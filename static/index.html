@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AShareRadar</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-copy">
+        <h1>AShareRadar</h1>
+        <p>趋势分析、买卖点策略、做T计划、个股背景辅助</p>
+      </div>
+      <div class="topbar-status">
+        <span>单股研究驾驶舱</span>
+        <div class="status-pill" id="dataStatus" aria-live="polite">数据连接中</div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel control-panel">
+        <div class="panel-title">
+          <span>个股查询</span>
+          <small>输入6位代码</small>
+        </div>
+        <form class="search-row" id="searchForm">
+          <input id="symbolInput" value="600519" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="如 600519" aria-label="股票代码" />
+          <button type="submit">分析</button>
+        </form>
+        <div class="quick-list" id="quickList">
+          <button type="button" data-symbol="600519">贵州茅台</button>
+          <button type="button" data-symbol="000001">平安银行</button>
+          <button type="button" data-symbol="300750">宁德时代</button>
+          <button type="button" data-symbol="002594">比亚迪</button>
+        </div>
+        <div class="watchlist-box">
+          <div class="panel-title compact"><span>我的自选</span><small>个人关注</small></div>
+          <form class="watch-form" id="watchForm">
+            <input id="watchSymbolInput" value="600519" maxlength="8" autocomplete="off" aria-label="自选股票代码" />
+            <input id="watchNoteInput" placeholder="关注原因" maxlength="80" autocomplete="off" aria-label="关注原因" />
+            <button type="submit">加入</button>
+          </form>
+          <div class="watch-list" id="watchList"></div>
+        </div>
+        <div class="notice">
+          <strong>新手提示</strong>
+          <p>平台只做研究分析和风险提示，不替代你的交易决策。实盘前请确认行情授权、交易规则和自己的仓位计划。</p>
+        </div>
+        <div class="data-health">
+          <div class="panel-title compact"><span>数据源状态</span><small id="cachePath">--</small></div>
+          <div id="sourcePlan" class="source-plan"></div>
+          <div id="providerStatus" class="provider-status"></div>
+          <div id="cacheStats" class="cache-stats"></div>
+        </div>
+        <div class="data-monitor">
+          <div class="panel-title compact"><span>本地监控</span><small id="schedulerState">待连接</small></div>
+          <div id="taskCards" class="task-cards"></div>
+          <div class="monitor-actions">
+            <button type="button" data-task="refresh_watch_quotes">刷新报价</button>
+            <button type="button" data-task="check_data_health">检查健康</button>
+          </div>
+          <div class="panel-title compact"><span>监控事件</span><small>最近记录</small></div>
+          <div id="monitorEvents" class="monitor-events"></div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <section class="market-strip" id="marketStrip"></section>
+
+        <section class="panel main-card">
+          <div class="stock-head">
+            <div>
+              <span class="muted" id="stockCode">--</span>
+              <h2 id="stockName">加载中</h2>
+            </div>
+            <div class="price-box">
+              <strong id="stockPrice">--</strong>
+              <span id="stockChange">--</span>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <div class="metric-card"><span>趋势评分</span><strong id="trendScore">--</strong></div>
+            <div class="metric-card"><span>趋势状态</span><strong id="trendLabel">--</strong></div>
+            <div class="metric-card"><span>当前建议</span><strong id="actionAdvice">--</strong></div>
+            <div class="metric-card"><span>支撑位</span><strong id="support">--</strong></div>
+            <div class="metric-card"><span>压力位</span><strong id="resistance">--</strong></div>
+            <div class="metric-card"><span>5日线</span><strong id="ma5">--</strong></div>
+            <div class="metric-card"><span>20日线</span><strong id="ma20">--</strong></div>
+            <div class="metric-card"><span>数据质量</span><strong id="dataQuality">--</strong></div>
+          </div>
+
+          <p class="summary" id="summary">正在加载分析结果...</p>
+          <div class="chart-wrap">
+            <canvas id="klineCanvas" width="920" height="300" aria-label="K线走势图"></canvas>
+          </div>
+        </section>
+
+        <section class="workspace-tabs" aria-label="工作台分区">
+          <button type="button" class="active" data-view="overview">总览</button>
+          <button type="button" data-view="qa">AI问诊</button>
+          <button type="button" data-view="strategy">策略风控</button>
+          <button type="button" data-view="finance">资金估值</button>
+          <button type="button" data-view="theme">题材强弱</button>
+          <button type="button" data-view="replay">复盘验证</button>
+          <button type="button" data-view="tools">工具记录</button>
+        </section>
+
+        <section class="workspace-view active" data-view-panel="overview">
+          <div class="diagnosis-panel" id="diagnosisPanel"></div>
+          <div class="insight-panel" id="insightOverview"></div>
+          <div class="feature-strip" id="featureSnapshot"></div>
+          <div class="quality-panel" id="qualityPanel"></div>
+          <div class="evidence-panel" id="signalEvidence"></div>
+          <div class="alpha-panel" id="alphaEvidence"></div>
+        </section>
+
+        <section class="workspace-view" data-view-panel="finance">
+          <section class="insight-grid">
+            <section class="panel">
+              <div class="panel-title"><span>五维诊断</span><small>技术 / 资金 / 基本 / 事件 / 风险</small></div>
+              <div class="factor-list" id="factorList"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><span>量价资金热度</span><small>估算 + 实时源</small></div>
+              <div class="flow-panel" id="fundFlowPanel"></div>
+              <div class="flow-panel compact-flow" id="orderPressurePanel"></div>
+            </section>
+          </section>
+          <section class="insight-grid">
+            <section class="panel">
+              <div class="panel-title"><span>财务估值</span><small>安全边际 / 规模 / 活跃度</small></div>
+              <div class="finance-panel" id="financialPanel"></div>
+              <div class="finance-panel compact-finance" id="valuationPanel"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><span>异动与龙虎榜</span><small>量价解释 / 席位预留</small></div>
+              <div class="abnormal-panel" id="abnormalPanel"></div>
+              <div class="abnormal-panel compact-abnormal" id="lhbPanel"></div>
+            </section>
+          </section>
+        </section>
+
+        <section class="workspace-view" data-view-panel="qa">
+          <div class="ai-dashboard" id="aiDashboard"></div>
+        </section>
+
+        <section class="workspace-view" data-view-panel="strategy">
+          <div class="regime-panel" id="marketRegime"></div>
+          <div class="validation-panel" id="signalValidation"></div>
+          <div class="timeframe-panel" id="timeframeAlignment"></div>
+          <div class="risk-reward-panel" id="riskReward"></div>
+          <div class="factor-lab-panel" id="factorLab"></div>
+          <section class="panel rule-panel">
+            <div class="panel-title"><span>规则命中</span><small>内置个股分析规则</small></div>
+            <div class="rule-list" id="ruleMatches"></div>
+          </section>
+          <section class="panel strategy-cards-panel">
+            <div class="panel-title"><span>策略卡</span><small>触发条件、参考价、失效条件</small></div>
+            <div class="strategy-card-list" id="strategyCards"></div>
+          </section>
+          <section class="strategy-grid">
+            <section class="panel">
+              <div class="panel-title"><span>买点策略</span><small>分批、确认、失效</small></div>
+              <div class="signal-list" id="buySignals"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><span>卖点风控</span><small>止盈、止损、降风险</small></div>
+              <div class="signal-list" id="sellSignals"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><span>做T计划</span><small>仅适合已有底仓</small></div>
+              <div class="signal-list" id="tSignals"></div>
+            </section>
+          </section>
+          <section class="panel minute-panel">
+            <div class="panel-title"><span>分钟做T</span><small>5分钟区间 / 盘中强弱</small></div>
+            <div class="minute-analysis" id="minuteAnalysis" aria-live="polite">正在加载分钟分析...</div>
+          </section>
+        </section>
+
+        <section class="workspace-view" data-view-panel="theme">
+          <section class="insight-grid">
+            <section class="panel">
+              <div class="panel-title"><span>行业概念</span><small>归属 / 强弱 / 风险</small></div>
+              <div class="theme-panel" id="themePanel"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><span>龙头强度</span><small>强弱 / 情绪 / 行业</small></div>
+              <div class="leadership-panel" id="leadershipPanel"></div>
+            </section>
+          </section>
+          <section class="panel">
+            <div class="panel-title"><span>筹码与压力区</span><small>成本中枢 / 支撑 / 压力</small></div>
+            <div class="chip-panel" id="chipPanel"></div>
+          </section>
+        </section>
+
+        <section class="workspace-view" data-view-panel="replay">
+          <section class="panel review-panel">
+            <div class="panel-title"><span>历史复盘</span><small>单股表现校验</small></div>
+            <div class="review-summary" id="reviewSummary">正在加载历史复盘...</div>
+            <div class="review-grid" id="reviewPoints"></div>
+            <div class="review-events" id="reviewEvents"></div>
+          </section>
+          <section class="panel replay-panel">
+            <div class="panel-title"><span>信号回放</span><small>历史相似信号验证</small></div>
+            <div class="replay-box" id="replayPanel"></div>
+          </section>
+          <section class="panel event-panel">
+            <div class="panel-title"><span>事件摘要</span><small>行情复盘 + 行业 + 数据提醒</small></div>
+            <div class="event-list" id="stockEvents"></div>
+          </section>
+        </section>
+
+        <section class="workspace-view" data-view-panel="tools">
+          <section class="insight-grid">
+            <section class="panel">
+              <div class="panel-title"><span>本地预警</span><small>价格 / 涨跌幅 / 趋势</small></div>
+              <form class="alert-form" id="alertForm">
+                <select id="alertType" aria-label="预警类型">
+                  <option value="price_above">价格高于</option>
+                  <option value="price_below">价格低于</option>
+                  <option value="change_pct_above">涨幅高于</option>
+                  <option value="change_pct_below">跌幅低于</option>
+                  <option value="trend_score_above">趋势评分高于</option>
+                  <option value="trend_score_below">趋势评分低于</option>
+                  <option value="break_support">跌破支撑</option>
+                  <option value="break_resistance">突破压力</option>
+                </select>
+                <input id="alertThreshold" type="number" step="0.01" placeholder="阈值；支撑/压力可留空" aria-label="预警阈值" />
+                <button type="submit">添加</button>
+                <button type="button" id="evaluateAlerts">检查</button>
+              </form>
+              <div class="alert-list" id="alertList"></div>
+              <div class="alert-events" id="alertEvents"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><span>个股笔记</span><small>图表标注</small></div>
+              <form class="note-form" id="noteForm">
+                <select id="noteType" aria-label="笔记类型">
+                  <option value="观察">观察</option>
+                  <option value="买点">买点</option>
+                  <option value="卖点">卖点</option>
+                  <option value="风险">风险</option>
+                  <option value="复盘">复盘</option>
+                </select>
+                <input id="noteContent" maxlength="500" placeholder="记录你的观察" autocomplete="off" aria-label="笔记内容" />
+                <button type="submit">保存</button>
+              </form>
+              <div class="mark-filter-list" id="markFilters"></div>
+              <div class="note-list" id="noteList"></div>
+            </section>
+          </section>
+          <section class="panel timeline-panel">
+            <div class="panel-title"><span>趋势时间线</span><small>建议留痕</small></div>
+            <div class="timeline-list" id="adviceTimeline"></div>
+          </section>
+        </section>
+
+      </section>
+
+      <aside class="side-column">
+        <section class="panel">
+          <div class="panel-title"><span>实时观察</span><small>自动刷新</small></div>
+          <div class="quote-list" id="quoteList"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><span>观察池强弱排序</span><small>样本内趋势 + 强度</small></div>
+          <div class="leader-list" id="leaderList"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><span>行业背景</span><small>个股参考</small></div>
+          <div class="leader-list" id="plateList"></div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <span id="sourceLine">数据来源加载中</span>
+      <span>研究辅助工具，不构成投资建议</span>
+    </footer>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

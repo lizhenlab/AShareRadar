@@ -1,0 +1,8 @@
+{
+  "name": "ashare-radar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:js": "node --check static/app.js && node --check static/js/*.js"
+  }
+}
