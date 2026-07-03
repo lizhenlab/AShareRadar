@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api
@@ -14,7 +14,7 @@ router = APIRouter()
 
 @router.get("/api/watchlist", response_model=list[WatchlistItem])
 async def watchlist(datahub: DataHub = Depends(get_datahub)) -> list[WatchlistItem]:
-    return datahub.cache.watchlist()
+    return run_sync_api(datahub.cache.watchlist)
 
 
 @router.post("/api/watchlist", response_model=WatchlistItem)
@@ -40,6 +40,8 @@ async def delete_watchlist_item(symbol: str, datahub: DataHub = Depends(get_data
     def remove() -> dict[str, object]:
         normalize_symbol(symbol)
         removed = datahub.cache.delete_watchlist_item(symbol)
+        if not removed:
+            raise HTTPException(status_code=404, detail="自选股不存在")
         return {"ok": True, "removed": removed}
 
     return run_sync_api(remove)

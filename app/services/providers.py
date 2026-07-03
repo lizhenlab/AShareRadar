@@ -4,6 +4,7 @@ import asyncio
 import math
 import random
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable
 
@@ -11,9 +12,29 @@ import httpx
 
 from app.config import get_settings
 from app.models.schemas import Kline, Quote
-from app.utils.parsing import safe_float
-from app.utils.symbols import normalize_symbol, standard_symbol, tencent_symbol
+from app.services.provider_utils import ensure_positive_limit, valid_ohlc
+from app.utils.market_data import valid_kline
+from app.utils.parsing import MISSING_NUMERIC_VALUES, required_float
+from app.utils.symbols import normalize_symbol, tencent_symbol
 from app.utils.time import now_text
+
+
+TENCENT_QUOTE_MIN_FIELDS = 45
+TENCENT_MARKET_MAP = {"1": "SH", "0": "SZ", "2": "SZ", "51": "SZ", "52": "SZ"}
+TENCENT_AMOUNT_SCALE = 10000
+TENCENT_MARKET_CAP_SCALE = 100000000
+TENCENT_QUOTE_PAYLOAD_RE = re.compile(r'="([^"]*)"')
+
+
+@dataclass(frozen=True)
+class _TencentQuoteNumbers:
+    price: float
+    prev_close: float
+    open_price: float
+    high: float
+    low: float
+    volume: float
+    amount: float
 
 
 class MarketDataError(RuntimeError):
@@ -31,51 +52,17 @@ class TencentMarketDataProvider:
         return (await self.quotes([symbol]))[0]
 
     async def quotes(self, symbols: Iterable[str]) -> list[Quote]:
-        query_symbols = [tencent_symbol(symbol) for symbol in symbols]
-        if not query_symbols:
+        url = _tencent_quote_url(symbols)
+        if not url:
             return []
-        url = "http://qt.gtimg.cn/q=" + ",".join(query_symbols)
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url)
-                response.encoding = "gbk"
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise MarketDataError(f"实时行情请求失败：{exc}") from exc
-
-        quotes: list[Quote] = []
-        for payload in re.findall(r'v_[^=]+="([^"]*)"', response.text):
-            parts = payload.split("~")
-            if len(parts) < 45 or not parts[2]:
-                continue
-            market = "SH" if parts[0] == "1" else "SZ"
-            quotes.append(
-                Quote(
-                    code=parts[2],
-                    name=parts[1],
-                    market=market,
-                    price=safe_float(parts[3]),
-                    prev_close=safe_float(parts[4]),
-                    open=safe_float(parts[5]),
-                    high=safe_float(parts[33] or parts[41]),
-                    low=safe_float(parts[34] or parts[42]),
-                    volume=safe_float(parts[36]),
-                    amount=safe_float(parts[37]) * 10000,
-                    change=safe_float(parts[31]),
-                    change_pct=safe_float(parts[32]),
-                    turnover_rate=safe_float(parts[38]) or None,
-                    pe=safe_float(parts[39]) or None,
-                    pb=safe_float(parts[46]) or None,
-                    market_cap=safe_float(parts[44]) * 100000000 if safe_float(parts[44]) else None,
-                    timestamp=_format_timestamp(parts[30]),
-                    source=self.source_name,
-                )
-            )
+        text = await _fetch_tencent_quote_text(url, self.timeout)
+        quotes = _tencent_quotes_from_text(text, self.source_name)
         if not quotes:
             raise MarketDataError("实时行情返回为空")
         return quotes
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+        ensure_positive_limit(limit)
         code = tencent_symbol(symbol)
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,{limit},qfq"
         try:
@@ -86,21 +73,84 @@ class TencentMarketDataProvider:
         except (httpx.HTTPError, ValueError) as exc:
             raise MarketDataError(f"K线请求失败：{exc}") from exc
 
-        item = data.get("data", {}).get(code, {})
-        rows = item.get("qfqday") or item.get("day") or []
+        rows = _tencent_kline_rows(data, code)
         if not rows:
             raise MarketDataError("K线返回为空")
-        return [
-            Kline(
-                date=row[0],
-                open=safe_float(row[1]),
-                close=safe_float(row[2]),
-                high=safe_float(row[3]),
-                low=safe_float(row[4]),
-                volume=safe_float(row[5]),
-            )
-            for row in rows
-        ]
+        klines = _tencent_klines_from_rows(rows)
+        if not klines:
+            raise MarketDataError("K线有效数据为空")
+        return klines
+
+
+async def _fetch_tencent_quote_text(url: str, timeout: float) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url)
+            response.encoding = "gbk"
+            response.raise_for_status()
+            return response.text
+    except httpx.HTTPError as exc:
+        raise MarketDataError(f"实时行情请求失败：{exc}") from exc
+
+
+def _tencent_quote_url(symbols: Iterable[str]) -> str:
+    query_symbols = [tencent_symbol(symbol) for symbol in symbols]
+    if not query_symbols:
+        return ""
+    return "http://qt.gtimg.cn/q=" + ",".join(query_symbols)
+
+
+def _tencent_quotes_from_text(text: str, source_name: str) -> list[Quote]:
+    return [
+        quote
+        for quote in (_parse_tencent_quote_payload(payload, source_name) for payload in _tencent_quote_payloads(text))
+        if quote is not None
+    ]
+
+
+def _tencent_kline_rows(data: object, code: str) -> Iterable[object]:
+    if not isinstance(data, dict):
+        return []
+    data_block = data.get("data")
+    if not isinstance(data_block, dict):
+        return []
+    item = data_block.get(code)
+    if not isinstance(item, dict):
+        return []
+    rows = item.get("qfqday") or item.get("day") or []
+    return rows if isinstance(rows, (list, tuple)) else []
+
+
+def _tencent_klines_from_rows(rows: Iterable[object]) -> list[Kline]:
+    return [kline for kline in (_parse_tencent_kline_row(row) for row in rows) if kline is not None]
+
+
+def _parse_tencent_kline_row(row: object) -> Kline | None:
+    if not isinstance(row, (list, tuple)):
+        return None
+    if len(row) < 6 or row[0] is None:
+        return None
+    date = str(row[0]).strip()
+    if not date:
+        return None
+    try:
+        open_price = required_float(row[1], "腾讯K线开盘价", positive=True)
+        close = required_float(row[2], "腾讯K线收盘价", positive=True)
+        high = required_float(row[3], "腾讯K线最高价", positive=True)
+        low = required_float(row[4], "腾讯K线最低价", positive=True)
+        _ensure_kline_price_bounds(open_price, close, high, low)
+        volume = _non_negative_value(row[5], "腾讯K线成交量")
+    except ValueError:
+        return None
+    kline = Kline(
+        date=date,
+        open=open_price,
+        close=close,
+        high=high,
+        low=low,
+        volume=volume,
+    )
+    return kline if valid_kline(kline) else None
 
 
 class DemoMarketDataProvider:
@@ -132,38 +182,40 @@ class DemoMarketDataProvider:
     async def quotes(self, symbols: Iterable[str]) -> list[Quote]:
         self._ensure_enabled()
         now = now_text()
+        run_minute = datetime.now().minute
         result: list[Quote] = []
         for symbol in symbols:
             code, market_code = normalize_symbol(symbol)
             normalized = f"{code}.{market_code.upper()}"
             name, market, base = self._names.get(normalized, (f"演示股票{code[-3:]}", market_code.upper(), 20.0))
-            seed = int(code) + datetime.now().minute
-            random.seed(seed)
-            change_pct = round(random.uniform(-3.2, 4.5), 2)
-            prev_close = base * (1 + random.uniform(-0.02, 0.02))
+            rng = random.Random(int(code) + run_minute)
+            change_pct = round(rng.uniform(-3.2, 4.5), 2)
+            prev_close = base * (1 + rng.uniform(-0.02, 0.02))
             price = prev_close * (1 + change_pct / 100)
-            high = max(price, prev_close) * (1 + random.uniform(0.002, 0.018))
-            low = min(price, prev_close) * (1 - random.uniform(0.002, 0.018))
-            volume = random.randint(200000, 6000000)
+            open_price = prev_close * (1 + rng.uniform(-0.01, 0.01))
+            high = max(price, prev_close, open_price) * (1 + rng.uniform(0.002, 0.018))
+            low = min(price, prev_close, open_price) * (1 - rng.uniform(0.002, 0.018))
+            prices = _rounded_demo_quote_prices(price, prev_close, open_price, high, low)
+            volume = rng.randint(200000, 6000000)
             amount = volume * price * 100
             result.append(
                 Quote(
                     code=code,
                     name=name,
                     market=market,
-                    price=round(price, 2),
-                    prev_close=round(prev_close, 2),
-                    open=round(prev_close * (1 + random.uniform(-0.01, 0.01)), 2),
-                    high=round(high, 2),
-                    low=round(low, 2),
+                    price=prices["price"],
+                    prev_close=prices["prev_close"],
+                    open=prices["open"],
+                    high=prices["high"],
+                    low=prices["low"],
                     volume=volume,
                     amount=round(amount, 2),
                     change=round(price - prev_close, 2),
                     change_pct=change_pct,
-                    turnover_rate=round(random.uniform(0.4, 8.5), 2),
-                    pe=round(random.uniform(8, 58), 2),
-                    pb=round(random.uniform(0.8, 9), 2),
-                    market_cap=round(random.uniform(300, 20000) * 100000000, 2),
+                    turnover_rate=round(rng.uniform(0.4, 8.5), 2),
+                    pe=round(rng.uniform(8, 58), 2),
+                    pb=round(rng.uniform(0.8, 9), 2),
+                    market_cap=round(rng.uniform(300, 20000) * 100000000, 2),
                     timestamp=now,
                     source=self.source_name,
                 )
@@ -172,31 +224,35 @@ class DemoMarketDataProvider:
         return result
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+        ensure_positive_limit(limit)
         self._ensure_enabled()
         code, market_code = normalize_symbol(symbol)
         normalized = f"{code}.{market_code.upper()}"
         _, _, base = self._names.get(normalized, (f"演示股票{code[-3:]}", market_code.upper(), 20.0))
-        random.seed(int(code))
+        rng = random.Random(int(code))
         rows: list[Kline] = []
         close = base
         today = datetime.now().date()
-        for index in range(limit * 2):
-            day = today - timedelta(days=(limit * 2 - index))
+        trading_days = _previous_weekdays(today, limit)
+        for index, day in enumerate(trading_days):
             if day.weekday() >= 5:
                 continue
-            drift = math.sin(index / 6) * 0.01 + random.uniform(-0.025, 0.028)
-            open_price = close * (1 + random.uniform(-0.012, 0.012))
+            drift = math.sin(index / 6) * 0.01 + rng.uniform(-0.025, 0.028)
+            open_price = close * (1 + rng.uniform(-0.012, 0.012))
             close = max(0.8, open_price * (1 + drift))
-            high = max(open_price, close) * (1 + random.uniform(0.002, 0.018))
-            low = min(open_price, close) * (1 - random.uniform(0.002, 0.018))
+            high = max(open_price, close) * (1 + rng.uniform(0.002, 0.018))
+            low = min(open_price, close) * (1 - rng.uniform(0.002, 0.018))
+            rounded_open, rounded_close, rounded_high, rounded_low = _rounded_demo_ohlc(
+                open_price, close, high, low
+            )
             rows.append(
                 Kline(
                     date=day.isoformat(),
-                    open=round(open_price, 2),
-                    close=round(close, 2),
-                    high=round(high, 2),
-                    low=round(low, 2),
-                    volume=random.randint(100000, 8000000),
+                    open=rounded_open,
+                    close=rounded_close,
+                    high=rounded_high,
+                    low=rounded_low,
+                    volume=rng.randint(100000, 8000000),
                 )
             )
         return rows[-limit:]
@@ -216,10 +272,211 @@ class DemoMarketDataProvider:
 
     def _ensure_enabled(self) -> None:
         if not self.enabled:
-            raise RuntimeError("本地演示数据源默认关闭；如需离线演示，请设置 DEMO_PROVIDER_ENABLED=1")
+            raise RuntimeError("本地演示数据源默认关闭；如需离线演示，请设置 ASHARE_RADAR_DEMO_PROVIDER_ENABLED=1")
 
 
 def _format_timestamp(raw: str) -> str:
-    if len(raw) >= 14 and raw.isdigit():
-        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]} {raw[8:10]}:{raw[10:12]}:{raw[12:14]}"
+    text = str(raw).strip()
+    if len(text) >= 14 and text[:14].isdigit():
+        timestamp = f"{text[:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}:{text[12:14]}"
+        try:
+            datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return now_text()
+        return timestamp
     return now_text()
+
+
+def _previous_weekdays(today, limit: int):
+    days = []
+    candidate = today - timedelta(days=1)
+    while len(days) < limit:
+        if candidate.weekday() < 5:
+            days.append(candidate)
+        candidate -= timedelta(days=1)
+    return list(reversed(days))
+
+
+def _tencent_quote_payloads(text: str) -> list[str]:
+    payloads: list[str] = []
+    for match in TENCENT_QUOTE_PAYLOAD_RE.finditer(text):
+        payload = match.group(1).strip()
+        if payload:
+            payloads.append(payload)
+    return payloads
+
+
+def _parse_tencent_quote_payload(payload: str, source_name: str) -> Quote | None:
+    parts = _tencent_quote_parts(payload)
+    if not _valid_tencent_quote_parts(parts):
+        return None
+    market = _tencent_market(parts[0])
+    if market is None:
+        return None
+    try:
+        numbers = _parse_tencent_quote_numbers(parts)
+    except ValueError:
+        return None
+    market_cap = _optional_scaled_non_negative(parts, 44, TENCENT_MARKET_CAP_SCALE)
+    return Quote(
+        code=parts[2].strip(),
+        name=parts[1].strip(),
+        market=market,
+        price=numbers.price,
+        prev_close=numbers.prev_close,
+        open=numbers.open_price,
+        high=numbers.high,
+        low=numbers.low,
+        volume=numbers.volume,
+        amount=numbers.amount,
+        change=_number_or_default(parts, 31, numbers.price - numbers.prev_close, "腾讯涨跌额"),
+        change_pct=_tencent_change_pct(parts, numbers.price, numbers.prev_close),
+        turnover_rate=_optional_non_negative(parts, 38),
+        pe=_optional_number(parts, 39),
+        pb=_optional_non_negative(parts, 46),
+        market_cap=market_cap,
+        timestamp=_format_timestamp(parts[30]),
+        source=source_name,
+    )
+
+
+def _valid_tencent_quote_parts(parts: list[str]) -> bool:
+    return (
+        len(parts) >= TENCENT_QUOTE_MIN_FIELDS
+        and bool(parts[1].strip())
+        and _valid_tencent_quote_code(parts[2])
+    )
+
+
+def _valid_tencent_quote_code(value: str) -> bool:
+    code = value.strip()
+    return code.isdigit() and len(code) == 6 and code != "000000"
+
+
+def _tencent_quote_parts(payload: str) -> list[str]:
+    return [part.strip() for part in payload.strip().split("~")]
+
+
+def _parse_tencent_quote_numbers(parts: list[str]) -> _TencentQuoteNumbers:
+    price = required_float(parts[3], "腾讯现价", positive=True)
+    prev_close = required_float(parts[4], "腾讯昨收", positive=True)
+    open_price = _required_number_or_default(parts, 5, price, "腾讯开盘价")
+    high = _first_required_number(parts, 33, 41, field="腾讯最高价")
+    low = _first_required_number(parts, 34, 42, field="腾讯最低价")
+    _ensure_quote_price_bounds(open_price, price, high, low)
+    volume = _non_negative_part(parts, 36, "腾讯成交量")
+    amount = _non_negative_part(parts, 37, "腾讯成交额") * TENCENT_AMOUNT_SCALE
+    return _TencentQuoteNumbers(
+        price=price,
+        prev_close=prev_close,
+        open_price=open_price,
+        high=high,
+        low=low,
+        volume=volume,
+        amount=amount,
+    )
+
+
+def _tencent_market(flag: str) -> str | None:
+    return TENCENT_MARKET_MAP.get(flag)
+
+
+def _first_required_number(parts: list[str], *indices: int, field: str) -> float:
+    for index in indices:
+        if index < len(parts) and parts[index] not in MISSING_NUMERIC_VALUES:
+            return required_float(parts[index], field, positive=True)
+    raise ValueError(f"{field}缺失")
+
+
+def _required_number_or_default(parts: list[str], index: int, default: float, field: str) -> float:
+    if index >= len(parts) or parts[index] in MISSING_NUMERIC_VALUES:
+        return default
+    return required_float(parts[index], field, positive=True)
+
+
+def _ensure_quote_price_bounds(open_price: float, price: float, high: float, low: float) -> None:
+    if not valid_ohlc(open_price, price, high, low):
+        raise ValueError("开盘价或现价超出最高/最低价范围")
+
+
+def _ensure_kline_price_bounds(open_price: float, close: float, high: float, low: float) -> None:
+    if not valid_ohlc(open_price, close, high, low):
+        raise ValueError("开收盘价超出最高/最低价范围")
+
+
+def _optional_number(parts: list[str], index: int) -> float | None:
+    if index >= len(parts) or parts[index] in MISSING_NUMERIC_VALUES:
+        return None
+    try:
+        value = required_float(parts[index])
+    except ValueError:
+        return None
+    return value or None
+
+
+def _optional_non_negative(parts: list[str], index: int) -> float | None:
+    value = _optional_number(parts, index)
+    return value if value is not None and value >= 0 else None
+
+
+def _optional_scaled_non_negative(parts: list[str], index: int, scale: float) -> float | None:
+    value = _optional_non_negative(parts, index)
+    return value * scale if value is not None else None
+
+
+def _number_or_default(parts: list[str], index: int, default: float, field: str) -> float:
+    if index >= len(parts) or parts[index] in MISSING_NUMERIC_VALUES:
+        return default
+    try:
+        return required_float(parts[index], field)
+    except ValueError:
+        return default
+
+
+def _tencent_change_pct(parts: list[str], price: float, prev_close: float) -> float:
+    explicit = _number_or_default(parts, 32, math.nan, "腾讯涨跌幅")
+    if math.isfinite(explicit):
+        return explicit
+    return (price - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+
+
+def _non_negative_part(parts: list[str], index: int, field: str) -> float:
+    if index >= len(parts):
+        raise ValueError(f"{field}缺失")
+    return _non_negative_value(parts[index], field)
+
+
+def _non_negative_value(value: object, field: str) -> float:
+    parsed = required_float(value, field)
+    if parsed < 0:
+        raise ValueError(f"{field}不能为负数")
+    return parsed
+
+
+def _rounded_demo_quote_prices(
+    price: float, prev_close: float, open_price: float, high: float, low: float
+) -> dict[str, float]:
+    rounded = {
+        "price": round(price, 2),
+        "prev_close": round(prev_close, 2),
+        "open": round(open_price, 2),
+        "high": round(high, 2),
+        "low": round(low, 2),
+    }
+    rounded["high"] = max(
+        rounded["high"], rounded["price"], rounded["prev_close"], rounded["open"]
+    )
+    rounded["low"] = min(
+        rounded["low"], rounded["price"], rounded["prev_close"], rounded["open"]
+    )
+    return rounded
+
+
+def _rounded_demo_ohlc(
+    open_price: float, close: float, high: float, low: float
+) -> tuple[float, float, float, float]:
+    rounded_open = round(open_price, 2)
+    rounded_close = round(close, 2)
+    rounded_high = max(round(high, 2), rounded_open, rounded_close)
+    rounded_low = min(round(low, 2), rounded_open, rounded_close)
+    return rounded_open, rounded_close, rounded_high, rounded_low

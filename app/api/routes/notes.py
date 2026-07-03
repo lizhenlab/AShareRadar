@@ -35,7 +35,8 @@ async def create_stock_note(
         normalize_symbol(payload.symbol)
         quote = await datahub.quote(payload.symbol)
         price = payload.price if payload.price is not None else quote.price
-        trade_date = payload.trade_date or quote.timestamp
+        raw_trade_date = payload.trade_date.strip() if payload.trade_date else ""
+        trade_date = raw_trade_date or quote.timestamp
         enriched = StockNoteInput(
             symbol=payload.symbol,
             content=payload.content,
@@ -54,6 +55,8 @@ async def create_stock_note(
 async def delete_stock_note(note_id: int, datahub: DataHub = Depends(get_datahub)) -> dict[str, object]:
     def remove() -> dict[str, object]:
         removed = datahub.cache.delete_stock_note(note_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="个股笔记不存在")
         return {"ok": True, "removed": removed}
 
     return run_sync_api(remove)

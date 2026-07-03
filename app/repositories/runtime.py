@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.db.mappers import row_to_monitor_event, row_to_task_run
+from app.db.system_mappers import row_to_monitor_event, row_to_task_run
 from app.models.schemas import MonitorEvent, TaskRun
 from app.repositories.base import SQLiteRepository
 from app.utils.symbols import standard_symbol
@@ -46,6 +46,8 @@ class RuntimeEventRepository(SQLiteRepository):
             )
 
     def task_runs(self, limit: int = 20) -> list[TaskRun]:
+        if limit <= 0:
+            return []
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
@@ -90,6 +92,8 @@ class RuntimeEventRepository(SQLiteRepository):
             )
 
     def monitor_events(self, limit: int = 30) -> list[MonitorEvent]:
+        if limit <= 0:
+            return []
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """

@@ -57,25 +57,26 @@ class WorkbenchContext:
 
 
 BuildWorkbenchContext = Callable[[str], Awaitable[WorkbenchContext]]
+CacheEntry = tuple[float, WorkbenchContext]
 
 
 class WorkbenchContextCache:
     def __init__(self, ttl_seconds: float = 8.0, max_size: int = 32) -> None:
         self.ttl_seconds = ttl_seconds
         self.max_size = max_size
-        self._entries: dict[str, tuple[float, WorkbenchContext]] = {}
+        self._entries: dict[str, CacheEntry] = {}
         self._inflight: dict[str, asyncio.Task[WorkbenchContext]] = {}
         self._lock = asyncio.Lock()
 
     @property
-    def entries(self) -> dict[str, tuple[float, WorkbenchContext]]:
+    def entries(self) -> dict[str, CacheEntry]:
         return self._entries
 
     def clear(self) -> None:
         self._entries.clear()
         self._inflight.clear()
 
-    def restore_entries(self, entries: dict[str, tuple[float, WorkbenchContext]]) -> None:
+    def restore_entries(self, entries: dict[str, CacheEntry]) -> None:
         self.clear()
         self._entries.update(entries)
 
@@ -84,37 +85,66 @@ class WorkbenchContextCache:
 
     async def get(self, symbol: str, build: BuildWorkbenchContext, *, use_cache: bool = True) -> WorkbenchContext:
         normalized = _normalize_context_symbol(symbol)
-        now = time.monotonic()
         if use_cache:
-            cached = self._entries.get(normalized)
-            if cached and now - cached[0] <= self.ttl_seconds:
-                return cached[1]
+            cached = self._fresh_entry(normalized)
+            if cached:
+                return cached
 
-        async with self._lock:
-            now = time.monotonic()
-            if use_cache:
-                cached = self._entries.get(normalized)
-                if cached and now - cached[0] <= self.ttl_seconds:
-                    return cached[1]
-            task = self._inflight.get(normalized)
-            if task is None or (not use_cache and task.done()):
-                task = asyncio.create_task(build(normalized), name=f"stock-workbench-{normalized}")
-                self._inflight[normalized] = task
+        task = await self._task_for(normalized, build, use_cache=use_cache)
 
         try:
             context = await task
+        except asyncio.CancelledError:
+            await self._discard_task(normalized, task)
+            raise
         except Exception:
-            async with self._lock:
-                if self._inflight.get(normalized) is task:
-                    self._inflight.pop(normalized, None)
+            await self._discard_task(normalized, task)
             raise
 
+        await self._store_task_result(normalized, task, context)
+        return context
+
+    def _fresh_entry(self, normalized: str) -> WorkbenchContext | None:
+        cached = self._entries.get(normalized)
+        if not cached:
+            return None
+        timestamp, context = cached
+        if time.monotonic() - timestamp <= self.ttl_seconds:
+            return context
+        self._entries.pop(normalized, None)
+        return None
+
+    async def _task_for(self, normalized: str, build: BuildWorkbenchContext, *, use_cache: bool) -> asyncio.Task[WorkbenchContext]:
+        async with self._lock:
+            if use_cache:
+                cached = self._fresh_entry(normalized)
+                if cached:
+                    return _completed_context_task(cached, normalized)
+            task = self._active_task(normalized)
+            if task is None:
+                task = asyncio.create_task(build(normalized), name=f"stock-workbench-{normalized}")
+                self._inflight[normalized] = task
+            return task
+
+    def _active_task(self, normalized: str) -> asyncio.Task[WorkbenchContext] | None:
+        task = self._inflight.get(normalized)
+        if task and task.done():
+            self._inflight.pop(normalized, None)
+            return None
+        return task
+
+    async def _discard_task(self, normalized: str, task: asyncio.Task[WorkbenchContext]) -> None:
         async with self._lock:
             if self._inflight.get(normalized) is task:
                 self._inflight.pop(normalized, None)
+
+    async def _store_task_result(self, normalized: str, task: asyncio.Task[WorkbenchContext], context: WorkbenchContext) -> None:
+        async with self._lock:
+            if self._inflight.get(normalized) is not task:
+                return
+            self._inflight.pop(normalized, None)
             self._entries[normalized] = (time.monotonic(), context)
             self._trim_entries()
-        return context
 
     def _trim_entries(self) -> None:
         if len(self._entries) <= self.max_size:
@@ -127,3 +157,12 @@ class WorkbenchContextCache:
 def _normalize_context_symbol(symbol: str) -> str:
     code, market = normalize_symbol(symbol)
     return f"{code}.{market.upper()}"
+
+
+def _completed_context_task(context: WorkbenchContext, normalized: str) -> asyncio.Task[WorkbenchContext]:
+    task: asyncio.Task[WorkbenchContext] = asyncio.get_running_loop().create_task(_return_context(context), name=f"stock-workbench-cached-{normalized}")
+    return task
+
+
+async def _return_context(context: WorkbenchContext) -> WorkbenchContext:
+    return context

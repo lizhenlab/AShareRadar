@@ -1,0 +1,646 @@
+import { $, escapeHtml, setMetricTone } from "./dom.js";
+import { changeClass, formatAmount, formatNumber, toneByScore, toneByText } from "./format.js";
+import {
+  asArray,
+  asObject,
+  escapedJoin,
+  levelToneClass,
+  renderEscapedItems,
+  renderList,
+  renderOptionalTag,
+} from "./workbench-render-utils.js";
+
+export function renderAnalysis(data, { state, drawKline } = {}) {
+  const analysis = asObject(data);
+  const quote = asObject(analysis.quote);
+  const actionAdvice = asObject(analysis.action_advice);
+  const quality = asObject(analysis.data_quality);
+  if (state) state.lastAnalysis = data;
+  $("stockCode").textContent = stockCodeText(quote);
+  $("stockName").textContent = quote.name || "--";
+  $("stockPrice").textContent = formatNumber(quote.price);
+  $("stockChange").textContent = `${formatNumber(quote.change)} / ${formatNumber(quote.change_pct)}%`;
+  $("stockChange").className = changeClass(quote.change_pct);
+  $("trendScore").textContent = `${analysis.trend_score ?? "--"}`;
+  $("trendLabel").textContent = analysis.trend_label || "--";
+  $("actionAdvice").textContent = actionAdvice.action ? `${actionAdvice.action} ${actionAdvice.confidence ?? "--"}%` : "--";
+  $("support").textContent = formatNumber(analysis.support);
+  $("resistance").textContent = formatNumber(analysis.resistance);
+  $("ma5").textContent = formatNumber(analysis.ma5);
+  $("ma20").textContent = formatNumber(analysis.ma20);
+  $("dataQuality").textContent = analysis.data_quality ? `${quality.level || "--"} ${quality.score ?? "--"}分` : "--";
+  $("summary").textContent = analysis.beginner_summary || "";
+  setMetricTone("trendScore", toneByScore(analysis.trend_score, 68, 45));
+  setMetricTone("trendLabel", toneByText(analysis.trend_label));
+  setMetricTone("actionAdvice", toneByText(actionAdvice.action));
+  setMetricTone("support", "");
+  setMetricTone("resistance", "");
+  setMetricTone("ma5", maTone(quote.price, analysis.ma5, "warn"));
+  setMetricTone("ma20", maTone(quote.price, analysis.ma20, "risk"));
+  setMetricTone("dataQuality", analysis.data_quality ? toneByScore(quality.score, 85, 70) : "warn");
+  renderQuality(analysis.data_quality ? quality : null);
+  renderSignalEvidence(analysis.signal_snapshot);
+  renderSignals("buySignals", analysis.buy_points);
+  renderSignals("sellSignals", analysis.sell_points);
+  renderSignals("tSignals", analysis.t_plan);
+  renderReview(analysis.review);
+  if (typeof drawKline === "function") drawKline(asArray(analysis.klines), analysis.ma5, analysis.ma20);
+}
+
+export function renderInsights(data, state) {
+  const insights = asObject(data);
+  const overview = asObject(insights.overview);
+  if (state) state.lastInsights = data;
+  renderInsightOverview(overview);
+  renderFactors(overview.factors);
+  renderFundFlow(asObject(insights.fund_flow));
+  renderOrderPressure(asObject(insights.order_pressure));
+  renderStrategyCards(insights.strategy_cards);
+  renderStockEvents(asObject(insights.events));
+  renderFinancialHealth(asObject(insights.financial_health));
+  renderValuation(asObject(insights.valuation));
+  renderAbnormalEvents(asObject(insights.abnormal_events));
+  renderLhb(asObject(insights.lhb));
+  renderRuleMatches(asObject(insights.rule_matches));
+}
+
+function stockCodeText(quote) {
+  const market = quote.market || "";
+  const code = quote.code || "";
+  return market || code ? `${market}${code}` : "--";
+}
+
+function maTone(price, average, lowerTone) {
+  const current = Number(price);
+  const ma = Number(average);
+  if (!Number.isFinite(current) || !Number.isFinite(ma)) return "";
+  return current >= ma ? "good" : lowerTone;
+}
+
+function renderInsightOverview(overview) {
+  const takeaways = asArray(overview.beginner_takeaways);
+  const keyPrices = asArray(overview.key_prices);
+  $("insightOverview").innerHTML = `
+    <div class="overview-score">
+      <div>
+        <span>全景评分</span>
+        <strong>${escapeHtml(overview.total_score)}<small>/100</small></strong>
+      </div>
+      <i>${escapeHtml(overview.total_level)}</i>
+    </div>
+    <div class="overview-content">
+      <strong>主要矛盾</strong>
+      <p>${escapeHtml(overview.main_conflict)}</p>
+      <div class="takeaways">
+        ${renderEscapedItems(takeaways, "span")}
+      </div>
+      <div class="key-price-list">
+        ${renderList(
+          keyPrices,
+          (item) => `
+            <div>
+              <span>${escapeHtml(item.label)}</span>
+              <strong>${formatNumber(item.price)}</strong>
+              <small>${escapeHtml(item.note)}</small>
+            </div>`
+        )}
+      </div>
+    </div>
+  `;
+}
+
+function renderFactors(items) {
+  $("factorList").innerHTML = renderList(
+    items,
+    (item) => `
+        <div class="factor-item">
+          <div class="factor-head">
+            <strong>${escapeHtml(item.name)}</strong>
+            <span>${escapeHtml(item.score)} · ${escapeHtml(item.level)}</span>
+          </div>
+          <div class="score-bar"><i style="width:${Math.max(0, Math.min(100, Number(item.score) || 0))}%"></i></div>
+          <p>${escapeHtml(item.summary)}</p>
+          ${renderEscapedItems(item.evidence, "small")}
+          ${asArray(item.missing_data).length ? `<em>待补充：${escapedJoin(item.missing_data, "、")}</em>` : ""}
+        </div>`
+  );
+}
+
+function renderFundFlow(flow) {
+  const windows = asArray(flow.windows);
+  const notes = asArray(flow.notes);
+  $("fundFlowPanel").innerHTML = `
+    <div class="flow-head">
+      <strong>量价热度 ${escapeHtml(flow.overall_score)} · ${escapeHtml(flow.level)}</strong>
+      <span>${escapeHtml(flow.source)}</span>
+    </div>
+    <p>${escapeHtml(flow.price_volume_relation)}</p>
+    <div class="flow-windows">
+      ${renderList(
+        windows,
+        (item) => `
+          <div>
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.score)}</strong>
+            <small>${escapeHtml(item.summary)}</small>
+          </div>`
+      )}
+    </div>
+    ${renderEscapedItems(notes, "small")}
+  `;
+}
+
+function renderOrderPressure(order) {
+  const notes = asArray(order.notes);
+  $("orderPressurePanel").innerHTML = `
+    <div class="flow-head">
+      <strong>${escapeHtml(order.pressure_level)}</strong>
+      <span>${escapeHtml(order.source)}</span>
+    </div>
+    <p>${escapeHtml(order.summary)}</p>
+    <div class="mini-metrics">
+      <span>买卖比：${order.bid_ask_ratio === null || order.bid_ask_ratio === undefined ? "--" : escapeHtml(order.bid_ask_ratio)}</span>
+      <span>价差：${order.spread_pct === null || order.spread_pct === undefined ? "--" : `${formatNumber(order.spread_pct, 4)}%`}</span>
+    </div>
+    ${renderEscapedItems(notes, "small")}
+  `;
+}
+
+function renderFinancialHealth(health) {
+  const metrics = asArray(health.metrics);
+  $("financialPanel").innerHTML = `
+    <div class="finance-head">
+      <strong>财务体检 ${escapeHtml(health.score)} · ${escapeHtml(health.level)}</strong>
+      <span>${escapeHtml(health.source)}</span>
+    </div>
+    <p>${escapeHtml(health.summary)}</p>
+    <div class="metric-stack">
+      ${renderList(
+        metrics,
+        (item) => `
+          <div>
+            <strong>${escapeHtml(item.name)} <span>${escapeHtml(item.value)}</span></strong>
+            <small>${escapeHtml(item.summary)}</small>
+          </div>`,
+        { limit: 5 }
+      )}
+    </div>
+  `;
+}
+
+function renderValuation(valuation) {
+  const metrics = valuationMetrics(valuation);
+  const evidence = asArray(valuation.evidence);
+  const watchPoints = asArray(valuation.watch_points);
+  $("valuationPanel").innerHTML = `
+    <div class="finance-head">
+      <strong>估值 ${escapeHtml(valuation.score)} · ${escapeHtml(valuation.level)}</strong>
+      <span>${escapeHtml(valuation.market_cap_text || valuation.source)}</span>
+    </div>
+    <p>${escapeHtml(valuation.summary)}</p>
+    <div class="mini-metrics">
+      ${renderEscapedItems(metrics, "span")}
+    </div>
+    ${renderEscapedItems(evidence, "small", { limit: 2 })}
+    ${renderEscapedItems(watchPoints, "small", { limit: 3 })}
+  `;
+}
+
+function valuationMetrics(valuation) {
+  const anchor = valuation.valuation_anchor_label || "历史锚待确认";
+  return [
+    `PE：${formatOptionalNumber(valuation.pe)}`,
+    `PB：${formatOptionalNumber(valuation.pb)}`,
+    `${anchor}：PE ${formatOptionalPercent(valuation.pe_percentile)} / PB ${formatOptionalPercent(valuation.pb_percentile)}`,
+    `同行分位：PE ${formatOptionalPercent(valuation.peer_pe_percentile)} / PB ${formatOptionalPercent(valuation.peer_pb_percentile)} · 样本 ${valuation.peer_sample_count || 0}`,
+    `价格位置：${formatOptionalPercent(valuation.price_percentile)}`,
+  ];
+}
+
+function formatOptionalNumber(value, digits = 2) {
+  return formatNumber(value, digits);
+}
+
+function formatOptionalPercent(value) {
+  const text = formatOptionalNumber(value, 1);
+  return text === "--" ? text : `${text}%`;
+}
+
+function renderAbnormalEvents(summary) {
+  const events = asArray(summary.events);
+  $("abnormalPanel").innerHTML = `
+    <div class="finance-head">
+      <strong>${escapeHtml(summary.main_signal)} · ${escapeHtml(summary.level)}</strong>
+      <span>评分 ${escapeHtml(summary.score)}</span>
+    </div>
+    <div class="event-list compact-list">
+      ${renderList(events, renderAbnormalEvent, {
+        limit: 4,
+        empty: `<div class="stock-event"><strong>暂无明显异动</strong><p>当前未触发放量、跳空、长影线或涨跌停附近信号。</p></div>`,
+      })}
+    </div>
+  `;
+}
+
+function renderAbnormalEvent(item) {
+  return `
+              <div class="stock-event">
+                <strong>${escapeHtml(item.title)}<span>${escapeHtml(item.level)}</span></strong>
+                <small>${escapeHtml(item.direction)} · ${escapeHtml(item.date)}</small>
+                <p>${escapeHtml(item.description)}</p>
+              </div>`;
+}
+
+function renderLhb(lhb) {
+  const reasons = asArray(lhb.reasons);
+  const actions = asArray(lhb.action_items);
+  $("lhbPanel").innerHTML = `
+    <div class="finance-head">
+      <strong>龙虎榜 ${escapeHtml(lhb.available ? "已接入" : "待接入")} · ${escapeHtml(lhb.level)}</strong>
+      <span>${escapeHtml(lhb.source)}</span>
+    </div>
+    <p>${escapeHtml(lhb.summary)}</p>
+    ${renderEscapedItems(reasons, "small", { limit: 4 })}
+    ${actions.length ? `<div class="event-actions">${renderEscapedItems(actions, "em", { limit: 3 })}</div>` : ""}
+    ${lhb.reliability ? `<small>可靠性：${escapeHtml(lhb.reliability)}</small>` : ""}
+  `;
+}
+
+function renderRuleMatches(summary) {
+  const matches = asArray(summary.matches);
+  $("ruleMatches").innerHTML = renderList(
+    matches,
+    (item) => `
+          <article class="rule-item">
+            <div>
+              <strong>${escapeHtml(item.name)}</strong>
+              <span class="tag ${levelToneClass(item.level)}">${escapeHtml(item.status)} · ${escapeHtml(item.level)}</span>
+            </div>
+            <p>${escapeHtml(item.reason)}</p>
+            <small>${escapeHtml((item.actions || [])[0] || item.invalidation)}</small>
+          </article>`,
+    { limit: 8, empty: `<article class="rule-item"><strong>暂无规则</strong><p>内置规则正在等待数据。</p></article>` }
+  );
+}
+
+function renderStrategyCards(items) {
+  $("strategyCards").innerHTML = renderList(
+    items,
+    (item) => `
+      <article class="strategy-card">
+        <div>
+          <strong>${escapeHtml(item.name)}</strong>
+          <span class="tag ${levelToneClass(item.level)}">${escapeHtml(item.status)} · ${escapeHtml(item.level)}</span>
+        </div>
+        <p>${escapeHtml((item.current_evidence || [])[0] || "")}</p>
+        <dl>
+          <dt>参考价</dt><dd>${escapeHtml(item.reference_price)}</dd>
+          <dt>失效</dt><dd>${escapeHtml(item.invalidation)}</dd>
+          <dt>适合</dt><dd>${escapeHtml(item.suitable_for)}</dd>
+        </dl>
+      </article>`
+  );
+}
+
+export function renderMinuteAnalysis(report) {
+  const el = $("minuteAnalysis");
+  if (!el || !report) return;
+  const view = minuteAnalysisView(report);
+  el.innerHTML = view.isUnavailable ? renderMinuteUnavailable(view) : renderMinuteDetails(view);
+}
+
+function minuteAnalysisView(report) {
+  const tPlan = report.t_plan || {};
+  const missing = asArray(report.missing_data);
+  return {
+    report,
+    tPlan,
+    supports: asArray(report.supports),
+    resistances: asArray(report.resistances),
+    warnings: asArray(report.warnings),
+    missing,
+    statusTone: minuteStatusTone(tPlan.suitability, missing),
+    isUnavailable: missing.length && Number(report.sample_count) === 0,
+  };
+}
+
+function minuteStatusTone(suitability, missing) {
+  if (suitability === "仅底仓可做T") return "good";
+  if (suitability === "不适合主动做T") return "risk";
+  if (missing.length) return "warn";
+  return "";
+}
+
+function renderMinuteUnavailable(view) {
+  return `
+      <div class="minute-status-card ${view.statusTone}">
+        <div>
+          <strong>分钟做T已暂停</strong>
+          <span>${escapeHtml(view.report.summary || "分钟K线暂不可用，当前不按盘中区间做T。")}</span>
+        </div>
+        <i class="tag risk">${escapeHtml(view.tPlan.suitability || "不适合主动做T")}</i>
+      </div>
+      <div class="minute-empty">
+        <strong>缺失数据：${escapeHtml(view.missing.join("、"))}</strong>
+        ${minuteStepItems(view.tPlan.execution_steps, 2)}
+        ${minuteStepItems(view.tPlan.stop_conditions, 2)}
+      </div>
+    `;
+}
+
+function renderMinuteDetails(view) {
+  return `
+    ${renderMinuteHead(view)}
+    <p>${escapeHtml(view.report.summary || "")}</p>
+    <div class="minute-metrics">${renderMinuteMetrics(view.report)}</div>
+    <div class="minute-zones">${renderMinuteZones(view)}</div>
+    <div class="minute-steps">${renderMinuteSteps(view)}</div>
+  `;
+}
+
+function renderMinuteHead(view) {
+  const { report, tPlan, statusTone } = view;
+  return `
+    <div class="minute-head">
+      <div>
+        <strong>${escapeHtml(report.trend_label)} · ${escapeHtml(report.momentum_label)}</strong>
+        <span>${escapeHtml(report.interval)} · 样本 ${escapeHtml(report.sample_count)} · ${escapeHtml(report.source)}</span>
+      </div>
+      <i class="${statusTone}">${escapeHtml(tPlan.suitability || "待确认")}</i>
+    </div>`;
+}
+
+function renderMinuteMetrics(report) {
+  return `
+      <span>最新价 <b>${formatNumber(report.latest_price)}</b></span>
+      <span>区间涨跌 <b class="${changeClass(report.intraday_change_pct)}">${formatNumber(report.intraday_change_pct)}%</b></span>
+      <span>盘中振幅 <b>${formatNumber(report.intraday_range_pct)}%</b></span>
+      <span>量能 <b>${escapeHtml(report.volume_pulse || "--")}</b></span>`;
+}
+
+function renderMinuteZones(view) {
+  return `
+      ${renderMinuteZone("低吸参考", view.tPlan.low_zone, view.supports)}
+      ${renderMinuteZone("高抛参考", view.tPlan.high_zone, view.resistances)}`;
+}
+
+function renderMinuteZone(title, zone, levels) {
+  return `
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <b>${escapeHtml(zone || "--")}</b>
+        ${minuteLevelItems(levels)}
+      </div>`;
+}
+
+function renderMinuteSteps(view) {
+  return `
+      ${minuteStepItems(view.tPlan.execution_steps, 3)}
+      ${minuteStepItems(view.tPlan.stop_conditions, 2, "risk")}
+      ${minuteWarningItems(view.warnings, view.statusTone)}`;
+}
+
+function minuteLevelItems(items) {
+  return renderList(
+    items,
+    (item) => `<span>${escapeHtml(item.label)} ${formatNumber(item.price)} · 强度 ${escapeHtml(item.strength)}</span>`,
+    { limit: 2 }
+  );
+}
+
+function minuteStepItems(items, limit, className = "") {
+  return renderEscapedItems(items, "span", { limit, className });
+}
+
+function minuteWarningItems(items, statusTone) {
+  const className = statusTone === "risk" ? "risk" : "warn";
+  return renderEscapedItems(items, "span", { limit: 3, className });
+}
+
+function renderStockEvents(summary) {
+  const stockEvents = asObject(summary);
+  $("stockEvents").innerHTML = [
+    renderStockEventList(stockEvents.events),
+    renderStockEventFollowup(stockEvents),
+  ]
+    .filter(Boolean)
+    .join("");
+}
+
+function renderStockEventList(events) {
+  return renderList(events, renderStockEventCard, {
+    empty: `<div class="stock-event"><strong>暂无事件</strong><p>等待更多行情、公告或研报数据。</p></div>`,
+  });
+}
+
+function renderStockEventCard(item) {
+  return `
+          <div class="stock-event">
+            <strong>${escapeHtml(item.title)}<span>${escapeHtml(item.level)}</span></strong>
+            <small>${eventMetaText(item)}</small>
+            <p>${escapeHtml(item.description)}</p>
+            ${renderOptionalTag("small", item.reliability, { prefix: "可靠性：" })}
+            ${renderOptionalTag("em", item.action_hint)}
+          </div>`;
+}
+
+function eventMetaText(item) {
+  return [item.date, item.category, item.source].map(escapeHtml).join(" · ");
+}
+
+function renderStockEventFollowup(summary) {
+  const steps = asArray(summary.next_steps).slice(0, 4);
+  const missingSources = asArray(summary.missing_sources);
+  if (!steps.length && !missingSources.length) return "";
+  return `
+      <div class="stock-event event-followup">
+        <strong>下一步核查<span>清单</span></strong>
+        ${renderEscapedItems(steps, "p")}
+        ${renderMissingSources(missingSources)}
+      </div>`;
+}
+
+function renderMissingSources(items) {
+  return items.length ? `<small>待补数据：${escapedJoin(items, " / ")}</small>` : "";
+}
+
+function renderQuality(quality) {
+  if (!quality) {
+    $("qualityPanel").innerHTML = "";
+    return;
+  }
+  const notes = asArray(quality.notes);
+  const anomalies = asArray(quality.anomalies);
+  const el = $("qualityPanel");
+  el.className = `quality-panel ${toneByScore(quality.score, 85, 70)}`;
+  el.innerHTML = `
+    <div class="quality-head">
+      <strong>${escapeHtml(quality.level)} · ${escapeHtml(quality.score)}分</strong>
+      <span>${escapeHtml(quality.consistency_level)} · ${escapeHtml(quality.source)}</span>
+    </div>
+    <div class="quality-notes">
+      ${renderEscapedItems(notes, "span")}
+      ${anomalies.length ? `<span class="warn">异常：${escapeHtml(anomalies.join("；"))}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderSignalEvidence(snapshot) {
+  if (!snapshot) {
+    $("signalEvidence").innerHTML = "";
+    return;
+  }
+  $("signalEvidence").innerHTML = `
+    <div class="evidence-head">
+      <strong>本次结论依据</strong>
+      <span>${escapeHtml(snapshot.label)} · 可信度 ${escapeHtml(snapshot.confidence)}%</span>
+    </div>
+    <p>${escapeHtml(snapshot.summary)}</p>
+    <div class="evidence-grid">
+      ${signalEvidenceGroups(snapshot).map(renderEvidenceGroup).join("")}
+    </div>
+    ${renderRiskNotes(snapshot.risk_notes)}
+  `;
+}
+
+function signalEvidenceGroups(snapshot) {
+  return [
+    ["加分依据", asArray(snapshot.positive), "good"],
+    ["风险扣分", asArray(snapshot.negative), "risk"],
+    ["中性观察", asArray(snapshot.neutral), ""],
+  ];
+}
+
+function renderEvidenceGroup([title, items, tone]) {
+  return `
+          <div class="evidence-group">
+            <strong>${escapeHtml(title)}</strong>
+            ${renderEvidenceItems(title, items, tone)}
+          </div>`;
+}
+
+function renderEvidenceItems(title, items, tone) {
+  const rows = asArray(items);
+  return rows.length ? rows.map((item) => renderEvidenceItem(item, tone)).join("") : emptyEvidenceItem(title);
+}
+
+function renderEvidenceItem(item, tone) {
+  return `
+                      <span class="${tone}">
+                        <b>${escapeHtml(item.name)} ${formatEvidenceImpact(item.impact)}</b>
+                        <small>${escapeHtml(item.reason)}</small>
+                      </span>`;
+}
+
+function formatEvidenceImpact(value) {
+  const prefix = Number(value) > 0 ? "+" : "";
+  return `${prefix}${escapeHtml(value)}`;
+}
+
+function emptyEvidenceItem(title) {
+  return `<span><b>暂无</b><small>当前没有明显${escapeHtml(title)}。</small></span>`;
+}
+
+function renderRiskNotes(items) {
+  const rows = asArray(items);
+  return rows.length ? `<div class="evidence-risks">${renderEscapedItems(rows, "span")}</div>` : "";
+}
+
+function renderReview(review) {
+  if (!review) {
+    $("reviewSummary").textContent = "历史复盘暂不可用。";
+    $("reviewPoints").innerHTML = "";
+    $("reviewEvents").innerHTML = "";
+    return;
+  }
+  const keyPoints = asArray(review.key_points);
+  const events = asArray(review.events);
+  $("reviewSummary").textContent = review.review_summary || "";
+  $("reviewPoints").innerHTML = renderList(
+    keyPoints,
+    (item) => `
+      <div class="review-point">
+        <span>${escapeHtml(item.label)}</span>
+        <strong class="${item.level === "风险" ? "down" : item.level === "积极" ? "up" : ""}">${escapeHtml(item.value)}</strong>
+      </div>`
+  );
+  $("reviewEvents").innerHTML = renderList(
+    events,
+    (item) => `
+          <div class="review-event">
+            <strong>${escapeHtml(item.title)}</strong>
+            <span>${escapeHtml(item.date)} · ${escapeHtml(item.level)}</span>
+            <p>${escapeHtml(item.description)}</p>
+          </div>`,
+    { empty: `<div class="review-event"><strong>暂无异常事件</strong><p>近阶段没有触发明显大涨、大跌或高波动事件。</p></div>` }
+  );
+}
+
+function renderSignals(id, items) {
+  $(id).innerHTML = renderList(items, (item) => {
+      const tagClass = levelToneClass(item.level);
+      return `
+        <article class="signal-item">
+          <strong>${escapeHtml(item.title)}<span class="tag ${tagClass}">${escapeHtml(item.level)}</span></strong>
+          <p>${escapeHtml(item.reason)}</p>
+        </article>`;
+    });
+}
+
+export function renderMarket(indices) {
+  const items = asArray(indices);
+  $("marketStrip").innerHTML = renderList(
+    items,
+    (item) => `
+      <div class="index-card">
+        <span>${escapeHtml(item.name)}</span>
+        <strong>${formatNumber(item.price)}</strong>
+        <em class="${changeClass(item.change_pct)}">${formatNumber(item.change_pct)}%</em>
+      </div>`,
+    { empty: `<div class="index-card"><span>市场概览</span><strong>暂无数据</strong><em>等待刷新</em></div>` }
+  );
+}
+
+export function renderStrongStocks(items, meta = {}) {
+  const rows = asArray(items);
+  const scope = meta && meta.scope ? `${meta.scope} · 样本 ${meta.sample_count || rows.length}` : `样本 ${rows.length}`;
+  $("leaderList").innerHTML = rows.length
+    ? `<div class="leader-row leader-scope"><strong>${escapeHtml(scope)}</strong><span>仅代表当前样本内排序，不是全市场涨幅榜。</span></div>` +
+      renderList(
+        rows,
+        (item) => `
+      <div class="leader-row">
+        <div>
+          <strong>${escapeHtml(item.name)} <span>${escapeHtml(item.code)}</span></strong>
+          <small>${escapeHtml(item.reason)}</small>
+          <small>${escapedJoin(item.tags, " / ")}</small>
+        </div>
+        <div>
+          <div class="leader-rank">${escapeHtml(item.rank)}</div>
+          <span>龙头 ${escapeHtml(item.leader_score || 0)}</span>
+          <span class="${changeClass(item.change_pct)}">${formatNumber(item.change_pct)}%</span>
+        </div>
+      </div>`,
+        { limit: 8 }
+      )
+    : `<div class="leader-row"><strong>暂无观察池排序</strong><span>等待行情刷新后重新计算。</span></div>`;
+}
+
+export function renderQuotes(items) {
+  const rows = asArray(items);
+  $("quoteList").innerHTML = renderList(
+    rows,
+    (item) => `
+      <div class="quote-row">
+        <div>
+          <strong>${escapeHtml(item.name)}</strong>
+          <span>${escapeHtml(item.market)}${escapeHtml(item.code)} · 成交额 ${formatAmount(item.amount)}</span>
+        </div>
+        <div>
+          <strong>${formatNumber(item.price)}</strong>
+          <span class="${changeClass(item.change_pct)}">${formatNumber(item.change_pct)}%</span>
+        </div>
+      </div>`,
+    { empty: `<div class="quote-row"><strong>实时观察等待中</strong><span>行情连接成功后自动更新。</span></div>` }
+  );
+}

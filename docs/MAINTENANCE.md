@@ -1,0 +1,260 @@
+# Maintenance and Refactor Guide
+
+## 1. Engineering Rules
+
+- Keep HTTP routes thin. Route files should validate inputs and call workflows/services.
+- Keep provider logic behind `DataHub` and `provider_registry`.
+- Keep SQLite access in repositories or `SQLiteCache`; do not write SQL in route handlers.
+- Keep provider, scheduler, repository, and diagnostics route handlers behind `run_api()` or `run_sync_api()` so domain and SQLite failures keep the same Chinese API error contract.
+- Keep user input/update Pydantic models strict about unknown fields unless a compatibility requirement explicitly says otherwise.
+- Add or update tests before changing trend, alert, provider fallback, or data-quality behavior.
+- Do not store API keys in project files.
+- When adding a user-facing recommendation, include reason, risk, invalidation condition, or missing-data note.
+- When research logic consumes prices, volumes, forward returns, confidence, or factor scores from provider/cache/calibration inputs, guard non-finite values before text or statistics are assembled.
+- Treat feature snapshots as a shared research boundary: clean non-finite or non-positive prices, amount, turnover, volume ratio, ATR/volatility, MA/support/resistance, and research score fields before leadership, Alpha, factor, or diagnosis text consumes them.
+- Rule matches, minute-analysis plans, and market-regime evidence must turn invalid numbers, insufficient samples, and blank names into missing-data/fallback text instead of actionable or empty evidence.
+- Keep primary business functions short and stage-oriented; split data preparation, rule decisions, persistence, and response assembly once a function grows beyond roughly 60 lines.
+
+## 2. Refactor Roadmap
+
+### Priority 1: Documentation and Inventory
+
+- Keep README as project entry.
+- Keep SRS, SDD, API reference, operations guide, test plan, and function inventory current.
+- Regenerate inventory after any code movement.
+
+### Priority 2: Split Large Services
+
+Completed splits:
+
+- `app/services/stock_insights.py` is now a thin compatibility facade and bundle assembler.
+- Insight behavior lives in `stock_activity.py`, `stock_abnormal_events.py`, `stock_abnormal_context.py`, `stock_abnormal_rules.py`, `stock_abnormal_summary.py`, `stock_lhb.py`, `stock_event_sources.py`, `stock_event_summary.py`, `stock_overview.py`, `stock_strategy.py`, `financial_health_components.py`, `financial_health.py`, `valuation_anchors.py`, `valuation_components.py`, `valuation_analysis.py`, and `stock_rules.py`.
+- `app/services/datahub.py` now delegates provider source/status wording to `datahub_status.py` and pure cache/source normalization helpers to `datahub_cache.py`, while owning the instance-scoped workbench context cache used by the API container.
+- Quote HTTP/SSE endpoints live in `app/api/routes/quotes.py`; keep batch-size limits, symbol fallback, canonical stream symbols, watchlist/seed fallback caps with dirty-symbol skips, refresh-interval lower bounds, JSON-safe SSE formatting, quote-error events, and disconnect behavior covered by `tests/test_quote_stream_modules.py`.
+- Provider call timeouts, capability success/failure recording, and short cooldowns live in `app/services/datahub_runtime.py`.
+- Quote fetching, partial cache reuse, quote quality entry, and multi-source consistency checks live in `app/services/datahub_quotes.py`. Provider-priority loops must tolerate unregistered provider names by skipping them with readable diagnostics.
+- Daily K-line and minute K-line fetching live in `app/services/datahub_klines.py`; keep fresh-cache request-limit coverage, provider-attempt fallback behavior, invalid-row filtering, parsed date/time sorting, latest-window selection, provider-limit caps, malformed max-limit fallback, missing-capability failure recording, cancellation propagation, and empty-response downgrade tests in sync with any source priority changes.
+- Minute interval aliases live in `app/services/datahub_cache.py`; update `tests/test_datahub_cache_modules.py` whenever supported aliases or canonical interval labels change.
+- Stock pool/profile, plate rank, and concept membership fetching live in `app/services/datahub_metadata.py`; keep incomplete-stock-pool semantics, authoritative-miss handling, unregistered-provider skips, AKShare plate capability failures, empty metadata-response downgrades, and non-mutating profile enrichment covered by tests.
+- Optional Futu order-book retrieval and ping checks live in `app/services/datahub_orderbook.py`; provider failures must be wrapped as data-source errors after recording order-book capability status.
+- Source-plan assembly, primary-source selection, provider decision rules, warning priority, and recovery suggestions live in `app/services/datahub_source_plan.py`; provider source-key and capability-state wording rules live in `app/services/datahub_status.py`. Keep provider/source/kind/error text cleaning, duplicate status ranking, unique non-demo provider counts, missing-primary warnings, finite success-rate counts, and warning/suggestion de-duplication covered when changing source-plan or status wording.
+- Provider/capability persistence and aggregation live in `app/repositories/provider_status.py` and `app/repositories/provider_status_aggregation.py`; keep explicit select columns, stable provider/capability ordering, enabled-state preservation, and invalid count normalization covered by `tests/test_provider_status_aggregation_modules.py`.
+- Data-quality score components live in `app/services/data_quality_components.py` and K-line assessment lives in `app/services/data_quality_kline.py`. Keep quote-field sanitation ahead of derived range/change-percent diagnostics, keep high/low/change_pct boundaries strict, keep K-line latest-date/source selection based on the newest parsable row instead of the input tail, keep short-cache/normal-cache/fallback-cache wording distinct, avoid duplicate insufficient-count notes when K-lines are completely missing, clamp consistency penalties so they cannot reverse into score bonuses, and add stable anomaly text when anomaly-level consistency results have no notes. Update `tests/test_data_quality_modules.py` with any rule or wording change.
+- Optional provider adapters now live in source-specific modules: `akshare_provider.py`, `tushare_provider.py`, `baostock_provider.py`, `futu_provider.py`, and `local_metadata_provider.py`; keep API transport/return-code handling in providers and row parsing in mapper modules. Critical quote fields must use strict parsing instead of falling back to zero, missing change-percent values should be recomputed from price and previous close, and core volume/amount fields must not accept negative values. Eastmoney request symbols and HTTP JSON/object shapes must fail with readable data-source errors instead of leaking low-level type errors. K-line/minute rows must pass the shared validity helpers in `app/utils/market_data.py` before they enter analysis or cache persistence; the rule rejects non-finite values, non-positive bars, open/close values outside high/low bounds, negative volume, and non-finite or negative optional minute amount/turnover values. Futu order books must reject fully empty depth after cleaning. `provider_utils.pick()` should ignore only expected missing-field errors; unexpected row-adapter failures must surface. For AKShare K-lines, keep import/request failures eligible for Eastmoney fallback but let returned-row schema errors surface. For AKShare concept sources, update candidate field maps, code-column detection, and all-candidate loader-failure behavior together with `tests/test_data_sources.py`.
+- Tencent quote parsing in `app/services/providers.py` has stricter quote-level invariants: payload extraction must tolerate trailing whitespace while rejecting unclosed payloads, required fields are stripped before minimum-count checks, stock code/name must be present, timestamps must parse as real datetimes, and open/current prices must stay within high/low. Demo provider quotes should preserve rounded containment invariants, and demo K-lines should keep returning the requested number of previous weekdays even for Monday/small-limit calls. Keep these covered in `tests/test_tencent_provider_modules.py` when changing Tencent parsing or demo generation.
+- `app/services/optional_providers.py` remains as a backward-compatible re-export layer only.
+- Factor lab logic now separates the public assembly facade (`research_factors.py`), current factor construction (`research_factor_current.py`), report aggregation (`research_factor_report.py`), current scoring (`research_factor_scoring.py`), dynamic weights (`research_factor_weights.py`), cross-report text/impact helpers (`research_factor_text.py`), immutable factor registration/proxy scores (`research_factor_specs.py`), and historical calibration (`research_factor_calibration.py`). When changing factor IDs/order, blank/whitespace ID validation, read-only registration snapshots, volume-confirmation rules, risk-pressure contribution rules, proxy-score thresholds, complete K-line metric windows, trigger-score clamp boundaries, calibration bucket stats, or bucket-note priority, update the helper tests in `tests/test_research_factor_scoring_modules.py`, `tests/test_research_factor_specs_modules.py`, and `tests/test_research_factor_calibration_modules.py`.
+- Fund-flow output in `stock_activity.py` is a rule-table volume/price heat estimate, not formal main-inflow data; threshold, order-book boundary, shared depth cleaning, crossed-spread handling, invalid-depth, turnover/amount sanitation, zero-volume baseline, or current-volume date-policy changes should update the score/relation/pressure rules and `tests/test_stock_activity_modules.py` together.
+- Finance and valuation logic now separates rule-table metric interpretation and finite-number guards (`financial_metrics.py`), financial-health metric components (`financial_health_components.py`), financial-health response assembly (`financial_health.py`), valuation anchors/percentiles with malformed-history filtering, latest-snapshot-per-day selection, bounded percentile inputs, and ordered anchor-label bands (`valuation_anchors.py`), valuation percentile delta rules and score components with finite wording and core/enrichment missing-data separation (`valuation_components.py`), valuation response assembly (`valuation_analysis.py`), and the compatibility facade (`stock_finance.py`).
+- Analysis logic now separates assembly (`analysis.py`), signal/risk/action submodules (`analysis_signal_*.py` with `analysis_signals.py` kept as a facade), and strong-stock ranking (`strong_stocks.py`). `build_analysis()` should keep trend metrics, gated signal-point sets, optional history/peer input copying, and final result composition separated. Signal snapshots and legacy direct summary helpers must sanitize scores, labels, quality views, contribution text/impact, and user-facing notes before grouping or summary generation. Strong-stock ranking requires K-line evidence; workflow-level K-line failures should be logged and excluded from ranking rather than scored as neutral.
+- Workflow logic now separates the public compatibility facade (`individual.py`), stock lookup (`stock_lookup.py`), base analysis and minute analysis (`stock_analysis.py`), full workbench research assembly (`workbench_pipeline.py`), and market overview sampling (`market_overview.py`). Symbol parsing must reject malformed codes such as all-zero values and conflicting market prefix/suffixes before provider calls; minute analysis must call the same stock-confirmation path as main analysis before fetching minute rows, so confirmed nonexistent symbols return 404 instead of a misleading source-unavailable report. Main analysis treats plate rank as optional context and logs plate failures instead of failing quote/K-line analysis. `stock_workbench` should stay staged as advice snapshot persistence, normalized-symbol local-state reads, and final response assembly; local-state helpers own the fixed read limits for chart marks, alert rules, alert events, and notes. Market samples must normalize and dedupe request symbols plus stock-pool metadata before provider calls, clean market/industry text, skip invalid literal industries, and log skipped invalid/duplicate values for diagnostics; explicit custom strong-stock lists with no valid symbol or too many unique symbols must be rejected instead of returning a misleading empty ranking or overloading providers.
+- Minute-analysis logic keeps strict minute-row cleaning, finite non-negative volume/amount/turnover checks, support/resistance candidate filtering, T-plan zone validation, conservative no-price/no-range/insufficient-sample wording, confidence downgrades, and warning priority in `minute_analysis.py`; update `tests/test_minute_analysis_modules.py` when changing these boundaries or the data-quality/action-disabled/volume-pullback/narrow-space warning order.
+- Market data persistence now separates the compatibility composition (`market_data.py`), column-list driven quote snapshots/history (`market_quotes.py`), daily/minute K-lines (`market_klines.py`), and stock metadata/plates/concepts (`market_metadata.py`). Quote and K-line repositories filter invalid rows both before writing and after reading so old local cache rows cannot re-enter analysis; quote validation requires finite change fields, positive price/previous close/OHLC, OHLC containment, and non-negative volume/amount. Metadata repositories should keep explicit column lists, stable ordering, concept-name de-duplication, and finite optional numeric-field cleaning in sync with `tests/test_datahub_metadata_modules.py`.
+- User-data persistence keeps new input validation in Pydantic/API layers and legacy-row tolerance in mappers/repositories. Advice history must sanitize dirty text/numeric display fields and only dedupe snapshots against finite trend/support/resistance values. Alert rules must keep unsupported or non-finite legacy rows readable but disabled, normalize dirty trigger counts to non-negative values, bound cooldowns, and sanitize event prices/change percentages/thresholds before writing or reading them. Keep this covered in `tests/test_local_lifecycle.py`, `tests/test_api_alert_routes.py`, and `tests/test_rules_alerts.py`.
+- Research Q&A logic now separates the compatibility facade (`research_qa.py`), free-form topic answer strategies (`research_qa_answer.py`), fixed QA report generation (`research_qa_report.py`), topic routing (`research_qa_topics.py`), and shared helpers (`research_qa_utils.py`). Add new free-form topics by registering a complete `TopicAnswerStrategy` entry so evidence/actions/invalidations/conclusion/prefix stay together; topic lookup should normalize whitespace, strategy outputs must pass the shared clean/dedupe/limit fallback path, and numeric text or invalid literals such as `None/null/nan/inf` must use conservative display fallbacks. Fixed FAQ cards must also pass shared evidence sanitation, normalize report items before response assembly, re-check risk/reward target/stop side, validate support/resistance around current price, and use conservative T-plan/theme fallbacks so missing or invalid levels stay as `待确认`.
+- Research market-regime logic keeps cleaned context metrics, market-label priority, named risk-adjustment components, factor-lab risk contributions, blank industry/factor filtering, and breadth-summary fallback wording in rule helpers inside `research_regime.py`; update `tests/test_research_regime_modules.py` when changing breadth, tailwind, headwind, factor-risk thresholds, blank-evidence filtering, or missing-price wording.
+- Research chip logic keeps valid-K filtering, finite positive price/volume gates, feature-price fallback, bucket construction, and support/pressure band selection in `research_chip.py`; update `tests/test_research_chip_modules.py` whenever bucket boundaries, invalid-row filtering, current-price fallback, or band ordering changes.
+- Research replay logic now separates candidate scanning, K-line/volume context construction, pattern detection, case-note templates, bounded completed-sample counts, and pattern-note wording in `research_replay.py`; update `tests/test_research_replay_modules.py` whenever replay window, volume-ratio, target-day validity, forward-return finite filtering, pending-outcome wording, note priority, or maturity-count rules change.
+- Research validation logic keeps finite fallbacks for risk multiplier, confidence adjustment, base confidence, factor score, and stability in `research_validation.py`; update `tests/test_research_validation_modules.py` whenever status priority, confidence penalties, defensive grouping, T-range open-interval boundaries, or "not a new position" wording changes.
+- Research Alpha logic keeps non-finite impact filtering, non-displayable evidence filtering, evidence strength sorting, non-positive limit guards, cleaned title/reason de-duplication before limits, bounded 0-100 confidence components and summary display, verdict-context finite fallbacks, cleaned data-quality notes, dirty-text/whitespace/`N/A` filtering, empty rule-match tolerance, and explicit missing factor/regime/timeframe/risk-reward or abnormal feature-field notes in `research_alpha.py`; update `tests/test_research_alpha_modules.py` whenever bucket priority, confidence composition, verdict context, text cleaning, or missing-data wording changes.
+- Research risk/reward logic keeps staged report assembly, non-finite/non-positive input cleaning, capped upside targets, stale structural-stop filtering, target/stop side validation before distance math, finite reward/risk ratios, pending summary text for missing or wrong-side price/target/defense/ATR/volatility/risk multiplier, wrong-side level rejection around current price, integer scenario-probability normalization with a neutral floor, decision-state probability caps for cautious ratings/validation/timeframes, blank/non-finite action/status/timeframe defaults, and missing-level scenario probability downweighting in `research_risk_reward.py`; update `tests/test_research_risk_reward_modules.py` whenever target/stop inputs, ratio formatting, summary wording, level-validity rules, rating boundaries, or scenario probability rules change.
+- Research feature and leadership logic keeps shared feature cleaning, leader-score input sanitation, concept evidence filtering, stable concept sorting by change/rank/input order, and missing `公司画像` notes in `research_features.py`; update `tests/test_research_leadership_modules.py` whenever feature-field cleaning, leadership score inputs, concept evidence filtering, or missing-data wording changes.
+- Stock event logic now separates abnormal-event assembly (`stock_abnormal_events.py`), abnormal-event metrics/rules/summary (`stock_abnormal_context.py`, `stock_abnormal_rules.py`, `stock_abnormal_summary.py`), LHB candidate checks (`stock_lhb.py`), event source adapters plus external-checklist rules (`stock_event_sources.py`), event panel aggregation (`stock_event_summary.py`), and the compatibility re-export layer (`stock_events.py`). Keep context metrics zero-base-safe and keep current-session volume based on quote/K-line date alignment before adding new detectors.
+- Pydantic models now live in domain modules: `app/models/market.py`, `app/models/analysis.py`, `app/models/research.py`, `app/models/user_data.py`, `app/models/system.py`, and `app/models/workbench.py`.
+- `app/models/schemas.py` remains as a backward-compatible re-export layer for existing imports.
+
+Completed test splits:
+
+- `tests/test_rules_alerts.py`: rules, factor calibration, alert validation/cooldown, alert transition decisions, and chart marks.
+- `tests/test_api_alert_routes.py`: alert route/repository contracts including Chinese type-error rendering, finite threshold/cooldown guards, unknown-field rejection, and local read failure mapping.
+- `tests/test_api_notes_routes.py`: note route/repository contracts including content trimming, finite positive price guards, date normalization, blank-date clearing, stable same-day ordering, and local read failure mapping.
+- `tests/test_data_sources.py`: provider fallback, capability health, optional adapters, strict quote parsing, Eastmoney request dedupe, missing change-percent fallback, non-negative core quote fields, AKShare K-line fallback/schema separation, AKShare quote/concept mapping, AKShare plate capability failure recording, AKShare minute OHLC filtering, source plans, unregistered quote-priority skips, and stock-pool semantics.
+- `tests/test_provider_utils_modules.py`: provider row-field picking, NaN skipping, expected missing-field fallback, unexpected adapter-error propagation, positive-limit validation, and finite/positive/bounded OHLC validity rules.
+- `tests/test_datahub_klines_modules.py`: K-line/minute coordinator fallback, fresh-cache request-limit coverage, provider invalid-row rejection, cache read/write invalid-row filtering, parsed date/time latest-window ordering, huge provider-limit caps, capability-failure recording, cancellation propagation, cache TTL, future fetched-at guards, and non-positive limits.
+- `tests/test_datahub_metadata_modules.py`: metadata coordinator fallback, unregistered providers, stock-pool/profile limits, future timestamps, stable cache ordering, invalid metadata rows, concept de-duplication, and optional numeric-field cleaning.
+- `tests/test_provider_status_aggregation_modules.py`: provider/capability status aggregation, disabled stale activity handling, invalid count normalization, tie-break ordering, and repository status ordering.
+- `tests/test_config_modules.py`: dynamic settings reads, no hardcoded LLM endpoint/model defaults, malformed environment fallback, and explicit boolean parsing.
+- `tests/test_llm_explainer.py`: LLM settings, incomplete configuration fallback, grounded answers, stock-code-only references, API-key redaction on failures, non-finite number filtering, ungrounded punctuation-adjacent number rejection, list-marker exemptions, and factual guardrails.
+- `tests/test_analysis_research.py`: indicators, data quality, analysis, research reports, market sampling normalization/fallback logging, strong-stock K-line degradation, valuation history, and alert quality gates.
+- `tests/test_minute_analysis_modules.py`: strict minute-row cleaning, finite non-negative volume/amount/turnover handling, support/resistance candidate filtering, T-plan zone validation, conservative no-price/no-range/insufficient-sample fallbacks, warning priority, and confidence downgrades.
+- `tests/test_research_regime_modules.py`: cleaned market-regime context metrics, blank industry/factor/breadth-summary filtering, fallback breadth wording, ordered environment labels, named risk adjustments, factor-risk contributions, and missing-price guardrails.
+- `tests/test_stock_rule_modules.py`: rule-spec metadata, complete valid 20-high breakout windows, finite/positive current price/MA20/support/volume-ratio/fund-score/valuation-score gates, anomaly missing-data/evidence, high-valuation chase boundaries, cautious data-quality gates, and stable sorting.
+- `tests/test_data_quality_modules.py`: ordered quote-field sanitation, stricter high/low/change_pct boundaries, cache-source wording, latest parsable K-line date/source selection, missing-K-line de-duplication, and consistency penalty/anomaly guardrails.
+- `tests/test_research_leadership_modules.py`: feature snapshot sanitation, concept evidence filtering and stable sorting, leadership missing-data notes, score-summary thresholds, data-quality downgrades, and tag limits.
+- `tests/test_individual_workflow_modules.py`: `stock_workbench` stage boundaries, advice snapshot persistence, local-state symbol normalization, fixed chart-mark/alert/note/event read limits, and response assembly guardrails.
+- `tests/test_research_qa_answer_modules.py`: free-form Q&A topic strategies, registry coverage including `综合判断`, confidence penalty boundaries, conservative fallbacks, cleaned/deduped answer lists, non-finite wording guards, and repeated-action de-duplication.
+- `tests/test_research_qa_report_modules.py`: fixed FAQ Q&A risk/reward evidence wording, report-item exit sanitation, support/resistance fallback wording, T-plan fallback evidence, and theme-concept invalid-literal/non-finite cleaning.
+- `tests/test_research_chip_modules.py`: chip invalid-row filtering, finite positive price/volume gates, valid-sample gates, bucket boundaries, current-zone support/pressure bands, nearest-band ordering, and feature-price fallback to the latest valid close.
+- `tests/test_research_replay_modules.py`: replay sample/window gates, invalid entry and target-day pending handling, finite price/volume/forward-return filtering, mature-sample success rates, bounded completed counts, and replay outcome/pattern note wording.
+- `tests/test_research_validation_modules.py`: signal-validation rule priority, non-finite risk/confidence/factor fallbacks, confidence penalties, T-range strict open interval wording, defensive grouping, and overall-status priority.
+- `tests/test_symbol_modules.py`: SH/SZ symbol normalization, provider symbol formatting, malformed-code errors, all-zero symbol rejection, and conflicting market marker rejection.
+- `tests/test_indicator_volume_modules.py`: shared positive-volume ratio and average-volume boundaries.
+- `tests/test_market_quotes_modules.py`: quote snapshot/history column mapping, trade-date normalization, cached quote/history persistence, invalid quote write filtering, and dirty cache read filtering.
+- `tests/test_chart_marks_modules.py`: chart-mark visible-limit categories, regular-event filtering, malformed-date visibility/alignment guards, note/event text and price sanitation, and internal limit guards.
+- `tests/test_local_lifecycle.py`: local persistence, guarded SQLite compatibility migrations, concepts/themes/events, legacy malformed note-date handling, dirty advice/alert legacy-row sanitation, workbench cache, advice history, and replay confidence.
+- `tests/test_workbench_context_cache_modules.py`: cache expiry, cancelled in-flight cleanup, clear-during-build writeback prevention, concurrent request coalescing, and DataHub-owned cache isolation.
+- `tests/test_api_container_modules.py`: API container/DataHub runtime object sharing, including workbench context cache ownership.
+- `tests/test_static_assets.py`: static CSS entrypoint, CSS module guardrails, JS function-size guardrails, UI symbol all-zero rejection, escaped workbench review rendering, Node-based research-panel render/Q&A-submit/market/factor smoke coverage, diagnostics-panel smoke coverage, and fake-canvas chart mark plus dirty-K-line filtering smoke coverage.
+- `tests/test_api_stock_routes.py`: stock route-level contract guardrails for not-found behavior before expensive data fetches.
+- `tests/test_stock_abnormal_events.py`: abnormal-event quiet state, mixed risk/positive priority, downside-risk detection, context metric calculation, and zero-base fallbacks.
+- `tests/test_stock_event_summary.py`: event-summary quiet state, external-checklist triggers, and event-source ordering.
+- `tests/test_valuation_modules.py`: valuation missing-field policy, percentile score direction/rule order, out-of-range percentile ignoring, latest daily history snapshot selection, finite valuation wording, valuation-anchor band priority, price-position fallback, and malformed valuation-history filtering.
+- `tests/test_financial_health_modules.py`: financial-health missing-field policy, metric-card ordering, and liquidity wording.
+- `tests/test_scheduler_modules.py`: scheduler task/state guardrails, task-definition ordering, manual/background failure semantics, positive-integer interval/limit/freshness setting sanitation, refresh symbol cleaning/de-duplication, no-valid-symbol skips, per-symbol K-line refresh degradation, data-health events, finite cleanup summaries, reschedule interval boundaries, and shared DataHub settings ownership.
+- `tests/test_tencent_provider_modules.py`, `tests/test_futu_provider_modules.py`, `tests/test_optional_kline_parsing_modules.py`: source-specific quote/K-line parser guardrails for strict price fields, Tencent payload matching/minimum fields, Tencent code/name/timestamp/OHLC containment, computed missing change-percent values, finite non-negative core volume/amount fields, malformed payload shapes/OHLC rows, Futu minute rows/order-book depth, Tushare/BaoStock daily rows, and demo-provider local random state plus rounded quote/K-line containment including Monday small-limit backfill.
+- `tests/test_datahub_orderbook_modules.py`: order-book coordinator timeout wrapping, order-book capability failure recording, and cooldown behavior.
+
+Candidate improvements:
+
+- Add route-level smoke tests with FastAPI's test client.
+- When a route reads SQLite-backed state, add at least one failure-contract test that proves `sqlite3.DatabaseError` maps to a 503 `detail` response rather than a raw 500.
+- When touching a route/service for a meaningful change, prefer importing models from the domain module instead of adding new imports to `app.models.schemas`.
+
+### Priority 3: Frontend Modularization
+
+Completed splits:
+
+- `static/app.js`: app orchestration, symbol input synchronization, stale load/advice guards, SSE frame handling, stream restart after watchlist changes, and high-level event binding.
+- `static/js/api.js`: fetch wrapper and readable API error detail normalization.
+- `static/js/alerts.js`: alert rule CRUD, manual evaluation, and alert event rendering.
+- `static/js/chart.js`: canvas K-line drawing, frontend finite/positive OHLC filtering before coordinate math, moving-average lines, chart mark filtering/date matching, and mark rendering helpers.
+- `static/js/diagnostics.js`: provider/cache/source-plan diagnostics, provider-detail helpers, scheduler status helpers, source-plan rendering helpers, task controls, and monitor event rendering.
+- `static/js/format.js`: numeric formatting and neutral tone handling for missing/non-finite values.
+- `static/js/notes.js`: stock note CRUD and note-list rendering.
+- `static/js/research-panels.js`: AI dashboard, Q&A submit flow with stale-request guards, evidence chain, Alpha/timeframe/risk-reward view helpers, factor lab, theme, chip, replay, research-panel rendering, and card-level view helpers.
+- `static/js/research-render-utils.js`: shared escaped list, metric-pair, missing-data, signed-value, and threshold-tone helpers for research panels.
+- `static/js/watchlist.js`: watchlist CRUD and watchlist rendering.
+- `static/js/workbench.js`: main stock card, insight panels, valuation/minute-analysis view helpers, minute-analysis detail helpers, stock-event/evidence rendering helpers, quality/review panels, market strip, and quote-list rendering.
+- `static/js/workbench-render-utils.js`: shared safe array/object coercion and escaped list/tag rendering helpers for workbench panels.
+- `static/styles.css`: CSS import manifest.
+- `static/css/base.css`: design tokens, global reset, top bar, base layout, search controls, and shared hover behavior.
+- `static/css/sidebar.css`: watchlist, data-source health, scheduler tasks, and monitor-event styles.
+- `static/css/workspace-core.css`: market strip, workspace tabs, stock header, metrics, summary, quality, and core research panels.
+- `static/css/research-panels.css`: AI Q&A dashboard, evidence chain, insight panels, theme/chip/replay/finance panels.
+- `static/css/interactions.css`: rule cards, strategy cards, events, review/timeline, alerts, notes, chart marks, and minute-analysis styles.
+- `static/css/side-footer.css`: right-side quote/leader lists, footer, empty states, and error states.
+- `static/css/responsive.css`: responsive layout rules.
+
+Candidate improvements:
+
+- Add browser-level visual regression screenshots for the main workbench and mobile breakpoint.
+
+### Priority 4: DataHub Decomposition
+
+Split `DataHub` by capability:
+
+- `QuoteCoordinator`
+- `KlineCoordinator`
+- `MinuteCoordinator`
+- `StockPoolCoordinator`
+- `ConceptCoordinator`
+- `ProviderHealthService`
+
+Do this only after adding route-level contract tests.
+
+## 3. Change Checklist
+
+For any functional change:
+
+1. Identify the affected SRS requirement.
+2. Update design docs if boundaries or data flow change.
+3. Add or update unit tests.
+4. Run `npm run check`.
+5. Run targeted backend/frontend checks when the change is narrow.
+6. Run `npm run check` before delivery when changes touch both backend and frontend.
+7. Regenerate `docs/FUNCTION_INVENTORY.md` when Python functions/classes move.
+8. Regenerate `docs/API_REFERENCE.md` when routes change.
+9. Smoke test `/api/health` and at least one stock workbench request.
+
+## 4. Code Ownership Map
+
+| Feature | Primary Files |
+| --- | --- |
+| App startup | `app/main.py`, `app/api/container.py`, `app/config.py` |
+| Quote routes and streaming | `app/api/routes/quotes.py`, `app/services/datahub_quotes.py`, `app/services/datahub_cache.py`, `app/services/datahub_runtime.py`, `app/services/eastmoney_client.py`, `app/services/providers.py` (Tencent URL/text/payload helpers), `app/services/akshare_provider.py`, `app/services/akshare_mappers.py`, `app/services/futu_provider.py`, `app/services/futu_mappers.py` |
+| K-lines and minute data | `app/utils/market_data.py` (finite/OHLC/K-line validity), `app/services/datahub_klines.py`, `app/services/datahub_cache.py`, `app/services/datahub_runtime.py`, `app/repositories/market_klines.py`, `app/services/provider_utils.py`, `app/services/eastmoney_client.py`, `app/services/providers.py`, `app/services/akshare_provider.py`, `app/services/tushare_provider.py`, `app/services/baostock_provider.py`, `app/services/futu_provider.py`, `app/services/futu_mappers.py` |
+| Stock pool, plate, and concepts | `app/services/datahub_metadata.py`, `app/services/datahub_cache.py`, `app/services/datahub_runtime.py`, `app/services/akshare_provider.py`, `app/services/akshare_mappers.py`, `app/services/provider_stock_mappers.py`, `app/services/tushare_provider.py`, `app/services/baostock_provider.py`, `app/services/local_metadata_provider.py` |
+| Order book and Futu ping | `app/services/datahub_orderbook.py`, `app/services/datahub_runtime.py`, `app/services/futu_provider.py`, `app/services/futu_mappers.py` |
+| Provider call runtime and cooldowns | `app/services/datahub_runtime.py`, `app/repositories/provider_status.py`, `app/repositories/provider_status_aggregation.py` |
+| Provider source plan and status wording | `app/services/datahub_source_plan.py` (provider-name/status de-duplication, missing-primary warnings), `app/services/datahub_status.py` (clean status text, duplicate capability status ranking, finite success-rate counts), `app/services/provider_registry.py`, `app/repositories/provider_status.py`, `app/repositories/provider_status_aggregation.py` |
+| Provider capability state and priority mapping | `app/services/provider_registry.py`, `app/repositories/provider_status.py`, `app/repositories/provider_status_aggregation.py` (enabled/active classification, disabled stale-activity guards, and runtime update enabled-state preservation) |
+| SQLite schema initialization and compatibility migrations | `app/db/schema.py`, `app/db/schema_definitions.py`, `app/db/schema_migrations.py` (partial legacy database guards and idempotent migration records) |
+| SQLite row mapping | `app/db/mappers.py`, `app/db/market_mappers.py`, `app/db/system_mappers.py`, `app/db/user_mappers.py` |
+| Quote snapshots and valuation history | `app/repositories/market_quotes.py` (column-list driven persistence), `app/db/schema_definitions.py`, `app/db/schema_migrations.py` |
+| Daily and minute K-line persistence | `app/repositories/market_klines.py`, `app/db/schema_definitions.py` |
+| Stock pool, plate rank, and concepts persistence | `app/repositories/market_metadata.py`, `app/db/schema_definitions.py`, `app/db/schema_migrations.py` |
+| Market data repository compatibility | `app/repositories/market_data.py`, `app/services/cache.py` |
+| Analysis assembly | `app/services/analysis.py` (trend metrics, signal bundle, result composition), `app/services/strong_stocks.py`, `app/services/leader_scoring.py` |
+| Analysis signal rules | `app/services/analysis_signals.py`, `app/services/analysis_signal_points.py` (ordered risk/buy/sell/strength rules, T-plan invalid-zone pending wording), `app/services/analysis_signal_quality.py` (kind-specific quality gates), `app/services/analysis_signal_snapshot.py`, `app/services/analysis_signal_advice.py` |
+| Indicator calculations | `app/services/indicators.py`, `app/services/indicator_trend_components.py` (MA/volume contribution rules), `app/services/indicator_trend.py`, `app/services/indicator_levels.py`, `app/services/indicator_volume.py` (positive-volume ratio helpers), `app/services/indicator_math.py` |
+| Data quality scoring and gates | `app/services/data_quality_components.py` (ordered quote-field sanitation, K-line/cache wording, consistency penalties/anomalies), `app/services/data_quality.py`, `app/services/data_quality_time.py`, `app/services/data_quality_kline.py`, `app/services/analysis_signal_quality.py` |
+| Workflow compatibility facade | `app/workflows/individual.py` (`stock_workbench` advice snapshot persistence, normalized-symbol local-state reads, response assembly) |
+| Stock lookup and validation | `app/workflows/stock_lookup.py`, `app/utils/symbols.py` |
+| Base stock analysis and minute workflow | `app/workflows/stock_analysis.py`, `app/services/analysis.py`, `app/services/review.py`, `app/services/minute_analysis.py`, `app/services/datahub_cache.py` |
+| Workbench research pipeline | `app/workflows/workbench_pipeline.py`, `app/services/workbench_context.py`, `app/services/research*.py`, `app/services/stock_insights.py` |
+| Market overview and strong-stock workflow | `app/workflows/market_overview.py`, `app/services/market_sampling.py` (sample normalization, stock-pool code/market/industry consistency filtering, duplicate-safe sampling, request-symbol quote filtering, missing-symbol fallback logging, skipped-value logging, cancellation-safe partial quote fallback), `app/services/strong_stocks.py`, `app/services/leader_scoring.py` |
+| Research report facade | `app/services/research.py` |
+| Research alpha evidence | `app/services/research_alpha_points.py`, `app/services/research_alpha.py` (finite-impact and display-text filtering, strength sorting, non-positive limit guards, cleaned title/reason de-duplication, dirty-text/`N/A` filtering, explicit missing-data merge, cleaned data-quality notes, bounded confidence adjustments, verdict finite fallbacks) |
+| Research market breadth | `app/services/research_breadth.py` |
+| Research chip analysis | `app/services/research_chip.py` (daily-K chip buckets, finite positive price/volume filtering, feature-price fallback, boundary clamps, current-zone support/pressure bands) |
+| Research diagnosis | `app/services/research_diagnosis.py`, `app/services/research_diagnosis_decisions.py`, `app/services/research_diagnosis_sections.py` |
+| Research evidence chain | `app/services/research_evidence.py` |
+| Research event digest | `app/services/research_events.py` |
+| Research factor lab assembly | `app/services/research_factors.py`, `app/services/research_factor_current.py`, `app/services/research_factor_report.py` |
+| Research factor scoring | `app/services/research_factor_scoring.py` (volume/risk/chip rule tables), `app/services/research_factor_specs.py` (read-only registration snapshot, blank/whitespace ID validation, complete metric windows, trigger score sanitation) |
+| Research factor weights | `app/services/research_factor_weights.py` |
+| Research factor text and impact helpers | `app/services/research_factor_text.py` |
+| Research factor calibration | `app/services/research_factor_calibration.py`, `app/services/research_factor_specs.py` |
+| Research feature snapshot and leadership | `app/services/research_features.py` (feature metric cleaning, leadership input sanitation, concept evidence filtering/sorting, company-profile missing-data notes) |
+| Research peer comparison | `app/services/research_peer.py` |
+| Research Q&A facade | `app/services/research_qa.py` |
+| Research free-form Q&A | `app/services/research_qa_answer.py` (confidence penalty rules, whitespace-normalized topic lookup, shared answer cleaning/limits/fallbacks, invalid-literal and finite-number wording, and `TopicAnswerStrategy` registry), `app/services/research_qa_topics.py`, `app/services/research_qa_utils.py` |
+| Research fixed QA report | `app/services/research_qa_report.py`, `app/services/research_qa_utils.py` (fixed FAQ generation, report-item normalization, risk/reward pending-level wording, support/resistance guards, T-plan fallback evidence, and theme-concept evidence cleaning) |
+| Research market regime | `app/services/research_regime.py` (cleaned context metrics, ordered market labels, named risk adjustments, blank industry/factor/breadth-summary filtering, finite evidence/suggestions) |
+| Research replay analysis | `app/services/research_replay.py` (pattern rules, target-day pending handling, finite forward-return statistics, note templates, mature-sample boundaries) |
+| Research risk radar | `app/services/research_risk.py` |
+| Research risk/reward | `app/services/research_risk_reward.py` (staged report assembly, finite/non-positive input cleaning, capped upside targets, structural-stop filtering, target/stop side validation before distance math, finite reward/risk ratio, pending summary wording, downside-stop adjustment rules, rating rules, decision-state scenario probability caps, integer scenario probability normalization with neutral floor, scenario plans with missing/wrong-side-level downweighting and wording guards) |
+| Research theme context | `app/services/research_theme.py` (theme stats with finite industry/concept cleaning, ordered evidence rules, opportunity/risk rules, report caps after full-input scoring) |
+| Research timeframe alignment | `app/services/research_timeframe.py` |
+| Research T strategy | `app/services/research_t_strategy.py` (style/suitability rule tables, low/high zone fallbacks, stop-condition wording) |
+| Research signal validation | `app/services/research_validation.py` (central status/timeframe constants, finite risk/confidence/factor fallbacks, strict status/confidence/overall rule tables, T-range open interval) |
+| Insight bundle assembly | `app/services/stock_insights.py` |
+| Fund flow and order pressure | `app/services/stock_activity.py` (fund-flow score rules, order-book threshold rules, shared valid-depth cleaning, invalid-depth/crossed-spread filtering, zero-baseline volume guards) |
+| Local abnormal event detection | `app/services/stock_abnormal_events.py`, `app/services/stock_abnormal_context.py`, `app/services/stock_abnormal_rules.py`, `app/services/stock_abnormal_summary.py` |
+| LHB candidate checks | `app/services/stock_lhb.py` |
+| Stock event source adapters and panel aggregation | `app/services/stock_event_sources.py`, `app/services/stock_event_summary.py` |
+| Stock event compatibility imports | `app/services/stock_events.py` |
+| Overview scoring and risk triggers | `app/services/stock_overview.py` (score helpers, positive valuation guards, finite/clean fundamental fields, shared support/resistance normalization, visible-event de-duplication, and ordered main-conflict rules) |
+| Strategy cards | `app/services/stock_strategy.py` (data-quality status downshift maps, fallback signal handling) |
+| Financial metric interpretation | `app/services/financial_metrics.py`, `app/services/scoring.py` |
+| Financial health diagnostics | `app/services/financial_health_components.py`, `app/services/financial_health.py`, `app/services/scoring.py` |
+| Valuation anchors, score components, and response assembly | `app/services/valuation_anchors.py` (latest daily snapshots, bounded percentiles), `app/services/valuation_components.py` (percentile delta rules, finite wording, core/enrichment missing-data policy), `app/services/valuation_analysis.py`, `app/services/scoring.py` |
+| Finance compatibility imports | `app/services/stock_finance.py` |
+| Rules and rule matches | `app/services/stock_rules.py` (`RULE_SPECS`, `RULE_CONFIDENCE`, spec-derived match metadata, complete valid 20-high windows, finite/positive input gates, rule states, missing-price/anomaly evidence guards, break-MA20 helpers, high-valuation chase helpers, cautious quality-gate decisions, sort keys), `app/services/analysis_signal_quality.py` |
+| Alerts | `app/services/alerts.py`, `app/api/routes/alerts.py`, `app/repositories/alerts.py`, `app/db/user_mappers.py`, `app/repositories/update_fields.py` (central transition decisions, default-name normalization, finite-threshold/cooldown guards, disabled unsupported legacy rules, non-negative trigger counts, sanitized event values, and explicit-column persistence) |
+| Notes and marks | `app/api/routes/notes.py`, `app/repositories/notes.py`, `app/repositories/update_fields.py`, `app/services/chart_marks.py` (date normalization, finite positive price guards, blank-date clearing, stable note ordering, malformed-date visibility guards, text/price sanitation, visible-limit categories, and event-to-mark helpers) |
+| Watchlist and advice | `app/api/routes/watchlist.py`, `app/repositories/watchlist.py`, `app/repositories/advice.py`, `app/db/user_mappers.py` (watchlist freshness, advice-history dirty-row display fallbacks, and finite-value dedupe guards) |
+| Monitoring | `app/services/scheduler.py` (task specs, task-state helpers, positive-integer setting sanitation, refresh symbol cleaning, K-line partial-failure handling, finite cleanup summaries, DataHub settings ownership), `app/services/system_diagnostics.py` (provider diagnostic decisions, sanitized storage/table counts, de-duplicated cache/storage/environment warnings), `app/api/routes/monitoring.py`, `app/repositories/runtime.py` |
+| Frontend | `static/app.js`, `static/js/*`, `static/styles.css`, `static/css/*` |
+
+## 5. Invariants
+
+- `standard_symbol` format should remain `CODE.MARKET`, for example `600519.SH`.
+- Cache fallback must be visible through source or quality notes.
+- Demo provider must remain disabled by default.
+- Alert triggers must honor cooldown.
+- Recovery events must not spam when state is unchanged.
+- Advice history should dedupe repeated same conclusions within the configured window.
+- Dirty local user rows should stay displayable but must not become executable signals, absorb fresh advice snapshots, or write non-finite values back into alert events.
+- Runtime cleanup must keep historical market tables by partition: `quote_history` per symbol, `kline_minute` per symbol and interval, and `stock_concept` per symbol. `cache_event` and `alert_event` use their own configurable whole-table caps (`ASHARE_RADAR_MAX_CACHE_EVENT_ROWS`, `ASHARE_RADAR_MAX_ALERT_EVENT_ROWS`).
+- LLM output must pass grounding checks before replacing rule answer; punctuation alone must not exempt ungrounded market numbers, and stock codes must not be treated as price/score evidence unless explicitly written as code references.
+- Provider adapters must not turn malformed critical prices into zero-valued quotes or K-lines; Tencent quotes must also keep code/name/timestamp and open/current-vs-high/low containment valid.
+- Research reports, rule matches, minute plans, and market-regime outputs must not serialize `nan` or `inf`; invalid feature snapshot fields, forward returns, target K-lines, Alpha verdict context, risk/reward ratios, rule evidence inputs, and intraday zones should stay pending or use bounded conservative fallbacks. Leadership concept evidence and market-regime evidence must drop blank names before stable sorting/text assembly, and doing-T validation must not be worded as a new-position recommendation.
+
+## 6. Known Non-Blocking Issues
+
+- `README.md` had been reduced to a title before this documentation pass; it has been rebuilt as an entry point.
+- Browser-level visual regression tests are still missing for first-screen and mobile layouts.
+- The frontend lacks committed browser-level regression tests.
+- Some external provider adapters use public endpoints that can change without notice.
+- Runtime files in `data/` used to be tracked; they are now ignored and should stay out of future commits.

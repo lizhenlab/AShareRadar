@@ -32,6 +32,7 @@ from app.models.schemas import (
 )
 from app.repositories.advice import AdviceHistoryRepository
 from app.repositories.alerts import AlertRepository
+from app.repositories.alerts import AlertStateDecision
 from app.repositories.cache_stats import CacheStatsRepository
 from app.repositories.market_data import MarketDataRepository
 from app.repositories.maintenance import RuntimeMaintenanceRepository
@@ -216,6 +217,7 @@ class SQLiteCache:
         quote: Quote,
         event_type: str | None = None,
         force_event: bool = False,
+        decision: AlertStateDecision | None = None,
     ) -> AlertEventItem | None:
         return self.alert_repo.update_rule_state(
             rule,
@@ -226,6 +228,7 @@ class SQLiteCache:
             quote=quote,
             event_type=event_type,
             force_event=force_event,
+            decision=decision,
         )
 
     def alert_events(self, symbol: str | None = None, limit: int = 100) -> list[AlertEventItem]:

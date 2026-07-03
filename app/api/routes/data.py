@@ -5,10 +5,10 @@ import asyncio
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_datahub
-from app.api.errors import run_api
+from app.api.errors import run_api, run_sync_api
 from app.models.schemas import DataStatus, OrderBook, PlateItem, StockInfo
 from app.services.datahub import DataHub
-from app.services.trading_calendar import calendar_source, refresh_trade_calendar
+from app.services.trading_calendar import TradeCalendarRefreshResult, refresh_trade_calendar_result
 from app.utils.symbols import normalize_symbol
 
 
@@ -17,7 +17,7 @@ router = APIRouter()
 
 @router.get("/api/data/status", response_model=DataStatus)
 async def data_status(datahub: DataHub = Depends(get_datahub)) -> DataStatus:
-    return datahub.status()
+    return run_sync_api(datahub.status)
 
 
 @router.get("/api/stocks", response_model=list[StockInfo])
@@ -53,13 +53,24 @@ async def order_book(
 
 @router.get("/api/futu/status")
 async def futu_status(datahub: DataHub = Depends(get_datahub)) -> dict[str, object]:
-    return await datahub.futu_ping()
+    return await run_api(datahub.futu_ping)
 
 
 @router.post("/api/data/trading-calendar/refresh")
 async def refresh_trading_calendar_api() -> dict[str, object]:
     async def refresh() -> dict[str, object]:
-        count = await asyncio.to_thread(refresh_trade_calendar)
-        return {"ok": bool(count), "trade_date_count": count, "source": calendar_source()}
+        result = await asyncio.to_thread(refresh_trade_calendar_result)
+        return _trade_calendar_refresh_payload(result)
 
     return await run_api(refresh)
+
+
+def _trade_calendar_refresh_payload(result: TradeCalendarRefreshResult) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "ok": result.ok,
+        "trade_date_count": result.trade_date_count,
+        "source": result.source,
+    }
+    if result.error:
+        payload["error"] = result.error
+    return payload

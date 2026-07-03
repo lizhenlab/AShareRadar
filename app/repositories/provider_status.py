@@ -1,15 +1,221 @@
 from __future__ import annotations
 
-from app.db.mappers import row_to_provider_capability_status, row_to_provider_status
+from collections.abc import Iterable
+from dataclasses import dataclass
+
+from app.db.system_mappers import row_to_provider_capability_status, row_to_provider_status
 from app.models.schemas import ProviderCapabilityStatus, ProviderStatus
 from app.repositories.base import SQLiteRepository
+from app.repositories.provider_status_aggregation import (
+    aggregate_provider_status as _aggregate_provider_status,
+    capability_has_activity as _capability_has_activity,
+)
 from app.utils.time import now_text
+
+MAX_ERROR_LENGTH = 500
+
+
+@dataclass(frozen=True)
+class ProviderRuntimeUpdate:
+    name: str
+    enabled: bool
+    priority: int
+    healthy: bool
+    latency_ms: float | None
+    last_success: str | None
+    last_error: str | None
+    success_delta: int
+    failure_delta: int
+
+
+PROVIDER_RUNTIME_COLUMNS = (
+    "name",
+    "enabled",
+    "priority",
+    "healthy",
+    "last_success",
+    "last_error",
+    "latency_ms",
+    "success_count",
+    "failure_count",
+    "updated_at",
+)
+PROVIDER_CAPABILITY_RUNTIME_COLUMNS = (
+    "name",
+    "kind",
+    "enabled",
+    "priority",
+    "healthy",
+    "last_success",
+    "last_error",
+    "latency_ms",
+    "success_count",
+    "failure_count",
+    "updated_at",
+)
+PROVIDER_STATUS_ORDER_BY = "priority ASC, name ASC"
+PROVIDER_CAPABILITY_STATUS_ORDER_BY = "priority ASC, name ASC, kind ASC"
+
+
+def _runtime_upsert_sql(*, table: str, columns: tuple[str, ...], conflict_target: str, enabled_assignment: str) -> str:
+    return (
+        f"INSERT INTO {table} ({_column_names(columns)}) VALUES ({_placeholders(columns)}) "
+        f"ON CONFLICT({conflict_target}) DO UPDATE SET "
+        + _runtime_update_assignments(table, enabled_assignment)
+    )
+
+
+def _column_names(columns: tuple[str, ...]) -> str:
+    return ", ".join(columns)
+
+
+def _placeholders(columns: tuple[str, ...]) -> str:
+    return ", ".join("?" for _column in columns)
+
+
+def _select_columns(columns: tuple[str, ...]) -> str:
+    return _column_names(columns)
+
+
+def _db_bool(value: bool) -> int:
+    return 1 if value else 0
+
+
+def _count_value(value: int | None) -> int:
+    return max(int(value or 0), 0)
+
+
+def _trim_error(error: str) -> str:
+    return str(error)[:MAX_ERROR_LENGTH]
+
+
+def _runtime_update_assignments(table: str, enabled_assignment: str) -> str:
+    assignments = [
+        enabled_assignment,
+        "priority=excluded.priority",
+        "healthy=excluded.healthy",
+        f"last_success=COALESCE(excluded.last_success, {table}.last_success)",
+        "last_error=excluded.last_error",
+        "latency_ms=excluded.latency_ms",
+        f"success_count={table}.success_count + ?",
+        f"failure_count={table}.failure_count + ?",
+        "updated_at=excluded.updated_at",
+    ]
+    return ", ".join(assignments)
+
+
+def _runtime_update_values(update: ProviderRuntimeUpdate, updated_at: str) -> tuple[object, ...]:
+    return (
+        update.name,
+        _db_bool(update.enabled),
+        update.priority,
+        _db_bool(update.healthy),
+        update.last_success,
+        update.last_error,
+        update.latency_ms,
+        _count_value(update.success_delta),
+        _count_value(update.failure_delta),
+        updated_at,
+    )
+
+
+def _runtime_update_deltas(update: ProviderRuntimeUpdate) -> tuple[int, int]:
+    return _count_value(update.success_delta), _count_value(update.failure_delta)
+
+
+def _capability_runtime_update_values(update: ProviderRuntimeUpdate, kind: str, updated_at: str) -> tuple[object, ...]:
+    values = _runtime_update_values(update, updated_at)
+    return (values[0], kind, *values[1:])
+
+
+def _execute_runtime_upsert(conn, sql: str, values: Iterable[object], update: ProviderRuntimeUpdate) -> None:
+    conn.execute(sql, (*values, *_runtime_update_deltas(update)))
+
+
+def _provider_status_values(item: ProviderStatus) -> tuple[object, ...]:
+    return (
+        item.name,
+        _db_bool(item.enabled),
+        item.priority,
+        _db_bool(item.healthy),
+        item.last_success,
+        item.last_error,
+        item.latency_ms,
+        _count_value(item.success_count),
+        _count_value(item.failure_count),
+        item.updated_at or now_text(),
+    )
+
+
+def _provider_sync_upsert_sql(enabled_assignment: str) -> str:
+    return (
+        f"INSERT INTO provider_status ({_column_names(PROVIDER_RUNTIME_COLUMNS)}) "
+        f"VALUES ({_placeholders(PROVIDER_RUNTIME_COLUMNS)}) "
+        "ON CONFLICT(name) DO UPDATE SET "
+        + ", ".join(
+            [
+                f"enabled={enabled_assignment}",
+                "priority=excluded.priority",
+                "healthy=excluded.healthy",
+                "last_success=COALESCE(excluded.last_success, provider_status.last_success)",
+                "last_error=excluded.last_error",
+                "latency_ms=excluded.latency_ms",
+                "success_count=excluded.success_count",
+                "failure_count=excluded.failure_count",
+                "updated_at=excluded.updated_at",
+            ],
+        )
+    )
+
+
+_PROVIDER_COLUMNS_SQL = _select_columns(PROVIDER_RUNTIME_COLUMNS)
+_PROVIDER_CAPABILITY_COLUMNS_SQL = _select_columns(PROVIDER_CAPABILITY_RUNTIME_COLUMNS)
+_PROVIDER_SELECT_SQL = f"SELECT {_PROVIDER_COLUMNS_SQL} FROM provider_status"
+_PROVIDER_CAPABILITY_SELECT_SQL = f"SELECT {_PROVIDER_CAPABILITY_COLUMNS_SQL} FROM provider_capability_status"
+_PROVIDER_UPSERT_SQL = _runtime_upsert_sql(
+    table="provider_status",
+    columns=PROVIDER_RUNTIME_COLUMNS,
+    conflict_target="name",
+    enabled_assignment="enabled=provider_status.enabled",
+)
+_PROVIDER_CAPABILITY_UPSERT_SQL = _runtime_upsert_sql(
+    table="provider_capability_status",
+    columns=PROVIDER_CAPABILITY_RUNTIME_COLUMNS,
+    conflict_target="name, kind",
+    enabled_assignment="enabled=provider_capability_status.enabled",
+)
+_PROVIDER_ENSURE_SQL = """
+INSERT INTO provider_status (
+    name, enabled, priority, healthy, success_count, failure_count, updated_at
+) VALUES (?, ?, ?, ?, 0, 0, ?)
+ON CONFLICT(name) DO UPDATE SET
+    enabled=excluded.enabled,
+    priority=excluded.priority,
+    updated_at=excluded.updated_at
+"""
+_PROVIDER_CAPABILITY_ENSURE_SQL = """
+INSERT INTO provider_capability_status (
+    name, kind, enabled, priority, healthy, success_count, failure_count, updated_at
+) VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+ON CONFLICT(name, kind) DO UPDATE SET
+    enabled=excluded.enabled,
+    priority=excluded.priority,
+    updated_at=excluded.updated_at
+"""
 
 
 class ProviderStatusRepository(SQLiteRepository):
     def enabled(self, name: str) -> bool:
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT enabled FROM provider_status WHERE name = ?", (name,)).fetchone()
+        return bool(row["enabled"]) if row else True
+
+    def capability_enabled(self, name: str, kind: str) -> bool:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT enabled FROM provider_capability_status WHERE name = ? AND kind = ?",
+                (name, kind),
+            ).fetchone()
         return bool(row["enabled"]) if row else True
 
     def record_success(self, name: str, priority: int, latency_ms: float) -> None:
@@ -33,7 +239,7 @@ class ProviderStatusRepository(SQLiteRepository):
             healthy=False,
             latency_ms=None,
             last_success=None,
-            last_error=error[:500],
+            last_error=_trim_error(error),
             success_delta=0,
             failure_delta=1,
         )
@@ -41,35 +247,17 @@ class ProviderStatusRepository(SQLiteRepository):
     def ensure_capability(self, name: str, kind: str, priority: int, enabled: bool = True) -> None:
         timestamp = now_text()
         with self._lock, self._connect() as conn:
-            exists = conn.execute(
-                "SELECT name FROM provider_capability_status WHERE name = ? AND kind = ?",
-                (name, kind),
-            ).fetchone()
-            if exists:
-                conn.execute(
-                    """
-                    UPDATE provider_capability_status
-                    SET enabled = ?, priority = ?
-                    WHERE name = ? AND kind = ?
-                    """,
-                    (int(enabled), priority, name, kind),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO provider_capability_status (
-                        name, kind, enabled, priority, healthy, success_count, failure_count, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 0, 0, ?)
-                    """,
-                    (name, kind, int(enabled), priority, 0, timestamp),
-                )
-        self._sync_provider_from_capabilities(name, priority)
+            conn.execute(
+                _PROVIDER_CAPABILITY_ENSURE_SQL,
+                (name, kind, _db_bool(enabled), priority, 0, timestamp),
+            )
+        self._sync_provider_from_capabilities(name, priority, preserve_enabled=False)
 
     def record_capability_success(self, name: str, kind: str, priority: int, latency_ms: float) -> None:
         self._upsert_capability(
             name=name,
             kind=kind,
-            enabled=True,
+            enabled=self.capability_enabled(name, kind),
             priority=priority,
             healthy=True,
             latency_ms=latency_ms,
@@ -78,49 +266,37 @@ class ProviderStatusRepository(SQLiteRepository):
             success_delta=1,
             failure_delta=0,
         )
-        self._sync_provider_from_capabilities(name, priority)
+        self._sync_provider_from_capabilities(name, priority, preserve_enabled=True)
 
     def record_capability_failure(self, name: str, kind: str, priority: int, error: str) -> None:
         self._upsert_capability(
             name=name,
             kind=kind,
-            enabled=True,
+            enabled=self.capability_enabled(name, kind),
             priority=priority,
             healthy=False,
             latency_ms=None,
             last_success=None,
-            last_error=error[:500],
+            last_error=_trim_error(error),
             success_delta=0,
             failure_delta=1,
         )
-        self._sync_provider_from_capabilities(name, priority)
+        self._sync_provider_from_capabilities(name, priority, preserve_enabled=True)
 
     def ensure(self, name: str, priority: int, enabled: bool = True) -> None:
+        timestamp = now_text()
         with self._lock, self._connect() as conn:
-            exists = conn.execute("SELECT name FROM provider_status WHERE name = ?", (name,)).fetchone()
-            if exists:
-                conn.execute(
-                    """
-                    UPDATE provider_status
-                    SET enabled = ?, priority = ?
-                    WHERE name = ?
-                    """,
-                    (int(enabled), priority, name),
-                )
-                return
             conn.execute(
-                """
-                INSERT INTO provider_status (
-                    name, enabled, priority, healthy, success_count, failure_count, updated_at
-                ) VALUES (?, ?, ?, ?, 0, 0, ?)
-                """,
-                (name, int(enabled), priority, int(enabled), now_text()),
+                _PROVIDER_ENSURE_SQL,
+                (name, _db_bool(enabled), priority, _db_bool(enabled), timestamp),
             )
 
     def items(self) -> list[ProviderStatus]:
         with self._lock, self._connect() as conn:
-            rows = conn.execute("SELECT * FROM provider_status ORDER BY priority ASC").fetchall()
-            capability_rows = conn.execute("SELECT * FROM provider_capability_status ORDER BY priority ASC, name ASC, kind ASC").fetchall()
+            rows = conn.execute(f"{_PROVIDER_SELECT_SQL} ORDER BY {PROVIDER_STATUS_ORDER_BY}").fetchall()
+            capability_rows = conn.execute(
+                f"{_PROVIDER_CAPABILITY_SELECT_SQL} ORDER BY {PROVIDER_CAPABILITY_STATUS_ORDER_BY}",
+            ).fetchall()
         by_name = {row["name"]: row_to_provider_status(row) for row in rows}
         grouped: dict[str, list[ProviderCapabilityStatus]] = {}
         for row in capability_rows:
@@ -128,12 +304,12 @@ class ProviderStatusRepository(SQLiteRepository):
             grouped.setdefault(item.name, []).append(item)
         for name, statuses in grouped.items():
             by_name[name] = _aggregate_provider_status(name, statuses, by_name.get(name))
-        return sorted(by_name.values(), key=lambda item: item.priority)
+        return sorted(by_name.values(), key=lambda item: (item.priority, item.name))
 
     def capability_items(self) -> list[ProviderCapabilityStatus]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM provider_capability_status ORDER BY priority ASC, name ASC, kind ASC"
+                f"{_PROVIDER_CAPABILITY_SELECT_SQL} ORDER BY {PROVIDER_CAPABILITY_STATUS_ORDER_BY}",
             ).fetchall()
         return [row_to_provider_capability_status(row) for row in rows]
 
@@ -150,39 +326,20 @@ class ProviderStatusRepository(SQLiteRepository):
         success_delta: int,
         failure_delta: int,
     ) -> None:
+        update = ProviderRuntimeUpdate(
+            name=name,
+            enabled=enabled,
+            priority=priority,
+            healthy=healthy,
+            latency_ms=latency_ms,
+            last_success=last_success,
+            last_error=last_error,
+            success_delta=success_delta,
+            failure_delta=failure_delta,
+        )
+        updated_at = now_text()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO provider_status (
-                    name, enabled, priority, healthy, last_success, last_error,
-                    latency_ms, success_count, failure_count, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    enabled=excluded.enabled,
-                    priority=excluded.priority,
-                    healthy=excluded.healthy,
-                    last_success=COALESCE(excluded.last_success, provider_status.last_success),
-                    last_error=excluded.last_error,
-                    latency_ms=excluded.latency_ms,
-                    success_count=provider_status.success_count + ?,
-                    failure_count=provider_status.failure_count + ?,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    name,
-                    int(enabled),
-                    priority,
-                    int(healthy),
-                    last_success,
-                    last_error,
-                    latency_ms,
-                    success_delta,
-                    failure_delta,
-                    now_text(),
-                    success_delta,
-                    failure_delta,
-                ),
-            )
+            _execute_runtime_upsert(conn, _PROVIDER_UPSERT_SQL, _runtime_update_values(update, updated_at), update)
 
     def _upsert_capability(
         self,
@@ -198,125 +355,46 @@ class ProviderStatusRepository(SQLiteRepository):
         success_delta: int,
         failure_delta: int,
     ) -> None:
+        update = ProviderRuntimeUpdate(
+            name=name,
+            enabled=enabled,
+            priority=priority,
+            healthy=healthy,
+            latency_ms=latency_ms,
+            last_success=last_success,
+            last_error=last_error,
+            success_delta=success_delta,
+            failure_delta=failure_delta,
+        )
+        updated_at = now_text()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO provider_capability_status (
-                    name, kind, enabled, priority, healthy, last_success, last_error,
-                    latency_ms, success_count, failure_count, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name, kind) DO UPDATE SET
-                    enabled=excluded.enabled,
-                    priority=excluded.priority,
-                    healthy=excluded.healthy,
-                    last_success=COALESCE(excluded.last_success, provider_capability_status.last_success),
-                    last_error=excluded.last_error,
-                    latency_ms=excluded.latency_ms,
-                    success_count=provider_capability_status.success_count + ?,
-                    failure_count=provider_capability_status.failure_count + ?,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    name,
-                    kind,
-                    int(enabled),
-                    priority,
-                    int(healthy),
-                    last_success,
-                    last_error,
-                    latency_ms,
-                    success_delta,
-                    failure_delta,
-                    now_text(),
-                    success_delta,
-                    failure_delta,
-                ),
+            _execute_runtime_upsert(
+                conn,
+                _PROVIDER_CAPABILITY_UPSERT_SQL,
+                _capability_runtime_update_values(update, kind, updated_at),
+                update,
             )
 
-    def _sync_provider_from_capabilities(self, name: str, fallback_priority: int) -> None:
+    def _sync_provider_from_capabilities(self, name: str, fallback_priority: int, *, preserve_enabled: bool) -> None:
+        enabled_assignment = "provider_status.enabled" if preserve_enabled else "excluded.enabled"
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM provider_capability_status WHERE name = ?",
+                f"{_PROVIDER_CAPABILITY_SELECT_SQL} WHERE name = ? ORDER BY {PROVIDER_CAPABILITY_STATUS_ORDER_BY}",
                 (name,),
             ).fetchall()
             if not rows:
                 return
             statuses = [row_to_provider_capability_status(row) for row in rows]
-            fallback_row = conn.execute("SELECT * FROM provider_status WHERE name = ?", (name,)).fetchone()
+            fallback_row = conn.execute(f"{_PROVIDER_SELECT_SQL} WHERE name = ?", (name,)).fetchone()
             fallback = row_to_provider_status(fallback_row) if fallback_row else None
             aggregate = _aggregate_provider_status(name, statuses, fallback)
             conn.execute(
-                """
-                INSERT INTO provider_status (
-                    name, enabled, priority, healthy, last_success, last_error,
-                    latency_ms, success_count, failure_count, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    enabled=excluded.enabled,
-                    priority=excluded.priority,
-                    healthy=excluded.healthy,
-                    last_success=COALESCE(excluded.last_success, provider_status.last_success),
-                    last_error=excluded.last_error,
-                    latency_ms=excluded.latency_ms,
-                    success_count=excluded.success_count,
-                    failure_count=excluded.failure_count,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    name,
-                    int(aggregate.enabled),
-                    aggregate.priority or fallback_priority,
-                    int(aggregate.healthy),
-                    aggregate.last_success,
-                    aggregate.last_error,
-                    aggregate.latency_ms,
-                    aggregate.success_count,
-                    aggregate.failure_count,
-                    aggregate.updated_at or now_text(),
+                _provider_sync_upsert_sql(enabled_assignment),
+                _provider_status_values(
+                    aggregate.model_copy(
+                        update={"priority": aggregate.priority if aggregate.priority is not None else fallback_priority},
+                    ),
                 ),
             )
 
-
-def _aggregate_provider_status(
-    name: str,
-    statuses: list[ProviderCapabilityStatus],
-    fallback: ProviderStatus | None,
-) -> ProviderStatus:
-    if fallback and not any(_capability_has_activity(item) for item in statuses):
-        return fallback
-    enabled_rows = [item for item in statuses if item.enabled]
-    active_rows = enabled_rows or statuses
-    priority = min((item.priority for item in active_rows), default=fallback.priority if fallback else 99)
-    healthy = any(item.enabled and item.healthy for item in statuses) if statuses else (fallback.healthy if fallback else False)
-    last_success = max((item.last_success for item in statuses if item.last_success), default=None)
-    error_rows = sorted(
-        [item for item in statuses if item.last_error],
-        key=lambda item: item.updated_at or "",
-        reverse=True,
-    )
-    last_error = error_rows[0].last_error if error_rows else None
-    latency_rows = sorted(
-        [item for item in statuses if item.latency_ms is not None],
-        key=lambda item: item.updated_at or "",
-        reverse=True,
-    )
-    latency_ms = latency_rows[0].latency_ms if latency_rows else None
-    updated_at = max((item.updated_at for item in statuses if item.updated_at), default=fallback.updated_at if fallback else now_text())
-    success_count = sum(item.success_count for item in statuses)
-    failure_count = sum(item.failure_count for item in statuses)
-    return ProviderStatus(
-        name=name,
-        enabled=any(item.enabled for item in statuses) if statuses else (fallback.enabled if fallback else False),
-        priority=priority,
-        healthy=healthy,
-        last_success=last_success,
-        last_error=last_error,
-        latency_ms=latency_ms,
-        success_count=success_count,
-        failure_count=failure_count,
-        updated_at=updated_at,
-    )
-
-
-def _capability_has_activity(item: ProviderCapabilityStatus) -> bool:
-    return bool(item.last_success or item.last_error or item.success_count or item.failure_count)
+__all__ = ["ProviderStatusRepository", "_aggregate_provider_status", "_capability_has_activity"]

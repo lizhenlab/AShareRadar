@@ -3,7 +3,11 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
+from app.utils.market_data import valid_ohlc as _valid_ohlc
 from app.utils.symbols import normalize_symbol
+
+
+ROW_FIELD_MISSING_ERRORS = (KeyError, IndexError, TypeError)
 
 
 def is_installed(module_name: str) -> bool:
@@ -14,11 +18,20 @@ def pick(row: Any, *names: str, default: Any = None) -> Any:
     for name in names:
         try:
             value = row[name]
-        except Exception:
+        except ROW_FIELD_MISSING_ERRORS:
             continue
         if value is not None and value == value:
             return value
     return default
+
+
+def ensure_positive_limit(limit: int, label: str = "limit") -> None:
+    if limit <= 0:
+        raise ValueError(f"{label} 必须大于 0")
+
+
+def valid_ohlc(open_price: object, close: object, high: object, low: object) -> bool:
+    return _valid_ohlc(open_price, close, high, low)
 
 
 def ak_symbol(symbol: str) -> str:

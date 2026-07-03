@@ -8,3 +8,5 @@ tushare==1.4.29
 baostock==0.9.1
 futu-api==10.5.6508
 pandas==2.2.2
+pyflakes==3.2.0
+pytest==7.4.4

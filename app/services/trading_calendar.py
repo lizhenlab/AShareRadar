@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import json
-import os
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from app.config import env_bool
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 CALENDAR_PATH = BASE_DIR / "data" / "trading_calendar.json"
+
+
+@dataclass(frozen=True)
+class TradeCalendarRefreshResult:
+    trade_date_count: int
+    source: str
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.trade_date_count > 0
+
+
+@dataclass(frozen=True)
+class TradeDateFetchResult:
+    days: set[date]
+    error: str | None = None
 
 
 def latest_expected_trade_date(now: datetime | None = None) -> date:
@@ -86,11 +105,24 @@ def calendar_source() -> str:
 
 
 def refresh_trade_calendar() -> int:
-    days = _fetch_akshare_trade_dates()
+    result = _fetch_akshare_trade_dates_result()
+    days = result.days
     if days:
         _save_days(days)
         _trade_days.cache_clear()
     return len(days)
+
+
+def refresh_trade_calendar_result() -> TradeCalendarRefreshResult:
+    result = _fetch_akshare_trade_dates_result()
+    if result.days:
+        _save_days(result.days)
+        _trade_days.cache_clear()
+    return TradeCalendarRefreshResult(
+        trade_date_count=len(result.days),
+        source=calendar_source(),
+        error=result.error if not result.days else None,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -98,7 +130,7 @@ def _trade_days() -> set[date]:
     cached = _load_cached_days()
     if cached:
         return cached
-    if os.getenv("TRADE_CALENDAR_AUTO_FETCH", "0") == "1":
+    if env_bool("ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH", False, aliases=("TRADE_CALENDAR_AUTO_FETCH",)):
         fetched = _fetch_akshare_trade_dates()
         if fetched:
             _save_days(fetched)
@@ -133,12 +165,23 @@ def _save_days(days: Iterable[date]) -> None:
 
 
 def _fetch_akshare_trade_dates() -> set[date]:
+    return _fetch_akshare_trade_dates_result().days
+
+
+def _fetch_akshare_trade_dates_result() -> TradeDateFetchResult:
     try:
         import akshare as ak
 
         frame = ak.tool_trade_date_hist_sina()
-    except Exception:
-        return set()
+        days = _parse_trade_date_frame(frame)
+        if not days:
+            return TradeDateFetchResult(set(), "AKShare 交易日历返回为空")
+        return TradeDateFetchResult(days)
+    except Exception as exc:
+        return TradeDateFetchResult(set(), _exception_text(exc))
+
+
+def _parse_trade_date_frame(frame: object) -> set[date]:
     values: list[object] = []
     for column in getattr(frame, "columns", []):
         values.extend(frame[column].dropna().tolist())
@@ -158,3 +201,8 @@ def _parse_dates(values: Iterable[object]) -> set[date]:
         except ValueError:
             continue
     return result
+
+
+def _exception_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__

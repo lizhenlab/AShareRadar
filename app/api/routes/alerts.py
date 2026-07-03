@@ -45,6 +45,8 @@ async def create_alert_rule(
 async def delete_alert_rule(rule_id: int, datahub: DataHub = Depends(get_datahub)) -> dict[str, object]:
     def remove() -> dict[str, object]:
         removed = datahub.cache.delete_alert_rule(rule_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="预警规则不存在")
         return {"ok": True, "removed": removed}
 
     return run_sync_api(remove)

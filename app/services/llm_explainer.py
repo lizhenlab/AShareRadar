@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from typing import Any
 
@@ -15,7 +16,7 @@ _GROUNDING_COUNT_UNITS = ("个", "条", "项", "类", "种", "层", "点")
 
 
 def llm_available(settings: Settings) -> bool:
-    return bool(settings.llm_enabled and settings.llm_api_key)
+    return bool(settings.llm_enabled and settings.llm_api_key and settings.llm_base_url and settings.llm_model)
 
 
 async def enhance_stock_answer(
@@ -32,7 +33,7 @@ async def enhance_stock_answer(
             timeout=settings.llm_timeout_seconds + 2,
         )
     except Exception as exc:
-        return _fallback(rule_answer, f"大模型降级：{_short_error(exc)}")
+        return _fallback(rule_answer, f"大模型降级：{_short_error(exc, settings)}")
     cleaned = _clean_answer(answer)
     if not cleaned or not _numbers_are_grounded(cleaned, rule_answer, analysis):
         return _fallback(rule_answer, "大模型输出未通过事实校验，已回退规则答案")
@@ -111,9 +112,12 @@ def _clean_answer(answer: str) -> str:
 
 def _numbers_are_grounded(answer: str, rule_answer: StockQuestionAnswer, analysis: AnalysisResult) -> bool:
     allowed = _allowed_numbers(rule_answer, analysis)
+    stock_code = analysis.quote.code
     for match in re.finditer(r"\d+(?:\.\d+)?", answer):
         raw = match.group()
         if _is_grounding_exempt_number(answer, match):
+            continue
+        if _is_stock_code_reference(answer, match, raw, stock_code):
             continue
         value = float(raw)
         if not any(_number_matches_allowed(value, item) for item in allowed):
@@ -123,7 +127,6 @@ def _numbers_are_grounded(answer: str, rule_answer: StockQuestionAnswer, analysi
 
 def _allowed_numbers(rule_answer: StockQuestionAnswer, analysis: AnalysisResult) -> set[float]:
     values: set[float] = set()
-    _add_allowed_number(values, analysis.quote.code, digits=0)
     for item in [
         analysis.quote.price,
         analysis.quote.prev_close,
@@ -148,7 +151,7 @@ def _allowed_numbers(rule_answer: StockQuestionAnswer, analysis: AnalysisResult)
         _add_allowed_number(values, item)
     for text in [rule_answer.answer, *rule_answer.evidence, *rule_answer.actions, *rule_answer.invalidations]:
         for raw in re.findall(r"\d+(?:\.\d+)?", str(text)):
-            values.add(round(float(raw), 2))
+            _add_allowed_number(values, raw)
     return values
 
 
@@ -156,9 +159,11 @@ def _add_allowed_number(values: set[float], raw: Any, digits: int = 2) -> None:
     if raw is None:
         return
     try:
-        values.add(round(float(raw), digits))
+        value = float(raw)
     except (TypeError, ValueError):
         return
+    if math.isfinite(value):
+        values.add(round(value, digits))
 
 
 def _number_matches_allowed(value: float, allowed: float) -> bool:
@@ -176,13 +181,39 @@ def _is_grounding_exempt_number(answer: str, match: re.Match[str]) -> bool:
         return True
     if value <= 10 and suffix.startswith(_GROUNDING_COUNT_UNITS):
         return True
-    return suffix[:1] in {".", "、", ")", "）", "，", ","}
+    return _is_list_marker_number(answer, match, value)
+
+
+def _is_stock_code_reference(answer: str, match: re.Match[str], raw: str, stock_code: str) -> bool:
+    if raw != stock_code:
+        return False
+    prefix = answer[max(0, match.start() - 8) : match.start()]
+    suffix = answer[match.end() : match.end() + 4]
+    return "代码" in prefix or suffix.upper().startswith((".SH", ".SZ"))
+
+
+def _is_list_marker_number(answer: str, match: re.Match[str], value: float) -> bool:
+    if value > 20 or not float(value).is_integer():
+        return False
+    suffix = answer[match.end() : match.end() + 1]
+    if suffix not in {".", "、", ")", "）"}:
+        return False
+    prefix = answer[: match.start()].rstrip(" \t")
+    return not prefix or prefix.endswith(("\n", "：", ":", "。", "；", ";", "！", "？"))
 
 
 def _fallback(rule_answer: StockQuestionAnswer, status: str) -> StockQuestionAnswer:
     return rule_answer.model_copy(update={"answer_source": "规则问诊", "llm_used": False, "llm_status": status})
 
 
-def _short_error(exc: Exception) -> str:
+def _short_error(exc: Exception, settings: Settings | None = None) -> str:
     text = str(exc)
+    if settings:
+        text = _redact_secret(text, settings.llm_api_key)
     return text[:120] if text else exc.__class__.__name__
+
+
+def _redact_secret(text: str, secret: str | None) -> str:
+    if not secret:
+        return text
+    return text.replace(secret, "<redacted>")

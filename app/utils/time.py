@@ -30,3 +30,10 @@ def seconds_since_text(value: str | None) -> float | None:
     except ValueError:
         return None
     return (datetime.now() - parsed).total_seconds()
+
+
+def non_negative_seconds_since_text(value: str | None) -> float | None:
+    seconds = seconds_since_text(value)
+    if seconds is None or seconds < 0:
+        return None
+    return seconds

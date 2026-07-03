@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 *.pyc
 *.log
+data/*.db
+data/*.sqlite3
+data/*.sqlite3-*
+data/trading_calendar.json
+!data/.gitkeep

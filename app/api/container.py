@@ -20,14 +20,12 @@ class AppContainer:
 def build_container() -> AppContainer:
     settings = get_settings()
     datahub = DataHub()
-    workbench_contexts = WorkbenchContextCache()
-    setattr(datahub, "workbench_contexts", workbench_contexts)
     scheduler = LocalDataScheduler(datahub)
     return AppContainer(
         settings=settings,
         datahub=datahub,
         scheduler=scheduler,
-        workbench_contexts=workbench_contexts,
+        workbench_contexts=datahub.workbench_contexts,
     )
 
 
