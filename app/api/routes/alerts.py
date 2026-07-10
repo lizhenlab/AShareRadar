@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api
-from app.models.schemas import AlertEvaluationSummary, AlertEventItem, AlertRuleInput, AlertRuleItem, AlertRuleUpdate
+from app.models.schemas import AlertEvaluationSummary, AlertEventItem, AlertRuleInput, AlertRuleItem, AlertRuleUpdate, MutationResult
 from app.services.alerts import evaluate_alert_rules, validate_alert_condition
 from app.services.datahub import DataHub
 from app.utils.symbols import normalize_symbol
@@ -41,13 +41,13 @@ async def create_alert_rule(
     return await run_api(create)
 
 
-@router.delete("/api/alerts/{rule_id}")
-async def delete_alert_rule(rule_id: int, datahub: DataHub = Depends(get_datahub)) -> dict[str, object]:
-    def remove() -> dict[str, object]:
+@router.delete("/api/alerts/{rule_id}", response_model=MutationResult)
+async def delete_alert_rule(rule_id: int, datahub: DataHub = Depends(get_datahub)) -> MutationResult:
+    def remove() -> MutationResult:
         removed = datahub.cache.delete_alert_rule(rule_id)
         if not removed:
             raise HTTPException(status_code=404, detail="预警规则不存在")
-        return {"ok": True, "removed": removed}
+        return MutationResult(ok=True, removed=removed)
 
     return run_sync_api(remove)
 

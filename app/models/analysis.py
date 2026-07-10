@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.models.market import Kline, PlateItem, Quote, StockInfo
@@ -131,6 +133,13 @@ class IndividualReview(BaseModel):
     events: list[ReviewEvent]
 
 
+class PeerSampleInfo(BaseModel):
+    status: Literal["not_requested", "not_applicable", "insufficient", "available", "degraded", "unavailable"] = "not_requested"
+    requested_count: int = Field(default=0, ge=0)
+    missing_count: int = Field(default=0, ge=0)
+    warning: str | None = None
+
+
 class AnalysisResult(BaseModel):
     quote: Quote
     stock_profile: StockInfo | None = None
@@ -155,6 +164,7 @@ class AnalysisResult(BaseModel):
     klines: list[Kline]
     quote_history: list[dict[str, float | str | None]] = Field(default_factory=list)
     peer_quotes: list[Quote] = Field(default_factory=list)
+    peer_sample: PeerSampleInfo = Field(default_factory=PeerSampleInfo)
 
 
 class FactorScore(BaseModel):

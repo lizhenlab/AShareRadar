@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from app.models.schemas import (
@@ -28,7 +29,11 @@ from app.models.schemas import (
     TimeframeAlignmentReport,
 )
 from app.services.datahub import DataHub
-from app.services.market_sampling import market_breadth_quotes as _market_breadth_quotes
+from app.services.market_sampling import (
+    MarketBreadthQuoteResult,
+    QuoteSampleResult,
+    market_breadth_quote_sample as _market_breadth_quote_sample,
+)
 from app.services.provider_registry import provider_capability
 from app.services.research import (
     build_alpha_evidence_report,
@@ -55,6 +60,7 @@ from app.services.research_breadth import MarketBreadthSnapshot
 from app.services.stock_insights import build_stock_insight_bundle
 from app.services.datahub_status import _provider_error_text
 from app.services.workbench_context import WorkbenchContext
+from app.workflows.optional_data import optional_workflow_value, short_error
 from app.workflows.stock_analysis import analyze_individual_stock
 
 
@@ -62,9 +68,11 @@ from app.workflows.stock_analysis import analyze_individual_stock
 class WorkbenchInputs:
     analysis: AnalysisResult
     breadth_quotes: list[Quote]
+    breadth_warnings: tuple[str, ...]
     order_book: OrderBook | None
     order_book_error: str | None
     concepts: list[StockConceptItem]
+    concept_error: str | None
 
 
 @dataclass(frozen=True)
@@ -109,15 +117,29 @@ async def build_workbench_context(datahub: DataHub, symbol: str) -> WorkbenchCon
 
 async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchInputs:
     analysis = await analyze_individual_stock(datahub, symbol, persist_history=False)
-    breadth_quotes = await _market_breadth_quotes(datahub)
-    order_book, order_book_error = await _order_book_or_error(datahub, symbol)
-    concepts = await datahub.stock_concepts(symbol, limit=8)
+    breadth_sample, order_book_result, concept_result = await asyncio.gather(
+        _market_breadth_sample_or_empty(datahub),
+        _order_book_or_error(datahub, symbol),
+        _stock_concepts_or_error(datahub, symbol),
+    )
+    order_book, order_book_error = order_book_result
+    concepts, concept_error = concept_result
     return WorkbenchInputs(
         analysis=analysis,
-        breadth_quotes=breadth_quotes,
+        breadth_quotes=list(breadth_sample.quotes),
+        breadth_warnings=breadth_sample.warnings,
         order_book=order_book,
         order_book_error=order_book_error,
         concepts=concepts,
+        concept_error=concept_error,
+    )
+
+
+async def _market_breadth_sample_or_empty(datahub: DataHub) -> MarketBreadthQuoteResult:
+    return await optional_workflow_value(
+        datahub,
+        lambda: _market_breadth_quote_sample(datahub),
+        lambda exc: _unavailable_market_breadth_sample(datahub, exc),
     )
 
 
@@ -125,11 +147,11 @@ def _build_research_core(inputs: WorkbenchInputs) -> WorkbenchResearchCore:
     analysis = inputs.analysis
     insights = build_stock_insight_bundle(analysis, order_book=inputs.order_book, order_book_error=inputs.order_book_error)
     feature_snapshot = build_feature_snapshot(analysis, insights)
-    theme_context = build_theme_context_report(analysis, feature_snapshot, inputs.concepts)
+    theme_context = build_theme_context_report(analysis, feature_snapshot, inputs.concepts, concept_error=inputs.concept_error)
     chip_analysis = build_chip_analysis(analysis, feature_snapshot)
-    leadership = build_leadership_report(analysis, insights, feature_snapshot, inputs.concepts)
+    leadership = build_leadership_report(analysis, insights, feature_snapshot, inputs.concepts, concept_error=inputs.concept_error)
     factor_lab = build_factor_lab_report(analysis, insights, feature_snapshot, chip_analysis, leadership)
-    market_breadth = build_market_breadth_snapshot(inputs.breadth_quotes)
+    market_breadth = build_market_breadth_snapshot(inputs.breadth_quotes, warnings=inputs.breadth_warnings)
     market_regime = build_market_regime_report(analysis, insights, feature_snapshot, factor_lab, market_breadth)
     timeframe_alignment = build_timeframe_alignment_report(analysis, feature_snapshot, factor_lab)
     signal_validation = build_signal_validation_report(analysis, feature_snapshot, factor_lab, market_regime, timeframe_alignment)
@@ -225,16 +247,46 @@ def _workbench_context_from_parts(
 
 
 async def _order_book_or_error(datahub: DataHub, symbol: str) -> tuple[OrderBook | None, str | None]:
-    order_book = None
-    futu_provider = datahub.providers.get("futu")
-    futu_capability = provider_capability(futu_provider) if futu_provider else None
-    if not bool(futu_capability and futu_capability.enabled):
-        return order_book, "Futu OpenAPI 未启用，盘口压力使用行情区间估算。"
     try:
-        order_book = await datahub.order_book(symbol)
-        return order_book, None
+        futu_provider = datahub.providers.get("futu")
+        futu_capability = provider_capability(futu_provider) if futu_provider else None
+        if not bool(futu_capability and futu_capability.enabled and futu_capability.order_book):
+            return None, "Futu OpenAPI 未启用，盘口压力使用行情区间估算。"
+        return await optional_workflow_value(
+            datahub,
+            lambda: _load_order_book(datahub, symbol),
+            lambda exc: (None, _provider_error_text(exc)),
+        )
     except Exception as exc:
         return None, _provider_error_text(exc)
+
+
+async def _stock_concepts_or_error(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str | None]:
+    return await optional_workflow_value(
+        datahub,
+        lambda: _load_stock_concepts(datahub, symbol),
+        lambda exc: ([], _provider_error_text(exc)),
+    )
+
+
+async def _load_order_book(datahub: DataHub, symbol: str) -> tuple[OrderBook | None, str | None]:
+    return await datahub.order_book(symbol), None
+
+
+async def _load_stock_concepts(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str | None]:
+    return await datahub.stock_concepts(symbol, limit=8), None
+
+
+def _unavailable_market_breadth_sample(datahub: DataHub, exc: Exception) -> MarketBreadthQuoteResult:
+    message = "市场宽度数据源请求失败，环境判断已降级。"
+    try:
+        datahub.cache.log_event("fallback", f"{message}；{short_error(exc)}")
+    except Exception:
+        pass
+    return MarketBreadthQuoteResult(
+        quote_sample=QuoteSampleResult(requested_symbols=(), quotes=(), missing_symbols=()),
+        warnings=(message,),
+    )
 
 
 __all__ = ["build_workbench_context"]

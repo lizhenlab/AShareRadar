@@ -18,6 +18,9 @@ def test_market_breadth_ignores_quotes_without_price_or_change_pct() -> None:
     assert snapshot.up_count == 1
     assert snapshot.down_count == 0
     assert snapshot.strong_count == 1
+    assert snapshot.sample_count == 1
+    assert snapshot.degraded is False
+    assert snapshot.warnings == ()
     assert "样本 1 只" in snapshot.summary
 
 
@@ -27,7 +30,35 @@ def test_market_breadth_empty_snapshot_is_neutral_degraded_state() -> None:
     assert snapshot.label == "市场宽度待确认"
     assert snapshot.score == 50
     assert snapshot.risk_adjustment == 0
+    assert snapshot.sample_count == 0
+    assert snapshot.degraded is False
     assert snapshot.summary == "市场宽度样本不足，环境判断暂以个股和行业为主。"
+
+
+def test_market_breadth_source_failure_is_distinct_from_genuine_empty_sample() -> None:
+    snapshot = build_market_breadth_snapshot(
+        [],
+        warnings=["市场宽度数据源请求失败，环境判断已降级。", "市场宽度数据源请求失败，环境判断已降级。"],
+    )
+
+    assert snapshot.label == "市场宽度数据降级"
+    assert snapshot.score == 45
+    assert snapshot.risk_adjustment == 0.05
+    assert snapshot.sample_count == 0
+    assert snapshot.degraded is True
+    assert snapshot.warnings == ("市场宽度数据源请求失败，环境判断已降级。",)
+    assert snapshot.summary == "市场宽度数据源暂不可用，环境判断已降级并以个股和行业为主。"
+
+
+def test_market_breadth_partial_source_warning_reduces_positive_risk_credit() -> None:
+    quotes = [make_quote(change_pct=4.0), make_quote(change_pct=2.0)]
+
+    complete = build_market_breadth_snapshot(quotes)
+    partial = build_market_breadth_snapshot(quotes, warnings=["市场宽度行情样本部分缺失，成功 2/3 个。"])
+
+    assert partial.score == complete.score
+    assert partial.risk_adjustment == round(complete.risk_adjustment + 0.03, 2)
+    assert partial.degraded is True
 
 
 def test_market_breadth_score_keeps_formula_components_explicit() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.models.analysis import AnalysisResult, FeatureSnapshot, StockInsightBundle
@@ -31,6 +33,11 @@ from app.models.research import (
 from app.models.user_data import AlertEventItem, AlertRuleItem, ChartMarkSummary, StockNoteItem
 
 
+class WorkbenchDataWarning(BaseModel):
+    component: Literal["advice_snapshot", "chart_marks", "alert_rules", "alert_events", "notes"]
+    message: str
+
+
 class StockWorkbench(BaseModel):
     symbol: str
     generated_at: str
@@ -58,6 +65,7 @@ class StockWorkbench(BaseModel):
     alert_rules: list[AlertRuleItem] = Field(default_factory=list)
     alert_events: list[AlertEventItem] = Field(default_factory=list)
     notes: list[StockNoteItem] = Field(default_factory=list)
+    local_data_warnings: list[WorkbenchDataWarning] = Field(default_factory=list)
     cache_policy: str = "同一只个股短时间内复用分析结果，避免重复请求外部行情源。"
 
 
@@ -73,7 +81,31 @@ class StrongStockItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class QuoteSampleStatus(BaseModel):
+    scope: str = "行情样本"
+    requested_count: int = Field(default=0, ge=0)
+    sample_count: int = Field(default=0, ge=0)
+    missing_count: int = Field(default=0, ge=0)
+    degraded: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
+class StrongStockWatchResponse(BaseModel):
+    updated_at: str
+    items: list[StrongStockItem] = Field(default_factory=list)
+    scope: str
+    sample_count: int = Field(ge=0)
+    requested_count: int = Field(default=0, ge=0)
+    missing_count: int = Field(default=0, ge=0)
+    degraded: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
 class MarketOverview(BaseModel):
     indices: list[Quote]
     strong_stocks: list[StrongStockItem]
     risk_note: str
+    index_meta: QuoteSampleStatus = Field(default_factory=lambda: QuoteSampleStatus(scope="市场指数样本"))
+    strong_stocks_meta: QuoteSampleStatus = Field(default_factory=lambda: QuoteSampleStatus(scope="市场概览强股样本"))
+    degraded: bool = False
+    warnings: list[str] = Field(default_factory=list)

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from app.api.deps import get_app_settings, get_datahub
 from app.api.errors import run_api
 from app.config import Settings
-from app.models.schemas import AnalysisResult, IndividualReview, MarketOverview
+from app.models.schemas import AnalysisResult, IndividualReview, MarketOverview, StrongStockWatchResponse
 from app.services.datahub import DataHub
 from app.workflows.individual import analyze_individual_stock, market_overview, review_individual_stock, strong_stock_watch
 
@@ -30,21 +30,21 @@ async def review(
     return await run_api(lambda: review_individual_stock(datahub, symbol, period_days))
 
 
-@router.get("/api/strong-stocks")
+@router.get("/api/strong-stocks", response_model=StrongStockWatchResponse)
 async def strong_stocks(
     symbols: str | None = None,
     datahub: DataHub = Depends(get_datahub),
     settings: Settings = Depends(get_app_settings),
-) -> dict[str, object]:
+) -> StrongStockWatchResponse:
     return await run_api(lambda: strong_stock_watch(datahub, settings, symbols))
 
 
-@router.get("/api/leaderboard")
+@router.get("/api/leaderboard", response_model=StrongStockWatchResponse)
 async def leaderboard(
     symbols: str | None = None,
     datahub: DataHub = Depends(get_datahub),
     settings: Settings = Depends(get_app_settings),
-) -> dict[str, object]:
+) -> StrongStockWatchResponse:
     return await strong_stocks(symbols=symbols, datahub=datahub, settings=settings)
 
 

@@ -139,7 +139,10 @@ class SQLiteCache:
         return self.cache_stats_repo.stats()
 
     def log_event(self, category: str, message: str) -> None:
-        self.runtime_event_repo.log_event(category, message)
+        try:
+            self.runtime_event_repo.log_event(category, message)
+        except Exception:
+            pass
 
     def start_task_run(self, task_name: str) -> int:
         return self.runtime_event_repo.start_task_run(task_name)

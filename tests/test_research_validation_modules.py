@@ -7,6 +7,9 @@ from app.services.research_validation import (
     VALIDATION_CONFIDENCE_TIMEFRAME_RULES,
     VALIDATION_OVERALL_RULES,
     VALIDATION_STATUS_RULES,
+    _breakout_validation,
+    _support_defense_validation,
+    _trend_pullback_validation,
     _validation_confidence,
     _validation_notes,
     _validation_overall_status,
@@ -80,6 +83,54 @@ def test_validation_non_finite_numbers_fall_back_to_neutral_defaults() -> None:
         "观察为主：接近确认的是暂无接近确认的信号；需要防守的是暂无高优先级风险验证项；"
         "环境风险倍率 1.00。"
     )
+
+
+def test_invalid_ma5_and_resistance_wait_without_promoting_overall_status() -> None:
+    for invalid_price in (0, float("nan")):
+        trend = _trend_pullback_validation(
+            _feature(price=11, ma5=invalid_price, trend_score=80),
+            _regime(1.0),
+            None,
+            None,
+        )
+        breakout = _breakout_validation(
+            _feature(price=11, resistance=invalid_price, volume_ratio=1.5),
+            _regime(1.0),
+            None,
+            None,
+        )
+
+        assert trend.status == "等待确认"
+        assert breakout.status == "等待确认"
+        assert _validation_overall_status([_item("接近确认"), trend, breakout], _regime(1.0), None) == "等待二次确认"
+
+
+def test_each_validation_waits_when_any_required_price_is_not_positive_and_finite() -> None:
+    for invalid_price in (0, float("nan")):
+        assert _trend_pullback_validation(
+            _feature(price=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
+        assert _breakout_validation(
+            _feature(price=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
+        assert _support_defense_validation(
+            _feature(price=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
+        assert _support_defense_validation(
+            _feature(support=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
+        assert _support_defense_validation(
+            _feature(ma20=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
+        assert _t_range_validation(
+            _feature(price=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
+        assert _t_range_validation(
+            _feature(support=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
+        assert _t_range_validation(
+            _feature(resistance=invalid_price), _regime(1.0), None, None
+        ).status == "等待确认"
 
 
 def test_t_range_validation_requires_strict_open_interval_and_precise_text() -> None:
@@ -164,14 +215,20 @@ def _raw_factor(expected_level: str, *, score: object, stability_score: object):
     )
 
 
-def _feature(price: float):
-    return SimpleNamespace(
-        price=price,
-        support=10,
-        resistance=12,
-        signal_confidence=70,
-        data_quality_score=80,
-    )
+def _feature(**updates: float):
+    values = {
+        "price": 11,
+        "support": 10,
+        "resistance": 12,
+        "ma5": 10.5,
+        "ma20": 10,
+        "trend_score": 70,
+        "volume_ratio": 1.2,
+        "signal_confidence": 70,
+        "data_quality_score": 80,
+    }
+    values.update(updates)
+    return SimpleNamespace(**values)
 
 
 def _item(status: str) -> SignalValidationItem:

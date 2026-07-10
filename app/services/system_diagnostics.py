@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from app.models.schemas import CacheFreshness, StorageDiagnostics, SystemDiagnostics
+from app.services.provider_failure_status import (
+    capability_recently_failed as provider_capability_recently_failed,
+    provider_recently_failed,
+)
 from app.services.trading_calendar import calendar_source
 from app.utils.market_data import finite_float
 from app.utils.time import now_text
@@ -14,6 +19,52 @@ from app.utils.time import now_text
 class DiagnosticDecision:
     warning: str | None = None
     suggestion: str | None = None
+
+
+@dataclass(frozen=True)
+class CacheTimestampDiagnosticRule:
+    timestamp_attr: str
+    age_attr: str
+    invalid_warning: str
+    invalid_suggestion: str
+    missing_warning: str | None = None
+    missing_suggestion: str | None = None
+    stale_threshold_seconds: int | None = None
+    stale_warning: Callable[[int], str] | None = None
+    stale_suggestion: str | None = None
+
+
+def _quote_stale_warning(age_seconds: int) -> str:
+    return f"最新报价缓存已超过 {age_seconds // 60} 分钟未更新。"
+
+
+CACHE_TIMESTAMP_DIAGNOSTIC_RULES = (
+    CacheTimestampDiagnosticRule(
+        timestamp_attr="latest_quote_at",
+        age_attr="latest_quote_age_seconds",
+        missing_warning="尚未形成报价缓存。",
+        missing_suggestion="打开任意个股或手动执行刷新报价。",
+        invalid_warning="最新报价缓存时间异常。",
+        invalid_suggestion="检查系统时间、数据源时间字段或清理异常缓存。",
+        stale_threshold_seconds=15 * 60,
+        stale_warning=_quote_stale_warning,
+        stale_suggestion="执行刷新报价任务，或检查实时行情源是否可用。",
+    ),
+    CacheTimestampDiagnosticRule(
+        timestamp_attr="latest_kline_at",
+        age_attr="latest_kline_age_seconds",
+        invalid_warning="最新日K缓存时间异常。",
+        invalid_suggestion="检查系统时间、日K数据源时间字段或清理异常缓存。",
+        stale_threshold_seconds=24 * 60 * 60,
+        stale_suggestion="日K线缓存超过1天未刷新，建议手动执行关键个股K线刷新。",
+    ),
+    CacheTimestampDiagnosticRule(
+        timestamp_attr="latest_minute_kline_at",
+        age_attr="latest_minute_kline_age_seconds",
+        invalid_warning="最新分钟K线缓存时间异常。",
+        invalid_suggestion="检查系统时间、分钟K线数据源时间字段或清理异常缓存。",
+    ),
+)
 
 
 def build_system_diagnostics(datahub, scheduler) -> SystemDiagnostics:
@@ -47,20 +98,35 @@ def build_system_diagnostics(datahub, scheduler) -> SystemDiagnostics:
 
 
 def _extend_cache_diagnostics(warnings: list[str], suggestions: list[str], cache, freshness: CacheFreshness) -> None:
-    if not cache.latest_quote_at:
-        warnings.append("尚未形成报价缓存。")
-        suggestions.append("打开任意个股或手动执行刷新报价。")
-    elif freshness.latest_quote_age_seconds is None:
-        warnings.append("最新报价缓存时间异常。")
-        suggestions.append("检查系统时间、数据源时间字段或清理异常缓存。")
-    elif freshness.latest_quote_age_seconds is not None and freshness.latest_quote_age_seconds > 15 * 60:
-        warnings.append(f"最新报价缓存已超过 {freshness.latest_quote_age_seconds // 60} 分钟未更新。")
-        suggestions.append("执行刷新报价任务，或检查实时行情源是否可用。")
-    if cache.latest_kline_at and freshness.latest_kline_age_seconds is None:
-        warnings.append("最新K线缓存时间异常。")
-        suggestions.append("检查系统时间、K线数据源时间字段或清理异常缓存。")
-    elif freshness.latest_kline_age_seconds is not None and freshness.latest_kline_age_seconds > 24 * 60 * 60:
-        suggestions.append("日K线缓存超过1天未刷新，建议手动执行关键个股K线刷新。")
+    for decision in _cache_diagnostic_decisions(cache, freshness):
+        if decision.warning:
+            warnings.append(decision.warning)
+        if decision.suggestion:
+            suggestions.append(decision.suggestion)
+
+
+def _cache_diagnostic_decisions(cache, freshness: CacheFreshness) -> list[DiagnosticDecision]:
+    return [
+        decision
+        for decision in (
+            _cache_timestamp_decision(cache, freshness, rule)
+            for rule in CACHE_TIMESTAMP_DIAGNOSTIC_RULES
+        )
+        if decision.warning or decision.suggestion
+    ]
+
+
+def _cache_timestamp_decision(cache, freshness: CacheFreshness, rule: CacheTimestampDiagnosticRule) -> DiagnosticDecision:
+    timestamp = getattr(cache, rule.timestamp_attr, None)
+    age = getattr(freshness, rule.age_attr, None)
+    if not timestamp:
+        return DiagnosticDecision(rule.missing_warning, rule.missing_suggestion)
+    if age is None:
+        return DiagnosticDecision(rule.invalid_warning, rule.invalid_suggestion)
+    if rule.stale_threshold_seconds is not None and age > rule.stale_threshold_seconds:
+        warning = rule.stale_warning(age) if rule.stale_warning else None
+        return DiagnosticDecision(warning, rule.stale_suggestion)
+    return DiagnosticDecision()
 
 
 def _extend_provider_diagnostics(warnings: list[str], suggestions: list[str], providers, capability_statuses) -> None:
@@ -88,7 +154,7 @@ def _provider_diagnostic_decision(providers, capability_statuses) -> DiagnosticD
 
 
 def _unhealthy_capability_labels(capability_statuses) -> list[str]:
-    return _unique_texts(_capability_failure_label(item) for item in capability_statuses or [] if _capability_recently_failed(item))
+    return _unique_texts(_capability_failure_label(item) for item in capability_statuses or [] if provider_capability_recently_failed(item))
 
 
 def _capability_failure_label(item) -> str:
@@ -96,20 +162,8 @@ def _capability_failure_label(item) -> str:
     return f"{name} {capability_label(getattr(item, 'kind', None))}"
 
 
-def _capability_recently_failed(item) -> bool:
-    return bool(
-        getattr(item, "enabled", False)
-        and not getattr(item, "healthy", True)
-        and (_clean_text(getattr(item, "last_error", None)) or _positive_count(getattr(item, "failure_count", 0)) > 0)
-    )
-
-
 def _unhealthy_provider_names(providers) -> list[str]:
-    return _unique_texts((_clean_text(getattr(item, "name", None)) or "未知数据源") for item in providers or [] if _provider_recently_failed(item))
-
-
-def _provider_recently_failed(item) -> bool:
-    return bool(getattr(item, "enabled", False) and not getattr(item, "healthy", True))
+    return _unique_texts((_clean_text(getattr(item, "name", None)) or "未知数据源") for item in providers or [] if provider_recently_failed(item))
 
 
 def _join_limited(items: list[str], limit: int) -> str:
@@ -164,6 +218,7 @@ def cache_freshness(cache, checked_at: str) -> CacheFreshness:
     return CacheFreshness(
         latest_quote_age_seconds=age_seconds(cache.latest_quote_at, checked_at),
         latest_kline_age_seconds=age_seconds(cache.latest_kline_at, checked_at),
+        latest_minute_kline_age_seconds=age_seconds(getattr(cache, "latest_minute_kline_at", None), checked_at),
         latest_stock_age_seconds=age_seconds(cache.latest_stock_at, checked_at),
         latest_plate_age_seconds=age_seconds(cache.latest_plate_at, checked_at),
     )

@@ -2,10 +2,13 @@ import { fetchJson } from "./api.js";
 import { $, escapeHtml } from "./dom.js";
 import { changeClass, formatNumber } from "./format.js";
 import {
+  asArray,
+  asObject,
   renderInlineItems,
   renderLimitedItems,
   renderMetricPairs,
   renderMissingData,
+  safeText,
   signedText,
   thresholdClass,
 } from "./research-render-utils.js";
@@ -14,19 +17,34 @@ const AI_QUESTION_PRESETS = ["现在能不能买？", "风险在哪里？", "适
 let aiQuestionRequestSeq = 0;
 
 export function renderResearch(workbench, state) {
-  renderAiDashboard(workbench, state);
-  renderFeatureSnapshot(workbench.feature_snapshot);
-  renderDiagnosis(workbench.diagnosis);
-  renderAlphaEvidence(workbench.alpha_evidence);
-  renderMarketRegime(workbench.market_regime);
-  renderSignalValidation(workbench.signal_validation);
-  renderTimeframeAlignment(workbench.timeframe_alignment);
-  renderRiskReward(workbench.risk_reward);
-  renderFactorLab(workbench.factor_lab);
-  renderThemeContext(workbench.theme_context);
-  renderChipAnalysis(workbench.chip_analysis);
-  renderLeadership(workbench.leadership);
-  renderReplay(workbench.replay);
+  const data = asObject(workbench);
+  renderResearchPanel("aiDashboard", "AI单股驾驶舱", () => renderAiDashboard(data, state));
+  renderResearchPanel("featureSnapshot", "特征快照", () => renderFeatureSnapshot(data.feature_snapshot));
+  renderResearchPanel("diagnosisPanel", "个股诊断", () => renderDiagnosis(data.diagnosis));
+  renderResearchPanel("alphaEvidence", "Alpha证据链", () => renderAlphaEvidence(data.alpha_evidence));
+  renderResearchPanel("marketRegime", "市场环境", () => renderMarketRegime(data.market_regime));
+  renderResearchPanel("signalValidation", "信号验证", () => renderSignalValidation(data.signal_validation));
+  renderResearchPanel("timeframeAlignment", "多周期一致性", () => renderTimeframeAlignment(data.timeframe_alignment));
+  renderResearchPanel("riskReward", "风险收益", () => renderRiskReward(data.risk_reward));
+  renderResearchPanel("factorLab", "因子实验室", () => renderFactorLab(data.factor_lab));
+  renderResearchPanel("themePanel", "题材背景", () => renderThemeContext(data.theme_context));
+  renderResearchPanel("chipPanel", "筹码分析", () => renderChipAnalysis(data.chip_analysis));
+  renderResearchPanel("leadershipPanel", "龙头识别", () => renderLeadership(data.leadership));
+  renderResearchPanel("replayPanel", "历史回放", () => renderReplay(data.replay));
+}
+
+function renderResearchPanel(elementId, title, render) {
+  try {
+    render();
+  } catch (error) {
+    const el = $(elementId);
+    if (!el) return;
+    el.innerHTML = `
+      <div class="empty-state">
+        <strong>${escapeHtml(title)}暂不可用</strong>
+        <span>${escapeHtml(error && error.message ? error.message : "该模块数据格式异常，主分析不受影响。")}</span>
+      </div>`;
+  }
 }
 
 function handleAiDashboardClick(event) {
@@ -48,6 +66,7 @@ async function handleAiQuestionSubmit(event, state) {
   const { input, form, button } = aiQuestionControls(event.currentTarget);
   const question = input ? input.value.trim() : "";
   if (!question || !form) return;
+  if (button && button.disabled) return;
   const request = beginAiQuestionRequest(state, form);
   try {
     setAiQuestionBusy(button, true);
@@ -225,16 +244,23 @@ function renderRelatedQuestions(items) {
 }
 
 function renderQaCard(report) {
-  const items = report.items || [];
+  report = asObject(report);
+  const items = asArray(report.items);
   return `
     <section class="ai-card">
       <strong>个股问诊</strong>
-      ${items.length ? renderLimitedItems(items, 4, (item) => `<div><b>${escapeHtml(item.question)}</b><span>${escapeHtml(item.answer)}</span></div>`) : `<span>问诊结果待生成。</span>`}
+      ${items.length ? renderLimitedItems(items, 4, renderQaItem) : `<span>问诊结果待生成。</span>`}
     </section>
   `;
 }
 
+function renderQaItem(item) {
+  item = asObject(item);
+  return `<div><b>${escapeHtml(item.question)}</b><span>${escapeHtml(item.answer)}</span></div>`;
+}
+
 function renderEvidenceChainCard(report) {
+  report = asObject(report);
   return `
     <section class="ai-card">
       <strong>证据链</strong>
@@ -247,18 +273,21 @@ function renderEvidenceChainCard(report) {
 }
 
 function renderRiskRadarCard(report) {
+  report = asObject(report);
+  const items = asArray(report.items);
   return `
     <section class="ai-card">
       <strong>风险雷达</strong>
       <p>${escapeHtml(report.summary || "")}</p>
       <div class="radar-list">
-        ${(report.items || []).length ? renderLimitedItems(report.items, 6, renderRiskRadarItem) : `<span>风险项待确认</span>`}
+        ${items.length ? renderLimitedItems(items, 6, renderRiskRadarItem) : `<span>风险项待确认</span>`}
       </div>
     </section>
   `;
 }
 
 function renderRiskRadarItem(item) {
+  item = asObject(item);
   return `<span class="${thresholdClass(item.score, { higherIsRisk: true, riskAt: 68, goodAt: 35 })}">${escapeHtml(item.name)} ${escapeHtml(item.level)} · ${escapeHtml(item.score)}</span>`;
 }
 
@@ -282,6 +311,7 @@ function renderPeerCard(report) {
       <span>${escapeHtml(report.industry || "行业待确认")} · 样本 ${escapeHtml(report.sample_count || 0)}</span>
       <span>${escapeHtml(report.valuation_position || "")} / ${escapeHtml(report.strength_position || "")}</span>
       ${renderInlineItems(report.metrics, "em", 3)}
+      ${renderInlineItems(report.warnings, "em", 2, "risk")}
     </section>
   `;
 }
@@ -305,12 +335,12 @@ function renderFeatureSnapshot(feature) {
     return;
   }
   const chips = [
-    ["趋势", `${feature.trend_score} · ${feature.trend_label}`],
-    ["资金", `${feature.fund_flow_score}`],
-    ["龙头", `${feature.leader_score} · ${feature.leader_level}`],
+    ["趋势", joinedMetric(feature.trend_score, feature.trend_label)],
+    ["资金", fallbackText(feature.fund_flow_score)],
+    ["龙头", joinedMetric(feature.leader_score, feature.leader_level)],
     ["量能", `${formatNumber(feature.volume_ratio)}倍`],
-    ["估值", `${feature.valuation_score}`],
-    ["质量", `${feature.data_quality_level} ${feature.data_quality_score}`],
+    ["估值", fallbackText(feature.valuation_score)],
+    ["质量", joinedMetric(feature.data_quality_level, feature.data_quality_score, " ")],
   ];
   el.innerHTML = `
     ${chips
@@ -377,13 +407,14 @@ function renderAlphaEvidence(report) {
 }
 
 function alphaEvidenceView(report) {
+  report = asObject(report);
   return {
     verdict: report.verdict,
     confidence: report.confidence,
     summary: report.summary,
-    positives: (report.positives || []).slice(0, 4),
-    negatives: (report.negatives || []).slice(0, 4),
-    missingData: (report.missing_data || []).slice(0, 6),
+    positives: asArray(report.positives).slice(0, 4),
+    negatives: asArray(report.negatives).slice(0, 4),
+    missingData: asArray(report.missing_data).slice(0, 6),
   };
 }
 
@@ -396,6 +427,7 @@ function renderAlphaColumn(title, items, className, emptyText) {
 }
 
 function renderAlphaItem(item, className) {
+  item = asObject(item);
   return `<span class="${className}"><b>${escapeHtml(item.title)} ${escapeHtml(signedText(item.impact))}</b><small>${escapeHtml(item.reason)}</small></span>`;
 }
 
@@ -455,24 +487,27 @@ function renderSignalValidation(report) {
     if (el) el.innerHTML = "";
     return;
   }
+  const items = asArray(report.items);
   el.innerHTML = `
     <div class="validation-head">
       <div>
         <span>信号验证闭环</span>
         <strong>${escapeHtml(report.overall_status)}</strong>
       </div>
-      <i>${escapeHtml((report.items || []).length)}项</i>
+      <i>${escapeHtml(items.length)}项</i>
     </div>
     <p>${escapeHtml(report.summary)}</p>
     <div class="validation-grid">
-      ${renderLimitedItems(report.items, 4, renderValidationItem)}
+      ${renderLimitedItems(items, 4, renderValidationItem)}
     </div>
     ${renderInlineItems(report.notes, "small", 1)}
   `;
 }
 
 function renderValidationItem(item) {
-  const statusClass = item.status.includes("风险") || item.status.includes("压制") ? "risk" : item.status.includes("确认") ? "good" : "";
+  item = asObject(item);
+  const status = safeText(item.status);
+  const statusClass = status.includes("风险") || status.includes("压制") ? "risk" : status.includes("确认") ? "good" : "";
   return `
     <div class="validation-item ${statusClass}">
       <div>
@@ -511,34 +546,54 @@ function renderTimeframeAlignment(report) {
 }
 
 function timeframeAlignmentView(report) {
+  report = asObject(report);
   return {
     label: report.alignment_label,
     score: report.alignment_score,
     conflictLevel: report.conflict_level,
     conflictClass: timeframeConflictClass(report),
     summary: report.summary,
-    timeframes: report.timeframes || [],
-    suggestions: report.suggestions || [],
+    timeframes: asArray(report.timeframes),
+    suggestions: asArray(report.suggestions),
   };
 }
 
 function timeframeConflictClass(report) {
-  if ((report.conflict_level || "").includes("冲突") || (report.alignment_label || "").includes("偏弱")) return "risk";
-  if ((report.alignment_label || "").includes("共振")) return "good";
+  report = asObject(report);
+  const conflictLevel = safeText(report.conflict_level);
+  const alignmentLabel = safeText(report.alignment_label);
+  if (conflictLevel.includes("冲突") || alignmentLabel.includes("偏弱")) return "risk";
+  if (alignmentLabel.includes("共振")) return "good";
   return "";
 }
 
 function renderTimeframeItem(item) {
+  item = asObject(item);
   return `
     <div class="timeframe-item ${timeframeItemClass(item)}">
       <div>
-        <strong>${escapeHtml(item.name)}</strong>
-        <span>${escapeHtml(item.score)} · ${escapeHtml(item.label)}</span>
+        <strong>${escapeHtml(fallbackText(item.name))}</strong>
+        <span>${escapeHtml(joinedMetric(item.score, item.label))}</span>
       </div>
       <small>${escapeHtml(item.window_days)}日 · 涨跌 ${formatNumber(item.return_pct)}% · 回撤 ${formatNumber(item.max_drawdown_pct)}%</small>
-      <small>${item.above_ma ? "高于" : "低于"}均线 ${formatNumber(item.ma_value)}</small>
+      <small>${escapeHtml(timeframeMaText(item))}</small>
     </div>
   `;
+}
+
+function joinedMetric(left, right, separator = " · ") {
+  return `${fallbackText(left)}${separator}${fallbackText(right)}`;
+}
+
+function fallbackText(value, fallback = "--") {
+  const text = safeText(value).trim();
+  return text || fallback;
+}
+
+function timeframeMaText(item) {
+  if (item.above_ma === true) return `高于均线 ${formatNumber(item.ma_value)}`;
+  if (item.above_ma === false) return `低于均线 ${formatNumber(item.ma_value)}`;
+  return "均线关系待确认";
 }
 
 function timeframeItemClass(item) {
@@ -574,9 +629,10 @@ function renderRiskReward(report) {
 }
 
 function riskRewardView(report) {
+  report = asObject(report);
   return {
     rating: report.rating,
-    ratingClass: riskRewardRatingClass(report.rating || ""),
+    ratingClass: riskRewardRatingClass(report.rating),
     rewardRiskRatio: report.reward_risk_ratio,
     currentPrice: report.current_price,
     upsideTarget: report.upside_target,
@@ -586,12 +642,13 @@ function riskRewardView(report) {
     atrPct: report.atr_pct,
     volatilityPct: report.volatility_pct,
     summary: report.summary,
-    scenarios: report.scenarios || [],
-    notes: report.notes || [],
+    scenarios: asArray(report.scenarios),
+    notes: asArray(report.notes),
   };
 }
 
 function riskRewardRatingClass(rating) {
+  rating = safeText(rating);
   if (rating.includes("风险") || rating.includes("不足")) return "risk";
   if (rating.includes("较好")) return "good";
   return "";
@@ -607,7 +664,9 @@ function renderRiskRewardMetrics(view) {
 }
 
 function renderScenarioPlan(item) {
-  const scenarioClass = item.name.includes("防守") ? "risk" : item.name.includes("积极") ? "good" : "";
+  item = asObject(item);
+  const name = safeText(item.name);
+  const scenarioClass = name.includes("防守") ? "risk" : name.includes("积极") ? "good" : "";
   return `
     <div class="scenario-item ${scenarioClass}">
       <div>
@@ -663,10 +722,13 @@ function renderFactorLabItems(items) {
 }
 
 function firstText(items, fallback) {
-  return (items || [])[0] || fallback;
+  return asArray(items)[0] || fallback;
 }
 
 function renderStandardFactor(item) {
+  item = asObject(item);
+  const calibration = asObject(item.calibration);
+  const bucket = asArray(item.calibration_buckets)[0];
   return `
     <div class="standard-factor ${factorDirectionClass(item)}">
       <div>
@@ -675,22 +737,24 @@ function renderStandardFactor(item) {
       </div>
       <div class="score-bar"><i style="width:${Math.max(0, Math.min(100, Number(item.score) || 0))}%"></i></div>
       <p>${escapeHtml(item.value)}</p>
-      <small>${factorCalibrationSampleText(item.calibration || {})}</small>
-      ${factorCalibrationReturnLine(item.calibration || {})}
+      <small>${factorCalibrationSampleText(calibration)}</small>
+      ${factorCalibrationReturnLine(calibration)}
       ${factorPercentileLine(item)}
-      ${factorBucketLine((item.calibration_buckets || [])[0])}
+      ${factorBucketLine(bucket)}
       ${renderInlineItems(item.evidence, "small", 1)}
     </div>
   `;
 }
 
 function factorDirectionClass(item) {
+  item = asObject(item);
   if (item.direction === "负向") return "risk";
   if (item.direction === "正向") return "good";
   return "";
 }
 
 function factorCalibrationSampleText(calibration) {
+  calibration = asObject(calibration);
   if (!calibration.sample_count) {
     return escapeHtml(calibration.confidence_level || "待补数据");
   }
@@ -698,6 +762,7 @@ function factorCalibrationSampleText(calibration) {
 }
 
 function factorCalibrationReturnLine(calibration) {
+  calibration = asObject(calibration);
   if (!calibration.sample_count) return "";
   const text = `胜率 ${formatNumber(calibration.win_rate, 1)}% · 5日 ${formatNumber(calibration.avg_forward_5d_return)}% · 最大不利 ${formatNumber(calibration.max_adverse_return)}%`;
   return `<small>${escapeHtml(text)}</small>`;
@@ -709,7 +774,8 @@ function factorPercentileLine(item) {
 }
 
 function factorBucketLine(bucket) {
-  if (!bucket) return "";
+  bucket = asObject(bucket);
+  if (!Object.keys(bucket).length) return "";
   return `<em>${escapeHtml(bucket.name)}：${escapeHtml(bucket.sample_count)}样本 / 5日 ${formatNumber(bucket.avg_forward_5d_return)}%</em>`;
 }
 
@@ -740,7 +806,7 @@ function renderChipAnalysis(chip) {
 }
 
 function renderChipBands(items) {
-  return (items || []).length
+  return asArray(items).length
     ? renderLimitedItems(
         items,
         3,
@@ -804,7 +870,7 @@ function themeIndustryText(report) {
 }
 
 function renderConceptStrip(concepts) {
-  const items = concepts || [];
+  const items = asArray(concepts);
   if (!items.length) {
     return `<span><b>概念待确认</b><small>等待公开源或本地缓存补齐。</small></span>`;
   }
@@ -812,6 +878,7 @@ function renderConceptStrip(concepts) {
 }
 
 function renderConceptPill(item) {
+  item = asObject(item);
   return `
     <span class="${conceptChangeClass(item.change_pct)}">
       <b>${escapeHtml(item.name)}</b>
@@ -828,6 +895,7 @@ function conceptChangeClass(value) {
 }
 
 function conceptLeaderText(item) {
+  item = asObject(item);
   return item.leading_stock ? ` · 领涨 ${escapeHtml(item.leading_stock)}` : "";
 }
 
@@ -867,10 +935,11 @@ function renderReplayStat(item) {
 }
 
 function renderReplayCases(items) {
-  return (items || []).slice(-5).map(renderReplayCase).join("");
+  return asArray(items).slice(-5).map(renderReplayCase).join("");
 }
 
 function renderReplayCase(item) {
+  item = asObject(item);
   return `
     <span>
       <b>${escapeHtml(item.date)} · ${escapeHtml(item.pattern)} · ${escapeHtml(item.outcome)}</b>

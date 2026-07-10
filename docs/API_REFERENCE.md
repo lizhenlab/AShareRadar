@@ -8,74 +8,82 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 Total endpoints: 66
 
-| Method | Path | Handler | Response model | File |
-| --- | --- | --- | --- | --- |
-| GET | `/api/advice/history` | `advice_history` | `list[AdviceHistoryItem]` | `app/api/routes/watchlist.py` |
-| GET | `/api/alerts` | `alert_rules` | `list[AlertRuleItem]` | `app/api/routes/alerts.py` |
-| POST | `/api/alerts` | `create_alert_rule` | `AlertRuleItem` | `app/api/routes/alerts.py` |
-| POST | `/api/alerts/evaluate` | `evaluate_alerts` | `AlertEvaluationSummary` | `app/api/routes/alerts.py` |
-| GET | `/api/alerts/events` | `alert_events` | `list[AlertEventItem]` | `app/api/routes/alerts.py` |
-| DELETE | `/api/alerts/{rule_id}` | `delete_alert_rule` | `-` | `app/api/routes/alerts.py` |
-| PATCH | `/api/alerts/{rule_id}` | `update_alert_rule` | `AlertRuleItem` | `app/api/routes/alerts.py` |
-| GET | `/api/analyze` | `analyze` | `AnalysisResult` | `app/api/routes/analysis.py` |
-| GET | `/api/data/status` | `data_status` | `DataStatus` | `app/api/routes/data.py` |
-| POST | `/api/data/trading-calendar/refresh` | `refresh_trading_calendar_api` | `-` | `app/api/routes/data.py` |
-| GET | `/api/futu/status` | `futu_status` | `-` | `app/api/routes/data.py` |
-| GET | `/api/health` | `health` | `-` | `app/api/routes/health.py` |
-| GET | `/api/leaderboard` | `leaderboard` | `-` | `app/api/routes/analysis.py` |
-| GET | `/api/market` | `market` | `MarketOverview` | `app/api/routes/analysis.py` |
-| GET | `/api/monitor/events` | `monitor_events` | `list[MonitorEvent]` | `app/api/routes/monitoring.py` |
-| GET | `/api/order-book` | `order_book` | `OrderBook` | `app/api/routes/data.py` |
-| GET | `/api/plates` | `plates` | `list[PlateItem]` | `app/api/routes/data.py` |
-| GET | `/api/quote` | `quote` | `Quote` | `app/api/routes/quotes.py` |
-| GET | `/api/quotes` | `quotes` | `list[Quote]` | `app/api/routes/quotes.py` |
-| GET | `/api/review` | `review` | `IndividualReview` | `app/api/routes/analysis.py` |
-| GET | `/api/rules` | `rules` | `list[RuleDefinition]` | `app/api/routes/stock.py` |
-| GET | `/api/stock/abnormal-events` | `stock_abnormal_events` | `AbnormalEventSummary` | `app/api/routes/stock.py` |
-| GET | `/api/stock/alpha-evidence` | `stock_alpha_evidence` | `AlphaEvidenceReport` | `app/api/routes/stock.py` |
-| POST | `/api/stock/ask` | `ask_stock` | `StockQuestionAnswer` | `app/api/routes/stock.py` |
-| GET | `/api/stock/chart-marks` | `chart_marks` | `ChartMarkSummary` | `app/api/routes/notes.py` |
-| GET | `/api/stock/chips` | `stock_chip_analysis` | `ChipAnalysis` | `app/api/routes/stock.py` |
-| GET | `/api/stock/diagnosis` | `stock_diagnosis` | `StockDiagnosis` | `app/api/routes/stock.py` |
-| GET | `/api/stock/event-digest` | `stock_event_digest` | `EventDigestReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/events` | `stock_events` | `StockEventSummary` | `app/api/routes/stock.py` |
-| GET | `/api/stock/evidence-chain` | `stock_evidence_chain` | `EvidenceChainReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/factor-lab` | `stock_factor_lab` | `FactorLabReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/factors` | `stock_factors` | `list[FactorScore]` | `app/api/routes/stock.py` |
-| GET | `/api/stock/features` | `stock_feature_snapshot` | `FeatureSnapshot` | `app/api/routes/stock.py` |
-| GET | `/api/stock/financial-health` | `stock_financial_health` | `FinancialHealth` | `app/api/routes/stock.py` |
-| GET | `/api/stock/fund-flow` | `stock_fund_flow` | `FundFlowAnalysis` | `app/api/routes/stock.py` |
-| GET | `/api/stock/insights` | `stock_insight_bundle` | `StockInsightBundle` | `app/api/routes/stock.py` |
-| GET | `/api/stock/leadership` | `stock_leadership` | `LeadershipReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/lhb` | `stock_lhb` | `LhbSummary` | `app/api/routes/stock.py` |
-| GET | `/api/stock/market-regime` | `stock_market_regime` | `MarketRegimeReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/minute-analysis` | `minute_analysis` | `MinuteAnalysisReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/notes` | `stock_notes` | `list[StockNoteItem]` | `app/api/routes/notes.py` |
-| POST | `/api/stock/notes` | `create_stock_note` | `StockNoteItem` | `app/api/routes/notes.py` |
-| DELETE | `/api/stock/notes/{note_id}` | `delete_stock_note` | `-` | `app/api/routes/notes.py` |
-| PATCH | `/api/stock/notes/{note_id}` | `update_stock_note` | `StockNoteItem` | `app/api/routes/notes.py` |
-| GET | `/api/stock/order-pressure` | `stock_order_pressure` | `OrderPressure` | `app/api/routes/stock.py` |
-| GET | `/api/stock/overview` | `stock_overview` | `StockOverview` | `app/api/routes/stock.py` |
-| GET | `/api/stock/peer-comparison` | `stock_peer_comparison` | `PeerComparisonReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/qa-report` | `stock_qa_report` | `StockQaReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/replay` | `stock_replay` | `StockReplayAnalysis` | `app/api/routes/stock.py` |
-| GET | `/api/stock/risk-radar` | `stock_risk_radar` | `RiskRadarReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/rule-matches` | `stock_rule_matches` | `StockRuleMatchSummary` | `app/api/routes/stock.py` |
-| GET | `/api/stock/strategy-cards` | `stock_strategy_cards` | `list[StrategyCard]` | `app/api/routes/stock.py` |
-| GET | `/api/stock/t-strategy` | `stock_t_strategy` | `TStrategyAssistantReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/theme-context` | `stock_theme_context` | `ThemeContextReport` | `app/api/routes/stock.py` |
-| GET | `/api/stock/valuation` | `stock_valuation` | `ValuationAnalysis` | `app/api/routes/stock.py` |
-| GET | `/api/stock/workbench` | `stock_workbench` | `StockWorkbench` | `app/api/routes/stock.py` |
-| GET | `/api/stocks` | `stocks` | `list[StockInfo]` | `app/api/routes/data.py` |
-| GET | `/api/stream/quotes` | `stream_quotes` | `-` | `app/api/routes/quotes.py` |
-| GET | `/api/strong-stocks` | `strong_stocks` | `-` | `app/api/routes/analysis.py` |
-| GET | `/api/system/diagnostics` | `system_diagnostics` | `SystemDiagnostics` | `app/api/routes/monitoring.py` |
-| POST | `/api/tasks/run-once` | `run_task_once` | `-` | `app/api/routes/monitoring.py` |
-| GET | `/api/tasks/runs` | `task_runs` | `list[TaskRun]` | `app/api/routes/monitoring.py` |
-| GET | `/api/tasks/status` | `task_status` | `SchedulerStatus` | `app/api/routes/monitoring.py` |
-| GET | `/api/watchlist` | `watchlist` | `list[WatchlistItem]` | `app/api/routes/watchlist.py` |
-| POST | `/api/watchlist` | `add_watchlist_item` | `WatchlistItem` | `app/api/routes/watchlist.py` |
-| DELETE | `/api/watchlist/{symbol}` | `delete_watchlist_item` | `-` | `app/api/routes/watchlist.py` |
+| Method | Path | Inputs | Handler | Response model | File |
+| --- | --- | --- | --- | --- | --- |
+| GET | `/api/advice/history` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `limit: int = 30` (ge=1; le=200) | `advice_history` | `list[AdviceHistoryItem]` | `app/api/routes/watchlist.py` |
+| GET | `/api/alerts` | query `symbol: str \| None = None` (description=可选，6位A股代码)<br>query `include_disabled: bool = True` | `alert_rules` | `list[AlertRuleItem]` | `app/api/routes/alerts.py` |
+| POST | `/api/alerts` | body `payload: AlertRuleInput` | `create_alert_rule` | `AlertRuleItem` | `app/api/routes/alerts.py` |
+| POST | `/api/alerts/evaluate` | query `symbol: str \| None = None` (description=可选，6位A股代码) | `evaluate_alerts` | `AlertEvaluationSummary` | `app/api/routes/alerts.py` |
+| GET | `/api/alerts/events` | query `symbol: str \| None = None` (description=可选，6位A股代码)<br>query `limit: int = 100` (ge=1; le=500) | `alert_events` | `list[AlertEventItem]` | `app/api/routes/alerts.py` |
+| DELETE | `/api/alerts/{rule_id}` | path `rule_id: int` | `delete_alert_rule` | `MutationResult` | `app/api/routes/alerts.py` |
+| PATCH | `/api/alerts/{rule_id}` | path `rule_id: int`<br>body `payload: AlertRuleUpdate` | `update_alert_rule` | `AlertRuleItem` | `app/api/routes/alerts.py` |
+| GET | `/api/analyze` | query `symbol: str = '600519'` (description=6位A股代码) | `analyze` | `AnalysisResult` | `app/api/routes/analysis.py` |
+| GET | `/api/data/status` | - | `data_status` | `DataStatus` | `app/api/routes/data.py` |
+| POST | `/api/data/trading-calendar/refresh` | - | `refresh_trading_calendar_api` | `TradeCalendarRefreshResponse` | `app/api/routes/data.py` |
+| GET | `/api/futu/status` | - | `futu_status` | `FutuStatusResponse` | `app/api/routes/data.py` |
+| GET | `/api/health` | - | `health` | `-` | `app/api/routes/health.py` |
+| GET | `/api/leaderboard` | query `symbols: str \| None = None` | `leaderboard` | `StrongStockWatchResponse` | `app/api/routes/analysis.py` |
+| GET | `/api/market` | - | `market` | `MarketOverview` | `app/api/routes/analysis.py` |
+| GET | `/api/monitor/events` | query `limit: int = 30` (ge=1; le=200) | `monitor_events` | `list[MonitorEvent]` | `app/api/routes/monitoring.py` |
+| GET | `/api/order-book` | query `symbol: str = '600519'` (description=6位A股代码) | `order_book` | `OrderBook` | `app/api/routes/data.py` |
+| GET | `/api/plates` | query `limit: int = 20` (ge=1; le=100)<br>query `refresh: bool = False` (description=是否强制刷新板块排行) | `plates` | `list[PlateItem]` | `app/api/routes/data.py` |
+| GET | `/api/quote` | query `symbol: str = '600519'` (description=6位A股代码) | `quote` | `Quote` | `app/api/routes/quotes.py` |
+| GET | `/api/quotes` | query `symbols: str = '600519,000001,300750'` | `quotes` | `list[Quote]` | `app/api/routes/quotes.py` |
+| GET | `/api/review` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `period_days: int = 60` (ge=20; le=240) | `review` | `IndividualReview` | `app/api/routes/analysis.py` |
+| GET | `/api/rules` | - | `rules` | `list[RuleDefinition]` | `app/api/routes/stock.py` |
+| GET | `/api/stock/abnormal-events` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_abnormal_events` | `AbnormalEventSummary` | `app/api/routes/stock.py` |
+| GET | `/api/stock/alpha-evidence` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_alpha_evidence` | `AlphaEvidenceReport` | `app/api/routes/stock.py` |
+| POST | `/api/stock/ask` | body `payload: StockQuestionInput` | `ask_stock` | `StockQuestionAnswer` | `app/api/routes/stock.py` |
+| GET | `/api/stock/chart-marks` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `limit: int = 80` (ge=1; le=300) | `chart_marks` | `ChartMarkSummary` | `app/api/routes/notes.py` |
+| GET | `/api/stock/chips` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_chip_analysis` | `ChipAnalysis` | `app/api/routes/stock.py` |
+| GET | `/api/stock/diagnosis` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_diagnosis` | `StockDiagnosis` | `app/api/routes/stock.py` |
+| GET | `/api/stock/event-digest` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_event_digest` | `EventDigestReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/events` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_events` | `StockEventSummary` | `app/api/routes/stock.py` |
+| GET | `/api/stock/evidence-chain` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_evidence_chain` | `EvidenceChainReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/factor-lab` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_factor_lab` | `FactorLabReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/factors` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_factors` | `list[FactorScore]` | `app/api/routes/stock.py` |
+| GET | `/api/stock/features` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_feature_snapshot` | `FeatureSnapshot` | `app/api/routes/stock.py` |
+| GET | `/api/stock/financial-health` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_financial_health` | `FinancialHealth` | `app/api/routes/stock.py` |
+| GET | `/api/stock/fund-flow` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_fund_flow` | `FundFlowAnalysis` | `app/api/routes/stock.py` |
+| GET | `/api/stock/insights` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_insight_bundle` | `StockInsightBundle` | `app/api/routes/stock.py` |
+| GET | `/api/stock/leadership` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_leadership` | `LeadershipReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/lhb` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_lhb` | `LhbSummary` | `app/api/routes/stock.py` |
+| GET | `/api/stock/market-regime` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_market_regime` | `MarketRegimeReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/minute-analysis` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `interval: str = '5m'` (description=分钟周期：1m/5m/15m/30m/60m)<br>query `limit: int = 120` (ge=20; le=500) | `minute_analysis` | `MinuteAnalysisReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/notes` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `limit: int = 100` (ge=1; le=500) | `stock_notes` | `list[StockNoteItem]` | `app/api/routes/notes.py` |
+| POST | `/api/stock/notes` | body `payload: StockNoteInput` | `create_stock_note` | `StockNoteItem` | `app/api/routes/notes.py` |
+| DELETE | `/api/stock/notes/{note_id}` | path `note_id: int` | `delete_stock_note` | `MutationResult` | `app/api/routes/notes.py` |
+| PATCH | `/api/stock/notes/{note_id}` | path `note_id: int`<br>body `payload: StockNoteUpdate` | `update_stock_note` | `StockNoteItem` | `app/api/routes/notes.py` |
+| GET | `/api/stock/order-pressure` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_order_pressure` | `OrderPressure` | `app/api/routes/stock.py` |
+| GET | `/api/stock/overview` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_overview` | `StockOverview` | `app/api/routes/stock.py` |
+| GET | `/api/stock/peer-comparison` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_peer_comparison` | `PeerComparisonReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/qa-report` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_qa_report` | `StockQaReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/replay` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_replay` | `StockReplayAnalysis` | `app/api/routes/stock.py` |
+| GET | `/api/stock/risk-radar` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_risk_radar` | `RiskRadarReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/rule-matches` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_rule_matches` | `StockRuleMatchSummary` | `app/api/routes/stock.py` |
+| GET | `/api/stock/strategy-cards` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_strategy_cards` | `list[StrategyCard]` | `app/api/routes/stock.py` |
+| GET | `/api/stock/t-strategy` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_t_strategy` | `TStrategyAssistantReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/theme-context` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_theme_context` | `ThemeContextReport` | `app/api/routes/stock.py` |
+| GET | `/api/stock/valuation` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_valuation` | `ValuationAnalysis` | `app/api/routes/stock.py` |
+| GET | `/api/stock/workbench` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_workbench` | `StockWorkbench` | `app/api/routes/stock.py` |
+| GET | `/api/stocks` | query `keyword: str \| None = None` (description=股票代码或名称关键字)<br>query `limit: int = 50` (ge=1; le=500)<br>query `refresh: bool = False` (description=是否强制刷新股票池) | `stocks` | `list[StockInfo]` | `app/api/routes/data.py` |
+| GET | `/api/stream/quotes` | query `symbols: str = '600519,000001,300750'` | `stream_quotes` | `-` | `app/api/routes/quotes.py` |
+| GET | `/api/strong-stocks` | query `symbols: str \| None = None` | `strong_stocks` | `StrongStockWatchResponse` | `app/api/routes/analysis.py` |
+| GET | `/api/system/diagnostics` | - | `system_diagnostics` | `SystemDiagnostics` | `app/api/routes/monitoring.py` |
+| POST | `/api/tasks/run-once` | query `task: str \| None = None` (description=任务名称，不填则按顺序执行全部本地刷新任务) | `run_task_once` | `TaskRunOnceResponse` | `app/api/routes/monitoring.py` |
+| GET | `/api/tasks/runs` | query `limit: int = 20` (ge=1; le=100) | `task_runs` | `list[TaskRun]` | `app/api/routes/monitoring.py` |
+| GET | `/api/tasks/status` | - | `task_status` | `SchedulerStatus` | `app/api/routes/monitoring.py` |
+| GET | `/api/watchlist` | - | `watchlist` | `list[WatchlistItem]` | `app/api/routes/watchlist.py` |
+| POST | `/api/watchlist` | body `payload: WatchlistInput` | `add_watchlist_item` | `WatchlistItem` | `app/api/routes/watchlist.py` |
+| DELETE | `/api/watchlist/{symbol}` | path `symbol: str` | `delete_watchlist_item` | `MutationResult` | `app/api/routes/watchlist.py` |
+
+## Error Contract
+
+- `400`: domain validation errors from routes or workflows, including malformed stock symbols or unsupported intervals.
+- `404`: not-found responses for local user-state records or confirmed missing stocks.
+- `422`: FastAPI/Pydantic request-shape validation before route logic runs.
+- `503`: provider, runtime, scheduler, or SQLite failures mapped through `app/api/errors.py`.
+- `GET /api/stream/quotes` returns `text/event-stream`; normal frames contain JSON quote arrays and `quote-error` frames contain `{ "message": "..." }`.
 
 ## API Design Notes
 

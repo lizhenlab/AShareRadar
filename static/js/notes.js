@@ -2,16 +2,23 @@ import { fetchJson } from "./api.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 
-export async function loadNotes(state) {
+export async function loadNotes(state, options = {}) {
+  const symbol = options.symbol || state.symbol;
+  const isCurrent = options.isCurrent || (() => true);
   try {
-    const notes = await fetchJson(`/api/stock/notes?symbol=${encodeURIComponent(state.symbol)}&limit=8`);
+    const notes = await fetchJson(`/api/stock/notes?symbol=${encodeURIComponent(symbol)}&limit=8`);
+    if (!isCurrent()) return false;
     renderNotes(notes);
+    return true;
   } catch (error) {
+    if (!isCurrent()) return false;
     $("noteList").innerHTML = `<div class="note-row"><strong>笔记读取失败</strong><span>${escapeHtml(error.message)}</span></div>`;
+    return false;
   }
 }
 
-export async function addStockNote(state, refreshChartMarks) {
+export async function addStockNote(state, refreshChartMarks, options = {}) {
+  const symbol = options.symbol || state.symbol;
   const content = $("noteContent").value.trim();
   if (!content) throw new Error("请输入笔记内容");
   const quote = state.lastAnalysis && state.lastAnalysis.quote;
@@ -19,32 +26,38 @@ export async function addStockNote(state, refreshChartMarks) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      symbol: state.symbol,
+      symbol,
       content,
       note_type: $("noteType").value,
       price: quote ? quote.price : undefined,
       trade_date: quote ? quote.timestamp : undefined,
     }),
   });
+  if (options.isCurrent && !options.isCurrent()) return false;
   $("noteContent").value = "";
-  await loadNotes(state);
-  await refreshChartMarks();
+  await loadNotes(state, { symbol, isCurrent: options.isCurrent });
+  await refreshChartMarks(options.context);
+  return true;
 }
 
-export async function removeStockNote(state, noteId, refreshChartMarks) {
+export async function removeStockNote(state, noteId, refreshChartMarks, options = {}) {
   await fetchJson(`/api/stock/notes/${encodeURIComponent(noteId)}`, { method: "DELETE" });
-  await loadNotes(state);
-  await refreshChartMarks();
+  if (options.isCurrent && !options.isCurrent()) return false;
+  await loadNotes(state, { symbol: options.symbol || state.symbol, isCurrent: options.isCurrent });
+  await refreshChartMarks(options.context);
+  return true;
 }
 
-export async function updateStockNote(state, noteId, payload, refreshChartMarks) {
+export async function updateStockNote(state, noteId, payload, refreshChartMarks, options = {}) {
   await fetchJson(`/api/stock/notes/${encodeURIComponent(noteId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  await loadNotes(state);
-  await refreshChartMarks();
+  if (options.isCurrent && !options.isCurrent()) return false;
+  await loadNotes(state, { symbol: options.symbol || state.symbol, isCurrent: options.isCurrent });
+  await refreshChartMarks(options.context);
+  return true;
 }
 
 export function renderNotes(items) {

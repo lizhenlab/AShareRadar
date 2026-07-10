@@ -8,6 +8,7 @@ import importlib
 import io
 
 from app.models.schemas import Kline, MinuteKline, PlateItem, ProviderCapability, Quote, StockConceptItem, StockInfo
+from app.runtime_environment import isolate_user_site_packages
 from app.services.akshare_mappers import minute_klines_from_hist_rows, quote_from_spot_row, stock_info_from_code_name_row
 from app.services.eastmoney_client import (
     eastmoney_kline as _eastmoney_kline,
@@ -19,6 +20,8 @@ from app.services.provider_utils import ak_symbol, ensure_positive_limit, is_ins
 from app.utils.parsing import required_float, safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
 from app.utils.time import now_text
+
+isolate_user_site_packages()
 
 AKSHARE_MINUTE_PERIODS = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m": "60"}
 

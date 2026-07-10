@@ -54,6 +54,35 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         self.assertEqual(diagnostics.storage.runtime_rows, 4)
         self.assertEqual(diagnostics.storage.user_rows, 3)
 
+    def test_diagnostics_reports_stale_daily_kline_even_when_minute_kline_is_fresh(self) -> None:
+        checked_base = datetime.now()
+        cache = _Cache(
+            CacheStats(
+                path="/tmp/ashare-radar-test.sqlite3",
+                quote_count=1,
+                quote_history_count=0,
+                kline_count=2,
+                daily_kline_count=1,
+                minute_kline_count=1,
+                stock_count=0,
+                plate_count=0,
+                provider_count=0,
+                latest_quote_at=checked_base.strftime("%Y-%m-%d %H:%M:%S"),
+                latest_kline_at=(checked_base - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),
+                latest_daily_kline_at=(checked_base - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),
+                latest_minute_kline_at=checked_base.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+            providers=[],
+            capability_statuses=[],
+            table_counts={},
+        )
+
+        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+            diagnostics = build_system_diagnostics(_DataHub(cache, capabilities=[]), _Scheduler(running=True))
+
+        self.assertIn("日K线缓存超过1天未刷新，建议手动执行关键个股K线刷新。", diagnostics.suggestions)
+        self.assertLess(diagnostics.freshness.latest_minute_kline_age_seconds or 0, 60)
+
     def test_diagnostics_reports_missing_quote_demo_source_and_calendar_fallback(self) -> None:
         cache = _Cache(
             CacheStats(
@@ -106,8 +135,43 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         self.assertIsNone(diagnostics.freshness.latest_quote_age_seconds)
         self.assertIsNone(diagnostics.freshness.latest_kline_age_seconds)
         self.assertIn("最新报价缓存时间异常。", diagnostics.warnings)
-        self.assertIn("最新K线缓存时间异常。", diagnostics.warnings)
+        self.assertIn("最新日K缓存时间异常。", diagnostics.warnings)
         self.assertIn("检查系统时间、数据源时间字段或清理异常缓存。", diagnostics.suggestions)
+
+    def test_diagnostics_reports_future_minute_kline_timestamp_as_invalid(self) -> None:
+        now = datetime.now()
+        future = (now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        cache = _Cache(
+            CacheStats(
+                path="/tmp/ashare-radar-test.sqlite3",
+                quote_count=1,
+                quote_history_count=0,
+                kline_count=2,
+                daily_kline_count=1,
+                minute_kline_count=1,
+                stock_count=0,
+                plate_count=0,
+                provider_count=0,
+                latest_quote_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+                latest_kline_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+                latest_daily_kline_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+                latest_minute_kline_at=future,
+            ),
+            providers=[],
+            capability_statuses=[],
+            table_counts={},
+        )
+        datahub = _DataHub(
+            cache,
+            capabilities=[_capability("tencent", realtime_quote=True), _capability("futu", realtime_quote=True)],
+        )
+
+        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True))
+
+        self.assertIsNone(diagnostics.freshness.latest_minute_kline_age_seconds)
+        self.assertIn("最新分钟K线缓存时间异常。", diagnostics.warnings)
+        self.assertIn("检查系统时间、分钟K线数据源时间字段或清理异常缓存。", diagnostics.suggestions)
 
     def test_diagnostics_deduplicates_messages_and_sanitizes_dirty_table_counts(self) -> None:
         future = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -224,6 +288,17 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         self.assertEqual(decision.warning, "存在数据源最近失败：akshare")
         self.assertEqual(decision.suggestion, "检查网络、Token 或数据源依赖安装状态。")
 
+    def test_provider_diagnostic_decision_ignores_stale_failures(self) -> None:
+        stale_at = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
+
+        decision = _provider_diagnostic_decision(
+            [_provider_status("akshare", healthy=False, updated_at=stale_at)],
+            [_capability_status("baostock", "kline", healthy=False, updated_at=stale_at)],
+        )
+
+        self.assertIsNone(decision.warning)
+        self.assertIsNone(decision.suggestion)
+
     def test_provider_diagnostic_decision_deduplicates_dirty_capability_failures(self) -> None:
         decision = _provider_diagnostic_decision(
             [],
@@ -282,7 +357,7 @@ class _Scheduler:
         return SchedulerStatus(enabled=True, running=self._running, started_at=None, task_count=0, tasks=[])
 
 
-def _provider_status(name: str, *, healthy: bool) -> ProviderStatus:
+def _provider_status(name: str, *, healthy: bool, updated_at: str | None = None) -> ProviderStatus:
     return ProviderStatus(
         name=name,
         enabled=True,
@@ -291,10 +366,18 @@ def _provider_status(name: str, *, healthy: bool) -> ProviderStatus:
         last_success=None,
         last_error=None if healthy else "network down",
         failure_count=0 if healthy else 1,
+        updated_at=updated_at,
     )
 
 
-def _capability_status(name: str, kind: str, *, healthy: bool, enabled: bool = True) -> ProviderCapabilityStatus:
+def _capability_status(
+    name: str,
+    kind: str,
+    *,
+    healthy: bool,
+    enabled: bool = True,
+    updated_at: str | None = None,
+) -> ProviderCapabilityStatus:
     return ProviderCapabilityStatus(
         name=name,
         kind=kind,
@@ -303,6 +386,7 @@ def _capability_status(name: str, kind: str, *, healthy: bool, enabled: bool = T
         healthy=healthy,
         last_error=None if healthy else "network down",
         failure_count=0 if healthy else 1,
+        updated_at=updated_at,
     )
 
 

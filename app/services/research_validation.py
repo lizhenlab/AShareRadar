@@ -124,11 +124,13 @@ def _trend_pullback_validation(
     factor: StandardFactor | None,
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
+    condition_met = feature.trend_score >= 55 and feature.price >= feature.ma5
     return SignalValidationItem(
         name="趋势回踩验证",
         category="买点",
-        status=_validation_status(
-            feature.trend_score >= 55 and feature.price >= feature.ma5,
+        status=_price_validation_status(
+            condition_met,
+            (feature.price, feature.ma5),
             market_regime,
             factor,
             timeframe,
@@ -151,11 +153,13 @@ def _breakout_validation(
     factor: StandardFactor | None,
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
+    condition_met = feature.price >= feature.resistance * 0.985 and feature.volume_ratio >= VOLUME_CONFIRMATION_RATIO
     return SignalValidationItem(
         name="压力突破验证",
         category="买点",
-        status=_validation_status(
-            feature.price >= feature.resistance * 0.985 and feature.volume_ratio >= VOLUME_CONFIRMATION_RATIO,
+        status=_price_validation_status(
+            condition_met,
+            (feature.price, feature.resistance),
             market_regime,
             factor,
             timeframe,
@@ -178,11 +182,13 @@ def _support_defense_validation(
     factor: StandardFactor | None,
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
+    condition_met = feature.price > feature.support * 1.01 and feature.price >= feature.ma20 * 0.985
     return SignalValidationItem(
         name="支撑防守验证",
         category="风控",
-        status=_validation_status(
-            feature.price > feature.support * 1.01 and feature.price >= feature.ma20 * 0.985,
+        status=_price_validation_status(
+            condition_met,
+            (feature.price, feature.support, feature.ma20),
             market_regime,
             factor,
             timeframe,
@@ -206,11 +212,13 @@ def _t_range_validation(
     factor: StandardFactor | None,
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
+    condition_met = feature.price > feature.support and feature.price < feature.resistance
     return SignalValidationItem(
         name="做T区间验证",
         category="做T",
-        status=_validation_status(
-            feature.price > feature.support and feature.price < feature.resistance,
+        status=_price_validation_status(
+            condition_met,
+            (feature.price, feature.support, feature.resistance),
             market_regime,
             factor,
             timeframe,
@@ -260,6 +268,28 @@ def _validation_status(
         if rule.matches(context):
             return rule.status
     return STATUS_WAITING
+
+
+def _price_validation_status(
+    condition_met: bool,
+    required_prices: tuple[object, ...],
+    market_regime: MarketRegimeReport,
+    factor: StandardFactor | None,
+    timeframe: TimeframeAlignmentReport | None = None,
+    *,
+    reverse: bool = False,
+) -> str:
+    if not _required_prices_are_valid(required_prices):
+        return STATUS_WAITING
+    return _validation_status(condition_met, market_regime, factor, timeframe, reverse=reverse)
+
+
+def _required_prices_are_valid(values: tuple[object, ...]) -> bool:
+    for value in values:
+        parsed = _finite_float(value)
+        if parsed is None or parsed <= 0:
+            return False
+    return True
 
 
 def _validation_status_context(

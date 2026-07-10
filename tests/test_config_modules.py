@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from app.config import DEFAULT_ASHARE_RADAR_LLM_TIMEOUT_SECONDS, Settings
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_operations_documents_every_ashare_radar_environment_variable() -> None:
+    app_text = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "app").rglob("*.py")))
+    operations_text = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+
+    config_names = set(re.findall(r"ASHARE_RADAR_[A-Z0-9_]+", app_text))
+    documented_names = set(re.findall(r"`(ASHARE_RADAR_[A-Z0-9_]+)`", operations_text))
+
+    assert documented_names == config_names
 
 
 def test_settings_reads_environment_when_instantiated(monkeypatch) -> None:

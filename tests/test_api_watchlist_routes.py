@@ -38,6 +38,28 @@ def test_delete_watchlist_item_returns_404_when_symbol_is_missing() -> None:
     assert cache.deleted_symbol == "600519"
 
 
+def test_delete_watchlist_item_returns_mutation_result_when_removed() -> None:
+    cache = _DeleteCache(removed=True)
+    client = _client(_DataHubStub(cache=cache))
+
+    response = client.delete("/api/watchlist/600519")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "removed": True}
+    assert cache.deleted_symbol == "600519"
+
+
+def test_delete_watchlist_item_uses_mutation_response_model() -> None:
+    app = FastAPI()
+    app.include_router(watchlist.router)
+
+    schema = app.openapi()["paths"]["/api/watchlist/{symbol}"]["delete"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+
+    assert schema == {"$ref": "#/components/schemas/MutationResult"}
+
+
 def _client(datahub) -> TestClient:
     app = FastAPI()
     app.include_router(watchlist.router)

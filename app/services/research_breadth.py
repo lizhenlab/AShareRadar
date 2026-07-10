@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import math
 
@@ -27,6 +27,12 @@ class MarketBreadthSnapshot:
     avg_change_pct: float
     risk_adjustment: float
     summary: str
+    sample_count: int
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.warnings)
 
 
 @dataclass(frozen=True)
@@ -65,10 +71,11 @@ MARKET_BREADTH_BANDS = (
 NEUTRAL_BREADTH_BAND = MarketBreadthBand("neutral", "市场宽度中性", 0, lambda score: True)
 
 
-def build_market_breadth_snapshot(quotes: list) -> MarketBreadthSnapshot:
+def build_market_breadth_snapshot(quotes: list, *, warnings: Iterable[str] = ()) -> MarketBreadthSnapshot:
+    clean_warnings = _clean_warnings(warnings)
     stats = _market_breadth_stats(quotes)
     if stats.sample_count == 0:
-        return _empty_market_breadth_snapshot()
+        return _empty_market_breadth_snapshot(clean_warnings)
     score = _market_breadth_score(stats)
     band = _market_breadth_band(score)
     return MarketBreadthSnapshot(
@@ -79,23 +86,43 @@ def build_market_breadth_snapshot(quotes: list) -> MarketBreadthSnapshot:
         strong_count=stats.strong_count,
         weak_count=stats.weak_count,
         avg_change_pct=round(stats.avg_change_pct, 2),
-        risk_adjustment=band.risk_adjustment,
+        risk_adjustment=round(band.risk_adjustment + (0.03 if clean_warnings else 0), 2),
         summary=_market_breadth_summary(band.label, stats),
+        sample_count=stats.sample_count,
+        warnings=clean_warnings,
     )
 
 
-def _empty_market_breadth_snapshot() -> MarketBreadthSnapshot:
+def _empty_market_breadth_snapshot(warnings: tuple[str, ...] = ()) -> MarketBreadthSnapshot:
+    source_degraded = bool(warnings)
     return MarketBreadthSnapshot(
-        label="市场宽度待确认",
-        score=50,
+        label="市场宽度数据降级" if source_degraded else "市场宽度待确认",
+        score=45 if source_degraded else 50,
         up_count=0,
         down_count=0,
         strong_count=0,
         weak_count=0,
         avg_change_pct=0,
-        risk_adjustment=0,
-        summary="市场宽度样本不足，环境判断暂以个股和行业为主。",
+        risk_adjustment=0.05 if source_degraded else 0,
+        summary=(
+            "市场宽度数据源暂不可用，环境判断已降级并以个股和行业为主。"
+            if source_degraded
+            else "市场宽度样本不足，环境判断暂以个股和行业为主。"
+        ),
+        sample_count=0,
+        warnings=warnings,
     )
+
+
+def _clean_warnings(values: Iterable[str]) -> tuple[str, ...]:
+    warnings: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = " ".join(value.split())[:160]
+        if text and text not in warnings:
+            warnings.append(text)
+    return tuple(warnings[:3])
 
 
 def _market_breadth_stats(quotes: list) -> MarketBreadthStats:

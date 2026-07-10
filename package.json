@@ -5,7 +5,8 @@
   "scripts": {
     "check": "npm run check:py && npm run check:js && npm test",
     "check:js": "node --check static/app.js && node --check static/js/*.js",
-    "check:py": "${PYTHON:-/opt/anaconda3/bin/python3} -m compileall -q app tests tools && ${PYTHON:-/opt/anaconda3/bin/python3} -m pyflakes app tests tools",
-    "test": "${PYTHON:-/opt/anaconda3/bin/python3} -m pytest -q"
+    "check:py": "PYCACHE_DIR=$(mktemp -d /tmp/ashare-radar-pycache.XXXXXX); trap 'rm -rf \"$PYCACHE_DIR\"' EXIT; PYTHONPYCACHEPREFIX=$PYCACHE_DIR PYTHONNOUSERSITE=1 ${PYTHON:-/opt/anaconda3/bin/python3} -m compileall -q app tests tools && PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 ${PYTHON:-/opt/anaconda3/bin/python3} -m pyflakes app tests tools",
+    "clean:caches": "find app tests tools -type d -name __pycache__ -prune -exec rm -rf {} + && rm -rf .pytest_cache",
+    "test": "PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 ${PYTHON:-/opt/anaconda3/bin/python3} -m pytest -q -p no:cacheprovider"
   }
 }

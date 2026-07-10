@@ -170,6 +170,8 @@ def build_leadership_report(
     insights: StockInsightBundle,
     feature: FeatureSnapshot,
     concepts: list[StockConceptItem] | None = None,
+    *,
+    concept_error: str | None = None,
 ) -> LeadershipReport:
     concepts = concepts or []
     feature = _safe_report_feature(feature)
@@ -181,7 +183,7 @@ def build_leadership_report(
         summary=_leadership_summary(feature),
         tags=feature.tags[:LEADERSHIP_TAG_LIMIT],
         evidence=_leadership_evidence(feature, concepts),
-        missing_data=_leadership_missing_data(analysis, insights, concepts),
+        missing_data=_leadership_missing_data(analysis, insights, concepts, concept_error),
     )
 
 
@@ -238,12 +240,17 @@ def _leadership_missing_data(
     analysis: AnalysisResult,
     insights: StockInsightBundle,
     concepts: list[StockConceptItem],
+    concept_error: str | None,
 ) -> list[str]:
-    return [
+    missing = [
         label
         for label, is_missing in LEADERSHIP_MISSING_RULES
         if is_missing(analysis, insights, concepts)
     ]
+    reason = _non_empty_text(concept_error)
+    if reason and "概念归属" in missing:
+        missing[missing.index("概念归属")] = f"概念归属：{reason}"
+    return missing
 
 
 def _leadership_summary(feature: FeatureSnapshot) -> str:

@@ -5,6 +5,10 @@ from typing import Protocol
 
 from app.config import Settings
 from app.models.schemas import Kline, MinuteKline, OrderBook, PlateItem, ProviderCapability, Quote, StockConceptItem, StockInfo
+from app.runtime_environment import isolate_user_site_packages
+
+isolate_user_site_packages()
+
 from app.services.akshare_provider import AKShareProvider
 from app.services.baostock_provider import BaoStockProvider
 from app.services.futu_provider import FutuProvider
@@ -116,6 +120,7 @@ def all_provider_names(settings: Settings, providers: dict[str, MarketProvider])
     for group in (
         settings.quote_provider_priority,
         settings.kline_provider_priority,
+        settings.minute_provider_priority,
         settings.stock_provider_priority,
         settings.plate_provider_priority,
         ("futu",),

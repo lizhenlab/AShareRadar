@@ -95,6 +95,17 @@ _ALERT_RULE_STATE_SQL = """
     WHERE id = ? AND enabled = 1
 """
 
+_ALERT_RULE_STATE_CAS_SQL = _ALERT_RULE_STATE_SQL.rstrip() + """
+      AND name = ?
+      AND condition_type = ?
+      AND threshold = ?
+      AND cooldown_seconds = ?
+      AND last_state = ?
+      AND COALESCE(last_triggered_at, '') = COALESCE(?, '')
+      AND MAX(CAST(COALESCE(trigger_count, 0) AS INTEGER), 0) = ?
+      AND updated_at = ?
+"""
+
 _ALERT_EVENT_INSERT_SQL = f"""
     INSERT INTO alert_event (
         {_columns_sql(_ALERT_EVENT_INSERT_COLUMNS)}
@@ -202,9 +213,10 @@ class AlertRepository(SQLiteRepository):
         if not rule.enabled:
             return None
         event_id: int | None = None
+        snapshot_guard = decision is not None
         decision = decision or _alert_state_decision(rule, triggered, event_type, force_event)
         with self._lock, self._connect() as conn:
-            if not _update_alert_rule_state_row(conn, rule, checked_at, state, decision):
+            if not _update_alert_rule_state_row(conn, rule, checked_at, state, decision, snapshot_guard=snapshot_guard):
                 return None
             if decision.should_create_event:
                 event_id = _insert_alert_event_row(conn, rule, quote, checked_at, message, decision.event_type)
@@ -387,18 +399,36 @@ def _update_alert_rule_state_row(
     checked_at: str,
     state: str,
     decision: AlertStateDecision,
+    *,
+    snapshot_guard: bool,
 ) -> bool:
+    params: list[object] = [
+        checked_at,
+        int(decision.should_update_triggered_at),
+        checked_at,
+        state,
+        decision.trigger_increment,
+        checked_at,
+        rule.id,
+    ]
+    sql = _ALERT_RULE_STATE_SQL
+    if snapshot_guard:
+        sql = _ALERT_RULE_STATE_CAS_SQL
+        params.extend(
+            [
+                rule.name,
+                rule.condition_type,
+                rule.threshold,
+                rule.cooldown_seconds,
+                rule.last_state,
+                rule.last_triggered_at,
+                max(0, rule.trigger_count),
+                rule.updated_at,
+            ]
+        )
     cursor = conn.execute(
-        _ALERT_RULE_STATE_SQL,
-        (
-            checked_at,
-            int(decision.should_update_triggered_at),
-            checked_at,
-            state,
-            decision.trigger_increment,
-            checked_at,
-            rule.id,
-        ),
+        sql,
+        params,
     )
     return cursor.rowcount > 0
 

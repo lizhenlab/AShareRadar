@@ -325,9 +325,9 @@ function minuteAnalysisView(report) {
 }
 
 function minuteStatusTone(suitability, missing) {
-  if (suitability === "仅底仓可做T") return "good";
   if (suitability === "不适合主动做T") return "risk";
   if (missing.length) return "warn";
+  if (suitability === "仅底仓可做T") return "good";
   return "";
 }
 
@@ -587,9 +587,10 @@ function renderSignals(id, items) {
     });
 }
 
-export function renderMarket(indices) {
+export function renderMarket(indices, meta = {}) {
   const items = asArray(indices);
-  $("marketStrip").innerHTML = renderList(
+  const warning = sampleWarning(meta);
+  const rows = renderList(
     items,
     (item) => `
       <div class="index-card">
@@ -597,33 +598,56 @@ export function renderMarket(indices) {
         <strong>${formatNumber(item.price)}</strong>
         <em class="${changeClass(item.change_pct)}">${formatNumber(item.change_pct)}%</em>
       </div>`,
-    { empty: `<div class="index-card"><span>市场概览</span><strong>暂无数据</strong><em>等待刷新</em></div>` }
+    {
+      empty: warning
+        ? `<div class="index-card"><span>市场指数暂不可用</span><strong>数据降级</strong><em>${escapeHtml(warning)}</em></div>`
+        : `<div class="index-card"><span>市场概览</span><strong>暂无数据</strong><em>等待刷新</em></div>`,
+    }
   );
+  const warningRow = items.length && warning
+    ? `<div class="index-card"><span>指数数据提示</span><strong>部分可用</strong><em>${escapeHtml(warning)}</em></div>`
+    : "";
+  $("marketStrip").innerHTML = rows + warningRow;
 }
 
 export function renderStrongStocks(items, meta = {}) {
-  const rows = asArray(items);
-  const scope = meta && meta.scope ? `${meta.scope} · 样本 ${meta.sample_count || rows.length}` : `样本 ${rows.length}`;
+  const rows = asArray(items).map(asObject);
+  const scope = meta && meta.scope ? `${meta.scope} · 样本 ${meta.sample_count ?? rows.length}` : `样本 ${rows.length}`;
+  const fallbackReason = meta && meta.fallback_reason ? String(meta.fallback_reason) : "";
+  const warning = sampleWarning(meta);
+  const scopeNote = fallbackReason
+    ? `强股接口暂不可用，显示市场概览样本：${fallbackReason}`
+    : warning
+      ? `数据降级：${warning}`
+    : "仅代表当前样本内排序，不是全市场涨幅榜。";
   $("leaderList").innerHTML = rows.length
-    ? `<div class="leader-row leader-scope"><strong>${escapeHtml(scope)}</strong><span>仅代表当前样本内排序，不是全市场涨幅榜。</span></div>` +
+    ? `<div class="leader-row leader-scope"><strong>${escapeHtml(scope)}</strong><span>${escapeHtml(scopeNote)}</span></div>` +
       renderList(
         rows,
         (item) => `
       <div class="leader-row">
         <div>
-          <strong>${escapeHtml(item.name)} <span>${escapeHtml(item.code)}</span></strong>
-          <small>${escapeHtml(item.reason)}</small>
+          <strong>${escapeHtml(item.name || "--")} <span>${escapeHtml(item.code || "--")}</span></strong>
+          <small>${escapeHtml(item.reason || "样本数据待确认")}</small>
           <small>${escapedJoin(item.tags, " / ")}</small>
         </div>
         <div>
-          <div class="leader-rank">${escapeHtml(item.rank)}</div>
-          <span>龙头 ${escapeHtml(item.leader_score || 0)}</span>
+          <div class="leader-rank">${escapeHtml(item.rank ?? "--")}</div>
+          <span>龙头 ${escapeHtml(item.leader_score ?? 0)}</span>
           <span class="${changeClass(item.change_pct)}">${formatNumber(item.change_pct)}%</span>
         </div>
       </div>`,
         { limit: 8 }
       )
-    : `<div class="leader-row"><strong>暂无观察池排序</strong><span>等待行情刷新后重新计算。</span></div>`;
+    : fallbackReason || warning
+      ? `<div class="leader-row"><strong>观察池数据暂不可用</strong><span>${escapeHtml(fallbackReason || warning)}</span></div>`
+      : `<div class="leader-row"><strong>暂无观察池排序</strong><span>等待行情刷新后重新计算。</span></div>`;
+}
+
+function sampleWarning(meta) {
+  const fallbackReason = meta && typeof meta.fallback_reason === "string" ? meta.fallback_reason.trim() : "";
+  if (fallbackReason) return fallbackReason;
+  return asArray(meta && meta.warnings).find((item) => typeof item === "string" && item.trim())?.trim() || "";
 }
 
 export function renderQuotes(items) {
@@ -634,7 +658,7 @@ export function renderQuotes(items) {
       <div class="quote-row">
         <div>
           <strong>${escapeHtml(item.name)}</strong>
-          <span>${escapeHtml(item.market)}${escapeHtml(item.code)} · 成交额 ${formatAmount(item.amount)}</span>
+          <span>${escapeHtml(item.market)}${escapeHtml(item.code)} · 成交额 ${formatAmount(item.amount)}${escapeHtml(quoteCacheLabel(item))}</span>
         </div>
         <div>
           <strong>${formatNumber(item.price)}</strong>
@@ -643,4 +667,11 @@ export function renderQuotes(items) {
       </div>`,
     { empty: `<div class="quote-row"><strong>实时观察等待中</strong><span>行情连接成功后自动更新。</span></div>` }
   );
+}
+
+function quoteCacheLabel(item) {
+  if (!item) return "";
+  if (item.fallback_used) return " · 兜底缓存";
+  if (item.from_cache) return " · 缓存";
+  return "";
 }

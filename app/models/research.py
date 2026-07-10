@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.models.analysis import PeerSampleInfo
 from app.models.market import StockConceptItem
 
 
@@ -239,6 +240,8 @@ class PeerComparisonReport(BaseModel):
     metrics: list[str] = Field(default_factory=list)
     leaders: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+    sample_status: PeerSampleInfo = Field(default_factory=PeerSampleInfo)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TStrategyAssistantReport(BaseModel):

@@ -10,6 +10,7 @@ Use Python 3.12 or newer. The local development runtime in this workspace is `/o
 
 ```bash
 export PYTHON=${PYTHON:-/opt/anaconda3/bin/python3}
+export PYTHONNOUSERSITE=1
 $PYTHON -m pip install -r requirements.txt
 $PYTHON -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
@@ -20,15 +21,17 @@ Open:
 http://127.0.0.1:8010
 ```
 
-`requirements.txt` includes the runtime packages plus the local check tools used by this repository.
+`requirements.txt` includes the runtime packages plus the local check tools used by this repository. `PYTHONNOUSERSITE=1` keeps user-level Python packages from shadowing the project runtime, which is important for the pandas/numpy stack used by AKShare and BaoStock.
 
 Useful checks:
 
 ```bash
 npm run check
-$PYTHON -m pytest -q
-$PYTHON -m pyflakes app tests tools
+npm test
+npm run clean:caches
 ```
+
+`npm run check` routes Python bytecode output to a temporary directory and disables pytest's cache provider, so routine verification should not leave `__pycache__/`, `*.pyc`, or `.pytest_cache/` artifacts in the worktree.
 
 ## Documentation
 
@@ -40,7 +43,7 @@ $PYTHON -m pyflakes app tests tools
 - [Function Inventory](docs/FUNCTION_INVENTORY.md)
 - [Maintenance and Refactor Guide](docs/MAINTENANCE.md)
 
-Regenerate generated inventory docs after code or route movement:
+Regenerate generated inventory docs after code or route movement. The function inventory also records Python function-health hotspots so reviews can see the longest and branchiest functions by area.
 
 ```bash
 $PYTHON tools/architecture_inventory.py
@@ -92,12 +95,12 @@ Key runtime files:
 - `app/config.py`: environment configuration.
 - `app/api/errors.py`: API exception mapping, SQLite/database failure mapping, validation-message rules, and Chinese error responses.
 - `app/api/routes/quotes.py`: quote endpoints, batch symbol limits, SSE stream symbol fallback with dirty fallback-symbol skips, canonical symbol validation, safe event formatting, refresh-interval guards, and quote-error events.
-- `app/models/market.py`: quote, K-line, stock profile, plate/concept, provider capability, and order-book models.
+- `app/models/market.py`: quote with cache/fallback flags, K-line, stock profile, plate/concept, provider capability, and order-book models.
 - `app/models/analysis.py`: analysis result, data quality, review, overview, strategy, finance, rule-match, and insight models.
 - `app/models/research.py`: factor lab, regime, validation, risk/reward, diagnosis, Q&A, theme, chip, replay, and minute-analysis models.
 - `app/models/user_data.py`: watchlist, alert, note, chart-mark, and advice-history models.
 - `app/models/system.py`: provider status, source-plan, cache stats, diagnostics, task, and scheduler models.
-- `app/models/workbench.py`: composite workbench and market-overview response models.
+- `app/models/workbench.py`: composite workbench/market response models, component-level local-data warnings, and quote-sample status contracts.
 - `app/models/schemas.py`: backward-compatible re-export layer for existing imports.
 - `app/db/schema.py`: schema initialization facade.
 - `app/db/schema_definitions.py`: SQLite table and index definitions.
@@ -105,7 +108,7 @@ Key runtime files:
 - `app/db/mappers.py`: backward-compatible row-mapper facade.
 - `app/db/market_mappers.py`: quote, K-line, stock-pool, plate, and concept row-to-model mapping.
 - `app/db/system_mappers.py`: provider status, provider capability, scheduler task, and monitor-event row mapping.
-- `app/db/user_mappers.py`: watchlist, advice, alert, note, and alert-condition label row mapping with legacy dirty-row sanitation for advice text/numbers and alert rule/event state.
+- `app/db/user_mappers.py`: watchlist, advice, alert, note, and alert-condition label row mapping with legacy dirty-row sanitation for advice text/numbers, alert rule/event state, and displayable stock-note fallbacks.
 - `app/repositories/market_data.py`: backward-compatible market data repository composition.
 - `app/repositories/market_quotes.py`: column-list driven quote snapshot and quote-history persistence.
 - `app/repositories/market_klines.py`: daily and minute K-line cache persistence.
@@ -131,17 +134,18 @@ Key runtime files:
 - `app/services/indicator_levels.py`: support/resistance calculation with valid K-line filtering, breakout/breakdown adjustment, and level-order guardrails.
 - `app/services/indicator_volume.py`: volume averages and shared positive-volume ratio helpers.
 - `app/services/indicator_math.py`: shared moving-average, ATR, volatility, drawdown, quantile, and percentage-change helpers.
-- `app/services/data_quality_components.py`: quote source, ordered quote-field rules that reject non-finite/negative/zero critical values before derived diagnostics, K-line requirement wording, freshness, cache-source labels, and non-negative multi-source consistency score components with stable anomaly notes.
+- `app/services/data_quality_components.py`: quote source/cache flags, ordered quote-field rules that reject non-finite/negative/zero critical values before derived diagnostics, K-line requirement wording, freshness, cache-source labels, and non-negative multi-source consistency score components with stable anomaly notes.
 - `app/services/data_quality.py`: public data-quality response assembly and backward-compatible quality helper exports.
 - `app/services/data_quality_time.py`: quote timestamp parsing, trading-session freshness checks, and expected trade-date helpers.
 - `app/services/data_quality_kline.py`: K-line latest-date/source/cache/fallback quality assessment that ignores input-order tail mistakes plus ordered level and penalty rule tables.
-- `app/services/datahub.py`: provider routing, cache fallback orchestration, coordinator wiring, and data-quality entry points.
+- `app/services/datahub.py`: provider routing facade, coordinator wiring, runtime/cache ownership, and data-quality entry points.
 - `app/services/datahub_cache.py`: quote/K-line cache tagging, symbol matching, stock-pool freshness, concept normalization, and explicit minute interval alias mapping.
-- `app/services/datahub_klines.py`: daily K-line and minute K-line fetching, cache reuse only when fresh cache covers the requested limit, shared provider-attempt fallback, invalid-row filtering with date/time sorting before latest-window selection, bounded provider-call limits with malformed max-limit fallback, capability failure recording, cancellation propagation, empty-response guardrails, and fallback cache tagging.
-- `app/services/datahub_metadata.py`: stock pool, stock profile, plate rank, and concept membership fetching with shared provider-attempt fallback, incomplete-stock-pool safeguards, authoritative-miss handling, AKShare plate capability failure recording, empty metadata-response guardrails, and non-mutating profile enrichment.
+- `app/services/datahub_klines.py`: daily K-line and minute K-line fetching, cache reuse only when fresh cache covers the requested limit, shared provider-attempt fallback, invalid-row filtering with date/time sorting before latest-window selection, best-effort cache persistence after provider success, bounded provider-call limits with malformed max-limit fallback, capability failure recording, cancellation propagation, empty-response guardrails, and fallback cache tagging.
+- `app/services/datahub_metadata.py`: stock pool/profile resolution through `StockPoolResolver`, plus plate rank and concept membership fetching with shared provider-attempt fallback, incomplete-stock-pool safeguards, authoritative empty-result handling, stale keyword fallback boundaries, invalid/all-empty metadata-row filtering that preserves previous cache rows, best-effort cache persistence after provider success, AKShare plate capability failure recording, empty metadata-response guardrails, and non-mutating profile enrichment.
 - `app/services/datahub_orderbook.py`: optional Futu order-book retrieval, Futu ping checks, provider-error wrapping, and order-book capability state recording.
-- `app/services/datahub_quotes.py`: quote fetching, partial cache reuse, fallback quote cache, quote quality entry, and multi-source consistency checks.
-- `app/services/datahub_runtime.py`: provider call timeouts, capability success/failure recording, and short cooldowns.
+- `app/services/datahub_quotes.py`: quote fetching, partial cache reuse, machine-readable short/fallback quote-cache tagging, best-effort cache persistence after provider success, quote quality entry, and multi-source consistency checks.
+- `app/services/datahub_runtime.py`: provider call timeouts, shared provider-attempt iteration, timed calls, source-name fallback, best-effort capability success/failure recording, and short cooldowns.
+- `app/services/datahub_status_service.py`: read-only DataHub status assembly, explicit provider enabled/capability synchronization, capability snapshots, and source-plan delegation.
 - `app/services/provider_registry.py`: provider construction, Settings-to-provider injection, priority normalization, capability-kind mapping, fallback capability metadata, and enabled checks.
 - `app/services/providers.py`: Tencent quote/K-line adapter, quote URL/HTTP helpers, safe malformed payload-shape extraction that tolerates trailing whitespace and rejects unclosed payloads, stripped field/minimum-count validation, strict quote/K-line price parsing, quote code/name validation, real timestamp validation, open/current price containment inside high/low, finite non-negative core amount/volume guards, malformed-row filtering, demo quotes with local random state plus rounded high/low containment, and demo K-line weekday backfill for small limits.
 - `app/services/datahub_source_plan.py`: provider source-plan assembly, cleaned/deduped provider names and statuses, primary-source selection, decision/warning rule order, missing-primary downgrades, and recovery suggestions.
@@ -159,18 +163,19 @@ Key runtime files:
 - `app/services/futu_mappers.py`: Futu snapshot/minute row mapping, strict critical quote-field parsing, A-share code filtering, invalid minute OHLC-row filtering, and Futu symbol formatting.
 - `app/services/local_metadata_provider.py`: local stock/plate/concept fallback metadata.
 - `app/services/optional_providers.py`: backward-compatible re-export layer for optional provider classes.
-- `app/workflows/individual.py`: backward-compatible workflow facade, staged `stock_workbench` advice snapshot persistence, normalized-symbol local-state reads with fixed chart-mark/alert/note/event limits, response assembly, and stock endpoint field accessors.
-- `app/workflows/stock_lookup.py`: stock-code confirmation and industry-to-plate matching.
-- `app/workflows/stock_analysis.py`: quote/K-line/profile collection, base analysis assembly with optional plate-rank context degradation, review, and minute analysis with canonical interval normalization plus stock confirmation before source degradation.
+- `app/workflows/individual.py`: backward-compatible workflow facade, staged non-blocking advice persistence, normalized-symbol local-state reads with fixed limits, component-level sanitized failure warnings, response assembly, and stock endpoint field accessors.
+- `app/workflows/stock_lookup.py`: stock-code confirmation, strict quote-confirmation fallback when the stock pool is unavailable or misses a code, and industry-to-plate matching.
+- `app/workflows/optional_data.py`: shared short timeout wrapper for optional workflow enrichment that must degrade instead of blocking core workbench loads.
+- `app/workflows/stock_analysis.py`: quote/K-line/profile collection, base analysis assembly with source-aware peer-sample status plus optional plate/history/advice degradation, review, and minute analysis with canonical interval normalization, stock confirmation before source degradation, and best-effort fallback logging.
 - `app/services/review.py`: individual review window filtering, review metrics, event rules, key points, and summary wording.
 - `app/services/minute_analysis.py`: minute-line analysis using strict shared minute K-line sanity filtering, finite non-negative volume/amount/turnover gates, unavailable-reason mapping, analysis-context assembly, trend/momentum/volume-pulse rules, filtered support/resistance candidates, warning priority, conservative no-price/no-range/insufficient-sample fallbacks, and validated T-plan decisions/zones.
-- `app/workflows/workbench_pipeline.py`: full workbench research pipeline and order-book degradation handling.
-- `app/workflows/market_overview.py`: market overview and strong-stock sampling workflows with quote batch-to-single fallback, explicit invalid/oversized custom-symbol rejection, and per-symbol K-line failure exclusion from strong-stock ranking.
-- `app/services/market_sampling.py`: market-breadth/peer sampling, seed exclusion, cleaned stock-pool symbol/code/market/industry consistency filtering, market/industry quotas, duplicate-safe even sampling, request-symbol filtered quote results, batched quote fallback with missing-symbol retries, cancellation-safe fallback helpers, and sampling failure logs.
+- `app/workflows/workbench_pipeline.py`: full workbench research pipeline plus optional market-breadth, order-book, and concept enrichment; breadth failures retain conservative degradation context.
+- `app/workflows/market_overview.py`: market overview and strong-stock workflows with requested/success/missing status, partial/all-failure warnings, explicit invalid/oversized custom-symbol rejection, custom-list all-quote-failure errors, and visible K-line failure exclusion from ranking.
+- `app/services/market_sampling.py`: structured breadth/peer quote sampling, seed exclusion, stock-pool consistency filtering, market/industry quotas, ordered partial results, explicit missing counts, batch-to-single fallback accounting, cancellation propagation, and source-degradation warnings.
 - `app/services/research.py`: compatibility facade that re-exports research report builders.
 - `app/services/research_alpha_points.py`: Alpha evidence point adapters and impact weights for trend, overview, rules, events, factors, regime, timeframe, and risk/reward.
 - `app/services/research_alpha.py`: Alpha evidence report assembly, positive/negative evidence buckets that drop non-finite or non-displayable points before strength sorting, non-positive limit guards, cleaned title/reason de-duplication before caps, bounded 0-100 confidence components, finite verdict-context fallbacks, cleaned missing-data/data-quality/summary text, explicit missing-data merge for factor/regime/timeframe/risk-reward gaps and abnormal feature fields, and ordered verdict rules.
-- `app/services/research_breadth.py`: market breadth sample filtering, score components, label bands, summaries, and risk adjustment.
+- `app/services/research_breadth.py`: market breadth filtering, score bands, genuine-empty versus source-failure semantics, conservative partial-source risk credit, summaries, and bounded warnings.
 - `app/services/research_features.py`: feature snapshot and leadership report assembly with unified cleaning for prices, amount, turnover, volume ratio, ATR/volatility, MA/support/resistance, trend/signal/data-quality/fund/valuation/financial scores, sanitized leadership inputs, stable concept-evidence sorting, and explicit company-profile missing-data notes.
 - `app/services/research_chip.py`: chip distribution approximation, finite positive price/volume K-line filtering, feature-price fallback to the latest valid close, guarded bucket construction, current-zone support/pressure bands, and concentration labels.
 - `app/services/research_diagnosis.py`: final diagnosis assembly and backward-compatible helper aliases.
@@ -186,8 +191,7 @@ Key runtime files:
 - `app/services/research_factor_text.py`: factor impact, historical-reference wording, alpha/diagnosis helper text.
 - `app/services/research_factor_specs.py`: immutable grouped factor specifications, strict duplicate/blank/whitespace ID validation, isolated factor-spec maps, read-only registered snapshots, historical proxy-score contexts, complete-window score-context helpers, rule-table scoring, finite/clamped trigger matching, and rolling helper metrics.
 - `app/services/research_factor_calibration.py`: historical factor calibration, sample statistics, percentile calculation, scenario bucket stats, and bucket-note rules.
-- `app/services/research_features.py`: feature snapshot metrics, shared leader-score usage, leadership evidence filtering/sorting, missing-data notes including absent company profiles, and summary rules.
-- `app/services/research_peer.py`: peer sample filtering, relative strength, peer valuation labels, leader sorting, and peer-risk notes.
+- `app/services/research_peer.py`: peer availability interpretation, valid partial-sample filtering, relative strength, valuation labels, leader sorting, and source-aware risk notes.
 - `app/services/research_qa.py`: backward-compatible stock Q&A facade.
 - `app/services/research_qa_answer.py`: free-form stock-question answering, unified topic-answer strategy registry including default comprehensive answers, whitespace-normalized topic lookup, confidence penalty rules, shared cleaned/deduped evidence/actions/invalidations, empty-output fallbacks, invalid-literal and finite-number wording guards, conclusion, and answer text.
 - `app/services/research_qa_report.py`: fixed FAQ-style stock Q&A report generation with shared report-item sanitation, risk/reward level checks, support/resistance side checks, T-plan fallbacks, and theme-concept evidence cleaning so missing, wrong-side, blank, or non-finite inputs render as pending instead of `0.00`, `nan`, or `inf`.
@@ -223,16 +227,20 @@ Key runtime files:
 - `app/services/stock_finance.py`: backward-compatible re-export layer for older imports.
 - `app/services/stock_rules.py`: rule-spec definitions, match context assembly, rule-match metadata derived from specs, complete valid 20-high breakout windows, finite/positive checks for current price, MA20, support, volume ratio, fund score, and valuation score, rule state helpers, break-MA20/support-rebound/high-valuation risk gating, abnormal-risk evidence, confidence maps, anomaly-to-missing-data/evidence guards, stable sort keys, and cautious data-quality gate decisions.
 - `app/services/scoring.py`: shared 0-100 score helpers.
-- `static/app.js`: web workbench orchestration, load-request freshness guards, symbol input synchronization, companion-panel refreshes with market/strong-stock fallback helpers, stale advice guards, SSE startup/frame handling, and UI event binding.
-- `static/js/alerts.js`: alert rule CRUD, manual evaluation, and alert event rendering.
+- `static/app.js`: web workbench orchestration, separate load/render/companion failure states, invalid-search and delayed-redraw guards, local-data warning summaries, request-scoped mutations, duplicate-action guards, fresh-session SSE backoff, SSE validation, and UI event binding.
+- `static/js/api.js`: fetch wrapper and readable API error detail normalization.
+- `static/js/alerts.js`: alert rule CRUD, isolated manual evaluation results, scoped post-mutation reloads, duplicate-evaluation prevention, and alert event rendering.
 - `static/js/chart.js`: canvas K-line drawing, frontend K-line sanity filtering before canvas math, moving-average lines, chart mark filtering/date matching, and mark rendering helpers.
-- `static/js/diagnostics.js`: provider/cache/source-plan diagnostics, provider-detail helpers, scheduler status helpers, source-plan rendering helpers, task controls, and monitor event rendering.
-- `static/js/notes.js`: stock note CRUD and note-list rendering.
-- `static/js/research-panels.js`: AI dashboard, Q&A submit flow with stale-request guards, evidence chain, Alpha/timeframe/risk-reward view helpers, factor lab, theme, chip, replay, research-panel rendering, and card-level view helpers.
-- `static/js/research-render-utils.js`: shared escaped item, metric-pair, missing-data, signed-value, and threshold-tone helpers for research panels.
+- `static/js/diagnostics.js`: provider/cache/source-plan diagnostics, request-scoped scheduler/monitor polling, provider-detail helpers, scheduler status helpers, source-plan rendering helpers, task controls with failed-run error preservation, and monitor event rendering.
+- `static/js/dom.js`: DOM helpers and HTML escaping.
+- `static/js/errors.js`: compact user-facing error wording helpers.
+- `static/js/format.js`: numeric formatting and neutral tone handling for missing or non-finite values.
+- `static/js/notes.js`: stock note CRUD, scoped post-mutation reload/chart-mark refresh, and note-list rendering.
+- `static/js/research-panels.js`: AI dashboard, Q&A submit flow with stale/duplicate guards, evidence chain, Alpha/timeframe/risk-reward helpers, peer-source warnings, factor/theme/chip/replay panels, and panel-level rendering isolation.
+- `static/js/research-render-utils.js`: shared safe array/object/text coercion, escaped item, metric-pair, missing-data, signed-value, and threshold-tone helpers for research panels.
 - `static/js/symbols.js`: UI symbol normalization plus malformed/all-zero search-input validation.
-- `static/js/watchlist.js`: watchlist CRUD and watchlist rendering.
-- `static/js/workbench.js`: main stock card, insight panels, valuation/minute-analysis view helpers, minute-analysis detail helpers, stock-event/evidence rendering helpers, quality/review panels, market strip, and quote-list rendering.
+- `static/js/watchlist.js`: watchlist CRUD, response-shape guardrails, request-scoped load/mutation freshness, duplicate-submit prevention, stale-form and last-known-list preservation, and watchlist rendering.
+- `static/js/workbench.js`: main stock/insight/quality/review panels, valuation/minute helpers, market and strong-stock degradation rendering, and quote-list rendering.
 - `static/js/workbench-render-utils.js`: shared safe array/object coercion and escaped list/tag rendering helpers for workbench panels.
 - `static/styles.css`: CSS entry manifest that imports the ordered style modules.
 - `static/css/base.css`: design tokens, global reset, top bar, base layout, search controls, and shared hover behavior.
@@ -240,7 +248,7 @@ Key runtime files:
 - `static/css/workspace-core.css`: market strip, workspace tabs, stock header, metrics, summary, quality, and core research panels.
 - `static/css/research-panels.css`: AI Q&A dashboard, evidence chain, insight panels, theme/chip/replay/finance panels.
 - `static/css/interactions.css`: rule cards, strategy cards, events, review/timeline, alerts, notes, chart marks, and minute-analysis styles.
-- `static/css/side-footer.css`: right-side quote/leader lists, footer, empty states, and error states.
+- `static/css/side-footer.css`: right-side quote/leader lists, leader-scope wrapping, footer, empty states, and error states.
 - `static/css/responsive.css`: responsive layout rules.
 - `data/ashare_radar.sqlite3`: local cache and user data.
 
@@ -250,7 +258,7 @@ Key runtime files:
 - SQLite is the local persistence layer.
 - Public and optional data sources can fail, delay, or change fields. The UI must display data quality and degradation instead of silently pretending data is real-time.
 - LLM output is explanatory only. Rule-based answers remain the fallback and grounding source; stock codes are only accepted as code references, not market-price numbers, and model/API errors are redacted before display.
-- Runtime files under `data/` are local state and are ignored by Git; only `data/.gitkeep` belongs in source control.
+- Runtime files under `data/` are local state and are ignored by Git; only `data/.gitkeep` belongs in source control. The supported local database is `data/ashare_radar.sqlite3`; old `app.db` and `smoke.sqlite3*` files are disposable development artifacts.
 
 ## License
 

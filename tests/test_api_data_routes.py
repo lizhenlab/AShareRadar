@@ -50,6 +50,17 @@ def test_refresh_trading_calendar_route_reports_refresh_error() -> None:
     }
 
 
+def test_refresh_trading_calendar_route_uses_refresh_response_model() -> None:
+    app = FastAPI()
+    app.include_router(data.router)
+
+    schema = app.openapi()["paths"]["/api/data/trading-calendar/refresh"]["post"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+
+    assert schema == {"$ref": "#/components/schemas/TradeCalendarRefreshResponse"}
+
+
 def test_data_status_route_maps_sqlite_errors_to_api_detail() -> None:
     client = _client(_FailingDataHub(sqlite3.OperationalError("database is locked")))
 
@@ -66,6 +77,26 @@ def test_futu_status_route_maps_runtime_errors_to_api_detail() -> None:
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Futu OpenD 未连接"}
+
+
+def test_futu_status_route_returns_contract() -> None:
+    client = _client(_FutuDataHub())
+
+    response = client.get("/api/futu/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "message": "Futu OpenD 可用", "latency_ms": 12.5}
+
+
+def test_futu_status_route_uses_status_response_model() -> None:
+    app = FastAPI()
+    app.include_router(data.router)
+
+    schema = app.openapi()["paths"]["/api/futu/status"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+
+    assert schema == {"$ref": "#/components/schemas/FutuStatusResponse"}
 
 
 def _client(datahub=None) -> TestClient:
@@ -85,3 +116,8 @@ class _FailingDataHub:
 
     async def futu_ping(self):
         raise self._exc
+
+
+class _FutuDataHub:
+    async def futu_ping(self):
+        return {"ok": True, "message": "Futu OpenD 可用", "latency_ms": 12.5}

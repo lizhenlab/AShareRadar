@@ -5,16 +5,16 @@ import json
 import math
 from collections.abc import Iterable
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_app_settings, get_datahub
-from app.api.errors import run_api
+from app.api.errors import run_api, run_sync_api
 from app.config import Settings
 from app.models.schemas import Quote
 from app.services.datahub import DataHub
 from app.services.datahub_status import _provider_error_text
-from app.utils.symbols import normalize_symbol
+from app.utils.symbols import normalize_symbol, standard_symbol_list
 
 
 router = APIRouter()
@@ -53,10 +53,7 @@ async def stream_quotes(
     datahub: DataHub = Depends(get_datahub),
     settings: Settings = Depends(get_app_settings),
 ) -> StreamingResponse:
-    try:
-        symbol_list = _stream_symbol_list(symbols, datahub, settings)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    symbol_list = run_sync_api(lambda: _stream_symbol_list(symbols, datahub, settings))
     return StreamingResponse(
         _quote_stream_events(request, datahub, symbol_list, settings.quote_refresh_seconds),
         media_type="text/event-stream",
@@ -87,30 +84,13 @@ def _split_symbol_query(symbols: str) -> list[str]:
     return [item.strip() for item in symbols.split(",") if item.strip()]
 
 
-def _canonical_symbol(symbol: str) -> str:
-    code, market = normalize_symbol(symbol)
-    return f"{code}.{market.upper()}"
-
-
 def _bounded_symbol_list(symbols: Iterable[str], *, truncate: bool = False, skip_invalid: bool = False) -> list[str]:
-    canonical = []
-    seen = set()
-    for symbol in symbols:
-        try:
-            item = _canonical_symbol(symbol)
-        except (AttributeError, TypeError, ValueError):
-            if skip_invalid:
-                continue
-            raise
-        if item in seen:
-            continue
-        seen.add(item)
-        canonical.append(item)
-        if truncate and len(canonical) == MAX_QUOTE_SYMBOLS:
-            return canonical
-    if len(canonical) > MAX_QUOTE_SYMBOLS:
-        raise ValueError(f"一次最多查询 {MAX_QUOTE_SYMBOLS} 个股票代码")
-    return canonical
+    return standard_symbol_list(
+        symbols,
+        skip_invalid=skip_invalid,
+        max_items=MAX_QUOTE_SYMBOLS,
+        truncate=truncate,
+    ).symbols
 
 
 def _fallback_symbol_list(symbols: Iterable[str]) -> list[str]:

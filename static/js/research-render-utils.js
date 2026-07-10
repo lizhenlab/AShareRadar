@@ -36,6 +36,18 @@ export function signedText(value) {
   return `${Number(value) > 0 ? "+" : ""}${text}`;
 }
 
+export function asArray(items) {
+  return Array.isArray(items) ? items : [];
+}
+
+export function asObject(item) {
+  return item && typeof item === "object" && !Array.isArray(item) ? item : {};
+}
+
+export function safeText(value) {
+  return typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
+}
+
 export function thresholdClass(value, options = {}) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "";
@@ -47,8 +59,4 @@ export function thresholdClass(value, options = {}) {
   if (number >= options.goodAt) return "good";
   if (number <= options.riskAt) return "risk";
   return "";
-}
-
-function asArray(items) {
-  return Array.isArray(items) ? items : [];
 }

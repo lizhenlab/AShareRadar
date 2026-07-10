@@ -4,13 +4,14 @@ import asyncio
 from datetime import date
 import json
 import math
+import sqlite3
 from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
-from app.api.deps import get_datahub
+from app.api.deps import get_app_settings, get_datahub
 from app.api.routes import quotes as quote_routes
 from app.api.routes.quotes import (
     MAX_QUOTE_SYMBOLS,
@@ -132,6 +133,23 @@ def test_quotes_route_rejects_oversized_symbol_batch_before_fetching_datahub() -
     assert hub.requested_symbols == []
 
 
+def test_quote_stream_route_maps_watchlist_sqlite_errors_to_api_detail() -> None:
+    hub = _Hub(cache_error=sqlite3.OperationalError("database is locked"))
+    app = FastAPI()
+    app.include_router(quote_routes.router)
+    app.dependency_overrides[get_datahub] = lambda: hub
+    app.dependency_overrides[get_app_settings] = lambda: SimpleNamespace(
+        seed_symbols=("600519",),
+        quote_refresh_seconds=1,
+    )
+
+    response = TestClient(app).get("/api/stream/quotes?symbols=,,")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "本地数据库暂不可用：database is locked"}
+    assert hub.requested_symbols == []
+
+
 def test_sse_message_formats_named_and_default_events() -> None:
     assert _sse_message([{"code": "600519"}]) == 'data: [{"code": "600519"}]\n\n'
     assert _sse_message({"message": "错误"}, event="quote-error") == 'event: quote-error\ndata: {"message": "错误"}\n\n'
@@ -196,8 +214,9 @@ class _Hub:
         watchlist_symbols: list[str] | None = None,
         quotes=None,
         error: Exception | None = None,
+        cache_error: Exception | None = None,
     ) -> None:
-        self.cache = _Cache(watchlist_symbols or [])
+        self.cache = _Cache(watchlist_symbols or [], error=cache_error)
         self._quotes = quotes or []
         self._error = error
         self.requested_symbols: list[str] = []
@@ -210,10 +229,13 @@ class _Hub:
 
 
 class _Cache:
-    def __init__(self, symbols: list[str]) -> None:
+    def __init__(self, symbols: list[str], *, error: Exception | None = None) -> None:
         self._symbols = symbols
+        self._error = error
 
     def watchlist_symbols(self) -> list[str]:
+        if self._error:
+            raise self._error
         return self._symbols
 
 

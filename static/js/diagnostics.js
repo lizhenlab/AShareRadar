@@ -4,23 +4,65 @@ import { compactErrorMessage } from "./errors.js";
 import { formatNumber } from "./format.js";
 
 export async function loadMonitoring(state) {
-  const [statusResult, runsResult, eventsResult] = await Promise.allSettled([
-    fetchJson("/api/tasks/status"),
-    fetchJson("/api/tasks/runs?limit=8"),
-    fetchJson("/api/monitor/events?limit=8"),
-  ]);
+  const requestId = Number(state.monitorSeq || 0) + 1;
+  state.monitorSeq = requestId;
+  try {
+    const [statusResult, runsResult, eventsResult] = await Promise.allSettled([
+      fetchJson("/api/tasks/status"),
+      fetchJson("/api/tasks/runs?limit=8"),
+      fetchJson("/api/monitor/events?limit=8"),
+    ]);
+    if (!isCurrentMonitoringRequest(state, requestId)) return false;
+    renderSchedulerResult(statusResult, runsResult);
+    renderMonitorEventsResult(eventsResult);
+    return true;
+  } finally {
+    if (isCurrentMonitoringRequest(state, requestId)) {
+      maintainMonitorTimer(state);
+    }
+  }
+}
+
+function isCurrentMonitoringRequest(state, requestId) {
+  return state.monitorSeq === requestId;
+}
+
+function renderSchedulerResult(statusResult, runsResult) {
   if (statusResult.status === "fulfilled") {
-    renderSchedulerStatus(statusResult.value, runsResult.status === "fulfilled" ? runsResult.value : []);
-  } else {
-    const error = statusResult.reason;
-    $("schedulerState").textContent = "读取失败";
-    $("taskCards").innerHTML = `<div class="task-card"><strong>监控暂不可用</strong><span>${escapeHtml(error.message)}</span></div>`;
+    try {
+      renderSchedulerStatus(statusResult.value, runsResult.status === "fulfilled" ? runsResult.value : []);
+      return;
+    } catch (error) {
+      renderSchedulerError(error);
+      return;
+    }
   }
+  renderSchedulerError(statusResult.reason);
+}
+
+function renderSchedulerError(error) {
+  $("schedulerState").textContent = "读取失败";
+  $("taskCards").innerHTML = `<div class="task-card"><strong>监控暂不可用</strong><span>${escapeHtml(errorMessage(error))}</span></div>`;
+}
+
+function renderMonitorEventsResult(eventsResult) {
   if (eventsResult.status === "fulfilled") {
-    renderMonitorEvents(eventsResult.value);
-  } else {
-    $("monitorEvents").innerHTML = `<div class="monitor-event warn"><strong>事件读取失败</strong><p>${escapeHtml(eventsResult.reason.message)}</p></div>`;
+    try {
+      renderMonitorEvents(eventsResult.value);
+      return;
+    } catch (error) {
+      renderMonitorEventsError(error);
+      return;
+    }
   }
+  renderMonitorEventsError(eventsResult.reason);
+}
+
+function renderMonitorEventsError(error) {
+  $("monitorEvents").innerHTML = `<div class="monitor-event warn"><strong>事件读取失败</strong><p>${escapeHtml(errorMessage(error))}</p></div>`;
+}
+
+function maintainMonitorTimer(state) {
   if (state.monitorTimer && !document.hidden) {
     clearInterval(state.monitorTimer);
     state.monitorTimer = null;
@@ -31,6 +73,8 @@ export async function loadMonitoring(state) {
 }
 
 export async function runMonitorTask(state, task) {
+  if (state.monitorTaskRunning) return false;
+  state.monitorTaskRunning = true;
   const buttons = document.querySelectorAll(".monitor-actions button");
   buttons.forEach((button) => {
     button.disabled = true;
@@ -38,14 +82,17 @@ export async function runMonitorTask(state, task) {
   try {
     $("schedulerState").textContent = "执行中";
     await fetchJson(`/api/tasks/run-once?task=${encodeURIComponent(task)}`, { method: "POST" });
+    await loadMonitoring(state);
+    return true;
   } catch (error) {
     $("schedulerState").textContent = compactErrorMessage(error.message);
+    return false;
   } finally {
+    state.monitorTaskRunning = false;
     buttons.forEach((button) => {
       button.disabled = false;
     });
-    loadMonitoring(state);
-    loadDataStatus();
+    await loadDataStatus();
   }
 }
 
@@ -59,9 +106,13 @@ export async function loadDataStatus() {
 }
 
 function renderSchedulerStatus(status, runs) {
-  $("schedulerState").textContent = schedulerStateText(status);
+  const safeStatus = asObject(status);
+  $("schedulerState").textContent = schedulerStateText(safeStatus);
   const runMap = schedulerRunMap(runs);
-  $("taskCards").innerHTML = (status.tasks || []).map((task) => renderTaskCard(task, runMap.get(task.name))).join("");
+  const tasks = asArray(safeStatus.tasks);
+  $("taskCards").innerHTML = tasks.length
+    ? tasks.map((task) => renderTaskCard(asObject(task), runMap.get(asObject(task).name))).join("")
+    : `<div class="task-card"><strong>暂无调度任务</strong><span>等待任务注册。</span></div>`;
 }
 
 function schedulerStateText(status) {
@@ -70,7 +121,7 @@ function schedulerStateText(status) {
 }
 
 function schedulerRunMap(runs) {
-  return new Map((runs || []).map((item) => [item.task_name, item]));
+  return new Map(asArray(runs).map((item) => [asObject(item).task_name, asObject(item)]));
 }
 
 function renderTaskCard(task, recent) {
@@ -95,7 +146,7 @@ function taskMessage(task, recent) {
 }
 
 function taskBadgeClass(task) {
-  if (task.last_status === "failed") return "bad";
+  if (task.last_status === "failed" || task.last_status === "cancelled") return "bad";
   if (task.running) return "running";
   return "";
 }
@@ -103,21 +154,24 @@ function taskBadgeClass(task) {
 function statusLabel(status) {
   if (status === "success") return "正常";
   if (status === "failed") return "异常";
+  if (status === "cancelled") return "已取消";
   if (status === "running") return "执行中";
   return "等待";
 }
 
 function renderMonitorEvents(items) {
-  $("monitorEvents").innerHTML = items.length
-    ? items
+  const rows = asArray(items);
+  $("monitorEvents").innerHTML = rows.length
+    ? rows
         .map((item) => {
-          const repeat = item.repeat_count && item.repeat_count > 1 ? ` · 重复 ${item.repeat_count} 次` : "";
-          const seenAt = item.last_seen_at || item.created_at;
+          const event = asObject(item);
+          const repeat = event.repeat_count && event.repeat_count > 1 ? ` · 重复 ${event.repeat_count} 次` : "";
+          const seenAt = event.last_seen_at || event.created_at;
           return `
-          <div class="monitor-event ${item.level === "warning" ? "warn" : ""}">
-            <strong>${escapeHtml(eventCategory(item.category))}${item.symbol ? ` · ${escapeHtml(item.symbol)}` : ""}</strong>
+          <div class="monitor-event ${event.level === "warning" ? "warn" : ""}">
+            <strong>${escapeHtml(eventCategory(event.category))}${event.symbol ? ` · ${escapeHtml(event.symbol)}` : ""}</strong>
             <span>${escapeHtml(seenAt)}${escapeHtml(repeat)}</span>
-            <p>${escapeHtml(item.message)}</p>
+            <p>${escapeHtml(event.message)}</p>
           </div>`;
         })
         .join("")
@@ -138,13 +192,19 @@ function eventCategory(category) {
 }
 
 function renderDataStatus(status) {
+  const safeStatus = asObject(status);
   $("cachePath").textContent = "本地缓存";
-  renderSourcePlan(status.source_plan);
-  const capabilityStatusText = (status.capability_statuses || [])
+  renderSourcePlan(safeStatus.source_plan);
+  const capabilityStatuses = asArray(safeStatus.capability_statuses).map(asObject);
+  const providers = asArray(safeStatus.providers).map(asObject);
+  const cache = asObject(safeStatus.cache);
+  const capabilities = asArray(safeStatus.capabilities).map(asObject);
+  const capabilityStatusText = capabilityStatuses
     .filter((item) => item.enabled)
     .map((item) => `${escapeHtml(item.name)}·${escapeHtml(capabilityKindLabel(item.kind))}·${escapeHtml(capabilityHealthLabel(item))}`)
     .join(" / ");
-  $("providerStatus").innerHTML = status.providers
+  $("providerStatus").innerHTML = providers.length
+    ? providers
     .map((item) => {
       const stateInfo = providerState(item);
       return `
@@ -157,12 +217,13 @@ function renderDataStatus(status) {
         <i class="health-dot ${stateInfo.tone}"></i>
       </div>`;
     })
-    .join("");
+    .join("")
+    : `<div class="provider-item"><strong>暂无数据源状态</strong><span>等待数据源完成首次探测。</span></div>`;
   $("cacheStats").innerHTML = `
-    <strong>缓存：报价 ${status.cache.quote_count} 条，K线 ${status.cache.kline_count} 条</strong>
-    <span>股票池 ${status.cache.stock_count} 条 · 板块 ${status.cache.plate_count} 条 · 快照历史 ${status.cache.quote_history_count} 条</span>
+    <strong>缓存：报价 ${cache.quote_count ?? 0} 条，日K ${cache.daily_kline_count ?? cache.kline_count ?? 0} 条，分钟K ${cache.minute_kline_count ?? 0} 条</strong>
+    <span>股票池 ${cache.stock_count ?? 0} 条 · 板块 ${cache.plate_count ?? 0} 条 · 快照历史 ${cache.quote_history_count ?? 0} 条</span>
     <span>说明：成功/失败是本地累计调用次数；状态看最近一次请求，未启用源不会参与当前分析。</span>
-    <span>能力：${status.capabilities.map((item) => `${escapeHtml(item.name)}·${escapeHtml(item.reliability_level || "公开源")}·${item.enabled ? "可用" : "待启用"}`).join(" / ")}</span>
+    <span>能力：${capabilities.length ? capabilities.map((item) => `${escapeHtml(item.name)}·${escapeHtml(item.reliability_level || "公开源")}·${item.enabled ? "可用" : "待启用"}`).join(" / ") : "等待探测"}</span>
     ${capabilityStatusText ? `<span>能力状态：${capabilityStatusText}</span>` : ""}
   `;
 }
@@ -221,18 +282,19 @@ function capabilityHealthLabel(item) {
 function renderSourcePlan(plan) {
   const el = $("sourcePlan");
   if (!el) return;
-  if (!plan) {
+  const safePlan = asObject(plan);
+  if (!Object.keys(safePlan).length) {
     el.innerHTML = "";
     return;
   }
   el.innerHTML = `
-    <div class="source-plan-head ${sourcePlanTone(plan)}">
-      <strong>${escapeHtml(plan.health_level)}</strong>
-      <span>${escapeHtml(plan.summary)}</span>
+    <div class="source-plan-head ${sourcePlanTone(safePlan)}">
+      <strong>${escapeHtml(safePlan.health_level || "待确认")}</strong>
+      <span>${escapeHtml(safePlan.summary || "数据源状态等待探测。")}</span>
     </div>
-    <div class="source-plan-sources">${renderSourcePlanSources(plan)}</div>
-    ${renderSourcePlanWarnings(plan.warnings)}
-    <div class="source-plan-actions">${renderSourcePlanSuggestions(plan.suggestions)}</div>
+    <div class="source-plan-sources">${renderSourcePlanSources(safePlan)}</div>
+    ${renderSourcePlanWarnings(safePlan.warnings)}
+    <div class="source-plan-actions">${renderSourcePlanSuggestions(safePlan.suggestions)}</div>
   `;
 }
 
@@ -257,13 +319,25 @@ function sourcePlanSources(plan) {
 }
 
 function renderSourcePlanWarnings(warnings) {
-  const rows = (warnings || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
+  const rows = asArray(warnings).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
   return rows ? `<div class="source-plan-warnings">${rows}</div>` : "";
 }
 
 function renderSourcePlanSuggestions(suggestions) {
-  return (suggestions || [])
+  return asArray(suggestions)
     .slice(0, 2)
     .map((item) => `<small>${escapeHtml(item)}</small>`)
     .join("");
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function errorMessage(error) {
+  return compactErrorMessage(error && error.message ? error.message : String(error || "数据格式异常"));
 }

@@ -6,13 +6,14 @@ import math
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import pytest
 
 from app.config import Settings
 from app.models.schemas import PlateItem, StockConceptItem, StockInfo
 from app.services.cache import SQLiteCache
-from app.services.datahub_metadata import MetadataCoordinator, _profile_with_local_industry
+from app.services.datahub_metadata import MetadataCoordinator, StockPoolRequest, StockPoolResolver, _profile_with_local_industry
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.local_metadata_provider import LocalIndividualStockProvider
 from tests.factories import make_plate_item, make_stock_info
@@ -56,6 +57,459 @@ def test_plate_rank_empty_provider_uses_backup_and_records_failure() -> None:
     assert last_error == "板块排行返回为空"
 
 
+def test_plate_rank_returns_provider_rows_when_cache_write_fails() -> None:
+    class CacheWriteFailingSQLiteCache(SQLiteCache):
+        def save_plate_rank(self, rows: list[PlateItem]) -> None:
+            raise sqlite3.DatabaseError("plate cache readonly")
+
+    class LivePlateProvider:
+        source_name = "实时板块源"
+
+        async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
+            return [make_plate_item().model_copy(update={"source": self.source_name})]
+
+    async def run_check(path: Path) -> tuple[list[PlateItem], bool, int]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = CacheWriteFailingSQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"live": LivePlateProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "live")],
+        )
+
+        rows = await coordinator.plate_rank(limit=5, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "live" and item.kind == "plate")
+        return rows, runtime.is_cooling("live", "plate"), status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, cooling, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.source for item in rows] == ["实时板块源"]
+    assert cooling is False
+    assert failure_count == 0
+
+
+def test_plate_rank_all_invalid_primary_rows_use_backup_without_clearing_cache() -> None:
+    class InvalidPlateProvider:
+        source_name = "坏板块源"
+
+        async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
+            return [
+                make_plate_item().model_copy(update={"rank": 0, "name": "无效板块"}),
+                make_plate_item().model_copy(update={"rank": 2, "name": " ", "change_pct": math.nan}),
+            ]
+
+    class BackupPlateProvider:
+        source_name = "备用板块源"
+
+        async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
+            return [make_plate_item().model_copy(update={"name": "备用板块", "source": self.source_name})]
+
+    async def run_check(path: Path) -> tuple[list[PlateItem], str | None, list[str]]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        cache.save_plate_rank([make_plate_item().model_copy(update={"name": "旧板块"})])
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"invalid": InvalidPlateProvider(), "backup": BackupPlateProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "invalid"), (2, "backup")],
+        )
+
+        rows = await coordinator.plate_rank(limit=5, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "invalid" and item.kind == "plate")
+        cached_names = [item.name for item in cache.get_plate_rank(max_age_seconds=10**9, limit=10)]
+        return rows, status.last_error, cached_names
+
+    with TemporaryDirectory() as tmpdir:
+        rows, last_error, cached_names = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.name for item in rows] == ["备用板块"]
+    assert last_error == "板块排行字段无效"
+    assert cached_names == ["备用板块"]
+
+
+def test_stock_pool_returns_provider_rows_when_cache_write_fails() -> None:
+    class CacheWriteFailingSQLiteCache(SQLiteCache):
+        def save_stock_pool(self, rows: list[StockInfo]) -> None:
+            raise sqlite3.DatabaseError("stock pool cache readonly")
+
+    class LiveStockProvider:
+        source_name = "实时股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            return [make_stock_info(code="600519", market="SH").model_copy(update={"source": self.source_name})]
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], bool, int]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = CacheWriteFailingSQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"live": LiveStockProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "live")],
+        )
+
+        rows = await coordinator.stock_pool(refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "live" and item.kind == "stock")
+        return rows, runtime.is_cooling("live", "stock"), status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, cooling, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.source for item in rows] == ["实时股票池"]
+    assert cooling is False
+    assert failure_count == 0
+
+
+def test_stock_pool_stale_fallback_ignores_log_event_failure() -> None:
+    class LogFailingSQLiteCache(SQLiteCache):
+        def log_event(self, category: str, message: str) -> None:
+            raise sqlite3.DatabaseError("event log readonly")
+
+    class FailingStockProvider:
+        source_name = "失败股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            raise RuntimeError("stock pool down")
+
+    async def run_check(path: Path) -> list[StockInfo]:
+        settings = Settings()
+        cache = LogFailingSQLiteCache(path)
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600519", market="SH").model_copy(
+                    update={"source": "缓存股票池", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                )
+            ]
+        )
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": FailingStockProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "external")],
+        )
+
+        return await coordinator.stock_pool(keyword="600519", limit=5, refresh=True)
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [(item.symbol, item.source) for item in rows] == [("600519.SH", "缓存股票池")]
+
+
+def test_stock_profile_local_industry_fallback_ignores_log_event_failure() -> None:
+    class LogFailingSQLiteCache(SQLiteCache):
+        def log_event(self, category: str, message: str) -> None:
+            raise sqlite3.DatabaseError("event log readonly")
+
+    class LiveStockProvider:
+        source_name = "实时股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            return [make_stock_info(code="600519", market="SH").model_copy(update={"industry": None, "source": self.source_name})]
+
+    class FailingLocalProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            raise RuntimeError("local profile down")
+
+    async def run_check(path: Path) -> StockInfo | None:
+        settings = Settings()
+        cache = LogFailingSQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": LiveStockProvider(), "local": FailingLocalProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "external")],
+        )
+
+        return await coordinator.stock_profile("600519.SH")
+
+    with TemporaryDirectory() as tmpdir:
+        profile = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert profile is not None
+    assert profile.symbol == "600519.SH"
+    assert profile.industry is None
+
+
+def test_stock_profile_uses_local_profile_when_primary_pool_has_coverage_miss() -> None:
+    class NarrowStockProvider:
+        source_name = "窄股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            return [
+                make_stock_info(code="600519", market="SH").model_copy(update={"source": self.source_name}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"source": self.source_name}),
+            ]
+
+    class LocalStockProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            return [
+                make_stock_info(code="600706", market="SH").model_copy(
+                    update={"name": "曲江文旅", "industry": "旅游酒店", "source": "本地个股资料"}
+                )
+            ]
+
+    async def run_check(path: Path) -> StockInfo | None:
+        settings = Settings(stock_pool_authoritative_min_count=3)
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": NarrowStockProvider(), "local": LocalStockProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "external")],
+        )
+
+        return await coordinator.stock_profile("600706.SH")
+
+    with TemporaryDirectory() as tmpdir:
+        profile = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert profile is not None
+    assert profile.symbol == "600706.SH"
+    assert profile.name == "曲江文旅"
+    assert profile.industry == "旅游酒店"
+    assert profile.source == "本地个股资料"
+
+
+def test_stock_pool_coverage_miss_records_success_and_tries_backup() -> None:
+    class NarrowStockProvider:
+        source_name = "窄股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            return [make_stock_info(code="000001", market="SZ").model_copy(update={"source": self.source_name})]
+
+    class BackupStockProvider:
+        source_name = "备用股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            return [make_stock_info(code="600519", market="SH").model_copy(update={"source": self.source_name})]
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], bool, int, int]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"narrow": NarrowStockProvider(), "backup": BackupStockProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "narrow"), (2, "backup")],
+        )
+
+        rows = await coordinator.stock_pool(keyword="600519", limit=5, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "narrow" and item.kind == "stock")
+        return rows, runtime.is_cooling("narrow", "stock"), status.success_count, status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, cooling, success_count, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.symbol for item in rows] == ["600519.SH"]
+    assert [item.source for item in rows] == ["备用股票池"]
+    assert cooling is False
+    assert success_count == 1
+    assert failure_count == 0
+
+
+def test_stock_pool_authoritative_provider_miss_returns_empty_without_backup() -> None:
+    class CompleteStockProvider:
+        source_name = "完整股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            return [
+                make_stock_info(code="600519", market="SH").model_copy(update={"source": self.source_name}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"source": self.source_name}),
+                make_stock_info(code="300750", market="SZ").model_copy(update={"source": self.source_name}),
+            ]
+
+    class BackupShouldNotRun:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_pool(self) -> list[StockInfo]:
+            self.calls += 1
+            raise AssertionError("authoritative miss should not call backup")
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], int, int]:
+        settings = Settings(stock_pool_authoritative_min_count=3)
+        cache = SQLiteCache(path)
+        backup = BackupShouldNotRun()
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"complete": CompleteStockProvider(), "backup": backup},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "complete"), (2, "backup")],
+        )
+
+        rows = await coordinator.stock_pool(keyword="688001", limit=10, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "complete" and item.kind == "stock")
+        return rows, backup.calls, status.success_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, backup_calls, success_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert rows == []
+    assert backup_calls == 0
+    assert success_count == 1
+
+
+def test_stock_pool_selection_state_distinguishes_coverage_miss_from_authoritative_empty() -> None:
+    resolver = StockPoolResolver(
+        settings=Settings(stock_pool_authoritative_min_count=2),
+        cache=SimpleNamespace(),
+        providers={},
+        runtime=SimpleNamespace(),
+        priority=lambda kind: [],
+    )
+    request = StockPoolRequest(keyword="688001", limit=10, refresh=True)
+
+    coverage_miss = resolver._select_rows([make_stock_info(code="600519", market="SH")], request)
+    authoritative_empty = resolver._select_rows(
+        [
+            make_stock_info(code="600519", market="SH"),
+            make_stock_info(code="000001", market="SZ"),
+        ],
+        request,
+    )
+
+    assert coverage_miss.resolved is False
+    assert coverage_miss.reason == "provider-coverage-miss"
+    assert authoritative_empty.resolved is True
+    assert authoritative_empty.reason == "provider-authoritative-empty"
+    assert authoritative_empty.list_rows() == []
+
+
+def test_stock_pool_refresh_still_uses_stale_keyword_fallback_after_provider_failure() -> None:
+    class FailingStockProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_pool(self) -> list[StockInfo]:
+            self.calls += 1
+            raise RuntimeError("stock provider down")
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], int, str | None]:
+        settings = Settings(stock_pool_cache_seconds=1)
+        cache = SQLiteCache(path)
+        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600706", market="SH").model_copy(
+                    update={"name": "曲江文旅", "updated_at": stale_time}
+                )
+            ]
+        )
+        provider = FailingStockProvider()
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failing": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "failing")],
+        )
+
+        rows = await coordinator.stock_pool(keyword="600706", limit=10, refresh=True)
+        with sqlite3.connect(path) as conn:
+            row = conn.execute("SELECT message FROM cache_event ORDER BY id DESC LIMIT 1").fetchone()
+        return rows, provider.calls, row[0] if row else None
+
+    with TemporaryDirectory() as tmpdir:
+        rows, calls, message = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.symbol for item in rows] == ["600706.SH"]
+    assert calls == 1
+    assert message == "股票池数据源失败，使用本地缓存股票池"
+
+
+def test_stock_concepts_returns_provider_rows_when_cache_write_fails() -> None:
+    class CacheWriteFailingSQLiteCache(SQLiteCache):
+        def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
+            raise sqlite3.DatabaseError("concept cache readonly")
+
+    class LiveConceptProvider:
+        source_name = "实时概念源"
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            return [_concept(symbol=symbol, rank=1, name="实时概念", source=self.source_name)]
+
+    async def run_check(path: Path) -> tuple[list[StockConceptItem], bool, int]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = CacheWriteFailingSQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"live": LiveConceptProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "live")],
+        )
+
+        rows = await coordinator.stock_concepts("600519.SH", limit=5, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "live" and item.kind == "concept")
+        return rows, runtime.is_cooling("live", "concept"), status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, cooling, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.name for item in rows] == ["实时概念"]
+    assert cooling is False
+    assert failure_count == 0
+
+
+def test_stock_concepts_all_invalid_primary_rows_use_backup_without_clearing_cache() -> None:
+    class InvalidConceptProvider:
+        source_name = "坏概念源"
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            return [
+                _concept(symbol=symbol, rank=1, name="坏概念A", source=" "),
+                _concept(symbol=symbol, rank=2, name="坏概念B", source=self.source_name).model_copy(
+                    update={"change_pct": math.inf, "updated_at": " "}
+                ),
+            ]
+
+    class BackupConceptProvider:
+        source_name = "备用概念源"
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            return [_concept(symbol=symbol, rank=1, name="备用概念", source=self.source_name)]
+
+    async def run_check(path: Path) -> tuple[list[StockConceptItem], str | None, list[str]]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        cache.save_stock_concepts("600519.SH", [_concept(symbol="600519.SH", rank=1, name="旧概念", source="旧源")])
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"invalid": InvalidConceptProvider(), "backup": BackupConceptProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "invalid"), (2, "backup")],
+        )
+
+        rows = await coordinator.stock_concepts("600519.SH", limit=5, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "invalid" and item.kind == "concept")
+        cached_names = [item.name for item in cache.get_stock_concepts("600519.SH", max_age_seconds=10**9, limit=10)]
+        return rows, status.last_error, cached_names
+
+    with TemporaryDirectory() as tmpdir:
+        rows, last_error, cached_names = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.name for item in rows] == ["备用概念"]
+    assert last_error == "概念归属返回为空"
+    assert cached_names == ["备用概念"]
+
+
 def test_plate_rank_unregistered_priority_provider_is_skipped_before_backup() -> None:
     class BackupPlateProvider:
         source_name = "备用板块源"
@@ -80,6 +534,50 @@ def test_plate_rank_unregistered_priority_provider_is_skipped_before_backup() ->
         rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert [item.source for item in rows] == ["备用板块源"]
+
+
+def test_metadata_missing_capability_is_silent_skip_without_status_noise() -> None:
+    class NoMetadataProvider:
+        source_name = "无元数据能力"
+
+    class BackupPlateProvider:
+        source_name = "备用板块源"
+
+        async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
+            return [make_plate_item().model_copy(update={"source": self.source_name})]
+
+    class BackupConceptProvider:
+        source_name = "备用概念源"
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            return [_concept(symbol=symbol, rank=1, name="备用概念", source=self.source_name)]
+
+    async def run_check(path: Path) -> tuple[list[PlateItem], list[StockConceptItem], list[str]]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={
+                "no_cap": NoMetadataProvider(),
+                "backup_plate": BackupPlateProvider(),
+                "backup_concept": BackupConceptProvider(),
+            },
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "no_cap"), (2, "backup_plate" if kind == "plate" else "backup_concept")],
+        )
+
+        plates = await coordinator.plate_rank(limit=5, refresh=True)
+        concepts = await coordinator.stock_concepts("600519.SH", limit=5, refresh=True)
+        status_names = [item.name for item in cache.provider_capability_statuses()]
+        return plates, concepts, status_names
+
+    with TemporaryDirectory() as tmpdir:
+        plates, concepts, status_names = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.source for item in plates] == ["备用板块源"]
+    assert [item.source for item in concepts] == ["备用概念源"]
+    assert "no_cap" not in status_names
 
 
 def test_stock_concepts_unregistered_priority_provider_is_skipped_before_backup() -> None:
@@ -108,6 +606,152 @@ def test_stock_concepts_unregistered_priority_provider_is_skipped_before_backup(
     assert [(item.symbol, item.rank, item.name, item.source) for item in rows] == [
         ("600519.SH", 1, "白酒", "备用概念源")
     ]
+
+
+def test_stock_concepts_raise_when_priority_providers_lack_concept_capability() -> None:
+    class NoConceptProvider:
+        source_name = "无概念能力源"
+
+    async def run_check(path: Path) -> str:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"no_cap": NoConceptProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "no_cap")],
+        )
+
+        with pytest.raises(RuntimeError, match=r"概念归属不可用：600519\.SH") as captured:
+            await coordinator.stock_concepts("600519.SH", limit=5, refresh=True)
+        return str(captured.value)
+
+    with TemporaryDirectory() as tmpdir:
+        message = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert "no_cap: 无概念能力源 不支持概念能力" in message
+
+
+def test_stock_concepts_raise_when_no_concept_provider_is_configured() -> None:
+    async def run_check(path: Path) -> str:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [],
+        )
+
+        with pytest.raises(RuntimeError, match=r"概念归属不可用：600519\.SH") as captured:
+            await coordinator.stock_concepts("600519.SH", limit=5, refresh=True)
+        return str(captured.value)
+
+    with TemporaryDirectory() as tmpdir:
+        message = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert "概念未配置可用数据源" in message
+
+
+def test_local_stock_concepts_empty_result_is_coverage_miss_not_provider_failure() -> None:
+    async def run_check(path: Path) -> tuple[list[StockConceptItem], bool, str | None, int]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"local": LocalIndividualStockProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "local")],
+        )
+
+        rows = await coordinator.stock_concepts("600706.SH", limit=5, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "local" and item.kind == "concept")
+        return rows, status.healthy, status.last_error, status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, healthy, last_error, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert rows == []
+    assert healthy is True
+    assert last_error is None
+    assert failure_count == 0
+
+
+def test_local_stock_concepts_coverage_miss_preserves_stale_cache() -> None:
+    class FailingConceptProvider:
+        source_name = "失败概念源"
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            raise RuntimeError("concept down")
+
+    async def run_check(path: Path) -> tuple[list[StockConceptItem], list[StockConceptItem], bool, str | None, int]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        cache.save_stock_concepts(
+            "600706.SH",
+            [
+                _concept(symbol="600706.SH", rank=1, name="历史概念", source="缓存概念").model_copy(
+                    update={"updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                )
+            ],
+        )
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": FailingConceptProvider(), "local": LocalIndividualStockProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "external"), (2, "local")],
+        )
+
+        rows = await coordinator.stock_concepts("600706.SH", limit=5, refresh=True)
+        cached_after = cache.get_stock_concepts("600706.SH", max_age_seconds=10**9, limit=5)
+        local_status = next(
+            item for item in cache.provider_capability_statuses() if item.name == "local" and item.kind == "concept"
+        )
+        return rows, cached_after, local_status.healthy, local_status.last_error, local_status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, cached_after, healthy, last_error, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [(item.name, item.source) for item in rows] == [("历史概念", "缓存概念")]
+    assert [(item.name, item.source) for item in cached_after] == [("历史概念", "缓存概念")]
+    assert healthy is True
+    assert last_error is None
+    assert failure_count == 0
+
+
+def test_stock_concepts_raises_when_sources_fail_without_cache() -> None:
+    class FailingConceptProvider:
+        source_name = "失败概念源"
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            raise RuntimeError("concept down")
+
+    async def run_check(path: Path) -> tuple[str, int, str | None]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": FailingConceptProvider(), "local": LocalIndividualStockProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "external"), (2, "local")],
+        )
+
+        with pytest.raises(RuntimeError, match=r"概念归属不可用：600706\.SH") as captured:
+            await coordinator.stock_concepts("600706.SH", limit=5, refresh=True)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "external" and item.kind == "concept")
+        return str(captured.value), status.failure_count, status.last_error
+
+    with TemporaryDirectory() as tmpdir:
+        message, failure_count, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert "concept down" in message
+    assert failure_count == 1
+    assert last_error == "concept down"
 
 
 def test_stock_pool_unregistered_priority_provider_is_skipped_before_backup() -> None:
@@ -147,6 +791,16 @@ def test_profile_with_local_industry_does_not_mutate_primary_profile() -> None:
     assert primary.industry is None
 
 
+def test_profile_with_local_industry_keeps_primary_industry() -> None:
+    primary = make_stock_info().model_copy(update={"industry": "主数据行业"})
+    local = make_stock_info().model_copy(update={"industry": "本地行业"})
+
+    merged = _profile_with_local_industry(primary, local)
+
+    assert merged is primary
+    assert merged.industry == "主数据行业"
+
+
 def test_profile_with_local_industry_does_not_create_profile_from_local_only() -> None:
     local = make_stock_info().model_copy(update={"industry": "白酒"})
 
@@ -180,6 +834,43 @@ def test_authoritative_stock_profile_miss_is_not_overridden_by_local_provider() 
     with TemporaryDirectory() as tmpdir:
         profile = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
+    assert profile is None
+
+
+def test_authoritative_fresh_stock_pool_empty_result_is_not_overridden_by_stale_match() -> None:
+    class ExplodingStockPoolProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            raise AssertionError("fresh authoritative cache should answer the miss")
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], StockInfo | None]:
+        settings = Settings(stock_pool_cache_seconds=3600, stock_pool_authoritative_min_count=3)
+        cache = SQLiteCache(path)
+        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_pool(
+            [
+                make_stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
+                for index in range(3)
+            ]
+        )
+        cache.save_stock_pool(
+            [make_stock_info(code="688001", market="SH").model_copy(update={"updated_at": stale_time})]
+        )
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"exploding": ExplodingStockPoolProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "exploding")],
+        )
+        rows = await coordinator.stock_pool(keyword="688001", limit=10, refresh=False)
+        profile = await coordinator.stock_profile("688001.SH")
+        return rows, profile
+
+    with TemporaryDirectory() as tmpdir:
+        rows, profile = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert rows == []
     assert profile is None
 
 
@@ -366,6 +1057,37 @@ def test_metadata_cache_filters_invalid_rows_and_dedupes_concept_names() -> None
             ("小金属", 1, "第三源", 2_000_000_000, 2.0, 3.0, "测试匹配"),
             ("镁金属", 2, "第一源", None, None, None, "概念成分匹配"),
         ]
+
+
+def test_metadata_cache_preserves_previous_rows_when_new_rows_are_empty_or_all_invalid() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        original_plate = make_plate_item().model_copy(update={"name": "旧板块", "rank": 1})
+        original_concept = _concept(symbol="600519.SH", rank=1, name="旧概念", source="旧源")
+        cache.save_plate_rank([original_plate])
+        cache.save_stock_concepts("600519.SH", [original_concept])
+
+        cache.save_plate_rank([])
+        cache.save_stock_concepts("600519.SH", [])
+        assert [item.name for item in cache.get_plate_rank(max_age_seconds=10**9, limit=10)] == ["旧板块"]
+        assert [item.name for item in cache.get_stock_concepts("600519.SH", max_age_seconds=10**9, limit=10)] == ["旧概念"]
+
+        cache.save_plate_rank(
+            [
+                make_plate_item().model_copy(update={"rank": 0, "name": "无效板块"}),
+                make_plate_item().model_copy(update={"rank": 2, "name": " ", "change_pct": math.nan}),
+            ]
+        )
+        cache.save_stock_concepts(
+            "600519.SH",
+            [
+                _concept(symbol="600519.SH", rank=0, name="无效概念", source="坏源"),
+                _concept(symbol="600519.SH", rank=1, name=" ", source="坏源").model_copy(update={"change_pct": math.inf}),
+            ],
+        )
+
+        assert [item.name for item in cache.get_plate_rank(max_age_seconds=10**9, limit=10)] == ["旧板块"]
+        assert [item.name for item in cache.get_stock_concepts("600519.SH", max_age_seconds=10**9, limit=10)] == ["旧概念"]
 
 
 def test_metadata_cache_orders_metadata_reads_stably() -> None:

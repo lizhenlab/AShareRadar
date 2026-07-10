@@ -133,6 +133,7 @@
   }
 
   .insight-panel,
+  .ai-dashboard-grid,
   .evidence-grid,
   .diagnosis-grid,
   .alpha-grid,
@@ -176,6 +177,20 @@
   .ai-question-bar,
   .minute-status-card {
     grid-template-columns: 1fr;
+  }
+
+  .timeframe-item > div,
+  .scenario-item > div,
+  .validation-item > div {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .timeframe-item span,
+  .scenario-item span,
+  .validation-item span {
+    min-width: 0;
+    white-space: normal;
   }
 }
 

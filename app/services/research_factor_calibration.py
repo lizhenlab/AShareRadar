@@ -2,19 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-import math
 
 from app.models.schemas import CalibrationBucket, FactorCalibration
 from app.services.indicators import pct_change
 from app.services.research_factor_specs import FactorSpec, _trend_proxy_score_at
 from app.services.scoring import clamp_score as _clamp
-from app.utils.market_data import valid_kline
+from app.utils.market_data import finite_float, valid_kline
 
-MIN_CALIBRATION_ROWS = 35
-MIN_BUCKET_ROWS = 45
 CALIBRATION_SCAN_START = 25
 FORWARD_5D_OFFSET = 5
 FORWARD_10D_OFFSET = 10
+MIN_CALIBRATION_ROWS = CALIBRATION_SCAN_START + FORWARD_10D_OFFSET + 1
+MIN_BUCKET_ROWS = 45
 LOCAL_LEVEL_WINDOW = 20
 STRONG_TREND_THRESHOLD = 65
 WEAK_TREND_THRESHOLD = 45
@@ -147,7 +146,7 @@ def _insufficient_calibration() -> FactorCalibration:
         avg_forward_10d_return=0,
         max_adverse_return=0,
         confidence_level="样本不足",
-        note="少于35根日K，暂不能形成稳定历史校准。",
+        note=f"少于{MIN_CALIBRATION_ROWS}根日K，暂不能形成历史校准样本。",
     )
 
 
@@ -298,18 +297,29 @@ def _local_support_resistance(rows: list, index: int) -> tuple[float, float]:
 def _factor_percentile(rows: list, evaluator: Callable[[list, int], float], current_score: int) -> float | None:
     if len(rows) < 30:
         return None
-    values: list[float] = []
-    for index in range(20, len(rows) - 1):
-        if not valid_kline(rows[index]):
-            continue
-        try:
-            value = evaluator(rows, index)
-        except (ValueError, ZeroDivisionError):
-            continue
-        if math.isfinite(value):
-            values.append(value)
+    values = _factor_percentile_values(rows, evaluator)
     if not values:
         return None
+    return _percentile_rank(values, current_score)
+
+
+def _factor_percentile_values(rows: list, evaluator: Callable[[list, int], float]) -> list[float]:
+    return [
+        value
+        for index in range(20, len(rows) - 1)
+        if valid_kline(rows[index])
+        if (value := _factor_value_at(rows, evaluator, index)) is not None
+    ]
+
+
+def _factor_value_at(rows: list, evaluator: Callable[[list, int], float], index: int) -> float | None:
+    try:
+        return finite_float(evaluator(rows, index))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _percentile_rank(values: list[float], current_score: int) -> float:
     below = sum(1 for item in values if item <= current_score)
     return round(below / len(values) * 100, 1)
 

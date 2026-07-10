@@ -2,11 +2,14 @@ import { fetchJson } from "./api.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 
-export async function loadAlerts(state) {
+export async function loadAlerts(state, options = {}) {
+  const symbol = options.symbol || state.symbol;
+  const isCurrent = options.isCurrent || (() => true);
   const [rulesResult, eventsResult] = await Promise.allSettled([
-    fetchJson(`/api/alerts?symbol=${encodeURIComponent(state.symbol)}`),
-    fetchJson(`/api/alerts/events?symbol=${encodeURIComponent(state.symbol)}&limit=6`),
+    fetchJson(`/api/alerts?symbol=${encodeURIComponent(symbol)}`),
+    fetchJson(`/api/alerts/events?symbol=${encodeURIComponent(symbol)}&limit=6`),
   ]);
+  if (!isCurrent()) return false;
   if (rulesResult.status === "fulfilled") {
     renderAlerts(rulesResult.value);
   } else {
@@ -17,9 +20,11 @@ export async function loadAlerts(state) {
   } else {
     $("alertEvents").innerHTML = `<div class="alert-event"><strong>事件读取失败</strong><p>${escapeHtml(eventsResult.reason.message)}</p></div>`;
   }
+  return true;
 }
 
-export async function addAlertRule(state) {
+export async function addAlertRule(state, options = {}) {
+  const symbol = options.symbol || state.symbol;
   const conditionType = $("alertType").value;
   const rawThreshold = $("alertThreshold").value.trim();
   const allowsDynamicLevel = conditionType === "break_support" || conditionType === "break_resistance";
@@ -30,42 +35,52 @@ export async function addAlertRule(state) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      symbol: state.symbol,
+      symbol,
       condition_type: conditionType,
       threshold,
       note: "本地个股研究提醒",
     }),
   });
+  if (options.isCurrent && !options.isCurrent()) return false;
   $("alertThreshold").value = "";
-  await loadAlerts(state);
+  await loadAlerts(state, { symbol, isCurrent: options.isCurrent });
+  return true;
 }
 
-export async function evaluateAlerts(state) {
+export async function evaluateAlerts(state, options = {}) {
+  const symbol = options.symbol || state.symbol;
   const button = $("evaluateAlerts");
+  if (button.disabled) return false;
   try {
     button.disabled = true;
     button.textContent = "检查中";
-    const result = await fetchJson(`/api/alerts/evaluate?symbol=${encodeURIComponent(state.symbol)}`, { method: "POST" });
+    const result = await fetchJson(`/api/alerts/evaluate?symbol=${encodeURIComponent(symbol)}`, { method: "POST" });
+    if (options.isCurrent && !options.isCurrent()) return false;
     renderAlertEvaluation(result);
-    await loadAlerts(state);
+    await loadAlerts(state, { symbol, isCurrent: options.isCurrent });
+    return true;
   } finally {
     button.disabled = false;
     button.textContent = "检查";
   }
 }
 
-export async function removeAlertRule(state, ruleId) {
+export async function removeAlertRule(state, ruleId, options = {}) {
   await fetchJson(`/api/alerts/${encodeURIComponent(ruleId)}`, { method: "DELETE" });
-  await loadAlerts(state);
+  if (options.isCurrent && !options.isCurrent()) return false;
+  await loadAlerts(state, { symbol: options.symbol || state.symbol, isCurrent: options.isCurrent });
+  return true;
 }
 
-export async function updateAlertRule(state, ruleId, payload) {
+export async function updateAlertRule(state, ruleId, payload, options = {}) {
   await fetchJson(`/api/alerts/${encodeURIComponent(ruleId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  await loadAlerts(state);
+  if (options.isCurrent && !options.isCurrent()) return false;
+  await loadAlerts(state, { symbol: options.symbol || state.symbol, isCurrent: options.isCurrent });
+  return true;
 }
 
 export function renderAlerts(items) {
@@ -105,11 +120,13 @@ export function renderAlertEvents(items) {
 }
 
 export function renderAlertEvaluation(result) {
+  const failedCount = Number(result.failed_count || 0);
+  const completedCount = Math.max(0, Number(result.checked_count || 0) - failedCount);
   $("alertEvents").innerHTML = `
-    <div class="alert-event">
-      <strong>检查完成</strong>
-      <span>${escapeHtml(result.checked_at)} · 触发 ${escapeHtml(result.triggered_count)} / ${escapeHtml(result.checked_count)}</span>
-      <p>新增触发记录 ${escapeHtml(result.new_event_count)} 条。</p>
+    <div class="alert-event ${failedCount ? "is-warning" : ""}">
+      <strong>${failedCount ? "检查部分完成" : "检查完成"}</strong>
+      <span>${escapeHtml(result.checked_at)} · 成功 ${escapeHtml(completedCount)} / ${escapeHtml(result.checked_count)} · 触发 ${escapeHtml(result.triggered_count)}</span>
+      <p>新增触发记录 ${escapeHtml(result.new_event_count)} 条${failedCount ? `，失败 ${escapeHtml(failedCount)} 条，请稍后重试。` : "。"}</p>
     </div>
   `;
 }

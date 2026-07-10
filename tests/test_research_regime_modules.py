@@ -118,6 +118,19 @@ def test_market_breadth_controls_environment_before_stock_tailwind() -> None:
     assert any("市场宽度偏冷" in item for item in cold_regime.suggestions)
 
 
+def test_market_regime_surfaces_breadth_source_degradation_conservatively() -> None:
+    analysis, bundle, feature, factor_lab = _regime_inputs()
+    warning = "市场宽度数据源请求失败，环境判断已降级。"
+    breadth = build_market_breadth_snapshot([], warnings=[warning])
+
+    regime = build_market_regime_report(analysis, bundle, feature, factor_lab, breadth)
+
+    assert regime.breadth_label == "市场宽度数据降级"
+    assert regime.breadth_score == 45
+    assert any(warning in item for item in regime.evidence)
+    assert any("不据此上调环境评级" in item for item in regime.suggestions)
+
+
 def test_market_regime_label_rules_keep_priority_explicit() -> None:
     analysis, bundle, feature, factor_lab = _regime_inputs()
     safe_analysis, safe_bundle = _safe_inputs(analysis, bundle)
@@ -190,6 +203,22 @@ def test_factor_lab_risk_adjustment_rules_scale_with_data_quality() -> None:
     assert round(adjustment(60), 2) == -0.07
     assert adjustment(45) == 0
     assert round(adjustment(90, negative_factor_lab), 2) == 0.17
+
+
+def test_factor_lab_does_not_reduce_risk_for_six_thin_overlapping_factor_samples() -> None:
+    analysis, bundle, feature, factor_lab = _regime_inputs()
+    thin_factor_lab = factor_lab.model_copy(
+        update={
+            "total_score": 70,
+            "calibrated_confidence": 70,
+            "calibration_sample_count": 4,
+            "positive_factor_count": 5,
+            "negative_factor_count": 1,
+        }
+    )
+    context = _build_regime_context(analysis, bundle, feature, thin_factor_lab, None)
+
+    assert _factor_lab_risk_adjustment(context) == 0
 
 
 def test_regime_risk_adjustments_are_named_and_ignore_non_finite_values() -> None:

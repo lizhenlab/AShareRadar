@@ -64,6 +64,7 @@ TIMEFRAME_CONFLICT_RULES: tuple[TimeframeConflictRule, ...] = (
 )
 
 ALIGNMENT_LABEL_RULES: tuple[AlignmentLabelRule, ...] = (
+    AlignmentLabelRule("周期仍需确认", lambda score, conflict: conflict == "待确认"),
     AlignmentLabelRule("周期冲突明显", lambda score, conflict: conflict == "高冲突"),
     AlignmentLabelRule("多周期偏弱", lambda score, conflict: conflict == "多周期偏弱" or score <= 45),
     AlignmentLabelRule("多周期共振", lambda score, conflict: conflict == "多周期顺向" and score >= 65),
@@ -82,8 +83,6 @@ def build_timeframe_alignment_report(
         _timeframe_trend(analysis, feature, "中期", 120),
     ]
     valid_frames = [item for item in frames if item.window_days <= len(analysis.klines)]
-    if not valid_frames:
-        valid_frames = frames[:1]
     alignment_score = _timeframe_alignment_score(valid_frames, factor_lab)
     conflict_level = _timeframe_conflict_level(valid_frames)
     alignment_label = _timeframe_alignment_label(alignment_score, conflict_level)
@@ -107,12 +106,12 @@ def _timeframe_trend(
 ) -> TimeframeTrend:
     rows = _timeframe_rows(analysis, window_days)
     if len(rows) < 5:
-        return _insufficient_timeframe(name, len(rows))
+        return _insufficient_timeframe(name, window_days)
     metrics = _timeframe_metrics(rows, feature.price)
     score = _timeframe_score(name, metrics, feature.trend_score)
     return TimeframeTrend(
         name=name,
-        window_days=metrics.row_count,
+        window_days=window_days,
         score=score,
         label=_score_level(score),
         return_pct=round(metrics.return_pct, 2),
@@ -124,6 +123,8 @@ def _timeframe_trend(
 
 
 def _timeframe_alignment_score(frames: list[TimeframeTrend], factor_lab: FactorLabReport) -> int:
+    if not frames:
+        return 50
     weights = {"短线": 0.45, "波段": 0.35, "中期": 0.2}
     total_weight = sum(weights.get(item.name, 0.25) for item in frames) or 1
     raw = sum(item.score * weights.get(item.name, 0.25) for item in frames) / total_weight
@@ -140,10 +141,10 @@ def _timeframe_rows(analysis: AnalysisResult, window_days: int) -> list[Kline]:
     return analysis.klines[-window_days:] if len(analysis.klines) >= window_days else analysis.klines[:]
 
 
-def _insufficient_timeframe(name: str, row_count: int) -> TimeframeTrend:
+def _insufficient_timeframe(name: str, window_days: int) -> TimeframeTrend:
     return TimeframeTrend(
         name=name,
-        window_days=row_count,
+        window_days=window_days,
         score=50,
         label="样本不足",
         return_pct=0,
@@ -209,7 +210,7 @@ def _timeframe_conflict_level(frames: list[TimeframeTrend]) -> str:
 
 def _timeframe_conflict_snapshot(frames: list[TimeframeTrend]) -> TimeframeConflictSnapshot | None:
     scores = tuple(item.score for item in frames)
-    if not scores:
+    if len(scores) < 2:
         return None
     return TimeframeConflictSnapshot(scores=scores, spread=max(scores) - min(scores))
 
@@ -219,7 +220,7 @@ def _timeframe_alignment_label(score: int, conflict_level: str) -> str:
 
 
 def _timeframe_summary(label: str, conflict_level: str, frames: list[TimeframeTrend]) -> str:
-    frame_text = "；".join(f"{item.name}{item.score}分/{item.label}" for item in frames)
+    frame_text = "；".join(f"{item.name}{item.score}分/{item.label}" for item in frames) or "暂无达到样本要求的周期"
     return f"{label}：{frame_text}。冲突级别为「{conflict_level}」。"
 
 

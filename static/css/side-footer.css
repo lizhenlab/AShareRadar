@@ -26,7 +26,12 @@
 .quote-row strong,
 .leader-row strong {
   display: block;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.leader-row.leader-scope {
+  grid-template-columns: 1fr;
 }
 
 .quote-row span,
@@ -75,4 +80,3 @@
   color: var(--red);
   background: var(--red-soft);
 }
-

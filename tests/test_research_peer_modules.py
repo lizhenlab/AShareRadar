@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.models.schemas import Quote
+from app.models.schemas import PeerSampleInfo, Quote
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.research_features import build_feature_snapshot
@@ -22,7 +22,44 @@ def test_peer_comparison_returns_safe_report_without_valid_peer_quotes() -> None
     assert report.industry == "白酒"
     assert report.sample_count == 0
     assert report.summary == "同行样本不足，暂以个股自身历史和行业涨跌背景为主。"
-    assert report.risks == ["同行报价样本不足，同行估值和强弱分位需要等待缓存积累。"]
+    assert report.sample_status.status == "degraded"
+    assert report.warnings == ["同行行情样本未通过有效性校验。"]
+    assert report.risks == [
+        "同行行情样本未通过有效性校验。",
+        "同行报价样本不足，同行估值和强弱分位需要等待缓存积累。",
+    ]
+
+
+def test_peer_comparison_distinguishes_source_failure_from_small_peer_group() -> None:
+    warning = "白酒同行股票池暂不可用。"
+    analysis, bundle, feature = _peer_inputs(
+        peer_sample=PeerSampleInfo(status="unavailable", warning=warning),
+        industry="白酒",
+    )
+
+    report = build_peer_comparison_report(analysis, bundle, feature)
+
+    assert report.sample_count == 0
+    assert report.sample_status.status == "unavailable"
+    assert report.summary == "同行数据源暂不可用，当前仅基于个股自身历史和行业背景判断。"
+    assert report.warnings == [warning]
+    assert report.risks[0] == warning
+
+
+def test_peer_comparison_keeps_partial_quotes_and_surfaces_degradation() -> None:
+    warning = "白酒同行行情样本部分缺失，成功 2/3 个。"
+    analysis, bundle, feature = _peer_inputs(
+        peer_quotes=[_peer_quote("600001", "同行A"), _peer_quote("600002", "同行B")],
+        peer_sample=PeerSampleInfo(status="degraded", requested_count=3, missing_count=1, warning=warning),
+        industry="白酒",
+    )
+
+    report = build_peer_comparison_report(analysis, bundle, feature)
+
+    assert report.sample_count == 2
+    assert report.sample_status.status == "degraded"
+    assert report.warnings == [warning]
+    assert report.risks[0] == warning
 
 
 def test_peer_comparison_calculates_strength_metrics_and_leaders() -> None:
@@ -95,6 +132,7 @@ def _peer_inputs(
     change_pct: float = 1.0,
     amount: float = 1_300_000_000,
     peer_quotes: list[Quote] | None = None,
+    peer_sample: PeerSampleInfo | None = None,
     industry: str = "测试行业",
     peer_pe_percentile: float | None = None,
 ):
@@ -115,6 +153,7 @@ def _peer_inputs(
         klines,
         stock_profile=make_stock_info().model_copy(update={"industry": industry}),
         peer_quotes=peer_quotes or [],
+        peer_sample=peer_sample,
         data_quality=quality,
     )
     bundle = build_stock_insight_bundle(analysis)

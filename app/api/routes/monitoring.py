@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_datahub, get_scheduler
 from app.api.errors import run_api, run_sync_api
-from app.models.schemas import MonitorEvent, SchedulerStatus, SystemDiagnostics, TaskRun
+from app.models.schemas import MonitorEvent, SchedulerStatus, SystemDiagnostics, TaskRun, TaskRunOnceResponse
 from app.services.datahub import DataHub
 from app.services.scheduler import LocalDataScheduler
 from app.services.system_diagnostics import build_system_diagnostics
@@ -34,14 +34,14 @@ async def monitor_events(
     return run_sync_api(lambda: datahub.cache.recent_monitor_events(limit=limit))
 
 
-@router.post("/api/tasks/run-once")
+@router.post("/api/tasks/run-once", response_model=TaskRunOnceResponse)
 async def run_task_once(
     task: str | None = Query(None, description="任务名称，不填则按顺序执行全部本地刷新任务"),
     scheduler: LocalDataScheduler = Depends(get_scheduler),
-) -> dict[str, object]:
-    async def run() -> dict[str, object]:
+) -> TaskRunOnceResponse:
+    async def run() -> TaskRunOnceResponse:
         messages = await scheduler.run_once(task)
-        return {"ok": True, "messages": messages}
+        return TaskRunOnceResponse(ok=True, messages=messages)
 
     return await run_api(run)
 

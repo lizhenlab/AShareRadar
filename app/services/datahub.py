@@ -31,15 +31,12 @@ from app.services.datahub_source_plan import SourcePlanBuilder
 from app.services.datahub_quotes import QuoteCoordinator
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.workbench_context import WorkbenchContextCache
+from app.services.datahub_status_service import DataStatusService
 from app.services.provider_registry import (
     all_provider_names,
     build_providers,
-    provider_capabilities,
-    provider_enabled_for,
     provider_index,
-    provider_is_enabled,
     provider_priority,
-    supported_provider_kinds,
 )
 
 
@@ -53,9 +50,16 @@ class DataHubCoordinators:
     metadata: MetadataCoordinator
     order_book: OrderBookCoordinator
     source_plan: SourcePlanBuilder
+    status: DataStatusService
 
 
 def _build_coordinators(datahub: DataHub, runtime: ProviderRuntime) -> DataHubCoordinators:
+    source_plan = SourcePlanBuilder(
+        provider_names=lambda: datahub._all_provider_names(),
+        priority=lambda kind: datahub._priority(kind),
+        provider_index=lambda name: datahub._provider_index(name),
+        is_cooling=lambda name, kind: datahub._provider_is_cooling(name, kind),
+    )
     return DataHubCoordinators(
         quote=QuoteCoordinator(
             settings=datahub.settings,
@@ -78,11 +82,13 @@ def _build_coordinators(datahub: DataHub, runtime: ProviderRuntime) -> DataHubCo
             runtime=runtime,
             priority=lambda kind: datahub._priority(kind),
         ),
-        source_plan=SourcePlanBuilder(
+        source_plan=source_plan,
+        status=DataStatusService(
+            cache=datahub.cache,
+            providers=datahub.providers,
             provider_names=lambda: datahub._all_provider_names(),
-            priority=lambda kind: datahub._priority(kind),
             provider_index=lambda name: datahub._provider_index(name),
-            is_cooling=lambda name, kind: datahub._provider_is_cooling(name, kind),
+            source_plan_builder=source_plan,
         ),
         order_book=OrderBookCoordinator(
             providers=datahub.providers,
@@ -105,6 +111,7 @@ class DataHub:
         self._metadata_coordinator = coordinators.metadata
         self._order_book_coordinator = coordinators.order_book
         self._source_plan_builder = coordinators.source_plan
+        self._status_service = coordinators.status
         self._sync_provider_enabled_flags()
 
     async def quote(self, symbol: str, use_cache: bool = True) -> Quote:
@@ -168,20 +175,10 @@ class DataHub:
         )
 
     def status(self) -> DataStatus:
-        self._sync_provider_enabled_flags()
-        providers = self.cache.provider_statuses()
-        capability_statuses = self.cache.provider_capability_statuses()
-        capabilities = self.capabilities()
-        return DataStatus(
-            providers=providers,
-            cache=self.cache.stats(),
-            capabilities=capabilities,
-            capability_statuses=capability_statuses,
-            source_plan=self._source_plan(providers, capabilities, capability_statuses),
-        )
+        return self._status_service.status()
 
     def capabilities(self) -> list[ProviderCapability]:
-        return provider_capabilities(self.providers)
+        return self._status_service.capabilities()
 
     def _source_plan(
         self,
@@ -189,7 +186,7 @@ class DataHub:
         capabilities: list[ProviderCapability],
         capability_statuses: list[ProviderCapabilityStatus] | None = None,
     ) -> DataSourcePlan:
-        return self._source_plan_builder.build(providers, capabilities, capability_statuses)
+        return self._status_service.source_plan(providers, capabilities, capability_statuses)
 
     def _provider_decision(
         self,
@@ -201,7 +198,7 @@ class DataHub:
         minute_names: list[str],
         capability_statuses: dict[tuple[str, str], ProviderCapabilityStatus],
     ) -> ProviderDecision:
-        return self._source_plan_builder.provider_decision(
+        return self._status_service.provider_decision(
             name,
             status,
             capability,
@@ -236,12 +233,7 @@ class DataHub:
         return provider_index(self.settings, self.providers, name)
 
     def _sync_provider_enabled_flags(self) -> None:
-        for name in self._all_provider_names():
-            provider = self.providers[name]
-            priority = self._provider_index(name)
-            self.cache.ensure_provider(name, priority, enabled=provider_is_enabled(provider))
-            for kind in supported_provider_kinds(provider):
-                self.cache.ensure_provider_capability(name, kind, priority, enabled=provider_enabled_for(provider, kind))
+        self._status_service.sync_provider_enabled_flags()
 
     async def _quote_consistency(self, quote: Quote, check_consistency: bool = True) -> tuple[str, list[str], int]:
         return await self._quote_coordinator.consistency(quote, check_consistency=check_consistency)

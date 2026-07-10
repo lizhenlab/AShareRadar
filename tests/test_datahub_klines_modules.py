@@ -57,6 +57,42 @@ def test_daily_kline_empty_provider_uses_fallback_cache_and_records_failure() ->
     assert last_error == "K线返回为空"
 
 
+def test_daily_kline_fallback_cache_ignores_log_event_failure() -> None:
+    class LogFailingSQLiteCache(SQLiteCache):
+        def log_event(self, category: str, message: str) -> None:
+            raise sqlite3.DatabaseError("event log readonly")
+
+    class FailingKlineProvider:
+        source_name = "失败K线源"
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            raise RuntimeError("kline down")
+
+    async def run_check(path: Path) -> list[Kline]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = LogFailingSQLiteCache(path)
+        cache.save_klines(
+            "600519.SH",
+            [make_kline(date=f"2026-05-{index + 1:02d}", source="历史缓存") for index in range(20)],
+            "历史缓存",
+        )
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failing": FailingKlineProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "failing")],
+        )
+
+        return await coordinator.kline("600519.SH", limit=20, use_cache=False)
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert len(rows) == 20
+    assert all(item.from_cache and item.fallback_used for item in rows)
+
+
 def test_minute_kline_records_provider_without_minute_method_and_uses_backup() -> None:
     class QuoteOnlyProvider:
         source_name = "只有行情源"
@@ -132,6 +168,78 @@ def test_minute_kline_empty_provider_uses_fallback_cache_and_records_failure() -
     assert last_error == "分钟K线返回为空"
 
 
+def test_minute_kline_fallback_cache_ignores_log_event_failure() -> None:
+    class LogFailingSQLiteCache(SQLiteCache):
+        def log_event(self, category: str, message: str) -> None:
+            raise sqlite3.DatabaseError("event log readonly")
+
+    class FailingMinuteProvider:
+        source_name = "失败分钟线源"
+
+        async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120) -> list[MinuteKline]:
+            raise RuntimeError("minute down")
+
+    async def run_check(path: Path) -> list[MinuteKline]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = LogFailingSQLiteCache(path)
+        cache.save_minute_klines(
+            "600519.SH",
+            "5m",
+            [_minute_row(timestamp=f"2026-05-13 10:{index:02d}:00", interval="5m") for index in range(12)],
+            "历史分钟缓存",
+        )
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failing": FailingMinuteProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "failing")],
+        )
+
+        return await coordinator.minute_kline("600519.SH", interval="5m", limit=12, use_cache=False)
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert len(rows) == 12
+    assert all(item.from_cache and item.fallback_used for item in rows)
+
+
+def test_daily_kline_returns_provider_rows_when_cache_write_fails() -> None:
+    class CacheWriteFailingSQLiteCache(SQLiteCache):
+        def save_klines(self, symbol: str, klines: list[Kline], source: str) -> None:
+            raise sqlite3.DatabaseError("kline cache readonly")
+
+    class LiveKlineProvider:
+        source_name = "实时K线源"
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            return [make_kline(date="2026-05-13", source=self.source_name)]
+
+    async def run_check(path: Path) -> tuple[list[Kline], bool, int]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = CacheWriteFailingSQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"live": LiveKlineProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "live")],
+        )
+
+        rows = await coordinator.kline("600519.SH", limit=20, use_cache=False)
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "live" and item.kind == "kline")
+        return rows, runtime.is_cooling("live", "kline"), status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        rows, cooling, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.source for item in rows] == ["实时K线源"]
+    assert cooling is False
+    assert failure_count == 0
+
+
 def test_partial_fresh_cache_does_not_skip_available_provider() -> None:
     class TrackingKlineProvider:
         source_name = "实时K线源"
@@ -194,14 +302,53 @@ def test_partial_fresh_cache_does_not_skip_available_provider() -> None:
     assert minute_source == "实时K线源"
 
 
-def test_unregistered_priority_provider_is_recorded_and_skipped_before_backup() -> None:
+def test_minute_kline_stale_business_timestamp_does_not_skip_provider() -> None:
+    class LiveMinuteProvider:
+        source_name = "实时分钟线源"
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120) -> list[MinuteKline]:
+            self.calls.append(limit)
+            return [_minute_row(timestamp=f"2026-07-08 10:{index:02d}:00", interval=interval) for index in range(limit)]
+
+    async def run_check(path: Path) -> tuple[list[str], list[int]]:
+        settings = Settings(minute_kline_cache_seconds=60 * 60)
+        cache = SQLiteCache(path)
+        cache.save_minute_klines(
+            "600519.SH",
+            "5m",
+            [_minute_row(timestamp=f"2000-01-03 10:{index:02d}:00", interval="5m") for index in range(20)],
+            "旧业务时间分钟缓存",
+        )
+        provider = LiveMinuteProvider()
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"live": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "live")],
+        )
+
+        rows = await coordinator.minute_kline("600519.SH", interval="5m", limit=20, use_cache=True)
+        return [item.source or "" for item in rows], provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        sources, calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == [20]
+    assert set(sources) == {"实时分钟线源"}
+
+
+def test_unregistered_priority_provider_is_skipped_before_backup_without_status_noise() -> None:
     class BackupKlineProvider:
         source_name = "备用K线源"
 
         async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
             return [make_kline(date="2026-05-13")]
 
-    async def run_check(path: Path) -> tuple[list[Kline], int, str | None]:
+    async def run_check(path: Path) -> tuple[list[Kline], bool]:
         settings = Settings(provider_failure_cooldown_seconds=60)
         cache = SQLiteCache(path)
         runtime = ProviderRuntime(cache, settings)
@@ -214,16 +361,17 @@ def test_unregistered_priority_provider_is_recorded_and_skipped_before_backup() 
         )
 
         rows = await coordinator.kline("600519.SH", limit=20, use_cache=False)
-        status = next(item for item in cache.provider_capability_statuses() if item.name == "missing" and item.kind == "kline")
-        return rows, status.failure_count, status.last_error
+        missing_status_exists = any(
+            item.name == "missing" and item.kind == "kline" for item in cache.provider_capability_statuses()
+        )
+        return rows, missing_status_exists
 
     with TemporaryDirectory() as tmpdir:
-        rows, failure_count, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+        rows, missing_status_exists = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert [item.source for item in rows] == ["备用K线源"]
     assert rows[0].from_cache is False
-    assert failure_count == 1
-    assert last_error == "数据源未注册"
+    assert missing_status_exists is False
 
 
 def test_invalid_provider_kline_rows_are_rejected_before_backup() -> None:
@@ -590,6 +738,34 @@ def test_kline_cache_rejects_future_fetch_timestamps() -> None:
 
         assert cache.get_klines("600519.SH", limit=1, max_age_seconds=10**9) == []
         assert cache.get_minute_klines("600519.SH", "5m", limit=1, max_age_seconds=10**9) == []
+
+
+def test_cache_stats_keeps_daily_and_minute_kline_freshness_separate() -> None:
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "cache.sqlite3"
+        cache = SQLiteCache(path)
+        cache.save_klines("600519.SH", [make_kline(date="2026-05-13")], "测试日线")
+        cache.save_minute_klines(
+            "600519.SH",
+            "5m",
+            [_minute_row(timestamp="2026-05-13 10:00:00", interval="5m")],
+            "测试分钟线",
+        )
+
+        old_daily = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        fresh_minute = now_text()
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE kline_daily SET fetched_at = ?", (old_daily,))
+            conn.execute("UPDATE kline_minute SET fetched_at = ?", (fresh_minute,))
+
+        stats = cache.stats()
+
+    assert stats.kline_count == 2
+    assert stats.daily_kline_count == 1
+    assert stats.minute_kline_count == 1
+    assert stats.latest_kline_at == old_daily
+    assert stats.latest_daily_kline_at == old_daily
+    assert stats.latest_minute_kline_at == fresh_minute
 
 
 def _minute_row(*, timestamp: str, interval: str) -> MinuteKline:

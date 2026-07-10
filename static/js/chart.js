@@ -7,7 +7,7 @@ export function drawKlineChart({
   activeCategories = new Set(),
   formatNumber = defaultFormatNumber,
 }) {
-  if (!canvas) return;
+  if (!canvas || typeof canvas.getContext !== "function") return;
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
@@ -15,6 +15,7 @@ export function drawKlineChart({
   canvas.width = width * ratio;
   canvas.height = height * ratio;
   const ctx = canvas.getContext("2d");
+  if (!ctx) return;
   ctx.scale(ratio, ratio);
   ctx.clearRect(0, 0, width, height);
 

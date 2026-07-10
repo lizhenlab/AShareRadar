@@ -176,6 +176,26 @@ class DataQualityModuleTests(unittest.TestCase):
         self.assertIn("报价兜底缓存", fallback_cache.anomalies)
         self.assertLess(fallback_cache.score, short_cache.score)
 
+    def test_quote_cache_flags_are_used_when_source_text_is_plain(self) -> None:
+        short_cache = build_data_quality(
+            _quote(source="腾讯行情", timestamp="2026-05-13 15:00:00").model_copy(update={"from_cache": True}),
+            [],
+            require_kline=False,
+            now=datetime(2026, 5, 13, 16, 0, 0),
+        )
+        fallback_cache = build_data_quality(
+            _quote(source="腾讯行情", timestamp="2026-05-13 15:00:00").model_copy(
+                update={"from_cache": True, "fallback_used": True}
+            ),
+            [],
+            require_kline=False,
+            now=datetime(2026, 5, 13, 16, 0, 0),
+        )
+
+        self.assertIn("当前报价来自缓存，已结合报价时间评估新鲜度。", short_cache.notes)
+        self.assertIn("当前报价来自兜底缓存，说明实时行情源本轮不可用。", fallback_cache.notes)
+        self.assertIn("报价兜底缓存", fallback_cache.anomalies)
+
     def test_required_missing_klines_only_reports_missing_not_count_shortage(self) -> None:
         quality = build_data_quality(
             _quote(timestamp="2026-05-13 15:00:00"),

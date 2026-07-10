@@ -18,7 +18,6 @@ def test_source_plan_action_handles_statusless_failed_capability() -> None:
                 healthy=False,
                 last_error="quote down",
                 failure_count=1,
-                updated_at="2026-05-13 09:35:00",
             )
         ],
     )
@@ -154,7 +153,6 @@ def test_source_plan_warning_deduplicates_dirty_capability_failures() -> None:
                 healthy=False,
                 last_error="quote down",
                 failure_count=1,
-                updated_at="2026-05-13 09:35:00",
             ),
             ProviderCapabilityStatus(
                 name="akshare",
@@ -164,7 +162,6 @@ def test_source_plan_warning_deduplicates_dirty_capability_failures() -> None:
                 healthy=False,
                 last_error="quote down again",
                 failure_count=1,
-                updated_at="2026-05-13 09:36:00",
             ),
         ],
     )
@@ -172,6 +169,74 @@ def test_source_plan_warning_deduplicates_dirty_capability_failures() -> None:
     capability_warning = next(item for item in plan.warnings if item.startswith("最近失败能力："))
     assert capability_warning.count("AKShare 报价") == 1
     assert "Quote" not in capability_warning
+
+
+def test_source_plan_ignores_stale_failures_outside_current_provider_names() -> None:
+    builder = _builder()
+    plan = builder.build(
+        providers=[
+            ProviderStatus(name="akshare", enabled=True, priority=2, healthy=True),
+            ProviderStatus(
+                name="old_source",
+                enabled=True,
+                priority=9,
+                healthy=False,
+                last_error="removed provider down",
+                failure_count=1,
+                updated_at="2026-05-13 09:35:00",
+            ),
+        ],
+        capabilities=[_capability("akshare")],
+        capability_statuses=[
+            ProviderCapabilityStatus(
+                name="old_source",
+                kind="quote",
+                enabled=True,
+                priority=9,
+                healthy=False,
+                last_error="old quote down",
+                failure_count=1,
+                updated_at="2026-05-13 09:35:00",
+            )
+        ],
+    )
+
+    assert plan.primary_quote_source == "akshare"
+    assert [decision.name for decision in plan.decisions] == ["akshare"]
+    assert all("old_source" not in warning for warning in plan.warnings)
+    assert all("最近失败" not in warning for warning in plan.warnings)
+
+
+def test_source_plan_does_not_label_old_failures_as_recent_warnings() -> None:
+    builder = _builder()
+    plan = builder.build(
+        providers=[
+            ProviderStatus(
+                name="akshare",
+                enabled=True,
+                priority=2,
+                healthy=False,
+                last_error="old provider failure",
+                failure_count=1,
+                updated_at="2026-05-13 09:35:00",
+            )
+        ],
+        capabilities=[_capability("akshare")],
+        capability_statuses=[
+            ProviderCapabilityStatus(
+                name="akshare",
+                kind="quote",
+                enabled=True,
+                priority=2,
+                healthy=False,
+                last_error="old quote failure",
+                failure_count=1,
+                updated_at="2026-05-13 09:35:00",
+            )
+        ],
+    )
+
+    assert all("最近失败" not in warning for warning in plan.warnings)
 
 
 def test_source_plan_marks_missing_kline_primary_as_degraded() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 
@@ -71,6 +73,7 @@ class AlertEvaluationItem(BaseModel):
     triggered: bool
     message: str
     event: AlertEventItem | None = None
+    status: Literal["evaluated", "failed"] = "evaluated"
 
 
 class AlertEvaluationSummary(BaseModel):
@@ -78,6 +81,7 @@ class AlertEvaluationSummary(BaseModel):
     checked_count: int
     triggered_count: int
     new_event_count: int
+    failed_count: int = 0
     items: list[AlertEvaluationItem]
 
 

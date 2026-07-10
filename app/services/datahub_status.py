@@ -8,6 +8,7 @@ import re
 import socket
 
 from app.models.schemas import ProviderCapability, ProviderCapabilityStatus, ProviderStatus
+from app.services.provider_failure_status import capability_recently_failed as provider_capability_recently_failed
 
 KIND_LABELS = {
     "quote": "报价",
@@ -243,7 +244,7 @@ def _unhealthy_capability_labels(items: list[ProviderCapabilityStatus]) -> list[
     labels: list[str] = []
     seen: set[tuple[str, str]] = set()
     for item in items:
-        if item.enabled and not item.healthy and _capability_has_activity(item):
+        if provider_capability_recently_failed(item):
             key = (_normalize_provider_name(item.name) or UNKNOWN_PROVIDER_KEY, _normalize_capability_kind(item.kind))
             if key in seen:
                 continue

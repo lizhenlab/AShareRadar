@@ -25,6 +25,7 @@ def row_to_quote(row: sqlite3.Row) -> Quote:
         market_cap=row["market_cap"],
         timestamp=row["quote_timestamp"],
         source=f"{row['source']}·缓存",
+        from_cache=True,
     )
 
 

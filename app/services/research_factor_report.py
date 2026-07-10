@@ -19,7 +19,7 @@ class FactorLabMetrics:
 
 def build_factor_lab_metrics(factors: list[StandardFactor], feature: FeatureSnapshot) -> FactorLabMetrics:
     total_score = _weighted_factor_score(factors)
-    calibration_sample_count = sum((item.calibration.sample_count if item.calibration else 0) for item in factors)
+    calibration_sample_count = _effective_calibration_sample_count(factors)
     support_count = factor_support_count(factors)
     risk_count = factor_risk_count(factors)
     calibration_quality = _factor_calibration_quality(factors)
@@ -40,6 +40,15 @@ def build_factor_lab_metrics(factors: list[StandardFactor], feature: FeatureSnap
         positives=top_positive_factors(factors),
         negatives=top_negative_factors(factors),
     )
+
+
+def _effective_calibration_sample_count(factors: list[StandardFactor]) -> int:
+    """Keep aggregate support conservative when factor samples reuse trading dates."""
+    sample_counts = [
+        max(0, item.calibration.sample_count) if item.calibration else 0
+        for item in factors
+    ]
+    return min(sample_counts, default=0)
 
 
 def factor_support_count(factors: list[StandardFactor]) -> int:
@@ -78,7 +87,10 @@ def factor_lab_notes(feature: FeatureSnapshot, profile_label: str, calibration_s
         "因子实验室只校验单只股票自身的历史相似状态，不做组合选股或自动交易。",
         "历史校准使用日K向后5日/10日表现，样本少时只作为低置信参考。",
         f"当前画像为「{profile_label}」，因子权重已按画像动态调整。",
-        f"当前共有 {calibration_sample_count} 个历史样本被用于因子校准。",
+        (
+            f"汇总有效样本按参与因子的最低单因子相似样本数计为 {calibration_sample_count} 个，"
+            "不跨因子累加可能重复的交易日。"
+        ),
         *([f"数据质量为{feature.data_quality_level}，所有因子已按低置信口径解释。"] if feature.data_quality_score < 70 else []),
     ]
 
@@ -110,6 +122,7 @@ def assemble_factor_lab_report(
 
 __all__ = [
     "FactorLabMetrics",
+    "_effective_calibration_sample_count",
     "assemble_factor_lab_report",
     "build_factor_lab_metrics",
     "factor_lab_notes",

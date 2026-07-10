@@ -136,10 +136,11 @@ class MarketMetadataRepositoryMixin:
         if not rows:
             return
         payload = _plate_rank_rows(rows)
+        if not payload:
+            return
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM plate_rank")
-            if payload:
-                conn.executemany(_PLATE_RANK_INSERT_SQL, payload)
+            conn.executemany(_PLATE_RANK_INSERT_SQL, payload)
 
     def get_plate_rank(self, max_age_seconds: int, limit: int = 20) -> list[PlateItem]:
         if limit <= 0:
@@ -162,10 +163,11 @@ class MarketMetadataRepositoryMixin:
     def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
         normalized = standard_symbol(symbol)
         payload = _stock_concept_rows(normalized, rows or [])
+        if not rows or not payload:
+            return
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM stock_concept WHERE symbol = ?", (normalized,))
-            if payload:
-                conn.executemany(_STOCK_CONCEPT_UPSERT_SQL, payload)
+            conn.executemany(_STOCK_CONCEPT_UPSERT_SQL, payload)
 
     def get_stock_concepts(self, symbol: str, max_age_seconds: int, limit: int = 8) -> list[StockConceptItem]:
         if limit <= 0:

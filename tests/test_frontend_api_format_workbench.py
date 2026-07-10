@@ -95,6 +95,62 @@ def test_fetch_json_normalizes_network_and_non_json_errors() -> None:
     _run_node_script(script)
 
 
+def test_fetch_json_accepts_empty_success_and_message_error_payloads() -> None:
+    script = r'''
+      import { fetchJson } from "./static/js/api.js";
+
+      globalThis.fetch = async () => ({ ok: true, status: 204 });
+      const noContent = await fetchJson("/api/delete");
+      if (noContent !== null) {
+        throw new Error(`204 response should resolve to null: ${String(noContent)}`);
+      }
+
+      globalThis.fetch = async () => ({
+        ok: true,
+        status: 200,
+        headers: { get(name) { return name.toLowerCase() === "content-length" ? "0" : null; } },
+      });
+      const emptyBody = await fetchJson("/api/empty");
+      if (emptyBody !== null) {
+        throw new Error(`empty response should resolve to null: ${String(emptyBody)}`);
+      }
+
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 409,
+        async text() {
+          return JSON.stringify({ message: "已经存在" });
+        },
+      });
+      const message = await rejectedMessage(fetchJson("/api/conflict"));
+      if (message !== "已经存在") {
+        throw new Error(`message payload was not surfaced: ${message}`);
+      }
+
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 502,
+        async text() {
+          return "上游行情源暂不可用";
+        },
+      });
+      const textMessage = await rejectedMessage(fetchJson("/api/plain-error"));
+      if (textMessage !== "上游行情源暂不可用") {
+        throw new Error(`plain text error was not surfaced: ${textMessage}`);
+      }
+
+      async function rejectedMessage(promise) {
+        try {
+          await promise;
+        } catch (error) {
+          return error.message;
+        }
+        throw new Error("expected fetchJson to throw");
+      }
+    '''
+    _run_node_script(script)
+
+
 def test_change_class_returns_neutral_for_zero_and_invalid_numbers() -> None:
     script = r'''
       import { changeClass } from "./static/js/format.js";
@@ -167,7 +223,7 @@ def test_number_formatters_hide_non_finite_values_and_clamp_digits() -> None:
 
 def test_workbench_renderers_tolerate_missing_quote_ma_and_arrays() -> None:
     script = r'''
-      import { renderAnalysis, renderInsights, renderMarket, renderQuotes, renderStrongStocks } from "./static/js/workbench.js";
+      import { renderAnalysis, renderInsights, renderMarket, renderMinuteAnalysis, renderQuotes, renderStrongStocks } from "./static/js/workbench.js";
 
       const elements = new Map();
       function element(id) {
@@ -285,6 +341,47 @@ def test_workbench_renderers_tolerate_missing_quote_ma_and_arrays() -> None:
       }
       if (!element("quoteList").innerHTML.includes("实时观察等待中")) {
         throw new Error("quote empty state was not rendered");
+      }
+      renderStrongStocks([null], { scope: "脏样本", sample_count: 1 });
+      if (!element("leaderList").innerHTML.includes("脏样本 · 样本 1") || !element("leaderList").innerHTML.includes("--")) {
+        throw new Error(`dirty strong stock row was not safely degraded: ${element("leaderList").innerHTML}`);
+      }
+      renderMinuteAnalysis({
+        sample_count: 12,
+        missing_data: ["分钟K线"],
+        t_plan: { suitability: "仅底仓可做T", execution_steps: [], stop_conditions: [] },
+        supports: [],
+        resistances: [],
+        warnings: [],
+      });
+      if (!element("minuteAnalysis").innerHTML.includes('class="warn"') || !element("minuteAnalysis").innerHTML.includes("仅底仓可做T")) {
+        throw new Error(`minute missing-data warning was not prioritized: ${element("minuteAnalysis").innerHTML}`);
+      }
+
+      renderQuotes([
+        {
+          name: "缓存行情",
+          market: "SH",
+          code: "600519",
+          amount: 1000000,
+          price: 10,
+          change_pct: 1,
+          from_cache: true,
+        },
+        {
+          name: "兜底行情",
+          market: "SZ",
+          code: "000001",
+          amount: 2000000,
+          price: 11,
+          change_pct: -1,
+          from_cache: true,
+          fallback_used: true,
+        },
+      ]);
+      const quoteHtml = element("quoteList").innerHTML;
+      if (!quoteHtml.includes("缓存行情") || !quoteHtml.includes(" · 缓存") || !quoteHtml.includes("兜底行情") || !quoteHtml.includes(" · 兜底缓存")) {
+        throw new Error(`quote cache labels were not rendered: ${quoteHtml}`);
       }
 
       renderStrongStocks(

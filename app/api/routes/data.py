@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api
-from app.models.schemas import DataStatus, OrderBook, PlateItem, StockInfo
+from app.models.schemas import DataStatus, FutuStatusResponse, OrderBook, PlateItem, StockInfo, TradeCalendarRefreshResponse
 from app.services.datahub import DataHub
 from app.services.trading_calendar import TradeCalendarRefreshResult, refresh_trade_calendar_result
 from app.utils.symbols import normalize_symbol
@@ -51,26 +51,24 @@ async def order_book(
     return await run_api(load)
 
 
-@router.get("/api/futu/status")
-async def futu_status(datahub: DataHub = Depends(get_datahub)) -> dict[str, object]:
+@router.get("/api/futu/status", response_model=FutuStatusResponse)
+async def futu_status(datahub: DataHub = Depends(get_datahub)) -> FutuStatusResponse:
     return await run_api(datahub.futu_ping)
 
 
-@router.post("/api/data/trading-calendar/refresh")
-async def refresh_trading_calendar_api() -> dict[str, object]:
-    async def refresh() -> dict[str, object]:
+@router.post("/api/data/trading-calendar/refresh", response_model=TradeCalendarRefreshResponse, response_model_exclude_none=True)
+async def refresh_trading_calendar_api() -> TradeCalendarRefreshResponse:
+    async def refresh() -> TradeCalendarRefreshResponse:
         result = await asyncio.to_thread(refresh_trade_calendar_result)
         return _trade_calendar_refresh_payload(result)
 
     return await run_api(refresh)
 
 
-def _trade_calendar_refresh_payload(result: TradeCalendarRefreshResult) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "ok": result.ok,
-        "trade_date_count": result.trade_date_count,
-        "source": result.source,
-    }
-    if result.error:
-        payload["error"] = result.error
-    return payload
+def _trade_calendar_refresh_payload(result: TradeCalendarRefreshResult) -> TradeCalendarRefreshResponse:
+    return TradeCalendarRefreshResponse(
+        ok=result.ok,
+        trade_date_count=result.trade_date_count,
+        source=result.source,
+        error=result.error or None,
+    )

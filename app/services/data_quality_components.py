@@ -80,11 +80,11 @@ def build_data_quality_report(
 
 def apply_source_quality(state: DataQualityScoreState, quote: Quote) -> None:
     source = quote.source or ""
-    if is_fallback_quote_source(source):
+    if quote.fallback_used or is_fallback_quote_source(source):
         state.penalize(16, note="当前报价来自兜底缓存，说明实时行情源本轮不可用。", anomaly="报价兜底缓存")
     elif "短时缓存" in source:
         state.penalize(8, note="当前报价来自短时缓存，需结合报价时间确认新鲜度。")
-    elif "缓存" in source:
+    elif quote.from_cache or "缓存" in source:
         state.penalize(8, note="当前报价来自缓存，已结合报价时间评估新鲜度。")
     if is_demo_quote_source(source):
         state.penalize(45, note="当前报价来自演示数据，不能作为真实行情依据。", anomaly="演示行情")

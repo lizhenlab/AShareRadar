@@ -130,6 +130,26 @@ def test_delete_alert_rule_returns_404_when_rule_is_missing() -> None:
     assert response.json() == {"detail": "预警规则不存在"}
 
 
+def test_delete_alert_rule_returns_mutation_result_when_removed() -> None:
+    client = _client(_DataHubStub(cache=_DeleteCache(removed=True)))
+
+    response = client.delete("/api/alerts/9")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "removed": True}
+
+
+def test_delete_alert_rule_uses_mutation_response_model() -> None:
+    app = FastAPI()
+    app.include_router(alerts.router)
+
+    schema = app.openapi()["paths"]["/api/alerts/{rule_id}"]["delete"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+
+    assert schema == {"$ref": "#/components/schemas/MutationResult"}
+
+
 def _client(datahub) -> TestClient:
     app = FastAPI()
     app.add_exception_handler(RequestValidationError, validation_exception_handler)

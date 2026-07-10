@@ -69,6 +69,8 @@ def test_save_quotes_persists_snapshot_and_history_fields() -> None:
 
     assert cached_quote.turnover_rate == 3.2
     assert cached_quote.source == "测试源·缓存"
+    assert cached_quote.from_cache is True
+    assert cached_quote.fallback_used is False
     assert history["pe"] == 28.5
     assert history["pb"] == 4.2
     assert history["market_cap"] == 1_000_000_000

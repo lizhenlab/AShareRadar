@@ -4,7 +4,9 @@ import asyncio
 from contextlib import redirect_stderr
 from datetime import date, datetime, timedelta
 import io
+import math
 import re
+import sqlite3
 import sys
 import unittest
 from unittest.mock import patch
@@ -1295,6 +1297,135 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertTrue(cooling)
         self.assertEqual(failure_count, 1)
 
+    def test_quote_coordinator_rejects_invalid_primary_quote_before_backup(self) -> None:
+        class InvalidProvider:
+            source_name = "坏报价源"
+
+            async def quotes(self, symbols):
+                return [
+                    _quote(source=self.source_name).model_copy(
+                        update={"code": symbol.split(".")[0], "market": symbol.split(".")[1], "price": math.inf}
+                    )
+                    for symbol in symbols
+                ]
+
+        class BackupProvider:
+            source_name = "备用报价源"
+
+            async def quotes(self, symbols):
+                return [
+                    _quote(source=self.source_name).model_copy(update={"code": symbol.split(".")[0], "market": symbol.split(".")[1]})
+                    for symbol in symbols
+                ]
+
+        async def run_check(path: Path) -> tuple[list[Quote], bool, str | None]:
+            settings = Settings(provider_failure_cooldown_seconds=60)
+            cache = SQLiteCache(path)
+            runtime = ProviderRuntime(cache, settings)
+            coordinator = QuoteCoordinator(
+                settings=settings,
+                cache=cache,
+                providers={"invalid": InvalidProvider(), "backup": BackupProvider()},
+                runtime=runtime,
+                priority=lambda kind: [(1, "invalid"), (2, "backup")],
+            )
+            rows = await coordinator.quotes(["600519.SH"], use_cache=False)
+            status = next(item for item in cache.provider_capability_statuses() if item.name == "invalid" and item.kind == "quote")
+            return rows, runtime.is_cooling("invalid", "quote"), status.last_error
+
+        with TemporaryDirectory() as tmpdir:
+            rows, cooling, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(rows[0].source, "备用报价源")
+        self.assertTrue(cooling)
+        self.assertEqual(last_error, "坏报价源 行情缺失或字段无效：600519.SH")
+
+    def test_quote_coordinator_partial_success_keeps_provider_healthy_and_fetches_only_missing(self) -> None:
+        class PartialProvider:
+            source_name = "部分报价源"
+
+            async def quotes(self, symbols):
+                return [
+                    _quote(source=self.source_name).model_copy(update={"code": symbols[0].split(".")[0], "market": symbols[0].split(".")[1]})
+                ]
+
+        class BackupProvider:
+            source_name = "备用报价源"
+
+            def __init__(self) -> None:
+                self.requested: list[str] = []
+
+            async def quotes(self, symbols):
+                self.requested.extend(symbols)
+                return [
+                    _quote(source=self.source_name).model_copy(update={"code": symbol.split(".")[0], "market": symbol.split(".")[1]})
+                    for symbol in symbols
+                ]
+
+        async def run_check(path: Path) -> tuple[list[Quote], list[str], bool, bool, int, int, str | None]:
+            settings = Settings(provider_failure_cooldown_seconds=60)
+            cache = SQLiteCache(path)
+            backup = BackupProvider()
+            runtime = ProviderRuntime(cache, settings)
+            coordinator = QuoteCoordinator(
+                settings=settings,
+                cache=cache,
+                providers={"partial": PartialProvider(), "backup": backup},
+                runtime=runtime,
+                priority=lambda kind: [(1, "partial"), (2, "backup")],
+            )
+            rows = await coordinator.quotes(["600519.SH", "000001.SZ"], use_cache=False)
+            status = next(item for item in cache.provider_capability_statuses() if item.name == "partial" and item.kind == "quote")
+            return rows, backup.requested, runtime.is_cooling("partial", "quote"), status.healthy, status.success_count, status.failure_count, status.last_error
+
+        with TemporaryDirectory() as tmpdir:
+            rows, backup_requested, cooling, healthy, success_count, failure_count, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual([f"{item.code}.{item.market}" for item in rows], ["600519.SH", "000001.SZ"])
+        self.assertEqual([item.source for item in rows], ["部分报价源", "备用报价源"])
+        self.assertEqual(backup_requested, ["000001.SZ"])
+        self.assertFalse(cooling)
+        self.assertTrue(healthy)
+        self.assertEqual(success_count, 1)
+        self.assertEqual(failure_count, 0)
+        self.assertIsNone(last_error)
+
+    def test_quote_coordinator_returns_provider_rows_when_cache_write_fails(self) -> None:
+        class CacheWriteFailingSQLiteCache(SQLiteCache):
+            def save_quotes(self, quotes: list[Quote]) -> None:
+                raise sqlite3.DatabaseError("quote cache readonly")
+
+        class LiveProvider:
+            source_name = "实时报价源"
+
+            async def quotes(self, symbols):
+                return [
+                    _quote(source=self.source_name).model_copy(update={"code": symbol.split(".")[0], "market": symbol.split(".")[1]})
+                    for symbol in symbols
+                ]
+
+        async def run_check(path: Path) -> tuple[list[Quote], bool, int]:
+            settings = Settings(provider_failure_cooldown_seconds=60)
+            cache = CacheWriteFailingSQLiteCache(path)
+            runtime = ProviderRuntime(cache, settings)
+            coordinator = QuoteCoordinator(
+                settings=settings,
+                cache=cache,
+                providers={"live": LiveProvider()},
+                runtime=runtime,
+                priority=lambda kind: [(1, "live")],
+            )
+            rows = await coordinator.quotes(["600519.SH"], use_cache=False)
+            status = next(item for item in cache.provider_capability_statuses() if item.name == "live" and item.kind == "quote")
+            return rows, runtime.is_cooling("live", "quote"), status.failure_count
+
+        with TemporaryDirectory() as tmpdir:
+            rows, cooling, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(rows[0].source, "实时报价源")
+        self.assertFalse(cooling)
+        self.assertEqual(failure_count, 0)
+
     def test_quote_coordinator_skips_unregistered_priority_provider(self) -> None:
         class BackupProvider:
             source_name = "备用报价源"
@@ -1376,20 +1507,22 @@ class DataSourceReliabilityTests(unittest.TestCase):
             async def quotes(self, symbols):
                 return [_quote(source=self.source_name) for _ in symbols]
 
-        async def run_check(path: Path) -> tuple[str, str]:
+        async def run_check(path: Path) -> tuple[str, str, bool, bool]:
             hub = DataHub(cache=SQLiteCache(path))
             hub.cache.save_quotes([_quote(source="腾讯行情")])
             hub.providers["backup"] = BackupProvider()
             quote = (await hub.quotes(["600519.SH"]))[0]
             with patch.object(hub, "_priority", return_value=[(1, "tencent"), (2, "backup")]):
                 level, _, _ = await hub._quote_consistency(quote)
-            return quote.source, level
+            return quote.source, level, quote.from_cache, quote.fallback_used
 
         with TemporaryDirectory() as tmpdir:
-            source, level = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+            source, level, from_cache, fallback_used = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
         self.assertIn("短时缓存", source)
         self.assertEqual(level, "一致")
+        self.assertTrue(from_cache)
+        self.assertFalse(fallback_used)
 
     def test_quotes_reuses_partial_cache_and_fetches_only_missing_symbols(self) -> None:
         class MissingOnlyProvider:
@@ -1419,7 +1552,36 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         self.assertEqual(requested, ["000001.SZ"])
         self.assertIn("短时缓存", rows[0].source)
+        self.assertTrue(rows[0].from_cache)
+        self.assertFalse(rows[0].fallback_used)
         self.assertEqual(rows[1].source, "实时补齐源")
+        self.assertFalse(rows[1].from_cache)
+        self.assertFalse(rows[1].fallback_used)
+
+    def test_quotes_mark_fallback_cache_with_machine_readable_flags(self) -> None:
+        class FailingQuoteProvider:
+            source_name = "失败行情源"
+
+            async def quotes(self, symbols):
+                raise RuntimeError("quote down")
+
+        async def run_check(path: Path):
+            settings = Settings(provider_failure_cooldown_seconds=60)
+            cache = SQLiteCache(path)
+            cache.save_quotes([_quote(source="腾讯行情")])
+            with patch("app.services.datahub.get_settings", return_value=settings):
+                hub = DataHub(cache=cache)
+            hub.providers["failing"] = FailingQuoteProvider()
+            with patch.object(hub, "_priority", return_value=[(1, "failing")]):
+                return await hub.quotes(["600519.SH"], use_cache=False)
+
+        with TemporaryDirectory() as tmpdir:
+            rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("兜底缓存", rows[0].source)
+        self.assertTrue(rows[0].from_cache)
+        self.assertTrue(rows[0].fallback_used)
 
     def test_quote_with_quality_use_cache_false_fetches_live_quote_and_still_checks_consistency(self) -> None:
         class LiveProvider:
@@ -1634,7 +1796,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(tiny_calls, 1)
         self.assertEqual(backup_calls, 1)
 
-    def test_authoritative_stock_pool_miss_is_not_found(self) -> None:
+    def test_authoritative_stock_pool_miss_without_quote_confirmation_is_not_found(self) -> None:
         async def run_check(path: Path) -> str:
             hub = DataHub(cache=SQLiteCache(path))
             fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1645,7 +1807,8 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 ]
             )
             try:
-                await individual._confirmed_stock_profile(hub, "688001.SH")
+                with patch.object(hub, "quote", side_effect=RuntimeError("quote unavailable")):
+                    await individual._confirmed_stock_profile(hub, "688001.SH")
             except Exception as exc:
                 return exc.__class__.__name__
             return "ok"
@@ -1654,6 +1817,29 @@ class DataSourceReliabilityTests(unittest.TestCase):
             error_name = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
         self.assertEqual(error_name, NotFoundError.__name__)
+
+    def test_authoritative_stock_pool_miss_can_be_confirmed_by_matching_quote(self) -> None:
+        async def run_check(path: Path) -> tuple[str | None, list[str]]:
+            hub = DataHub(cache=SQLiteCache(path))
+            fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            hub.cache.save_stock_pool(
+                [
+                    _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
+                    for index in range(1000)
+                ]
+            )
+            quote = _quote().model_copy(update={"code": "688001", "market": "SH", "name": "测试新股"})
+            with patch.object(hub, "quote", return_value=quote):
+                profile = await individual._confirmed_stock_profile(hub, "688001.SH")
+            with sqlite3.connect(path) as conn:
+                events = [row[0] for row in conn.execute("SELECT message FROM cache_event ORDER BY id")]
+            return profile.symbol if profile else None, events
+
+        with TemporaryDirectory() as tmpdir:
+            symbol, events = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(symbol, "688001.SH")
+        self.assertTrue(any("股票池未命中，使用行情确认股票代码：688001.SH" in message for message in events))
 
     def test_stale_stock_master_match_is_not_reported_as_missing(self) -> None:
         async def run_check(path: Path) -> tuple[list[str], str | None]:

@@ -18,6 +18,7 @@ from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.datahub import DataHub
 from app.services.market_sampling import unique_standard_symbols
+from app.repositories.alerts import AlertStateDecision
 from app.services.research import (
     build_feature_snapshot,
     build_theme_context_report,
@@ -304,6 +305,77 @@ class LocalLifecycleTests(unittest.TestCase):
         self.assertIsNone(disabled_after.last_checked_at)
         self.assertEqual(disabled_after.trigger_count, 0)
 
+    def test_alert_rule_state_compare_and_swap_blocks_duplicate_concurrent_event(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            quote = _quote()
+            snapshot = cache.create_alert_rule(
+                quote,
+                AlertRuleInput(symbol="600519", condition_type="price_above", threshold=1200.0),
+            )
+            decision = AlertStateDecision(
+                event_type="触发",
+                should_create_event=True,
+                should_update_triggered_at=True,
+                trigger_increment=1,
+            )
+
+            first = cache.update_alert_rule_state(
+                snapshot,
+                checked_at="2026-05-13 10:00:00",
+                state="触发",
+                triggered=True,
+                message="第一次并发触发",
+                quote=quote,
+                decision=decision,
+            )
+            second = cache.update_alert_rule_state(
+                snapshot,
+                checked_at="2026-05-13 10:00:00",
+                state="触发",
+                triggered=True,
+                message="第二次旧快照触发",
+                quote=quote,
+                decision=decision,
+            )
+            current = cache.alert_rule(snapshot.id)
+            events = cache.alert_events(symbol=snapshot.symbol)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        assert current is not None
+        self.assertEqual(current.trigger_count, 1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].message, "第一次并发触发")
+
+    def test_alert_rule_state_compare_and_swap_rejects_changed_threshold_snapshot(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            quote = _quote()
+            snapshot = cache.create_alert_rule(
+                quote,
+                AlertRuleInput(symbol="600519", condition_type="price_above", threshold=1200.0),
+            )
+            cache.update_alert_rule(snapshot.id, AlertRuleUpdate(threshold=1300.0))
+            stale_event = cache.update_alert_rule_state(
+                snapshot,
+                checked_at="2026-05-13 10:00:00",
+                state="触发",
+                triggered=True,
+                message="旧阈值不应触发",
+                quote=quote,
+                decision=AlertStateDecision("触发", True, True, 1),
+            )
+            current = cache.alert_rule(snapshot.id)
+            events = cache.alert_events(symbol=snapshot.symbol)
+
+        self.assertIsNone(stale_event)
+        assert current is not None
+        self.assertEqual(current.threshold, 1300.0)
+        self.assertEqual(current.last_state, "等待")
+        self.assertEqual(current.trigger_count, 0)
+        self.assertEqual(events, [])
+
     def test_stock_note_can_toggle_visibility_and_clear_anchor(self) -> None:
         with TemporaryDirectory() as tmpdir:
             cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
@@ -386,6 +458,43 @@ class LocalLifecycleTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "笔记价格必须是有效数字"):
                 cache.update_stock_note(created.id, StockNoteUpdate.model_construct(price=math.inf))
+
+    def test_dirty_legacy_stock_note_row_remains_displayable(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            cache = SQLiteCache(path)
+            created = cache.create_stock_note(_quote(), StockNoteInput(symbol="600519", content="观察", price=1288.0))
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    """
+                    UPDATE stock_note
+                    SET name = '', note_type = '', content = '', price = 'bad', visible = 'bad',
+                        trade_date = '  ', color = '  ', created_at = '', updated_at = ''
+                    WHERE id = ?
+                    """,
+                    (created.id,),
+                )
+
+            notes = cache.stock_notes("600519", limit=5)
+
+        self.assertEqual(len(notes), 1)
+        note = notes[0]
+        self.assertEqual(note.name, "未知股票")
+        self.assertEqual(note.note_type, "观察")
+        self.assertEqual(note.content, "历史笔记字段异常，已使用兜底展示。")
+        self.assertIsNone(note.price)
+        self.assertIsNone(note.trade_date)
+        self.assertIsNone(note.color)
+        self.assertFalse(note.visible)
+        self.assertEqual(note.created_at, "")
+        self.assertEqual(note.updated_at, "")
+
+    def test_runtime_event_log_write_failure_is_best_effort(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            cache.runtime_event_repo = _FailingRuntimeEventRepo()  # type: ignore[assignment]
+
+            cache.log_event("fallback", "事件库暂不可写")
 
     def test_legacy_invalid_stock_note_trade_date_does_not_align_to_kline(self) -> None:
         marks = _note_marks(
@@ -1031,6 +1140,9 @@ class WorkbenchCacheTests(unittest.TestCase):
             analysis = __import__("asyncio").run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
         self.assertGreaterEqual(len(analysis.peer_quotes), 5)
+        self.assertEqual(analysis.peer_sample.status, "available")
+        self.assertEqual(analysis.peer_sample.requested_count, len(analysis.peer_quotes))
+        self.assertIsNone(analysis.peer_sample.warning)
 
     def test_analyze_individual_stock_degrades_when_plate_rank_fails(self) -> None:
         async def run_check(path: Path):
@@ -1069,6 +1181,140 @@ class WorkbenchCacheTests(unittest.TestCase):
 
         self.assertIsNone(analysis.industry_context)
         self.assertIn(("fallback", "个股行业背景暂不可用：600519.SH；板块源不可用"), events)
+
+    def test_analyze_individual_stock_degrades_when_quality_check_is_slow(self) -> None:
+        async def slow_quality(*args, **kwargs):
+            await asyncio.sleep(1)
+            return build_data_quality(_quote(), [_kline() for _ in range(40)])
+
+        async def run_check(path: Path):
+            hub = DataHub(cache=SQLiteCache(path))
+            hub.settings.workbench_optional_timeout_seconds = 0.01
+            events: list[tuple[str, str]] = []
+            with patch.object(hub, "quote", return_value=_quote()), patch.object(
+                hub,
+                "stock_profile",
+                return_value=_stock_info(code="600519", market="SH"),
+            ), patch.object(
+                hub,
+                "stock_pool",
+                return_value=[],
+            ), patch.object(
+                hub,
+                "kline",
+                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
+            ), patch.object(
+                hub,
+                "plate_rank",
+                return_value=[],
+            ), patch.object(
+                hub,
+                "assess_quote_quality",
+                side_effect=slow_quality,
+            ), patch.object(
+                hub.cache,
+                "log_event",
+                side_effect=lambda category, message: events.append((category, message)),
+            ):
+                analysis = await individual.analyze_individual_stock(hub, "600519", persist_history=False)
+            return analysis, events
+
+        with TemporaryDirectory() as tmpdir:
+            analysis, events = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(analysis.data_quality.consistency_level, "未校验")
+        self.assertTrue(any("数据质量校验暂不可用：600519.SH；TimeoutError" in note for note in analysis.data_quality.notes))
+        self.assertIn(("fallback", "数据质量校验暂不可用：600519.SH；TimeoutError"), events)
+
+    def test_analyze_individual_stock_degrades_when_quote_history_read_fails(self) -> None:
+        async def run_check(path: Path):
+            hub = DataHub(cache=SQLiteCache(path))
+            events: list[tuple[str, str]] = []
+            with patch.object(hub, "quote", return_value=_quote()), patch.object(
+                hub,
+                "stock_profile",
+                return_value=_stock_info(code="600519", market="SH"),
+            ), patch.object(
+                hub,
+                "stock_pool",
+                return_value=[],
+            ), patch.object(
+                hub,
+                "kline",
+                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
+            ), patch.object(
+                hub,
+                "plate_rank",
+                return_value=[],
+            ), patch.object(
+                hub,
+                "assess_quote_quality",
+                return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
+            ), patch.object(
+                hub.cache,
+                "quote_history",
+                side_effect=sqlite3.DatabaseError("quote history readonly"),
+            ), patch.object(
+                hub.cache,
+                "log_event",
+                side_effect=lambda category, message: events.append((category, message)),
+            ):
+                analysis = await individual.analyze_individual_stock(hub, "600519", persist_history=False)
+            return analysis, events
+
+        with TemporaryDirectory() as tmpdir:
+            analysis, events = __import__("asyncio").run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(analysis.quote_history, [])
+        self.assertIn(("fallback", "个股历史报价暂不可用：600519.SH；quote history readonly"), events)
+
+    def test_analyze_individual_stock_degrades_when_advice_snapshot_write_fails(self) -> None:
+        async def run_check(path: Path):
+            hub = DataHub(cache=SQLiteCache(path))
+            events: list[tuple[str, str]] = []
+            with patch.object(hub, "quote", return_value=_quote()), patch.object(
+                hub,
+                "stock_profile",
+                return_value=_stock_info(code="600519", market="SH"),
+            ), patch.object(
+                hub,
+                "stock_pool",
+                return_value=[],
+            ), patch.object(
+                hub,
+                "kline",
+                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
+            ), patch.object(
+                hub,
+                "plate_rank",
+                return_value=[],
+            ), patch.object(
+                hub,
+                "assess_quote_quality",
+                return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
+            ), patch.object(
+                hub.cache,
+                "save_advice_snapshot",
+                side_effect=sqlite3.DatabaseError("advice readonly"),
+            ), patch.object(
+                hub.cache,
+                "log_event",
+                side_effect=lambda category, message: events.append((category, message)),
+            ):
+                analysis = await individual.analyze_individual_stock(hub, "600519", persist_history=True)
+            return analysis, events
+
+        with TemporaryDirectory() as tmpdir:
+            analysis, events = __import__("asyncio").run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(analysis.quote.code, "600519")
+        self.assertIn(("fallback", "分析建议快照暂不可写：600519.SH；advice readonly"), events)
+
+
+class _FailingRuntimeEventRepo:
+    def log_event(self, category: str, message: str) -> None:
+        raise sqlite3.DatabaseError("event log readonly")
+
 
 class ReplayConfidenceTests(unittest.TestCase):
     def test_replay_pattern_note_warns_when_sample_is_small(self) -> None:

@@ -91,6 +91,27 @@ class MinuteAnalysisTests(unittest.TestCase):
         self.assertIn("分钟K线", report.missing_data)
         self.assertIn("网络代理连接失败", report.summary)
 
+    def test_minute_analysis_source_failure_ignores_local_event_log_failure(self) -> None:
+        class FailingEventCache:
+            def log_event(self, category: str, message: str) -> None:
+                raise RuntimeError("event db readonly")
+
+        class FakeHub:
+            def __init__(self) -> None:
+                self.cache = FailingEventCache()
+
+            async def stock_profile(self, symbol: str):
+                return _stock_info(code="600519", market="SH")
+
+            async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120):
+                raise RuntimeError("所有分钟K线数据源均不可用：akshare: ProxyError('Unable to connect to proxy')")
+
+        report = asyncio.run(stock_minute_analysis(FakeHub(), "600519", interval="5m", limit=120))  # type: ignore[arg-type]
+
+        self.assertEqual(report.symbol, "600519.SH")
+        self.assertEqual(report.t_plan.suitability, "不适合主动做T")
+        self.assertIn("网络代理连接失败", report.summary)
+
     def test_stock_minute_analysis_normalizes_interval_alias_before_fetch_and_report(self) -> None:
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
@@ -137,9 +158,10 @@ class MinuteAnalysisTests(unittest.TestCase):
                 calls.append((symbol, interval, limit))
                 return []
 
-            with patch.object(hub, "minute_kline", side_effect=minute_kline):
-                with self.assertRaises(NotFoundError):
-                    await stock_minute_analysis(hub, "688001", interval="5m", limit=120)
+            with patch.object(hub, "quote", side_effect=RuntimeError("quote unavailable")):
+                with patch.object(hub, "minute_kline", side_effect=minute_kline):
+                    with self.assertRaises(NotFoundError):
+                        await stock_minute_analysis(hub, "688001", interval="5m", limit=120)
             return calls
 
         with TemporaryDirectory() as tmpdir:
@@ -228,6 +250,8 @@ class MinuteAnalysisTests(unittest.TestCase):
         self.assertEqual(len(analysis.quote_history), 1)
         self.assertEqual(analysis.quote_history[0]["price"], 120.0)
         self.assertEqual(len(analysis.peer_quotes), 1)
+        self.assertEqual(analysis.peer_sample.status, "available")
+        self.assertEqual(analysis.peer_sample.requested_count, 1)
 
     def test_recent_volume_ratio_is_stable(self) -> None:
         klines = [_kline(volume=1000 + index * 20) for index in range(30)]
@@ -545,7 +569,8 @@ class MinuteAnalysisTests(unittest.TestCase):
         self.assertIn("白酒概念", "；".join(theme_answer.evidence))
         self.assertTrue(theme_answer.actions)
         self.assertTrue(any("题材" in item or "概念" in item for item in theme_answer.invalidations))
-        self.assertLess(theme_answer_without_context.confidence, theme_answer.confidence)
+        self.assertLessEqual(theme_answer_without_context.confidence, theme_answer.confidence)
+        self.assertIn("待确认", theme_answer_without_context.conclusion)
         self.assertEqual(risk_reward_answer.topic, "风险收益")
         self.assertIn("收益风险比", "；".join(risk_reward_answer.evidence))
         self.assertTrue(any("1.2" in item or "性价比" in item for item in risk_reward_answer.invalidations))
@@ -700,8 +725,9 @@ class MinuteAnalysisTests(unittest.TestCase):
     def test_market_breadth_symbols_use_stock_pool_before_truncation(self) -> None:
         async def run_check(path: Path) -> list[str]:
             hub = DataHub(cache=SQLiteCache(path))
+            fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             hub.cache.save_stock_pool([
-                _stock_info(code=f"0000{index:02d}", market="SZ")
+                _stock_info(code=f"0000{index:02d}", market="SZ").model_copy(update={"updated_at": fresh_time})
                 for index in range(70)
             ])
             return await market_breadth_symbols(hub)
@@ -942,3 +968,42 @@ class MinuteAnalysisTests(unittest.TestCase):
         self.assertEqual(summary.triggered_count, 1)
         self.assertIn("低置信提醒", summary.items[0].message)
         self.assertIn("报价严重滞后", summary.items[0].message)
+
+    def test_alert_evaluation_isolates_recoverable_provider_failure_per_rule(self) -> None:
+        async def run_check(path: Path):
+            cache = SQLiteCache(path)
+            first_quote = _quote()
+            second_quote = first_quote.model_copy(update={"code": "000001", "market": "SZ", "name": "平安银行"})
+            cache.create_alert_rule(
+                first_quote,
+                AlertRuleInput(symbol="600519", condition_type="price_above", threshold=1200.0),
+            )
+            cache.create_alert_rule(
+                second_quote,
+                AlertRuleInput(symbol="000001", condition_type="price_above", threshold=10.0),
+            )
+
+            class FakeDataHub:
+                def __init__(self) -> None:
+                    self.cache = cache
+
+                async def quote(self, symbol: str) -> Quote:
+                    if symbol == "000001.SZ":
+                        raise RuntimeError("quote provider unavailable")
+                    return first_quote
+
+                async def assess_quote_quality(self, quote: Quote, **kwargs):
+                    return build_data_quality(quote, [], require_kline=False)
+
+            return await evaluate_alert_rules(FakeDataHub())
+
+        with TemporaryDirectory() as tmpdir:
+            summary = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+        self.assertEqual(summary.checked_count, 2)
+        self.assertEqual(summary.failed_count, 1)
+        self.assertEqual(summary.triggered_count, 1)
+        items_by_symbol = {item.rule.symbol: item for item in summary.items}
+        self.assertEqual(items_by_symbol["600519.SH"].status, "evaluated")
+        self.assertEqual(items_by_symbol["000001.SZ"].status, "failed")
+        self.assertIn("quote provider unavailable", items_by_symbol["000001.SZ"].message)

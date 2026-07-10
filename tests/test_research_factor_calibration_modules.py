@@ -11,17 +11,25 @@ from app.services.research_factor_calibration import (
     _calibration_buckets,
     _calibration_confidence_level,
     _calibration_expected_level,
+    _factor_percentile,
 )
 from app.services.research_factor_specs import FactorSpec
 from tests.factories import make_kline
 
 
 def test_calibrate_factor_returns_insufficient_sample_before_minimum_rows() -> None:
-    calibration = _calibrate_factor(_rows([100 + index for index in range(34)]), _spec(), 60)
+    calibration = _calibrate_factor(_rows([100 + index for index in range(35)]), _spec(), 60)
 
     assert calibration.sample_count == 0
     assert calibration.confidence_level == "样本不足"
-    assert calibration.note == "少于35根日K，暂不能形成稳定历史校准。"
+    assert calibration.note == "少于36根日K，暂不能形成历史校准样本。"
+
+
+def test_calibrate_factor_scans_first_valid_sample_at_36_rows() -> None:
+    calibration = _calibrate_factor(_rows([100 + index for index in range(36)]), _spec(), 60)
+
+    assert calibration.sample_count == 1
+    assert calibration.confidence_level == "偏低"
 
 
 def test_calibrate_factor_returns_no_similar_sample_when_trigger_never_matches() -> None:
@@ -98,6 +106,19 @@ def test_calibration_buckets_builds_named_scene_summaries() -> None:
     assert buckets[0].name == "强趋势"
     assert buckets[0].sample_count > 0
     assert all(bucket.name in {"强趋势", "弱趋势", "支撑附近", "压力附近"} for bucket in buckets)
+
+
+def test_factor_percentile_skips_non_numeric_and_failed_evaluator_values() -> None:
+    def evaluator(_rows, index: int):
+        if index == 20:
+            return None
+        if index == 21:
+            return float("inf")
+        if index == 22:
+            raise ValueError("missing factor input")
+        return index
+
+    assert _factor_percentile(_rows([100 + index for index in range(40)]), evaluator, 30) == 50.0
 
 
 def _spec(*, trigger=None) -> FactorSpec:

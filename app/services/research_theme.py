@@ -17,6 +17,7 @@ class ThemeStats:
     strongest: StockConceptItem | None
     relative_to_industry: float | None
     relative_to_concepts: float | None
+    concept_error: str | None
 
 
 ThemeTextRule = Callable[[AnalysisResult, FeatureSnapshot, ThemeStats], str | None]
@@ -37,8 +38,10 @@ def build_theme_context_report(
     analysis: AnalysisResult,
     feature: FeatureSnapshot,
     concepts: list[StockConceptItem] | None = None,
+    *,
+    concept_error: str | None = None,
 ) -> ThemeContextReport:
-    stats = _theme_stats(analysis, concepts or [])
+    stats = _theme_stats(analysis, concepts or [], concept_error)
     symbol = f"{analysis.quote.code}.{analysis.quote.market}"
     score = _theme_score(feature, stats)
     level = _theme_level(score, stats.industry_change, stats.concept_avg)
@@ -67,7 +70,11 @@ def build_theme_context_report(
     )
 
 
-def _theme_stats(analysis: AnalysisResult, concepts: list[StockConceptItem]) -> ThemeStats:
+def _theme_stats(
+    analysis: AnalysisResult,
+    concepts: list[StockConceptItem],
+    concept_error: str | None,
+) -> ThemeStats:
     unique_concepts = _unique_concepts(concepts)
     industry = _industry_name(analysis)
     industry_change = _finite_or_none(getattr(analysis.industry_context, "change_pct", None)) if analysis.industry_context else None
@@ -82,6 +89,7 @@ def _theme_stats(analysis: AnalysisResult, concepts: list[StockConceptItem]) -> 
         strongest=strongest,
         relative_to_industry=stock_change - industry_change if industry_change is not None else None,
         relative_to_concepts=stock_change - concept_avg if concept_avg is not None else None,
+        concept_error=_clean_text(concept_error) or None,
     )
 
 
@@ -215,6 +223,8 @@ def _theme_summary(
     if stats.concept_avg is not None:
         concept_text = f"，最强概念为「{stats.strongest.name}」{stats.strongest.change_pct:.2f}%" if stats.strongest else ""
         parts.append(f"概念平均涨跌幅 {stats.concept_avg:.2f}%{concept_text}。")
+    elif stats.concept_error:
+        parts.append("概念归属数据源暂不可用，概念均值未纳入本次判断。")
     if level in POSITIVE_THEME_LEVELS:
         parts.append("结论上可以提高趋势信号的解释权重，但买卖点仍要服从个股价位和风控。")
     elif level == "主题逆风":
@@ -261,6 +271,12 @@ def _theme_concept_average_evidence(_: AnalysisResult, __: FeatureSnapshot, stat
     return f"概念平均涨跌幅 {stats.concept_avg:.2f}%，用于判断主题是否配合个股走势。"
 
 
+def _theme_concept_source_evidence(_: AnalysisResult, __: FeatureSnapshot, stats: ThemeStats) -> str | None:
+    if stats.concepts or not stats.concept_error:
+        return None
+    return "概念归属数据源暂不可用，本次未使用概念均值作主题强弱判断。"
+
+
 def _theme_relative_industry_evidence(_: AnalysisResult, __: FeatureSnapshot, stats: ThemeStats) -> str | None:
     if stats.relative_to_industry is None:
         return None
@@ -278,6 +294,7 @@ THEME_EVIDENCE_RULES: tuple[ThemeTextRule, ...] = (
     _theme_industry_evidence,
     _theme_concepts_evidence,
     _theme_concept_average_evidence,
+    _theme_concept_source_evidence,
     _theme_relative_industry_evidence,
     _theme_relative_concepts_evidence,
 )
@@ -349,6 +366,8 @@ def _risk_low_leadership(_: AnalysisResult, feature: FeatureSnapshot, stats: The
 
 
 def _risk_missing_concepts(_: AnalysisResult, __: FeatureSnapshot, stats: ThemeStats) -> str | None:
+    if stats.concept_error:
+        return "概念归属数据源暂不可用，主题判断只能按行业和个股走势保守解释。"
     return "概念成分暂未确认，主题判断只能按行业和个股走势保守解释。" if not stats.concepts else None
 
 
@@ -369,7 +388,9 @@ def _theme_missing_data(feature: FeatureSnapshot, stats: ThemeStats) -> list[str
     missing_data = []
     if stats.industry == UNKNOWN_INDUSTRY or stats.industry_change is None:
         missing_data.append(MISSING_INDUSTRY_STRENGTH)
-    if not stats.concepts:
+    if stats.concept_error:
+        missing_data.append(f"概念归属数据源：{stats.concept_error}")
+    elif not stats.concepts:
         missing_data.append(MISSING_CONCEPT_COMPONENTS)
     if _finite_or_zero(getattr(feature, "data_quality_score", None)) < 80:
         missing_data.append(f"数据质量{_clean_text(getattr(feature, 'data_quality_level', None)) or '待确认'}")

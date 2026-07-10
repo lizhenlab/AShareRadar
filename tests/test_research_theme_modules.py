@@ -138,6 +138,23 @@ def test_theme_context_sanitizes_non_finite_industry_and_stock_change_text() -> 
     assert "nan" not in report_text.lower()
 
 
+def test_theme_context_marks_concept_source_error_separately_from_empty_components() -> None:
+    analysis, feature = _theme_inputs(industry_context=make_plate_item(change_pct=0.5))
+
+    report = build_theme_context_report(
+        analysis,
+        feature,
+        [],
+        concept_error="概念归属不可用：600706.SH；akshare: concept down",
+    )
+    report_text = " ".join([report.summary, *report.evidence, *report.risks, *report.missing_data])
+
+    assert report.concepts == []
+    assert "概念归属成分" not in report.missing_data
+    assert "概念归属数据源：概念归属不可用：600706.SH；akshare: concept down" in report.missing_data
+    assert "概念归属数据源暂不可用" in report_text
+
+
 def _theme_inputs(
     *,
     quote=None,

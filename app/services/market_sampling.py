@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.models.schemas import Quote, StockInfo
-from app.utils.symbols import standard_symbol
+from app.utils.symbols import standard_symbol_list
 
 
 MARKET_BREADTH_LIMIT = 60
@@ -30,22 +30,89 @@ class MarketSamplingQuota:
     industry_per_group: int
 
 
+@dataclass(frozen=True)
+class QuoteSampleResult:
+    requested_symbols: tuple[str, ...]
+    quotes: tuple[Quote, ...]
+    missing_symbols: tuple[str, ...]
+    fallback_batch_count: int = 0
+
+    @property
+    def requested_count(self) -> int:
+        return len(self.requested_symbols)
+
+    @property
+    def sample_count(self) -> int:
+        return len(self.quotes)
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.missing_symbols)
+
+    @property
+    def unavailable(self) -> bool:
+        return bool(self.requested_symbols) and not self.quotes
+
+
+@dataclass(frozen=True)
+class MarketBreadthSymbolResult:
+    symbols: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MarketBreadthQuoteResult:
+    quote_sample: QuoteSampleResult
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def quotes(self) -> tuple[Quote, ...]:
+        return self.quote_sample.quotes
+
+
+@dataclass(frozen=True)
+class PeerQuoteSampleResult:
+    quotes: tuple[Quote, ...] = ()
+    status: str = "not_requested"
+    requested_count: int = 0
+    missing_count: int = 0
+    warning: str | None = None
+
+
 async def market_breadth_quotes(datahub) -> list[Quote]:
-    symbols = await market_breadth_symbols(datahub)
-    if not symbols:
-        return []
-    return await fetch_quotes_with_single_fallback(datahub, symbols, context="市场宽度样本")
+    return list((await market_breadth_quote_sample(datahub)).quotes)
+
+
+async def market_breadth_quote_sample(datahub) -> MarketBreadthQuoteResult:
+    symbol_sample = await _market_breadth_symbol_sample(datahub)
+    if not symbol_sample.symbols:
+        empty_sample = QuoteSampleResult(requested_symbols=(), quotes=(), missing_symbols=())
+        warnings = _dedupe_strings([*symbol_sample.warnings, "市场宽度未配置有效样本代码。"])
+        return MarketBreadthQuoteResult(quote_sample=empty_sample, warnings=tuple(warnings))
+    quote_sample = await fetch_quote_sample(datahub, symbol_sample.symbols, context="市场宽度样本")
+    warnings = list(symbol_sample.warnings)
+    if quote_sample.unavailable:
+        warnings.append("市场宽度行情样本暂不可用，环境判断已降级。")
+    elif quote_sample.degraded:
+        warnings.append(f"市场宽度行情样本部分缺失，成功 {quote_sample.sample_count}/{quote_sample.requested_count} 个。")
+    return MarketBreadthQuoteResult(quote_sample=quote_sample, warnings=tuple(_dedupe_strings(warnings)))
 
 
 async def market_breadth_symbols(datahub) -> list[str]:
-    pool = await _stock_pool_or_empty(datahub, failure_message="市场宽度股票池不可用，仅使用种子样本")
+    return list((await _market_breadth_symbol_sample(datahub)).symbols)
+
+
+async def _market_breadth_symbol_sample(datahub) -> MarketBreadthSymbolResult:
+    pool_result = await _stock_pool_sample(datahub, failure_message="市场宽度股票池不可用，仅使用种子样本")
     seed_symbols = unique_standard_symbols(datahub.settings.seed_symbols)
     pool_symbols = stratified_market_breadth_symbols(
-        pool,
+        list(pool_result.rows),
         max(0, MARKET_BREADTH_LIMIT - len(seed_symbols)),
         seed_symbols,
     )
-    return list(dict.fromkeys([*seed_symbols, *pool_symbols]))[:MARKET_BREADTH_LIMIT]
+    symbols = list(dict.fromkeys([*seed_symbols, *pool_symbols]))[:MARKET_BREADTH_LIMIT]
+    warnings = ("市场宽度股票池暂不可用，当前仅使用默认观察样本。",) if pool_result.unavailable else ()
+    return MarketBreadthSymbolResult(symbols=tuple(symbols), warnings=warnings)
 
 
 def stratified_market_breadth_symbols(
@@ -180,14 +247,42 @@ def dedupe_quotes(quotes: Iterable[Quote]) -> list[Quote]:
 
 
 async def peer_quotes(datahub, profile: StockInfo | None, target_symbol: str) -> list[Quote]:
+    return list((await peer_quote_sample(datahub, profile, target_symbol)).quotes)
+
+
+async def peer_quote_sample(datahub, profile: StockInfo | None, target_symbol: str) -> PeerQuoteSampleResult:
     industry = _clean_sample_text(getattr(profile, "industry", None)) if profile else None
     if not profile or not industry:
-        return []
-    pool = await _stock_pool_or_empty(datahub, failure_message=f"{industry}同行股票池不可用，同行样本为空")
-    selected = peer_symbols(pool, profile, target_symbol, PEER_QUOTE_LIMIT)
+        return PeerQuoteSampleResult(
+            status="not_applicable",
+            warning="行业归属待确认，暂无法建立同行样本。",
+        )
+    pool_result = await _stock_pool_sample(datahub, failure_message=f"{industry}同行股票池不可用，同行样本为空")
+    if pool_result.unavailable:
+        return PeerQuoteSampleResult(
+            status="unavailable",
+            warning=f"{industry}同行股票池暂不可用。",
+        )
+    selected = peer_symbols(list(pool_result.rows), profile, target_symbol, PEER_QUOTE_LIMIT)
     if not selected:
-        return []
-    return await fetch_quotes_with_single_fallback(datahub, selected, context=f"{industry}同行样本")
+        return PeerQuoteSampleResult(status="insufficient")
+    quote_sample = await fetch_quote_sample(datahub, selected, context=f"{industry}同行样本")
+    if quote_sample.unavailable:
+        status = "unavailable"
+        warning = f"{industry}同行行情样本暂不可用。"
+    elif quote_sample.degraded:
+        status = "degraded"
+        warning = f"{industry}同行行情样本部分缺失，成功 {quote_sample.sample_count}/{quote_sample.requested_count} 个。"
+    else:
+        status = "available"
+        warning = None
+    return PeerQuoteSampleResult(
+        quotes=quote_sample.quotes,
+        status=status,
+        requested_count=quote_sample.requested_count,
+        missing_count=len(quote_sample.missing_symbols),
+        warning=warning,
+    )
 
 
 def peer_symbols(pool: list[StockInfo], profile: StockInfo | None, target_symbol: str, limit: int = PEER_QUOTE_LIMIT) -> list[str]:
@@ -215,6 +310,22 @@ async def fetch_quotes_with_single_fallback(
     batch_size: int = MARKET_BREADTH_BATCH_SIZE,
     context: str = "行情样本",
 ) -> list[Quote]:
+    result = await fetch_quote_sample(
+        datahub,
+        symbols,
+        batch_size=batch_size,
+        context=context,
+    )
+    return list(result.quotes)
+
+
+async def fetch_quote_sample(
+    datahub,
+    symbols: Iterable[str],
+    *,
+    batch_size: int = MARKET_BREADTH_BATCH_SIZE,
+    context: str = "行情样本",
+) -> QuoteSampleResult:
     raw_symbols = list(symbols)
     normalized_symbols = unique_standard_symbols(raw_symbols)
     if len(normalized_symbols) < len(raw_symbols):
@@ -225,29 +336,35 @@ async def fetch_quotes_with_single_fallback(
         )
     batch_size = max(1, batch_size)
     if not normalized_symbols:
-        return []
+        return QuoteSampleResult(requested_symbols=(), quotes=(), missing_symbols=())
     quotes: list[Quote] = []
-    failed_symbols: list[str] = []
-    batch_failures = 0
+    fallback_batches = 0
     for batch in _symbol_batches(normalized_symbols, batch_size):
         batch_result = await _fetch_quote_batch_with_fallback(datahub, batch, context)
         quotes.extend(batch_result.quotes)
-        failed_symbols.extend(batch_result.failed_symbols)
-        batch_failures += int(batch_result.batch_failed)
-    if failed_symbols:
+        fallback_batches += int(batch_result.fallback_used)
+    ordered_quotes = _requested_quotes_in_order(quotes, normalized_symbols)
+    returned_symbols = {_quote_symbol_or_none(quote) for quote in ordered_quotes}
+    missing_symbols = [symbol for symbol in normalized_symbols if symbol not in returned_symbols]
+    if missing_symbols:
         _log_sampling_event(
             datahub,
             "fallback",
-            f"{context}最终缺失 {len(failed_symbols)} / {len(normalized_symbols)} 个样本，批量失败 {batch_failures} 批。",
+            f"{context}最终缺失 {len(missing_symbols)} / {len(normalized_symbols)} 个样本，触发逐只回退 {fallback_batches} 批。",
         )
-    return _requested_quotes_in_order(quotes, normalized_symbols)
+    return QuoteSampleResult(
+        requested_symbols=tuple(normalized_symbols),
+        quotes=tuple(ordered_quotes),
+        missing_symbols=tuple(missing_symbols),
+        fallback_batch_count=fallback_batches,
+    )
 
 
 @dataclass(frozen=True)
 class QuoteBatchResult:
     quotes: list[Quote]
     failed_symbols: list[str]
-    batch_failed: bool
+    fallback_used: bool
 
 
 def _symbol_batches(symbols: list[str], batch_size: int) -> list[list[str]]:
@@ -259,7 +376,7 @@ async def _fetch_quote_batch_with_fallback(datahub, batch: list[str], context: s
     if exc is None:
         matched_quotes, missing_symbols = _match_requested_quotes(quotes, batch)
         if not missing_symbols:
-            return QuoteBatchResult(quotes=matched_quotes, failed_symbols=[], batch_failed=False)
+            return QuoteBatchResult(quotes=matched_quotes, failed_symbols=[], fallback_used=False)
         _log_sampling_event(
             datahub,
             "fallback",
@@ -269,11 +386,11 @@ async def _fetch_quote_batch_with_fallback(datahub, batch: list[str], context: s
         return QuoteBatchResult(
             quotes=[*matched_quotes, *quotes],
             failed_symbols=failed_symbols,
-            batch_failed=True,
+            fallback_used=True,
         )
     _log_sampling_event(datahub, "fallback", f"{context}批量行情失败，改为逐只重试：{_short_error(exc)}")
     quotes, failed_symbols = await _fetch_single_quotes(datahub, batch, context)
-    return QuoteBatchResult(quotes=quotes, failed_symbols=failed_symbols, batch_failed=True)
+    return QuoteBatchResult(quotes=quotes, failed_symbols=failed_symbols, fallback_used=True)
 
 
 async def _fetch_single_quotes(datahub, symbols: list[str], context: str) -> tuple[list[Quote], list[str]]:
@@ -295,27 +412,28 @@ async def _fetch_single_quotes(datahub, symbols: list[str], context: str) -> tup
 
 
 def unique_standard_symbols(symbols: Iterable[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for symbol in symbols:
-        normalized = _standard_symbol_or_none(symbol)
-        if not normalized:
-            continue
-        if normalized not in seen:
-            seen.add(normalized)
-            result.append(normalized)
-    return result
+    return standard_symbol_list(symbols, skip_invalid=True).symbols
 
 
 async def _stock_pool_or_empty(datahub, *, failure_message: str) -> list[StockInfo]:
+    return list((await _stock_pool_sample(datahub, failure_message=failure_message)).rows)
+
+
+@dataclass(frozen=True)
+class StockPoolSampleResult:
+    rows: tuple[StockInfo, ...]
+    unavailable: bool = False
+
+
+async def _stock_pool_sample(datahub, *, failure_message: str) -> StockPoolSampleResult:
     # DataHub folds provider/cache failures into heterogeneous Exception subclasses.
     try:
-        return await datahub.stock_pool(limit=1200, refresh=False)
+        return StockPoolSampleResult(rows=tuple(await datahub.stock_pool(limit=1200, refresh=False)))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         _log_sampling_event(datahub, "fallback", f"{failure_message}：{_short_error(exc)}")
-        return []
+        return StockPoolSampleResult(rows=(), unavailable=True)
 
 
 async def _quotes_or_error(datahub, symbols: list[str]) -> tuple[list[Quote], Exception | None]:
@@ -357,12 +475,8 @@ def _quote_symbol_or_none(quote: Quote) -> str | None:
 
 
 def _standard_symbol_or_none(symbol: object) -> str | None:
-    if not isinstance(symbol, str):
-        return None
-    try:
-        return standard_symbol(symbol)
-    except ValueError:
-        return None
+    result = standard_symbol_list([symbol], skip_invalid=True)
+    return result.symbols[0] if result.symbols else None
 
 
 def _stock_code_or_none(value: object) -> str | None:
@@ -391,7 +505,10 @@ def _log_sampling_event(datahub, category: str, message: str) -> None:
     cache = getattr(datahub, "cache", None)
     log_event = getattr(cache, "log_event", None)
     if callable(log_event):
-        log_event(category, message)
+        try:
+            log_event(category, message)
+        except Exception:
+            pass
 
 
 def _short_error(exc: Exception) -> str:
@@ -408,15 +525,22 @@ def _format_symbols(symbols: list[str], limit: int = 5) -> str:
 __all__ = [
     "MARKET_BREADTH_BATCH_SIZE",
     "MARKET_BREADTH_LIMIT",
+    "MarketBreadthQuoteResult",
+    "MarketBreadthSymbolResult",
     "PEER_QUOTE_LIMIT",
+    "PeerQuoteSampleResult",
+    "QuoteSampleResult",
     "STRONG_STOCK_SAMPLE_LIMIT",
     "dedupe_quotes",
     "even_sample",
     "fetch_quotes_with_single_fallback",
+    "fetch_quote_sample",
     "industry_symbol_groups",
     "market_breadth_quotes",
+    "market_breadth_quote_sample",
     "market_breadth_symbols",
     "peer_quotes",
+    "peer_quote_sample",
     "stratified_market_breadth_symbols",
     "unique_standard_symbols",
 ]

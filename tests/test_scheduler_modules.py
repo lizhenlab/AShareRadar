@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -96,6 +97,26 @@ def test_run_once_and_status_use_task_spec_order() -> None:
         "evaluate_alerts",
         "zz_custom",
     ]
+
+
+def test_alert_scheduler_marks_all_rule_failures_as_task_failure() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    summary = SimpleNamespace(
+        checked_count=2,
+        triggered_count=0,
+        new_event_count=0,
+        failed_count=2,
+    )
+
+    with patch("app.services.alerts.evaluate_alert_rules", return_value=summary):
+        with pytest.raises(RuntimeError, match="失败 2 条"):
+            asyncio.run(scheduler._evaluate_alerts())
+
+    assert scheduler.datahub.cache.monitor_events[-1] == (
+        "warning",
+        "alert",
+        "已评估 2 条本地预警，当前触发 0 条，新增事件 0 条，失败 2 条",
+    )
 
 
 def test_task_state_serializes_local_task_runtime_fields() -> None:
@@ -205,6 +226,34 @@ def test_automatic_task_failure_uses_exception_class_for_blank_message() -> None
     assert scheduler.datahub.cache.finished_runs == [("failed", "RuntimeError")]
 
 
+def test_cancelled_task_finishes_persisted_run_and_clears_running_state() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    started = asyncio.Event()
+
+    async def blocking_handler() -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    task = LocalTask("slow_task", "慢任务", 20, blocking_handler, datetime.now())
+
+    async def run_check() -> None:
+        execution = asyncio.create_task(scheduler._execute(task))
+        await started.wait()
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+    asyncio.run(run_check())
+
+    assert task.running is False
+    assert task.last_status == "cancelled"
+    assert task.last_message == "慢任务 已取消"
+    assert task.last_finished_at is not None
+    assert scheduler.datahub.cache.finished_runs == [("cancelled", "慢任务 已取消")]
+    assert scheduler.datahub.cache.monitor_events[-1] == ("warning", "task", "慢任务 已取消")
+
+
 def test_refresh_watch_quotes_normalizes_dedupes_and_skips_invalid_symbols() -> None:
     hub = _SchedulerHub(kline_symbols=["600519", "600519.SH", "bad", " ", "SZ000001"])
     scheduler = LocalDataScheduler(hub)
@@ -214,6 +263,59 @@ def test_refresh_watch_quotes_normalizes_dedupes_and_skips_invalid_symbols() -> 
     assert hub.quote_calls == [["600519.SH", "000001.SZ"]]
     assert message == "已刷新 2 只观察个股报价"
     assert ("warning", "quote", "观察池报价刷新剔除 3 个重复或无效股票代码") in hub.cache.monitor_events
+
+
+def test_refresh_watch_quotes_reports_fallback_cache_as_warning() -> None:
+    hub = _SchedulerHub(quote_fallback_symbols={"600519.SH"}, kline_symbols=["600519.SH", "000001.SZ"])
+    scheduler = LocalDataScheduler(hub)
+
+    message = asyncio.run(scheduler._refresh_watch_quotes())
+
+    assert hub.quote_calls == [["600519.SH", "000001.SZ"]]
+    assert message == "已刷新 1 只观察个股报价，兜底缓存 1 只：600519.SH"
+    assert hub.cache.monitor_events[-1] == ("warning", "quote", message)
+
+
+def test_refresh_watch_quotes_reports_partial_provider_coverage() -> None:
+    hub = _SchedulerHub(
+        kline_symbols=["600519.SH", "000001.SZ"],
+        quote_return_symbols=["600519.SH"],
+    )
+    scheduler = LocalDataScheduler(hub)
+
+    message = asyncio.run(scheduler._refresh_watch_quotes())
+
+    assert message == "已刷新 1 只观察个股报价，缺失 1 只：000001.SZ"
+    assert hub.cache.monitor_events[-1] == ("warning", "quote", message)
+
+
+def test_refresh_watch_quotes_ignores_duplicate_and_unrequested_rows() -> None:
+    hub = _SchedulerHub(
+        kline_symbols=["600519.SH", "000001.SZ"],
+        quote_return_symbols=["600519.SH", "600519.SH", "300750.SZ"],
+    )
+    scheduler = LocalDataScheduler(hub)
+
+    message = asyncio.run(scheduler._refresh_watch_quotes())
+
+    assert message == "已刷新 1 只观察个股报价，缺失 1 只：000001.SZ"
+
+
+def test_refresh_watch_quotes_raises_when_all_requested_rows_are_missing() -> None:
+    hub = _SchedulerHub(
+        kline_symbols=["600519.SH", "000001.SZ"],
+        quote_return_symbols=[],
+    )
+    scheduler = LocalDataScheduler(hub)
+
+    with pytest.raises(RuntimeError, match="观察池报价全部缺失 2 只"):
+        asyncio.run(scheduler._refresh_watch_quotes())
+
+    assert hub.cache.monitor_events[-1] == (
+        "warning",
+        "quote",
+        "观察池报价全部缺失 2 只：600519.SH、000001.SZ",
+    )
 
 
 def test_refresh_watch_quotes_returns_skip_message_when_no_valid_symbols_exist() -> None:
@@ -236,6 +338,17 @@ def test_refresh_key_klines_continues_after_per_symbol_failure() -> None:
     assert hub.kline_calls == ["600001.SH", "600002.SH", "600003.SH"]
     assert message == "已刷新 2 只关键个股日K线，失败 1 只"
     assert ("warning", "kline", "关键个股K线刷新失败 1 只：600001.SH: kline failed") in hub.cache.monitor_events
+
+
+def test_refresh_key_klines_reports_fallback_cache_as_warning() -> None:
+    hub = _SchedulerHub(kline_fallback={"600001.SH"}, kline_symbols=["600001.SH", "600002.SH"])
+    scheduler = LocalDataScheduler(hub)
+
+    message = asyncio.run(scheduler._refresh_key_klines())
+
+    assert hub.kline_calls == ["600001.SH", "600002.SH"]
+    assert message == "已刷新 1 只关键个股日K线，兜底缓存 1 只"
+    assert hub.cache.monitor_events[-1] == ("warning", "kline", message)
 
 
 def test_refresh_key_klines_raises_when_all_symbols_fail() -> None:
@@ -338,6 +451,20 @@ def test_data_health_events_falls_back_to_provider_failures_when_capabilities_ar
     assert [event.message for event in events] == ["数据源最近存在失败：akshare"]
 
 
+def test_data_health_events_ignore_stale_provider_failures() -> None:
+    stale_at = seconds_ago_text(31 * 60)
+    events = _data_health_events(
+        _cache_stats(latest_quote_at=seconds_ago_text(1), latest_kline_at=seconds_ago_text(1)),
+        [_capability_status("tencent", "quote", healthy=False, last_error="timeout", updated_at=stale_at)],
+        [_provider_status("akshare", healthy=False, updated_at=stale_at)],
+        _settings(),
+    )
+
+    assert [(event.level, event.category, event.message) for event in events] == [
+        ("info", "health", "报价、K线、行业背景和数据源状态正常")
+    ]
+
+
 def test_data_health_events_reports_missing_quote_and_kline_cache() -> None:
     events = _data_health_events(
         _cache_stats(latest_quote_at=None, latest_kline_at=None),
@@ -348,7 +475,7 @@ def test_data_health_events_reports_missing_quote_and_kline_cache() -> None:
 
     assert [(event.category, event.message) for event in events] == [
         ("quote", "尚未形成报价缓存，请先打开页面或手动刷新"),
-        ("kline", "尚未形成K线缓存，个股趋势分析会依赖实时拉取"),
+        ("kline", "尚未形成日K缓存，个股趋势分析会依赖实时拉取"),
     ]
 
 
@@ -364,7 +491,24 @@ def test_data_health_events_reports_stale_quote_and_kline_cache() -> None:
     assert events[0].category == "quote"
     assert events[0].message.startswith("报价缓存已超过 ")
     assert events[0].message.endswith(" 秒未更新")
-    assert events[1].message == "K线缓存偏旧，建议手动触发关键个股K线刷新"
+    assert events[1].message == "日K缓存偏旧，建议手动触发关键个股K线刷新"
+
+
+def test_data_health_events_reports_stale_daily_kline_even_when_minute_kline_is_fresh() -> None:
+    events = _data_health_events(
+        _cache_stats(
+            latest_quote_at=seconds_ago_text(1),
+            latest_kline_at=seconds_ago_text(120),
+            latest_minute_kline_at=seconds_ago_text(1),
+        ),
+        [],
+        [],
+        _settings(kline_cache_seconds=30),
+    )
+
+    assert [(event.category, event.message) for event in events] == [
+        ("kline", "日K缓存偏旧，建议手动触发关键个股K线刷新")
+    ]
 
 
 def test_data_health_events_clamps_invalid_cache_thresholds() -> None:
@@ -392,7 +536,7 @@ def test_data_health_events_reports_future_cache_timestamps_as_invalid() -> None
 
     assert [(event.category, event.message) for event in events] == [
         ("quote", "报价缓存时间异常，需检查系统时间或缓存数据"),
-        ("kline", "K线缓存时间异常，需检查系统时间或缓存数据"),
+        ("kline", "日K缓存时间异常，需检查系统时间或缓存数据"),
     ]
 
 
@@ -501,8 +645,11 @@ class _SchedulerHub:
     def __init__(
         self,
         *,
+        quote_fallback_symbols: set[str] | None = None,
+        quote_return_symbols: list[str] | None = None,
         kline_empty: set[str] | None = None,
         kline_failures: set[str] | None = None,
+        kline_fallback: set[str] | None = None,
         kline_limit: int = 10,
         kline_symbols: list[str] | None = None,
         cache: _SchedulerCache | None = None,
@@ -513,14 +660,21 @@ class _SchedulerHub:
         self.settings.scheduler_kline_symbols_limit = kline_limit
         self.settings.seed_symbols = seed_symbols
         self.cache = cache or _SchedulerCache(kline_symbols)
+        self.quote_fallback_symbols = quote_fallback_symbols or set()
+        self.quote_return_symbols = quote_return_symbols
         self.kline_empty = kline_empty or set()
         self.kline_failures = kline_failures or set()
+        self.kline_fallback = kline_fallback or set()
         self.kline_calls: list[str] = []
         self.quote_calls: list[list[str]] = []
 
     async def quotes(self, symbols, use_cache: bool = True):
         self.quote_calls.append(list(symbols))
-        return [object() for _ in symbols]
+        returned_symbols = list(symbols) if self.quote_return_symbols is None else self.quote_return_symbols
+        return [
+            SimpleNamespace(code=symbol.split(".")[0], market=symbol.split(".")[1], fallback_used=symbol in self.quote_fallback_symbols)
+            for symbol in returned_symbols
+        ]
 
     async def kline(self, symbol: str, limit: int = 120, use_cache: bool = True):
         self.kline_calls.append(symbol)
@@ -528,20 +682,29 @@ class _SchedulerHub:
             raise RuntimeError("kline failed")
         if symbol in self.kline_empty:
             return []
-        return [object()]
+        return [SimpleNamespace(fallback_used=symbol in self.kline_fallback)]
 
 
-def _cache_stats(*, latest_quote_at: str | None, latest_kline_at: str | None) -> CacheStats:
+def _cache_stats(
+    *,
+    latest_quote_at: str | None,
+    latest_kline_at: str | None,
+    latest_minute_kline_at: str | None = None,
+) -> CacheStats:
     return CacheStats(
         path=":memory:",
         quote_count=1 if latest_quote_at else 0,
         quote_history_count=0,
         kline_count=1 if latest_kline_at else 0,
+        daily_kline_count=1 if latest_kline_at else 0,
+        minute_kline_count=1 if latest_minute_kline_at else 0,
         stock_count=0,
         plate_count=0,
         provider_count=0,
         latest_quote_at=latest_quote_at,
         latest_kline_at=latest_kline_at,
+        latest_daily_kline_at=latest_kline_at,
+        latest_minute_kline_at=latest_minute_kline_at,
     )
 
 
@@ -552,6 +715,7 @@ def _capability_status(
     healthy: bool,
     last_error: str | None = None,
     priority: int = 1,
+    updated_at: str | None = None,
 ) -> ProviderCapabilityStatus:
     return ProviderCapabilityStatus(
         name=name,
@@ -561,10 +725,11 @@ def _capability_status(
         healthy=healthy,
         last_error=last_error,
         failure_count=1 if last_error else 0,
+        updated_at=updated_at,
     )
 
 
-def _provider_status(name: str, *, healthy: bool) -> ProviderStatus:
+def _provider_status(name: str, *, healthy: bool, updated_at: str | None = None) -> ProviderStatus:
     return ProviderStatus(
         name=name,
         enabled=True,
@@ -572,4 +737,5 @@ def _provider_status(name: str, *, healthy: bool) -> ProviderStatus:
         healthy=healthy,
         last_error=None if healthy else "network down",
         failure_count=0 if healthy else 1,
+        updated_at=updated_at,
     )

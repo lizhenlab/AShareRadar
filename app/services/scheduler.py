@@ -14,13 +14,18 @@ from app.models.schemas import (
     SchedulerStatus,
 )
 from app.services.datahub import DataHub
-from app.utils.symbols import standard_symbol
+from app.services.provider_failure_status import (
+    capability_recently_failed as provider_capability_recently_failed,
+    provider_recently_failed,
+)
+from app.utils.symbols import standard_symbol_list
 from app.utils.time import datetime_to_text, non_negative_seconds_since_text
 
 
 TASK_STATUS_RUNNING = "running"
 TASK_STATUS_SUCCESS = "success"
 TASK_STATUS_FAILED = "failed"
+TASK_STATUS_CANCELLED = "cancelled"
 TASK_ERROR_MAX_LENGTH = 120
 KLINE_FAILURE_DETAIL_LIMIT = 3
 PROVIDER_FAILURE_DETAIL_LIMIT = 5
@@ -71,6 +76,25 @@ class HealthEvent:
 
 
 @dataclass(frozen=True)
+class KlineRefreshSummary:
+    refreshed: int
+    fallback_cache: int
+    failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class QuoteRefreshSummary:
+    requested: int
+    refreshed: int
+    fallback_symbols: tuple[str, ...]
+    missing_symbols: tuple[str, ...]
+
+    @property
+    def returned(self) -> int:
+        return self.refreshed + len(self.fallback_symbols)
+
+
+@dataclass(frozen=True)
 class CacheFreshnessRule:
     category: str
     timestamp_attr: str
@@ -86,7 +110,7 @@ def _quote_stale_message(delay_seconds: int) -> str:
 
 
 def _kline_stale_message(delay_seconds: int) -> str:
-    return "K线缓存偏旧，建议手动触发关键个股K线刷新"
+    return "日K缓存偏旧，建议手动触发关键个股K线刷新"
 
 
 _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
@@ -146,8 +170,8 @@ _KLINE_CACHE_RULE = CacheFreshnessRule(
     timestamp_attr="latest_kline_at",
     threshold_attr="kline_cache_seconds",
     threshold_multiplier=2,
-    missing_message="尚未形成K线缓存，个股趋势分析会依赖实时拉取",
-    invalid_message="K线缓存时间异常，需检查系统时间或缓存数据",
+    missing_message="尚未形成日K缓存，个股趋势分析会依赖实时拉取",
+    invalid_message="日K缓存时间异常，需检查系统时间或缓存数据",
     stale_message=_kline_stale_message,
 )
 _CACHE_FRESHNESS_RULES = (_QUOTE_CACHE_RULE, _KLINE_CACHE_RULE)
@@ -258,13 +282,17 @@ class LocalDataScheduler:
             task.last_message = message
             self.datahub.cache.finish_task_run(run_id, TASK_STATUS_SUCCESS, message)
             return message
+        except asyncio.CancelledError:
+            message = f"{task.display_name} 已取消"
+            task.last_status = TASK_STATUS_CANCELLED
+            task.last_message = message
+            _record_task_end(self.datahub.cache, run_id, TASK_STATUS_CANCELLED, message)
+            raise
         except Exception as exc:
             message = _task_error_message(exc)
             task.last_status = TASK_STATUS_FAILED
             task.last_message = message
-            if run_id is not None:
-                self.datahub.cache.finish_task_run(run_id, TASK_STATUS_FAILED, message)
-            self.datahub.cache.save_monitor_event("warning", "task", message, symbol=None)
+            _record_task_end(self.datahub.cache, run_id, TASK_STATUS_FAILED, message)
             if manual:
                 raise RuntimeError(message) from exc
             return message
@@ -285,8 +313,12 @@ class LocalDataScheduler:
             self.datahub.cache.save_monitor_event("warning", "quote", message)
             return message
         quotes = await self.datahub.quotes(symbols, use_cache=False)
-        message = f"已刷新 {len(quotes)} 只观察个股报价"
-        self.datahub.cache.save_monitor_event("info", "quote", message)
+        summary = _quote_refresh_summary(symbols, quotes)
+        message = _quote_refresh_message(summary)
+        level = "warning" if summary.fallback_symbols or summary.missing_symbols else "info"
+        self.datahub.cache.save_monitor_event(level, "quote", message)
+        if summary.returned == 0:
+            raise RuntimeError(message)
         return message
 
     async def _refresh_key_klines(self) -> str:
@@ -300,33 +332,48 @@ class LocalDataScheduler:
             message = "无有效关键个股，已跳过日K线刷新"
             self.datahub.cache.save_monitor_event("warning", "kline", message)
             return message
+        summary = await self._refresh_key_kline_symbols(symbols)
+        self._save_kline_refresh_failure_event(summary.failures)
+        if summary.failures and summary.refreshed == 0:
+            raise RuntimeError(f"关键个股日K线全部刷新失败：{_kline_failure_detail(summary.failures)}")
+        message = _kline_refresh_message(summary)
+        level = "warning" if summary.failures or summary.fallback_cache else "info"
+        self.datahub.cache.save_monitor_event(level, "kline", message)
+        return message
+
+    async def _refresh_key_kline_symbols(self, symbols: list[str]) -> KlineRefreshSummary:
         refreshed = 0
-        failures: list[str] = []
+        fallback_cache = 0
+        failures = []
         for symbol in symbols:
-            try:
-                klines = await self.datahub.kline(symbol, 120, use_cache=False)
-            except Exception as exc:
-                failures.append(f"{symbol}: {_short_task_error(exc)}")
+            failure = await self._refresh_single_key_kline(symbol)
+            if failure is None:
+                refreshed += 1
+            elif failure == "fallback-cache":
+                fallback_cache += 1
             else:
-                if klines:
-                    refreshed += 1
-                else:
-                    failures.append(f"{symbol}: 返回空K线")
+                failures.append(failure)
             await asyncio.sleep(0)
+        return KlineRefreshSummary(refreshed=refreshed, fallback_cache=fallback_cache, failures=tuple(failures))
+
+    async def _refresh_single_key_kline(self, symbol: str) -> str | None:
+        try:
+            klines = await self.datahub.kline(symbol, 120, use_cache=False)
+        except Exception as exc:
+            return f"{symbol}: {_short_task_error(exc)}"
+        if not klines:
+            return f"{symbol}: 返回空K线"
+        if _rows_used_fallback_cache(klines):
+            return "fallback-cache"
+        return None
+
+    def _save_kline_refresh_failure_event(self, failures: tuple[str, ...]) -> None:
         if failures:
-            detail = "；".join(failures[:KLINE_FAILURE_DETAIL_LIMIT])
             self.datahub.cache.save_monitor_event(
                 "warning",
                 "kline",
-                f"关键个股K线刷新失败 {len(failures)} 只：{detail}",
+                f"关键个股K线刷新失败 {len(failures)} 只：{_kline_failure_detail(failures)}",
             )
-            if refreshed == 0:
-                raise RuntimeError(f"关键个股日K线全部刷新失败：{detail}")
-        message = f"已刷新 {refreshed} 只关键个股日K线"
-        if failures:
-            message += f"，失败 {len(failures)} 只"
-        self.datahub.cache.save_monitor_event("info", "kline", message)
-        return message
 
     async def _refresh_plate_rank(self) -> str:
         rows = await self.datahub.plate_rank(limit=20, refresh=True)
@@ -356,8 +403,12 @@ class LocalDataScheduler:
             f"已评估 {summary.checked_count} 条本地预警，"
             f"当前触发 {summary.triggered_count} 条，新增事件 {summary.new_event_count} 条"
         )
-        level = "warning" if summary.triggered_count else "info"
+        if summary.failed_count:
+            message += f"，失败 {summary.failed_count} 条"
+        level = "warning" if summary.triggered_count or summary.failed_count else "info"
         self.datahub.cache.save_monitor_event(level, "alert", message)
+        if summary.checked_count and summary.failed_count == summary.checked_count:
+            raise RuntimeError(message)
         return message
 
 
@@ -445,28 +496,8 @@ def _scheduler_symbols(
 
 
 def _normalize_unique_symbols(symbols: Iterable[object]) -> tuple[list[str], int]:
-    normalized_symbols: list[str] = []
-    seen: set[str] = set()
-    skipped_count = 0
-    for raw_symbol in symbols:
-        if raw_symbol is None:
-            skipped_count += 1
-            continue
-        text = str(raw_symbol).strip()
-        if not text:
-            skipped_count += 1
-            continue
-        try:
-            symbol = standard_symbol(text)
-        except ValueError:
-            skipped_count += 1
-            continue
-        if symbol in seen:
-            skipped_count += 1
-            continue
-        seen.add(symbol)
-        normalized_symbols.append(symbol)
-    return normalized_symbols, skipped_count
+    result = standard_symbol_list(symbols, skip_invalid=True, count_duplicates_as_skipped=True)
+    return result.symbols, result.skipped_count
 
 
 def _limit_symbols(symbols: list[str], limit: int | None) -> list[str]:
@@ -483,6 +514,72 @@ def _save_symbol_skip_event(cache, category: str, context: str, skipped_count: i
             category,
             f"{context}剔除 {skipped_count} 个重复或无效股票代码",
         )
+
+
+def _kline_failure_detail(failures: tuple[str, ...]) -> str:
+    return "；".join(failures[:KLINE_FAILURE_DETAIL_LIMIT])
+
+
+def _quote_refresh_summary(symbols: list[str], quotes: Iterable[object]) -> QuoteRefreshSummary:
+    requested_symbols = tuple(dict.fromkeys(symbols))
+    requested_set = set(requested_symbols)
+    returned: dict[str, object] = {}
+    for quote in quotes:
+        symbol = _quote_symbol(quote)
+        if symbol in requested_set:
+            returned[symbol] = quote
+    fallback_symbols = tuple(symbol for symbol in requested_symbols if symbol in returned and _item_used_fallback_cache(returned[symbol]))
+    missing_symbols = tuple(symbol for symbol in requested_symbols if symbol not in returned)
+    return QuoteRefreshSummary(
+        requested=len(requested_symbols),
+        refreshed=len(returned) - len(fallback_symbols),
+        fallback_symbols=fallback_symbols,
+        missing_symbols=missing_symbols,
+    )
+
+
+def _quote_refresh_message(summary: QuoteRefreshSummary) -> str:
+    if summary.returned == 0:
+        return f"观察池报价全部缺失 {summary.requested} 只：{_quote_missing_detail(summary.missing_symbols)}"
+    message = f"已刷新 {summary.refreshed} 只观察个股报价"
+    if summary.fallback_symbols:
+        message += f"，兜底缓存 {len(summary.fallback_symbols)} 只：{_quote_fallback_detail(summary.fallback_symbols)}"
+    if summary.missing_symbols:
+        message += f"，缺失 {len(summary.missing_symbols)} 只：{_quote_missing_detail(summary.missing_symbols)}"
+    return message
+
+
+def _quote_fallback_detail(symbols: tuple[str, ...]) -> str:
+    return "、".join(symbols[:PROVIDER_FAILURE_DETAIL_LIMIT])
+
+
+def _quote_missing_detail(symbols: tuple[str, ...]) -> str:
+    return "、".join(symbols[:PROVIDER_FAILURE_DETAIL_LIMIT])
+
+
+def _kline_refresh_message(summary: KlineRefreshSummary) -> str:
+    message = f"已刷新 {summary.refreshed} 只关键个股日K线"
+    if summary.fallback_cache:
+        message += f"，兜底缓存 {summary.fallback_cache} 只"
+    if summary.failures:
+        message += f"，失败 {len(summary.failures)} 只"
+    return message
+
+
+def _quote_symbol(item: object) -> str:
+    code = str(getattr(item, "code", "") or "").strip()
+    market = str(getattr(item, "market", "") or "").strip()
+    raw = f"{code}.{market}" if code and market else ""
+    symbols = standard_symbol_list([raw], skip_invalid=True).symbols
+    return symbols[0] if symbols else "--"
+
+
+def _rows_used_fallback_cache(rows: Iterable[object]) -> bool:
+    return any(_item_used_fallback_cache(item) for item in rows)
+
+
+def _item_used_fallback_cache(item: object) -> bool:
+    return bool(getattr(item, "fallback_used", False))
 
 
 def _seconds_since(value: str | None) -> float | None:
@@ -534,22 +631,14 @@ def _recent_capability_failures(capability_rows: list[ProviderCapabilityStatus])
     return _unique_texts(
         f"{item.name} {_capability_label(item.kind)}"
         for item in sorted(capability_rows, key=_capability_sort_key)
-        if _capability_recently_failed(item)
+        if provider_capability_recently_failed(item)
     )
-
-
-def _capability_recently_failed(item: ProviderCapabilityStatus) -> bool:
-    return bool(item.enabled and not item.healthy and (item.last_error or item.failure_count))
 
 
 def _unhealthy_provider_failures(provider_rows: list[ProviderStatus]) -> list[str]:
     return _unique_texts(
-        item.name for item in sorted(provider_rows, key=_provider_sort_key) if _provider_recently_failed(item)
+        item.name for item in sorted(provider_rows, key=_provider_sort_key) if provider_recently_failed(item)
     )
-
-
-def _provider_recently_failed(item: ProviderStatus) -> bool:
-    return bool(item.enabled and not item.healthy)
 
 
 def _cache_freshness_events(stats: CacheStats, settings) -> list[HealthEvent]:
@@ -619,6 +708,18 @@ def _task_error_message(exc: Exception) -> str:
     if not text:
         return exc.__class__.__name__
     return text[:TASK_ERROR_MAX_LENGTH]
+
+
+def _record_task_end(cache, run_id: int | None, status: str, message: str) -> None:
+    if run_id is not None:
+        try:
+            cache.finish_task_run(run_id, status, message)
+        except Exception:
+            pass
+    try:
+        cache.save_monitor_event("warning", "task", message, symbol=None)
+    except Exception:
+        pass
 
 
 def _short_task_error(exc: Exception) -> str:

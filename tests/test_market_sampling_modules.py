@@ -10,9 +10,12 @@ from app.services.market_sampling import (
     _seed_codes,
     dedupe_quotes,
     even_sample,
+    fetch_quote_sample,
     fetch_quotes_with_single_fallback,
     industry_symbol_groups,
+    market_breadth_quote_sample,
     market_breadth_symbols,
+    peer_quote_sample,
     peer_quotes,
     peer_symbols,
     stratified_market_breadth_symbols,
@@ -151,6 +154,14 @@ def test_market_breadth_symbols_logs_stock_pool_failure_and_keeps_seed_symbols()
     assert "市场宽度股票池不可用" in hub.cache.events[0][1]
 
 
+def test_market_breadth_symbols_ignores_log_event_failure_when_stock_pool_is_down() -> None:
+    hub = _LogFailingStockPoolHub(seed_symbols=["600519.SH"])
+
+    symbols = asyncio.run(market_breadth_symbols(hub))
+
+    assert symbols == ["600519.SH"]
+
+
 def test_market_breadth_symbols_normalizes_and_dedupes_seed_symbols_before_sampling() -> None:
     hub = _FailingStockPoolHub(seed_symbols=["600519", "600519.SH", "bad", "SZ000001"])
 
@@ -183,6 +194,22 @@ def test_fetch_quotes_with_single_fallback_normalizes_symbol_sample_and_logs_ski
     assert [f"{item.code}.{item.market}" for item in quotes] == ["600519.SH", "000001.SZ"]
     assert hub.requested_symbols == [["600519.SH", "000001.SZ"]]
     assert "测试样本剔除 2 个重复或无效样本" in hub.cache.events[0][1]
+
+
+def test_fetch_quotes_with_single_fallback_ignores_log_event_failure() -> None:
+    hub = _LogFailingQuoteHub()
+
+    quotes = asyncio.run(
+        fetch_quotes_with_single_fallback(
+            hub,
+            ["600519", "600519.SH", "bad"],
+            batch_size=10,
+            context="测试样本",
+        )
+    )
+
+    assert [f"{item.code}.{item.market}" for item in quotes] == ["600519.SH"]
+    assert hub.requested_symbols == [["600519.SH"]]
 
 
 def test_fetch_quotes_with_single_fallback_filters_unrequested_quotes_and_preserves_order() -> None:
@@ -221,6 +248,65 @@ def test_fetch_quotes_with_single_fallback_logs_batch_and_single_failures() -> N
     assert "测试样本最终缺失 1 / 2 个样本" in messages
 
 
+def test_fetch_quotes_with_single_fallback_keeps_empty_result_when_all_quotes_fail() -> None:
+    hub = _AllFailingQuoteHub()
+
+    quotes = asyncio.run(
+        fetch_quotes_with_single_fallback(
+            hub,
+            ["600001.SH", "600002.SH"],
+            batch_size=2,
+            context="测试样本",
+        )
+    )
+
+    assert quotes == []
+    assert hub.requested_symbols == [["600001.SH", "600002.SH"], ["600001.SH"], ["600002.SH"]]
+    messages = "；".join(message for _, message in hub.cache.events)
+    assert "测试样本批量行情失败，改为逐只重试" in messages
+    assert "测试样本单只行情失败：600001.SH" in messages
+    assert "测试样本单只行情失败：600002.SH" in messages
+    assert "测试样本最终缺失 2 / 2 个样本" in messages
+
+
+def test_fetch_quote_sample_exposes_partial_failure_status_without_losing_available_quotes() -> None:
+    hub = _BatchFailingQuoteHub(failing_symbol="600002.SH")
+
+    result = asyncio.run(
+        fetch_quote_sample(
+            hub,
+            ["600001.SH", "600002.SH"],
+            batch_size=2,
+            context="测试样本",
+        )
+    )
+
+    assert [f"{item.code}.{item.market}" for item in result.quotes] == ["600001.SH"]
+    assert result.requested_symbols == ("600001.SH", "600002.SH")
+    assert result.missing_symbols == ("600002.SH",)
+    assert result.requested_count == 2
+    assert result.sample_count == 1
+    assert result.fallback_batch_count == 1
+    assert result.degraded is True
+    assert result.unavailable is False
+
+
+def test_fetch_quote_sample_marks_all_requested_quotes_unavailable() -> None:
+    result = asyncio.run(
+        fetch_quote_sample(
+            _AllFailingQuoteHub(),
+            ["600001.SH", "600002.SH"],
+            batch_size=2,
+            context="测试样本",
+        )
+    )
+
+    assert result.quotes == ()
+    assert result.missing_symbols == ("600001.SH", "600002.SH")
+    assert result.degraded is True
+    assert result.unavailable is True
+
+
 def test_fetch_quotes_with_single_fallback_retries_missing_batch_symbols_and_logs_wrong_single_return() -> None:
     hub = _MissingThenWrongQuoteHub()
 
@@ -248,14 +334,38 @@ def test_fetch_quotes_with_single_fallback_does_not_swallow_cancelled_error() ->
         asyncio.run(fetch_quotes_with_single_fallback(hub, ["600519.SH"], context="测试样本"))
 
 
-def test_peer_quotes_logs_stock_pool_failure() -> None:
+def test_peer_quote_sample_labels_stock_pool_failure() -> None:
     hub = _FailingStockPoolHub(seed_symbols=[])
+    profile = make_stock_info(code="600519", market="SH").model_copy(update={"industry": "白酒"})
+
+    result = asyncio.run(peer_quote_sample(hub, profile, "600519.SH"))
+
+    assert result.quotes == ()
+    assert result.status == "unavailable"
+    assert result.warning == "白酒同行股票池暂不可用。"
+    assert "白酒同行股票池不可用" in hub.cache.events[0][1]
+
+
+def test_peer_quote_sample_keeps_partial_quotes_and_missing_count() -> None:
+    hub = _PeerSampleHub(failing_symbol="600002.SH")
+    profile = make_stock_info(code="600519", market="SH").model_copy(update={"industry": "白酒"})
+
+    result = asyncio.run(peer_quote_sample(hub, profile, "600519.SH"))
+
+    assert [f"{item.code}.{item.market}" for item in result.quotes] == ["600001.SH"]
+    assert result.status == "degraded"
+    assert result.requested_count == 2
+    assert result.missing_count == 1
+    assert result.warning == "白酒同行行情样本部分缺失，成功 1/2 个。"
+
+
+def test_peer_quotes_compatibility_wrapper_returns_sample_quotes() -> None:
+    hub = _PeerSampleHub(failing_symbol="600002.SH")
     profile = make_stock_info(code="600519", market="SH").model_copy(update={"industry": "白酒"})
 
     quotes = asyncio.run(peer_quotes(hub, profile, "600519.SH"))
 
-    assert quotes == []
-    assert "白酒同行股票池不可用" in hub.cache.events[0][1]
+    assert [f"{item.code}.{item.market}" for item in quotes] == ["600001.SH"]
 
 
 def test_market_breadth_symbols_does_not_swallow_cancelled_error() -> None:
@@ -265,12 +375,26 @@ def test_market_breadth_symbols_does_not_swallow_cancelled_error() -> None:
         asyncio.run(market_breadth_symbols(hub))
 
 
+def test_market_breadth_quote_sample_labels_stock_pool_fallback_even_when_seed_quote_succeeds() -> None:
+    hub = _FailingStockPoolHub(seed_symbols=["600519.SH"])
+
+    result = asyncio.run(market_breadth_quote_sample(hub))
+
+    assert [f"{item.code}.{item.market}" for item in result.quotes] == ["600519.SH"]
+    assert result.warnings == ("市场宽度股票池暂不可用，当前仅使用默认观察样本。",)
+
+
 class _EventCache:
     def __init__(self) -> None:
         self.events: list[tuple[str, str]] = []
 
     def log_event(self, category: str, message: str) -> None:
         self.events.append((category, message))
+
+
+class _FailingEventCache:
+    def log_event(self, category: str, message: str) -> None:
+        raise RuntimeError("cache log down")
 
 
 class _Settings:
@@ -286,6 +410,15 @@ class _FailingStockPoolHub:
     async def stock_pool(self, limit: int = 1200, refresh: bool = False):
         raise RuntimeError("stock pool down")
 
+    async def quotes(self, symbols, use_cache: bool = True):
+        return [_quote_for(symbol) for symbol in symbols]
+
+
+class _LogFailingStockPoolHub(_FailingStockPoolHub):
+    def __init__(self, *, seed_symbols: list[str]) -> None:
+        super().__init__(seed_symbols=seed_symbols)
+        self.cache = _FailingEventCache()
+
 
 class _QuoteHub:
     def __init__(self) -> None:
@@ -299,6 +432,12 @@ class _QuoteHub:
         for symbol in normalized:
             result.append(_quote_for(symbol))
         return result
+
+
+class _LogFailingQuoteHub(_QuoteHub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cache = _FailingEventCache()
 
 
 class _ShuffledQuoteHub:
@@ -323,6 +462,25 @@ class _BatchFailingQuoteHub:
         if normalized[0] == self.failing_symbol:
             raise RuntimeError("single failed")
         return [_quote_for(normalized[0])]
+
+
+class _PeerSampleHub(_BatchFailingQuoteHub):
+    async def stock_pool(self, limit: int = 1200, refresh: bool = False):
+        return [
+            make_stock_info(code="600001", market="SH").model_copy(update={"industry": "白酒"}),
+            make_stock_info(code="600002", market="SH").model_copy(update={"industry": "白酒"}),
+        ]
+
+
+class _AllFailingQuoteHub:
+    def __init__(self) -> None:
+        self.cache = _EventCache()
+        self.requested_symbols: list[list[str]] = []
+
+    async def quotes(self, symbols, use_cache: bool = True):
+        normalized = list(symbols)
+        self.requested_symbols.append(normalized)
+        raise RuntimeError("quote source down")
 
 
 class _MissingThenWrongQuoteHub:

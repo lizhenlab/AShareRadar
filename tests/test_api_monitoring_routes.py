@@ -57,6 +57,28 @@ def test_run_task_once_route_maps_manual_task_failure_to_api_detail() -> None:
     assert response.json() == {"detail": "刷新失败"}
 
 
+def test_run_task_once_route_returns_contract() -> None:
+    scheduler = _RunOnceScheduler(messages=["刷新行情完成", "刷新K线完成"])
+    client = _client(scheduler=scheduler)
+
+    response = client.post("/api/tasks/run-once?task=refresh_watch_quotes")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "messages": ["刷新行情完成", "刷新K线完成"]}
+    assert scheduler.task_names == ["refresh_watch_quotes"]
+
+
+def test_run_task_once_route_uses_run_once_response_model() -> None:
+    app = FastAPI()
+    app.include_router(monitoring.router)
+
+    schema = app.openapi()["paths"]["/api/tasks/run-once"]["post"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+
+    assert schema == {"$ref": "#/components/schemas/TaskRunOnceResponse"}
+
+
 def _client(datahub=None, scheduler=None) -> TestClient:
     app = FastAPI()
     app.include_router(monitoring.router)
@@ -117,3 +139,16 @@ class _FailingRunOnceScheduler:
 
     async def run_once(self, task_name: str | None = None):
         raise self._exc
+
+
+class _RunOnceScheduler:
+    def __init__(self, *, messages: list[str]) -> None:
+        self._messages = messages
+        self.task_names: list[str | None] = []
+
+    def status(self):
+        return _SchedulerStub().status()
+
+    async def run_once(self, task_name: str | None = None):
+        self.task_names.append(task_name)
+        return list(self._messages)

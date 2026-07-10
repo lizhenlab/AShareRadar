@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.runtime_environment import isolate_user_site_packages
+
+isolate_user_site_packages()
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware

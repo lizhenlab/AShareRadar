@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api
-from app.models.schemas import AdviceHistoryItem, WatchlistInput, WatchlistItem
+from app.models.schemas import AdviceHistoryItem, MutationResult, WatchlistInput, WatchlistItem
 from app.services.datahub import DataHub
 from app.utils.symbols import normalize_symbol
 
@@ -35,14 +35,14 @@ async def add_watchlist_item(
     return await run_api(save)
 
 
-@router.delete("/api/watchlist/{symbol}")
-async def delete_watchlist_item(symbol: str, datahub: DataHub = Depends(get_datahub)) -> dict[str, object]:
-    def remove() -> dict[str, object]:
+@router.delete("/api/watchlist/{symbol}", response_model=MutationResult)
+async def delete_watchlist_item(symbol: str, datahub: DataHub = Depends(get_datahub)) -> MutationResult:
+    def remove() -> MutationResult:
         normalize_symbol(symbol)
         removed = datahub.cache.delete_watchlist_item(symbol)
         if not removed:
             raise HTTPException(status_code=404, detail="自选股不存在")
-        return {"ok": True, "removed": removed}
+        return MutationResult(ok=True, removed=removed)
 
     return run_sync_api(remove)
 

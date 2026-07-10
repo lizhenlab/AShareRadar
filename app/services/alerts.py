@@ -26,12 +26,18 @@ async def evaluate_alert_rules(datahub: DataHub, symbol: str | None = None) -> A
     checked_at = now_text()
     rules = datahub.cache.alert_rules(symbol=symbol, include_disabled=False, limit=200)
     evaluator = AlertRuleEvaluator(datahub, checked_at)
-    results = [await evaluator.evaluate(rule) for rule in rules]
+    results = []
+    for rule in rules:
+        try:
+            results.append(await evaluator.evaluate(rule))
+        except (RuntimeError, TimeoutError, ValueError) as exc:
+            results.append(_failed_evaluation(rule, exc))
     return AlertEvaluationSummary(
         checked_at=checked_at,
         checked_count=len(rules),
         triggered_count=sum(1 for item in results if item.triggered),
         new_event_count=evaluator.new_event_count,
+        failed_count=sum(1 for item in results if item.status == "failed"),
         items=results,
     )
 
@@ -115,6 +121,16 @@ class AlertRuleEvaluator:
         if event:
             self.new_event_count += 1
         return event
+
+
+def _failed_evaluation(rule: AlertRuleItem, exc: Exception) -> AlertEvaluationItem:
+    detail = " ".join(str(exc).split()).strip() or exc.__class__.__name__
+    return AlertEvaluationItem(
+        rule=rule,
+        triggered=False,
+        message=f"{rule.stock_name} 检查失败：{detail[:120]}",
+        status="failed",
+    )
 
 
 def validate_alert_condition(condition_type: str, threshold: float | None = None) -> None:

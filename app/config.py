@@ -193,6 +193,7 @@ class Settings(BaseModel):
     quote_refresh_seconds: int = 3
     request_timeout_seconds: float = 8.0
     provider_call_timeout_seconds: float = 8.0
+    workbench_optional_timeout_seconds: float = 1.5
     provider_failure_cooldown_seconds: int = Field(
         default_factory=lambda: _env_int(
             "ASHARE_RADAR_PROVIDER_FAILURE_COOLDOWN_SECONDS",

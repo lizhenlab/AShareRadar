@@ -109,6 +109,21 @@ def test_leadership_missing_data_tracks_unavailable_inputs() -> None:
     assert any("量能比" in item for item in report.evidence)
 
 
+def test_leadership_missing_data_preserves_concept_source_error() -> None:
+    quote = make_quote().model_copy(update={"amount": 0})
+    analysis, insights, feature = _leadership_inputs(quote=quote)
+
+    report = build_leadership_report(
+        analysis,
+        insights,
+        feature,
+        concept_error="概念归属不可用：600706.SH；akshare: concept down",
+    )
+
+    assert "概念归属：概念归属不可用：600706.SH；akshare: concept down" in report.missing_data
+    assert "概念归属" not in report.missing_data
+
+
 def test_leadership_report_sanitizes_dirty_feature_snapshot_before_text() -> None:
     analysis, insights, feature = _leadership_inputs()
     dirty_feature = feature.model_copy(

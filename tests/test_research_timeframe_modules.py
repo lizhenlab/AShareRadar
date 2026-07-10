@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
 
 from app.models.schemas import TimeframeTrend
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.research_features import build_feature_snapshot
-from app.services.research_timeframe import _timeframe_alignment_label, _timeframe_conflict_level, _timeframe_trend
+from app.services.research_timeframe import (
+    _timeframe_alignment_label,
+    _timeframe_conflict_level,
+    _timeframe_trend,
+    build_timeframe_alignment_report,
+)
 from app.services.stock_insights import build_stock_insight_bundle
 from tests.factories import make_kline, make_quote
 
@@ -43,7 +51,7 @@ def test_timeframe_trend_uses_neutral_result_when_sample_is_too_small() -> None:
 
     assert trend.score == 50
     assert trend.label == "样本不足"
-    assert trend.window_days == 4
+    assert trend.window_days == 20
     assert trend.evidence == ["K线样本不足，暂按中性处理。"]
 
 
@@ -68,6 +76,7 @@ def test_timeframe_trend_treats_non_positive_window_as_insufficient() -> None:
 
 
 def test_timeframe_conflict_level_boundaries_are_stable() -> None:
+    assert _timeframe_conflict_level([_trend("短线", 80)]) == "待确认"
     assert _timeframe_conflict_level([_trend("短线", 80), _trend("波段", 44)]) == "高冲突"
     assert _timeframe_conflict_level([_trend("短线", 62), _trend("波段", 45)]) == "中冲突"
     assert _timeframe_conflict_level([_trend("短线", 55), _trend("波段", 60)]) == "多周期顺向"
@@ -85,8 +94,55 @@ def test_timeframe_alignment_label_follows_explicit_directional_conflict_levels(
     assert _timeframe_alignment_label(52, "多周期偏弱") == "多周期偏弱"
 
 
+def test_timeframe_alignment_has_no_valid_period_below_20_rows() -> None:
+    closes = [100 + index * 0.2 for index in range(19)]
+    analysis, feature = _timeframe_inputs(closes, latest=closes[-1])
+
+    report = build_timeframe_alignment_report(analysis, feature, SimpleNamespace(total_score=50))
+
+    assert report.timeframes == []
+    assert report.alignment_score == 50
+    assert report.conflict_level == "待确认"
+    assert report.alignment_label == "周期仍需确认"
+
+
+@pytest.mark.parametrize(
+    ("row_count", "expected_frames"),
+    [
+        (20, [("短线", 20)]),
+        (59, [("短线", 20)]),
+        (60, [("短线", 20), ("波段", 60)]),
+        (119, [("短线", 20), ("波段", 60)]),
+        (120, [("短线", 20), ("波段", 60), ("中期", 120)]),
+    ],
+)
+def test_timeframe_alignment_only_includes_completed_requested_windows(
+    row_count: int,
+    expected_frames: list[tuple[str, int]],
+) -> None:
+    closes = [100 + index * 0.2 for index in range(row_count)]
+    analysis, feature = _timeframe_inputs(closes, latest=closes[-1])
+
+    report = build_timeframe_alignment_report(analysis, feature, SimpleNamespace(total_score=50))
+
+    assert [(item.name, item.window_days) for item in report.timeframes] == expected_frames
+    if row_count < 60:
+        assert report.conflict_level == "待确认"
+        assert report.alignment_label == "周期仍需确认"
+        assert "多周期共振" not in report.summary
+
+
 def _timeframe_inputs(closes: list[float], *, latest: float):
-    klines = [make_kline(date=f"2026-05-{index + 1:02d}", close=close, high=close + 1, low=close - 1) for index, close in enumerate(closes)]
+    start = date(2026, 1, 1)
+    klines = [
+        make_kline(
+            date=(start + timedelta(days=index)).isoformat(),
+            close=close,
+            high=close + 1,
+            low=close - 1,
+        )
+        for index, close in enumerate(closes)
+    ]
     quote = make_quote(price=latest, prev_close=closes[-1], high=latest + 1, low=latest - 1, change_pct=0.0)
     quality = build_data_quality(quote, klines, now=datetime(2026, 5, 13, 16, 0, 0))
     analysis = build_analysis(quote, klines, data_quality=quality)

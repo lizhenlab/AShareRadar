@@ -4,6 +4,9 @@ from app.models.schemas import FactorCalibration, FactorLabReport, StandardFacto
 from app.services.research_factor_scoring import _dedupe
 
 
+MIN_FACTOR_CONFIRMATION_SAMPLES = 20
+
+
 def _factor_score_impact(factor: StandardFactor) -> int:
     base = round((factor.score - 50) / 2)
     calibration = factor.calibration
@@ -84,9 +87,15 @@ def _factor_reference(factor: StandardFactor | None) -> str:
 
 def _factor_confirmation_text(factor_lab: FactorLabReport) -> str:
     main = factor_lab.top_positive[0] if factor_lab.top_positive else "正向因子"
-    if factor_lab.calibration_sample_count >= 20:
-        return f"因子实验室由「{main}」提供支撑，校准样本 {factor_lab.calibration_sample_count} 个，置信度 {factor_lab.calibrated_confidence}%。"
-    return f"因子实验室出现「{main}」支撑，但样本只有 {factor_lab.calibration_sample_count} 个，仍需价量确认。"
+    if factor_lab.calibration_sample_count >= MIN_FACTOR_CONFIRMATION_SAMPLES:
+        return (
+            f"因子实验室由「{main}」提供支撑，最低单因子有效样本 {factor_lab.calibration_sample_count} 个，"
+            f"汇总置信度 {factor_lab.calibrated_confidence}%。"
+        )
+    return (
+        f"因子实验室出现「{main}」支撑，但最低单因子有效样本只有 {factor_lab.calibration_sample_count} 个，"
+        "仍需价量确认。"
+    )
 
 
 def _factor_risk_text(factor_lab: FactorLabReport) -> str:

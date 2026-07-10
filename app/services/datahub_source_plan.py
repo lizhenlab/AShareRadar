@@ -26,10 +26,12 @@ from app.services.datahub_status import (
     _source_plan_summary,
     _unhealthy_capability_labels,
 )
+from app.services.provider_failure_status import provider_recently_failed
 
 
 @dataclass(frozen=True)
 class SourcePlanContext:
+    provider_names: list[str]
     providers: list[ProviderStatus]
     capabilities: list[ProviderCapability]
     capability_statuses: list[ProviderCapabilityStatus]
@@ -93,10 +95,7 @@ class SourcePlanBuilder:
     ) -> DataSourcePlan:
         context = self._context(providers, capabilities, capability_statuses or [])
         primaries = _primary_sources(context)
-        decisions = [
-            self._provider_decision_from_context(name, context)
-            for name in _normalized_provider_names(self._provider_names())
-        ]
+        decisions = [self._provider_decision_from_context(name, context) for name in context.provider_names]
         warnings, suggestions = _plan_warnings_and_suggestions(context, primaries)
         health_level = _plan_health_level(warnings, primaries)
         summary = _source_plan_summary(health_level, primaries.quote, primaries.kline, primaries.minute)
@@ -146,6 +145,7 @@ class SourcePlanBuilder:
         capability_statuses: list[ProviderCapabilityStatus],
     ) -> SourcePlanContext:
         return SourcePlanContext(
+            provider_names=_normalized_provider_names(self._provider_names()),
             providers=providers,
             capabilities=capabilities,
             capability_statuses=capability_statuses,
@@ -315,7 +315,7 @@ def _always_matches(_context: ProviderDecisionContext) -> bool:
 
 
 def _unhealthy_capability_warning_labels(context: SourcePlanContext) -> list[str]:
-    return _unhealthy_capability_labels(context.capability_statuses)
+    return _unhealthy_capability_labels(_current_capability_statuses(context))
 
 
 def _unhealthy_provider_warning_labels(context: SourcePlanContext) -> list[str]:
@@ -323,11 +323,18 @@ def _unhealthy_provider_warning_labels(context: SourcePlanContext) -> list[str]:
     seen: set[str] = set()
     for item in context.providers:
         name = _normalize_provider_name(item.name)
-        if not (item.enabled and not item.healthy and _provider_has_failure_signal(item)) or name in seen:
+        if name not in context.provider_names:
+            continue
+        if not provider_recently_failed(item) or name in seen:
             continue
         labels.append(_provider_display_name(item.name))
         seen.add(name)
     return labels
+
+
+def _current_capability_statuses(context: SourcePlanContext) -> list[ProviderCapabilityStatus]:
+    current_names = set(context.provider_names)
+    return [item for item in context.capability_statuses if _normalize_provider_name(item.name) in current_names]
 
 
 def _provider_has_failure_signal(item: ProviderStatus) -> bool:

@@ -111,6 +111,25 @@ def test_demo_provider_quotes_repeat_with_fixed_local_minute(monkeypatch: pytest
     assert first == second
 
 
+def test_demo_provider_quotes_preserve_order_and_unknown_symbol_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls) -> datetime:
+            return cls(2026, 7, 3, 10, 17, 5)
+
+    monkeypatch.setattr("app.services.providers.datetime", FixedDatetime)
+    monkeypatch.setattr("app.services.providers.now_text", lambda: "2026-07-03 10:17:05")
+    provider = DemoMarketDataProvider(enabled=True)
+
+    quotes = asyncio.run(provider.quotes(["688001.SH", "000001.SZ", "002594.SZ"]))
+
+    assert [item.code for item in quotes] == ["688001", "000001", "002594"]
+    assert [item.market for item in quotes] == ["SH", "SZ", "SZ"]
+    assert quotes[0].name == "演示股票001"
+    assert quotes[1].name == "平安银行"
+    assert all(item.source == "本地演示数据" for item in quotes)
+
+
 def test_demo_provider_klines_keep_open_and_close_inside_price_range() -> None:
     provider = DemoMarketDataProvider(enabled=True)
 

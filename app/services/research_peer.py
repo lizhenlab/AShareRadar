@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import AnalysisResult, FeatureSnapshot, PeerComparisonReport, Quote, StockInsightBundle
+from app.models.schemas import AnalysisResult, FeatureSnapshot, PeerComparisonReport, PeerSampleInfo, Quote, StockInsightBundle
 from app.utils.market_data import finite_float
 
 PEER_LEADER_LIMIT = 3
@@ -21,8 +21,10 @@ class PeerComparisonStats:
 
 def build_peer_comparison_report(analysis: AnalysisResult, insights: StockInsightBundle, feature: FeatureSnapshot) -> PeerComparisonReport:
     stats = _peer_comparison_stats(analysis)
+    sample_status = _peer_report_sample_status(analysis, stats.peers)
     if not stats.peers:
-        return _empty_peer_comparison_report(stats.industry)
+        return _empty_peer_comparison_report(stats.industry, sample_status)
+    warnings = _peer_warnings(sample_status)
     return PeerComparisonReport(
         industry=stats.industry,
         sample_count=len(stats.peers),
@@ -31,7 +33,9 @@ def build_peer_comparison_report(analysis: AnalysisResult, insights: StockInsigh
         summary=_peer_summary(stats),
         metrics=_peer_metrics(analysis, insights, feature, stats),
         leaders=_peer_leaders(stats.peers),
-        risks=_peer_risks(insights, stats),
+        risks=list(dict.fromkeys([*warnings, *_peer_risks(insights, stats)])),
+        sample_status=sample_status,
+        warnings=warnings,
     )
 
 
@@ -78,13 +82,37 @@ def _peer_strength_percentile(change_pct: float, peers: list[Quote]) -> float:
     return sum(1 for item in peers if item.change_pct <= clean_change) / len(peers) * 100
 
 
-def _empty_peer_comparison_report(industry: str) -> PeerComparisonReport:
+def _empty_peer_comparison_report(industry: str, sample_status: PeerSampleInfo) -> PeerComparisonReport:
+    warnings = _peer_warnings(sample_status)
+    if sample_status.status == "unavailable":
+        summary = "同行数据源暂不可用，当前仅基于个股自身历史和行业背景判断。"
+    elif sample_status.status == "not_applicable":
+        summary = "行业归属待确认，暂无法建立同行对比。"
+    else:
+        summary = "同行样本不足，暂以个股自身历史和行业涨跌背景为主。"
     return PeerComparisonReport(
         industry=industry,
         sample_count=0,
-        summary="同行样本不足，暂以个股自身历史和行业涨跌背景为主。",
-        risks=["同行报价样本不足，同行估值和强弱分位需要等待缓存积累。"],
+        summary=summary,
+        risks=list(dict.fromkeys([*warnings, "同行报价样本不足，同行估值和强弱分位需要等待缓存积累。"])),
+        sample_status=sample_status,
+        warnings=warnings,
     )
+
+
+def _peer_report_sample_status(analysis: AnalysisResult, valid_peers: list[Quote]) -> PeerSampleInfo:
+    status = analysis.peer_sample
+    if valid_peers and status.status == "not_requested":
+        return PeerSampleInfo(status="available", requested_count=len(valid_peers))
+    if not valid_peers and analysis.peer_quotes:
+        warning = status.warning or "同行行情样本未通过有效性校验。"
+        return status.model_copy(update={"status": "degraded", "warning": warning})
+    return status
+
+
+def _peer_warnings(status: PeerSampleInfo) -> list[str]:
+    warning = " ".join(status.warning.split())[:160] if isinstance(status.warning, str) else ""
+    return [warning] if warning else []
 
 
 def _peer_summary(stats: PeerComparisonStats) -> str:

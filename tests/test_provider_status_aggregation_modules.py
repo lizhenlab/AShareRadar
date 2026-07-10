@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from app.models.schemas import ProviderCapabilityStatus, ProviderStatus
 from app.repositories.provider_status_aggregation import aggregate_provider_status
@@ -220,6 +221,27 @@ def test_provider_status_repository_orders_provider_and_capability_ties_stably()
         ("alpha", "quote"),
         ("zeta", "quote"),
     ]
+
+
+def test_provider_status_repository_ensure_preserves_active_probe_timestamp() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        with patch(
+            "app.repositories.provider_status.now_text",
+            side_effect=["2026-05-13 09:00:00", "2026-05-13 09:01:00", "2026-05-13 09:02:00"],
+        ):
+            cache.ensure_provider_capability("alpha", "quote", 1, enabled=True)
+            cache.update_provider_capability_failure("alpha", "quote", 1, "network down")
+            cache.ensure_provider_capability("alpha", "quote", 2, enabled=True)
+
+        capability = next(item for item in cache.provider_capability_statuses() if item.name == "alpha")
+        provider = next(item for item in cache.provider_statuses() if item.name == "alpha")
+
+    assert capability.priority == 2
+    assert capability.last_error == "network down"
+    assert capability.updated_at == "2026-05-13 09:01:00"
+    assert provider.priority == 2
+    assert provider.updated_at == "2026-05-13 09:01:00"
 
 
 def _provider_status(

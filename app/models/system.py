@@ -62,11 +62,15 @@ class CacheStats(BaseModel):
     quote_count: int
     quote_history_count: int
     kline_count: int
+    daily_kline_count: int = 0
+    minute_kline_count: int = 0
     stock_count: int
     plate_count: int
     provider_count: int
     latest_quote_at: str | None = None
     latest_kline_at: str | None = None
+    latest_daily_kline_at: str | None = None
+    latest_minute_kline_at: str | None = None
     latest_stock_at: str | None = None
     latest_plate_at: str | None = None
 
@@ -77,6 +81,29 @@ class DataStatus(BaseModel):
     capabilities: list[ProviderCapability] = Field(default_factory=list)
     capability_statuses: list[ProviderCapabilityStatus] = Field(default_factory=list)
     source_plan: DataSourcePlan | None = None
+
+
+class FutuStatusResponse(BaseModel):
+    ok: bool
+    message: str
+    latency_ms: float | None = None
+
+
+class TradeCalendarRefreshResponse(BaseModel):
+    ok: bool
+    trade_date_count: int
+    source: str
+    error: str | None = None
+
+
+class TaskRunOnceResponse(BaseModel):
+    ok: bool
+    messages: list[str] = Field(default_factory=list)
+
+
+class MutationResult(BaseModel):
+    ok: bool
+    removed: bool
 
 
 class TaskRun(BaseModel):
@@ -123,6 +150,7 @@ class SchedulerStatus(BaseModel):
 class CacheFreshness(BaseModel):
     latest_quote_age_seconds: int | None = None
     latest_kline_age_seconds: int | None = None
+    latest_minute_kline_age_seconds: int | None = None
     latest_stock_age_seconds: int | None = None
     latest_plate_age_seconds: int | None = None
 

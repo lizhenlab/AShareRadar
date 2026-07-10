@@ -164,20 +164,24 @@ def row_to_alert_event(row: sqlite3.Row) -> AlertEventItem:
 
 def row_to_stock_note(row: sqlite3.Row) -> StockNoteItem:
     return StockNoteItem(
-        id=row["id"],
-        symbol=row["symbol"],
-        code=row["code"],
-        market=row["market"],
-        name=row["name"],
-        note_type=row["note_type"],
-        content=row["content"],
-        price=row["price"],
-        trade_date=row["trade_date"],
-        color=row["color"],
-        visible=bool(row["visible"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
+        id=_int_or_default(row["id"]),
+        symbol=_clean_text_or_default(row["symbol"], "", 20),
+        code=_clean_text_or_default(row["code"], "", 20),
+        market=_clean_text_or_default(row["market"], "", 8),
+        name=_clean_text_or_default(row["name"], "未知股票", 80),
+        note_type=_clean_text_or_default(row["note_type"], "观察", 20),
+        content=_clean_text_or_default(row["content"], "历史笔记字段异常，已使用兜底展示。", 500),
+        price=_finite_float_or_none(row["price"]),
+        trade_date=_clean_optional_text(row["trade_date"], 20),
+        color=_clean_optional_text(row["color"], 20),
+        visible=_bounded_int_or_default(row["visible"], 0, 1, 0) == 1,
+        created_at=_clean_text_or_default(row["created_at"], "", 20),
+        updated_at=_clean_text_or_default(row["updated_at"], "", 20),
     )
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    return finite_float(value)
 
 
 def alert_condition_label(condition_type: str) -> str:

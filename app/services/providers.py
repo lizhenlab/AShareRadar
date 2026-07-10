@@ -183,43 +183,7 @@ class DemoMarketDataProvider:
         self._ensure_enabled()
         now = now_text()
         run_minute = datetime.now().minute
-        result: list[Quote] = []
-        for symbol in symbols:
-            code, market_code = normalize_symbol(symbol)
-            normalized = f"{code}.{market_code.upper()}"
-            name, market, base = self._names.get(normalized, (f"演示股票{code[-3:]}", market_code.upper(), 20.0))
-            rng = random.Random(int(code) + run_minute)
-            change_pct = round(rng.uniform(-3.2, 4.5), 2)
-            prev_close = base * (1 + rng.uniform(-0.02, 0.02))
-            price = prev_close * (1 + change_pct / 100)
-            open_price = prev_close * (1 + rng.uniform(-0.01, 0.01))
-            high = max(price, prev_close, open_price) * (1 + rng.uniform(0.002, 0.018))
-            low = min(price, prev_close, open_price) * (1 - rng.uniform(0.002, 0.018))
-            prices = _rounded_demo_quote_prices(price, prev_close, open_price, high, low)
-            volume = rng.randint(200000, 6000000)
-            amount = volume * price * 100
-            result.append(
-                Quote(
-                    code=code,
-                    name=name,
-                    market=market,
-                    price=prices["price"],
-                    prev_close=prices["prev_close"],
-                    open=prices["open"],
-                    high=prices["high"],
-                    low=prices["low"],
-                    volume=volume,
-                    amount=round(amount, 2),
-                    change=round(price - prev_close, 2),
-                    change_pct=change_pct,
-                    turnover_rate=round(rng.uniform(0.4, 8.5), 2),
-                    pe=round(rng.uniform(8, 58), 2),
-                    pb=round(rng.uniform(0.8, 9), 2),
-                    market_cap=round(rng.uniform(300, 20000) * 100000000, 2),
-                    timestamp=now,
-                    source=self.source_name,
-                )
-            )
+        result = [_demo_quote(symbol, self._names, now, run_minute, self.source_name) for symbol in symbols]
         await asyncio.sleep(0)
         return result
 
@@ -227,8 +191,7 @@ class DemoMarketDataProvider:
         ensure_positive_limit(limit)
         self._ensure_enabled()
         code, market_code = normalize_symbol(symbol)
-        normalized = f"{code}.{market_code.upper()}"
-        _, _, base = self._names.get(normalized, (f"演示股票{code[-3:]}", market_code.upper(), 20.0))
+        _, _, base = _demo_stock_profile(code, market_code, self._names)
         rng = random.Random(int(code))
         rows: list[Kline] = []
         close = base
@@ -273,6 +236,59 @@ class DemoMarketDataProvider:
     def _ensure_enabled(self) -> None:
         if not self.enabled:
             raise RuntimeError("本地演示数据源默认关闭；如需离线演示，请设置 ASHARE_RADAR_DEMO_PROVIDER_ENABLED=1")
+
+
+def _demo_quote(
+    symbol: str,
+    names: dict[str, tuple[str, str, float]],
+    timestamp: str,
+    run_minute: int,
+    source_name: str,
+) -> Quote:
+    code, market_code = normalize_symbol(symbol)
+    name, market, base = _demo_stock_profile(code, market_code, names)
+    rng = random.Random(int(code) + run_minute)
+    prices, change_pct, raw_price, raw_prev_close = _demo_quote_prices(base, rng)
+    volume = rng.randint(200000, 6000000)
+    return Quote(
+        code=code,
+        name=name,
+        market=market,
+        price=prices["price"],
+        prev_close=prices["prev_close"],
+        open=prices["open"],
+        high=prices["high"],
+        low=prices["low"],
+        volume=volume,
+        amount=round(volume * raw_price * 100, 2),
+        change=round(raw_price - raw_prev_close, 2),
+        change_pct=change_pct,
+        turnover_rate=round(rng.uniform(0.4, 8.5), 2),
+        pe=round(rng.uniform(8, 58), 2),
+        pb=round(rng.uniform(0.8, 9), 2),
+        market_cap=round(rng.uniform(300, 20000) * 100000000, 2),
+        timestamp=timestamp,
+        source=source_name,
+    )
+
+
+def _demo_stock_profile(
+    code: str,
+    market_code: str,
+    names: dict[str, tuple[str, str, float]],
+) -> tuple[str, str, float]:
+    market = market_code.upper()
+    return names.get(f"{code}.{market}", (f"演示股票{code[-3:]}", market, 20.0))
+
+
+def _demo_quote_prices(base: float, rng: random.Random) -> tuple[dict[str, float], float, float, float]:
+    change_pct = round(rng.uniform(-3.2, 4.5), 2)
+    prev_close = base * (1 + rng.uniform(-0.02, 0.02))
+    price = prev_close * (1 + change_pct / 100)
+    open_price = prev_close * (1 + rng.uniform(-0.01, 0.01))
+    high = max(price, prev_close, open_price) * (1 + rng.uniform(0.002, 0.018))
+    low = min(price, prev_close, open_price) * (1 - rng.uniform(0.002, 0.018))
+    return _rounded_demo_quote_prices(price, prev_close, open_price, high, low), change_pct, price, prev_close
 
 
 def _format_timestamp(raw: str) -> str:

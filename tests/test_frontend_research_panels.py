@@ -59,40 +59,40 @@ def test_delayed_ai_answer_does_not_replace_rerendered_symbol_answer() -> None:
     _run_node_script(script)
 
 
-def test_older_ai_request_does_not_remove_latest_answer_on_same_form() -> None:
+def test_ai_question_submit_ignores_duplicate_submit_while_pending() -> None:
     script = r'''
       import { renderResearch } from "./static/js/research-panels.js";
 
       const dom = installResearchPanelDom();
       const state = { symbol: "600519.SH" };
       const firstReply = deferredReply();
-      const secondReply = deferredReply();
-      const replies = [firstReply, secondReply];
-      globalThis.fetch = async () => replies.shift().promise;
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        return firstReply.promise;
+      };
 
       renderResearch(workbench(), state);
       dom.input().value = "第一问";
       const firstSubmit = dom.form().listener.handler({ preventDefault() {}, currentTarget: dom.form() });
       dom.input().value = "第二问";
       const secondSubmit = dom.form().listener.handler({ preventDefault() {}, currentTarget: dom.form() });
-
-      secondReply.resolve(answerResponse("最新回答"));
       await secondSubmit;
-      const latestAnswer = dom.answerHtml();
-      if (!latestAnswer.includes("最新回答")) {
-        throw new Error("latest answer was not inserted");
+
+      if (fetchCalls !== 1) {
+        throw new Error(`duplicate submit should not issue another request, got ${fetchCalls}`);
       }
-      firstReply.resolve(answerResponse("旧回答"));
+      if (!dom.button().disabled || dom.button().textContent !== "分析中") {
+        throw new Error("button should stay busy while the first request is pending");
+      }
+      firstReply.resolve(answerResponse("第一问回答"));
       await firstSubmit;
 
-      if (!dom.answerHtml().includes("最新回答")) {
-        throw new Error("older request removed latest answer");
-      }
-      if (dom.answerHtml().includes("旧回答") || dom.insertedHtml.some((html) => html.includes("旧回答"))) {
-        throw new Error("older request was inserted after latest answer");
+      if (!dom.answerHtml().includes("第一问回答")) {
+        throw new Error("first request answer was not inserted after duplicate submit was ignored");
       }
       if (dom.button().disabled || dom.button().textContent !== "问一下") {
-        throw new Error("button did not recover after latest request");
+        throw new Error("button did not recover after first request");
       }
     '''
     _run_node_script(script)
@@ -158,6 +158,49 @@ def test_concept_strip_uses_neutral_class_for_zero_and_missing_change() -> None:
       }
       if (html.includes('class="up-bg"') || html.includes('class="down-bg"')) {
         throw new Error(`neutral concepts received directional classes: ${html}`);
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_feature_snapshot_and_timeframe_unknown_fields_use_neutral_placeholders() -> None:
+    script = r'''
+      import { renderResearch } from "./static/js/research-panels.js";
+
+      installResearchPanelDom();
+      renderResearch({
+        ...workbench(),
+        feature_snapshot: { tags: [] },
+        timeframe_alignment: {
+          alignment_label: "待确认",
+          alignment_score: 50,
+          conflict_level: "中性",
+          summary: "周期数据待确认",
+          timeframes: [
+            {
+              name: "短线",
+              score: 50,
+              label: "观察",
+              window_days: 5,
+              return_pct: 0,
+              max_drawdown_pct: 0,
+            },
+          ],
+          suggestions: [],
+        },
+      }, { symbol: "600519.SH" });
+
+      const featureHtml = document.getElementById("featureSnapshot").innerHTML;
+      const timeframeHtml = document.getElementById("timeframeAlignment").innerHTML;
+      const combined = `${featureHtml}${timeframeHtml}`;
+      if (combined.includes("undefined")) {
+        throw new Error(`research placeholders leaked undefined: ${combined}`);
+      }
+      if (!featureHtml.includes("--")) {
+        throw new Error(`missing feature fields did not render placeholders: ${featureHtml}`);
+      }
+      if (timeframeHtml.includes("低于均线") || !timeframeHtml.includes("均线关系待确认")) {
+        throw new Error(`unknown MA relation was rendered directionally: ${timeframeHtml}`);
       }
     '''
     _run_node_script(script)

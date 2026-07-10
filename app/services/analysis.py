@@ -8,6 +8,7 @@ from app.models.schemas import (
     DataQuality,
     IndividualReview,
     Kline,
+    PeerSampleInfo,
     PlateItem,
     Quote,
     SignalContribution,
@@ -71,6 +72,7 @@ def build_analysis(
     data_quality: DataQuality | None = None,
     quote_history: list[dict[str, float | str | None]] | None = None,
     peer_quotes: list[Quote] | None = None,
+    peer_sample: PeerSampleInfo | None = None,
 ) -> AnalysisResult:
     valid_klines = filter_valid_klines(klines)
     metrics = _trend_metrics(quote, valid_klines)
@@ -87,6 +89,7 @@ def build_analysis(
         review=review,
         quote_history=quote_history,
         peer_quotes=peer_quotes,
+        peer_sample=peer_sample,
     )
 
 
@@ -184,6 +187,7 @@ def _analysis_result(
     review: IndividualReview | None,
     quote_history: list[dict[str, float | str | None]] | None,
     peer_quotes: list[Quote] | None,
+    peer_sample: PeerSampleInfo | None,
 ) -> AnalysisResult:
     return AnalysisResult(
         quote=quote,
@@ -209,7 +213,13 @@ def _analysis_result(
         klines=klines,
         quote_history=_list_or_empty(quote_history),
         peer_quotes=_list_or_empty(peer_quotes),
+        peer_sample=peer_sample or _inferred_peer_sample(peer_quotes),
     )
+
+
+def _inferred_peer_sample(peer_quotes: list[Quote] | None) -> PeerSampleInfo:
+    count = len(peer_quotes or [])
+    return PeerSampleInfo(status="available" if count else "not_requested", requested_count=count)
 
 
 def _list_or_empty(values: list | None) -> list:

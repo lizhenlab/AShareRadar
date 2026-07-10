@@ -191,7 +191,14 @@ INSERT INTO provider_status (
 ON CONFLICT(name) DO UPDATE SET
     enabled=excluded.enabled,
     priority=excluded.priority,
-    updated_at=excluded.updated_at
+    updated_at=CASE
+        WHEN provider_status.last_success IS NULL
+            AND provider_status.last_error IS NULL
+            AND COALESCE(provider_status.success_count, 0) = 0
+            AND COALESCE(provider_status.failure_count, 0) = 0
+        THEN excluded.updated_at
+        ELSE provider_status.updated_at
+    END
 """
 _PROVIDER_CAPABILITY_ENSURE_SQL = """
 INSERT INTO provider_capability_status (
@@ -200,7 +207,14 @@ INSERT INTO provider_capability_status (
 ON CONFLICT(name, kind) DO UPDATE SET
     enabled=excluded.enabled,
     priority=excluded.priority,
-    updated_at=excluded.updated_at
+    updated_at=CASE
+        WHEN provider_capability_status.last_success IS NULL
+            AND provider_capability_status.last_error IS NULL
+            AND COALESCE(provider_capability_status.success_count, 0) = 0
+            AND COALESCE(provider_capability_status.failure_count, 0) = 0
+        THEN excluded.updated_at
+        ELSE provider_capability_status.updated_at
+    END
 """
 
 

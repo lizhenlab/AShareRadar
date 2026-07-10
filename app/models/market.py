@@ -24,6 +24,8 @@ class Quote(BaseModel):
     market_cap: float | None = None
     timestamp: str
     source: str = "腾讯行情"
+    from_cache: bool = False
+    fallback_used: bool = False
 
 
 class Kline(BaseModel):

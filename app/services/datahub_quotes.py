@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-import time
 
 from app.models.schemas import DataQuality, Kline, Quote
 from app.services.data_quality import build_data_quality
 from app.services.datahub_cache import _matched_quotes, _normalize_symbols, _ordered_complete_quotes, _tag_cached_quotes
-from app.services.datahub_runtime import ProviderRuntime
+from app.services.datahub_runtime import ProviderAttempt, ProviderRuntime, provider_source_name
 from app.services.datahub_status import _provider_source_key
+from app.utils.market_data import filter_valid_quotes
 from app.utils.symbols import standard_symbol
 
 
@@ -37,7 +37,8 @@ class QuoteCoordinator:
         self.priority = priority
 
     async def quote(self, symbol: str, use_cache: bool = True) -> Quote:
-        return (await self.quotes([symbol], use_cache=use_cache))[0]
+        requested = standard_symbol(symbol)
+        return (await self.quotes([requested], use_cache=use_cache))[0]
 
     async def quotes(self, symbols: Iterable[str], use_cache: bool = True) -> list[Quote]:
         requested_symbols = _normalize_symbols(symbols)
@@ -55,7 +56,7 @@ class QuoteCoordinator:
 
         self._fill_fallback_quotes(symbol_list, collected)
         if len(collected) == len(symbol_list):
-            self.cache.log_event("fallback", "部分或全部实时数据源失败，缺失个股使用24小时内缓存报价")
+            _safe_log_quote_event(self.cache, "fallback", "部分或全部实时数据源失败，缺失个股使用24小时内缓存报价")
             return _ordered_quotes(collected, requested_symbols)
 
         unresolved = [symbol for symbol in symbol_list if symbol not in collected]
@@ -68,45 +69,42 @@ class QuoteCoordinator:
 
     async def _fill_realtime_quotes(self, symbol_list: list[str], collected: dict[str, Quote]) -> list[str]:
         errors: list[str] = []
-        for index, name in self.priority("quote"):
+        for attempt in self.runtime.attempts(self.priority("quote"), self.providers, "quote", errors):
             remaining = [symbol for symbol in symbol_list if symbol not in collected]
             if not remaining:
                 break
-            if self.runtime.is_cooling(name, "quote"):
-                errors.append(f"{name}: 最近失败，短暂冷却中")
-                continue
-            await self._try_provider_quotes(index, name, remaining, collected, errors)
+            await self._try_provider_quotes(attempt, remaining, collected, errors)
         return errors
 
     async def _try_provider_quotes(
         self,
-        index: int,
-        name: str,
+        attempt: ProviderAttempt,
         remaining: list[str],
         collected: dict[str, Quote],
         errors: list[str],
     ) -> None:
-        provider = self.providers.get(name)
-        if provider is None:
-            errors.append(f"{name}: 数据源未注册")
-            return
-        started = time.perf_counter()
+        source = provider_source_name(attempt.provider, attempt.name)
         try:
-            quotes = await self.runtime.call(provider.quotes(remaining))
+            result = await self.runtime.timed_call(attempt.provider.quotes(remaining))  # type: ignore[attr-defined]
+            quotes = filter_valid_quotes(result.value)
             matched, missing = _matched_quotes(quotes, remaining)
             if not matched:
-                raise RuntimeError(f"{provider.source_name} 行情缺失：{','.join(missing)}")
-            latency_ms = (time.perf_counter() - started) * 1000
-            self.runtime.record_success(name, index, round(latency_ms, 2), "quote")
-            self.cache.save_quotes(matched)
+                raise RuntimeError(f"{source} 行情缺失或字段无效：{','.join(missing)}")
+            self.runtime.record_attempt_success(attempt, "quote", result.latency_ms)
             collected.update(_quotes_by_symbol(matched))
+            self._save_quotes_best_effort(matched)
             if missing:
-                message = f"{provider.source_name} 批量行情部分缺失：{','.join(missing)}"
-                errors.append(f"{name}: {message}")
-                self.cache.log_event("fallback", message)
+                message = f"{source} 批量行情部分缺失：{','.join(missing)}"
+                errors.append(f"{attempt.name}: {message}")
+                _safe_log_quote_event(self.cache, "fallback", message)
         except Exception as exc:
-            errors.append(f"{name}: {exc}")
-            self.runtime.record_failure(name, index, exc, "quote")
+            self.runtime.record_attempt_failure(attempt, "quote", exc, errors)
+
+    def _save_quotes_best_effort(self, quotes: list[Quote]) -> None:
+        try:
+            self.cache.save_quotes(quotes)
+        except Exception:
+            pass
 
     def _fill_fallback_quotes(self, symbol_list: list[str], collected: dict[str, Quote]) -> None:
         missing_symbols = [symbol for symbol in symbol_list if symbol not in collected]
@@ -120,7 +118,7 @@ class QuoteCoordinator:
         check_consistency: bool = True,
     ) -> tuple[Quote, DataQuality]:
         quote = await self.quote(symbol, use_cache=use_cache)
-        quality = await self.assess_quote_quality(quote, check_consistency=check_consistency)
+        quality = await self.assess_quote_quality(quote, use_cache=use_cache, check_consistency=check_consistency)
         return quote, quality
 
     async def assess_quote_quality(
@@ -135,7 +133,7 @@ class QuoteCoordinator:
         if quality_klines is None:
             quality_klines = (
                 self.cache.get_klines(f"{quote.code}.{quote.market}", 120, self.settings.kline_cache_seconds)
-                if require_kline
+                if require_kline and use_cache
                 else []
             )
         consistency_level, notes, penalty = await self.consistency(quote, check_consistency=check_consistency)
@@ -206,18 +204,17 @@ class QuoteCoordinator:
         source_note = f"参与校验 {summary.compared + 1} 个行情源，备用失败 {summary.failed} 个。"
         if max_price_gap_pct > threshold:
             note = f"{source_note}多源最大价格差异 {max_price_gap_pct:.2f}%，超过 {threshold:.2f}% 阈值。"
-            self.cache.save_monitor_event("warning", "quote", note, symbol=target_symbol)
+            _safe_save_monitor_event(self.cache, "warning", "quote", note, symbol=target_symbol)
             return "存在差异", [note], 18
         note = f"{source_note}多源最大价格差异 {max_price_gap_pct:.2f}%，处于可接受范围。"
         return "一致", [note], 0
 
     async def consistency_probe(self, index: int, name: str, provider, target_symbol: str) -> dict[str, object]:
-        started = time.perf_counter()
         try:
-            rows = await self.runtime.call(provider.quotes([target_symbol]))
+            result = await self.runtime.timed_call(provider.quotes([target_symbol]))
+            rows = result.value
             ordered = _ordered_complete_quotes(rows, [target_symbol], provider.source_name)
-            latency_ms = round((time.perf_counter() - started) * 1000, 2)
-            return {"name": name, "index": index, "quote": ordered[0], "latency_ms": latency_ms}
+            return {"name": name, "index": index, "quote": ordered[0], "latency_ms": result.latency_ms}
         except Exception as exc:
             return {"name": name, "index": index, "error": exc}
 
@@ -230,9 +227,29 @@ def _ordered_quotes(by_symbol: dict[str, Quote], requested_symbols: list[str]) -
     return [by_symbol[symbol] for symbol in requested_symbols]
 
 
+def _safe_log_quote_event(cache: object, category: str, message: str) -> None:
+    log_event = getattr(cache, "log_event", None)
+    if not callable(log_event):
+        return
+    try:
+        log_event(category, message)
+    except Exception:
+        pass
+
+
+def _safe_save_monitor_event(cache: object, level: str, category: str, message: str, *, symbol: str) -> None:
+    save_monitor_event = getattr(cache, "save_monitor_event", None)
+    if not callable(save_monitor_event):
+        return
+    try:
+        save_monitor_event(level, category, message, symbol=symbol)
+    except Exception:
+        pass
+
+
 def _consistency_skip_result(quote: Quote, check_consistency: bool) -> tuple[str, list[str], int] | None:
     if not check_consistency:
         return "未校验", ["当前报价未做多源一致性抽检。"], 4
-    if "缓存" in quote.source and "短时缓存" not in quote.source:
+    if quote.fallback_used or ("缓存" in quote.source and "短时缓存" not in quote.source):
         return "未校验", ["当前报价来自较旧兜底缓存，暂不做多源一致性抽检。"], 4
     return None

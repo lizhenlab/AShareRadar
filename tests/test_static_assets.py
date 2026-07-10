@@ -41,6 +41,15 @@ def test_css_entrypoint_imports_existing_modules_in_order() -> None:
         assert path.read_text(encoding="utf-8").strip(), f"empty CSS module: {filename}"
 
 
+def test_side_leader_rows_do_not_force_cjk_letter_breaks() -> None:
+    css = (STATIC_DIR / "css" / "side-footer.css").read_text(encoding="utf-8")
+
+    assert ".leader-row.leader-scope" in css
+    assert "overflow-wrap: break-word;" in css
+    assert "word-break: normal;" in css
+    assert "overflow-wrap: anywhere;" not in css
+
+
 def test_frontend_js_functions_stay_small_enough_to_review() -> None:
     hotspots = [
         function
@@ -78,268 +87,25 @@ def test_ui_symbol_validation_matches_backend_zero_code_rule() -> None:
     _run_node_script(script)
 
 
-def test_research_panel_renderer_runs_with_fake_dom() -> None:
+
+def test_research_panel_renderer_escapes_and_formats_core_panels() -> None:
     script = r'''
-      import { renderResearch } from "./static/js/research-panels.js";
+      import { runResearchPanelSmoke } from "./tests/static_research_smoke_helpers.mjs";
 
-      const elements = new Map();
-      const insertedHtml = [];
-      const fetchCalls = [];
-      function element(id) {
-        if (!elements.has(id)) {
-          elements.set(id, {
-            id,
-            innerHTML: "",
-            onclick: null,
-            value: "",
-            disabled: false,
-            textContent: "问一下",
-            addEventListener(type, handler) {
-              this.listener = { type, handler };
-            },
-            querySelector(selector) {
-              if (selector === "button") return element(`${id}-button`);
-              return null;
-            },
-            insertAdjacentHTML(position, html) {
-              insertedHtml.push({ position, html });
-            },
-            requestSubmit() {
-              if (this.listener) this.listener.handler({ preventDefault() {} });
-            },
-          });
-        }
-        return elements.get(id);
-      }
-
-      globalThis.document = {
-        getElementById: element,
-        querySelector() {
-          return null;
-        },
-        createElement() {
-          return { innerHTML: "", firstElementChild: null };
-        },
-      };
-      globalThis.fetch = async (url, options = {}) => {
-        fetchCalls.push({ url, options });
-        return {
-          ok: true,
-          async json() {
-            return {
-              question: "风险在哪里？",
-              answer: "风险已识别<script>",
-              topic: "风险",
-              confidence: 61,
-              evidence: ["风险证据"],
-              actions: ["降仓"],
-              invalidations: ["站回压力"],
-              related_questions: [],
-            };
-          },
-        };
-      };
-
-      const workbench = {
-        qa_report: { summary: "规则问诊", items: [] },
-        question_answer: {
-          question: "能买<script>吗？",
-          answer: "先等确认",
-          topic: "buy",
-          confidence: 66,
-          llm_used: true,
-          llm_status: "已增强",
-          evidence: ["证据<script>"],
-          actions: ["只观察"],
-          invalidations: ["跌破支撑"],
-          related_questions: ["风险<script>在哪里？"],
-        },
-        evidence_chain: { summary: "证据", support: [], opposition: [], invalidations: [] },
-        risk_radar: { overall_level: "中性", summary: "风险", items: [] },
-        event_digest: { summary: "事件", negative_events: [], positive_events: [], watch_events: [] },
-        peer_comparison: { summary: "同行", industry: "白酒", sample_count: 3, metrics: [] },
-        t_strategy: { summary: "做T", low_zone: "10", high_zone: "12", stop_conditions: [] },
-        feature_snapshot: {
-          trend_score: 60,
-          trend_label: "震荡",
-          fund_flow_score: 55,
-          leader_score: 40,
-          leader_level: "普通",
-          volume_ratio: 1.2,
-          valuation_score: 57,
-          data_quality_level: "优秀",
-          data_quality_score: 90,
-          tags: ["测试"],
-        },
-        diagnosis: {
-          headline: "等待确认",
-          action: "观察",
-          confidence: 60,
-          beginner_summary: "摘要",
-          professional_summary: "专业摘要",
-          confirmation_signals: [],
-          hard_risks: [],
-        },
-        alpha_evidence: {
-          verdict: "偏强<script>",
-          confidence: 60,
-          summary: "Alpha<script>",
-          positives: [{ title: "业绩改善<script>", impact: 4, reason: "盈利修复<script>" }],
-          negatives: [{ title: "估值压力<script>", impact: -2, reason: "接近历史高位<script>" }],
-          missing_data: ["机构持仓<script>", "现金流"],
-        },
-        market_regime: {
-          market_label: "风险环境",
-          stock_state: "风险优先",
-          risk_multiplier: 1.2,
-          industry_label: "行业震荡",
-          breadth_label: "中性",
-          breadth_score: 50,
-          confidence_adjustment: 5,
-          suggestions: ["先降仓"],
-          evidence: ["风险证据"],
-        },
-        signal_validation: { overall_status: "待确认", summary: "验证", items: [], notes: [] },
-        timeframe_alignment: {
-          conflict_level: "短线冲突<script>",
-          alignment_label: "偏弱分歧",
-          alignment_score: 42,
-          summary: "周期<script>",
-          timeframes: [
-            { name: "短线<script>", score: 38, label: "偏弱", window_days: 20, return_pct: -3.2, max_drawdown_pct: -6.4, above_ma: false, ma_value: 10.2 },
-            { name: "中线", score: 68, label: "共振", window_days: 60, return_pct: 8.1, max_drawdown_pct: -2.4, above_ma: true, ma_value: 11.2 },
-          ],
-          suggestions: ["先等短线修复<script>", "只保留底仓", "第三条", "第四条不显示"],
-        },
-        risk_reward: {
-          rating: "风险不足<script>",
-          reward_risk_ratio: 0.8,
-          current_price: 10,
-          upside_target: 12,
-          upside_pct: 20,
-          downside_stop: 9,
-          downside_pct: -10,
-          atr_pct: 2,
-          volatility_pct: 3,
-          summary: "收益风险<script>",
-          scenarios: [
-            { name: "防守情景<script>", probability: 55, trigger: "跌破支撑<script>", expected_move: "-6%", response: "降仓<script>", invalidation: "收回支撑<script>" },
-            { name: "积极情景", probability: 30, trigger: "突破压力", expected_move: "+8%", response: "小仓跟随", invalidation: "跌回平台" },
-          ],
-          notes: ["仓位要轻<script>", "第二条不显示"],
-        },
-        factor_lab: {
-          total_score: 55,
-          calibrated_confidence: 40,
-          top_positive: ["趋势因子<script>"],
-          profile_label: "常规",
-          calibration_sample_count: 0,
-          positive_factor_count: 0,
-          negative_factor_count: 0,
-          summary: "因子",
-          factors: [{
-            name: "趋势因子<script>",
-            score: 66,
-            weight: 1.2,
-            value: "偏强",
-            direction: "正向",
-            percentile: 72.5,
-            calibration: {
-              sample_count: 8,
-              confidence_level: "中等",
-              expected_level: "偏正",
-              win_rate: 62.5,
-              avg_forward_5d_return: 1.2,
-              max_adverse_return: -2.3,
-            },
-            calibration_buckets: [{ name: "强趋势", sample_count: 5, avg_forward_5d_return: 1.1 }],
-            evidence: ["因子证据"],
-          }],
-          weight_policy: ["权重规则"],
-          notes: ["因子备注"],
-        },
-        theme_context: {
-          level: "中性",
-          score: 50,
-          style: "观察",
-          relative_strength: "待确认",
-          industry: "白酒<script>",
-          industry_change_pct: 1.23,
-          summary: "主题",
-          concepts: [{ name: "高端<script>", change_pct: 2.5, leading_stock: "龙头<script>", match_reason: "匹配" }],
-          opportunities: ["机会"],
-          risks: ["风险"],
-          evidence: ["证据"],
-          missing_data: [],
-        },
-        chip_analysis: { distribution_label: "均衡", concentration: "一般", center_price: 10, summary: "筹码", support_bands: [], pressure_bands: [], notes: [] },
-        leadership: { score: 40, level: "普通", summary: "龙头", tags: [], evidence: [], missing_data: [] },
-        replay: {
-          sample_count: 6,
-          window_days: 120,
-          success_rate: 66.7,
-          summary: "复盘",
-          pattern_stats: [{ pattern: "放量突破<script>", sample_count: 6, win_rate: 66.7, avg_forward_5d_return: 1.8, note: "偏正" }],
-          cases: [{ date: "2026-05-01", pattern: "放量突破", outcome: "有效", forward_3d_return: 1.2, forward_5d_return: null }],
-        },
-      };
-
-      renderResearch(workbench, { symbol: "600519" });
-      const aiHtml = element("aiDashboard").innerHTML;
-      const themeHtml = element("themePanel").innerHTML;
-      if (!aiHtml.includes("本次问诊") || !aiHtml.includes("&lt;script&gt;")) {
-        throw new Error("AI dashboard did not render escaped question answer content");
-      }
-      if (themeHtml.includes("<script>") || !themeHtml.includes("&lt;script&gt;")) {
-        throw new Error("Theme panel did not escape concept content");
-      }
-      const factorHtml = element("factorLab").innerHTML;
-      if (!factorHtml.includes("历史分位 72.5%") || !factorHtml.includes("&lt;script&gt;") || !factorHtml.includes("权重规则")) {
-        throw new Error("Factor lab did not render escaped calibrated factor content");
-      }
-      const regimeHtml = element("marketRegime").innerHTML;
-      if (!regimeHtml.includes('class="risk"') || !regimeHtml.includes("置信修正 +5") || !regimeHtml.includes("先降仓")) {
-        throw new Error("Market regime did not render risk tone, signed adjustment, and suggestions");
-      }
-      const alphaHtml = element("alphaEvidence").innerHTML;
-      if (!alphaHtml.includes("业绩改善&lt;script&gt; +4") || !alphaHtml.includes("估值压力&lt;script&gt; -2") || !alphaHtml.includes("待补数据：机构持仓&lt;script&gt;、现金流")) {
-        throw new Error("Alpha evidence did not render signed, escaped evidence and missing data");
-      }
-      const timeframeHtml = element("timeframeAlignment").innerHTML;
-      if (!timeframeHtml.includes('class="risk"') || !timeframeHtml.includes("短线&lt;script&gt;") || timeframeHtml.includes("第四条不显示") || timeframeHtml.includes("<script>")) {
-        throw new Error("Timeframe alignment did not render conflict tone, limited suggestions, and escaped rows");
-      }
-      const riskRewardHtml = element("riskReward").innerHTML;
-      if (!riskRewardHtml.includes('class="risk"') || !riskRewardHtml.includes("防守情景&lt;script&gt;") || !riskRewardHtml.includes("收益风险比 0.80") || riskRewardHtml.includes("第二条不显示")) {
-        throw new Error("Risk/reward panel did not render risk tone, scenarios, metrics, and limited notes");
-      }
-      if (!element("aiQuestionForm").listener) {
-        throw new Error("AI question form listener was not registered");
-      }
-      element("aiQuestionInput").value = "风险在哪里？";
-      await element("aiQuestionForm").listener.handler({ preventDefault() {} });
-      const button = element("aiQuestionForm-button");
-      if (button.disabled || button.textContent !== "问一下") {
-        throw new Error("AI question button did not recover after submit");
-      }
-      if (fetchCalls.length !== 1 || !fetchCalls[0].url.endsWith("/api/stock/ask")) {
-        throw new Error("AI question request was not sent");
-      }
-      const body = JSON.parse(fetchCalls[0].options.body);
-      if (body.symbol !== "600519" || body.question !== "风险在哪里？") {
-        throw new Error(`AI question request body was wrong: ${fetchCalls[0].options.body}`);
-      }
-      if (!insertedHtml.at(-1).html.includes("风险已识别&lt;script&gt;")) {
-        throw new Error("AI question answer was not inserted and escaped");
-      }
-      const replayHtml = element("replayPanel").innerHTML;
-      if (!replayHtml.includes("样本有效率 66.7%") || !replayHtml.includes("5日 --")) {
-        throw new Error("Replay panel did not render formatted stats and pending returns");
-      }
+      await runResearchPanelSmoke();
     '''
 
-    subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, check=True)
+    _run_node_script(script)
 
+
+def test_research_panel_ai_question_submit_posts_and_escapes_answer() -> None:
+    script = r'''
+      import { runAiQuestionSubmitSmoke } from "./tests/static_research_smoke_helpers.mjs";
+
+      await runAiQuestionSubmitSmoke();
+    '''
+
+    _run_node_script(script)
 
 def test_chart_renderer_draws_active_marks_with_fake_canvas() -> None:
     script = r'''
@@ -785,6 +551,229 @@ def test_diagnostics_renderer_runs_with_fake_dom() -> None:
       }
     '''
 
+    subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, check=True)
+
+
+def test_diagnostics_renderer_tolerates_malformed_partial_payloads() -> None:
+    script = r'''
+      import { loadDataStatus, loadMonitoring } from "./static/js/diagnostics.js";
+
+      const elements = new Map();
+      function element(id) {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            innerHTML: "",
+            textContent: "",
+          });
+        }
+        return elements.get(id);
+      }
+
+      let timerStarted = 0;
+      globalThis.setInterval = () => {
+        timerStarted += 1;
+        return 99;
+      };
+      globalThis.clearInterval = () => {};
+      globalThis.document = {
+        hidden: false,
+        getElementById: element,
+        querySelectorAll() {
+          return [];
+        },
+      };
+
+      const responses = {
+        "/api/tasks/status": { enabled: true, running: false, tasks: { bad: "shape" } },
+        "/api/tasks/runs?limit=8": { rows: [] },
+        "/api/monitor/events?limit=8": { items: [] },
+        "/api/data/status": {
+          source_plan: {
+            health_level: "未知",
+            summary: "",
+            warnings: { bad: "shape" },
+            suggestions: "检查网络",
+          },
+          providers: { bad: "shape" },
+          cache: null,
+          capabilities: "bad",
+          capability_statuses: { bad: "shape" },
+        },
+      };
+
+      globalThis.fetch = async (url) => ({
+        ok: true,
+        async json() {
+          return responses[url];
+        },
+      });
+
+      const state = { monitorTimer: null };
+      await loadMonitoring(state);
+      await loadDataStatus();
+
+      if (state.monitorTimer !== 99 || timerStarted !== 1) {
+        throw new Error("monitor timer was not maintained after malformed payload rendering");
+      }
+      if (!element("taskCards").innerHTML.includes("暂无调度任务")) {
+        throw new Error(`malformed tasks did not render empty task state: ${element("taskCards").innerHTML}`);
+      }
+      if (!element("monitorEvents").innerHTML.includes("暂无事件")) {
+        throw new Error(`malformed events did not render empty event state: ${element("monitorEvents").innerHTML}`);
+      }
+      if (!element("providerStatus").innerHTML.includes("暂无数据源状态")) {
+        throw new Error(`malformed providers did not render empty provider state: ${element("providerStatus").innerHTML}`);
+      }
+      if (!element("cacheStats").innerHTML.includes("报价 0 条") || !element("cacheStats").innerHTML.includes("能力：等待探测")) {
+        throw new Error(`malformed cache/capabilities did not render safe defaults: ${element("cacheStats").innerHTML}`);
+      }
+    '''
+
+    subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, check=True)
+
+
+def test_research_panels_tolerate_malformed_optional_collections() -> None:
+    script = r'''
+      import { renderResearch } from "./static/js/research-panels.js";
+
+      const elements = new Map();
+      function element(id) {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            innerHTML: "",
+            textContent: "",
+            value: "",
+            isConnected: true,
+            onclick: null,
+            addEventListener(type, handler) {
+              this.listener = { type, handler };
+            },
+            querySelector(selector) {
+              if (selector === "button") return element(`${id}-button`);
+              if (selector === ".ai-card-wide") return null;
+              return null;
+            },
+            closest(selector) {
+              if (selector === "#aiDashboard") return element("aiDashboard");
+              return null;
+            },
+            insertAdjacentHTML() {},
+            remove() {},
+          });
+        }
+        return elements.get(id);
+      }
+
+      globalThis.document = {
+        getElementById: element,
+        querySelector() {
+          return null;
+        },
+      };
+
+      renderResearch({
+        qa_report: { items: { bad: true } },
+        evidence_chain: { support: { bad: true }, opposition: null, invalidations: { bad: true } },
+        risk_radar: { summary: "风险", items: { bad: true } },
+        event_digest: { negative_events: { bad: true }, positive_events: null, watch_events: { bad: true } },
+        peer_comparison: { metrics: { bad: true } },
+        t_strategy: { stop_conditions: { bad: true } },
+        feature_snapshot: { tags: { bad: true } },
+        diagnosis: { confirmation_signals: { bad: true }, hard_risks: { bad: true } },
+        alpha_evidence: { positives: { bad: true }, negatives: "bad", missing_data: { bad: true } },
+        market_regime: { suggestions: { bad: true }, evidence: { bad: true } },
+        signal_validation: { items: [{ status: null }, null, "bad"], notes: { bad: true } },
+        timeframe_alignment: { timeframes: { bad: true }, suggestions: { bad: true } },
+        risk_reward: { rating: null, scenarios: [{ name: null }, null], notes: { bad: true } },
+        factor_lab: {
+          top_positive: "bad",
+          factors: [null, { calibration_buckets: { bad: true }, calibration: null, evidence: { bad: true } }],
+          weight_policy: { bad: true },
+          notes: { bad: true },
+        },
+        theme_context: { concepts: { bad: true }, opportunities: { bad: true }, risks: null },
+        chip_analysis: { support_bands: { bad: true }, pressure_bands: null, notes: { bad: true } },
+        leadership: { tags: { bad: true }, evidence: { bad: true }, missing_data: { bad: true } },
+        replay: { pattern_stats: { bad: true }, cases: { bad: true } },
+      }, { symbol: "600706.SH" });
+
+      if (!element("alphaEvidence").innerHTML.includes("等待更多积极证据")) {
+        throw new Error("malformed alpha collections did not render empty state");
+      }
+      if (!element("timeframeAlignment").innerHTML.includes("timeframe-grid")) {
+        throw new Error("malformed timeframe collections stopped rendering");
+      }
+      if (!element("riskReward").innerHTML.includes("scenario-grid")) {
+        throw new Error("malformed scenario collections stopped rendering");
+      }
+      if (!element("replayPanel").innerHTML.includes("replay-cases")) {
+        throw new Error("malformed replay cases stopped rendering");
+      }
+    '''
+    subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, check=True)
+
+
+def test_research_panel_failure_isolated_to_single_panel() -> None:
+    script = r'''
+      import { renderResearch } from "./static/js/research-panels.js";
+
+      const elements = new Map();
+      function element(id) {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            innerHTML: "",
+            textContent: "",
+            value: "",
+            isConnected: true,
+            addEventListener() {},
+            querySelector() {
+              return null;
+            },
+            closest() {
+              return null;
+            },
+            insertAdjacentHTML() {},
+          });
+        }
+        return elements.get(id);
+      }
+
+      globalThis.document = {
+        getElementById: element,
+        querySelector() {
+          return null;
+        },
+      };
+
+      const workbench = {
+        qa_report: { summary: "问诊", items: [] },
+        risk_radar: { overall_level: "中性", items: [] },
+        replay: {
+          sample_count: 1,
+          window_days: 120,
+          summary: "历史回放仍应渲染",
+          pattern_stats: [],
+          cases: [],
+        },
+      };
+      Object.defineProperty(workbench, "alpha_evidence", {
+        get() {
+          throw new Error("alpha payload broken");
+        },
+      });
+
+      renderResearch(workbench, { symbol: "600706.SH" });
+
+      if (!element("alphaEvidence").innerHTML.includes("Alpha证据链暂不可用")) {
+        throw new Error(`alpha panel did not render isolated fallback: ${element("alphaEvidence").innerHTML}`);
+      }
+      if (!element("replayPanel").innerHTML.includes("历史回放仍应渲染")) {
+        throw new Error(`later panels did not keep rendering: ${element("replayPanel").innerHTML}`);
+      }
+    '''
     subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, check=True)
 
 

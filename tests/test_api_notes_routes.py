@@ -149,6 +149,26 @@ def test_delete_stock_note_returns_404_when_note_is_missing() -> None:
     assert response.json() == {"detail": "个股笔记不存在"}
 
 
+def test_delete_stock_note_returns_mutation_result_when_removed() -> None:
+    client = _client(_DataHubStub(cache=_DeleteCache(removed=True), quote=make_quote()))
+
+    response = client.delete("/api/stock/notes/9")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "removed": True}
+
+
+def test_delete_stock_note_uses_mutation_response_model() -> None:
+    app = FastAPI()
+    app.include_router(notes.router)
+
+    schema = app.openapi()["paths"]["/api/stock/notes/{note_id}"]["delete"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+
+    assert schema == {"$ref": "#/components/schemas/MutationResult"}
+
+
 def _client(datahub) -> TestClient:
     app = FastAPI()
     app.add_exception_handler(RequestValidationError, validation_exception_handler)

@@ -262,10 +262,9 @@ CREATE TABLE IF NOT EXISTS schema_migration (
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Indexes that use compatibility-added columns are created after migrations.
 CREATE INDEX IF NOT EXISTS idx_quote_history_symbol_time
     ON quote_history(symbol, fetched_at);
-CREATE INDEX IF NOT EXISTS idx_quote_history_symbol_trade_latest
-    ON quote_history(symbol, trade_date DESC, fetched_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_kline_symbol_date
     ON kline_daily(symbol, date);
 CREATE INDEX IF NOT EXISTS idx_kline_minute_symbol_time

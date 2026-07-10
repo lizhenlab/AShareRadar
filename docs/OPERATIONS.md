@@ -8,13 +8,14 @@ Start the app:
 
 ```bash
 export PYTHON=${PYTHON:-/opt/anaconda3/bin/python3}
+export PYTHONNOUSERSITE=1
 $PYTHON -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
 Detached local service used during development:
 
 ```bash
-screen -dmS ashare_radar bash -lc 'cd /Users/zl/Documents/AShareRadar && /opt/anaconda3/bin/python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8010 > /tmp/ashare_radar.log 2>&1'
+screen -dmS ashare_radar bash -lc 'cd /Users/zl/Documents/AShareRadar && PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8010 > /tmp/ashare_radar.log 2>&1'
 ```
 
 Check status:
@@ -31,6 +32,13 @@ Stop:
 screen -S ashare_radar -X quit
 ```
 
+Inspect logs for the detached service:
+
+```bash
+tail -n 200 /tmp/ashare_radar.log
+tail -f /tmp/ashare_radar.log
+```
+
 ## 2. Local Data Boundary
 
 Runtime files under `data/` are local state, not source code:
@@ -39,13 +47,47 @@ Runtime files under `data/` are local state, not source code:
 data/ashare_radar.sqlite3
 data/ashare_radar.sqlite3-wal
 data/ashare_radar.sqlite3-shm
-data/app.db
 data/trading_calendar.json
 ```
 
-The repository keeps `data/.gitkeep` only so the directory exists. Runtime data is ignored by `.gitignore`.
+The supported SQLite runtime database is `data/ashare_radar.sqlite3`. Legacy or smoke-test files such as `data/app.db` and `data/smoke.sqlite3*` are disposable local artifacts, not supported runtime state. The repository keeps `data/.gitkeep` only so the directory exists. Runtime data is ignored by `.gitignore`.
 
-If local data becomes inconsistent during development, stop the service and remove the affected runtime files. The app will recreate SQLite schema on startup.
+Before deleting or replacing local data, stop the service and create a timestamped backup that keeps SQLite WAL/SHM files together:
+
+```bash
+screen -S ashare_radar -X quit || true
+mkdir -p data/backups
+backup="data/backups/ashare_radar_$(date +%Y%m%d_%H%M%S)"
+mkdir "$backup"
+cp -p data/ashare_radar.sqlite3* data/trading_calendar.json "$backup"/ 2>/dev/null || true
+ls -lh "$backup"
+```
+
+If local data becomes inconsistent during development, remove only the affected runtime files after a backup exists. The app will recreate the SQLite schema on startup.
+
+```bash
+rm -f data/ashare_radar.sqlite3 data/ashare_radar.sqlite3-wal data/ashare_radar.sqlite3-shm
+rm -f data/app.db data/smoke.sqlite3 data/smoke.sqlite3-wal data/smoke.sqlite3-shm
+$PYTHON -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+```
+
+Restore a backup while the service is stopped:
+
+```bash
+screen -S ashare_radar -X quit || true
+backup="data/backups/ashare_radar_YYYYMMDD_HHMMSS"
+cp -p "$backup"/ashare_radar.sqlite3* data/ 2>/dev/null || true
+cp -p "$backup"/trading_calendar.json data/ 2>/dev/null || true
+PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+```
+
+Verify after cleanup or restore:
+
+```bash
+curl -sS http://127.0.0.1:8010/api/health
+curl -sS http://127.0.0.1:8010/api/data/status
+curl -sS 'http://127.0.0.1:8010/api/stock/workbench?symbol=600519'
+```
 
 The trading-calendar refresh API (`POST /api/data/trading-calendar/refresh`) reports `ok=false` and an `error` field when the optional AKShare calendar source fails, so a failed refresh can be distinguished from an empty but valid local cache.
 
@@ -82,11 +124,13 @@ Use the `ASHARE_RADAR_*` namespace for new configuration. Legacy aliases are acc
 | `ASHARE_RADAR_MAX_STOCK_CONCEPT_ROWS` | `20000` | `MAX_STOCK_CONCEPT_ROWS` | Runtime retention cap. |
 | `ASHARE_RADAR_MAX_TASK_RUN_ROWS` | `2000` | `MAX_TASK_RUN_ROWS` | Runtime retention cap. |
 | `ASHARE_RADAR_MAX_MONITOR_EVENT_ROWS` | `3000` | `MAX_MONITOR_EVENT_ROWS` | Runtime retention cap. |
+| `ASHARE_RADAR_MAX_CACHE_EVENT_ROWS` | `5000` | `MAX_CACHE_EVENT_ROWS` | Runtime retention cap for cache/provider events. |
+| `ASHARE_RADAR_MAX_ALERT_EVENT_ROWS` | `5000` | `MAX_ALERT_EVENT_ROWS` | Runtime retention cap for alert events. |
 | `ASHARE_RADAR_MAX_ADVICE_HISTORY_ROWS` | `20000` | `MAX_ADVICE_HISTORY_ROWS` | Runtime retention cap. |
 | `ASHARE_RADAR_ADVICE_HISTORY_DEDUPE_SECONDS` | `180` | `ADVICE_HISTORY_DEDUPE_SECONDS` | Advice-history de-duplication window. |
 | `ASHARE_RADAR_QUOTE_STALE_WARNING_SECONDS` | `900` | `QUOTE_STALE_WARNING_SECONDS` | Quote freshness warning threshold. |
 | `ASHARE_RADAR_QUOTE_CONSISTENCY_WARNING_PCT` | `1.0` | `QUOTE_CONSISTENCY_WARNING_PCT` | Multi-source price-difference warning threshold. |
-| `ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH` | `0` | `TRADE_CALENDAR_AUTO_FETCH` | Optional AKShare calendar fetch when cache is missing. |
+| `ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH` | `0` | `TRADE_CALENDAR_AUTO_FETCH` | Optional AKShare calendar fetch when the local trading-calendar cache is missing. |
 
 ## 4. Verification Gates
 
@@ -108,7 +152,7 @@ curl -sS 'http://127.0.0.1:8010/api/stock/workbench?symbol=600519'
 
 ## 5. Provider Failure Handling
 
-- AKShare is optional. If its pandas/numpy stack is broken, the app should degrade to backup providers or local stock data without dumping native traceback noise into service logs.
+- AKShare is optional. The app and npm checks isolate user-level Python packages so pandas/numpy resolve from the project runtime. If AKShare still fails, the app should degrade to backup providers or local stock data without dumping native traceback noise into service logs.
 - Demo provider remains disabled unless `ASHARE_RADAR_DEMO_PROVIDER_ENABLED=1`.
 - Tushare should be reported as disabled until `ASHARE_RADAR_TUSHARE_TOKEN` is configured.
 - Futu should be reported as disabled until `ASHARE_RADAR_FUTU_ENABLED=1` and OpenD is reachable.

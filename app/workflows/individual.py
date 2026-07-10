@@ -38,6 +38,7 @@ from app.models.schemas import (
     TStrategyAssistantReport,
     ThemeContextReport,
     ValuationAnalysis,
+    WorkbenchDataWarning,
 )
 from app.services.datahub import DataHub
 from app.services.llm_explainer import enhance_stock_answer
@@ -65,6 +66,7 @@ class StockWorkbenchLocalState:
     alert_rules: list[AlertRuleItem]
     alert_events: list[AlertEventItem]
     notes: list[StockNoteItem]
+    warnings: list[WorkbenchDataWarning]
 
 
 async def stock_workbench_context(
@@ -85,36 +87,38 @@ async def stock_insight_bundle(datahub: DataHub, symbol: str) -> StockInsightBun
 async def stock_workbench(datahub: DataHub, symbol: str) -> StockWorkbench:
     context = await stock_workbench_context(datahub, symbol)
     normalized = _workbench_symbol(context.insights.overview.symbol)
-    _ensure_advice_snapshot(datahub, context)
+    advice_warning = _ensure_advice_snapshot(datahub, context)
     local_state = _workbench_local_state(datahub, normalized, context)
-    return _stock_workbench_response(context, normalized, local_state)
+    warnings = [item for item in [advice_warning, *local_state.warnings] if item is not None]
+    return _stock_workbench_response(context, normalized, local_state, warnings)
 
 
-def _ensure_advice_snapshot(datahub: DataHub, context: WorkbenchContext) -> None:
+def _ensure_advice_snapshot(datahub: DataHub, context: WorkbenchContext) -> WorkbenchDataWarning | None:
     if context.advice_snapshot_saved:
-        return
-    datahub.cache.save_advice_snapshot(context.analysis)
-    context.advice_snapshot_saved = True
+        return None
+    try:
+        datahub.cache.save_advice_snapshot(context.analysis)
+    except Exception as exc:
+        message = "分析建议快照暂未保存，本次分析结果仍可正常查看。"
+        _log_local_state_failure(datahub, message, exc)
+        return WorkbenchDataWarning(component="advice_snapshot", message=message)
+    else:
+        context.advice_snapshot_saved = True
+        return None
 
 
 def _workbench_local_state(datahub: DataHub, normalized: str, context: WorkbenchContext) -> StockWorkbenchLocalState:
-    from app.services.chart_marks import build_chart_marks_from_context
-
     normalized = _workbench_symbol(normalized)
+    chart_marks, chart_warning = _safe_chart_marks(datahub, normalized, context)
+    alert_rules, rules_warning = _safe_alert_rules(datahub, normalized)
+    alert_events, events_warning = _safe_alert_events(datahub, normalized)
+    notes, notes_warning = _safe_stock_notes(datahub, normalized)
     return StockWorkbenchLocalState(
-        chart_marks=build_chart_marks_from_context(
-            datahub,
-            normalized,
-            context.insights,
-            limit=WORKBENCH_CHART_MARK_LIMIT,
-        ),
-        alert_rules=datahub.cache.alert_rules(
-            symbol=normalized,
-            include_disabled=True,
-            limit=WORKBENCH_ALERT_RULE_LIMIT,
-        ),
-        alert_events=datahub.cache.alert_events(symbol=normalized, limit=WORKBENCH_ALERT_EVENT_LIMIT),
-        notes=datahub.cache.stock_notes(normalized, limit=WORKBENCH_NOTE_LIMIT),
+        chart_marks=chart_marks,
+        alert_rules=alert_rules,
+        alert_events=alert_events,
+        notes=notes,
+        warnings=[item for item in [chart_warning, rules_warning, events_warning, notes_warning] if item is not None],
     )
 
 
@@ -122,10 +126,71 @@ def _workbench_symbol(symbol: str) -> str:
     return standard_symbol(symbol)
 
 
+def _safe_chart_marks(
+    datahub: DataHub,
+    normalized: str,
+    context: WorkbenchContext,
+) -> tuple[ChartMarkSummary, WorkbenchDataWarning | None]:
+    from app.services.chart_marks import build_chart_marks_from_context
+
+    try:
+        marks = build_chart_marks_from_context(datahub, normalized, context.insights, limit=WORKBENCH_CHART_MARK_LIMIT)
+        return marks, None
+    except Exception as exc:
+        message = "图表标注暂不可用，当前显示空标注。"
+        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        return (
+            ChartMarkSummary(symbol=normalized, updated_at=now_text(), marks=[]),
+            WorkbenchDataWarning(component="chart_marks", message=message),
+        )
+
+
+def _safe_alert_rules(datahub: DataHub, normalized: str) -> tuple[list[AlertRuleItem], WorkbenchDataWarning | None]:
+    try:
+        rows = datahub.cache.alert_rules(
+            symbol=normalized,
+            include_disabled=True,
+            limit=WORKBENCH_ALERT_RULE_LIMIT,
+        )
+        return rows, None
+    except Exception as exc:
+        message = "预警规则暂不可用，当前显示空列表。"
+        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        return [], WorkbenchDataWarning(component="alert_rules", message=message)
+
+
+def _safe_alert_events(datahub: DataHub, normalized: str) -> tuple[list[AlertEventItem], WorkbenchDataWarning | None]:
+    try:
+        rows = datahub.cache.alert_events(symbol=normalized, limit=WORKBENCH_ALERT_EVENT_LIMIT)
+        return rows, None
+    except Exception as exc:
+        message = "预警事件暂不可用，当前显示空列表。"
+        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        return [], WorkbenchDataWarning(component="alert_events", message=message)
+
+
+def _safe_stock_notes(datahub: DataHub, normalized: str) -> tuple[list[StockNoteItem], WorkbenchDataWarning | None]:
+    try:
+        rows = datahub.cache.stock_notes(normalized, limit=WORKBENCH_NOTE_LIMIT)
+        return rows, None
+    except Exception as exc:
+        message = "个股笔记暂不可用，当前显示空列表。"
+        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        return [], WorkbenchDataWarning(component="notes", message=message)
+
+
+def _log_local_state_failure(datahub: DataHub, message: str, exc: Exception) -> None:
+    try:
+        datahub.cache.log_event("fallback", f"{message}；{exc.__class__.__name__}")
+    except Exception:
+        pass
+
+
 def _stock_workbench_response(
     context: WorkbenchContext,
     normalized: str,
     local_state: StockWorkbenchLocalState,
+    warnings: list[WorkbenchDataWarning],
 ) -> StockWorkbench:
     return StockWorkbench(
         symbol=normalized,
@@ -154,6 +219,7 @@ def _stock_workbench_response(
         alert_rules=local_state.alert_rules,
         alert_events=local_state.alert_events,
         notes=local_state.notes,
+        local_data_warnings=warnings[:5],
     )
 
 

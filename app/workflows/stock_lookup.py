@@ -1,18 +1,81 @@
 from __future__ import annotations
 
-from app.models.schemas import PlateItem, StockInfo
+import asyncio
+
+from app.models.schemas import PlateItem, Quote, StockInfo
 from app.services.datahub import DataHub
 from app.utils.errors import NotFoundError
+from app.utils.symbols import normalize_symbol
+from app.workflows.optional_data import optional_timeout_seconds, short_error
 
 
 async def confirmed_stock_profile(datahub: DataHub, symbol: str) -> StockInfo | None:
     try:
-        profile = await datahub.stock_profile(symbol)
-    except RuntimeError as exc:
-        raise RuntimeError(f"股票池暂不可用，无法确认股票代码：{symbol}；{exc}") from exc
+        profile = await _stock_profile_or_timeout(datahub, symbol)
+    except (RuntimeError, TimeoutError) as exc:
+        fallback = await _quote_confirmed_profile(datahub, symbol)
+        if fallback is not None:
+            _log_quote_confirmation(datahub, fallback.symbol, _profile_failure_reason(exc))
+            return fallback
+        raise RuntimeError(f"股票池暂不可用，无法确认股票代码：{symbol}；{_profile_error_text(exc)}") from exc
     if profile is None:
-        raise NotFoundError(f"股票代码不存在或当前股票池不支持：{symbol}")
+        fallback = await _quote_confirmed_profile(datahub, symbol)
+        if fallback is not None:
+            _log_quote_confirmation(datahub, fallback.symbol, "股票池未命中")
+            return fallback
+        raise NotFoundError(f"股票代码不存在，且实时行情也无法确认：{symbol}")
     return profile
+
+
+async def _stock_profile_or_timeout(datahub: DataHub, symbol: str) -> StockInfo | None:
+    return await asyncio.wait_for(datahub.stock_profile(symbol), timeout=optional_timeout_seconds(datahub))
+
+
+async def _quote_confirmed_profile(datahub: DataHub, symbol: str) -> StockInfo | None:
+    try:
+        quote = await datahub.quote(symbol, use_cache=False)
+    except RuntimeError:
+        return None
+    return _profile_from_quote(symbol, quote)
+
+
+def _profile_failure_reason(exc: Exception) -> str:
+    return "股票池查询超时" if isinstance(exc, TimeoutError) else "股票池暂不可用"
+
+
+def _profile_error_text(exc: Exception) -> str:
+    return "查询超时" if isinstance(exc, TimeoutError) else short_error(exc)
+
+
+def _profile_from_quote(symbol: str, quote: Quote) -> StockInfo | None:
+    if quote.from_cache or quote.fallback_used:
+        return None
+    code, market = normalize_symbol(symbol)
+    if quote.code != code or quote.market.upper() != market.upper():
+        return None
+    name = str(quote.name or "").strip()
+    if not name:
+        return None
+    standard = f"{code}.{market.upper()}"
+    return StockInfo(
+        symbol=standard,
+        code=code,
+        market=market.upper(),
+        name=name,
+        industry=None,
+        list_date=None,
+        source=f"{str(quote.source or '行情').strip()}确认",
+        updated_at=str(quote.timestamp or "").strip(),
+    )
+
+
+def _log_quote_confirmation(datahub: DataHub, symbol: str, reason: str) -> None:
+    log_event = getattr(getattr(datahub, "cache", None), "log_event", None)
+    if callable(log_event):
+        try:
+            log_event("fallback", f"{reason}，使用行情确认股票代码：{symbol}")
+        except Exception:
+            pass
 
 
 def match_industry(profile: StockInfo | None, plates: list[PlateItem]) -> PlateItem | None:

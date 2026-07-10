@@ -6,7 +6,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.data_quality_time import expected_quote_date, latest_expected_trade_date
-from app.services.datahub_cache import MINUTE_INTERVAL_ALIASES, _kline_cache_is_fresh, _normalize_minute_interval, _stock_pool_cache_is_fresh
+from app.models.schemas import MinuteKline
+from app.services.datahub_cache import (
+    MINUTE_INTERVAL_ALIASES,
+    _kline_cache_is_fresh,
+    _minute_kline_cache_is_fresh,
+    _normalize_minute_interval,
+    _stock_pool_cache_is_fresh,
+)
 from tests.factories import make_kline
 
 
@@ -76,3 +83,34 @@ def test_kline_cache_freshness_rejects_future_dates() -> None:
     assert _kline_cache_is_fresh([make_kline(date=expected.isoformat())])
     assert _kline_cache_is_fresh([make_kline(date=allowed.isoformat())])
     assert not _kline_cache_is_fresh([make_kline(date=future.isoformat())])
+
+
+def test_minute_kline_cache_freshness_checks_business_timestamp() -> None:
+    trading_now = datetime(2026, 5, 13, 10, 20, 0)
+    midday_now = datetime(2026, 5, 13, 12, 0, 0)
+    after_close_now = datetime(2026, 5, 13, 16, 0, 0)
+
+    assert not _minute_kline_cache_is_fresh([], "5m", now=trading_now)
+    assert _minute_kline_cache_is_fresh([_minute_row("2026-05-13 10:15:00")], "5m", now=trading_now)
+    assert not _minute_kline_cache_is_fresh([_minute_row("2026-05-13 09:30:00")], "5m", now=trading_now)
+    assert not _minute_kline_cache_is_fresh([_minute_row("2026-05-12 10:15:00")], "5m", now=trading_now)
+    assert not _minute_kline_cache_is_fresh([_minute_row("2026-05-13 10:30:00")], "5m", now=trading_now)
+    assert _minute_kline_cache_is_fresh([_minute_row("2026-05-13 11:25:00")], "5m", now=midday_now)
+    assert not _minute_kline_cache_is_fresh([_minute_row("2026-05-13 11:10:00")], "5m", now=midday_now)
+    assert _minute_kline_cache_is_fresh([_minute_row("2026-05-13 14:55:00")], "5m", now=after_close_now)
+    assert not _minute_kline_cache_is_fresh([_minute_row("2026-05-13 14:30:00")], "5m", now=after_close_now)
+    assert not _minute_kline_cache_is_fresh([_minute_row("2026-05-13 16:30:00")], "5m", now=after_close_now)
+    assert not _minute_kline_cache_is_fresh([_minute_row("2026-05-13 10:15:00")], "2h", now=trading_now)
+
+
+def _minute_row(timestamp: str) -> MinuteKline:
+    return MinuteKline(
+        timestamp=timestamp,
+        open=100.0,
+        close=101.0,
+        high=102.0,
+        low=99.0,
+        volume=1000.0,
+        amount=101000.0,
+        interval="5m",
+    )

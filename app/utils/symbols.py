@@ -1,9 +1,55 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Iterable
+
 
 SUPPORTED_MARKETS = {"sh", "sz"}
 DEFAULT_SH_PREFIXES = ("5", "6", "9")
 SYMBOL_ERROR_MESSAGE = "股票代码应为6位数字且不能全为0，例如 600519 或 000001"
+
+
+@dataclass(frozen=True)
+class SymbolListResult:
+    symbols: list[str]
+    skipped_count: int = 0
+
+
+@dataclass
+class _SymbolListBuilder:
+    skip_invalid: bool
+    max_items: int | None
+    truncate: bool
+    count_duplicates_as_skipped: bool
+    symbols: list[str] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
+    skipped_count: int = 0
+    stopped: bool = False
+
+    def add(self, raw_symbol: object) -> None:
+        symbol = _standard_symbol_from_raw(raw_symbol, skip_invalid=self.skip_invalid)
+        if symbol is None:
+            self.skipped_count += 1
+            return
+        if symbol in self.seen:
+            self._skip_duplicate()
+            return
+        self._append(symbol)
+
+    def result(self) -> SymbolListResult:
+        if self.max_items is not None and len(self.symbols) > self.max_items:
+            raise ValueError(f"一次最多查询 {self.max_items} 个股票代码")
+        return SymbolListResult(symbols=self.symbols, skipped_count=self.skipped_count)
+
+    def _append(self, symbol: str) -> None:
+        self.seen.add(symbol)
+        self.symbols.append(symbol)
+        if self.truncate and self.max_items is not None and len(self.symbols) == self.max_items:
+            self.stopped = True
+
+    def _skip_duplicate(self) -> None:
+        if self.count_duplicates_as_skipped:
+            self.skipped_count += 1
 
 
 def normalize_symbol(symbol: str) -> tuple[str, str]:
@@ -53,6 +99,41 @@ def _infer_market(code: str) -> str:
 def standard_symbol(symbol: str) -> str:
     code, market = normalize_symbol(symbol)
     return f"{code}.{market.upper()}"
+
+
+def standard_symbol_list(
+    symbols: Iterable[object],
+    *,
+    skip_invalid: bool = False,
+    max_items: int | None = None,
+    truncate: bool = False,
+    count_duplicates_as_skipped: bool = False,
+) -> SymbolListResult:
+    builder = _SymbolListBuilder(
+        skip_invalid=skip_invalid,
+        max_items=max_items,
+        truncate=truncate,
+        count_duplicates_as_skipped=count_duplicates_as_skipped,
+    )
+    for raw_symbol in symbols:
+        builder.add(raw_symbol)
+        if builder.stopped:
+            break
+    return builder.result()
+
+
+def _standard_symbol_from_raw(raw_symbol: object, *, skip_invalid: bool) -> str | None:
+    try:
+        if raw_symbol is None:
+            raise ValueError(SYMBOL_ERROR_MESSAGE)
+        text = str(raw_symbol).strip()
+        if not text:
+            raise ValueError(SYMBOL_ERROR_MESSAGE)
+        return standard_symbol(text)
+    except (AttributeError, TypeError, ValueError):
+        if skip_invalid:
+            return None
+        raise
 
 
 def tencent_symbol(symbol: str) -> str:

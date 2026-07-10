@@ -4,12 +4,17 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 import math
-import time
 from typing import TypeVar
 
 from app.models.schemas import Kline, MinuteKline
-from app.services.datahub_cache import _kline_cache_is_fresh, _normalize_minute_interval, _tag_klines, _tag_minute_klines
-from app.services.datahub_runtime import ProviderRuntime
+from app.services.datahub_cache import (
+    _kline_cache_is_fresh,
+    _minute_kline_cache_is_fresh,
+    _normalize_minute_interval,
+    _tag_klines,
+    _tag_minute_klines,
+)
+from app.services.datahub_runtime import ProviderRuntime, provider_source_name
 from app.services.provider_utils import ensure_positive_limit
 from app.utils.market_data import filter_valid_klines, filter_valid_minute_klines
 from app.utils.symbols import normalize_symbol
@@ -63,7 +68,7 @@ class KlineCoordinator:
 
         fallback = self.cache.get_klines(symbol, limit, max_age_seconds=60 * 60 * 24 * 30)
         if fallback:
-            self.cache.log_event("fallback", f"所有K线数据源失败，使用缓存K线：{symbol}")
+            _safe_log_kline_event(self.cache, "fallback", f"所有K线数据源失败，使用缓存K线：{symbol}")
             return _tag_klines(fallback, None, from_cache=True, fallback_used=True)
         raise RuntimeError("所有K线数据源均不可用：" + "；".join(errors))
 
@@ -78,7 +83,7 @@ class KlineCoordinator:
         normalized_interval = _normalize_minute_interval(interval)
         if use_cache:
             cached = self.cache.get_minute_klines(symbol, normalized_interval, limit, self.settings.minute_kline_cache_seconds)
-            if len(cached) >= limit:
+            if len(cached) >= limit and _minute_kline_cache_is_fresh(cached, normalized_interval):
                 return cached[-limit:]
 
         errors: list[str] = []
@@ -99,7 +104,7 @@ class KlineCoordinator:
 
         fallback = self.cache.get_minute_klines(symbol, normalized_interval, limit, max_age_seconds=60 * 60 * 6)
         if fallback:
-            self.cache.log_event("fallback", f"所有分钟K线数据源失败，使用缓存分钟K线：{symbol}")
+            _safe_log_kline_event(self.cache, "fallback", f"所有分钟K线数据源失败，使用缓存分钟K线：{symbol}")
             return _tag_minute_klines(fallback, None, normalized_interval, from_cache=True, fallback_used=True)
         raise RuntimeError("所有分钟K线数据源均不可用：" + "；".join(errors))
 
@@ -112,32 +117,21 @@ class KlineCoordinator:
         prepare: Callable[[list[T], str], list[T]],
         save: Callable[[list[T], str], None],
     ) -> list[T] | None:
-        for index, name in self.priority(kind):
-            if self.runtime.is_cooling(name, kind):
-                errors.append(f"{name}: 最近失败，短暂冷却中")
-                continue
-            provider = self.providers.get(name)
-            if provider is None:
-                exc = RuntimeError("数据源未注册")
-                errors.append(f"{name}: {exc}")
-                self.runtime.record_failure(name, index, exc, kind)
-                continue
-            source = _provider_source_name(provider, name)
-            started = time.perf_counter()
+        for attempt in self.runtime.attempts(self.priority(kind), self.providers, kind, errors):
+            source = provider_source_name(attempt.provider, attempt.name)
             try:
-                awaitable = fetch(provider)
+                awaitable = fetch(attempt.provider)
                 if awaitable is None:
                     raise RuntimeError(f"数据源不支持{_kind_label(kind)}能力")
-                rows = prepare(await self.runtime.call(awaitable), source)
-                latency_ms = (time.perf_counter() - started) * 1000
-                self.runtime.record_success(name, index, round(latency_ms, 2), kind)
-                save(rows, source)
+                result = await self.runtime.timed_call(awaitable)
+                rows = prepare(result.value, source)
+                self.runtime.record_attempt_success(attempt, kind, result.latency_ms)
+                _save_rows_best_effort(save, rows, source)
                 return rows
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                errors.append(f"{name}: {exc}")
-                self.runtime.record_failure(name, index, exc, kind)
+                self.runtime.record_attempt_failure(attempt, kind, exc, errors)
         return None
 
 
@@ -145,6 +139,23 @@ def _non_empty_rows(rows: list[T], error: str) -> list[T]:
     if not rows:
         raise RuntimeError(error)
     return rows
+
+
+def _save_rows_best_effort(save: Callable[[list[T], str], None], rows: list[T], source: str) -> None:
+    try:
+        save(rows, source)
+    except Exception:
+        pass
+
+
+def _safe_log_kline_event(cache: object, category: str, message: str) -> None:
+    log_event = getattr(cache, "log_event", None)
+    if not callable(log_event):
+        return
+    try:
+        log_event(category, message)
+    except Exception:
+        pass
 
 
 def _kline_call(provider: object, symbol: str, limit: int) -> Awaitable[list[Kline]] | None:
@@ -204,10 +215,3 @@ def _positive_int_or_default(value: object, default: int) -> int:
 
 def _kind_label(kind: str) -> str:
     return {"kline": "日K", "minute": "分钟K"}.get(kind, kind)
-
-
-def _provider_source_name(provider: object, fallback: str) -> str:
-    source = getattr(provider, "source_name", None)
-    if isinstance(source, str) and source.strip():
-        return source
-    return fallback

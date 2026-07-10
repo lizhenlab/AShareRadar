@@ -26,6 +26,7 @@ DEFAULT_DATA_QUALITY_SCORE = 0
 SUGGESTION_LIMIT = 5
 EVIDENCE_LIMIT = 6
 BREADTH_COLD_SUGGESTION_SCORE = 40
+MIN_FACTOR_RISK_REDUCTION_SAMPLES = 24
 ANALYSIS_RISK_ADJUSTMENTS = {"高风险": 0.22, "中等风险": 0.1}
 STOCK_TAILWIND_INDUSTRY_LABELS = frozenset(
     {
@@ -207,6 +208,7 @@ def _clean_breadth_snapshot(breadth: MarketBreadthSnapshot | None) -> MarketBrea
         score=_score(snapshot.score),
         avg_change_pct=_number_or_default(snapshot.avg_change_pct),
         risk_adjustment=_number_or_default(snapshot.risk_adjustment),
+        warnings=_breadth_warnings(snapshot),
     )
 
 
@@ -359,7 +361,7 @@ def _has_positive_factor_edge_with_sample(
 ) -> bool:
     return (
         positive_scale > 0
-        and _non_negative_int(factor_lab.calibration_sample_count) >= 24
+        and _has_factor_risk_reduction_samples(factor_lab)
         and _positive_factor_edge(factor_lab)
     )
 
@@ -379,6 +381,7 @@ def _has_confident_factor_score(
 ) -> bool:
     return (
         positive_scale > 0
+        and _has_factor_risk_reduction_samples(factor_lab)
         and _score(factor_lab.total_score) >= 66
         and _score(factor_lab.calibrated_confidence, default=0) >= 58
     )
@@ -414,6 +417,10 @@ FACTOR_LAB_RISK_RULES = (
     FactorLabRiskRule(_has_low_factor_score, _low_factor_score_adjustment),
     FactorLabRiskRule(_has_negative_factor_edge, _negative_factor_edge_adjustment),
 )
+
+
+def _has_factor_risk_reduction_samples(factor_lab: FactorLabReport) -> bool:
+    return _non_negative_int(factor_lab.calibration_sample_count) >= MIN_FACTOR_RISK_REDUCTION_SAMPLES
 
 
 def _positive_factor_adjustment_scale(context: RegimeContext) -> float:
@@ -506,6 +513,8 @@ def _industry_suggestion(industry_label: str) -> str | None:
 
 
 def _breadth_suggestion(breadth: MarketBreadthSnapshot) -> str | None:
+    if _breadth_warnings(breadth):
+        return "市场宽度数据降级时，不据此上调环境评级，先以个股趋势、行业和风险线为主。"
     if breadth.score <= BREADTH_COLD_SUGGESTION_SCORE:
         return "市场宽度偏冷时，优先看防守线，不把个别异动当成普遍回暖。"
     if breadth.score >= WARM_BREADTH_SCORE:
@@ -522,7 +531,7 @@ def _top_negative_suggestion(factor_lab: FactorLabReport | None) -> str | None:
 
 def _low_factor_sample_suggestion(factor_lab: FactorLabReport | None) -> str | None:
     if factor_lab and _non_negative_int(factor_lab.calibration_sample_count) < 8:
-        return "因子历史样本仍偏少，建议把实验室分数当作低置信辅助项。"
+        return "因子汇总有效样本仍偏少，建议把实验室分数当作低置信辅助项。"
     return None
 
 
@@ -544,6 +553,7 @@ def _regime_evidence(context: RegimeContext) -> list[str]:
             f"资金 {_score_text(feature.fund_flow_score)}。"
         ),
         _breadth_summary_text(context.breadth),
+        *_breadth_warning_evidence(context.breadth),
         _factor_lab_evidence(context.factor_lab),
     ]
     industry_name = _non_empty_text(feature.industry_name)
@@ -561,7 +571,8 @@ def _factor_lab_evidence(factor_lab: FactorLabReport | None) -> str:
         return "因子实验室暂未参与环境判断。"
     return (
         f"因子总分 {_score_text(factor_lab.total_score, with_unit=False)}，"
-        f"校准置信度 {_percent_text(factor_lab.calibrated_confidence)}。"
+        f"校准置信度 {_percent_text(factor_lab.calibrated_confidence)}，"
+        f"最低单因子有效样本 {_non_negative_int(factor_lab.calibration_sample_count)} 个。"
     )
 
 
@@ -611,6 +622,28 @@ def _first_non_empty_text(values: object) -> str | None:
 
 def _breadth_summary_text(breadth: MarketBreadthSnapshot) -> str:
     return _non_empty_text(getattr(breadth, "summary", None)) or "市场宽度样本不足，环境参考待确认。"
+
+
+def _breadth_warnings(breadth: object) -> tuple[str, ...]:
+    raw = getattr(breadth, "warnings", ())
+    if isinstance(raw, str):
+        raw = (raw,)
+    try:
+        values = list(raw)
+    except TypeError:
+        values = []
+    warnings: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = " ".join(value.split())[:160]
+        if text and text not in warnings:
+            warnings.append(text)
+    return tuple(warnings[:3])
+
+
+def _breadth_warning_evidence(breadth: MarketBreadthSnapshot) -> list[str]:
+    return [f"市场宽度提示：{item}" for item in _breadth_warnings(breadth)[:2]]
 
 
 def _price_text(value: float) -> str:
