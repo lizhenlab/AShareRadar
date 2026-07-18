@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
@@ -10,6 +10,7 @@ import pytest
 
 from app.config import Settings
 from app.models.schemas import Quote
+from app.services import trading_calendar
 from app.services.cache import SQLiteCache
 from app.services.data_quality_time import (
     normalize_quote_event_time,
@@ -568,7 +569,20 @@ def test_fallback_cache_rejects_dirty_old_event_time_and_uses_calendar_window() 
         (datetime(2026, 2, 23, 10, 0), "2026-02-13 15:00:00"),
     ],
 )
-def test_quote_event_time_accepts_latest_valid_trading_snapshot(current: datetime, event_time: str) -> None:
+def test_quote_event_time_accepts_latest_valid_trading_snapshot(
+    current: datetime,
+    event_time: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trade_days = {
+        date(2026, 2, 13),
+        date(2026, 2, 24),
+        date(2026, 5, 13),
+        date(2026, 5, 15),
+        date(2026, 5, 18),
+    }
+    monkeypatch.setattr(trading_calendar, "_trade_days", lambda: trade_days)
+
     assert quote_event_time_error(event_time, now=current) is None
 
 

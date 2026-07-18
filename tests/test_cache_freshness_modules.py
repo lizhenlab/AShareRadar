@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
 from app.models.system import CacheStats
+from app.services import trading_calendar
 from app.services.cache_freshness import assess_cache_freshness
 
 
@@ -127,7 +128,15 @@ def test_nonempty_metadata_cache_without_timestamp_is_not_reported_healthy() -> 
 def test_last_valid_trade_day_is_market_fresh_during_weekend_or_holiday(
     now: datetime,
     last_trade_date: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    trade_days = {
+        date(2026, 5, 15),
+        date(2026, 9, 30),
+        date(2026, 10, 9),
+    }
+    monkeypatch.setattr(trading_calendar, "_trade_days", lambda: trade_days)
+
     assessment = assess_cache_freshness(
         _stats(
             fetched_at=f"{last_trade_date} 15:01:00",
