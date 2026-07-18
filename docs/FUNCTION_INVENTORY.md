@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 213 | 469 | 2644 | 489 | 45716 |
-| `tests/` | 128 | 131 | 1469 | 601 | 45388 |
+| `tests/` | 128 | 131 | 1469 | 601 | 45411 |
 | `tools/` | 3 | 4 | 47 | 0 | 702 |
 
 ## Python Function Health
@@ -5440,20 +5440,20 @@ Lines: 222
 
 #### `tests/test_cache_freshness_modules.py`
 
-Lines: 398
+Lines: 407
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_new_fetch_activity_does_not_hide_old_market_events` | 11 | `def test_new_fetch_activity_does_not_hide_old_market_events() -> None` |
-| function | `test_legacy_fetch_timestamps_never_prove_market_freshness` | 40 | `def test_legacy_fetch_timestamps_never_prove_market_freshness() -> None` |
-| function | `test_stock_pool_and_plate_cache_expiry_use_configured_thresholds` | 68 | `def test_stock_pool_and_plate_cache_expiry_use_configured_thresholds() -> None` |
-| function | `test_nonempty_metadata_cache_without_timestamp_is_not_reported_healthy` | 102 | `def test_nonempty_metadata_cache_without_timestamp_is_not_reported_healthy() -> None` |
-| function | `test_last_valid_trade_day_is_market_fresh_during_weekend_or_holiday` | 127 | `def test_last_valid_trade_day_is_market_fresh_during_weekend_or_holiday(now: datetime, last_trade_date: str) -> None` |
-| function | `test_after_hours_quote_timestamp_keeps_the_closing_snapshot_fresh` | 167 | `def test_after_hours_quote_timestamp_keeps_the_closing_snapshot_fresh(now: datetime, event_timestamp: str, daily_date: str) -> None` |
-| function | `test_future_and_dirty_market_events_are_reported_by_domain` | 188 | `def test_future_and_dirty_market_events_are_reported_by_domain() -> None` |
-| function | `test_checked_domains_only_include_optional_minute_domain_when_data_exists` | 210 | `def test_checked_domains_only_include_optional_minute_domain_when_data_exists() -> None` |
-| function | `test_market_freshness_uses_one_boundary_matrix_for_all_domains` | 344 | `def test_market_freshness_uses_one_boundary_matrix_for_all_domains(now: datetime, event_timestamp: str, daily_date: str, expected_statuses: tuple[str, str, str]) -> None` |
-| function | `_stats` | 368 | `def _stats(*, fetched_at: str, quote_timestamp: str, daily_date: str, minute_timestamp: str \| None, minute_count: int=1) -> CacheStats` |
+| function | `test_new_fetch_activity_does_not_hide_old_market_events` | 12 | `def test_new_fetch_activity_does_not_hide_old_market_events() -> None` |
+| function | `test_legacy_fetch_timestamps_never_prove_market_freshness` | 41 | `def test_legacy_fetch_timestamps_never_prove_market_freshness() -> None` |
+| function | `test_stock_pool_and_plate_cache_expiry_use_configured_thresholds` | 69 | `def test_stock_pool_and_plate_cache_expiry_use_configured_thresholds() -> None` |
+| function | `test_nonempty_metadata_cache_without_timestamp_is_not_reported_healthy` | 103 | `def test_nonempty_metadata_cache_without_timestamp_is_not_reported_healthy() -> None` |
+| function | `test_last_valid_trade_day_is_market_fresh_during_weekend_or_holiday` | 128 | `def test_last_valid_trade_day_is_market_fresh_during_weekend_or_holiday(now: datetime, last_trade_date: str, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_after_hours_quote_timestamp_keeps_the_closing_snapshot_fresh` | 176 | `def test_after_hours_quote_timestamp_keeps_the_closing_snapshot_fresh(now: datetime, event_timestamp: str, daily_date: str) -> None` |
+| function | `test_future_and_dirty_market_events_are_reported_by_domain` | 197 | `def test_future_and_dirty_market_events_are_reported_by_domain() -> None` |
+| function | `test_checked_domains_only_include_optional_minute_domain_when_data_exists` | 219 | `def test_checked_domains_only_include_optional_minute_domain_when_data_exists() -> None` |
+| function | `test_market_freshness_uses_one_boundary_matrix_for_all_domains` | 353 | `def test_market_freshness_uses_one_boundary_matrix_for_all_domains(now: datetime, event_timestamp: str, daily_date: str, expected_statuses: tuple[str, str, str]) -> None` |
+| function | `_stats` | 377 | `def _stats(*, fetched_at: str, quote_timestamp: str, daily_date: str, minute_timestamp: str \| None, minute_count: int=1) -> CacheStats` |
 
 #### `tests/test_cache_stats_modules.py`
 
@@ -5785,38 +5785,38 @@ Lines: 152
 
 #### `tests/test_datahub_quotes_modules.py`
 
-Lines: 750
+Lines: 764
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `_fixed_quote_clock` | 29 | `def _fixed_quote_clock(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_quote_fallback_cache_ignores_log_event_failure` | 33 | `def test_quote_fallback_cache_ignores_log_event_failure() -> None` |
-| function | `test_quote_partial_success_keeps_provider_healthy_without_cooling_provider` | 62 | `def test_quote_partial_success_keeps_provider_healthy_without_cooling_provider() -> None` |
-| function | `test_quote_coordinator_runs_distinct_symbol_requests_concurrently` | 103 | `def test_quote_coordinator_runs_distinct_symbol_requests_concurrently() -> None` |
-| function | `test_quote_coordinator_single_flights_same_symbol_request_key` | 156 | `def test_quote_coordinator_single_flights_same_symbol_request_key() -> None` |
-| function | `test_quote_coordinator_offloads_cache_io_from_event_loop_thread` | 222 | `def test_quote_coordinator_offloads_cache_io_from_event_loop_thread() -> None` |
-| function | `test_quote_coverage_miss_falls_back_without_global_failure_or_cooldown` | 288 | `def test_quote_coverage_miss_falls_back_without_global_failure_or_cooldown() -> None` |
-| function | `test_quote_malformed_empty_value_is_protocol_failure_and_cools_provider` | 332 | `def test_quote_malformed_empty_value_is_protocol_failure_and_cools_provider() -> None` |
-| function | `test_stale_provider_falls_back_before_success_return_and_cache_write` | 370 | `def test_stale_provider_falls_back_before_success_return_and_cache_write() -> None` |
-| function | `test_all_stale_providers_fail_and_do_not_write_quote_cache` | 414 | `def test_all_stale_providers_fail_and_do_not_write_quote_cache() -> None` |
-| function | `test_future_provider_quote_is_protocol_failure_and_falls_back` | 451 | `def test_future_provider_quote_is_protocol_failure_and_falls_back() -> None` |
-| function | `test_short_cache_rejects_old_quote_timestamp_even_with_fresh_fetched_at` | 485 | `def test_short_cache_rejects_old_quote_timestamp_even_with_fresh_fetched_at() -> None` |
-| function | `test_fallback_cache_rejects_dirty_old_event_time_and_uses_calendar_window` | 516 | `def test_fallback_cache_rejects_dirty_old_event_time_and_uses_calendar_window() -> None` |
-| function | `test_quote_event_time_accepts_latest_valid_trading_snapshot` | 571 | `def test_quote_event_time_accepts_latest_valid_trading_snapshot(current: datetime, event_time: str) -> None` |
-| function | `test_quote_event_time_normalizes_timezone_aware_values_to_shanghai_naive` | 575 | `def test_quote_event_time_normalizes_timezone_aware_values_to_shanghai_naive() -> None` |
-| function | `test_quote_consistency_warning_ignores_monitor_event_write_failure` | 584 | `def test_quote_consistency_warning_ignores_monitor_event_write_failure() -> None` |
-| function | `test_quote_consistency_rejects_secondary_from_different_trade_date` | 612 | `def test_quote_consistency_rejects_secondary_from_different_trade_date() -> None` |
-| function | `test_quote_consistency_coverage_miss_does_not_cool_provider` | 645 | `def test_quote_consistency_coverage_miss_does_not_cool_provider() -> None` |
-| function | `test_quote_consistency_rejects_excessive_same_day_timestamp_skew` | 678 | `def test_quote_consistency_rejects_excessive_same_day_timestamp_skew() -> None` |
-| function | `test_quote_with_quality_no_cache_does_not_read_cached_klines` | 688 | `def test_quote_with_quality_no_cache_does_not_read_cached_klines() -> None` |
-| function | `test_single_quote_rejects_blank_symbol_before_batch_lookup` | 716 | `def test_single_quote_rejects_blank_symbol_before_batch_lookup() -> None` |
-| class | `_LogFailingQuoteCache` | 733 | `class _LogFailingQuoteCache(SQLiteCache)` |
-| method | `_LogFailingQuoteCache.log_event` | 734 | `def log_event(self, category: str, message: str) -> None` |
-| class | `_MonitorFailingQuoteCache` | 738 | `class _MonitorFailingQuoteCache(SQLiteCache)` |
-| method | `_MonitorFailingQuoteCache.save_monitor_event` | 739 | `def save_monitor_event(self, level: str, category: str, message: str, symbol: str \| None=None) -> None` |
-| class | `_KlineReadFailingQuoteCache` | 743 | `class _KlineReadFailingQuoteCache(SQLiteCache)` |
-| method | `_KlineReadFailingQuoteCache.get_klines` | 744 | `def get_klines(self, symbol: str, limit: int, max_age_seconds: int)` |
-| function | `_quote_for` | 748 | `def _quote_for(symbol: str, source: str) -> Quote` |
+| function | `_fixed_quote_clock` | 30 | `def _fixed_quote_clock(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_quote_fallback_cache_ignores_log_event_failure` | 34 | `def test_quote_fallback_cache_ignores_log_event_failure() -> None` |
+| function | `test_quote_partial_success_keeps_provider_healthy_without_cooling_provider` | 63 | `def test_quote_partial_success_keeps_provider_healthy_without_cooling_provider() -> None` |
+| function | `test_quote_coordinator_runs_distinct_symbol_requests_concurrently` | 104 | `def test_quote_coordinator_runs_distinct_symbol_requests_concurrently() -> None` |
+| function | `test_quote_coordinator_single_flights_same_symbol_request_key` | 157 | `def test_quote_coordinator_single_flights_same_symbol_request_key() -> None` |
+| function | `test_quote_coordinator_offloads_cache_io_from_event_loop_thread` | 223 | `def test_quote_coordinator_offloads_cache_io_from_event_loop_thread() -> None` |
+| function | `test_quote_coverage_miss_falls_back_without_global_failure_or_cooldown` | 289 | `def test_quote_coverage_miss_falls_back_without_global_failure_or_cooldown() -> None` |
+| function | `test_quote_malformed_empty_value_is_protocol_failure_and_cools_provider` | 333 | `def test_quote_malformed_empty_value_is_protocol_failure_and_cools_provider() -> None` |
+| function | `test_stale_provider_falls_back_before_success_return_and_cache_write` | 371 | `def test_stale_provider_falls_back_before_success_return_and_cache_write() -> None` |
+| function | `test_all_stale_providers_fail_and_do_not_write_quote_cache` | 415 | `def test_all_stale_providers_fail_and_do_not_write_quote_cache() -> None` |
+| function | `test_future_provider_quote_is_protocol_failure_and_falls_back` | 452 | `def test_future_provider_quote_is_protocol_failure_and_falls_back() -> None` |
+| function | `test_short_cache_rejects_old_quote_timestamp_even_with_fresh_fetched_at` | 486 | `def test_short_cache_rejects_old_quote_timestamp_even_with_fresh_fetched_at() -> None` |
+| function | `test_fallback_cache_rejects_dirty_old_event_time_and_uses_calendar_window` | 517 | `def test_fallback_cache_rejects_dirty_old_event_time_and_uses_calendar_window() -> None` |
+| function | `test_quote_event_time_accepts_latest_valid_trading_snapshot` | 572 | `def test_quote_event_time_accepts_latest_valid_trading_snapshot(current: datetime, event_time: str, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_quote_event_time_normalizes_timezone_aware_values_to_shanghai_naive` | 589 | `def test_quote_event_time_normalizes_timezone_aware_values_to_shanghai_naive() -> None` |
+| function | `test_quote_consistency_warning_ignores_monitor_event_write_failure` | 598 | `def test_quote_consistency_warning_ignores_monitor_event_write_failure() -> None` |
+| function | `test_quote_consistency_rejects_secondary_from_different_trade_date` | 626 | `def test_quote_consistency_rejects_secondary_from_different_trade_date() -> None` |
+| function | `test_quote_consistency_coverage_miss_does_not_cool_provider` | 659 | `def test_quote_consistency_coverage_miss_does_not_cool_provider() -> None` |
+| function | `test_quote_consistency_rejects_excessive_same_day_timestamp_skew` | 692 | `def test_quote_consistency_rejects_excessive_same_day_timestamp_skew() -> None` |
+| function | `test_quote_with_quality_no_cache_does_not_read_cached_klines` | 702 | `def test_quote_with_quality_no_cache_does_not_read_cached_klines() -> None` |
+| function | `test_single_quote_rejects_blank_symbol_before_batch_lookup` | 730 | `def test_single_quote_rejects_blank_symbol_before_batch_lookup() -> None` |
+| class | `_LogFailingQuoteCache` | 747 | `class _LogFailingQuoteCache(SQLiteCache)` |
+| method | `_LogFailingQuoteCache.log_event` | 748 | `def log_event(self, category: str, message: str) -> None` |
+| class | `_MonitorFailingQuoteCache` | 752 | `class _MonitorFailingQuoteCache(SQLiteCache)` |
+| method | `_MonitorFailingQuoteCache.save_monitor_event` | 753 | `def save_monitor_event(self, level: str, category: str, message: str, symbol: str \| None=None) -> None` |
+| class | `_KlineReadFailingQuoteCache` | 757 | `class _KlineReadFailingQuoteCache(SQLiteCache)` |
+| method | `_KlineReadFailingQuoteCache.get_klines` | 758 | `def get_klines(self, symbol: str, limit: int, max_age_seconds: int)` |
+| function | `_quote_for` | 762 | `def _quote_for(symbol: str, source: str) -> Quote` |
 
 #### `tests/test_datahub_runtime_modules.py`
 
