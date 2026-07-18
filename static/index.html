@@ -19,49 +19,24 @@
     </header>
 
     <main class="layout">
-      <section class="panel control-panel">
+      <section class="panel query-panel">
         <div class="panel-title">
           <span>个股查询</span>
-          <small>输入6位代码</small>
+          <small>代码或名称</small>
         </div>
         <form class="search-row" id="searchForm">
-          <input id="symbolInput" value="600519" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="如 600519" aria-label="股票代码" />
+          <div class="stock-search-field">
+            <input id="symbolInput" value="600519" maxlength="30" autocomplete="off" placeholder="如 600519 或 贵州茅台" aria-label="股票代码或名称" aria-describedby="symbolError" aria-invalid="false" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="symbolSuggestions" />
+            <div class="stock-suggestions" id="symbolSuggestions" role="listbox" aria-label="股票搜索候选" hidden></div>
+          </div>
           <button type="submit">分析</button>
         </form>
+        <p class="form-error" id="symbolError" role="alert" hidden></p>
         <div class="quick-list" id="quickList">
           <button type="button" data-symbol="600519">贵州茅台</button>
           <button type="button" data-symbol="000001">平安银行</button>
           <button type="button" data-symbol="300750">宁德时代</button>
           <button type="button" data-symbol="002594">比亚迪</button>
-        </div>
-        <div class="watchlist-box">
-          <div class="panel-title compact"><span>我的自选</span><small>个人关注</small></div>
-          <form class="watch-form" id="watchForm">
-            <input id="watchSymbolInput" value="600519" maxlength="8" autocomplete="off" aria-label="自选股票代码" />
-            <input id="watchNoteInput" placeholder="关注原因" maxlength="80" autocomplete="off" aria-label="关注原因" />
-            <button type="submit">加入</button>
-          </form>
-          <div class="watch-list" id="watchList"></div>
-        </div>
-        <div class="notice">
-          <strong>新手提示</strong>
-          <p>平台只做研究分析和风险提示，不替代你的交易决策。实盘前请确认行情授权、交易规则和自己的仓位计划。</p>
-        </div>
-        <div class="data-health">
-          <div class="panel-title compact"><span>数据源状态</span><small id="cachePath">--</small></div>
-          <div id="sourcePlan" class="source-plan"></div>
-          <div id="providerStatus" class="provider-status"></div>
-          <div id="cacheStats" class="cache-stats"></div>
-        </div>
-        <div class="data-monitor">
-          <div class="panel-title compact"><span>本地监控</span><small id="schedulerState">待连接</small></div>
-          <div id="taskCards" class="task-cards"></div>
-          <div class="monitor-actions">
-            <button type="button" data-task="refresh_watch_quotes">刷新报价</button>
-            <button type="button" data-task="check_data_health">检查健康</button>
-          </div>
-          <div class="panel-title compact"><span>监控事件</span><small>最近记录</small></div>
-          <div id="monitorEvents" class="monitor-events"></div>
         </div>
       </section>
 
@@ -92,22 +67,77 @@
           </div>
 
           <p class="summary" id="summary">正在加载分析结果...</p>
-          <div class="chart-wrap">
-            <canvas id="klineCanvas" width="920" height="300" aria-label="K线走势图"></canvas>
-          </div>
+          <section class="chart-workspace" id="chartWorkspace" data-mobile-chart="daily" aria-label="日线和分时图表">
+            <div class="chart-mobile-switch segmented-control" role="group" aria-label="移动端图表视图">
+              <button type="button" class="active" id="mobileChartDaily" data-chart-view="daily" aria-pressed="true">日线</button>
+              <button type="button" id="mobileChartMinute" data-chart-view="minute" aria-pressed="false">分时</button>
+            </div>
+            <div class="chart-grid">
+              <section class="research-chart-pane" id="dailyChartPane" aria-labelledby="dailyChartTitle">
+                <div class="chart-toolbar">
+                  <div class="chart-heading">
+                    <strong id="dailyChartTitle">日线</strong>
+                    <span id="dailyChartStatus" role="status" aria-live="polite">60日</span>
+                  </div>
+                  <div class="chart-controls">
+                    <div class="segmented-control" id="dailyRangeControls" role="group" aria-label="日线范围">
+                      <button type="button" id="dailyRange20" data-daily-range="20" aria-pressed="false">20</button>
+                      <button type="button" class="active" id="dailyRange60" data-daily-range="60" aria-pressed="true">60</button>
+                      <button type="button" id="dailyRange120" data-daily-range="120" aria-pressed="false">120</button>
+                      <button type="button" id="dailyRange240" data-daily-range="240" aria-pressed="false">240</button>
+                    </div>
+                    <div class="chart-overlays" role="group" aria-label="日线均线">
+                      <label><input id="dailyMa5Toggle" type="checkbox" checked />MA5</label>
+                      <label><input id="dailyMa20Toggle" type="checkbox" checked />MA20</label>
+                    </div>
+                  </div>
+                </div>
+                <div class="chart-canvas-shell">
+                  <canvas id="klineCanvas" width="920" height="300" tabindex="0" aria-label="日线K线走势图，可用左右方向键逐根查看" aria-describedby="dailyChartInspectorValues"></canvas>
+                  <div class="chart-inspector" id="dailyChartInspector" aria-hidden="true" hidden>
+                    <span class="chart-crosshair chart-crosshair-x" aria-hidden="true"></span>
+                    <span class="chart-crosshair chart-crosshair-y" aria-hidden="true"></span>
+                    <div class="chart-inspector-values" id="dailyChartInspectorValues" role="status" aria-live="polite"></div>
+                  </div>
+                </div>
+              </section>
+              <section class="research-chart-pane" id="minuteChartPane" aria-labelledby="minuteChartTitle">
+                <div class="chart-toolbar">
+                  <div class="chart-heading">
+                    <strong id="minuteChartTitle">分时</strong>
+                    <span class="loading" id="minuteChartStatus" role="status" aria-live="polite">5分钟 · 等待数据</span>
+                  </div>
+                  <div class="segmented-control" id="minuteIntervalControls" role="group" aria-label="分时周期">
+                    <button type="button" class="active" id="minuteInterval5m" data-minute-interval="5m" aria-pressed="true">5m</button>
+                    <button type="button" id="minuteInterval15m" data-minute-interval="15m" aria-pressed="false">15m</button>
+                    <button type="button" id="minuteInterval30m" data-minute-interval="30m" aria-pressed="false">30m</button>
+                    <button type="button" id="minuteInterval60m" data-minute-interval="60m" aria-pressed="false">60m</button>
+                  </div>
+                </div>
+                <div class="chart-canvas-shell">
+                  <canvas id="minuteKlineCanvas" width="920" height="300" tabindex="0" aria-label="5分钟分时K线走势图，可用左右方向键逐根查看" aria-describedby="minuteChartInspectorValues"></canvas>
+                  <div class="chart-inspector" id="minuteChartInspector" aria-hidden="true" hidden>
+                    <span class="chart-crosshair chart-crosshair-x" aria-hidden="true"></span>
+                    <span class="chart-crosshair chart-crosshair-y" aria-hidden="true"></span>
+                    <div class="chart-inspector-values" id="minuteChartInspectorValues" role="status" aria-live="polite"></div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
         </section>
 
-        <section class="workspace-tabs" aria-label="工作台分区">
-          <button type="button" class="active" data-view="overview">总览</button>
-          <button type="button" data-view="qa">AI问诊</button>
-          <button type="button" data-view="strategy">策略风控</button>
-          <button type="button" data-view="finance">资金估值</button>
-          <button type="button" data-view="theme">题材强弱</button>
-          <button type="button" data-view="replay">复盘验证</button>
-          <button type="button" data-view="tools">工具记录</button>
+        <section class="workspace-tabs" aria-label="工作台分区" role="tablist">
+          <button type="button" class="active" id="workspace-tab-overview" data-view="overview" role="tab" aria-selected="true" aria-controls="workspace-panel-overview" tabindex="0">总览</button>
+          <button type="button" id="workspace-tab-qa" data-view="qa" role="tab" aria-selected="false" aria-controls="workspace-panel-qa" tabindex="-1">AI问诊</button>
+          <button type="button" id="workspace-tab-strategy" data-view="strategy" role="tab" aria-selected="false" aria-controls="workspace-panel-strategy" tabindex="-1">策略风控</button>
+          <button type="button" id="workspace-tab-finance" data-view="finance" role="tab" aria-selected="false" aria-controls="workspace-panel-finance" tabindex="-1">资金估值</button>
+          <button type="button" id="workspace-tab-theme" data-view="theme" role="tab" aria-selected="false" aria-controls="workspace-panel-theme" tabindex="-1">题材强弱</button>
+          <button type="button" id="workspace-tab-replay" data-view="replay" role="tab" aria-selected="false" aria-controls="workspace-panel-replay" tabindex="-1">复盘验证</button>
+          <button type="button" id="workspace-tab-tools" data-view="tools" role="tab" aria-selected="false" aria-controls="workspace-panel-tools" tabindex="-1">工具记录</button>
         </section>
 
-        <section class="workspace-view active" data-view-panel="overview">
+        <section class="workspace-view active" id="workspace-panel-overview" data-view-panel="overview" role="tabpanel" aria-labelledby="workspace-tab-overview">
           <div class="diagnosis-panel" id="diagnosisPanel"></div>
           <div class="insight-panel" id="insightOverview"></div>
           <div class="feature-strip" id="featureSnapshot"></div>
@@ -116,7 +146,7 @@
           <div class="alpha-panel" id="alphaEvidence"></div>
         </section>
 
-        <section class="workspace-view" data-view-panel="finance">
+        <section class="workspace-view" id="workspace-panel-finance" data-view-panel="finance" role="tabpanel" aria-labelledby="workspace-tab-finance">
           <section class="insight-grid">
             <section class="panel">
               <div class="panel-title"><span>五维诊断</span><small>技术 / 资金 / 基本 / 事件 / 风险</small></div>
@@ -142,11 +172,11 @@
           </section>
         </section>
 
-        <section class="workspace-view" data-view-panel="qa">
+        <section class="workspace-view" id="workspace-panel-qa" data-view-panel="qa" role="tabpanel" aria-labelledby="workspace-tab-qa">
           <div class="ai-dashboard" id="aiDashboard"></div>
         </section>
 
-        <section class="workspace-view" data-view-panel="strategy">
+        <section class="workspace-view" id="workspace-panel-strategy" data-view-panel="strategy" role="tabpanel" aria-labelledby="workspace-tab-strategy">
           <div class="regime-panel" id="marketRegime"></div>
           <div class="validation-panel" id="signalValidation"></div>
           <div class="timeframe-panel" id="timeframeAlignment"></div>
@@ -175,12 +205,12 @@
             </section>
           </section>
           <section class="panel minute-panel">
-            <div class="panel-title"><span>分钟做T</span><small>5分钟区间 / 盘中强弱</small></div>
+            <div class="panel-title"><span>分钟做T</span><small id="minuteAnalysisPeriod">5分钟区间 / 盘中强弱</small></div>
             <div class="minute-analysis" id="minuteAnalysis" aria-live="polite">正在加载分钟分析...</div>
           </section>
         </section>
 
-        <section class="workspace-view" data-view-panel="theme">
+        <section class="workspace-view" id="workspace-panel-theme" data-view-panel="theme" role="tabpanel" aria-labelledby="workspace-tab-theme">
           <section class="insight-grid">
             <section class="panel">
               <div class="panel-title"><span>行业概念</span><small>归属 / 强弱 / 风险</small></div>
@@ -197,7 +227,58 @@
           </section>
         </section>
 
-        <section class="workspace-view" data-view-panel="replay">
+        <section class="workspace-view" id="workspace-panel-replay" data-view-panel="replay" role="tabpanel" aria-labelledby="workspace-tab-replay">
+          <section class="panel advice-review-panel">
+            <div class="panel-title"><span>建议复盘计划</span><small>快照绑定 / 无前视评估</small></div>
+            <form id="reviewPlanForm" class="review-plan-form">
+              <label class="review-plan-wide"><span>建议快照</span><select id="reviewAdviceId" aria-label="建议快照"><option value="">等待建议记录</option></select></label>
+              <label><span>目标价</span><input id="reviewTarget" type="number" min="0.01" step="0.01" required /></label>
+              <label><span>止损价</span><input id="reviewStop" type="number" min="0.01" step="0.01" required /></label>
+              <label><span>观察日</span><input id="reviewHorizon" type="number" min="1" max="60" step="1" value="20" required /></label>
+              <label class="review-plan-wide"><span>研究假设</span><textarea id="reviewHypothesis" maxlength="1000" required></textarea></label>
+              <label class="review-plan-wide"><span>触发条件</span><input id="reviewTrigger" maxlength="1000" required /></label>
+              <label class="review-plan-wide"><span>失效条件</span><input id="reviewInvalidation" maxlength="1000" required /></label>
+              <div class="review-plan-actions review-plan-wide">
+                <p id="reviewPlanFeedback" role="status" aria-live="polite" hidden></p>
+                <span>
+                  <button type="button" class="mini-button" id="reviewPlanCancel" hidden>取消编辑</button>
+                  <button type="submit" id="reviewPlanSubmit">建立计划</button>
+                </span>
+              </div>
+            </form>
+            <div id="reviewPlanList" class="review-plan-list"></div>
+          </section>
+          <section class="panel watchlist-scan-panel">
+            <div class="panel-title"><span>观察池条件扫描</span><small>固定规则 / 完整日K</small></div>
+            <form id="watchlistScanForm" class="watchlist-scan-form">
+              <fieldset class="scan-universe-group">
+                <legend>扫描范围</legend>
+                <div class="scan-choice-list">
+                  <label class="scan-choice"><input type="radio" name="scanUniverse" value="watchlist" checked /><span>当前观察池</span></label>
+                  <label class="scan-choice"><input type="radio" name="scanUniverse" value="symbols" /><span>自定义代码</span></label>
+                </div>
+              </fieldset>
+              <label class="scan-input-field"><span>历史截至日</span><input id="watchlistScanAsOf" type="date" aria-describedby="watchlistScanFeedback" /></label>
+              <label class="scan-input-field scan-symbols-field" id="watchlistScanCustomField" hidden>
+                <span>自定义代码（最多50只）</span>
+                <textarea id="watchlistScanSymbols" rows="2" maxlength="1000" placeholder="600519, 000001, 300750" aria-describedby="watchlistScanFeedback" disabled></textarea>
+              </label>
+              <fieldset class="scan-condition-group">
+                <legend>扫描条件</legend>
+                <div class="scan-choice-list">
+                  <label class="scan-choice"><input type="checkbox" value="close_above_ma20" data-scan-condition checked /><span>高于20日均线</span></label>
+                  <label class="scan-choice"><input type="checkbox" value="close_below_ma20" data-scan-condition /><span>低于20日均线</span></label>
+                  <label class="scan-choice"><input type="checkbox" value="breakout_20d_high" data-scan-condition /><span>突破20日高点</span></label>
+                  <label class="scan-choice"><input type="checkbox" value="volume_surge_5d" data-scan-condition checked /><span>5日放量</span></label>
+                </div>
+              </fieldset>
+              <div class="watchlist-scan-actions">
+                <p id="watchlistScanFeedback" role="status" aria-live="polite" hidden></p>
+                <button type="submit">扫描</button>
+              </div>
+            </form>
+            <div id="watchlistScanResults" class="watchlist-scan-results" role="status" aria-live="polite" aria-busy="false"><div class="scan-state"><strong>等待扫描</strong></div></div>
+          </section>
           <section class="panel review-panel">
             <div class="panel-title"><span>历史复盘</span><small>单股表现校验</small></div>
             <div class="review-summary" id="reviewSummary">正在加载历史复盘...</div>
@@ -214,7 +295,7 @@
           </section>
         </section>
 
-        <section class="workspace-view" data-view-panel="tools">
+        <section class="workspace-view" id="workspace-panel-tools" data-view-panel="tools" role="tabpanel" aria-labelledby="workspace-tab-tools">
           <section class="insight-grid">
             <section class="panel">
               <div class="panel-title"><span>本地预警</span><small>价格 / 涨跌幅 / 趋势</small></div>
@@ -234,6 +315,11 @@
                 <button type="button" id="evaluateAlerts">检查</button>
               </form>
               <div class="alert-list" id="alertList"></div>
+              <div class="notification-control">
+                <button type="button" class="mini-button" id="enableAlertNotifications">启用桌面提醒</button>
+                <span id="alertNotificationState" role="status" aria-live="polite">仅通知后续新触发</span>
+              </div>
+              <div class="alert-events alert-evaluation" id="alertEvaluation" role="status" aria-live="polite" aria-atomic="true" aria-busy="false" hidden></div>
               <div class="alert-events" id="alertEvents"></div>
             </section>
             <section class="panel">
@@ -253,12 +339,109 @@
               <div class="note-list" id="noteList"></div>
             </section>
           </section>
-          <section class="panel timeline-panel">
-            <div class="panel-title"><span>趋势时间线</span><small>建议留痕</small></div>
-            <div class="timeline-list" id="adviceTimeline"></div>
+          <section class="panel timeline-panel research-activity-panel" aria-labelledby="researchActivityTitle" aria-describedby="researchActivityDescription">
+            <div class="panel-title">
+              <span id="researchActivityTitle">本地研究动态</span>
+              <small id="researchActivityDescription">建议、提醒与笔记记录</small>
+            </div>
+            <div class="research-activity-controls segmented-control" id="researchActivityFilters" role="group" aria-label="本地研究动态类型">
+              <button type="button" class="active" data-activity-filter="all" aria-pressed="true">全部</button>
+              <button type="button" data-activity-filter="advice" aria-pressed="false">建议</button>
+              <button type="button" data-activity-filter="alert" aria-pressed="false">提醒</button>
+              <button type="button" data-activity-filter="note" aria-pressed="false">笔记</button>
+            </div>
+            <div id="researchActivity" aria-live="polite" aria-atomic="false" aria-busy="true"></div>
+          </section>
+          <section class="panel timeline-panel" aria-labelledby="adviceTimelineTitle" aria-describedby="adviceTimelineDescription">
+            <div class="panel-title">
+              <span id="adviceTimelineTitle">核心分析建议变化</span>
+              <small id="adviceTimelineDescription">与上一条保留快照比较</small>
+            </div>
+            <div class="timeline-list" id="adviceTimeline" role="list" aria-live="polite" aria-atomic="false" aria-busy="false"></div>
+          </section>
+          <section class="panel local-data-panel">
+            <div class="panel-title"><span>本地数据管理</span><small>用户数据 / 保留策略</small></div>
+            <div class="local-data-actions">
+              <button type="button" id="exportLocalData">导出用户数据</button>
+              <input type="file" id="localDataImportFile" accept="application/json,.json" aria-label="选择用户数据文件" />
+              <select id="localDataImportMode" aria-label="导入模式"><option value="merge">合并</option><option value="replace">完整替换</option></select>
+              <button type="button" id="previewLocalDataImport">预览导入</button>
+              <button type="button" id="commitLocalDataImport" disabled>确认导入</button>
+            </div>
+            <div id="localDataImportPreview" class="local-data-preview"></div>
+            <div class="runtime-cleanup-row">
+              <div id="runtimeCleanupPreview" class="local-data-preview"><strong>尚未读取清理预览</strong></div>
+              <button type="button" class="mini-button" id="runRuntimeCleanup" disabled>执行清理</button>
+            </div>
+            <p id="localDataFeedback" class="local-data-feedback" role="status" aria-live="polite" hidden></p>
           </section>
         </section>
 
+      </section>
+
+      <section class="control-panel">
+        <div class="watchlist-box">
+          <div class="panel-title compact"><span>我的自选</span><small>个人关注</small></div>
+          <form class="watch-form" id="watchForm" aria-busy="false">
+            <div class="stock-search-field watch-stock-search">
+              <input id="watchSymbolInput" value="600519" maxlength="30" autocomplete="off" placeholder="股票代码或名称" aria-label="自选股票代码或名称" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="watchSymbolSuggestions" />
+              <div class="stock-suggestions" id="watchSymbolSuggestions" role="listbox" aria-label="自选股票搜索候选" hidden></div>
+            </div>
+            <div class="watch-form-fields">
+              <label>
+                <span>研究状态</span>
+                <select id="watchStatusInput" aria-label="研究状态">
+                  <option value="to_research" selected>待研究</option>
+                  <option value="watching">持续观察</option>
+                  <option value="holding_research">持仓研究</option>
+                  <option value="excluded">已排除</option>
+                </select>
+              </label>
+              <label>
+                <span>优先级</span>
+                <select id="watchPriorityInput" aria-label="优先级">
+                  <option value="high">高</option>
+                  <option value="medium" selected>中</option>
+                  <option value="low">低</option>
+                </select>
+              </label>
+              <label class="watch-form-date">
+                <span>复核日期</span>
+                <input id="watchReviewDateInput" type="date" aria-label="复核日期" />
+              </label>
+            </div>
+            <input id="watchGroupInput" placeholder="分组（可选）" maxlength="20" autocomplete="off" aria-label="自选分组" />
+            <input id="watchNoteInput" placeholder="关注原因（可选）" maxlength="80" autocomplete="off" aria-label="关注原因" />
+            <button type="submit">加入队列</button>
+          </form>
+          <p class="watchlist-feedback" id="watchlistFeedback" role="status" aria-live="polite" aria-atomic="true" hidden></p>
+          <div class="watch-list" id="watchList"></div>
+        </div>
+        <div class="notice">
+          <strong>新手提示</strong>
+          <p>平台只做研究分析和风险提示，不替代你的交易决策。实盘前请确认行情授权、交易规则和自己的仓位计划。</p>
+        </div>
+        <div class="data-health">
+          <div class="panel-title compact"><span>数据源状态</span><small id="cachePath">--</small></div>
+          <div id="sourcePlan" class="source-plan"></div>
+          <div id="providerStatus" class="provider-status"></div>
+          <div id="cacheStats" class="cache-stats"></div>
+          <div id="storageDiagnostics" class="storage-diagnostics"></div>
+          <div id="diagnosticMessages" class="diagnostic-messages"></div>
+        </div>
+        <div class="data-monitor">
+          <div class="panel-title compact"><span>本地监控</span><small id="schedulerState">待连接</small></div>
+          <div id="taskCards" class="task-cards"></div>
+          <div class="monitor-actions">
+            <button type="button" data-task="refresh_watch_quotes">刷新报价</button>
+            <button type="button" data-task="refresh_key_klines">刷新日K</button>
+            <button type="button" data-task="refresh_plate_rank">刷新行业</button>
+            <button type="button" data-task="check_data_health">检查健康</button>
+            <button type="button" data-task="evaluate_alerts">评估预警</button>
+          </div>
+          <div class="panel-title compact"><span>监控事件</span><small>最近记录</small></div>
+          <div id="monitorEvents" class="monitor-events"></div>
+        </div>
       </section>
 
       <aside class="side-column">

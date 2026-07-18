@@ -11,13 +11,15 @@ from app.services.financial_metrics import (
     pb_view,
     pe_view,
 )
+from app.utils.market_data import finite_float
 
-FORMAL_FINANCIAL_FIELDS = ["ROE", "营收增速", "净利润增速", "经营现金流", "资产负债率", "分红记录"]
+FORMAL_FINANCIAL_FIELDS = ["报告期", "ROE", "营收增速", "净利润增速", "经营现金流", "资产负债率"]
 
 
 @dataclass
 class FinancialHealthState:
-    score: int = 54
+    score: int | None = None
+    formal_minimum_complete: bool = False
     metrics: list[FinancialMetric] = field(default_factory=list)
     highlights: list[str] = field(default_factory=list)
     risk_notes: list[str] = field(default_factory=list)
@@ -37,19 +39,20 @@ def build_financial_health_state(analysis: AnalysisResult) -> FinancialHealthSta
 
 def _apply_pe_metric(state: FinancialHealthState, analysis: AnalysisResult) -> None:
     quote = analysis.quote
-    if quote.pe is None:
-        state.metrics.append(missing_metric("市盈率", "行情源暂未返回 PE，无法判断利润对应估值。"))
+    pe = finite_float(quote.pe)
+    if pe is None:
+        state.metrics.append(missing_metric("市盈率", "行情源未返回有效 PE，市场估值锚不可用。", category="market_valuation"))
         state.missing.append("PE")
         return
-    pe_score, pe_level, pe_summary = pe_view(quote.pe)
-    state.score += round((pe_score - 50) * 0.18)
+    _pe_score, pe_level, pe_summary = pe_view(pe)
     state.metrics.append(
         FinancialMetric(
             name="市盈率",
-            value=f"{quote.pe:.2f}",
+            value=f"{pe:.2f}",
             level=pe_level,
             summary=pe_summary,
             source=quote.source,
+            category="market_valuation",
         )
     )
     if pe_level in {"偏强", "强"}:
@@ -60,19 +63,20 @@ def _apply_pe_metric(state: FinancialHealthState, analysis: AnalysisResult) -> N
 
 def _apply_pb_metric(state: FinancialHealthState, analysis: AnalysisResult) -> None:
     quote = analysis.quote
-    if quote.pb is None:
-        state.metrics.append(missing_metric("市净率", "行情源暂未返回 PB，资产估值锚不足。"))
+    pb = finite_float(quote.pb)
+    if pb is None:
+        state.metrics.append(missing_metric("市净率", "行情源未返回有效 PB，市场资产估值锚不可用。", category="market_valuation"))
         state.missing.append("PB")
         return
-    pb_score, pb_level, pb_summary = pb_view(quote.pb)
-    state.score += round((pb_score - 50) * 0.14)
+    _pb_score, pb_level, pb_summary = pb_view(pb)
     state.metrics.append(
         FinancialMetric(
             name="市净率",
-            value=f"{quote.pb:.2f}",
+            value=f"{pb:.2f}",
             level=pb_level,
             summary=pb_summary,
             source=quote.source,
+            category="market_valuation",
         )
     )
     if pb_level in {"偏强", "强"}:
@@ -83,19 +87,20 @@ def _apply_pb_metric(state: FinancialHealthState, analysis: AnalysisResult) -> N
 
 def _apply_market_cap_metric(state: FinancialHealthState, analysis: AnalysisResult) -> None:
     quote = analysis.quote
-    if quote.market_cap is None:
-        state.metrics.append(missing_metric("总市值", "行情源暂未返回总市值，规模和流动性判断需降权。"))
+    market_cap = finite_float(quote.market_cap)
+    if market_cap is None or market_cap <= 0:
+        state.metrics.append(missing_metric("总市值", "行情源未返回有效总市值，规模体征不可用。", category="market_valuation"))
         state.missing.append("总市值")
         return
-    cap_score, cap_level, cap_summary = market_cap_view(quote.market_cap)
-    state.score += round((cap_score - 50) * 0.12)
+    _cap_score, cap_level, cap_summary = market_cap_view(market_cap)
     state.metrics.append(
         FinancialMetric(
             name="总市值",
-            value=format_amount_text(quote.market_cap),
+            value=format_amount_text(market_cap),
             level=cap_level,
             summary=cap_summary,
             source=quote.source,
+            category="market_valuation",
         )
     )
     state.highlights.append(cap_summary)
@@ -110,17 +115,17 @@ def _apply_industry_metric(state: FinancialHealthState, analysis: AnalysisResult
                 level="观察",
                 summary="行业用于横向估值比较，后续接入行业分位会更有参考价值。",
                 source=analysis.stock_profile.source,
+                category="context",
             )
         )
         return
-    state.metrics.append(missing_metric("所属行业", "行业字段缺失，暂不能做同行比较。"))
+    state.metrics.append(missing_metric("所属行业", "行业字段缺失，暂不能做同行比较。", category="context"))
     state.missing.extend(["所属行业", "行业估值分位"])
 
 
 def _apply_liquidity_metric(state: FinancialHealthState, analysis: AnalysisResult) -> None:
     quote = analysis.quote
     liquidity_score, liquidity_level, liquidity_summary = liquidity_view(quote.amount, quote.turnover_rate)
-    state.score += round((liquidity_score - 50) * 0.12)
     state.metrics.append(
         FinancialMetric(
             name="交易活跃度",
@@ -128,17 +133,19 @@ def _apply_liquidity_metric(state: FinancialHealthState, analysis: AnalysisResul
             level=liquidity_level,
             summary=liquidity_summary,
             source=quote.source,
+            category="trading_vital",
         )
     )
+    if liquidity_level == "不可用":
+        state.missing.append("成交额")
     if liquidity_level in {"偏弱", "弱"}:
         state.risk_notes.append(liquidity_summary)
 
 
 def _apply_financial_fallbacks(state: FinancialHealthState) -> None:
-    if not state.highlights:
-        state.highlights.append("当前只能从行情估值字段做基础体检，完整财报源接入后需要重新校验。")
+    state.highlights.insert(0, "当前仅展示市场估值与交易体征，不生成财务体检分。")
     if not state.risk_notes:
-        state.risk_notes.append("尚未接入资产负债、现金流和利润增长，基本面风险只能做初筛。")
+        state.risk_notes.append("正式报告期、ROE、营收与利润、现金流和负债率最小集不完整，财务健康结论不可用。")
 
 
 def liquidity_metric_value(amount: float, turnover_rate: float | None) -> str:

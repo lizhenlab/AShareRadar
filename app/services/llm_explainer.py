@@ -1,22 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import inspect
 import math
-import re
 from typing import Any
 
 from app.config import Settings
 from app.models.schemas import AnalysisResult, StockQuestionAnswer
+from app.services.llm_output_validation import (
+    LlmOutputValidationError,
+    _allowed_numbers as _allowed_numbers,
+    authority_binding_issue,
+    validate_and_render_answer,
+)
+from app.services.llm_prompt import build_chat_messages
+from app.services.provider_errors import sanitize_provider_error
 
 
-_GROUNDING_SKIP_PREFIXES = ("ma", "ema", "atr")
-_GROUNDING_PERIOD_UNITS = ("日", "天", "分钟", "小时")
-_GROUNDING_COUNT_UNITS = ("个", "条", "项", "类", "种", "层", "点")
+__all__ = ["_allowed_numbers", "_call_llm", "enhance_stock_answer", "llm_available"]
 
 
 def llm_available(settings: Settings) -> bool:
-    return bool(settings.llm_enabled and settings.llm_api_key and settings.llm_base_url and settings.llm_model)
+    return bool(
+        settings.llm_enabled
+        and _nonempty(settings.llm_api_key)
+        and _nonempty(settings.llm_base_url)
+        and _nonempty(settings.llm_model)
+    )
 
 
 async def enhance_stock_answer(
@@ -27,193 +37,145 @@ async def enhance_stock_answer(
 ) -> StockQuestionAnswer:
     if not llm_available(settings):
         return _fallback(rule_answer, "未配置大模型API")
+
+    binding_issue = authority_binding_issue(rule_answer, analysis)
+    if binding_issue:
+        return _fallback(rule_answer, f"大模型未调用：规则绑定不可用（{binding_issue}）")
+
+    timeout = _llm_timeout(settings)
     try:
-        answer = await asyncio.wait_for(
-            asyncio.to_thread(_call_llm, settings, rule_answer, analysis),
-            timeout=settings.llm_timeout_seconds + 2,
-        )
+        async with asyncio.timeout(timeout):
+            answer, repaired = await _validated_llm_answer(settings, rule_answer, analysis)
+    except asyncio.TimeoutError:
+        return _fallback(rule_answer, f"大模型降级：请求超时（{timeout:g}秒）")
+    except LlmOutputValidationError as exc:
+        return _fallback(rule_answer, f"大模型输出校验失败：{_short_error(exc, settings, rule_answer)}")
     except Exception as exc:
-        return _fallback(rule_answer, f"大模型降级：{_short_error(exc, settings)}")
-    cleaned = _clean_answer(answer)
-    if not cleaned or not _numbers_are_grounded(cleaned, rule_answer, analysis):
-        return _fallback(rule_answer, "大模型输出未通过事实校验，已回退规则答案")
-    return rule_answer.model_copy(update={"answer": cleaned, "answer_source": f"大模型解释增强·{settings.llm_model}", "llm_used": True, "llm_status": "已基于当前分析结果生成解释"})
+        return _fallback(rule_answer, f"大模型降级：{_short_error(exc, settings, rule_answer)}")
 
-
-def _call_llm(settings: Settings, rule_answer: StockQuestionAnswer, analysis: AnalysisResult) -> str:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, timeout=settings.llm_timeout_seconds)
-    payload = _answer_context(rule_answer, analysis)
-    completion = client.chat.completions.create(
-        model=settings.llm_model,
-        temperature=0.1,
-        max_tokens=700,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "你是A股单股研究平台的解释层，只能根据给定JSON回答。"
-                    "不要编造新闻、公告、价格、指标或数据源。"
-                    "不要输出JSON之外的新数字；价格位可以四舍五入到整数或两位小数，其他比例和分数必须原样引用。"
-                    "不能给确定性买卖指令，必须保留风险提示。"
-                    "用中文，面向小白，结构为四行：结论、为什么、接下来盯什么、失效条件。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": "请基于以下JSON解释用户问题，不能使用JSON之外的事实：\n" + json.dumps(payload, ensure_ascii=False),
-            },
-        ],
+    return rule_answer.model_copy(
+        update={
+            "answer": answer,
+            "answer_source": f"大模型解释增强·{settings.llm_model}",
+            "llm_used": True,
+            "llm_status": (
+                "结构化字段已绑定规则引擎，经一次格式纠错后仅增强解释"
+                if repaired
+                else "结构化字段已绑定规则引擎，仅增强解释"
+            ),
+        }
     )
-    return completion.choices[0].message.content or ""
 
 
-def _answer_context(rule_answer: StockQuestionAnswer, analysis: AnalysisResult) -> dict[str, Any]:
-    quote = analysis.quote
-    return {
-        "question": rule_answer.question,
-        "rule_conclusion": rule_answer.conclusion,
-        "rule_answer": rule_answer.answer,
-        "topic": rule_answer.topic,
-        "confidence": rule_answer.confidence,
-        "symbol": rule_answer.symbol,
-        "stock_name": quote.name,
-        "price": quote.price,
-        "change_pct": quote.change_pct,
-        "support": analysis.support,
-        "resistance": analysis.resistance,
-        "ma5": analysis.ma5,
-        "ma20": analysis.ma20,
-        "trend_score": analysis.trend_score,
-        "trend_label": analysis.trend_label,
-        "risk_level": analysis.risk_level,
-        "data_quality": {
-            "score": analysis.data_quality.score,
-            "level": analysis.data_quality.level,
-            "source": analysis.data_quality.source,
-            "notes": analysis.data_quality.notes[:4],
-        },
-        "evidence": rule_answer.evidence[:6],
-        "actions": rule_answer.actions[:5],
-        "invalidations": rule_answer.invalidations[:5],
-        "allowed_numbers": sorted(_allowed_numbers(rule_answer, analysis)),
-    }
+async def _validated_llm_answer(
+    settings: Settings,
+    rule_answer: StockQuestionAnswer,
+    analysis: AnalysisResult,
+) -> tuple[str, bool]:
+    raw_answer = await _invoke_llm(settings, rule_answer, analysis)
+    try:
+        return validate_and_render_answer(raw_answer, rule_answer, analysis), False
+    except LlmOutputValidationError:
+        repaired = await _invoke_llm(settings, rule_answer, analysis, repair=True)
+        try:
+            return validate_and_render_answer(repaired, rule_answer, analysis), True
+        except LlmOutputValidationError as exc:
+            raise LlmOutputValidationError(f"纠错重试仍未通过：{exc}") from exc
 
 
-def _clean_answer(answer: str) -> str:
-    lines = []
-    for line in str(answer or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
-        normalized = " ".join(line.strip().split())
-        if normalized:
-            lines.append(normalized)
-    return "\n".join(lines)[:1200]
+async def _invoke_llm(
+    settings: Settings,
+    rule_answer: StockQuestionAnswer,
+    analysis: AnalysisResult,
+    *,
+    repair: bool = False,
+) -> Any:
+    result = _call_llm(settings, rule_answer, analysis, repair=repair)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
-def _numbers_are_grounded(answer: str, rule_answer: StockQuestionAnswer, analysis: AnalysisResult) -> bool:
-    allowed = _allowed_numbers(rule_answer, analysis)
-    stock_code = analysis.quote.code
-    for match in re.finditer(r"\d+(?:\.\d+)?", answer):
-        raw = match.group()
-        if _is_grounding_exempt_number(answer, match):
-            continue
-        if _is_stock_code_reference(answer, match, raw, stock_code):
-            continue
-        value = float(raw)
-        if not any(_number_matches_allowed(value, item) for item in allowed):
-            return False
-    return True
+async def _call_llm(
+    settings: Settings,
+    rule_answer: StockQuestionAnswer,
+    analysis: AnalysisResult,
+    *,
+    repair: bool = False,
+) -> str:
+    from openai import AsyncOpenAI
+
+    timeout = _llm_timeout(settings)
+    client = AsyncOpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        timeout=timeout,
+        max_retries=0,
+    )
+    try:
+        completion_call = client.chat.completions.create(
+            model=settings.llm_model,
+            temperature=0.0,
+            max_tokens=700,
+            messages=build_chat_messages(rule_answer, analysis, repair=repair),
+        )
+        completion = await completion_call if inspect.isawaitable(completion_call) else completion_call
+        content = completion.choices[0].message.content
+        if not isinstance(content, str):
+            raise RuntimeError("模型未返回文本内容")
+        return content
+    finally:
+        await _close_client(client)
 
 
-def _allowed_numbers(rule_answer: StockQuestionAnswer, analysis: AnalysisResult) -> set[float]:
-    values: set[float] = set()
-    for item in [
-        analysis.quote.price,
-        analysis.quote.prev_close,
-        analysis.quote.open,
-        analysis.quote.high,
-        analysis.quote.low,
-        analysis.quote.change,
-        analysis.quote.change_pct,
-        analysis.quote.turnover_rate,
-        analysis.quote.pe,
-        analysis.quote.pb,
-        analysis.support,
-        analysis.resistance,
-        analysis.ma5,
-        analysis.ma10,
-        analysis.ma20,
-        analysis.trend_score,
-        analysis.data_quality.score,
-        analysis.data_quality.kline_count,
-        rule_answer.confidence,
-    ]:
-        _add_allowed_number(values, item)
-    for text in [rule_answer.answer, *rule_answer.evidence, *rule_answer.actions, *rule_answer.invalidations]:
-        for raw in re.findall(r"\d+(?:\.\d+)?", str(text)):
-            _add_allowed_number(values, raw)
-    return values
-
-
-def _add_allowed_number(values: set[float], raw: Any, digits: int = 2) -> None:
-    if raw is None:
+async def _close_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if not callable(close):
         return
     try:
-        value = float(raw)
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        pass
+
+
+def _llm_timeout(settings: Settings) -> float:
+    try:
+        value = float(settings.llm_timeout_seconds)
     except (TypeError, ValueError):
-        return
-    if math.isfinite(value):
-        values.add(round(value, digits))
+        return 8.0
+    if not math.isfinite(value) or value <= 0:
+        return 8.0
+    return min(value, 120.0)
 
 
-def _number_matches_allowed(value: float, allowed: float) -> bool:
-    tolerance = max(0.05, abs(allowed) * 0.005)
-    return abs(value - allowed) <= tolerance
-
-
-def _is_grounding_exempt_number(answer: str, match: re.Match[str]) -> bool:
-    value = float(match.group())
-    prefix = answer[max(0, match.start() - 4) : match.start()].lower()
-    suffix = answer[match.end() : match.end() + 3]
-    if prefix.endswith(_GROUNDING_SKIP_PREFIXES):
-        return True
-    if suffix.startswith(_GROUNDING_PERIOD_UNITS):
-        return True
-    if value <= 10 and suffix.startswith(_GROUNDING_COUNT_UNITS):
-        return True
-    return _is_list_marker_number(answer, match, value)
-
-
-def _is_stock_code_reference(answer: str, match: re.Match[str], raw: str, stock_code: str) -> bool:
-    if raw != stock_code:
-        return False
-    prefix = answer[max(0, match.start() - 8) : match.start()]
-    suffix = answer[match.end() : match.end() + 4]
-    return "代码" in prefix or suffix.upper().startswith((".SH", ".SZ"))
-
-
-def _is_list_marker_number(answer: str, match: re.Match[str], value: float) -> bool:
-    if value > 20 or not float(value).is_integer():
-        return False
-    suffix = answer[match.end() : match.end() + 1]
-    if suffix not in {".", "、", ")", "）"}:
-        return False
-    prefix = answer[: match.start()].rstrip(" \t")
-    return not prefix or prefix.endswith(("\n", "：", ":", "。", "；", ";", "！", "？"))
+def _nonempty(value: Any) -> bool:
+    return bool(str(value).strip()) if value is not None else False
 
 
 def _fallback(rule_answer: StockQuestionAnswer, status: str) -> StockQuestionAnswer:
-    return rule_answer.model_copy(update={"answer_source": "规则问诊", "llm_used": False, "llm_status": status})
+    return rule_answer.model_copy(
+        update={
+            "answer": rule_answer.answer,
+            "answer_source": "规则问诊",
+            "llm_used": False,
+            "llm_status": status,
+        }
+    )
 
 
-def _short_error(exc: Exception, settings: Settings | None = None) -> str:
-    text = str(exc)
-    if settings:
-        text = _redact_secret(text, settings.llm_api_key)
+def _short_error(
+    exc: Exception,
+    settings: Settings | None = None,
+    rule_answer: StockQuestionAnswer | None = None,
+) -> str:
+    text = sanitize_provider_error(
+        exc,
+        sensitive_values=(
+            settings.llm_api_key if settings is not None else None,
+            rule_answer.question if rule_answer is not None else None,
+        ),
+    )
+    text = " ".join(text.split()).strip()
     return text[:120] if text else exc.__class__.__name__
-
-
-def _redact_secret(text: str, secret: str | None) -> str:
-    if not secret:
-        return text
-    return text.replace(secret, "<redacted>")

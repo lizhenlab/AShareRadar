@@ -7,6 +7,7 @@ from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.datahub import DataHub
 from app.services.datahub_cache import _normalize_minute_interval
+from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
 from app.services.market_sampling import PeerQuoteSampleResult, peer_quote_sample as _peer_quote_sample
 from app.services.minute_analysis import build_minute_analysis_report, build_unavailable_minute_analysis_report
 from app.services.review import build_individual_review
@@ -15,26 +16,36 @@ from app.workflows.optional_data import optional_workflow_value, short_error
 from app.workflows.stock_lookup import confirmed_stock_profile, match_industry
 
 
+WORKBENCH_DAILY_KLINE_LIMIT = 240
+WORKBENCH_REVIEW_WINDOW_DAYS = 60
+
+
 async def analyze_individual_stock(datahub: DataHub, symbol: str, persist_history: bool = True) -> AnalysisResult:
     code, market = normalize_symbol(symbol)
     standard = f"{code}.{market.upper()}"
     profile = await confirmed_stock_profile(datahub, standard)
     quote_data, klines, plates_result = await asyncio.gather(
         datahub.quote(symbol),
-        datahub.kline(symbol, 120),
+        datahub.kline(symbol, WORKBENCH_DAILY_KLINE_LIMIT),
         _optional_plate_rank(datahub, standard),
         return_exceptions=True,
     )
+    if isinstance(quote_data, asyncio.CancelledError):
+        raise quote_data
     if isinstance(quote_data, Exception):
         raise quote_data
+    if isinstance(klines, asyncio.CancelledError):
+        raise klines
     if isinstance(klines, Exception):
         raise klines
+    if isinstance(plates_result, asyncio.CancelledError):
+        raise plates_result
     plates = plates_result if isinstance(plates_result, list) else []
     quote_symbol = f"{quote_data.code}.{quote_data.market}"
     data_quality = await _assess_quote_quality_or_fallback(datahub, quote_data, klines, quote_symbol)
     industry = match_industry(profile, plates)
-    review = build_individual_review(quote_data, klines, period_days=60)
-    quote_history = _safe_quote_history(datahub, quote_symbol)
+    review = build_individual_review(quote_data, klines, period_days=WORKBENCH_REVIEW_WINDOW_DAYS)
+    quote_history = await _safe_quote_history(datahub, quote_symbol)
     peer_sample = await _peer_quote_sample_or_fallback(datahub, profile, quote_symbol)
     result = build_analysis(
         quote_data,
@@ -48,43 +59,66 @@ async def analyze_individual_stock(datahub: DataHub, symbol: str, persist_histor
         peer_sample=_peer_sample_info(peer_sample),
     )
     if persist_history:
-        _safe_save_advice_snapshot(datahub, result, quote_symbol)
+        await _safe_save_advice_snapshot(datahub, result, quote_symbol)
     return result
 
 
-def _safe_quote_history(datahub: DataHub, symbol: str) -> list[dict[str, float | str | None]]:
+async def _safe_quote_history(datahub: DataHub, symbol: str) -> list[dict[str, float | str | None]]:
     try:
-        return datahub.cache.quote_history(symbol, limit=120)
+        return await run_cache_io(datahub.cache.quote_history, symbol, limit=120)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        _log_analysis_fallback(datahub, f"个股历史报价暂不可用：{symbol}；{_short_error(exc)}")
+        await _log_analysis_fallback(datahub, f"个股历史报价暂不可用：{symbol}；{_short_error(exc)}")
         return []
 
 
-def _safe_save_advice_snapshot(datahub: DataHub, result: AnalysisResult, symbol: str) -> None:
+async def _safe_save_advice_snapshot(datahub: DataHub, result: AnalysisResult, symbol: str) -> None:
     try:
-        datahub.cache.save_advice_snapshot(result)
+        await run_cache_io(datahub.cache.save_advice_snapshot, result)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        _log_analysis_fallback(datahub, f"分析建议快照暂不可写：{symbol}；{_short_error(exc)}")
+        await _log_analysis_fallback(datahub, f"分析建议快照暂不可写：{symbol}；{_short_error(exc)}")
 
 
 async def _optional_plate_rank(datahub: DataHub, symbol: str) -> list:
-    return await optional_workflow_value(
+    failure: Exception | None = None
+
+    def empty_rows(exc: Exception) -> list:
+        nonlocal failure
+        failure = exc
+        return []
+
+    rows = await optional_workflow_value(
         datahub,
         lambda: datahub.plate_rank(limit=20),
-        lambda exc: _empty_optional_analysis_rows(datahub, f"个股行业背景暂不可用：{symbol}；{short_error(exc)}"),
+        empty_rows,
     )
+    if failure is not None:
+        await _log_analysis_fallback(datahub, f"个股行业背景暂不可用：{symbol}；{short_error(failure)}")
+    return rows
 
 
 async def _peer_quote_sample_or_fallback(datahub: DataHub, profile, symbol: str) -> PeerQuoteSampleResult:
-    return await optional_workflow_value(
+    failure: Exception | None = None
+
+    def unavailable_sample(exc: Exception) -> PeerQuoteSampleResult:
+        nonlocal failure
+        failure = exc
+        return _unavailable_peer_sample(symbol, exc)
+
+    sample = await optional_workflow_value(
         datahub,
         lambda: _peer_quote_sample(datahub, profile, symbol),
-        lambda exc: _unavailable_peer_sample(datahub, symbol, exc),
+        unavailable_sample,
     )
+    if failure is not None:
+        await _log_analysis_fallback(datahub, f"同行样本暂不可用：{symbol}；{short_error(failure)}")
+    return sample
 
 
-def _unavailable_peer_sample(datahub: DataHub, symbol: str, exc: Exception) -> PeerQuoteSampleResult:
-    _log_analysis_fallback(datahub, f"同行样本暂不可用：{symbol}；{short_error(exc)}")
+def _unavailable_peer_sample(symbol: str, exc: Exception) -> PeerQuoteSampleResult:
     return PeerQuoteSampleResult(
         status="unavailable",
         warning="同行样本请求失败，当前仅使用个股历史和行业背景。",
@@ -101,16 +135,25 @@ def _peer_sample_info(sample: PeerQuoteSampleResult) -> PeerSampleInfo:
 
 
 async def _assess_quote_quality_or_fallback(datahub: DataHub, quote, klines, symbol: str):
-    return await optional_workflow_value(
+    failure: Exception | None = None
+
+    def fallback_quality(exc: Exception):
+        nonlocal failure
+        failure = exc
+        return _fallback_data_quality(quote, klines, symbol, exc)
+
+    quality = await optional_workflow_value(
         datahub,
         lambda: datahub.assess_quote_quality(quote, klines),
-        lambda exc: _fallback_data_quality(datahub, quote, klines, symbol, exc),
+        fallback_quality,
     )
+    if failure is not None:
+        await _log_analysis_fallback(datahub, f"数据质量校验暂不可用：{symbol}；{short_error(failure)}")
+    return quality
 
 
-def _fallback_data_quality(datahub: DataHub, quote, klines, symbol: str, exc: Exception):
+def _fallback_data_quality(quote, klines, symbol: str, exc: Exception):
     message = f"数据质量校验暂不可用：{symbol}；{short_error(exc)}"
-    _log_analysis_fallback(datahub, message)
     return build_data_quality(
         quote,
         klines,
@@ -120,16 +163,10 @@ def _fallback_data_quality(datahub: DataHub, quote, klines, symbol: str, exc: Ex
     )
 
 
-def _empty_optional_analysis_rows(datahub: DataHub, message: str) -> list:
-    _log_analysis_fallback(datahub, message)
-    return []
-
-
-def _log_analysis_fallback(datahub: DataHub, message: str) -> None:
-    try:
-        datahub.cache.log_event("fallback", message)
-    except Exception:
-        pass
+async def _log_analysis_fallback(datahub: DataHub, message: str) -> None:
+    log_event = getattr(datahub.cache, "log_event", None)
+    if callable(log_event):
+        await run_cache_io_best_effort(log_event, "fallback", message)
 
 
 def _short_error(exc: Exception) -> str:
@@ -155,17 +192,16 @@ async def stock_minute_analysis(
     await confirmed_stock_profile(datahub, standard)
     try:
         rows = await datahub.minute_kline(standard, interval=normalized_interval, limit=limit)
-    except RuntimeError as exc:
-        _safe_log_minute_fallback(datahub, f"分钟分析不可用：{standard} {normalized_interval}；{_short_error(exc)}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await _safe_log_minute_fallback(datahub, f"分钟分析不可用：{standard} {normalized_interval}；{_short_error(exc)}")
         return build_unavailable_minute_analysis_report(standard, interval=normalized_interval, reason=str(exc))
     return build_minute_analysis_report(standard, rows, interval=normalized_interval)
 
 
-def _safe_log_minute_fallback(datahub: DataHub, message: str) -> None:
-    try:
-        datahub.cache.log_event("fallback", message)
-    except Exception:
-        pass
+async def _safe_log_minute_fallback(datahub: DataHub, message: str) -> None:
+    await _log_analysis_fallback(datahub, message)
 
 
 __all__ = ["analyze_individual_stock", "review_individual_stock", "stock_minute_analysis"]

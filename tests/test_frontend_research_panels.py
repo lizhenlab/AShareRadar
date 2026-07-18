@@ -1,10 +1,147 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_research_panel_facade_preserves_public_api_and_key_outputs() -> None:
+    script = r'''
+      import * as researchPanels from "./static/js/research-panels.js";
+      import { runResearchPanelSmoke } from "./tests/static_research_smoke_helpers.mjs";
+
+      const exportNames = Object.keys(researchPanels).sort();
+      if (JSON.stringify(exportNames) !== JSON.stringify(["renderResearch"])) {
+        throw new Error(`research panel public API changed: ${exportNames.join(", ")}`);
+      }
+      await runResearchPanelSmoke();
+    '''
+    _run_node_script(script)
+
+
+def test_research_panel_modules_are_thin_acyclic_and_share_formatters() -> None:
+    module_names = {
+        "research-panels.js",
+        "research-formatters.js",
+        "research-risk-reward.js",
+        "research-factor-diagnostics.js",
+        "research-qa-reports.js",
+        "research-render-utils.js",
+    }
+    sources = {
+        name: (ROOT / "static" / "js" / name).read_text(encoding="utf-8")
+        for name in module_names
+    }
+    import_pattern = re.compile(r'from\s+["\']\./([^"\']+)["\']')
+    graph = {
+        name: {dependency for dependency in import_pattern.findall(source) if dependency in module_names}
+        for name, source in sources.items()
+    }
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(module: str) -> None:
+        assert module not in visiting, f"cyclic research panel import at {module}"
+        if module in visited:
+            return
+        visiting.add(module)
+        for dependency in graph[module]:
+            visit(dependency)
+        visiting.remove(module)
+        visited.add(module)
+
+    for module_name in graph:
+        visit(module_name)
+
+    facade = sources["research-panels.js"]
+    assert len(facade.splitlines()) <= 80
+    assert graph["research-panels.js"] == {
+        "research-factor-diagnostics.js",
+        "research-qa-reports.js",
+        "research-render-utils.js",
+        "research-risk-reward.js",
+    }
+    for module_name in (
+        "research-risk-reward.js",
+        "research-factor-diagnostics.js",
+        "research-qa-reports.js",
+    ):
+        assert "research-formatters.js" in graph[module_name]
+        assert 'from "./format.js"' not in sources[module_name]
+    assert 'from "./format.js"' in sources["research-formatters.js"]
+    assert "aiQuestionRequestSeq" not in "\n".join(sources.values())
+
+
+def test_factor_lab_renders_all_seven_production_factors_and_participation_note() -> None:
+    script = r'''
+      import { renderFactorLab } from "./static/js/research-factor-diagnostics.js";
+
+      const target = { innerHTML: "" };
+      globalThis.document = {
+        getElementById(id) {
+          return id === "factorLab" ? target : null;
+        },
+      };
+      const factorSpecs = [
+        ["trend_momentum", "趋势动量"],
+        ["volume_confirmation", "量价确认"],
+        ["risk_pressure", "风险压力"],
+        ["fund_flow_proxy", "量价连续性（衍生）"],
+        ["chip_position", "筹码位置"],
+        ["leadership_strength", "龙头强度"],
+        ["valuation_anchor", "估值锚"],
+      ];
+      const factors = factorSpecs.map(([id, name], index) => ({
+        id,
+        name,
+        score: 60 + index,
+        weight: 1,
+        value: index === 6 ? "估值中性" : "观察",
+        direction: "正向",
+        evidence: index === 0 ? ["证据<script>"] : [],
+        calibration: {
+          sample_count: index === 6 ? 0 : 12,
+          confidence_level: index === 6 ? "待补数据" : "中等",
+          expected_level: index === 6 ? "待补数据" : "偏正",
+          participates_in_historical_aggregate: index !== 6,
+        },
+      }));
+
+      renderFactorLab({
+        total_score: 66,
+        evidence_sufficiency: 62,
+        composite_reliability_level: "中等",
+        profile_label: "常规个股",
+        calibration_sample_count: 12,
+        positive_factor_count: 3,
+        negative_factor_count: 1,
+        top_positive: ["趋势动量"],
+        summary: "七因子生产报告",
+        factors,
+        weight_policy: ["默认权重"],
+        notes: ["第一条说明", "第二条说明", "第三条保持紧凑", "估值锚不参与历史校准"],
+      });
+
+      const html = target.innerHTML;
+      const renderedCount = (html.match(/class="standard-factor(?:\s|\")/g) || []).length;
+      if (renderedCount !== 7) {
+        throw new Error(`expected seven rendered factors, got ${renderedCount}: ${html}`);
+      }
+      for (const [, name] of factorSpecs) {
+        if (!html.includes(name)) throw new Error(`production factor was hidden: ${name}`);
+      }
+      if (!html.includes("历史聚合口径：估值锚仍参与当前评分，但不参与综合证据充分度、正负证据与历史样本聚合")) {
+        throw new Error(`explicit participation note was missing: ${html}`);
+      }
+      if (html.includes("第三条保持紧凑") || html.includes("<script>") || !html.includes("证据&lt;script&gt;")) {
+        throw new Error(`factor rendering was not compact and escaped: ${html}`);
+      }
+    '''
+    _run_node_script(script)
 
 
 def test_delayed_ai_answer_does_not_replace_rerendered_symbol_answer() -> None:
@@ -35,6 +172,9 @@ def test_delayed_ai_answer_does_not_replace_rerendered_symbol_answer() -> None:
 
       if (fetchCalls.length !== 1) {
         throw new Error(`expected one ask request, got ${fetchCalls.length}`);
+      }
+      if (!fetchCalls[0].options.signal || !fetchCalls[0].options.signal.aborted) {
+        throw new Error("rerender did not abort the stale AI question fetch");
       }
       const body = JSON.parse(fetchCalls[0].options.body);
       if (body.symbol !== "600519.SH" || body.question !== "旧个股问题") {
@@ -120,6 +260,45 @@ def test_current_ai_question_error_still_renders() -> None:
       }
       if (dom.button().disabled || dom.button().textContent !== "问一下") {
         throw new Error("button did not recover after error");
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_ai_question_timeout_allows_llm_correction_and_recovers_current_form() -> None:
+    script = r'''
+      import { renderResearch } from "./static/js/research-panels.js";
+
+      const dom = installResearchPanelDom();
+      const state = { symbol: "600519.SH" };
+      const delays = [];
+      let fetchSignal = null;
+      globalThis.setTimeout = (callback, delay) => {
+        delays.push(delay);
+        queueMicrotask(callback);
+        return delays.length;
+      };
+      globalThis.clearTimeout = () => {};
+      globalThis.fetch = async (url, options = {}) => {
+        fetchSignal = options.signal;
+        return new Promise(() => {});
+      };
+
+      renderResearch(workbench(), state);
+      dom.input().value = "超时测试";
+      await dom.form().listener.handler({ preventDefault() {}, currentTarget: dom.form() });
+
+      if (delays.length !== 1 || delays[0] !== 35000) {
+        throw new Error(`AI question timeout did not allow the server correction budget: ${delays}`);
+      }
+      if (!fetchSignal || !fetchSignal.aborted) {
+        throw new Error("timed out AI question did not abort its fetch signal");
+      }
+      if (!dom.answerHtml().includes("请求超时，请稍后重试")) {
+        throw new Error(`current AI timeout was not rendered: ${dom.answerHtml()}`);
+      }
+      if (dom.button().disabled || dom.button().textContent !== "问一下") {
+        throw new Error("AI question form did not recover after timeout");
       }
     '''
     _run_node_script(script)

@@ -86,9 +86,11 @@ class FeatureSnapshot(BaseModel):
     turnover_rate: float | None = None
     amount: float | None = None
     valuation_score: int = 0
-    financial_score: int = 0
+    financial_score: int | None = None
     fund_flow_score: int = 0
+    fund_flow_data_nature: Literal["derived", "estimated", "observed", "unavailable"] = "unavailable"
     order_pressure: str = "--"
+    order_pressure_data_nature: Literal["derived", "estimated", "observed", "unavailable"] = "unavailable"
     industry_name: str | None = None
     industry_change_pct: float | None = None
     tags: list[str] = Field(default_factory=list)
@@ -209,6 +211,8 @@ class FundFlowAnalysis(BaseModel):
     symbol: str
     available: bool
     source: str
+    data_nature: Literal["derived", "estimated", "observed", "unavailable"] = "unavailable"
+    methodology: str = "旧数据未标注量价指标口径。"
     updated_at: str
     overall_score: int
     level: str
@@ -222,6 +226,8 @@ class OrderPressure(BaseModel):
     symbol: str
     available: bool
     source: str
+    data_nature: Literal["derived", "estimated", "observed", "unavailable"] = "unavailable"
+    methodology: str = "旧数据未标注订单压力口径。"
     updated_at: str
     pressure_level: str
     spread_pct: float | None = None
@@ -270,12 +276,17 @@ class FinancialMetric(BaseModel):
     level: str
     summary: str
     source: str
+    category: Literal["formal_financial", "market_valuation", "trading_vital", "context"] = "formal_financial"
 
 
 class FinancialHealth(BaseModel):
     symbol: str
     updated_at: str
-    score: int
+    score: int | None = None
+    score_available: bool = False
+    formal_minimum_complete: bool = False
+    report_period: str | None = None
+    metric_scope: Literal["formal_financial_health", "market_valuation_trading_vitals", "legacy_unspecified"] = "legacy_unspecified"
     level: str
     summary: str
     metrics: list[FinancialMetric]
@@ -283,6 +294,12 @@ class FinancialHealth(BaseModel):
     risk_notes: list[str] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)
     source: str
+
+    def model_post_init(self, __context: object) -> None:
+        if not self.score_available or not self.formal_minimum_complete:
+            self.score = None
+            self.score_available = False
+            self.level = "不可用"
 
 
 class ValuationAnalysis(BaseModel):

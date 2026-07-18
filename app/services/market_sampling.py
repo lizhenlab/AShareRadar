@@ -5,6 +5,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.models.schemas import Quote, StockInfo
+from app.services.datahub_runtime import run_cache_io_best_effort
+from app.services.provider_errors import sanitize_provider_error
 from app.utils.symbols import standard_symbol_list
 
 
@@ -329,7 +331,7 @@ async def fetch_quote_sample(
     raw_symbols = list(symbols)
     normalized_symbols = unique_standard_symbols(raw_symbols)
     if len(normalized_symbols) < len(raw_symbols):
-        _log_sampling_event(
+        await _log_sampling_event(
             datahub,
             "fallback",
             f"{context}剔除 {len(raw_symbols) - len(normalized_symbols)} 个重复或无效样本。",
@@ -347,7 +349,7 @@ async def fetch_quote_sample(
     returned_symbols = {_quote_symbol_or_none(quote) for quote in ordered_quotes}
     missing_symbols = [symbol for symbol in normalized_symbols if symbol not in returned_symbols]
     if missing_symbols:
-        _log_sampling_event(
+        await _log_sampling_event(
             datahub,
             "fallback",
             f"{context}最终缺失 {len(missing_symbols)} / {len(normalized_symbols)} 个样本，触发逐只回退 {fallback_batches} 批。",
@@ -377,7 +379,7 @@ async def _fetch_quote_batch_with_fallback(datahub, batch: list[str], context: s
         matched_quotes, missing_symbols = _match_requested_quotes(quotes, batch)
         if not missing_symbols:
             return QuoteBatchResult(quotes=matched_quotes, failed_symbols=[], fallback_used=False)
-        _log_sampling_event(
+        await _log_sampling_event(
             datahub,
             "fallback",
             f"{context}批量行情缺失 {len(missing_symbols)} 个样本，改为逐只补齐：{_format_symbols(missing_symbols)}",
@@ -388,7 +390,7 @@ async def _fetch_quote_batch_with_fallback(datahub, batch: list[str], context: s
             failed_symbols=failed_symbols,
             fallback_used=True,
         )
-    _log_sampling_event(datahub, "fallback", f"{context}批量行情失败，改为逐只重试：{_short_error(exc)}")
+    await _log_sampling_event(datahub, "fallback", f"{context}批量行情失败，改为逐只重试：{_short_error(exc)}")
     quotes, failed_symbols = await _fetch_single_quotes(datahub, batch, context)
     return QuoteBatchResult(quotes=quotes, failed_symbols=failed_symbols, fallback_used=True)
 
@@ -404,10 +406,10 @@ async def _fetch_single_quotes(datahub, symbols: list[str], context: str) -> tup
                 quotes.extend(matched_quotes)
                 continue
             failed_symbols.extend(missing_symbols)
-            _log_sampling_event(datahub, "fallback", f"{context}单只行情未返回请求符号：{symbol}")
+            await _log_sampling_event(datahub, "fallback", f"{context}单只行情未返回请求符号：{symbol}")
             continue
         failed_symbols.append(symbol)
-        _log_sampling_event(datahub, "fallback", f"{context}单只行情失败：{symbol}；{_short_error(exc)}")
+        await _log_sampling_event(datahub, "fallback", f"{context}单只行情失败：{symbol}；{_short_error(exc)}")
     return quotes, failed_symbols
 
 
@@ -432,7 +434,7 @@ async def _stock_pool_sample(datahub, *, failure_message: str) -> StockPoolSampl
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        _log_sampling_event(datahub, "fallback", f"{failure_message}：{_short_error(exc)}")
+        await _log_sampling_event(datahub, "fallback", f"{failure_message}：{_short_error(exc)}")
         return StockPoolSampleResult(rows=(), unavailable=True)
 
 
@@ -501,18 +503,15 @@ def _clean_sample_text(value: object) -> str | None:
     return None if text.casefold() in INVALID_SAMPLE_TEXT_VALUES else text
 
 
-def _log_sampling_event(datahub, category: str, message: str) -> None:
+async def _log_sampling_event(datahub, category: str, message: str) -> None:
     cache = getattr(datahub, "cache", None)
     log_event = getattr(cache, "log_event", None)
     if callable(log_event):
-        try:
-            log_event(category, message)
-        except Exception:
-            pass
+        await run_cache_io_best_effort(log_event, category, message)
 
 
 def _short_error(exc: Exception) -> str:
-    text = str(exc).strip()
+    text = sanitize_provider_error(exc).strip()
     return text[:140] if text else exc.__class__.__name__
 
 

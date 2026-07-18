@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from typing import TypeVar
 
 from app.models.schemas import Kline, ProviderCapability, StockInfo
 from app.runtime_environment import isolate_user_site_packages
 from app.services.provider_utils import bs_symbol, ensure_positive_limit, is_installed, valid_ohlc
 from app.services.provider_stock_mappers import stock_info_from_baostock_row
+from app.services.providers import stamp_daily_kline_contract
 from app.utils.parsing import required_float, safe_float
 from app.utils.time import now_text
 
 isolate_user_site_packages()
 
+_T = TypeVar("_T")
+_BAOSTOCK_SESSION_LOCK = threading.Lock()
+BAOSTOCK_QFQ_ADJUST_FLAG = "2"
+
 
 class BaoStockProvider:
     source_name = "BaoStock"
+
+    def __init__(self) -> None:
+        self._session_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="baostock-session")
+        self._closed = False
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
         ensure_positive_limit(limit)
@@ -30,22 +43,42 @@ class BaoStockProvider:
                     bs_symbol(symbol),
                     "date,open,high,low,close,volume",
                     frequency="d",
-                    adjustflag="2",
+                    adjustflag=BAOSTOCK_QFQ_ADJUST_FLAG,
                 )
                 rows = []
                 while rs.next():
                     rows.append(rs.get_row_data())
                 if rs.error_code != "0":
                     raise RuntimeError(f"BaoStock K线失败：{rs.error_msg}")
-                return [item for row in rows[-limit:] if (item := _baostock_kline_from_row(row)) is not None]
+                klines = [
+                    item
+                    for row in rows[-limit:]
+                    if (item := _baostock_kline_from_row(row)) is not None
+                ]
+                return stamp_daily_kline_contract(
+                    klines,
+                    adjustment_mode="qfq",
+                    source=self.source_name,
+                )
             finally:
                 bs.logout()
 
-        return await asyncio.to_thread(load)
+        return await self._run_session(load)
 
     async def stock_pool(self) -> list[StockInfo]:
         self._ensure_installed()
-        return await asyncio.to_thread(_load_baostock_stock_pool, self.source_name)
+        return await self._run_session(lambda: _load_baostock_stock_pool(self.source_name))
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._session_executor.shutdown(wait=False, cancel_futures=True)
+
+    async def _run_session(self, call: Callable[[], _T]) -> _T:
+        if self._closed:
+            raise RuntimeError("BaoStockProvider 已关闭")
+        return await _run_baostock_session(self._session_executor, call)
 
     def capability(self) -> ProviderCapability:
         installed = is_installed("baostock")
@@ -63,6 +96,20 @@ class BaoStockProvider:
     def _ensure_installed() -> None:
         if not is_installed("baostock"):
             raise RuntimeError("未安装 baostock，请执行 python3 -m pip install baostock")
+
+
+async def _run_baostock_session(executor: ThreadPoolExecutor, call: Callable[[], _T]) -> _T:
+    worker = executor.submit(_call_with_baostock_session_lock, call)
+    try:
+        return await asyncio.wrap_future(worker)
+    except asyncio.CancelledError:
+        worker.cancel()
+        raise
+
+
+def _call_with_baostock_session_lock(call: Callable[[], _T]) -> _T:
+    with _BAOSTOCK_SESSION_LOCK:
+        return call()
 
 
 def _load_baostock_stock_pool(source_name: str) -> list[StockInfo]:

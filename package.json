@@ -5,8 +5,12 @@
   "scripts": {
     "check": "npm run check:py && npm run check:js && npm test",
     "check:js": "node --check static/app.js && node --check static/js/*.js",
-    "check:py": "PYCACHE_DIR=$(mktemp -d /tmp/ashare-radar-pycache.XXXXXX); trap 'rm -rf \"$PYCACHE_DIR\"' EXIT; PYTHONPYCACHEPREFIX=$PYCACHE_DIR PYTHONNOUSERSITE=1 ${PYTHON:-/opt/anaconda3/bin/python3} -m compileall -q app tests tools && PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 ${PYTHON:-/opt/anaconda3/bin/python3} -m pyflakes app tests tools",
+    "check:py": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; PYCACHE_DIR=$(mktemp -d /tmp/ashare-radar-pycache.XXXXXX); trap 'rm -rf \"$PYCACHE_DIR\"' EXIT; PYTHONPYCACHEPREFIX=$PYCACHE_DIR PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m compileall -q app tests tools && PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m pyflakes app tests tools",
     "clean:caches": "find app tests tools -type d -name __pycache__ -prune -exec rm -rf {} + && rm -rf .pytest_cache",
-    "test": "PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 ${PYTHON:-/opt/anaconda3/bin/python3} -m pytest -q -p no:cacheprovider"
+    "test": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m pytest -q -p no:cacheprovider",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
   }
 }

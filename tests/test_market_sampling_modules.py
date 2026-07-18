@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -212,6 +213,21 @@ def test_fetch_quotes_with_single_fallback_ignores_log_event_failure() -> None:
     assert hub.requested_symbols == [["600519.SH"]]
 
 
+def test_sampling_event_writes_run_outside_the_event_loop_thread() -> None:
+    hub = _QuoteHub()
+    hub.cache = _ThreadRecordingEventCache()
+
+    async def run() -> int:
+        event_loop_thread = threading.get_ident()
+        await fetch_quotes_with_single_fallback(hub, ["600519", "600519.SH", "bad"], context="测试样本")
+        return event_loop_thread
+
+    event_loop_thread = asyncio.run(run())
+
+    assert hub.cache.thread_ids
+    assert all(thread_id != event_loop_thread for thread_id in hub.cache.thread_ids)
+
+
 def test_fetch_quotes_with_single_fallback_filters_unrequested_quotes_and_preserves_order() -> None:
     hub = _ShuffledQuoteHub()
 
@@ -395,6 +411,16 @@ class _EventCache:
 class _FailingEventCache:
     def log_event(self, category: str, message: str) -> None:
         raise RuntimeError("cache log down")
+
+
+class _ThreadRecordingEventCache(_EventCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.thread_ids: list[int] = []
+
+    def log_event(self, category: str, message: str) -> None:
+        self.thread_ids.append(threading.get_ident())
+        super().log_event(category, message)
 
 
 class _Settings:

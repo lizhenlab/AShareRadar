@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable
 from typing import Any
 
 from app.models.schemas import MinuteKline, OrderBook, OrderBookLevel, ProviderCapability, Quote
+from app.services.data_quality_time import normalize_quote_event_time
+from app.services.datahub_runtime import run_provider_io
 from app.services.futu_mappers import futu_symbol, minute_kline_from_row, quote_from_snapshot_row
-from app.services.provider_utils import ensure_positive_limit, is_installed
+from app.services.provider_errors import ProviderProtocolError
+from app.services.provider_utils import ensure_positive_limit, is_installed, pick
 from app.utils.parsing import safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
 from app.utils.time import now_text
@@ -53,7 +55,7 @@ class FutuProvider:
             finally:
                 ctx.close()
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def order_book(self, symbol: str) -> OrderBook:
         self._ensure_ready()
@@ -70,7 +72,7 @@ class FutuProvider:
             finally:
                 ctx.close()
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120) -> list[MinuteKline]:
         ensure_positive_limit(limit)
@@ -89,7 +91,7 @@ class FutuProvider:
             finally:
                 ctx.close()
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def ping(self) -> str:
         self._ensure_ready()
@@ -103,7 +105,7 @@ class FutuProvider:
             finally:
                 ctx.close()
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     def capability(self) -> ProviderCapability:
         installed = is_installed("futu")
@@ -139,21 +141,44 @@ def _ensure_futu_ok(ret: Any, data: Any, ok_value: Any) -> None:
 
 
 def _ordered_snapshot_quotes(requested: list[str], data: Any, *, source_name: str) -> list[Quote]:
-    by_symbol = _snapshot_quotes_by_symbol(data, source_name=source_name)
+    by_symbol = _snapshot_quotes_by_symbol(data, wanted=set(requested), source_name=source_name)
     missing = [symbol for symbol in requested if symbol not in by_symbol]
     if missing:
         raise RuntimeError(f"Futu快照缺少A股代码：{','.join(missing)}")
     return [by_symbol[symbol] for symbol in requested]
 
 
-def _snapshot_quotes_by_symbol(data: Any, *, source_name: str) -> dict[str, Quote]:
-    stamp = now_text()
+def _snapshot_quotes_by_symbol(data: Any, *, wanted: set[str], source_name: str) -> dict[str, Quote]:
     result: dict[str, Quote] = {}
+    missing_event_time: set[str] = set()
     for _, row in data.iterrows():
-        quote = quote_from_snapshot_row(row, stamp=stamp, source_name=source_name)
+        event_time = _futu_quote_event_time(row)
+        quote = quote_from_snapshot_row(row, stamp=event_time or "", source_name=source_name)
         if quote:
-            result[f"{quote.code}.{quote.market}"] = quote
+            symbol = f"{quote.code}.{quote.market}"
+            if symbol not in wanted:
+                continue
+            if event_time is None:
+                missing_event_time.add(symbol)
+            else:
+                result[symbol] = quote
+    unresolved_event_time = sorted(missing_event_time - result.keys())
+    if unresolved_event_time:
+        raise ProviderProtocolError(f"Futu快照缺少可解析的事件时间：{','.join(unresolved_event_time)}")
     return result
+
+
+def _futu_quote_event_time(row: Any) -> str | None:
+    value = pick(
+        row,
+        "update_time",
+        "last_trade_time",
+        "trade_time",
+        "timestamp",
+        default=None,
+    )
+    event_date = pick(row, "trade_date", "date", default=None)
+    return normalize_quote_event_time(value, event_date=event_date)
 
 
 def _order_book_from_response(symbol: str, data: dict[str, Any], *, source_name: str) -> OrderBook:

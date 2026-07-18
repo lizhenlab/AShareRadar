@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
-from app.config import DEFAULT_ASHARE_RADAR_LLM_TIMEOUT_SECONDS, Settings
+import pytest
+from pydantic import ValidationError
+
+from app.config import PROJECT_ROOT, Settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,20 +41,46 @@ def test_settings_reads_environment_when_instantiated(monkeypatch) -> None:
     assert settings.tushare_token == "new-token"
 
 
-def test_settings_invalid_environment_values_fall_back_to_safe_defaults(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("name", "raw", "message"),
+    [
+        ("ASHARE_RADAR_LLM_TIMEOUT_SECONDS", "slow", "必须是数字"),
+        ("ASHARE_RADAR_FUTU_PORT", "0", "必须大于等于 1"),
+        ("ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS", "many", "必须是整数"),
+        ("ASHARE_RADAR_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS", "-1", "必须大于等于 0.1"),
+    ],
+)
+def test_settings_invalid_numeric_environment_values_fail_fast(
+    monkeypatch,
+    name: str,
+    raw: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv(name, raw)
+
+    with pytest.raises(ValueError, match=rf"{name} {message}"):
+        Settings()
+
+
+def test_settings_invalid_boolean_environment_value_reports_the_variable(monkeypatch) -> None:
     monkeypatch.setenv("ASHARE_RADAR_LLM_ENABLED", "maybe")
-    monkeypatch.setenv("ASHARE_RADAR_LLM_TIMEOUT_SECONDS", "slow")
-    monkeypatch.setenv("ASHARE_RADAR_FUTU_PORT", "0")
-    monkeypatch.setenv("ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS", "many")
-    monkeypatch.setenv("ASHARE_RADAR_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS", "-1")
 
-    settings = Settings()
+    with pytest.raises(ValueError, match="ASHARE_RADAR_LLM_ENABLED 必须是布尔值"):
+        Settings()
 
-    assert settings.llm_enabled is True
-    assert settings.llm_timeout_seconds == DEFAULT_ASHARE_RADAR_LLM_TIMEOUT_SECONDS
-    assert settings.futu_port == 11111
-    assert settings.max_quote_history_rows == 50000
-    assert settings.scheduler_shutdown_timeout_seconds == 5.0
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+def test_settings_reject_non_finite_environment_floats(monkeypatch, raw: str) -> None:
+    monkeypatch.setenv("ASHARE_RADAR_LLM_TIMEOUT_SECONDS", raw)
+
+    with pytest.raises(ValueError, match="ASHARE_RADAR_LLM_TIMEOUT_SECONDS 必须是有限数字"):
+        Settings()
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_settings_reject_non_finite_explicit_floats(value: float) -> None:
+    with pytest.raises(ValidationError, match="finite number"):
+        Settings(request_timeout_seconds=value)
 
 
 def test_settings_do_not_default_llm_endpoint_or_model(monkeypatch) -> None:
@@ -67,6 +97,53 @@ def test_settings_do_not_default_llm_endpoint_or_model(monkeypatch) -> None:
     assert settings.llm_api_key is None
     assert settings.llm_base_url is None
     assert settings.llm_model is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("https://example.test/v1/", "https://example.test/v1"),
+        ("https://example.test/v1///", "https://example.test/v1"),
+        ("http://localhost:8000/v1/", "http://localhost:8000/v1"),
+        ("http://127.0.0.1:8000/v1/", "http://127.0.0.1:8000/v1"),
+        ("http://[::1]:8000/v1/", "http://[::1]:8000/v1"),
+    ],
+)
+def test_settings_normalize_secure_or_loopback_llm_base_urls(raw: str, expected: str) -> None:
+    assert Settings(llm_base_url=raw).llm_base_url == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://example.test/v1",
+        "http://localhost.example.test/v1",
+        "ftp://example.test/v1",
+        "https:///v1",
+        "https://example.test/v1?api-version=1",
+        "https://example.test/v1#fragment",
+    ],
+)
+def test_settings_reject_insecure_or_non_absolute_llm_base_urls(raw: str) -> None:
+    with pytest.raises(ValidationError, match="llm_base_url"):
+        Settings(llm_base_url=raw)
+
+
+def test_settings_reject_llm_base_url_userinfo_without_echoing_credentials() -> None:
+    credential = "alice:private-password"
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(llm_base_url=f"https://{credential}@example.test/v1")
+
+    rendered = str(exc_info.value)
+    assert "userinfo" in rendered
+    assert credential not in rendered
+
+
+def test_settings_validate_and_normalize_llm_base_url_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("ASHARE_RADAR_LLM_BASE_URL", "https://example.test/v1///")
+
+    assert Settings().llm_base_url == "https://example.test/v1"
 
 
 def test_settings_boolean_environment_values_are_explicit(monkeypatch) -> None:
@@ -105,3 +182,25 @@ def test_settings_prefer_new_environment_names_over_legacy_aliases(monkeypatch) 
 
     assert settings.futu_port == 22222
     assert settings.tushare_token == "new-token"
+
+
+def test_cache_paths_are_project_relative_and_environment_overridable(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ASHARE_RADAR_CACHE_PATH", raising=False)
+    monkeypatch.delenv("CACHE_PATH", raising=False)
+
+    assert Settings().cache_path == PROJECT_ROOT / "data" / "ashare_radar.sqlite3"
+    assert Settings(cache_path=Path("tmp/explicit.sqlite3")).cache_path == PROJECT_ROOT / "tmp" / "explicit.sqlite3"
+
+    monkeypatch.setenv("ASHARE_RADAR_CACHE_PATH", "var/env.sqlite3")
+
+    assert Settings().cache_path == PROJECT_ROOT / "var" / "env.sqlite3"
+
+
+def test_settings_repr_hides_secret_values() -> None:
+    settings = Settings(tushare_token="tushare-secret", llm_api_key="llm-secret")
+
+    rendered = repr(settings)
+
+    assert "tushare-secret" not in rendered
+    assert "llm-secret" not in rendered

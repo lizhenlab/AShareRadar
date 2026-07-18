@@ -5,13 +5,23 @@ import math
 import random
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Iterable
 
 import httpx
 
-from app.config import get_settings
+from app.models.market import (
+    DAILY_KLINE_CONTRACT_VERSION,
+    KlineAdjustmentMode,
+)
 from app.models.schemas import Kline, Quote
+from app.services.provider_errors import (
+    ProviderCoverageMiss,
+    ProviderError,
+    ProviderProtocolError,
+    ProviderTransportError,
+    sanitize_provider_error,
+)
 from app.services.provider_utils import ensure_positive_limit, valid_ohlc
 from app.utils.market_data import valid_kline
 from app.utils.parsing import MISSING_NUMERIC_VALUES, required_float
@@ -37,16 +47,27 @@ class _TencentQuoteNumbers:
     amount: float
 
 
-class MarketDataError(RuntimeError):
+class MarketDataError(ProviderError):
     """行情数据源调用失败。"""
+
+
+class MarketDataCoverageMiss(ProviderCoverageMiss, MarketDataError):
+    """腾讯行情未覆盖请求标的。"""
+
+
+class MarketDataTransportError(ProviderTransportError, MarketDataError):
+    """腾讯行情网络调用失败。"""
+
+
+class MarketDataProtocolError(ProviderProtocolError, MarketDataError):
+    """腾讯行情返回内容无法安全使用。"""
 
 
 class TencentMarketDataProvider:
     source_name = "腾讯行情"
 
-    def __init__(self) -> None:
-        settings = get_settings()
-        self.timeout = settings.request_timeout_seconds
+    def __init__(self, *, timeout: float) -> None:
+        self.timeout = timeout
 
     async def quote(self, symbol: str) -> Quote:
         return (await self.quotes([symbol]))[0]
@@ -58,7 +79,9 @@ class TencentMarketDataProvider:
         text = await _fetch_tencent_quote_text(url, self.timeout)
         quotes = _tencent_quotes_from_text(text, self.source_name)
         if not quotes:
-            raise MarketDataError("实时行情返回为空")
+            if _tencent_quote_response_is_coverage_miss(text):
+                raise MarketDataCoverageMiss("实时行情未覆盖请求股票")
+            raise MarketDataProtocolError("实时行情返回为空或格式异常")
         return quotes
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
@@ -70,16 +93,24 @@ class TencentMarketDataProvider:
                 response = await client.get(url)
                 response.raise_for_status()
                 data = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise MarketDataError(f"K线请求失败：{exc}") from exc
+        except httpx.HTTPError as exc:
+            raise MarketDataTransportError(f"K线请求失败：{sanitize_provider_error(exc)}") from exc
+        except ValueError as exc:
+            raise MarketDataProtocolError(f"K线响应解析失败：{sanitize_provider_error(exc)}") from exc
 
         rows = _tencent_kline_rows(data, code)
         if not rows:
-            raise MarketDataError("K线返回为空")
+            if _tencent_kline_response_is_coverage_miss(data, code):
+                raise MarketDataCoverageMiss(f"K线未覆盖请求股票：{symbol}")
+            raise MarketDataProtocolError("K线返回结构异常")
         klines = _tencent_klines_from_rows(rows)
         if not klines:
-            raise MarketDataError("K线有效数据为空")
-        return klines
+            raise MarketDataProtocolError("K线有效数据为空")
+        return stamp_daily_kline_contract(
+            klines,
+            adjustment_mode="qfq",
+            source=self.source_name,
+        )
 
 
 async def _fetch_tencent_quote_text(url: str, timeout: float) -> str:
@@ -90,14 +121,14 @@ async def _fetch_tencent_quote_text(url: str, timeout: float) -> str:
             response.raise_for_status()
             return response.text
     except httpx.HTTPError as exc:
-        raise MarketDataError(f"实时行情请求失败：{exc}") from exc
+        raise MarketDataTransportError(f"实时行情请求失败：{sanitize_provider_error(exc)}") from exc
 
 
 def _tencent_quote_url(symbols: Iterable[str]) -> str:
     query_symbols = [tencent_symbol(symbol) for symbol in symbols]
     if not query_symbols:
         return ""
-    return "http://qt.gtimg.cn/q=" + ",".join(query_symbols)
+    return "https://qt.gtimg.cn/q=" + ",".join(query_symbols)
 
 
 def _tencent_quotes_from_text(text: str, source_name: str) -> list[Quote]:
@@ -117,8 +148,25 @@ def _tencent_kline_rows(data: object, code: str) -> Iterable[object]:
     item = data_block.get(code)
     if not isinstance(item, dict):
         return []
-    rows = item.get("qfqday") or item.get("day") or []
+    rows = item.get("qfqday") or []
     return rows if isinstance(rows, (list, tuple)) else []
+
+
+def _tencent_kline_response_is_coverage_miss(data: object, code: str) -> bool:
+    if not isinstance(data, dict):
+        return False
+    data_block = data.get("data")
+    if not isinstance(data_block, dict):
+        return False
+    if code not in data_block:
+        return True
+    item = data_block.get(code)
+    if not isinstance(item, dict):
+        return False
+    if "qfqday" not in item:
+        return False
+    rows = item["qfqday"]
+    return isinstance(rows, (list, tuple)) and not rows
 
 
 def _tencent_klines_from_rows(rows: Iterable[object]) -> list[Kline]:
@@ -218,7 +266,11 @@ class DemoMarketDataProvider:
                     volume=rng.randint(100000, 8000000),
                 )
             )
-        return rows[-limit:]
+        return stamp_daily_kline_contract(
+            rows[-limit:],
+            adjustment_mode="qfq",
+            source=self.source_name,
+        )
 
     def capability(self):
         from app.models.schemas import ProviderCapability
@@ -297,14 +349,14 @@ def _format_timestamp(raw: str) -> str:
         timestamp = f"{text[:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}:{text[12:14]}"
         try:
             datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return now_text()
+        except ValueError as exc:
+            raise MarketDataProtocolError("腾讯行情报价事件时间无法解析") from exc
         return timestamp
-    return now_text()
+    raise MarketDataProtocolError("腾讯行情缺少有效报价事件时间")
 
 
-def _previous_weekdays(today, limit: int):
-    days = []
+def _previous_weekdays(today: date, limit: int) -> list[date]:
+    days: list[date] = []
     candidate = today - timedelta(days=1)
     while len(days) < limit:
         if candidate.weekday() < 5:
@@ -320,6 +372,11 @@ def _tencent_quote_payloads(text: str) -> list[str]:
         if payload:
             payloads.append(payload)
     return payloads
+
+
+def _tencent_quote_response_is_coverage_miss(text: str) -> bool:
+    matches = list(TENCENT_QUOTE_PAYLOAD_RE.finditer(text))
+    return bool(matches) and all(not match.group(1).strip() for match in matches)
 
 
 def _parse_tencent_quote_payload(payload: str, source_name: str) -> Quote | None:
@@ -496,3 +553,43 @@ def _rounded_demo_ohlc(
     rounded_high = max(round(high, 2), rounded_open, rounded_close)
     rounded_low = min(round(low, 2), rounded_open, rounded_close)
     return rounded_open, rounded_close, rounded_high, rounded_low
+
+
+def stamp_daily_kline_contract(
+    rows: list[Kline],
+    *,
+    adjustment_mode: KlineAdjustmentMode,
+    source: str,
+) -> list[Kline]:
+    if not rows:
+        return []
+    sources = {str(item.source or source).strip() for item in rows}
+    if "" in sources or len(sources) != 1:
+        raise ProviderProtocolError("日K序列来源不一致")
+    as_of = _daily_kline_as_of(rows)
+    series_source = next(iter(sources))
+    data_version = "|".join(
+        (DAILY_KLINE_CONTRACT_VERSION, adjustment_mode, series_source, as_of)
+    )
+    return [
+        item.model_copy(
+            update={
+                "adjustment_mode": adjustment_mode,
+                "as_of": as_of,
+                "data_version": data_version,
+                "contract_version": DAILY_KLINE_CONTRACT_VERSION,
+                "source": item.source or source,
+            }
+        )
+        for item in rows
+    ]
+
+
+def _daily_kline_as_of(rows: list[Kline]) -> str:
+    parsed_dates: list[date] = []
+    for item in rows:
+        try:
+            parsed_dates.append(datetime.fromisoformat(str(item.date)[:10]).date())
+        except ValueError as exc:
+            raise ProviderProtocolError(f"日K日期无法解析：{item.date}") from exc
+    return max(parsed_dates).isoformat()

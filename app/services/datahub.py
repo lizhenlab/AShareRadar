@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import inspect
 from typing import Iterable
 
-from app.config import get_settings
+from app.config import Settings
 from app.models.schemas import (
     DataQuality,
     DataSourcePlan,
@@ -19,7 +20,7 @@ from app.models.schemas import (
     Quote,
     StockInfo,
 )
-from app.services.cache import SQLiteCache
+from app.services.cache import SQLiteCache, resolve_cache_settings
 from app.services.datahub_metadata import MetadataCoordinator
 from app.services.datahub_klines import KlineCoordinator
 from app.services.datahub_orderbook import OrderBookCoordinator
@@ -29,7 +30,7 @@ from app.services.datahub_status import (
 )
 from app.services.datahub_source_plan import SourcePlanBuilder
 from app.services.datahub_quotes import QuoteCoordinator
-from app.services.datahub_runtime import ProviderRuntime
+from app.services.datahub_runtime import PROVIDER_SHUTDOWN_TIMEOUT_SECONDS, ProviderRuntime
 from app.services.workbench_context import WorkbenchContextCache
 from app.services.datahub_status_service import DataStatusService
 from app.services.provider_registry import (
@@ -99,12 +100,20 @@ def _build_coordinators(datahub: DataHub, runtime: ProviderRuntime) -> DataHubCo
 
 
 class DataHub:
-    def __init__(self, cache: SQLiteCache | None = None) -> None:
-        self.settings = get_settings()
-        self.cache = cache or SQLiteCache()
-        self.workbench_contexts = WorkbenchContextCache()
+    def __init__(
+        self,
+        cache: SQLiteCache | None = None,
+        *,
+        settings: Settings | None = None,
+        workbench_contexts: WorkbenchContextCache | None = None,
+    ) -> None:
+        self.settings = resolve_cache_settings(cache, settings)
+        self.cache = cache if cache is not None else SQLiteCache(settings=self.settings)
+        self.workbench_contexts = workbench_contexts if workbench_contexts is not None else WorkbenchContextCache()
         self.providers = build_providers(self.settings)
         self._provider_runtime = ProviderRuntime(self.cache, self.settings)
+        self._close_lock = asyncio.Lock()
+        self._providers_closed = False
         coordinators = _build_coordinators(self, self._provider_runtime)
         self._quote_coordinator = coordinators.quote
         self._kline_coordinator = coordinators.kline
@@ -159,6 +168,9 @@ class DataHub:
     async def plate_rank(self, limit: int = 20, refresh: bool = False):
         return await self._metadata_coordinator.plate_rank(limit=limit, refresh=refresh)
 
+    async def plate_rank_result(self, limit: int = 20, refresh: bool = False):
+        return await self._metadata_coordinator.plate_rank_result(limit=limit, refresh=refresh)
+
     async def stock_concepts(self, symbol: str, limit: int = 8, refresh: bool = False):
         return await self._metadata_coordinator.stock_concepts(symbol, limit=limit, refresh=refresh)
 
@@ -173,6 +185,19 @@ class DataHub:
             self.quotes(symbols, use_cache=False),
             *(self.kline(symbol, 120, use_cache=False) for symbol in symbols),
         )
+
+    async def aclose(self, timeout: float = PROVIDER_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
+        async with self._close_lock:
+            if self._providers_closed:
+                return True
+            if not await self._provider_runtime.aclose(timeout=timeout):
+                return False
+            await asyncio.gather(
+                *(_close_provider(provider) for provider in self.providers.values()),
+                return_exceptions=True,
+            )
+            self._providers_closed = True
+            return True
 
     def status(self) -> DataStatus:
         return self._status_service.status()
@@ -211,9 +236,6 @@ class DataHub:
     def _priority(self, kind: str) -> list[tuple[int, str]]:
         return provider_priority(self.settings, self.providers, kind)
 
-    async def _call(self, awaitable):
-        return await self._provider_runtime.call(awaitable)
-
     def _provider_is_cooling(self, name: str, kind: str = "general") -> bool:
         return self._provider_runtime.is_cooling(name, kind)
 
@@ -240,3 +262,12 @@ class DataHub:
 
     async def _quote_consistency_probe(self, index: int, name: str, provider, target_symbol: str) -> dict[str, object]:
         return await self._quote_coordinator.consistency_probe(index, name, provider, target_symbol)
+
+
+async def _close_provider(provider: object) -> None:
+    close = getattr(provider, "aclose", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result

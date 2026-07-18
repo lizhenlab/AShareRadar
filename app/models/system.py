@@ -67,10 +67,16 @@ class CacheStats(BaseModel):
     stock_count: int
     plate_count: int
     provider_count: int
-    latest_quote_at: str | None = None
-    latest_kline_at: str | None = None
-    latest_daily_kline_at: str | None = None
-    latest_minute_kline_at: str | None = None
+    latest_quote_at: str | None = Field(default=None, description="兼容字段：最近报价抓取时间。")
+    latest_kline_at: str | None = Field(default=None, description="兼容字段：最近日K抓取时间。")
+    latest_daily_kline_at: str | None = Field(default=None, description="兼容字段：最近日K抓取时间。")
+    latest_minute_kline_at: str | None = Field(default=None, description="兼容字段：最近分钟K抓取时间。")
+    latest_quote_fetched_at: str | None = Field(default=None, description="最近报价抓取时间。")
+    latest_daily_kline_fetched_at: str | None = Field(default=None, description="最近日K抓取时间。")
+    latest_minute_kline_fetched_at: str | None = Field(default=None, description="最近分钟K抓取时间。")
+    latest_quote_timestamp: str | None = Field(default=None, description="最近报价市场事件时间。")
+    latest_daily_kline_date: str | None = Field(default=None, description="最近日K市场交易日期。")
+    latest_minute_kline_timestamp: str | None = Field(default=None, description="最近分钟K市场事件时间。")
     latest_stock_at: str | None = None
     latest_plate_at: str | None = None
 
@@ -142,25 +148,47 @@ class ScheduledTaskState(BaseModel):
 class SchedulerStatus(BaseModel):
     enabled: bool
     running: bool
+    standby: bool = False
+    message: str | None = None
     started_at: str | None = None
     task_count: int
     tasks: list[ScheduledTaskState]
 
 
+class FreshnessObservation(BaseModel):
+    status: str
+    observed_at: str | None = None
+    age_seconds: int | None = None
+    detail: str | None = None
+
+
 class CacheFreshness(BaseModel):
-    latest_quote_age_seconds: int | None = None
-    latest_kline_age_seconds: int | None = None
-    latest_minute_kline_age_seconds: int | None = None
-    latest_stock_age_seconds: int | None = None
-    latest_plate_age_seconds: int | None = None
+    latest_quote_age_seconds: int | None = Field(default=None, description="兼容字段：最近报价抓取年龄。")
+    latest_kline_age_seconds: int | None = Field(default=None, description="兼容字段：最近日K抓取年龄。")
+    latest_minute_kline_age_seconds: int | None = Field(default=None, description="兼容字段：最近分钟K抓取年龄。")
+    latest_stock_age_seconds: int | None = Field(default=None, description="兼容字段：最近股票池更新时间年龄。")
+    latest_plate_age_seconds: int | None = Field(default=None, description="兼容字段：最近行业背景更新时间年龄。")
+    latest_quote_fetch_age_seconds: int | None = None
+    latest_daily_kline_fetch_age_seconds: int | None = None
+    latest_minute_kline_fetch_age_seconds: int | None = None
+    latest_stock_fetch_age_seconds: int | None = None
+    latest_plate_fetch_age_seconds: int | None = None
+    fetch_activity: dict[str, FreshnessObservation] = Field(default_factory=dict)
+    market_freshness: dict[str, FreshnessObservation] = Field(default_factory=dict)
+    checked_domains: list[str] = Field(default_factory=list)
 
 
 class StorageDiagnostics(BaseModel):
     db_path: str
     db_size_bytes: int
     db_size_mb: float
+    cache_rows: int
     runtime_rows: int
     user_rows: int
+    budget_bytes: int
+    warning_at_pct: float
+    usage_pct: float
+    over_budget: bool
 
 
 class SystemDiagnostics(BaseModel):

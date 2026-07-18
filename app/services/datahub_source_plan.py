@@ -26,6 +26,7 @@ from app.services.datahub_status import (
     _source_plan_summary,
     _unhealthy_capability_labels,
 )
+from app.services.provider_errors import sanitize_provider_error
 from app.services.provider_failure_status import provider_recently_failed
 
 
@@ -93,7 +94,8 @@ class SourcePlanBuilder:
         capabilities: list[ProviderCapability],
         capability_statuses: list[ProviderCapabilityStatus] | None = None,
     ) -> DataSourcePlan:
-        context = self._context(providers, capabilities, capability_statuses or [])
+        current_capability_statuses = capability_statuses or []
+        context = self._context(providers, capabilities, current_capability_statuses)
         primaries = _primary_sources(context)
         decisions = [self._provider_decision_from_context(name, context) for name in context.provider_names]
         warnings, suggestions = _plan_warnings_and_suggestions(context, primaries)
@@ -134,7 +136,7 @@ class SourcePlanBuilder:
             capabilities=capabilities,
             success_rate=_provider_success_rate(status),
             last_success=(_clean_status_text(status.last_success) or None) if status else None,
-            last_error=(_clean_status_text(status.last_error) or None) if status else None,
+            last_error=_sanitized_status_error(status),
             action=action,
         )
 
@@ -281,7 +283,7 @@ def _healthy_provider_decision(state: str) -> tuple[str, str]:
 
 def _failed_provider_decision(name: str, status: ProviderStatus, state: str) -> tuple[str, str]:
     failed_state = state if state and "最近失败" in state else "最近失败"
-    return failed_state, _provider_recovery_action(name, status.last_error)
+    return failed_state, _provider_recovery_action(name, _sanitized_status_error(status))
 
 
 def _statusless_provider_decision(state: str) -> tuple[str, str]:
@@ -339,6 +341,13 @@ def _current_capability_statuses(context: SourcePlanContext) -> list[ProviderCap
 
 def _provider_has_failure_signal(item: ProviderStatus) -> bool:
     return bool(_clean_status_text(item.last_error) or _safe_count(item.failure_count))
+
+
+def _sanitized_status_error(status: ProviderStatus | None) -> str | None:
+    if status is None:
+        return None
+    text = _clean_status_text(status.last_error)
+    return sanitize_provider_error(text) or None
 
 
 def _append_warning_pair(warnings: list[str], suggestions: list[str], warning: str, suggestion: str) -> None:

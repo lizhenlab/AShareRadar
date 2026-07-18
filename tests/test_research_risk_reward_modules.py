@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import app.services.research_risk_reward as risk_reward
+from app.models.schemas import FactorLabReport, ScenarioPlan
 from app.services.research_risk_reward import (
     DOWNSIDE_STOP_ADJUSTMENT_RULES,
     RISK_REWARD_RATING_RULES,
@@ -19,6 +21,65 @@ from app.services.research_risk_reward import (
     _scenario_probabilities,
     _upside_distance_pct,
 )
+from app.services.research_risk_reward_metrics import _risk_reward_metrics as implementation_risk_reward_metrics
+from app.services.research_risk_reward_report import build_risk_reward_report as implementation_build_risk_reward_report
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_scenario_plan_keeps_legacy_probability_as_explicit_rule_weight() -> None:
+    plan = ScenarioPlan(
+        name="观察路径",
+        probability=37,
+        trigger="等待确认",
+        expected_move="区间波动",
+        response="观察",
+        invalidation="边界突破",
+    )
+
+    payload = plan.model_dump()
+    assert plan.rule_weight == 37
+    assert payload["probability"] == 37
+    assert payload["rule_weight"] == 37
+    assert payload["weight_basis"] == "heuristic_rule_weight"
+
+
+def test_factor_lab_legacy_confidence_is_exposed_as_non_statistical_evidence_sufficiency() -> None:
+    report = FactorLabReport(
+        symbol="000001.SZ",
+        updated_at="2026-07-15 10:00:00",
+        total_score=60,
+        calibrated_confidence=64,
+        factors=[],
+        summary="等待更多证据。",
+        notes=["样本较少，只作为证据充分度较低的参考。"],
+    )
+
+    assert report.calibrated_confidence == 64
+    assert report.evidence_sufficiency == 64
+    assert report.composite_reliability_level == "中等"
+    assert report.confidence_semantics == "non_statistical_evidence_sufficiency"
+    assert "不是统计置信度或概率" in report.evidence_sufficiency_note
+    assert report.notes == ["样本较少，只作为证据充分度较低的参考。"]
+
+
+def test_risk_reward_facade_preserves_builder_and_metric_results() -> None:
+    feature = _feature(price=100, support=95, resistance=108, atr14=2, atr_pct=2, volatility_pct=3)
+    factor_lab = _factor_lab(total_score=68, positive_factor_count=3, negative_factor_count=1)
+    regime = _market_regime(risk_multiplier=1.0)
+
+    assert build_risk_reward_report is implementation_build_risk_reward_report
+    assert _risk_reward_metrics(feature, factor_lab, regime) == implementation_risk_reward_metrics(feature, factor_lab, regime)
+
+
+def test_risk_reward_split_modules_stay_bounded() -> None:
+    facade = ROOT / "app/services/research_risk_reward.py"
+    components = sorted((ROOT / "app/services").glob("research_risk_reward_*.py"))
+
+    assert len(facade.read_text(encoding="utf-8").splitlines()) <= 130
+    assert components
+    assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 420 for path in components)
 
 
 def test_rating_high_timeframe_conflict_has_top_priority() -> None:
@@ -336,6 +397,7 @@ def test_scenario_plans_use_waiting_text_for_missing_price_levels() -> None:
 
     assert [item.name for item in scenarios] == ["积极路径", "震荡路径", "防守路径"]
     assert sum(item.probability for item in scenarios) == 100
+    assert all(item.rule_weight == item.probability for item in scenarios)
     assert "待确认" in scenario_text
     assert "压力位待确认，需先形成可验证突破边界" in scenario_text
     assert "0.00" not in scenario_text

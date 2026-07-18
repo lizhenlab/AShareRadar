@@ -11,6 +11,7 @@ from app.utils.market_data import (
     finite_float,
     valid_quote,
 )
+from app.utils.market_time import normalize_market_datetime
 from app.utils.symbols import standard_symbol
 from app.utils.time import now_text
 
@@ -25,6 +26,17 @@ def _placeholders(columns: tuple[str, ...]) -> str:
 
 def _update_assignments(columns: Iterable[str]) -> str:
     return ", ".join(f"{column}=excluded.{column}" for column in columns)
+
+
+def _quote_freshness_guard(table: str) -> str:
+    incoming_event = "COALESCE(ashare_market_epoch(excluded.quote_timestamp), -1)"
+    stored_event = f"COALESCE(ashare_market_epoch({table}.quote_timestamp), -1)"
+    incoming_fetch = "COALESCE(ashare_market_epoch(excluded.fetched_at), -1)"
+    stored_fetch = f"COALESCE(ashare_market_epoch({table}.fetched_at), -1)"
+    return (
+        f" WHERE {incoming_event} > {stored_event} "
+        f"OR ({incoming_event} = {stored_event} AND {incoming_fetch} >= {stored_fetch})"
+    )
 
 
 QUOTE_SNAPSHOT_COLUMNS = (
@@ -74,19 +86,36 @@ QUOTE_HISTORY_RESULT_COLUMNS = (
     "trade_date",
     "fetched_at",
 )
+QUOTE_SNAPSHOT_REQUIRED_FINITE_COLUMNS = (
+    "price",
+    "prev_close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    *QUOTE_REQUIRED_FINITE_FIELDS,
+)
 
 _QUOTE_SNAPSHOT_SQL = (
     f"INSERT INTO quote_snapshot ({_column_names(QUOTE_SNAPSHOT_COLUMNS)}) "
     f"VALUES ({_placeholders(QUOTE_SNAPSHOT_COLUMNS)}) "
     "ON CONFLICT(symbol) DO UPDATE SET "
     + _update_assignments(column for column in QUOTE_SNAPSHOT_COLUMNS if column != "symbol")
+    + _quote_freshness_guard("quote_snapshot")
 )
-_QUOTE_HISTORY_SQL = f"INSERT INTO quote_history ({_column_names(QUOTE_HISTORY_COLUMNS)}) VALUES ({_placeholders(QUOTE_HISTORY_COLUMNS)})"
+_QUOTE_HISTORY_SQL = (
+    f"INSERT INTO quote_history ({_column_names(QUOTE_HISTORY_COLUMNS)}) "
+    f"VALUES ({_placeholders(QUOTE_HISTORY_COLUMNS)}) "
+    "ON CONFLICT(symbol, trade_date) DO UPDATE SET "
+    + _update_assignments(column for column in QUOTE_HISTORY_COLUMNS if column not in {"symbol", "trade_date"})
+    + _quote_freshness_guard("quote_history")
+)
 
 
 class MarketQuoteRepositoryMixin:
     def save_quotes(self, quotes: list[Quote]) -> None:
-        valid_quotes = filter_valid_quotes(quotes)
+        valid_quotes = [quote for quote in filter_valid_quotes(quotes) if _normalized_quote_timestamp(quote.timestamp)]
         if not valid_quotes:
             return
         fetched_at = now_text()
@@ -126,31 +155,13 @@ class MarketQuoteRepositoryMixin:
 def _latest_quote_history_rows(conn, symbol: str, limit: int):
     return conn.execute(
         f"""
-        WITH recent_dates AS (
-            SELECT trade_date
-            FROM quote_history
-            WHERE symbol = ? AND trade_date IS NOT NULL AND trade_date <> ''
-            GROUP BY trade_date
-            ORDER BY trade_date DESC
-            LIMIT ?
-        ),
-        latest_ids AS (
-            SELECT
-                recent_dates.trade_date,
-                (
-                    SELECT id
-                    FROM quote_history AS q
-                    WHERE q.symbol = ? AND q.trade_date = recent_dates.trade_date
-                    ORDER BY q.fetched_at DESC, q.id DESC
-                    LIMIT 1
-                ) AS id
-            FROM recent_dates
-        )
-        SELECT {_qualified_column_names("q", QUOTE_HISTORY_RESULT_COLUMNS)}
-        FROM latest_ids
-        JOIN quote_history AS q ON q.id = latest_ids.id
+        SELECT {_column_names(QUOTE_HISTORY_RESULT_COLUMNS)}
+        FROM quote_history
+        WHERE symbol = ? AND trade_date <> ''
+        ORDER BY trade_date DESC
+        LIMIT ?
         """,
-        (symbol, limit, symbol),
+        (symbol, limit),
     ).fetchall()
 
 
@@ -170,7 +181,7 @@ def _valid_quotes_by_symbol(rows) -> dict[str, Quote]:
 
 
 def _valid_quote_snapshot_row(row) -> bool:
-    return _required_finite_columns(row, QUOTE_REQUIRED_FINITE_FIELDS) and _optional_finite_columns(
+    return _required_finite_columns(row, QUOTE_SNAPSHOT_REQUIRED_FINITE_COLUMNS) and _optional_finite_columns(
         row, QUOTE_OPTIONAL_FINITE_FIELDS
     )
 
@@ -201,13 +212,9 @@ def _quote_history_sort_key(row: dict[str, float | str | None]) -> str:
     return str(row.get("trade_date") or row.get("quote_timestamp") or row.get("fetched_at") or "")
 
 
-def _qualified_column_names(prefix: str, columns: tuple[str, ...]) -> str:
-    return ", ".join(f"{prefix}.{column}" for column in columns)
-
-
 def _quote_trade_date(quote_timestamp: str | None, fetched_at: str) -> str:
-    value = str(quote_timestamp or fetched_at or "").strip()
-    return (value or fetched_at)[:10].replace("/", "-")
+    value = _normalized_quote_timestamp(quote_timestamp) or _normalized_quote_timestamp(fetched_at)
+    return value[:10] if value else ""
 
 
 def _quote_persistence_rows(quotes: list[Quote], fetched_at: str) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
@@ -229,6 +236,7 @@ def _quote_history_row(symbol: str, quote: Quote, fetched_at: str) -> tuple[obje
 
 
 def _quote_values(symbol: str, quote: Quote, fetched_at: str) -> dict[str, object]:
+    quote_timestamp = _normalized_quote_timestamp(quote.timestamp) or ""
     return {
         "symbol": symbol,
         "code": quote.code,
@@ -247,11 +255,15 @@ def _quote_values(symbol: str, quote: Quote, fetched_at: str) -> dict[str, objec
         "pe": quote.pe,
         "pb": quote.pb,
         "market_cap": quote.market_cap,
-        "quote_timestamp": quote.timestamp,
+        "quote_timestamp": quote_timestamp,
         "source": quote.source,
         "trade_date": _quote_trade_date(quote.timestamp, fetched_at),
         "fetched_at": fetched_at,
     }
+
+
+def _normalized_quote_timestamp(value: object) -> str | None:
+    return normalize_market_datetime(value)
 
 
 def _row_from_columns(values: dict[str, object], columns: tuple[str, ...]) -> tuple[object, ...]:

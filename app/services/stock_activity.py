@@ -70,12 +70,22 @@ ORDER_BOOK_STRONG_BID_RATIO = 1.25
 ORDER_BOOK_STRONG_ASK_RATIO = 0.8
 ORDER_BOOK_INSUFFICIENT_DEPTH_SUMMARY = "盘口深度不足，暂不能判断买卖盘强弱。"
 FUND_FLOW_BASE_NOTES = (
-    "当前为量价资金热度估算，使用成交额、涨跌幅、换手率和量价关系，不等同于真实主力净流入。",
+    "数据性质：derived（衍生）。当前指标使用成交额、涨跌幅、换手率和量价关系，不是真实资金流。",
     "未接入逐笔成交或正式资金流前，不输出大单/特大单净流入结论。",
-    "接入东方财富资金流或 Futu 逐笔/盘口后，可替换为更精确的大单、特大单拆分。",
+    "接入可核验资金流或逐笔成交后，必须与当前量价衍生指标分开展示。",
 )
-ORDER_BOOK_REALTIME_NOTE = "盘口来自实时深度数据，仅反映当前时点挂单压力。"
-RANGE_PRESSURE_FALLBACK_NOTE = "Futu OpenAPI 未启用或盘口不可用，当前用日内高低价位置估算压力。"
+FUND_FLOW_UNAVAILABLE_NOTES = (
+    "数据性质：unavailable（不可用）。缺少有效量价输入，不生成方向性量价代理结论。",
+    "未接入逐笔成交或正式资金流，不输出真实资金流、大单或主力净流入结论。",
+)
+FUND_FLOW_DERIVED_METHODOLOGY = "成交额、涨跌幅、换手率和量价关系的规则衍生指标；不等于真实资金流。"
+FUND_FLOW_UNAVAILABLE_METHODOLOGY = "有效量价输入不足，衍生指标不可用；未观测真实资金流。"
+ORDER_BOOK_REALTIME_NOTE = "数据性质：observed（实测）。来自实时盘口挂单深度，仅反映当前时点订单压力，不代表已成交资金。"
+RANGE_PRESSURE_FALLBACK_NOTE = "数据性质：estimated（估算）。实时盘口不可用，当前仅用日内高低价位置估算订单压力。"
+ORDER_PRESSURE_UNAVAILABLE_NOTE = "数据性质：unavailable（不可用）。实时盘口和有效日内价格区间均缺失。"
+ORDER_BOOK_METHODOLOGY = "实时盘口挂单金额比与价差观测；挂单不等于成交或资金流。"
+RANGE_PRESSURE_METHODOLOGY = "由现价在日内高低区间的位置估算；不是真实盘口观测。"
+UNAVAILABLE_PRESSURE_METHODOLOGY = "实时盘口与日内区间输入均不可用。"
 FUND_FLOW_WEIGHTS = {
     "amount": 0.25,
     "turnover": 0.25,
@@ -115,7 +125,7 @@ RANGE_PRESSURE_RULES = (
 PRICE_VOLUME_RELATION_RULES = (
     RelationRule("量价配合偏积极。", lambda analysis, volume_score: analysis.quote.change_pct > 1 and volume_score >= 60),
     RelationRule("价格上涨但量能跟随不足。", lambda analysis, volume_score: analysis.quote.change_pct > 1 and volume_score < 50),
-    RelationRule("放量下跌，资金承压。", lambda analysis, volume_score: analysis.quote.change_pct < -1 and volume_score >= 60),
+    RelationRule("放量下跌，量价关系承压。", lambda analysis, volume_score: analysis.quote.change_pct < -1 and volume_score >= 60),
     RelationRule("价格回落，量能未明显放大。", lambda analysis, _volume_score: analysis.quote.change_pct < -1),
     RelationRule(NEUTRAL_PRICE_VOLUME_SUMMARY, lambda _analysis, _volume_score: True),
 )
@@ -124,19 +134,22 @@ PRICE_VOLUME_RELATION_RULES = (
 def build_fund_flow_analysis(analysis: AnalysisResult) -> FundFlowAnalysis:
     quote = analysis.quote
     context = _fund_flow_score_context(analysis)
-    overall = _fund_flow_overall_score(context, analysis.data_quality.score)
-    relation = _price_volume_relation(analysis, volume_score=context.volume_score)
+    data_nature = _fund_flow_data_nature(analysis, context)
+    overall = _fund_flow_overall_score(context, analysis.data_quality.score) if data_nature == "derived" else DEFAULT_RULE_SCORE
+    relation = _price_volume_relation(analysis, volume_score=context.volume_score) if data_nature == "derived" else "量价代理输入不足，方向不可用。"
     return FundFlowAnalysis(
         symbol=_analysis_symbol(analysis),
         available=context.amount > 0,
-        source=f"{quote.source}·量价热度估算",
+        source=f"{quote.source}·{'量价衍生指标（非真实资金流）' if data_nature == 'derived' else '量价代理不可用'}",
+        data_nature=data_nature,
+        methodology=FUND_FLOW_DERIVED_METHODOLOGY if data_nature == "derived" else FUND_FLOW_UNAVAILABLE_METHODOLOGY,
         updated_at=quote.timestamp,
         overall_score=overall,
-        level=score_level(overall),
+        level=score_level(overall) if data_nature == "derived" else "不可用",
         estimated_main_net_inflow=None,
         price_volume_relation=relation,
         windows=_fund_flow_windows(analysis, overall, relation),
-        notes=_fund_flow_notes(analysis),
+        notes=_fund_flow_notes(analysis, data_nature),
     )
 
 
@@ -201,8 +214,8 @@ def _recent_fund_flow_window(klines: list[Kline], window: int) -> FundFlowWindow
     )
 
 
-def _fund_flow_notes(analysis: AnalysisResult) -> list[str]:
-    notes = list(FUND_FLOW_BASE_NOTES)
+def _fund_flow_notes(analysis: AnalysisResult, data_nature: str) -> list[str]:
+    notes = list(FUND_FLOW_BASE_NOTES if data_nature == "derived" else FUND_FLOW_UNAVAILABLE_NOTES)
     if _should_downgrade_quality(analysis):
         notes.append(_data_quality_note(analysis, "量价热度评分已降权。"))
     return notes
@@ -215,6 +228,8 @@ def _order_book_pressure(analysis: AnalysisResult, order_book: OrderBook) -> Ord
         symbol=_analysis_symbol(analysis),
         available=True,
         source=order_book.source,
+        data_nature="observed",
+        methodology=ORDER_BOOK_METHODOLOGY,
         updated_at=order_book.updated_at,
         pressure_level=level,
         spread_pct=_rounded_optional(metrics.spread_pct, 4),
@@ -228,17 +243,21 @@ def _order_book_pressure(analysis: AnalysisResult, order_book: OrderBook) -> Ord
 
 def _range_estimated_pressure(analysis: AnalysisResult, *, order_book_error: str | None) -> OrderPressure:
     metrics = _range_pressure_metrics(analysis)
-    level = _quality_adjusted_level(_range_pressure_level(analysis, metrics), analysis)
+    range_available = _range_pressure_available(analysis)
+    level = _quality_adjusted_level(_range_pressure_level(analysis, metrics), analysis) if range_available else "订单压力不可用"
+    summary = f"{level}，日内振幅约 {metrics.intraday_range_pct:.2f}%。" if range_available else "缺少有效实时盘口和日内价格区间，订单压力不可用。"
     return OrderPressure(
         symbol=_analysis_symbol(analysis),
         available=False,
-        source=f"{analysis.quote.source}·区间估算",
+        source=f"{analysis.quote.source}·{'日内区间估算' if range_available else '订单压力不可用'}",
+        data_nature="estimated" if range_available else "unavailable",
+        methodology=RANGE_PRESSURE_METHODOLOGY if range_available else UNAVAILABLE_PRESSURE_METHODOLOGY,
         updated_at=analysis.quote.timestamp,
         pressure_level=level,
         spread_pct=None,
         bid_ask_ratio=None,
-        summary=f"{level}，日内振幅约 {metrics.intraday_range_pct:.2f}%。",
-        notes=_range_pressure_notes(analysis, order_book_error),
+        summary=summary,
+        notes=_range_pressure_notes(analysis, order_book_error, range_available=range_available),
     )
 
 
@@ -301,7 +320,7 @@ def _order_book_summary(level: str, ratio: float | None) -> str:
 def _order_book_notes(analysis: AnalysisResult) -> list[str]:
     notes = [ORDER_BOOK_REALTIME_NOTE]
     if _should_downgrade_quality(analysis):
-        notes.append(_data_quality_note(analysis, "盘口结论仅作低置信参考。"))
+        notes.append(_data_quality_note(analysis, "盘口结论仅作低可信等级参考。"))
     return notes
 
 
@@ -327,13 +346,29 @@ def _range_pressure_level(analysis: AnalysisResult, metrics: RangePressureMetric
     return "盘口需实时源确认"
 
 
-def _range_pressure_notes(analysis: AnalysisResult, order_book_error: str | None) -> list[str]:
-    notes = [RANGE_PRESSURE_FALLBACK_NOTE]
+def _range_pressure_notes(analysis: AnalysisResult, order_book_error: str | None, *, range_available: bool) -> list[str]:
+    notes = [RANGE_PRESSURE_FALLBACK_NOTE if range_available else ORDER_PRESSURE_UNAVAILABLE_NOTE]
     if order_book_error:
         notes.append(order_book_error[:160])
     if _should_downgrade_quality(analysis):
         notes.append(_data_quality_note(analysis, "盘口估算结论已降权。"))
     return notes
+
+
+def _fund_flow_data_nature(analysis: AnalysisResult, context: FundFlowScoreContext) -> str:
+    quote = analysis.quote
+    has_turnover = (turnover := finite_float(quote.turnover_rate)) is not None and turnover >= 0
+    has_change = finite_float(quote.change_pct) is not None
+    has_history = len(analysis.klines) >= 2
+    return "derived" if context.amount > 0 or has_turnover or has_change or has_history else "unavailable"
+
+
+def _range_pressure_available(analysis: AnalysisResult) -> bool:
+    quote = analysis.quote
+    price = finite_float(quote.price)
+    high = finite_float(quote.high)
+    low = finite_float(quote.low)
+    return price is not None and price > 0 and high is not None and low is not None and high >= low
 
 
 def _quality_adjusted_level(level: str, analysis: AnalysisResult) -> str:

@@ -83,6 +83,24 @@ def test_overview_prefixes_main_conflict_when_data_quality_is_low() -> None:
     assert any("数据质量 一般" in item for item in overview.beginner_takeaways)
 
 
+def test_overview_labels_heuristic_scores_without_probability_wording() -> None:
+    analysis = _analysis(pe=22.0, pb=2.5, market_cap=80_000_000_000, industry="制造")
+
+    overview = build_stock_insight_bundle(analysis).overview
+    takeaways = " ".join(overview.beginner_takeaways)
+    risk_evidence = " ".join(next(item for item in overview.factors if item.name == "风险面").evidence)
+
+    assert "本次信号证据充分度" in takeaways
+    assert "建议强度" in takeaways
+    assert "/100" in takeaways
+    assert "可信度" not in takeaways
+    assert "信心" not in takeaways
+    assert "信号证据充分度" in risk_evidence
+    assert "信号可信度" not in risk_evidence
+    assert "日内振幅约" in risk_evidence
+    assert "%" in risk_evidence
+
+
 def test_overview_quality_prefix_boundary_is_70() -> None:
     low_quality = build_stock_insight_bundle(
         _analysis(pe=22.0, pb=2.5, market_cap=80_000_000_000, industry="制造", data_quality_score=69)
@@ -128,7 +146,7 @@ def test_overview_factor_order_stays_stable() -> None:
         _analysis(pe=22.0, pb=2.5, market_cap=80_000_000_000, industry="制造", data_quality_score=80)
     ).overview
 
-    assert [item.name for item in overview.factors] == ["技术面", "资金面", "基本面", "事件面", "风险面"]
+    assert [item.name for item in overview.factors] == ["技术面", "量价热度（衍生）", "基本面", "事件面", "风险面"]
 
 
 def test_key_prices_skip_invalid_prices_and_normalize_reversed_support_resistance() -> None:
@@ -196,10 +214,10 @@ def test_main_conflict_rules_keep_priority_explicit() -> None:
         "趋势证据和数据可信度都不够强，先降低操作频率，等待更清晰的确认。"
     )
     assert _main_conflict(_conflict_analysis(trend_score=40), _fund_flow(70), _order_pressure("均衡")) == (
-        "资金面有尝试修复，但技术趋势仍偏弱，先等价格重新站稳短期均线。"
+        "量价热度（衍生）有尝试修复，但技术趋势仍偏弱，先等价格重新站稳短期均线。"
     )
     assert _main_conflict(_conflict_analysis(trend_score=70), _fund_flow(45), _order_pressure("均衡")) == (
-        "技术面尚可，但资金跟随不足，突破信号需要继续确认。"
+        "技术面尚可，但量价热度（衍生）跟随不足，突破信号需要继续确认。"
     )
     assert _main_conflict(_conflict_analysis(), _fund_flow(55), _order_pressure("主动卖压")) == "盘口或价格位置显示上方压力，短线不宜追高。"
 

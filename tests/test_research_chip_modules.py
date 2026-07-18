@@ -17,7 +17,9 @@ def test_chip_analysis_filters_invalid_rows_and_keeps_distribution_available() -
         [
             make_kline(date="2026-05-20", close=110, high=0, low=109, volume=5000),
             make_kline(date="2026-05-21", close=111, high=112, low=110, volume=0),
-            make_kline(date="2026-05-22", close=112, high=math.inf, low=111, volume=5000),
+            make_kline(date="2026-05-22", close=112, high=113, low=111, volume=5000).model_copy(
+                update={"high": math.inf}
+            ),
         ]
     )
     analysis, feature = _chip_inputs(rows, price=109)

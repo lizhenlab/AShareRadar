@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-
 from app.models.schemas import Kline, ProviderCapability, StockInfo
+from app.services.datahub_runtime import run_provider_io
 from app.services.provider_utils import ensure_positive_limit, is_installed, ts_symbol, valid_ohlc
 from app.services.provider_stock_mappers import stock_info_from_tushare_row
+from app.services.providers import stamp_daily_kline_contract
 from app.utils.parsing import required_float, safe_float
 from app.utils.time import now_text
 
@@ -21,11 +21,22 @@ class TushareProvider:
         pro = self._client()
 
         def load() -> list[Kline]:
-            df = pro.daily(ts_code=ts_symbol(symbol))
+            df = _tushare_qfq_frame(pro, symbol, limit)
+            if df is None:
+                return []
             rows = df.sort_values("trade_date").tail(limit)
-            return [item for _, row in rows.iterrows() if (item := _tushare_kline_from_row(row)) is not None]
+            klines = [
+                item
+                for _, row in rows.iterrows()
+                if (item := _tushare_kline_from_row(row)) is not None
+            ]
+            return stamp_daily_kline_contract(
+                klines,
+                adjustment_mode="qfq",
+                source=self.source_name,
+            )
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def stock_pool(self) -> list[StockInfo]:
         pro = self._client()
@@ -40,7 +51,7 @@ class TushareProvider:
                     result.append(item)
             return result
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     def capability(self) -> ProviderCapability:
         installed = is_installed("tushare")
@@ -52,7 +63,7 @@ class TushareProvider:
             reliability_level="准正式",
             daily_kline=installed and has_token,
             stock_pool=installed and has_token,
-            note="需要 ASHARE_RADAR_TUSHARE_TOKEN 环境变量；兼容 TUSHARE_TOKEN。适合个股基础信息、日线和财务数据。",
+            note="需要 ASHARE_RADAR_TUSHARE_TOKEN 环境变量；兼容 TUSHARE_TOKEN。日线通过 pro_bar 获取前复权序列。",
         )
 
     def _client(self):
@@ -62,8 +73,19 @@ class TushareProvider:
             raise RuntimeError("未配置 ASHARE_RADAR_TUSHARE_TOKEN，跳过 Tushare 数据源")
         import tushare as ts
 
-        ts.set_token(self.token)
-        return ts.pro_api()
+        return ts.pro_api(self.token)
+
+
+def _tushare_qfq_frame(pro, symbol: str, limit: int):
+    import tushare as ts
+
+    return ts.pro_bar(
+        ts_code=ts_symbol(symbol),
+        api=pro,
+        adj="qfq",
+        freq="D",
+        limit=limit,
+    )
 
 
 def _tushare_kline_from_row(row) -> Kline | None:

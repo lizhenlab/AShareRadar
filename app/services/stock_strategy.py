@@ -55,7 +55,7 @@ def _breakout_confirmation_card(analysis: AnalysisResult, fund_flow: FundFlowAna
         SignalItem(
             title="压力突破确认",
             level=_quality_signal_level(signal_level, analysis),
-            reason=f"关注 {analysis.resistance:.2f} 附近是否放量站稳，资金面评分 {fund_flow.overall_score}。",
+            reason=f"关注 {analysis.resistance:.2f} 附近是否放量站稳，量价热度评分（衍生） {fund_flow.overall_score}。",
         ),
         status=_quality_strategy_status("接近触发" if analysis.quote.price >= analysis.resistance * 0.985 else "等待", analysis),
         reference_price=f"压力位 {analysis.resistance:.2f}",
@@ -103,7 +103,7 @@ def _risk_stop_card(analysis: AnalysisResult) -> StrategyCard:
         signal,
         status=_quality_strategy_status("触发" if analysis.risk_level in {"中等风险", "高风险"} else "备用", analysis),
         reference_price=f"20日线 {analysis.ma20:.2f}",
-        invalidation="重新站回5日线且资金面改善",
+        invalidation="重新站回5日线且量价热度（衍生）改善",
         suitable_for="优先控制回撤的使用者",
     )
 

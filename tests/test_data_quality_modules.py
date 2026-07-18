@@ -83,11 +83,11 @@ class DataQualityModuleTests(unittest.TestCase):
 
     def test_non_finite_quote_fields_are_flagged_without_derived_mismatch(self) -> None:
         state = DataQualityScoreState()
-
-        apply_quote_field_quality(
-            state,
-            _quote(price=math.nan, prev_close=math.inf, high=101.0, low=99.0, change_pct=math.nan),
+        quote = _quote(price=100.0, prev_close=100.0, high=101.0, low=99.0, change_pct=0.0).model_copy(
+            update={"price": math.nan, "prev_close": math.inf, "change": math.nan, "change_pct": math.nan}
         )
+
+        apply_quote_field_quality(state, quote)
 
         self.assertEqual(state.anomalies, ["报价价格异常", "昨收价缺失", "涨跌幅异常"])
         self.assertNotIn("涨跌幅口径偏差", state.anomalies)
@@ -209,8 +209,17 @@ class DataQualityModuleTests(unittest.TestCase):
         self.assertIn("缺少K线数据，趋势、买卖点和做T参考都需要降级。", quality.notes)
 
     def test_quality_score_is_clamped_at_zero(self) -> None:
+        quote = _quote(
+            source="本地演示数据",
+            price=-1.0,
+            prev_close=0.0,
+            high=0.0,
+            low=0.0,
+            change_pct=0.0,
+            timestamp="bad-time",
+        ).model_copy(update={"change_pct": math.nan})
         quality = build_data_quality(
-            _quote(source="本地演示数据", price=-1.0, prev_close=0.0, high=0.0, low=0.0, change_pct=math.nan, timestamp="bad-time"),
+            quote,
             [],
             consistency_level="存在差异",
             consistency_notes=["多源最大价格差异 50.00%。"],

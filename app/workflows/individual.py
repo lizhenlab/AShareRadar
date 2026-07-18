@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from app.models.schemas import (
@@ -40,7 +41,9 @@ from app.models.schemas import (
     ValuationAnalysis,
     WorkbenchDataWarning,
 )
+from app.services import chart_marks as chart_marks_service
 from app.services.datahub import DataHub
+from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
 from app.services.llm_explainer import enhance_stock_answer
 from app.services.research import answer_stock_question
 from app.services.stock_insights import rule_definitions
@@ -87,32 +90,34 @@ async def stock_insight_bundle(datahub: DataHub, symbol: str) -> StockInsightBun
 async def stock_workbench(datahub: DataHub, symbol: str) -> StockWorkbench:
     context = await stock_workbench_context(datahub, symbol)
     normalized = _workbench_symbol(context.insights.overview.symbol)
-    advice_warning = _ensure_advice_snapshot(datahub, context)
-    local_state = _workbench_local_state(datahub, normalized, context)
+    advice_warning = await _ensure_advice_snapshot(datahub, context)
+    local_state = await _workbench_local_state(datahub, normalized, context)
     warnings = [item for item in [advice_warning, *local_state.warnings] if item is not None]
     return _stock_workbench_response(context, normalized, local_state, warnings)
 
 
-def _ensure_advice_snapshot(datahub: DataHub, context: WorkbenchContext) -> WorkbenchDataWarning | None:
+async def _ensure_advice_snapshot(datahub: DataHub, context: WorkbenchContext) -> WorkbenchDataWarning | None:
     if context.advice_snapshot_saved:
         return None
     try:
-        datahub.cache.save_advice_snapshot(context.analysis)
+        await run_cache_io(datahub.cache.save_advice_snapshot, context.analysis)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         message = "分析建议快照暂未保存，本次分析结果仍可正常查看。"
-        _log_local_state_failure(datahub, message, exc)
+        await _log_local_state_failure(datahub, message, exc)
         return WorkbenchDataWarning(component="advice_snapshot", message=message)
     else:
         context.advice_snapshot_saved = True
         return None
 
 
-def _workbench_local_state(datahub: DataHub, normalized: str, context: WorkbenchContext) -> StockWorkbenchLocalState:
+async def _workbench_local_state(datahub: DataHub, normalized: str, context: WorkbenchContext) -> StockWorkbenchLocalState:
     normalized = _workbench_symbol(normalized)
-    chart_marks, chart_warning = _safe_chart_marks(datahub, normalized, context)
-    alert_rules, rules_warning = _safe_alert_rules(datahub, normalized)
-    alert_events, events_warning = _safe_alert_events(datahub, normalized)
-    notes, notes_warning = _safe_stock_notes(datahub, normalized)
+    chart_marks, chart_warning = await _safe_chart_marks(datahub, normalized, context)
+    alert_rules, rules_warning = await _safe_alert_rules(datahub, normalized)
+    alert_events, events_warning = await _safe_alert_events(datahub, normalized)
+    notes, notes_warning = await _safe_stock_notes(datahub, normalized)
     return StockWorkbenchLocalState(
         chart_marks=chart_marks,
         alert_rules=alert_rules,
@@ -126,64 +131,75 @@ def _workbench_symbol(symbol: str) -> str:
     return standard_symbol(symbol)
 
 
-def _safe_chart_marks(
+async def _safe_chart_marks(
     datahub: DataHub,
     normalized: str,
     context: WorkbenchContext,
 ) -> tuple[ChartMarkSummary, WorkbenchDataWarning | None]:
-    from app.services.chart_marks import build_chart_marks_from_context
-
     try:
-        marks = build_chart_marks_from_context(datahub, normalized, context.insights, limit=WORKBENCH_CHART_MARK_LIMIT)
+        marks = await chart_marks_service.build_chart_marks_from_context(
+            datahub,
+            normalized,
+            context.insights,
+            limit=WORKBENCH_CHART_MARK_LIMIT,
+        )
         return marks, None
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         message = "图表标注暂不可用，当前显示空标注。"
-        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        await _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
         return (
             ChartMarkSummary(symbol=normalized, updated_at=now_text(), marks=[]),
             WorkbenchDataWarning(component="chart_marks", message=message),
         )
 
 
-def _safe_alert_rules(datahub: DataHub, normalized: str) -> tuple[list[AlertRuleItem], WorkbenchDataWarning | None]:
+async def _safe_alert_rules(datahub: DataHub, normalized: str) -> tuple[list[AlertRuleItem], WorkbenchDataWarning | None]:
     try:
-        rows = datahub.cache.alert_rules(
+        rows = await run_cache_io(
+            datahub.cache.alert_rules,
             symbol=normalized,
             include_disabled=True,
             limit=WORKBENCH_ALERT_RULE_LIMIT,
         )
         return rows, None
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         message = "预警规则暂不可用，当前显示空列表。"
-        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        await _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
         return [], WorkbenchDataWarning(component="alert_rules", message=message)
 
 
-def _safe_alert_events(datahub: DataHub, normalized: str) -> tuple[list[AlertEventItem], WorkbenchDataWarning | None]:
+async def _safe_alert_events(datahub: DataHub, normalized: str) -> tuple[list[AlertEventItem], WorkbenchDataWarning | None]:
     try:
-        rows = datahub.cache.alert_events(symbol=normalized, limit=WORKBENCH_ALERT_EVENT_LIMIT)
+        rows = await run_cache_io(datahub.cache.alert_events, symbol=normalized, limit=WORKBENCH_ALERT_EVENT_LIMIT)
         return rows, None
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         message = "预警事件暂不可用，当前显示空列表。"
-        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        await _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
         return [], WorkbenchDataWarning(component="alert_events", message=message)
 
 
-def _safe_stock_notes(datahub: DataHub, normalized: str) -> tuple[list[StockNoteItem], WorkbenchDataWarning | None]:
+async def _safe_stock_notes(datahub: DataHub, normalized: str) -> tuple[list[StockNoteItem], WorkbenchDataWarning | None]:
     try:
-        rows = datahub.cache.stock_notes(normalized, limit=WORKBENCH_NOTE_LIMIT)
+        rows = await run_cache_io(datahub.cache.stock_notes, normalized, limit=WORKBENCH_NOTE_LIMIT)
         return rows, None
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         message = "个股笔记暂不可用，当前显示空列表。"
-        _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
+        await _log_local_state_failure(datahub, f"{message} 股票：{normalized}", exc)
         return [], WorkbenchDataWarning(component="notes", message=message)
 
 
-def _log_local_state_failure(datahub: DataHub, message: str, exc: Exception) -> None:
-    try:
-        datahub.cache.log_event("fallback", f"{message}；{exc.__class__.__name__}")
-    except Exception:
-        pass
+async def _log_local_state_failure(datahub: DataHub, message: str, exc: Exception) -> None:
+    log_event = getattr(datahub.cache, "log_event", None)
+    if callable(log_event):
+        await run_cache_io_best_effort(log_event, "fallback", f"{message}；{exc.__class__.__name__}")
 
 
 def _stock_workbench_response(

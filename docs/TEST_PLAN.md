@@ -2,259 +2,243 @@
 
 ## 1. Test Objectives
 
-- Verify single-stock analysis behavior under realistic and degraded data.
-- Verify provider fallback, capability health, cache reuse, and data-quality gates.
-- Verify local lifecycle features: watchlist, alerts, notes, chart marks, advice history, monitor events.
-- Verify LLM integration never blocks rule fallback.
-- Verify frontend JavaScript remains syntactically valid.
-- Verify the CSS entrypoint imports existing style modules in the expected order.
+- Verify stock lookup, quote/K-line acquisition, explicit daily adjustment provenance, analysis, research, and transparent degradation.
+- Verify local SQLite state, schema compatibility, advice review history/as-of evaluation, current/custom historical scans, preview-claimed imports, runtime backup/cleanup protection, scheduler, and diagnostics.
+- Verify browser request freshness, code/name autocomplete, exact chart inspection, local activity, review/scan reachability, notification retry, accessibility state, persistence isolation, and SSE behavior.
+- Verify process-environment-only LLM configuration, dependency, security, generated-document, and maintainability gates.
 
 ## 2. Test Commands
 
 ```bash
-export PYTHON=${PYTHON:-/opt/anaconda3/bin/python3}
-npm run check
-$PYTHON tools/architecture_inventory.py
-$PYTHON tools/api_inventory.py
+export PROJECT_ROOT="${PROJECT_ROOT:-$HOME/AShareRadar}"
+source "$PROJECT_ROOT/.venv/bin/activate"
+export PYTHON="$PROJECT_ROOT/.venv/bin/python"
+export PYTHONNOUSERSITE=1
+$PYTHON -m pip install --require-hashes -r requirements-dev-lock.txt
+$PYTHON -m pip check
+$PYTHON -m ruff check app tests tools
+$PYTHON -m mypy
+npm run check:js
+$PYTHON tools/api_inventory.py --check
+$PYTHON tools/architecture_inventory.py --check
+$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing
+npm ci && npx --no-install playwright install chromium && npm run test:e2e
 ```
 
-Optional runtime smoke checks:
-
-```bash
-curl -sS http://127.0.0.1:8010/api/health
-curl -sS 'http://127.0.0.1:8010/api/stocks?keyword=600519&limit=5'
-curl -sS 'http://127.0.0.1:8010/api/stock/workbench?symbol=600519'
-```
+The development lock contains runtime and engineering dependencies. Tests run with Python 3.12, `PYTHONNOUSERSITE=1`, temporary SQLite files, and fake providers/clients; the automated suite must not require credentials, persistent runtime data, live providers, or outbound network access.
 
 ## 3. Current Automated Coverage
 
 The current test suite is split by domain:
 
-- `tests/test_rules_alerts.py`: rule definitions, factor calibration, alert cooldown/validation, future-trigger timestamp recovery, alert transition decisions, alert-condition evaluation, and chart marks.
-- `tests/test_api_error_modules.py`: API validation-message rule order, Chinese validation text for parsing/type/range/unknown-field errors, fallback messages, joined error-location rendering, and SQLite database-error mapping for async/sync API helpers.
-- `tests/test_data_sources.py`: provider priority, provider fallback, capability health, optional provider adapters, strict Eastmoney quote-field parsing, invalid realtime quote rejection before backup fallback, partial quote-provider success that keeps the provider healthy while fetching only missing symbols from backup, provider quote success despite cache-write failures, Eastmoney request dedupe, missing change-percent fallback, non-negative core quote fields, AKShare quote bridge priority, AKShare spot missing-code reporting, AKShare quote mapper guards, AKShare K-line import-failure fallback versus schema-error surfacing, AKShare concept-candidate/code-column matching, all-candidate concept-loader failure escalation, AKShare plate capability failure recording, AKShare minute-period mapping and OHLC row filtering, BaoStock/Tushare stock-pool row filtering, Eastmoney endpoint retry/order preservation/OHLC/K-line filtering, source plans, cache fallback, unregistered quote-priority skips, authoritative stock-pool cache, quote-confirmed stock-pool misses, and incomplete-provider miss semantics.
-- `tests/test_provider_utils_modules.py`: provider row-field picking, NaN skipping, expected missing-field fallback, unexpected adapter-error propagation, shared positive-limit validation, and finite/positive/bounded OHLC validity validation.
-- `tests/test_scoring_modules.py`: shared score clamping, bounded integer conversion, score-level boundaries, and compatibility exports used by research helpers.
-- `tests/test_datahub_cache_modules.py`: datahub cache-helper guardrails for explicit minute interval aliases, case/empty defaults, unsupported interval errors, stock-pool freshness windows, intraday current-day K-line acceptance, future K-line date rejection, and minute K-line business timestamp freshness across trading, midday, and after-close phases.
-- `tests/test_datahub_quotes_modules.py`: quote coordinator guardrails for fallback-cache event-log failures, partial provider success staying healthy without cooldown, blank single-symbol rejection before batch lookup, consistency-warning monitor write failures, and `use_cache=false` quality checks that must not read cached K-lines.
-- `tests/test_datahub_klines_modules.py`: K-line/minute K-line coordinator guardrails for empty/invalid provider responses, fallback-cache tagging, shared provider-attempt cooldown recording, best-effort provider-result cache persistence, missing minute capability skips with capability-failure recording, interval normalization, unregistered priority providers without status noise, fresh-cache request-limit coverage before provider skipping, stale minute business timestamps forcing provider refresh, cache read/write invalid-row filtering, parsed date/time latest-window ordering without backfilling older rows, daily/minute cache-stat separation, huge provider-limit caps, malformed max-limit fallbacks, cancellation propagation, non-positive cache limits, positive provider-call limits, and future fetched-at rejection.
-- `tests/test_datahub_metadata_modules.py`: metadata coordinator and `StockPoolResolver` guardrails for explicit stock-pool resolution states, empty/all-invalid plate and concept responses, shared provider-attempt cooldown recording, missing metadata capability handling that fails clearly when every requested source lacks the method, missing concept-provider configuration errors, provider success despite cache-write failures, concept normalization after fallback, local concept coverage misses without provider-failure noise or stale fallback-cache deletion, stock-pool provider coverage misses that record success before backup, coverage-miss local stock-profile fallback, authoritative provider misses that return empty without backup, refresh requests that still use stale keyword fallback after source failure, stock-pool provider skips, authoritative profile misses that stale keyword cache cannot override, default local-only profile fallback prevention, non-mutating local profile enrichment, primary-industry preservation, non-positive cache limits, stable metadata ordering, invalid metadata-row filtering, concept de-duplication, optional numeric-field cleaning, all-invalid metadata-write preservation of previous cache rows, local-provider limit guards, and future updated-at rejection.
-- `tests/test_provider_registry_modules.py`: provider priority normalization, unknown-kind handling, capability fallback metadata, mismatched capability-name normalization, and supported-kind mapping.
-- `tests/test_datahub_runtime_modules.py`: provider runtime guardrails for timed calls, missing-provider skips, cooldown checks, status-write degradation, and provider-attempt success/failure recording.
-- `tests/test_datahub_status_service_modules.py`: DataHub status-service guardrails for read-only status assembly without provider-sync write side effects, explicit provider enabled/capability synchronization, missing configured-provider skips, source-plan delegation, and legacy provider capability fallback.
-- `tests/test_datahub_source_plan_modules.py`: source-plan decision/action guardrails for statusless failures, unprobed capabilities, disabled providers, dirty/duplicate provider names and statuses, cooling priority, missing primary source warnings, unique non-demo provider counts, warning/suggestion de-duplication, and warning-rule order.
-- `tests/test_datahub_status_modules.py`: provider source-key normalization, unknown-source fallback, primary-source selection, duplicate capability status ranking, unhealthy-label de-duplication, finite success-rate counts, recovery-action rule order, cleaned error text, error-type priority, provider-specific setup hints, and default fallback guidance.
-- `tests/test_quote_stream_modules.py`: quote-route and SSE quote-stream guardrails for empty and oversized batch-symbol rejection, watchlist/seed fallback caps with dirty-symbol skips, explicit/watchlist/seed symbol selection, canonical symbols, fallback watchlist SQLite-error mapping, refresh-interval lower bounds, JSON-safe event formatting, readable quote-error events, and disconnect stop behavior.
-- `tests/test_api_alert_routes.py`: route-level and repository contract tests for alert-rule creation, blank-name defaulting, Chinese type-error rendering, finite threshold/cooldown guards, unknown-field update rejection, alert-rule read failure mapping, and alert-event read failure mapping.
-- `tests/test_api_notes_routes.py`: route-level and repository contract tests for stock-note creation, blank trade-date fallback/clearing, trimmed content, non-positive/non-finite price rejection, trade-date normalization/rejection, stable same-day note ordering, note updates, and note-list read failure mapping.
-- `tests/test_api_stock_routes.py`: route-level contract tests for stock endpoints and analysis route contracts, including malformed zero-symbol rejection before profile or minute data fetches and custom strong-stock all-quote-failure 503 mapping.
-- `tests/test_config_modules.py`: environment-backed settings guardrails for `ASHARE_RADAR_*` names, Operations environment-variable documentation parity, legacy aliases, new-name precedence, dynamic reads, invalid-value fallback, explicit booleans, and numeric lower bounds.
-- `tests/test_llm_explainer.py`: LLM environment loading, fallback, grounded answer acceptance, stock-code reference boundaries, API-key redaction on failure, non-finite allowed-number filtering, ungrounded comma-adjacent number rejection, narrow list-marker exemptions, and ungrounded-number rejection.
-- `tests/test_symbol_modules.py`: SH/SZ symbol normalization, provider symbol formatting, malformed-code rejection, all-zero symbol rejection, and conflicting market marker rejection.
-- `tests/test_market_sampling_modules.py`: market-sampling normalization/diversity, structured requested/success/missing results, fallback-batch accounting, stock-pool degradation, breadth seed fallback, partial/all-failed quote status, cancellation propagation, and source-aware peer sample states.
-- `tests/test_market_quotes_modules.py`: quote snapshot/history column mapping, trade-date normalization, cached snapshot/history persistence, invalid quote write filtering, dirty cache read filtering, non-positive cache windows, and future fetched-at rejection.
-- `tests/test_market_overview_modules.py`: independent index/strong-stock status, partial and all-quote-failure warnings, custom-list all-failure rejection, wrong-symbol filtering, K-line degradation/cancellation, and custom-list validation/size guardrails.
-- `tests/test_stock_analysis_modules.py`: peer stock-pool failure and optional-timeout propagation into sanitized `PeerSampleInfo` without losing the core analysis path.
-- `tests/test_research_breadth_modules.py`: valid-sample filtering, genuine-empty versus source-failure state, conservative source-warning risk adjustment, score formula, and band boundaries.
-- `tests/test_research_peer_modules.py`: invalid, insufficient, partial, available, and unavailable peer states; source-aware summaries/warnings; relative strength, valuation, leader, and risk rules.
-- `tests/test_minute_analysis_modules.py`: minute unavailable-reason priority, trend-label rules, momentum-rule order, volume-pulse windows, warning-rule order, support/resistance level ordering and candidate filtering, shared minute K-line sanity filtering for malformed OHLC/non-finite values/negative volume/amount/turnover, T-plan defensive/range/waiting decisions, zone legality, confidence downgrades, conservative no-price/no-range/insufficient-sample text, interval fallback, and recent-extreme fallbacks.
-- `tests/test_leader_scoring_modules.py`: shared leader-score profile formulas and context-specific tag thresholds.
-- `tests/test_research_leadership_modules.py`: feature snapshot sanitation, leadership-report feature cleaning, concept evidence filtering and stable ordering, company-profile missing-data notes, score-summary thresholds, data-quality downgrades, and tag limits.
-- `tests/test_analysis_research.py`: minute analysis, workflow interval normalization, stock-confirmation before minute fetches, minute-source unavailable degradation when fallback logging fails, indicators, data quality, strategy/rule gates, research reports, market sampling without external-provider leakage, valuation history, market-regime fallbacks, and alert quality gates.
-- `tests/test_data_quality_modules.py`: focused data-quality score-component guardrails, quote-field rule order and critical-value sanitation, stricter high/low/change_pct boundaries, cache-source wording, future quote/K-line timestamp penalties, intraday current-day K-line handling, latest parsable K-line date/source selection under unsorted or malformed tails, K-line level/penalty rule order, missing-K-line de-duplication, terminal K-line penalties, field-mismatch boundaries, and consistency penalty/anomaly guardrails.
-- `tests/test_indicator_levels_modules.py`: support/resistance valid-row filtering, invalid-close fallback, realtime breakdown adjustment, and level-order guardrails.
-- `tests/test_indicator_trend_modules.py`: focused trend-score contribution order, moving-average rule order, volume-confirmation rule order, and threshold guardrails.
-- `tests/test_indicator_volume_modules.py`: shared positive-volume ratio, zero/invalid window fallbacks, recent-volume sample guards, and positive average-volume filtering.
-- `tests/test_analysis_signal_modules.py`: analysis signal facade compatibility, finite-value guardrails, sanitized signal snapshot scores/labels/quality/contributions/notes, direct summary-helper sanitation, malformed confidence fallbacks, risk-level priority, ordered buy/sell point rules, strength-tag rules, T-plan invalid-zone pending wording, low-quality gate rules, action-advice decision boundaries, and module-boundary guardrails.
-- `tests/test_research_factor_modules.py`: factor lab facade compatibility and current/report module-boundary guardrails.
-- `tests/test_research_factor_scoring_modules.py`: volume-confirmation rule priority/boundaries, risk-pressure contribution rules, chip-position factor fallback priority, distance-to-cost-center boundaries, and concentration adjustment guardrails.
-- `tests/test_research_factor_specs_modules.py`: immutable factor registration order, read-only registered snapshots, factor-spec registration validation, duplicate/blank/whitespace-ID validation, isolated factor-spec maps, historical proxy-score rule components, complete score-context boundary/window helpers, malformed/non-finite K-line fallbacks, zero-volume handling, chip cost-center gates, finite/clamped trigger-score boundaries, and rolling helper boundaries.
-- `tests/test_research_factor_weight_modules.py`: factor weight profile priority, low-quality overlays, default notes, and final weight clamps.
-- `tests/test_research_factor_calibration_modules.py`: factor calibration sample gates, invalid entry/forward-row skips, no-match fallback, forward-return statistics, confidence/expected-level rules, scenario bucket stats, and bucket-note priority.
-- `tests/test_research_peer_modules.py`: peer sample filtering, relative-strength percentile, amount metrics, leader sorting, valuation/strength risks, and no-sample fallback.
-- `tests/test_research_regime_modules.py`: market-regime state priority, cleaned context metrics, ordered market-label rules, named risk-adjustment components, non-finite adjustment guards, factor-risk adjustment contributions, blank industry/factor/breadth-summary filtering, breadth-summary fallback text, missing support/resistance guardrails, finite evidence/suggestions, and market-breadth boundaries.
-- `tests/test_research_theme_modules.py`: theme-context industry fallback, finite industry/stock/concept input cleaning, blank/non-finite concept filtering, concept dedupe, report concept caps after full-input scoring, ordered evidence slots, and hot-theme/weak-stock risk guardrails.
-- `tests/test_research_event_digest_modules.py`: event-digest risk/positive/watch buckets, default watch fallback, and missing-data de-duplication.
-- `tests/test_research_replay_modules.py`: replay minimum-sample gates, invalid entry/window filtering, replay context boundary and volume-window helpers, recent pending-signal handling, invalid target-day pending handling, finite price/volume/forward-return filtering, mature-sample success rates, bounded completed-sample counts, missing-return statistics, and replay outcome/pattern notes.
-- `tests/test_research_risk_modules.py`: risk-radar item rule order, score boundaries, top-risk sorting, and overall-level guardrails.
-- `tests/test_research_alpha_modules.py`: Alpha evidence point source, positive/negative bucket non-finite impact and non-displayable text filtering, strength sorting, non-positive limit guards, cleaned title/reason de-duplication before limits, dirty point/impact-string tolerance, missing-data de-duplication/limits with invalid-literal/`N/A` filtering, whitespace normalization, empty rule-match tolerance, explicit absent factor/regime/timeframe/risk-reward and abnormal feature fields, data-quality note cleaning, factor-lab point filtering/calibration, impact direction, bounded finite-value confidence adjustment and summary display, verdict-context fallbacks, and verdict-priority guardrails.
-- `tests/test_research_breadth_modules.py`: market-breadth invalid-sample filtering, empty-state fallback, score component formula, and label-band boundaries.
-- `tests/test_research_chip_modules.py`: chip-analysis invalid-row filtering, finite positive price/volume gates, valid-sample gates, flat/upper-bound bucket building, current-zone support/pressure bands, nearest support/pressure ordering, and feature-price fallback to the latest valid close.
-- `tests/test_research_diagnosis_modules.py`: diagnosis action downgrades, headline/action rule priority, missing key-price text, watch-focus de-duplication, main-conflict sentence normalization, and diagnosis-section guardrails.
-- `tests/test_review_modules.py`: individual-review period gates, malformed K-line filtering, review-window metrics, event priority, and latest-event limits.
-- `tests/test_research_timeframe_modules.py`: timeframe trend score components, invalid-price fallback, non-positive window handling, insufficient-sample fallback, same-direction conflict boundaries, and alignment-label boundaries.
-- `tests/test_research_risk_reward_modules.py`: risk/reward rating priority for timeframe conflicts, external risk gates, attractive-ratio requirements, mixed-timeframe wait boundaries, finite/non-positive metric sanitation, finite reward/risk ratios, capped upside targets, stale structural-stop filtering, upside-target/downside-stop side validation before distance math, downside-stop bounds/adjustments, pending summary wording for missing or wrong-side price/target/defense/ATR/volatility/risk multipliers, integer scenario-probability normalization/sanitization with neutral floor, decision-state probability caps, missing/wrong-side-level active-path downweighting, missing-price wording guards, blank/non-finite action/status/timeframe fallbacks, and default boundaries.
-- `tests/test_research_validation_modules.py`: signal-validation item, non-finite risk/confidence/factor fallback handling, confidence penalties, T-range strict open-interval wording, timeframe-note boundaries, summary confirmed/defensive grouping, and overall-status priority for environment, timeframe, weak factors, reverse risk, and confirmation counts.
-- `tests/test_research_t_strategy_modules.py`: T-strategy style/suitability rule priority, active-T blocking, tradable-range gates, validation-risk gates, zone text, missing-price fallbacks, and price-buffer behavior when resistance is unavailable.
-- `tests/test_research_qa_answer_modules.py`: free-form Q&A topic strategy registry coverage, comprehensive/default-topic mapping, whitespace-normalized topic lookup, unregistered-topic default fallback, answer-action display limits, cleaned/deduped list limits, empty-output fallback, confidence penalty boundaries, conservative theme fallback, invalid-literal/non-finite wording guards, and action de-duplication.
-- `tests/test_research_qa_report_modules.py`: fixed FAQ Q&A guardrails for risk/reward target/stop evidence, report-item exit sanitation, support/resistance invalid or wrong-side levels, T-plan fallback evidence, and theme-concept invalid-literal/non-finite cleaning.
-- `tests/test_local_lifecycle.py`: local persistence lifecycle, alert-rule name defaulting, guarded SQLite compatibility migrations, stock-note content/price/date cleaning including non-finite direct-call guards, malformed and dirty legacy note-row display fallbacks, dirty legacy advice/alert row sanitation, unsupported legacy alert disabling, non-negative trigger-count updates, best-effort runtime-event logging, non-positive user/runtime list limits, concept/theme/event context, workbench cache, main-analysis local quote-history/advice-snapshot degradation, advice history, and replay confidence.
-- `tests/test_individual_workflow_modules.py`: `stock_workbench` stage boundaries, non-blocking advice snapshot persistence, local-state symbol normalization, fixed chart-mark/alert-rule/alert-event/note read limits, local-state read failure degradation, and response assembly guardrails.
-- `tests/test_workbench_context_cache_modules.py`: focused workbench-context cache guardrails for expired entries, cancelled in-flight tasks, clear-during-build behavior, concurrent request sharing, and DataHub instance-owned cache isolation.
-- `tests/test_api_container_modules.py`: application-container object sharing guardrails for DataHub-owned workbench context cache.
-- `tests/test_workbench_pipeline_modules.py`: focused workbench pipeline guardrails for order-book degradation, optional concept timeout degradation, and readable fallback errors.
-- `tests/test_stock_lookup_modules.py`: stock lookup guardrails for live quote-confirmation fallback during stock-pool outage or stock-pool miss, cached/fallback quote rejection during stock identity confirmation, not-found reporting when quote confirmation also fails, mismatched quote rejection, and unexpected quote-error propagation.
-- `tests/test_db_mappers.py`: DB mapper compatibility facade guardrails.
-- `tests/test_provider_status_aggregation_modules.py`: provider/capability status aggregation guardrails for config-only rows, disabled-capability stale activity, active health, invalid count normalization, deterministic tie-break ordering, repository ordering, unprobed providers, and config sync preserving active probe timestamps.
-- `tests/test_tencent_provider_modules.py`: Tencent quote URL construction, quote text parsing, empty-response errors, payload extraction with trailing whitespace and unclosed-payload rejection, malformed K-line payload-shape fallback, stripped field/minimum-count validation, field fallback, required code/name validation, real timestamp validation, open/current price containment inside high/low, missing change-percent fallback, finite non-negative core volume/amount guards, index market flags, strict critical quote-field parsing, malformed quote/K-line row rejection, and demo-provider random-state isolation, request-order preservation, unknown-symbol fallback naming, rounded quote/K-line containment, and Monday small-limit backfill.
-- `tests/test_futu_provider_modules.py`: Futu empty quote requests, ordered snapshot missing-code reporting after invalid critical price filtering, minute-row OHLC filtering, interval mapping, order-book depth cleaning, and empty-depth rejection.
-- `tests/test_datahub_orderbook_modules.py`: order-book coordinator timeout wrapping, failure recording, and cooldown.
-- `tests/test_optional_kline_parsing_modules.py`: Tushare and BaoStock daily K-line OHLC row filtering.
-- `tests/test_static_assets.py`: static frontend CSS entrypoint, imported CSS module guardrails, right-side leader-row wrapping guardrails, JS function-size guardrails, UI symbol all-zero rejection, Node-based research-panel render/Q&A-submit/market/factor/Alpha/timeframe/risk-reward smoke coverage, malformed optional research-panel collections, escaped workbench review/evidence renderer smoke coverage, diagnostics-panel smoke coverage, and fake-canvas chart mark plus dirty-K-line filtering smoke coverage.
-- `tests/test_frontend_app_flow.py`: Node/fake-DOM app-flow guardrails for request freshness, stale companion/mutation isolation, local-data warning sanitation, market/strong-stock partial/all-failure labels, render/load separation, SSE lifecycle/frame validation, watchlist state preservation, and duplicate-action prevention.
-- `tests/test_frontend_research_panels.py`: Node/fake-DOM AI question guardrails for stale request suppression, duplicate in-flight submit suppression, current-error rendering, unknown feature/timeframe placeholders, neutral unknown moving-average relation rendering, and escaped research render-helper boundaries.
-- `tests/test_frontend_diagnostics.py`: Node/fake-DOM diagnostics guardrails for stale monitoring responses not overwriting newer scheduler panels, and failed manual monitor tasks preserving the error state instead of immediately refreshing it away.
-- `tests/test_frontend_api_format_workbench.py`: Node/fake-DOM frontend guardrails for readable API detail messages, finite-number formatting, neutral missing-number classes, partial workbench rendering, dirty strong-stock row degradation, minute missing-data warning priority, and escaped valuation/leader output.
-- `tests/test_chart_marks_modules.py`: chart-mark categories after visible limiting, regular-event filtering before caps, malformed-date alignment/visibility guards, note/event text and price sanitation, and internal negative-limit guards.
-- `tests/test_stock_abnormal_events.py`, `tests/test_stock_event_summary.py`, `tests/test_financial_metrics_modules.py`, `tests/test_financial_health_modules.py`, `tests/test_valuation_modules.py`: focused insight-module guardrails for abnormal events, quote-vs-K-line current-volume context metrics/fallbacks, event summaries, external-checklist rule order, financial metric interpretation, financial health, valuation scoring, percentile delta rule order, out-of-range percentile ignoring, latest daily valuation-history snapshot selection, finite valuation wording, valuation-anchor bands, and malformed valuation-history filtering.
-- `tests/test_stock_lhb_modules.py`: LHB candidate default state, move/turnover triggers, strong-move scoring bonus, weak-trend action, and abnormal-event reason limits.
-- `tests/test_stock_overview_modules.py`: overview fundamental-factor scoring, non-positive/non-finite valuation and market-cap guards, clean text guards, missing-field evidence, high/low valuation boundaries, ordered main-conflict rules, usable-fund divergence gates, shared normalized key-price/takeaway/risk-trigger handling, visible-event de-duplication, factor order, score caps, and low-quality conflict prefixes.
-- `tests/test_stock_strategy_modules.py`: strategy-card data-quality status downshift maps and signal-level downgrade boundaries.
-- `tests/test_stock_rule_modules.py`: focused stock-rule guardrails for rule-spec definition/config/raw order, rule-id uniqueness, confidence map alignment, spec-derived match metadata, volume-breakout status/confidence/missing-data, complete valid 20-day high windows, current quote-volume handling, finite/positive current-price/MA20/support/volume-ratio/fund-score/valuation-score gates, break-MA20 boundaries, support-rebound risk downgrades, missing support levels, fund/technology-divergence risk/observation boundaries, high-valuation chase boundaries without invalid valuation-score triggers, abnormal-risk evidence, data-quality gate decisions, and stable same-rank sorting.
-- `tests/test_rules_alerts_marks.py`: compatibility placeholder documenting the former broad regression split for rules, alerts, chart marks, data sources, LLM, analysis, and local lifecycle coverage.
-- `tests/test_stock_activity_modules.py`: focused fund-flow/order-pressure guardrails for negative amount availability, price-volume relation rules, current quote-volume handling, invalid quote-volume fallback, real-time order-book pressure, threshold-boundary neutrality, shared invalid-depth filtering, crossed-spread protection, zero-depth ratios, zero-volume baselines, invalid turnover handling, fallback range pressure, and data-quality downgrades.
-- `tests/test_provider_failure_status_modules.py`: shared provider/capability recent-failure window guardrails for monitoring diagnostics and scheduler health events.
-- `tests/test_system_diagnostics_modules.py`: focused monitoring-diagnostics guardrails for rule-table cache timestamp diagnostics, daily K-line freshness not being masked by fresh minute K-lines, future minute K-line timestamp warnings, failed provider capabilities, stale provider-failure suppression, provider-diagnostic priority/caps, quote-source redundancy, scheduler state, sanitized storage/table counts and dirty keys, de-duplicated warnings/suggestions, demo source warnings, and trading-calendar fallback.
-- `tests/test_api_data_routes.py`: route-level contract tests for trading-calendar refresh success, explicit refresh-error payloads, data-status SQLite failure mapping, and Futu status runtime-failure mapping.
-- `tests/test_api_watchlist_routes.py`: route-level watchlist and advice-history read failure mapping for local SQLite errors.
-- `tests/test_api_monitoring_routes.py`: route-level monitoring failure contracts for scheduler status, task runs, monitor events, system diagnostics, and manual task failures.
-- `tests/test_scheduler_modules.py`: focused scheduler task-definition/state guardrails, deterministic task ordering, DataHub settings ownership, positive-integer interval/limit/freshness setting sanitation, refresh symbol cleaning/de-duplication, no-valid-symbol skips, manual/background failure semantics, quote/K-line fallback-cache warning messages, staged per-symbol K-line refresh degradation, data-health provider failure priority, stale provider-failure suppression, missing/stale daily K-line cache events that are not masked by minute K-lines, healthy state, reschedule boundaries, and finite cleanup summaries.
-- `tests/test_runtime_environment_modules.py`: runtime isolation guardrails so user-level site-packages cannot shadow the bundled pandas/numpy provider stack.
-- `tests/test_tool_inventory_modules.py`: documentation generator guardrails for function-inventory source collection/tooling coverage, Python production function size/branch health, complete test-plan module references, auditable latest-test-report structure, operations backup-before-delete guidance, business-API reference scope, generated API input/error/SSE contract fields, and duplicate model-field detection.
-- `tests/factories.py`: shared Quote/K-line/plate/stock fixtures.
+- `tests/test_advice_reviews.py`: snapshot binding, no-lookahead windows, ambiguous barriers, pending/insufficient states, revision ownership, idempotent evaluation persistence, and cross-revision evaluation history.
+- `tests/test_advice_review_window_contract.py`: trading-day completeness, 15:15 publication boundaries, cross-contract rejection, and weekend pending behavior.
+- `tests/test_analysis_research.py`
+- `tests/test_analysis_signal_modules.py`
+- `tests/test_api_alert_routes.py`
+- `tests/test_api_container_modules.py`
+- `tests/test_api_data_routes.py`
+- `tests/test_api_error_modules.py`
+- `tests/test_api_local_data_routes.py`: single-use preview claims, file/mode/database-state binding, expiry/replay rejection, verified pre-import backups, stable backup failures, and backed-up manual user-history cleanup.
+- `tests/test_api_monitoring_routes.py`
+- `tests/test_api_notes_routes.py`
+- `tests/test_api_review_routes.py`: review-plan deletion success/not-found contracts and OpenAPI response schema coverage.
+- `tests/test_api_security_modules.py`
+- `tests/test_api_stock_routes.py`
+- `tests/test_api_watchlist_research_queue.py`
+- `tests/test_api_watchlist_routes.py`
+- `tests/test_app_lifecycle_integration.py`
+- `tests/test_cache_freshness_modules.py`
+- `tests/test_cache_stats_modules.py`
+- `tests/test_chart_marks_modules.py`
+- `tests/test_config_modules.py`
+- `tests/test_container_settings_lifecycle.py`
+- `tests/test_data_quality_modules.py`
+- `tests/test_data_sources.py`
+- `tests/test_datahub_cache_modules.py`
+- `tests/test_datahub_klines_modules.py`
+- `tests/test_datahub_metadata_modules.py`
+- `tests/test_datahub_orderbook_modules.py`
+- `tests/test_datahub_quotes_modules.py`
+- `tests/test_datahub_runtime_modules.py`
+- `tests/test_datahub_source_plan_modules.py`
+- `tests/test_datahub_status_modules.py`
+- `tests/test_datahub_status_service_modules.py`
+- `tests/test_db_mappers.py`
+- `tests/test_financial_health_modules.py`
+- `tests/test_financial_metrics_modules.py`
+- `tests/test_frontend_advice_timeline.py`
+- `tests/test_frontend_api_format_workbench.py`: fetch parsing for 204/205, zero-length/empty success payloads, structured errors, and workbench formatting.
+- `tests/test_frontend_app_flow.py`: core-workbench-first cold-load order, stock/session orchestration, immediate advice-timeline loading ownership, A-B-A stale response rejection, SSE, persistence, companion request guards, and full browser-state/SSE refresh after user-data import.
+- `tests/test_frontend_chart_inspector.py`: immutable daily/minute inspection snapshots, plot-boundary hit testing, CSS-to-canvas pointer mapping, keyboard traversal, redraw clamping, and listener cleanup.
+- `tests/test_frontend_chart_context.py`: visible-window clipping, moving-average warm-up context, stable mark limits, and edge-aware non-overlapping mark labels.
+- `tests/test_frontend_chart_workspace.py`: daily/minute chart controls, request budgets, stale safety, unavailable audit rows, and explicit unavailable handling for 204/empty/null or mismatched minute responses.
+- `tests/test_frontend_diagnostics.py`
+- `tests/test_frontend_local_activity_state.py`: notes/alert-event source synchronization, sanitized unavailable states, and stale/aborted read ownership.
+- `tests/test_frontend_local_data.py`: latest file-read/import-preview/commit/cleanup-preview ownership, stale file/mode invalidation, server preview-token authority, rollback-backup feedback, portable download cleanup, and storage diagnostic rendering.
+- `tests/test_frontend_local_data_security.py`: guarded POST semantics for local user-data export.
+- `tests/test_frontend_notes_alerts_requests.py`: independent note/alert write ownership, local successful-write reconciliation, stale readback protection, explicit readback degradation, and row-scoped failure feedback.
+- `tests/test_frontend_notifications.py`: permission timing, first-poll baseline, keyset page draining, non-advancing-page safety, trigger de-duplication, burst summaries, and failed-delivery retry without skips.
+- `tests/test_frontend_research_activity.py`: three-source normalization/order, limits and filters, escaped output, and distinct loading/empty/partial-or-total-unavailable states.
+- `tests/test_frontend_research_panels.py`
+- `tests/test_frontend_review_scan.py`: escaped review rendering, snapshot-bound and rendered-symbol-owned plan requests, server-current-time handling for today, Shanghai end-of-day historical evaluation, lazy/retryable history ownership, current/custom scan controls, strict prices/symbols, whitelisted conditions, and result rendering.
+- `tests/test_frontend_stock_search.py`: 250 ms debounce, abort/stale protection, bounded LRU behavior, payload validation, explicit states, keyboard selection, and destruction cleanup.
+- `tests/test_frontend_watchlist_requests.py`
+- `tests/test_frontend_workspace_preferences.py`: persisted workspace selection, unsupported-value fallback, and storage failure tolerance.
+- `tests/test_futu_provider_modules.py`
+- `tests/test_indicator_levels_modules.py`
+- `tests/test_indicator_trend_modules.py`
+- `tests/test_indicator_volume_modules.py`
+- `tests/test_individual_workflow_modules.py`
+- `tests/test_kline_contract.py`: legacy migration isolation, coexisting adjustment modes, mixed-batch rejection, and explicit provider provenance.
+- `tests/test_leader_scoring_modules.py`
+- `tests/test_llm_explainer.py`
+- `tests/test_local_data_portability.py`: exact export allowlist, merge/replace dry runs, schema drift rejection, conflict behavior, and transactional rollback.
+- `tests/test_local_lifecycle.py`: local persistence/migrations, comparable advice-change unread counting, viewed-through watermark races, automatic user-history cleanup protection, and shared runtime invariants.
+- `tests/test_market_overview_modules.py`
+- `tests/test_market_quotes_modules.py`: quote persistence, fixed Shanghai event time, epoch freshness ordering across mixed timezone formats, and legacy UTC ISO cache compatibility.
+- `tests/test_market_sampling_modules.py`
+- `tests/test_minute_analysis_modules.py`
+- `tests/test_optional_kline_parsing_modules.py`
+- `tests/test_optional_provider_concurrency.py`
+- `tests/test_provider_errors_modules.py`
+- `tests/test_provider_failure_status_modules.py`
+- `tests/test_provider_registry_modules.py`
+- `tests/test_provider_status_aggregation_modules.py`
+- `tests/test_provider_status_repository_modules.py`
+- `tests/test_provider_utils_modules.py`
+- `tests/test_quote_stream_modules.py`
+- `tests/test_research_alpha_modules.py`
+- `tests/test_research_breadth_modules.py`
+- `tests/test_research_chip_modules.py`
+- `tests/test_research_conclusion_change.py`
+- `tests/test_research_diagnosis_modules.py`
+- `tests/test_research_event_digest_modules.py`
+- `tests/test_research_factor_calibration_modules.py`
+- `tests/test_research_factor_modules.py`
+- `tests/test_research_factor_scoring_modules.py`
+- `tests/test_research_factor_specs_modules.py`
+- `tests/test_research_factor_weight_modules.py`
+- `tests/test_research_leadership_modules.py`
+- `tests/test_research_peer_modules.py`
+- `tests/test_research_qa_answer_modules.py`
+- `tests/test_research_qa_report_modules.py`
+- `tests/test_research_regime_modules.py`
+- `tests/test_research_replay_modules.py`
+- `tests/test_research_risk_modules.py`
+- `tests/test_research_risk_reward_modules.py`
+- `tests/test_research_t_strategy_modules.py`
+- `tests/test_research_theme_modules.py`
+- `tests/test_research_timeframe_modules.py`
+- `tests/test_research_validation_modules.py`
+- `tests/test_review_modules.py`
+- `tests/test_rules_alerts.py`
+- `tests/test_runtime_backup.py`: snapshot verification, tamper rejection, guarded restore/rollback, orphan reconciliation, cleanup preview parity, and review-linked advice retention protection.
+- `tests/test_runtime_environment_modules.py`
+- `tests/test_scheduler_modules.py`
+- `tests/test_schema_compat.py`
+- `tests/test_scoring_modules.py`
+- `tests/test_static_assets.py`
+- `tests/test_stock_abnormal_events.py`
+- `tests/test_stock_activity_modules.py`
+- `tests/test_stock_analysis_modules.py`
+- `tests/test_stock_event_summary.py`
+- `tests/test_stock_lhb_modules.py`
+- `tests/test_stock_lookup_modules.py`
+- `tests/test_stock_overview_modules.py`
+- `tests/test_stock_rule_modules.py`
+- `tests/test_stock_strategy_modules.py`
+- `tests/test_symbol_modules.py`
+- `tests/test_system_diagnostics_modules.py`
+- `tests/test_tencent_provider_modules.py`
+- `tests/test_tool_inventory_modules.py`
+- `tests/test_trading_calendar_modules.py`
+- `tests/test_valuation_modules.py`
+- `tests/test_watchlist_research_queue.py`: queue validation/order, mark-viewed state, comparable changed-advice unread increments, and viewed-through watermark preservation of later changes.
+- `tests/test_watchlist_scan.py`: explicit/current universes, as-of results, missing rows, versioned fixed rules, script rejection, and symbol caps.
+- `tests/test_workbench_context_cache_modules.py`
+- `tests/test_workbench_pipeline_modules.py`
 
-Covered areas:
+Browser regression support is indexed separately:
 
-- Rule definitions are versioned and parameterized.
-- API and UI validation errors keep Chinese message mapping stable for bounds, length, parsing, boolean, missing-field, malformed all-zero/conflicting-market symbols, and fallback cases.
-- API read endpoints that touch local state map SQLite/database failures to stable Chinese 503 `detail` responses instead of leaking raw 500 errors.
-- Manual scheduler task failures record failed task history and return an API failure instead of `ok: true`; background scheduler failures remain recorded without stopping the scheduler loop.
-- Alert cooldown, recovery, validation, condition evaluation dispatch, dynamic support/resistance thresholds, create/update name defaulting, update lifecycle, and quality gates.
-- Chart mark visibility and K-line date contract.
-- Provider priority, priority deduplication, unknown-kind guardrails, capability fallback metadata, partial quote merge without marking the usable provider as failed, machine-readable quote cache/fallback flags, market-sample diversity, sample normalization/dedupe logging, stock-pool failure logging, market overview quote degradation, custom strong-stock all-quote-failure errors, strong-stock K-line evidence gating, capability health, cooldown, and unregistered-provider skip behavior.
-- Main analysis degrades optional plate-rank failures into missing industry context while preserving quote/K-line analysis; minute analysis degrades confirmed source failures into unavailable reports without depending on event-log persistence; custom strong-stock lists have explicit size limits and all-unavailable quote errors before returning rankings.
-- AKShare/Eastmoney quote, daily K-line, minute K-line, and concept fallback parsing, including endpoint retry, empty-request short-circuiting, deduped fetch with requested-order preservation, quote bridge priority, strict critical Eastmoney quote parsing, missing change-percent fallback, non-negative core quote fields, spot-row missing-code reporting, malformed quote rows, invalid short/zero codes, AKShare import-failure K-line fallback, AKShare returned-row schema error surfacing, all-candidate concept-loader failure escalation, empty/invalid provider-response downgrade, fallback-cache tagging, OHLC/cache filtering, minute-period mapping, minute-row invalid time/OHLC/amount/turnover filtering, concept-candidate filtering, and placeholder numeric fields that must not be mapped to fake or misleading quotes.
-- Tencent quote/K-line URL construction, parsed-empty error handling, payload parsing with trailing whitespace, malformed K-line payload-shape fallback, backup high/low fields, required code/name validation, real timestamp validation, open/current price containment inside high/low, index market flags, optional market-cap handling, strict critical price-field parsing, missing change-percent fallback, finite non-negative core volume/amount guards, malformed payload/K-line rejection, and demo random-state isolation, request-order preservation, unknown-symbol fallback naming, and contained open/price values.
-- Futu quote/minute/order-book parsing preserves request order, reports missing A-share snapshots after filtering non-A-share rows and invalid critical prices, skips malformed minute OHLC rows, skips malformed depth prices while preserving zero-volume levels, rejects fully empty order-book depth, wraps order-book timeouts as data-source failures, and rejects unsupported minute intervals.
-- Data source status is read-only during status assembly, while provider enabled/capability synchronization remains explicit; provider source-plan decisions stay covered.
-- Provider source-key normalization keeps known source aliases stable and preserves unknown source prefixes.
-- Provider recovery actions keep network/proxy, remote-disconnect, timeout, provider-specific, and default suggestions stable.
-- Source-plan primary selection and decision actions distinguish active failed capabilities, unprobed enabled capabilities, cooling providers, disabled providers, and missing aggregate provider rows.
-- Quote routes reject empty or oversized unique batch-symbol requests before provider calls, dedupe normalized duplicate symbols, while SSE quote streaming keeps symbol fallback caps, dirty fallback-symbol skips, canonical symbol labels, fallback watchlist read failures mapped to API 503 before stream creation, refresh-interval lower bounds, JSON-safe data events, readable quote-error events, and disconnect stop behavior stable.
-- Stock-note creation and updates reject blank content, non-positive manual prices, invalid dates, and unknown fields; trim stored content; normalize supported date formats; and fall back to quote timestamps when create requests send blank trade dates.
-- Repository list/cache reads return empty results for non-positive limits and reject future cache timestamps instead of allowing SQLite negative-limit full-table reads or long-lived future rows.
-- Warmup behavior, explicit `StockPoolResolution` state for coverage miss versus authoritative empty, authoritative stock-pool cache misses that stale keyword cache cannot override inside `StockPoolResolver`, incomplete stock-pool provider misses, coverage-miss local stock-profile fallback, authoritative provider miss empty results, refresh-time stale keyword fallback after provider failure, unregistered stock/plate/concept priority skips, AKShare plate capability failure recording, empty metadata-response downgrade, local concept coverage misses without unhealthy status noise or stale fallback-cache deletion, non-mutating profile enrichment, local profile enrichment without overriding resolver-level authoritative misses, local smoke-symbol fallback, and stale local stock-master matches.
-- Stock lookup can continue from a matching quote when the stock pool is unavailable or misses a code, rejects quote responses for the wrong code/market or missing name, reports not-found when quote confirmation is also unavailable, and propagates unexpected quote errors instead of masking them as stock-pool outages.
-- Runtime startup and npm checks isolate user-level Python packages so optional provider imports use the bundled pandas/numpy stack.
-- Settings read environment variables at instantiation time and fall back safely when numeric or boolean values are malformed.
-- LLM environment variable parsing, fallback, grounded answer acceptance, stock-code reference boundaries, API-key redaction on failure, non-finite allowed-number filtering, ungrounded comma-adjacent number rejection, narrow list-marker exemptions, and ungrounded-number rejection.
-- Minute analysis T-plan, stock existence confirmation before source degradation, unavailable state, unavailable-reason mapping, OHLC consistency filtering, finite non-negative volume/amount/turnover filtering, support/resistance candidate filtering, legal T-plan zones, trend/momentum/volume rules, warning priority, conservative no-price/no-range/insufficient-sample wording, confidence downgrades, decision priority, interval fallback, and support/resistance fallbacks.
-- Shared leader-score profiles preserve feature-snapshot and strong-stock ranking formulas while keeping tag thresholds context-specific.
-- Leadership reports clean feature inputs, drop concept evidence with blank names or non-finite changes, sort concepts stably by heat/rank/input order, keep company-profile missing-data notes explicit, keep score-summary thresholds stable, and downgrade low-quality data.
-- Indicator support/resistance, volume ratio, trend contribution breakdown, contribution order, and trend threshold direction.
-- Support/resistance filters inverted high/low rows, uses the last valid close when realtime price is absent, adjusts to valid recent highs/lows on breakout or breakdown, and preserves support below resistance.
-- Analysis signal module compatibility exports, finite-value guards, ordered risk-level priority, ordered buy/sell point rules, strength-tag rules, action advice quality gates, strong-trend attention, risk-priority control, hold observation, and wait-state boundaries.
-- Data quality freshness, intraday stale quote penalties, critical quote-field sanitation before derived diagnostics, high/low/change_pct boundary checks, future quote/K-line timestamp penalties, intraday current-day K-line notes, midday snapshots, short-cache/normal-cache/fallback-cache wording, stale/fallback/demo K-line level and penalty rule tables, terminal missing/invalid K-line penalties without duplicate missing-K-line notes, after-hours quote handling, quote-only checks, ordered quote-field sanity rules, non-negative consistency penalties, and consistency anomaly propagation.
-- Research report quality sharing, market breadth invalid-sample filtering and label boundaries, valuation, theme context, and event-digest bucket priority.
-- Free-form stock Q&A has complete strategy outputs for all routed topics, falls back conservatively for unregistered topics, applies confidence penalties predictably, caps theme missing-data penalties, and de-duplicates repeated risk actions.
-- Fixed FAQ stock Q&A preserves risk/reward pending-level wording, normalizes dirty report items at the builder boundary, and does not turn missing or wrong-side target/stop/support/resistance levels or theme/T-plan evidence into `0.00`, `nan`, or `inf` output.
-- Market-regime state priority, cleaned context metrics, ordered market-label rules, named risk multiplier adjustment scaling, non-finite adjustment guards, blank industry/factor/breadth-summary filtering, breadth-summary fallback wording, finite evidence/suggestions, and missing support/resistance guardrails.
-- Peer comparison keeps invalid quotes out of the sample, calculates relative-strength position, sorts peer leaders, and reports valuation/strength risks explicitly.
-- Factor scoring preserves chip-position fallback priority, cost-center distance bands, and concentration score adjustment.
-- Factor specifications keep registration immutable, validated, and duplicate-checked, preserve historical trend, volume, risk, chip, and leadership proxy scoring as rule-driven logic, and make malformed/non-finite K-lines or missing volume return neutral fallbacks instead of fake strong signals.
-- Factor weight policy preserves profile priority, low-quality risk overlays, and final weight min/max clamps.
-- Factor calibration separates sample collection, statistics, expected-level rules, confidence labels, scene bucket summaries, and bucket-note priority.
-- Chip analysis filters invalid/non-finite/non-positive price or volume K-lines, requires enough valid rows, keeps bucket volume stable across flat ranges and upper-bound prices, includes the current price bucket in nearby support/pressure bands, orders bands by proximity before volume, and falls back to the latest valid close when feature price is invalid.
-- Theme-context industry-name fallback, concept dedupe before scoring, report caps after full-input scoring, ordered evidence slots, and hot-theme/weak-stock risk flags.
-- Replay minimum K-line gates, invalid entry/window filtering, recent pending-signal handling, malformed K-line rejection, invalid target-day pending handling, finite-return success-rate/average-return statistics, bounded completed-sample counts, missing-return win-rate statistics, and pending-outcome notes.
-- Risk radar preserves item ordering, risk score formulas, top-risk sorting, timeframe conflict boundaries, and overall-level thresholds.
-- Alpha evidence source collection, positive/negative bucket non-finite impact filtering, strength ordering, de-duplication before limits, missing-data de-duplication/limits with explicit absent upstream inputs and abnormal feature fields, impact direction, bounded finite-value confidence adjustment penalties/bonuses, verdict-context fallbacks, and verdict priority.
-- Timeframe scoring preserves moving-average, return, drawdown, invalid-price fallback, short-term trend-blend boundaries, same-direction conflict classification, and alignment labels.
-- Risk/reward rating keeps timeframe conflict ahead of external risk priority, requires factor/validation/breadth confirmation for attractive ratios, preserves wait/default boundaries, cleans non-finite/non-positive inputs before ratio and summary assembly, caps stale/abnormal upside and structural-stop levels, keeps scenario probabilities normalized to 100 after input sanitization with a neutral-path floor, caps active positive paths when rating/validation/timeframe state is cautious or when price/support/resistance/target/defense levels are missing, and avoids misleading zero-price scenario wording when levels are missing.
-- Signal validation keeps environment/timeframe suppression ahead of weaker confirmations, preserves reverse-risk triggers, centralizes status/timeframe constants, sanitizes non-finite risk/confidence/factor inputs, treats doing-T ranges as strict open intervals, and rolls confirmed/defensive items into stable summaries and overall statuses.
-- Diagnosis data-quality gates, headline/action rule priority, timeframe-conflict downgrade rules, contextual confirmation/risk sections, missing-price guards, watch-focus de-duplication, and main-conflict sentence normalization.
-- Individual review filters malformed K-lines, treats non-positive periods as insufficient, preserves review-window metrics, and keeps review-event priority/limit stable.
-- Focused valuation-module behavior for missing fields, percentile score direction, valuation-anchor band priority, price-position fallback, and malformed valuation-history filtering.
-- Focused financial-metric and financial-health behavior for non-finite values, non-positive market cap, liquidity amount/turnover rules, missing core quote fields, and metric-card ordering.
-- Overview factor cards keep fundamental-field evidence, missing fields, non-positive valuation handling, valuation boundaries, ordered main-conflict priority, and low-quality conflict messaging stable.
-- Strategy-card checks keep severe/weak data-quality status downshifts and signal-level downgrades stable.
-- LHB candidate checks keep pre-listing reasons, verification actions, strong-move scoring, and weak-trend caveats explicit.
-- Stock event source rules keep external placeholder events and next-step actions aligned for LHB candidates, announcement checks, high-risk states, and margin-financing checks.
-- Stock rule checks keep rule definitions and match metadata aligned, rule confidence maps synchronized, volume-breakout trigger state, complete valid 20-high breakout windows, current quote-volume detection, finite/positive current-price/MA20/support/volume-ratio/fund-score/valuation-score gates, break-MA20 status boundaries, confidence, missing volume/high/price notes, anomaly evidence, support-rebound risk downgrades, missing support levels, fund/technology divergence direction, high-valuation chase thresholds that ignore invalid valuation scores, sell-pressure risk escalation, abnormal-risk evidence, cautious quality-gate downshifts, and stable sort tie-breaks explicit.
-- Focused fund-flow and order-pressure behavior for positive amount availability, price-volume relation rules, current quote-volume detection, invalid quote-volume fallback, real-time bid/ask ratio, threshold-boundary neutrality, invalid-depth filtering, crossed-spread protection, zero bid amount, missing ask depth, range fallback, and quality downgrade labels.
-- Factor lab aggregate sample tests ensure overlapping per-factor histories use the minimum single-factor count, thin samples cannot lower regime risk, and the first 10-day calibration sample requires 36 rows.
-- SQLite persistence for quote history, old `quote_history` schemas missing `trade_date`, compatibility-before-index initialization order, invalid quote filtering, concepts, partition-aware runtime cleanup, monitor/cache/alert events.
-- `tests/test_schema_compat.py`: partial legacy schema initialization, compatibility-column backfill, dependent-index ordering, and repeated initialization idempotence.
-- Local user persistence keeps dirty legacy advice rows displayable without absorbing fresh snapshots, keeps dirty/unsupported alert rules readable but disabled, and uses compare-and-swap state writes to prevent duplicate concurrent alert events.
-- DB row-mapper compatibility exports.
-- Provider status aggregation preserves history on config-only rows, reflects disabled capabilities, ignores disabled stale activity in metrics, normalizes invalid counts, uses deterministic priority/name/kind tie-breaks, and avoids treating unprobed capabilities as recent failures.
-- System diagnostics warnings and suggestions for stale/invalid cache timestamps, failed capabilities, provider-diagnostic priority/caps, scheduler gaps, demo sources, and calendar fallback.
-- Scheduler tests cover requested-versus-returned quote coverage, fallback/missing warnings, all-missing failure, cancelled terminal task runs, alert partial/all-failure summaries, capability failure priority, shared failure windows/settings, cache freshness, and cleanup totals.
-- Workbench `stock_workbench` stages advice persistence, normalized-symbol local-state reads, component-level warning assembly, workbench context cache trimming, and advice-history dedupe. Main analysis keeps quote/K-line results available when optional enrichment fails while preserving peer sample status; breadth source failures remain visible and conservatively weighted in market-regime evidence.
-- Workbench context cache expiry pruning, cancelled in-flight cleanup, clear-during-build writeback prevention, concurrent request coalescing, and DataHub instance isolation.
-- Replay confidence warning on small samples.
-- Static frontend CSS entrypoint, imported CSS module existence/order, right-side leader-row wrapping, JS function-size guardrails, workbench review/valuation HTML escaping, malformed optional research-panel collections, panel-level research-render failure isolation, and research-panel render/Q&A/market/factor smoke coverage.
-- Frontend app orchestration guards against invalid searches leaving old loads active, delayed redraws after state reset, overlapping/stale loads and watchlist/alert/note mutations, duplicate actions, cross-symbol SSE backoff, SSE lifecycle/frame errors, malformed state, stale diagnostics polling, unreadable API errors, partial payloads, unsanitized warnings, and hidden sample/source degradation.
-- Documentation tooling keeps `app/`, `tests/`, and `tools/` function/class inventory in scope, summarizes Python function-health hotspots, guards production Python function size/branch complexity, and keeps the API reference explicitly excluding the UI root route from business API counts.
+- `tests/e2e/frontend-flow.spec.js`: desktop/mobile workbench, code/name suggestions, exact chart inspection, local research activity, queue, timeline loading/ownership, stale-request, and request-budget flows.
+- `tests/e2e/static-server.mjs`: local static fixture server used by Playwright.
 
 ## 4. Manual Smoke Test Checklist
 
-1. Start the app on `127.0.0.1:8010`.
-2. Open the browser and confirm the title is `AShareRadar`.
-3. Query `600519`, `000001`, and `002182`.
-4. Confirm a valid stock shows quote, trend score, support/resistance, K-line chart, data quality, alerts, notes, and market panels.
-5. Confirm invalid symbols return a clear user-facing error without replacing the previous successful stock with misleading data.
-6. Add and remove a watchlist item.
-7. Add, update, pause, evaluate, and delete an alert rule.
-8. Add, hide, show, and delete a note; confirm chart marks update.
-9. Open diagnostics and check provider/capability state.
-10. Confirm no browser console errors after initial load.
+1. Start the app on `127.0.0.1:8010` and confirm `/api/health` succeeds.
+2. Type a Chinese name or partial code in both stock inputs; confirm the 250 ms autocomplete can be navigated by pointer and keyboard, and that loading, empty, and unavailable messages are distinct.
+3. Enter a complete valid 6-digit code and confirm it submits directly without `/api/stocks`; confirm a non-complete cache miss adds only its search request.
+4. Switch A-B-A between valid SH/SZ symbols and confirm the timeline and advice-review list retain only the newest request's state.
+5. Switch daily ranges through 20/60/120/240 and confirm no request is issued.
+6. Inspect the workbench JSON and confirm every daily row declares `adjustment_mode=qfq` plus non-empty `as_of`, `data_version`, and `contract_version` values.
+7. Inspect first/middle/last rows on both canvases by desktop hover, touch tap, and keyboard; confirm time, OHLC, change, volume, enabled MAs, source/cache/fallback/fetch metadata, and crosshair position match the selected row without a request.
+8. Switch minute intervals and confirm one request for each new interval and none when reselecting the current interval.
+9. Confirm minute 204/empty/`null`, wrong-symbol, wrong-interval, and unavailable reports clear stale chart data and withhold executable levels or T-plan ranges.
+10. In Tools, confirm local activity merges recommendation changes, alert events, and notes with distinct loading, empty, partial, and unavailable states.
+11. Create a review plan from a persisted advice snapshot with `target > snapshot > stop`, evaluate it at a historical cutoff and at current time, expand its evaluation history, then edit it and confirm the new revision does not display the prior revision's result as current.
+12. Run each fixed watchlist condition and a combined scan against both the current watchlist and custom codes; repeat with a historical cutoff and confirm excluded symbols, all-selected matching, as-of provenance, and missing-data rows are handled explicitly.
+13. Add a watchlist item, edit queue metadata, load its advice timeline, and mark it viewed through the newest displayed advice ID; create a later comparable change and confirm it remains unread. Confirm excluded items do not enter quote refresh.
+14. Add/update/delete an alert and note, and confirm navigation does not cancel an accepted persistence write.
+15. Enable desktop alerts, establish the first-poll baseline, then create a new trigger and confirm one notification while the page remains open. Simulate one notification-construction failure and confirm the failed and later events are delivered in order on the next poll without duplicating the successful prefix.
+16. Export user data, load the JSON in merge mode, and confirm commit stays disabled until the matching server dry-run preview succeeds. Confirm the commit reports a verified rollback backup; change the file, mode, or target user data after preview and confirm commit is rejected. Treat replace as destructive and verify it only against disposable data.
+17. Create and verify a runtime backup. Open cleanup preview and confirm user-history candidates trigger a verified pre-cleanup backup while review-linked advice is excluded. Run scheduled health cleanup and confirm alert/advice history is unchanged.
+18. Open diagnostics and confirm fetch/market freshness, storage budget, categorized rows, providers, scheduler, and trading-calendar guidance remain readable.
+19. Confirm invalid symbols stay in the query panel, while a failed valid-stock load clears the prior stock content and shows an explicit failure; then check desktop/mobile layouts for console errors.
 
-## 5. Regression Risk Areas
+## 5. Request And Browser Budgets
 
-| Area | Risk | Required Test Style |
-| --- | --- | --- |
-| `DataHub.quotes` | Partial provider responses can reorder or drop symbols. | Unit tests with fake providers and temp SQLite. |
-| Data quality | Trading-day logic can falsely penalize weekends/holidays. | Tests with fixed datetime and cached trading calendar. |
-| Workbench cache | Cached context can suppress necessary user-data refreshes or leak across DataHub instances. | Tests for advice dedupe, alert/note freshness, and DataHub-scoped cache isolation. |
-| LLM explanation | Model can invent ungrounded numeric claims or echo secrets in errors. | Unit tests for number grounding, stock-code reference boundaries, punctuation-adjacent numbers, list-marker exemptions, redaction, and fallback. |
-| Frontend rendering | External data text can inject HTML or break layout. | JS syntax check, fake-DOM escaping tests, plus browser smoke tests. |
-| Provider adapters | Upstream field names can change. | Adapter parsing tests with fixture-like rows. |
+| Flow | Expected additional requests |
+| --- | ---: |
+| Cold stock load, including SSE | 14 |
+| Each stock switch, including SSE | 5 |
+| Daily chart range switch | 0 |
+| Each new minute interval | 1 |
+| Repeated active minute interval | 0 |
+| Complete valid 6-digit input | 0 stock-search requests |
+| Non-complete user input, after debounce and on cache miss | 1 stock-search request |
+| Repeated cached autocomplete query | 0 stock-search requests |
+| Daily/minute pointer, touch, or keyboard inspection | 0 |
+| Local research-activity filter switch | 0 |
+| Fixed-condition watchlist scan | 1 |
+| Advice-review evaluation | 1 |
+| Expanding one advice-review history for the first time | 1 |
+| Each Tools-tab cleanup preview | 1 |
+| Enabling browser notifications | 1 immediate baseline page; later 30-second polls use as many 50-event keyset pages as needed, capped at 200 pages |
+
+Stock-search requests are not part of the four-request stock-switch baseline: only a debounced, uncached, non-complete user query may trigger one. A selected suggestion then follows the ordinary stock-load budget. The latest recorded desktop/mobile browser matrix is **20 passed, 4 skipped**; the skipped cases are intentional device-exclusive scenarios recorded by Playwright rather than treated as passes.
+
+Regression-sensitive boundaries include core-workbench-first cold-load dispatch under browser connection limits, fixed Shanghai market-event time and legacy UTC cache ordering, `qfq`/legacy K-line isolation, quote/minute session freshness, provider request-key single-flight and orphan isolation, the 15:15 daily publish threshold, server-current-time handling for today's review/scan and no-lookahead historical windows, rendered-symbol review ownership, single-use state-bound import previews, latest-owner file/import/cleanup UI state, post-import browser/SSE rehydration, serialized backup-before-import, automatic user-history cleanup exclusion, review-linked retention protection, successful alert-write reconciliation under failed readback, comparable-change unread watermarks, notification page/delivery cursor advancement, scheduler timeout lock ownership, stale companion responses, and request-budget drift.
 
 ## 6. Latest Test Report
 
-Latest formal verification:
+The current shared worktree has completed the full Python, coverage, generated-document, static-analysis, dependency, and browser gates. Historical rows remain only for traceability.
 
 | Date | Worktree State | Environment | Command | Scope | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2026-07-10 | Local dirty worktree during state-consistency and research-boundary hardening | macOS, Python `/opt/anaconda3/bin/python3`, `PYTHONNOUSERSITE=1`, Node/npm local project runtime | `npm run check` | Python compile with temporary bytecode cache, pyflakes, JS syntax, full pytest suite | 1142 passed | Covered legacy schema index ordering, alert compare-and-swap and per-rule failure isolation, scheduler quote coverage/cancellation, factor sample de-duplication and 36-row calibration boundary, complete timeframe windows, required-price validation, invalid-search/load invalidation, delayed redraw safety, fresh-session SSE backoff, and stale watchlist mutations. |
-| 2026-07-10 | Local dirty worktree during sample-provenance hardening | macOS, Python `/opt/anaconda3/bin/python3`, `PYTHONNOUSERSITE=1`, Node/npm local project runtime | `npm run check` | Python compile with temporary bytecode cache, pyflakes, JS syntax, full pytest suite | 1116 passed | Covered structured market/strong-stock sample status, K-line ranking warnings, local component warnings, breadth source degradation, peer availability provenance, sanitized frontend messages, and cancellation propagation. |
-| 2026-07-10 | Local dirty worktree during async-state and engineering-hygiene hardening | macOS, Python `/opt/anaconda3/bin/python3`, `PYTHONNOUSERSITE=1`, Node/npm local project runtime | `npm run check` | Python compile with temporary bytecode cache, pyflakes, JS syntax, full pytest suite | 1100 passed | Covered scoped alert/note mutations after navigation, stale plate-rank and diagnostics polling guards, duplicate button/AI/watchlist submit prevention, missing concept-provider configuration errors, disposable data-artifact cleanup, and cache-clean check tooling. |
-| 2026-07-09 | Local dirty worktree during 600706/provider-status hardening | macOS, Python `/opt/anaconda3/bin/python3`, `PYTHONNOUSERSITE=1`, Node/npm local project runtime | `npm run check` | Python compile, pyflakes, JS syntax, full pytest suite | 1094 passed | Covered failed workbench load isolation, overlapping-load/watchlist freshness guards, duplicate watchlist-submit prevention, EventSource constructor-failure cleanup, canvas-context fallback rendering, optional workbench enrichment/profile/quality timeouts, provider capability/source-plan stale-failure filtering, metadata missing-capability errors, live-only quote confirmation during stock lookup, partial quote coverage handling, route response-model contracts, and diagnostics renderer hardening. |
-| 2026-07-08 | Local dirty worktree during engineering pass | macOS, Python `/opt/anaconda3/bin/python3`, `PYTHONNOUSERSITE=1`, Node/npm local project runtime | `npm run check` | Python compile, pyflakes, JS syntax, full pytest suite | 1058 passed | Required gate before delivery. |
-| 2026-07-08 | Local dirty worktree during engineering pass | Same as above | `/opt/anaconda3/bin/python3 tools/architecture_inventory.py` | Function/class inventory and Python function-health summary generation | passed | Regenerates `docs/FUNCTION_INVENTORY.md`. |
-| 2026-07-08 | Local dirty worktree during engineering pass | Same as above | `/opt/anaconda3/bin/python3 tools/api_inventory.py` | Business API reference generation | passed | Regenerates `docs/API_REFERENCE.md`. |
+| 2026-07-18 | Current shared worktree after review-plan deletion, alert id-cursor/retention alignment, notification enable/disable and bounded backlog draining, scheduler degraded outcomes, and metadata freshness diagnostics | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing` | Full Python suite with branch coverage | 1787 passed in 58.24s; 91.92% coverage | Coverage gate is 90%; no live provider, credential, persistent runtime-data, or outbound-network dependency. |
+| 2026-07-17 | Current shared worktree after review/scan time ownership, local-data import/cleanup concurrency, alert readback, unread, notification, security, and provider-runtime hardening | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing` | Full Python suite with branch coverage | 1759 passed in 112.01s; 91.87% coverage | Coverage gate is 90%; installed from `requirements-dev-lock.txt` with `--require-hashes`; no live provider, credential, persistent runtime-data, or outbound-network dependency. |
+| 2026-07-16 | Historical source after autocomplete, chart inspection, and local activity; before the current feature set | macOS, Python 3.12, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider` | Full Python suite without coverage | 1633 passed in 35.06s | Retained as a baseline, not a result for the current shared worktree. |
+| 2026-07-15 | Historical baseline before the current three frontend additions | macOS, Python 3.12, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider` | Full Python suite without coverage | 1608 passed in 33.58s | Does not include the four new Python frontend test modules indexed above. |
+| 2026-07-10 | Local dirty worktree during state-consistency hardening | macOS, project Python 3.12, `PYTHONNOUSERSITE=1` | `npm run check` | Python compile, pyflakes, JS syntax, full pytest suite | 1142 passed | Historical regression record retained for traceability. |
 
 Recent targeted checks kept for traceability:
 
 | Date | Command | Scope | Result | Why It Was Run |
 | --- | --- | --- | --- | --- |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_datahub_quotes_modules.py tests/test_datahub_status_service_modules.py tests/test_datahub_metadata_modules.py tests/test_stock_lookup_modules.py -q` | Quote coordinator, status service, metadata/profile fallback, stock lookup | 47 passed | Covered blank single-quote validation, partial quote coverage handling, read-only data-status assembly, and coverage-miss local profile fallback. |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_frontend_api_format_workbench.py tests/test_frontend_app_flow.py -q` | Frontend API helper and app orchestration | 9 passed | Covered 204/empty API success handling, message/plain-text errors, failed-load stream shutdown, and watchlist-read failure state preservation. |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_frontend_api_format_workbench.py tests/test_frontend_app_flow.py tests/test_symbol_modules.py tests/test_datahub_cache_modules.py tests/test_research_factor_calibration_modules.py -q` | Frontend P1 fixes plus symbol/cache/factor-calibration refactors | 30 passed | Covered symbol-list builder, minute-K cache freshness rule split, and factor percentile bad-value skipping. |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_system_diagnostics_modules.py tests/test_tool_inventory_modules.py -q` | System diagnostics and documentation guardrails | 23 passed | Covered cache timestamp diagnostic rule-table refactor and future minute K-line timestamp warning. |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_tencent_provider_modules.py tests/test_tool_inventory_modules.py -q` | Tencent/demo provider parsing plus documentation guardrails | 41 passed | Covered demo quote helper refactor and request-order/unknown-symbol fallback behavior. |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_tool_inventory_modules.py -q` | Documentation generator and documentation-quality guardrails | 8 passed | Covered auditable test report structure and operations backup-before-delete guidance. |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_datahub_metadata_modules.py tests/test_tool_inventory_modules.py -q` | Stock-pool resolution state, metadata coordinator, generated documentation guardrails | 38 passed | Covered explicit `StockPoolResolution` and API/documentation tooling changes. |
-| 2026-07-08 | `PYTHONNOUSERSITE=1 /opt/anaconda3/bin/python3 -m pytest tests/test_datahub_cache_modules.py tests/test_datahub_klines_modules.py tests/test_scheduler_modules.py tests/test_system_diagnostics_modules.py tests/test_datahub_status_service_modules.py tests/test_frontend_app_flow.py tests/test_static_assets.py -q` | Cache freshness, K-line fallback, scheduler health, diagnostics, frontend loading guardrails | 100 passed | Covered daily/minute K-line freshness split and fallback-cache warning behavior. |
+| 2026-07-18 | `npm run test:e2e` | Desktop and mobile browser regression after alert/review/runtime changes | 20 passed, 4 skipped in 19.3s | Confirms request budgets, responsive layouts, chart inspection, local activity, timeline, queue, and stale-response behavior remain intact. |
+| 2026-07-18 | `$PYTHON -m pytest -q <alert, review, scheduler, freshness, cleanup, notification, and inventory modules>` | Focused behavior and maintainability regressions | 180 passed in 13.22s; independent audit 132 passed | Confirms id-cursor retention, bounded notification backlog, partial degraded outcomes, plan deletion, metadata diagnostics, and generated-document guardrails. |
+| 2026-07-17 | `$PYTHON -m pytest -q <provider runtime, quote, K-line, metadata, scheduler, sampling, lifecycle, and workbench modules>` | Provider admission, request-key single-flight, cancellation/orphan isolation, and downstream concurrency regressions | 363 passed in 3.67s | Confirms concurrent stocks no longer reject healthy foreground calls and true background calls remain bounded. |
+| 2026-07-17 | `$PYTHON tools/api_inventory.py --check` and `$PYTHON tools/architecture_inventory.py --check` | Protected generated API/function references after regeneration | passed | Confirms both generated references match the final source tree. |
+| 2026-07-17 | `npm run test:e2e` | Desktop and mobile browser regression | 20 passed, 4 skipped in 17.3s | Confirms core-first request order, request budgets, responsive layouts, chart inspection, local activity, timeline, queue, and stale-response behavior. |
+| 2026-07-17 | `$PYTHON -m pytest -q -p no:cacheprovider <documentation and feature modules>` | Documentation index/config plus adjustment, review, scan, portability, backup, diagnostics, notifications, and workspace-preference regressions | 105 passed in 10.46s | Confirms the current documentation contracts and focused implemented-feature behavior. |
+| 2026-07-16 | `$PYTHON -m pytest -q -p no:cacheprovider -k tool_inventory` | Documentation and generator guardrails | 13 passed | Historical guardrail result retained for traceability. |
+| 2026-07-16 | `$PYTHON tools/api_inventory.py --check` and `$PYTHON tools/architecture_inventory.py --check` | Generated API/function references | passed | Both generated references match the current source tree. |
+| 2026-07-16 | `npm run test:e2e` | Desktop and mobile browser regression | 20 passed, 4 skipped | Covers code/name search, exact chart inspection, local activity, request budgets, and existing desktop/mobile workflows. |
 
 ## 7. Coverage Gaps
 
-- No browser automation test is committed for first-screen rendering.
-- No snapshot tests for the large frontend DOM.
-- Route-level contract tests cover high-risk failure contracts and selected local-state reads, but not every stock response model.
-- No load tests for SSE quote streaming.
-- No committed full-version SQLite fixture replay; compatibility migration helpers are covered, but not a complete historical database upgrade matrix.
-- No explicit performance budgets for provider timeout cascades.
-
-Future test work should continue expanding FastAPI route-level contract tests across the remaining response models and add browser-level visual regression checks for the first screen.
+- Browser automation covers selected desktop/mobile workflows but has no full visual-regression baseline.
+- There are no SSE load tests or provider timeout-cascade performance tests.
+- SQLite compatibility helpers are covered, but there is no committed replay fixture for every historical database version.
+- Route-level response contracts focus on high-risk paths rather than every stock report endpoint.

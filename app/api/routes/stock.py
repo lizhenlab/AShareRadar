@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, Query
 
@@ -129,7 +129,10 @@ for path, response_model, handler in [
 @router.get("/api/stock/minute-analysis", response_model=MinuteAnalysisReport)
 async def minute_analysis(
     symbol: str = Query("600519", description="6位A股代码"),
-    interval: str = Query("5m", description="分钟周期：1m/5m/15m/30m/60m"),
+    interval: Literal["1m", "5m", "15m", "30m", "60m"] = Query(
+        "5m",
+        description="分钟周期：1m/5m/15m/30m/60m",
+    ),
     limit: int = Query(120, ge=20, le=500),
     datahub: DataHub = Depends(get_datahub),
 ) -> MinuteAnalysisReport:

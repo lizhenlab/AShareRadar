@@ -7,7 +7,11 @@ import pytest
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.research_features import build_feature_snapshot
-from app.services.research_factor_weights import _adjusted_factor_weight, _factor_weight_policy
+from app.services.research_factor_weights import (
+    _adjusted_factor_weight,
+    _factor_weight_context,
+    _factor_weight_policy,
+)
 from app.services.stock_insights import build_stock_insight_bundle
 from tests.factories import make_kline, make_quote
 
@@ -80,6 +84,33 @@ def test_factor_weight_policy_detects_low_liquidity_profile() -> None:
     assert notes == ["低流动性个股提高风险和量价确认权重，降低资金估算与强弱标签权重。"]
 
 
+@pytest.mark.parametrize(
+    ("turnover_rate", "expected_profile"),
+    [
+        (None, "常规个股"),
+        (0, "大市值稳健股"),
+        (1.9, "大市值稳健股"),
+        (2.0, "常规个股"),
+    ],
+)
+def test_factor_weight_policy_preserves_missing_turnover_and_low_turnover_boundary(
+    turnover_rate: float | None,
+    expected_profile: str,
+) -> None:
+    analysis, feature = _factor_weight_inputs(
+        amount=3_000_000_000,
+        turnover_rate=turnover_rate,
+        volume_ratio=1.0,
+        data_quality_score=90,
+    )
+
+    context = _factor_weight_context(analysis, feature)
+    profile, _, _ = _factor_weight_policy(analysis, feature)
+
+    assert context.turnover == turnover_rate
+    assert profile == expected_profile
+
+
 def test_adjusted_factor_weight_clamps_final_weight() -> None:
     assert _adjusted_factor_weight("risk_pressure", 2.0, {"risk_pressure": 2.0}) == 1.8
     assert _adjusted_factor_weight("valuation_anchor", 0.2, {"valuation_anchor": 0.2}) == 0.5
@@ -90,7 +121,7 @@ def _factor_weight_inputs(
     *,
     amount: float = 1_300_000_000,
     market_cap: float | None = None,
-    turnover_rate: float = 4.2,
+    turnover_rate: float | None = 4.2,
     volume_ratio: float = 1.0,
     data_quality_score: int = 90,
 ):

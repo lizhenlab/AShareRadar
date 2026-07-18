@@ -7,6 +7,7 @@ from app.config import Settings
 from app.models.schemas import Kline, MarketOverview, Quote
 from app.services.analysis import build_strong_stock_watch
 from app.services.datahub import DataHub
+from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
 from app.services.market_sampling import (
     QuoteSampleResult,
     STRONG_STOCK_SAMPLE_LIMIT,
@@ -14,6 +15,7 @@ from app.services.market_sampling import (
     market_breadth_symbols as _market_breadth_symbols,
     unique_standard_symbols as _unique_standard_symbols,
 )
+from app.workflows.optional_data import short_error
 
 MARKET_INDEX_SYMBOLS = ("sh000001", "sz399001", "sz399006")
 CUSTOM_STRONG_STOCK_LIMIT = 50
@@ -27,7 +29,7 @@ class KlineSampleResult:
 
 async def strong_stock_watch(datahub: DataHub, settings: Settings, symbols: str | None = None) -> dict[str, object]:
     is_custom_scope = symbols is not None
-    if is_custom_scope:
+    if symbols is not None:
         raw_symbols = [item.strip() for item in symbols.split(",") if item.strip()]
         symbol_list = _unique_standard_symbols(raw_symbols)
         if not symbol_list:
@@ -36,22 +38,27 @@ async def strong_stock_watch(datahub: DataHub, settings: Settings, symbols: str 
             raise ValueError(f"一次最多分析 {CUSTOM_STRONG_STOCK_LIMIT} 个股票代码")
         scope = "自定义列表"
     else:
-        watch_symbols = datahub.cache.watchlist_symbols()
+        watch_symbols, watchlist_warning = await _watchlist_symbols_or_empty(datahub)
         breadth_symbols = await _market_breadth_symbols(datahub)
         symbol_list = _unique_standard_symbols([*watch_symbols, *settings.seed_symbols, *breadth_symbols])[
             :STRONG_STOCK_SAMPLE_LIMIT
         ]
-        scope = "自选股 + 默认观察池 + 股票池分层抽样"
+        scope = "默认观察池 + 股票池分层抽样" if watchlist_warning else "自选股 + 默认观察池 + 股票池分层抽样"
         if not symbol_list:
             symbol_list = list(settings.seed_symbols)
             scope = "默认观察池"
+    if is_custom_scope:
+        watchlist_warning = ""
     quote_sample = await fetch_quote_sample(datahub, symbol_list, context=f"{scope}强股样本")
     quotes_data = list(quote_sample.quotes)
     _ensure_custom_quotes_available(is_custom_scope, symbol_list, quotes_data)
     kline_sample = await _kline_map_for_quotes(datahub, quotes_data, limit=80, context="强股观察池")
     items = build_strong_stock_watch(quotes_data, kline_sample.rows_by_code)
     status = _quote_sample_status(scope, quote_sample)
-    warnings = _sample_warnings(status, _kline_sample_warnings(kline_sample, len(quotes_data)))
+    warnings = _sample_warnings(
+        status,
+        [*_kline_sample_warnings(kline_sample, len(quotes_data)), *([watchlist_warning] if watchlist_warning else [])],
+    )
     return {
         "updated_at": quotes_data[0].timestamp if quotes_data else "",
         "items": items,
@@ -96,14 +103,16 @@ async def _kline_map_for_quotes(datahub, quotes: list[Quote], *, limit: int, con
     result: dict[str, list[Kline]] = {}
     failed_symbols: list[str] = []
     for quote, symbol, item in zip(quotes, symbols, rows):
-        if isinstance(item, asyncio.CancelledError):
-            raise item
-        if isinstance(item, Exception):
-            _log_workflow_event(datahub, "fallback", f"{context}K线失败，{symbol} 不参与强股排序：{_short_error(item)}")
+        if isinstance(item, BaseException):
+            if isinstance(item, asyncio.CancelledError):
+                raise item
+            if not isinstance(item, Exception):
+                raise item
+            await _log_workflow_event(datahub, "fallback", f"{context}K线失败，{symbol} 不参与强股排序：{short_error(item)}")
             result[quote.code] = []
             failed_symbols.append(symbol)
-        else:
-            result[quote.code] = item
+            continue
+        result[quote.code] = item
     return KlineSampleResult(rows_by_code=result, failed_symbols=tuple(failed_symbols))
 
 
@@ -147,19 +156,22 @@ def _ensure_custom_quotes_available(is_custom_scope: bool, symbols: list[str], q
         raise RuntimeError(f"自定义强股列表行情不可用：{_format_symbols(symbols)}")
 
 
-def _log_workflow_event(datahub, category: str, message: str) -> None:
+async def _watchlist_symbols_or_empty(datahub) -> tuple[list[str], str]:
+    try:
+        return await run_cache_io(datahub.cache.watchlist_symbols), ""
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        warning = f"自选股读取暂不可用，已使用默认观察池和股票池样本：{short_error(exc)}"
+        await _log_workflow_event(datahub, "fallback", warning)
+        return [], warning
+
+
+async def _log_workflow_event(datahub, category: str, message: str) -> None:
     cache = getattr(datahub, "cache", None)
     log_event = getattr(cache, "log_event", None)
     if callable(log_event):
-        try:
-            log_event(category, message)
-        except Exception:
-            pass
-
-
-def _short_error(exc: Exception) -> str:
-    text = str(exc).strip()
-    return text[:140] if text else exc.__class__.__name__
+        await run_cache_io_best_effort(log_event, category, message)
 
 
 def _format_symbols(symbols: list[str], limit: int = 5) -> str:

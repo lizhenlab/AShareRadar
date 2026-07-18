@@ -5,7 +5,7 @@ import asyncio
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_datahub
-from app.api.errors import run_api, run_sync_api
+from app.api.errors import run_api, run_sync_api_async
 from app.models.schemas import DataStatus, FutuStatusResponse, OrderBook, PlateItem, StockInfo, TradeCalendarRefreshResponse
 from app.services.datahub import DataHub
 from app.services.trading_calendar import TradeCalendarRefreshResult, refresh_trade_calendar_result
@@ -17,7 +17,7 @@ router = APIRouter()
 
 @router.get("/api/data/status", response_model=DataStatus)
 async def data_status(datahub: DataHub = Depends(get_datahub)) -> DataStatus:
-    return run_sync_api(datahub.status)
+    return await run_sync_api_async(datahub.status)
 
 
 @router.get("/api/stocks", response_model=list[StockInfo])

@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.models.analysis import PeerSampleInfo
-from app.models.market import StockConceptItem
+from app.models.market import MinuteKline, StockConceptItem
+
+
+def _composite_reliability_level(value: int) -> str:
+    if value >= 75:
+        return "较高"
+    if value >= 55:
+        return "中等"
+    if value >= 35:
+        return "较低"
+    return "不足"
 
 
 class AlphaEvidencePoint(BaseModel):
@@ -19,7 +31,9 @@ class AlphaEvidencePoint(BaseModel):
 class AlphaEvidenceReport(BaseModel):
     symbol: str
     updated_at: str
-    confidence: int
+    confidence: int = Field(description="兼容字段：0-100 的 Alpha 证据充分度评分，不代表统计置信度或概率")
+    confidence_semantics: Literal["non_statistical_evidence_sufficiency"] = "non_statistical_evidence_sufficiency"
+    confidence_note: str = "该值由规则证据、数据质量和风险约束综合形成，是启发式评分，不是统计置信度或命中概率。"
     verdict: str
     summary: str
     positives: list[AlphaEvidencePoint] = Field(default_factory=list)
@@ -37,6 +51,7 @@ class FactorCalibration(BaseModel):
     stability_score: int = 0
     expected_level: str = "观察"
     confidence_level: str
+    participates_in_historical_aggregate: bool = True
     note: str
 
 
@@ -63,13 +78,19 @@ class StandardFactor(BaseModel):
     missing_data: list[str] = Field(default_factory=list)
     calibration: FactorCalibration | None = None
     calibration_buckets: list[CalibrationBucket] = Field(default_factory=list)
+    data_nature: Literal["derived", "estimated", "observed", "unavailable"] | None = None
+    methodology: str | None = None
 
 
 class FactorLabReport(BaseModel):
     symbol: str
     updated_at: str
     total_score: int
-    calibrated_confidence: int
+    calibrated_confidence: int = Field(description="兼容字段：非统计的综合证据充分度，不代表置信区间或命中概率")
+    evidence_sufficiency: int | None = Field(default=None, description="综合因子证据充分度，非统计置信度")
+    composite_reliability_level: str | None = Field(default=None, description="综合可信等级，非统计口径")
+    confidence_semantics: Literal["non_statistical_evidence_sufficiency"] = "non_statistical_evidence_sufficiency"
+    evidence_sufficiency_note: str = "综合值由因子、数据质量、样本稳定性和正负证据共同形成，不是统计置信度或概率。"
     calibration_sample_count: int = 0
     positive_factor_count: int = 0
     negative_factor_count: int = 0
@@ -81,6 +102,12 @@ class FactorLabReport(BaseModel):
     summary: str
     notes: list[str] = Field(default_factory=list)
 
+    def model_post_init(self, __context: object) -> None:
+        if self.evidence_sufficiency is None:
+            self.evidence_sufficiency = self.calibrated_confidence
+        if self.composite_reliability_level is None:
+            self.composite_reliability_level = _composite_reliability_level(self.evidence_sufficiency)
+
 
 class MarketRegimeReport(BaseModel):
     symbol: str
@@ -91,7 +118,10 @@ class MarketRegimeReport(BaseModel):
     industry_label: str
     stock_state: str
     risk_multiplier: float
-    confidence_adjustment: int
+    confidence_adjustment: int = Field(description="兼容字段：对启发式证据充分度评分的加减分，不是概率修正")
+    confidence_adjustment_semantics: Literal["non_statistical_evidence_sufficiency_adjustment"] = (
+        "non_statistical_evidence_sufficiency_adjustment"
+    )
     suggestions: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
 
@@ -100,7 +130,9 @@ class SignalValidationItem(BaseModel):
     name: str
     category: str
     status: str
-    confidence: int
+    confidence: int = Field(description="兼容字段：0-100 的规则验证强度评分，不代表统计置信度或命中概率")
+    confidence_semantics: Literal["non_statistical_validation_strength"] = "non_statistical_validation_strength"
+    confidence_note: str = "该值由触发、确认、失效条件及数据质量综合形成，是启发式验证强度，不是统计概率。"
     trigger_condition: str
     confirmation_condition: str
     invalidation_condition: str
@@ -119,11 +151,17 @@ class SignalValidationReport(BaseModel):
 
 class ScenarioPlan(BaseModel):
     name: str
-    probability: int
+    probability: int = Field(description="兼容字段：启发式规则情景权重，不代表统计概率")
+    rule_weight: int | None = Field(default=None, description="归一化到 100 的启发式规则情景权重")
+    weight_basis: Literal["heuristic_rule_weight"] = "heuristic_rule_weight"
     trigger: str
     expected_move: str
     response: str
     invalidation: str
+
+    def model_post_init(self, __context: object) -> None:
+        if self.rule_weight is None:
+            self.rule_weight = self.probability
 
 
 class RiskRewardReport(BaseModel):
@@ -140,6 +178,8 @@ class RiskRewardReport(BaseModel):
     volatility_pct: float = 0
     rating: str
     summary: str
+    scenario_weight_basis: Literal["heuristic_rule_weight"] = "heuristic_rule_weight"
+    scenario_weight_note: str = "规则情景权重由启发式规则归一化，仅用于情景比较，不是统计概率。"
     scenarios: list[ScenarioPlan] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -177,7 +217,9 @@ class StockDiagnosis(BaseModel):
     hard_risks: list[str] = Field(default_factory=list)
     watch_focus: list[str] = Field(default_factory=list)
     action: str
-    confidence: int
+    confidence: int = Field(description="兼容字段：0-100 的诊断证据充分度评分，不代表统计置信度或命中概率")
+    confidence_semantics: Literal["non_statistical_evidence_sufficiency"] = "non_statistical_evidence_sufficiency"
+    confidence_note: str = "该值衡量当前诊断依据的充分程度，是启发式评分，不是统计置信度或命中概率。"
 
 
 class EvidenceChainReport(BaseModel):
@@ -212,7 +254,9 @@ class StockQuestionAnswer(BaseModel):
     topic: str
     conclusion: str
     answer: str
-    confidence: int
+    confidence: int = Field(description="兼容字段：0-100 的回答可靠度评分，不代表统计正确率或概率")
+    confidence_semantics: Literal["non_statistical_answer_reliability"] = "non_statistical_answer_reliability"
+    confidence_note: str = "该值由规则问诊、诊断证据和数据质量综合形成，是启发式回答可靠度，不是统计正确率或概率。"
     answer_source: str = "规则问诊"
     llm_used: bool = False
     llm_status: str | None = None
@@ -372,6 +416,16 @@ class MinuteAnalysisReport(BaseModel):
     interval: str
     source: str
     sample_count: int
+    klines: list[MinuteKline] = Field(
+        default_factory=list,
+        description=(
+            "分析实际使用的有效分钟K线，按 timestamp 升序且去重。availability=unavailable 时仅供数据审计："
+            "provider/空数据返回空，样本不足可返回过滤后行；UI 不得据此形成执行区间。"
+        ),
+    )
+    availability: Literal["ok", "degraded", "unavailable"] = "unavailable"
+    availability_reason: str = "未提供分钟分析可用性状态，按不可用处理。"
+    reason_code: str = "legacy_status_missing"
     latest_price: float | None = None
     intraday_change_pct: float = 0
     intraday_range_pct: float = 0
@@ -384,3 +438,21 @@ class MinuteAnalysisReport(BaseModel):
     t_plan: MinuteTPlan
     warnings: list[str] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)
+
+    def model_post_init(self, __context: object) -> None:
+        if self.availability != "unavailable":
+            return
+        self.supports = []
+        self.resistances = []
+        self.t_plan = self.t_plan.model_copy(
+            update={
+                "low_zone": "不可用",
+                "high_zone": "不可用",
+                "suitability": "暂停做T判断",
+                "style": "数据不可用",
+                "confidence": 0,
+                "summary": self.availability_reason,
+                "execution_steps": ["等待有效分钟K线恢复并重新分析后，再形成盘中参考区间。"],
+                "stop_conditions": ["分钟分析不可用期间，不按盘中区间执行做T。"],
+            }
+        )

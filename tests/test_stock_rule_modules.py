@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
+import app.services.stock_rules as stock_rules_facade
 from app.models.schemas import AbnormalEventItem, AbnormalEventSummary
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
@@ -9,6 +11,7 @@ from app.services.stock_insights import build_stock_insight_bundle
 from app.services.stock_rules import (
     RULE_CONFIG,
     RULE_SPECS,
+    RULE_SORT_INDEX,
     RULE_VERSION,
     SCORE_VERSION,
     _apply_quality_gate,
@@ -24,7 +27,30 @@ from app.services.stock_rules import (
     _sorted_rule_matches,
     rule_definitions,
 )
+from app.services.stock_rule_flow import _rule_fund_tech_divergence as implementation_fund_tech_divergence
+from app.services.stock_rule_price import _rule_volume_breakout as implementation_volume_breakout
+from app.services.stock_rule_registry import build_rule_match_summary as implementation_build_rule_match_summary
+from app.services.stock_rule_risk import _rule_abnormal_risk as implementation_abnormal_risk
 from tests.factories import make_kline, make_quote
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_stock_rules_facade_reexports_rule_family_implementations() -> None:
+    assert stock_rules_facade.build_rule_match_summary is implementation_build_rule_match_summary
+    assert _rule_volume_breakout is implementation_volume_breakout
+    assert _rule_fund_tech_divergence is implementation_fund_tech_divergence
+    assert _rule_abnormal_risk is implementation_abnormal_risk
+
+
+def test_stock_rule_split_modules_stay_bounded() -> None:
+    facade = ROOT / "app/services/stock_rules.py"
+    components = sorted((ROOT / "app/services").glob("stock_rule_*.py"))
+
+    assert len(facade.read_text(encoding="utf-8").splitlines()) <= 130
+    assert components
+    assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 220 for path in components)
 
 
 def test_volume_breakout_hits_when_price_and_volume_confirm() -> None:
@@ -50,6 +76,8 @@ def test_rule_specs_drive_definitions_config_and_raw_order() -> None:
     assert len(spec_ids) == len(set(spec_ids))
     assert [item.id for item in definitions] == spec_ids
     assert [item.rule_id for item in matches] == spec_ids
+    assert RULE_SORT_INDEX == {rule_id: index for index, rule_id in enumerate(spec_ids)}
+    assert list(RULE_CONFIG) == spec_ids
     assert set(RULE_CONFIG) == set(spec_ids)
     assert all(item.version == RULE_VERSION and item.parameters == RULE_CONFIG[item.id] for item in definitions)
     assert all(item.parameters is not RULE_CONFIG[item.id] for item in definitions)
@@ -250,7 +278,7 @@ def test_fund_tech_divergence_negative_or_sell_pressure_is_risk_when_hit() -> No
 
     assert match.status == "命中"
     assert match.level == "风险"
-    assert match.reason == "趋势评分 68，资金评分 44，盘口 卖压偏强。"
+    assert match.reason == "趋势评分 68，量价热度评分（衍生） 44，盘口 卖压偏强。"
 
 
 def test_fund_tech_divergence_gap_only_is_close_and_tracks_missing_fund_flow() -> None:
@@ -319,8 +347,8 @@ def test_support_rebound_treats_non_finite_fund_score_as_missing() -> None:
     assert match.status == "接近"
     assert match.level == "观察"
     assert "存在止跌承接证据" not in match.evidence
-    assert match.evidence[2] == "资金评分 缺失"
-    assert match.missing_data == ["资金评分"]
+    assert match.evidence[2] == "量价热度评分（衍生） 缺失"
+    assert match.missing_data == ["量价热度评分（衍生）"]
 
 
 def test_abnormal_risk_uses_main_signal_for_non_risk_events() -> None:

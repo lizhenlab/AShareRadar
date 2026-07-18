@@ -20,7 +20,8 @@ from app.services.system_diagnostics import (
 
 class SystemDiagnosticsModuleTests(unittest.TestCase):
     def test_diagnostics_reports_stale_cache_failed_capability_and_stopped_scheduler(self) -> None:
-        checked_base = datetime.now()
+        checked_base = datetime(2026, 5, 13, 10, 30, 0)
+        fetched_at = "2026-05-13 10:29:30"
         cache_stats = CacheStats(
             path="/tmp/ashare-radar-test.sqlite3",
             quote_count=1,
@@ -29,8 +30,12 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             stock_count=100,
             plate_count=5,
             provider_count=2,
-            latest_quote_at=(checked_base - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S"),
-            latest_kline_at=(checked_base - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            latest_quote_at=fetched_at,
+            latest_kline_at=fetched_at,
+            latest_quote_fetched_at=fetched_at,
+            latest_daily_kline_fetched_at=fetched_at,
+            latest_quote_timestamp="2026-05-12 15:00:00",
+            latest_daily_kline_date="2026-05-11",
             latest_stock_at=checked_base.strftime("%Y-%m-%d %H:%M:%S"),
             latest_plate_at=checked_base.strftime("%Y-%m-%d %H:%M:%S"),
         )
@@ -44,18 +49,22 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         scheduler = _Scheduler(running=False)
 
         with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
-            diagnostics = build_system_diagnostics(datahub, scheduler)
+            diagnostics = build_system_diagnostics(datahub, scheduler, now=checked_base)
 
-        self.assertTrue(any("最新报价缓存已超过" in item for item in diagnostics.warnings))
+        self.assertTrue(any("报价市场数据过期" in item for item in diagnostics.warnings))
         self.assertIn("存在数据能力最近失败：akshare 报价", diagnostics.warnings)
         self.assertIn("可用实时报价源少于2个，多源一致性校验能力不足。", diagnostics.warnings)
-        self.assertIn("日K线缓存超过1天未刷新，建议手动执行关键个股K线刷新。", diagnostics.suggestions)
+        self.assertIn("执行关键个股日K刷新，并检查数据源交易日期。", diagnostics.suggestions)
         self.assertIn("存在本地预警但调度器未运行，建议启动调度器或手动评估。", diagnostics.suggestions)
-        self.assertEqual(diagnostics.storage.runtime_rows, 4)
+        self.assertEqual(diagnostics.freshness.fetch_activity["quote"].status, "recent")
+        self.assertEqual(diagnostics.freshness.market_freshness["quote"].status, "stale")
+        self.assertEqual(diagnostics.storage.cache_rows, 4)
+        self.assertEqual(diagnostics.storage.runtime_rows, 0)
         self.assertEqual(diagnostics.storage.user_rows, 3)
 
     def test_diagnostics_reports_stale_daily_kline_even_when_minute_kline_is_fresh(self) -> None:
-        checked_base = datetime.now()
+        checked_base = datetime(2026, 5, 13, 10, 30, 0)
+        fetched_at = "2026-05-13 10:29:30"
         cache = _Cache(
             CacheStats(
                 path="/tmp/ashare-radar-test.sqlite3",
@@ -65,12 +74,18 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
                 daily_kline_count=1,
                 minute_kline_count=1,
                 stock_count=0,
-                plate_count=0,
+                plate_count=1,
                 provider_count=0,
-                latest_quote_at=checked_base.strftime("%Y-%m-%d %H:%M:%S"),
-                latest_kline_at=(checked_base - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),
-                latest_daily_kline_at=(checked_base - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),
-                latest_minute_kline_at=checked_base.strftime("%Y-%m-%d %H:%M:%S"),
+                latest_quote_at=fetched_at,
+                latest_kline_at=fetched_at,
+                latest_daily_kline_at=fetched_at,
+                latest_minute_kline_at=fetched_at,
+                latest_quote_fetched_at=fetched_at,
+                latest_daily_kline_fetched_at=fetched_at,
+                latest_minute_kline_fetched_at=fetched_at,
+                latest_quote_timestamp="2026-05-13 10:29:00",
+                latest_daily_kline_date="2026-05-11",
+                latest_minute_kline_timestamp="2026-05-13 10:29:00",
             ),
             providers=[],
             capability_statuses=[],
@@ -78,12 +93,49 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         )
 
         with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
-            diagnostics = build_system_diagnostics(_DataHub(cache, capabilities=[]), _Scheduler(running=True))
+            diagnostics = build_system_diagnostics(
+                _DataHub(cache, capabilities=[]),
+                _Scheduler(running=True),
+                now=checked_base,
+            )
 
-        self.assertIn("日K线缓存超过1天未刷新，建议手动执行关键个股K线刷新。", diagnostics.suggestions)
-        self.assertLess(diagnostics.freshness.latest_minute_kline_age_seconds or 0, 60)
+        self.assertIn("执行关键个股日K刷新，并检查数据源交易日期。", diagnostics.suggestions)
+        self.assertEqual(diagnostics.freshness.latest_minute_kline_age_seconds, 30)
+        self.assertEqual(diagnostics.freshness.market_freshness["daily_kline"].status, "stale")
+        self.assertEqual(diagnostics.freshness.market_freshness["minute_kline"].status, "fresh")
+
+    def test_diagnostics_does_not_report_standby_scheduler_as_stopped(self) -> None:
+        cache = _Cache(
+            CacheStats(
+                path=":memory:",
+                quote_count=0,
+                quote_history_count=0,
+                kline_count=0,
+                stock_count=0,
+                plate_count=0,
+                provider_count=0,
+            ),
+            providers=[],
+            capability_statuses=[],
+            table_counts={"alert_rule": 1},
+        )
+        scheduler = SimpleNamespace(
+            status=lambda: SchedulerStatus(
+                enabled=True,
+                running=False,
+                standby=True,
+                task_count=0,
+                tasks=[],
+            )
+        )
+
+        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+            diagnostics = build_system_diagnostics(_DataHub(cache, capabilities=[]), scheduler)
+
+        self.assertNotIn("存在本地预警但调度器未运行，建议启动调度器或手动评估。", diagnostics.suggestions)
 
     def test_diagnostics_reports_missing_quote_demo_source_and_calendar_fallback(self) -> None:
+        now = datetime(2026, 5, 13, 10, 30, 0)
         cache = _Cache(
             CacheStats(
                 path="/tmp/ashare-radar-test.sqlite3",
@@ -102,15 +154,17 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         datahub = _DataHub(cache, capabilities=[_capability("demo", realtime_quote=True, reliability_level="演示")])
 
         with patch("app.services.system_diagnostics.calendar_source", return_value="工作日兜底"):
-            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True))
+            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
-        self.assertIn("尚未形成报价缓存。", diagnostics.warnings)
+        self.assertIn("尚未形成报价缓存或市场事件时间，无法判断报价业务新鲜度。", diagnostics.warnings)
+        self.assertIn("尚未形成行业背景缓存。", diagnostics.warnings)
         self.assertIn("演示行情源已启用，当前环境不适合输出真实个股建议。", diagnostics.warnings)
         self.assertIn("交易日历未缓存，当前按普通工作日判断行情新鲜度。", diagnostics.warnings)
-        self.assertIn("打开任意个股或手动执行刷新报价。", diagnostics.suggestions)
+        self.assertIn("刷新报价并检查行情源返回的市场事件时间。", diagnostics.suggestions)
 
-    def test_diagnostics_reports_future_cache_timestamps_as_invalid(self) -> None:
-        future = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    def test_diagnostics_reports_future_market_timestamps_separately_from_fetch_activity(self) -> None:
+        now = datetime(2026, 5, 13, 10, 30, 0)
+        fetched_at = "2026-05-13 10:29:30"
         cache = _Cache(
             CacheStats(
                 path="/tmp/ashare-radar-test.sqlite3",
@@ -118,10 +172,14 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
                 quote_history_count=0,
                 kline_count=1,
                 stock_count=0,
-                plate_count=0,
+                plate_count=1,
                 provider_count=0,
-                latest_quote_at=future,
-                latest_kline_at=future,
+                latest_quote_at=fetched_at,
+                latest_kline_at=fetched_at,
+                latest_quote_fetched_at=fetched_at,
+                latest_daily_kline_fetched_at=fetched_at,
+                latest_quote_timestamp="2026-05-14 10:00:00",
+                latest_daily_kline_date="2026-05-14",
             ),
             providers=[],
             capability_statuses=[],
@@ -130,17 +188,19 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         datahub = _DataHub(cache, capabilities=[_capability("tencent", realtime_quote=True)])
 
         with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
-            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True))
+            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
-        self.assertIsNone(diagnostics.freshness.latest_quote_age_seconds)
-        self.assertIsNone(diagnostics.freshness.latest_kline_age_seconds)
-        self.assertIn("最新报价缓存时间异常。", diagnostics.warnings)
-        self.assertIn("最新日K缓存时间异常。", diagnostics.warnings)
-        self.assertIn("检查系统时间、数据源时间字段或清理异常缓存。", diagnostics.suggestions)
+        self.assertEqual(diagnostics.freshness.latest_quote_age_seconds, 30)
+        self.assertEqual(diagnostics.freshness.latest_kline_age_seconds, 30)
+        self.assertEqual(diagnostics.freshness.fetch_activity["quote"].status, "recent")
+        self.assertEqual(diagnostics.freshness.market_freshness["quote"].status, "future")
+        self.assertEqual(diagnostics.freshness.market_freshness["daily_kline"].status, "future")
+        self.assertIn("报价市场事件时间 2026-05-14 10:00:00 晚于检查时间。", diagnostics.warnings)
+        self.assertIn("日K市场日期 2026-05-14 晚于检查日期。", diagnostics.warnings)
 
-    def test_diagnostics_reports_future_minute_kline_timestamp_as_invalid(self) -> None:
-        now = datetime.now()
-        future = (now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    def test_diagnostics_reports_future_minute_kline_market_timestamp(self) -> None:
+        now = datetime(2026, 5, 13, 10, 30, 0)
+        fetched_at = "2026-05-13 10:29:30"
         cache = _Cache(
             CacheStats(
                 path="/tmp/ashare-radar-test.sqlite3",
@@ -150,12 +210,18 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
                 daily_kline_count=1,
                 minute_kline_count=1,
                 stock_count=0,
-                plate_count=0,
+                plate_count=1,
                 provider_count=0,
-                latest_quote_at=now.strftime("%Y-%m-%d %H:%M:%S"),
-                latest_kline_at=now.strftime("%Y-%m-%d %H:%M:%S"),
-                latest_daily_kline_at=now.strftime("%Y-%m-%d %H:%M:%S"),
-                latest_minute_kline_at=future,
+                latest_quote_at=fetched_at,
+                latest_kline_at=fetched_at,
+                latest_daily_kline_at=fetched_at,
+                latest_minute_kline_at=fetched_at,
+                latest_quote_fetched_at=fetched_at,
+                latest_daily_kline_fetched_at=fetched_at,
+                latest_minute_kline_fetched_at=fetched_at,
+                latest_quote_timestamp="2026-05-13 10:29:00",
+                latest_daily_kline_date="2026-05-12",
+                latest_minute_kline_timestamp="2026-05-14 10:00:00",
             ),
             providers=[],
             capability_statuses=[],
@@ -167,14 +233,16 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         )
 
         with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
-            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True))
+            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
-        self.assertIsNone(diagnostics.freshness.latest_minute_kline_age_seconds)
-        self.assertIn("最新分钟K线缓存时间异常。", diagnostics.warnings)
-        self.assertIn("检查系统时间、分钟K线数据源时间字段或清理异常缓存。", diagnostics.suggestions)
+        self.assertEqual(diagnostics.freshness.latest_minute_kline_age_seconds, 30)
+        self.assertEqual(diagnostics.freshness.market_freshness["minute_kline"].status, "future")
+        self.assertIn("分钟K市场事件时间 2026-05-14 10:00:00 晚于检查时间。", diagnostics.warnings)
+        self.assertIn("刷新分钟K线，并检查数据源返回的市场事件时间。", diagnostics.suggestions)
 
     def test_diagnostics_deduplicates_messages_and_sanitizes_dirty_table_counts(self) -> None:
-        future = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime(2026, 5, 13, 10, 30, 0)
+        future = "2026-05-14 10:00:00"
         cache = _Cache(
             CacheStats(
                 path="/tmp/ashare-radar-test.sqlite3",
@@ -182,10 +250,14 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
                 quote_history_count=0,
                 kline_count=1,
                 stock_count=0,
-                plate_count=0,
+                plate_count=1,
                 provider_count=0,
                 latest_quote_at=future,
                 latest_kline_at=future,
+                latest_quote_fetched_at=future,
+                latest_daily_kline_fetched_at=future,
+                latest_quote_timestamp="2026-05-13 10:29:00",
+                latest_daily_kline_date="2026-05-12",
             ),
             providers=[],
             capability_statuses=[],
@@ -204,13 +276,14 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         )
 
         with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
-            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True))
+            diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
-        self.assertEqual(diagnostics.suggestions.count("检查系统时间、数据源时间字段或清理异常缓存。"), 1)
+        self.assertEqual(diagnostics.suggestions.count("检查系统时间、抓取时间字段或清理异常缓存。"), 1)
         self.assertIn("可用实时报价源少于2个，多源一致性校验能力不足。", diagnostics.warnings)
         self.assertEqual(diagnostics.table_counts["quote_history"], 5)
         self.assertNotIn("nan", diagnostics.table_counts)
-        self.assertEqual(diagnostics.storage.runtime_rows, 5)
+        self.assertEqual(diagnostics.storage.cache_rows, 5)
+        self.assertEqual(diagnostics.storage.runtime_rows, 0)
         self.assertEqual(diagnostics.storage.user_rows, 0)
 
     def test_age_seconds_rejects_future_timestamps(self) -> None:
@@ -241,8 +314,26 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             )
 
         self.assertEqual(diagnostics.db_size_bytes, 1024)
-        self.assertEqual(diagnostics.runtime_rows, 16)
-        self.assertEqual(diagnostics.user_rows, 9)
+        self.assertEqual(diagnostics.cache_rows, 12)
+        self.assertEqual(diagnostics.runtime_rows, 7)
+        self.assertEqual(diagnostics.user_rows, 15)
+        self.assertEqual(diagnostics.budget_bytes, 512 * 1024 * 1024)
+        self.assertFalse(diagnostics.over_budget)
+
+    def test_storage_diagnostics_includes_active_wal_and_shm_files(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            path.write_bytes(b"x" * 1024)
+            Path(f"{path}-wal").write_bytes(b"w" * 2048)
+            Path(f"{path}-shm").write_bytes(b"s" * 4096)
+
+            diagnostics = storage_diagnostics(path, {})
+
+        self.assertEqual(diagnostics.db_size_bytes, 1024 + 2048 + 4096)
+        self.assertEqual(
+            diagnostics.usage_pct,
+            round(diagnostics.db_size_bytes / diagnostics.budget_bytes * 100, 2),
+        )
 
     def test_storage_diagnostics_sanitizes_malformed_table_counts(self) -> None:
         diagnostics = storage_diagnostics(
@@ -260,6 +351,24 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
 
         self.assertEqual(diagnostics.runtime_rows, 2)
         self.assertEqual(diagnostics.user_rows, 4)
+
+    def test_storage_diagnostics_reports_configured_budget_pressure(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            path.write_bytes(b"x" * 1024)
+
+            diagnostics = storage_diagnostics(path, {}, budget_mb=0.0005)
+
+        self.assertEqual(diagnostics.budget_bytes, 512 * 1024 * 1024)
+        self.assertFalse(diagnostics.over_budget)
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            path.write_bytes(b"x" * 17 * 1024 * 1024)
+            diagnostics = storage_diagnostics(path, {}, budget_mb=16)
+
+        self.assertTrue(diagnostics.over_budget)
+        self.assertGreater(diagnostics.usage_pct, 100)
 
     def test_capability_label_maps_known_kinds_and_keeps_unknown(self) -> None:
         self.assertEqual(capability_label("minute"), "分钟线")

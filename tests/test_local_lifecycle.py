@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 import math
 import sqlite3
+from threading import Barrier, Event
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -23,6 +26,7 @@ from app.services.research import (
     build_feature_snapshot,
     build_theme_context_report,
 )
+from app.services.scheduler import LocalDataScheduler
 from app.services.stock_insights import build_stock_insight_bundle
 from app.services.workbench_context import WorkbenchContextCache
 from app.config import Settings
@@ -63,28 +67,29 @@ class LocalLifecycleTests(unittest.TestCase):
 
     def test_watchlist_latest_quote_respects_cache_ttl_future_and_dirty_values(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, quote_cache_seconds=60)
+            cache = SQLiteCache(settings=settings)
             quote = _quote()
 
-            with patch("app.repositories.watchlist.get_settings", return_value=Settings(quote_cache_seconds=60)):
-                cache.save_watchlist_item(quote)
-                cache.save_quotes([quote])
-                self.assertEqual(cache.watchlist_item("600519.SH").latest_price, quote.price)
+            cache.save_watchlist_item(quote)
+            cache.save_quotes([quote])
+            self.assertEqual(cache.watchlist_item("600519.SH").latest_price, quote.price)
 
-                stale = (datetime.now() - timedelta(seconds=120)).strftime("%Y-%m-%d %H:%M:%S")
-                with cache._connect() as conn:
-                    conn.execute("UPDATE quote_snapshot SET fetched_at = ?", (stale,))
-                self.assertIsNone(cache.watchlist_item("600519.SH").latest_price)
+            stale = (datetime.now() - timedelta(seconds=120)).strftime("%Y-%m-%d %H:%M:%S")
+            with cache._connect() as conn:
+                conn.execute("UPDATE quote_snapshot SET fetched_at = ?", (stale,))
+            self.assertIsNone(cache.watchlist_item("600519.SH").latest_price)
 
-                future = (datetime.now() + timedelta(seconds=120)).strftime("%Y-%m-%d %H:%M:%S")
-                with cache._connect() as conn:
-                    conn.execute("UPDATE quote_snapshot SET fetched_at = ?", (future,))
-                self.assertIsNone(cache.watchlist_item("600519.SH").latest_price)
+            future = (datetime.now() + timedelta(seconds=120)).strftime("%Y-%m-%d %H:%M:%S")
+            with cache._connect() as conn:
+                conn.execute("UPDATE quote_snapshot SET fetched_at = ?", (future,))
+            self.assertIsNone(cache.watchlist_item("600519.SH").latest_price)
 
-                current = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                with cache._connect() as conn:
-                    conn.execute("UPDATE quote_snapshot SET fetched_at = ?, price = ?", (current, math.inf))
-                dirty = cache.watchlist_item("600519.SH")
+            current = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with cache._connect() as conn:
+                conn.execute("UPDATE quote_snapshot SET fetched_at = ?, price = ?", (current, math.inf))
+            dirty = cache.watchlist_item("600519.SH")
 
         self.assertIsNotNone(dirty)
         assert dirty is not None
@@ -134,6 +139,37 @@ class LocalLifecycleTests(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.name, "价格上穿 1400")
             self.assertEqual(updated.threshold, 1400.0)
+
+    def test_alert_rule_semantic_update_resets_stale_evaluation_state(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            created = cache.create_alert_rule(
+                _quote(),
+                AlertRuleInput(symbol="600519", condition_type="price_above", threshold=1400.0),
+            )
+            with sqlite3.connect(cache.path) as conn:
+                conn.execute(
+                    """
+                    UPDATE alert_rule
+                    SET last_checked_at = '2026-05-13 10:00:00',
+                        last_triggered_at = '2026-05-13 10:00:00',
+                        last_state = '触发'
+                    WHERE id = ?
+                    """,
+                    (created.id,),
+                )
+
+            updated = cache.update_alert_rule(
+                created.id,
+                AlertRuleUpdate(condition_type="price_below", threshold=1200.0),
+            )
+
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated.condition_type, "price_below")
+            self.assertEqual(updated.last_state, "等待")
+            self.assertIsNone(updated.last_checked_at)
+            self.assertIsNone(updated.last_triggered_at)
 
     def test_alert_rule_create_blank_name_uses_default_name(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -522,7 +558,9 @@ class LocalLifecycleTests(unittest.TestCase):
 
     def test_runtime_cleanup_handles_minute_kline_table_without_id(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, max_minute_kline_rows=3)
+            cache = SQLiteCache(settings=settings)
             rows = [
                 MinuteKline(
                     timestamp=f"2026-05-15 10:{index:02d}:00",
@@ -538,8 +576,7 @@ class LocalLifecycleTests(unittest.TestCase):
             ]
             cache.save_minute_klines("600519.SH", "5m", rows, "测试分钟线")
             cache.save_minute_klines("000001.SZ", "5m", rows[:1], "测试分钟线")
-            with patch("app.repositories.maintenance.get_settings", return_value=Settings(max_minute_kline_rows=3)):
-                removed = cache.cleanup_runtime_rows()
+            removed = cache.cleanup_runtime_rows()
             with cache._connect() as conn:
                 counts_by_symbol = {
                     row["symbol"]: row["count"]
@@ -558,7 +595,9 @@ class LocalLifecycleTests(unittest.TestCase):
 
     def test_runtime_cleanup_keeps_quote_history_for_cold_symbols(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, max_quote_history_rows=2)
+            cache = SQLiteCache(settings=settings)
             for day in range(10, 14):
                 price = 1300 + day
                 cache.save_quotes([_quote(timestamp=f"2026-05-{day:02d} 10:00:00", price=price, high=price + 5)])
@@ -579,8 +618,7 @@ class LocalLifecycleTests(unittest.TestCase):
                 ]
             )
 
-            with patch("app.repositories.maintenance.get_settings", return_value=Settings(max_quote_history_rows=2)):
-                removed = cache.cleanup_runtime_rows()
+            removed = cache.cleanup_runtime_rows()
             with cache._connect() as conn:
                 counts_by_symbol = {
                     row["symbol"]: row["count"]
@@ -599,7 +637,9 @@ class LocalLifecycleTests(unittest.TestCase):
 
     def test_runtime_cleanup_trims_cache_and_alert_events(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, max_cache_event_rows=2, max_alert_event_rows=2)
+            cache = SQLiteCache(settings=settings)
             quote = _quote()
             rule = cache.create_alert_rule(
                 quote,
@@ -617,17 +657,95 @@ class LocalLifecycleTests(unittest.TestCase):
                     force_event=True,
                 )
 
-            with patch(
-                "app.repositories.maintenance.get_settings",
-                return_value=Settings(max_cache_event_rows=2, max_alert_event_rows=2),
-            ):
-                removed = cache.cleanup_runtime_rows()
+            removed = cache.cleanup_runtime_rows()
             counts = cache.table_counts()
 
         self.assertEqual(removed["cache_event"], 2)
         self.assertEqual(removed["alert_event"], 2)
         self.assertEqual(counts["cache_event"], 2)
         self.assertEqual(counts["alert_event"], 2)
+
+    def test_alert_event_cleanup_keeps_latest_insertions_for_id_cursor(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, max_alert_event_rows=2)
+            cache = SQLiteCache(settings=settings)
+            quote = _quote()
+            rule = cache.create_alert_rule(
+                quote,
+                AlertRuleInput(symbol="600519", condition_type="price_above", threshold=1200.0),
+            )
+            events = [
+                cache.update_alert_rule_state(
+                    rule,
+                    checked_at=checked_at,
+                    state="触发",
+                    triggered=True,
+                    message=f"测试触发 {index}",
+                    quote=quote,
+                    force_event=True,
+                )
+                for index, checked_at in enumerate(
+                    (
+                        "2026-05-13 10:00:00",
+                        "2026-05-13 10:01:00",
+                        "2026-05-13 09:00:00",
+                    )
+                )
+            ]
+            assert all(event is not None for event in events)
+            event_ids = [event.id for event in events if event is not None]
+
+            cache.cleanup_runtime_rows()
+            remaining = cache.alert_events(limit=10)
+            after_second = cache.alert_events(after_id=event_ids[1], limit=10)
+
+        self.assertEqual([item.id for item in remaining], [event_ids[2], event_ids[1]])
+        self.assertEqual([item.id for item in after_second], [event_ids[2]])
+
+    def test_scheduler_cleanup_preserves_user_history(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(
+                cache_path=path,
+                max_cache_event_rows=1,
+                max_alert_event_rows=1,
+                max_advice_history_rows=1,
+            )
+            cache = SQLiteCache(settings=settings)
+            quote = _quote()
+            rule = cache.create_alert_rule(
+                quote,
+                AlertRuleInput(symbol="600519", condition_type="price_above", threshold=1200.0),
+            )
+            for index in range(3):
+                cache.log_event("quote", f"regenerable event {index}")
+                cache.update_alert_rule_state(
+                    rule,
+                    checked_at=f"2026-05-13 10:0{index}:00",
+                    state="触发",
+                    triggered=True,
+                    message=f"用户预警 {index}",
+                    quote=quote,
+                    force_event=True,
+                )
+            analysis = _analysis_for_advice()
+            for index in range(3):
+                cache.save_advice_snapshot(
+                    analysis.model_copy(update={"support": analysis.support + index * 0.01})
+                )
+            before = cache.table_counts()
+            scheduler = LocalDataScheduler(SimpleNamespace(settings=settings, cache=cache))
+
+            asyncio.run(scheduler._check_data_health())
+            after = cache.table_counts()
+
+        self.assertEqual(before["cache_event"], 3)
+        self.assertEqual(before["alert_event"], 3)
+        self.assertEqual(before["advice_history"], 3)
+        self.assertEqual(after["cache_event"], 1)
+        self.assertEqual(after["alert_event"], before["alert_event"])
+        self.assertEqual(after["advice_history"], before["advice_history"])
 
     def test_provider_runtime_updates_preserve_manual_enabled_state(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -671,7 +789,9 @@ class LocalLifecycleTests(unittest.TestCase):
 
     def test_monitor_event_cleanup_keeps_recent_last_seen_event(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, max_monitor_event_rows=1)
+            cache = SQLiteCache(settings=settings)
             cache.save_monitor_event("info", "quote", "较早创建但最近重复")
             cache.save_monitor_event("info", "kline", "较晚创建但不活跃")
             with cache._connect() as conn:
@@ -683,8 +803,7 @@ class LocalLifecycleTests(unittest.TestCase):
                     "UPDATE monitor_event SET created_at = ?, last_seen_at = ? WHERE category = ?",
                     ("2026-05-13 10:00:00", "2026-05-13 10:00:00", "kline"),
                 )
-            with patch("app.repositories.maintenance.get_settings", return_value=Settings(max_monitor_event_rows=1)):
-                cache.cleanup_runtime_rows()
+            cache.cleanup_runtime_rows()
             events = cache.recent_monitor_events(limit=10)
 
         self.assertEqual(len(events), 1)
@@ -732,6 +851,33 @@ class LocalLifecycleTests(unittest.TestCase):
                 self.assertEqual(cache.recent_task_runs(limit=limit), [])
                 self.assertEqual(cache.recent_monitor_events(limit=limit), [])
                 self.assertEqual(cache.advice_history("600519", limit=limit), [])
+
+    def test_cancelled_task_run_rejects_late_success_or_failure_updates(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            run_id = cache.start_task_run("race-test")
+
+            cache.finish_task_run(run_id, "cancelled", "cancelled first")
+            cache.finish_task_run(run_id, "success", "late success")
+            cache.finish_task_run(run_id, "failed", "late failure")
+
+            run = cache.recent_task_runs(limit=1)[0]
+
+        self.assertEqual(run.status, "cancelled")
+        self.assertEqual(run.message, "cancelled first")
+
+    def test_cancellation_can_override_success_persisted_during_cancellation_race(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            run_id = cache.start_task_run("race-test")
+
+            cache.finish_task_run(run_id, "success", "handler completed")
+            cache.finish_task_run(run_id, "cancelled", "caller cancelled")
+
+            run = cache.recent_task_runs(limit=1)[0]
+
+        self.assertEqual(run.status, "cancelled")
+        self.assertEqual(run.message, "caller cancelled")
 
     def test_advice_history_sanitizes_dirty_legacy_numeric_rows(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -803,6 +949,477 @@ class LocalLifecycleTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0].repeat_count, 1)
 
+    def test_advice_history_uses_exact_conclusion_identity_and_keeps_a_b_a(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            base = _analysis_for_advice()
+            confidence = base.action_advice.confidence + (1 if base.action_advice.confidence < 100 else -1)
+            trend_score = base.trend_score + (1 if base.trend_score < 100 else -1)
+            quality_score = base.data_quality.score + (1 if base.data_quality.score < 100 else -1)
+            variants = (
+                base.model_copy(
+                    update={"action_advice": base.action_advice.model_copy(update={"action": f"{base.action_advice.action}A"})}
+                ),
+                base.model_copy(
+                    update={"action_advice": base.action_advice.model_copy(update={"confidence": confidence})}
+                ),
+                base.model_copy(update={"trend_score": trend_score}),
+                base.model_copy(update={"trend_label": f"{base.trend_label}A"}),
+                base.model_copy(update={"risk_level": f"{base.risk_level}A"}),
+                base.model_copy(update={"support": base.support + 0.01}),
+                base.model_copy(update={"resistance": base.resistance + 0.01}),
+                base.model_copy(
+                    update={"data_quality": base.data_quality.model_copy(update={"score": quality_score})}
+                ),
+                base.model_copy(
+                    update={"data_quality": base.data_quality.model_copy(update={"level": f"{base.data_quality.level}A"})}
+                ),
+                base.model_copy(
+                    update={"data_quality": base.data_quality.model_copy(update={"source": "身份变化测试源"})}
+                ),
+            )
+
+            initial = cache.save_advice_snapshot(base)
+            saved_ids = [initial.id]
+            for variant in variants:
+                changed = cache.save_advice_snapshot(variant)
+                restored = cache.save_advice_snapshot(base)
+                self.assertNotEqual(changed.id, restored.id)
+                saved_ids.extend((changed.id, restored.id))
+            rows = cache.advice_history("600519.SH", limit=100)
+
+        self.assertEqual(len(rows), 1 + 2 * len(variants))
+        self.assertEqual(len(set(saved_ids)), len(saved_ids))
+        self.assertTrue(all(row.repeat_count == 1 for row in rows))
+
+    def test_advice_identity_uses_price_cents_but_not_quote_or_market_time(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            base = _analysis_for_advice()
+            first = cache.save_advice_snapshot(base)
+            same_cent = base.model_copy(
+                update={
+                    "support": base.support + 0.004,
+                    "quote": base.quote.model_copy(
+                        update={
+                            "price": base.quote.price + 1,
+                            "change_pct": base.quote.change_pct + 1,
+                            "timestamp": "2026-07-15 14:59:59",
+                        }
+                    ),
+                }
+            )
+            merged = cache.save_advice_snapshot(same_cent)
+            changed_cent = cache.save_advice_snapshot(base.model_copy(update={"support": base.support + 0.01}))
+
+            rows = cache.advice_history("600519.SH", limit=10)
+
+        self.assertEqual(merged.id, first.id)
+        self.assertEqual(changed_cent.id, first.id + 1)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1].repeat_count, 2)
+
+    def test_new_advice_snapshot_writes_contract_provenance_and_never_merges_legacy(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            analysis = _analysis_for_advice()
+            first = cache.save_advice_snapshot(analysis)
+            with cache._connect() as conn:
+                new_contract = conn.execute(
+                    """
+                    SELECT snapshot_contract_version, conclusion_basis, rule_version,
+                           model_version, market_time, data_quality_source
+                    FROM advice_history WHERE id = ?
+                    """,
+                    (first.id,),
+                ).fetchone()
+                conn.execute(
+                    """
+                    UPDATE advice_history
+                    SET snapshot_contract_version = 'legacy',
+                        conclusion_basis = 'legacy_unknown',
+                        rule_version = 'unknown', model_version = 'unknown',
+                        market_time = NULL, data_quality_source = NULL
+                    WHERE id = ?
+                    """,
+                    (first.id,),
+                )
+
+            second = cache.save_advice_snapshot(analysis)
+            timeline = cache.advice_timeline("600519.SH", limit=2)
+
+        self.assertEqual(
+            tuple(new_contract),
+            (
+                "conclusion.v1",
+                "analysis_action_advice",
+                "rules.v2",
+                "none",
+                analysis.quote.timestamp,
+                analysis.data_quality.source,
+            ),
+        )
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(len(timeline), 2)
+        self.assertEqual(timeline[0].comparison_status, "legacy")
+        self.assertEqual(timeline[0].previous_id, first.id)
+
+    def test_watchlist_unread_count_increments_only_for_comparable_conclusion_change(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            analysis = _analysis_for_advice()
+            cache.save_watchlist_item(analysis.quote)
+
+            cache.save_advice_snapshot(analysis)
+            after_insert = cache.watchlist_item("600519.SH")
+            cache.save_advice_snapshot(analysis)
+            after_merge = cache.watchlist_item("600519.SH")
+            changed_confidence = analysis.action_advice.confidence + (
+                1 if analysis.action_advice.confidence < 100 else -1
+            )
+            cache.save_advice_snapshot(
+                analysis.model_copy(
+                    update={
+                        "action_advice": analysis.action_advice.model_copy(
+                            update={"confidence": changed_confidence}
+                        )
+                    }
+                )
+            )
+            after_change = cache.watchlist_item("600519.SH")
+
+        self.assertEqual(after_insert.unread_change_count, 0)
+        self.assertEqual(after_merge.unread_change_count, 0)
+        self.assertEqual(after_change.unread_change_count, 1)
+
+    def test_watchlist_unread_count_ignores_identical_insert_and_incomparable_version(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, advice_history_dedupe_seconds=0)
+            cache = SQLiteCache(settings=settings)
+            analysis = _analysis_for_advice()
+            cache.save_watchlist_item(analysis.quote)
+
+            first = cache.save_advice_snapshot(analysis)
+            duplicate = cache.save_advice_snapshot(analysis)
+            with cache._connect() as conn:
+                conn.execute(
+                    "UPDATE advice_history SET rule_version = 'rules.incompatible' WHERE id = ?",
+                    (duplicate.id,),
+                )
+            changed_confidence = analysis.action_advice.confidence + (
+                1 if analysis.action_advice.confidence < 100 else -1
+            )
+            version_changed = cache.save_advice_snapshot(
+                analysis.model_copy(
+                    update={
+                        "action_advice": analysis.action_advice.model_copy(
+                            update={"confidence": changed_confidence}
+                        )
+                    }
+                )
+            )
+            item = cache.watchlist_item(analysis.quote.code)
+
+        self.assertNotEqual(first.id, duplicate.id)
+        self.assertNotEqual(duplicate.id, version_changed.id)
+        self.assertIsNotNone(item)
+        self.assertEqual(item.unread_change_count, 0)
+
+    def test_mark_viewed_watermark_keeps_committed_later_changes_and_is_idempotent(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, advice_history_dedupe_seconds=0)
+            cache = SQLiteCache(settings=settings)
+            analysis = _analysis_for_advice()
+            cache.save_watchlist_item(analysis.quote)
+            baseline = cache.save_advice_snapshot(analysis)
+            step = -1 if analysis.action_advice.confidence >= 99 else 1
+            first_change = cache.save_advice_snapshot(
+                analysis.model_copy(
+                    update={
+                        "action_advice": analysis.action_advice.model_copy(
+                            update={"confidence": analysis.action_advice.confidence + step}
+                        )
+                    }
+                )
+            )
+            second_change = cache.save_advice_snapshot(
+                analysis.model_copy(
+                    update={
+                        "action_advice": analysis.action_advice.model_copy(
+                            update={"confidence": analysis.action_advice.confidence + (2 * step)}
+                        )
+                    }
+                )
+            )
+
+            marked = cache.mark_watchlist_viewed(
+                analysis.quote.code,
+                viewed_through_advice_id=first_change.id,
+            )
+            marked_again = cache.mark_watchlist_viewed(
+                analysis.quote.code,
+                viewed_through_advice_id=first_change.id,
+            )
+            fully_marked = cache.mark_watchlist_viewed(
+                analysis.quote.code,
+                viewed_through_advice_id=second_change.id,
+            )
+
+        self.assertLess(baseline.id, first_change.id)
+        self.assertLess(first_change.id, second_change.id)
+        self.assertIsNotNone(marked)
+        self.assertEqual(marked.unread_change_count, 1)
+        self.assertIsNotNone(marked_again)
+        self.assertEqual(marked_again.unread_change_count, 1)
+        self.assertIsNotNone(fully_marked)
+        self.assertEqual(fully_marked.unread_change_count, 0)
+
+    def test_mark_viewed_rejects_missing_or_foreign_watermark_without_clearing(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, advice_history_dedupe_seconds=0)
+            cache = SQLiteCache(settings=settings)
+            analysis = _analysis_for_advice()
+            cache.save_watchlist_item(analysis.quote)
+            cache.save_advice_snapshot(analysis)
+            changed_confidence = analysis.action_advice.confidence + (
+                1 if analysis.action_advice.confidence < 100 else -1
+            )
+            cache.save_advice_snapshot(
+                analysis.model_copy(
+                    update={
+                        "action_advice": analysis.action_advice.model_copy(
+                            update={"confidence": changed_confidence}
+                        )
+                    }
+                )
+            )
+            foreign = analysis.model_copy(
+                update={
+                    "quote": analysis.quote.model_copy(
+                        update={"code": "000001", "market": "SZ", "name": "平安银行"}
+                    )
+                }
+            )
+            foreign_advice = cache.save_advice_snapshot(foreign)
+
+            with self.assertRaisesRegex(ValueError, "不存在或不属于"):
+                cache.mark_watchlist_viewed(
+                    analysis.quote.code,
+                    viewed_through_advice_id=foreign_advice.id,
+                )
+            with self.assertRaisesRegex(ValueError, "不存在或不属于"):
+                cache.mark_watchlist_viewed(
+                    analysis.quote.code,
+                    viewed_through_advice_id=foreign_advice.id + 10_000,
+                )
+            item = cache.watchlist_item(analysis.quote.code)
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item.unread_change_count, 1)
+        self.assertIsNone(item.last_viewed_at)
+
+    def test_advice_snapshot_and_unread_increment_roll_back_together(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            analysis = _analysis_for_advice()
+            cache.save_watchlist_item(analysis.quote)
+            baseline = cache.save_advice_snapshot(analysis)
+            cache.increment_watchlist_unread_count(analysis.quote.code, 2)
+            changed_confidence = analysis.action_advice.confidence + (
+                1 if analysis.action_advice.confidence < 100 else -1
+            )
+            changed = analysis.model_copy(
+                update={
+                    "action_advice": analysis.action_advice.model_copy(
+                        update={"confidence": changed_confidence}
+                    )
+                }
+            )
+
+            from app.repositories.watchlist import increment_watchlist_unread_change_count
+
+            def increment_then_fail(*args, **kwargs):
+                increment_watchlist_unread_change_count(*args, **kwargs)
+                raise sqlite3.DatabaseError("watchlist readonly")
+
+            with (
+                patch(
+                    "app.repositories.advice.increment_watchlist_unread_change_count",
+                    side_effect=increment_then_fail,
+                ),
+                self.assertRaisesRegex(sqlite3.DatabaseError, "watchlist readonly"),
+            ):
+                cache.save_advice_snapshot(changed)
+            rows = cache.advice_history("600519.SH", limit=5)
+            watchlist_item = cache.watchlist_item("600519.SH")
+
+        self.assertEqual([row.id for row in rows], [baseline.id])
+        self.assertIsNotNone(watchlist_item)
+        self.assertEqual(watchlist_item.unread_change_count, 2)
+
+    def test_advice_snapshot_insert_succeeds_without_watchlist_row(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+
+            saved = cache.save_advice_snapshot(_analysis_for_advice())
+
+            self.assertEqual([row.id for row in cache.advice_history("600519.SH", limit=5)], [saved.id])
+            self.assertIsNone(cache.watchlist_item("600519.SH"))
+
+    def test_advice_snapshot_increment_normalizes_dirty_unread_count(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            analysis = _analysis_for_advice()
+            cache.save_watchlist_item(analysis.quote)
+            cache.save_advice_snapshot(analysis)
+            with cache._connect() as conn:
+                conn.execute(
+                    "UPDATE watchlist SET unread_change_count = ? WHERE symbol = ?",
+                    ("dirty", "600519.SH"),
+                )
+
+            changed_confidence = analysis.action_advice.confidence + (
+                1 if analysis.action_advice.confidence < 100 else -1
+            )
+            cache.save_advice_snapshot(
+                analysis.model_copy(
+                    update={
+                        "action_advice": analysis.action_advice.model_copy(
+                            update={"confidence": changed_confidence}
+                        )
+                    }
+                )
+            )
+
+            watchlist_item = cache.watchlist_item("600519.SH")
+            self.assertIsNotNone(watchlist_item)
+            self.assertEqual(watchlist_item.unread_change_count, 1)
+
+    def test_mark_viewed_watermark_does_not_clear_concurrent_later_change(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, advice_history_dedupe_seconds=0)
+            saving_cache = SQLiteCache(settings=settings)
+            viewing_cache = SQLiteCache(settings=settings)
+            analysis = _analysis_for_advice()
+            saving_cache.save_watchlist_item(analysis.quote)
+            saving_cache.save_advice_snapshot(analysis)
+            step = -1 if analysis.action_advice.confidence >= 99 else 1
+            first_change = analysis.model_copy(
+                update={
+                    "action_advice": analysis.action_advice.model_copy(
+                        update={"confidence": analysis.action_advice.confidence + step}
+                    )
+                }
+            )
+            displayed = saving_cache.save_advice_snapshot(first_change)
+            second_change = analysis.model_copy(
+                update={
+                    "action_advice": analysis.action_advice.model_copy(
+                        update={"confidence": analysis.action_advice.confidence + (2 * step)}
+                    )
+                }
+            )
+            watermark_entered = Event()
+            allow_mark = Event()
+
+            from app.repositories.watchlist import _unread_change_count_after_watermark
+
+            def paused_watermark_count(*args, **kwargs):
+                remaining = _unread_change_count_after_watermark(*args, **kwargs)
+                watermark_entered.set()
+                if not allow_mark.wait(timeout=5):
+                    raise TimeoutError("test did not release mark-viewed transaction")
+                return remaining
+
+            def mark_viewed():
+                return viewing_cache.mark_watchlist_viewed(
+                    "600519.SH",
+                    viewed_through_advice_id=displayed.id,
+                )
+
+            with patch(
+                "app.repositories.watchlist._unread_change_count_after_watermark",
+                side_effect=paused_watermark_count,
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    mark_future = executor.submit(mark_viewed)
+                    self.assertTrue(watermark_entered.wait(timeout=2))
+                    save_future = executor.submit(saving_cache.save_advice_snapshot, second_change)
+                    try:
+                        with self.assertRaises(FutureTimeoutError):
+                            save_future.result(timeout=0.1)
+                    finally:
+                        allow_mark.set()
+                    marked = mark_future.result(timeout=2)
+                    saved = save_future.result(timeout=2)
+
+            final_item = saving_cache.watchlist_item("600519.SH")
+
+        self.assertEqual(saved.symbol, "600519.SH")
+        self.assertIsNotNone(marked)
+        self.assertIsNotNone(final_item)
+        self.assertEqual(final_item.unread_change_count, 1)
+
+    def test_advice_timeline_reads_one_extra_baseline_row(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            with patch.object(cache.advice_repo, "timeline_items", return_value=[]) as load:
+                self.assertEqual(cache.advice_timeline("600519.SH", limit=8), [])
+
+        load.assert_called_once_with("600519.SH", limit=9)
+
+    def test_advice_history_respects_injected_dedupe_settings(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = Settings(
+                cache_path=Path(tmpdir) / "cache.sqlite3",
+                advice_history_dedupe_seconds=0,
+            )
+            cache = SQLiteCache(settings=settings)
+
+            first = cache.save_advice_snapshot(_analysis_for_advice())
+            second = cache.save_advice_snapshot(_analysis_for_advice())
+            rows = cache.advice_history("600519.SH", limit=5)
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row.repeat_count == 1 for row in rows))
+
+    def test_advice_history_deduplicates_atomically_across_cache_instances(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, advice_history_dedupe_seconds=600)
+            first_cache = SQLiteCache(settings=settings)
+            second_cache = SQLiteCache(settings=settings)
+            analysis = _analysis_for_advice()
+            first_cache.save_watchlist_item(analysis.quote)
+            saved_ids: list[int] = []
+
+            def save_after_barrier(cache: SQLiteCache, barrier: Barrier) -> int:
+                barrier.wait()
+                return cache.save_advice_snapshot(analysis).id
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                for _ in range(5):
+                    barrier = Barrier(2)
+                    futures = (
+                        executor.submit(save_after_barrier, first_cache, barrier),
+                        executor.submit(save_after_barrier, second_cache, barrier),
+                    )
+                    saved_ids.extend(future.result() for future in futures)
+
+            rows = first_cache.advice_history("600519.SH", limit=5)
+            watchlist_item = first_cache.watchlist_item("600519.SH")
+
+        self.assertEqual(len(set(saved_ids)), 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].repeat_count, 10)
+        self.assertIsNotNone(watchlist_item)
+        self.assertEqual(watchlist_item.unread_change_count, 0)
+
 class ThemeContextTests(unittest.TestCase):
     def test_compat_schema_skips_missing_tables_and_creates_migration_table(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -869,7 +1486,9 @@ class ThemeContextTests(unittest.TestCase):
 
     def test_stock_concept_cache_roundtrip_and_cleanup(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path, max_stock_concept_rows=2)
+            cache = SQLiteCache(settings=settings)
             cache.save_stock_concepts(
                 "600519.SH",
                 [
@@ -921,8 +1540,7 @@ class ThemeContextTests(unittest.TestCase):
                 ],
             )
             rows = cache.get_stock_concepts("600519", max_age_seconds=60 * 60 * 24, limit=5)
-            with patch("app.repositories.maintenance.get_settings", return_value=Settings(max_stock_concept_rows=2)):
-                removed = cache.cleanup_runtime_rows()
+            removed = cache.cleanup_runtime_rows()
             with cache._connect() as conn:
                 counts_by_symbol = {
                     row["symbol"]: row["count"]

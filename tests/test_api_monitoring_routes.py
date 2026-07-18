@@ -1,12 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 from app.api.deps import get_datahub, get_scheduler
 from app.api.routes import monitoring
+
+
+def test_system_diagnostics_runs_builder_off_event_loop_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    builder_thread_id = None
+    expected = object()
+
+    def build(_datahub, _scheduler):
+        nonlocal builder_thread_id
+        builder_thread_id = threading.get_ident()
+        return expected
+
+    monkeypatch.setattr(monitoring, "build_system_diagnostics", build)
+
+    async def invoke() -> tuple[object, int]:
+        event_loop_thread_id = threading.get_ident()
+        result = await monitoring.system_diagnostics(_DataHubStub(cache=_EmptyCache()), _SchedulerStub())
+        return result, event_loop_thread_id
+
+    result, event_loop_thread_id = asyncio.run(invoke())
+
+    assert result is expected
+    assert builder_thread_id is not None
+    assert builder_thread_id != event_loop_thread_id
 
 
 def test_task_status_route_maps_runtime_errors_to_api_detail() -> None:

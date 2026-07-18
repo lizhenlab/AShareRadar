@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from app.models.schemas import MinuteKline, MinuteSupportResistance
+from app.models.schemas import MinuteAnalysisReport, MinuteKline, MinuteSupportResistance
+from app.services.datahub_cache import _normalize_minute_interval
 from app.services.minute_analysis import (
     MINUTE_WARNING_RULES,
     MOMENTUM_RULES,
@@ -14,6 +15,12 @@ from app.services.minute_analysis import (
     _t_plan_zones,
     build_minute_analysis_report,
 )
+
+
+def test_datahub_supports_documented_minute_intervals() -> None:
+    supported = ["1m", "5m", "15m", "30m", "60m"]
+
+    assert [_normalize_minute_interval(interval) for interval in supported] == supported
 
 
 def test_minute_t_plan_defensive_rule_wins_on_volume_selloff() -> None:
@@ -103,7 +110,13 @@ def test_unavailable_report_defaults_blank_interval_to_5m() -> None:
     report = build_unavailable_minute_analysis_report("600519.SH", interval="", reason="")
 
     assert report.interval == "5m"
-    assert report.t_plan.style == "数据不足"
+    assert report.klines == []
+    assert report.availability == "unavailable"
+    assert report.reason_code == "provider_failure"
+    assert report.t_plan.style == "数据不可用"
+    assert report.t_plan.low_zone == "不可用"
+    assert report.t_plan.high_zone == "不可用"
+    assert report.t_plan.confidence == 0
 
 
 def test_t_plan_zones_fall_back_to_recent_intraday_extremes() -> None:
@@ -135,11 +148,11 @@ def test_t_plan_zones_wait_when_support_and_resistance_are_inverted() -> None:
 def test_minute_t_plan_is_conservative_without_price_or_sample() -> None:
     plan = _minute_t_plan([], 0, [], [], "盘中震荡", "量能待确认", 0)
 
-    assert plan.low_zone == "待确认"
-    assert plan.high_zone == "待确认"
-    assert plan.suitability == "不适合主动做T"
-    assert plan.style == "数据不足"
-    assert plan.confidence == 20
+    assert plan.low_zone == "不可用"
+    assert plan.high_zone == "不可用"
+    assert plan.suitability == "暂停做T判断"
+    assert plan.style == "数据不可用"
+    assert plan.confidence == 0
     assert "暂不能形成做T参考" in plan.summary
 
 
@@ -165,7 +178,12 @@ def test_volume_pulse_requires_recent_volume_and_labels_direction() -> None:
     assert _volume_pulse(_rows(closes=[101, 100.9, 100.8, 100.7, 100.6, 100.2, 99.8, 99.5], volumes=[100] * 5 + [250, 260, 270])) == "放量回落"
     assert _volume_pulse(_rows(volumes=[100] * 5 + [40, 45, 42])) == "明显缩量"
     assert _volume_pulse(_rows(volumes=[100] * 5 + [0, 0, 0])) == "量能待确认"
-    assert _volume_pulse(_rows(closes=[100, 100.1, 100.2, 100.1, 100.2, 100.3, 100.8, 101.1], volumes=[100] * 5 + [float("inf"), 260, 270])) == "量能待确认"
+    dirty_rows = _rows(
+        closes=[100, 100.1, 100.2, 100.1, 100.2, 100.3, 100.8, 101.1],
+        volumes=[100] * 5 + [250, 260, 270],
+    )
+    dirty_rows[5] = dirty_rows[5].model_copy(update={"volume": float("inf")})
+    assert _volume_pulse(dirty_rows) == "量能待确认"
 
 
 def test_momentum_label_uses_ordered_thresholds() -> None:
@@ -194,8 +212,9 @@ def test_minute_levels_keep_near_levels_closer_than_defensive_levels() -> None:
 def test_minute_levels_ignore_nonfinite_or_nonpositive_price_candidates() -> None:
     rows = _rows(
         lows=[0, 0, 0, 0, 0, 99.1, 99.2, 99.3],
-        highs=[float("inf"), float("inf"), float("inf"), float("inf"), float("inf"), 100.5, 100.6, 100.7],
+        highs=[100.4, 100.4, 100.4, 100.4, 100.4, 100.5, 100.6, 100.7],
     )
+    rows[:5] = [row.model_copy(update={"high": float("inf")}) for row in rows[:5]]
 
     supports = _minute_levels(rows, 100, "support")
     resistances = _minute_levels(rows, 100, "resistance")
@@ -207,14 +226,21 @@ def test_minute_levels_ignore_nonfinite_or_nonpositive_price_candidates() -> Non
 
 
 def test_minute_report_filters_invalid_rows_before_short_sample_gate() -> None:
-    valid_rows = _rows()[:6]
+    valid_rows = _rows()[:7]
     invalid_latest = valid_rows[-1].model_copy(update={"close": float("inf"), "high": float("inf")})
 
     report = build_minute_analysis_report("600519.SH", valid_rows + [invalid_latest])
 
     assert report.sample_count == len(valid_rows)
+    assert report.klines == valid_rows
     assert report.latest_price == valid_rows[-1].close
-    assert "有效分钟K线不足" in report.summary
+    assert report.availability == "unavailable"
+    assert report.reason_code == "insufficient_valid_samples"
+    assert "过滤无效数据后" in report.summary
+    assert report.supports == []
+    assert report.resistances == []
+    assert report.t_plan.low_zone == "不可用"
+    assert report.t_plan.high_zone == "不可用"
 
 
 def test_minute_report_filters_inconsistent_minute_rows_before_analysis() -> None:
@@ -237,6 +263,7 @@ def test_minute_report_filters_inconsistent_minute_rows_before_analysis() -> Non
 
     assert report.interval == "5m"
     assert report.sample_count == len(valid_rows)
+    assert report.klines == valid_rows
     assert report.latest_price == valid_rows[-1].close
 
 
@@ -255,7 +282,276 @@ def test_minute_report_uses_shared_minute_kline_sanity_filter() -> None:
     report = build_minute_analysis_report("600519.SH", invalid_rows + valid_rows)
 
     assert report.sample_count == len(valid_rows)
+    assert report.klines == valid_rows
     assert report.latest_price == valid_rows[-1].close
+
+
+def test_minute_report_returns_sorted_deduped_analysis_rows_with_provenance() -> None:
+    rows = _rows()[:9]
+    revised = rows[3].model_copy(
+        update={
+            "source": "修订分钟线",
+            "from_cache": True,
+            "fallback_used": True,
+        }
+    )
+    invalid = rows[4].model_copy(update={"low": rows[4].high + 1})
+
+    report = build_minute_analysis_report("600519.SH", [*reversed(rows), revised, invalid])
+
+    assert report.sample_count == len(report.klines) == 9
+    assert [row.timestamp for row in report.klines] == sorted({row.timestamp for row in rows})
+    assert report.latest_price == rows[-1].close
+    assert report.availability == "degraded"
+    assert report.klines[3].source == "修订分钟线"
+    assert report.klines[3].interval == "5m"
+    assert report.klines[3].from_cache is True
+    assert report.klines[3].fallback_used is True
+    assert invalid not in report.klines
+
+
+def test_minute_report_filters_blank_and_unparseable_timestamps() -> None:
+    valid_rows = _rows()[:7]
+    invalid_timestamps = ["", "   ", "not-a-timestamp"]
+    invalid_rows = [
+        valid_rows[index].model_copy(update={"timestamp": timestamp})
+        for index, timestamp in enumerate(invalid_timestamps)
+    ]
+
+    report = build_minute_analysis_report("600519.SH", valid_rows + invalid_rows)
+
+    assert report.sample_count == len(report.klines) == 7
+    assert report.klines == valid_rows
+    assert report.availability == "unavailable"
+    assert report.reason_code == "insufficient_valid_samples"
+
+
+def test_minute_report_sorts_supported_timestamp_formats_by_actual_time() -> None:
+    rows = _rows()[:8]
+    timestamp_values = [
+        "2026-05-15T01:25:00Z",
+        "2026/05/15 09:30",
+        "202605150935",
+        "2026-05-15 09:40:00",
+        "2026-05-15T09:45:00",
+        "2026-05-15T01:50:00Z",
+        "2026-05-15T09:55:00+0800",
+        "20260515100000",
+    ]
+    mixed_rows = [row.model_copy(update={"timestamp": timestamp}) for row, timestamp in zip(reversed(rows), reversed(timestamp_values))]
+
+    report = build_minute_analysis_report("600519.SH", mixed_rows)
+
+    assert report.sample_count == len(report.klines) == 8
+    assert [row.timestamp for row in report.klines] == timestamp_values
+    assert report.reason_code == "complete"
+
+
+def test_minute_report_does_not_merge_short_samples_across_trading_dates() -> None:
+    today_rows = _rows()[:7]
+    yesterday_rows = [
+        row.model_copy(update={"timestamp": row.timestamp.replace("2026-05-15", "2026-05-14")})
+        for row in _rows()[:7]
+    ]
+
+    report = build_minute_analysis_report("600519.SH", [*yesterday_rows, *today_rows])
+
+    assert report.availability == "unavailable"
+    assert report.reason_code == "insufficient_samples"
+    assert report.sample_count == len(report.klines) == 7
+    assert report.klines == today_rows
+    assert "最新交易日" in report.availability_reason
+
+
+def test_minute_report_uses_only_latest_date_for_all_intraday_analysis() -> None:
+    yesterday_rows = [
+        row.model_copy(
+            update={
+                "timestamp": row.timestamp.replace("2026-05-15", "2026-05-14"),
+                "open": 10 + index,
+                "close": 10.2 + index,
+                "high": 10.5 + index,
+                "low": 9.5 + index,
+                "volume": 10_000 + index * 1_000,
+            }
+        )
+        for index, row in enumerate(_rows()[:8])
+    ]
+    today_rows = [
+        row.model_copy(
+            update={
+                "open": 100 + index,
+                "close": 100.2 + index,
+                "high": 100.5 + index,
+                "low": 99.5 + index,
+                "volume": 1_000 + index * 100,
+            }
+        )
+        for index, row in enumerate(_rows()[:8])
+    ]
+
+    report = build_minute_analysis_report("600519.SH", [*reversed(today_rows), *reversed(yesterday_rows)])
+
+    assert report.availability == "ok"
+    assert report.sample_count == len(report.klines) == 8
+    assert report.klines == today_rows
+    assert report.intraday_change_pct == 7.2
+    assert report.intraday_range_pct == 7.46
+    assert all(level.price >= min(row.low for row in today_rows) for level in [*report.supports, *report.resistances])
+
+
+def test_minute_report_assigns_utc_rows_by_shanghai_local_date() -> None:
+    rows = _rows()[:9]
+    timestamp_values = ["2026-05-14T15:59:00Z", *[f"2026-05-14T16:0{index}:00Z" for index in range(8)]]
+    utc_rows = [row.model_copy(update={"timestamp": timestamp}) for row, timestamp in zip(rows, timestamp_values)]
+
+    report = build_minute_analysis_report("600519.SH", list(reversed(utc_rows)))
+
+    assert report.sample_count == len(report.klines) == 8
+    assert report.klines == utc_rows[1:]
+    assert report.klines[0].timestamp == "2026-05-14T16:00:00Z"
+    assert report.reason_code == "complete"
+
+
+def test_minute_report_dedupes_equivalent_timezones_and_keeps_last_valid_revision() -> None:
+    rows = _rows()[:8]
+    original = rows[3].model_copy(update={"timestamp": "2026/05/15 10:03:00", "source": "原始分钟线"})
+    revision = rows[3].model_copy(update={"timestamp": "2026-05-15T02:03:00Z", "source": "有效修订"})
+    dirty_revision = rows[3].model_copy(
+        update={
+            "timestamp": "20260515100300",
+            "source": "无效修订",
+            "low": rows[3].high + 1,
+        }
+    )
+    input_rows = [row for index, row in enumerate(rows) if index != 3]
+
+    report = build_minute_analysis_report("600519.SH", [*input_rows, original, revision, dirty_revision])
+
+    assert report.sample_count == len(report.klines) == 8
+    matching_rows = [row for row in report.klines if row.source in {"原始分钟线", "有效修订", "无效修订"}]
+    assert len(matching_rows) == 1
+    assert matching_rows[0] is revision
+    assert matching_rows[0].timestamp == "2026-05-15T02:03:00Z"
+    assert report.reason_code == "complete"
+
+
+def test_minute_report_ignores_dirty_future_rows_when_selecting_latest_date() -> None:
+    latest_valid_rows = _rows()[:8]
+    dirty_future_ohlc = latest_valid_rows[-1].model_copy(
+        update={
+            "timestamp": "2026-05-16 09:30:00",
+            "low": latest_valid_rows[-1].high + 1,
+        }
+    )
+    dirty_future_timestamp = latest_valid_rows[-1].model_copy(update={"timestamp": "2026-05-17 25:00:00"})
+
+    report = build_minute_analysis_report(
+        "600519.SH",
+        [dirty_future_timestamp, *reversed(latest_valid_rows), dirty_future_ohlc],
+    )
+
+    assert report.sample_count == len(report.klines) == 8
+    assert report.klines == latest_valid_rows
+    assert report.updated_at == latest_valid_rows[-1].timestamp
+    assert report.reason_code == "complete"
+
+
+def test_minute_report_json_roundtrip_preserves_kline_contract() -> None:
+    report = build_minute_analysis_report("600519.SH", _rows())
+
+    restored = MinuteAnalysisReport.model_validate_json(report.model_dump_json())
+
+    assert restored == report
+    assert restored.sample_count == len(restored.klines)
+    assert restored.klines[0].timestamp == report.klines[0].timestamp
+
+
+def test_minute_report_marks_empty_rows_unavailable() -> None:
+    report = build_minute_analysis_report("600519.SH", [])
+
+    assert report.availability == "unavailable"
+    assert report.reason_code == "empty_data"
+    assert report.sample_count == 0
+    assert report.klines == []
+    assert "返回为空" in report.availability_reason
+
+
+def test_minute_report_requires_eight_valid_price_samples() -> None:
+    seven_sample_report = build_minute_analysis_report("600519.SH", _rows()[:7])
+    eight_sample_report = build_minute_analysis_report("600519.SH", _rows()[:8])
+
+    assert seven_sample_report.availability == "unavailable"
+    assert seven_sample_report.reason_code == "insufficient_samples"
+    assert seven_sample_report.klines == _rows()[:7]
+    assert seven_sample_report.t_plan.low_zone == "不可用"
+    assert eight_sample_report.availability == "ok"
+    assert eight_sample_report.reason_code == "complete"
+    assert eight_sample_report.sample_count == 8
+    assert eight_sample_report.klines == _rows()[:8]
+
+
+def test_minute_report_marks_cache_or_fallback_data_degraded() -> None:
+    rows = [row.model_copy(update={"from_cache": True, "fallback_used": True}) for row in _rows()]
+
+    report = build_minute_analysis_report("600519.SH", rows)
+
+    assert report.availability == "degraded"
+    assert report.reason_code == "cache_or_fallback"
+    assert report.supports
+    assert report.resistances
+    assert report.t_plan.low_zone != "不可用"
+    assert report.t_plan.high_zone != "不可用"
+    assert "仍可参考" in report.availability_reason
+    assert report.missing_data == ["实时分钟K线（当前使用缓存或兜底数据）"]
+
+
+def test_minute_report_marks_missing_key_volume_input_degraded() -> None:
+    rows = _rows(volumes=[100] * 13 + [0, 0, 0])
+
+    report = build_minute_analysis_report("600519.SH", rows)
+
+    assert report.availability == "degraded"
+    assert report.reason_code == "missing_volume"
+    assert report.volume_pulse == "量能待确认"
+    assert report.missing_data == ["有效分钟成交量"]
+    assert "趋势、支撑压力和价格区间仍可用" in report.availability_reason
+    assert "量能及量价结论不可用" in report.availability_reason
+
+
+def test_minute_report_keeps_business_risk_available() -> None:
+    closes = [100.6 - index * 0.08 for index in range(16)]
+    rows = _rows(
+        lows=[99] * 16,
+        highs=[101] * 16,
+        closes=closes,
+        volumes=[100] * 13 + [300, 300, 300],
+    )
+
+    report = build_minute_analysis_report("600519.SH", rows)
+
+    assert report.trend_label == "盘中转弱"
+    assert report.t_plan.suitability == "不适合主动做T"
+    assert report.availability == "ok"
+    assert report.reason_code == "complete"
+    assert report.missing_data == []
+
+
+def test_minute_report_legacy_constructor_defaults_to_unavailable() -> None:
+    current = build_minute_analysis_report("600519.SH", _rows())
+    legacy_payload = current.model_dump(exclude={"availability", "availability_reason", "reason_code", "klines"})
+
+    report = MinuteAnalysisReport.model_validate(legacy_payload)
+
+    assert report.availability == "unavailable"
+    assert report.reason_code == "legacy_status_missing"
+    assert report.klines == []
+    assert "按不可用处理" in report.availability_reason
+    assert report.supports == []
+    assert report.resistances == []
+    assert report.t_plan.low_zone == "不可用"
+    assert report.t_plan.high_zone == "不可用"
+    assert report.t_plan.confidence == 0
 
 
 def _rows(

@@ -11,6 +11,7 @@ from app.models.schemas import (
     StockInsightBundle,
 )
 from app.services.research_breadth import MarketBreadthSnapshot, build_market_breadth_snapshot
+from app.services.research_factor_text import _factor_evidence_sufficiency
 from app.services.scoring import bounded_int as _bounded_int
 from app.utils.market_data import finite_float as _finite_float
 
@@ -531,7 +532,7 @@ def _top_negative_suggestion(factor_lab: FactorLabReport | None) -> str | None:
 
 def _low_factor_sample_suggestion(factor_lab: FactorLabReport | None) -> str | None:
     if factor_lab and _non_negative_int(factor_lab.calibration_sample_count) < 8:
-        return "因子汇总有效样本仍偏少，建议把实验室分数当作低置信辅助项。"
+        return "因子汇总有效样本仍偏少，建议把实验室分数当作证据充分度较低的辅助项。"
     return None
 
 
@@ -550,7 +551,7 @@ def _regime_evidence(context: RegimeContext) -> list[str]:
         ),
         (
             f"个股趋势 {feature.trend_label} {_score_text(feature.trend_score)}，"
-            f"资金 {_score_text(feature.fund_flow_score)}。"
+            f"量价热度（衍生） {_score_text(feature.fund_flow_score)}。"
         ),
         _breadth_summary_text(context.breadth),
         *_breadth_warning_evidence(context.breadth),
@@ -571,7 +572,7 @@ def _factor_lab_evidence(factor_lab: FactorLabReport | None) -> str:
         return "因子实验室暂未参与环境判断。"
     return (
         f"因子总分 {_score_text(factor_lab.total_score, with_unit=False)}，"
-        f"校准置信度 {_percent_text(factor_lab.calibrated_confidence)}，"
+        f"证据充分度 {_factor_evidence_sufficiency(factor_lab)}/100，"
         f"最低单因子有效样本 {_non_negative_int(factor_lab.calibration_sample_count)} 个。"
     )
 

@@ -274,6 +274,30 @@ def test_source_plan_realtime_redundancy_counts_unique_non_demo_providers() -> N
     assert any("至少保留两个实时报价源" in item for item in plan.suggestions)
 
 
+def test_source_plan_sanitizes_status_errors_before_return() -> None:
+    provider = ProviderStatus(
+        name="akshare",
+        enabled=True,
+        priority=2,
+        healthy=False,
+        last_error="GET https://alice:secret@example.test/quote?token=raw-token failed",
+        failure_count=1,
+    )
+
+    plan = _builder().build(
+        providers=[provider],
+        capabilities=[_capability("akshare")],
+        capability_statuses=[],
+    )
+
+    returned_text = plan.decisions[0].last_error or ""
+    assert "alice" not in returned_text
+    assert "secret" not in returned_text
+    assert "raw-token" not in returned_text
+    assert "<redacted>" in returned_text
+    assert provider.last_error == "GET https://alice:secret@example.test/quote?token=raw-token failed"
+
+
 def _builder() -> SourcePlanBuilder:
     return SourcePlanBuilder(
         provider_names=lambda: ["akshare"],

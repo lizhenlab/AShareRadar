@@ -62,37 +62,39 @@ TURNOVER_ADJUSTMENT_RULES: tuple[TurnoverAdjustmentRule, ...] = (
 )
 
 
-def missing_metric(name: str, summary: str) -> FinancialMetric:
-    return FinancialMetric(name=name, value="待接入", level="观察", summary=summary, source="数据缺失")
+def missing_metric(name: str, summary: str, *, category: str = "formal_financial") -> FinancialMetric:
+    return FinancialMetric(name=name, value="待接入", level="不可用", summary=summary, source="数据缺失", category=category)
 
 
 def pe_view(pe: float) -> tuple[int, str, str]:
     if not _usable_number(pe):
-        return 28, "弱", "PE 字段异常，需确认行情源或盈利口径。"
+        return 50, "不可用", "PE 字段异常，市场估值判断不可用。"
     return _metric_band_view(pe, PE_BANDS, (30, "偏弱", "PE 明显偏高，估值压缩风险需要重点关注。"))
 
 
 def pb_view(pb: float) -> tuple[int, str, str]:
     if not _usable_number(pb):
-        return 30, "弱", "PB 字段异常，需确认净资产或行情字段。"
+        return 50, "不可用", "PB 字段异常，市场资产估值判断不可用。"
     return _metric_band_view(pb, PB_BANDS, (32, "偏弱", "PB 较高，市场对盈利和成长要求更苛刻。"))
 
 
 def market_cap_view(market_cap: float) -> tuple[int, str, str]:
     if not _usable_number(market_cap) or market_cap <= 0:
-        return 34, "偏弱", "总市值字段异常，规模和流动性判断需降权。"
+        return 50, "不可用", "总市值字段异常，规模体征不可用。"
     yi = market_cap / 100_000_000
     return _metric_band_view(yi, MARKET_CAP_BANDS, (36, "偏弱", "微小市值更容易受流动性和情绪冲击。"))
 
 
 def liquidity_view(amount: float, turnover_rate: float | None) -> tuple[int, str, str]:
     if not _usable_number(amount) or amount <= 0:
-        return 34, "偏弱", "成交额字段异常或缺失，价格信号可靠性需要降权。"
+        return 50, "不可用", "成交额字段异常或缺失，交易活跃度不可用。"
     score = clamp_score(45 + _liquidity_amount_delta(amount) + _turnover_delta(turnover_rate))
     return score, *_liquidity_level_text(score)
 
 
-def financial_summary(score: int, missing: list[str]) -> str:
+def financial_summary(score: int | None, missing: list[str], *, formal_minimum_complete: bool = False) -> str:
+    if score is None or not formal_minimum_complete:
+        return "正式财报最小集不完整，暂不生成财务体检分；以下仅为市场估值与交易体征，不代表财务健康结论。"
     base = "基础财务体检偏稳" if score >= 65 else "基础财务体检中性" if score >= 50 else "基础财务体检偏弱"
     if missing:
         return f"{base}，但仍缺少{missing[0]}等正式财报字段。"

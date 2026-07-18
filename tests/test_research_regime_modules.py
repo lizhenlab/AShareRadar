@@ -11,6 +11,7 @@ from app.services.research_chip import build_chip_analysis
 from app.services.research_features import build_feature_snapshot, build_leadership_report
 from app.services.research_factors import build_factor_lab_report
 from app.services.research_regime import (
+    MIN_FACTOR_RISK_REDUCTION_SAMPLES,
     _build_regime_context,
     _factor_lab_risk_adjustment,
     _market_regime_label,
@@ -131,6 +132,20 @@ def test_market_regime_surfaces_breadth_source_degradation_conservatively() -> N
     assert any("不据此上调环境评级" in item for item in regime.suggestions)
 
 
+def test_market_regime_evidence_uses_source_level_non_statistical_semantics() -> None:
+    analysis, bundle, feature, factor_lab = _regime_inputs()
+
+    regime = build_market_regime_report(analysis, bundle, feature, factor_lab)
+    evidence = " ".join(regime.evidence)
+
+    assert "证据充分度" in evidence
+    assert "/100" in evidence
+    assert "量价热度（衍生）" in evidence
+    assert "校准置信度" not in evidence
+    assert "资金评分" not in evidence
+    assert regime.confidence_adjustment_semantics == "non_statistical_evidence_sufficiency_adjustment"
+
+
 def test_market_regime_label_rules_keep_priority_explicit() -> None:
     analysis, bundle, feature, factor_lab = _regime_inputs()
     safe_analysis, safe_bundle = _safe_inputs(analysis, bundle)
@@ -219,6 +234,18 @@ def test_factor_lab_does_not_reduce_risk_for_six_thin_overlapping_factor_samples
     context = _build_regime_context(analysis, bundle, feature, thin_factor_lab, None)
 
     assert _factor_lab_risk_adjustment(context) == 0
+
+
+def test_real_six_factor_sample_floor_reaches_factor_risk_reduction_rules() -> None:
+    analysis, bundle, feature, factor_lab = _fully_calibrated_regime_inputs()
+    context = _build_regime_context(analysis, bundle, feature, factor_lab, None)
+
+    assert len(factor_lab.factors) == 7
+    assert factor_lab.calibration_sample_count >= MIN_FACTOR_RISK_REDUCTION_SAMPLES
+    assert factor_lab.factors[-1].id == "valuation_anchor"
+    assert factor_lab.factors[-1].calibration is not None
+    assert factor_lab.factors[-1].calibration.sample_count == 0
+    assert round(_factor_lab_risk_adjustment(context), 2) == -0.14
 
 
 def test_regime_risk_adjustments_are_named_and_ignore_non_finite_values() -> None:
@@ -363,6 +390,45 @@ def _regime_inputs():
     ]
     quote = make_quote(price=142.0, prev_close=139.0, high=144.0, low=138.5, change_pct=2.16, turnover_rate=4.2)
     quality = build_data_quality(quote, klines, now=datetime(2026, 5, 13, 16, 0, 0))
+    analysis = build_analysis(quote, klines, data_quality=quality)
+    bundle = build_stock_insight_bundle(analysis)
+    feature = build_feature_snapshot(analysis, bundle)
+    chip = build_chip_analysis(analysis, feature)
+    leadership = build_leadership_report(analysis, bundle, feature)
+    factor_lab = build_factor_lab_report(analysis, bundle, feature, chip, leadership)
+    return analysis, bundle, feature, factor_lab
+
+
+def _fully_calibrated_regime_inputs():
+    start = date(2026, 1, 1)
+    klines = []
+    for index in range(100):
+        close = 100 + index * 0.5
+        row = make_kline(
+            date=(start + timedelta(days=index)).isoformat(),
+            close=close,
+            high=close + 1,
+            low=close - 1,
+            volume=1600 + index * 20,
+        )
+        if index % 5 in {3, 4}:
+            row = row.model_copy(update={"open": close + 0.5})
+        klines.append(row)
+    price = klines[-1].close
+    previous_close = klines[-2].close
+    quote = make_quote(
+        price=price,
+        prev_close=previous_close,
+        high=price + 1,
+        low=price - 1,
+        change_pct=(price / previous_close - 1) * 100,
+        turnover_rate=4.2,
+    ).model_copy(update={"open": price - 0.2})
+    quality = build_data_quality(
+        quote,
+        klines,
+        now=datetime(2026, 5, 13, 16, 0, 0),
+    ).model_copy(update={"score": 90, "level": "优秀", "anomalies": []})
     analysis = build_analysis(quote, klines, data_quality=quality)
     bundle = build_stock_insight_bundle(analysis)
     feature = build_feature_snapshot(analysis, bundle)

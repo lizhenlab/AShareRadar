@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from statistics import mean
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from app.models.schemas import MinuteAnalysisReport, MinuteKline, MinuteSupportResistance, MinuteTPlan
 from app.services.indicators import pct_change
@@ -26,6 +29,14 @@ BASE_LEVEL_STRENGTH = 38
 LEVEL_TOUCH_BONUS = 12
 LEVEL_TOUCH_BAND_PCT = 0.25
 LEVEL_DEDUPE_BAND_PCT = 0.1
+ASHARE_TIMEZONE = ZoneInfo("Asia/Shanghai")
+MINUTE_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}"
+    r"(?::\d{2}(?:\.\d{1,6})?)?(?:[zZ]|[+-]\d{2}:?\d{2})?$"
+)
+COMPACT_MINUTE_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<date>\d{8})[ T]?(?P<clock>\d{4}(?:\d{2})?)(?P<fraction>\.\d{1,6})?$"
+)
 
 
 @dataclass(frozen=True)
@@ -185,6 +196,19 @@ class MinuteAnalysisContext:
     resistances: list[MinuteSupportResistance]
     t_plan: MinuteTPlan
     warnings: list[str]
+    availability: str
+    availability_reason: str
+    reason_code: str
+    missing_data: list[str]
+
+
+@dataclass(frozen=True)
+class MinuteAvailability:
+    status: str
+    reason: str
+    reason_code: str
+    missing_data: list[str]
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -236,7 +260,8 @@ def build_minute_analysis_report(symbol: str, rows: list[MinuteKline], interval:
     normalized_interval = _normalize_interval(interval)
     clean_rows = _valid_minute_rows(rows)
     if len(clean_rows) < MIN_MINUTE_SAMPLE_COUNT:
-        return _empty_report(symbol, clean_rows, normalized_interval, _insufficient_sample_reason(rows, clean_rows))
+        reason, reason_code = _insufficient_sample_reason(rows, clean_rows)
+        return _empty_report(symbol, clean_rows, normalized_interval, reason, reason_code=reason_code)
 
     return _minute_report(_minute_analysis_context(symbol, clean_rows, normalized_interval))
 
@@ -245,7 +270,7 @@ def build_unavailable_minute_analysis_report(symbol: str, interval: str = "5m", 
     user_reason = "分钟K线数据源暂不可用，已暂停盘中做T判断。"
     if reason:
         user_reason = f"{user_reason}原因：{_compact_unavailable_reason(reason)}。"
-    return _empty_report(symbol, [], _normalize_interval(interval), user_reason)
+    return _empty_report(symbol, [], _normalize_interval(interval), user_reason, reason_code="provider_failure")
 
 
 def _normalize_interval(interval: str) -> str:
@@ -259,6 +284,7 @@ def _minute_analysis_context(symbol: str, rows: list[MinuteKline], interval: str
     intraday_range_pct = _intraday_range_pct(rows, latest_price)
     trend_label = _trend_label_from_rows(rows)
     volume_pulse = _volume_pulse(rows)
+    availability = _minute_availability(rows, volume_pulse)
     supports = _minute_levels(rows, latest_price, "support")
     resistances = _minute_levels(rows, latest_price, "resistance")
     t_plan = _minute_t_plan(rows, latest_price, supports, resistances, trend_label, volume_pulse, intraday_range_pct)
@@ -277,7 +303,11 @@ def _minute_analysis_context(symbol: str, rows: list[MinuteKline], interval: str
         supports=supports,
         resistances=resistances,
         t_plan=t_plan,
-        warnings=_minute_warnings(rows, t_plan, intraday_range_pct, volume_pulse),
+        warnings=_dedupe_text(_minute_warnings(rows, t_plan, intraday_range_pct, volume_pulse) + availability.warnings),
+        availability=availability.status,
+        availability_reason=availability.reason,
+        reason_code=availability.reason_code,
+        missing_data=availability.missing_data,
     )
 
 
@@ -288,6 +318,10 @@ def _minute_report(context: MinuteAnalysisContext) -> MinuteAnalysisReport:
         interval=context.interval,
         source=context.source,
         sample_count=len(context.rows),
+        klines=context.rows,
+        availability=context.availability,
+        availability_reason=context.availability_reason,
+        reason_code=context.reason_code,
         latest_price=context.latest_price,
         intraday_change_pct=context.intraday_change_pct,
         intraday_range_pct=context.intraday_range_pct,
@@ -299,7 +333,7 @@ def _minute_report(context: MinuteAnalysisContext) -> MinuteAnalysisReport:
         resistances=context.resistances,
         t_plan=context.t_plan,
         warnings=context.warnings,
-        missing_data=[],
+        missing_data=context.missing_data,
     )
 
 
@@ -334,13 +368,24 @@ def _minute_source(rows: list[MinuteKline]) -> str:
     return latest.source or rows[0].source or "分钟源待确认"
 
 
-def _empty_report(symbol: str, rows: list[MinuteKline], interval: str, reason: str) -> MinuteAnalysisReport:
+def _empty_report(
+    symbol: str,
+    rows: list[MinuteKline],
+    interval: str,
+    reason: str,
+    *,
+    reason_code: str,
+) -> MinuteAnalysisReport:
     return MinuteAnalysisReport(
         symbol=symbol,
         updated_at=_empty_report_updated_at(rows),
         interval=interval,
         source=_empty_report_source(rows),
         sample_count=len(rows),
+        klines=rows,
+        availability="unavailable",
+        availability_reason=reason,
+        reason_code=reason_code,
         latest_price=_empty_report_latest_price(rows),
         summary=reason,
         t_plan=_empty_t_plan(reason),
@@ -366,11 +411,11 @@ def _empty_report_latest_price(rows: list[MinuteKline]) -> float | None:
 
 def _empty_t_plan(reason: str) -> MinuteTPlan:
     return MinuteTPlan(
-        low_zone="待确认",
-        high_zone="待确认",
-        suitability="不适合主动做T",
-        style="数据不足",
-        confidence=20,
+        low_zone="不可用",
+        high_zone="不可用",
+        suitability="暂停做T判断",
+        style="数据不可用",
+        confidence=0,
         summary=reason,
         execution_steps=["等待有效分钟K线样本补齐、价格区间确认后再判断盘中区间。"],
         stop_conditions=["分钟K线缺失、价格无效或样本不足时，不按盘中区间做T。"],
@@ -378,13 +423,130 @@ def _empty_t_plan(reason: str) -> MinuteTPlan:
 
 
 def _valid_minute_rows(rows: list[MinuteKline]) -> list[MinuteKline]:
-    return filter_valid_minute_klines(rows)
+    # 同一实际时刻可能被数据源后续修订，保留输入序列中最后一条有效记录。
+    deduped: dict[datetime, MinuteKline] = {}
+    for row in filter_valid_minute_klines(rows):
+        timestamp_key = _minute_timestamp_key(row.timestamp)
+        if timestamp_key is not None:
+            deduped[timestamp_key] = row
+    if not deduped:
+        return []
+
+    latest_local_date = max(deduped).astimezone(ASHARE_TIMEZONE).date()
+    return [
+        deduped[timestamp_key]
+        for timestamp_key in sorted(deduped)
+        if timestamp_key.astimezone(ASHARE_TIMEZONE).date() == latest_local_date
+    ]
 
 
-def _insufficient_sample_reason(raw_rows: list[MinuteKline], clean_rows: list[MinuteKline]) -> str:
+def _minute_timestamp_key(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    parsed = _parse_minute_timestamp(text)
+    if parsed is None:
+        return None
+    localized = parsed.replace(tzinfo=ASHARE_TIMEZONE) if parsed.tzinfo is None else parsed
+    return localized.astimezone(timezone.utc)
+
+
+def _parse_minute_timestamp(text: str) -> datetime | None:
+    if MINUTE_TIMESTAMP_PATTERN.fullmatch(text):
+        normalized = text.replace("/", "-")
+        if normalized[-1:] in {"z", "Z"}:
+            normalized = f"{normalized[:-1]}+00:00"
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+    compact_match = COMPACT_MINUTE_TIMESTAMP_PATTERN.fullmatch(text)
+    if compact_match is None:
+        return None
+    compact_value = f"{compact_match.group('date')}{compact_match.group('clock')}"
+    timestamp_format = "%Y%m%d%H%M%S" if len(compact_value) == 14 else "%Y%m%d%H%M"
+    try:
+        parsed = datetime.strptime(compact_value, timestamp_format)
+    except ValueError:
+        return None
+    fraction = compact_match.group("fraction")
+    if fraction:
+        parsed = parsed.replace(microsecond=int(fraction[1:].ljust(6, "0")))
+    return parsed
+
+
+def _insufficient_sample_reason(raw_rows: list[MinuteKline], clean_rows: list[MinuteKline]) -> tuple[str, str]:
+    if not raw_rows:
+        return "分钟K线返回为空，暂不能形成做T参考。", "empty_data"
+    if clean_rows and _has_multiple_valid_minute_dates(raw_rows):
+        return "最新交易日分钟K线样本不足，至少需要 8 条有效样本，暂不能形成做T参考。", "insufficient_samples"
     if len(raw_rows) < MIN_MINUTE_SAMPLE_COUNT and len(raw_rows) == len(clean_rows):
-        return "分钟K线样本不足，暂不能形成做T参考。"
-    return "有效分钟K线不足，暂不能形成做T参考。"
+        return "分钟K线样本不足，至少需要 8 条有效样本，暂不能形成做T参考。", "insufficient_samples"
+    return "过滤无效数据后，有效分钟K线不足 8 条，暂不能形成做T参考。", "insufficient_valid_samples"
+
+
+def _has_multiple_valid_minute_dates(rows: list[MinuteKline]) -> bool:
+    valid_dates = set()
+    for row in filter_valid_minute_klines(rows):
+        timestamp_key = _minute_timestamp_key(row.timestamp)
+        if timestamp_key is None:
+            continue
+        valid_dates.add(timestamp_key.astimezone(ASHARE_TIMEZONE).date())
+        if len(valid_dates) > 1:
+            return True
+    return False
+
+
+def _minute_availability(rows: list[MinuteKline], volume_pulse: str) -> MinuteAvailability:
+    cache_or_fallback = any(row.from_cache or row.fallback_used for row in rows)
+    volume_missing = volume_pulse == "量能待确认"
+    if cache_or_fallback and volume_missing:
+        return MinuteAvailability(
+            status="degraded",
+            reason=(
+                "分钟价格结构可分析，但数据来自缓存或兜底且关键成交量输入缺失；"
+                "趋势、支撑压力和价格区间仍可参考，时效性、量能及量价结论不可用。"
+            ),
+            reason_code="cache_or_fallback_and_missing_volume",
+            missing_data=["实时分钟K线（当前使用缓存或兜底数据）", "有效分钟成交量"],
+            warnings=["量能输入不足，当前量能与量价配合结论不可用。"],
+        )
+    if cache_or_fallback:
+        return MinuteAvailability(
+            status="degraded",
+            reason=(
+                "分钟价格与成交量结构可分析，但数据来自缓存或兜底；"
+                "趋势、支撑压力和价格区间仍可参考，时效性与量价确认需降权。"
+            ),
+            reason_code="cache_or_fallback",
+            missing_data=["实时分钟K线（当前使用缓存或兜底数据）"],
+            warnings=[],
+        )
+    if volume_missing:
+        return MinuteAvailability(
+            status="degraded",
+            reason=(
+                "分钟价格结构可分析，但关键成交量输入缺失；"
+                "趋势、支撑压力和价格区间仍可用，量能及量价结论不可用。"
+            ),
+            reason_code="missing_volume",
+            missing_data=["有效分钟成交量"],
+            warnings=["量能输入不足，当前量能与量价配合结论不可用。"],
+        )
+    return MinuteAvailability(
+        status="ok",
+        reason="分钟价格、成交量和数据来源均满足分析要求，全部分钟分析结论可用。",
+        reason_code="complete",
+        missing_data=[],
+        warnings=[],
+    )
+
+
+def _dedupe_text(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
 
 
 def _compact_unavailable_reason(reason: str) -> str:

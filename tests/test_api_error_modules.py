@@ -7,8 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import BaseModel, ValidationError
 
-from app.api.errors import VALIDATION_MESSAGE_RULES, _validation_message, run_api, run_sync_api, validation_exception_handler
+from app.api.errors import (
+    INTERNAL_VALIDATION_DETAIL,
+    VALIDATION_MESSAGE_RULES,
+    _validation_message,
+    internal_validation_exception_handler,
+    run_api,
+    run_sync_api,
+    validation_exception_handler,
+)
 
 
 @pytest.mark.parametrize(
@@ -91,3 +100,62 @@ def test_run_api_maps_sqlite_errors_to_service_unavailable() -> None:
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "本地数据库暂不可用：database is locked"
+
+
+def test_api_errors_redact_provider_credentials_before_returning_details() -> None:
+    def load() -> object:
+        raise RuntimeError("source down https://example.test/quote?api_key=secret-key&symbol=600519")
+
+    with pytest.raises(HTTPException) as exc_info:
+        run_sync_api(load)
+
+    assert exc_info.value.status_code == 503
+    assert "secret-key" not in exc_info.value.detail
+    assert "api_key=<redacted>" in exc_info.value.detail
+
+
+class _InternalRow(BaseModel):
+    amount: int
+
+
+def _internal_validation_error() -> ValidationError:
+    with pytest.raises(ValidationError) as exc_info:
+        _InternalRow(amount="dirty-private-value")
+    return exc_info.value
+
+
+def test_run_sync_api_maps_internal_model_validation_to_sanitized_service_unavailable() -> None:
+    validation_error = _internal_validation_error()
+
+    def load() -> object:
+        raise validation_error
+
+    with pytest.raises(HTTPException) as exc_info:
+        run_sync_api(load)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == INTERNAL_VALIDATION_DETAIL
+    assert "dirty-private-value" not in str(exc_info.value.detail)
+
+
+def test_run_api_maps_internal_model_validation_to_sanitized_service_unavailable() -> None:
+    validation_error = _internal_validation_error()
+
+    async def load() -> object:
+        raise validation_error
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(run_api(load))
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == INTERNAL_VALIDATION_DETAIL
+
+
+def test_internal_validation_handler_never_returns_model_details() -> None:
+    validation_error = _internal_validation_error()
+
+    response = asyncio.run(internal_validation_exception_handler(SimpleNamespace(), validation_error))
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {"detail": INTERNAL_VALIDATION_DETAIL}
+    assert b"dirty-private-value" not in response.body

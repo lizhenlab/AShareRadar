@@ -8,6 +8,7 @@ import math
 import re
 import sqlite3
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -40,10 +41,14 @@ from app.services.eastmoney_client import (
     eastmoney_no_proxy,
     eastmoney_quote_from_row,
     eastmoney_quote_params,
+    eastmoney_quote_urls,
     eastmoney_quotes,
+    eastmoney_history_json,
     merge_no_proxy,
 )
+from app.services.provider_errors import ProviderCoverageMiss, ProviderError, ProviderProtocolError, ProviderTransportError
 from app.services.provider_registry import provider_priority
+from app.services.providers import stamp_daily_kline_contract
 from app.services.provider_stock_mappers import stock_info_from_baostock_row
 from app.services.local_metadata_provider import LocalIndividualStockProvider
 from app.services.optional_providers import _import_akshare
@@ -57,6 +62,17 @@ from tests.factories import (
     make_quote as _quote,
     make_stock_info as _stock_info,
 )
+
+
+QUOTE_TEST_NOW = datetime(2026, 5, 13, 10, 5)
+
+
+def _quote_test_now() -> datetime:
+    return QUOTE_TEST_NOW
+
+
+def _set_quote_test_clock(hub: DataHub) -> None:
+    hub._quote_coordinator._now = _quote_test_now
 
 class TradingCalendarTests(unittest.TestCase):
     def test_latest_expected_trade_date_uses_cached_trade_days(self) -> None:
@@ -98,6 +114,14 @@ class TradingCalendarTests(unittest.TestCase):
         self.assertEqual(result.error, "AKShare 交易日历返回为空")
 
 class DataSourceReliabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        quote_clock = patch(
+            "app.services.datahub_quotes._quote_now",
+            return_value=datetime(2026, 5, 13, 10, 5),
+        )
+        quote_clock.start()
+        self.addCleanup(quote_clock.stop)
+
     def test_demo_provider_is_not_in_default_realtime_priority(self) -> None:
         with TemporaryDirectory() as tmpdir:
             hub = DataHub(cache=SQLiteCache(Path(tmpdir) / "cache.sqlite3"))
@@ -154,6 +178,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         async def run_check(path: Path) -> tuple[int, int]:
             hub = DataHub(cache=SQLiteCache(path))
+            _set_quote_test_clock(hub)
             hub.settings.provider_failure_cooldown_seconds = 60
             hub.providers["broken"] = FailingProvider()
             hub.providers["backup"] = BackupProvider()
@@ -189,6 +214,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         async def run_check(path: Path) -> list[Quote]:
             hub = DataHub(cache=SQLiteCache(path))
+            _set_quote_test_clock(hub)
             hub.providers["partial"] = PartialProvider()
             hub.providers["backup"] = BackupProvider()
             with patch.object(hub, "_priority", return_value=[(1, "partial"), (2, "backup")]):
@@ -223,6 +249,49 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 self.assertIn("push2his.eastmoney.com", __import__("os").environ["no_proxy"])
             self.assertEqual(__import__("os").environ["NO_PROXY"], "localhost")
 
+    def test_eastmoney_no_proxy_serializes_environment_changes(self) -> None:
+        worker_started = threading.Event()
+        worker_entered = threading.Event()
+
+        def worker() -> None:
+            worker_started.set()
+            with eastmoney_no_proxy():
+                worker_entered.set()
+
+        with patch.dict("os.environ", {"NO_PROXY": "localhost", "no_proxy": "localhost"}, clear=False):
+            with eastmoney_no_proxy():
+                thread = threading.Thread(target=worker)
+                thread.start()
+                self.assertTrue(worker_started.wait(1))
+                self.assertFalse(worker_entered.wait(0.05))
+            self.assertTrue(worker_entered.wait(1))
+            thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(__import__("os").environ["NO_PROXY"], "localhost")
+
+    def test_market_quote_endpoints_are_https_only(self) -> None:
+        self.assertTrue(eastmoney_quote_urls())
+        self.assertTrue(all(url.startswith("https://") for url in eastmoney_quote_urls()))
+
+        calls: list[str] = []
+
+        def fake_get_json(url, params):
+            calls.append(url)
+            return {"rc": 0, "data": {"klines": []}}
+
+        with patch("app.services.eastmoney_client.eastmoney_get_json", side_effect=fake_get_json):
+            eastmoney_history_json("600519.SH", period="101", include_market_cap=True)
+
+        self.assertTrue(calls)
+        self.assertTrue(all(url.startswith("https://") for url in calls))
+
+    def test_eastmoney_get_json_rejects_plain_http_before_session_open(self) -> None:
+        with patch("app.services.eastmoney_client._eastmoney_session") as session:
+            with self.assertRaisesRegex(ProviderProtocolError, "仅允许 HTTPS"):
+                eastmoney_get_json("http://example.test/quote", {})
+
+        session.assert_not_called()
+
     def test_eastmoney_light_quote_maps_to_quote_model(self) -> None:
         quote = eastmoney_quote_from_row(
             {
@@ -241,6 +310,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 "f18": 1273.38,
                 "f20": 1600000000000,
                 "f23": 6.8,
+                "f86": "20260513100000",
             }
         )
 
@@ -248,6 +318,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(quote.market, "SH")
         self.assertEqual(quote.name, "贵州茅台")
         self.assertEqual(quote.price, 1303.0)
+        self.assertEqual(quote.timestamp, "2026-05-13 10:00:00")
         self.assertEqual(quote.source, "AKShare·东方财富直连")
 
     def test_eastmoney_quotes_returns_empty_without_network_for_empty_request(self) -> None:
@@ -256,6 +327,37 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         get_json.assert_not_called()
+
+    def test_eastmoney_quotes_classifies_empty_successful_response_as_coverage_miss(self) -> None:
+        payload = {"rc": 0, "data": {"diff": []}}
+
+        with patch("app.services.eastmoney_client.eastmoney_get_json", return_value=payload):
+            with self.assertRaisesRegex(ProviderCoverageMiss, "未覆盖请求股票"):
+                eastmoney_quotes(["688001.SH"])
+
+    def test_eastmoney_quotes_classifies_malformed_data_as_protocol_failure(self) -> None:
+        payload = {"rc": 0, "data": []}
+
+        with patch("app.services.eastmoney_client.eastmoney_get_json", return_value=payload):
+            with self.assertRaisesRegex(ProviderError, "data 字段结构异常") as raised:
+                eastmoney_quotes(["600519.SH"])
+
+        self.assertNotIsInstance(raised.exception, ProviderCoverageMiss)
+
+    def test_eastmoney_quotes_keeps_covered_rows_when_batch_is_partially_covered(self) -> None:
+        payload = {
+            "rc": 0,
+            "data": {
+                "diff": [
+                    {"f2": 1303.0, "f12": "600519", "f14": "贵州茅台", "f18": 1273.38, "f86": "20260513100000"},
+                ]
+            },
+        }
+
+        with patch("app.services.eastmoney_client.eastmoney_get_json", return_value=payload):
+            rows = eastmoney_quotes(["600519.SH", "688001.SH"])
+
+        self.assertEqual([f"{item.code}.{item.market}" for item in rows], ["600519.SH"])
 
     def test_eastmoney_quote_params_dedupes_fetch_symbols_but_keeps_market(self) -> None:
         params = eastmoney_quote_params(["600519.SH", "000001.SZ", "600519.SH", "sz000001"])
@@ -289,13 +391,35 @@ class DataSourceReliabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "东方财富接口返回结构异常"):
                 eastmoney_get_json("https://example.test", {})
 
+    def test_eastmoney_get_json_sanitizes_unexpected_session_errors(self) -> None:
+        class FailingSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def get(self, *args, **kwargs):
+                raise RuntimeError(
+                    "GET https://alice:secret@example.test/quote?token=raw-token failed"
+                )
+
+        with patch("app.services.eastmoney_client._eastmoney_session", return_value=FailingSession()):
+            with self.assertRaises(ProviderTransportError) as raised:
+                eastmoney_get_json("https://example.test", {})
+
+        error = str(raised.exception)
+        self.assertNotIn("alice", error)
+        self.assertNotIn("secret", error)
+        self.assertNotIn("raw-token", error)
+
     def test_eastmoney_quotes_preserves_request_order_after_endpoint_retry(self) -> None:
         payload = {
             "rc": 0,
             "data": {
                 "diff": [
-                    {"f2": 11.2, "f12": "000001", "f14": "平安银行", "f18": 11.0},
-                    {"f2": 1303.0, "f12": "600519", "f14": "贵州茅台", "f18": 1273.38},
+                    {"f2": 11.2, "f12": "000001", "f14": "平安银行", "f18": 11.0, "f86": "20260513100000"},
+                    {"f2": 1303.0, "f12": "600519", "f14": "贵州茅台", "f18": 1273.38, "f86": "20260513100000"},
                 ]
             },
         }
@@ -317,7 +441,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             "data": {
                 "diff": [
                     "bad-row",
-                    {"f2": 1303.0, "f12": "600519", "f14": "贵州茅台", "f18": 1273.38},
+                    {"f2": 1303.0, "f12": "600519", "f14": "贵州茅台", "f18": 1273.38, "f86": "20260513100000"},
                 ]
             },
         }
@@ -366,6 +490,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 "f17": "-",
                 "f18": 1273.38,
                 "f115": 14.97,
+                "f86": "20260513100000",
             }
         )
 
@@ -393,7 +518,9 @@ class DataSourceReliabilityTests(unittest.TestCase):
                     eastmoney_quote_from_row(row)
 
     def test_eastmoney_light_quote_allows_negative_pe_for_loss_making_stock(self) -> None:
-        quote = eastmoney_quote_from_row({"f12": "000001", "f14": "样本", "f2": 10.0, "f18": 9.5, "f9": -12.3})
+        quote = eastmoney_quote_from_row(
+            {"f12": "000001", "f14": "样本", "f2": 10.0, "f18": 9.5, "f9": -12.3, "f86": "20260513100000"}
+        )
 
         self.assertEqual(quote.pe, -12.3)
 
@@ -467,6 +594,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 "今开": 1268.02,
                 "最高": 1319.0,
                 "最低": 1250.1,
+                "更新时间": "2026-05-13 10:00:00",
             }
         ]
 
@@ -521,8 +649,8 @@ class DataSourceReliabilityTests(unittest.TestCase):
         provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
         raw_rows = [
             {"代码": "", "名称": "缺代码", "最新价": 99.0},
-            {"代码": "000001", "名称": "平安银行", "最新价": 11.2, "昨收": 11.0},
-            {"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38},
+            {"代码": "000001", "名称": "平安银行", "最新价": 11.2, "昨收": 11.0, "更新时间": "2026-05-13 10:00:00"},
+            {"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38, "更新时间": "2026-05-13 10:00:00"},
         ]
 
         class FakeFrame:
@@ -548,10 +676,38 @@ class DataSourceReliabilityTests(unittest.TestCase):
     def test_ordered_spot_quotes_reports_missing_codes_after_row_filtering(self) -> None:
         class FakeFrame:
             def iterrows(self):
-                return iter(enumerate([{"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38}]))
+                return iter(
+                    enumerate(
+                        [
+                            {
+                                "代码": "600519",
+                                "名称": "贵州茅台",
+                                "最新价": 1303.0,
+                                "昨收": 1273.38,
+                                "更新时间": "2026-05-13 10:00:00",
+                            }
+                        ]
+                    )
+                )
 
         with self.assertRaisesRegex(RuntimeError, "000001"):
             _ordered_spot_quotes(FakeFrame(), ["600519", "000001"], "AKShare")
+
+    def test_akshare_spot_quotes_reject_missing_event_time(self) -> None:
+        class FakeFrame:
+            def iterrows(self):
+                return iter(enumerate([{"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38}]))
+
+        with self.assertRaisesRegex(ProviderProtocolError, "缺少可解析的事件时间"):
+            _ordered_spot_quotes(FakeFrame(), ["600519"], "AKShare")
+
+    def test_eastmoney_quote_rejects_missing_or_invalid_event_time(self) -> None:
+        base = {"f12": "600519", "f14": "贵州茅台", "f2": 1303.0, "f18": 1273.38}
+
+        for event_time in (None, "", "bad-time", "20260230100000"):
+            with self.subTest(event_time=event_time):
+                with self.assertRaisesRegex(ProviderProtocolError, "事件时间"):
+                    eastmoney_quote_from_row({**base, "f86": event_time})
 
     def test_akshare_concept_candidates_skip_incomplete_rows_and_map_fields(self) -> None:
         em = _em_concept_candidate(
@@ -799,7 +955,14 @@ class DataSourceReliabilityTests(unittest.TestCase):
             rows = asyncio.run(provider.kline("600519.SH", limit=1))
 
         fallback.assert_called_once_with("600519.SH", period="101", limit=1)
-        self.assertEqual(rows, fallback_rows)
+        self.assertEqual(
+            rows,
+            stamp_daily_kline_contract(
+                fallback_rows,
+                adjustment_mode="qfq",
+                source="AKShare",
+            ),
+        )
 
     def test_akshare_daily_kline_schema_error_does_not_use_light_fallback(self) -> None:
         provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
@@ -914,7 +1077,9 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 return None
 
             @staticmethod
-            def pro_api():
+            def pro_api(token: str):
+                if token != "test-token":
+                    raise AssertionError(f"unexpected token: {token}")
                 return FakePro()
 
         with patch("app.services.tushare_provider.is_installed", return_value=True), patch.dict("sys.modules", {"tushare": FakeTs}):
@@ -1193,8 +1358,20 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 return 0, FakeFrame(
                     [
                         {"code": "HK.00700", "stock_name": "腾讯控股", "last_price": 400.0},
-                        {"code": "SZ.000001", "stock_name": "平安银行", "last_price": 11.2, "prev_close_price": 11.0},
-                        {"code": "SH.600519", "stock_name": "贵州茅台", "last_price": 1303.0, "prev_close_price": 1273.38},
+                        {
+                            "code": "SZ.000001",
+                            "stock_name": "平安银行",
+                            "last_price": 11.2,
+                            "prev_close_price": 11.0,
+                            "update_time": "2026-05-13 10:00:00",
+                        },
+                        {
+                            "code": "SH.600519",
+                            "stock_name": "贵州茅台",
+                            "last_price": 1303.0,
+                            "prev_close_price": 1273.38,
+                            "update_time": "2026-05-13 10:00:00",
+                        },
                     ]
                 )
 
@@ -1285,6 +1462,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 providers={"primary": FailingProvider(), "backup": BackupProvider()},
                 runtime=runtime,
                 priority=lambda kind: [(1, "primary"), (2, "backup")],
+                now=_quote_test_now,
             )
             rows = await coordinator.quotes(["600519.SH"], use_cache=False)
             failure_count = next(item.failure_count for item in cache.provider_statuses() if item.name == "primary")
@@ -1328,6 +1506,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 providers={"invalid": InvalidProvider(), "backup": BackupProvider()},
                 runtime=runtime,
                 priority=lambda kind: [(1, "invalid"), (2, "backup")],
+                now=_quote_test_now,
             )
             rows = await coordinator.quotes(["600519.SH"], use_cache=False)
             status = next(item for item in cache.provider_capability_statuses() if item.name == "invalid" and item.kind == "quote")
@@ -1373,6 +1552,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 providers={"partial": PartialProvider(), "backup": backup},
                 runtime=runtime,
                 priority=lambda kind: [(1, "partial"), (2, "backup")],
+                now=_quote_test_now,
             )
             rows = await coordinator.quotes(["600519.SH", "000001.SZ"], use_cache=False)
             status = next(item for item in cache.provider_capability_statuses() if item.name == "partial" and item.kind == "quote")
@@ -1414,6 +1594,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 providers={"live": LiveProvider()},
                 runtime=runtime,
                 priority=lambda kind: [(1, "live")],
+                now=_quote_test_now,
             )
             rows = await coordinator.quotes(["600519.SH"], use_cache=False)
             status = next(item for item in cache.provider_capability_statuses() if item.name == "live" and item.kind == "quote")
@@ -1445,6 +1626,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 providers={"backup": BackupProvider()},
                 runtime=ProviderRuntime(cache, settings),
                 priority=lambda kind: [(1, "missing"), (2, "backup")],
+                now=_quote_test_now,
             )
             return await coordinator.quotes(["600519.SH"], use_cache=False)
 
@@ -1478,6 +1660,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 providers={"recording": provider},
                 runtime=runtime,
                 priority=lambda kind: [(1, "recording")],
+                now=_quote_test_now,
             )
             rows = await coordinator.quotes(["600519.SH", "000001.SZ", "600519.SH"], use_cache=False)
             return rows, provider.requested
@@ -1509,6 +1692,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         async def run_check(path: Path) -> tuple[str, str, bool, bool]:
             hub = DataHub(cache=SQLiteCache(path))
+            _set_quote_test_clock(hub)
             hub.cache.save_quotes([_quote(source="腾讯行情")])
             hub.providers["backup"] = BackupProvider()
             quote = (await hub.quotes(["600519.SH"]))[0]
@@ -1540,6 +1724,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
+            _set_quote_test_clock(hub)
             hub.cache.save_quotes([_quote(source="腾讯行情")])
             provider = MissingOnlyProvider()
             hub.providers["missing_only"] = provider
@@ -1566,11 +1751,11 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 raise RuntimeError("quote down")
 
         async def run_check(path: Path):
-            settings = Settings(provider_failure_cooldown_seconds=60)
+            settings = Settings(cache_path=path, provider_failure_cooldown_seconds=60)
             cache = SQLiteCache(path)
             cache.save_quotes([_quote(source="腾讯行情")])
-            with patch("app.services.datahub.get_settings", return_value=settings):
-                hub = DataHub(cache=cache)
+            hub = DataHub(cache=cache, settings=settings)
+            _set_quote_test_clock(hub)
             hub.providers["failing"] = FailingQuoteProvider()
             with patch.object(hub, "_priority", return_value=[(1, "failing")]):
                 return await hub.quotes(["600519.SH"], use_cache=False)
@@ -1592,6 +1777,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         async def run_check(path: Path) -> tuple[str, str]:
             hub = DataHub(cache=SQLiteCache(path))
+            _set_quote_test_clock(hub)
             hub.cache.save_quotes([_quote(source="腾讯行情")])
             hub.providers["live"] = LiveProvider()
             with patch.object(hub, "_priority", return_value=[(1, "live")]):

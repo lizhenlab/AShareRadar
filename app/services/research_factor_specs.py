@@ -752,8 +752,8 @@ POSITION_FACTOR_SPECS: tuple[FactorSpec, ...] = (
 FLOW_FACTOR_SPECS: tuple[FactorSpec, ...] = (
     FactorSpec(
         id="fund_flow_proxy",
-        name="资金连续性",
-        category="资金",
+        name="量价连续性（衍生）",
+        category="量价衍生",
         weight=1.1,
         direction="正向",
         evaluator=_fund_flow_proxy_score_at,

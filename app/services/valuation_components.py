@@ -273,7 +273,7 @@ PEER_PERCENTILE_DELTA_RULES = (
 def valuation_summary(score: int, missing: list[str]) -> str:
     primary_missing = {"PE", "PB", "总市值"}.intersection(missing)
     if len(primary_missing) >= 2:
-        return "估值字段不足，暂只能做低置信度观察。"
+        return "估值字段不足，暂只能做低证据充分度观察。"
     if score >= 65:
         return "估值压力相对可控，但仍需和趋势确认一起使用。"
     if score >= 50:

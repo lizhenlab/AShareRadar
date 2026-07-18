@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.models.market import KlineAdjustmentMode
 from app.models.schemas import Kline, PlateItem, Quote, StockInfo
 
 
@@ -74,6 +75,9 @@ def make_kline(
     volume: float = 1000.0,
     date: str = "2026-05-13",
     source: str | None = None,
+    adjustment_mode: KlineAdjustmentMode = "qfq",
+    as_of: str | None = "2026-12-31",
+    data_version: str = "test-daily-kline-qfq-v1",
     from_cache: bool = False,
     fallback_used: bool = False,
 ) -> Kline:
@@ -84,6 +88,9 @@ def make_kline(
         high=high if high is not None else close + 1,
         low=low if low is not None else close - 1,
         volume=volume,
+        adjustment_mode=adjustment_mode,
+        as_of=as_of,
+        data_version=data_version,
         source=source,
         from_cache=from_cache,
         fallback_used=fallback_used,

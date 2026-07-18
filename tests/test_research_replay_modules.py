@@ -154,7 +154,11 @@ def test_replay_pattern_context_rejects_non_finite_price_values() -> None:
     assert _replay_pattern_context(rows, 20) is None
 
     clean_rows = [make_kline(date=f"2026-04-{index + 1:02d}", close=100, high=101, low=99, volume=1000) for index in range(20)]
-    clean_rows.append(make_kline(date="2026-05-01", close=105, high=math.inf, low=104, volume=1800))
+    clean_rows.append(
+        make_kline(date="2026-05-01", close=105, high=106, low=104, volume=1800).model_copy(
+            update={"high": math.inf}
+        )
+    )
 
     assert _replay_pattern_context(clean_rows, 20) is None
 

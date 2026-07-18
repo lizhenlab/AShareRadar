@@ -332,7 +332,8 @@ class ResearchAlphaModuleTests(unittest.TestCase):
         )
 
         self.assertIn("支撑 延续", summary)
-        self.assertIn("综合置信度 0%", summary)
+        self.assertIn("Alpha证据充分度 0/100", summary)
+        self.assertNotIn("置信度", summary)
         self.assertIn("缺少估值 口径等数据", summary)
         self.assertNotIn("nan", summary.lower())
         self.assertNotIn("inf", summary.lower())

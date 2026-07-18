@@ -6,6 +6,8 @@ import time
 from app.models.schemas import OrderBook
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.datahub_status import _provider_error_text
+from app.services.provider_errors import sanitize_provider_error
+from app.utils.symbols import standard_symbol
 
 
 FUTU_UNAVAILABLE_MESSAGE = "Futu OpenAPI 未启用。设置 ASHARE_RADAR_FUTU_ENABLED=1 并启动 Futu OpenD 后再使用"
@@ -32,13 +34,23 @@ class OrderBookCoordinator:
             raise RuntimeError("Futu 盘口最近失败，短暂冷却中")
         started = time.perf_counter()
         try:
-            result = await self.runtime.call(provider.order_book(symbol))  # type: ignore[attr-defined]
+            result = await self.runtime.call_provider(
+                "futu",
+                "order_book",
+                lambda: provider.order_book(symbol),  # type: ignore[attr-defined]
+                request_key=("order_book", standard_symbol(symbol)),
+            )
             latency_ms = (time.perf_counter() - started) * 1000
-            self.runtime.record_success("futu", self.provider_index("futu"), round(latency_ms, 2), "order_book")
+            await self.runtime.record_success_async(
+                "futu",
+                self.provider_index("futu"),
+                round(latency_ms, 2),
+                "order_book",
+            )
             return result
         except Exception as exc:
-            self.runtime.record_failure("futu", self.provider_index("futu"), exc, "order_book")
-            raise RuntimeError(_provider_error_text(exc)) from exc
+            await self.runtime.record_failure_async("futu", self.provider_index("futu"), exc, "order_book")
+            raise RuntimeError(sanitize_provider_error(_provider_error_text(exc))) from exc
 
     async def futu_ping(self) -> dict[str, object]:
         provider = self._futu_provider()
@@ -50,13 +62,18 @@ class OrderBookCoordinator:
             return {"ok": False, "message": str(exc), "latency_ms": None}
         started = time.perf_counter()
         try:
-            message = await self.runtime.call(provider.ping())  # type: ignore[attr-defined]
+            message = await self.runtime.call_provider(
+                "futu",
+                "order_book",
+                lambda: provider.ping(),  # type: ignore[attr-defined]
+                request_key=("ping",),
+            )
             latency_ms = round((time.perf_counter() - started) * 1000, 2)
-            self.runtime.record_success("futu", self.provider_index("futu"), latency_ms, "order_book")
+            await self.runtime.record_success_async("futu", self.provider_index("futu"), latency_ms, "order_book")
             return {"ok": True, "message": message, "latency_ms": latency_ms}
         except Exception as exc:
-            self.runtime.record_failure("futu", self.provider_index("futu"), exc, "order_book")
-            return {"ok": False, "message": str(exc), "latency_ms": None}
+            await self.runtime.record_failure_async("futu", self.provider_index("futu"), exc, "order_book")
+            return {"ok": False, "message": sanitize_provider_error(exc), "latency_ms": None}
 
     def _futu_provider(self):
         return self.providers.get("futu")

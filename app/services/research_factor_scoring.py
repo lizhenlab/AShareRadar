@@ -74,6 +74,9 @@ def _build_factor(
     evidence: list[str],
     missing_data: list[str],
     weight_adjustments: dict[str, float] | None = None,
+    *,
+    data_nature: str | None = None,
+    methodology: str | None = None,
 ) -> StandardFactor:
     clean_score = _clamp(score)
     return StandardFactor(
@@ -90,6 +93,8 @@ def _build_factor(
         missing_data=_dedupe(missing_data)[:6],
         calibration=_calibrate_factor(analysis.klines, spec, clean_score),
         calibration_buckets=_calibration_buckets(analysis.klines, spec, clean_score),
+        data_nature=data_nature,
+        methodology=methodology,
     )
 
 
@@ -98,8 +103,21 @@ def _weighted_factor_score(factors: list[StandardFactor]) -> int:
     return _clamp(round(sum(item.score * item.weight for item in factors) / total_weight))
 
 
+def _factor_participates_in_historical_aggregate(factor: StandardFactor) -> bool:
+    calibration = factor.calibration
+    return bool(calibration and getattr(calibration, "participates_in_historical_aggregate", True))
+
+
+def _historical_aggregate_factors(factors: list[StandardFactor]) -> list[StandardFactor]:
+    return [item for item in factors if _factor_participates_in_historical_aggregate(item)]
+
+
 def _factor_calibration_quality(factors: list[StandardFactor]) -> int:
-    scored = [item.calibration for item in factors if item.calibration and item.calibration.sample_count > 0]
+    scored = [
+        item.calibration
+        for item in _historical_aggregate_factors(factors)
+        if item.calibration and item.calibration.sample_count > 0
+    ]
     if not scored:
         return 35
     total_weight = sum(min(1.6, max(0.6, item.sample_count / 12)) for item in scored)
@@ -276,6 +294,8 @@ __all__ = [
     "_dedupe",
     "_factor_calibration_quality",
     "_factor_direction",
+    "_factor_participates_in_historical_aggregate",
+    "_historical_aggregate_factors",
     "_risk_pressure_score",
     "RISK_PRESSURE_RULES",
     "VOLUME_CONFIRMATION_RULES",

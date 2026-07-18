@@ -6,7 +6,12 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from app.models.schemas import Kline, MinuteKline, Quote, StockConceptItem, StockInfo
-from app.services.data_quality_time import expected_quote_date, is_after_close, is_midday_break, is_trading_session, latest_expected_trade_date
+from app.services import trading_calendar
+from app.services.data_quality_time import (
+    expected_quote_date,
+    latest_expected_daily_kline_date,
+    market_local_datetime,
+)
 from app.utils.symbols import standard_symbol
 from app.utils.time import non_negative_seconds_since_text
 
@@ -111,20 +116,20 @@ def _stock_pool_cache_is_fresh(cache, max_age_seconds: int) -> bool:
     return age is not None and age <= max_age_seconds
 
 
-def _kline_cache_is_fresh(klines: list[Kline]) -> bool:
+def _kline_cache_is_fresh(klines: list[Kline], now: datetime | None = None) -> bool:
     if not klines:
         return False
     last_date = _parse_kline_date(klines[-1].date)
     if last_date is None:
         return False
-    current = datetime.now()
-    latest_expected = latest_expected_trade_date(current)
+    current = market_local_datetime(now)
+    latest_expected = latest_expected_daily_kline_date(current)
     latest_allowed = expected_quote_date(current)
     return latest_expected <= last_date.date() <= latest_allowed
 
 
 def _minute_kline_cache_is_fresh(rows: list[MinuteKline], interval: str, now: datetime | None = None) -> bool:
-    current = now or datetime.now()
+    current = market_local_datetime(now)
     context = _minute_cache_freshness_context(rows, interval, current)
     return context is not None and _minute_session_cache_is_fresh(context)
 
@@ -153,28 +158,106 @@ def _minute_business_timestamp_is_valid(context: MinuteCacheFreshnessContext) ->
 
 
 def _minute_session_cache_is_fresh(context: MinuteCacheFreshnessContext) -> bool:
+    if context.latest.date() != context.current.date():
+        return _minute_after_close_cache_is_fresh(context)
     for rule in MINUTE_CACHE_SESSION_RULES:
         if rule.applies(context.current):
             return rule.is_fresh(context)
-    return True
+    return False
 
 
 def _minute_trading_session_cache_is_fresh(context: MinuteCacheFreshnessContext) -> bool:
+    phase = trading_calendar.market_session_phase(context.current)
+    latest_time = context.latest.time()
+    if phase is trading_calendar.MarketSessionPhase.MORNING:
+        in_session = (
+            trading_calendar.CALL_AUCTION_START_TIME
+            <= latest_time
+            <= trading_calendar.MORNING_SESSION_END_TIME
+        )
+    elif phase is trading_calendar.MarketSessionPhase.AFTERNOON:
+        in_session = (
+            trading_calendar.AFTERNOON_SESSION_START_TIME
+            <= latest_time
+            <= trading_calendar.MARKET_CLOSE_TIME
+        )
+    else:
+        return False
+    return in_session and _minute_live_cache_is_fresh(context)
+
+
+def _minute_call_auction_cache_is_fresh(context: MinuteCacheFreshnessContext) -> bool:
+    return (
+        context.latest.time() >= trading_calendar.CALL_AUCTION_START_TIME
+        and _minute_live_cache_is_fresh(context)
+    )
+
+
+def _minute_afternoon_reopen_cache_is_fresh(context: MinuteCacheFreshnessContext) -> bool:
+    latest_time = context.latest.time()
+    morning_close_snapshot = (
+        trading_calendar.MORNING_CLOSE_SNAPSHOT_START_TIME
+        <= latest_time
+        <= trading_calendar.MORNING_SESSION_END_TIME
+    )
+    afternoon_live = (
+        trading_calendar.AFTERNOON_SESSION_START_TIME
+        <= latest_time
+        <= trading_calendar.AFTERNOON_REOPEN_GRACE_END_TIME
+        and _minute_live_cache_is_fresh(context)
+    )
+    return morning_close_snapshot or afternoon_live
+
+
+def _minute_live_cache_is_fresh(context: MinuteCacheFreshnessContext) -> bool:
     return context.current - context.latest <= timedelta(minutes=max(10, context.interval_minutes * 3))
 
 
 def _minute_midday_break_cache_is_fresh(context: MinuteCacheFreshnessContext) -> bool:
-    return _is_at_or_after_time(context.latest, hour=11, minute=25)
+    return (
+        trading_calendar.MORNING_CLOSE_SNAPSHOT_START_TIME
+        <= context.latest.time()
+        <= trading_calendar.MORNING_SESSION_END_TIME
+    )
 
 
 def _minute_after_close_cache_is_fresh(context: MinuteCacheFreshnessContext) -> bool:
-    return _is_at_or_after_time(context.latest, hour=14, minute=55)
+    return (
+        trading_calendar.CLOSING_SNAPSHOT_START_TIME
+        <= context.latest.time()
+        <= trading_calendar.MARKET_CLOSE_TIME
+    )
+
+
+def _minute_phase_is(current: datetime, phase: trading_calendar.MarketSessionPhase) -> bool:
+    return trading_calendar.market_session_phase(current) is phase
+
+
+def _is_call_auction(current: datetime) -> bool:
+    return _minute_phase_is(current, trading_calendar.MarketSessionPhase.CALL_AUCTION)
+
+
+def _is_midday_break(current: datetime) -> bool:
+    return _minute_phase_is(current, trading_calendar.MarketSessionPhase.MIDDAY_BREAK)
+
+
+def _is_afternoon_reopen_grace(current: datetime) -> bool:
+    return _minute_phase_is(current, trading_calendar.MarketSessionPhase.AFTERNOON_REOPEN_GRACE)
+
+
+def _is_after_close(current: datetime) -> bool:
+    return trading_calendar.market_session_phase(current) in {
+        trading_calendar.MarketSessionPhase.CLOSE_PUBLISH_BUFFER,
+        trading_calendar.MarketSessionPhase.AFTER_CLOSE,
+    }
 
 
 MINUTE_CACHE_SESSION_RULES = (
-    MinuteCacheSessionRule(is_trading_session, _minute_trading_session_cache_is_fresh),
-    MinuteCacheSessionRule(is_midday_break, _minute_midday_break_cache_is_fresh),
-    MinuteCacheSessionRule(is_after_close, _minute_after_close_cache_is_fresh),
+    MinuteCacheSessionRule(_is_after_close, _minute_after_close_cache_is_fresh),
+    MinuteCacheSessionRule(_is_midday_break, _minute_midday_break_cache_is_fresh),
+    MinuteCacheSessionRule(_is_afternoon_reopen_grace, _minute_afternoon_reopen_cache_is_fresh),
+    MinuteCacheSessionRule(_is_call_auction, _minute_call_auction_cache_is_fresh),
+    MinuteCacheSessionRule(trading_calendar.is_trading_session, _minute_trading_session_cache_is_fresh),
 )
 
 
@@ -198,10 +281,6 @@ def _minute_interval_minutes(interval: str) -> int | None:
         return int(text[:-1])
     except ValueError:
         return None
-
-
-def _is_at_or_after_time(value: datetime, *, hour: int, minute: int) -> bool:
-    return value.hour > hour or (value.hour == hour and value.minute >= minute)
 
 
 def _tag_klines(

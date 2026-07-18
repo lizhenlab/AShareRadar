@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
+from importlib import import_module
 import math
 
 from app.models.schemas import ChartMarkItem, ChartMarkSummary, StockEventItem, StockInsightBundle, StockNoteItem
 from app.services.datahub import DataHub
+from app.services.datahub_runtime import run_cache_io
+from app.services.workbench_context import WorkbenchContext
 from app.utils.symbols import normalize_symbol
 from app.utils.time import now_text
 
@@ -18,18 +22,29 @@ DATE_KEY_FORMATS = (
     "%Y/%m/%d",
 )
 INVALID_MARK_TEXT_VALUES = {"", "none", "null", "nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}
+ChartContextLoader = Callable[[DataHub, str], Awaitable[WorkbenchContext]]
 
 
-async def build_chart_marks(datahub: DataHub, symbol: str, limit: int = 80) -> ChartMarkSummary:
+async def _load_default_chart_context(datahub: DataHub, symbol: str) -> WorkbenchContext:
+    individual_workflow = import_module("app.workflows.individual")
+    return await individual_workflow.stock_workbench_context(datahub, symbol)
+
+
+async def build_chart_marks(
+    datahub: DataHub,
+    symbol: str,
+    limit: int = 80,
+    *,
+    context_loader: ChartContextLoader | None = None,
+) -> ChartMarkSummary:
     code, market = normalize_symbol(symbol)
     normalized = f"{code}.{market.upper()}"
-    from app.workflows.individual import stock_workbench_context
+    loader = context_loader if context_loader is not None else _load_default_chart_context
+    context = await loader(datahub, normalized)
+    return await build_chart_marks_from_context(datahub, normalized, context.insights, limit=limit)
 
-    context = await stock_workbench_context(datahub, normalized)
-    return build_chart_marks_from_context(datahub, normalized, context.insights, limit=limit)
 
-
-def build_chart_marks_from_context(
+async def build_chart_marks_from_context(
     datahub: DataHub,
     symbol: str,
     bundle: StockInsightBundle,
@@ -37,14 +52,14 @@ def build_chart_marks_from_context(
 ) -> ChartMarkSummary:
     code, market = normalize_symbol(symbol)
     normalized = f"{code}.{market.upper()}"
-    marks = _all_chart_marks(datahub, normalized, bundle, limit)
+    notes = await run_cache_io(datahub.cache.stock_notes, normalized, limit=max(0, limit), visible_only=True)
+    marks = _all_chart_marks(notes, bundle)
     visible_marks = [item for item in marks if item.visible][: max(0, limit)]
     categories = sorted({item.category for item in visible_marks})
     return ChartMarkSummary(symbol=normalized, updated_at=now_text(), marks=visible_marks, categories=categories)
 
 
-def _all_chart_marks(datahub: DataHub, symbol: str, bundle: StockInsightBundle, limit: int) -> list[ChartMarkItem]:
-    notes = datahub.cache.stock_notes(symbol, limit=max(0, limit), visible_only=True)
+def _all_chart_marks(notes: list[StockNoteItem], bundle: StockInsightBundle) -> list[ChartMarkItem]:
     return [
         *_note_marks(notes),
         *_abnormal_event_marks(bundle),

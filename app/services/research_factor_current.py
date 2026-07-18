@@ -50,7 +50,7 @@ def trend_momentum_factor(
         f"{feature.trend_label} / {feature.trend_score}分",
         [
             f"现价 {feature.price:.2f}，5日线 {feature.ma5:.2f}，10日线 {feature.ma10:.2f}，20日线 {feature.ma20:.2f}。",
-            f"趋势信号置信度 {feature.signal_confidence}%。",
+            f"趋势信号可靠度 {feature.signal_confidence}/100。",
         ],
         [] if len(analysis.klines) >= 30 else ["更长历史K线"],
         adjustments,
@@ -109,13 +109,15 @@ def fund_flow_proxy_factor(
         specs["fund_flow_proxy"],
         analysis,
         feature.fund_flow_score,
-        f"资金评分 {feature.fund_flow_score} / {insights.fund_flow.level}",
+        f"量价热度评分（衍生） {feature.fund_flow_score} / {insights.fund_flow.level}",
         [
             insights.fund_flow.price_volume_relation,
-            f"资金源：{insights.fund_flow.source}。",
+            f"量价指标来源（衍生）：{insights.fund_flow.source}。",
         ],
         insights.fund_flow.notes[:1] if not insights.fund_flow.available else [],
         adjustments,
+        data_nature="derived" if insights.fund_flow.data_nature != "unavailable" else "unavailable",
+        methodology="量价规则衍生指标，不是真实资金流或主力净流入。",
     )
 
 
@@ -186,7 +188,11 @@ def valuation_anchor_factor(
             stability_score=0,
             expected_level="待补数据",
             confidence_level="待补数据",
-            note="当前没有历史估值序列，只用最新行情估值字段做安全边际观察。",
+            participates_in_historical_aggregate=False,
+            note=(
+                "当前没有历史估值序列，只用最新行情估值字段做安全边际观察；"
+                "本项参与当前评分，不参与历史校准样本汇总。"
+            ),
         ),
     )
 

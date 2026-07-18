@@ -23,7 +23,9 @@ export function renderAnalysis(data, { state, drawKline } = {}) {
   $("stockChange").className = changeClass(quote.change_pct);
   $("trendScore").textContent = `${analysis.trend_score ?? "--"}`;
   $("trendLabel").textContent = analysis.trend_label || "--";
-  $("actionAdvice").textContent = actionAdvice.action ? `${actionAdvice.action} ${actionAdvice.confidence ?? "--"}%` : "--";
+  $("actionAdvice").textContent = actionAdvice.action
+    ? `${actionAdvice.action} · 建议强度 ${actionAdvice.confidence ?? "--"}/100`
+    : "--";
   $("support").textContent = formatNumber(analysis.support);
   $("resistance").textContent = formatNumber(analysis.resistance);
   $("ma5").textContent = formatNumber(analysis.ma5);
@@ -129,10 +131,12 @@ function renderFactors(items) {
 function renderFundFlow(flow) {
   const windows = asArray(flow.windows);
   const notes = asArray(flow.notes);
+  const nature = dataNatureLabel(flow.data_nature);
+  const score = flow.data_nature === "unavailable" || !flow.data_nature ? "不可用" : `${flow.overall_score ?? "--"} · ${flow.level || "--"}`;
   $("fundFlowPanel").innerHTML = `
     <div class="flow-head">
-      <strong>量价热度 ${escapeHtml(flow.overall_score)} · ${escapeHtml(flow.level)}</strong>
-      <span>${escapeHtml(flow.source)}</span>
+      <strong>量价热度 ${escapeHtml(score)}</strong>
+      <span>${escapeHtml(nature)} · ${escapeHtml(flow.source)}</span>
     </div>
     <p>${escapeHtml(flow.price_volume_relation)}</p>
     <div class="flow-windows">
@@ -141,7 +145,7 @@ function renderFundFlow(flow) {
         (item) => `
           <div>
             <span>${escapeHtml(item.label)}</span>
-            <strong>${escapeHtml(item.score)}</strong>
+            <strong>${escapeHtml(flow.data_nature === "unavailable" || !flow.data_nature ? "--" : item.score)}</strong>
             <small>${escapeHtml(item.summary)}</small>
           </div>`
       )}
@@ -154,8 +158,8 @@ function renderOrderPressure(order) {
   const notes = asArray(order.notes);
   $("orderPressurePanel").innerHTML = `
     <div class="flow-head">
-      <strong>${escapeHtml(order.pressure_level)}</strong>
-      <span>${escapeHtml(order.source)}</span>
+      <strong>订单压力 · ${escapeHtml(dataNatureLabel(order.data_nature))}</strong>
+      <span>${escapeHtml(order.pressure_level)} · ${escapeHtml(order.source)}</span>
     </div>
     <p>${escapeHtml(order.summary)}</p>
     <div class="mini-metrics">
@@ -168,9 +172,17 @@ function renderOrderPressure(order) {
 
 function renderFinancialHealth(health) {
   const metrics = asArray(health.metrics);
+  const scoreAvailable = health.score_available === true
+    && health.formal_minimum_complete === true
+    && health.score !== null
+    && health.score !== undefined
+    && Number.isFinite(Number(health.score));
+  const title = scoreAvailable
+    ? `财务体检 ${health.score} · ${health.level || "--"}`
+    : "市场估值与交易体征 · 财务体检分不可用";
   $("financialPanel").innerHTML = `
     <div class="finance-head">
-      <strong>财务体检 ${escapeHtml(health.score)} · ${escapeHtml(health.level)}</strong>
+      <strong>${escapeHtml(title)}</strong>
       <span>${escapeHtml(health.source)}</span>
     </div>
     <p>${escapeHtml(health.summary)}</p>
@@ -186,6 +198,15 @@ function renderFinancialHealth(health) {
       )}
     </div>
   `;
+}
+
+function dataNatureLabel(value) {
+  return {
+    derived: "衍生（derived）",
+    estimated: "估算（estimated）",
+    observed: "实测（observed）",
+    unavailable: "不可用（unavailable）",
+  }[value] || "不可用（unavailable，旧数据未标注）";
 }
 
 function renderValuation(valuation) {
@@ -311,7 +332,8 @@ export function renderMinuteAnalysis(report) {
 
 function minuteAnalysisView(report) {
   const tPlan = report.t_plan || {};
-  const missing = asArray(report.missing_data);
+  const availability = minuteAvailabilityState(report);
+  const missing = minuteMissingData(report, availability.status);
   return {
     report,
     tPlan,
@@ -319,37 +341,102 @@ function minuteAnalysisView(report) {
     resistances: asArray(report.resistances),
     warnings: asArray(report.warnings),
     missing,
-    statusTone: minuteStatusTone(tPlan.suitability, missing),
-    isUnavailable: missing.length && Number(report.sample_count) === 0,
+    availability: availability.status,
+    availabilityReason: availability.reason,
+    availabilityLabel: minuteAvailabilityLabel(availability.status),
+    statusTone: minuteAvailabilityTone(availability.status),
+    isUnavailable: availability.status === "unavailable",
+    isDegraded: availability.status === "degraded",
   };
 }
 
-function minuteStatusTone(suitability, missing) {
-  if (suitability === "不适合主动做T") return "risk";
-  if (missing.length) return "warn";
-  if (suitability === "仅底仓可做T") return "good";
-  return "";
+export function minuteAvailabilityState(report) {
+  const hasExplicitAvailability = Boolean(
+    report
+    && typeof report === "object"
+    && Object.prototype.hasOwnProperty.call(report, "availability")
+  );
+  const rawAvailability = hasExplicitAvailability ? report.availability : undefined;
+  if (["ok", "degraded", "unavailable"].includes(rawAvailability)) {
+    return {
+      status: rawAvailability,
+      reason: minuteAvailabilityReason(report, rawAvailability),
+    };
+  }
+  if (hasExplicitAvailability) {
+    return {
+      status: "unavailable",
+      reason: "分钟分析返回未知可用性状态，已按不可用处理。",
+    };
+  }
+  const sampleCount = Number(report?.sample_count);
+  const legacyMissing = asArray(report?.missing_data);
+  const minuteKlineMissing = legacyMissing.some((item) => typeof item === "string" && item.includes("分钟K线"));
+  if (!Number.isFinite(sampleCount) || sampleCount < 8 || minuteKlineMissing) {
+    return {
+      status: "unavailable",
+      reason: "旧版分钟数据未声明可用性，且缺少可验证的分钟K线或有效样本不足 8 条，已按不可用处理。",
+    };
+  }
+  return {
+    status: "degraded",
+    reason: "旧版分钟数据未声明可用性；价格结构仅作降级参考，量能与数据时效性待确认。",
+  };
+}
+
+function minuteAvailabilityReason(report, availability) {
+  const reason = typeof report?.availability_reason === "string" ? report.availability_reason.trim() : "";
+  if (reason) return reason;
+  return {
+    ok: "分钟分析数据满足分析要求。",
+    degraded: "分钟分析处于降级状态；价格结构仍可参考，受限结论以缺失数据提示为准。",
+    unavailable: "分钟分析数据不可用，当前不形成盘中执行区间。",
+  }[availability];
+}
+
+function minuteAvailabilityLabel(availability) {
+  return {
+    ok: "数据可用",
+    degraded: "数据降级",
+    unavailable: "数据不可用",
+  }[availability] || "数据不可用";
+}
+
+function minuteAvailabilityTone(availability) {
+  return {
+    ok: "good",
+    degraded: "warn",
+    unavailable: "risk",
+  }[availability] || "risk";
+}
+
+function minuteMissingData(report, availability) {
+  const missing = asArray(report?.missing_data).filter((item) => typeof item === "string" && item.trim());
+  if (missing.length) return missing;
+  if (availability === "degraded") return ["分钟数据完整性或时效性"];
+  if (availability === "unavailable") return ["可验证的分钟分析数据"];
+  return [];
 }
 
 function renderMinuteUnavailable(view) {
   return `
       <div class="minute-status-card ${view.statusTone}">
         <div>
-          <strong>分钟做T已暂停</strong>
-          <span>${escapeHtml(view.report.summary || "分钟K线暂不可用，当前不按盘中区间做T。")}</span>
+          <strong>分钟分析不可用</strong>
+          <span>${escapeHtml(view.availabilityReason)}</span>
         </div>
-        <i class="tag risk">${escapeHtml(view.tPlan.suitability || "不适合主动做T")}</i>
+        <i class="tag risk">${escapeHtml(view.availabilityLabel)}</i>
       </div>
       <div class="minute-empty">
         <strong>缺失数据：${escapeHtml(view.missing.join("、"))}</strong>
-        ${minuteStepItems(view.tPlan.execution_steps, 2)}
-        ${minuteStepItems(view.tPlan.stop_conditions, 2)}
+        <span>等待有效分钟K线恢复并重新分析后，再形成盘中参考区间。</span>
       </div>
     `;
 }
 
 function renderMinuteDetails(view) {
   return `
+    ${view.isDegraded ? renderMinuteDegraded(view) : ""}
     ${renderMinuteHead(view)}
     <p>${escapeHtml(view.report.summary || "")}</p>
     <div class="minute-metrics">${renderMinuteMetrics(view.report)}</div>
@@ -358,15 +445,29 @@ function renderMinuteDetails(view) {
   `;
 }
 
+function renderMinuteDegraded(view) {
+  return `
+    <div class="minute-status-card warn">
+      <div>
+        <strong>分钟分析降级</strong>
+        <span>${escapeHtml(view.availabilityReason)}</span>
+      </div>
+      <i class="tag">${escapeHtml(view.availabilityLabel)}</i>
+    </div>
+    <div class="minute-empty">
+      <strong>受限数据：${escapeHtml(view.missing.join("、"))}</strong>
+    </div>`;
+}
+
 function renderMinuteHead(view) {
   const { report, tPlan, statusTone } = view;
   return `
     <div class="minute-head">
       <div>
         <strong>${escapeHtml(report.trend_label)} · ${escapeHtml(report.momentum_label)}</strong>
-        <span>${escapeHtml(report.interval)} · 样本 ${escapeHtml(report.sample_count)} · ${escapeHtml(report.source)}</span>
+        <span>${escapeHtml(report.interval)} · 样本 ${escapeHtml(report.sample_count)} · ${escapeHtml(report.source)} · 结论 ${escapeHtml(tPlan.suitability || "待确认")}</span>
       </div>
-      <i class="${statusTone}">${escapeHtml(tPlan.suitability || "待确认")}</i>
+      <i class="${statusTone}" title="${escapeHtml(view.availabilityReason)}">${escapeHtml(view.availabilityLabel)}</i>
     </div>`;
 }
 
@@ -493,7 +594,7 @@ function renderSignalEvidence(snapshot) {
   $("signalEvidence").innerHTML = `
     <div class="evidence-head">
       <strong>本次结论依据</strong>
-      <span>${escapeHtml(snapshot.label)} · 可信度 ${escapeHtml(snapshot.confidence)}%</span>
+      <span>${escapeHtml(snapshot.label)} · 信号证据充分度 ${escapeHtml(snapshot.confidence)}/100</span>
     </div>
     <p>${escapeHtml(snapshot.summary)}</p>
     <div class="evidence-grid">

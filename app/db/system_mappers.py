@@ -3,6 +3,11 @@ from __future__ import annotations
 import sqlite3
 
 from app.models.schemas import MonitorEvent, ProviderCapabilityStatus, ProviderStatus, TaskRun
+from app.services.provider_errors import sanitize_provider_error
+
+
+def _sanitized_provider_error(value: object | None) -> str | None:
+    return None if value is None else sanitize_provider_error(value)
 
 
 def row_to_provider_status(row: sqlite3.Row) -> ProviderStatus:
@@ -12,7 +17,7 @@ def row_to_provider_status(row: sqlite3.Row) -> ProviderStatus:
         priority=row["priority"],
         healthy=bool(row["healthy"]),
         last_success=row["last_success"],
-        last_error=row["last_error"],
+        last_error=_sanitized_provider_error(row["last_error"]),
         latency_ms=row["latency_ms"],
         success_count=row["success_count"],
         failure_count=row["failure_count"],
@@ -28,7 +33,7 @@ def row_to_provider_capability_status(row: sqlite3.Row) -> ProviderCapabilitySta
         priority=row["priority"],
         healthy=bool(row["healthy"]),
         last_success=row["last_success"],
-        last_error=row["last_error"],
+        last_error=_sanitized_provider_error(row["last_error"]),
         latency_ms=row["latency_ms"],
         success_count=row["success_count"],
         failure_count=row["failure_count"],

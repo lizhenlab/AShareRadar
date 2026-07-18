@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.utils.market_data import finite_float
+from app.utils.text import clean_optional_text as _clean_text
 from app.utils.time import non_negative_seconds_since_text
 
 
@@ -45,19 +46,3 @@ def _positive_count(raw_value: object) -> int:
     if value is None or value <= 0:
         return 0
     return int(value)
-
-
-def _clean_text(value: object) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = " ".join(value.split())
-    else:
-        try:
-            float(value)
-        except (TypeError, ValueError):
-            text = " ".join(str(value).split())
-        else:
-            return None
-    invalid_text = {"nan", "none", "null", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}
-    return text if text and text.lower() not in invalid_text else None

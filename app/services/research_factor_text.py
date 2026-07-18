@@ -90,12 +90,17 @@ def _factor_confirmation_text(factor_lab: FactorLabReport) -> str:
     if factor_lab.calibration_sample_count >= MIN_FACTOR_CONFIRMATION_SAMPLES:
         return (
             f"因子实验室由「{main}」提供支撑，最低单因子有效样本 {factor_lab.calibration_sample_count} 个，"
-            f"汇总置信度 {factor_lab.calibrated_confidence}%。"
+            f"综合证据充分度 {_factor_evidence_sufficiency(factor_lab)}/100。"
         )
     return (
         f"因子实验室出现「{main}」支撑，但最低单因子有效样本只有 {factor_lab.calibration_sample_count} 个，"
         "仍需价量确认。"
     )
+
+
+def _factor_evidence_sufficiency(factor_lab: FactorLabReport) -> int:
+    value = factor_lab.evidence_sufficiency
+    return value if value is not None else factor_lab.calibrated_confidence
 
 
 def _factor_risk_text(factor_lab: FactorLabReport) -> str:
@@ -110,6 +115,7 @@ __all__ = [
     "_factor_bucket_alpha_text",
     "_factor_calibration_impact",
     "_factor_confirmation_text",
+    "_factor_evidence_sufficiency",
     "_factor_lab_summary",
     "_factor_missing_data",
     "_factor_reference",

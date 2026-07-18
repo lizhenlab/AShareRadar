@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+import app.services.research_qa_answer as answer_facade
 from app.models.schemas import (
     ActionAdvice,
     AnalysisResult,
@@ -27,7 +30,10 @@ from app.models.schemas import (
     TimeframeAlignmentReport,
 )
 from app.services.research_qa_answer import (
+    QUESTION_CONFIDENCE_PENALTIES,
     TOPIC_ANSWER_STRATEGIES,
+    ConfidenceContext,
+    TopicAnswerStrategy,
     answer_stock_question,
     question_actions,
     question_answer_text,
@@ -37,6 +43,59 @@ from app.services.research_qa_answer import (
     question_invalidations,
 )
 from app.services.research_qa_topics import QUESTION_TOPIC_KEYWORDS, RELATED_QUESTIONS
+from app.services.research_qa_answer_confidence import (
+    QUESTION_CONFIDENCE_PENALTIES as implementation_confidence_penalties,
+    question_confidence as implementation_question_confidence,
+)
+from app.services.research_qa_answer_contracts import (
+    ConfidenceContext as implementation_confidence_context,
+    TopicAnswerStrategy as implementation_topic_answer_strategy,
+)
+from app.services.research_qa_answer_report import answer_stock_question as implementation_answer_stock_question
+from app.services.research_qa_answer_selectors import question_actions as implementation_question_actions
+from app.services.research_qa_answer_strategies import TOPIC_ANSWER_STRATEGIES as implementation_topic_answer_strategies
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_question_answer_facade_reexports_split_implementations() -> None:
+    assert answer_facade.answer_stock_question is implementation_answer_stock_question
+    assert answer_facade.question_confidence is implementation_question_confidence
+    assert answer_facade.question_actions is implementation_question_actions
+
+
+def test_question_answer_facade_restores_legacy_strategy_constant_and_type_exports() -> None:
+    assert TOPIC_ANSWER_STRATEGIES is implementation_topic_answer_strategies
+    assert QUESTION_CONFIDENCE_PENALTIES is implementation_confidence_penalties
+    assert ConfidenceContext is implementation_confidence_context
+    assert TopicAnswerStrategy is implementation_topic_answer_strategy
+    assert {
+        "ActionBuilder",
+        "ActionContext",
+        "AnswerPrefixBuilder",
+        "ConfidenceContext",
+        "ConfidencePenaltyRule",
+        "ConclusionBuilder",
+        "ConclusionContext",
+        "EvidenceBuilder",
+        "EvidenceContext",
+        "InvalidationBuilder",
+        "InvalidationContext",
+        "QUESTION_CONFIDENCE_PENALTIES",
+        "StockQuestionContext",
+        "TOPIC_ANSWER_STRATEGIES",
+        "TopicAnswerStrategy",
+    } <= set(answer_facade.__all__)
+
+
+def test_question_answer_split_modules_stay_bounded() -> None:
+    facade = ROOT / "app/services/research_qa_answer.py"
+    components = sorted((ROOT / "app/services").glob("research_qa_answer_*.py"))
+
+    assert len(facade.read_text(encoding="utf-8").splitlines()) <= 70
+    assert components
+    assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 220 for path in components)
 
 
 @pytest.mark.parametrize(
@@ -242,6 +301,17 @@ def test_question_answer_text_uses_first_three_actions() -> None:
 
     assert "动作1；动作2；动作3" in answer
     assert "动作4" not in answer
+    assert "回答可靠度 80/100" in answer
+    assert "置信度" not in answer
+    assert "80%" not in answer
+
+
+def test_question_answer_keeps_legacy_confidence_with_explicit_score_semantics() -> None:
+    result = answer_stock_question("风险在哪里", *_qa_args())
+
+    assert isinstance(result.confidence, int)
+    assert result.confidence_semantics == "non_statistical_answer_reliability"
+    assert "不是统计正确率或概率" in result.confidence_note
 
 
 def test_answer_text_handles_empty_actions_with_beginner_summary_fallback() -> None:

@@ -1,8 +1,46 @@
 from __future__ import annotations
 
 
-SCHEMA_SQL = """
-PRAGMA journal_mode = WAL;
+QUOTE_HISTORY_COLUMN_DEFINITIONS = """
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    name TEXT NOT NULL,
+    price REAL NOT NULL,
+    change_pct REAL NOT NULL,
+    pe REAL,
+    pb REAL,
+    market_cap REAL,
+    source TEXT NOT NULL,
+    quote_timestamp TEXT NOT NULL,
+    trade_date TEXT NOT NULL CHECK (length(trim(trade_date)) > 0),
+    fetched_at TEXT NOT NULL
+"""
+
+
+KLINE_DAILY_COLUMN_DEFINITIONS = """
+    symbol TEXT NOT NULL,
+    adjustment_mode TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (adjustment_mode IN ('qfq', 'hfq', 'none', 'unknown')),
+    date TEXT NOT NULL,
+    open REAL NOT NULL,
+    close REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    volume REAL NOT NULL,
+    as_of TEXT,
+    data_version TEXT NOT NULL DEFAULT 'legacy' CHECK (length(trim(data_version)) > 0),
+    contract_version TEXT NOT NULL DEFAULT 'legacy' CHECK (length(trim(contract_version)) > 0),
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, adjustment_mode, date)
+"""
+
+
+SCHEMA_SQL = f"""
+PRAGMA busy_timeout = 15000;
+BEGIN IMMEDIATE;
 
 CREATE TABLE IF NOT EXISTS provider_status (
     name TEXT PRIMARY KEY,
@@ -56,33 +94,11 @@ CREATE TABLE IF NOT EXISTS quote_snapshot (
 );
 
 CREATE TABLE IF NOT EXISTS quote_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    code TEXT NOT NULL,
-    market TEXT NOT NULL,
-    name TEXT NOT NULL,
-    price REAL NOT NULL,
-    change_pct REAL NOT NULL,
-    pe REAL,
-    pb REAL,
-    market_cap REAL,
-    source TEXT NOT NULL,
-    quote_timestamp TEXT NOT NULL,
-    trade_date TEXT,
-    fetched_at TEXT NOT NULL
+{QUOTE_HISTORY_COLUMN_DEFINITIONS}
 );
 
 CREATE TABLE IF NOT EXISTS kline_daily (
-    symbol TEXT NOT NULL,
-    date TEXT NOT NULL,
-    open REAL NOT NULL,
-    close REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    volume REAL NOT NULL,
-    source TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
-    PRIMARY KEY (symbol, date)
+{KLINE_DAILY_COLUMN_DEFINITIONS}
 );
 
 CREATE TABLE IF NOT EXISTS kline_minute (
@@ -137,6 +153,13 @@ CREATE TABLE IF NOT EXISTS watchlist (
     note TEXT,
     group_name TEXT NOT NULL DEFAULT '默认',
     pinned INTEGER NOT NULL DEFAULT 0,
+    research_status TEXT NOT NULL DEFAULT 'watching'
+        CHECK (research_status IN ('to_research', 'watching', 'holding_research', 'excluded')),
+    priority TEXT NOT NULL DEFAULT 'medium'
+        CHECK (priority IN ('high', 'medium', 'low')),
+    next_review_date TEXT,
+    last_viewed_at TEXT,
+    unread_change_count INTEGER NOT NULL DEFAULT 0 CHECK (unread_change_count >= 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -162,7 +185,18 @@ CREATE TABLE IF NOT EXISTS advice_history (
     summary TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT,
-    repeat_count INTEGER NOT NULL DEFAULT 1
+    repeat_count INTEGER NOT NULL DEFAULT 1,
+    snapshot_contract_version TEXT NOT NULL DEFAULT 'legacy',
+    conclusion_basis TEXT NOT NULL DEFAULT 'legacy_unknown',
+    rule_version TEXT NOT NULL DEFAULT 'unknown',
+    model_version TEXT NOT NULL DEFAULT 'unknown',
+    market_time TEXT,
+    data_quality_source TEXT,
+    kline_adjustment_mode TEXT NOT NULL DEFAULT 'unknown',
+    kline_anchor_date TEXT,
+    kline_anchor_close REAL,
+    kline_data_version TEXT NOT NULL DEFAULT 'unknown',
+    kline_contract_version TEXT NOT NULL DEFAULT 'unknown'
 );
 
 CREATE TABLE IF NOT EXISTS alert_rule (
@@ -263,8 +297,6 @@ CREATE TABLE IF NOT EXISTS schema_migration (
 );
 
 -- Indexes that use compatibility-added columns are created after migrations.
-CREATE INDEX IF NOT EXISTS idx_quote_history_symbol_time
-    ON quote_history(symbol, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_kline_symbol_date
     ON kline_daily(symbol, date);
 CREATE INDEX IF NOT EXISTS idx_kline_minute_symbol_time
@@ -293,7 +325,12 @@ CREATE INDEX IF NOT EXISTS idx_stock_note_symbol_created
     ON stock_note(symbol, created_at);
 CREATE INDEX IF NOT EXISTS idx_provider_capability_status_name_kind
     ON provider_capability_status(name, kind);
+COMMIT;
 """
 
 
-__all__ = ["SCHEMA_SQL"]
+__all__ = [
+    "KLINE_DAILY_COLUMN_DEFINITIONS",
+    "QUOTE_HISTORY_COLUMN_DEFINITIONS",
+    "SCHEMA_SQL",
+]

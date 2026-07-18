@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from app.models.schemas import Kline, KlineQuality
-from app.services.data_quality_time import expected_quote_date, latest_expected_trade_date, weekday_gap
+from app.services.data_quality_time import (
+    expected_quote_date,
+    latest_expected_daily_kline_date,
+    market_local_datetime,
+    weekday_gap,
+)
 
 
 @dataclass(frozen=True)
@@ -73,11 +78,11 @@ def assess_kline_quality(klines: list[Kline], *, now: datetime | None = None) ->
 
 
 def kline_quality_context(klines: list[Kline], *, now: datetime | None = None) -> KlineQualityContext:
-    current = now or datetime.now()
+    current = market_local_datetime(now)
     return KlineQualityContext(
         source=kline_source(klines),
         last_date=latest_kline_date(klines),
-        latest_expected=latest_expected_trade_date(current),
+        latest_expected=latest_expected_daily_kline_date(current),
         latest_allowed=expected_quote_date(current),
         from_cache=any(item.from_cache for item in klines),
         fallback_used=any(item.fallback_used for item in klines),

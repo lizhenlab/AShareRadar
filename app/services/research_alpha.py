@@ -565,7 +565,7 @@ def _alpha_summary(
     top_negative = _first_alpha_title(negatives, "暂无核心风险项")
     clean_missing_data = _dedupe(_missing_items(missing_data))
     missing_text = f"，但缺少{clean_missing_data[0]}等数据" if clean_missing_data else ""
-    return f"核心加分来自「{top_positive}」，核心风险来自「{top_negative}」，综合置信度 {_clamp(confidence)}%{missing_text}。"
+    return f"核心加分来自「{top_positive}」，核心风险来自「{top_negative}」，Alpha证据充分度 {_clamp(confidence)}/100{missing_text}。"
 
 
 def _first_alpha_title(points: list[AlphaEvidencePoint], fallback: str) -> str:

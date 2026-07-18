@@ -33,6 +33,48 @@ def test_data_status_service_builds_status_without_sync_write_side_effects() -> 
     assert status.source_plan.primary_quote_source == "live"
 
 
+def test_data_status_service_sanitizes_provider_errors_without_changing_source_plan_inputs() -> None:
+    raw_error = "GET https://alice:secret@example.test/quote?token=raw-token failed"
+    provider_status = ProviderStatus(
+        name="live",
+        enabled=True,
+        priority=1,
+        healthy=False,
+        last_error=raw_error,
+        failure_count=1,
+    )
+    capability_status = ProviderCapabilityStatus(
+        name="live",
+        kind="quote",
+        enabled=True,
+        priority=1,
+        healthy=False,
+        last_error=raw_error,
+        failure_count=1,
+    )
+    cache = _StatusCache(provider_rows=[provider_status], capability_rows=[capability_status])
+    service = _service(
+        cache,
+        {"live": _CapabilityProvider(_capability("live", realtime_quote=True))},
+        provider_names=lambda: ["live"],
+        provider_index=lambda _name: 1,
+        priority=lambda kind: [(1, "live")] if kind == "quote" else [],
+    )
+
+    status = service.status()
+
+    returned_errors = [status.providers[0].last_error, status.capability_statuses[0].last_error]
+    assert all(error is not None and "alice" not in error for error in returned_errors)
+    assert all(error is not None and "secret" not in error for error in returned_errors)
+    assert all(error is not None and "raw-token" not in error for error in returned_errors)
+    assert all(error is not None and "<redacted>" in error for error in returned_errors)
+    assert status.source_plan is not None
+    assert status.source_plan.primary_quote_source is None
+    assert "raw-token" not in (status.source_plan.decisions[0].last_error or "")
+    assert provider_status.last_error == raw_error
+    assert capability_status.last_error == raw_error
+
+
 def test_data_status_service_sync_provider_flags_updates_cache() -> None:
     cache = _StatusCache(provider_rows=[], capability_rows=[])
     providers = {

@@ -10,6 +10,7 @@ from app.repositories.provider_status_aggregation import (
     aggregate_provider_status as _aggregate_provider_status,
     capability_has_activity as _capability_has_activity,
 )
+from app.services.provider_errors import sanitize_provider_error
 from app.utils.time import now_text
 
 MAX_ERROR_LENGTH = 500
@@ -85,8 +86,12 @@ def _count_value(value: int | None) -> int:
     return max(int(value or 0), 0)
 
 
-def _trim_error(error: str) -> str:
-    return str(error)[:MAX_ERROR_LENGTH]
+def _trim_error(error: object) -> str:
+    return sanitize_provider_error(error)[:MAX_ERROR_LENGTH]
+
+
+def _stored_error(error: object | None) -> str | None:
+    return None if error is None else _trim_error(error)
 
 
 def _runtime_update_assignments(table: str, enabled_assignment: str) -> str:
@@ -111,7 +116,7 @@ def _runtime_update_values(update: ProviderRuntimeUpdate, updated_at: str) -> tu
         update.priority,
         _db_bool(update.healthy),
         update.last_success,
-        update.last_error,
+        _stored_error(update.last_error),
         update.latency_ms,
         _count_value(update.success_delta),
         _count_value(update.failure_delta),
@@ -139,7 +144,7 @@ def _provider_status_values(item: ProviderStatus) -> tuple[object, ...]:
         item.priority,
         _db_bool(item.healthy),
         item.last_success,
-        item.last_error,
+        _stored_error(item.last_error),
         item.latency_ms,
         _count_value(item.success_count),
         _count_value(item.failure_count),
@@ -253,7 +258,7 @@ class ProviderStatusRepository(SQLiteRepository):
             healthy=False,
             latency_ms=None,
             last_success=None,
-            last_error=_trim_error(error),
+            last_error=error,
             success_delta=0,
             failure_delta=1,
         )
@@ -291,7 +296,7 @@ class ProviderStatusRepository(SQLiteRepository):
             healthy=False,
             latency_ms=None,
             last_success=None,
-            last_error=_trim_error(error),
+            last_error=error,
             success_delta=0,
             failure_delta=1,
         )

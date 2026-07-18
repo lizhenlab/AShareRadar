@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
+from app.services.provider_errors import sanitize_provider_error
+
 
 DEFAULT_OPTIONAL_WORKBENCH_TIMEOUT_SECONDS = 1.5
 T = TypeVar("T")
@@ -33,7 +35,7 @@ def optional_timeout_seconds(datahub: object) -> float:
 
 
 def short_error(exc: Exception) -> str:
-    text = str(exc).strip()
+    text = sanitize_provider_error(exc).strip()
     return text[:140] if text else exc.__class__.__name__
 
 

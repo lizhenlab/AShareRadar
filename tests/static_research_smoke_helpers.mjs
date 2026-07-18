@@ -6,28 +6,66 @@ export async function runResearchPanelSmoke() {
 
   const aiHtml = element("aiDashboard").innerHTML;
   const themeHtml = element("themePanel").innerHTML;
-  assert(aiHtml.includes("本次问诊") && aiHtml.includes("&lt;script&gt;"), "AI dashboard did not render escaped question answer content");
+  assert(
+    aiHtml.includes("本次问诊")
+      && aiHtml.includes("&lt;script&gt;")
+      && aiHtml.includes("回答可靠度 66/100")
+      && !aiHtml.includes("置信度"),
+    "AI dashboard did not render escaped question answer content with score semantics",
+  );
   assert(aiHtml.includes("同行源&lt;script&gt;暂不可用") && !aiHtml.includes("同行源<script>"), "Peer source warning was not rendered and escaped");
   assert(!themeHtml.includes("<script>") && themeHtml.includes("&lt;script&gt;"), "Theme panel did not escape concept content");
 
   const factorHtml = element("factorLab").innerHTML;
   assert(
-    factorHtml.includes("历史分位 72.5%") && factorHtml.includes("&lt;script&gt;") && factorHtml.includes("权重规则"),
+    factorHtml.includes("历史分位 72.5%")
+      && factorHtml.includes("证据充分度 41/100")
+      && factorHtml.includes("综合可信等级 较低")
+      && !factorHtml.includes("校准置信")
+      && !factorHtml.includes("低置信参考")
+      && factorHtml.includes("证据充分度较低的参考")
+      && factorHtml.includes("&lt;script&gt;")
+      && factorHtml.includes("权重规则"),
     "Factor lab did not render escaped calibrated factor content",
   );
 
   const regimeHtml = element("marketRegime").innerHTML;
   assert(
-    regimeHtml.includes('class="risk"') && regimeHtml.includes("置信修正 +5") && regimeHtml.includes("先降仓"),
+    regimeHtml.includes('class="risk"')
+      && regimeHtml.includes("证据充分度修正 +5")
+      && regimeHtml.includes("证据充分度 40/100")
+      && regimeHtml.includes("量价热度（衍生） 55 分")
+      && !regimeHtml.includes("校准置信度")
+      && regimeHtml.includes("先降仓"),
     "Market regime did not render risk tone, signed adjustment, and suggestions",
   );
 
   const alphaHtml = element("alphaEvidence").innerHTML;
   assert(
-    alphaHtml.includes("业绩改善&lt;script&gt; +4")
+    alphaHtml.includes("Alpha证据充分度 60/100")
+      && alphaHtml.includes("业绩改善&lt;script&gt; +4")
       && alphaHtml.includes("估值压力&lt;script&gt; -2")
-      && alphaHtml.includes("待补数据：机构持仓&lt;script&gt;、现金流"),
+      && alphaHtml.includes("待补数据：机构持仓&lt;script&gt;、现金流")
+      && !alphaHtml.includes("置信度"),
     "Alpha evidence did not render signed, escaped evidence and missing data",
+  );
+
+  const featureHtml = element("featureSnapshot").innerHTML;
+  const diagnosisHtml = element("diagnosisPanel").innerHTML;
+  const validationHtml = element("signalValidation").innerHTML;
+  assert(
+    featureHtml.includes("60 · 震荡")
+      && featureHtml.includes("1.20倍")
+      && diagnosisHtml.includes("等待确认")
+      && diagnosisHtml.includes("观察 · 诊断证据充分度 60/100")
+      && diagnosisHtml.includes("证据充分度 40/100")
+      && diagnosisHtml.includes("量价热度评分（衍生口径）")
+      && !diagnosisHtml.includes("校准置信度")
+      && validationHtml.includes("待确认")
+      && validationHtml.includes("1项")
+      && validationHtml.includes("验证强度 58/100")
+      && !validationHtml.includes("置信度"),
+    "Feature, diagnosis, or validation panel output changed",
   );
 
   const timeframeHtml = element("timeframeAlignment").innerHTML;
@@ -43,9 +81,21 @@ export async function runResearchPanelSmoke() {
   assert(
     riskRewardHtml.includes('class="risk"')
       && riskRewardHtml.includes("防守情景&lt;script&gt;")
+      && riskRewardHtml.includes("规则情景权重 56/100")
+      && riskRewardHtml.includes("规则情景权重 30/100")
+      && !riskRewardHtml.includes("55%")
       && riskRewardHtml.includes("收益风险比 0.80")
       && !riskRewardHtml.includes("第二条不显示"),
     "Risk/reward panel did not render risk tone, scenarios, metrics, and limited notes",
+  );
+
+  const chipHtml = element("chipPanel").innerHTML;
+  const leadershipHtml = element("leadershipPanel").innerHTML;
+  assert(
+    chipHtml.includes("均衡 · 一般")
+      && chipHtml.includes("成本中枢 10.00")
+      && leadershipHtml.includes("40 · 普通"),
+    "Chip analysis or leadership panel output changed",
   );
 
   const replayHtml = element("replayPanel").innerHTML;
@@ -83,7 +133,13 @@ export async function runAiQuestionSubmitSmoke() {
 
   const body = JSON.parse(fetchCalls[0].options.body);
   assert(body.symbol === "600519" && body.question === "风险在哪里？", `AI question request body was wrong: ${fetchCalls[0].options.body}`);
-  assert(insertedHtml.at(-1).html.includes("风险已识别&lt;script&gt;"), "AI question answer was not inserted and escaped");
+  const answerHtml = insertedHtml.at(-1).html;
+  assert(
+    answerHtml.includes("风险已识别&lt;script&gt;")
+      && answerHtml.includes("回答可靠度 61/100")
+      && !answerHtml.includes("置信度"),
+    "AI question answer was not inserted, escaped, or labeled with score semantics",
+  );
 }
 
 function installStaticAssetDom() {
@@ -153,6 +209,7 @@ function researchSmokeWorkbench() {
       trend_score: 60,
       trend_label: "震荡",
       fund_flow_score: 55,
+      fund_flow_data_nature: "derived",
       leader_score: 40,
       leader_level: "普通",
       volume_ratio: 1.2,
@@ -166,8 +223,8 @@ function researchSmokeWorkbench() {
       action: "观察",
       confidence: 60,
       beginner_summary: "摘要",
-      professional_summary: "专业摘要",
-      confirmation_signals: [],
+      professional_summary: "因子证据充分度 40/100，量价热度（衍生） 55 分。",
+      confirmation_signals: ["量价热度评分（衍生口径）维持在 60 分以上。"],
       hard_risks: [],
     },
     alpha_evidence: {
@@ -187,9 +244,23 @@ function researchSmokeWorkbench() {
       breadth_score: 50,
       confidence_adjustment: 5,
       suggestions: ["先降仓"],
-      evidence: ["风险证据"],
+      evidence: ["证据充分度 40/100，量价热度（衍生） 55 分。"],
     },
-    signal_validation: { overall_status: "待确认", summary: "验证", items: [], notes: [] },
+    signal_validation: {
+      overall_status: "待确认",
+      summary: "验证",
+      items: [{
+        name: "突破验证",
+        category: "价格",
+        status: "待确认",
+        confidence: 58,
+        trigger_condition: "接近压力",
+        confirmation_condition: "放量突破",
+        invalidation_condition: "跌回平台",
+        historical_reference: "历史样本仅作参考",
+      }],
+      notes: [],
+    },
     timeframe_alignment: {
       conflict_level: "短线冲突<script>",
       alignment_label: "偏弱分歧",
@@ -213,7 +284,7 @@ function researchSmokeWorkbench() {
       volatility_pct: 3,
       summary: "收益风险<script>",
       scenarios: [
-        { name: "防守情景<script>", probability: 55, trigger: "跌破支撑<script>", expected_move: "-6%", response: "降仓<script>", invalidation: "收回支撑<script>" },
+        { name: "防守情景<script>", probability: 55, rule_weight: 56, trigger: "跌破支撑<script>", expected_move: "-6%", response: "降仓<script>", invalidation: "收回支撑<script>" },
         { name: "积极情景", probability: 30, trigger: "突破压力", expected_move: "+8%", response: "小仓跟随", invalidation: "跌回平台" },
       ],
       notes: ["仓位要轻<script>", "第二条不显示"],
@@ -221,6 +292,8 @@ function researchSmokeWorkbench() {
     factor_lab: {
       total_score: 55,
       calibrated_confidence: 40,
+      evidence_sufficiency: 41,
+      composite_reliability_level: "较低",
       top_positive: ["趋势因子<script>"],
       profile_label: "常规",
       calibration_sample_count: 0,
@@ -246,7 +319,7 @@ function researchSmokeWorkbench() {
         evidence: ["因子证据"],
       }],
       weight_policy: ["权重规则"],
-      notes: ["因子备注"],
+      notes: ["样本较少，只作证据充分度较低的参考。"],
     },
     theme_context: {
       level: "中性",

@@ -40,7 +40,7 @@ class FeatureMetrics:
     atr_pct: float
     volatility_pct: float
     valuation_score: int
-    financial_score: int
+    financial_score: int | None
     fund_flow_score: int
     leader_score: int
     tags: list[str]
@@ -82,7 +82,9 @@ def build_feature_snapshot(analysis: AnalysisResult, insights: StockInsightBundl
         valuation_score=metrics.valuation_score,
         financial_score=metrics.financial_score,
         fund_flow_score=metrics.fund_flow_score,
+        fund_flow_data_nature=_data_nature(getattr(insights.fund_flow, "data_nature", None)),
         order_pressure=_non_empty_text(insights.order_pressure.pressure_level) or "--",
+        order_pressure_data_nature=_data_nature(getattr(insights.order_pressure, "data_nature", None)),
         industry_name=_non_empty_text(industry.name) if industry else None,
         industry_change_pct=finite_float(industry.change_pct) if industry else None,
         tags=metrics.tags,
@@ -105,7 +107,7 @@ def _feature_metrics(analysis: AnalysisResult, insights: StockInsightBundle) -> 
         atr_pct=atr_pct,
         volatility_pct=volatility_pct,
         valuation_score=_score_or_zero(insights.valuation.score),
-        financial_score=_score_or_zero(insights.financial_health.score),
+        financial_score=_financial_health_score(insights.financial_health),
         fund_flow_score=_score_or_zero(insights.fund_flow.overall_score),
         leader_score=leader_score_value,
         tags=_feature_tags(leader_inputs, leader_score_value),
@@ -136,6 +138,26 @@ def _optional_score(value: object) -> int | None:
     return clamp_score(value) if finite_float(value) is not None else None
 
 
+def _financial_health_score(health: object) -> int | None:
+    if getattr(health, "score_available", False) is not True or getattr(health, "formal_minimum_complete", False) is not True:
+        return None
+    return _optional_score(getattr(health, "score", None))
+
+
+def _data_nature(value: object) -> str:
+    text = _non_empty_text(value)
+    return text if text in {"derived", "estimated", "observed", "unavailable"} else "unavailable"
+
+
+def _data_nature_label(value: object) -> str:
+    return {
+        "derived": "衍生",
+        "estimated": "估算",
+        "observed": "实测",
+        "unavailable": "不可用",
+    }[_data_nature(value)]
+
+
 def _non_empty_text(value: object) -> str | None:
     if value is None:
         return None
@@ -157,9 +179,11 @@ def _feature_notes(analysis: AnalysisResult, insights: StockInsightBundle) -> li
     data_quality_level = _safe_quality_level(analysis.data_quality.score, analysis.data_quality.level)
     trend_label = _safe_trend_label(analysis.trend_score, analysis.trend_label)
     notes = [
-        f"信号可信度 {signal_confidence}%，数据质量 {data_quality_level} {data_quality_score} 分。",
-        f"趋势 {trend_label}，资金面 {insights.fund_flow.level}，估值 {insights.valuation.level}。",
+        f"信号可靠度 {signal_confidence}/100，数据质量 {data_quality_level} {data_quality_score} 分。",
+        f"趋势 {trend_label}，量价热度（{_data_nature_label(getattr(insights.fund_flow, 'data_nature', None))}）{insights.fund_flow.level}，估值 {insights.valuation.level}。",
     ]
+    if _financial_health_score(insights.financial_health) is None:
+        notes.append("正式财报最小集不完整，财务体检分按不可用处理，未计为 0 分。")
     if insights.lhb.missing_data:
         notes.append("龙虎榜席位、公告和逐笔资金仍是后续精确化重点。")
     return notes
@@ -195,7 +219,7 @@ def _leadership_evidence(feature: FeatureSnapshot, concepts: list[StockConceptIt
     return [
         f"趋势评分 {feature.trend_score}，涨跌幅 {feature.change_pct:.2f}%。",
         _liquidity_evidence(feature),
-        f"资金评分 {feature.fund_flow_score}，盘口状态：{feature.order_pressure}。",
+        f"量价热度评分 {feature.fund_flow_score}（{_data_nature_label(feature.fund_flow_data_nature)}），订单压力：{feature.order_pressure}。",
         *(item for item in optional_evidence if item),
     ]
 
@@ -286,7 +310,11 @@ def _feature_leader_inputs(
         volume_ratio=_non_negative_or_zero(volume_ratio),
         amount=_non_negative_or_zero(analysis.quote.amount),
         turnover_rate=_optional_non_negative(analysis.quote.turnover_rate),
-        fund_flow_score=_optional_score(insights.fund_flow.overall_score),
+        fund_flow_score=(
+            _optional_score(insights.fund_flow.overall_score)
+            if _data_nature(getattr(insights.fund_flow, "data_nature", None)) != "unavailable"
+            else None
+        ),
         industry_change_pct=finite_float(analysis.industry_context.change_pct) if analysis.industry_context else None,
         abnormal_level=insights.abnormal_events.level,
         data_quality_score=_score_or_zero(analysis.data_quality.score),
@@ -319,9 +347,11 @@ def _safe_report_feature(feature: FeatureSnapshot) -> FeatureSnapshot:
             "turnover_rate": _optional_non_negative(feature.turnover_rate),
             "amount": _optional_non_negative(feature.amount),
             "valuation_score": _score_or_zero(feature.valuation_score),
-            "financial_score": _score_or_zero(feature.financial_score),
+            "financial_score": _optional_score(feature.financial_score),
             "fund_flow_score": _score_or_zero(feature.fund_flow_score),
+            "fund_flow_data_nature": _data_nature(feature.fund_flow_data_nature),
             "order_pressure": _non_empty_text(feature.order_pressure) or "--",
+            "order_pressure_data_nature": _data_nature(feature.order_pressure_data_nature),
             "industry_name": _non_empty_text(feature.industry_name),
             "industry_change_pct": finite_float(feature.industry_change_pct),
             "tags": _clean_tags(feature.tags),

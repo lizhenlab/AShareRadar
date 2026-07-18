@@ -74,6 +74,7 @@ _ALERT_EVENT_COLUMNS = (
 )
 
 _ALERT_EVENT_INSERT_COLUMNS = _ALERT_EVENT_COLUMNS[1:]
+MAX_ALERT_EVENT_PAGE_SIZE = 500
 
 _ALERT_RULE_SELECT_SQL = _columns_sql(_ALERT_RULE_COLUMNS)
 _ALERT_EVENT_SELECT_SQL = _columns_sql(_ALERT_EVENT_COLUMNS)
@@ -121,6 +122,12 @@ class AlertStateDecision:
     trigger_increment: int
 
 
+@dataclass(frozen=True)
+class AlertStateUpdateResult:
+    applied: bool
+    event: AlertEventItem | None = None
+
+
 class AlertRepository(SQLiteRepository):
     def create_rule(self, quote: Quote, payload: AlertRuleInput) -> AlertRuleItem:
         timestamp = now_text()
@@ -138,8 +145,8 @@ class AlertRepository(SQLiteRepository):
             row = conn.execute(f"SELECT {_ALERT_RULE_SELECT_SQL} FROM alert_rule WHERE id = ?", (row_id,)).fetchone()
         return row_to_alert_rule(row) if row else None
 
-    def rules(self, symbol: str | None = None, include_disabled: bool = True, limit: int = 200) -> list[AlertRuleItem]:
-        if limit <= 0:
+    def rules(self, symbol: str | None = None, include_disabled: bool = True, limit: int | None = None) -> list[AlertRuleItem]:
+        if limit is not None and limit <= 0:
             return []
         sql = f"SELECT {_ALERT_RULE_SELECT_SQL} FROM alert_rule"
         params: list[object] = []
@@ -151,8 +158,10 @@ class AlertRepository(SQLiteRepository):
             clauses.append("enabled = 1")
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY enabled DESC, updated_at DESC, id DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY enabled DESC, updated_at DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
         with self._lock, self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         items = [row_to_alert_rule(row) for row in rows]
@@ -185,6 +194,14 @@ class AlertRepository(SQLiteRepository):
 
     def _apply_rule_updates(self, row_id: int, updates: list[FieldUpdate]) -> AlertRuleItem | None:
         assignments, params = update_sql_parts(updates)
+        if _rule_semantics_changed(updates):
+            assignments.extend(
+                [
+                    "last_checked_at = NULL",
+                    "last_triggered_at = NULL",
+                    "last_state = '等待'",
+                ]
+            )
         assignments.append("updated_at = ?")
         params.append(now_text())
         params.append(row_id)
@@ -210,17 +227,42 @@ class AlertRepository(SQLiteRepository):
         force_event: bool = False,
         decision: AlertStateDecision | None = None,
     ) -> AlertEventItem | None:
+        return self.update_rule_state_checked(
+            rule,
+            checked_at=checked_at,
+            state=state,
+            triggered=triggered,
+            message=message,
+            quote=quote,
+            event_type=event_type,
+            force_event=force_event,
+            decision=decision,
+        ).event
+
+    def update_rule_state_checked(
+        self,
+        rule: AlertRuleItem,
+        *,
+        checked_at: str,
+        state: str,
+        triggered: bool,
+        message: str,
+        quote: Quote,
+        event_type: str | None = None,
+        force_event: bool = False,
+        decision: AlertStateDecision | None = None,
+    ) -> AlertStateUpdateResult:
         if not rule.enabled:
-            return None
+            return AlertStateUpdateResult(applied=False)
         event_id: int | None = None
         snapshot_guard = decision is not None
         decision = decision or _alert_state_decision(rule, triggered, event_type, force_event)
         with self._lock, self._connect() as conn:
             if not _update_alert_rule_state_row(conn, rule, checked_at, state, decision, snapshot_guard=snapshot_guard):
-                return None
+                return AlertStateUpdateResult(applied=False)
             if decision.should_create_event:
                 event_id = _insert_alert_event_row(conn, rule, quote, checked_at, message, decision.event_type)
-        return self.event(event_id) if event_id else None
+        return AlertStateUpdateResult(applied=True, event=self.event(event_id) if event_id else None)
 
     def event(self, row_id: int | None) -> AlertEventItem | None:
         if row_id is None:
@@ -229,15 +271,32 @@ class AlertRepository(SQLiteRepository):
             row = conn.execute(f"SELECT {_ALERT_EVENT_SELECT_SQL} FROM alert_event WHERE id = ?", (row_id,)).fetchone()
         return row_to_alert_event(row) if row else None
 
-    def events(self, symbol: str | None = None, limit: int = 100) -> list[AlertEventItem]:
+    def events(
+        self,
+        symbol: str | None = None,
+        limit: int = 100,
+        *,
+        after_created_at: str | None = None,
+        after_id: int | None = None,
+    ) -> list[AlertEventItem]:
         if limit <= 0:
             return []
+        limit = min(limit, MAX_ALERT_EVENT_PAGE_SIZE)
+        if after_created_at is not None and after_id is None:
+            raise ValueError("使用 after_created_at 时必须同时提供 after_id")
         sql = f"SELECT {_ALERT_EVENT_SELECT_SQL} FROM alert_event"
         params: list[object] = []
+        clauses: list[str] = []
         if symbol:
-            sql += " WHERE symbol = ?"
+            clauses.append("symbol = ?")
             params.append(standard_symbol(symbol))
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        if after_id is not None:
+            clauses.append("id > ?")
+            params.append(after_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        direction = "ASC" if after_id is not None else "DESC"
+        sql += f" ORDER BY id {direction} LIMIT ?"
         params.append(limit)
         with self._lock, self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -317,6 +376,7 @@ def _alert_rule_updates(payload: AlertRuleUpdate) -> list[FieldUpdate]:
         payload,
         {
             "name": lambda value: (value or "").strip()[:40],
+            "condition_type": lambda value: _required_value(value, "预警类型不能为空"),
             "threshold": _clean_alert_threshold,
             "note": _clean_alert_rule_note,
             "enabled": _clean_alert_enabled,
@@ -344,12 +404,22 @@ def _empty_name_update_requested(raw_updates: dict, updates: list[FieldUpdate]) 
 
 def _with_default_rule_name(updates: list[FieldUpdate], current: AlertRuleItem) -> list[FieldUpdate]:
     threshold = _effective_alert_threshold(updates, current)
-    return _replace_field(updates, FieldUpdate("name", _default_rule_name(current.condition_type, threshold)))
+    condition_type = _effective_condition_type(updates, current)
+    return _replace_field(updates, FieldUpdate("name", _default_rule_name(condition_type, threshold)))
 
 
 def _effective_alert_threshold(updates: list[FieldUpdate], current: AlertRuleItem) -> float:
     updated_threshold = _field_value(updates, "threshold")
     return current.threshold if updated_threshold is None else updated_threshold
+
+
+def _effective_condition_type(updates: list[FieldUpdate], current: AlertRuleItem) -> str:
+    updated_type = _field_value(updates, "condition_type")
+    return current.condition_type if updated_type is None else str(updated_type)
+
+
+def _rule_semantics_changed(updates: list[FieldUpdate]) -> bool:
+    return any(item.column in {"condition_type", "threshold"} for item in updates)
 
 
 def _replace_field(updates: list[FieldUpdate], replacement: FieldUpdate) -> list[FieldUpdate]:

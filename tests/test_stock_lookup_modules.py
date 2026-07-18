@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -22,6 +23,7 @@ def test_confirmed_stock_profile_falls_back_to_matching_quote_when_stock_pool_is
     assert profile.source == "腾讯行情确认"
     assert hub.profile_calls == ["600706.SH"]
     assert hub.quote_calls == ["600706.SH"]
+    assert [item.symbol for item in hub.cache.saved_profiles] == ["600706.SH"]
     assert hub.cache.events == [("fallback", "股票池暂不可用，使用行情确认股票代码：600706.SH")]
 
 
@@ -48,6 +50,25 @@ def test_confirmed_stock_profile_ignores_log_event_failure_on_quote_confirmation
     assert profile.name == "曲江文旅"
     assert hub.profile_calls == ["600706.SH"]
     assert hub.quote_calls == ["600706.SH"]
+
+
+def test_quote_confirmation_persistence_runs_outside_the_event_loop_thread() -> None:
+    cache = _ThreadRecordingCache()
+    hub = _LookupHub(
+        profile_error=RuntimeError("所有股票池数据源均不可用"),
+        quote=_quote(code="600706", market="SH", name="曲江文旅"),
+        cache=cache,
+    )
+
+    async def run() -> int:
+        event_loop_thread = threading.get_ident()
+        await confirmed_stock_profile(hub, "600706.SH")
+        return event_loop_thread
+
+    event_loop_thread = asyncio.run(run())
+
+    assert cache.thread_ids.keys() == {"save", "log"}
+    assert all(thread_id != event_loop_thread for thread_id in cache.thread_ids.values())
 
 
 def test_confirmed_stock_profile_falls_back_to_matching_quote_when_stock_pool_misses() -> None:
@@ -160,9 +181,13 @@ class _LookupHub:
 class _EventCache:
     def __init__(self) -> None:
         self.events: list[tuple[str, str]] = []
+        self.saved_profiles = []
 
     def log_event(self, level: str, message: str) -> None:
         self.events.append((level, message))
+
+    def save_stock_pool(self, profiles) -> None:
+        self.saved_profiles.extend(profiles)
 
 
 class _Settings:
@@ -173,6 +198,20 @@ class _Settings:
 class _FailingEventCache:
     def log_event(self, level: str, message: str) -> None:
         raise RuntimeError("cache log down")
+
+
+class _ThreadRecordingCache(_EventCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.thread_ids: dict[str, int] = {}
+
+    def log_event(self, level: str, message: str) -> None:
+        self.thread_ids["log"] = threading.get_ident()
+        super().log_event(level, message)
+
+    def save_stock_pool(self, profiles) -> None:
+        self.thread_ids["save"] = threading.get_ident()
+        super().save_stock_pool(profiles)
 
 
 def _quote(*, code: str, market: str, name: str, source: str = "测试行情") -> Quote:

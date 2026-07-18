@@ -3,10 +3,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from math import isfinite
 
+from app.models.reviews import AdviceReviewEvaluationDraft, AdviceReviewPlan
 from app.models.schemas import AnalysisResult, Kline, ReplayCase, ReplayPatternStat, StockReplayAnalysis
 from app.services.indicators import pct_change
+from app.services.trading_calendar import (
+    DAILY_KLINE_PUBLISH_TIME,
+    is_trading_day,
+)
+from app.utils.market_data import valid_kline
 
 
 MIN_REPLAY_KLINES = 30
@@ -275,13 +282,7 @@ def _is_support_rebound(context: ReplayPatternContext) -> bool:
     current = context.current
     closes_off_low = current.close >= (current.high + current.low) / 2
     holds_support = current.close >= context.low_20 * 0.98
-    return (
-        current.low <= context.low_20 * 1.03
-        and current.close > current.open
-        and closes_off_low
-        and holds_support
-        and context.volume_ratio >= 1.05
-    )
+    return current.low <= context.low_20 * 1.03 and current.close > current.open and closes_off_low and holds_support and context.volume_ratio >= 1.05
 
 
 def _is_volume_pullback(context: ReplayPatternContext) -> bool:
@@ -473,10 +474,7 @@ REPLAY_PATTERN_NOTE_RULES = (
     ),
     ReplayPatternNoteRule(
         _has_small_completed_sample,
-        lambda context: (
-            f"{context.pattern}已完成5日回看样本只有 {context.completed_count} 次"
-            f"{context.pending_suffix}，不宜提高权重。"
-        ),
+        lambda context: (f"{context.pattern}已完成5日回看样本只有 {context.completed_count} 次" f"{context.pending_suffix}，不宜提高权重。"),
     ),
     ReplayPatternNoteRule(
         _has_strong_replay_history,
@@ -491,3 +489,386 @@ REPLAY_PATTERN_NOTE_RULES = (
         lambda context: f"{context.pattern}历史表现中性，更适合当作辅助证据。",
     ),
 )
+
+
+ADVICE_REVIEW_RULE_VERSION = "advice-review-v2"
+
+
+@dataclass(frozen=True)
+class AdviceReviewWindow:
+    visible_rows: list[Kline]
+    forward_rows: list[Kline]
+    snapshot_date: date
+    as_of_cutoff: date
+
+
+@dataclass(frozen=True)
+class AdviceReviewForwardCoverage:
+    rows: list[Kline]
+    expected_dates: tuple[date, ...]
+    first_missing_date: date | None
+
+    @property
+    def complete(self) -> bool:
+        return self.first_missing_date is None
+
+
+@dataclass(frozen=True)
+class AdviceReviewBarrierOutcome:
+    conclusion: str | None
+    terminal_index: int | None
+    target_hit: bool
+    target_hit_date: str | None
+    stop_hit: bool
+    stop_hit_date: str | None
+
+
+@dataclass(frozen=True)
+class AdviceReviewPriceContext:
+    adjustment_mode: str
+    data_version: str
+    contract_version: str
+    anchor_evaluation_close: float
+    scale_factor: float
+    entry_price: float
+    target_price: float
+    stop_price: float
+
+
+def evaluate_advice_forward_window(
+    plan: AdviceReviewPlan,
+    rows: list[Kline],
+    *,
+    as_of: datetime,
+    evaluated_at: str,
+) -> AdviceReviewEvaluationDraft:
+    """Evaluate one frozen advice plan without using same-day or post-as-of bars."""
+
+    snapshot_time = _review_market_datetime(plan.snapshot_market_time)
+    if as_of < snapshot_time:
+        raise ValueError("as_of 不能早于 advice snapshot 的 market_time")
+    window = advice_review_window(rows, snapshot_time=snapshot_time, as_of=as_of)
+    coverage = _advice_review_forward_coverage(window, plan.horizon_days)
+    prices = _advice_review_price_context(plan, rows)
+    barrier = _advice_review_barrier_outcome(coverage.rows, prices)
+    evaluation_rows = _terminal_review_rows(coverage.rows, barrier.terminal_index)
+    status, conclusion = _advice_review_status_and_conclusion(
+        coverage,
+        evaluation_rows,
+        plan.horizon_days,
+        barrier.conclusion,
+        prices,
+    )
+    metrics = _advice_review_metrics(evaluation_rows, prices.entry_price) if prices else (None, None, None)
+    return _advice_review_evaluation_draft(plan, window, evaluation_rows, barrier, prices, status, conclusion, metrics, as_of, evaluated_at)
+
+
+def _advice_review_evaluation_draft(
+    plan: AdviceReviewPlan,
+    window: AdviceReviewWindow,
+    evaluation_rows: list[Kline],
+    barrier: AdviceReviewBarrierOutcome,
+    prices: AdviceReviewPriceContext | None,
+    status: str,
+    conclusion: str,
+    metrics: tuple[float | None, float | None, float | None],
+    as_of: datetime,
+    evaluated_at: str,
+) -> AdviceReviewEvaluationDraft:
+    return AdviceReviewEvaluationDraft(
+        plan_id=plan.id,
+        plan_revision=plan.revision,
+        advice_id=plan.advice_id,
+        symbol=plan.symbol,
+        snapshot_market_time=plan.snapshot_market_time,
+        as_of=as_of.strftime("%Y-%m-%d %H:%M:%S"),
+        evaluated_at=evaluated_at,
+        status=status,
+        conclusion=conclusion,
+        rule_version=ADVICE_REVIEW_RULE_VERSION,
+        snapshot_adjustment_mode=plan.snapshot_adjustment_mode,
+        snapshot_anchor_date=plan.snapshot_anchor_date,
+        snapshot_anchor_close=plan.snapshot_anchor_close,
+        snapshot_data_version=plan.snapshot_data_version,
+        snapshot_contract_version=plan.snapshot_contract_version,
+        evaluation_adjustment_mode=prices.adjustment_mode if prices else "unknown",
+        evaluation_data_version=prices.data_version if prices else "unknown",
+        evaluation_contract_version=prices.contract_version if prices else "unknown",
+        anchor_evaluation_close=prices.anchor_evaluation_close if prices else None,
+        price_scale_factor=prices.scale_factor if prices else None,
+        normalized_entry_price=prices.entry_price if prices else None,
+        normalized_target_price=prices.target_price if prices else None,
+        normalized_stop_price=prices.stop_price if prices else None,
+        entry_price=plan.snapshot_price,
+        target_price=plan.target_price,
+        stop_price=plan.stop_price,
+        horizon_days=plan.horizon_days,
+        visible_bar_count=len(window.visible_rows),
+        visible_start_date=_first_row_date(window.visible_rows),
+        visible_end_date=_last_row_date(window.visible_rows),
+        available_forward_days=len(evaluation_rows),
+        forward_start_date=_first_row_date(evaluation_rows),
+        forward_end_date=_last_row_date(evaluation_rows),
+        return_pct=metrics[0],
+        max_favorable_excursion_pct=metrics[1],
+        max_adverse_excursion_pct=metrics[2],
+        target_hit=barrier.target_hit,
+        target_hit_date=barrier.target_hit_date,
+        stop_hit=barrier.stop_hit,
+        stop_hit_date=barrier.stop_hit_date,
+    )
+
+
+def advice_review_window(
+    rows: list[Kline],
+    *,
+    snapshot_time: datetime,
+    as_of: datetime,
+) -> AdviceReviewWindow:
+    if as_of < snapshot_time:
+        raise ValueError("as_of 不能早于 advice snapshot 的 market_time")
+    dated_rows = _valid_unique_daily_rows(rows)
+    snapshot_date = snapshot_time.date()
+    visible_cutoff = completed_daily_bar_cutoff(snapshot_time)
+    as_of_cutoff = completed_daily_bar_cutoff(as_of)
+    visible = [row for row_date, row in dated_rows if row_date <= visible_cutoff]
+    forward = [row for row_date, row in dated_rows if snapshot_date < row_date <= as_of_cutoff]
+    return AdviceReviewWindow(
+        visible_rows=visible,
+        forward_rows=forward,
+        snapshot_date=snapshot_date,
+        as_of_cutoff=as_of_cutoff,
+    )
+
+
+def completed_daily_bar_cutoff(value: datetime) -> date:
+    """Return the latest daily bar that is fully visible at a market-local time."""
+
+    if value.time() >= DAILY_KLINE_PUBLISH_TIME:
+        return value.date()
+    return value.date() - timedelta(days=1)
+
+
+def _advice_review_forward_coverage(
+    window: AdviceReviewWindow,
+    horizon_days: int,
+) -> AdviceReviewForwardCoverage:
+    expected_dates = _expected_review_dates(
+        window.snapshot_date,
+        window.as_of_cutoff,
+        horizon_days,
+    )
+    rows_by_date = {_strict_daily_date(row.date): row for row in window.forward_rows}
+    contiguous_rows: list[Kline] = []
+    for expected_date in expected_dates:
+        row = rows_by_date.get(expected_date)
+        if row is None:
+            return AdviceReviewForwardCoverage(contiguous_rows, expected_dates, expected_date)
+        contiguous_rows.append(row)
+    return AdviceReviewForwardCoverage(contiguous_rows, expected_dates, None)
+
+
+def _expected_review_dates(
+    snapshot_date: date,
+    as_of_cutoff: date,
+    horizon_days: int,
+) -> tuple[date, ...]:
+    current = snapshot_date
+    expected: list[date] = []
+    while current < as_of_cutoff and len(expected) < horizon_days:
+        current += timedelta(days=1)
+        if is_trading_day(current):
+            expected.append(current)
+    return tuple(expected)
+
+
+def _valid_unique_daily_rows(rows: list[Kline]) -> list[tuple[date, Kline]]:
+    by_date: dict[date, Kline] = {}
+    for row in rows:
+        row_date = _strict_daily_date(row.date)
+        if row_date is not None and valid_kline(row):
+            by_date[row_date] = row
+    return sorted(by_date.items(), key=lambda item: item[0])
+
+
+def _strict_daily_date(value: object) -> date | None:
+    text_value = str(value or "").strip()
+    try:
+        parsed = date.fromisoformat(text_value)
+    except ValueError:
+        return None
+    return parsed if parsed.isoformat() == text_value else None
+
+
+def _review_market_datetime(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("研究计划缺少有效 snapshot_market_time") from exc
+
+
+def _advice_review_price_context(plan: AdviceReviewPlan, rows: list[Kline]) -> AdviceReviewPriceContext | None:
+    snapshot_anchor = _review_snapshot_anchor(plan)
+    if snapshot_anchor is None:
+        return None
+    dated_rows = _valid_unique_daily_rows(rows)
+    contract = _review_evaluation_contract(
+        dated_rows,
+        plan.snapshot_adjustment_mode,
+        plan.snapshot_contract_version,
+    )
+    if contract is None:
+        return None
+    anchor_close = _review_evaluation_anchor_close(dated_rows, plan.snapshot_anchor_date)
+    if anchor_close is None:
+        return None
+    scale = anchor_close / snapshot_anchor
+    if not isfinite(scale) or scale <= 0:
+        return None
+    adjustment_mode, data_version, contract_version = contract
+    return AdviceReviewPriceContext(
+        adjustment_mode=adjustment_mode,
+        data_version=data_version,
+        contract_version=contract_version,
+        anchor_evaluation_close=anchor_close,
+        scale_factor=scale,
+        entry_price=plan.snapshot_price * scale,
+        target_price=plan.target_price * scale,
+        stop_price=plan.stop_price * scale,
+    )
+
+
+def _review_snapshot_anchor(plan: AdviceReviewPlan) -> float | None:
+    value = plan.snapshot_anchor_close
+    if plan.snapshot_adjustment_mode != "qfq" or not plan.snapshot_anchor_date:
+        return None
+    if value is None or not isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _review_evaluation_contract(
+    rows: list[tuple[date, Kline]],
+    expected_adjustment_mode: str,
+    expected_contract_version: str,
+) -> tuple[str, str, str] | None:
+    metadata = {(row.adjustment_mode, row.data_version, row.contract_version) for _row_date, row in rows}
+    if len(metadata) != 1:
+        return None
+    adjustment_mode, data_version, contract_version = next(iter(metadata))
+    invalid_versions = {"", "unknown", "legacy"}
+    if adjustment_mode != expected_adjustment_mode:
+        return None
+    if data_version in invalid_versions or contract_version != expected_contract_version:
+        return None
+    return adjustment_mode, data_version, contract_version
+
+
+def _review_evaluation_anchor_close(
+    rows: list[tuple[date, Kline]],
+    anchor_date: str,
+) -> float | None:
+    anchor = next((row for _row_date, row in rows if row.date == anchor_date), None)
+    if anchor is None or not isfinite(anchor.close) or anchor.close <= 0:
+        return None
+    return anchor.close
+
+
+def _advice_review_barrier_outcome(
+    rows: list[Kline],
+    prices: AdviceReviewPriceContext | None,
+) -> AdviceReviewBarrierOutcome:
+    if prices is None:
+        return AdviceReviewBarrierOutcome(None, None, False, None, False, None)
+    for index, row in enumerate(rows):
+        target_hit = row.high >= prices.target_price
+        stop_hit = row.low <= prices.stop_price
+        if target_hit and stop_hit:
+            return AdviceReviewBarrierOutcome(
+                conclusion="target_stop_ambiguous",
+                terminal_index=index,
+                target_hit=True,
+                target_hit_date=row.date,
+                stop_hit=True,
+                stop_hit_date=row.date,
+            )
+        if target_hit:
+            return AdviceReviewBarrierOutcome(
+                conclusion="target_hit",
+                terminal_index=index,
+                target_hit=True,
+                target_hit_date=row.date,
+                stop_hit=False,
+                stop_hit_date=None,
+            )
+        if stop_hit:
+            return AdviceReviewBarrierOutcome(
+                conclusion="stop_hit",
+                terminal_index=index,
+                target_hit=False,
+                target_hit_date=None,
+                stop_hit=True,
+                stop_hit_date=row.date,
+            )
+    return AdviceReviewBarrierOutcome(
+        conclusion=None,
+        terminal_index=None,
+        target_hit=False,
+        target_hit_date=None,
+        stop_hit=False,
+        stop_hit_date=None,
+    )
+
+
+def _terminal_review_rows(rows: list[Kline], terminal_index: int | None) -> list[Kline]:
+    return rows if terminal_index is None else rows[: terminal_index + 1]
+
+
+def _advice_review_status_and_conclusion(
+    coverage: AdviceReviewForwardCoverage,
+    rows: list[Kline],
+    horizon_days: int,
+    barrier_conclusion: str | None,
+    prices: AdviceReviewPriceContext | None,
+) -> tuple[str, str]:
+    if barrier_conclusion is not None:
+        return "evaluated", barrier_conclusion
+    if not coverage.complete:
+        return "insufficient", "insufficient_data"
+    if not coverage.expected_dates:
+        return "pending", "pending"
+    if prices is None:
+        return "insufficient", "insufficient_data"
+    if len(coverage.expected_dates) >= horizon_days:
+        return "evaluated", _horizon_review_conclusion(rows[-1].close, prices.entry_price)
+    return "pending", "pending"
+
+
+def _horizon_review_conclusion(close: float, entry_price: float) -> str:
+    return_pct = pct_change(close, entry_price)
+    if return_pct > 0:
+        return "horizon_gain"
+    if return_pct < 0:
+        return "horizon_loss"
+    return "horizon_flat"
+
+
+def _advice_review_metrics(
+    rows: list[Kline],
+    entry_price: float,
+) -> tuple[float | None, float | None, float | None]:
+    if not rows:
+        return None, None, None
+    return (
+        round(pct_change(rows[-1].close, entry_price), 4),
+        round(max(pct_change(row.high, entry_price) for row in rows), 4),
+        round(min(pct_change(row.low, entry_price) for row in rows), 4),
+    )
+
+
+def _first_row_date(rows: list[Kline]) -> str | None:
+    return rows[0].date if rows else None
+
+
+def _last_row_date(rows: list[Kline]) -> str | None:
+    return rows[-1].date if rows else None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Iterable
 from contextlib import redirect_stderr
 from dataclasses import dataclass
@@ -16,7 +15,11 @@ from app.services.eastmoney_client import (
     eastmoney_no_proxy as _eastmoney_no_proxy,
     eastmoney_quotes as _eastmoney_quotes,
 )
+from app.services.data_quality_time import normalize_quote_event_time
+from app.services.datahub_runtime import run_provider_io
+from app.services.provider_errors import ProviderProtocolError, sanitize_provider_error
 from app.services.provider_utils import ak_symbol, ensure_positive_limit, is_installed, pick, valid_ohlc
+from app.services.providers import stamp_daily_kline_contract
 from app.utils.parsing import required_float, safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
 from app.utils.time import now_text
@@ -68,7 +71,7 @@ class AKShareProvider:
                 return direct_quotes
             return _akshare_spot_quotes(_import_akshare(), symbols, self.source_name, direct_error)
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
         ensure_positive_limit(limit)
@@ -78,10 +81,16 @@ class AKShareProvider:
             try:
                 df = _akshare_daily_hist_frame(symbol)
             except AKShareFetchError:
-                return _eastmoney_kline(symbol, period="101", limit=limit)
-            return _akshare_daily_klines_from_frame(df, limit)
+                rows = _eastmoney_kline(symbol, period="101", limit=limit)
+            else:
+                rows = _akshare_daily_klines_from_frame(df, limit)
+            return stamp_daily_kline_contract(
+                rows,
+                adjustment_mode="qfq",
+                source=self.source_name,
+            )
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120) -> list[MinuteKline]:
         ensure_positive_limit(limit)
@@ -94,7 +103,7 @@ class AKShareProvider:
             except AKShareFetchError:
                 return _eastmoney_minute_kline(symbol, period=period, interval=interval, limit=limit)
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def stock_pool(self) -> list[StockInfo]:
         self._ensure_installed()
@@ -112,7 +121,7 @@ class AKShareProvider:
                     result.append(item)
             return result
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
         ensure_positive_limit(limit)
@@ -141,7 +150,7 @@ class AKShareProvider:
                 )
             return result
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
         ensure_positive_limit(limit)
@@ -159,7 +168,7 @@ class AKShareProvider:
                     with _eastmoney_no_proxy():
                         result = loader(ak, normalized, code, stamp, limit)
                 except Exception as exc:
-                    errors.append(str(exc))
+                    errors.append(sanitize_provider_error(exc))
                     continue
                 if result:
                     return result
@@ -167,7 +176,7 @@ class AKShareProvider:
                 raise RuntimeError("概念公开源不可用：" + "；".join(errors[:2]))
             return []
 
-        return await asyncio.to_thread(load)
+        return await run_provider_io(load)
 
     def capability(self) -> ProviderCapability:
         installed = is_installed("akshare")
@@ -210,7 +219,7 @@ def _try_eastmoney_quotes(symbols) -> tuple[list[Quote] | None, str]:
     try:
         result = _eastmoney_quotes(symbols)
     except Exception as exc:
-        return None, str(exc)
+        return None, sanitize_provider_error(exc)
     return (result if result else None), ""
 
 
@@ -294,13 +303,37 @@ def _ordered_spot_quotes(df, wanted_codes: list[str], source_name: str) -> list[
 
 
 def _spot_quotes_by_code(df, wanted: set[str], source_name: str) -> dict[str, Quote]:
-    stamp = now_text()
     by_code: dict[str, Quote] = {}
+    missing_event_time: set[str] = set()
     for _, row in df.iterrows():
-        quote = quote_from_spot_row(row, stamp=stamp, source_name=source_name)
+        event_time = _akshare_quote_event_time(row)
+        quote = quote_from_spot_row(row, stamp=event_time or "", source_name=source_name)
         if quote and quote.code in wanted and quote.code not in by_code:
-            by_code[quote.code] = quote
+            if event_time is None:
+                missing_event_time.add(quote.code)
+            else:
+                by_code[quote.code] = quote
+    unresolved_event_time = sorted(missing_event_time - by_code.keys())
+    if unresolved_event_time:
+        raise ProviderProtocolError(f"AKShare实时行情缺少可解析的事件时间：{','.join(unresolved_event_time)}")
     return by_code
+
+
+def _akshare_quote_event_time(row) -> str | None:
+    value = pick(
+        row,
+        "更新时间",
+        "最新时间",
+        "交易时间",
+        "时间",
+        "update_time",
+        "last_trade_time",
+        "trade_time",
+        "timestamp",
+        default=None,
+    )
+    event_date = pick(row, "交易日期", "日期", "trade_date", "date", default=None)
+    return normalize_quote_event_time(value, event_date=event_date)
 
 
 def _stock_concepts_from_em(ak, normalized: str, code: str, stamp: str, limit: int) -> list[StockConceptItem]:
@@ -480,7 +513,7 @@ def _concept_code_column(column) -> bool:
 
 
 def _short_error(exc: Exception) -> str:
-    text = str(exc).strip()
+    text = sanitize_provider_error(exc).strip()
     return text[:140] if text else exc.__class__.__name__
 
 

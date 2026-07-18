@@ -225,6 +225,244 @@
   background: var(--blue-soft);
 }
 
+.chart-workspace {
+  min-width: 0;
+  margin: 0 22px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.chart-mobile-switch.segmented-control {
+  display: none;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.research-chart-pane {
+  min-width: 0;
+  padding-top: 12px;
+}
+
+.research-chart-pane + .research-chart-pane {
+  border-left: 1px solid var(--line);
+}
+
+.research-chart-pane[hidden] {
+  display: none;
+}
+
+.chart-toolbar {
+  display: flex;
+  min-height: 66px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px 10px;
+}
+
+.chart-heading {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 3px;
+  min-width: 72px;
+}
+
+.chart-heading strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.chart-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chart-heading span.ready {
+  color: var(--green);
+}
+
+.chart-heading span.degraded,
+.chart-heading span.loading {
+  color: var(--amber);
+}
+
+.chart-heading span.unavailable {
+  color: var(--red);
+}
+
+.chart-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.segmented-control {
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(38px, auto);
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.segmented-control button {
+  min-width: 38px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  color: #475467;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.segmented-control button:last-child {
+  border-right: 0;
+}
+
+.segmented-control button:hover,
+.segmented-control button.active {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.segmented-control button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #8fb3ff;
+  outline-offset: -2px;
+}
+
+.chart-overlays {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.chart-overlays label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.chart-overlays input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+.chart-canvas-shell {
+  position: relative;
+  min-width: 0;
+  border-top: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.research-chart-pane canvas:focus-visible {
+  outline: 2px solid #8fb3ff;
+  outline-offset: -2px;
+}
+
+.chart-inspector {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  pointer-events: none;
+}
+
+.chart-crosshair {
+  position: absolute;
+  display: block;
+  background: rgba(71, 84, 103, 0.52);
+}
+
+.chart-crosshair-x {
+  width: 1px;
+}
+
+.chart-crosshair-y {
+  height: 1px;
+}
+
+.chart-inspector-values {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  max-width: calc(100% - 62px);
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.72);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.12);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-inspector-heading,
+.chart-inspector-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chart-inspector-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+}
+
+.chart-inspector-heading strong {
+  font-size: 12px;
+}
+
+.chart-inspector-heading span,
+.chart-inspector-meta {
+  color: var(--muted);
+}
+
+.chart-inspector-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, auto));
+  gap: 2px 10px;
+}
+
+.chart-inspector-grid span {
+  white-space: nowrap;
+}
+
+.chart-inspector-meta {
+  margin-top: 4px;
+}
+
+.research-chart-pane canvas {
+  display: block;
+  width: 100%;
+  height: 260px;
+}
+
 .diagnosis-panel,
 .feature-strip,
 .alpha-panel,
@@ -846,4 +1084,3 @@
   border-color: rgba(197, 54, 44, 0.24);
   background: var(--red-soft);
 }
-

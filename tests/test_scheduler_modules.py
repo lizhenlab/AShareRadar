@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+import gc
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +11,7 @@ import pytest
 
 from app.models.schemas import CacheStats, ProviderCapabilityStatus, ProviderStatus
 from app.services.scheduler import (
+    FileSchedulerInstanceGuard,
     LocalDataScheduler,
     LocalTask,
     _build_local_tasks,
@@ -35,6 +38,440 @@ def test_scheduler_uses_datahub_settings_instance() -> None:
     scheduler = LocalDataScheduler(SimpleNamespace(settings=settings))  # type: ignore[arg-type]
 
     assert scheduler.settings is settings
+
+
+def test_file_scheduler_guard_allows_only_one_holder(tmp_path) -> None:
+    path = tmp_path / "scheduler.lock"
+    first = FileSchedulerInstanceGuard(path)
+    second = FileSchedulerInstanceGuard(path)
+
+    assert first.acquire() is True
+    assert second.acquire() is False
+
+    first.release()
+
+    assert second.acquire() is True
+    second.release()
+
+
+def test_scheduler_single_instance_strategy_can_be_injected() -> None:
+    guard = _ExclusiveGuard()
+    first_hub = _SchedulerHub()
+    second_hub = _SchedulerHub()
+    first_hub.settings.scheduler_enabled = True
+    second_hub.settings.scheduler_enabled = True
+    first = LocalDataScheduler(first_hub, instance_guard=guard)
+    second = LocalDataScheduler(second_hub, instance_guard=guard)
+
+    async def run_check() -> tuple[bool, bool, bool]:
+        first_started = await first.start()
+        duplicate_started = await second.start()
+        await first.stop()
+        second_started = await second.start()
+        await second.stop()
+        return first_started, duplicate_started, second_started
+
+    assert asyncio.run(run_check()) == (True, False, True)
+    assert guard.acquire_calls == 3
+    assert guard.release_calls == 2
+    assert second_hub.cache.monitor_events[0] == (
+        "info",
+        "scheduler",
+        "已有其他进程运行本地数据调度器，本进程已跳过启动",
+    )
+
+
+def test_non_lock_holder_reports_standby_instead_of_stopped() -> None:
+    guard = _ExclusiveGuard()
+    holder_hub = _SchedulerHub()
+    standby_hub = _SchedulerHub()
+    holder_hub.settings.scheduler_enabled = True
+    standby_hub.settings.scheduler_enabled = True
+    holder = LocalDataScheduler(holder_hub, instance_guard=guard)
+    standby = LocalDataScheduler(standby_hub, instance_guard=guard)
+
+    async def run_check():
+        assert await holder.start() is True
+        assert await standby.start() is False
+        status = standby.status()
+        assert await holder.stop() is True
+        return status
+
+    status = asyncio.run(run_check())
+
+    assert status.running is False
+    assert status.standby is True
+    assert status.message == "其他实例持有调度器锁，本进程待命"
+
+
+def test_file_scheduler_standby_status_clears_after_other_holder_releases(tmp_path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    holder_hub = _SchedulerHub()
+    standby_hub = _SchedulerHub()
+    holder_hub.settings.scheduler_enabled = True
+    standby_hub.settings.scheduler_enabled = True
+    holder = LocalDataScheduler(holder_hub, instance_guard=FileSchedulerInstanceGuard(lock_path))
+    standby = LocalDataScheduler(standby_hub, instance_guard=FileSchedulerInstanceGuard(lock_path))
+
+    async def run_check():
+        assert await holder.start() is True
+        assert await standby.start() is False
+        while_locked = standby.status()
+        assert await holder.stop() is True
+        after_release = standby.status()
+        return while_locked, after_release
+
+    while_locked, after_release = asyncio.run(run_check())
+
+    assert while_locked.standby is True
+    assert after_release.standby is False
+    assert after_release.message is None
+
+
+def test_scheduler_start_stop_are_idempotent_and_release_guard() -> None:
+    guard = _ExclusiveGuard()
+    hub = _SchedulerHub()
+    hub.settings.scheduler_enabled = True
+    scheduler = LocalDataScheduler(hub, instance_guard=guard)
+
+    async def run_check() -> tuple[bool, bool, bool, bool]:
+        return await scheduler.start(), await scheduler.start(), await scheduler.stop(), await scheduler.stop()
+
+    assert asyncio.run(run_check()) == (True, False, True, False)
+    assert guard.release_calls == 1
+    assert scheduler._runner is None  # noqa: SLF001
+
+
+def test_scheduler_reconciles_orphaned_runs_only_after_acquiring_instance_guard() -> None:
+    guard = _ExclusiveGuard()
+    holder_cache = _SchedulerCache()
+    holder_cache.orphaned_runs = 2
+    holder_hub = _SchedulerHub(cache=holder_cache)
+    holder_hub.settings.scheduler_enabled = True
+    holder = LocalDataScheduler(holder_hub, instance_guard=guard)
+    blocked_cache = _SchedulerCache()
+    blocked_hub = _SchedulerHub(cache=blocked_cache)
+    blocked_hub.settings.scheduler_enabled = True
+    blocked = LocalDataScheduler(blocked_hub, instance_guard=guard)
+
+    async def run_check() -> None:
+        assert await holder.start() is True
+        assert await blocked.start() is False
+        await holder.stop()
+
+    asyncio.run(run_check())
+
+    assert holder_cache.reconcile_calls == 1
+    assert blocked_cache.reconcile_calls == 0
+    assert (
+        "warning",
+        "scheduler",
+        "应用启动时已终止 2 条遗留运行记录",
+    ) in holder_cache.monitor_events
+
+
+def test_run_once_respects_guard_held_by_another_scheduler() -> None:
+    guard = _ExclusiveGuard()
+    holder_hub = _SchedulerHub()
+    holder_hub.settings.scheduler_enabled = True
+    holder = LocalDataScheduler(holder_hub, instance_guard=guard)
+    for task in holder.tasks.values():
+        task.next_run_at = datetime.now() + timedelta(days=1)
+
+    calls: list[str] = []
+    manual = LocalDataScheduler(_SchedulerHub(), instance_guard=guard)
+    manual.tasks = {
+        "manual": LocalTask(
+            "manual",
+            "手动任务",
+            20,
+            _recording_handler("manual", calls),
+            datetime.now(),
+        )
+    }
+
+    async def run_check() -> None:
+        assert await holder.start() is True
+        with pytest.raises(RuntimeError, match="手动任务未执行"):
+            await manual.run_once("manual")
+        await holder.stop()
+
+    asyncio.run(run_check())
+
+    assert calls == []
+    assert guard.acquire_calls == 2
+    assert guard.release_calls == 1
+
+
+def test_run_once_reuses_guard_already_held_by_started_scheduler() -> None:
+    guard = _ExclusiveGuard()
+    hub = _SchedulerHub()
+    hub.settings.scheduler_enabled = True
+    scheduler = LocalDataScheduler(hub, instance_guard=guard)
+    calls: list[str] = []
+    scheduler.tasks = {
+        "manual": LocalTask(
+            "manual",
+            "手动任务",
+            20,
+            _recording_handler("manual", calls),
+            datetime.now() + timedelta(days=1),
+        )
+    }
+
+    async def run_check() -> list[str]:
+        assert await scheduler.start() is True
+        messages = await scheduler.run_once("manual")
+        await scheduler.stop()
+        return messages
+
+    assert asyncio.run(run_check()) == ["manual"]
+    assert calls == ["manual"]
+    assert guard.acquire_calls == 1
+    assert guard.release_calls == 1
+
+
+def test_stop_does_not_wait_for_manual_run_and_releases_guard_afterward() -> None:
+    guard = _ExclusiveGuard()
+    hub = _SchedulerHub()
+    hub.settings.scheduler_enabled = True
+    scheduler = LocalDataScheduler(hub, instance_guard=guard)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_handler() -> str:
+        started.set()
+        await release.wait()
+        return "manual-finished"
+
+    scheduler.tasks = {
+        "manual": LocalTask(
+            "manual",
+            "手动任务",
+            20,
+            blocking_handler,
+            datetime.now() + timedelta(days=1),
+        )
+    }
+
+    async def run_check() -> tuple[float, int, list[str]]:
+        assert await scheduler.start() is True
+        manual_run = asyncio.create_task(scheduler.run_once("manual"))
+        await started.wait()
+        loop = asyncio.get_running_loop()
+        fallback_release = loop.call_later(0.5, release.set)
+        began = loop.time()
+        assert await scheduler.stop() is True
+        elapsed = loop.time() - began
+        releases_at_stop = guard.release_calls
+        release.set()
+        fallback_release.cancel()
+        messages = await manual_run
+        return elapsed, releases_at_stop, messages
+
+    elapsed, releases_at_stop, messages = asyncio.run(run_check())
+
+    assert elapsed < 0.25
+    assert releases_at_stop == 0
+    assert messages == ["manual-finished"]
+    assert guard.acquire_calls == 1
+    assert guard.release_calls == 1
+
+
+def test_scheduler_health_maintenance_runs_off_event_loop() -> None:
+    cache = _ThreadRecordingCache()
+    hub = _SchedulerHub(cache=cache)
+    hub.settings.quote_stale_warning_seconds = 60
+    hub.settings.kline_cache_seconds = 300
+    scheduler = LocalDataScheduler(hub)
+
+    async def run_check() -> tuple[int, str]:
+        event_loop_thread = threading.get_ident()
+        message = await scheduler._check_data_health()
+        return event_loop_thread, message
+
+    event_loop_thread, message = asyncio.run(run_check())
+
+    assert cache.cleanup_thread_id is not None
+    assert cache.cleanup_thread_id != event_loop_thread
+    assert "尚未形成报价缓存" in message
+
+
+def test_scheduler_start_cancellation_releases_guard_acquired_in_worker() -> None:
+    guard = _BlockingGuard()
+    hub = _SchedulerHub()
+    hub.settings.scheduler_enabled = True
+    scheduler = LocalDataScheduler(hub, instance_guard=guard)
+
+    async def run_check() -> None:
+        starting = asyncio.create_task(scheduler.start())
+        await asyncio.to_thread(guard.acquire_started.wait)
+        starting.cancel()
+        guard.allow_acquire.set()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+
+    asyncio.run(run_check())
+
+    assert guard.release_calls == 1
+    assert guard.acquired is False
+    assert scheduler._runner is None  # noqa: SLF001
+
+
+def test_scheduler_start_cancellation_after_runner_creation_cleans_state() -> None:
+    guard = _ExclusiveGuard()
+    cache = _BlockingStartEventCache()
+    hub = _SchedulerHub(cache=cache)
+    hub.settings.scheduler_enabled = True
+    scheduler = LocalDataScheduler(hub, instance_guard=guard)
+    for task in scheduler.tasks.values():
+        task.next_run_at = datetime.now() + timedelta(days=1)
+
+    async def run_check() -> None:
+        starting = asyncio.create_task(scheduler.start())
+        await asyncio.to_thread(cache.start_event_started.wait)
+        starting.cancel()
+        cache.allow_start_event.set()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+
+    asyncio.run(run_check())
+
+    assert guard.release_calls == 1
+    assert guard.acquired is False
+    assert scheduler._runner is None  # noqa: SLF001
+    assert scheduler.started_at is None
+
+
+def test_scheduler_stop_keeps_guard_until_stubborn_runner_finishes() -> None:
+    guard = _ExclusiveGuard()
+    first_hub = _SchedulerHub()
+    second_hub = _SchedulerHub()
+    first_hub.settings.scheduler_enabled = True
+    second_hub.settings.scheduler_enabled = True
+    first_hub.settings.scheduler_shutdown_timeout_seconds = 0.01
+    first = LocalDataScheduler(first_hub, instance_guard=guard)
+    second = LocalDataScheduler(second_hub, instance_guard=guard)
+    for scheduler in (first, second):
+        for task in scheduler.tasks.values():
+            task.next_run_at = datetime.now() + timedelta(days=1)
+
+    async def run_check() -> tuple[bool, bool, bool, float, bool, int, list[dict]]:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        loop_errors: list[dict] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+        async def stubborn_runner() -> None:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+            finally:
+                finished.set()
+            raise RuntimeError("late scheduler shutdown failure")
+
+        first._loop = stubborn_runner  # type: ignore[method-assign]  # noqa: SLF001
+        assert await first.start() is True
+        await started.wait()
+        fallback_release = loop.call_later(0.5, release.set)
+        began = loop.time()
+        stopped = await first.stop()
+        elapsed = loop.time() - began
+        duplicate_started = await second.start()
+        releases_while_runner_alive = guard.release_calls
+        release.set()
+        fallback_release.cancel()
+        await finished.wait()
+        async def wait_for_guard_release() -> None:
+            while guard.acquired:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_guard_release(), timeout=1)
+        restarted = await second.start()
+        assert await second.stop() is True
+        gc.collect()
+        await asyncio.sleep(0)
+        loop.set_exception_handler(previous_handler)
+        return (
+            stopped,
+            duplicate_started,
+            restarted,
+            elapsed,
+            cancelled.is_set(),
+            releases_while_runner_alive,
+            loop_errors,
+        )
+
+    stopped, duplicate_started, restarted, elapsed, cancelled, early_releases, loop_errors = asyncio.run(run_check())
+
+    assert stopped is True
+    assert duplicate_started is False
+    assert restarted is True
+    assert elapsed < 0.25
+    assert cancelled is True
+    assert early_releases == 0
+    assert guard.acquire_calls == 3
+    assert guard.release_calls == 2
+    assert loop_errors == []
+    assert first._runner is None  # noqa: SLF001
+
+
+def test_scheduler_stop_cancellation_propagates_without_releasing_stubborn_runner_guard() -> None:
+    guard = _ExclusiveGuard()
+    hub = _SchedulerHub()
+    hub.settings.scheduler_enabled = True
+    hub.settings.scheduler_shutdown_timeout_seconds = 0.01
+    scheduler = LocalDataScheduler(hub, instance_guard=guard)
+    for task in scheduler.tasks.values():
+        task.next_run_at = datetime.now() + timedelta(days=1)
+
+    async def run_check() -> tuple[bool, int]:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stubborn_runner() -> None:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+
+        scheduler._loop = stubborn_runner  # type: ignore[method-assign]  # noqa: SLF001
+        assert await scheduler.start() is True
+        await started.wait()
+        stopping = asyncio.create_task(scheduler.stop())
+        await asyncio.sleep(0)
+        stopping.cancel()
+        fallback_release = asyncio.get_running_loop().call_later(0.5, release.set)
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        guard_held_after_cancel = guard.acquired
+        releases_after_cancel = guard.release_calls
+        assert cancelled.is_set()
+        release.set()
+        fallback_release.cancel()
+
+        async def wait_for_guard_release() -> None:
+            while guard.acquired:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_guard_release(), timeout=1)
+        return guard_held_after_cancel, releases_after_cancel
+
+    guard_held_after_cancel, releases_after_cancel = asyncio.run(run_check())
+
+    assert guard_held_after_cancel is True
+    assert releases_after_cancel == 0
+    assert guard.release_calls == 1
 
 
 def test_build_local_tasks_uses_explicit_specs_min_intervals_and_offsets() -> None:
@@ -117,6 +554,23 @@ def test_alert_scheduler_marks_all_rule_failures_as_task_failure() -> None:
         "alert",
         "已评估 2 条本地预警，当前触发 0 条，新增事件 0 条，失败 2 条",
     )
+
+
+def test_alert_scheduler_persists_partial_rule_failures_as_degraded() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    summary = SimpleNamespace(
+        checked_count=2,
+        triggered_count=0,
+        new_event_count=0,
+        failed_count=1,
+    )
+
+    with patch("app.services.alerts.evaluate_alert_rules", return_value=summary):
+        message = asyncio.run(scheduler._execute(scheduler.tasks["evaluate_alerts"]))
+
+    assert message.endswith("失败 1 条")
+    assert scheduler.tasks["evaluate_alerts"].last_status == "degraded"
+    assert scheduler.datahub.cache.finished_runs == [("degraded", message)]
 
 
 def test_task_state_serializes_local_task_runtime_fields() -> None:
@@ -254,6 +708,39 @@ def test_cancelled_task_finishes_persisted_run_and_clears_running_state() -> Non
     assert scheduler.datahub.cache.monitor_events[-1] == ("warning", "task", "慢任务 已取消")
 
 
+def test_cancelled_task_closes_run_created_after_start_thread_returns() -> None:
+    calls: list[str] = []
+    cache = _BlockingTaskRunStartCache()
+    scheduler = LocalDataScheduler(_SchedulerHub(cache=cache))
+    task = LocalTask(
+        "late_start",
+        "迟到任务",
+        20,
+        _recording_handler("handler-ran", calls),
+        datetime.now(),
+    )
+
+    async def run_check() -> None:
+        execution = asyncio.create_task(scheduler._execute(task))
+        assert await asyncio.to_thread(cache.start_entered.wait, 1)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert cache.run_statuses == {}
+        cache.allow_start.set()
+        assert await asyncio.to_thread(cache.finished.wait, 1)
+        await asyncio.sleep(0)
+
+    asyncio.run(run_check())
+
+    assert calls == []
+    assert task.running is False
+    assert task.last_status == "cancelled"
+    assert cache.run_statuses == {1: "cancelled"}
+    assert cache.finished_runs == [("cancelled", "迟到任务 已取消")]
+    assert cache.monitor_events[-1] == ("warning", "task", "迟到任务 已取消")
+
+
 def test_refresh_watch_quotes_normalizes_dedupes_and_skips_invalid_symbols() -> None:
     hub = _SchedulerHub(kline_symbols=["600519", "600519.SH", "bad", " ", "SZ000001"])
     scheduler = LocalDataScheduler(hub)
@@ -269,10 +756,27 @@ def test_refresh_watch_quotes_reports_fallback_cache_as_warning() -> None:
     hub = _SchedulerHub(quote_fallback_symbols={"600519.SH"}, kline_symbols=["600519.SH", "000001.SZ"])
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._refresh_watch_quotes())
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"]))
 
     assert hub.quote_calls == [["600519.SH", "000001.SZ"]]
     assert message == "已刷新 1 只观察个股报价，兜底缓存 1 只：600519.SH"
+    assert scheduler.tasks["refresh_watch_quotes"].last_status == "degraded"
+    assert hub.cache.finished_runs == [("degraded", message)]
+    assert hub.cache.monitor_events[-1] == ("warning", "quote", message)
+
+
+def test_all_fallback_quote_refresh_is_persisted_as_degraded() -> None:
+    hub = _SchedulerHub(
+        quote_fallback_symbols={"600519.SH", "000001.SZ"},
+        kline_symbols=["600519.SH", "000001.SZ"],
+    )
+    scheduler = LocalDataScheduler(hub)
+
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"]))
+
+    assert message == "已刷新 0 只观察个股报价，兜底缓存 2 只：600519.SH、000001.SZ"
+    assert scheduler.tasks["refresh_watch_quotes"].last_status == "degraded"
+    assert hub.cache.finished_runs == [("degraded", message)]
     assert hub.cache.monitor_events[-1] == ("warning", "quote", message)
 
 
@@ -283,9 +787,11 @@ def test_refresh_watch_quotes_reports_partial_provider_coverage() -> None:
     )
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._refresh_watch_quotes())
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"]))
 
     assert message == "已刷新 1 只观察个股报价，缺失 1 只：000001.SZ"
+    assert scheduler.tasks["refresh_watch_quotes"].last_status == "degraded"
+    assert hub.cache.finished_runs == [("degraded", message)]
     assert hub.cache.monitor_events[-1] == ("warning", "quote", message)
 
 
@@ -329,14 +835,80 @@ def test_refresh_watch_quotes_returns_skip_message_when_no_valid_symbols_exist()
     assert hub.cache.monitor_events[-1] == ("warning", "quote", "无有效观察个股，已跳过报价刷新")
 
 
+def test_scheduler_selection_uses_only_active_symbols_for_quotes_and_klines() -> None:
+    cache = _SelectionSchedulerCache(
+        active_symbols=["600001", "600001.SH", "bad", "SZ000002"],
+        excluded_symbols=["600519", "600519.SH", "bad"],
+        has_entries=True,
+    )
+    hub = _SchedulerHub(cache=cache, seed_symbols=("600519", "600003"))
+    scheduler = LocalDataScheduler(hub)
+
+    quote_message = asyncio.run(scheduler._refresh_watch_quotes())
+    kline_message = asyncio.run(scheduler._refresh_key_klines())
+
+    assert hub.quote_calls == [["600001.SH", "000002.SZ"]]
+    assert hub.kline_calls == ["600001.SH", "000002.SZ"]
+    assert quote_message == "已刷新 2 只观察个股报价"
+    assert kline_message == "已刷新 2 只关键个股日K线"
+    assert ("warning", "quote", "观察池报价刷新剔除 4 个重复或无效股票代码") in cache.monitor_events
+    assert ("warning", "kline", "关键个股K线刷新剔除 4 个重复或无效股票代码") in cache.monitor_events
+
+
+def test_scheduler_selection_all_excluded_never_falls_back_to_seeds() -> None:
+    cache = _SelectionSchedulerCache(
+        active_symbols=[],
+        excluded_symbols=["600519", "600519.SH", "bad"],
+        has_entries=True,
+    )
+    hub = _SchedulerHub(cache=cache, seed_symbols=("600519", "000001"))
+    scheduler = LocalDataScheduler(hub)
+
+    quote_message = asyncio.run(scheduler._refresh_watch_quotes())
+    kline_message = asyncio.run(scheduler._refresh_key_klines())
+
+    assert hub.quote_calls == []
+    assert hub.kline_calls == []
+    assert quote_message == "无有效观察个股，已跳过报价刷新"
+    assert kline_message == "无有效关键个股，已跳过日K线刷新"
+
+
+def test_scheduler_selection_truly_empty_uses_normalized_seeds_for_quotes_and_klines() -> None:
+    cache = _SelectionSchedulerCache(active_symbols=[], excluded_symbols=[], has_entries=False)
+    hub = _SchedulerHub(
+        cache=cache,
+        seed_symbols=("600519", "600519.SH", "bad", "000001"),
+    )
+    scheduler = LocalDataScheduler(hub)
+
+    asyncio.run(scheduler._refresh_watch_quotes())
+    asyncio.run(scheduler._refresh_key_klines())
+
+    assert hub.quote_calls == [["600519.SH", "000001.SZ"]]
+    assert hub.kline_calls == ["600519.SH", "000001.SZ"]
+
+
+def test_scheduler_legacy_cache_without_selection_api_keeps_empty_list_seed_fallback() -> None:
+    hub = _SchedulerHub(kline_symbols=["bad"], seed_symbols=("600519",))
+    scheduler = LocalDataScheduler(hub)
+
+    asyncio.run(scheduler._refresh_watch_quotes())
+    asyncio.run(scheduler._refresh_key_klines())
+
+    assert hub.quote_calls == [["600519.SH"]]
+    assert hub.kline_calls == ["600519.SH"]
+
+
 def test_refresh_key_klines_continues_after_per_symbol_failure() -> None:
     hub = _SchedulerHub(kline_failures={"600001.SH"}, kline_symbols=["600001.SH", "600002.SH", "600003.SH"])
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._refresh_key_klines())
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"]))
 
     assert hub.kline_calls == ["600001.SH", "600002.SH", "600003.SH"]
     assert message == "已刷新 2 只关键个股日K线，失败 1 只"
+    assert scheduler.tasks["refresh_key_klines"].last_status == "degraded"
+    assert hub.cache.finished_runs == [("degraded", message)]
     assert ("warning", "kline", "关键个股K线刷新失败 1 只：600001.SH: kline failed") in hub.cache.monitor_events
 
 
@@ -344,11 +916,40 @@ def test_refresh_key_klines_reports_fallback_cache_as_warning() -> None:
     hub = _SchedulerHub(kline_fallback={"600001.SH"}, kline_symbols=["600001.SH", "600002.SH"])
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._refresh_key_klines())
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"]))
 
     assert hub.kline_calls == ["600001.SH", "600002.SH"]
     assert message == "已刷新 1 只关键个股日K线，兜底缓存 1 只"
+    assert scheduler.tasks["refresh_key_klines"].last_status == "degraded"
+    assert hub.cache.finished_runs == [("degraded", message)]
     assert hub.cache.monitor_events[-1] == ("warning", "kline", message)
+
+
+def test_all_fallback_kline_refresh_is_persisted_as_degraded() -> None:
+    hub = _SchedulerHub(
+        kline_fallback={"600001.SH", "600002.SH"},
+        kline_symbols=["600001.SH", "600002.SH"],
+    )
+    scheduler = LocalDataScheduler(hub)
+
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"]))
+
+    assert message == "已刷新 0 只关键个股日K线，兜底缓存 2 只"
+    assert scheduler.tasks["refresh_key_klines"].last_status == "degraded"
+    assert hub.cache.finished_runs == [("degraded", message)]
+    assert hub.cache.monitor_events[-1] == ("warning", "kline", message)
+
+
+def test_fallback_plate_refresh_is_persisted_as_degraded() -> None:
+    hub = _SchedulerHub(plate_fallback=True)
+    scheduler = LocalDataScheduler(hub)
+
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_plate_rank"]))
+
+    assert message == "行业背景数据源不可用，使用缓存 1 条"
+    assert scheduler.tasks["refresh_plate_rank"].last_status == "degraded"
+    assert hub.cache.finished_runs == [("degraded", message)]
+    assert hub.cache.monitor_events[-1] == ("warning", "plate", message)
 
 
 def test_refresh_key_klines_raises_when_all_symbols_fail() -> None:
@@ -413,11 +1014,13 @@ def test_refresh_key_klines_returns_skip_message_when_no_valid_symbols_exist() -
 
 
 def test_data_health_events_prefers_capability_failures_over_provider_names() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=seconds_ago_text(1), latest_kline_at=seconds_ago_text(1)),
+        _fresh_cache_stats(now),
         [_capability_status("tencent", "quote", healthy=False, last_error="timeout")],
         [_provider_status("akshare", healthy=False)],
         _settings(),
+        now=now,
     )
 
     assert [event.category for event in events] == ["provider"]
@@ -426,8 +1029,9 @@ def test_data_health_events_prefers_capability_failures_over_provider_names() ->
 
 
 def test_data_health_events_deduplicates_and_sorts_capability_failures() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=seconds_ago_text(1), latest_kline_at=seconds_ago_text(1)),
+        _fresh_cache_stats(now),
         [
             _capability_status("tencent", "quote", healthy=False, last_error="timeout", priority=2),
             _capability_status("akshare", "kline", healthy=False, last_error="timeout", priority=1),
@@ -435,122 +1039,165 @@ def test_data_health_events_deduplicates_and_sorts_capability_failures() -> None
         ],
         [],
         _settings(),
+        now=now,
     )
 
     assert [event.message for event in events] == ["数据源最近存在失败：akshare 日K、tencent 报价"]
 
 
 def test_data_health_events_falls_back_to_provider_failures_when_capabilities_are_inactive() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=seconds_ago_text(1), latest_kline_at=seconds_ago_text(1)),
+        _fresh_cache_stats(now),
         [_capability_status("tencent", "quote", healthy=False)],
         [_provider_status("akshare", healthy=False)],
         _settings(),
+        now=now,
     )
 
     assert [event.message for event in events] == ["数据源最近存在失败：akshare"]
 
 
 def test_data_health_events_ignore_stale_provider_failures() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     stale_at = seconds_ago_text(31 * 60)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=seconds_ago_text(1), latest_kline_at=seconds_ago_text(1)),
+        _fresh_cache_stats(now),
         [_capability_status("tencent", "quote", healthy=False, last_error="timeout", updated_at=stale_at)],
         [_provider_status("akshare", healthy=False, updated_at=stale_at)],
         _settings(),
+        now=now,
     )
 
     assert [(event.level, event.category, event.message) for event in events] == [
-        ("info", "health", "报价、K线、行业背景和数据源状态正常")
+        ("info", "health", "报价市场时效、日K市场时效、股票池缓存时效、行业背景缓存时效、股票池可用性、行业背景可用性、数据源状态均正常")
     ]
 
 
 def test_data_health_events_reports_missing_quote_and_kline_cache() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=None, latest_kline_at=None),
+        _cache_stats(latest_quote_at=None, latest_kline_at=None, plate_count=0),
         [],
         [],
         _settings(),
+        now=now,
     )
 
     assert [(event.category, event.message) for event in events] == [
-        ("quote", "尚未形成报价缓存，请先打开页面或手动刷新"),
-        ("kline", "尚未形成日K缓存，个股趋势分析会依赖实时拉取"),
+        ("quote", "尚未形成报价缓存或市场事件时间，无法判断报价业务新鲜度。"),
+        ("kline", "尚未形成日K缓存或市场日期，无法判断日K业务新鲜度。"),
+        ("plate", "尚未形成行业背景缓存。"),
     ]
 
 
-def test_data_health_events_reports_stale_quote_and_kline_cache() -> None:
+def test_data_health_events_warns_when_fetch_is_new_but_market_data_is_old() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
+    fetched_at = "2026-05-13 10:29:30"
     events = _data_health_events(
-        _cache_stats(latest_quote_at=seconds_ago_text(120), latest_kline_at=seconds_ago_text(120)),
+        _cache_stats(
+            latest_quote_at=fetched_at,
+            latest_kline_at=fetched_at,
+            latest_quote_timestamp="2026-05-12 15:00:00",
+            latest_daily_kline_date="2026-05-11",
+        ),
         [],
         [],
         _settings(quote_stale_warning_seconds=60, kline_cache_seconds=30),
+        now=now,
     )
 
     assert len(events) == 2
     assert events[0].category == "quote"
-    assert events[0].message.startswith("报价缓存已超过 ")
-    assert events[0].message.endswith(" 秒未更新")
-    assert events[1].message == "日K缓存偏旧，建议手动触发关键个股K线刷新"
+    assert "报价市场数据过期" in events[0].message
+    assert events[1].category == "kline"
+    assert "日K市场数据过期" in events[1].message
 
 
 def test_data_health_events_reports_stale_daily_kline_even_when_minute_kline_is_fresh() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
+    fetched_at = "2026-05-13 10:29:30"
     events = _data_health_events(
         _cache_stats(
-            latest_quote_at=seconds_ago_text(1),
-            latest_kline_at=seconds_ago_text(120),
-            latest_minute_kline_at=seconds_ago_text(1),
+            latest_quote_at=fetched_at,
+            latest_kline_at=fetched_at,
+            latest_minute_kline_at=fetched_at,
+            latest_quote_timestamp="2026-05-13 10:29:00",
+            latest_daily_kline_date="2026-05-11",
+            latest_minute_kline_timestamp="2026-05-13 10:29:00",
         ),
         [],
         [],
         _settings(kline_cache_seconds=30),
+        now=now,
     )
 
-    assert [(event.category, event.message) for event in events] == [
-        ("kline", "日K缓存偏旧，建议手动触发关键个股K线刷新")
-    ]
+    assert len(events) == 1
+    assert events[0].category == "kline"
+    assert "日K市场数据过期" in events[0].message
 
 
-def test_data_health_events_clamps_invalid_cache_thresholds() -> None:
+def test_data_health_events_ignores_legacy_thresholds_for_business_freshness() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=seconds_ago_text(0), latest_kline_at=seconds_ago_text(0)),
+        _fresh_cache_stats(now),
         [],
         [],
         _settings(quote_stale_warning_seconds=-1, kline_cache_seconds=float("nan")),
+        now=now,
     )
 
     assert [(event.level, event.category, event.message) for event in events] == [
-        ("info", "health", "报价、K线、行业背景和数据源状态正常")
+        ("info", "health", "报价市场时效、日K市场时效、股票池缓存时效、行业背景缓存时效、股票池可用性、行业背景可用性均正常")
     ]
 
 
-def test_data_health_events_reports_future_cache_timestamps_as_invalid() -> None:
-    future = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-
+def test_data_health_events_reports_future_and_dirty_market_timestamps() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=future, latest_kline_at=future),
+        _cache_stats(
+            latest_quote_at="2026-05-13 10:29:30",
+            latest_kline_at="2026-05-13 10:29:30",
+            latest_quote_timestamp="2026-05-14 10:00:00",
+            latest_daily_kline_date="dirty-date",
+        ),
         [],
         [],
         _settings(),
+        now=now,
     )
 
     assert [(event.category, event.message) for event in events] == [
-        ("quote", "报价缓存时间异常，需检查系统时间或缓存数据"),
-        ("kline", "日K缓存时间异常，需检查系统时间或缓存数据"),
+        ("quote", "报价市场事件时间 2026-05-14 10:00:00 晚于检查时间。"),
+        ("kline", "日K市场日期无法解析。"),
     ]
 
 
 def test_data_health_events_returns_ok_when_no_issue_exists() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
     events = _data_health_events(
-        _cache_stats(latest_quote_at=seconds_ago_text(1), latest_kline_at=seconds_ago_text(1)),
+        _fresh_cache_stats(now),
         [],
         [],
         _settings(),
+        now=now,
     )
 
     assert [(event.level, event.category, event.message) for event in events] == [
-        ("info", "health", "报价、K线、行业背景和数据源状态正常")
+        ("info", "health", "报价市场时效、日K市场时效、股票池缓存时效、行业背景缓存时效、股票池可用性、行业背景可用性均正常")
     ]
+
+
+def test_data_health_events_does_not_claim_missing_industry_background_is_normal() -> None:
+    now = datetime(2026, 5, 13, 10, 30, 0)
+    stats = _fresh_cache_stats(now).model_copy(update={"plate_count": 0})
+
+    events = _data_health_events(stats, [], [], _settings(), now=now)
+
+    assert [(event.level, event.category, event.message) for event in events] == [
+        ("warning", "plate", "尚未形成行业背景缓存。")
+    ]
+    assert all("正常" not in event.message for event in events)
 
 
 def test_runtime_cleanup_message_sums_removed_rows() -> None:
@@ -621,6 +1268,14 @@ class _SchedulerCache:
         self.finished_runs: list[tuple[str, str | None]] = []
         self.monitor_events: list[tuple[str, str, str]] = []
         self._next_run_id = 0
+        self.orphaned_runs = 0
+        self.reconcile_calls = 0
+
+    def reconcile_orphaned_task_runs(self) -> int:
+        self.reconcile_calls += 1
+        count = self.orphaned_runs
+        self.orphaned_runs = 0
+        return count
 
     def start_task_run(self, task_name: str) -> int:
         self._next_run_id += 1
@@ -634,6 +1289,115 @@ class _SchedulerCache:
 
     def watchlist_symbols(self) -> list[str]:
         return list(self.kline_symbols)
+
+
+class _SelectionSchedulerCache(_SchedulerCache):
+    def __init__(
+        self,
+        *,
+        active_symbols: list[str],
+        excluded_symbols: list[str],
+        has_entries: bool,
+    ) -> None:
+        super().__init__()
+        self.selection = SimpleNamespace(
+            active_symbols=tuple(active_symbols),
+            excluded_symbols=tuple(excluded_symbols),
+            has_entries=has_entries,
+        )
+
+    def watchlist_symbol_selection(self):
+        return self.selection
+
+
+class _ThreadRecordingCache(_SchedulerCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanup_thread_id: int | None = None
+        self.maintenance_repo = self
+
+    def stats(self) -> CacheStats:
+        return _cache_stats(latest_quote_at=None, latest_kline_at=None)
+
+    def provider_capability_statuses(self) -> list[ProviderCapabilityStatus]:
+        return []
+
+    def provider_statuses(self) -> list[ProviderStatus]:
+        return []
+
+    def cleanup_regenerable_runtime_rows(self) -> dict[str, int]:
+        self.cleanup_thread_id = threading.get_ident()
+        return {}
+
+    def cleanup_runtime_rows(self) -> dict[str, int]:
+        raise AssertionError("scheduler must not run the full user-history cleanup")
+
+
+class _ExclusiveGuard:
+    def __init__(self) -> None:
+        self.acquired = False
+        self.acquire_calls = 0
+        self.release_calls = 0
+
+    def acquire(self) -> bool:
+        self.acquire_calls += 1
+        if self.acquired:
+            return False
+        self.acquired = True
+        return True
+
+    def release(self) -> None:
+        assert self.acquired is True
+        self.acquired = False
+        self.release_calls += 1
+
+
+class _BlockingGuard(_ExclusiveGuard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.acquire_started = threading.Event()
+        self.allow_acquire = threading.Event()
+
+    def acquire(self) -> bool:
+        self.acquire_calls += 1
+        self.acquire_started.set()
+        self.allow_acquire.wait(timeout=5)
+        self.acquired = True
+        return True
+
+
+class _BlockingStartEventCache(_SchedulerCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_event_started = threading.Event()
+        self.allow_start_event = threading.Event()
+
+    def save_monitor_event(self, level: str, category: str, message: str, symbol: str | None = None) -> None:
+        if category == "scheduler" and message == "本地数据刷新与健康监控已启动":
+            self.start_event_started.set()
+            self.allow_start_event.wait(timeout=5)
+        super().save_monitor_event(level, category, message, symbol=symbol)
+
+
+class _BlockingTaskRunStartCache(_SchedulerCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = threading.Event()
+        self.allow_start = threading.Event()
+        self.finished = threading.Event()
+        self.run_statuses: dict[int, str] = {}
+
+    def start_task_run(self, task_name: str) -> int:
+        self.start_entered.set()
+        self.allow_start.wait(timeout=5)
+        run_id = super().start_task_run(task_name)
+        self.run_statuses[run_id] = "running"
+        return run_id
+
+    def finish_task_run(self, run_id: int, status: str, message: str | None = None) -> None:
+        super().finish_task_run(run_id, status, message)
+        self.run_statuses[run_id] = status
+        self.finished.set()
 
 
 class _StartFailingCache(_SchedulerCache):
@@ -652,6 +1416,7 @@ class _SchedulerHub:
         kline_fallback: set[str] | None = None,
         kline_limit: int = 10,
         kline_symbols: list[str] | None = None,
+        plate_fallback: bool = False,
         cache: _SchedulerCache | None = None,
         seed_symbols: tuple[str, ...] = ("600519.SH",),
     ) -> None:
@@ -667,6 +1432,8 @@ class _SchedulerHub:
         self.kline_fallback = kline_fallback or set()
         self.kline_calls: list[str] = []
         self.quote_calls: list[list[str]] = []
+        self.plate_fallback = plate_fallback
+        self.plate_rank_calls: list[tuple[int, bool]] = []
 
     async def quotes(self, symbols, use_cache: bool = True):
         self.quote_calls.append(list(symbols))
@@ -684,12 +1451,22 @@ class _SchedulerHub:
             return []
         return [SimpleNamespace(fallback_used=symbol in self.kline_fallback)]
 
+    async def plate_rank_result(self, limit: int = 20, refresh: bool = False):
+        self.plate_rank_calls.append((limit, refresh))
+        return SimpleNamespace(rows=[SimpleNamespace()], used_fallback_cache=self.plate_fallback)
+
 
 def _cache_stats(
     *,
     latest_quote_at: str | None,
     latest_kline_at: str | None,
     latest_minute_kline_at: str | None = None,
+    latest_quote_timestamp: str | None = None,
+    latest_daily_kline_date: str | None = None,
+    latest_minute_kline_timestamp: str | None = None,
+    stock_count: int = 1,
+    plate_count: int = 1,
+    metadata_at: str | None = "2026-05-13 10:29:30",
 ) -> CacheStats:
     return CacheStats(
         path=":memory:",
@@ -698,13 +1475,31 @@ def _cache_stats(
         kline_count=1 if latest_kline_at else 0,
         daily_kline_count=1 if latest_kline_at else 0,
         minute_kline_count=1 if latest_minute_kline_at else 0,
-        stock_count=0,
-        plate_count=0,
+        stock_count=stock_count,
+        plate_count=plate_count,
         provider_count=0,
         latest_quote_at=latest_quote_at,
         latest_kline_at=latest_kline_at,
         latest_daily_kline_at=latest_kline_at,
         latest_minute_kline_at=latest_minute_kline_at,
+        latest_quote_fetched_at=latest_quote_at,
+        latest_daily_kline_fetched_at=latest_kline_at,
+        latest_minute_kline_fetched_at=latest_minute_kline_at,
+        latest_quote_timestamp=latest_quote_timestamp,
+        latest_daily_kline_date=latest_daily_kline_date,
+        latest_minute_kline_timestamp=latest_minute_kline_timestamp,
+        latest_stock_at=metadata_at if stock_count else None,
+        latest_plate_at=metadata_at if plate_count else None,
+    )
+
+
+def _fresh_cache_stats(now: datetime) -> CacheStats:
+    fetched_at = (now - timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+    return _cache_stats(
+        latest_quote_at=fetched_at,
+        latest_kline_at=fetched_at,
+        latest_quote_timestamp=(now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+        latest_daily_kline_date="2026-05-12",
     )
 
 

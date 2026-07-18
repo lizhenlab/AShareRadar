@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -78,6 +79,23 @@ def test_strong_stock_watch_labels_default_scope_when_all_quotes_fail() -> None:
     assert result["warnings"] == ["自选股 + 默认观察池 + 股票池分层抽样行情暂不可用，成功 0/1 个样本，请稍后重试。"]
 
 
+def test_strong_stock_watch_offloads_watchlist_failure_and_uses_default_samples() -> None:
+    hub = _OverviewHub(failing_symbols=set(), seed_symbols=("600001.SH",))
+    hub.cache = _ThreadRecordingFailingWatchlistCache()
+
+    async def run() -> tuple[dict[str, object], int]:
+        event_loop_thread = threading.get_ident()
+        return await strong_stock_watch(hub, Settings(seed_symbols=("600001.SH",))), event_loop_thread
+
+    result, event_loop_thread = asyncio.run(run())
+
+    assert hub.cache.watchlist_thread is not None
+    assert hub.cache.watchlist_thread != event_loop_thread
+    assert result["sample_count"] == 1
+    assert result["degraded"] is True
+    assert any("自选股读取暂不可用" in warning for warning in result["warnings"])
+
+
 def test_strong_stock_watch_ignores_kline_failure_log_event_failure() -> None:
     hub = _KlineAndLogFailingOverviewHub(failing_symbols=set())
 
@@ -87,6 +105,17 @@ def test_strong_stock_watch_ignores_kline_failure_log_event_failure() -> None:
     assert result["items"] == []
     assert result["degraded"] is True
     assert result["warnings"] == ["强股排序所需日K线全部不可用，当前无法生成排序。"]
+
+
+def test_strong_stock_watch_redacts_secrets_from_kline_failure_events() -> None:
+    hub = _SensitiveKlineOverviewHub(failing_symbols=set())
+
+    result = asyncio.run(strong_stock_watch(hub, Settings(), symbols="600001.SH"))
+
+    assert result["items"] == []
+    messages = "；".join(message for _, message in hub.cache.events)
+    assert "private-token" not in messages
+    assert "<redacted>" in messages
 
 
 def test_market_overview_labels_independent_index_and_strong_stock_failures() -> None:
@@ -150,6 +179,16 @@ class _LogFailingEventCache(_EventCache):
         raise RuntimeError("event log down")
 
 
+class _ThreadRecordingFailingWatchlistCache(_EventCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.watchlist_thread: int | None = None
+
+    def watchlist_symbols(self) -> list[str]:
+        self.watchlist_thread = threading.get_ident()
+        raise RuntimeError("watchlist database busy")
+
+
 class _OverviewHub:
     def __init__(self, *, failing_symbols: set[str], seed_symbols: tuple[str, ...] = ()) -> None:
         self.cache = _EventCache()
@@ -205,6 +244,11 @@ class _KlineAndLogFailingOverviewHub(_OverviewHub):
 class _CancellingKlineOverviewHub(_OverviewHub):
     async def kline(self, symbol: str, limit: int = 80):
         raise asyncio.CancelledError()
+
+
+class _SensitiveKlineOverviewHub(_OverviewHub):
+    async def kline(self, symbol: str, limit: int = 80):
+        raise RuntimeError("GET https://example.test/kline?access_token=private-token")
 
 
 class _WrongQuoteHub(_OverviewHub):

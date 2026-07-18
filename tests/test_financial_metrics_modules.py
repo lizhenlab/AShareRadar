@@ -14,14 +14,14 @@ def test_pe_and_pb_views_keep_normal_boundaries() -> None:
 
 
 def test_financial_views_treat_non_finite_values_as_field_errors() -> None:
-    assert pe_view(nan)[0:2] == (28, "弱")
-    assert pb_view(inf)[0:2] == (30, "弱")
-    assert market_cap_view(nan)[0:2] == (34, "偏弱")
+    assert pe_view(nan)[0:2] == (50, "不可用")
+    assert pb_view(inf)[0:2] == (50, "不可用")
+    assert market_cap_view(nan)[0:2] == (50, "不可用")
 
 
 def test_market_cap_view_rejects_non_positive_values() -> None:
-    assert market_cap_view(0)[0:2] == (34, "偏弱")
-    assert market_cap_view(-1)[0:2] == (34, "偏弱")
+    assert market_cap_view(0)[0:2] == (50, "不可用")
+    assert market_cap_view(-1)[0:2] == (50, "不可用")
 
 
 def test_liquidity_view_scores_amount_and_turnover_rules() -> None:
@@ -31,8 +31,8 @@ def test_liquidity_view_scores_amount_and_turnover_rules() -> None:
 
 
 def test_liquidity_view_rejects_invalid_amount_without_fake_turnover_bonus() -> None:
-    assert liquidity_view(0, 2.0) == (34, "偏弱", "成交额字段异常或缺失，价格信号可靠性需要降权。")
-    assert liquidity_view(nan, 2.0)[0:2] == (34, "偏弱")
+    assert liquidity_view(0, 2.0) == (50, "不可用", "成交额字段异常或缺失，交易活跃度不可用。")
+    assert liquidity_view(nan, 2.0)[0:2] == (50, "不可用")
 
 
 def test_format_amount_text_handles_non_finite_values() -> None:

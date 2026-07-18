@@ -29,6 +29,7 @@ from app.models.schemas import (
     TimeframeAlignmentReport,
 )
 from app.services.datahub import DataHub
+from app.services.datahub_runtime import run_cache_io_best_effort
 from app.services.market_sampling import (
     MarketBreadthQuoteResult,
     QuoteSampleResult,
@@ -136,11 +137,24 @@ async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchI
 
 
 async def _market_breadth_sample_or_empty(datahub: DataHub) -> MarketBreadthQuoteResult:
-    return await optional_workflow_value(
+    failure: Exception | None = None
+
+    def unavailable_sample(exc: Exception) -> MarketBreadthQuoteResult:
+        nonlocal failure
+        failure = exc
+        return _unavailable_market_breadth_sample()
+
+    sample = await optional_workflow_value(
         datahub,
         lambda: _market_breadth_quote_sample(datahub),
-        lambda exc: _unavailable_market_breadth_sample(datahub, exc),
+        unavailable_sample,
     )
+    if failure is not None:
+        message = "市场宽度数据源请求失败，环境判断已降级。"
+        log_event = getattr(datahub.cache, "log_event", None)
+        if callable(log_event):
+            await run_cache_io_best_effort(log_event, "fallback", f"{message}；{short_error(failure)}")
+    return sample
 
 
 def _build_research_core(inputs: WorkbenchInputs) -> WorkbenchResearchCore:
@@ -277,12 +291,8 @@ async def _load_stock_concepts(datahub: DataHub, symbol: str) -> tuple[list[Stoc
     return await datahub.stock_concepts(symbol, limit=8), None
 
 
-def _unavailable_market_breadth_sample(datahub: DataHub, exc: Exception) -> MarketBreadthQuoteResult:
+def _unavailable_market_breadth_sample() -> MarketBreadthQuoteResult:
     message = "市场宽度数据源请求失败，环境判断已降级。"
-    try:
-        datahub.cache.log_event("fallback", f"{message}；{short_error(exc)}")
-    except Exception:
-        pass
     return MarketBreadthQuoteResult(
         quote_sample=QuoteSampleResult(requested_symbols=(), quotes=(), missing_symbols=()),
         warnings=(message,),

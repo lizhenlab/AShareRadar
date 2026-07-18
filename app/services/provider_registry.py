@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol
+from typing import Protocol, cast
 
 from app.config import Settings
 from app.models.schemas import Kline, MinuteKline, OrderBook, PlateItem, ProviderCapability, Quote, StockConceptItem, StockInfo
@@ -92,7 +92,7 @@ class CapabilityProvider(Protocol):
 
 def build_providers(settings: Settings) -> dict[str, MarketProvider]:
     return {
-        "tencent": TencentMarketDataProvider(),
+        "tencent": cast(MarketProvider, TencentMarketDataProvider(timeout=settings.request_timeout_seconds)),
         "akshare": AKShareProvider(),
         "baostock": BaoStockProvider(),
         "tushare": TushareProvider(token=settings.tushare_token),
@@ -102,7 +102,7 @@ def build_providers(settings: Settings) -> dict[str, MarketProvider]:
             enabled=settings.futu_enabled,
         ),
         "local": LocalIndividualStockProvider(),
-        "demo": DemoMarketDataProvider(enabled=settings.demo_provider_enabled),
+        "demo": cast(MarketProvider, DemoMarketDataProvider(enabled=settings.demo_provider_enabled)),
     }
 
 

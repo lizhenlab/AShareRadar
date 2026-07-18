@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import threading
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
+from datetime import date
 from pathlib import Path
 
-from app.config import get_settings
+from app.config import Settings, get_settings, resolve_project_path
 from app.db.connection import SQLiteConnectionFactory
 from app.db.schema import initialize_schema
+from app.models.market import DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE, KlineAdjustmentMode
 from app.models.schemas import (
     AdviceHistoryItem,
+    AdviceReviewDetail,
+    AdviceReviewEvaluation,
+    AdviceReviewEvaluationDraft,
+    AdviceReviewPlan,
+    AdviceReviewPlanInput,
+    AdviceReviewPlanUpdate,
+    AdviceTimelineItem,
     AnalysisResult,
     AlertEventItem,
     AlertRuleInput,
@@ -22,6 +32,7 @@ from app.models.schemas import (
     PlateItem,
     ProviderStatus,
     Quote,
+    ResearchStatus,
     StockConceptItem,
     StockInfo,
     StockNoteInput,
@@ -29,23 +40,50 @@ from app.models.schemas import (
     StockNoteUpdate,
     TaskRun,
     WatchlistItem,
+    WatchlistPriority,
+    WatchlistUpdate,
 )
 from app.repositories.advice import AdviceHistoryRepository
+from app.repositories.advice_reviews import AdviceReviewRepository
 from app.repositories.alerts import AlertRepository
-from app.repositories.alerts import AlertStateDecision
+from app.repositories.alerts import AlertStateDecision, AlertStateUpdateResult
 from app.repositories.cache_stats import CacheStatsRepository
 from app.repositories.market_data import MarketDataRepository
 from app.repositories.maintenance import RuntimeMaintenanceRepository
 from app.repositories.notes import StockNoteRepository
 from app.repositories.provider_status import ProviderStatusRepository
 from app.repositories.runtime import RuntimeEventRepository
-from app.repositories.watchlist import WatchlistRepository
+from app.repositories.watchlist import WatchlistRepository, WatchlistSymbolSelection
+from app.services.research_conclusion_change import build_conclusion_timeline
+
+
+def resolve_cache_settings(
+    cache: SQLiteCache | None = None,
+    settings: Settings | None = None,
+    *,
+    owner: str = "cache",
+) -> Settings:
+    cache_settings = cache.settings if cache is not None else None
+    if settings is None:
+        settings = cache_settings if cache_settings is not None else get_settings()
+        if cache is not None and cache_settings is None and cache.path != settings.cache_path:
+            settings = settings.model_copy(update={"cache_path": cache.path})
+    if cache is not None:
+        cache.bind_settings(settings, owner=owner)
+    return settings
 
 
 class SQLiteCache:
-    def __init__(self, path: Path | None = None) -> None:
-        settings = get_settings()
-        self.path = path or settings.cache_path
+    def __init__(self, path: Path | None = None, *, settings: Settings | None = None) -> None:
+        if path is None:
+            settings = settings if settings is not None else get_settings()
+            path = settings.cache_path
+        resolved_path = resolve_project_path(path)
+        if settings is not None:
+            _require_settings_path(resolved_path, settings, "cache")
+        repository_settings = settings if settings is not None else Settings(cache_path=resolved_path)
+        self._settings = settings
+        self.path = resolved_path
         self._connections = SQLiteConnectionFactory(self.path)
         self._lock = threading.RLock()
         self._init_schema()
@@ -53,11 +91,40 @@ class SQLiteCache:
         self.market_data_repo = MarketDataRepository(self.path, self._lock)
         self.provider_status_repo = ProviderStatusRepository(self.path, self._lock)
         self.runtime_event_repo = RuntimeEventRepository(self.path, self._lock)
-        self.watchlist_repo = WatchlistRepository(self.path, self._lock)
-        self.advice_repo = AdviceHistoryRepository(self.path, self._lock)
+        self.watchlist_repo = WatchlistRepository(self.path, self._lock, settings=repository_settings)
+        self.advice_repo = AdviceHistoryRepository(self.path, self._lock, settings=repository_settings)
+        self.advice_review_repo = AdviceReviewRepository(self.path, self._lock)
         self.alert_repo = AlertRepository(self.path, self._lock)
         self.note_repo = StockNoteRepository(self.path, self._lock)
-        self.maintenance_repo = RuntimeMaintenanceRepository(self.path, self._lock)
+        self.maintenance_repo = RuntimeMaintenanceRepository(self.path, self._lock, settings=repository_settings)
+
+    @property
+    def settings(self) -> Settings | None:
+        return self._settings
+
+    @settings.setter
+    def settings(self, settings: Settings | None) -> None:
+        if settings is None:
+            self._settings = None
+            return
+        self.bind_settings(settings)
+
+    @contextmanager
+    def exclusive_local_data_operation(self) -> Iterator[None]:
+        with self._lock:
+            yield
+
+    def bind_settings(self, settings: Settings, *, owner: str = "cache") -> Settings:
+        _require_settings_path(self.path, settings, owner)
+        current = self._settings
+        if current is not None and current is not settings and current != settings:
+            raise ValueError(f"{owner}.settings 与 Settings 配置不一致")
+        self._settings = settings
+        for repository_name in ("watchlist_repo", "advice_repo", "maintenance_repo"):
+            repository = getattr(self, repository_name, None)
+            if repository is not None:
+                repository.settings = settings
+        return settings
 
     def _connect(self) -> AbstractContextManager:
         return self._connections.connect()
@@ -78,8 +145,19 @@ class SQLiteCache:
     def save_klines(self, symbol: str, klines: list[Kline], source: str) -> None:
         self.market_data_repo.save_klines(symbol, klines, source)
 
-    def get_klines(self, symbol: str, limit: int, max_age_seconds: int) -> list[Kline]:
-        return self.market_data_repo.get_klines(symbol, limit, max_age_seconds)
+    def get_klines(
+        self,
+        symbol: str,
+        limit: int,
+        max_age_seconds: int,
+        adjustment_mode: KlineAdjustmentMode = DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+    ) -> list[Kline]:
+        return self.market_data_repo.get_klines(
+            symbol,
+            limit,
+            max_age_seconds,
+            adjustment_mode=adjustment_mode,
+        )
 
     def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None:
         self.market_data_repo.save_minute_klines(symbol, interval, rows, source)
@@ -150,6 +228,9 @@ class SQLiteCache:
     def finish_task_run(self, run_id: int, status: str, message: str | None = None) -> None:
         self.runtime_event_repo.finish_task_run(run_id, status, message)
 
+    def reconcile_orphaned_task_runs(self) -> int:
+        return self.runtime_event_repo.reconcile_orphaned_task_runs()
+
     def recent_task_runs(self, limit: int = 20) -> list[TaskRun]:
         return self.runtime_event_repo.task_runs(limit=limit)
 
@@ -165,8 +246,19 @@ class SQLiteCache:
         note: str | None = None,
         group_name: str | None = None,
         pinned: bool | None = None,
+        research_status: ResearchStatus | None = None,
+        priority: WatchlistPriority | None = None,
+        next_review_date: date | str | None = None,
     ) -> WatchlistItem:
-        return self.watchlist_repo.save_item(quote, note=note, group_name=group_name, pinned=pinned)
+        return self.watchlist_repo.save_item(
+            quote,
+            note=note,
+            group_name=group_name,
+            pinned=pinned,
+            research_status=research_status,
+            priority=priority,
+            next_review_date=next_review_date,
+        )
 
     def watchlist_item(self, symbol: str) -> WatchlistItem | None:
         return self.watchlist_repo.item(symbol)
@@ -174,11 +266,36 @@ class SQLiteCache:
     def watchlist(self) -> list[WatchlistItem]:
         return self.watchlist_repo.items()
 
+    def update_watchlist_item(self, symbol: str, payload: WatchlistUpdate) -> WatchlistItem | None:
+        return self.watchlist_repo.update_item(symbol, payload)
+
+    def mark_watchlist_viewed(
+        self,
+        symbol: str,
+        *,
+        clear_unread: bool = True,
+        viewed_through_advice_id: int | None = None,
+    ) -> WatchlistItem | None:
+        return self.watchlist_repo.mark_viewed(
+            symbol,
+            clear_unread=clear_unread,
+            viewed_through_advice_id=viewed_through_advice_id,
+        )
+
+    def adjust_watchlist_unread_count(self, symbol: str, delta: int) -> WatchlistItem | None:
+        return self.watchlist_repo.adjust_unread_change_count(symbol, delta)
+
+    def increment_watchlist_unread_count(self, symbol: str, amount: int = 1) -> WatchlistItem | None:
+        return self.watchlist_repo.increment_unread_change_count(symbol, amount)
+
     def delete_watchlist_item(self, symbol: str) -> bool:
         return self.watchlist_repo.delete(symbol)
 
     def watchlist_symbols(self) -> list[str]:
         return self.watchlist_repo.symbols()
+
+    def watchlist_symbol_selection(self) -> WatchlistSymbolSelection:
+        return self.watchlist_repo.symbol_selection()
 
     def save_advice_snapshot(self, analysis: AnalysisResult) -> AdviceHistoryItem:
         return self.advice_repo.save_snapshot(analysis)
@@ -189,6 +306,56 @@ class SQLiteCache:
     def advice_history(self, symbol: str, limit: int = 30) -> list[AdviceHistoryItem]:
         return self.advice_repo.items(symbol, limit=limit)
 
+    def advice_timeline(self, symbol: str, limit: int = 30) -> list[AdviceTimelineItem]:
+        if limit <= 0:
+            return []
+        items = self.advice_repo.timeline_items(symbol, limit=limit + 1)
+        return build_conclusion_timeline(items, limit)
+
+    def create_advice_review_plan(self, payload: AdviceReviewPlanInput) -> AdviceReviewPlan:
+        return self.advice_review_repo.create_plan(payload)
+
+    def advice_review_plan(self, plan_id: int) -> AdviceReviewPlan | None:
+        return self.advice_review_repo.plan(plan_id)
+
+    def advice_review_plan_by_advice(self, advice_id: int) -> AdviceReviewPlan | None:
+        return self.advice_review_repo.plan_by_advice(advice_id)
+
+    def advice_review_plans(self, *, symbol: str | None = None, limit: int = 100) -> list[AdviceReviewPlan]:
+        return self.advice_review_repo.plans(symbol=symbol, limit=limit)
+
+    def advice_review_details(self, *, symbol: str | None = None, limit: int = 100) -> list[AdviceReviewDetail]:
+        return self.advice_review_repo.details(symbol=symbol, limit=limit)
+
+    def update_advice_review_plan(
+        self,
+        plan_id: int,
+        payload: AdviceReviewPlanUpdate,
+    ) -> AdviceReviewPlan | None:
+        return self.advice_review_repo.update_plan(plan_id, payload)
+
+    def delete_advice_review_plan(self, plan_id: int) -> bool:
+        return self.advice_review_repo.delete_plan(plan_id)
+
+    def advice_review_detail(self, plan_id: int) -> AdviceReviewDetail | None:
+        return self.advice_review_repo.detail(plan_id)
+
+    def advice_review_evaluation(self, evaluation_id: int) -> AdviceReviewEvaluation | None:
+        return self.advice_review_repo.evaluation(evaluation_id)
+
+    def advice_review_evaluation_history(
+        self,
+        plan_id: int,
+        limit: int = 100,
+    ) -> list[AdviceReviewEvaluation]:
+        return self.advice_review_repo.evaluation_history(plan_id, limit=limit)
+
+    def save_advice_review_evaluation(
+        self,
+        evaluation: AdviceReviewEvaluationDraft,
+    ) -> AdviceReviewEvaluation:
+        return self.advice_review_repo.save_evaluation(evaluation)
+
     def create_alert_rule(self, quote: Quote, payload: AlertRuleInput) -> AlertRuleItem:
         return self.alert_repo.create_rule(quote, payload)
 
@@ -196,7 +363,7 @@ class SQLiteCache:
         self,
         symbol: str | None = None,
         include_disabled: bool = True,
-        limit: int = 200,
+        limit: int | None = None,
     ) -> list[AlertRuleItem]:
         return self.alert_repo.rules(symbol=symbol, include_disabled=include_disabled, limit=limit)
 
@@ -234,8 +401,45 @@ class SQLiteCache:
             decision=decision,
         )
 
-    def alert_events(self, symbol: str | None = None, limit: int = 100) -> list[AlertEventItem]:
-        return self.alert_repo.events(symbol=symbol, limit=limit)
+    def update_alert_rule_state_checked(
+        self,
+        rule: AlertRuleItem,
+        *,
+        checked_at: str,
+        state: str,
+        triggered: bool,
+        message: str,
+        quote: Quote,
+        event_type: str | None = None,
+        force_event: bool = False,
+        decision: AlertStateDecision | None = None,
+    ) -> AlertStateUpdateResult:
+        return self.alert_repo.update_rule_state_checked(
+            rule,
+            checked_at=checked_at,
+            state=state,
+            triggered=triggered,
+            message=message,
+            quote=quote,
+            event_type=event_type,
+            force_event=force_event,
+            decision=decision,
+        )
+
+    def alert_events(
+        self,
+        symbol: str | None = None,
+        limit: int = 100,
+        *,
+        after_created_at: str | None = None,
+        after_id: int | None = None,
+    ) -> list[AlertEventItem]:
+        return self.alert_repo.events(
+            symbol=symbol,
+            limit=limit,
+            after_created_at=after_created_at,
+            after_id=after_id,
+        )
 
     def create_stock_note(self, quote: Quote, payload: StockNoteInput) -> StockNoteItem:
         return self.note_repo.create(quote, payload)
@@ -255,5 +459,13 @@ class SQLiteCache:
     def cleanup_runtime_rows(self) -> dict[str, int]:
         return self.maintenance_repo.cleanup_runtime_rows()
 
+    def preview_runtime_cleanup(self) -> dict[str, int]:
+        return self.maintenance_repo.preview_runtime_cleanup()
+
     def table_counts(self) -> dict[str, int]:
         return self.maintenance_repo.table_counts()
+
+
+def _require_settings_path(path: Path, settings: Settings, owner: str) -> None:
+    if path != resolve_project_path(settings.cache_path):
+        raise ValueError(f"{owner}.path 与 Settings.cache_path 配置不一致")

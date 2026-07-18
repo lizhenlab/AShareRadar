@@ -20,7 +20,12 @@ def test_leadership_evidence_keeps_hot_concepts_sorted_and_limited() -> None:
         analysis,
         insights,
         feature,
-        [_concept("异常题材", math.inf), _concept("低位题材", -3.0), _concept("机器人", 4.2), _concept("AI应用", 1.1)],
+        [
+            _concept("异常题材", 0).model_copy(update={"change_pct": math.inf}),
+            _concept("低位题材", -3.0),
+            _concept("机器人", 4.2),
+            _concept("AI应用", 1.1),
+        ],
     )
 
     joined_evidence = "；".join(report.evidence)
@@ -32,10 +37,10 @@ def test_leadership_evidence_keeps_hot_concepts_sorted_and_limited() -> None:
 
 
 def test_feature_snapshot_sanitizes_leader_score_inputs_like_display_fields() -> None:
-    dirty_quote = make_quote(change_pct=math.inf, turnover_rate=math.inf).model_copy(
-        update={"amount": math.inf}
+    dirty_quote = make_quote(change_pct=0.0, turnover_rate=0.0).model_copy(
+        update={"change_pct": math.inf, "turnover_rate": math.inf, "amount": math.inf}
     )
-    dirty_industry = make_plate_item(change_pct=math.inf)
+    dirty_industry = make_plate_item(change_pct=0.0).model_copy(update={"change_pct": math.inf})
     analysis, _insights, feature = _leadership_inputs(quote=dirty_quote, industry_context=dirty_industry)
 
     assert feature.change_pct == 0
@@ -83,7 +88,8 @@ def test_feature_snapshot_clamps_dirty_scores_and_metrics_before_output() -> Non
     assert feature.ma10 == 0
     assert feature.ma20 == 0
     assert feature.valuation_score == 0
-    assert feature.financial_score == 0
+    assert feature.financial_score is None
+    assert any("财务体检分按不可用处理，未计为 0 分" in note for note in feature.notes)
     assert feature.fund_flow_score == 0
     assert feature.order_pressure == "--"
     assert "趋势强" not in feature.tags
@@ -148,7 +154,11 @@ def test_leadership_report_sanitizes_dirty_feature_snapshot_before_text() -> Non
         analysis,
         insights,
         dirty_feature,
-        [_concept("异常题材", math.inf), _concept("平稳题材", 0), _concept("热题材", 3.1)],
+        [
+            _concept("异常题材", 0).model_copy(update={"change_pct": math.inf}),
+            _concept("平稳题材", 0),
+            _concept("热题材", 3.1),
+        ],
     )
 
     joined_evidence = "；".join(report.evidence)
@@ -158,7 +168,8 @@ def test_leadership_report_sanitizes_dirty_feature_snapshot_before_text() -> Non
     assert report.tags == ["有效标签"]
     assert "inf" not in joined_evidence
     assert "nan" not in joined_evidence
-    assert "盘口状态：--" in joined_evidence
+    assert "订单压力：--" in joined_evidence
+    assert "订单压力，盘口状态" not in joined_evidence
     assert "概念背景：热题材3.10%、平稳题材0.00%。" in joined_evidence
     assert "异常题材" not in joined_evidence
 

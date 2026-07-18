@@ -10,7 +10,7 @@ from app.models.schemas import AnalysisResult, FeatureSnapshot
 class FactorWeightContext:
     amount: float
     market_cap: float
-    turnover: float
+    turnover: float | None
     volume_ratio: float
     data_quality_score: int
 
@@ -72,7 +72,7 @@ def _factor_weight_context(analysis: AnalysisResult, feature: FeatureSnapshot) -
     return FactorWeightContext(
         amount=feature.amount or 0,
         market_cap=analysis.quote.market_cap or 0,
-        turnover=feature.turnover_rate or 0,
+        turnover=feature.turnover_rate,
         volume_ratio=feature.volume_ratio,
         data_quality_score=feature.data_quality_score,
     )
@@ -98,11 +98,17 @@ def _apply_low_quality_adjustments(
 
 
 def _is_large_stable_stock(context: FactorWeightContext) -> bool:
-    return context.market_cap >= 500_000_000_000 or (context.amount >= 3_000_000_000 and context.turnover < 2)
+    return context.market_cap >= 500_000_000_000 or (
+        context.amount >= 3_000_000_000
+        and context.turnover is not None
+        and context.turnover < 2
+    )
 
 
 def _is_high_activity_stock(context: FactorWeightContext) -> bool:
-    return context.turnover >= 8 or context.volume_ratio >= 1.6
+    return (
+        context.turnover is not None and context.turnover >= 8
+    ) or context.volume_ratio >= 1.6
 
 
 def _is_low_liquidity_stock(context: FactorWeightContext) -> bool:

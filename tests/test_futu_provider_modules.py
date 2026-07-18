@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from app.services.provider_errors import ProviderProtocolError
 from app.services.futu_provider import (
     FutuProvider,
     _futu_kltype,
@@ -66,7 +67,13 @@ def test_ordered_snapshot_quotes_reports_requested_a_share_missing_after_filteri
     frame = _Frame(
         [
             {"code": "HK.00700", "stock_name": "腾讯控股", "last_price": 400.0},
-            {"code": "SH.600519", "stock_name": "贵州茅台", "last_price": 1303.0, "prev_close_price": 1273.38},
+            {
+                "code": "SH.600519",
+                "stock_name": "贵州茅台",
+                "last_price": 1303.0,
+                "prev_close_price": 1273.38,
+                "update_time": "2026-05-13 10:00:00",
+            },
         ]
     )
 
@@ -84,6 +91,40 @@ def test_ordered_snapshot_quotes_filters_invalid_critical_prices() -> None:
 
     with pytest.raises(RuntimeError, match="600519.SH,000001.SZ"):
         _ordered_snapshot_quotes(["600519.SH", "000001.SZ"], frame, source_name="Futu OpenAPI")
+
+
+def test_ordered_snapshot_quotes_uses_provider_event_time() -> None:
+    frame = _Frame(
+        [
+            {
+                "code": "SH.600519",
+                "stock_name": "贵州茅台",
+                "last_price": 1303.0,
+                "prev_close_price": 1273.38,
+                "update_time": "2026-05-13 10:01:02",
+            }
+        ]
+    )
+
+    rows = _ordered_snapshot_quotes(["600519.SH"], frame, source_name="Futu OpenAPI")
+
+    assert rows[0].timestamp == "2026-05-13 10:01:02"
+
+
+def test_ordered_snapshot_quotes_rejects_missing_event_time_instead_of_using_fetch_time() -> None:
+    frame = _Frame(
+        [
+            {
+                "code": "SH.600519",
+                "stock_name": "贵州茅台",
+                "last_price": 1303.0,
+                "prev_close_price": 1273.38,
+            }
+        ]
+    )
+
+    with pytest.raises(ProviderProtocolError, match="缺少可解析的事件时间"):
+        _ordered_snapshot_quotes(["600519.SH"], frame, source_name="Futu OpenAPI")
 
 
 def test_minute_klines_from_response_filters_invalid_rows_and_uses_normalized_interval() -> None:

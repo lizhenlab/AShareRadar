@@ -1,11 +1,18 @@
 from functools import lru_cache
+import math
 import os
 from pathlib import Path
+import re
 import shlex
-from pydantic import BaseModel, Field
+from urllib.parse import SplitResult, urlsplit, urlunsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 LLM_SHELL_ENV_PATH = Path.home() / ".zshrc"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CACHE_PATH = PROJECT_ROOT / "data" / "ashare_radar.sqlite3"
+CACHE_PATH_ENV_NAME = "ASHARE_RADAR_CACHE_PATH"
 LLM_SHELL_ENV_NAMES = {
     "ASHARE_RADAR_LLM_ENABLED",
     "ASHARE_RADAR_LLM_API_KEY",
@@ -15,9 +22,14 @@ LLM_SHELL_ENV_NAMES = {
 }
 DEFAULT_CORS_ALLOW_ORIGINS = ("http://127.0.0.1:8010", "http://localhost:8010")
 DEFAULT_ASHARE_RADAR_LLM_ENABLED = True
-DEFAULT_ASHARE_RADAR_LLM_TIMEOUT_SECONDS = 12.0
+DEFAULT_ASHARE_RADAR_LLM_TIMEOUT_SECONDS = 30.0
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+_LLM_HTTP_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_SHELL_BLOCK_WORD_RE = re.compile(
+    r"(?:^|[;&|])\s*(if|for|while|until|case|select|repeat|fi|done|esac)\b"
+)
+_SHELL_BLOCK_OPENERS = frozenset({"if", "for", "while", "until", "case", "select", "repeat"})
 
 
 def _env_tuple(name: str, default: tuple[str, ...], *, aliases: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -45,7 +57,7 @@ def _env_bool(name: str, default: bool, *, aliases: tuple[str, ...] = ()) -> boo
         return True
     if value in FALSE_ENV_VALUES:
         return False
-    return default
+    raise ValueError(f"{name} 必须是布尔值，支持 1/0、true/false、yes/no 或 on/off")
 
 
 def env_bool(name: str, default: bool, *, aliases: tuple[str, ...] = ()) -> bool:
@@ -59,9 +71,9 @@ def _env_int(name: str, default: int, *, minimum: int | None = None, aliases: tu
     try:
         value = int(raw)
     except ValueError:
-        return default
+        raise ValueError(f"{name} 必须是整数") from None
     if minimum is not None and value < minimum:
-        return default
+        raise ValueError(f"{name} 必须大于等于 {minimum}")
     return value
 
 
@@ -72,10 +84,24 @@ def _env_float(name: str, default: float, *, minimum: float | None = None, alias
     try:
         value = float(raw)
     except ValueError:
-        return default
+        raise ValueError(f"{name} 必须是数字") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{name} 必须是有限数字")
     if minimum is not None and value < minimum:
-        return default
+        raise ValueError(f"{name} 必须大于等于 {minimum}")
     return value
+
+
+def resolve_project_path(path: str | Path) -> Path:
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = PROJECT_ROOT / resolved
+    return resolved.resolve()
+
+
+def _env_path(name: str, default: Path, *, aliases: tuple[str, ...] = ()) -> Path:
+    raw = _env_text(name, aliases=aliases)
+    return resolve_project_path(raw) if raw is not None else default
 
 
 def _first_env_value(name: str, aliases: tuple[str, ...]) -> str | None:
@@ -92,8 +118,22 @@ def _first_env_value(name: str, aliases: tuple[str, ...]) -> str | None:
 
 def _load_shell_env(path: Path, names: set[str]) -> dict[str, str]:
     values: dict[str, str] = {}
+    group_depth = 0
+    block_depth = 0
+    quote: str | None = None
+    continued = False
+    heredocs: list[tuple[str, bool]] = []
     for line in _shell_env_lines(path):
-        values.update(_shell_env_line_values(line, names))
+        if heredocs:
+            if _shell_heredoc_closed(line, heredocs[0]):
+                heredocs.pop(0)
+            continue
+        if group_depth == 0 and block_depth == 0 and quote is None and not continued:
+            values.update(_shell_env_line_values(line, names))
+        control_text, quote = _shell_control_text(line, quote)
+        group_depth, block_depth = _shell_nesting_after_control_text(control_text, group_depth, block_depth)
+        heredocs.extend(_shell_heredoc_delimiters(line))
+        continued = quote is not None or _shell_command_continues(line, control_text)
     return values
 
 
@@ -106,20 +146,21 @@ def _shell_env_lines(path: Path) -> tuple[str, ...]:
 
 def _shell_env_line_values(line: str, names: set[str]) -> dict[str, str]:
     parts = _shell_env_words(line)
-    if parts[:1] == ("export",):
-        parts = parts[1:]
-    values: dict[str, str] = {}
-    for part in parts:
-        assignment = _shell_env_assignment(part, names)
-        if assignment is not None:
-            key, value = assignment
-            values[key] = value
-    return values
+    if len(parts) == 1:
+        part = parts[0]
+    elif len(parts) == 2 and parts[0] == "export":
+        part = parts[1]
+    else:
+        return {}
+    assignment = _shell_env_assignment(part, names)
+    return {assignment[0]: assignment[1]} if assignment is not None else {}
 
 
 def _shell_env_words(line: str) -> tuple[str, ...]:
     try:
-        return tuple(shlex.split(line, comments=True, posix=True))
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return tuple(lexer)
     except ValueError:
         return ()
 
@@ -129,15 +170,117 @@ def _shell_env_assignment(part: str, names: set[str]) -> tuple[str, str] | None:
         return None
     key, value = part.split("=", 1)
     stripped = value.strip()
-    if key not in names or not stripped:
+    if key not in names or not stripped or any(marker in stripped for marker in ("$(", "`", "<(", ">(")):
         return None
     return key, stripped
+
+
+def _shell_nesting_after_control_text(control_text: str, group_depth: int, block_depth: int) -> tuple[int, int]:
+    for char in control_text:
+        if char in "({":
+            group_depth += 1
+        elif char in ")}":
+            group_depth = max(0, group_depth - 1)
+    for match in _SHELL_BLOCK_WORD_RE.finditer(control_text):
+        if match.group(1) in _SHELL_BLOCK_OPENERS:
+            block_depth += 1
+        else:
+            block_depth = max(0, block_depth - 1)
+    return group_depth, block_depth
+
+
+def _shell_control_text(line: str, quote: str | None) -> tuple[str, str | None]:
+    output: list[str] = []
+    escaped = False
+    for char in line:
+        if escaped:
+            output.append(" ")
+            escaped = False
+        elif char == "\\" and quote != "'":
+            output.append(" ")
+            escaped = True
+        elif quote is not None:
+            output.append(" ")
+            if char == quote:
+                quote = None
+        elif char in {"'", '"'}:
+            output.append(" ")
+            quote = char
+        elif char == "#":
+            break
+        else:
+            output.append(char)
+    return "".join(output), quote
+
+
+def _shell_heredoc_delimiters(line: str) -> tuple[tuple[str, bool], ...]:
+    parts = _shell_env_words(line)
+    delimiters: list[tuple[str, bool]] = []
+    for index, part in enumerate(parts[:-1]):
+        if part != "<<":
+            continue
+        raw = parts[index + 1]
+        strip_tabs = raw.startswith("-")
+        delimiter = raw.removeprefix("-") if strip_tabs else raw
+        if delimiter:
+            delimiters.append((delimiter, strip_tabs))
+    return tuple(delimiters)
+
+
+def _shell_heredoc_closed(line: str, heredoc: tuple[str, bool]) -> bool:
+    delimiter, strip_tabs = heredoc
+    candidate = line.lstrip("\t") if strip_tabs else line
+    return candidate == delimiter
+
+
+def _shell_command_continues(line: str, control_text: str) -> bool:
+    trailing_backslashes = len(line) - len(line.rstrip("\\"))
+    if trailing_backslashes % 2 == 1:
+        return True
+    return control_text.rstrip().endswith(("&&", "||", "|", "|&"))
+
+
+def _normalized_llm_base_url(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    text = value.strip()
+    parsed, host = _parse_llm_base_url(text)
+    scheme = parsed.scheme.casefold()
+    _validate_llm_url_policy(parsed, scheme, host)
+    return urlunsplit((scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _parse_llm_base_url(text: str) -> tuple[SplitResult, str]:
+    if any(char.isspace() for char in text):
+        raise ValueError("llm_base_url 必须是绝对 HTTP(S) URL")
+    try:
+        parsed = urlsplit(text)
+        host = parsed.hostname
+        parsed.port
+    except ValueError:
+        raise ValueError("llm_base_url 必须是合法的绝对 HTTP(S) URL") from None
+    if "@" in parsed.netloc or parsed.username is not None or parsed.password is not None:
+        raise ValueError("llm_base_url 不允许包含 userinfo")
+    if host is None:
+        raise ValueError("llm_base_url 必须是绝对 HTTP(S) URL")
+    return parsed, host
+
+
+def _validate_llm_url_policy(parsed: SplitResult, scheme: str, host: str) -> None:
+    if scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("llm_base_url 必须是绝对 HTTP(S) URL")
+    if scheme == "http" and host.casefold() not in _LLM_HTTP_LOOPBACK_HOSTS:
+        raise ValueError("llm_base_url 必须使用 HTTPS，只有 localhost、127.0.0.1 和 [::1] 可使用 HTTP")
+    if parsed.query or parsed.fragment:
+        raise ValueError("llm_base_url 不允许包含查询参数或片段")
 
 
 _SHELL_ENV_VALUES = _load_shell_env(LLM_SHELL_ENV_PATH, LLM_SHELL_ENV_NAMES)
 
 
 class Settings(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, hide_input_in_errors=True, validate_default=True)
+
     app_name: str = "AShareRadar"
     cors_allow_origins: tuple[str, ...] = Field(
         default_factory=lambda: _env_tuple(
@@ -152,7 +295,9 @@ class Settings(BaseModel):
     minute_provider_priority: tuple[str, ...] = ("futu", "akshare")
     stock_provider_priority: tuple[str, ...] = ("akshare", "tushare", "baostock", "local")
     plate_provider_priority: tuple[str, ...] = ("akshare", "local")
-    cache_path: Path = Path("data/ashare_radar.sqlite3")
+    cache_path: Path = Field(
+        default_factory=lambda: _env_path(CACHE_PATH_ENV_NAME, DEFAULT_CACHE_PATH, aliases=("CACHE_PATH",))
+    )
     demo_provider_enabled: bool = Field(
         default_factory=lambda: _env_bool("ASHARE_RADAR_DEMO_PROVIDER_ENABLED", False, aliases=("DEMO_PROVIDER_ENABLED",))
     )
@@ -185,6 +330,7 @@ class Settings(BaseModel):
         )
     )
     tushare_token: str | None = Field(
+        repr=False,
         default_factory=lambda: _env_text("ASHARE_RADAR_TUSHARE_TOKEN", aliases=("TUSHARE_TOKEN",))
     )
     futu_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_FUTU_ENABLED", False, aliases=("FUTU_ENABLED",)))
@@ -205,7 +351,10 @@ class Settings(BaseModel):
     llm_enabled: bool = Field(
         default_factory=lambda: _env_bool("ASHARE_RADAR_LLM_ENABLED", DEFAULT_ASHARE_RADAR_LLM_ENABLED)
     )
-    llm_api_key: str | None = Field(default_factory=lambda: _env_text("ASHARE_RADAR_LLM_API_KEY"))
+    llm_api_key: str | None = Field(
+        default_factory=lambda: _env_text("ASHARE_RADAR_LLM_API_KEY"),
+        repr=False,
+    )
     llm_base_url: str | None = Field(default_factory=lambda: _env_text("ASHARE_RADAR_LLM_BASE_URL"))
     llm_model: str | None = Field(default_factory=lambda: _env_text("ASHARE_RADAR_LLM_MODEL"))
     llm_timeout_seconds: float = Field(
@@ -288,6 +437,13 @@ class Settings(BaseModel):
     max_advice_history_rows: int = Field(
         default_factory=lambda: _env_int("ASHARE_RADAR_MAX_ADVICE_HISTORY_ROWS", 20000, minimum=1, aliases=("MAX_ADVICE_HISTORY_ROWS",))
     )
+    max_database_size_mb: int = Field(
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_MAX_DATABASE_SIZE_MB",
+            512,
+            minimum=16,
+        )
+    )
     advice_history_dedupe_seconds: int = Field(
         default_factory=lambda: _env_int(
             "ASHARE_RADAR_ADVICE_HISTORY_DEDUPE_SECONDS",
@@ -324,6 +480,16 @@ class Settings(BaseModel):
         "000333",
         "002475",
     )
+
+    @field_validator("cache_path")
+    @classmethod
+    def _resolve_cache_path(cls, value: Path) -> Path:
+        return resolve_project_path(value)
+
+    @field_validator("llm_base_url")
+    @classmethod
+    def _validate_llm_base_url(cls, value: str | None) -> str | None:
+        return _normalized_llm_base_url(value)
 
 
 @lru_cache

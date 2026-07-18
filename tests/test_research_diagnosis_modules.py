@@ -54,6 +54,25 @@ def test_high_timeframe_conflict_is_visible_in_final_diagnosis() -> None:
     assert any("高冲突" in item for item in diagnosis.hard_risks)
 
 
+def test_diagnosis_source_uses_evidence_sufficiency_and_derived_price_volume_terms() -> None:
+    analysis, bundle, feature, alpha, factor_lab, regime, validation, risk_reward, timeframe = _diagnosis_inputs()
+
+    diagnosis = build_stock_diagnosis(analysis, bundle, feature, alpha, factor_lab, regime, validation, risk_reward, timeframe)
+    visible_text = " ".join([diagnosis.professional_summary, *diagnosis.confirmation_signals])
+
+    assert "证据充分度" in visible_text
+    assert "/100" in visible_text
+    assert f"Alpha证据结论为「{alpha.verdict}」，证据充分度 {alpha.confidence}/100" in visible_text
+    assert "量价热度（衍生）" in visible_text
+    assert "置信度" not in visible_text
+    assert "校准置信度" not in visible_text
+    assert "资金面评分" not in visible_text
+    assert alpha.confidence_semantics == "non_statistical_evidence_sufficiency"
+    assert "不是统计置信度或命中概率" in alpha.confidence_note
+    assert diagnosis.confidence_semantics == "non_statistical_evidence_sufficiency"
+    assert "不是统计置信度或命中概率" in diagnosis.confidence_note
+
+
 def test_diagnosis_headline_rules_keep_defensive_priority() -> None:
     analysis, _bundle, feature, alpha, factor_lab, regime, validation, risk_reward, timeframe = _diagnosis_inputs()
     low_quality_feature = feature.model_copy(update={"data_quality_score": 42})
@@ -126,7 +145,7 @@ def test_diagnosis_sections_skip_missing_key_price_text() -> None:
 
 def test_watch_focus_deduplicates_contextual_suggestions() -> None:
     _analysis, _bundle, feature, _alpha, factor_lab, regime, validation, _risk_reward, timeframe = _diagnosis_inputs()
-    duplicate = "先看关键价位，再看量能和资金是否确认。"
+    duplicate = "先看关键价位，再看量能和量价热度（衍生）是否确认。"
     regime = regime.model_copy(update={"suggestions": [duplicate, "行业环境若转弱，降低信号权重。"]})
     timeframe = timeframe.model_copy(update={"suggestions": ["行业环境若转弱，降低信号权重。"]})
 

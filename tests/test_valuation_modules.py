@@ -31,7 +31,7 @@ class ValuationModuleTests(unittest.TestCase):
 
         valuation = build_valuation_analysis(analysis)
 
-        self.assertEqual(valuation.summary, "估值字段不足，暂只能做低置信度观察。")
+        self.assertEqual(valuation.summary, "估值字段不足，暂只能做低证据充分度观察。")
         self.assertIn("PE", valuation.missing_data)
         self.assertIn("PB", valuation.missing_data)
         self.assertIn("总市值", valuation.missing_data)
@@ -63,7 +63,7 @@ class ValuationModuleTests(unittest.TestCase):
 
         self.assertEqual(valuation_summary(57, enrichment_missing), "估值处在中性区间，重点看业绩和行业背景能否配合。")
         self.assertEqual(valuation_summary(57, many_enrichment_missing), "估值处在中性区间，重点看业绩和行业背景能否配合。")
-        self.assertEqual(valuation_summary(57, core_missing), "估值字段不足，暂只能做低置信度观察。")
+        self.assertEqual(valuation_summary(57, core_missing), "估值字段不足，暂只能做低证据充分度观察。")
 
     def test_valuation_history_percentile_skips_malformed_values(self) -> None:
         quote = _quote(pe=25.0, timestamp="2026-05-13 15:00:00")
@@ -116,7 +116,9 @@ class ValuationModuleTests(unittest.TestCase):
         self.assertEqual(valuation_percentile_from_history(analysis, "pe"), 0.0)
 
     def test_current_valuation_summary_hides_non_finite_raw_values(self) -> None:
-        quote = _quote(pe=math.inf, pb=math.nan, market_cap=100_000_000, timestamp="2026-05-13 15:00:00")
+        quote = _quote(pe=1.0, pb=1.0, market_cap=100_000_000, timestamp="2026-05-13 15:00:00").model_copy(
+            update={"pe": math.inf, "pb": math.nan}
+        )
         klines = [_kline(date="2026-05-13", close=1300.0, volume=2000.0) for _ in range(80)]
         analysis = build_analysis(
             quote,

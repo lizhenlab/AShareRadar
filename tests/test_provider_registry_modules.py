@@ -44,6 +44,12 @@ def test_build_providers_injects_tushare_token_from_settings() -> None:
     assert getattr(providers["tushare"], "token") == "injected-token"
 
 
+def test_build_providers_injects_tencent_timeout_from_settings() -> None:
+    providers = build_providers(Settings(request_timeout_seconds=1.25))
+
+    assert getattr(providers["tencent"], "timeout") == 1.25
+
+
 def test_provider_priority_returns_empty_for_unknown_kind() -> None:
     settings = Settings(quote_provider_priority=("custom",))
     providers = {"custom": _ProviderWithoutCapability()}

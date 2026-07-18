@@ -3,16 +3,25 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
+import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
 from app.models.schemas import Kline, MinuteKline, Quote
+from app.services.data_quality_time import normalize_quote_event_time
+from app.services.provider_errors import (
+    ProviderCoverageMiss,
+    ProviderError,
+    ProviderProtocolError,
+    ProviderTransportError,
+    sanitize_provider_error,
+)
 from app.services.provider_utils import ensure_positive_limit
 from app.utils.market_data import valid_kline, valid_minute_kline
 from app.utils.parsing import MISSING_NUMERIC_VALUES, required_float, safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
-from app.utils.time import now_text
 
 
 EASTMONEY_BRIDGE_SOURCE_NAME = "AKShare·东方财富直连"
@@ -26,7 +35,7 @@ EASTMONEY_NO_PROXY_HOSTS = (
     "push2his.eastmoney.com",
 )
 EASTMONEY_QUOTE_HOSTS = ("82.push2.eastmoney.com", "23.push2.eastmoney.com", "53.push2.eastmoney.com")
-EASTMONEY_SCHEMES = ("https", "http")
+EASTMONEY_SCHEMES = ("https",)
 EASTMONEY_HIST_HOST = "push2his.eastmoney.com"
 EASTMONEY_UT_PARAM = "bd1d9ddb04089700cf9c27f6f7426281"
 EASTMONEY_HISTORY_UT_PARAM = "7eea3edcaed734bea9cbfc24409ed989"
@@ -51,6 +60,7 @@ EASTMONEY_QUOTE_FIELDS = (
     "f20",
     "f21",
     "f23",
+    "f86",
     "f115",
     "f152",
 )
@@ -63,6 +73,7 @@ EASTMONEY_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
     "Connection": "close",
 }
+_EASTMONEY_ENV_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -83,22 +94,24 @@ class EastmoneyQuoteFields:
     pe: float | None
     pb: float | None
     market_cap: float | None
+    timestamp: str
 
 
 @contextmanager
 def eastmoney_no_proxy():
-    previous = {key: os.environ.get(key) for key in ("NO_PROXY", "no_proxy")}
-    merged = merge_no_proxy(previous["NO_PROXY"] or previous["no_proxy"])
-    os.environ["NO_PROXY"] = merged
-    os.environ["no_proxy"] = merged
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    with _EASTMONEY_ENV_LOCK:
+        previous = {key: os.environ.get(key) for key in ("NO_PROXY", "no_proxy")}
+        merged = merge_no_proxy(previous["NO_PROXY"] or previous["no_proxy"])
+        os.environ["NO_PROXY"] = merged
+        os.environ["no_proxy"] = merged
+        try:
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 def merge_no_proxy(existing: str | None) -> str:
@@ -112,17 +125,26 @@ def merge_no_proxy(existing: str | None) -> str:
 
 
 def eastmoney_get_json(url: str, params: dict[str, Any], timeout: float = 8) -> dict[str, Any]:
-    with eastmoney_no_proxy(), _eastmoney_session() as session:
-        response = session.get(url, params=params, headers=EASTMONEY_HEADERS, timeout=timeout)
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError:
-            raise RuntimeError("东方财富接口返回非 JSON 响应") from None
+    _require_https_url(url)
+    try:
+        with _eastmoney_session() as session:
+            response = session.get(url, params=params, headers=EASTMONEY_HEADERS, timeout=timeout)
+            response.raise_for_status()
+            try:
+                data = response.json()
+            except ValueError:
+                raise ProviderProtocolError("东方财富接口返回非 JSON 响应") from None
+    except ProviderError:
+        raise
+    except requests.RequestException as exc:
+        raise ProviderTransportError(sanitize_provider_error(exc)) from exc
+    except Exception as exc:
+        raise ProviderTransportError(sanitize_provider_error(exc)) from exc
     if not isinstance(data, dict):
-        raise RuntimeError("东方财富接口返回结构异常")
+        raise ProviderProtocolError("东方财富接口返回结构异常")
     if data.get("rc") != 0:
-        raise RuntimeError(f"东方财富接口返回异常：rc={data.get('rc')} {data.get('rt')}")
+        detail = sanitize_provider_error(f"rc={data.get('rc')} {data.get('rt')}")
+        raise ProviderProtocolError(f"东方财富接口返回异常：{detail}")
     return data
 
 
@@ -132,13 +154,24 @@ def eastmoney_quotes(symbols) -> list[Quote]:
         return []
     params = eastmoney_quote_params(requested)
     errors: list[str] = []
+    endpoint_responded = False
+    covered_quotes: list[Quote] = []
     for url in eastmoney_quote_urls():
+        error_count = len(errors)
         quotes = eastmoney_quotes_from_url(url, params, errors)
+        covered_quotes.extend(quotes)
+        endpoint_responded = endpoint_responded or bool(quotes) or len(errors) == error_count
         ordered = ordered_eastmoney_quotes(quotes, requested)
         if ordered is not None:
             return ordered
+    if endpoint_responded:
+        available = _ordered_available_eastmoney_quotes(covered_quotes, requested)
+        if available:
+            return available
+        missing = _missing_eastmoney_symbols(covered_quotes, requested)
+        raise ProviderCoverageMiss("东方财富轻量行情未覆盖请求股票：" + ",".join(missing))
     if errors:
-        raise RuntimeError("东方财富轻量行情不可用：" + "；".join(errors[:2]))
+        raise ProviderError("东方财富轻量行情不可用：" + "；".join(errors[:2]))
     return []
 
 
@@ -182,15 +215,24 @@ def eastmoney_quote_urls() -> list[str]:
 def eastmoney_quotes_from_url(url: str, params: dict[str, str], errors: list[str]) -> list[Quote]:
     try:
         data = eastmoney_get_json(url, params)
+        return eastmoney_quotes_from_rows(eastmoney_quote_rows(data), errors)
     except Exception as exc:
-        errors.append(str(exc))
+        errors.append(sanitize_provider_error(exc))
         return []
-    return eastmoney_quotes_from_rows(eastmoney_quote_rows(data), errors)
 
 
 def eastmoney_quote_rows(data: dict[str, Any]) -> list[Any]:
-    rows = (data.get("data") or {}).get("diff") or []
-    return rows if isinstance(rows, list) else []
+    data_block = data.get("data")
+    if data_block is None:
+        return []
+    if not isinstance(data_block, dict):
+        raise ProviderProtocolError("东方财富行情 data 字段结构异常")
+    rows = data_block.get("diff")
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ProviderProtocolError("东方财富行情 diff 字段结构异常")
+    return rows
 
 
 def eastmoney_quotes_from_rows(rows: list[Any], errors: list[str]) -> list[Quote]:
@@ -202,7 +244,7 @@ def eastmoney_quotes_from_rows(rows: list[Any], errors: list[str]) -> list[Quote
         try:
             quotes.append(eastmoney_quote_from_row(row))
         except ValueError as exc:
-            errors.append(str(exc))
+            errors.append(sanitize_provider_error(exc))
     return quotes
 
 
@@ -211,6 +253,16 @@ def ordered_eastmoney_quotes(quotes: list[Quote], requested: list[str]) -> list[
     if not all(symbol in by_symbol for symbol in requested):
         return None
     return [by_symbol[symbol] for symbol in requested]
+
+
+def _ordered_available_eastmoney_quotes(quotes: list[Quote], requested: list[str]) -> list[Quote]:
+    by_symbol = {standard_symbol(f"{item.code}.{item.market}"): item for item in quotes}
+    return [by_symbol[symbol] for symbol in requested if symbol in by_symbol]
+
+
+def _missing_eastmoney_symbols(quotes: list[Quote], requested: list[str]) -> list[str]:
+    covered = {standard_symbol(f"{item.code}.{item.market}") for item in quotes}
+    return list(dict.fromkeys(symbol for symbol in requested if symbol not in covered))
 
 
 def eastmoney_quote_from_row(row: dict[str, Any]) -> Quote:
@@ -232,7 +284,7 @@ def eastmoney_quote_from_row(row: dict[str, Any]) -> Quote:
         pe=fields.pe,
         pb=fields.pb,
         market_cap=fields.market_cap,
-        timestamp=now_text(),
+        timestamp=fields.timestamp,
         source=EASTMONEY_BRIDGE_SOURCE_NAME,
     )
 
@@ -262,6 +314,7 @@ def eastmoney_quote_fields(row: dict[str, Any]) -> EastmoneyQuoteFields:
         pe=eastmoney_optional_number(row, "f9", fallback_key="f115"),
         pb=eastmoney_optional_non_negative_number(row, "f23", "东方财富市净率"),
         market_cap=eastmoney_optional_non_negative_number(row, "f20", "东方财富总市值"),
+        timestamp=eastmoney_quote_timestamp(row),
     )
 
 
@@ -347,33 +400,54 @@ def eastmoney_text(row: dict[str, Any], key: str) -> str:
     return str(row.get(key) or "").strip()
 
 
+def eastmoney_quote_timestamp(row: dict[str, Any]) -> str:
+    text = eastmoney_text(row, "f86")
+    timestamp = normalize_quote_event_time(text)
+    if timestamp is None:
+        raise ProviderProtocolError("东方财富行情缺少有效报价事件时间")
+    return timestamp
+
+
 def eastmoney_kline(symbol: str, period: str, limit: int) -> list[Kline]:
     ensure_positive_limit(limit)
     data = eastmoney_history_json(symbol, period=period, include_market_cap=True)
-    result = [item for item in (_daily_kline_from_values(values) for values in _eastmoney_kline_values(data, limit)) if item is not None]
+    values = _eastmoney_kline_values(data, limit)
+    if not values:
+        raise ProviderCoverageMiss(f"东方财富日K未覆盖请求股票：{symbol}")
+    result = [item for item in (_daily_kline_from_values(item) for item in values) if item is not None]
     if not result:
-        raise RuntimeError("东方财富日K返回为空")
+        raise ProviderProtocolError("东方财富日K有效数据为空")
     return result
 
 
 def eastmoney_minute_kline(symbol: str, period: str, interval: str, limit: int) -> list[MinuteKline]:
     ensure_positive_limit(limit)
     data = eastmoney_history_json(symbol, period=period, include_market_cap=False)
+    values = _eastmoney_kline_values(data, limit)
+    if not values:
+        raise ProviderCoverageMiss(f"东方财富分钟K线未覆盖请求股票：{symbol}")
     result = [
         item
-        for item in (_minute_kline_from_values(values, interval) for values in _eastmoney_kline_values(data, limit))
+        for item in (_minute_kline_from_values(item, interval) for item in values)
         if item is not None
     ]
     if not result:
-        raise RuntimeError("东方财富分钟K线返回为空")
+        raise ProviderProtocolError("东方财富分钟K线有效数据为空")
     return result
 
 
 def _eastmoney_kline_values(data: dict[str, Any], limit: int) -> list[list[str]]:
     ensure_positive_limit(limit)
-    rows = (data.get("data") or {}).get("klines") or []
-    if not isinstance(rows, list):
+    data_block = data.get("data")
+    if data_block is None:
         return []
+    if not isinstance(data_block, dict):
+        raise ProviderProtocolError("东方财富历史行情 data 字段结构异常")
+    rows = data_block.get("klines")
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ProviderProtocolError("东方财富历史行情 klines 字段结构异常")
     return [item.strip().split(",") for item in rows[-limit:] if isinstance(item, str) and item.strip()]
 
 
@@ -424,17 +498,14 @@ def eastmoney_history_json(symbol: str, period: str, include_market_cap: bool) -
         "beg": "19700101" if period == EASTMONEY_DAILY_PERIOD else "0",
         "end": "20500101" if period == EASTMONEY_DAILY_PERIOD else "20500000",
     }
-    urls = [
-        f"http://{EASTMONEY_HIST_HOST}/api/qt/stock/kline/get",
-        f"https://{EASTMONEY_HIST_HOST}/api/qt/stock/kline/get",
-    ]
+    urls = [f"https://{EASTMONEY_HIST_HOST}/api/qt/stock/kline/get"]
     errors: list[str] = []
     for url in urls:
         try:
             return eastmoney_get_json(url, params)
         except Exception as exc:
-            errors.append(str(exc))
-    raise RuntimeError("东方财富历史行情不可用：" + "；".join(errors[:2]))
+            errors.append(sanitize_provider_error(exc))
+    raise ProviderError("东方财富历史行情不可用：" + "；".join(errors[:2]))
 
 
 def eastmoney_quote_secid(symbol: str) -> str:
@@ -447,6 +518,15 @@ def _eastmoney_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
     return session
+
+
+def _require_https_url(url: str) -> None:
+    try:
+        scheme = urlsplit(url).scheme.lower()
+    except ValueError:
+        scheme = ""
+    if scheme != "https":
+        raise ProviderProtocolError("东方财富行情仅允许 HTTPS 请求")
 
 
 _eastmoney_no_proxy = eastmoney_no_proxy

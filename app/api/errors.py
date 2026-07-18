@@ -3,18 +3,23 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import logging
 from typing import TypeVar
 
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
+from app.services.provider_errors import sanitize_provider_error
 from app.utils.errors import NotFoundError
 
 
 T = TypeVar("T")
+LOGGER = logging.getLogger(__name__)
+INTERNAL_VALIDATION_DETAIL = "内部数据格式异常，当前数据暂不可用"
 
 
 @dataclass(frozen=True)
@@ -41,23 +46,45 @@ def run_sync_api(call: Callable[[], T]) -> T:
         raise _api_exception(exc) from exc
 
 
+async def run_sync_api_async(call: Callable[[], T]) -> T:
+    try:
+        return await run_in_threadpool(call)
+    except (NotFoundError, ValueError, RuntimeError, sqlite3.DatabaseError) as exc:
+        raise _api_exception(exc) from exc
+
+
 def _api_exception(exc: Exception) -> HTTPException:
     if isinstance(exc, NotFoundError):
-        return HTTPException(status_code=404, detail=str(exc))
+        return HTTPException(status_code=404, detail=sanitize_provider_error(exc))
+    if isinstance(exc, ValidationError):
+        _log_internal_validation_error(exc)
+        return HTTPException(status_code=503, detail=INTERNAL_VALIDATION_DETAIL)
     if isinstance(exc, ValueError):
-        return HTTPException(status_code=400, detail=str(exc))
+        return HTTPException(status_code=400, detail=sanitize_provider_error(exc))
     if isinstance(exc, sqlite3.DatabaseError):
-        return HTTPException(status_code=503, detail=f"本地数据库暂不可用：{exc}")
-    return HTTPException(status_code=503, detail=str(exc))
+        return HTTPException(status_code=503, detail=f"本地数据库暂不可用：{sanitize_provider_error(exc)}")
+    return HTTPException(status_code=503, detail=sanitize_provider_error(exc))
 
 
-async def validation_exception_handler(request: Request, exc: RequestValidationError | ValidationError) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     details = []
     for error in exc.errors():
         loc = " / ".join(str(item) for item in error.get("loc", []) if item != "query")
         msg = _validation_message(error)
         details.append(f"{loc}: {msg}" if loc else str(msg))
     return JSONResponse(status_code=422, content={"detail": "；".join(details) or "输入参数不合法"})
+
+
+async def internal_validation_exception_handler(request: Request, exc: ValidationError) -> JSONResponse:
+    _log_internal_validation_error(exc)
+    return JSONResponse(status_code=503, content={"detail": INTERNAL_VALIDATION_DETAIL})
+
+
+def _log_internal_validation_error(exc: ValidationError) -> None:
+    LOGGER.error(
+        "Internal model validation failed",
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
 
 
 def _validation_message(error: dict) -> str:

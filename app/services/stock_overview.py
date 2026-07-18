@@ -6,6 +6,7 @@ from typing import Callable
 from app.models.schemas import AnalysisResult, FactorScore, FundFlowAnalysis, KeyPriceLevel, OrderPressure, StockEventSummary, StockOverview
 from app.services.scoring import clamp_score, score_level
 from app.utils.market_data import finite_float
+from app.utils.text import clean_optional_text as _clean_text
 
 FUNDAMENTAL_BASE_SCORE = 55
 LOW_PE_THRESHOLD = 25
@@ -65,29 +66,15 @@ VALUATION_METRIC_SPECS = {
 }
 
 
-def _clean_text(value: object) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = " ".join(value.split())
-    else:
-        try:
-            float(value)
-        except (TypeError, ValueError):
-            text = " ".join(str(value).split())
-        else:
-            return None
-    invalid_text = {"nan", "none", "null", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}
-    return text if text and text.lower() not in invalid_text else None
-
-
 def _unique_strings(items) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for item in items:
         text = _clean_text(item)
-        key = text.casefold() if text is not None else None
-        if text is None or key in seen:
+        if text is None:
+            continue
+        key = text.casefold()
+        if key in seen:
             continue
         seen.add(key)
         result.append(text)
@@ -206,9 +193,9 @@ def _beginner_takeaways(analysis: AnalysisResult, main_conflict: str) -> list[st
     action_confidence = _bounded_score(getattr(analysis.action_advice, "confidence", None))
     return _unique_strings(
         [
-            f"本次信号可信度 {confidence}%，结论已按数据质量 {data_quality_level} 自动降权。",
+            f"本次信号证据充分度 {confidence}/100，结论已按数据质量 {data_quality_level} 自动降权。",
             _support_resistance_takeaway(analysis),
-            f"当前建议是「{action}」，信心 {action_confidence}%。",
+            f"当前建议是「{action}」，建议强度 {action_confidence}/100。",
             main_conflict,
         ]
     )
@@ -285,10 +272,10 @@ def _signal_contribution_evidence(item: object) -> str | None:
 def _fund_factor(fund_flow: FundFlowAnalysis) -> FactorScore:
     score = _bounded_score(fund_flow.overall_score)
     return FactorScore(
-        name="资金面",
+        name="量价热度（衍生）",
         score=score,
         level=score_level(score),
-        summary=_clean_text(fund_flow.price_volume_relation) or "资金流向待确认",
+        summary=_clean_text(fund_flow.price_volume_relation) or "量价关系待确认",
         evidence=_unique_strings(getattr(item, "summary", None) for item in (getattr(fund_flow, "windows", []) or [])),
         missing_data=[] if getattr(fund_flow, "available", False) else ["逐笔大单/特大单资金流"],
     )
@@ -432,7 +419,7 @@ def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> Fac
             [
                 analysis.action_advice.reason,
                 order_pressure.summary,
-                f"信号可信度 {confidence}%，数据质量 {data_quality_score} 分。",
+                f"信号证据充分度 {confidence}/100，数据质量 {data_quality_score} 分。",
             ]
         ),
         missing_data=[] if getattr(order_pressure, "available", False) else ["实时五档盘口"],
@@ -508,12 +495,12 @@ MAIN_CONFLICT_RULES = (
     ),
     MainConflictRule(
         "weak_trend_strong_fund_flow",
-        "资金面有尝试修复，但技术趋势仍偏弱，先等价格重新站稳短期均线。",
+        "量价热度（衍生）有尝试修复，但技术趋势仍偏弱，先等价格重新站稳短期均线。",
         _has_weak_trend_strong_fund_flow,
     ),
     MainConflictRule(
         "strong_trend_weak_fund_flow",
-        "技术面尚可，但资金跟随不足，突破信号需要继续确认。",
+        "技术面尚可，但量价热度（衍生）跟随不足，突破信号需要继续确认。",
         _has_strong_trend_weak_fund_flow,
     ),
     MainConflictRule(
@@ -539,8 +526,8 @@ def _risk_triggers(analysis: AnalysisResult, order_pressure: OrderPressure) -> l
 
 def _support_break_trigger(analysis: AnalysisResult) -> str:
     support, _ = _normalized_support_resistance(analysis)
-    support = _price_text(support)
-    return f"有效跌破支撑位 {support}" if support else "支撑位缺失，先等待有效价位重算"
+    support_text = _price_text(support)
+    return f"有效跌破支撑位 {support_text}" if support_text else "支撑位缺失，先等待有效价位重算"
 
 
 def _ma20_break_trigger(analysis: AnalysisResult) -> str:

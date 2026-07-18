@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -92,6 +93,42 @@ def test_plate_rank_returns_provider_rows_when_cache_write_fails() -> None:
     assert failure_count == 0
 
 
+def test_plate_rank_result_marks_stale_cache_fallback_without_changing_list_api() -> None:
+    class FailingPlateProvider:
+        source_name = "失败板块源"
+
+        async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
+            raise RuntimeError("plate down")
+
+    async def run_check(path: Path):
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        cache.save_plate_rank(
+            [
+                make_plate_item().model_copy(
+                    update={"source": "本地缓存", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                )
+            ]
+        )
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failed": FailingPlateProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "failed")],
+        )
+        result = await coordinator.plate_rank_result(limit=5, refresh=True)
+        rows = await coordinator.plate_rank(limit=5, refresh=True)
+        return result, rows
+
+    with TemporaryDirectory() as tmpdir:
+        result, rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert result.used_fallback_cache is True
+    assert [item.source for item in result.rows] == ["本地缓存"]
+    assert [item.source for item in rows] == ["本地缓存"]
+
+
 def test_plate_rank_all_invalid_primary_rows_use_backup_without_clearing_cache() -> None:
     class InvalidPlateProvider:
         source_name = "坏板块源"
@@ -166,6 +203,138 @@ def test_stock_pool_returns_provider_rows_when_cache_write_fails() -> None:
     assert [item.source for item in rows] == ["实时股票池"]
     assert cooling is False
     assert failure_count == 0
+
+
+def test_metadata_coordinator_offloads_cache_and_runtime_io_from_event_loop_thread() -> None:
+    class ThreadTrackingMetadataCache(SQLiteCache):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.io_threads: dict[str, set[int]] = {}
+
+        def _track(self, operation: str) -> None:
+            self.io_threads.setdefault(operation, set()).add(threading.get_ident())
+
+        def get_stock_pool(
+            self,
+            max_age_seconds: int,
+            limit: int = 5000,
+            keyword: str | None = None,
+        ) -> list[StockInfo]:
+            self._track("get_stock_pool")
+            return super().get_stock_pool(max_age_seconds, limit=limit, keyword=keyword)
+
+        def stock_pool_count(self, max_age_seconds: int | None = None) -> int:
+            self._track("stock_pool_count")
+            return super().stock_pool_count(max_age_seconds)
+
+        def stats(self):
+            self._track("stats")
+            return super().stats()
+
+        def save_stock_pool(self, rows: list[StockInfo]) -> None:
+            self._track("save_stock_pool")
+            super().save_stock_pool(rows)
+
+        def get_plate_rank(self, max_age_seconds: int, limit: int = 20) -> list[PlateItem]:
+            self._track("get_plate_rank")
+            return super().get_plate_rank(max_age_seconds, limit=limit)
+
+        def save_plate_rank(self, rows: list[PlateItem]) -> None:
+            self._track("save_plate_rank")
+            super().save_plate_rank(rows)
+
+        def get_stock_concepts(
+            self,
+            symbol: str,
+            max_age_seconds: int,
+            limit: int = 8,
+        ) -> list[StockConceptItem]:
+            self._track("get_stock_concepts")
+            return super().get_stock_concepts(symbol, max_age_seconds, limit=limit)
+
+        def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
+            self._track("save_stock_concepts")
+            super().save_stock_concepts(symbol, rows)
+
+        def update_provider_capability_success(
+            self,
+            name: str,
+            kind: str,
+            priority: int,
+            latency_ms: float,
+        ) -> None:
+            self._track("provider_success")
+            super().update_provider_capability_success(name, kind, priority, latency_ms)
+
+        def update_provider_capability_failure(
+            self,
+            name: str,
+            kind: str,
+            priority: int,
+            error: str,
+        ) -> None:
+            self._track("provider_failure")
+            super().update_provider_capability_failure(name, kind, priority, error)
+
+        def log_event(self, category: str, message: str) -> None:
+            self._track("log_event")
+            super().log_event(category, message)
+
+    class FailingPlateProvider:
+        source_name = "失败板块源"
+
+        async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
+            raise RuntimeError("plate down")
+
+    class LiveMetadataProvider:
+        source_name = "实时元数据源"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            return [make_stock_info(code="600519", market="SH").model_copy(update={"source": self.source_name})]
+
+        async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
+            return [make_plate_item().model_copy(update={"source": self.source_name})]
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            return [_concept(symbol=symbol, rank=1, name="实时概念", source=self.source_name)]
+
+    async def run_check(path: Path) -> tuple[list[str], dict[str, set[int]], int]:
+        settings = Settings(stock_pool_authoritative_min_count=1000)
+        cache = ThreadTrackingMetadataCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"akshare": FailingPlateProvider(), "live": LiveMetadataProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "akshare"), (2, "live")] if kind == "plate" else [(1, "live")],
+        )
+        event_loop_thread = threading.get_ident()
+
+        stocks = await coordinator.stock_pool(keyword="600519", limit=5, refresh=False)
+        plates = await coordinator.plate_rank(limit=5, refresh=False)
+        concepts = await coordinator.stock_concepts("600519.SH", limit=5, refresh=False)
+        values = [stocks[0].symbol, plates[0].source, concepts[0].name]
+        return values, cache.io_threads, event_loop_thread
+
+    with TemporaryDirectory() as tmpdir:
+        values, io_threads, event_loop_thread = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert values == ["600519.SH", "实时元数据源", "实时概念"]
+    assert {
+        "get_stock_pool",
+        "stock_pool_count",
+        "stats",
+        "save_stock_pool",
+        "get_plate_rank",
+        "save_plate_rank",
+        "get_stock_concepts",
+        "save_stock_concepts",
+        "provider_success",
+        "provider_failure",
+        "log_event",
+    } <= io_threads.keys()
+    assert io_threads["get_stock_pool"] == io_threads["stock_pool_count"] == io_threads["stats"]
+    assert all(event_loop_thread not in thread_ids for thread_ids in io_threads.values())
 
 
 def test_stock_pool_stale_fallback_ignores_log_event_failure() -> None:

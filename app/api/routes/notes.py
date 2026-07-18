@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import get_datahub
-from app.api.errors import run_api, run_sync_api
+from app.api.errors import run_api, run_sync_api_async
 from app.models.schemas import ChartMarkSummary, MutationResult, StockNoteInput, StockNoteItem, StockNoteUpdate
 from app.services.chart_marks import build_chart_marks
 from app.services.datahub import DataHub
@@ -23,7 +23,7 @@ async def stock_notes(
         normalize_symbol(symbol)
         return datahub.cache.stock_notes(symbol, limit=limit)
 
-    return run_sync_api(load)
+    return await run_sync_api_async(load)
 
 
 @router.post("/api/stock/notes", response_model=StockNoteItem)
@@ -46,7 +46,7 @@ async def create_stock_note(
             color=payload.color,
             visible=payload.visible,
         )
-        return datahub.cache.create_stock_note(quote, enriched)
+        return await run_sync_api_async(lambda: datahub.cache.create_stock_note(quote, enriched))
 
     return await run_api(create)
 
@@ -59,7 +59,7 @@ async def delete_stock_note(note_id: int, datahub: DataHub = Depends(get_datahub
             raise HTTPException(status_code=404, detail="个股笔记不存在")
         return MutationResult(ok=True, removed=removed)
 
-    return run_sync_api(remove)
+    return await run_sync_api_async(remove)
 
 
 @router.patch("/api/stock/notes/{note_id}", response_model=StockNoteItem)
@@ -74,7 +74,7 @@ async def update_stock_note(
             raise HTTPException(status_code=404, detail="个股笔记不存在")
         return note
 
-    return run_sync_api(update)
+    return await run_sync_api_async(update)
 
 
 @router.get("/api/stock/chart-marks", response_model=ChartMarkSummary)

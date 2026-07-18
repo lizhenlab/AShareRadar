@@ -13,6 +13,7 @@ from app.models.schemas import (
     ProviderStatus,
 )
 from app.services.datahub_source_plan import SourcePlanBuilder
+from app.services.provider_errors import sanitize_provider_error
 from app.services.provider_registry import (
     MarketProvider,
     provider_capabilities,
@@ -59,12 +60,13 @@ class DataStatusService:
         providers = self.cache.provider_statuses()
         capability_statuses = self.cache.provider_capability_statuses()
         capabilities = self.capabilities()
+        source_plan = self.source_plan(providers, capabilities, capability_statuses)
         return DataStatus(
-            providers=providers,
+            providers=[_sanitized_provider_status(item) for item in providers],
             cache=self.cache.stats(),
             capabilities=capabilities,
-            capability_statuses=capability_statuses,
-            source_plan=self.source_plan(providers, capabilities, capability_statuses),
+            capability_statuses=[_sanitized_capability_status(item) for item in capability_statuses],
+            source_plan=source_plan,
         )
 
     def capabilities(self) -> list[ProviderCapability]:
@@ -108,6 +110,18 @@ class DataStatusService:
             self.cache.ensure_provider(name, priority, enabled=provider_is_enabled(provider))
             for kind in _synced_capability_kinds(supported_provider_kinds(provider), existing_kinds.get(name, set())):
                 self.cache.ensure_provider_capability(name, kind, priority, enabled=provider_enabled_for(provider, kind))
+
+
+def _sanitized_provider_status(status: ProviderStatus) -> ProviderStatus:
+    return status.model_copy(update={"last_error": _sanitized_provider_error(status.last_error)})
+
+
+def _sanitized_capability_status(status: ProviderCapabilityStatus) -> ProviderCapabilityStatus:
+    return status.model_copy(update={"last_error": _sanitized_provider_error(status.last_error)})
+
+
+def _sanitized_provider_error(value: object | None) -> str | None:
+    return None if value is None else sanitize_provider_error(value)
 
 
 def _existing_provider_capability_kinds(statuses: list[ProviderCapabilityStatus]) -> dict[str, set[str]]:

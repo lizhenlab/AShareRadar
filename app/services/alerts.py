@@ -1,18 +1,28 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from importlib import import_module
 import math
 
 from app.models.schemas import AlertEvaluationItem, AlertEvaluationSummary, AlertEventItem, AlertRuleItem, AnalysisResult, DataQuality, Quote
-from app.repositories.alerts import AlertStateDecision
+from app.repositories.alerts import AlertStateDecision, AlertStateUpdateResult
 from app.services.datahub import DataHub
+from app.services.datahub_runtime import run_cache_io
+from app.services.provider_errors import sanitize_provider_error
 from app.utils.time import now_text, parse_text_time
 
 
 AlertEvaluationResult = tuple[bool, float | None, str]
 AlertEvaluator = Callable[[AlertRuleItem, Quote, AnalysisResult | None], AlertEvaluationResult]
 ThresholdValidator = Callable[[float], None]
+AlertAnalysisLoader = Callable[[DataHub, str], Awaitable[AnalysisResult]]
+
+
+async def _load_default_alert_analysis(datahub: DataHub, symbol: str) -> AnalysisResult:
+    stock_analysis = import_module("app.workflows.stock_analysis")
+    return await stock_analysis.analyze_individual_stock(datahub, symbol, persist_history=False)
 
 
 @dataclass(frozen=True)
@@ -22,15 +32,22 @@ class AlertConditionSpec:
     needs_analysis: bool = False
 
 
-async def evaluate_alert_rules(datahub: DataHub, symbol: str | None = None) -> AlertEvaluationSummary:
+async def evaluate_alert_rules(
+    datahub: DataHub,
+    symbol: str | None = None,
+    *,
+    analysis_loader: AlertAnalysisLoader | None = None,
+) -> AlertEvaluationSummary:
     checked_at = now_text()
-    rules = datahub.cache.alert_rules(symbol=symbol, include_disabled=False, limit=200)
-    evaluator = AlertRuleEvaluator(datahub, checked_at)
+    rules = await run_cache_io(datahub.cache.alert_rules, symbol=symbol, include_disabled=False)
+    evaluator = AlertRuleEvaluator(datahub, checked_at, analysis_loader)
     results = []
     for rule in rules:
         try:
             results.append(await evaluator.evaluate(rule))
-        except (RuntimeError, TimeoutError, ValueError) as exc:
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             results.append(_failed_evaluation(rule, exc))
     return AlertEvaluationSummary(
         checked_at=checked_at,
@@ -43,12 +60,18 @@ async def evaluate_alert_rules(datahub: DataHub, symbol: str | None = None) -> A
 
 
 class AlertRuleEvaluator:
-    def __init__(self, datahub: DataHub, checked_at: str) -> None:
+    def __init__(
+        self,
+        datahub: DataHub,
+        checked_at: str,
+        analysis_loader: AlertAnalysisLoader | None = None,
+    ) -> None:
         self.datahub = datahub
         self.checked_at = checked_at
+        self.analysis_loader = analysis_loader if analysis_loader is not None else _load_default_alert_analysis
         self.analysis_cache: dict[str, AnalysisResult] = {}
-        self.quote_cache: dict[str, Quote] = {}
-        self.quality_cache: dict[str, DataQuality] = {}
+        self.live_quote_cache: dict[str, Quote] = {}
+        self.live_quality_cache: dict[str, DataQuality] = {}
         self.new_event_count = 0
 
     async def evaluate(self, rule: AlertRuleItem) -> AlertEvaluationItem:
@@ -57,8 +80,8 @@ class AlertRuleEvaluator:
         triggered, current_value, message = _evaluate_rule(rule, quote, analysis)
         quality = await self._quality_for_rule(rule, quote, analysis)
         message = _message_with_quality_gate(message, triggered, quality)
-        event = self._persist_state(rule, quote, triggered, message, quality.score)
-        rule_after = self.datahub.cache.alert_rule(rule.id) or rule
+        event = await self._persist_state(rule, quote, triggered, message, quality.score)
+        rule_after = await run_cache_io(self.datahub.cache.alert_rule, rule.id) or rule
         return AlertEvaluationItem(
             rule=rule_after,
             current_value=current_value,
@@ -72,33 +95,29 @@ class AlertRuleEvaluator:
             return None
         analysis = self.analysis_cache.get(rule.symbol)
         if analysis is None:
-            from app.workflows.individual import analyze_individual_stock
-
-            analysis = await analyze_individual_stock(self.datahub, rule.symbol, persist_history=False)
+            analysis = await self.analysis_loader(self.datahub, rule.symbol)
             self.analysis_cache[rule.symbol] = analysis
-            self.quote_cache[rule.symbol] = analysis.quote
         return analysis
 
     async def _quote_for_rule(self, rule: AlertRuleItem, analysis: AnalysisResult | None) -> Quote:
         if analysis:
             return analysis.quote
-        quote = self.quote_cache.get(rule.symbol)
+        quote = self.live_quote_cache.get(rule.symbol)
         if quote is None:
             quote = await self.datahub.quote(rule.symbol)
-            self.quote_cache[rule.symbol] = quote
+            self.live_quote_cache[rule.symbol] = quote
         return quote
 
     async def _quality_for_rule(self, rule: AlertRuleItem, quote: Quote, analysis: AnalysisResult | None) -> DataQuality:
         if analysis:
-            self.quality_cache[rule.symbol] = analysis.data_quality
             return analysis.data_quality
-        quality = self.quality_cache.get(rule.symbol)
+        quality = self.live_quality_cache.get(rule.symbol)
         if quality is None:
             quality = await self.datahub.assess_quote_quality(quote, klines=[], require_kline=False)
-            self.quality_cache[rule.symbol] = quality
+            self.live_quality_cache[rule.symbol] = quality
         return quality
 
-    def _persist_state(
+    async def _persist_state(
         self,
         rule: AlertRuleItem,
         quote: Quote,
@@ -107,7 +126,8 @@ class AlertRuleEvaluator:
         quality_score: int,
     ) -> AlertEventItem | None:
         decision = decide_alert_transition(rule, triggered, self.checked_at, quality_score)
-        event = self.datahub.cache.update_alert_rule_state(
+        update = await run_cache_io(
+            getattr(self.datahub.cache, "update_alert_rule_state_checked", self._legacy_state_update),
             rule,
             checked_at=self.checked_at,
             state="触发" if triggered else "未触发",
@@ -118,13 +138,22 @@ class AlertRuleEvaluator:
             force_event=decision.should_create_event,
             decision=decision,
         )
+        if isinstance(update, AlertStateUpdateResult):
+            if not update.applied:
+                raise RuntimeError("预警规则在评估期间已修改或删除，请重新评估")
+            event = update.event
+        else:
+            event = update
         if event:
             self.new_event_count += 1
         return event
 
+    def _legacy_state_update(self, *args, **kwargs):
+        return self.datahub.cache.update_alert_rule_state(*args, **kwargs)
+
 
 def _failed_evaluation(rule: AlertRuleItem, exc: Exception) -> AlertEvaluationItem:
-    detail = " ".join(str(exc).split()).strip() or exc.__class__.__name__
+    detail = " ".join(sanitize_provider_error(exc).split()).strip() or exc.__class__.__name__
     return AlertEvaluationItem(
         rule=rule,
         triggered=False,

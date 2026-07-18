@@ -1,14 +1,23 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 import math
 from typing import TypeVar
 
 from app.models.schemas import PlateItem, StockConceptItem, StockInfo
 from app.services.datahub_cache import _normalize_stock_concepts, _stock_pool_cache_is_authoritative, _stock_pool_rows_are_authoritative
-from app.services.datahub_runtime import ProviderAttempt, ProviderRuntime, provider_source_name
+from app.services.datahub_runtime import (
+    ProviderAttempt,
+    ProviderCallBusyError,
+    ProviderCoverageMiss,
+    ProviderRuntime,
+    provider_source_name,
+    run_cache_io,
+    run_cache_io_best_effort,
+)
 from app.services.datahub_status import _provider_error_text
+from app.services.provider_errors import is_provider_coverage_miss, sanitize_provider_error
 from app.services.provider_utils import ensure_positive_limit
 from app.utils.symbols import normalize_symbol, standard_symbol
 
@@ -42,10 +51,6 @@ class StockPoolResolution:
         return list(self.rows)
 
 
-class ProviderCoverageMiss(Exception):
-    """Raised when a fallback provider is healthy but has no coverage for the requested item."""
-
-
 class StockPoolResolver:
     def __init__(
         self,
@@ -70,7 +75,7 @@ class StockPoolResolver:
     async def stock_pool_resolution(self, keyword: str | None = None, limit: int = 5000, refresh: bool = False) -> StockPoolResolution:
         ensure_positive_limit(limit)
         request = StockPoolRequest(keyword=keyword, limit=limit, refresh=refresh)
-        cached = self._cache_result(request)
+        cached = await run_cache_io(self._cache_result, request)
         if cached.resolved:
             return cached
 
@@ -79,7 +84,7 @@ class StockPoolResolver:
         if provider_rows.resolved:
             return provider_rows
 
-        fallback = self._final_fallback(request)
+        fallback = await run_cache_io(self._final_fallback, request)
         if fallback.resolved:
             return fallback
         raise RuntimeError("所有股票池数据源均不可用：" + "；".join(errors))
@@ -121,14 +126,13 @@ class StockPoolResolver:
             errors.append(_no_provider_message("stock"))
             return StockPoolResolution.miss("provider-miss")
         for attempt in self.runtime.attempts(priority_rows, self.providers, "stock", errors):
-            awaitable = _provider_call(attempt.provider, "stock_pool")
-            if awaitable is None:
+            if not callable(getattr(attempt.provider, "stock_pool", None)):
                 errors.append(_unsupported_provider_message(attempt, "stock"))
                 continue
             try:
-                rows = await self._fetch_provider_stock_pool(attempt, awaitable)
+                rows = await self._fetch_provider_stock_pool(attempt)
             except Exception as exc:
-                self.runtime.record_attempt_failure(attempt, "stock", exc, errors)
+                await self.runtime.record_attempt_failure_async(attempt, "stock", exc, errors)
                 continue
             selected = self._select_rows(rows, request)
             if selected.resolved:
@@ -139,14 +143,18 @@ class StockPoolResolver:
     async def _fetch_provider_stock_pool(
         self,
         attempt: ProviderAttempt,
-        awaitable: Awaitable[list[StockInfo]],
     ) -> list[StockInfo]:
-        result = await self.runtime.timed_call(awaitable)
+        result = await self.runtime.timed_provider_call(
+            attempt.name,
+            "stock",
+            lambda: _required_provider_call(attempt.provider, "stock_pool", "股票池"),
+            request_key=("stock_pool",),
+        )
         rows = result.value
         if not rows:
             raise RuntimeError(f"{provider_source_name(attempt.provider, attempt.name)} 股票池返回为空")
-        self.runtime.record_attempt_success(attempt, "stock", result.latency_ms)
-        _save_metadata_best_effort(lambda items: self.cache.save_stock_pool(items), rows)
+        await self.runtime.record_attempt_success_async(attempt, "stock", result.latency_ms)
+        await _save_metadata_best_effort(lambda items: self.cache.save_stock_pool(items), rows)
         return rows
 
     def _select_rows(self, rows: list[StockInfo], request: StockPoolRequest) -> StockPoolResolution:
@@ -194,19 +202,31 @@ class StockPoolResolver:
         local_provider = self.providers.get("local")
         if local_provider is None:
             return None
-        awaitable = _provider_call(local_provider, "stock_pool")
-        if awaitable is None:
+        if not callable(getattr(local_provider, "stock_pool", None)):
             return None
         try:
-            local_rows = await self.runtime.call(awaitable)
+            local_rows = await self.runtime.call_provider(
+                "local",
+                "stock",
+                lambda: _required_provider_call(local_provider, "stock_pool", "股票池"),
+                request_key=("stock_pool",),
+            )
         except Exception as exc:
-            _safe_log_metadata_event(
+            await _safe_log_metadata_event_async(
                 self.cache,
                 "fallback",
-                f"本地个股基础资料不可用，行业兜底跳过：{target}；{_provider_error_text(exc)}",
+                f"本地个股基础资料不可用，行业兜底跳过：{target}；" f"{sanitize_provider_error(_provider_error_text(exc))}",
             )
             return None
         return _stock_profile_match(local_rows, target)
+
+
+@dataclass(frozen=True)
+class PlateRankResult:
+    """板块排行的来源元数据；公开列表 API 保持兼容。"""
+
+    rows: list[PlateItem]
+    used_fallback_cache: bool = False
 
 
 class MetadataCoordinator:
@@ -242,57 +262,85 @@ class MetadataCoordinator:
         return await self.stock_pool_resolver.local_stock_profile(target)
 
     async def plate_rank(self, limit: int = 20, refresh: bool = False) -> list[PlateItem]:
+        return (await self.plate_rank_result(limit=limit, refresh=refresh)).rows
+
+    async def plate_rank_result(self, limit: int = 20, refresh: bool = False) -> "PlateRankResult":
         ensure_positive_limit(limit)
         if not refresh:
-            cached = self.cache.get_plate_rank(self.settings.plate_rank_cache_seconds, limit=limit)
+            cached = await run_cache_io(
+                self.cache.get_plate_rank,
+                self.settings.plate_rank_cache_seconds,
+                limit=limit,
+            )
             if cached:
-                return cached
+                return PlateRankResult(rows=cached)
 
         errors: list[str] = []
         fetched = await self._metadata_provider_result(
             kind="plate",
+            method_name="plate_rank",
             errors=errors,
             call=lambda provider: _provider_call(provider, "plate_rank", limit=limit),
             prepare=lambda _attempt, rows: _prepare_plate_rows(rows, limit),
             save=lambda rows: self.cache.save_plate_rank(rows),
-            record_failure=self._record_plate_failure,
+            before_failure=self._log_plate_failure,
+            request_key=("plate_rank", limit),
         )
         if fetched is not None:
-            return fetched
+            return PlateRankResult(rows=fetched)
 
-        fallback = self.cache.get_plate_rank(max_age_seconds=60 * 60 * 24, limit=limit)
+        fallback = await run_cache_io(
+            self.cache.get_plate_rank,
+            max_age_seconds=60 * 60 * 24,
+            limit=limit,
+        )
         if fallback:
-            _safe_log_metadata_event(self.cache, "fallback", "板块数据源失败，使用本地缓存板块排行")
-            return fallback
+            await _safe_log_metadata_event_async(self.cache, "fallback", "板块数据源失败，使用本地缓存板块排行")
+            return PlateRankResult(rows=fallback, used_fallback_cache=True)
         raise RuntimeError("所有板块数据源均不可用：" + "；".join(errors))
 
     async def stock_concepts(self, symbol: str, limit: int = 8, refresh: bool = False) -> list[StockConceptItem]:
         ensure_positive_limit(limit)
         normalized = standard_symbol(symbol)
         if not refresh:
-            cached = self.cache.get_stock_concepts(normalized, self.settings.stock_concept_cache_seconds, limit=limit)
+            cached = await run_cache_io(
+                self.cache.get_stock_concepts,
+                normalized,
+                self.settings.stock_concept_cache_seconds,
+                limit=limit,
+            )
             if cached:
                 return cached
 
         errors: list[str] = []
         fetched = await self._metadata_provider_result(
             kind="concept",
+            method_name="stock_concepts",
             errors=errors,
             call=lambda provider: _provider_call(provider, "stock_concepts", normalized, limit=limit),
             prepare=lambda attempt, rows: _prepare_concept_rows(attempt, normalized, rows, limit),
             save=lambda rows: self.cache.save_stock_concepts(normalized, rows),
-            record_failure=lambda name, index, exc: self.runtime.record_failure(name, index, exc, "concept"),
+            request_key=("stock_concepts", normalized, limit),
         )
         if fetched is not None:
             return fetched
 
-        fallback = self.cache.get_stock_concepts(normalized, max_age_seconds=60 * 60 * 24 * 30, limit=limit)
+        fallback = await run_cache_io(
+            self.cache.get_stock_concepts,
+            normalized,
+            max_age_seconds=60 * 60 * 24 * 30,
+            limit=limit,
+        )
         if fallback:
-            _safe_log_metadata_event(self.cache, "fallback", f"概念归属数据源失败，使用本地缓存概念：{normalized}")
+            await _safe_log_metadata_event_async(
+                self.cache,
+                "fallback",
+                f"概念归属数据源失败，使用本地缓存概念：{normalized}",
+            )
             return fallback
         if errors:
             message = f"概念归属不可用：{normalized}；{_metadata_error_detail(errors, '本地兜底无覆盖')}"
-            _safe_log_metadata_event(self.cache, "fallback", message)
+            await _safe_log_metadata_event_async(self.cache, "fallback", message)
             raise RuntimeError(message)
         return []
 
@@ -300,53 +348,71 @@ class MetadataCoordinator:
         self,
         *,
         kind: str,
+        method_name: str,
         errors: list[str],
         call: Callable[[object], Awaitable[list[T]] | None],
         prepare: Callable[[ProviderAttempt, list[T]], list[T]],
         save: Callable[[list[T]], None],
-        record_failure: Callable[[str, int, Exception], None],
+        before_failure: Callable[[ProviderAttempt, Exception], Awaitable[None]] | None = None,
+        request_key: Hashable,
     ) -> list[T] | None:
         priority_rows = list(self.priority(kind))
         if not priority_rows:
             errors.append(_no_provider_message(kind))
             return None
         for attempt in self.runtime.attempts(priority_rows, self.providers, kind, errors):
-            awaitable = call(attempt.provider)
-            if awaitable is None:
+            if not callable(getattr(attempt.provider, method_name, None)):
                 errors.append(_unsupported_provider_message(attempt, kind))
                 continue
             result = None
             try:
-                result = await self.runtime.timed_call(awaitable)
+                result = await self.runtime.timed_provider_call(
+                    attempt.name,
+                    kind,
+                    lambda: _required_metadata_call(call, attempt.provider, kind),
+                    request_key=request_key,
+                )
                 rows = prepare(attempt, result.value)
-                self.runtime.record_attempt_success(attempt, kind, result.latency_ms)
-                _save_metadata_best_effort(save, rows)
+                await self.runtime.record_attempt_success_async(attempt, kind, result.latency_ms)
+                await _save_metadata_best_effort(save, rows)
                 return rows
             except ProviderCoverageMiss as exc:
                 if result is None:
-                    self.runtime.record_attempt_failure(attempt, kind, exc, errors, record_failure=record_failure)
+                    await self._record_attempt_failure(attempt, kind, exc, errors, before_failure)
                     continue
-                self.runtime.record_attempt_success(attempt, kind, result.latency_ms)
+                await self.runtime.record_attempt_success_async(attempt, kind, result.latency_ms)
                 continue
             except Exception as exc:
-                self.runtime.record_attempt_failure(attempt, kind, exc, errors, record_failure=record_failure)
+                await self._record_attempt_failure(attempt, kind, exc, errors, before_failure)
         return None
 
-    def _record_plate_failure(self, name: str, index: int, exc: Exception) -> None:
-        if name == "akshare":
-            _safe_log_metadata_event(self.cache, "fallback", f"AKShare板块排行不可用，继续尝试本地板块：{_provider_error_text(exc)}")
-        self.runtime.record_failure(name, index, exc, "plate")
+    async def _record_attempt_failure(
+        self,
+        attempt: ProviderAttempt,
+        kind: str,
+        exc: Exception,
+        errors: list[str],
+        before_failure: Callable[[ProviderAttempt, Exception], Awaitable[None]] | None,
+    ) -> None:
+        errors.append(f"{attempt.name}: {sanitize_provider_error(_provider_error_text(exc))}")
+        if is_provider_coverage_miss(exc) or isinstance(exc, ProviderCallBusyError):
+            return
+        if before_failure is not None:
+            await before_failure(attempt, exc)
+        await self.runtime.record_failure_async(attempt.name, attempt.index, exc, kind)
+
+    async def _log_plate_failure(self, attempt: ProviderAttempt, exc: Exception) -> None:
+        if attempt.name == "akshare":
+            await _safe_log_metadata_event_async(
+                self.cache,
+                "fallback",
+                "AKShare板块排行不可用，继续尝试本地板块：" f"{sanitize_provider_error(_provider_error_text(exc))}",
+            )
 
 
 def _match_stock_pool_keyword(rows: list[StockInfo], keyword: str) -> list[StockInfo]:
     keyword_lower = keyword.lower()
-    return [
-        item
-        for item in rows
-        if keyword_lower in item.code.lower()
-        or keyword_lower in item.name.lower()
-        or keyword_lower in item.symbol.lower()
-    ]
+    return [item for item in rows if keyword_lower in item.code.lower() or keyword_lower in item.name.lower() or keyword_lower in item.symbol.lower()]
 
 
 def _unsupported_provider_message(attempt: ProviderAttempt, kind: str) -> str:
@@ -394,6 +460,30 @@ def _provider_call(provider: object, method_name: str, *args, **kwargs) -> Await
     return method(*args, **kwargs)
 
 
+async def _required_provider_call(
+    provider: object,
+    method_name: str,
+    capability_label: str,
+    *args,
+    **kwargs,
+) -> list[T]:
+    awaitable = _provider_call(provider, method_name, *args, **kwargs)
+    if awaitable is None:
+        raise RuntimeError(f"数据源不支持{capability_label}能力")
+    return await awaitable
+
+
+async def _required_metadata_call(
+    call: Callable[[object], Awaitable[list[T]] | None],
+    provider: object,
+    kind: str,
+) -> list[T]:
+    awaitable = call(provider)
+    if awaitable is None:
+        raise RuntimeError(f"数据源不支持{_metadata_kind_label(kind)}能力")
+    return await awaitable
+
+
 def _non_empty_metadata_rows(rows: list[T], error: str) -> list[T]:
     if not rows:
         raise RuntimeError(error)
@@ -433,11 +523,14 @@ def _clean_plate_rows(rows: list[PlateItem]) -> list[PlateItem]:
     return cleaned
 
 
-def _save_metadata_best_effort(save: Callable[[list[T]], None], rows: list[T]) -> None:
-    try:
-        save(rows)
-    except Exception:
-        pass
+async def _save_metadata_best_effort(save: Callable[[list[T]], None], rows: list[T]) -> None:
+    await run_cache_io_best_effort(save, rows)
+
+
+async def _safe_log_metadata_event_async(cache: object, category: str, message: str) -> None:
+    log_event = getattr(cache, "log_event", None)
+    if callable(log_event):
+        await run_cache_io_best_effort(log_event, category, message)
 
 
 def _safe_log_metadata_event(cache: object, category: str, message: str) -> None:

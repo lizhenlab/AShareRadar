@@ -8,6 +8,11 @@ from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.api.deps import get_datahub
+from app.api.routes import stock as stock_routes
 from app.models.schemas import AlertRuleInput, MinuteKline, Quote, StockConceptItem
 from app.services.cache import SQLiteCache
 from app.services.alerts import evaluate_alert_rules
@@ -51,6 +56,12 @@ from tests.factories import (
     make_stock_info as _stock_info,
 )
 
+
+def _local_only_datahub(path: Path) -> DataHub:
+    settings = Settings(cache_path=path, stock_provider_priority=("local",))
+    return DataHub(cache=SQLiteCache(settings=settings), settings=settings)
+
+
 class MinuteAnalysisTests(unittest.TestCase):
     def test_minute_analysis_builds_t_plan_from_intraday_levels(self) -> None:
         rows = [
@@ -70,6 +81,7 @@ class MinuteAnalysisTests(unittest.TestCase):
         report = build_minute_analysis_report("600519.SH", rows, interval="5m")
 
         self.assertEqual(report.interval, "5m")
+        self.assertEqual(report.sample_count, len(report.klines))
         self.assertGreaterEqual(report.sample_count, 30)
         self.assertTrue(report.supports)
         self.assertTrue(report.resistances)
@@ -79,7 +91,7 @@ class MinuteAnalysisTests(unittest.TestCase):
 
     def test_minute_analysis_returns_safe_report_when_source_fails(self) -> None:
         async def run_check(path: Path):
-            hub = DataHub(cache=SQLiteCache(path))
+            hub = _local_only_datahub(path)
             with patch.object(hub, "minute_kline", side_effect=RuntimeError("所有分钟K线数据源均不可用：akshare: ProxyError('Unable to connect to proxy')")):
                 return await stock_minute_analysis(hub, "600900", interval="5m", limit=120)
 
@@ -87,7 +99,12 @@ class MinuteAnalysisTests(unittest.TestCase):
             report = __import__("asyncio").run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
         self.assertEqual(report.symbol, "600900.SH")
-        self.assertEqual(report.t_plan.suitability, "不适合主动做T")
+        self.assertEqual(report.availability, "unavailable")
+        self.assertEqual(report.reason_code, "provider_failure")
+        self.assertEqual(report.klines, [])
+        self.assertEqual(report.t_plan.suitability, "暂停做T判断")
+        self.assertEqual(report.t_plan.low_zone, "不可用")
+        self.assertEqual(report.t_plan.high_zone, "不可用")
         self.assertIn("分钟K线", report.missing_data)
         self.assertIn("网络代理连接失败", report.summary)
 
@@ -104,17 +121,20 @@ class MinuteAnalysisTests(unittest.TestCase):
                 return _stock_info(code="600519", market="SH")
 
             async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120):
-                raise RuntimeError("所有分钟K线数据源均不可用：akshare: ProxyError('Unable to connect to proxy')")
+                raise ConnectionError("HTTPSConnectionPool: remote end closed connection")
 
         report = asyncio.run(stock_minute_analysis(FakeHub(), "600519", interval="5m", limit=120))  # type: ignore[arg-type]
 
         self.assertEqual(report.symbol, "600519.SH")
-        self.assertEqual(report.t_plan.suitability, "不适合主动做T")
-        self.assertIn("网络代理连接失败", report.summary)
+        self.assertEqual(report.availability, "unavailable")
+        self.assertEqual(report.reason_code, "provider_failure")
+        self.assertEqual(report.klines, [])
+        self.assertEqual(report.t_plan.suitability, "暂停做T判断")
+        self.assertIn("行情接口连接失败", report.summary)
 
     def test_stock_minute_analysis_normalizes_interval_alias_before_fetch_and_report(self) -> None:
         async def run_check(path: Path):
-            hub = DataHub(cache=SQLiteCache(path))
+            hub = _local_only_datahub(path)
             calls = []
 
             async def minute_kline(symbol: str, interval: str = "5m", limit: int = 120):
@@ -142,9 +162,72 @@ class MinuteAnalysisTests(unittest.TestCase):
         self.assertEqual(interval, "5m")
         self.assertEqual(calls, [("600519.SH", "5m", 12)])
 
+    def test_minute_analysis_route_enforces_documented_interval_whitelist(self) -> None:
+        class FakeHub:
+            def __init__(self) -> None:
+                self.minute_calls: list[str] = []
+
+            async def stock_profile(self, symbol: str):
+                return _stock_info(code="600519", market="SH")
+
+            async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120):
+                self.minute_calls.append(interval)
+                return [
+                    MinuteKline(
+                        timestamp=f"2026-05-15 10:{index:02d}:00",
+                        open=100,
+                        close=100,
+                        high=101,
+                        low=99,
+                        volume=1000 + index,
+                        interval=interval,
+                        source="测试分钟线",
+                    )
+                    for index in range(8)
+                ]
+
+        hub = FakeHub()
+        app = FastAPI()
+        app.include_router(stock_routes.router)
+        app.dependency_overrides[get_datahub] = lambda: hub
+        client = TestClient(app)
+        supported = ["1m", "5m", "15m", "30m", "60m"]
+
+        for interval in supported:
+            response = client.get("/api/stock/minute-analysis", params={"symbol": "600519", "interval": interval, "limit": 20})
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["sample_count"], len(payload["klines"]))
+            self.assertEqual(len(payload["klines"]), 8)
+            self.assertEqual(payload["klines"][0]["interval"], interval)
+            self.assertEqual(payload["klines"][0]["source"], "测试分钟线")
+            self.assertFalse(payload["klines"][0]["from_cache"])
+            self.assertFalse(payload["klines"][0]["fallback_used"])
+
+        accepted_call_count = len(hub.minute_calls)
+        for interval in ["3m", "10m", "5min", "2m", ""]:
+            response = client.get("/api/stock/minute-analysis", params={"symbol": "600519", "interval": interval, "limit": 20})
+            self.assertEqual(response.status_code, 422, response.text)
+
+        self.assertEqual(hub.minute_calls, supported)
+        self.assertEqual(len(hub.minute_calls), accepted_call_count)
+        interval_parameter = next(
+            item
+            for item in app.openapi()["paths"]["/api/stock/minute-analysis"]["get"]["parameters"]
+            if item["name"] == "interval"
+        )
+        self.assertEqual(interval_parameter["schema"]["enum"], supported)
+        self.assertEqual(interval_parameter["description"], "分钟周期：1m/5m/15m/30m/60m")
+        limit_parameter = next(
+            item
+            for item in app.openapi()["paths"]["/api/stock/minute-analysis"]["get"]["parameters"]
+            if item["name"] == "limit"
+        )
+        self.assertEqual(limit_parameter["schema"]["maximum"], 500)
+
     def test_stock_minute_analysis_confirms_symbol_before_fetching_minute_rows(self) -> None:
         async def run_check(path: Path):
-            hub = DataHub(cache=SQLiteCache(path))
+            hub = _local_only_datahub(path)
             fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             hub.cache.save_stock_pool(
                 [
@@ -724,7 +807,7 @@ class MinuteAnalysisTests(unittest.TestCase):
 
     def test_market_breadth_symbols_use_stock_pool_before_truncation(self) -> None:
         async def run_check(path: Path) -> list[str]:
-            hub = DataHub(cache=SQLiteCache(path))
+            hub = _local_only_datahub(path)
             fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             hub.cache.save_stock_pool([
                 _stock_info(code=f"0000{index:02d}", market="SZ").model_copy(update={"updated_at": fresh_time})
@@ -923,23 +1006,12 @@ class MinuteAnalysisTests(unittest.TestCase):
     def test_quote_history_returns_latest_snapshot_per_trade_date(self) -> None:
         with TemporaryDirectory() as tmpdir:
             cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
-            with cache._connect() as conn:
-                conn.executemany(
-                    """
-                    INSERT INTO quote_history (
-                        symbol, code, market, name, price, change_pct, pe, pb, market_cap, source,
-                        quote_timestamp, trade_date, fetched_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        ("600519.SH", "600519", "SH", "贵州茅台", 100.0, 0.1, 20.0, 3.0, 1.0, "测试", "2026-05-13 09:35:00", "2026-05-13", "2026-05-13 09:35:01"),
-                        ("600519.SH", "600519", "SH", "贵州茅台", 105.0, 0.5, 21.0, 3.2, 1.1, "测试", "2026-05-13 14:55:00", "2026-05-13", "2026-05-13 14:55:01"),
-                        ("600519.SH", "600519", "SH", "贵州茅台", 108.0, 0.8, 22.0, 3.4, 1.2, "测试", "2026-05-14 10:10:00", "2026-05-14", "2026-05-14 10:10:01"),
-                    ],
-                )
+            cache.save_quotes([_quote(timestamp="2026-05-13 09:35:00", price=1300.0, pe=20.0)])
+            cache.save_quotes([_quote(timestamp="2026-05-13 14:55:00", price=1305.0, pe=21.0)])
+            cache.save_quotes([_quote(timestamp="2026-05-14 10:10:00", price=1308.0, pe=22.0)])
             rows = cache.quote_history("600519.SH", limit=2)
 
-        self.assertEqual([item["price"] for item in rows], [105.0, 108.0])
+        self.assertEqual([item["price"] for item in rows], [1305.0, 1308.0])
 
     def test_price_alert_uses_quote_quality_gate(self) -> None:
         async def run_check(path: Path):

@@ -169,7 +169,7 @@ def _breakout_validation(
             f"价格接近或突破压力位 {feature.resistance:.2f}，"
             f"且放量不低于20日均量 {VOLUME_CONFIRMATION_RATIO:.1f} 倍。"
         ),
-        confirmation_condition="突破后回踩不跌回压力位下方，资金评分维持在60分附近或继续改善。",
+        confirmation_condition="突破后回踩不跌回压力位下方，量价热度评分（衍生）维持在60分附近或继续改善。",
         invalidation_condition="突破后快速缩量回落，或次日跌回压力位下方。",
         historical_reference=_factor_reference(factor),
         action_hint="适合右侧确认，不适合盘中一冲就追。",

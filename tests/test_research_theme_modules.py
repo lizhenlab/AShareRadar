@@ -100,7 +100,7 @@ def test_theme_context_filters_blank_and_non_finite_concepts_before_scoring() ->
             _concept("  AI应用  ", 2.0, rank=2),
             _concept("AI应用", 4.0, rank=3),
             _concept(" ", 9.0, rank=1),
-            _concept("机器人", math.inf, rank=1),
+            _concept("机器人", 0, rank=1).model_copy(update={"change_pct": math.inf}),
             _concept("低位题材", -1.0, rank=4),
         ],
     )

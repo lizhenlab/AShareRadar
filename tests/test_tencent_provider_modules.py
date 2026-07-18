@@ -9,9 +9,11 @@ import pytest
 from app.services.providers import (
     DemoMarketDataProvider,
     MarketDataError,
+    MarketDataProtocolError,
     TencentMarketDataProvider,
     _format_timestamp,
     _parse_tencent_quote_payload,
+    _tencent_kline_response_is_coverage_miss,
     _tencent_kline_rows,
     _tencent_klines_from_rows,
     _tencent_quote_payloads,
@@ -49,7 +51,7 @@ def test_tencent_quote_payloads_ignore_unclosed_assignments() -> None:
 
 
 def test_tencent_quote_url_normalizes_symbols_and_keeps_request_order() -> None:
-    assert _tencent_quote_url(["600519.SH", "000001.SZ"]) == "http://qt.gtimg.cn/q=sh600519,sz000001"
+    assert _tencent_quote_url(["600519.SH", "000001.SZ"]) == "https://qt.gtimg.cn/q=sh600519,sz000001"
     assert _tencent_quote_url([]) == ""
 
 
@@ -71,7 +73,7 @@ def test_tencent_provider_quotes_raises_when_payloads_are_empty(monkeypatch: pyt
     monkeypatch.setattr("app.services.providers._fetch_tencent_quote_text", fake_fetch)
 
     with pytest.raises(MarketDataError, match="实时行情返回为空"):
-        asyncio.run(TencentMarketDataProvider().quotes(["600519.SH"]))
+        asyncio.run(TencentMarketDataProvider(timeout=8.0).quotes(["600519.SH"]))
 
 
 def test_demo_provider_does_not_mutate_global_random_state() -> None:
@@ -183,6 +185,19 @@ def test_tencent_kline_rows_handles_malformed_payload_shapes() -> None:
     assert list(_tencent_kline_rows({"data": {"sh600519": {"qfqday": "bad"}}}, "sh600519")) == []
 
 
+def test_tencent_kline_empty_coverage_is_distinct_from_malformed_protocol() -> None:
+    assert _tencent_kline_response_is_coverage_miss(
+        {"data": {"sh600519": {"qfqday": []}}},
+        "sh600519",
+    )
+    assert _tencent_kline_response_is_coverage_miss({"data": {}}, "sh600519")
+    assert not _tencent_kline_response_is_coverage_miss([], "sh600519")
+    assert not _tencent_kline_response_is_coverage_miss(
+        {"data": {"sh600519": {"qfqday": "bad"}}},
+        "sh600519",
+    )
+
+
 def test_tencent_provider_kline_raises_when_all_rows_are_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResponse:
         encoding = "utf-8"
@@ -209,7 +224,7 @@ def test_tencent_provider_kline_raises_when_all_rows_are_malformed(monkeypatch: 
     monkeypatch.setattr("app.services.providers.httpx.AsyncClient", FakeClient)
 
     with pytest.raises(MarketDataError, match="K线有效数据为空"):
-        asyncio.run(TencentMarketDataProvider().kline("600519.SH", limit=1))
+        asyncio.run(TencentMarketDataProvider(timeout=8.0).kline("600519.SH", limit=1))
 
 
 def test_parse_tencent_quote_uses_backup_high_low_fields_and_optional_market_cap() -> None:
@@ -253,12 +268,18 @@ def test_parse_tencent_quote_accepts_exact_minimum_fields_and_strips_field_white
     assert quote.pb is None
 
 
-def test_format_timestamp_rejects_impossible_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("app.services.providers.now_text", lambda: "2026-07-03 08:00:00")
+@pytest.mark.parametrize("value", ["20261399101112", "20260230101112", "bad", ""])
+def test_format_timestamp_rejects_missing_or_impossible_timestamp(value: str) -> None:
+    with pytest.raises(MarketDataProtocolError, match="事件时间"):
+        _format_timestamp(value)
 
-    assert _format_timestamp("20261399101112") == "2026-07-03 08:00:00"
-    assert _format_timestamp("20260230101112") == "2026-07-03 08:00:00"
-    assert _format_timestamp("bad") == "2026-07-03 08:00:00"
+
+def test_parse_tencent_quote_propagates_invalid_event_time_as_protocol_failure() -> None:
+    parts = _quote_parts()
+    parts[30] = "bad-time"
+
+    with pytest.raises(MarketDataProtocolError, match="事件时间"):
+        _parse_tencent_quote_payload("~".join(parts), "腾讯行情")
 
 
 def test_parse_tencent_quote_computes_missing_change_pct() -> None:

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import fcntl
+from functools import partial
 import math
-from typing import Awaitable, Callable, Iterable
+import os
+from pathlib import Path
+import threading
+from typing import Awaitable, Callable, Iterable, Protocol, TextIO, TypeVar
 
 from app.models.schemas import (
     CacheStats,
@@ -13,22 +19,132 @@ from app.models.schemas import (
     ScheduledTaskState,
     SchedulerStatus,
 )
+from app.services.cache_freshness import assess_cache_freshness
 from app.services.datahub import DataHub
 from app.services.provider_failure_status import (
     capability_recently_failed as provider_capability_recently_failed,
     provider_recently_failed,
 )
+from app.services.provider_errors import sanitize_provider_error
 from app.utils.symbols import standard_symbol_list
-from app.utils.time import datetime_to_text, non_negative_seconds_since_text
+from app.utils.time import datetime_to_text
 
 
 TASK_STATUS_RUNNING = "running"
 TASK_STATUS_SUCCESS = "success"
+TASK_STATUS_DEGRADED = "degraded"
 TASK_STATUS_FAILED = "failed"
 TASK_STATUS_CANCELLED = "cancelled"
 TASK_ERROR_MAX_LENGTH = 120
 KLINE_FAILURE_DETAIL_LIMIT = 3
 PROVIDER_FAILURE_DETAIL_LIMIT = 5
+INSTANCE_GUARD_BUSY_MESSAGE = "已有其他进程运行本地数据调度器，手动任务未执行"
+T = TypeVar("T")
+
+
+class SchedulerInstanceGuard(Protocol):
+    def acquire(self) -> bool:
+        ...
+
+    def release(self) -> None:
+        ...
+
+
+class NoopSchedulerInstanceGuard:
+    def acquire(self) -> bool:
+        return True
+
+    def release(self) -> None:
+        return None
+
+    def held_by_other(self) -> bool:
+        return False
+
+
+class FileSchedulerInstanceGuard:
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._handle: TextIO | None = None
+
+    def acquire(self) -> bool:
+        if self._handle is not None:
+            return True
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return False
+        try:
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(os.getpid()))
+            handle.flush()
+        except Exception:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+            raise
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def held_by_other(self) -> bool:
+        if self._handle is not None:
+            return False
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+        finally:
+            handle.close()
+
+
+class _TaskRunStartHandoff:
+    def __init__(self, cache, task_name: str, cancel_message: str) -> None:
+        self.cache = cache
+        self.task_name = task_name
+        self.cancel_message = cancel_message
+        self.ready: ConcurrentFuture[int] = ConcurrentFuture()
+        self._decision = threading.Event()
+        self._cancelled = False
+
+    def run(self) -> None:
+        try:
+            run_id = self.cache.start_task_run(self.task_name)
+        except BaseException as exc:
+            self.ready.set_exception(exc)
+            return
+        self.ready.set_result(run_id)
+        self._decision.wait()
+        if self._cancelled:
+            _finish_task_run_quietly(
+                self.cache,
+                run_id,
+                TASK_STATUS_CANCELLED,
+                self.cancel_message,
+            )
+
+    def claim(self) -> None:
+        self._decision.set()
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self._decision.set()
 
 
 def _text_at(value: datetime | None) -> str | None:
@@ -94,23 +210,13 @@ class QuoteRefreshSummary:
         return self.refreshed + len(self.fallback_symbols)
 
 
-@dataclass(frozen=True)
-class CacheFreshnessRule:
-    category: str
-    timestamp_attr: str
-    threshold_attr: str
-    threshold_multiplier: int
-    missing_message: str
-    invalid_message: str
-    stale_message: Callable[[int], str]
+class TaskExecutionResult(str):
+    """A task message with an explicit persisted outcome, while remaining string-compatible."""
 
-
-def _quote_stale_message(delay_seconds: int) -> str:
-    return f"报价缓存已超过 {delay_seconds} 秒未更新"
-
-
-def _kline_stale_message(delay_seconds: int) -> str:
-    return "日K缓存偏旧，建议手动触发关键个股K线刷新"
+    def __new__(cls, message: str, status: str = TASK_STATUS_SUCCESS):
+        result = super().__new__(cls, message)
+        result.status = status
+        return result
 
 
 _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
@@ -156,26 +262,6 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
 )
 _TASK_ORDER = tuple(definition.name for definition in _TASK_DEFINITIONS)
 
-_QUOTE_CACHE_RULE = CacheFreshnessRule(
-    category="quote",
-    timestamp_attr="latest_quote_at",
-    threshold_attr="quote_stale_warning_seconds",
-    threshold_multiplier=1,
-    missing_message="尚未形成报价缓存，请先打开页面或手动刷新",
-    invalid_message="报价缓存时间异常，需检查系统时间或缓存数据",
-    stale_message=_quote_stale_message,
-)
-_KLINE_CACHE_RULE = CacheFreshnessRule(
-    category="kline",
-    timestamp_attr="latest_kline_at",
-    threshold_attr="kline_cache_seconds",
-    threshold_multiplier=2,
-    missing_message="尚未形成日K缓存，个股趋势分析会依赖实时拉取",
-    invalid_message="日K缓存时间异常，需检查系统时间或缓存数据",
-    stale_message=_kline_stale_message,
-)
-_CACHE_FRESHNESS_RULES = (_QUOTE_CACHE_RULE, _KLINE_CACHE_RULE)
-
 _CAPABILITY_LABELS = {
     "quote": "报价",
     "kline": "日K",
@@ -188,7 +274,12 @@ _CAPABILITY_LABELS = {
 
 
 class LocalDataScheduler:
-    def __init__(self, datahub: DataHub) -> None:
+    def __init__(
+        self,
+        datahub: DataHub,
+        *,
+        instance_guard: SchedulerInstanceGuard | None = None,
+    ) -> None:
         self.datahub = datahub
         self.settings = datahub.settings
         self.enabled = self.settings.scheduler_enabled
@@ -196,6 +287,15 @@ class LocalDataScheduler:
         self._stop_event = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
         self._active_tasks: set[asyncio.Task[str]] = set()
+        self._lifecycle_lock = asyncio.Lock()
+        self._manual_run_lock = asyncio.Lock()
+        self._instance_guard = instance_guard if instance_guard is not None else _default_instance_guard(datahub)
+        self._guard_acquired = False
+        self._scheduler_guard_active = False
+        self._standby = False
+        self._manual_guard_users = 0
+        self._shutdown_tasks: set[asyncio.Task] = set()
+        self._guard_release_task: asyncio.Task[None] | None = None
         self.tasks = _build_local_tasks(self.settings, datetime.now(), self._task_handlers())
 
     def _task_handlers(self) -> dict[str, Callable[[], Awaitable[str]]]:
@@ -204,52 +304,258 @@ class LocalDataScheduler:
             handlers[definition.name] = getattr(self, definition.handler_name)
         return handlers
 
-    async def start(self) -> None:
-        if not self.enabled or self._runner and not self._runner.done():
-            return
-        self.started_at = datetime.now()
-        self._stop_event.clear()
-        self._runner = asyncio.create_task(self._loop(), name="local-data-scheduler")
-        self.datahub.cache.save_monitor_event("info", "scheduler", "本地数据刷新与健康监控已启动")
-
-    async def stop(self) -> None:
-        if not self._runner:
-            return
-        self._stop_event.set()
-        await self._runner
-        if self._active_tasks:
-            active_tasks = list(self._active_tasks)
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*active_tasks, return_exceptions=True),
-                    timeout=self.settings.scheduler_shutdown_timeout_seconds,
+    async def start(self) -> bool:
+        async with self._lifecycle_lock:
+            if not self.enabled:
+                return False
+            if self._shutdown_tasks or self._guard_release_task is not None:
+                return False
+            if self._runner is not None and not self._runner.done():
+                return False
+            if self._runner is not None:
+                await asyncio.gather(self._runner, return_exceptions=True)
+                pending = await self._drain_active_tasks()
+                self._runner = None
+                if pending:
+                    self._scheduler_guard_active = False
+                    self._defer_instance_guard_release(pending)
+                    return False
+            acquired = self._guard_acquired or await self._acquire_instance_guard()
+            if not acquired:
+                self._standby = True
+                await self._save_monitor_event(
+                    "info",
+                    "scheduler",
+                    "已有其他进程运行本地数据调度器，本进程已跳过启动",
                 )
-            except TimeoutError:
-                for task in active_tasks:
-                    task.cancel()
-                await asyncio.gather(*active_tasks, return_exceptions=True)
+                return False
+            self._guard_acquired = True
+            self._scheduler_guard_active = True
+            self._standby = False
+            try:
+                await self._reconcile_orphaned_task_runs()
+                self.started_at = datetime.now()
+                self._stop_event.clear()
+                self._runner = asyncio.create_task(self._loop(), name="local-data-scheduler")
+                self._runner.add_done_callback(_consume_future_exception)
+                await self._save_monitor_event("info", "scheduler", "本地数据刷新与健康监控已启动")
+            except BaseException:
+                await self._abort_start()
+                raise
+            return True
+
+    async def _reconcile_orphaned_task_runs(self) -> None:
+        reconcile = getattr(self.datahub.cache, "reconcile_orphaned_task_runs", None)
+        if reconcile is None:
+            return
+        reconciled = await _offload(reconcile)
+        if reconciled:
+            await self._save_monitor_event(
+                "warning",
+                "scheduler",
+                f"应用启动时已终止 {reconciled} 条遗留运行记录",
+            )
+
+    async def _acquire_instance_guard(self) -> bool:
+        acquire = asyncio.create_task(_offload(self._instance_guard.acquire), name="scheduler-instance-guard-acquire")
+        try:
+            return await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            acquired = await asyncio.shield(acquire)
+            if acquired:
+                await _offload(self._instance_guard.release)
+            raise
+
+    async def _abort_start(self) -> None:
+        self._stop_event.set()
+        runner = self._runner
+        shutdown_tasks = tuple(self._active_tasks) + ((runner,) if runner is not None else ())
+        pending = await self._wait_for_shutdown_tasks(shutdown_tasks, cancel_first=True)
         self._runner = None
-        self.datahub.cache.save_monitor_event("info", "scheduler", "本地数据刷新与健康监控已停止")
+        self.started_at = None
+        self._scheduler_guard_active = False
+        if pending:
+            self._defer_instance_guard_release(pending)
+        else:
+            await self._release_instance_guard()
+
+    async def stop(self) -> bool:
+        cleanup = asyncio.create_task(self._stop(), name="local-data-scheduler-stop")
+        cleanup.add_done_callback(_consume_future_exception)
+        try:
+            return await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await asyncio.shield(cleanup)
+            raise
+
+    async def _stop(self) -> bool:
+        async with self._lifecycle_lock:
+            if self._shutdown_tasks or self._guard_release_task is not None:
+                return False
+            runner = self._runner
+            if runner is None and not self._scheduler_guard_active and not self._active_tasks:
+                return False
+            self._stop_event.set()
+            shutdown_tasks = tuple(self._active_tasks) + ((runner,) if runner is not None else ())
+            pending = set(shutdown_tasks)
+            try:
+                pending = await self._wait_for_shutdown_tasks(shutdown_tasks)
+            finally:
+                self._runner = None
+                self._scheduler_guard_active = False
+                pending = {task for task in pending if not task.done()}
+                if pending:
+                    self._defer_instance_guard_release(pending)
+                else:
+                    await self._release_instance_guard()
+            await self._save_monitor_event("info", "scheduler", "本地数据刷新与健康监控已停止")
+            return True
+
+    async def _drain_active_tasks(self) -> set[asyncio.Task]:
+        return await self._wait_for_shutdown_tasks(tuple(self._active_tasks))
+
+    async def _wait_for_shutdown_tasks(
+        self,
+        tasks: Iterable[asyncio.Task[object]],
+        *,
+        cancel_first: bool = False,
+    ) -> set[asyncio.Task]:
+        timeout = _positive_float_or_default(
+            getattr(self.settings, "scheduler_shutdown_timeout_seconds", 5.0),
+            5.0,
+        )
+        return await _wait_for_tasks_bounded(tasks, timeout=timeout, cancel_first=cancel_first)
+
+    async def _release_instance_guard(self) -> None:
+        if (
+            not self._guard_acquired
+            or self._scheduler_guard_active
+            or self._manual_guard_users
+            or self._shutdown_tasks
+        ):
+            return
+        self._guard_acquired = False
+        release = asyncio.create_task(_offload(self._instance_guard.release), name="scheduler-instance-guard-release")
+        try:
+            await asyncio.shield(release)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(release)
+            except BaseException:
+                self._guard_acquired = True
+                raise
+            raise
+        except BaseException:
+            self._guard_acquired = True
+            raise
+
+    def _defer_instance_guard_release(self, tasks: Iterable[asyncio.Task]) -> None:
+        for task in tasks:
+            if task.done() or task in self._shutdown_tasks:
+                continue
+            self._shutdown_tasks.add(task)
+            task.add_done_callback(self._shutdown_task_done)
+        if not self._shutdown_tasks:
+            self._schedule_instance_guard_release()
+
+    def _shutdown_task_done(self, task: asyncio.Task) -> None:
+        _consume_future_exception(task)
+        self._shutdown_tasks.discard(task)
+        if not self._shutdown_tasks:
+            self._schedule_instance_guard_release()
+
+    def _schedule_instance_guard_release(self) -> None:
+        if self._guard_release_task is not None:
+            return
+        release = asyncio.create_task(
+            self._release_instance_guard_after_shutdown(),
+            name="scheduler-deferred-instance-guard-release",
+        )
+        self._guard_release_task = release
+        release.add_done_callback(_consume_future_exception)
+
+    async def _release_instance_guard_after_shutdown(self) -> None:
+        current = asyncio.current_task()
+        try:
+            async with self._lifecycle_lock:
+                if not self._shutdown_tasks:
+                    await self._release_instance_guard()
+        finally:
+            if self._guard_release_task is current:
+                self._guard_release_task = None
+
+    async def _save_monitor_event(
+        self,
+        level: str,
+        category: str,
+        message: str,
+        *,
+        symbol: str | None = None,
+    ) -> None:
+        try:
+            await _offload(
+                self.datahub.cache.save_monitor_event,
+                level,
+                category,
+                message,
+                symbol=symbol,
+            )
+        except Exception:
+            pass
 
     async def run_once(self, task_name: str | None = None) -> list[str]:
         names = [task_name] if task_name else _ordered_task_names(self.tasks)
-        messages: list[str] = []
         for name in names:
-            task = self.tasks.get(name)
-            if not task:
+            if name not in self.tasks:
                 raise ValueError(f"未知任务：{name}")
-            messages.append(await self._execute(task, manual=True))
-        return messages
+        async with self._manual_run_lock:
+            acquired = await self._begin_manual_guard_use()
+            if not acquired:
+                await self._save_monitor_event("info", "scheduler", INSTANCE_GUARD_BUSY_MESSAGE)
+                raise RuntimeError(INSTANCE_GUARD_BUSY_MESSAGE)
+            try:
+                messages: list[str] = []
+                for name in names:
+                    messages.append(await self._execute(self.tasks[name], manual=True))
+                return messages
+            finally:
+                await self._end_manual_guard_use()
+
+    async def _begin_manual_guard_use(self) -> bool:
+        async with self._lifecycle_lock:
+            if not self._guard_acquired:
+                if not await self._acquire_instance_guard():
+                    return False
+                self._guard_acquired = True
+            self._manual_guard_users += 1
+            return True
+
+    async def _end_manual_guard_use(self) -> None:
+        async with self._lifecycle_lock:
+            self._manual_guard_users -= 1
+            await self._release_instance_guard()
 
     def status(self) -> SchedulerStatus:
         running = bool(self._runner and not self._runner.done())
+        standby = bool(self.enabled and not running and self._standby and self._standby_lock_is_held())
         return SchedulerStatus(
             enabled=self.enabled,
             running=running,
+            standby=standby,
+            message=("其他实例持有调度器锁，本进程待命" if standby else None),
             started_at=_text_at(self.started_at),
             task_count=len(self.tasks),
             tasks=[_task_state(task) for task in _ordered_tasks(self.tasks)],
         )
+
+    def _standby_lock_is_held(self) -> bool:
+        probe = getattr(self._instance_guard, "held_by_other", None)
+        if not callable(probe):
+            return True
+        try:
+            return bool(probe())
+        except OSError:
+            return False
 
     async def _loop(self) -> None:
         while not self._stop_event.is_set():
@@ -260,11 +566,15 @@ class LocalDataScheduler:
             for task in due_tasks:
                 active_task = asyncio.create_task(self._execute(task), name=f"local-data-task-{task.name}")
                 self._active_tasks.add(active_task)
-                active_task.add_done_callback(self._active_tasks.discard)
+                active_task.add_done_callback(self._active_task_done)
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
             except TimeoutError:
                 continue
+
+    def _active_task_done(self, task: asyncio.Task[str]) -> None:
+        self._active_tasks.discard(task)
+        _consume_future_exception(task)
 
     async def _execute(self, task: LocalTask, manual: bool = False) -> str:
         if task.running:
@@ -276,23 +586,29 @@ class LocalDataScheduler:
         task.last_message = "执行中"
         run_id: int | None = None
         try:
-            run_id = self.datahub.cache.start_task_run(task.name)
-            message = await task.handler()
-            task.last_status = TASK_STATUS_SUCCESS
+            run_id = await _start_task_run_cancel_safe(
+                self.datahub.cache,
+                task.name,
+                f"{task.display_name} 已取消",
+            )
+            result = await task.handler()
+            message = str(result)
+            status = _task_result_status(result)
+            task.last_status = status
             task.last_message = message
-            self.datahub.cache.finish_task_run(run_id, TASK_STATUS_SUCCESS, message)
+            await _offload(self.datahub.cache.finish_task_run, run_id, status, message)
             return message
         except asyncio.CancelledError:
             message = f"{task.display_name} 已取消"
             task.last_status = TASK_STATUS_CANCELLED
             task.last_message = message
-            _record_task_end(self.datahub.cache, run_id, TASK_STATUS_CANCELLED, message)
+            await _offload(_record_task_end, self.datahub.cache, run_id, TASK_STATUS_CANCELLED, message)
             raise
         except Exception as exc:
             message = _task_error_message(exc)
             task.last_status = TASK_STATUS_FAILED
             task.last_message = message
-            _record_task_end(self.datahub.cache, run_id, TASK_STATUS_FAILED, message)
+            await _offload(_record_task_end, self.datahub.cache, run_id, TASK_STATUS_FAILED, message)
             if manual:
                 raise RuntimeError(message) from exc
             return message
@@ -303,42 +619,48 @@ class LocalDataScheduler:
             _reschedule_task(task, manual, finished_at)
 
     async def _refresh_watch_quotes(self) -> str:
-        symbols, skipped_count = _scheduler_symbols(
-            self.datahub.cache.watchlist_symbols(),
+        symbols, skipped_count = await _offload(
+            _scheduler_cache_symbols,
+            self.datahub.cache,
             self.settings.seed_symbols,
         )
-        _save_symbol_skip_event(self.datahub.cache, "quote", "观察池报价刷新", skipped_count)
+        await _offload(_save_symbol_skip_event, self.datahub.cache, "quote", "观察池报价刷新", skipped_count)
         if not symbols:
             message = "无有效观察个股，已跳过报价刷新"
-            self.datahub.cache.save_monitor_event("warning", "quote", message)
+            await self._save_monitor_event("warning", "quote", message)
             return message
         quotes = await self.datahub.quotes(symbols, use_cache=False)
         summary = _quote_refresh_summary(symbols, quotes)
         message = _quote_refresh_message(summary)
         level = "warning" if summary.fallback_symbols or summary.missing_symbols else "info"
-        self.datahub.cache.save_monitor_event(level, "quote", message)
+        await self._save_monitor_event(level, "quote", message)
         if summary.returned == 0:
             raise RuntimeError(message)
+        if summary.fallback_symbols or summary.missing_symbols:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
 
     async def _refresh_key_klines(self) -> str:
-        symbols, skipped_count = _scheduler_symbols(
-            self.datahub.cache.watchlist_symbols(),
+        symbols, skipped_count = await _offload(
+            _scheduler_cache_symbols,
+            self.datahub.cache,
             self.settings.seed_symbols,
             limit=self.settings.scheduler_kline_symbols_limit,
         )
-        _save_symbol_skip_event(self.datahub.cache, "kline", "关键个股K线刷新", skipped_count)
+        await _offload(_save_symbol_skip_event, self.datahub.cache, "kline", "关键个股K线刷新", skipped_count)
         if not symbols:
             message = "无有效关键个股，已跳过日K线刷新"
-            self.datahub.cache.save_monitor_event("warning", "kline", message)
+            await self._save_monitor_event("warning", "kline", message)
             return message
         summary = await self._refresh_key_kline_symbols(symbols)
-        self._save_kline_refresh_failure_event(summary.failures)
+        await self._save_kline_refresh_failure_event(summary.failures)
         if summary.failures and summary.refreshed == 0:
             raise RuntimeError(f"关键个股日K线全部刷新失败：{_kline_failure_detail(summary.failures)}")
         message = _kline_refresh_message(summary)
         level = "warning" if summary.failures or summary.fallback_cache else "info"
-        self.datahub.cache.save_monitor_event(level, "kline", message)
+        await self._save_monitor_event(level, "kline", message)
+        if summary.failures or summary.fallback_cache:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
 
     async def _refresh_key_kline_symbols(self, symbols: list[str]) -> KlineRefreshSummary:
@@ -367,30 +689,36 @@ class LocalDataScheduler:
             return "fallback-cache"
         return None
 
-    def _save_kline_refresh_failure_event(self, failures: tuple[str, ...]) -> None:
+    async def _save_kline_refresh_failure_event(self, failures: tuple[str, ...]) -> None:
         if failures:
-            self.datahub.cache.save_monitor_event(
+            await self._save_monitor_event(
                 "warning",
                 "kline",
                 f"关键个股K线刷新失败 {len(failures)} 只：{_kline_failure_detail(failures)}",
             )
 
     async def _refresh_plate_rank(self) -> str:
-        rows = await self.datahub.plate_rank(limit=20, refresh=True)
-        message = f"已刷新 {len(rows)} 条行业背景数据"
-        self.datahub.cache.save_monitor_event("info", "plate", message)
+        result = await self.datahub.plate_rank_result(limit=20, refresh=True)
+        if result.used_fallback_cache:
+            message = f"行业背景数据源不可用，使用缓存 {len(result.rows)} 条"
+            await self._save_monitor_event("warning", "plate", message)
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
+        message = f"已刷新 {len(result.rows)} 条行业背景数据"
+        await self._save_monitor_event("info", "plate", message)
         return message
 
-    async def _check_data_health(self) -> str:
-        stats = self.datahub.cache.stats()
-        capability_rows = self.datahub.cache.provider_capability_statuses()
-        provider_rows = self.datahub.cache.provider_statuses()
-        health_events = _data_health_events(stats, capability_rows, provider_rows, self.settings)
+    async def _check_data_health(self, *, now: datetime | None = None) -> str:
+        stats, capability_rows, provider_rows = await asyncio.gather(
+            _offload(self.datahub.cache.stats),
+            _offload(self.datahub.cache.provider_capability_statuses),
+            _offload(self.datahub.cache.provider_statuses),
+        )
+        health_events = _data_health_events(stats, capability_rows, provider_rows, self.settings, now=now)
         for event in health_events:
-            self.datahub.cache.save_monitor_event(event.level, event.category, event.message)
+            await self._save_monitor_event(event.level, event.category, event.message)
         events = [event.message for event in health_events]
 
-        removed = self.datahub.cache.cleanup_runtime_rows()
+        removed = await _offload(self.datahub.cache.maintenance_repo.cleanup_regenerable_runtime_rows)
         if cleanup_message := _runtime_cleanup_message(removed):
             events.append(cleanup_message)
         return "；".join(events)
@@ -406,10 +734,74 @@ class LocalDataScheduler:
         if summary.failed_count:
             message += f"，失败 {summary.failed_count} 条"
         level = "warning" if summary.triggered_count or summary.failed_count else "info"
-        self.datahub.cache.save_monitor_event(level, "alert", message)
+        await self._save_monitor_event(level, "alert", message)
         if summary.checked_count and summary.failed_count == summary.checked_count:
             raise RuntimeError(message)
+        if summary.failed_count:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
+
+
+async def _offload(call: Callable[..., T], *args, **kwargs) -> T:
+    return await asyncio.to_thread(partial(call, *args, **kwargs))
+
+
+async def _start_task_run_cancel_safe(cache, task_name: str, cancel_message: str) -> int:
+    loop = asyncio.get_running_loop()
+    handoff = _TaskRunStartHandoff(cache, task_name, cancel_message)
+    worker = loop.run_in_executor(None, handoff.run)
+    worker.add_done_callback(_consume_future_exception)
+    ready = asyncio.wrap_future(handoff.ready)
+    ready.add_done_callback(_consume_future_exception)
+    try:
+        run_id = await asyncio.shield(ready)
+    except asyncio.CancelledError:
+        handoff.cancel()
+        raise
+    except BaseException:
+        handoff.cancel()
+        raise
+    handoff.claim()
+    return run_id
+
+
+async def _wait_for_tasks_bounded(
+    tasks: Iterable[asyncio.Task],
+    *,
+    timeout: float,
+    cancel_first: bool = False,
+) -> set[asyncio.Task]:
+    pending_tasks = set(tasks)
+    if not pending_tasks:
+        return set()
+    for task in pending_tasks:
+        task.add_done_callback(_consume_future_exception)
+        if cancel_first:
+            task.cancel()
+    done, pending = await asyncio.wait(pending_tasks, timeout=timeout)
+    for task in done:
+        _consume_future_exception(task)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.sleep(0)
+    return {task for task in pending if not task.done()}
+
+
+def _consume_future_exception(future: asyncio.Future) -> None:
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+def _default_instance_guard(datahub: DataHub) -> SchedulerInstanceGuard:
+    cache_path = getattr(getattr(datahub, "cache", None), "path", None)
+    if cache_path is None:
+        return NoopSchedulerInstanceGuard()
+    return FileSchedulerInstanceGuard(Path(f"{cache_path}.scheduler.lock"))
 
 
 def _build_local_tasks(
@@ -475,18 +867,57 @@ def _task_state(task: LocalTask) -> ScheduledTaskState:
     )
 
 
+def _task_result_status(result: object) -> str:
+    status = getattr(result, "status", TASK_STATUS_SUCCESS)
+    return status if status in {TASK_STATUS_SUCCESS, TASK_STATUS_DEGRADED} else TASK_STATUS_SUCCESS
+
+
 def _reschedule_task(task: LocalTask, manual: bool, finished_at: datetime) -> None:
     interval_seconds = _positive_int_at_least(task.interval_seconds, 1)
     task.next_run_at = finished_at + timedelta(seconds=interval_seconds)
+
+
+def _scheduler_cache_symbols(
+    cache,
+    seed_symbols: Iterable[object] | None,
+    *,
+    limit: int | None = None,
+) -> tuple[list[str], int]:
+    selection_reader = getattr(cache, "watchlist_symbol_selection", None)
+    if not callable(selection_reader):
+        return _scheduler_symbols(cache.watchlist_symbols(), seed_symbols, limit=limit)
+    selection = selection_reader()
+    return _scheduler_symbols(
+        selection.active_symbols,
+        seed_symbols,
+        excluded_symbols=selection.excluded_symbols,
+        has_entries=selection.has_entries,
+        limit=limit,
+    )
 
 
 def _scheduler_symbols(
     watchlist_symbols: Iterable[object] | None,
     seed_symbols: Iterable[object] | None,
     *,
+    excluded_symbols: Iterable[object] | None = None,
+    has_entries: bool | None = None,
     limit: int | None = None,
 ) -> tuple[list[str], int]:
     watchlist = list(watchlist_symbols or [])
+    if has_entries is not None:
+        symbols, skipped_count = _normalize_unique_symbols(watchlist)
+        excluded, excluded_skipped_count = _normalize_unique_symbols(excluded_symbols or [])
+        skipped_count += excluded_skipped_count
+        if symbols:
+            return _limit_symbols(symbols, limit), skipped_count
+        if has_entries:
+            return [], skipped_count
+        seeds, seed_skipped_count = _normalize_unique_symbols(seed_symbols or [])
+        skipped_count += seed_skipped_count
+        excluded_set = set(excluded)
+        return _limit_symbols([symbol for symbol in seeds if symbol not in excluded_set], limit), skipped_count
+
     raw_symbols = watchlist if watchlist else list(seed_symbols or [])
     symbols, skipped_count = _normalize_unique_symbols(raw_symbols)
     if watchlist and not symbols:
@@ -582,23 +1013,33 @@ def _item_used_fallback_cache(item: object) -> bool:
     return bool(getattr(item, "fallback_used", False))
 
 
-def _seconds_since(value: str | None) -> float | None:
-    return non_negative_seconds_since_text(value)
-
-
 def _data_health_events(
     stats: CacheStats,
     capability_rows: list[ProviderCapabilityStatus],
     provider_rows: list[ProviderStatus],
-    settings,
+    _settings,
+    *,
+    now: datetime | None = None,
 ) -> list[HealthEvent]:
+    assessment = assess_cache_freshness(
+        stats,
+        now=now or datetime.now(),
+        stock_pool_cache_seconds=getattr(_settings, "stock_pool_cache_seconds", 24 * 60 * 60),
+        plate_rank_cache_seconds=getattr(_settings, "plate_rank_cache_seconds", 10 * 60),
+    )
     events = [
         *_provider_health_events(capability_rows, provider_rows),
-        *_cache_freshness_events(stats, settings),
+        *(
+            HealthEvent("warning", issue.category, issue.message)
+            for issue in assessment.issues
+        ),
     ]
     if events:
         return events
-    return [HealthEvent("info", "health", "报价、K线、行业背景和数据源状态正常")]
+    checked_domains = list(assessment.checked_domains)
+    if capability_rows or provider_rows:
+        checked_domains.append("数据源状态")
+    return [HealthEvent("info", "health", f"{'、'.join(checked_domains)}均正常")]
 
 
 def _provider_health_events(
@@ -641,38 +1082,6 @@ def _unhealthy_provider_failures(provider_rows: list[ProviderStatus]) -> list[st
     )
 
 
-def _cache_freshness_events(stats: CacheStats, settings) -> list[HealthEvent]:
-    events: list[HealthEvent] = []
-    for rule in _CACHE_FRESHNESS_RULES:
-        events.extend(
-            _cache_event_for_rule(getattr(stats, rule.timestamp_attr), getattr(settings, rule.threshold_attr), rule)
-        )
-    return events
-
-
-def _quote_cache_events(latest_quote_at: str | None, stale_warning_seconds: int) -> list[HealthEvent]:
-    return _cache_event_for_rule(latest_quote_at, stale_warning_seconds, _QUOTE_CACHE_RULE)
-
-
-def _kline_cache_events(latest_kline_at: str | None, cache_seconds: int) -> list[HealthEvent]:
-    return _cache_event_for_rule(latest_kline_at, cache_seconds, _KLINE_CACHE_RULE)
-
-
-def _cache_event_for_rule(
-    latest_at: str | None,
-    threshold_seconds: int,
-    rule: CacheFreshnessRule,
-) -> list[HealthEvent]:
-    delay = _seconds_since(latest_at)
-    if delay is None:
-        message = rule.invalid_message if latest_at else rule.missing_message
-        return [HealthEvent("warning", rule.category, message)]
-    threshold = _positive_int_at_least(threshold_seconds, 1)
-    if delay > threshold * rule.threshold_multiplier:
-        return [HealthEvent("warning", rule.category, rule.stale_message(int(delay)))]
-    return []
-
-
 def _runtime_cleanup_message(removed: dict[str, int]) -> str | None:
     cleanup_total = sum(_positive_int_or_zero(count) for count in removed.values())
     if not cleanup_total:
@@ -703,8 +1112,16 @@ def _positive_int_or_zero(value: object) -> int:
     return _positive_int_or_none(value) or 0
 
 
+def _positive_float_or_default(value: object, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) and parsed > 0 else default
+
+
 def _task_error_message(exc: Exception) -> str:
-    text = " ".join(str(exc).strip().split())
+    text = " ".join(sanitize_provider_error(exc).strip().split())
     if not text:
         return exc.__class__.__name__
     return text[:TASK_ERROR_MAX_LENGTH]
@@ -712,12 +1129,16 @@ def _task_error_message(exc: Exception) -> str:
 
 def _record_task_end(cache, run_id: int | None, status: str, message: str) -> None:
     if run_id is not None:
-        try:
-            cache.finish_task_run(run_id, status, message)
-        except Exception:
-            pass
+        _finish_task_run_quietly(cache, run_id, status, message)
     try:
         cache.save_monitor_event("warning", "task", message, symbol=None)
+    except Exception:
+        pass
+
+
+def _finish_task_run_quietly(cache, run_id: int, status: str, message: str) -> None:
+    try:
+        cache.finish_task_run(run_id, status, message)
     except Exception:
         pass
 

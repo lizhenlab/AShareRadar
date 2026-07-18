@@ -31,6 +31,7 @@ def test_app_import_isolates_provider_runtime_from_user_site_packages() -> None:
             (
                 "import app.main, json, numpy, pandas, site, sys; "
                 "print(json.dumps({'user_site': site.USER_SITE, 'paths': sys.path, "
+                "'prefix': sys.prefix, 'base_prefix': sys.base_prefix, "
                 "'numpy': numpy.__file__, 'pandas': pandas.__file__}))"
             ),
         ],
@@ -44,5 +45,8 @@ def test_app_import_isolates_provider_runtime_from_user_site_packages() -> None:
     user_site = payload["user_site"]
 
     assert user_site not in payload["paths"]
-    assert "/opt/anaconda3/" in payload["numpy"]
-    assert "/opt/anaconda3/" in payload["pandas"]
+    runtime_roots = (Path(payload["prefix"]).resolve(), Path(payload["base_prefix"]).resolve())
+    for package in ("numpy", "pandas"):
+        package_path = Path(payload[package]).resolve()
+        assert user_site not in str(package_path)
+        assert any(package_path.is_relative_to(root) for root in runtime_roots)

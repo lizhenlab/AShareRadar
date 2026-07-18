@@ -66,6 +66,14 @@ def test_validation_confidence_timeframe_penalties_are_explicit() -> None:
     assert _validation_confidence(80, None, _regime(1.0), None) == 80
 
 
+def test_validation_confidence_keeps_legacy_field_with_strength_semantics() -> None:
+    item = _item("等待确认")
+
+    assert item.confidence == 50
+    assert item.confidence_semantics == "non_statistical_validation_strength"
+    assert "不是统计概率" in item.confidence_note
+
+
 def test_validation_non_finite_numbers_fall_back_to_neutral_defaults() -> None:
     confirmed = [_item("接近确认"), _item("接近确认")]
     non_finite_factor = _raw_factor("积极", score=float("inf"), stability_score=float("nan"))
