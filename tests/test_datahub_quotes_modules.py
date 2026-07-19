@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+import time
 
 import pytest
 
@@ -18,7 +20,11 @@ from app.services.data_quality_time import (
     quote_cache_lookup_seconds,
     quote_event_time_error,
 )
-from app.services.datahub_quotes import QuoteCoordinator, _consistency_freshness_error
+from app.services.datahub_quotes import (
+    QuoteCoordinator,
+    _consistency_freshness_error,
+    _quote_now as production_quote_now,
+)
 from app.services.datahub_runtime import ProviderRuntime
 from tests.factories import make_quote
 
@@ -94,11 +100,127 @@ def test_quote_partial_success_keeps_provider_healthy_without_cooling_provider()
         rows, healthy, success_count, failure_count, last_error, cooling = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert [item.source for item in rows] == ["部分行情源", "备用行情源"]
+    assert [item.fallback_used for item in rows] == [False, True]
     assert healthy is True
     assert success_count == 1
     assert failure_count == 0
     assert last_error is None
     assert cooling is False
+
+
+def test_quote_batch_drops_only_bad_event_time_rows_and_falls_back_per_symbol() -> None:
+    backup_requests: list[tuple[str, ...]] = []
+
+    class MixedQualityProvider:
+        source_name = "混合质量行情源"
+
+        async def quotes(self, symbols) -> list[Quote]:
+            timestamps = {
+                "600519.SH": "2026-05-13 10:04:00",
+                "000001.SZ": "2026-05-12 15:00:00",
+                "300750.SZ": "2026-05-13 10:06:00",
+                "601318.SH": "not-a-time",
+            }
+            return [
+                _quote_for(symbol, self.source_name).model_copy(
+                    update={"timestamp": timestamps[symbol]}
+                )
+                for symbol in symbols
+            ]
+
+    class BackupProvider:
+        source_name = "逐股后备行情源"
+
+        async def quotes(self, symbols) -> list[Quote]:
+            backup_requests.append(tuple(symbols))
+            return [
+                _quote_for(symbol, self.source_name).model_copy(
+                    update={"timestamp": "2026-05-13 10:04:00"}
+                )
+                for symbol in symbols
+            ]
+
+    async def run_check(path: Path):
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = QuoteCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"mixed": MixedQualityProvider(), "backup": BackupProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "mixed"), (2, "backup")],
+        )
+        symbols = ["600519.SH", "000001.SZ", "300750.SZ", "601318.SH"]
+        rows, errors = await coordinator.partial_quotes_with_errors(symbols, use_cache=False)
+        status = next(
+            item
+            for item in cache.provider_capability_statuses()
+            if item.name == "mixed" and item.kind == "quote"
+        )
+        cached = cache.get_quotes(symbols, 10**9)
+        with cache._connect() as conn:
+            events = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT message FROM cache_event WHERE category = 'quote_degraded'"
+                )
+            ]
+        return rows, errors, status, cached, events, runtime.is_cooling("mixed", "quote")
+
+    with TemporaryDirectory() as tmpdir:
+        rows, errors, status, cached, events, cooling = asyncio.run(
+            run_check(Path(tmpdir) / "cache.sqlite3")
+        )
+
+    assert backup_requests == [("000001.SZ", "300750.SZ", "601318.SH")]
+    assert [item.source for item in rows] == [
+        "混合质量行情源",
+        "逐股后备行情源",
+        "逐股后备行情源",
+        "逐股后备行情源",
+    ]
+    assert [item.fallback_used for item in rows] == [False, True, True, True]
+    assert status.success_count == 1
+    assert status.failure_count == 0
+    assert status.last_error is None
+    assert cooling is False
+    assert len(cached) == 4
+    assert [item.fallback_used for item in cached] == [False, True, True, True]
+    assert any("行质量降级" in item and "000001.SZ" in item for item in errors)
+    assert any("300750.SZ" in item and "601318.SH" in item for item in events)
+
+
+def test_partial_quotes_returns_available_rows_while_strict_quotes_still_rejects_gaps() -> None:
+    class PartialOnlyProvider:
+        source_name = "部分行情源"
+
+        async def quotes(self, symbols) -> list[Quote]:
+            return [_quote_for(symbols[0], self.source_name)]
+
+    async def run_check(path: Path) -> tuple[list[Quote], tuple[str, ...], str]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = QuoteCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"partial": PartialOnlyProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "partial")],
+        )
+        symbols = ["600519.SH", "000001.SZ"]
+        available, errors = await coordinator.partial_quotes_with_errors(symbols, use_cache=False)
+        with pytest.raises(RuntimeError) as raised:
+            await coordinator.quotes(symbols, use_cache=False)
+        return available, errors, str(raised.value)
+
+    with TemporaryDirectory() as tmpdir:
+        available, provider_errors, error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [f"{item.code}.{item.market}" for item in available] == ["600519.SH"]
+    assert any("000001.SZ" in item for item in provider_errors)
+    assert "000001.SZ" in error
+    assert "实时行情未完整返回" in error
 
 
 def test_quote_coordinator_runs_distinct_symbol_requests_concurrently() -> None:
@@ -324,6 +446,7 @@ def test_quote_coverage_miss_falls_back_without_global_failure_or_cooldown() -> 
 
     assert calls == ["uncovered", "backup"]
     assert rows[0].source == "备用行情源"
+    assert rows[0].fallback_used is True
     assert cooling is False
     assert healthy is True
     assert success_count == 1
@@ -363,6 +486,7 @@ def test_quote_malformed_empty_value_is_protocol_failure_and_cools_provider() ->
         rows, cooling, failure_count, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert rows[0].source == "备用行情源"
+    assert rows[0].fallback_used is True
     assert cooling is True
     assert failure_count == 1
     assert last_error == "坏结构行情源 行情返回结构异常"
@@ -593,6 +717,25 @@ def test_quote_event_time_normalizes_timezone_aware_values_to_shanghai_naive() -
     assert normalize_quote_event_time(utc_event) == "2026-05-13 10:04:00"
     assert parse_quote_time(utc_event) == datetime(2026, 5, 13, 10, 4)
     assert quote_event_time_error(utc_event, now=aware_now) is None
+
+
+def test_quote_production_clock_is_independent_of_host_timezone() -> None:
+    original_timezone = os.environ.get("TZ")
+    snapshots: list[datetime] = []
+    try:
+        for timezone_name in ("UTC", "Asia/Shanghai"):
+            os.environ["TZ"] = timezone_name
+            time.tzset()
+            snapshots.append(production_quote_now())
+    finally:
+        if original_timezone is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_timezone
+        time.tzset()
+
+    assert all(item.tzinfo is None for item in snapshots)
+    assert abs((snapshots[1] - snapshots[0]).total_seconds()) < 1
 
 
 def test_quote_consistency_warning_ignores_monitor_event_write_failure() -> None:

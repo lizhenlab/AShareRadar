@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Hashable, Iterable, Iterator, Mapping
 from concurrent.futures import Future as ConcurrentFuture
-from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import partial
@@ -12,6 +11,7 @@ import time
 from typing import Any, Generic, ParamSpec, TypeVar
 
 from app.services.datahub_status import _provider_error_text
+from app.services.daemon_executor import DaemonThreadPoolExecutor
 from app.services.provider_errors import (
     ProviderCoverageMiss,
     is_provider_coverage_miss,
@@ -38,7 +38,7 @@ __all__ = [
 PROVIDER_IO_MAX_WORKERS = 4
 PROVIDER_CAPABILITY_MAX_IN_FLIGHT = 2
 PROVIDER_SHUTDOWN_TIMEOUT_SECONDS = 1.0
-_PROVIDER_IO_EXECUTOR: ContextVar[ThreadPoolExecutor | None] = ContextVar(
+_PROVIDER_IO_EXECUTOR: ContextVar[DaemonThreadPoolExecutor | None] = ContextVar(
     "ashare_radar_provider_io_executor",
     default=None,
 )
@@ -122,7 +122,7 @@ class ProviderRuntime:
             set[ConcurrentFuture[Any]],
         ] = {}
         self._worker_lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(
+        self._executor = DaemonThreadPoolExecutor(
             max_workers=PROVIDER_IO_MAX_WORKERS,
             thread_name_prefix="ashare-provider",
         )
@@ -137,6 +137,7 @@ class ProviderRuntime:
         start: Callable[[], Awaitable[T]],
         *,
         request_key: Hashable | None = None,
+        timeout_seconds: float | None = None,
     ) -> T:
         if self._closed:
             raise RuntimeError("ProviderRuntime 已关闭")
@@ -147,7 +148,12 @@ class ProviderRuntime:
             raise TypeError("provider request_key 必须可哈希") from exc
         capability_key = (name, kind)
         full_key = (name, kind, identity)
-        timeout = max(0.0, float(self.settings.provider_call_timeout_seconds))
+        configured_timeout = (
+            self.settings.provider_call_timeout_seconds
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        timeout = max(0.0, float(configured_timeout))
         deadline = asyncio.get_running_loop().time() + timeout
         state = await self._admit_provider_call(
             capability_key,
@@ -162,6 +168,7 @@ class ProviderRuntime:
             state,
             f"{name} {kind} 调用",
             timeout=remaining,
+            timeout_label=timeout,
         )
 
     async def aclose(self, timeout: float = PROVIDER_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
@@ -259,6 +266,7 @@ class ProviderRuntime:
         label: str,
         *,
         timeout: float,
+        timeout_label: float,
     ) -> T:
         task = state.task
 
@@ -271,7 +279,7 @@ class ProviderRuntime:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if task not in done:
-                raise ProviderCallTimeoutError(f"{label}超过 {self.settings.provider_call_timeout_seconds:g} 秒，后台任务仍在收尾")
+                raise ProviderCallTimeoutError(f"{label}超过 {timeout_label:g} 秒，后台任务仍在收尾")
             return task.result()
         finally:
             condition = self._provider_conditions[capability_key]
@@ -290,9 +298,16 @@ class ProviderRuntime:
         start: Callable[[], Awaitable[T]],
         *,
         request_key: Hashable | None = None,
+        timeout_seconds: float | None = None,
     ) -> TimedProviderCall[T]:
         started = time.perf_counter()
-        value = await self.call_provider(name, kind, start, request_key=request_key)
+        value = await self.call_provider(
+            name,
+            kind,
+            start,
+            request_key=request_key,
+            timeout_seconds=timeout_seconds,
+        )
         return TimedProviderCall(value=value, latency_ms=round((time.perf_counter() - started) * 1000, 2))
 
     def attempts(

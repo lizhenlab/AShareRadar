@@ -319,6 +319,7 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
         };
         const {
           ALERT_NOTIFICATION_CURSOR_KEY,
+          ALERT_NOTIFICATION_FALLBACK_LOCK_KEY,
           deliverAlertNotifications,
           pollAlertNotifications,
         } = await import("./static/js/notifications.js");
@@ -345,6 +346,7 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
 
         assert(firstCompleted === false, "delivery failure was reported as a successful poll");
         assert(failedCursor.id === 2, "cursor advanced past the failed event");
+        assert(!storage.getItem(ALERT_NOTIFICATION_FALLBACK_LOCK_KEY), "fallback delivery lease was left permanent");
         assert(sent.join(",") === "ashare-radar-alert-2", "events after a failure were delivered or the successful prefix was lost");
         assert(elements.get("alertNotificationState").textContent.includes("投递失败"), "delivery failure state was not visible");
         assert(elements.get("alertNotificationState").dataset.tone === "warn", "delivery failure state did not use warning tone");
@@ -518,6 +520,177 @@ def test_notification_permission_request_failure_remains_retryable() -> None:
         assert(state.alertNotificationsEnabled === false, "permission failure left notifications active");
         assert(elements.get("enableAlertNotifications").disabled === false, "permission failure prevented a retry");
         assert(elements.get("alertNotificationState").textContent.includes("权限请求失败"), "permission failure was not explained");
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor() -> None:
+    _run_node(
+        r'''
+        globalThis.document = { getElementById() { return null; } };
+        const requests = [];
+        globalThis.fetch = async (url) => {
+          requests.push(String(url));
+          return jsonResponse([event(2)]);
+        };
+        const {
+          ALERT_NOTIFICATION_CURSOR_KEY,
+          deliverAlertNotifications,
+          pollAlertNotifications,
+        } = await import("./static/js/notifications.js");
+        const storage = memoryStorage();
+        const sent = [];
+        const lockCalls = [];
+        let lockTail = Promise.resolve();
+        const locks = {
+          request(name, options, callback) {
+            lockCalls.push({ name, options });
+            const current = lockTail.then(() => callback({ name }));
+            lockTail = current.catch(() => {});
+            return current;
+          },
+        };
+        class FakeNotification {
+          static permission = "granted";
+          constructor(_title, options) { sent.push(options.tag); }
+        }
+        const firstPage = { alertNotificationsEnabled: true };
+        const secondPage = { alertNotificationsEnabled: true };
+        deliverAlertNotifications(firstPage, [event(1)], { NotificationApi: FakeNotification, storage });
+
+        const results = await Promise.all([
+          pollAlertNotifications(firstPage, { NotificationApi: FakeNotification, storage, locks }),
+          pollAlertNotifications(secondPage, { NotificationApi: FakeNotification, storage, locks }),
+        ]);
+        const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
+
+        assert(results.every(Boolean), "one page reported a failed coordinated poll");
+        assert(requests.length === 2 && requests.every((url) => url.includes("after_id=1")), "pages did not fetch from their initial cursor");
+        assert(sent.join(",") === "ashare-radar-alert-2", "the shared event was delivered more than once");
+        assert(cursor.id === 2, "shared cursor did not advance");
+        assert(lockCalls.length === 2, "delivery did not use the Web Locks API");
+        assert(lockCalls.every((call) => call.options.mode === "exclusive" && call.options.ifAvailable === true), "lock was not short/non-waiting");
+
+        function event(id) { return { id, created_at: "2026-07-16 10:00:00", event_type: "触发", message: `事件${id}` }; }
+        function jsonResponse(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
+        function memoryStorage() {
+          const values = new Map();
+          return {
+            getItem: (key) => values.get(key) ?? null,
+            setItem: (key, value) => values.set(key, value),
+            removeItem: (key) => values.delete(key),
+          };
+        }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_notification_storage_changes_merge_cursor_and_stop_other_page_polling() -> None:
+    _run_node(
+        r'''
+        globalThis.document = { getElementById() { return null; } };
+        const intervalIds = new Set();
+        const cleared = [];
+        let nextInterval = 0;
+        globalThis.setInterval = () => { const id = ++nextInterval; intervalIds.add(id); return id; };
+        globalThis.clearInterval = (id) => { intervalIds.delete(id); cleared.push(id); };
+        const storageTarget = eventTarget();
+        const storage = memoryStorage();
+        storage.setItem("ashare-radar.alert-notifications-enabled.v1", "1");
+        storage.setItem("ashare-radar.alert-notification-cursor.v1", JSON.stringify({ createdAt: "", id: 5 }));
+        let resolveFetch;
+        let requestedUrl = "";
+        globalThis.fetch = (url) => {
+          requestedUrl = String(url);
+          return new Promise((resolve) => { resolveFetch = resolve; });
+        };
+        const {
+          ALERT_NOTIFICATION_CURSOR_KEY,
+          ALERT_NOTIFICATION_ENABLED_KEY,
+          initializeAlertNotifications,
+          pollAlertNotifications,
+        } = await import("./static/js/notifications.js");
+        const sent = [];
+        class FakeNotification {
+          static permission = "granted";
+          constructor(_title, options) { sent.push(options.tag); }
+        }
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
+        const state = {};
+        assert(initializeAlertNotifications(state, { NotificationApi: FakeNotification, storage, storageTarget, locks }) === true, "page did not initialize");
+        assert(intervalIds.size === 1, "polling interval did not start");
+
+        storage.setItem(ALERT_NOTIFICATION_CURSOR_KEY, JSON.stringify({ createdAt: "", id: 6 }));
+        const polling = pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, storageTarget, locks });
+        await Promise.resolve();
+        assert(requestedUrl.includes("after_id=6"), "poll did not merge the latest shared cursor");
+        storage.setItem(ALERT_NOTIFICATION_ENABLED_KEY, "0");
+        storageTarget.dispatch({ key: ALERT_NOTIFICATION_ENABLED_KEY, newValue: "0" });
+        resolveFetch(jsonResponse([event(7)]));
+
+        assert(await polling === false, "storage-disabled in-flight poll reported success");
+        assert(state.alertNotificationsEnabled === false, "storage disable did not update page state");
+        assert(state.alertNotificationTimer == null && intervalIds.size === 0 && cleared.length === 1, "storage disable did not stop polling");
+        assert(sent.length === 0, "storage-disabled page delivered an event");
+
+        function event(id) { return { id, created_at: "2026-07-16 10:00:00", event_type: "触发", message: `事件${id}` }; }
+        function jsonResponse(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
+        function eventTarget() {
+          let handler = null;
+          return {
+            addEventListener(name, callback) { if (name === "storage") handler = callback; },
+            removeEventListener() {},
+            dispatch(event) { handler(event); },
+          };
+        }
+        function memoryStorage() {
+          const values = new Map();
+          return {
+            getItem: (key) => values.get(key) ?? null,
+            setItem: (key, value) => values.set(key, value),
+            removeItem: (key) => values.delete(key),
+          };
+        }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["enableAlertNotifications", { textContent: "", disabled: false }],
+          ["alertNotificationState", { textContent: "", dataset: {} }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        globalThis.fetch = async () => new Response(JSON.stringify([{
+          id: 2, created_at: "2026-07-16 10:01:00", event_type: "触发", message: "不应投递",
+        }]), { status: 200, headers: { "Content-Type": "application/json" } });
+        const { pollAlertNotifications } = await import("./static/js/notifications.js");
+        const sent = [];
+        class FakeNotification {
+          static permission = "granted";
+          constructor(_title, options) { sent.push(options.tag); }
+        }
+        const storage = {
+          getItem() { throw new Error("storage denied"); },
+          setItem() { throw new Error("storage denied"); },
+        };
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
+        const state = {
+          alertNotificationsEnabled: true,
+          alertNotificationCursor: { createdAt: "", id: 1 },
+        };
+
+        const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
+
+        assert(completed === false, "uncoordinated poll reported success");
+        assert(sent.length === 0, "uncoordinated page emitted a duplicate-prone notification");
+        assert(elements.get("alertNotificationState").textContent.includes("无法安全协调多标签页"), "unsafe storage state was hidden");
+        assert(elements.get("alertNotificationState").dataset.tone === "warn", "unsafe storage state was not a warning");
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''
     )

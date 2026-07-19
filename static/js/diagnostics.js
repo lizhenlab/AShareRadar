@@ -393,6 +393,8 @@ export function renderSystemDiagnostics(diagnostics) {
   const messagesTarget = $("diagnosticMessages");
   if (storageTarget) {
     const budgetMb = Number(storage.budget_bytes || 0) / 1024 / 1024;
+    const sqliteMb = Number(storage.sqlite_size_bytes || 0) / 1024 / 1024;
+    const backupMb = Number(storage.backup_size_bytes || 0) / 1024 / 1024;
     const usage = nonNegativePercent(storage.usage_pct);
     const meterValue = Math.min(100, usage);
     storageTarget.innerHTML = `
@@ -401,10 +403,14 @@ export function renderSystemDiagnostics(diagnostics) {
         <span>${escapeHtml(formatNumber(usage))}%</span>
       </div>
       <meter min="0" max="100" low="0" high="80" optimum="0" value="${escapeHtml(meterValue)}">${escapeHtml(usage)}%</meter>
+      <small>SQLite ${escapeHtml(formatNumber(sqliteMb))} MB · 备份 ${escapeHtml(formatNumber(backupMb))} MB（${escapeHtml(storage.managed_backup_count || 0)} 份）</small>
       <div class="storage-row-counts">
         <span><b>${escapeHtml(storage.cache_rows || 0)}</b>可再生缓存</span>
         <span><b>${escapeHtml(storage.runtime_rows || 0)}</b>运行日志</span>
         <span><b>${escapeHtml(storage.user_rows || 0)}</b>用户数据</span>
+        <span><b>${escapeHtml(storage.quote_rows || 0)}</b>行情</span>
+        <span><b>${escapeHtml(storage.kline_rows || 0)}</b>K 线</span>
+        <span><b>${escapeHtml(storage.market_scan_rows || 0)}</b>全市场扫描</span>
       </div>`;
   }
   if (messagesTarget) {

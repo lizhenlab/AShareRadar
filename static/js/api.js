@@ -141,8 +141,10 @@ export function createRequestScope(previousScope = null, parentSignal = null) {
 async function fetchJsonResponse(url, options) {
   const response = await fetchResponse(url, options);
   if (!response.ok) {
-    const error = await errorPayload(response);
-    throw new Error(errorMessage(error, response.status));
+    const payload = await errorPayload(response);
+    const error = new Error(errorMessage(payload, response.status));
+    error.status = response.status;
+    throw error;
   }
   return successPayload(response);
 }

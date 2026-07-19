@@ -14,7 +14,13 @@ import pytest
 from app.config import Settings
 from app.models.schemas import PlateItem, StockConceptItem, StockInfo
 from app.services.cache import SQLiteCache
-from app.services.datahub_metadata import MetadataCoordinator, StockPoolRequest, StockPoolResolver, _profile_with_local_industry
+from app.services.datahub_metadata import (
+    MetadataCoordinator,
+    StockPoolRequest,
+    StockPoolResolver,
+    _profile_with_local_industry,
+    _stock_pool_markets,
+)
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.local_metadata_provider import LocalIndividualStockProvider
 from tests.factories import make_plate_item, make_stock_info
@@ -103,13 +109,7 @@ def test_plate_rank_result_marks_stale_cache_fallback_without_changing_list_api(
     async def run_check(path: Path):
         settings = Settings(provider_failure_cooldown_seconds=60)
         cache = SQLiteCache(path)
-        cache.save_plate_rank(
-            [
-                make_plate_item().model_copy(
-                    update={"source": "本地缓存", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                )
-            ]
-        )
+        cache.save_plate_rank([make_plate_item().model_copy(update={"source": "本地缓存", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})])
         coordinator = MetadataCoordinator(
             settings=settings,
             cache=cache,
@@ -125,8 +125,8 @@ def test_plate_rank_result_marks_stale_cache_fallback_without_changing_list_api(
         result, rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert result.used_fallback_cache is True
-    assert [item.source for item in result.rows] == ["本地缓存"]
-    assert [item.source for item in rows] == ["本地缓存"]
+    assert [(item.source, item.fallback_used) for item in result.rows] == [("本地缓存", True)]
+    assert [(item.source, item.fallback_used) for item in rows] == [("本地缓存", True)]
 
 
 def test_plate_rank_all_invalid_primary_rows_use_backup_without_clearing_cache() -> None:
@@ -205,6 +205,409 @@ def test_stock_pool_returns_provider_rows_when_cache_write_fails() -> None:
     assert failure_count == 0
 
 
+def test_stock_pool_uses_its_dedicated_long_provider_timeout(tmp_path: Path) -> None:
+    class SlowStockProvider:
+        source_name = "慢速全量股票池"
+
+        async def stock_pool(self) -> list[StockInfo]:
+            await asyncio.sleep(0.03)
+            return [make_stock_info(code="600519", market="SH")]
+
+    async def run_check() -> list[StockInfo]:
+        settings = Settings(
+            provider_call_timeout_seconds=0.01,
+            stock_pool_provider_timeout_seconds=1,
+        )
+        cache = SQLiteCache(tmp_path / "stock-timeout.sqlite3")
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"slow": SlowStockProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "slow")],
+        )
+        return await coordinator.stock_pool(refresh=True)
+
+    rows = asyncio.run(run_check())
+
+    assert [item.symbol for item in rows] == ["600519.SH"]
+
+
+def test_stock_pool_unlimited_provider_path_returns_every_row_and_keeps_positive_limit() -> None:
+    provider_rows = [
+        make_stock_info(code="600519", market="SH"),
+        make_stock_info(code="000001", market="SZ"),
+        make_stock_info(code="300750", market="SZ"),
+    ]
+
+    class LiveStockProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            return provider_rows
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], list[StockInfo]]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"live": LiveStockProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "live")],
+        )
+        unlimited = await coordinator.stock_pool(limit=None, refresh=True)
+        limited = await coordinator.stock_pool(limit=2, refresh=True)
+        return unlimited, limited
+
+    with TemporaryDirectory() as tmpdir:
+        unlimited, limited = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.symbol for item in unlimited] == ["600519.SH", "000001.SZ", "300750.SZ"]
+    assert [item.symbol for item in limited] == ["600519.SH", "000001.SZ"]
+
+
+def test_stock_pool_market_coverage_rejects_sh_sz_code_exchange_mismatch() -> None:
+    mismatched = make_stock_info(code="600519", market="SH").model_copy(update={"symbol": "600519.SZ", "market": "SZ"})
+
+    assert _stock_pool_markets([mismatched]) == set()
+
+
+def test_stock_pool_required_markets_skips_partial_provider_and_preserves_cached_metadata() -> None:
+    calls: list[str] = []
+
+    class PartialProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("partial")
+            return [
+                make_stock_info(code="600519", market="SH"),
+                make_stock_info(code="000001", market="SZ"),
+                make_stock_info(code="920066", market="BJ").model_copy(update={"code": "830001"}),
+            ]
+
+    class FullProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("full")
+            return [
+                make_stock_info(code="600519", market="SH").model_copy(update={"industry": None, "list_date": None}),
+                make_stock_info(code="000001", market="SZ"),
+                make_stock_info(code="920066", market="BJ"),
+            ]
+
+    async def run_check(path: Path) -> list[StockInfo]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600519", market="SH").model_copy(
+                    update={
+                        "industry": "白酒",
+                        "list_date": "2001-08-27",
+                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+            ]
+        )
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"partial": PartialProvider(), "full": FullProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "partial"), (2, "full")],
+        )
+        return await coordinator.stock_pool(
+            limit=None,
+            refresh=True,
+            required_markets={"SH", "SZ", "BJ"},
+        )
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == ["partial", "full"]
+    assert {item.market for item in rows} == {"SH", "SZ", "BJ"}
+    maotai = next(item for item in rows if item.symbol == "600519.SH")
+    assert maotai.industry == "白酒"
+    assert maotai.list_date == "2001-08-27"
+
+
+def test_stock_pool_market_minimums_skip_truncated_three_market_provider() -> None:
+    calls: list[str] = []
+    truncated_rows = [
+        make_stock_info(code="600519", market="SH"),
+        make_stock_info(code="000001", market="SZ"),
+        make_stock_info(code="920066", market="BJ"),
+        make_stock_info(code="920066", market="BJ"),
+    ]
+    full_rows = [
+        make_stock_info(code="600519", market="SH"),
+        make_stock_info(code="600000", market="SH"),
+        make_stock_info(code="000001", market="SZ"),
+        make_stock_info(code="300750", market="SZ"),
+        make_stock_info(code="920066", market="BJ"),
+    ]
+
+    class TruncatedProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("truncated")
+            return truncated_rows
+
+    class FullProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("full")
+            return full_rows
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], list[StockInfo]]:
+        settings = Settings(
+            stock_pool_authoritative_min_count=5,
+            market_scan_min_sh_count=2,
+            market_scan_min_sz_count=2,
+            market_scan_min_bj_count=1,
+        )
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"truncated": TruncatedProvider(), "full": FullProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "truncated"), (2, "full")],
+        )
+        returned = await coordinator.stock_pool(
+            limit=None,
+            refresh=True,
+            required_markets={"SH", "SZ", "BJ"},
+            minimum_market_counts={"SH": 2, "SZ": 2, "BJ": 1},
+        )
+        return returned, cache.get_stock_pool(max_age_seconds=10**9, limit=None)
+
+    with TemporaryDirectory() as tmpdir:
+        returned, cached = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    expected = {item.symbol for item in full_rows}
+    assert calls == ["truncated", "full"]
+    assert {item.symbol for item in returned} == expected
+    assert {item.symbol for item in cached} == expected
+
+
+def test_stock_pool_skips_provider_that_shrinks_against_authoritative_baseline() -> None:
+    fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    baseline = [
+        *(make_stock_info(code=f"600{index:03d}", market="SH") for index in range(60)),
+        *(make_stock_info(code=f"000{index:03d}", market="SZ") for index in range(1, 51)),
+        *(make_stock_info(code=f"920{index:03d}", market="BJ") for index in range(20)),
+    ]
+    baseline = [item.model_copy(update={"updated_at": fresh_time}) for item in baseline]
+    truncated = [
+        *(make_stock_info(code=f"600{index:03d}", market="SH") for index in range(45)),
+        *(make_stock_info(code=f"000{index:03d}", market="SZ") for index in range(1, 51)),
+        *(make_stock_info(code=f"920{index:03d}", market="BJ") for index in range(20)),
+    ]
+    calls: list[str] = []
+
+    class TruncatedProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("truncated")
+            return truncated
+
+    class CompleteProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("complete")
+            return baseline
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], str | None]:
+        settings = Settings(
+            stock_pool_authoritative_min_count=100,
+            market_scan_min_sh_count=1,
+            market_scan_min_sz_count=1,
+            market_scan_min_bj_count=1,
+        )
+        cache = SQLiteCache(path)
+        cache.replace_stock_pool(baseline)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={
+                "truncated": TruncatedProvider(),
+                "complete": CompleteProvider(),
+            },
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "truncated"), (2, "complete")],
+        )
+        rows = await coordinator.stock_pool(
+            limit=None,
+            refresh=True,
+            required_markets={"SH", "SZ", "BJ"},
+            minimum_market_counts={"SH": 1, "SZ": 1, "BJ": 1},
+        )
+        status = next(item for item in cache.provider_capability_statuses() if item.name == "truncated" and item.kind == "stock")
+        return rows, status.last_error
+
+    with TemporaryDirectory() as tmpdir:
+        rows, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == ["truncated", "complete"]
+    assert {item.symbol for item in rows} == {item.symbol for item in baseline}
+    assert last_error is not None
+    assert "相对最近权威快照异常缩水" in last_error
+
+
+def test_authoritative_full_stock_pool_snapshot_removes_disappeared_symbols() -> None:
+    class FullProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            return [
+                make_stock_info(code="600519", market="SH"),
+                make_stock_info(code="000001", market="SZ"),
+                make_stock_info(code="920066", market="BJ"),
+            ]
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], list[StockInfo]]:
+        settings = Settings(
+            stock_pool_authoritative_min_count=3,
+            market_scan_min_sh_count=1,
+            market_scan_min_sz_count=1,
+            market_scan_min_bj_count=1,
+        )
+        cache = SQLiteCache(path)
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600519", market="SH"),
+                make_stock_info(code="000001", market="SZ"),
+                make_stock_info(code="920066", market="BJ"),
+                make_stock_info(code="600099", market="SH").model_copy(update={"name": "已从新快照消失"}),
+            ]
+        )
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"full": FullProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "full")],
+        )
+        returned = await coordinator.stock_pool(
+            limit=None,
+            refresh=True,
+            required_markets={"SH", "SZ", "BJ"},
+        )
+        cached = cache.get_stock_pool(max_age_seconds=10**9, limit=None)
+        return returned, cached
+
+    with TemporaryDirectory() as tmpdir:
+        returned, cached = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    expected = {"600519.SH", "000001.SZ", "920066.BJ"}
+    assert {item.symbol for item in returned} == expected
+    assert {item.symbol for item in cached} == expected
+
+
+def test_full_market_stock_pool_does_not_use_month_old_fallback() -> None:
+    class FailingProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            raise RuntimeError("stock provider down")
+
+    async def run_check(path: Path) -> None:
+        settings = Settings(stock_pool_cache_seconds=1)
+        cache = SQLiteCache(path)
+        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600519", market="SH").model_copy(update={"updated_at": stale_time}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"updated_at": stale_time}),
+                make_stock_info(code="920066", market="BJ").model_copy(update={"updated_at": stale_time}),
+            ]
+        )
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failed": FailingProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "failed")],
+        )
+        with pytest.raises(RuntimeError, match="所有股票池数据源均不可用"):
+            await coordinator.stock_pool(
+                limit=None,
+                refresh=True,
+                required_markets={"SH", "SZ", "BJ"},
+            )
+
+    with TemporaryDirectory() as tmpdir:
+        asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+
+def test_stock_pool_unlimited_fresh_cache_returns_every_row_without_provider_call() -> None:
+    class ProviderShouldNotRun:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_pool(self) -> list[StockInfo]:
+            self.calls += 1
+            raise AssertionError("fresh cache should satisfy the unlimited request")
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], int]:
+        settings = Settings(stock_pool_cache_seconds=3600)
+        cache = SQLiteCache(path)
+        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600519", market="SH").model_copy(update={"updated_at": fresh_time}),
+                make_stock_info(code="600000", market="SH").model_copy(update={"updated_at": fresh_time}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"updated_at": fresh_time}),
+            ]
+        )
+        provider = ProviderShouldNotRun()
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"unused": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "unused")],
+        )
+        rows = await coordinator.stock_pool(limit=None, refresh=False)
+        return rows, provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        rows, provider_calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.symbol for item in rows] == ["600000.SH", "600519.SH", "000001.SZ"]
+    assert provider_calls == 0
+
+
+def test_stock_pool_unlimited_stale_fallback_returns_every_keyword_match() -> None:
+    class FailingStockProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_pool(self) -> list[StockInfo]:
+            self.calls += 1
+            raise RuntimeError("stock provider down")
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], int]:
+        settings = Settings(stock_pool_cache_seconds=1)
+        cache = SQLiteCache(path)
+        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600000", market="SH").model_copy(update={"name": "浦发银行", "updated_at": stale_time}),
+                make_stock_info(code="601398", market="SH").model_copy(update={"name": "工商银行", "updated_at": stale_time}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"name": "平安银行", "updated_at": stale_time}),
+                make_stock_info(code="600519", market="SH").model_copy(update={"name": "贵州茅台", "updated_at": stale_time}),
+            ]
+        )
+        provider = FailingStockProvider()
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failing": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "failing")],
+        )
+        rows = await coordinator.stock_pool(keyword="银行", limit=None, refresh=True)
+        return rows, provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        rows, provider_calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [item.symbol for item in rows] == ["600000.SH", "601398.SH", "000001.SZ"]
+    assert provider_calls == 1
+
+
 def test_metadata_coordinator_offloads_cache_and_runtime_io_from_event_loop_thread() -> None:
     class ThreadTrackingMetadataCache(SQLiteCache):
         def __init__(self, path: Path) -> None:
@@ -217,7 +620,7 @@ def test_metadata_coordinator_offloads_cache_and_runtime_io_from_event_loop_thre
         def get_stock_pool(
             self,
             max_age_seconds: int,
-            limit: int = 5000,
+            limit: int | None = 5000,
             keyword: str | None = None,
         ) -> list[StockInfo]:
             self._track("get_stock_pool")
@@ -322,8 +725,6 @@ def test_metadata_coordinator_offloads_cache_and_runtime_io_from_event_loop_thre
     assert values == ["600519.SH", "实时元数据源", "实时概念"]
     assert {
         "get_stock_pool",
-        "stock_pool_count",
-        "stats",
         "save_stock_pool",
         "get_plate_rank",
         "save_plate_rank",
@@ -333,7 +734,6 @@ def test_metadata_coordinator_offloads_cache_and_runtime_io_from_event_loop_thre
         "provider_failure",
         "log_event",
     } <= io_threads.keys()
-    assert io_threads["get_stock_pool"] == io_threads["stock_pool_count"] == io_threads["stats"]
     assert all(event_loop_thread not in thread_ids for thread_ids in io_threads.values())
 
 
@@ -422,11 +822,7 @@ def test_stock_profile_uses_local_profile_when_primary_pool_has_coverage_miss() 
 
     class LocalStockProvider:
         async def stock_pool(self) -> list[StockInfo]:
-            return [
-                make_stock_info(code="600706", market="SH").model_copy(
-                    update={"name": "曲江文旅", "industry": "旅游酒店", "source": "本地个股资料"}
-                )
-            ]
+            return [make_stock_info(code="600706", market="SH").model_copy(update={"name": "曲江文旅", "industry": "旅游酒店", "source": "本地个股资料"})]
 
     async def run_check(path: Path) -> StockInfo | None:
         settings = Settings(stock_pool_authoritative_min_count=3)
@@ -490,6 +886,38 @@ def test_stock_pool_coverage_miss_records_success_and_tries_backup() -> None:
     assert failure_count == 0
 
 
+def test_single_market_pool_above_total_threshold_cannot_confirm_bj_keyword_empty() -> None:
+    calls: list[str] = []
+
+    class ShanghaiOnlyProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("sh-only")
+            return [make_stock_info(code=str(600000 + index), market="SH") for index in range(1_000)]
+
+    class BeijingBackupProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("bj-backup")
+            return [make_stock_info(code="920066", market="BJ")]
+
+    async def run_check(path: Path) -> list[StockInfo]:
+        settings = Settings(stock_pool_authoritative_min_count=1_000)
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"sh-only": ShanghaiOnlyProvider(), "bj-backup": BeijingBackupProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "sh-only"), (2, "bj-backup")],
+        )
+        return await coordinator.stock_pool(keyword="920066", limit=10, refresh=True)
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == ["sh-only", "bj-backup"]
+    assert [item.symbol for item in rows] == ["920066.BJ"]
+
+
 def test_stock_pool_authoritative_provider_miss_returns_empty_without_backup() -> None:
     class CompleteStockProvider:
         source_name = "完整股票池"
@@ -498,7 +926,7 @@ def test_stock_pool_authoritative_provider_miss_returns_empty_without_backup() -
             return [
                 make_stock_info(code="600519", market="SH").model_copy(update={"source": self.source_name}),
                 make_stock_info(code="000001", market="SZ").model_copy(update={"source": self.source_name}),
-                make_stock_info(code="300750", market="SZ").model_copy(update={"source": self.source_name}),
+                make_stock_info(code="920066", market="BJ").model_copy(update={"source": self.source_name}),
             ]
 
     class BackupShouldNotRun:
@@ -548,6 +976,7 @@ def test_stock_pool_selection_state_distinguishes_coverage_miss_from_authoritati
         [
             make_stock_info(code="600519", market="SH"),
             make_stock_info(code="000001", market="SZ"),
+            make_stock_info(code="920066", market="BJ"),
         ],
         request,
     )
@@ -572,13 +1001,7 @@ def test_stock_pool_refresh_still_uses_stale_keyword_fallback_after_provider_fai
         settings = Settings(stock_pool_cache_seconds=1)
         cache = SQLiteCache(path)
         stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
-        cache.save_stock_pool(
-            [
-                make_stock_info(code="600706", market="SH").model_copy(
-                    update={"name": "曲江文旅", "updated_at": stale_time}
-                )
-            ]
-        )
+        cache.save_stock_pool([make_stock_info(code="600706", market="SH").model_copy(update={"name": "曲江文旅", "updated_at": stale_time})])
         provider = FailingStockProvider()
         coordinator = MetadataCoordinator(
             settings=settings,
@@ -643,9 +1066,7 @@ def test_stock_concepts_all_invalid_primary_rows_use_backup_without_clearing_cac
         async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
             return [
                 _concept(symbol=symbol, rank=1, name="坏概念A", source=" "),
-                _concept(symbol=symbol, rank=2, name="坏概念B", source=self.source_name).model_copy(
-                    update={"change_pct": math.inf, "updated_at": " "}
-                ),
+                _concept(symbol=symbol, rank=2, name="坏概念B", source=self.source_name).model_copy(update={"change_pct": math.inf, "updated_at": " "}),
             ]
 
     class BackupConceptProvider:
@@ -772,9 +1193,7 @@ def test_stock_concepts_unregistered_priority_provider_is_skipped_before_backup(
     with TemporaryDirectory() as tmpdir:
         rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
-    assert [(item.symbol, item.rank, item.name, item.source) for item in rows] == [
-        ("600519.SH", 1, "白酒", "备用概念源")
-    ]
+    assert [(item.symbol, item.rank, item.name, item.source) for item in rows] == [("600519.SH", 1, "白酒", "备用概念源")]
 
 
 def test_stock_concepts_raise_when_priority_providers_lack_concept_capability() -> None:
@@ -824,8 +1243,18 @@ def test_stock_concepts_raise_when_no_concept_provider_is_configured() -> None:
     assert "概念未配置可用数据源" in message
 
 
-def test_local_stock_concepts_empty_result_is_coverage_miss_not_provider_failure() -> None:
-    async def run_check(path: Path) -> tuple[list[StockConceptItem], bool, str | None, int]:
+def test_local_static_metadata_is_not_exposed_as_realtime_plate_or_concept_capability() -> None:
+    provider = LocalIndividualStockProvider()
+
+    capability = provider.capability()
+
+    assert capability.stock_pool is True
+    assert capability.plate_rank is False
+    assert capability.concept_board is False
+
+
+def test_local_static_concepts_are_rejected_by_metadata_coordinator() -> None:
+    async def run_check(path: Path) -> str:
         settings = Settings()
         cache = SQLiteCache(path)
         coordinator = MetadataCoordinator(
@@ -836,17 +1265,14 @@ def test_local_stock_concepts_empty_result_is_coverage_miss_not_provider_failure
             priority=lambda kind: [(1, "local")],
         )
 
-        rows = await coordinator.stock_concepts("600706.SH", limit=5, refresh=True)
-        status = next(item for item in cache.provider_capability_statuses() if item.name == "local" and item.kind == "concept")
-        return rows, status.healthy, status.last_error, status.failure_count
+        with pytest.raises(RuntimeError, match="本地静态资料不提供concept实时涨跌幅") as captured:
+            await coordinator.stock_concepts("600706.SH", limit=5, refresh=True)
+        return str(captured.value)
 
     with TemporaryDirectory() as tmpdir:
-        rows, healthy, last_error, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+        message = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
-    assert rows == []
-    assert healthy is True
-    assert last_error is None
-    assert failure_count == 0
+    assert "概念归属不可用" in message
 
 
 def test_local_stock_concepts_coverage_miss_preserves_stale_cache() -> None:
@@ -856,7 +1282,7 @@ def test_local_stock_concepts_coverage_miss_preserves_stale_cache() -> None:
         async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
             raise RuntimeError("concept down")
 
-    async def run_check(path: Path) -> tuple[list[StockConceptItem], list[StockConceptItem], bool, str | None, int]:
+    async def run_check(path: Path):
         settings = Settings()
         cache = SQLiteCache(path)
         cache.save_stock_concepts(
@@ -875,21 +1301,18 @@ def test_local_stock_concepts_coverage_miss_preserves_stale_cache() -> None:
             priority=lambda kind: [(1, "external"), (2, "local")],
         )
 
-        rows = await coordinator.stock_concepts("600706.SH", limit=5, refresh=True)
+        result = await coordinator.stock_concepts_result("600706.SH", limit=5, refresh=True)
         cached_after = cache.get_stock_concepts("600706.SH", max_age_seconds=10**9, limit=5)
-        local_status = next(
-            item for item in cache.provider_capability_statuses() if item.name == "local" and item.kind == "concept"
-        )
-        return rows, cached_after, local_status.healthy, local_status.last_error, local_status.failure_count
+        local_statuses = [item for item in cache.provider_capability_statuses() if item.name == "local" and item.kind == "concept"]
+        return result, cached_after, local_statuses
 
     with TemporaryDirectory() as tmpdir:
-        rows, cached_after, healthy, last_error, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+        result, cached_after, local_statuses = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
-    assert [(item.name, item.source) for item in rows] == [("历史概念", "缓存概念")]
+    assert result.used_fallback_cache is True
+    assert [(item.name, item.source, item.fallback_used) for item in result.rows] == [("历史概念", "缓存概念", True)]
     assert [(item.name, item.source) for item in cached_after] == [("历史概念", "缓存概念")]
-    assert healthy is True
-    assert last_error is None
-    assert failure_count == 0
+    assert local_statuses == []
 
 
 def test_stock_concepts_raises_when_sources_fail_without_cache() -> None:
@@ -987,8 +1410,9 @@ def test_authoritative_stock_profile_miss_is_not_overridden_by_local_provider() 
         fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
-                make_stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
-                for index in range(3)
+                make_stock_info(code="600000", market="SH").model_copy(update={"updated_at": fresh_time}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"updated_at": fresh_time}),
+                make_stock_info(code="920066", market="BJ").model_copy(update={"updated_at": fresh_time}),
             ]
         )
         coordinator = MetadataCoordinator(
@@ -1018,13 +1442,12 @@ def test_authoritative_fresh_stock_pool_empty_result_is_not_overridden_by_stale_
         stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
-                make_stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
-                for index in range(3)
+                make_stock_info(code="600000", market="SH").model_copy(update={"updated_at": fresh_time}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"updated_at": fresh_time}),
+                make_stock_info(code="920066", market="BJ").model_copy(update={"updated_at": fresh_time}),
             ]
         )
-        cache.save_stock_pool(
-            [make_stock_info(code="688001", market="SH").model_copy(update={"updated_at": stale_time})]
-        )
+        cache.save_stock_pool([make_stock_info(code="688001", market="SH").model_copy(update={"updated_at": stale_time})])
         coordinator = MetadataCoordinator(
             settings=settings,
             cache=cache,
@@ -1141,6 +1564,45 @@ def test_metadata_cache_rejects_non_positive_limits() -> None:
             assert cache.get_stock_concepts("600519.SH", max_age_seconds=max_age_seconds, limit=1) == []
 
 
+def test_metadata_cache_and_repository_support_unlimited_stock_pool_keyword_reads() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_pool(
+            [
+                make_stock_info(code="600000", market="SH").model_copy(update={"name": "浦发银行", "updated_at": fresh_time}),
+                make_stock_info(code="601398", market="SH").model_copy(update={"name": "工商银行", "updated_at": fresh_time}),
+                make_stock_info(code="000001", market="SZ").model_copy(update={"name": "平安银行", "updated_at": fresh_time}),
+                make_stock_info(code="600519", market="SH").model_copy(update={"name": "贵州茅台", "updated_at": fresh_time}),
+            ]
+        )
+
+        cached = cache.get_stock_pool(max_age_seconds=3600, limit=None, keyword="银行")
+        repository_rows = cache.market_data_repo.get_stock_pool(max_age_seconds=3600, limit=None, keyword="银行")
+        limited = cache.get_stock_pool(max_age_seconds=3600, limit=2, keyword="银行")
+
+    expected = ["600000.SH", "601398.SH", "000001.SZ"]
+    assert [item.symbol for item in cached] == expected
+    assert [item.symbol for item in repository_rows] == expected
+    assert [item.symbol for item in limited] == expected[:2]
+
+
+def test_unlimited_stock_pool_cache_does_not_truncate_after_five_thousand_rows() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_pool(
+            [make_stock_info(code=f"{600000 + index:06d}", market="SH").model_copy(update={"updated_at": fresh_time}) for index in range(5001)]
+        )
+
+        unlimited = cache.get_stock_pool(max_age_seconds=3600, limit=None)
+        legacy_cap = cache.get_stock_pool(max_age_seconds=3600, limit=5000)
+
+    assert len(unlimited) == 5001
+    assert len(legacy_cap) == 5000
+    assert unlimited[-1].symbol == "605000.SH"
+
+
 def test_metadata_cache_rejects_future_update_timestamps() -> None:
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "cache.sqlite3"
@@ -1203,13 +1665,9 @@ def test_metadata_cache_filters_invalid_rows_and_dedupes_concept_names() -> None
                         "match_reason": "",
                     }
                 ),
-                _concept(symbol="000002.SZ", rank=1, name="镁金属", source="第二源").model_copy(
-                    update={"change_pct": 9.0}
-                ),
+                _concept(symbol="000002.SZ", rank=1, name="镁金属", source="第二源").model_copy(update={"change_pct": 9.0}),
                 _concept(symbol="000002.SZ", rank=1, name=" ", source="空名"),
-                _concept(symbol="000002.SZ", rank=1, name="小金属", source="第三源").model_copy(
-                    update={"change_pct": 4.0}
-                ),
+                _concept(symbol="000002.SZ", rank=1, name="小金属", source="第三源").model_copy(update={"change_pct": 4.0}),
             ],
         )
 
@@ -1220,8 +1678,7 @@ def test_metadata_cache_filters_invalid_rows_and_dedupes_concept_names() -> None
         ]
         concepts = cache.get_stock_concepts("000002.SZ", max_age_seconds=10**9, limit=10)
         assert [
-            (item.name, item.rank, item.source, item.amount, item.turnover_rate, item.leading_stock_change_pct, item.match_reason)
-            for item in concepts
+            (item.name, item.rank, item.source, item.amount, item.turnover_rate, item.leading_stock_change_pct, item.match_reason) for item in concepts
         ] == [
             ("小金属", 1, "第三源", 2_000_000_000, 2.0, 3.0, "测试匹配"),
             ("镁金属", 2, "第一源", None, None, None, "概念成分匹配"),
@@ -1279,12 +1736,8 @@ def test_metadata_cache_orders_metadata_reads_stably() -> None:
         cache.save_stock_concepts(
             "600519.SH",
             [
-                _concept(symbol="600519.SH", rank=1, name="消费B", source="测试概念").model_copy(
-                    update={"change_pct": 3.0}
-                ),
-                _concept(symbol="600519.SH", rank=1, name="消费A", source="测试概念").model_copy(
-                    update={"change_pct": 3.0}
-                ),
+                _concept(symbol="600519.SH", rank=1, name="消费B", source="测试概念").model_copy(update={"change_pct": 3.0}),
+                _concept(symbol="600519.SH", rank=1, name="消费A", source="测试概念").model_copy(update={"change_pct": 3.0}),
             ],
         )
 
@@ -1302,6 +1755,174 @@ def test_metadata_cache_orders_metadata_reads_stably() -> None:
             "消费A",
             "消费B",
         ]
+
+
+_FULL_MARKET_MINIMUMS = {"SH": 2, "SZ": 1, "BJ": 1}
+
+
+def _full_market_consistency_settings() -> Settings:
+    return Settings(
+        stock_pool_authoritative_min_count=4,
+        market_scan_min_sh_count=2,
+        market_scan_min_sz_count=1,
+        market_scan_min_bj_count=1,
+    )
+
+
+def _full_market_consistency_rows(*, source: str) -> list[StockInfo]:
+    return [
+        make_stock_info(code="600519", market="SH").model_copy(update={"source": source}),
+        make_stock_info(code="600000", market="SH").model_copy(update={"source": source}),
+        make_stock_info(code="000001", market="SZ").model_copy(update={"source": source}),
+        make_stock_info(code="920066", market="BJ").model_copy(update={"source": source}),
+    ]
+
+
+@pytest.mark.parametrize("missing_field", ["name", "source"])
+def test_full_market_coverage_uses_only_rows_with_required_fields(missing_field: str) -> None:
+    calls: list[str] = []
+    primary_rows = _full_market_consistency_rows(source="primary")
+    primary_rows[1] = primary_rows[1].model_copy(update={missing_field: " "})
+    backup_rows = _full_market_consistency_rows(source="backup")
+
+    class PrimaryProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("primary")
+            return primary_rows
+
+    class BackupProvider:
+        async def stock_pool(self) -> list[StockInfo]:
+            calls.append("backup")
+            return backup_rows
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], list[StockInfo]]:
+        settings = _full_market_consistency_settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"primary": PrimaryProvider(), "backup": BackupProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "primary"), (2, "backup")],
+        )
+        returned = await coordinator.stock_pool(
+            limit=None,
+            refresh=True,
+            required_markets=_FULL_MARKET_MINIMUMS,
+            minimum_market_counts=_FULL_MARKET_MINIMUMS,
+        )
+        persisted = cache.get_stock_pool(max_age_seconds=10**9, limit=None)
+        return returned, persisted
+
+    with TemporaryDirectory() as tmpdir:
+        returned, persisted = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == ["primary", "backup"]
+    assert {item.symbol for item in returned} == {item.symbol for item in persisted}
+    assert {item.source for item in returned} == {"backup"}
+    assert len(returned) == len(persisted) == 4
+
+
+def test_full_market_scan_and_persistence_share_one_normalized_deduplicated_pool() -> None:
+    rows = _full_market_consistency_rows(source=" primary ")
+    rows[0] = rows[0].model_copy(
+        update={
+            "symbol": " sh600519 ",
+            "code": " 600519 ",
+            "market": " sh ",
+            "name": " first row ",
+            "updated_at": " 2026-05-13 10:00:00 ",
+        }
+    )
+    rows.insert(
+        1,
+        make_stock_info(code="600519", market="SH").model_copy(update={"name": "duplicate row", "source": "duplicate"}),
+    )
+
+    class Provider:
+        async def stock_pool(self) -> list[StockInfo]:
+            return rows
+
+    async def run_check(path: Path) -> tuple[list[StockInfo], list[StockInfo]]:
+        settings = _full_market_consistency_settings()
+        cache = SQLiteCache(path)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"provider": Provider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "provider")],
+        )
+        returned = await coordinator.stock_pool(
+            limit=None,
+            refresh=True,
+            required_markets=_FULL_MARKET_MINIMUMS,
+            minimum_market_counts=_FULL_MARKET_MINIMUMS,
+        )
+        persisted = cache.get_stock_pool(max_age_seconds=10**9, limit=None)
+        return returned, persisted
+
+    with TemporaryDirectory() as tmpdir:
+        returned, persisted = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    returned_by_symbol = {item.symbol: item for item in returned}
+    persisted_by_symbol = {item.symbol: item for item in persisted}
+    assert returned_by_symbol == persisted_by_symbol
+    assert len(returned_by_symbol) == 4
+    assert returned_by_symbol["600519.SH"].code == "600519"
+    assert returned_by_symbol["600519.SH"].market == "SH"
+    assert returned_by_symbol["600519.SH"].name == "first row"
+    assert returned_by_symbol["600519.SH"].source == "primary"
+
+
+def test_stock_pool_actual_write_count_mismatch_rolls_back_old_pool() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        old_rows = [make_stock_info(code="600519", market="SH")]
+        cache.replace_stock_pool(old_rows)
+        with cache._connect() as conn:
+            conn.execute(
+                """
+                CREATE TRIGGER skip_one_stock_master_insert
+                BEFORE INSERT ON stock_master
+                WHEN NEW.symbol = '000001.SZ'
+                BEGIN
+                    SELECT RAISE(IGNORE);
+                END
+                """
+            )
+
+        with pytest.raises(RuntimeError, match="写入数量不一致"):
+            cache.replace_stock_pool(_full_market_consistency_rows(source="new"))
+
+        persisted = cache.get_stock_pool(max_age_seconds=10**9, limit=None)
+
+    assert [item.symbol for item in persisted] == ["600519.SH"]
+
+
+def test_stock_pool_insert_failure_rolls_back_old_pool() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        old_rows = [make_stock_info(code="600519", market="SH")]
+        cache.replace_stock_pool(old_rows)
+        with cache._connect() as conn:
+            conn.execute(
+                """
+                CREATE TRIGGER fail_one_stock_master_insert
+                BEFORE INSERT ON stock_master
+                WHEN NEW.symbol = '000001.SZ'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced stock pool insert failure');
+                END
+                """
+            )
+
+        with pytest.raises(sqlite3.DatabaseError, match="forced stock pool insert failure"):
+            cache.replace_stock_pool(_full_market_consistency_rows(source="new"))
+
+        persisted = cache.get_stock_pool(max_age_seconds=10**9, limit=None)
+
+    assert [item.symbol for item in persisted] == ["600519.SH"]
 
 
 def _concept(*, symbol: str, rank: int, name: str, source: str) -> StockConceptItem:

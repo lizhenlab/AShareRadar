@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import math
+import os
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import threading
+import time
 
 import pytest
 
 from app.config import Settings
 from app.models.schemas import Kline, MinuteKline
 from app.services.cache import SQLiteCache
-from app.services.datahub_klines import DEFAULT_MAX_MINUTE_KLINE_LIMIT, MAX_DAILY_KLINE_LIMIT, KlineCoordinator, _bounded_limit
+from app.services.datahub_klines import (
+    DEFAULT_MAX_MINUTE_KLINE_LIMIT,
+    MAX_DAILY_KLINE_LIMIT,
+    KlineCoordinator,
+    _bounded_limit,
+    _kline_now as production_kline_now,
+    _latest_minute_klines,
+)
 from app.services.datahub_runtime import ProviderRuntime
 from app.utils.time import now_text
 from tests.factories import make_kline
@@ -25,6 +34,46 @@ KLINE_TEST_NOW = datetime(2026, 5, 13, 10, 20, 0)
 @pytest.fixture(autouse=True)
 def _fixed_kline_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.datahub_klines._kline_now", lambda: KLINE_TEST_NOW)
+
+
+def test_latest_minute_rows_compare_aware_and_naive_times_in_shanghai_timezone() -> None:
+    original_timezone = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        rows = [
+            _minute_row(timestamp="2026-05-13 09:31:00", interval="1m"),
+            _minute_row(timestamp="2026-05-13T01:32:00+00:00", interval="1m"),
+        ]
+
+        latest = _latest_minute_klines(rows, 1)
+    finally:
+        if original_timezone is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_timezone
+        time.tzset()
+
+    assert [row.timestamp for row in latest] == ["2026-05-13T01:32:00+00:00"]
+
+
+def test_kline_production_clock_is_independent_of_host_timezone() -> None:
+    original_timezone = os.environ.get("TZ")
+    snapshots: list[datetime] = []
+    try:
+        for timezone_name in ("UTC", "Asia/Shanghai"):
+            os.environ["TZ"] = timezone_name
+            time.tzset()
+            snapshots.append(production_kline_now())
+    finally:
+        if original_timezone is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_timezone
+        time.tzset()
+
+    assert all(item.tzinfo is None for item in snapshots)
+    assert abs((snapshots[1] - snapshots[0]).total_seconds()) < 1
 
 
 def test_daily_kline_coverage_miss_uses_fallback_without_global_failure() -> None:
@@ -99,9 +148,66 @@ def test_daily_kline_none_response_is_protocol_failure_not_coverage_miss() -> No
         rows, cooling, failure_count, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert rows[0].source == "备用K线源"
+    assert rows[0].fallback_used is True
     assert cooling is True
     assert failure_count == 1
     assert last_error == "坏结构K线源 日K返回结构异常"
+
+
+def test_backup_daily_klines_remain_fallback_when_second_request_uses_only_cache() -> None:
+    end_date = KLINE_TEST_NOW.date()
+
+    class FailingPrimaryProvider:
+        source_name = "失败主日线源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            self.calls += 1
+            raise RuntimeError("主源不可用")
+
+    class BackupProvider:
+        source_name = "备用日线源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            self.calls += 1
+            return [
+                make_kline(
+                    date=(end_date - timedelta(days=19 - index)).isoformat(),
+                    as_of=end_date.isoformat(),
+                    data_version="backup-daily-version-1",
+                )
+                for index in range(20)
+            ][-limit:]
+
+    async def run_check(path: Path) -> tuple[list[Kline], list[Kline], int, int]:
+        settings = Settings(kline_cache_seconds=3600)
+        cache = SQLiteCache(path)
+        primary = FailingPrimaryProvider()
+        backup = BackupProvider()
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"primary": primary, "backup": backup},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "primary"), (2, "backup")],
+            now=lambda: datetime(2026, 5, 13, 16, 0, 0),
+        )
+
+        first = await coordinator.kline("600519.SH", limit=20, use_cache=False)
+        second = await coordinator.kline("600519.SH", limit=20, use_cache=True)
+        return first, second, primary.calls, backup.calls
+
+    with TemporaryDirectory() as tmpdir:
+        first, second, primary_calls, backup_calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert primary_calls == backup_calls == 1
+    assert all(item.fallback_used and not item.from_cache for item in first)
+    assert all(item.fallback_used and item.from_cache for item in second)
 
 
 def test_stale_primary_daily_kline_uses_fresh_backup_before_success_or_save() -> None:
@@ -145,7 +251,7 @@ def test_stale_primary_daily_kline_uses_fresh_backup_before_success_or_save() ->
         rows, stale_status, backup_status = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert [item.source for item in rows] == ["新日线后备源"]
-    assert all(not item.from_cache and not item.fallback_used for item in rows)
+    assert all(not item.from_cache and item.fallback_used for item in rows)
     assert stale_status == (0, 1, "旧日线源 日K业务时间无效或已过期：2026-05-12")
     assert backup_status == (1, 0)
 
@@ -262,6 +368,40 @@ def test_minute_kline_coverage_miss_uses_fallback_without_global_failure() -> No
     assert failure_count == 0
 
 
+def test_minute_kline_fallback_provenance_roundtrips_with_false_default() -> None:
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "cache.sqlite3"
+        cache = SQLiteCache(path)
+        cache.save_minute_klines(
+            "600519.SH",
+            "5m",
+            [
+                _minute_row(timestamp="2026-05-13 10:10:00", interval="5m"),
+                _minute_row(timestamp="2026-05-13 10:15:00", interval="5m").model_copy(
+                    update={"fallback_used": True}
+                ),
+            ],
+            "分钟线源",
+        )
+        loaded = cache.get_minute_klines(
+            "600519.SH",
+            "5m",
+            limit=10,
+            max_age_seconds=10**9,
+        )
+        with sqlite3.connect(path) as conn:
+            persisted = [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT fallback_used FROM kline_minute ORDER BY timestamp"
+                )
+            ]
+
+    assert [item.fallback_used for item in loaded] == [False, True]
+    assert all(item.from_cache for item in loaded)
+    assert persisted == [0, 1]
+
+
 def test_stale_primary_minute_kline_uses_fresh_backup_before_success_or_save() -> None:
     current = datetime(2026, 5, 13, 16, 0, 0)
 
@@ -277,7 +417,14 @@ def test_stale_primary_minute_kline_uses_fresh_backup_before_success_or_save() -
         async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120) -> list[MinuteKline]:
             return [_minute_row(timestamp="2026-05-13 14:55:00", interval=interval)]
 
-    async def run_check(path: Path) -> tuple[list[MinuteKline], tuple[int, int, str | None], tuple[int, int]]:
+    async def run_check(
+        path: Path,
+    ) -> tuple[
+        list[MinuteKline],
+        list[MinuteKline],
+        tuple[int, int, str | None],
+        tuple[int, int],
+    ]:
         settings = Settings(provider_failure_cooldown_seconds=60)
         cache = SQLiteCache(path)
         coordinator = KlineCoordinator(
@@ -290,20 +437,25 @@ def test_stale_primary_minute_kline_uses_fresh_backup_before_success_or_save() -
         )
 
         rows = await coordinator.minute_kline("600519.SH", interval="5m", limit=20, use_cache=False)
+        cached = cache.get_minute_klines("600519.SH", "5m", limit=20, max_age_seconds=10**9)
         statuses = {item.name: item for item in cache.provider_capability_statuses() if item.kind == "minute"}
         stale = statuses["stale"]
         backup = statuses["backup"]
         return (
             rows,
+            cached,
             (stale.success_count, stale.failure_count, stale.last_error),
             (backup.success_count, backup.failure_count),
         )
 
     with TemporaryDirectory() as tmpdir:
-        rows, stale_status, backup_status = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+        rows, cached, stale_status, backup_status = asyncio.run(
+            run_check(Path(tmpdir) / "cache.sqlite3")
+        )
 
     assert [item.source for item in rows] == ["新分钟线后备源"]
-    assert all(not item.from_cache and not item.fallback_used for item in rows)
+    assert all(not item.from_cache and item.fallback_used for item in rows)
+    assert all(item.from_cache and item.fallback_used for item in cached)
     assert stale_status == (0, 1, "旧分钟线源 分钟K线业务时间无效或已过期：2026-05-13 14:30:00")
     assert backup_status == (1, 0)
 
@@ -604,7 +756,7 @@ def test_kline_coordinator_offloads_daily_and_minute_cache_io() -> None:
     assert all(event_loop_thread not in thread_ids for thread_ids in io_threads.values())
 
 
-def test_short_daily_refresh_preserves_longer_compatible_history() -> None:
+def test_short_cross_source_daily_refresh_does_not_splice_longer_history() -> None:
     end_date = KLINE_TEST_NOW.date()
     original = [
         make_kline(
@@ -650,11 +802,13 @@ def test_short_daily_refresh_preserves_longer_compatible_history() -> None:
     assert calls == [260]
     assert len(stored) == 260
     assert stored[0].date == original[0].date
-    assert stored[-1].close == 111.0
+    assert stored[-1].close == 100.0
     fetched_contracts = {(item.adjustment_mode, item.as_of, item.data_version, item.contract_version) for item in fetched}
     stored_contracts = {(item.adjustment_mode, item.as_of, item.data_version, item.contract_version) for item in stored}
     assert len(fetched_contracts) == 1
     assert fetched_contracts == stored_contracts
+    assert {item.source for item in fetched} == {"调度刷新源"}
+    assert {item.source for item in stored} == {"长历史缓存"}
 
 
 def test_short_new_daily_data_version_does_not_replace_longer_stored_vintage() -> None:
@@ -686,11 +840,174 @@ def test_short_new_daily_data_version_does_not_replace_longer_stored_vintage() -
     assert len({(item.adjustment_mode, item.as_of, item.data_version, item.contract_version) for item in stored}) == 1
 
 
+def test_equal_length_older_daily_vintages_cannot_replace_newer_cache() -> None:
+    end_date = KLINE_TEST_NOW.date()
+
+    def rows(*, as_of: date, data_version: str, close: float) -> list[Kline]:
+        return [
+            make_kline(
+                date=(as_of - timedelta(days=19 - index)).isoformat(),
+                as_of=as_of.isoformat(),
+                data_version=data_version,
+                close=close,
+            )
+            for index in range(20)
+        ]
+
+    newest = [
+        item.model_copy(update={"fetched_at": "2026-05-13 10:00:03.000000"})
+        for item in rows(as_of=end_date, data_version="daily-version-10", close=110.0)
+    ]
+    older_as_of = [
+        item.model_copy(update={"fetched_at": "2026-05-13 10:00:04.000000"})
+        for item in rows(
+            as_of=end_date - timedelta(days=1),
+            data_version="daily-version-99",
+            close=90.0,
+        )
+    ]
+    older_version = [
+        item.model_copy(update={"fetched_at": "2026-05-13 10:00:02.000000"})
+        for item in rows(as_of=end_date, data_version="daily-version-2", close=80.0)
+    ]
+
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        cache.save_klines("600519.SH", newest, "最新版本")
+        cache.save_klines("600519.SH", older_as_of, "旧日期版本")
+        cache.save_klines("600519.SH", older_version, "同日旧版本")
+        stored = cache.get_klines("600519.SH", limit=30, max_age_seconds=10**9)
+
+    assert len(stored) == 20
+    assert {item.as_of for item in stored} == {end_date.isoformat()}
+    assert {item.data_version for item in stored} == {"daily-version-10"}
+    assert {item.close for item in stored} == {110.0}
+
+
+@pytest.mark.parametrize(
+    ("primary_delay", "fallback_delay"),
+    ((0.0, 0.03), (0.03, 0.0)),
+)
+def test_same_as_of_concurrent_writes_always_keep_non_fallback_quality(
+    primary_delay: float,
+    fallback_delay: float,
+) -> None:
+    as_of = KLINE_TEST_NOW.date()
+
+    def rows(
+        *,
+        source: str,
+        data_version: str,
+        close: float,
+        fetched_at: str,
+        fallback_used: bool,
+    ) -> list[Kline]:
+        return [
+            make_kline(
+                date=(as_of - timedelta(days=19 - index)).isoformat(),
+                as_of=as_of.isoformat(),
+                data_version=data_version,
+                close=close,
+                source=source,
+                fallback_used=fallback_used,
+            ).model_copy(update={"fetched_at": fetched_at})
+            for index in range(20)
+        ]
+
+    primary = rows(
+        source="AAA主源",
+        data_version="daily-kline.v1|qfq|AAA主源|2026-05-13",
+        close=110.0,
+        fetched_at="2026-05-13 10:00:00.000001",
+        fallback_used=False,
+    )
+    fallback = rows(
+        source="ZZZ后备源",
+        data_version="daily-kline.v1|qfq|ZZZ后备源|2026-05-13",
+        close=90.0,
+        fetched_at="2026-05-13 11:00:00.000001",
+        fallback_used=True,
+    )
+
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        barrier = threading.Barrier(3)
+        errors: list[Exception] = []
+
+        def save(candidate: list[Kline], source: str, delay: float) -> None:
+            try:
+                barrier.wait(timeout=5)
+                time.sleep(delay)
+                cache.save_klines("600519.SH", candidate, source)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=save, args=(primary, "AAA主源", primary_delay)),
+            threading.Thread(target=save, args=(fallback, "ZZZ后备源", fallback_delay)),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=10)
+        stored = cache.get_klines("600519.SH", limit=30, max_age_seconds=10**9)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert {item.source for item in stored} == {"AAA主源"}
+    assert {item.close for item in stored} == {110.0}
+    assert all(not item.fallback_used for item in stored)
+
+
+@pytest.mark.parametrize("newer_first", (False, True))
+def test_same_quality_daily_writes_use_fetched_at_not_provider_text(
+    newer_first: bool,
+) -> None:
+    as_of = KLINE_TEST_NOW.date()
+
+    def rows(source: str, data_version: str, close: float, fetched_at: str) -> list[Kline]:
+        return [
+            make_kline(
+                date=(as_of - timedelta(days=9 - index)).isoformat(),
+                as_of=as_of.isoformat(),
+                data_version=data_version,
+                close=close,
+                source=source,
+            ).model_copy(update={"fetched_at": fetched_at})
+            for index in range(10)
+        ]
+
+    older = rows(
+        "ZZZ较早抓取源",
+        "daily-kline.v1|qfq|ZZZ较早抓取源|2026-05-13",
+        90.0,
+        "2026-05-13 10:00:00.000001",
+    )
+    newer = rows(
+        "AAA较新抓取源",
+        "daily-kline.v1|qfq|AAA较新抓取源|2026-05-13",
+        110.0,
+        "2026-05-13T02:00:00.000002Z",
+    )
+
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        ordered = (newer, older) if newer_first else (older, newer)
+        for candidate in ordered:
+            cache.save_klines("600519.SH", candidate, candidate[0].source or "unknown")
+        stored = cache.get_klines("600519.SH", limit=20, max_age_seconds=10**9)
+
+    assert {item.source for item in stored} == {"AAA较新抓取源"}
+    assert {item.close for item in stored} == {110.0}
+
+
 def test_short_new_vintage_provider_does_not_shrink_longer_cache() -> None:
     end_date = KLINE_TEST_NOW.date()
+    old_end = end_date - timedelta(days=1)
     original = [
         make_kline(
-            date=(end_date - timedelta(days=259 - index)).isoformat(),
+            date=(old_end - timedelta(days=259 - index)).isoformat(),
             as_of="2026-05-12",
             data_version="daily-version-1",
             source="旧版本日线源",
@@ -810,11 +1127,63 @@ def test_concurrent_short_new_vintage_cannot_overwrite_complete_replacement() ->
     assert len({(item.adjustment_mode, item.as_of, item.data_version, item.contract_version) for item in stored}) == 1
 
 
+def test_concurrent_equal_length_daily_vintages_always_keep_newest() -> None:
+    end_date = KLINE_TEST_NOW.date()
+
+    def rows(*, as_of: date, data_version: str, close: float) -> list[Kline]:
+        return [
+            make_kline(
+                date=(as_of - timedelta(days=39 - index)).isoformat(),
+                as_of=as_of.isoformat(),
+                data_version=data_version,
+                close=close,
+            )
+            for index in range(40)
+        ]
+
+    original = rows(as_of=end_date - timedelta(days=2), data_version="daily-version-1", close=100.0)
+    older = rows(as_of=end_date - timedelta(days=1), data_version="daily-version-2", close=102.0)
+    newest = rows(as_of=end_date, data_version="daily-version-3", close=103.0)
+
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        cache.save_klines("600519.SH", original, "初始版本")
+        barrier = threading.Barrier(3)
+        errors: list[Exception] = []
+
+        def save(candidate: list[Kline], source: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                cache.save_klines("600519.SH", candidate, source)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=save, args=(older, "旧并发版本")),
+            threading.Thread(target=save, args=(newest, "新并发版本")),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert errors == []
+        stored = cache.get_klines("600519.SH", limit=50, max_age_seconds=10**9)
+
+    assert len(stored) == 40
+    assert {item.as_of for item in stored} == {end_date.isoformat()}
+    assert {item.data_version for item in stored} == {"daily-version-3"}
+    assert {item.close for item in stored} == {103.0}
+
+
 def test_refresh_requests_full_existing_coverage_and_replaces_with_one_new_vintage() -> None:
     end_date = KLINE_TEST_NOW.date()
+    old_end = end_date - timedelta(days=1)
     original = [
         make_kline(
-            date=(end_date - timedelta(days=259 - index)).isoformat(),
+            date=(old_end - timedelta(days=259 - index)).isoformat(),
             as_of="2026-05-12",
             data_version="daily-version-1",
         )
@@ -866,6 +1235,241 @@ def test_refresh_requests_full_existing_coverage_and_replaces_with_one_new_vinta
     assert len(stored) == 260
     assert returned_contracts == {("qfq", "2026-05-13", "daily-version-2", "daily-kline.v1")}
     assert stored_contracts == returned_contracts
+
+
+def test_stale_complete_cache_refreshes_with_verified_incremental_tail() -> None:
+    old_end = KLINE_TEST_NOW.date() - timedelta(days=1)
+    original = [
+        make_kline(
+            date=(old_end - timedelta(days=259 - index)).isoformat(),
+            as_of=old_end.isoformat(),
+            data_version="daily-version-1",
+            source="增量日线源",
+            fallback_used=True,
+        )
+        for index in range(260)
+    ]
+    refresh = [
+        item.model_copy(
+            update={
+                "as_of": KLINE_TEST_NOW.date().isoformat(),
+                "data_version": "daily-version-2",
+                "source": None,
+                "fallback_used": False,
+            }
+        )
+        for item in original[-39:]
+    ]
+    refresh.append(
+        make_kline(
+            date=KLINE_TEST_NOW.date().isoformat(),
+            as_of=KLINE_TEST_NOW.date().isoformat(),
+            data_version="daily-version-2",
+        )
+    )
+
+    class IncrementalProvider:
+        source_name = "增量日线源"
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            self.calls.append(limit)
+            return refresh[-limit:]
+
+    async def run_check(path: Path) -> tuple[list[Kline], list[Kline], list[int]]:
+        settings = Settings(kline_cache_seconds=1)
+        cache = SQLiteCache(path)
+        cache.save_klines("600519.SH", original, "增量日线源")
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE kline_daily SET fetched_at = '2020-01-01 00:00:00'")
+        provider = IncrementalProvider()
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"incremental": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "incremental")],
+        )
+
+        returned = await coordinator.kline("600519.SH", limit=260, use_cache=True)
+        stored = cache.get_klines("600519.SH", limit=300, max_age_seconds=10**9)
+        return returned, stored, provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        returned, stored, calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == [40]
+    assert len(returned) == len(stored) == 260
+    assert returned[-1].date == KLINE_TEST_NOW.date().isoformat()
+    assert {item.data_version for item in returned} == {
+        "daily-version-1",
+        "daily-version-2",
+    }
+    assert {item.data_version for item in stored} == {
+        "daily-version-1",
+        "daily-version-2",
+    }
+    assert {item.data_version for item in returned[:220]} == {"daily-version-1"}
+    assert {item.data_version for item in returned[220:]} == {"daily-version-2"}
+    assert {item.source for item in returned} == {"增量日线源"}
+    assert sum(item.fallback_used for item in returned) == 220
+    assert sum(item.fallback_used for item in stored) == 220
+    assert all(item.fallback_used for item in returned[:220])
+    assert all(not item.fallback_used for item in returned[220:])
+
+
+@pytest.mark.parametrize("mismatch", ("source", "volume"))
+def test_incremental_source_or_volume_mismatch_triggers_full_refresh(
+    mismatch: str,
+) -> None:
+    old_end = KLINE_TEST_NOW.date() - timedelta(days=1)
+    original_source = "原始日线源"
+    provider_source = "切换日线源" if mismatch == "source" else original_source
+    original = [
+        make_kline(
+            date=(old_end - timedelta(days=79 - index)).isoformat(),
+            close=100 + index / 100,
+            volume=10_000 + index,
+            as_of=old_end.isoformat(),
+            data_version="daily-version-1",
+            source=original_source,
+        )
+        for index in range(80)
+    ]
+    refresh = [
+        item.model_copy(
+            update={
+                "as_of": KLINE_TEST_NOW.date().isoformat(),
+                "data_version": "daily-version-2",
+                "source": None,
+            }
+        )
+        for item in original[-39:]
+    ]
+    changed_date = refresh[5].date
+    if mismatch == "volume":
+        refresh[5] = refresh[5].model_copy(update={"volume": refresh[5].volume + 500})
+    refresh.append(
+        make_kline(
+            date=KLINE_TEST_NOW.date().isoformat(),
+            close=101.0,
+            volume=20_000,
+            as_of=KLINE_TEST_NOW.date().isoformat(),
+            data_version="daily-version-2",
+        )
+    )
+    full_history = [
+        item.model_copy(
+            update={
+                "as_of": KLINE_TEST_NOW.date().isoformat(),
+                "data_version": "daily-version-2",
+                "source": None,
+                "volume": item.volume + 500
+                if mismatch == "volume" and item.date == changed_date
+                else item.volume,
+            }
+        )
+        for item in original[1:]
+    ]
+    full_history.append(refresh[-1])
+
+    class RefreshProvider:
+        source_name = provider_source
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            self.calls.append(limit)
+            return refresh if limit == 40 else full_history[-limit:]
+
+    async def run_check(path: Path) -> tuple[list[Kline], list[Kline], list[int]]:
+        settings = Settings(kline_cache_seconds=1)
+        cache = SQLiteCache(path)
+        cache.save_klines("600519.SH", original, original_source)
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE kline_daily SET fetched_at = '2020-01-01 00:00:00'")
+        provider = RefreshProvider()
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"refresh": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "refresh")],
+        )
+        returned = await coordinator.kline("600519.SH", limit=80, use_cache=True)
+        stored = cache.get_klines("600519.SH", limit=100, max_age_seconds=10**9)
+        return returned, stored, provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        returned, stored, calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == [40, 80]
+    assert len(returned) == len(stored) == 80
+    assert {item.data_version for item in returned} == {"daily-version-2"}
+    assert {item.source for item in stored} == {provider_source}
+
+
+def test_incremental_overlap_change_falls_back_to_full_history_refresh() -> None:
+    old_end = KLINE_TEST_NOW.date() - timedelta(days=1)
+    original = [
+        make_kline(
+            date=(old_end - timedelta(days=259 - index)).isoformat(),
+            close=100 + index / 100,
+            as_of=old_end.isoformat(),
+            data_version="daily-version-1",
+            source="除权重算日线源",
+        )
+        for index in range(260)
+    ]
+    replacement = [
+        make_kline(
+            date=(KLINE_TEST_NOW.date() - timedelta(days=259 - index)).isoformat(),
+            close=90 + index / 100,
+            as_of=KLINE_TEST_NOW.date().isoformat(),
+            data_version="daily-version-2",
+        )
+        for index in range(260)
+    ]
+
+    class RebasedProvider:
+        source_name = "除权重算日线源"
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            self.calls.append(limit)
+            return replacement[-limit:]
+
+    async def run_check(path: Path) -> tuple[list[Kline], list[Kline], list[int]]:
+        settings = Settings(kline_cache_seconds=1)
+        cache = SQLiteCache(path)
+        cache.save_klines("600519.SH", original, "除权重算日线源")
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE kline_daily SET fetched_at = '2020-01-01 00:00:00'")
+        provider = RebasedProvider()
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"rebased": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "rebased")],
+        )
+
+        returned = await coordinator.kline("600519.SH", limit=260, use_cache=True)
+        stored = cache.get_klines("600519.SH", limit=300, max_age_seconds=10**9)
+        return returned, stored, provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        returned, stored, calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == [40, 260]
+    assert len(returned) == len(stored) == 260
+    assert returned[0].close == replacement[0].close
+    assert {item.data_version for item in stored} == {"daily-version-2"}
 
 
 def test_insufficient_daily_cache_coverage_fetches_requested_history() -> None:
@@ -1188,6 +1792,7 @@ def test_unregistered_priority_provider_is_skipped_before_backup_without_status_
 
     assert [item.source for item in rows] == ["备用K线源"]
     assert rows[0].from_cache is False
+    assert rows[0].fallback_used is True
     assert missing_status_exists is False
 
 
@@ -1224,6 +1829,7 @@ def test_invalid_provider_kline_rows_are_rejected_before_backup() -> None:
         rows, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert [item.source for item in rows] == ["备用K线源"]
+    assert rows[0].fallback_used is True
     assert last_error == "K线返回为空"
 
 

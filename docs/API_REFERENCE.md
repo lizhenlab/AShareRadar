@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 82
+Total endpoints: 89
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -30,6 +30,13 @@ Total endpoints: 82
 | POST | `/api/local-data/export` | - | `export_local_user_data` | `UserDataBundle` | `app/api/routes/local_data.py` |
 | POST | `/api/local-data/import` | body `payload: UserDataBundle`<br>query `mode: Literal['merge', 'replace'] = 'merge'`<br>query `dry_run: bool = True`<br>query `preview_token: str \| None = None` (min_length=32; max_length=200) | `import_local_user_data` | `LocalDataImportResult` | `app/api/routes/local_data.py` |
 | GET | `/api/market` | - | `market` | `MarketOverview` | `app/api/routes/analysis.py` |
+| GET | `/api/market-scans` | query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `market_scan_runs` | `MarketScanRunPage` | `app/api/routes/market_scan.py` |
+| POST | `/api/market-scans` | body `payload: MarketScanStartRequest \| None` | `create_market_scan` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/latest` | - | `latest_market_scan` | `MarketScanRun \| None` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/{run_id}` | path `run_id: int` | `market_scan_run` | `MarketScanRun` | `app/api/routes/market_scan.py` |
+| POST | `/api/market-scans/{run_id}/cancel` | path `run_id: int` | `cancel_market_scan` | `MarketScanRun` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/{run_id}/results` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200)<br>query `status: MarketScanStatusFilter = 'success'`<br>query `market: MarketCode \| None = None`<br>query `industry: str \| None = None` (max_length=80)<br>query `is_st: bool \| None = None`<br>query `is_new: bool \| None = None`<br>query `min_data_quality_score: int \| None = None` (ge=0; le=100)<br>query `keyword: str \| None = None` (max_length=80)<br>query `sort: MarketScanSort = 'rank'`<br>query `order: MarketScanSortOrder = 'asc'` | `market_scan_results` | `MarketScanResultPage` | `app/api/routes/market_scan.py` |
+| POST | `/api/market-scans/{run_id}/retry` | path `run_id: int` | `retry_market_scan` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/monitor/events` | query `limit: int = 30` (ge=1; le=200) | `monitor_events` | `list[MonitorEvent]` | `app/api/routes/monitoring.py` |
 | GET | `/api/order-book` | query `symbol: str = '600519'` (description=6位A股代码) | `order_book` | `OrderBook` | `app/api/routes/data.py` |
 | GET | `/api/plates` | query `limit: int = 20` (ge=1; le=100)<br>query `refresh: bool = False` (description=是否强制刷新板块排行) | `plates` | `list[PlateItem]` | `app/api/routes/data.py` |

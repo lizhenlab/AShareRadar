@@ -90,6 +90,7 @@ class PlateItem(BaseModel):
     leading_stock_change_pct: FiniteFloat | None = None
     source: str
     updated_at: str
+    fallback_used: bool = False
 
 
 class StockConceptItem(BaseModel):
@@ -104,6 +105,7 @@ class StockConceptItem(BaseModel):
     match_reason: str = "概念成分匹配"
     source: str
     updated_at: str
+    fallback_used: bool = False
 
 
 class ProviderCapability(BaseModel):

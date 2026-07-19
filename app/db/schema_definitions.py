@@ -12,6 +12,7 @@ QUOTE_HISTORY_COLUMN_DEFINITIONS = """
     pe REAL,
     pb REAL,
     market_cap REAL,
+    fallback_used INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1)),
     source TEXT NOT NULL,
     quote_timestamp TEXT NOT NULL,
     trade_date TEXT NOT NULL CHECK (length(trim(trade_date)) > 0),
@@ -32,6 +33,7 @@ KLINE_DAILY_COLUMN_DEFINITIONS = """
     as_of TEXT,
     data_version TEXT NOT NULL DEFAULT 'legacy' CHECK (length(trim(data_version)) > 0),
     contract_version TEXT NOT NULL DEFAULT 'legacy' CHECK (length(trim(contract_version)) > 0),
+    fallback_used INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1)),
     source TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (symbol, adjustment_mode, date)
@@ -89,6 +91,7 @@ CREATE TABLE IF NOT EXISTS quote_snapshot (
     pb REAL,
     market_cap REAL,
     quote_timestamp TEXT NOT NULL,
+    fallback_used INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1)),
     source TEXT NOT NULL,
     fetched_at TEXT NOT NULL
 );
@@ -112,6 +115,7 @@ CREATE TABLE IF NOT EXISTS kline_minute (
     volume REAL NOT NULL,
     amount REAL,
     turnover_rate REAL,
+    fallback_used INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1)),
     source TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (symbol, interval, timestamp)
@@ -132,6 +136,82 @@ CREATE TABLE IF NOT EXISTS task_run (
     finished_at TEXT,
     duration_ms INTEGER,
     message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS market_scan_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_run_id INTEGER,
+    retry_of_run_id INTEGER,
+    status TEXT NOT NULL
+        CHECK (status IN ('queued', 'running', 'cancelling', 'success', 'degraded', 'failed', 'cancelled', 'interrupted')),
+    trigger TEXT NOT NULL
+        CHECK (trigger IN ('manual', 'scheduled', 'retry')),
+    rule_version TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    data_date TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    stock_pool_source TEXT,
+    total_count INTEGER NOT NULL DEFAULT 0 CHECK (total_count >= 0),
+    excluded_count INTEGER NOT NULL DEFAULT 0 CHECK (excluded_count >= 0),
+    processed_count INTEGER NOT NULL DEFAULT 0 CHECK (processed_count >= 0),
+    success_count INTEGER NOT NULL DEFAULT 0 CHECK (success_count >= 0),
+    missing_count INTEGER NOT NULL DEFAULT 0 CHECK (missing_count >= 0),
+    skipped_count INTEGER NOT NULL DEFAULT 0 CHECK (skipped_count >= 0),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    message TEXT,
+    last_error TEXT,
+    cancel_requested_at TEXT,
+    FOREIGN KEY (task_run_id) REFERENCES task_run(id) ON DELETE SET NULL,
+    FOREIGN KEY (retry_of_run_id) REFERENCES market_scan_run(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS market_scan_result (
+    run_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL CHECK (market IN ('SH', 'SZ', 'BJ')),
+    name TEXT NOT NULL,
+    industry TEXT,
+    list_date TEXT,
+    is_st INTEGER NOT NULL DEFAULT 0 CHECK (is_st IN (0, 1)),
+    is_new INTEGER NOT NULL DEFAULT 0 CHECK (is_new IN (0, 1)),
+    metadata_source TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'success', 'missing', 'skipped')),
+    rank INTEGER CHECK (rank IS NULL OR rank > 0),
+    score INTEGER CHECK (score IS NULL OR score BETWEEN 0 AND 100),
+    trend_score INTEGER CHECK (trend_score IS NULL OR trend_score BETWEEN 0 AND 100),
+    leader_score INTEGER CHECK (leader_score IS NULL OR leader_score BETWEEN 0 AND 100),
+    data_quality_score INTEGER CHECK (data_quality_score IS NULL OR data_quality_score BETWEEN 0 AND 100),
+    price REAL,
+    change_pct REAL,
+    turnover_rate REAL,
+    volume_ratio REAL,
+    amount REAL,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    metrics_json TEXT NOT NULL DEFAULT '{{}}',
+    reason TEXT,
+    error TEXT,
+    data_date TEXT,
+    quote_timestamp TEXT,
+    quote_source TEXT,
+    kline_source TEXT,
+    adjustment_mode TEXT,
+    quote_fallback_used INTEGER NOT NULL DEFAULT 0
+        CHECK (quote_fallback_used IN (0, 1)),
+    kline_fallback_used INTEGER NOT NULL DEFAULT 0
+        CHECK (kline_fallback_used IN (0, 1)),
+    metadata_degraded INTEGER NOT NULL DEFAULT 0
+        CHECK (metadata_degraded IN (0, 1)),
+    degradation_reasons_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, symbol),
+    FOREIGN KEY (run_id) REFERENCES market_scan_run(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS monitor_event (
@@ -309,6 +389,17 @@ CREATE INDEX IF NOT EXISTS idx_stock_concept_symbol_updated
     ON stock_concept(symbol, updated_at);
 CREATE INDEX IF NOT EXISTS idx_task_run_started
     ON task_run(started_at);
+CREATE INDEX IF NOT EXISTS idx_market_scan_run_created
+    ON market_scan_run(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_market_scan_run_status
+    ON market_scan_run(status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_market_scan_single_active
+    ON market_scan_run((1))
+    WHERE status IN ('queued', 'running', 'cancelling');
+CREATE INDEX IF NOT EXISTS idx_market_scan_result_rank
+    ON market_scan_result(run_id, status, rank, symbol);
+CREATE INDEX IF NOT EXISTS idx_market_scan_result_filters
+    ON market_scan_result(run_id, market, industry, is_st, status);
 CREATE INDEX IF NOT EXISTS idx_monitor_event_created
     ON monitor_event(created_at);
 CREATE INDEX IF NOT EXISTS idx_watchlist_updated

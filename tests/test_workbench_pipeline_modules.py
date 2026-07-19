@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,6 +87,17 @@ def test_stock_concepts_or_error_times_out_as_optional_data() -> None:
 
     assert concepts == []
     assert error == "TimeoutError: 数据源响应超时"
+
+
+def test_stale_concept_cache_is_withheld_from_theme_and_leader_scoring() -> None:
+    class DataHubStub:
+        async def stock_concepts_result(self, symbol: str, limit: int = 8):
+            return SimpleNamespace(rows=[object()], used_fallback_cache=True)
+
+    concepts, error = asyncio.run(_stock_concepts_or_error(DataHubStub(), "600706"))  # type: ignore[arg-type]
+
+    assert concepts == []
+    assert error == "概念数据源不可用，过期缓存不参与主题与龙头强度评分。"
 
 
 def test_market_breadth_sample_preserves_all_quote_failure_as_warning() -> None:

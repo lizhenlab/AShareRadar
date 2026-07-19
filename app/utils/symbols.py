@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 
-SUPPORTED_MARKETS = {"sh", "sz"}
+SUPPORTED_MARKETS = ("sh", "sz", "bj")
+BJ_STOCK_PREFIXES = ("43", "83", "87", "88", "92")
 DEFAULT_SH_PREFIXES = ("5", "6", "9")
 SYMBOL_ERROR_MESSAGE = "股票代码应为6位数字且不能全为0，例如 600519 或 000001"
 
@@ -61,7 +62,10 @@ def normalize_symbol(symbol: str) -> tuple[str, str]:
     if prefix_market and suffix_market and prefix_market != suffix_market:
         raise ValueError(SYMBOL_ERROR_MESSAGE)
     code = _validated_symbol_code(code_text)
-    return code, prefix_market or suffix_market or _infer_market(code)
+    explicit_market = prefix_market or suffix_market
+    inferred_market = _infer_market(code)
+    _validate_explicit_bj_market(code, explicit_market, inferred_market)
+    return code, explicit_market or inferred_market
 
 
 def _clean_symbol(symbol: str) -> str:
@@ -93,12 +97,36 @@ def _validated_symbol_code(value: str) -> str:
 
 
 def _infer_market(code: str) -> str:
+    if code.startswith(BJ_STOCK_PREFIXES):
+        return "bj"
     return "sh" if code.startswith(DEFAULT_SH_PREFIXES) else "sz"
+
+
+def _validate_explicit_bj_market(code: str, explicit_market: str, inferred_market: str) -> None:
+    if not explicit_market:
+        return
+    if (explicit_market == "bj") != (inferred_market == "bj"):
+        raise ValueError(f"股票代码 {code} 与市场标识不一致")
 
 
 def standard_symbol(symbol: str) -> str:
     code, market = normalize_symbol(symbol)
     return f"{code}.{market.upper()}"
+
+
+def is_a_share_stock_code(code: str, market: str) -> bool:
+    try:
+        normalized_code = _validated_symbol_code(str(code).strip())
+    except ValueError:
+        return False
+    normalized_market = str(market or "").strip().upper()
+    if normalized_market == "SH":
+        return normalized_code.startswith("6")
+    if normalized_market == "SZ":
+        return normalized_code.startswith(("0", "3"))
+    if normalized_market == "BJ":
+        return normalized_code.startswith(BJ_STOCK_PREFIXES)
+    return False
 
 
 def standard_symbol_list(

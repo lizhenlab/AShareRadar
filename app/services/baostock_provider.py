@@ -30,6 +30,7 @@ class BaoStockProvider:
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
         ensure_positive_limit(limit)
+        query_symbol = bs_symbol(symbol)
         self._ensure_installed()
 
         def load() -> list[Kline]:
@@ -40,7 +41,7 @@ class BaoStockProvider:
                 raise RuntimeError(f"BaoStock登录失败：{lg.error_msg}")
             try:
                 rs = bs.query_history_k_data_plus(
-                    bs_symbol(symbol),
+                    query_symbol,
                     "date,open,high,low,close,volume",
                     frequency="d",
                     adjustflag=BAOSTOCK_QFQ_ADJUST_FLAG,

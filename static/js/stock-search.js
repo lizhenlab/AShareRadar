@@ -4,13 +4,13 @@ import {
   fetchJson,
   isAbortError,
 } from "./api.js";
+import { validateUiSymbol } from "./symbols.js";
 
 export const DEFAULT_STOCK_SEARCH_DEBOUNCE_MS = 250;
 export const DEFAULT_STOCK_SEARCH_CACHE_SIZE = 40;
 export const STOCK_SEARCH_LIMIT = 8;
 
 const REQUIRED_STOCK_FIELDS = ["symbol", "code", "market", "name"];
-const STOCK_SYMBOL_PATTERN = /^(\d{6})\.(SH|SZ)$/;
 const UNAVAILABLE_MESSAGE = "Stock search unavailable";
 
 export function createStockSearchController(options = {}) {
@@ -193,16 +193,16 @@ function validateStockItem(item) {
     throw new TypeError("Invalid stock search item");
   }
   const { symbol, code, market, name } = item;
-  const match = typeof symbol === "string" ? STOCK_SYMBOL_PATTERN.exec(symbol) : null;
+  const normalizedSymbol = canonicalStockSymbol(symbol);
+  const [expectedCode, expectedMarket] = normalizedSymbol.split(".");
   const normalizedName = boundedText(name, 80);
   if (
-    !match ||
-    match[1] === "000000" ||
+    normalizedSymbol !== symbol ||
     typeof code !== "string" ||
     typeof market !== "string" ||
     !normalizedName ||
-    code !== match[1] ||
-    market !== match[2]
+    code !== expectedCode ||
+    market !== expectedMarket
   ) {
     throw new TypeError("Invalid stock search item");
   }
@@ -215,6 +215,15 @@ function validateStockItem(item) {
     source: optionalBoundedText(item.source, 120),
     updated_at: optionalBoundedText(item.updated_at, 40),
   };
+}
+
+function canonicalStockSymbol(symbol) {
+  if (typeof symbol !== "string") return "";
+  try {
+    return validateUiSymbol(symbol);
+  } catch (error) {
+    return "";
+  }
 }
 
 function boundedText(value, maxLength) {

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from collections.abc import Iterable
+import sqlite3
+import threading
+from typing import TYPE_CHECKING
 
 from app.db.market_mappers import row_to_quote
 from app.models.schemas import Quote
@@ -28,15 +32,28 @@ def _update_assignments(columns: Iterable[str]) -> str:
     return ", ".join(f"{column}=excluded.{column}" for column in columns)
 
 
-def _quote_freshness_guard(table: str) -> str:
+def _quote_freshness_guard(table: str, quality_columns: tuple[str, ...]) -> str:
     incoming_event = "COALESCE(ashare_market_epoch(excluded.quote_timestamp), -1)"
     stored_event = f"COALESCE(ashare_market_epoch({table}.quote_timestamp), -1)"
     incoming_fetch = "COALESCE(ashare_market_epoch(excluded.fetched_at), -1)"
     stored_fetch = f"COALESCE(ashare_market_epoch({table}.fetched_at), -1)"
+    incoming_fallback = "COALESCE(excluded.fallback_used, 1)"
+    stored_fallback = f"COALESCE({table}.fallback_used, 1)"
+    incoming_quality = _quote_completeness("excluded", quality_columns)
+    stored_quality = _quote_completeness(table, quality_columns)
     return (
         f" WHERE {incoming_event} > {stored_event} "
-        f"OR ({incoming_event} = {stored_event} AND {incoming_fetch} >= {stored_fetch})"
+        f"OR ({incoming_event} = {stored_event} AND ("
+        f"{incoming_fallback} < {stored_fallback} OR ("
+        f"{incoming_fallback} = {stored_fallback} AND ("
+        f"{incoming_quality} > {stored_quality} OR ("
+        f"{incoming_quality} = {stored_quality} AND {incoming_fetch} >= {stored_fetch}"
+        ")))))"
     )
+
+
+def _quote_completeness(prefix: str, columns: tuple[str, ...]) -> str:
+    return "(" + " + ".join(f"CASE WHEN {prefix}.{column} IS NOT NULL THEN 1 ELSE 0 END" for column in columns) + ")"
 
 
 QUOTE_SNAPSHOT_COLUMNS = (
@@ -58,6 +75,7 @@ QUOTE_SNAPSHOT_COLUMNS = (
     "pb",
     "market_cap",
     "quote_timestamp",
+    "fallback_used",
     "source",
     "fetched_at",
 )
@@ -71,6 +89,7 @@ QUOTE_HISTORY_COLUMNS = (
     "pe",
     "pb",
     "market_cap",
+    "fallback_used",
     "source",
     "quote_timestamp",
     "trade_date",
@@ -84,6 +103,7 @@ QUOTE_HISTORY_RESULT_COLUMNS = (
     "market_cap",
     "quote_timestamp",
     "trade_date",
+    "fallback_used",
     "fetched_at",
 )
 QUOTE_SNAPSHOT_REQUIRED_FINITE_COLUMNS = (
@@ -102,18 +122,25 @@ _QUOTE_SNAPSHOT_SQL = (
     f"VALUES ({_placeholders(QUOTE_SNAPSHOT_COLUMNS)}) "
     "ON CONFLICT(symbol) DO UPDATE SET "
     + _update_assignments(column for column in QUOTE_SNAPSHOT_COLUMNS if column != "symbol")
-    + _quote_freshness_guard("quote_snapshot")
+    + _quote_freshness_guard("quote_snapshot", ("turnover_rate", "pe", "pb", "market_cap"))
 )
 _QUOTE_HISTORY_SQL = (
     f"INSERT INTO quote_history ({_column_names(QUOTE_HISTORY_COLUMNS)}) "
     f"VALUES ({_placeholders(QUOTE_HISTORY_COLUMNS)}) "
     "ON CONFLICT(symbol, trade_date) DO UPDATE SET "
     + _update_assignments(column for column in QUOTE_HISTORY_COLUMNS if column not in {"symbol", "trade_date"})
-    + _quote_freshness_guard("quote_history")
+    + _quote_freshness_guard("quote_history", ("pe", "pb", "market_cap"))
 )
 
 
 class MarketQuoteRepositoryMixin:
+    if TYPE_CHECKING:
+        _lock: threading.RLock
+
+        def _connect(self) -> AbstractContextManager[sqlite3.Connection]: ...
+
+        def _time_window(self, max_age_seconds: int) -> tuple[str, str] | None: ...
+
     def save_quotes(self, quotes: list[Quote]) -> None:
         valid_quotes = [quote for quote in filter_valid_quotes(quotes) if _normalized_quote_timestamp(quote.timestamp)]
         if not valid_quotes:
@@ -166,7 +193,9 @@ def _latest_quote_history_rows(conn, symbol: str, limit: int):
 
 
 def _quote_history_result(row) -> dict[str, float | str | None]:
-    return {column: row[column] for column in QUOTE_HISTORY_RESULT_COLUMNS}
+    result = {column: row[column] for column in QUOTE_HISTORY_RESULT_COLUMNS}
+    result["fallback_used"] = bool(row["fallback_used"])
+    return result
 
 
 def _valid_quotes_by_symbol(rows) -> dict[str, Quote]:
@@ -181,19 +210,12 @@ def _valid_quotes_by_symbol(rows) -> dict[str, Quote]:
 
 
 def _valid_quote_snapshot_row(row) -> bool:
-    return _required_finite_columns(row, QUOTE_SNAPSHOT_REQUIRED_FINITE_COLUMNS) and _optional_finite_columns(
-        row, QUOTE_OPTIONAL_FINITE_FIELDS
-    )
+    return _required_finite_columns(row, QUOTE_SNAPSHOT_REQUIRED_FINITE_COLUMNS) and _optional_finite_columns(row, QUOTE_OPTIONAL_FINITE_FIELDS)
 
 
 def _valid_quote_history_row(row) -> bool:
     price = finite_float(row["price"])
-    return (
-        price is not None
-        and price > 0
-        and _required_finite_columns(row, ("change_pct",))
-        and _optional_finite_columns(row, ("pe", "pb", "market_cap"))
-    )
+    return price is not None and price > 0 and _required_finite_columns(row, ("change_pct",)) and _optional_finite_columns(row, ("pe", "pb", "market_cap"))
 
 
 def _required_finite_columns(row, columns: Iterable[str]) -> bool:
@@ -256,6 +278,7 @@ def _quote_values(symbol: str, quote: Quote, fetched_at: str) -> dict[str, objec
         "pb": quote.pb,
         "market_cap": quote.market_cap,
         "quote_timestamp": quote_timestamp,
+        "fallback_used": int(quote.fallback_used),
         "source": quote.source,
         "trade_date": _quote_trade_date(quote.timestamp, fetched_at),
         "fetched_at": fetched_at,

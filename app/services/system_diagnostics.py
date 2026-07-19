@@ -11,7 +11,8 @@ from app.services.provider_failure_status import (
     capability_recently_failed as provider_capability_recently_failed,
     provider_recently_failed,
 )
-from app.services.trading_calendar import calendar_source
+from app.services.runtime_backup import runtime_backup_storage
+from app.services.trading_calendar import TradeCalendarSource, TradeCalendarStatus, calendar_status
 from app.utils.market_data import finite_float
 from app.utils.text import clean_optional_text as _clean_text
 
@@ -23,20 +24,14 @@ class DiagnosticDecision:
 
 
 STORAGE_WARNING_AT_PCT = 80.0
-CACHE_DATA_TABLES = frozenset(
-    {
-        "provider_status",
-        "provider_capability_status",
-        "quote_snapshot",
-        "quote_history",
-        "kline_daily",
-        "kline_minute",
-        "stock_master",
-        "plate_rank",
-        "stock_concept",
-    }
+QUOTE_STORAGE_TABLES = frozenset({"quote_snapshot", "quote_history"})
+KLINE_STORAGE_TABLES = frozenset({"kline_daily", "kline_minute"})
+MARKET_SCAN_STORAGE_TABLES = frozenset({"market_scan_run", "market_scan_result"})
+OTHER_CACHE_DATA_TABLES = frozenset(
+    {"provider_status", "provider_capability_status", "stock_master", "plate_rank", "stock_concept"}
 )
-RUNTIME_STATE_TABLES = frozenset({"cache_event", "task_run", "monitor_event"})
+CACHE_DATA_TABLES = QUOTE_STORAGE_TABLES | KLINE_STORAGE_TABLES | OTHER_CACHE_DATA_TABLES
+RUNTIME_STATE_TABLES = frozenset({"cache_event", "task_run", "monitor_event"}) | MARKET_SCAN_STORAGE_TABLES
 SQLITE_STORAGE_COMPONENT_SUFFIXES = {
     "main": "",
     "wal": "-wal",
@@ -52,11 +47,16 @@ def build_system_diagnostics(datahub, scheduler, *, now: datetime | None = None)
     table_counts = _normalized_table_counts(datahub.cache.table_counts())
     scheduler_status = scheduler.status()
     checked_at = current.strftime("%Y-%m-%d %H:%M:%S")
-    assessment = assess_cache_freshness(
-        cache_stats,
-        now=current,
-        stock_pool_cache_seconds=getattr(getattr(datahub, "settings", None), "stock_pool_cache_seconds", 24 * 60 * 60),
-        plate_rank_cache_seconds=getattr(getattr(datahub, "settings", None), "plate_rank_cache_seconds", 10 * 60),
+    trade_calendar = calendar_status(current.date())
+    assessment = (
+        assess_cache_freshness(
+            cache_stats,
+            now=current,
+            stock_pool_cache_seconds=getattr(getattr(datahub, "settings", None), "stock_pool_cache_seconds", 24 * 60 * 60),
+            plate_rank_cache_seconds=getattr(getattr(datahub, "settings", None), "plate_rank_cache_seconds", 10 * 60),
+        )
+        if trade_calendar.covered
+        else CacheFreshnessAssessment(domains=(), availability_issues=(), checked_domains=())
     )
     freshness = cache_freshness(cache_stats, checked_at, assessment=assessment)
     budget_mb = getattr(getattr(datahub, "settings", None), "max_database_size_mb", 512)
@@ -67,7 +67,7 @@ def build_system_diagnostics(datahub, scheduler, *, now: datetime | None = None)
     _extend_cache_diagnostics(warnings, suggestions, assessment)
     _extend_provider_diagnostics(warnings, suggestions, providers, capability_statuses)
     _extend_capability_diagnostics(warnings, suggestions, datahub.capabilities())
-    _extend_environment_diagnostics(warnings, suggestions, table_counts, storage, scheduler_status)
+    _extend_environment_diagnostics(warnings, suggestions, table_counts, storage, scheduler_status, trade_calendar)
 
     return SystemDiagnostics(
         checked_at=checked_at,
@@ -159,10 +159,23 @@ def _demo_capability_enabled(capabilities) -> bool:
     return any(getattr(item, "enabled", False) and _clean_text(getattr(item, "reliability_level", None)) == "演示" for item in capabilities or [])
 
 
-def _extend_environment_diagnostics(warnings: list[str], suggestions: list[str], table_counts, storage: StorageDiagnostics, scheduler_status) -> None:
-    if calendar_source() == "工作日兜底":
-        warnings.append("交易日历未缓存，当前按普通工作日判断行情新鲜度。")
-        suggestions.append("可设置 ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH=1 或调用交易日历刷新逻辑，以降低节假日误判。")
+def _extend_environment_diagnostics(
+    warnings: list[str],
+    suggestions: list[str],
+    table_counts,
+    storage: StorageDiagnostics,
+    scheduler_status,
+    trade_calendar: TradeCalendarStatus,
+) -> None:
+    if trade_calendar.source is TradeCalendarSource.OUT_OF_COVERAGE:
+        warnings.append("交易日历未覆盖当前日期，已跳过依赖交易日期的行情新鲜度判断并保守关闭交易任务。")
+        suggestions.append("调用 POST /api/data/trading-calendar/refresh 刷新运行时日历；进入新年度前同时更新 bundled baseline。")
+    elif trade_calendar.source is TradeCalendarSource.UNAVAILABLE:
+        warnings.append("运行时交易日历与内置基线均不可用，已跳过行情交易日期判断并保守关闭交易任务。")
+        suggestions.append("检查 app/resources/trading_calendar.json 完整性，并调用交易日历刷新 API 重建 data/ 运行时缓存。")
+    elif trade_calendar.warning:
+        warnings.append(trade_calendar.warning)
+        suggestions.append("调用 POST /api/data/trading-calendar/refresh 重建运行时交易日历缓存。")
     if (
         _table_count(table_counts, "alert_rule")
         and not getattr(scheduler_status, "running", False)
@@ -264,24 +277,42 @@ def storage_diagnostics(
 ) -> StorageDiagnostics:
     table_counts = _normalized_table_counts(table_counts)
     component_sizes = _sqlite_component_sizes(path)
-    size_bytes = sum(component_sizes.values())
+    backup_storage = runtime_backup_storage(path) if str(path) != ":memory:" else None
+    sqlite_size_bytes = sum(component_sizes.values())
+    backup_size_bytes = backup_storage.size_bytes if backup_storage is not None else 0
+    size_bytes = sqlite_size_bytes + backup_size_bytes
     budget_bytes = _storage_budget_bytes(budget_mb)
-    cache_rows = sum(_table_count(table_counts, table) for table in CACHE_DATA_TABLES)
-    runtime_rows = sum(_table_count(table_counts, table) for table in RUNTIME_STATE_TABLES)
+    quote_rows = _table_group_count(table_counts, QUOTE_STORAGE_TABLES)
+    kline_rows = _table_group_count(table_counts, KLINE_STORAGE_TABLES)
+    market_scan_rows = _table_group_count(table_counts, MARKET_SCAN_STORAGE_TABLES)
+    other_cache_rows = _table_group_count(table_counts, OTHER_CACHE_DATA_TABLES)
+    other_runtime_rows = _table_group_count(table_counts, RUNTIME_STATE_TABLES - MARKET_SCAN_STORAGE_TABLES)
     user_rows = sum(_table_count(table_counts, table) for table in USER_DATA_TABLE_ALLOWLIST)
     usage_pct = round(size_bytes / budget_bytes * 100, 2)
     return StorageDiagnostics(
         db_path=str(path),
         db_size_bytes=size_bytes,
         db_size_mb=round(size_bytes / 1024 / 1024, 2),
-        cache_rows=cache_rows,
-        runtime_rows=runtime_rows,
+        sqlite_size_bytes=sqlite_size_bytes,
+        backup_size_bytes=backup_size_bytes,
+        managed_backup_count=backup_storage.managed_bundle_count if backup_storage is not None else 0,
+        cache_rows=quote_rows + kline_rows + other_cache_rows,
+        runtime_rows=market_scan_rows + other_runtime_rows,
         user_rows=user_rows,
+        quote_rows=quote_rows,
+        kline_rows=kline_rows,
+        market_scan_rows=market_scan_rows,
+        other_cache_rows=other_cache_rows,
+        other_runtime_rows=other_runtime_rows,
         budget_bytes=budget_bytes,
         warning_at_pct=STORAGE_WARNING_AT_PCT,
         usage_pct=usage_pct,
         over_budget=size_bytes > budget_bytes,
     )
+
+
+def _table_group_count(table_counts: dict[str, int], tables: frozenset[str]) -> int:
+    return sum(_table_count(table_counts, table) for table in tables)
 
 
 def _sqlite_component_sizes(path: Path) -> dict[str, int]:

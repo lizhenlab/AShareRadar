@@ -299,7 +299,7 @@ def eastmoney_quote_fields(row: dict[str, Any]) -> EastmoneyQuoteFields:
     ensure_quote_price_bounds(price, high, low)
     return EastmoneyQuoteFields(
         code=code,
-        market=normalize_symbol(code)[1].upper(),
+        market=eastmoney_quote_market(row, code),
         name=eastmoney_quote_name(row, code),
         price=price,
         prev_close=prev_close,
@@ -324,6 +324,23 @@ def eastmoney_quote_code(row: dict[str, Any]) -> str:
         raise ValueError("东方财富行情行缺少有效6位股票代码")
     normalize_symbol(raw_code)
     return raw_code
+
+
+def eastmoney_quote_market(row: dict[str, Any], code: str) -> str:
+    inferred_market = normalize_symbol(code)[1]
+    raw_market = eastmoney_text(row, "f13")
+    if not raw_market:
+        return inferred_market.upper()
+    if raw_market == "1":
+        market = "sh"
+    elif raw_market == "0":
+        market = "bj" if inferred_market == "bj" else "sz"
+    else:
+        raise ProviderProtocolError(f"东方财富行情返回未知市场标识：{raw_market}")
+    try:
+        return normalize_symbol(f"{code}.{market}")[1].upper()
+    except ValueError:
+        raise ProviderProtocolError(f"东方财富行情代码与市场标识不一致：{code}/{raw_market}") from None
 
 
 def eastmoney_quote_name(row: dict[str, Any], code: str) -> str:
@@ -510,7 +527,7 @@ def eastmoney_history_json(symbol: str, period: str, include_market_cap: bool) -
 
 def eastmoney_quote_secid(symbol: str) -> str:
     code, market = normalize_symbol(symbol)
-    market_code = "1" if market == "sh" else "0"
+    market_code = {"sh": "1", "sz": "0", "bj": "0"}[market]
     return f"{market_code}.{code}"
 
 

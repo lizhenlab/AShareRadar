@@ -4,6 +4,11 @@ import re
 import subprocess
 from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.api.static_assets import RevalidatingStaticFiles
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT / "static"
@@ -19,7 +24,21 @@ JS_STRING_RE = re.compile(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\
 def test_index_links_css_entrypoint() -> None:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-    assert '<link rel="stylesheet" href="/static/styles.css" />' in html
+    assert re.search(r'<link rel="stylesheet" href="/static/styles\.css\?v=[^"]+" />', html)
+
+
+def test_static_assets_always_revalidate_nested_modules() -> None:
+    app = FastAPI()
+    app.mount("/static", RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
+    client = TestClient(app)
+
+    entrypoint = client.get("/static/styles.css?v=test")
+    nested = client.get("/static/css/base.css")
+    module = client.get("/static/js/api.js")
+
+    assert entrypoint.headers["cache-control"] == "no-cache"
+    assert nested.headers["cache-control"] == "no-cache"
+    assert module.headers["cache-control"] == "no-cache"
 
 
 def test_css_entrypoint_imports_existing_modules_in_order() -> None:
@@ -31,6 +50,7 @@ def test_css_entrypoint_imports_existing_modules_in_order() -> None:
         "sidebar.css",
         "workspace-core.css",
         "research-panels.css",
+        "market-scan.css",
         "interactions.css",
         "side-footer.css",
         "responsive.css",
@@ -61,16 +81,41 @@ def test_frontend_js_functions_stay_small_enough_to_review() -> None:
     assert hotspots == []
 
 
-def test_ui_symbol_validation_matches_backend_zero_code_rule() -> None:
+def test_ui_symbol_validation_supports_all_a_share_markets_and_rejects_conflicts() -> None:
     script = r'''
       import { normalizeUiSymbol, validateUiSymbol, UI_SYMBOL_ERROR_MESSAGE } from "./static/js/symbols.js";
 
-      if (normalizeUiSymbol("600519") !== "600519.SH") {
-        throw new Error("expected SH normalization for 600519");
+      const accepted = new Map([
+        ["600519", "600519.SH"],
+        ["sh.600519", "600519.SH"],
+        ["600519.sh", "600519.SH"],
+        ["600519.SZ", "600519.SZ"],
+        ["sz000001", "000001.SZ"],
+        ["000001.SZ", "000001.SZ"],
+        ["000001.SH", "000001.SH"],
+        ["430047", "430047.BJ"],
+        ["BJ-830799", "830799.BJ"],
+        ["bj.872392", "872392.BJ"],
+        ["880001.BJ", "880001.BJ"],
+        ["920066", "920066.BJ"],
+        ["BJ920066.BJ", "920066.BJ"],
+      ]);
+      for (const [input, expected] of accepted) {
+        if (validateUiSymbol(input) !== expected || normalizeUiSymbol(input) !== expected) {
+          throw new Error(`unexpected normalization for ${input}`);
+        }
       }
-      if (validateUiSymbol("sz000001") !== "000001.SZ") {
-        throw new Error("expected SZ prefix normalization");
+
+      for (const input of ["SH600519.SZ", "920066.SH", "000001.BJ", "600519.BJ", "BJ920066.SH"]) {
+        let rejected = false;
+        try {
+          validateUiSymbol(input);
+        } catch (error) {
+          rejected = error.message.includes("市场") || error.message.includes("不一致");
+        }
+        if (!rejected) throw new Error(`expected market conflict rejection for ${input}`);
       }
+
       let rejected = false;
       try {
         validateUiSymbol("000000");

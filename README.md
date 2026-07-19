@@ -1,6 +1,6 @@
 # AShareRadar
 
-AShareRadar is a local A-share single-stock research workbench. It combines code/name lookup, adjustment-aware daily K-lines and inspectable intraday charts, trend and risk analysis, versioned advice history with as-of reviews, fixed-condition current/custom watchlist scans, notes, alerts, browser notifications, local data portability, and system diagnostics in a Chinese FastAPI web application backed by SQLite.
+AShareRadar is a local A-share research workbench. It combines full-market SH/SZ/BJ scanning and deterministic ranking with code/name lookup, adjustment-aware daily K-lines, inspectable intraday charts, trend and risk analysis, versioned advice history, fixed-condition watchlist scans, notes, alerts, local data portability, and system diagnostics in a Chinese FastAPI web application backed by SQLite.
 
 It is a research assistant, not an automated trading system. It does not connect to brokerage accounts, place orders, or provide investment advice.
 
@@ -15,10 +15,12 @@ source "$PROJECT_ROOT/.venv/bin/activate"
 export PYTHON="$PROJECT_ROOT/.venv/bin/python"
 export PYTHONNOUSERSITE=1
 $PYTHON -m pip install --require-hashes -r requirements-lock.txt
-$PYTHON -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 1
+$PYTHON -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 1 --timeout-graceful-shutdown 5
 ```
 
 Open `http://127.0.0.1:8010`.
+
+The five-second Uvicorn graceful-shutdown bound prevents an open SSE stream or in-flight data request from keeping request draining pending indefinitely. Application/provider cleanup follows with its own bounded waits; the daemon provider-worker boundary described below handles an SDK call that cannot be interrupted.
 
 For development, install `requirements-dev-lock.txt` directly in the virtual environment; it already contains the complete runtime resolution plus the engineering tools. Node.js and npm are development tools and are not required to run the web application:
 
@@ -71,6 +73,7 @@ export ASHARE_RADAR_LLM_API_KEY="your OpenAI-compatible key"
 export ASHARE_RADAR_LLM_BASE_URL="https://your-openai-compatible-endpoint/v1"
 export ASHARE_RADAR_LLM_MODEL="your model name"
 export ASHARE_RADAR_LLM_ENABLED=1
+chmod 600 "$HOME/.zshrc"
 ```
 
 Optional provider settings:
@@ -83,6 +86,21 @@ export ASHARE_RADAR_FUTU_PORT=11111
 ```
 
 Legacy variables such as `TUSHARE_TOKEN`, `FUTU_ENABLED`, and `SCHEDULER_*` remain accepted as aliases. New configuration should use the `ASHARE_RADAR_*` namespace.
+
+## Full-Market Ranking
+
+Open **全市场榜单** and click **开始扫描**. The API immediately creates a background run; the page then polls real progress and publishes a stable, pageable snapshot only after that run reaches a terminal state.
+
+- The universe is the current listed A-share pool across SH, SZ, and BJ. It has no fixed 5,000-row truncation, rejects Shanghai/Shenzhen B shares, excludes delisted rows, and retains explicit ST/new-stock tags. Provider rows are normalized and de-duplicated once; coverage checks and the atomic cached-pool replacement use that same candidate set. Guards enforce both a 4,000-name total and configurable minimums for each market, and reject a large total or per-market drop from the latest authoritative snapshot before per-stock work begins.
+- Suspended stocks, short histories, stale quotes/K-lines, malformed data, and source failures remain visible as `skipped` or `missing`; they never enter the ranking as zero-score stocks.
+- Every first-time symbol request asks DataHub for up to 260 completed `qfq` daily bars. Later runs reuse a compatible cache and perform a small overlap-verified incremental refresh; a detected adjustment rebase triggers a full refresh. Cache persistence retains quote/K-line fallback provenance, and older K-line vintages cannot replace newer equal-length snapshots.
+- `full-market-score-v1` combines the existing leader score at 85% and data quality at 15%. Leader inputs include trend, price change, volume ratio, amount, and turnover. Ties use trend score, change percentage, amount, then symbol in that order.
+- Runs and per-stock results are persisted with as-of/data dates, sources, metrics, structured degradation provenance, status, rank, coverage, and duration. The completed `data_date` is the frozen end-of-day snapshot boundary, so later revisions from that same market date remain eligible while another date does not. Active runs are de-duplicated, can be cancelled, and become `interrupted` rather than falsely remaining active after a restart. One repository-generated retry plan controls validation and atomic derived-run creation: the original stays immutable, clean successful rows are reused, and missing/skipped or degraded rows are recalculated. Task creation/attachment and scan/task terminal changes each commit atomically; transient SQLite lock conflicts are retried, while an owned local terminal failure is later converged to `interrupted` after its worker exits.
+- Full-market scoring is local and deterministic. It never calls an LLM per stock; LLM use remains an optional, on-demand explanation path for a selected stock.
+
+The scan workspace validates API response contracts, uses a single bounded exponential-backoff poller, falls back to the latest run after a missing run or repeated refresh failures, resets pagination when it discovers a new run, and resumes immediately when the browser returns online. Static assets are revalidated with `no-cache`, and the scan ES modules share one version mapping.
+
+On a trading day, manual scans are accepted only after the 15:15 completed-daily-bar boundary. Optional after-close scheduling, concurrency, timeouts, retention, degraded behavior, and troubleshooting are documented in the [Operations Guide](docs/OPERATIONS.md).
 
 ## Current Architecture
 
@@ -105,15 +123,16 @@ See [Software Design Description](docs/DESIGN.md) and [Maintenance and Refactor 
 ## Runtime Boundaries
 
 - The app is local, single-user software. Browser writes and explicit refreshes enforce the configured same-origin boundary; ordinary reads and metadata-free non-browser clients remain supported.
-- SQLite is the local persistence layer. The scheduler uses a database-adjacent process lock, so the supported Uvicorn topology is one worker. Scheduler status distinguishes degraded fallback results from failures and reports a non-owner process as standby while another instance holds the lock.
+- SQLite is the local persistence layer. One database-adjacent `runtime-leader` lock owns the scheduler and full-market scanner as a unit; bounded stop may return before a non-cooperative task, but leadership is released only after both services are truly idle. A standby then takes over both together. The supported Uvicorn topology remains one worker because status and controls are process-local.
 - Daily research uses an explicit `qfq` K-line contract with adjustment, as-of, data-version, and contract-version provenance. Cache keys isolate other adjustment modes and legacy `unknown` rows.
 - Provider failures and cache fallback stay visible, and provider errors are sanitized before persistence or response rendering.
+- Blocking provider SDK work runs in a bounded runtime-owned daemon executor. Shutdown rejects new calls, cancels queued work, and waits only for its configured budget; an already-running uncooperative SDK call cannot be force-stopped, but its daemon worker does not keep Python alive at process exit.
 - Code/name autocomplete calls the existing stock-search endpoint only for a debounced, uncached, non-complete query. Chart inspection and local research-activity filtering use data already loaded in the browser and issue no requests.
 - LLM wording is optional and explanatory. Failure falls back to deterministic rule text, and local watchlists, notes, alerts, advice history, and provider credentials are excluded from its prompt.
-- User-owned records can be exported and transactionally imported as versioned JSON. Import commits require a matching server preview and verified rollback backup; scheduled cleanup removes only regenerable/runtime rows. Deleting an advice-review plan is irreversible and also deletes its evaluation history, while the source advice snapshot remains intact. Full backup/restore and manual retention cleanup are documented in the [Operations Guide](docs/OPERATIONS.md).
+- User-owned records can be exported and transactionally imported as versioned JSON. Import commits require a matching server preview and verified rollback backup; backup creation, verification, rotation, and restore share a bounded cross-process operation lease so an in-use bundle cannot be pruned. Scheduled cleanup removes only regenerable/runtime rows through throttled set-based retention. Active scans and the direct parent of each retained retry are safety exceptions; older retry ancestry can expire in the same pass. Large successful cleanups compact SQLite only when reclaimed pages are material, and compaction failure never rolls back logical retention. Deleting an advice-review plan is irreversible and also deletes its evaluation history, while the source advice snapshot remains intact. Full backup/restore and manual retention cleanup are documented in the [Operations Guide](docs/OPERATIONS.md).
 - Browser notifications can be enabled or disabled explicitly, and that preference survives page reloads. Alert-event pagination uses the event ID as its authoritative cursor. Enabling or re-enabling establishes a fresh baseline, so historical events and events created while notifications were disabled are not replayed; a failed delivery remains behind the cursor for ordered retry.
-- Diagnostics apply freshness checks to quote and K-line data as well as stock-pool and plate metadata, including non-empty metadata caches that are missing a usable update timestamp.
-- Files under `data/`, including the scheduler lock, are local runtime state and must not be committed; `data/.gitkeep` only preserves the directory.
+- Diagnostics apply freshness checks to quote and K-line data as well as stock-pool and plate metadata, and report SQLite/managed-backup bytes plus quote, K-line, and full-market-scan row groups.
+- Files under `data/`, including runtime-leadership and compatibility lock files, are local runtime state and must not be committed; `data/.gitkeep` only preserves the directory.
 
 ## License
 

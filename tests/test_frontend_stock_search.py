@@ -326,6 +326,89 @@ def test_stock_search_destroy_cancels_work_and_prevents_all_later_callbacks() ->
     _run_node_script(script)
 
 
+def test_stock_search_and_quote_stream_accept_valid_beijing_symbols_only() -> None:
+    script = r'''
+      import assert from "node:assert/strict";
+      import { createStockSearchController } from "./static/js/stock-search.js";
+
+      const states = [];
+      const payloads = [
+        [stock("920066.BJ", "Beijing")],
+        [{ ...stock("920066.SH", "Wrong suffix") }],
+        [{ ...stock("600519.BJ", "Wrong market") }],
+        [{ ...stock("920066.BJ", "Mismatched fields"), market: "SH" }],
+      ];
+      let call = 0;
+      globalThis.fetch = async () => jsonResponse(payloads[call++]);
+      const controller = createStockSearchController({
+        debounceMs: 0,
+        onState: (state) => states.push(state),
+      });
+
+      controller.input("北交");
+      await waitFor(() => states.at(-1)?.phase === "ready", "valid BJ result");
+      assert.equal(states.at(-1).items[0].symbol, "920066.BJ");
+      for (const query of ["wrong-suffix", "wrong-market", "mismatch"]) {
+        controller.input(query);
+        await waitFor(
+          () => states.at(-1)?.query === query && states.at(-1)?.phase === "unavailable",
+          query
+        );
+      }
+      controller.destroy();
+
+      const { createAppHarness } = await import("./tests/frontend_app_flow_helpers.mjs");
+      const { __appTest, element, streams } = await createAppHarness();
+      __appTest.state.symbol = "920066.BJ";
+      __appTest.state.loadSeq = 7;
+      __appTest.startStream();
+      const stream = streams.at(-1);
+      assert.match(decodeURIComponent(stream.url), /920066\.BJ/);
+      stream.onmessage({ data: JSON.stringify([quote("920066", "BJ", "北交行情")]) });
+      assert.match(element("quoteList").innerHTML, /北交行情/);
+      const rendered = element("quoteList").innerHTML;
+      stream.onmessage({ data: JSON.stringify([quote("920066", "SH", "非法组合")]) });
+      assert.equal(element("quoteList").innerHTML, rendered);
+      assert.equal(__appTest.state.sseStatus.phase, "invalid");
+
+      function quote(code, market, name) {
+        return { code, market, name, price: 10, change_pct: 1, amount: 1000000 };
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_stock_search_binding_clears_blur_close_on_focus_input_and_destroy() -> None:
+    script = r'''
+      import assert from "node:assert/strict";
+      import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
+
+      const timers = new Map();
+      let nextId = 0;
+      globalThis.setTimeout = (callback, delay = 0) => {
+        const id = ++nextId;
+        timers.set(id, { callback, delay });
+        return id;
+      };
+      globalThis.clearTimeout = (id) => timers.delete(id);
+      const { __appTest, element } = await createAppHarness();
+      const input = element("symbolInput");
+
+      input.listeners.blur();
+      assert.equal(timers.size, 1);
+      input.listeners.focus();
+      assert.equal(timers.size, 0, "focus kept the old blur close timer");
+      input.listeners.blur();
+      element("symbolInput").value = "平安";
+      input.listeners.input?.({ currentTarget: input });
+      assert.equal([...timers.values()].some((timer) => timer.delay === 120), false, "input kept the old blur close timer");
+      input.listeners.blur();
+      __appTest.destroyStockSearchBindings();
+      assert.equal(timers.size, 0, "destroy kept the old blur close timer");
+    '''
+    _run_node_script(script)
+
+
 def _run_node_script(test_body: str) -> None:
     subprocess.run(
         ["node", "--input-type=module", "-e", f"{test_body}\n{NODE_HELPERS}"],

@@ -2,7 +2,7 @@ export const WORKSPACE_PREFERENCES_VERSION = 1;
 export const WORKSPACE_PREFERENCES_STORAGE_KEY = "ashare-radar.workspace-preferences";
 
 export const WORKSPACE_PREFERENCE_OPTIONS = Object.freeze({
-  workspaceView: Object.freeze(["overview", "qa", "strategy", "finance", "theme", "replay", "tools"]),
+  workspaceView: Object.freeze(["overview", "market-scan", "qa", "strategy", "finance", "theme", "replay", "tools"]),
   dailyChartRange: Object.freeze([20, 60, 120, 240]),
   minuteChartInterval: Object.freeze(["5m", "15m", "30m", "60m"]),
   mobileChartView: Object.freeze(["daily", "minute"]),

@@ -182,9 +182,17 @@ class StorageDiagnostics(BaseModel):
     db_path: str
     db_size_bytes: int
     db_size_mb: float
+    sqlite_size_bytes: int = 0
+    backup_size_bytes: int = 0
+    managed_backup_count: int = 0
     cache_rows: int
     runtime_rows: int
     user_rows: int
+    quote_rows: int = 0
+    kline_rows: int = 0
+    market_scan_rows: int = 0
+    other_cache_rows: int = 0
+    other_runtime_rows: int = 0
     budget_bytes: int
     warning_at_pct: float
     usage_pct: float

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from pathlib import Path
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -54,6 +58,28 @@ def test_provider_runtime_timed_call_returns_value_and_latency() -> None:
 
     assert value == "ok"
     assert latency_ms >= 0
+
+
+def test_provider_runtime_supports_a_longer_timeout_for_full_stock_pool_calls() -> None:
+    async def run_check() -> str:
+        runtime = ProviderRuntime(
+            _FailingStatusCache(),
+            Settings(provider_call_timeout_seconds=0.01),
+        )
+
+        async def slow_stock_pool() -> str:
+            await asyncio.sleep(0.03)
+            return "full-pool"
+
+        result = await runtime.timed_provider_call(
+            "metadata",
+            "stock",
+            slow_stock_pool,
+            timeout_seconds=0.2,
+        )
+        return result.value
+
+    assert asyncio.run(run_check()) == "full-pool"
 
 
 def test_provider_runtime_allows_two_distinct_keys_and_queues_the_third() -> None:
@@ -410,11 +436,50 @@ def test_provider_runtime_uses_owned_bounded_executor_and_closes_idempotently() 
     assert in_flight is False
 
 
-def test_datahub_close_timeout_keeps_provider_open_until_worker_finishes(tmp_path) -> None:
+def test_stuck_provider_worker_does_not_block_process_exit() -> None:
+    script = """
+import asyncio
+import threading
+
+from app.config import Settings
+from app.services.datahub_runtime import ProviderCallTimeoutError, ProviderRuntime, run_provider_io
+
+
+async def main():
+    runtime = ProviderRuntime(object(), Settings(provider_call_timeout_seconds=0.01))
+    blocker = threading.Event()
+    try:
+        await runtime.call_provider(
+            "blocking",
+            "quote",
+            lambda: run_provider_io(blocker.wait),
+        )
+    except ProviderCallTimeoutError:
+        pass
+    await runtime.aclose(timeout=0.01)
+
+
+asyncio.run(main())
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_datahub_close_timeout_auto_closes_provider_before_asyncio_run_finishes(tmp_path) -> None:
     release = threading.Event()
     started = threading.Event()
     finished = threading.Event()
     close_states: list[bool] = []
+    provider_closed = asyncio.Event()
 
     def blocking_call() -> str:
         started.set()
@@ -427,6 +492,7 @@ def test_datahub_close_timeout_keeps_provider_open_until_worker_finishes(tmp_pat
     class CloseTrackingProvider:
         async def aclose(self) -> None:
             close_states.append(finished.is_set())
+            provider_closed.set()
 
     async def run_check() -> None:
         settings = Settings(
@@ -447,15 +513,335 @@ def test_datahub_close_timeout_keeps_provider_open_until_worker_finishes(tmp_pat
             assert await hub.aclose(timeout=0.02) is False
             assert hub._provider_runtime.provider_call_in_flight("slow", "stock") is True
             assert close_states == []
+            deferred = hub._provider_close_task
+            assert deferred is not None
 
             release.set()
-            assert await hub.aclose(timeout=0.5) is True
+            await asyncio.wait_for(provider_closed.wait(), timeout=1.5)
+            await asyncio.wait_for(asyncio.shield(deferred), timeout=0.2)
+            assert deferred.done() is True
             assert close_states == [True]
             assert hub._provider_runtime.provider_call_in_flight("slow", "stock") is False
 
             assert await hub.aclose(timeout=0.5) is True
             assert close_states == [True]
         finally:
+            release.set()
+            await hub.aclose(timeout=0.5)
+
+    asyncio.run(run_check())
+
+
+def test_datahub_concurrent_close_waiters_keep_independent_deadlines(tmp_path: Path) -> None:
+    class BlockingRuntime:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def aclose(self, timeout: float) -> bool:
+            self.started.set()
+            await self.release.wait()
+            return True
+
+    async def run_check() -> None:
+        hub = DataHub(settings=Settings(cache_path=tmp_path / "cache.sqlite3"))
+        runtime = BlockingRuntime()
+        hub._provider_runtime = runtime  # type: ignore[assignment]
+        hub.providers = {}
+        long_waiter = asyncio.create_task(hub.aclose(timeout=0.20))
+        try:
+            await asyncio.wait_for(runtime.started.wait(), timeout=0.1)
+            shared_task = hub._provider_close_task
+            started = asyncio.get_running_loop().time()
+
+            assert await hub.aclose(timeout=0.01) is False
+
+            elapsed = asyncio.get_running_loop().time() - started
+            assert 0.008 <= elapsed < 0.08
+            assert long_waiter.done() is False
+            assert hub._provider_close_task is shared_task
+
+            runtime.release.set()
+            assert await long_waiter is True
+        finally:
+            runtime.release.set()
+            await asyncio.gather(long_waiter, return_exceptions=True)
+
+    asyncio.run(run_check())
+
+
+def test_datahub_first_close_waiter_cancellation_does_not_cancel_shared_task(tmp_path: Path) -> None:
+    provider_closed = asyncio.Event()
+
+    class BlockingRuntime:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def aclose(self, timeout: float) -> bool:
+            self.started.set()
+            await self.release.wait()
+            return True
+
+    class CloseTrackingProvider:
+        async def aclose(self) -> None:
+            provider_closed.set()
+
+    async def run_check() -> None:
+        hub = DataHub(settings=Settings(cache_path=tmp_path / "cache.sqlite3"))
+        runtime = BlockingRuntime()
+        hub._provider_runtime = runtime  # type: ignore[assignment]
+        hub.providers = {"tracked": CloseTrackingProvider()}
+        first_waiter = asyncio.create_task(hub.aclose(timeout=0.5))
+        try:
+            await asyncio.wait_for(runtime.started.wait(), timeout=0.1)
+            shared_task = hub._provider_close_task
+            assert shared_task is not None
+
+            first_waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first_waiter
+
+            assert hub._provider_close_task is shared_task
+            assert shared_task.cancelled() is False
+
+            runtime.release.set()
+            assert await asyncio.wait_for(asyncio.shield(shared_task), timeout=0.2) is True
+            assert provider_closed.is_set()
+        finally:
+            runtime.release.set()
+            await asyncio.gather(first_waiter, return_exceptions=True)
+
+    asyncio.run(run_check())
+
+
+def test_datahub_runtime_close_retries_without_extra_sleep(tmp_path: Path) -> None:
+    class SequencedRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def aclose(self, timeout: float) -> bool:
+            self.calls += 1
+            await asyncio.sleep(0.005)
+            return self.calls >= 3
+
+    async def run_check() -> None:
+        hub = DataHub(settings=Settings(cache_path=tmp_path / "cache.sqlite3"))
+        runtime = SequencedRuntime()
+        hub._provider_runtime = runtime  # type: ignore[assignment]
+        hub.providers = {}
+        started = asyncio.get_running_loop().time()
+
+        assert await hub.aclose(timeout=0.1) is True
+
+        assert asyncio.get_running_loop().time() - started < 0.08
+        assert runtime.calls == 3
+
+    asyncio.run(run_check())
+
+
+def test_datahub_provider_partial_failure_retries_only_failed_provider(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    close_calls = {"stable": 0, "flaky": 0}
+
+    class StableProvider:
+        async def aclose(self) -> None:
+            close_calls["stable"] += 1
+
+    class FlakyProvider:
+        async def aclose(self) -> None:
+            close_calls["flaky"] += 1
+            if close_calls["flaky"] == 1:
+                raise RuntimeError("/private/cache.sqlite3 api_key=do-not-log")
+
+    async def run_check() -> None:
+        hub = DataHub(settings=Settings(cache_path=tmp_path / "cache.sqlite3"))
+        hub.providers = {
+            "stable": StableProvider(),
+            "flaky": FlakyProvider(),
+        }
+
+        assert await hub.aclose(timeout=0.2) is False
+        assert hub._providers_closed is False
+        assert close_calls == {"stable": 1, "flaky": 1}
+
+        assert await hub.aclose(timeout=0.2) is True
+        assert close_calls == {"stable": 1, "flaky": 2}
+        assert await hub.aclose(timeout=0.2) is True
+        assert close_calls == {"stable": 1, "flaky": 2}
+
+    caplog.set_level(logging.WARNING, logger="app.services.datahub")
+    asyncio.run(run_check())
+
+    diagnostic = caplog.text
+    assert "DataHub provider shutdown failed: RuntimeError" in diagnostic
+    assert "cache.sqlite3" not in diagnostic
+    assert "do-not-log" not in diagnostic
+    assert "api_key" not in diagnostic
+
+
+def test_datahub_shared_close_task_exception_is_consumed_and_visible_to_waiters(tmp_path: Path) -> None:
+    loop_errors: list[dict] = []
+
+    class FailingRuntime:
+        async def aclose(self, timeout: float) -> bool:
+            raise RuntimeError("runtime close failed")
+
+    async def run_check() -> None:
+        hub = DataHub(settings=Settings(cache_path=tmp_path / "cache.sqlite3"))
+        hub._provider_runtime = FailingRuntime()  # type: ignore[assignment]
+        hub.providers = {}
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            with pytest.raises(RuntimeError, match="runtime close failed"):
+                await hub.aclose(timeout=0.1)
+            await asyncio.sleep(0)
+            assert loop_errors == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    asyncio.run(run_check())
+
+
+def test_datahub_provider_cancelled_error_propagates_and_retries_only_unfinished_provider(tmp_path: Path) -> None:
+    close_calls = {"stable": 0, "cancelled": 0}
+
+    class StableProvider:
+        async def aclose(self) -> None:
+            close_calls["stable"] += 1
+
+    class CancelOnceProvider:
+        async def aclose(self) -> None:
+            close_calls["cancelled"] += 1
+            if close_calls["cancelled"] == 1:
+                raise asyncio.CancelledError
+
+    async def run_check() -> None:
+        hub = DataHub(settings=Settings(cache_path=tmp_path / "cache.sqlite3"))
+        hub.providers = {
+            "stable": StableProvider(),
+            "cancelled": CancelOnceProvider(),
+        }
+
+        with pytest.raises(asyncio.CancelledError):
+            await hub.aclose(timeout=0.2)
+
+        assert close_calls == {"stable": 1, "cancelled": 1}
+        assert hub._providers_closed is False
+        assert await hub.aclose(timeout=0.2) is True
+        assert close_calls == {"stable": 1, "cancelled": 2}
+
+    asyncio.run(run_check())
+
+
+def test_datahub_repeated_close_waiters_share_deferred_provider_close_and_survive_cancellation(tmp_path) -> None:
+    release = threading.Event()
+    started = threading.Event()
+    provider_closed = asyncio.Event()
+    close_calls = 0
+
+    def blocking_call() -> str:
+        started.set()
+        release.wait(timeout=2)
+        return "done"
+
+    class CloseTrackingProvider:
+        async def aclose(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            provider_closed.set()
+
+    async def run_check() -> None:
+        settings = Settings(
+            cache_path=tmp_path / "cache.sqlite3",
+            provider_call_timeout_seconds=0.01,
+        )
+        hub = DataHub(settings=settings)
+        hub.providers = {"slow": CloseTrackingProvider()}
+        try:
+            with pytest.raises(ProviderCallTimeoutError):
+                await hub._provider_runtime.call_provider(
+                    "slow",
+                    "stock",
+                    lambda: run_provider_io(blocking_call),
+                )
+            assert started.is_set()
+            assert await hub.aclose(timeout=0.01) is False
+            deferred = hub._provider_close_task
+            assert deferred is not None
+
+            cancelled_waiter = asyncio.create_task(hub.aclose(timeout=0.5))
+            second_waiter = asyncio.create_task(hub.aclose(timeout=0.5))
+            await asyncio.sleep(0)
+            cancelled_waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled_waiter
+            assert hub._provider_close_task is deferred
+            assert deferred.done() is False
+
+            release.set()
+            assert await second_waiter is True
+            await asyncio.wait_for(provider_closed.wait(), timeout=1.5)
+            assert close_calls == 1
+            assert await hub.aclose(timeout=0.1) is True
+            assert close_calls == 1
+        finally:
+            release.set()
+            await hub.aclose(timeout=0.5)
+
+    asyncio.run(run_check())
+
+
+def test_datahub_cancelled_deferred_close_task_is_consumed_and_can_be_restarted(tmp_path) -> None:
+    release = threading.Event()
+    started = threading.Event()
+    provider_closed = asyncio.Event()
+    loop_errors: list[dict] = []
+
+    def blocking_call() -> str:
+        started.set()
+        release.wait(timeout=2)
+        return "done"
+
+    class CloseTrackingProvider:
+        async def aclose(self) -> None:
+            provider_closed.set()
+
+    async def run_check() -> None:
+        settings = Settings(
+            cache_path=tmp_path / "cache.sqlite3",
+            provider_call_timeout_seconds=0.01,
+        )
+        hub = DataHub(settings=settings)
+        hub.providers = {"slow": CloseTrackingProvider()}
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            with pytest.raises(ProviderCallTimeoutError):
+                await hub._provider_runtime.call_provider(
+                    "slow",
+                    "stock",
+                    lambda: run_provider_io(blocking_call),
+                )
+            assert started.is_set()
+            assert await hub.aclose(timeout=0.01) is False
+            deferred = hub._provider_close_task
+            assert deferred is not None
+            deferred.cancel()
+            await asyncio.gather(deferred, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert loop_errors == []
+
+            release.set()
+            assert await hub.aclose(timeout=0.5) is True
+            await asyncio.wait_for(provider_closed.wait(), timeout=1.5)
+        finally:
+            loop.set_exception_handler(previous_handler)
             release.set()
             await hub.aclose(timeout=0.5)
 

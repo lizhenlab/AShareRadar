@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
-from typing import Iterable
+from collections.abc import Iterable, Mapping
+import logging
+import math
 
 from app.config import Settings
 from app.models.schemas import (
@@ -21,7 +23,7 @@ from app.models.schemas import (
     StockInfo,
 )
 from app.services.cache import SQLiteCache, resolve_cache_settings
-from app.services.datahub_metadata import MetadataCoordinator
+from app.services.datahub_metadata import MetadataCoordinator, StockPoolResolution
 from app.services.datahub_klines import KlineCoordinator
 from app.services.datahub_orderbook import OrderBookCoordinator
 from app.services.datahub_status import (
@@ -42,6 +44,9 @@ from app.services.provider_registry import (
 
 
 __all__ = ["DataHub", "_provider_error_text", "_provider_source_key"]
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -112,8 +117,9 @@ class DataHub:
         self.workbench_contexts = workbench_contexts if workbench_contexts is not None else WorkbenchContextCache()
         self.providers = build_providers(self.settings)
         self._provider_runtime = ProviderRuntime(self.cache, self.settings)
-        self._close_lock = asyncio.Lock()
         self._providers_closed = False
+        self._closed_providers: list[object] = []
+        self._provider_close_task: asyncio.Task[bool] | None = None
         coordinators = _build_coordinators(self, self._provider_runtime)
         self._quote_coordinator = coordinators.quote
         self._kline_coordinator = coordinators.kline
@@ -128,6 +134,16 @@ class DataHub:
 
     async def quotes(self, symbols: Iterable[str], use_cache: bool = True) -> list[Quote]:
         return await self._quote_coordinator.quotes(symbols, use_cache=use_cache)
+
+    async def partial_quotes(self, symbols: Iterable[str], use_cache: bool = True) -> list[Quote]:
+        return await self._quote_coordinator.partial_quotes(symbols, use_cache=use_cache)
+
+    async def partial_quotes_with_errors(
+        self,
+        symbols: Iterable[str],
+        use_cache: bool = True,
+    ) -> tuple[list[Quote], tuple[str, ...]]:
+        return await self._quote_coordinator.partial_quotes_with_errors(symbols, use_cache=use_cache)
 
     async def quote_with_quality(
         self,
@@ -159,8 +175,37 @@ class DataHub:
     async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120, use_cache: bool = True) -> list[MinuteKline]:
         return await self._kline_coordinator.minute_kline(symbol, interval=interval, limit=limit, use_cache=use_cache)
 
-    async def stock_pool(self, keyword: str | None = None, limit: int = 5000, refresh: bool = False) -> list[StockInfo]:
-        return await self._metadata_coordinator.stock_pool(keyword=keyword, limit=limit, refresh=refresh)
+    async def stock_pool(
+        self,
+        keyword: str | None = None,
+        limit: int | None = 5000,
+        refresh: bool = False,
+        required_markets: Iterable[str] | None = None,
+        minimum_market_counts: Mapping[str, int] | None = None,
+    ) -> list[StockInfo]:
+        return await self._metadata_coordinator.stock_pool(
+            keyword=keyword,
+            limit=limit,
+            refresh=refresh,
+            required_markets=required_markets,
+            minimum_market_counts=minimum_market_counts,
+        )
+
+    async def stock_pool_resolution(
+        self,
+        keyword: str | None = None,
+        limit: int | None = 5000,
+        refresh: bool = False,
+        required_markets: Iterable[str] | None = None,
+        minimum_market_counts: Mapping[str, int] | None = None,
+    ) -> StockPoolResolution:
+        return await self._metadata_coordinator.stock_pool_resolution(
+            keyword=keyword,
+            limit=limit,
+            refresh=refresh,
+            required_markets=required_markets,
+            minimum_market_counts=minimum_market_counts,
+        )
 
     async def stock_profile(self, symbol: str) -> StockInfo | None:
         return await self._metadata_coordinator.stock_profile(symbol)
@@ -173,6 +218,9 @@ class DataHub:
 
     async def stock_concepts(self, symbol: str, limit: int = 8, refresh: bool = False):
         return await self._metadata_coordinator.stock_concepts(symbol, limit=limit, refresh=refresh)
+
+    async def stock_concepts_result(self, symbol: str, limit: int = 8, refresh: bool = False):
+        return await self._metadata_coordinator.stock_concepts_result(symbol, limit=limit, refresh=refresh)
 
     async def order_book(self, symbol: str) -> OrderBook:
         return await self._order_book_coordinator.order_book(symbol)
@@ -187,17 +235,78 @@ class DataHub:
         )
 
     async def aclose(self, timeout: float = PROVIDER_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
-        async with self._close_lock:
-            if self._providers_closed:
-                return True
-            if not await self._provider_runtime.aclose(timeout=timeout):
-                return False
-            await asyncio.gather(
-                *(_close_provider(provider) for provider in self.providers.values()),
-                return_exceptions=True,
-            )
-            self._providers_closed = True
+        close_timeout = _bounded_close_timeout(timeout)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + close_timeout
+        if self._providers_closed:
             return True
+        close_task = self._get_or_create_provider_close_task()
+        remaining = max(0.0, deadline - loop.time())
+        return await self._wait_for_provider_close(close_task, timeout=remaining)
+
+    def _get_or_create_provider_close_task(self) -> asyncio.Task[bool]:
+        task = self._provider_close_task
+        if task is not None and not task.done():
+            return task
+        task = asyncio.create_task(
+            self._close_providers_after_runtime_quiesces(),
+            name="datahub-provider-close",
+        )
+        task.add_done_callback(_consume_provider_close_exception)
+        self._provider_close_task = task
+        return task
+
+    async def _close_providers_after_runtime_quiesces(self) -> bool:
+        while not await self._provider_runtime.aclose(timeout=PROVIDER_SHUTDOWN_TIMEOUT_SECONDS):
+            pass
+        pending = [
+            provider
+            for provider in self.providers.values()
+            if not self._provider_was_closed(provider)
+        ]
+        pending = _unique_by_identity(pending)
+        results = await asyncio.gather(
+            *(self._close_provider_once(provider) for provider in pending),
+            return_exceptions=True,
+        )
+        fatal_errors: list[BaseException] = []
+        for result in results:
+            if result is True:
+                continue
+            if isinstance(result, asyncio.CancelledError):
+                fatal_errors.append(result)
+            elif isinstance(result, Exception):
+                logger.warning("DataHub provider shutdown failed: %s", type(result).__name__)
+            elif isinstance(result, BaseException):
+                fatal_errors.append(result)
+            else:
+                logger.warning("DataHub provider shutdown reported incomplete")
+
+        self._providers_closed = all(self._provider_was_closed(provider) for provider in self.providers.values())
+        if len(fatal_errors) == 1:
+            raise fatal_errors[0]
+        if fatal_errors:
+            raise BaseExceptionGroup("DataHub provider shutdown failed", fatal_errors)
+        return self._providers_closed
+
+    async def _close_provider_once(self, provider: object) -> bool:
+        closed = await _close_provider(provider)
+        if closed:
+            self._closed_providers.append(provider)
+        return closed
+
+    def _provider_was_closed(self, provider: object) -> bool:
+        return any(closed is provider for closed in self._closed_providers)
+
+    async def _wait_for_provider_close(self, task: asyncio.Task[bool], *, timeout: float) -> bool:
+        if task.done():
+            return task.result()
+        if timeout <= 0:
+            return False
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except TimeoutError:
+            return self._providers_closed
 
     def status(self) -> DataStatus:
         return self._status_service.status()
@@ -264,10 +373,36 @@ class DataHub:
         return await self._quote_coordinator.consistency_probe(index, name, provider, target_symbol)
 
 
-async def _close_provider(provider: object) -> None:
+async def _close_provider(provider: object) -> bool:
     close = getattr(provider, "aclose", None)
     if not callable(close):
-        return
+        return True
     result = close()
     if inspect.isawaitable(result):
-        await result
+        result = await result
+    return result is not False
+
+
+def _unique_by_identity(values: Iterable[object]) -> list[object]:
+    unique: list[object] = []
+    for value in values:
+        if not any(existing is value for existing in unique):
+            unique.append(value)
+    return unique
+
+
+def _bounded_close_timeout(value: float) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return timeout if math.isfinite(timeout) and timeout >= 0 else 0.0
+
+
+def _consume_provider_close_exception(task: asyncio.Task[bool]) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass

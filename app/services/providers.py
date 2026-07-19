@@ -30,7 +30,7 @@ from app.utils.time import now_text
 
 
 TENCENT_QUOTE_MIN_FIELDS = 45
-TENCENT_MARKET_MAP = {"1": "SH", "0": "SZ", "2": "SZ", "51": "SZ", "52": "SZ"}
+TENCENT_MARKET_MAP = {"1": "SH", "0": "SZ", "2": "SZ", "51": "SZ", "52": "SZ", "62": "BJ"}
 TENCENT_AMOUNT_SCALE = 10000
 TENCENT_MARKET_CAP_SCALE = 100000000
 TENCENT_QUOTE_PAYLOAD_RE = re.compile(r'="([^"]*)"')
@@ -383,7 +383,7 @@ def _parse_tencent_quote_payload(payload: str, source_name: str) -> Quote | None
     parts = _tencent_quote_parts(payload)
     if not _valid_tencent_quote_parts(parts):
         return None
-    market = _tencent_market(parts[0])
+    market = _tencent_market(parts[0], parts[2])
     if market is None:
         return None
     try:
@@ -450,8 +450,15 @@ def _parse_tencent_quote_numbers(parts: list[str]) -> _TencentQuoteNumbers:
     )
 
 
-def _tencent_market(flag: str) -> str | None:
-    return TENCENT_MARKET_MAP.get(flag)
+def _tencent_market(flag: str, code: str) -> str | None:
+    market = TENCENT_MARKET_MAP.get(flag)
+    if market is None:
+        return None
+    try:
+        normalize_symbol(f"{code}.{market}")
+    except ValueError:
+        return None
+    return market
 
 
 def _first_required_number(parts: list[str], *indices: int, field: str) -> float:

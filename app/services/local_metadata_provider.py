@@ -113,7 +113,7 @@ class LocalIndividualStockProvider:
             enabled=True,
             reliability_level="本地基础数据",
             stock_pool=True,
-            plate_rank=True,
-            concept_board=True,
-            note="本地兜底数据，只用于外部数据源失败时保持个股界面可用。",
+            plate_rank=False,
+            concept_board=False,
+            note="本地静态资料只补充股票名称和行业归属，不提供实时板块或概念涨跌幅。",
         )

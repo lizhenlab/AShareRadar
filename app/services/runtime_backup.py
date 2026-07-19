@@ -5,17 +5,22 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import fcntl
 import hashlib
+import logging
 import os
 from pathlib import Path
+import re
+import secrets
 import shutil
 import sqlite3
 import tempfile
-from typing import Iterator, TextIO
+import threading
+import time
+from typing import Iterator
 
 from pydantic import ValidationError
 
+from app.config import MIN_RUNTIME_BACKUP_COUNT, get_settings
 from app.models.local_data import (
     RUNTIME_BACKUP_MANIFEST_VERSION,
     RuntimeBackupManifest,
@@ -23,6 +28,8 @@ from app.models.local_data import (
     RuntimeBackupVerification,
     RuntimeRestoreResult,
 )
+from app.services.instance_guard import FileInstanceGuard
+from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
 from app.services.user_data_portability import available_user_tables
 
 
@@ -31,10 +38,27 @@ BACKUP_MANIFEST_NAME = "manifest.json"
 BACKUP_READ_CHUNK_BYTES = 1024 * 1024
 BACKUP_MANIFEST_MAX_BYTES = 1024 * 1024
 SQLITE_BUSY_TIMEOUT_MS = 15_000
+RESTORE_LOCK_PATH_SUFFIXES = (RUNTIME_LEADER_LOCK_SUFFIX, ".scheduler.lock", ".market-scan.lock")
+BACKUP_OPERATION_LOCK_NAME = ".runtime-backup-operation.lock"
+BACKUP_OPERATION_LOCK_SUFFIX = ".runtime-backup-operation.lock"
+BACKUP_OPERATION_LOCK_TIMEOUT_SECONDS = 30.0
+BACKUP_OPERATION_LOCK_POLL_SECONDS = 0.05
+DESTRUCTIVE_LOCAL_DATA_LOCK_SUFFIX = ".destructive-local-data.lock"
+BACKUP_TEMPORARY_MARKER = "runtime-backup-tmp"
+BACKUP_TEMPORARY_TOKEN_HEX_LENGTH = 32
+BACKUP_TEMPORARY_MIN_AGE_SECONDS = 24 * 60 * 60
+
+_THREAD_OPERATION_LOCKS_GUARD = threading.Lock()
+_THREAD_OPERATION_LOCKS: dict[Path, threading.Lock] = {}
+LOGGER = logging.getLogger(__name__)
 
 
 class RuntimeBackupError(RuntimeError):
     """Raised when a backup cannot be proven safe to use."""
+
+
+class RuntimeBackupLeaseReleaseError(RuntimeBackupError):
+    """Raised after every operation lease release has been attempted."""
 
 
 @dataclass(frozen=True)
@@ -54,10 +78,231 @@ class _VerifiedRestoreSource:
     manifest: RuntimeBackupManifest
 
 
-def create_runtime_backup(source_path: Path, destination: Path | None = None) -> RuntimeBackupResult:
+@dataclass(frozen=True)
+class RuntimeBackupStorage:
+    managed_bundle_count: int
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class _ManagedBackupBundle:
+    path: Path
+    created_at: datetime
+    size_bytes: int
+
+
+class RuntimeBackupSession:
+    """Creates rollback bundles while the caller's database transaction is active."""
+
+    def __init__(self, source: Path, max_backups: int) -> None:
+        self._source = source
+        self._max_backups = max_backups
+        self._protected_paths: list[Path] = []
+        self._active = True
+
+    def create_verified_backup(self) -> RuntimeBackupResult:
+        if not self._active:
+            raise RuntimeBackupError("运行时备份保护会话已结束")
+        target = _backup_destination(self._source, None)
+        result = _create_runtime_backup_bundle(self._source, target)
+        self._protected_paths.append(target)
+        _verify_runtime_backup(target)
+        return result
+
+    def _finish(self) -> None:
+        self._active = False
+        _prune_managed_runtime_backups(
+            self._source,
+            max_backups=self._max_backups,
+            protected_paths=tuple(self._protected_paths),
+        )
+
+
+@contextmanager
+def _runtime_backup_operation_lease(
+    *lock_paths: Path,
+    acquire_error: str = "无法建立运行时备份操作租约，请检查数据目录权限后重试",
+    timeout_error: str = "运行时备份操作繁忙，等待操作租约超时，请稍后重试",
+    release_error: str = "运行时备份操作已结束，但释放操作租约失败，请重启服务后重试",
+) -> Iterator[None]:
+    paths = tuple(sorted({Path(path).expanduser().resolve() for path in lock_paths}, key=str))
+    deadline = time.monotonic() + max(0.0, BACKUP_OPERATION_LOCK_TIMEOUT_SECONDS)
+    thread_locks: list[threading.Lock] = []
+    file_guards: list[FileInstanceGuard] = []
+    body_error: BaseException | None = None
+    try:
+        for path in paths:
+            lock = _thread_operation_lock(path)
+            remaining = max(0.0, deadline - time.monotonic())
+            if not lock.acquire(timeout=remaining):
+                raise RuntimeBackupError(timeout_error)
+            thread_locks.append(lock)
+        for path in paths:
+            file_guards.append(
+                _acquire_operation_file_guard(
+                    path,
+                    deadline,
+                    acquire_error=acquire_error,
+                    timeout_error=timeout_error,
+                )
+            )
+        yield
+    except BaseException as exc:
+        body_error = exc
+        raise
+    finally:
+        first_release_error = _release_operation_resources(file_guards, thread_locks)
+        if first_release_error is not None:
+            LOGGER.error(
+                "Runtime operation lease release failed after all resources were attempted",
+                exc_info=(
+                    type(first_release_error),
+                    first_release_error,
+                    first_release_error.__traceback__,
+                ),
+            )
+            if body_error is None:
+                raise RuntimeBackupLeaseReleaseError(release_error) from first_release_error
+
+
+def _thread_operation_lock(path: Path) -> threading.Lock:
+    with _THREAD_OPERATION_LOCKS_GUARD:
+        lock = _THREAD_OPERATION_LOCKS.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _THREAD_OPERATION_LOCKS[path] = lock
+        return lock
+
+
+def _acquire_operation_file_guard(
+    path: Path,
+    deadline: float,
+    *,
+    acquire_error: str,
+    timeout_error: str,
+) -> FileInstanceGuard:
+    guard = FileInstanceGuard(path)
+    while True:
+        try:
+            if guard.acquire():
+                return guard
+        except Exception:
+            raise RuntimeBackupError(acquire_error) from None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeBackupError(timeout_error)
+        time.sleep(min(max(0.001, BACKUP_OPERATION_LOCK_POLL_SECONDS), remaining))
+
+
+def _release_operation_resources(
+    file_guards: list[FileInstanceGuard],
+    thread_locks: list[threading.Lock],
+) -> BaseException | None:
+    first_error: BaseException | None = None
+    for guard in reversed(file_guards):
+        try:
+            guard.release()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    for lock in reversed(thread_locks):
+        try:
+            lock.release()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    return first_error
+
+
+def _database_operation_lock_path(database: Path) -> Path:
+    resolved = Path(database).expanduser().resolve()
+    return Path(f"{resolved}{BACKUP_OPERATION_LOCK_SUFFIX}")
+
+
+def _backup_directory_operation_lock_path(directory: Path) -> Path:
+    return Path(directory).expanduser().resolve() / BACKUP_OPERATION_LOCK_NAME
+
+
+def _destructive_local_data_lock_path(database: Path) -> Path:
+    resolved = Path(database).expanduser().resolve()
+    return Path(f"{resolved}{DESTRUCTIVE_LOCAL_DATA_LOCK_SUFFIX}")
+
+
+@contextmanager
+def destructive_local_data_lease(database: Path) -> Iterator[None]:
+    with _runtime_backup_operation_lease(
+        _destructive_local_data_lock_path(database),
+        acquire_error="无法建立本地数据破坏性操作租约，请检查数据目录权限后重试",
+        timeout_error="本地数据破坏性操作繁忙，等待操作租约超时，请稍后重试",
+        release_error="本地数据操作已结束，但释放破坏性操作租约失败，请重启服务后重试",
+    ):
+        yield
+
+
+@contextmanager
+def runtime_backup_session(
+    source_path: Path,
+    *,
+    max_backups: int | None = None,
+) -> Iterator[RuntimeBackupSession]:
     source = _require_database(source_path)
-    target = _backup_destination(source, destination)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
+    limit = _runtime_backup_limit(max_backups)
+    backup_directory = _managed_backup_directory(source)
+    backup_directory.mkdir(parents=True, exist_ok=True)
+    with _runtime_backup_operation_lease(
+        _database_operation_lock_path(source),
+        _backup_directory_operation_lock_path(backup_directory),
+    ):
+        _remove_stale_managed_backup_temporaries(source)
+        session = RuntimeBackupSession(source, limit)
+        body_error: BaseException | None = None
+        try:
+            yield session
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            try:
+                session._finish()
+            except BaseException:
+                if body_error is None:
+                    raise
+                LOGGER.exception("Runtime backup session finalization failed while propagating caller error")
+
+
+def create_runtime_backup(
+    source_path: Path,
+    destination: Path | None = None,
+    *,
+    max_backups: int | None = None,
+) -> RuntimeBackupResult:
+    source = _require_database(source_path)
+    destination_parent = _backup_destination_parent(source, destination)
+    destination_parent.mkdir(parents=True, exist_ok=True)
+    managed_limit = (
+        _runtime_backup_limit(max_backups)
+        if destination_parent == _managed_backup_directory(source)
+        else None
+    )
+    with _runtime_backup_operation_lease(
+        _database_operation_lock_path(source),
+        _backup_directory_operation_lock_path(destination_parent),
+    ):
+        if managed_limit is not None:
+            _remove_stale_managed_backup_temporaries(source)
+        target = _backup_destination(source, destination)
+        result = _create_runtime_backup_bundle(source, target)
+        if managed_limit is not None:
+            _prune_managed_runtime_backups(
+                source,
+                max_backups=managed_limit,
+                protected_paths=(target,),
+            )
+        return result
+
+
+def _create_runtime_backup_bundle(source: Path, target: Path) -> RuntimeBackupResult:
+    temporary = _new_backup_temporary_directory(source, target.parent)
     try:
         database_path = temporary / BACKUP_DATABASE_NAME
         _sqlite_snapshot(source, database_path)
@@ -79,6 +324,14 @@ def create_runtime_backup(source_path: Path, destination: Path | None = None) ->
 
 
 def verify_runtime_backup(backup_path: Path) -> RuntimeBackupVerification:
+    root = _backup_root(backup_path)
+    with _runtime_backup_operation_lease(
+        _backup_directory_operation_lock_path(root.parent),
+    ):
+        return _verify_runtime_backup(root)
+
+
+def _verify_runtime_backup(backup_path: Path) -> RuntimeBackupVerification:
     root, manifest_path = _backup_layout(backup_path)
     manifest = _read_manifest(manifest_path)
     database_path = _manifest_database_path(root, manifest)
@@ -100,22 +353,54 @@ def restore_runtime_backup(
     *,
     service_stopped: bool = False,
     rollback_destination: Path | None = None,
+    max_backups: int | None = None,
 ) -> RuntimeRestoreResult:
     if not service_stopped:
         raise RuntimeBackupError("恢复前必须停止服务并显式确认 service_stopped=True")
     target = Path(target_path).expanduser().resolve()
+    managed_limit = _runtime_backup_limit(max_backups)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with _verified_restore_source(backup_path, target) as verified:
-        with _restore_guard(target):
-            rollback = _create_rollback_backup(target, rollback_destination)
-            _replace_from_verified_backup(verified.database_path, target, verified.manifest, rollback)
-    return RuntimeRestoreResult(
-        restored=True,
-        target_path=str(target),
-        backup_path=str(verified.backup_path),
-        rollback_backup_path=str(rollback.backup_path) if rollback else None,
-        integrity_check="ok",
-    )
+    backup_root = _backup_root(backup_path)
+    rollback_parent = _rollback_backup_parent(target, rollback_destination)
+    database_replaced = False
+    try:
+        with _runtime_backup_operation_lease(
+            _database_operation_lock_path(target),
+            _backup_directory_operation_lock_path(backup_root.parent),
+            _backup_directory_operation_lock_path(_managed_backup_directory(target)),
+            _backup_directory_operation_lock_path(rollback_parent),
+        ):
+            _remove_stale_managed_backup_temporaries(target)
+            with _verified_restore_source(backup_root, target) as verified:
+                with _restore_guard(target):
+                    rollback = _create_rollback_backup(target, rollback_destination)
+                    _replace_from_verified_backup(verified.database_path, target, verified.manifest, rollback)
+                    database_replaced = True
+            protected_paths = [verified.backup_path]
+            if rollback is not None:
+                protected_paths.append(Path(rollback.backup_path))
+            _prune_managed_runtime_backups(
+                target,
+                max_backups=managed_limit,
+                protected_paths=tuple(protected_paths),
+            )
+            return RuntimeRestoreResult(
+                restored=True,
+                target_path=str(target),
+                backup_path=str(verified.backup_path),
+                rollback_backup_path=str(rollback.backup_path) if rollback else None,
+                integrity_check="ok",
+            )
+    except RuntimeBackupLeaseReleaseError as exc:
+        if not database_replaced:
+            raise
+        LOGGER.critical(
+            "Runtime database replacement completed but an operation lease failed to release",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        raise RuntimeBackupError(
+            "数据库恢复已完成，但运行时操作锁释放失败；请重启服务并核验数据库状态"
+        ) from exc
 
 
 @contextmanager
@@ -196,33 +481,39 @@ def _create_rollback_backup(
     if not target.exists():
         return None
     rollback_target = destination or (target.parent / "backups" / f"{target.stem}_pre_restore_{_filename_timestamp()}")
-    return create_runtime_backup(target, rollback_target)
+    source = _require_database(target)
+    return _create_runtime_backup_bundle(source, _backup_destination(source, rollback_target))
 
 
 @contextmanager
 def _restore_guard(target: Path) -> Iterator[None]:
-    lock_path = Path(f"{target}.scheduler.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+", encoding="utf-8")
+    guards: list[FileInstanceGuard] = []
+    body_error: BaseException | None = None
     try:
-        _acquire_restore_lock(handle)
+        for suffix in RESTORE_LOCK_PATH_SUFFIXES:
+            guard = FileInstanceGuard(Path(f"{target}{suffix}"))
+            if not guard.acquire():
+                raise RuntimeBackupError("检测到服务或调度任务仍在使用目标数据库，已拒绝恢复")
+            guards.append(guard)
         yield
+    except BaseException as exc:
+        body_error = exc
+        raise
     finally:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
-
-
-def _acquire_restore_lock(handle: TextIO) -> None:
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raise RuntimeBackupError("检测到服务或调度任务仍在使用目标数据库，已拒绝恢复") from None
-    handle.seek(0)
-    handle.truncate()
-    handle.write(str(os.getpid()))
-    handle.flush()
+        first_release_error = _release_operation_resources(guards, [])
+        if first_release_error is not None:
+            LOGGER.error(
+                "Restore guard release failed after all guards were attempted",
+                exc_info=(
+                    type(first_release_error),
+                    first_release_error,
+                    first_release_error.__traceback__,
+                ),
+            )
+            if body_error is None:
+                raise RuntimeBackupLeaseReleaseError(
+                    "数据库恢复步骤已结束，但释放服务状态锁失败，请重启服务后核验数据库状态"
+                ) from first_release_error
 
 
 def _require_quiescent_database(path: Path) -> None:
@@ -311,7 +602,7 @@ def _build_manifest(source: Path, database: Path, facts: _DatabaseFacts) -> Runt
     return RuntimeBackupManifest(
         manifest_version=RUNTIME_BACKUP_MANIFEST_VERSION,
         created_at=_utc_now_text(),
-        source_path=str(source),
+        source_path=source.name,
         database_file=database.name,
         database_size_bytes=facts.size_bytes,
         schema_version=facts.schema_version,
@@ -378,11 +669,15 @@ def _write_manifest(path: Path, manifest: RuntimeBackupManifest) -> None:
 
 
 def _backup_layout(path: Path) -> tuple[Path, Path]:
-    candidate = Path(path).expanduser().resolve()
-    root = candidate.parent if candidate.name == BACKUP_MANIFEST_NAME else candidate
+    root = _backup_root(path)
     if not root.is_dir():
         raise RuntimeBackupError(f"备份目录不存在：{root}")
     return root, root / BACKUP_MANIFEST_NAME
+
+
+def _backup_root(path: Path) -> Path:
+    candidate = Path(path).expanduser().resolve()
+    return candidate.parent if candidate.name == BACKUP_MANIFEST_NAME else candidate
 
 
 def _manifest_database_path(root: Path, manifest: RuntimeBackupManifest) -> Path:
@@ -392,12 +687,225 @@ def _manifest_database_path(root: Path, manifest: RuntimeBackupManifest) -> Path
     return database
 
 
+def runtime_backup_storage(source_path: Path) -> RuntimeBackupStorage:
+    source = Path(source_path).expanduser().resolve()
+    backup_directory = _managed_backup_directory(source)
+    if not backup_directory.exists():
+        return RuntimeBackupStorage(managed_bundle_count=0, size_bytes=0)
+    with _runtime_backup_operation_lease(_database_operation_lock_path(source)):
+        bundles = _managed_backup_bundles(source)
+        return RuntimeBackupStorage(
+            managed_bundle_count=len(bundles),
+            size_bytes=_directory_size(backup_directory),
+        )
+
+
+def _prune_managed_runtime_backups(
+    source: Path,
+    *,
+    max_backups: int | None = None,
+    protected_paths: tuple[Path, ...] = (),
+) -> tuple[Path, ...]:
+    backup_directory = _managed_backup_directory(source)
+    _remove_stale_managed_backup_temporaries(source)
+    protected = {Path(path).expanduser().resolve() for path in protected_paths}
+    limit = _runtime_backup_limit(max_backups)
+    bundles = sorted(_managed_backup_bundles(source), key=lambda bundle: (bundle.created_at, bundle.path.name))
+    excess = max(0, len(bundles) - limit)
+    removed: list[Path] = []
+    for bundle in bundles:
+        if excess == 0:
+            break
+        if bundle.path in protected:
+            continue
+        try:
+            shutil.rmtree(bundle.path)
+        except FileNotFoundError:
+            excess -= 1
+            continue
+        except OSError:
+            continue
+        removed.append(bundle.path)
+        excess -= 1
+    if removed:
+        try:
+            _fsync_directory(backup_directory)
+        except OSError:
+            LOGGER.warning("Managed runtime backup directory fsync failed after rotation", exc_info=True)
+    return tuple(removed)
+
+
+def _runtime_backup_limit(value: int | None) -> int:
+    limit = get_settings().max_runtime_backups if value is None else value
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < MIN_RUNTIME_BACKUP_COUNT:
+        raise ValueError(f"max_backups 必须是大于等于 {MIN_RUNTIME_BACKUP_COUNT} 的整数")
+    return limit
+
+
+def _managed_backup_bundles(source: Path) -> tuple[_ManagedBackupBundle, ...]:
+    backup_directory = _managed_backup_directory(source)
+    try:
+        children = tuple(backup_directory.iterdir())
+    except OSError:
+        return ()
+    bundles: list[_ManagedBackupBundle] = []
+    for child in children:
+        try:
+            bundle = _managed_backup_bundle(source, child)
+        except (OSError, RuntimeBackupError):
+            continue
+        if bundle is not None:
+            bundles.append(bundle)
+    return tuple(bundles)
+
+
+def _managed_backup_bundle(source: Path, child: Path) -> _ManagedBackupBundle | None:
+    backup_directory = _managed_backup_directory(source)
+    if child.is_symlink() or not child.is_dir() or child.resolve().parent != backup_directory:
+        return None
+    manifest = _read_manifest(child / BACKUP_MANIFEST_NAME)
+    if Path(manifest.source_path).name != source.name:
+        return None
+    _manifest_database_path(child, manifest)
+    return _ManagedBackupBundle(
+        path=child.resolve(),
+        created_at=_backup_created_at(manifest.created_at, child),
+        size_bytes=_directory_size(child),
+    )
+
+
+def _managed_backup_directory(source: Path) -> Path:
+    return (source.parent / "backups").resolve()
+
+
+def _backup_created_at(value: str, path: Path) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        try:
+            return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        except OSError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        facts = entry.stat(follow_symlinks=False)
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        else:
+                            total += max(0, facts.st_size)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def _new_backup_temporary_directory(source: Path, parent: Path) -> Path:
+    parent.mkdir(parents=True, exist_ok=True)
+    for _attempt in range(100):
+        token = secrets.token_hex(BACKUP_TEMPORARY_TOKEN_HEX_LENGTH // 2)
+        temporary = parent / f".{source.stem}.{BACKUP_TEMPORARY_MARKER}-{token}"
+        try:
+            temporary.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return temporary
+    raise RuntimeBackupError("无法创建唯一的运行时备份临时目录")
+
+
+def _remove_stale_managed_backup_temporaries(source: Path) -> tuple[Path, ...]:
+    backup_directory = _managed_backup_directory(source)
+    try:
+        children = tuple(backup_directory.iterdir())
+    except OSError:
+        return ()
+    pattern = _managed_backup_temporary_pattern(source)
+    now = time.time()
+    removed: list[Path] = []
+    for child in children:
+        try:
+            if not _is_stale_managed_backup_temporary(
+                source,
+                child,
+                backup_directory=backup_directory,
+                pattern=pattern,
+                now=now,
+            ):
+                continue
+            shutil.rmtree(child)
+            removed.append(child)
+        except OSError:
+            continue
+    _fsync_after_stale_backup_cleanup(backup_directory, removed)
+    return tuple(removed)
+
+
+def _managed_backup_temporary_pattern(source: Path) -> re.Pattern[str]:
+    return re.compile(
+        rf"\.{re.escape(source.stem)}\.{BACKUP_TEMPORARY_MARKER}-"
+        rf"[0-9a-f]{{{BACKUP_TEMPORARY_TOKEN_HEX_LENGTH}}}\Z"
+    )
+
+
+def _is_stale_managed_backup_temporary(
+    source: Path,
+    child: Path,
+    *,
+    backup_directory: Path,
+    pattern: re.Pattern[str],
+    now: float,
+) -> bool:
+    if pattern.fullmatch(child.name) is None:
+        return False
+    if child.is_symlink() or not child.is_dir() or child.resolve().parent != backup_directory:
+        return False
+    if now - child.stat().st_mtime <= BACKUP_TEMPORARY_MIN_AGE_SECONDS:
+        return False
+    try:
+        return _managed_backup_bundle(source, child) is None
+    except RuntimeBackupError:
+        return True
+
+
+def _fsync_after_stale_backup_cleanup(backup_directory: Path, removed: list[Path]) -> None:
+    if not removed:
+        return
+    try:
+        _fsync_directory(backup_directory)
+    except OSError:
+        LOGGER.warning("Managed runtime backup directory fsync failed after stale cleanup", exc_info=True)
+
+
 def _backup_destination(source: Path, destination: Path | None) -> Path:
     target = Path(destination).expanduser().resolve() if destination is not None else source.parent / "backups" / f"{source.stem}_{_filename_timestamp()}"
     if target.exists():
         raise RuntimeBackupError(f"备份目标已存在：{target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def _backup_destination_parent(source: Path, destination: Path | None) -> Path:
+    if destination is None:
+        return _managed_backup_directory(source)
+    return Path(destination).expanduser().resolve().parent
+
+
+def _rollback_backup_parent(target: Path, destination: Path | None) -> Path:
+    if destination is None:
+        return _managed_backup_directory(target)
+    return Path(destination).expanduser().resolve().parent
 
 
 def _temporary_database_path(target: Path) -> Path:
@@ -477,8 +985,15 @@ def _filename_timestamp() -> str:
 __all__ = [
     "BACKUP_DATABASE_NAME",
     "BACKUP_MANIFEST_NAME",
+    "DESTRUCTIVE_LOCAL_DATA_LOCK_SUFFIX",
     "RuntimeBackupError",
+    "RuntimeBackupLeaseReleaseError",
+    "RuntimeBackupSession",
+    "RuntimeBackupStorage",
     "create_runtime_backup",
+    "destructive_local_data_lease",
     "restore_runtime_backup",
+    "runtime_backup_session",
+    "runtime_backup_storage",
     "verify_runtime_backup",
 ]

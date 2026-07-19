@@ -12,7 +12,7 @@ import threading
 import time
 
 from app.models.local_data import LocalDataImportMode, UserDataBundle
-from app.services.user_data_portability import export_user_data
+from app.services.user_data_portability import user_data_state_digest
 
 
 IMPORT_PREVIEW_TTL_SECONDS = 10 * 60
@@ -81,6 +81,8 @@ class LocalDataImportPreviewRegistry:
         path: Path,
         bundle: UserDataBundle,
         mode: LocalDataImportMode,
+        *,
+        database_digest: str | None = None,
     ) -> LocalDataImportPreviewClaim:
         cleaned = str(token or "").strip()
         if not cleaned:
@@ -96,7 +98,8 @@ class LocalDataImportPreviewRegistry:
             raise LocalDataImportPreviewError("导入文件、模式或目标数据库已变化，请重新预览")
         if claim.bundle_digest != user_data_bundle_digest(bundle):
             raise LocalDataImportPreviewError("导入文件内容已变化，请重新预览")
-        if claim.database_digest != user_data_state_digest(path):
+        current_digest = database_digest if database_digest is not None else user_data_state_digest(path)
+        if claim.database_digest != current_digest:
             raise LocalDataImportPreviewError("预览后本地用户数据已变化，请重新预览")
         return claim
 
@@ -108,12 +111,6 @@ class LocalDataImportPreviewRegistry:
 
 def user_data_bundle_digest(bundle: UserDataBundle) -> str:
     return _stable_digest(bundle.model_dump(mode="json"))
-
-
-def user_data_state_digest(path: Path) -> str:
-    payload = export_user_data(path).model_dump(mode="json")
-    payload.pop("exported_at", None)
-    return _stable_digest(payload)
 
 
 def _stable_digest(payload: object) -> str:

@@ -596,11 +596,19 @@ class LocalLifecycleTests(unittest.TestCase):
     def test_runtime_cleanup_keeps_quote_history_for_cold_symbols(self) -> None:
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "cache.sqlite3"
-            settings = Settings(cache_path=path, max_quote_history_rows=2)
+            settings = Settings(cache_path=path, max_quote_history_rows=120)
             cache = SQLiteCache(settings=settings)
-            for day in range(10, 14):
-                price = 1300 + day
-                cache.save_quotes([_quote(timestamp=f"2026-05-{day:02d} 10:00:00", price=price, high=price + 5)])
+            first_day = datetime(2025, 1, 1)
+            cache.save_quotes(
+                [
+                    _quote(
+                        timestamp=f"{(first_day + timedelta(days=offset)):%Y-%m-%d} 10:00:00",
+                        price=1300 + offset,
+                        high=1305 + offset,
+                    )
+                    for offset in range(122)
+                ]
+            )
             cache.save_quotes(
                 [
                     _quote(timestamp="2026-05-10 10:00:00", price=12.0).model_copy(
@@ -632,7 +640,7 @@ class LocalLifecycleTests(unittest.TestCase):
                 }
 
         self.assertEqual(removed["quote_history"], 2)
-        self.assertEqual(counts_by_symbol["600519.SH"], 2)
+        self.assertEqual(counts_by_symbol["600519.SH"], 120)
         self.assertEqual(counts_by_symbol["000001.SZ"], 1)
 
     def test_runtime_cleanup_trims_cache_and_alert_events(self) -> None:
@@ -731,9 +739,7 @@ class LocalLifecycleTests(unittest.TestCase):
                 )
             analysis = _analysis_for_advice()
             for index in range(3):
-                cache.save_advice_snapshot(
-                    analysis.model_copy(update={"support": analysis.support + index * 0.01})
-                )
+                cache.save_advice_snapshot(analysis.model_copy(update={"support": analysis.support + index * 0.01}))
             before = cache.table_counts()
             scheduler = LocalDataScheduler(SimpleNamespace(settings=settings, cache=cache))
 
@@ -759,9 +765,7 @@ class LocalLifecycleTests(unittest.TestCase):
             cache.ensure_provider("tencent", 1, enabled=False)
             cache.update_provider_capability_success("tencent", "quote", 1, 8.0)
             aggregate_status = next(item for item in cache.provider_statuses() if item.name == "tencent")
-            capability_status = next(
-                item for item in cache.provider_capability_statuses() if item.name == "tencent" and item.kind == "quote"
-            )
+            capability_status = next(item for item in cache.provider_capability_statuses() if item.name == "tencent" and item.kind == "quote")
 
         self.assertFalse(direct_status.enabled)
         self.assertEqual(direct_status.success_count, 1)
@@ -957,26 +961,16 @@ class LocalLifecycleTests(unittest.TestCase):
             trend_score = base.trend_score + (1 if base.trend_score < 100 else -1)
             quality_score = base.data_quality.score + (1 if base.data_quality.score < 100 else -1)
             variants = (
-                base.model_copy(
-                    update={"action_advice": base.action_advice.model_copy(update={"action": f"{base.action_advice.action}A"})}
-                ),
-                base.model_copy(
-                    update={"action_advice": base.action_advice.model_copy(update={"confidence": confidence})}
-                ),
+                base.model_copy(update={"action_advice": base.action_advice.model_copy(update={"action": f"{base.action_advice.action}A"})}),
+                base.model_copy(update={"action_advice": base.action_advice.model_copy(update={"confidence": confidence})}),
                 base.model_copy(update={"trend_score": trend_score}),
                 base.model_copy(update={"trend_label": f"{base.trend_label}A"}),
                 base.model_copy(update={"risk_level": f"{base.risk_level}A"}),
                 base.model_copy(update={"support": base.support + 0.01}),
                 base.model_copy(update={"resistance": base.resistance + 0.01}),
-                base.model_copy(
-                    update={"data_quality": base.data_quality.model_copy(update={"score": quality_score})}
-                ),
-                base.model_copy(
-                    update={"data_quality": base.data_quality.model_copy(update={"level": f"{base.data_quality.level}A"})}
-                ),
-                base.model_copy(
-                    update={"data_quality": base.data_quality.model_copy(update={"source": "身份变化测试源"})}
-                ),
+                base.model_copy(update={"data_quality": base.data_quality.model_copy(update={"score": quality_score})}),
+                base.model_copy(update={"data_quality": base.data_quality.model_copy(update={"level": f"{base.data_quality.level}A"})}),
+                base.model_copy(update={"data_quality": base.data_quality.model_copy(update={"source": "身份变化测试源"})}),
             )
 
             initial = cache.save_advice_snapshot(base)
@@ -1074,17 +1068,9 @@ class LocalLifecycleTests(unittest.TestCase):
             after_insert = cache.watchlist_item("600519.SH")
             cache.save_advice_snapshot(analysis)
             after_merge = cache.watchlist_item("600519.SH")
-            changed_confidence = analysis.action_advice.confidence + (
-                1 if analysis.action_advice.confidence < 100 else -1
-            )
+            changed_confidence = analysis.action_advice.confidence + (1 if analysis.action_advice.confidence < 100 else -1)
             cache.save_advice_snapshot(
-                analysis.model_copy(
-                    update={
-                        "action_advice": analysis.action_advice.model_copy(
-                            update={"confidence": changed_confidence}
-                        )
-                    }
-                )
+                analysis.model_copy(update={"action_advice": analysis.action_advice.model_copy(update={"confidence": changed_confidence})})
             )
             after_change = cache.watchlist_item("600519.SH")
 
@@ -1107,17 +1093,9 @@ class LocalLifecycleTests(unittest.TestCase):
                     "UPDATE advice_history SET rule_version = 'rules.incompatible' WHERE id = ?",
                     (duplicate.id,),
                 )
-            changed_confidence = analysis.action_advice.confidence + (
-                1 if analysis.action_advice.confidence < 100 else -1
-            )
+            changed_confidence = analysis.action_advice.confidence + (1 if analysis.action_advice.confidence < 100 else -1)
             version_changed = cache.save_advice_snapshot(
-                analysis.model_copy(
-                    update={
-                        "action_advice": analysis.action_advice.model_copy(
-                            update={"confidence": changed_confidence}
-                        )
-                    }
-                )
+                analysis.model_copy(update={"action_advice": analysis.action_advice.model_copy(update={"confidence": changed_confidence})})
             )
             item = cache.watchlist_item(analysis.quote.code)
 
@@ -1137,20 +1115,12 @@ class LocalLifecycleTests(unittest.TestCase):
             step = -1 if analysis.action_advice.confidence >= 99 else 1
             first_change = cache.save_advice_snapshot(
                 analysis.model_copy(
-                    update={
-                        "action_advice": analysis.action_advice.model_copy(
-                            update={"confidence": analysis.action_advice.confidence + step}
-                        )
-                    }
+                    update={"action_advice": analysis.action_advice.model_copy(update={"confidence": analysis.action_advice.confidence + step})}
                 )
             )
             second_change = cache.save_advice_snapshot(
                 analysis.model_copy(
-                    update={
-                        "action_advice": analysis.action_advice.model_copy(
-                            update={"confidence": analysis.action_advice.confidence + (2 * step)}
-                        )
-                    }
+                    update={"action_advice": analysis.action_advice.model_copy(update={"confidence": analysis.action_advice.confidence + (2 * step)})}
                 )
             )
 
@@ -1184,25 +1154,11 @@ class LocalLifecycleTests(unittest.TestCase):
             analysis = _analysis_for_advice()
             cache.save_watchlist_item(analysis.quote)
             cache.save_advice_snapshot(analysis)
-            changed_confidence = analysis.action_advice.confidence + (
-                1 if analysis.action_advice.confidence < 100 else -1
-            )
+            changed_confidence = analysis.action_advice.confidence + (1 if analysis.action_advice.confidence < 100 else -1)
             cache.save_advice_snapshot(
-                analysis.model_copy(
-                    update={
-                        "action_advice": analysis.action_advice.model_copy(
-                            update={"confidence": changed_confidence}
-                        )
-                    }
-                )
+                analysis.model_copy(update={"action_advice": analysis.action_advice.model_copy(update={"confidence": changed_confidence})})
             )
-            foreign = analysis.model_copy(
-                update={
-                    "quote": analysis.quote.model_copy(
-                        update={"code": "000001", "market": "SZ", "name": "平安银行"}
-                    )
-                }
-            )
+            foreign = analysis.model_copy(update={"quote": analysis.quote.model_copy(update={"code": "000001", "market": "SZ", "name": "平安银行"})})
             foreign_advice = cache.save_advice_snapshot(foreign)
 
             with self.assertRaisesRegex(ValueError, "不存在或不属于"):
@@ -1228,16 +1184,8 @@ class LocalLifecycleTests(unittest.TestCase):
             cache.save_watchlist_item(analysis.quote)
             baseline = cache.save_advice_snapshot(analysis)
             cache.increment_watchlist_unread_count(analysis.quote.code, 2)
-            changed_confidence = analysis.action_advice.confidence + (
-                1 if analysis.action_advice.confidence < 100 else -1
-            )
-            changed = analysis.model_copy(
-                update={
-                    "action_advice": analysis.action_advice.model_copy(
-                        update={"confidence": changed_confidence}
-                    )
-                }
-            )
+            changed_confidence = analysis.action_advice.confidence + (1 if analysis.action_advice.confidence < 100 else -1)
+            changed = analysis.model_copy(update={"action_advice": analysis.action_advice.model_copy(update={"confidence": changed_confidence})})
 
             from app.repositories.watchlist import increment_watchlist_unread_change_count
 
@@ -1281,17 +1229,9 @@ class LocalLifecycleTests(unittest.TestCase):
                     ("dirty", "600519.SH"),
                 )
 
-            changed_confidence = analysis.action_advice.confidence + (
-                1 if analysis.action_advice.confidence < 100 else -1
-            )
+            changed_confidence = analysis.action_advice.confidence + (1 if analysis.action_advice.confidence < 100 else -1)
             cache.save_advice_snapshot(
-                analysis.model_copy(
-                    update={
-                        "action_advice": analysis.action_advice.model_copy(
-                            update={"confidence": changed_confidence}
-                        )
-                    }
-                )
+                analysis.model_copy(update={"action_advice": analysis.action_advice.model_copy(update={"confidence": changed_confidence})})
             )
 
             watchlist_item = cache.watchlist_item("600519.SH")
@@ -1309,19 +1249,11 @@ class LocalLifecycleTests(unittest.TestCase):
             saving_cache.save_advice_snapshot(analysis)
             step = -1 if analysis.action_advice.confidence >= 99 else 1
             first_change = analysis.model_copy(
-                update={
-                    "action_advice": analysis.action_advice.model_copy(
-                        update={"confidence": analysis.action_advice.confidence + step}
-                    )
-                }
+                update={"action_advice": analysis.action_advice.model_copy(update={"confidence": analysis.action_advice.confidence + step})}
             )
             displayed = saving_cache.save_advice_snapshot(first_change)
             second_change = analysis.model_copy(
-                update={
-                    "action_advice": analysis.action_advice.model_copy(
-                        update={"confidence": analysis.action_advice.confidence + (2 * step)}
-                    )
-                }
+                update={"action_advice": analysis.action_advice.model_copy(update={"confidence": analysis.action_advice.confidence + (2 * step)})}
             )
             watermark_entered = Event()
             allow_mark = Event()
@@ -1419,6 +1351,7 @@ class LocalLifecycleTests(unittest.TestCase):
         self.assertEqual(rows[0].repeat_count, 10)
         self.assertIsNotNone(watchlist_item)
         self.assertEqual(watchlist_item.unread_change_count, 0)
+
 
 class ThemeContextTests(unittest.TestCase):
     def test_compat_schema_skips_missing_tables_and_creates_migration_table(self) -> None:
@@ -1522,7 +1455,7 @@ class ThemeContextTests(unittest.TestCase):
                         match_reason="测试概念成分匹配",
                         source="测试概念源",
                         updated_at=now_text(),
-                    )
+                    ),
                 ],
             )
             cache.save_stock_concepts(
@@ -1610,7 +1543,10 @@ class ThemeContextTests(unittest.TestCase):
     def test_event_digest_exposes_external_data_checklist(self) -> None:
         analysis = build_analysis(
             _quote(change_pct=7.2, turnover_rate=13.5),
-            [_kline(date=f"2026-05-{index + 1:02d}", close=100 + index * 0.4, high=102 + index * 0.4, low=99 + index * 0.4, volume=1000 + index * 120) for index in range(40)],
+            [
+                _kline(date=f"2026-05-{index + 1:02d}", close=100 + index * 0.4, high=102 + index * 0.4, low=99 + index * 0.4, volume=1000 + index * 120)
+                for index in range(40)
+            ],
             data_quality=build_data_quality(_quote(change_pct=7.2, turnover_rate=13.5), [_kline() for _ in range(40)]),
         )
         insights = build_stock_insight_bundle(analysis)
@@ -1619,6 +1555,7 @@ class ThemeContextTests(unittest.TestCase):
         self.assertIn("龙虎榜席位", insights.events.missing_sources)
         self.assertTrue(any(item.category in {"龙虎榜", "公告", "融资融券"} for item in insights.events.events))
         self.assertTrue(any(item.action_hint for item in insights.events.events))
+
 
 class WorkbenchCacheTests(unittest.TestCase):
     def test_context_cache_trims_oldest_entries(self) -> None:
@@ -1636,10 +1573,7 @@ class WorkbenchCacheTests(unittest.TestCase):
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
             quote = _quote(pe=26.8, pb=2.95, market_cap=1_000_000_000)
-            klines = [
-                _kline(date=f"2026-05-{index + 1:02d}", close=100 + index, high=101 + index, low=99 + index, volume=2000)
-                for index in range(40)
-            ]
+            klines = [_kline(date=f"2026-05-{index + 1:02d}", close=100 + index, high=101 + index, low=99 + index, volume=2000) for index in range(40)]
             quality = build_data_quality(quote, klines)
             pool = [_stock_info(code="600519", market="SH")] + [_stock_info(code=f"600{index:03d}", market="SH") for index in range(20)]
 
@@ -1661,34 +1595,43 @@ class WorkbenchCacheTests(unittest.TestCase):
                 return rows
 
             hub.workbench_contexts = WorkbenchContextCache()
-            with patch.object(hub, "quote", return_value=quote), patch.object(
-                hub,
-                "kline",
-                return_value=klines,
-            ), patch.object(
-                hub,
-                "plate_rank",
-                return_value=[_plate_item()],
-            ), patch.object(
-                hub,
-                "assess_quote_quality",
-                return_value=quality,
-            ), patch.object(
-                hub,
-                "stock_profile",
-                return_value=_stock_info(code="600519", market="SH"),
-            ), patch.object(
-                hub,
-                "stock_pool",
-                return_value=pool,
-            ), patch.object(
-                hub,
-                "quotes",
-                side_effect=quotes_for,
-            ), patch.object(
-                hub,
-                "stock_concepts",
-                return_value=[],
+            with (
+                patch.object(hub, "quote", return_value=quote),
+                patch.object(
+                    hub,
+                    "kline",
+                    return_value=klines,
+                ),
+                patch.object(
+                    hub,
+                    "plate_rank",
+                    return_value=[_plate_item()],
+                ),
+                patch.object(
+                    hub,
+                    "assess_quote_quality",
+                    return_value=quality,
+                ),
+                patch.object(
+                    hub,
+                    "stock_profile",
+                    return_value=_stock_info(code="600519", market="SH"),
+                ),
+                patch.object(
+                    hub,
+                    "stock_pool",
+                    return_value=pool,
+                ),
+                patch.object(
+                    hub,
+                    "quotes",
+                    side_effect=quotes_for,
+                ),
+                patch.object(
+                    hub,
+                    "stock_concepts",
+                    return_value=[],
+                ),
             ):
                 await individual.stock_workbench(hub, "600519")
                 await individual.stock_workbench(hub, "600519")
@@ -1707,50 +1650,56 @@ class WorkbenchCacheTests(unittest.TestCase):
     def test_analyze_individual_stock_loads_peer_quotes(self) -> None:
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
-            hub.cache.save_stock_pool(
-                [_stock_info(code="600519", market="SH")]
-                + [_stock_info(code=f"600{index:03d}", market="SH") for index in range(20)]
-            )
+            hub.cache.save_stock_pool([_stock_info(code="600519", market="SH")] + [_stock_info(code=f"600{index:03d}", market="SH") for index in range(20)])
             hub.cache.save_plate_rank([])
             peer_pool = [_stock_info(code="600519", market="SH")] + [_stock_info(code=f"600{index:03d}", market="SH") for index in range(20)]
-            with patch.object(hub, "quote", return_value=_quote(pe=26.8, pb=2.95, market_cap=1_000_000_000)), patch.object(
-                hub,
-                "stock_profile",
-                return_value=_stock_info(code="600519", market="SH"),
-            ), patch.object(
-                hub,
-                "stock_pool",
-                return_value=peer_pool,
-            ), patch.object(
-                hub,
-                "kline",
-                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index, high=101 + index, low=99 + index, volume=2000) for index in range(40)],
-            ), patch.object(hub, "assess_quote_quality", return_value=build_data_quality(_quote(), [_kline() for _ in range(40)])), patch.object(
-                hub,
-                "quotes",
-                side_effect=lambda symbols, use_cache=True: [
-                    Quote(
-                        code=item.split(".")[0],
-                        name=f"同行{idx}",
-                        market=item.split(".")[1],
-                        price=10 + idx,
-                        prev_close=9.8 + idx,
-                        open=9.9 + idx,
-                        high=10.2 + idx,
-                        low=9.7 + idx,
-                        volume=100000,
-                        amount=1_000_000,
-                        change=0.2,
-                        change_pct=2.0,
-                        turnover_rate=1.5,
-                        pe=18 + idx,
-                        pb=2.0 + idx * 0.08,
-                        market_cap=1_000_000_000,
-                        timestamp="2026-05-13 10:00:00",
-                        source="测试行情",
-                    )
-                    for idx, item in enumerate(symbols)
-                ],
+            with (
+                patch.object(hub, "quote", return_value=_quote(pe=26.8, pb=2.95, market_cap=1_000_000_000)),
+                patch.object(
+                    hub,
+                    "stock_profile",
+                    return_value=_stock_info(code="600519", market="SH"),
+                ),
+                patch.object(
+                    hub,
+                    "stock_pool",
+                    return_value=peer_pool,
+                ),
+                patch.object(
+                    hub,
+                    "kline",
+                    return_value=[
+                        _kline(date=f"2026-05-{index + 1:02d}", close=100 + index, high=101 + index, low=99 + index, volume=2000) for index in range(40)
+                    ],
+                ),
+                patch.object(hub, "assess_quote_quality", return_value=build_data_quality(_quote(), [_kline() for _ in range(40)])),
+                patch.object(
+                    hub,
+                    "quotes",
+                    side_effect=lambda symbols, use_cache=True: [
+                        Quote(
+                            code=item.split(".")[0],
+                            name=f"同行{idx}",
+                            market=item.split(".")[1],
+                            price=10 + idx,
+                            prev_close=9.8 + idx,
+                            open=9.9 + idx,
+                            high=10.2 + idx,
+                            low=9.7 + idx,
+                            volume=100000,
+                            amount=1_000_000,
+                            change=0.2,
+                            change_pct=2.0,
+                            turnover_rate=1.5,
+                            pe=18 + idx,
+                            pb=2.0 + idx * 0.08,
+                            market_cap=1_000_000_000,
+                            timestamp="2026-05-13 10:00:00",
+                            source="测试行情",
+                        )
+                        for idx, item in enumerate(symbols)
+                    ],
+                ),
             ):
                 return await individual.analyze_individual_stock(hub, "600519", persist_history=False)
 
@@ -1766,30 +1715,38 @@ class WorkbenchCacheTests(unittest.TestCase):
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
             events: list[tuple[str, str]] = []
-            with patch.object(hub, "quote", return_value=_quote()), patch.object(
-                hub,
-                "stock_profile",
-                return_value=_stock_info(code="600519", market="SH"),
-            ), patch.object(
-                hub,
-                "stock_pool",
-                return_value=[],
-            ), patch.object(
-                hub,
-                "kline",
-                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
-            ), patch.object(
-                hub,
-                "plate_rank",
-                side_effect=RuntimeError("板块源不可用"),
-            ), patch.object(
-                hub,
-                "assess_quote_quality",
-                return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
-            ), patch.object(
-                hub.cache,
-                "log_event",
-                side_effect=lambda category, message: events.append((category, message)),
+            with (
+                patch.object(hub, "quote", return_value=_quote()),
+                patch.object(
+                    hub,
+                    "stock_profile",
+                    return_value=_stock_info(code="600519", market="SH"),
+                ),
+                patch.object(
+                    hub,
+                    "stock_pool",
+                    return_value=[],
+                ),
+                patch.object(
+                    hub,
+                    "kline",
+                    return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
+                ),
+                patch.object(
+                    hub,
+                    "plate_rank",
+                    side_effect=RuntimeError("板块源不可用"),
+                ),
+                patch.object(
+                    hub,
+                    "assess_quote_quality",
+                    return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
+                ),
+                patch.object(
+                    hub.cache,
+                    "log_event",
+                    side_effect=lambda category, message: events.append((category, message)),
+                ),
             ):
                 analysis = await individual.analyze_individual_stock(hub, "600519", persist_history=False)
             return analysis, events
@@ -1809,30 +1766,38 @@ class WorkbenchCacheTests(unittest.TestCase):
             hub = DataHub(cache=SQLiteCache(path))
             hub.settings.workbench_optional_timeout_seconds = 0.01
             events: list[tuple[str, str]] = []
-            with patch.object(hub, "quote", return_value=_quote()), patch.object(
-                hub,
-                "stock_profile",
-                return_value=_stock_info(code="600519", market="SH"),
-            ), patch.object(
-                hub,
-                "stock_pool",
-                return_value=[],
-            ), patch.object(
-                hub,
-                "kline",
-                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
-            ), patch.object(
-                hub,
-                "plate_rank",
-                return_value=[],
-            ), patch.object(
-                hub,
-                "assess_quote_quality",
-                side_effect=slow_quality,
-            ), patch.object(
-                hub.cache,
-                "log_event",
-                side_effect=lambda category, message: events.append((category, message)),
+            with (
+                patch.object(hub, "quote", return_value=_quote()),
+                patch.object(
+                    hub,
+                    "stock_profile",
+                    return_value=_stock_info(code="600519", market="SH"),
+                ),
+                patch.object(
+                    hub,
+                    "stock_pool",
+                    return_value=[],
+                ),
+                patch.object(
+                    hub,
+                    "kline",
+                    return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
+                ),
+                patch.object(
+                    hub,
+                    "plate_rank",
+                    return_value=[],
+                ),
+                patch.object(
+                    hub,
+                    "assess_quote_quality",
+                    side_effect=slow_quality,
+                ),
+                patch.object(
+                    hub.cache,
+                    "log_event",
+                    side_effect=lambda category, message: events.append((category, message)),
+                ),
             ):
                 analysis = await individual.analyze_individual_stock(hub, "600519", persist_history=False)
             return analysis, events
@@ -1848,34 +1813,43 @@ class WorkbenchCacheTests(unittest.TestCase):
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
             events: list[tuple[str, str]] = []
-            with patch.object(hub, "quote", return_value=_quote()), patch.object(
-                hub,
-                "stock_profile",
-                return_value=_stock_info(code="600519", market="SH"),
-            ), patch.object(
-                hub,
-                "stock_pool",
-                return_value=[],
-            ), patch.object(
-                hub,
-                "kline",
-                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
-            ), patch.object(
-                hub,
-                "plate_rank",
-                return_value=[],
-            ), patch.object(
-                hub,
-                "assess_quote_quality",
-                return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
-            ), patch.object(
-                hub.cache,
-                "quote_history",
-                side_effect=sqlite3.DatabaseError("quote history readonly"),
-            ), patch.object(
-                hub.cache,
-                "log_event",
-                side_effect=lambda category, message: events.append((category, message)),
+            with (
+                patch.object(hub, "quote", return_value=_quote()),
+                patch.object(
+                    hub,
+                    "stock_profile",
+                    return_value=_stock_info(code="600519", market="SH"),
+                ),
+                patch.object(
+                    hub,
+                    "stock_pool",
+                    return_value=[],
+                ),
+                patch.object(
+                    hub,
+                    "kline",
+                    return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
+                ),
+                patch.object(
+                    hub,
+                    "plate_rank",
+                    return_value=[],
+                ),
+                patch.object(
+                    hub,
+                    "assess_quote_quality",
+                    return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
+                ),
+                patch.object(
+                    hub.cache,
+                    "quote_history",
+                    side_effect=sqlite3.DatabaseError("quote history readonly"),
+                ),
+                patch.object(
+                    hub.cache,
+                    "log_event",
+                    side_effect=lambda category, message: events.append((category, message)),
+                ),
             ):
                 analysis = await individual.analyze_individual_stock(hub, "600519", persist_history=False)
             return analysis, events
@@ -1890,34 +1864,43 @@ class WorkbenchCacheTests(unittest.TestCase):
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
             events: list[tuple[str, str]] = []
-            with patch.object(hub, "quote", return_value=_quote()), patch.object(
-                hub,
-                "stock_profile",
-                return_value=_stock_info(code="600519", market="SH"),
-            ), patch.object(
-                hub,
-                "stock_pool",
-                return_value=[],
-            ), patch.object(
-                hub,
-                "kline",
-                return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
-            ), patch.object(
-                hub,
-                "plate_rank",
-                return_value=[],
-            ), patch.object(
-                hub,
-                "assess_quote_quality",
-                return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
-            ), patch.object(
-                hub.cache,
-                "save_advice_snapshot",
-                side_effect=sqlite3.DatabaseError("advice readonly"),
-            ), patch.object(
-                hub.cache,
-                "log_event",
-                side_effect=lambda category, message: events.append((category, message)),
+            with (
+                patch.object(hub, "quote", return_value=_quote()),
+                patch.object(
+                    hub,
+                    "stock_profile",
+                    return_value=_stock_info(code="600519", market="SH"),
+                ),
+                patch.object(
+                    hub,
+                    "stock_pool",
+                    return_value=[],
+                ),
+                patch.object(
+                    hub,
+                    "kline",
+                    return_value=[_kline(date=f"2026-05-{index + 1:02d}", close=100 + index) for index in range(40)],
+                ),
+                patch.object(
+                    hub,
+                    "plate_rank",
+                    return_value=[],
+                ),
+                patch.object(
+                    hub,
+                    "assess_quote_quality",
+                    return_value=build_data_quality(_quote(), [_kline() for _ in range(40)]),
+                ),
+                patch.object(
+                    hub.cache,
+                    "save_advice_snapshot",
+                    side_effect=sqlite3.DatabaseError("advice readonly"),
+                ),
+                patch.object(
+                    hub.cache,
+                    "log_event",
+                    side_effect=lambda category, message: events.append((category, message)),
+                ),
             ):
                 analysis = await individual.analyze_individual_stock(hub, "600519", persist_history=True)
             return analysis, events

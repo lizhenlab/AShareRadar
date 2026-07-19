@@ -158,6 +158,19 @@ from app.models.system import (
     StorageDiagnostics,
     SystemDiagnostics,
 )
+from app.models.market_scan import (
+    MarketScanResultItem,
+    MarketScanResultPage,
+    MarketScanResultStatus,
+    MarketScanRun,
+    MarketScanRunPage,
+    MarketScanRunStatus,
+    MarketScanSort,
+    MarketScanSortOrder,
+    MarketScanStartRequest,
+    MarketScanStartResponse,
+    MarketScanTrigger,
+)
 
 __all__ = [
     "Quote",
@@ -297,4 +310,15 @@ __all__ = [
     "CacheFreshness",
     "StorageDiagnostics",
     "SystemDiagnostics",
+    "MarketScanResultItem",
+    "MarketScanResultPage",
+    "MarketScanResultStatus",
+    "MarketScanRun",
+    "MarketScanRunPage",
+    "MarketScanRunStatus",
+    "MarketScanSort",
+    "MarketScanSortOrder",
+    "MarketScanStartRequest",
+    "MarketScanStartResponse",
+    "MarketScanTrigger",
 ]

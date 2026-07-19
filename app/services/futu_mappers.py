@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.schemas import MinuteKline, Quote
+from app.services.provider_errors import ProviderCoverageMiss
 from app.services.provider_stock_mappers import stock_code_from_value
 from app.services.provider_utils import pick, valid_ohlc
 from app.utils.parsing import MISSING_NUMERIC_VALUES, required_float, safe_float
@@ -15,6 +16,8 @@ _MISSING = object()
 
 def futu_symbol(symbol: str) -> str:
     code, market = normalize_symbol(symbol)
+    if market.upper() not in _SUPPORTED_MARKETS:
+        raise ProviderCoverageMiss(f"Futu OpenAPI 当前不覆盖北交所股票：{code}.BJ")
     return f"{market.upper()}.{code}"
 
 

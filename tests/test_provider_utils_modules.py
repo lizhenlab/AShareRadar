@@ -4,7 +4,8 @@ import math
 
 import pytest
 
-from app.services.provider_utils import ensure_positive_limit, pick, valid_ohlc
+from app.services.provider_errors import ProviderCoverageMiss
+from app.services.provider_utils import ak_symbol, bs_symbol, ensure_positive_limit, pick, ts_symbol, valid_ohlc
 
 
 def test_pick_uses_first_present_non_nan_value() -> None:
@@ -45,3 +46,18 @@ def test_valid_ohlc_requires_positive_prices_and_bounds() -> None:
     assert valid_ohlc(100, 101, math.inf, 99) is False
     assert valid_ohlc(100, 101, 102, -math.inf) is False
     assert valid_ohlc(math.nan, 101, 102, 99) is False
+
+
+def test_provider_symbol_helpers_route_beijing_without_changing_sh_sz() -> None:
+    assert ak_symbol("920066.BJ") == "920066"
+    assert ts_symbol("430047") == "430047.BJ"
+    assert ts_symbol("920066.BJ") == "920066.BJ"
+    assert ts_symbol("600519") == "600519.SH"
+    assert ts_symbol("000001") == "000001.SZ"
+    assert bs_symbol("600519.SH") == "sh.600519"
+    assert bs_symbol("000001.SZ") == "sz.000001"
+
+
+def test_baostock_symbol_helper_explicitly_rejects_beijing_market() -> None:
+    with pytest.raises(ProviderCoverageMiss, match="BaoStock.*不覆盖北交所.*920066.BJ"):
+        bs_symbol("920066.BJ")

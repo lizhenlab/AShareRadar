@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import gc
+import sqlite3
 import threading
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,16 +11,14 @@ from unittest.mock import patch
 import pytest
 
 from app.models.schemas import CacheStats, ProviderCapabilityStatus, ProviderStatus
+from app.services.instance_guard import FileInstanceGuard
 from app.services.scheduler import (
     FileSchedulerInstanceGuard,
     LocalDataScheduler,
     LocalTask,
-    _build_local_tasks,
-    _data_health_events,
-    _reschedule_task,
-    _runtime_cleanup_message,
-    _task_state,
 )
+from app.services.scheduler_health import _data_health_events, _runtime_cleanup_message
+from app.services.scheduler_schedule import _build_local_tasks, _reschedule_task, _task_state
 from app.utils.time import seconds_ago_text
 
 
@@ -52,6 +51,10 @@ def test_file_scheduler_guard_allows_only_one_holder(tmp_path) -> None:
 
     assert second.acquire() is True
     second.release()
+
+
+def test_file_scheduler_guard_keeps_shared_guard_compatibility() -> None:
+    assert issubclass(FileSchedulerInstanceGuard, FileInstanceGuard)
 
 
 def test_scheduler_single_instance_strategy_can_be_injected() -> None:
@@ -384,16 +387,20 @@ def test_scheduler_stop_keeps_guard_until_stubborn_runner_finishes() -> None:
         began = loop.time()
         stopped = await first.stop()
         elapsed = loop.time() - began
+        assert first.is_quiescent is False
         duplicate_started = await second.start()
         releases_while_runner_alive = guard.release_calls
         release.set()
         fallback_release.cancel()
         await finished.wait()
+
         async def wait_for_guard_release() -> None:
             while guard.acquired:
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(wait_for_guard_release(), timeout=1)
+        await asyncio.wait_for(first.wait_until_quiescent(), timeout=1)
+        assert first.is_quiescent is True
         restarted = await second.start()
         assert await second.stop() is True
         gc.collect()
@@ -487,6 +494,18 @@ def test_build_local_tasks_uses_explicit_specs_min_intervals_and_offsets() -> No
     ]
     assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30]
     assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20]
+
+
+def test_scheduler_loop_lets_market_scanner_use_its_shanghai_clock() -> None:
+    scanner = _ScheduledTickScanner()
+    scheduler = LocalDataScheduler(_SchedulerHub(), market_scanner=scanner)  # type: ignore[arg-type]
+    for task in scheduler.tasks.values():
+        task.next_run_at = datetime.now() + timedelta(days=1)
+    scanner.on_tick = scheduler._stop_event.set  # noqa: SLF001
+
+    asyncio.run(scheduler._loop())  # noqa: SLF001
+
+    assert scanner.calls == [None]
 
 
 def test_build_local_tasks_clamps_invalid_interval_settings() -> None:
@@ -637,6 +656,22 @@ def test_manual_task_failure_raises_after_recording_failed_run() -> None:
 
     assert scheduler.datahub.cache.finished_runs == [("failed", "boom")]
     assert scheduler.datahub.cache.monitor_events[-1] == ("warning", "task", "boom")
+
+
+def test_task_end_persistence_failures_use_safe_stderr_fallback(capsys) -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub(cache=_PersistenceFailingCache()))
+    scheduler.tasks = {
+        "bad_task": LocalTask("bad_task", "失败任务", 20, _failing_handler, datetime.now()),
+    }
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(scheduler.run_once("bad_task"))
+
+    output = capsys.readouterr().err
+    assert "scheduler task run persistence failed: OperationalError: database is locked" in output
+    assert "scheduler task event persistence failed: OperationalError: readonly database" in output
+    assert "task-run-secret" not in output
+    assert "event-secret" not in output
 
 
 def test_task_run_start_failure_clears_runtime_state_and_uses_clean_message() -> None:
@@ -1194,9 +1229,7 @@ def test_data_health_events_does_not_claim_missing_industry_background_is_normal
 
     events = _data_health_events(stats, [], [], _settings(), now=now)
 
-    assert [(event.level, event.category, event.message) for event in events] == [
-        ("warning", "plate", "尚未形成行业背景缓存。")
-    ]
+    assert [(event.level, event.category, event.message) for event in events] == [("warning", "plate", "尚未形成行业背景缓存。")]
     assert all("正常" not in event.message for event in events)
 
 
@@ -1289,6 +1322,16 @@ class _SchedulerCache:
 
     def watchlist_symbols(self) -> list[str]:
         return list(self.kline_symbols)
+
+
+class _ScheduledTickScanner:
+    def __init__(self) -> None:
+        self.calls: list[datetime | None] = []
+        self.on_tick = lambda: None
+
+    async def scheduled_tick(self, now: datetime | None = None) -> None:
+        self.calls.append(now)
+        self.on_tick()
 
 
 class _SelectionSchedulerCache(_SchedulerCache):
@@ -1403,6 +1446,14 @@ class _BlockingTaskRunStartCache(_SchedulerCache):
 class _StartFailingCache(_SchedulerCache):
     def start_task_run(self, task_name: str) -> int:
         raise RuntimeError("  database\nlocked  ")
+
+
+class _PersistenceFailingCache(_SchedulerCache):
+    def finish_task_run(self, run_id: int, status: str, message: str | None = None) -> None:
+        raise sqlite3.OperationalError("database is locked; api_key=task-run-secret")
+
+    def save_monitor_event(self, level: str, category: str, message: str, symbol: str | None = None) -> None:
+        raise sqlite3.OperationalError("attempt to write a readonly database; token=event-secret")
 
 
 class _SchedulerHub:

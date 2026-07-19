@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,7 +16,7 @@ def test_refresh_trading_calendar_route_reports_success_without_error() -> None:
 
     with patch(
         "app.api.routes.data.refresh_trade_calendar_result",
-        return_value=TradeCalendarRefreshResult(trade_date_count=245, source="交易日历缓存"),
+        return_value=TradeCalendarRefreshResult(trade_date_count=245, source="runtime_cache"),
     ):
         response = client.post("/api/data/trading-calendar/refresh")
 
@@ -24,7 +24,7 @@ def test_refresh_trading_calendar_route_reports_success_without_error() -> None:
     assert response.json() == {
         "ok": True,
         "trade_date_count": 245,
-        "source": "交易日历缓存",
+        "source": "runtime_cache",
     }
 
 
@@ -35,7 +35,7 @@ def test_refresh_trading_calendar_route_reports_refresh_error() -> None:
         "app.api.routes.data.refresh_trade_calendar_result",
         return_value=TradeCalendarRefreshResult(
             trade_date_count=0,
-            source="工作日兜底",
+            source="bundled_baseline",
             error="ImportError: numpy.core.multiarray failed to import",
         ),
     ):
@@ -45,9 +45,20 @@ def test_refresh_trading_calendar_route_reports_refresh_error() -> None:
     assert response.json() == {
         "ok": False,
         "trade_date_count": 0,
-        "source": "工作日兜底",
+        "source": "bundled_baseline",
         "error": "ImportError: numpy.core.multiarray failed to import",
     }
+
+
+def test_refresh_trading_calendar_route_keeps_sync_refresh_off_event_loop() -> None:
+    client = _client()
+    offload = AsyncMock(return_value=TradeCalendarRefreshResult(245, "runtime_cache"))
+
+    with patch("app.api.routes.data.asyncio.to_thread", offload):
+        response = client.post("/api/data/trading-calendar/refresh")
+
+    assert response.status_code == 200
+    offload.assert_awaited_once_with(data.refresh_trade_calendar_result)
 
 
 def test_refresh_trading_calendar_route_uses_refresh_response_model() -> None:

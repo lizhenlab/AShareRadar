@@ -4,7 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AShareRadar</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <noscript><link rel="stylesheet" href="/static/styles.css" /></noscript>
+    <link rel="stylesheet" href="/static/styles.css?v=20260719-frontend-correctness-2" />
+    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260719-frontend-correctness-2" />
+    <script type="importmap">
+      {
+        "imports": {
+          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260719-frontend-correctness-2",
+          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260719-frontend-correctness-2",
+          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260719-frontend-correctness-2",
+          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260719-frontend-correctness-2",
+          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260719-frontend-correctness-2"
+        }
+      }
+    </script>
   </head>
   <body>
     <header class="topbar">
@@ -43,7 +56,7 @@
       <section class="workspace">
         <section class="market-strip" id="marketStrip"></section>
 
-        <section class="panel main-card">
+        <section class="panel main-card market-scan-focus-target" id="stockWorkbench" tabindex="-1" aria-labelledby="stockName">
           <div class="stock-head">
             <div>
               <span class="muted" id="stockCode">--</span>
@@ -129,6 +142,7 @@
 
         <section class="workspace-tabs" aria-label="工作台分区" role="tablist">
           <button type="button" class="active" id="workspace-tab-overview" data-view="overview" role="tab" aria-selected="true" aria-controls="workspace-panel-overview" tabindex="0">总览</button>
+          <button type="button" id="workspace-tab-market-scan" data-view="market-scan" role="tab" aria-selected="false" aria-controls="workspace-panel-market-scan" tabindex="-1">全市场榜单</button>
           <button type="button" id="workspace-tab-qa" data-view="qa" role="tab" aria-selected="false" aria-controls="workspace-panel-qa" tabindex="-1">AI问诊</button>
           <button type="button" id="workspace-tab-strategy" data-view="strategy" role="tab" aria-selected="false" aria-controls="workspace-panel-strategy" tabindex="-1">策略风控</button>
           <button type="button" id="workspace-tab-finance" data-view="finance" role="tab" aria-selected="false" aria-controls="workspace-panel-finance" tabindex="-1">资金估值</button>
@@ -144,6 +158,70 @@
           <div class="quality-panel" id="qualityPanel"></div>
           <div class="evidence-panel" id="signalEvidence"></div>
           <div class="alpha-panel" id="alphaEvidence"></div>
+        </section>
+
+        <section class="workspace-view" id="workspace-panel-market-scan" data-view-panel="market-scan" role="tabpanel" aria-labelledby="workspace-tab-market-scan">
+          <section class="panel market-scan-panel" aria-labelledby="marketScanTitle">
+            <div class="market-scan-heading">
+              <div>
+                <span class="market-scan-kicker">沪市 / 深市 / 北交所</span>
+                <h3 id="marketScanTitle">全市场A股榜单</h3>
+                <p id="marketScanHeadline">等待读取最近扫描</p>
+              </div>
+              <div class="market-scan-actions">
+                <button type="button" id="marketScanStart">开始扫描</button>
+                <button type="button" class="mini-button" id="marketScanCancel" hidden>取消</button>
+                <button type="button" class="mini-button" id="marketScanRetry" hidden>重试问题项</button>
+              </div>
+            </div>
+
+            <div class="market-scan-progress" id="marketScanProgress">
+              <div><span>任务进度</span><strong id="marketScanProgressText">--</strong></div>
+              <progress id="marketScanProgressBar" max="100" value="0" aria-label="全市场扫描进度" aria-describedby="marketScanProgressText" aria-valuetext="尚无扫描进度" aria-busy="false">0%</progress>
+            </div>
+
+            <div class="market-scan-summary" id="marketScanSummary">
+              <div><span>数据日期</span><strong id="marketScanDataDate">--</strong></div>
+              <div><span>股票池</span><strong id="marketScanTotal">--</strong></div>
+              <div><span>有效排名</span><strong id="marketScanSuccess">--</strong></div>
+              <div><span>缺失 / 跳过</span><strong id="marketScanIssues">--</strong></div>
+              <div><span>数据覆盖率</span><strong id="marketScanCoverage">--</strong></div>
+              <div><span>最近扫描</span><strong id="marketScanFinishedAt">--</strong></div>
+              <div><span>规则版本</span><strong id="marketScanRule">--</strong></div>
+            </div>
+
+            <form class="market-scan-filters" id="marketScanFilters">
+              <label><span>状态</span><select id="marketScanStatus"><option value="success">有效排名</option><option value="missing">数据缺失</option><option value="skipped">已跳过</option><option value="pending">待处理</option><option value="all">全部状态</option></select></label>
+              <label><span>市场</span><select id="marketScanMarket"><option value="">全部市场</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BJ">北交所</option></select></label>
+              <label><span>行业</span><input id="marketScanIndustry" maxlength="80" placeholder="行业名称" /></label>
+              <label><span>ST</span><select id="marketScanSt"><option value="">不限</option><option value="true">仅 ST</option><option value="false">排除 ST</option></select></label>
+              <label><span>新股</span><select id="marketScanNew"><option value="">不限</option><option value="true">仅新股</option><option value="false">排除新股</option></select></label>
+              <label><span>最低质量</span><input id="marketScanQuality" type="number" min="0" max="100" step="1" placeholder="0-100" /></label>
+              <label><span>搜索</span><input id="marketScanKeyword" maxlength="80" placeholder="代码或名称" /></label>
+              <label><span>排序</span><select id="marketScanSort"><option value="rank">综合排名</option><option value="score">综合分</option><option value="trend_score">趋势分</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
+              <label><span>方向</span><select id="marketScanOrder"><option value="asc">升序</option><option value="desc">降序</option></select></label>
+              <div class="market-scan-filter-actions">
+                <button type="submit">应用</button>
+                <button type="reset" class="mini-button">重置</button>
+              </div>
+            </form>
+
+            <p class="market-scan-announcement" id="marketScanAnnouncement" role="status" aria-live="polite" aria-atomic="true" aria-relevant="text"></p>
+            <div class="market-scan-result-state" id="marketScanResultState">暂无榜单数据</div>
+            <div class="market-scan-table-wrap" id="marketScanTableWrap" role="region" aria-label="全市场扫描榜单，可横向滚动" aria-busy="false" tabindex="0" hidden>
+              <table class="market-scan-table">
+                <thead><tr><th>排名</th><th>股票</th><th>市场 / 行业</th><th>综合</th><th>趋势</th><th>涨跌幅</th><th>换手率</th><th>成交额</th><th>质量</th><th>状态 / 标签</th></tr></thead>
+                <tbody id="marketScanRows"></tbody>
+              </table>
+            </div>
+            <div class="market-scan-pagination" id="marketScanPagination" aria-busy="false" hidden>
+              <span id="marketScanPageText">--</span>
+              <div>
+                <button type="button" class="mini-button" id="marketScanPrev">上一页</button>
+                <button type="button" class="mini-button" id="marketScanNext">下一页</button>
+              </div>
+            </div>
+          </section>
         </section>
 
         <section class="workspace-view" id="workspace-panel-finance" data-view-panel="finance" role="tabpanel" aria-labelledby="workspace-tab-finance">
@@ -465,6 +543,6 @@
       <span>研究辅助工具，不构成投资建议</span>
     </footer>
 
-    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/app.js?v=20260719-frontend-correctness-2"></script>
   </body>
 </html>

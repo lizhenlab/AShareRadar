@@ -8,11 +8,33 @@ import pytest
 from app.workflows.stock_analysis import (
     _peer_quote_sample_or_fallback,
     _peer_sample_info,
+    _optional_plate_rank,
     _safe_quote_history,
     _safe_save_advice_snapshot,
     analyze_individual_stock,
 )
-from tests.factories import make_quote, make_stock_info
+from tests.factories import make_plate_item, make_quote, make_stock_info
+
+
+def test_stale_plate_cache_is_not_used_as_current_industry_strength() -> None:
+    class Cache:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, str]] = []
+
+        def log_event(self, category: str, message: str) -> None:
+            self.events.append((category, message))
+
+    class Hub:
+        cache = Cache()
+
+        async def plate_rank(self, limit: int):
+            return [make_plate_item(change_pct=9.9).model_copy(update={"fallback_used": True})]
+
+    hub = Hub()
+    rows = asyncio.run(_optional_plate_rank(hub, "600519.SH"))  # type: ignore[arg-type]
+
+    assert rows == []
+    assert any("不参与强度评分" in message for _category, message in hub.cache.events)
 
 
 def test_peer_sample_stock_pool_failure_reaches_analysis_contract() -> None:

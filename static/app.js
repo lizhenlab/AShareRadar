@@ -48,6 +48,7 @@ import {
 import { $, escapeHtml, setMetricTone } from "./js/dom.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
+import { createMarketScanController } from "./js/market-scan.js";
 import {
   addStockNote,
   removeStockNote,
@@ -138,6 +139,7 @@ const state = {
   loadSeq: 0,
   loadRequest: null,
   pendingLoad: null,
+  onlineRecoveryPromise: null,
   watchlist: [],
   researchActivitySymbol: "",
   researchActivityFilter: "all",
@@ -233,6 +235,7 @@ function setWorkspaceView(view) {
   const target = buttons.some((button) => button.dataset.view === requested)
     ? requested
     : fallback?.dataset.view || DEFAULT_WORKSPACE_PREFERENCES.workspaceView;
+  const previousView = state.workspaceView;
   state.workspaceView = target;
   buttons.forEach((button) => {
     const active = button.dataset.view === target;
@@ -246,6 +249,8 @@ function setWorkspaceView(view) {
     panel.hidden = !active;
   });
   persistWorkspacePreferences();
+  if (target === "market-scan" && previousView !== target) void marketScanController.activate();
+  else if (target !== "market-scan" && marketScanController.state.activated) marketScanController.deactivate();
   if (target === "tools") void loadRuntimeCleanupPreview().catch(() => {});
   const analysis = state.lastAnalysis;
   if (!analysis) return;
@@ -350,16 +355,20 @@ function loadingState(title, detail = "正在读取数据，请稍候。") {
 async function loadAll(options = {}) {
   const request = beginLoadRequest(options);
   const workbenchLoad = loadCurrentWorkbench(request);
-  const globalLoads = refreshGlobalPanels();
-  const workbench = await workbenchLoad;
-  if (!workbench || isStaleLoad(request)) return false;
-  if (!renderCurrentWorkbench(workbench, request)) return false;
-  const stockPanels = refreshStockPanels(request);
-  await globalLoads.watchlist;
-  if (options.waitForAdviceTimeline) await stockPanels.adviceTimeline;
-  if (isStaleLoad(request)) return false;
-  reconcileStreamSubscription({ context: loadContextFromRequest(request) });
-  return true;
+  const globalLoads = refreshGlobalPanels({ force: Boolean(options.forceGlobal) });
+  try {
+    const workbench = await workbenchLoad;
+    if (!workbench || isStaleLoad(request)) return false;
+    if (!renderCurrentWorkbench(workbench, request)) return false;
+    const stockPanels = refreshStockPanels(request);
+    await globalLoads.watchlist;
+    if (options.waitForAdviceTimeline) await stockPanels.adviceTimeline;
+    if (isStaleLoad(request)) return false;
+    reconcileStreamSubscription({ context: loadContextFromRequest(request) });
+    return true;
+  } finally {
+    if (options.waitForGlobal) await Promise.allSettled(Object.values(globalLoads));
+  }
 }
 
 async function loadCurrentWorkbench(request) {
@@ -1420,8 +1429,11 @@ function streamSymbols() {
 }
 
 function canonicalStreamSymbol(symbol) {
-  const normalized = normalizeUiSymbol(symbol);
-  return /^\d{6}\.(SH|SZ)$/.test(normalized) ? normalized : "";
+  try {
+    return validateUiSymbol(symbol);
+  } catch (error) {
+    return "";
+  }
 }
 
 function isCurrentStream(stream, streamId, context) {
@@ -1452,14 +1464,21 @@ function isValidQuoteRow(item) {
   return (
     typeof item.name === "string" &&
     Boolean(item.name.trim()) &&
-    typeof item.code === "string" &&
-    /^\d{6}$/.test(item.code) &&
-    typeof item.market === "string" &&
-    /^(SH|SZ)$/.test(item.market) &&
+    validQuoteSymbol(item.code, item.market) &&
     isFiniteQuoteNumber(item.price) &&
     isFiniteQuoteNumber(item.change_pct) &&
     isFiniteQuoteNumber(item.amount)
   );
+}
+
+function validQuoteSymbol(code, market) {
+  if (typeof code !== "string" || typeof market !== "string") return false;
+  const symbol = `${code}.${market}`;
+  try {
+    return validateUiSymbol(symbol) === symbol;
+  } catch (error) {
+    return false;
+  }
 }
 
 function isFiniteQuoteNumber(value) {
@@ -1927,41 +1946,20 @@ function createStockSearchBinding({ inputId, listId, onSelect }) {
       onSelect(symbol, item);
     },
   });
-
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      controller.move(event.key === "ArrowDown" ? 1 : -1);
-      return;
-    }
-    if (event.key === "Enter" && view.phase === "ready" && view.items.length) {
-      event.preventDefault();
-      controller.selectIndex(view.activeIndex >= 0 ? view.activeIndex : 0);
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      controller.close();
-    }
-  });
-  input.addEventListener("blur", () => {
-    setTimeout(() => controller.close(), 120);
-  });
-  list.addEventListener("pointerdown", (event) => event.preventDefault());
-  list.addEventListener("click", (event) => {
-    const option = event.target && typeof event.target.closest === "function"
-      ? event.target.closest("button[data-stock-index]")
-      : null;
-    if (!option) return;
-    controller.selectIndex(Number(option.dataset.stockIndex));
-  });
+  const events = bindStockSearchEvents(input, list, controller, () => view);
 
   const binding = {
     input(value) {
+      events.clearBlurTimer();
       return controller.input(value);
     },
     close() {
+      events.clearBlurTimer();
       return controller.close();
+    },
+    destroy() {
+      events.destroy();
+      return controller.destroy();
     },
     selectDefault() {
       if (view.phase !== "ready" || !view.items.length) return null;
@@ -1976,6 +1974,55 @@ function createStockSearchBinding({ inputId, listId, onSelect }) {
   };
   stockSearchBindings.push(binding);
   return binding;
+}
+
+function bindStockSearchEvents(input, list, controller, currentView) {
+  let blurTimer = null;
+  const clearBlurTimer = () => {
+    if (blurTimer !== null) clearTimeout(blurTimer);
+    blurTimer = null;
+  };
+  const handleKeydown = (event) => {
+    const view = currentView();
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      controller.move(event.key === "ArrowDown" ? 1 : -1);
+    } else if (event.key === "Enter" && view.phase === "ready" && view.items.length) {
+      event.preventDefault();
+      controller.selectIndex(view.activeIndex >= 0 ? view.activeIndex : 0);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      controller.close();
+    }
+  };
+  const handleBlur = () => {
+    clearBlurTimer();
+    blurTimer = setTimeout(() => {
+      blurTimer = null;
+      controller.close();
+    }, 120);
+  };
+  const handleClick = (event) => {
+    const option = event.target?.closest?.("button[data-stock-index]");
+    if (option) controller.selectIndex(Number(option.dataset.stockIndex));
+  };
+  const preventPointerFocus = (event) => event.preventDefault();
+  input.addEventListener("keydown", handleKeydown);
+  input.addEventListener("focus", clearBlurTimer);
+  input.addEventListener("blur", handleBlur);
+  list.addEventListener("pointerdown", preventPointerFocus);
+  list.addEventListener("click", handleClick);
+  return {
+    clearBlurTimer,
+    destroy() {
+      clearBlurTimer();
+      input.removeEventListener?.("keydown", handleKeydown);
+      input.removeEventListener?.("focus", clearBlurTimer);
+      input.removeEventListener?.("blur", handleBlur);
+      list.removeEventListener?.("pointerdown", preventPointerFocus);
+      list.removeEventListener?.("click", handleClick);
+    },
+  };
 }
 
 function renderStockSearchView(input, list, view) {
@@ -2096,6 +2143,19 @@ const watchStockSearch = createStockSearchBinding({
   inputId: "watchSymbolInput",
   listId: "watchSymbolSuggestions",
   onSelect() {},
+});
+
+const marketScanController = createMarketScanController({
+  onSelectStock(symbol) {
+    clearSymbolError();
+    setActiveSymbol(symbol);
+    setWorkspaceView("overview");
+    void loadAll({ reveal: true });
+    const workbench = $("stockWorkbench");
+    if (workbench && typeof workbench.focus === "function") {
+      requestAnimationFrame(() => workbench.focus());
+    }
+  },
 });
 
 $("searchForm").addEventListener("submit", (event) => {
@@ -2666,8 +2726,49 @@ window.addEventListener("resize", () => {
   }, 200);
 });
 
+function workbenchNeedsOnlineRecovery() {
+  const phase = state.coreStatus?.phase || "idle";
+  const failures = state.auxiliaryStatus?.failures || {};
+  return Boolean(
+    state.pendingLoad
+    || phase === "loading"
+    || phase === "error"
+    || state.visibilityRefreshSources.size
+    || Object.keys(failures).length
+  );
+}
+
+function handleWorkbenchOnline() {
+  if (document.hidden || state.onlineRecoveryPromise || !workbenchNeedsOnlineRecovery()) return false;
+  const recoverCore = Boolean(state.pendingLoad)
+    || ["loading", "error"].includes(state.coreStatus?.phase)
+    || Object.keys(state.auxiliaryStatus?.failures || {}).length > 0;
+  if (state.pendingLoad) invalidateActiveLoad();
+  const task = recoverCore
+    ? loadAll({ forceGlobal: true, waitForGlobal: true })
+    : Promise.allSettled(Object.values(refreshGlobalPanels({ force: true })));
+  const recovery = Promise.resolve(task).finally(() => {
+    if (state.onlineRecoveryPromise === recovery) state.onlineRecoveryPromise = null;
+  });
+  state.onlineRecoveryPromise = recovery;
+  return true;
+}
+
+function destroyStockSearchBindings() {
+  stockSearchBindings.forEach((binding) => binding.destroy());
+}
+
+function handleStockSearchPageHide(event) {
+  if (!event?.persisted) {
+    destroyStockSearchBindings();
+    return;
+  }
+  stockSearchBindings.forEach((binding) => binding.close());
+}
+
 function handleVisibilityChange() {
   if (document.hidden) {
+    marketScanController.setVisible(false);
     if (state.monitorTimer) {
       clearInterval(state.monitorTimer);
       state.monitorTimer = null;
@@ -2683,11 +2784,14 @@ function handleVisibilityChange() {
     stopStream();
     return;
   }
+  marketScanController.setVisible(true);
   refreshGlobalPanels({ force: true });
   if (state.lastAnalysis) reconcileStreamSubscription();
 }
 
 document.addEventListener("visibilitychange", handleVisibilityChange);
+window.addEventListener("online", handleWorkbenchOnline);
+window.addEventListener("pagehide", handleStockSearchPageHide);
 
 initializeChartInspectors();
 initializeAlertNotifications(state);
@@ -2711,6 +2815,9 @@ export const __appTest = {
   refreshGlobalPanels,
   refreshMonitoring,
   refreshWatchlist,
+  destroyStockSearchBindings,
+  handleStockSearchPageHide,
+  handleWorkbenchOnline,
   handleVisibilityChange,
   reconcileStreamSubscription,
   setActiveSymbol,
@@ -2718,11 +2825,14 @@ export const __appTest = {
   currentWorkspacePreferences,
   restoreWorkspacePreferences,
   startStream,
+  canonicalStreamSymbol,
+  quoteRowsFromStreamEvent,
   compositeStatus,
   GLOBAL_ENDPOINTS,
   GLOBAL_REFRESH_TTL_MS,
   DAILY_CHART_RANGES,
   MINUTE_CHART_INTERVALS,
+  marketScanController,
 };
 
 if (!globalThis.__ASHARE_RADAR_DISABLE_AUTOLOAD__) {

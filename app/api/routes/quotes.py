@@ -7,6 +7,7 @@ from collections.abc import Iterable
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from app.api.deps import get_app_settings, get_datahub
 from app.api.errors import run_api, run_sync_api, run_sync_api_async
@@ -21,6 +22,15 @@ from app.utils.symbols import normalize_symbol, standard_symbol_list
 router = APIRouter()
 MAX_QUOTE_SYMBOLS = 50
 MIN_QUOTE_REFRESH_SECONDS = 1
+
+
+class _QuoteStreamResponse(StreamingResponse):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        except asyncio.CancelledError:
+            # Disconnect and graceful-shutdown cancellation are normal for SSE.
+            return
 
 
 class _NoActiveWatchlistSymbolsError(ValueError):
@@ -53,7 +63,7 @@ async def quotes(
 
 @router.get(
     "/api/stream/quotes",
-    response_class=StreamingResponse,
+    response_class=_QuoteStreamResponse,
     responses={
         200: {
             "description": "实时行情事件流",
@@ -70,7 +80,7 @@ async def stream_quotes(
     symbol_list = run_sync_api(lambda: _requested_stream_symbol_list(symbols))
     if symbol_list is None:
         symbol_list = await run_sync_api_async(lambda: _api_stream_fallback_symbol_list(datahub, settings))
-    return StreamingResponse(
+    return _QuoteStreamResponse(
         _quote_stream_events(request, datahub, symbol_list, settings.quote_refresh_seconds),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

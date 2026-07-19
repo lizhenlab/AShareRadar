@@ -7,6 +7,8 @@ from app.config import Settings, get_settings
 from app.services.cache import SQLiteCache, resolve_cache_settings
 from app.services.datahub import DataHub
 from app.services.local_data_import_guard import LocalDataImportPreviewRegistry
+from app.services.market_scan_manager import MarketScanManager
+from app.services.runtime_coordinator import RuntimeCoordinator, RuntimeLeadership
 from app.services.scheduler import LocalDataScheduler
 from app.services.workbench_context import WorkbenchContextCache
 
@@ -20,6 +22,8 @@ class AppContainer:
     datahub: DataHub
     scheduler: LocalDataScheduler
     workbench_contexts: WorkbenchContextCache
+    market_scanner: MarketScanManager | None = None
+    runtime_coordinator: RuntimeCoordinator | None = None
     local_data_import_previews: LocalDataImportPreviewRegistry = field(default_factory=LocalDataImportPreviewRegistry)
 
     def __post_init__(self) -> None:
@@ -49,12 +53,23 @@ def build_container(
     effective_cache = _resolve_cache_injection(datahub, cache)
     resolved_settings = _resolve_settings(settings, datahub, effective_cache, scheduler)
     datahub = _build_datahub(datahub, cache, resolved_settings)
-    scheduler = _build_scheduler(scheduler, datahub, resolved_settings)
+    leadership = RuntimeLeadership.for_cache_path(datahub.cache.path)
+    market_scanner = MarketScanManager(datahub, instance_guard=leadership.service_guard())
+    scheduler = _build_scheduler(
+        scheduler,
+        datahub,
+        resolved_settings,
+        market_scanner,
+        instance_guard=leadership.service_guard(),
+    )
+    runtime_coordinator = RuntimeCoordinator(leadership, scheduler, market_scanner)
     return AppContainer(
         settings=resolved_settings,
         datahub=datahub,
         scheduler=scheduler,
         workbench_contexts=datahub.workbench_contexts,
+        market_scanner=market_scanner,
+        runtime_coordinator=runtime_coordinator,
         local_data_import_previews=LocalDataImportPreviewRegistry(),
     )
 
@@ -105,13 +120,21 @@ def _build_scheduler(
     scheduler: LocalDataScheduler | None,
     datahub: DataHub,
     settings: Settings,
+    market_scanner: MarketScanManager,
+    *,
+    instance_guard,
 ) -> LocalDataScheduler:
     if scheduler is None:
-        return LocalDataScheduler(datahub)
+        return LocalDataScheduler(datahub, market_scanner=market_scanner, instance_guard=instance_guard)
     scheduler_datahub = getattr(scheduler, "datahub", _MISSING)
     if scheduler_datahub is not _MISSING and scheduler_datahub is not datahub:
         raise ValueError("scheduler.datahub 必须与容器 datahub 使用同一实例")
     _require_settings_owner("scheduler", scheduler, settings)
+    scanner = getattr(scheduler, "market_scanner", None)
+    if scanner is not None and scanner is not market_scanner:
+        raise ValueError("scheduler.market_scanner 必须与容器使用同一实例")
+    scheduler.market_scanner = market_scanner
+    scheduler.bind_instance_guard(instance_guard)
     return scheduler
 
 

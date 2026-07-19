@@ -70,12 +70,17 @@ def _run_command(args: argparse.Namespace):
         return verify_runtime_backup(args.backup)
     settings = Settings()
     if args.command == "backup":
-        return create_runtime_backup(settings.cache_path, args.destination)
+        return create_runtime_backup(
+            settings.cache_path,
+            args.destination,
+            max_backups=settings.max_runtime_backups,
+        )
     return restore_runtime_backup(
         args.backup,
         settings.cache_path,
         service_stopped=args.confirm_service_stopped,
         rollback_destination=args.rollback_destination,
+        max_backups=settings.max_runtime_backups,
     )
 
 

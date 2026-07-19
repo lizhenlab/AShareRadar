@@ -127,6 +127,13 @@ def test_documentation_does_not_embed_machine_specific_paths() -> None:
     assert offenders == []
 
 
+def test_data_directory_ignores_every_runtime_artifact() -> None:
+    rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert "data/*" in rules
+    assert "!data/.gitkeep" in rules
+
+
 def test_machine_specific_path_detection_is_cross_platform_and_user_agnostic() -> None:
     examples = (
         "/Users/example-account/project",
@@ -181,6 +188,13 @@ def test_ci_keeps_the_incremental_quality_gates() -> None:
     action_refs = re.findall(r"uses:\s*[^@\s]+@([^\s#]+)", workflow)
     assert action_refs
     assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs)
+    for action_name in ("checkout", "setup-python", "setup-node"):
+        majors = re.findall(
+            rf"actions/{action_name}@[0-9a-f]{{40}}\s+# v(\d+)",
+            workflow,
+        )
+        assert majors
+        assert all(int(major) >= 6 for major in majors)
 
 
 def test_test_report_keeps_auditable_latest_verification_table() -> None:

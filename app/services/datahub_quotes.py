@@ -25,6 +25,7 @@ from app.services.provider_errors import (
 )
 from app.services.trading_calendar import is_trading_day
 from app.utils.market_data import filter_valid_quotes
+from app.utils.market_time import market_now_naive
 from app.utils.symbols import standard_symbol
 
 
@@ -63,27 +64,61 @@ class QuoteCoordinator:
         return (await self.quotes([requested], use_cache=use_cache))[0]
 
     async def quotes(self, symbols: Iterable[str], use_cache: bool = True) -> list[Quote]:
+        requested_symbols, symbol_list, collected, errors = await self._collect_quotes(
+            symbols,
+            use_cache=use_cache,
+        )
+        if not symbol_list:
+            return []
+        if len(collected) != len(symbol_list):
+            unresolved = [symbol for symbol in symbol_list if symbol not in collected]
+            raise RuntimeError("实时行情未完整返回，缺失：" + "、".join(unresolved) + "；" + "；".join(errors))
+        return _ordered_quotes(collected, requested_symbols)
+
+    async def partial_quotes(self, symbols: Iterable[str], use_cache: bool = True) -> list[Quote]:
+        """Return every available requested quote without hiding partial provider success."""
+        quotes, _errors = await self.partial_quotes_with_errors(symbols, use_cache=use_cache)
+        return quotes
+
+    async def partial_quotes_with_errors(
+        self,
+        symbols: Iterable[str],
+        use_cache: bool = True,
+    ) -> tuple[list[Quote], tuple[str, ...]]:
+        """Return available quotes plus stable provider diagnostics for unresolved symbols."""
+        requested_symbols, _symbol_list, collected, errors = await self._collect_quotes(
+            symbols,
+            use_cache=use_cache,
+        )
+        return (
+            _ordered_available_quotes(collected, requested_symbols),
+            tuple(dict.fromkeys(error for error in errors if error)),
+        )
+
+    async def _collect_quotes(
+        self,
+        symbols: Iterable[str],
+        *,
+        use_cache: bool,
+    ) -> tuple[list[str], list[str], dict[str, Quote], list[str]]:
         requested_symbols = _normalize_symbols(symbols)
         if not requested_symbols:
-            return []
+            return [], [], {}, []
         symbol_list = list(dict.fromkeys(requested_symbols))
         current = self._now()
 
         collected = await self._short_cache_quotes(symbol_list, current) if use_cache else {}
         if len(collected) == len(symbol_list):
-            return _ordered_quotes(collected, requested_symbols)
+            return requested_symbols, symbol_list, collected, []
 
         errors = await self._fill_realtime_quotes(symbol_list, collected, current)
         if len(collected) == len(symbol_list):
-            return _ordered_quotes(collected, requested_symbols)
+            return requested_symbols, symbol_list, collected, errors
 
         await self._fill_fallback_quotes(symbol_list, collected, current)
         if len(collected) == len(symbol_list):
             await _safe_log_quote_event(self.cache, "fallback", "部分或全部实时数据源失败或无覆盖，缺失个股使用最近有效交易时刻缓存报价")
-            return _ordered_quotes(collected, requested_symbols)
-
-        unresolved = [symbol for symbol in symbol_list if symbol not in collected]
-        raise RuntimeError("实时行情未完整返回，缺失：" + "、".join(unresolved) + "；" + "；".join(errors))
+        return requested_symbols, symbol_list, collected, errors
 
     async def _short_cache_quotes(self, symbol_list: list[str], current: datetime) -> dict[str, Quote]:
         cached = await run_cache_io(self.cache.get_quotes, symbol_list, self.settings.quote_cache_seconds)
@@ -101,7 +136,14 @@ class QuoteCoordinator:
             remaining = [symbol for symbol in symbol_list if symbol not in collected]
             if not remaining:
                 break
-            await self._try_provider_quotes(attempt, remaining, collected, errors, current)
+            await self._try_provider_quotes(
+                attempt,
+                remaining,
+                collected,
+                errors,
+                current,
+                fallback_attempt=bool(errors),
+            )
         return errors
 
     async def _try_provider_quotes(
@@ -111,6 +153,8 @@ class QuoteCoordinator:
         collected: dict[str, Quote],
         errors: list[str],
         current: datetime,
+        *,
+        fallback_attempt: bool,
     ) -> None:
         source = provider_source_name(attempt.provider, attempt.name)
         try:
@@ -130,16 +174,23 @@ class QuoteCoordinator:
             matched, missing = _matched_quotes(quotes, remaining)
             if not matched:
                 raise ProviderProtocolError(f"{source} 行情缺失或字段无效：{','.join(missing)}")
-            event_time_error = _provider_event_time_error(source, matched, current)
-            if event_time_error:
-                raise ProviderProtocolError(event_time_error)
+            valid_time_quotes, event_time_errors = _partition_quotes_by_event_time(matched, current)
+            if not valid_time_quotes:
+                raise ProviderProtocolError(_provider_event_time_error(source, matched, current) or f"{source} 行情事件时间异常")
+            if fallback_attempt:
+                valid_time_quotes = [quote.model_copy(update={"fallback_used": True}) for quote in valid_time_quotes]
             await self.runtime.record_attempt_success_async(attempt, "quote", result.latency_ms)
-            collected.update(_quotes_by_symbol(matched))
-            await self._save_quotes_best_effort(matched, current)
-            if missing:
-                message = f"{source} 批量行情部分缺失：{','.join(missing)}"
+            collected.update(_quotes_by_symbol(valid_time_quotes))
+            await self._save_quotes_best_effort(valid_time_quotes, current)
+            for message in _quote_batch_degradation_messages(
+                source,
+                raw_quotes,
+                quotes,
+                remaining,
+                event_time_errors,
+            ):
                 errors.append(f"{attempt.name}: {message}")
-                await _safe_log_quote_event(self.cache, "fallback", message)
+                await _safe_log_quote_event(self.cache, "quote_degraded", message)
         except Exception as exc:
             await self.runtime.record_attempt_failure_async(attempt, "quote", exc, errors)
 
@@ -358,8 +409,12 @@ def _ordered_quotes(by_symbol: dict[str, Quote], requested_symbols: list[str]) -
     return [by_symbol[symbol] for symbol in requested_symbols]
 
 
+def _ordered_available_quotes(by_symbol: dict[str, Quote], requested_symbols: list[str]) -> list[Quote]:
+    return [by_symbol[symbol] for symbol in requested_symbols if symbol in by_symbol]
+
+
 def _quote_now() -> datetime:
-    return datetime.now()
+    return market_now_naive()
 
 
 def _quotes_with_valid_event_time(quotes: Iterable[Quote], current: datetime) -> list[Quote]:
@@ -375,6 +430,59 @@ def _provider_event_time_error(source: str, quotes: Iterable[Quote], current: da
     if not errors:
         return None
     return f"{source} 行情事件时间异常：" + "；".join(errors)
+
+
+def _partition_quotes_by_event_time(
+    quotes: Iterable[Quote],
+    current: datetime,
+) -> tuple[list[Quote], dict[str, str]]:
+    valid: list[Quote] = []
+    errors: dict[str, str] = {}
+    for quote in quotes:
+        symbol = standard_symbol(f"{quote.code}.{quote.market}")
+        error = quote_event_time_error(quote.timestamp, now=current)
+        if error is None:
+            valid.append(quote)
+        else:
+            errors[symbol] = error
+    return valid, errors
+
+
+def _quote_batch_degradation_messages(
+    source: str,
+    raw_quotes: list[object],
+    valid_field_quotes: list[Quote],
+    requested_symbols: list[str],
+    event_time_errors: dict[str, str],
+) -> list[str]:
+    returned_symbols = {symbol for item in raw_quotes if (symbol := _quote_symbol(item)) is not None}
+    valid_field_symbols = set(_quotes_by_symbol(valid_field_quotes))
+    coverage_missing = [symbol for symbol in requested_symbols if symbol not in returned_symbols]
+    invalid_fields = [
+        symbol
+        for symbol in requested_symbols
+        if symbol in returned_symbols and symbol not in valid_field_symbols
+    ]
+    messages: list[str] = []
+    if coverage_missing:
+        messages.append(f"{source} 批量行情覆盖降级，未覆盖：{','.join(coverage_missing)}")
+    if invalid_fields:
+        messages.append(f"{source} 批量行情行质量降级，字段无效：{','.join(invalid_fields)}")
+    if event_time_errors:
+        details = "；".join(f"{symbol}: {error}" for symbol, error in event_time_errors.items())
+        messages.append(f"{source} 批量行情行质量降级，事件时间淘汰：{details}")
+    return messages
+
+
+def _quote_symbol(value: object) -> str | None:
+    code = str(getattr(value, "code", "") or "").strip()
+    market = str(getattr(value, "market", "") or "").strip()
+    if not code or not market:
+        return None
+    try:
+        return standard_symbol(f"{code}.{market}")
+    except ValueError:
+        return None
 
 
 def _consistency_freshness_error(primary: Quote, secondary: Quote) -> str | None:

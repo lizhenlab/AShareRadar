@@ -33,7 +33,12 @@ from app.services.akshare_provider import (
     _ordered_spot_quotes,
     _sina_concept_candidate,
 )
-from app.services.akshare_mappers import minute_kline_from_hist_row, minute_klines_from_hist_rows, quote_from_spot_row
+from app.services.akshare_mappers import (
+    minute_kline_from_hist_row,
+    minute_klines_from_hist_rows,
+    quote_from_spot_row,
+    stock_info_from_code_name_row,
+)
 from app.services.eastmoney_client import (
     eastmoney_get_json,
     eastmoney_kline,
@@ -41,6 +46,7 @@ from app.services.eastmoney_client import (
     eastmoney_no_proxy,
     eastmoney_quote_from_row,
     eastmoney_quote_params,
+    eastmoney_quote_secid,
     eastmoney_quote_urls,
     eastmoney_quotes,
     eastmoney_history_json,
@@ -52,6 +58,7 @@ from app.services.providers import stamp_daily_kline_contract
 from app.services.provider_stock_mappers import stock_info_from_baostock_row
 from app.services.local_metadata_provider import LocalIndividualStockProvider
 from app.services.optional_providers import _import_akshare
+from app.services.sina_client import sina_bj_stock_pool_rows
 from app.config import Settings
 from app.utils.errors import NotFoundError
 from app.utils.time import now_text
@@ -360,10 +367,33 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual([f"{item.code}.{item.market}" for item in rows], ["600519.SH"])
 
     def test_eastmoney_quote_params_dedupes_fetch_symbols_but_keeps_market(self) -> None:
-        params = eastmoney_quote_params(["600519.SH", "000001.SZ", "600519.SH", "sz000001"])
+        params = eastmoney_quote_params(["600519.SH", "000001.SZ", "920066.BJ", "600519.SH", "sz000001"])
 
-        self.assertEqual(params["secids"], "1.600519,0.000001")
+        self.assertEqual(params["secids"], "1.600519,0.000001,0.920066")
         self.assertIn("f115", params["fields"])
+
+    def test_eastmoney_secid_routes_beijing_and_keeps_sh_sz_compatible(self) -> None:
+        self.assertEqual(eastmoney_quote_secid("600519.SH"), "1.600519")
+        self.assertEqual(eastmoney_quote_secid("000001.SZ"), "0.000001")
+        self.assertEqual(eastmoney_quote_secid("430047.BJ"), "0.430047")
+        self.assertEqual(eastmoney_quote_secid("920066"), "0.920066")
+
+    def test_eastmoney_quote_market_uses_provider_flag_and_beijing_prefix(self) -> None:
+        base = {"f2": 10.0, "f18": 9.5, "f86": "20260513100000"}
+
+        sh_index = eastmoney_quote_from_row({**base, "f12": "000001", "f13": 1, "f14": "上证指数"})
+        bj_stock = eastmoney_quote_from_row({**base, "f12": "920066", "f13": 0, "f14": "科拜尔"})
+
+        self.assertEqual(sh_index.market, "SH")
+        self.assertEqual(bj_stock.market, "BJ")
+
+    def test_eastmoney_quote_market_rejects_unknown_or_inconsistent_flags(self) -> None:
+        base = {"f2": 10.0, "f18": 9.5, "f86": "20260513100000"}
+
+        with self.assertRaisesRegex(ProviderProtocolError, "未知市场标识"):
+            eastmoney_quote_from_row({**base, "f12": "920066", "f13": 9})
+        with self.assertRaisesRegex(ProviderProtocolError, "代码与市场标识不一致"):
+            eastmoney_quote_from_row({**base, "f12": "920066", "f13": 1})
 
     def test_eastmoney_quote_params_rejects_invalid_symbols_with_readable_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "东方财富行情请求包含无效股票代码"):
@@ -917,9 +947,55 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(item.symbol, "000001.SZ")
         self.assertEqual(item.market, "SZ")
         self.assertEqual(item.list_date, "1991-04-03")
-        self.assertIsNone(
-            stock_info_from_baostock_row({"code": "bj.430001", "code_name": "北交所"}, stamp="2026-05-13 10:00:00", source_name="BaoStock")
+        bj_item = stock_info_from_baostock_row(
+            {"code": "bj.430001", "code_name": "北交所"}, stamp="2026-05-13 10:00:00", source_name="BaoStock"
         )
+        self.assertIsNotNone(bj_item)
+        assert bj_item is not None
+        self.assertEqual(bj_item.symbol, "430001.BJ")
+        self.assertEqual(bj_item.market, "BJ")
+
+    def test_stock_pool_mapper_restores_leading_zero_from_numeric_exchange_code(self) -> None:
+        item = stock_info_from_code_name_row(
+            {"证券代码": 1, "证券简称": "平安银行", "上市日期": "19910403"},
+            stamp="2026-05-13 10:00:00",
+            source_name="AKShare",
+        )
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item.symbol, "000001.SZ")
+        self.assertEqual(item.code, "000001")
+
+    def test_baostock_mapper_excludes_non_stock_and_delisted_rows(self) -> None:
+        base = {
+            "code": "sh.600519",
+            "code_name": "贵州茅台",
+            "ipoDate": "20010827",
+            "type": "1",
+            "status": "1",
+            "outDate": "",
+        }
+
+        self.assertIsNotNone(
+            stock_info_from_baostock_row(
+                base,
+                stamp="2026-05-13 10:00:00",
+                source_name="BaoStock",
+            )
+        )
+        for updates in (
+            {"type": "2"},
+            {"status": "0"},
+            {"outDate": "2026-01-01"},
+        ):
+            self.assertIsNone(
+                stock_info_from_baostock_row(
+                    {**base, **updates},
+                    stamp="2026-05-13 10:00:00",
+                    source_name="BaoStock",
+                )
+            )
 
     def test_akshare_minute_kline_uses_light_fallback_when_import_fails(self) -> None:
         provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
@@ -1030,6 +1106,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             {"code": "", "name": "缺代码"},
             {"code": "000000", "name": "非法零代码"},
             {"code": "600519", "name": "贵州茅台"},
+            {"code": "920066", "name": "科拜尔"},
         ]
 
         class FakeFrame:
@@ -1050,14 +1127,208 @@ class DataSourceReliabilityTests(unittest.TestCase):
         ):
             rows = asyncio.run(provider.stock_pool())
 
-        self.assertEqual([item.code for item in rows], ["600519"])
+        self.assertEqual([(item.code, item.market) for item in rows], [("600519", "SH"), ("920066", "BJ")])
+
+    def test_akshare_stock_pool_preserves_exchange_list_dates_and_industries(self) -> None:
+        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        calls: list[tuple[str, str | None]] = []
+
+        class FakeFrame:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def iterrows(self):
+                return iter(enumerate(self.rows))
+
+        class FakeAk:
+            @staticmethod
+            def stock_info_sh_name_code(symbol: str):
+                calls.append(("sh", symbol))
+                rows = (
+                    [{"证券代码": "600519", "证券简称": "贵州茅台", "上市日期": date(2001, 8, 27)}]
+                    if symbol == "主板A股"
+                    else []
+                )
+                return FakeFrame(rows)
+
+            @staticmethod
+            def stock_info_sz_name_code(symbol: str):
+                calls.append(("sz", symbol))
+                return FakeFrame(
+                    [
+                        {
+                            "A股代码": "000001",
+                            "A股简称": "平安银行",
+                            "A股上市日期": "1991/04/03",
+                            "所属行业": "银行",
+                        }
+                    ]
+                )
+
+            @staticmethod
+            def stock_info_bj_name_code():
+                calls.append(("bj", None))
+                return FakeFrame(
+                    [
+                        {
+                            "证券代码": "920066",
+                            "证券简称": "科拜尔",
+                            "上市日期": date(2024, 7, 3),
+                            "所属行业": "新材料",
+                        }
+                    ]
+                )
+
+        with patch("app.services.akshare_provider.is_installed", return_value=True), patch.dict(
+            "sys.modules",
+            {"akshare": FakeAk},
+        ):
+            rows = asyncio.run(provider.stock_pool())
+
+        by_symbol = {item.symbol: item for item in rows}
+        self.assertEqual(set(by_symbol), {"600519.SH", "000001.SZ", "920066.BJ"})
+        self.assertEqual(by_symbol["600519.SH"].list_date, "2001-08-27")
+        self.assertEqual(by_symbol["000001.SZ"].list_date, "1991-04-03")
+        self.assertEqual(by_symbol["000001.SZ"].industry, "银行")
+        self.assertEqual(by_symbol["920066.BJ"].list_date, "2024-07-03")
+        self.assertEqual(by_symbol["920066.BJ"].industry, "新材料")
+        self.assertEqual(
+            calls,
+            [("sh", "主板A股"), ("sh", "科创板"), ("sz", "A股列表"), ("bj", None)],
+        )
+
+    def test_akshare_stock_pool_uses_bj_spot_list_when_bse_endpoint_fails(self) -> None:
+        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        calls: list[str] = []
+
+        class FakeFrame:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def iterrows(self):
+                return iter(enumerate(self.rows))
+
+        class FakeAk:
+            @staticmethod
+            def stock_info_sh_name_code(symbol: str):
+                calls.append(f"sh:{symbol}")
+                code = "600519" if symbol == "主板A股" else "688001"
+                return FakeFrame([{"证券代码": code, "证券简称": f"沪市{code}"}])
+
+            @staticmethod
+            def stock_info_sz_name_code(symbol: str):
+                calls.append(f"sz:{symbol}")
+                return FakeFrame([{"A股代码": "000001", "A股简称": "平安银行"}])
+
+            @staticmethod
+            def stock_info_bj_name_code():
+                calls.append("bj:official")
+                raise ValueError("BSE maintenance page")
+
+            @staticmethod
+            def stock_bj_a_spot_em():
+                calls.append("bj:spot")
+                return FakeFrame([{"代码": "920066", "名称": "科拜尔"}])
+
+        with patch("app.services.akshare_provider.is_installed", return_value=True), patch.dict(
+            "sys.modules",
+            {"akshare": FakeAk},
+        ):
+            rows = asyncio.run(provider.stock_pool())
+
+        self.assertEqual(
+            {item.symbol for item in rows},
+            {"600519.SH", "688001.SH", "000001.SZ", "920066.BJ"},
+        )
+        self.assertEqual(
+            calls,
+            ["sh:主板A股", "sh:科创板", "sz:A股列表", "bj:official", "bj:spot"],
+        )
+
+    def test_akshare_stock_pool_uses_sina_bj_list_after_bse_and_eastmoney_fail(self) -> None:
+        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+
+        class FakeFrame:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def iterrows(self):
+                return iter(enumerate(self.rows))
+
+        class FakeAk:
+            @staticmethod
+            def stock_info_sh_name_code(symbol: str):
+                code = "600519" if symbol == "主板A股" else "688001"
+                return FakeFrame([{"证券代码": code, "证券简称": f"沪市{code}"}])
+
+            @staticmethod
+            def stock_info_sz_name_code(symbol: str):
+                return FakeFrame([{"A股代码": "000001", "A股简称": "平安银行"}])
+
+            @staticmethod
+            def stock_info_bj_name_code():
+                raise ValueError("BSE maintenance page")
+
+            @staticmethod
+            def stock_bj_a_spot_em():
+                raise ConnectionError("Eastmoney disconnected")
+
+        with (
+            patch("app.services.akshare_provider.is_installed", return_value=True),
+            patch.dict("sys.modules", {"akshare": FakeAk}),
+            patch(
+                "app.services.akshare_provider.sina_bj_stock_pool_rows",
+                return_value=[{"code": "920066", "name": "科拜尔"}],
+            ),
+        ):
+            rows = asyncio.run(provider.stock_pool())
+
+        by_symbol = {item.symbol: item for item in rows}
+        self.assertEqual(set(by_symbol), {"600519.SH", "688001.SH", "000001.SZ", "920066.BJ"})
+        self.assertEqual(by_symbol["920066.BJ"].source, "AKShare·新浪财经")
+
+    def test_sina_bj_stock_pool_fetches_every_page_and_validates_count(self) -> None:
+        calls: list[tuple[str, int | None]] = []
+
+        def fake_get_json(url: str, params: dict[str, str], *, timeout: float):
+            self.assertEqual(timeout, 3)
+            page = int(params["page"]) if "page" in params else None
+            calls.append((url, page))
+            if page is None:
+                return "205"
+            start = (page - 1) * 100
+            stop = min(start + 100, 205)
+            return [{"code": f"{920000 + index:06d}", "name": f"北交所{index}"} for index in range(start, stop)]
+
+        with patch("app.services.sina_client._sina_get_json", side_effect=fake_get_json):
+            rows = sina_bj_stock_pool_rows(timeout=3)
+
+        self.assertEqual(len(rows), 205)
+        self.assertEqual([page for _, page in calls], [None, 1, 2, 3])
+
+    def test_sina_bj_stock_pool_rejects_truncated_or_dirty_pages(self) -> None:
+        with patch(
+            "app.services.sina_client._sina_get_json",
+            side_effect=["101", [{"code": "920001", "name": "纬达光电"}], []],
+        ):
+            with self.assertRaisesRegex(ProviderProtocolError, "不完整"):
+                sina_bj_stock_pool_rows()
+
+        with patch(
+            "app.services.sina_client._sina_get_json",
+            side_effect=["1", [{"code": "bad", "name": "非法记录"}]],
+        ):
+            with self.assertRaisesRegex(ProviderProtocolError, "无效记录"):
+                sina_bj_stock_pool_rows()
 
     def test_tushare_stock_pool_skips_rows_without_valid_code(self) -> None:
         provider = __import__("app.services.optional_providers", fromlist=["TushareProvider"]).TushareProvider(token="test-token")
         raw_rows = [
             {"ts_code": "", "name": "缺代码", "industry": "未知", "list_date": ""},
             {"ts_code": "000000.SZ", "name": "非法零代码", "industry": "未知", "list_date": "20200101"},
+            {"ts_code": "920066.SH", "name": "市场冲突", "industry": "未知", "list_date": "20200101"},
             {"ts_code": "600519.SH", "name": "贵州茅台", "industry": "白酒", "list_date": "20010827"},
+            {"ts_code": "920066.BJ", "name": "科拜尔", "industry": "新材料", "list_date": "20240703"},
         ]
 
         class FakeFrame:
@@ -1085,8 +1356,9 @@ class DataSourceReliabilityTests(unittest.TestCase):
         with patch("app.services.tushare_provider.is_installed", return_value=True), patch.dict("sys.modules", {"tushare": FakeTs}):
             rows = asyncio.run(provider.stock_pool())
 
-        self.assertEqual([item.code for item in rows], ["600519"])
+        self.assertEqual([(item.code, item.market) for item in rows], [("600519", "SH"), ("920066", "BJ")])
         self.assertEqual(rows[0].list_date, "2001-08-27")
+        self.assertEqual(rows[1].list_date, "2024-07-03")
 
     def test_baostock_stock_pool_skips_rows_without_valid_code(self) -> None:
         provider = __import__("app.services.optional_providers", fromlist=["BaoStockProvider"]).BaoStockProvider()
@@ -1135,8 +1407,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         ):
             rows = asyncio.run(provider.stock_pool())
 
-        self.assertEqual([item.code for item in rows], ["600519"])
-        self.assertEqual(rows[0].market, "SH")
+        self.assertEqual([(item.code, item.market) for item in rows], [("430001", "BJ"), ("600519", "SH")])
 
     def test_local_stock_pool_includes_manual_smoke_symbol(self) -> None:
         provider = LocalIndividualStockProvider()
@@ -1151,7 +1422,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(target.industry, "小金属")
         self.assertTrue(any(item.name == "镁金属" for item in concepts))
 
-    def test_akshare_plate_failure_does_not_mark_main_provider_failed(self) -> None:
+    def test_akshare_plate_failure_does_not_mark_main_provider_failed_or_use_static_local_rows(self) -> None:
         class FailingPlateProvider:
             source_name = "AKShare"
 
@@ -1161,24 +1432,31 @@ class DataSourceReliabilityTests(unittest.TestCase):
         class LocalPlateProvider:
             source_name = "本地基础数据"
 
+            def __init__(self) -> None:
+                self.calls = 0
+
             async def plate_rank(self, limit: int = 20):
+                self.calls += 1
                 return [_plate_item()]
 
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
             hub.providers["akshare"] = FailingPlateProvider()
-            hub.providers["local"] = LocalPlateProvider()
+            local = LocalPlateProvider()
+            hub.providers["local"] = local
             hub.cache.update_provider_capability_success("akshare", "quote", 2, 12.0)
             with patch.object(hub, "_priority", return_value=[(2, "akshare"), (5, "local")]):
-                rows = await hub.plate_rank(limit=1, refresh=True)
+                with self.assertRaisesRegex(RuntimeError, "所有板块数据源均不可用") as raised:
+                    await hub.plate_rank(limit=1, refresh=True)
             status = next(item for item in hub.cache.provider_statuses() if item.name == "akshare")
             plate_status = next(item for item in hub.cache.provider_capability_statuses() if item.name == "akshare" and item.kind == "plate")
-            return rows, status, plate_status
+            return str(raised.exception), status, plate_status, local.calls
 
         with TemporaryDirectory() as tmpdir:
-            rows, status, plate_status = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+            error, status, plate_status, local_calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
-        self.assertEqual(len(rows), 1)
+        self.assertIn("本地静态资料不提供plate实时涨跌幅", error)
+        self.assertEqual(local_calls, 0)
         self.assertTrue(status.healthy)
         self.assertFalse(plate_status.healthy)
         self.assertEqual(plate_status.failure_count, 1)
@@ -1919,8 +2197,8 @@ class DataSourceReliabilityTests(unittest.TestCase):
             fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cache.save_stock_pool(
                 [
-                    _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
-                    for index in range(3)
+                    _stock_info(code=code, market=market).model_copy(update={"updated_at": fresh_time})
+                    for code, market in (("600000", "SH"), ("000001", "SZ"), ("920001", "BJ"))
                 ]
             )
             coordinator = MetadataCoordinator(
@@ -1989,7 +2267,11 @@ class DataSourceReliabilityTests(unittest.TestCase):
             hub.cache.save_stock_pool(
                 [
                     _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
-                    for index in range(1000)
+                    for index in range(998)
+                ]
+                + [
+                    _stock_info(code="000001", market="SZ").model_copy(update={"updated_at": fresh_time}),
+                    _stock_info(code="920001", market="BJ").model_copy(update={"updated_at": fresh_time}),
                 ]
             )
             try:
@@ -2011,7 +2293,11 @@ class DataSourceReliabilityTests(unittest.TestCase):
             hub.cache.save_stock_pool(
                 [
                     _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
-                    for index in range(1000)
+                    for index in range(998)
+                ]
+                + [
+                    _stock_info(code="000001", market="SZ").model_copy(update={"updated_at": fresh_time}),
+                    _stock_info(code="920001", market="BJ").model_copy(update={"updated_at": fresh_time}),
                 ]
             )
             quote = _quote().model_copy(update={"code": "688001", "market": "SH", "name": "测试新股"})

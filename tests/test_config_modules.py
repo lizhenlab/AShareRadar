@@ -29,6 +29,14 @@ def test_settings_reads_environment_when_instantiated(monkeypatch) -> None:
     monkeypatch.setenv("ASHARE_RADAR_FUTU_HOST", "10.0.0.8")
     monkeypatch.setenv("ASHARE_RADAR_FUTU_PORT", "22222")
     monkeypatch.setenv("ASHARE_RADAR_SCHEDULER_QUOTE_INTERVAL_SECONDS", "47")
+    monkeypatch.setenv("ASHARE_RADAR_STOCK_POOL_PROVIDER_TIMEOUT_SECONDS", "75")
+    monkeypatch.setenv("ASHARE_RADAR_MARKET_SCAN_MIN_SH_COUNT", "1900")
+    monkeypatch.setenv("ASHARE_RADAR_MARKET_SCAN_MIN_SZ_COUNT", "2600")
+    monkeypatch.setenv("ASHARE_RADAR_MARKET_SCAN_MIN_BJ_COUNT", "210")
+    monkeypatch.setenv("ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS", "180")
+    monkeypatch.setenv("ASHARE_RADAR_MAX_DAILY_KLINE_ROWS", "320")
+    monkeypatch.setenv("ASHARE_RADAR_RUNTIME_MAINTENANCE_INTERVAL_SECONDS", "7200")
+    monkeypatch.setenv("ASHARE_RADAR_MAX_RUNTIME_BACKUPS", "12")
     monkeypatch.setenv("ASHARE_RADAR_TUSHARE_TOKEN", "new-token")
 
     settings = Settings()
@@ -38,6 +46,14 @@ def test_settings_reads_environment_when_instantiated(monkeypatch) -> None:
     assert settings.futu_host == "10.0.0.8"
     assert settings.futu_port == 22222
     assert settings.scheduler_quote_interval_seconds == 47
+    assert settings.stock_pool_provider_timeout_seconds == 75
+    assert settings.market_scan_min_sh_count == 1900
+    assert settings.market_scan_min_sz_count == 2600
+    assert settings.market_scan_min_bj_count == 210
+    assert settings.max_quote_history_rows == 180
+    assert settings.max_daily_kline_rows == 320
+    assert settings.runtime_maintenance_interval_seconds == 7200
+    assert settings.max_runtime_backups == 12
     assert settings.tushare_token == "new-token"
 
 
@@ -47,6 +63,8 @@ def test_settings_reads_environment_when_instantiated(monkeypatch) -> None:
         ("ASHARE_RADAR_LLM_TIMEOUT_SECONDS", "slow", "必须是数字"),
         ("ASHARE_RADAR_FUTU_PORT", "0", "必须大于等于 1"),
         ("ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS", "many", "必须是整数"),
+        ("ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS", "119", "必须大于等于 120"),
+        ("ASHARE_RADAR_MAX_RUNTIME_BACKUPS", "1", "必须大于等于 2"),
         ("ASHARE_RADAR_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS", "-1", "必须大于等于 0.1"),
     ],
 )
@@ -81,6 +99,35 @@ def test_settings_reject_non_finite_environment_floats(monkeypatch, raw: str) ->
 def test_settings_reject_non_finite_explicit_floats(value: float) -> None:
     with pytest.raises(ValidationError, match="finite number"):
         Settings(request_timeout_seconds=value)
+
+
+def test_settings_reject_market_scan_history_larger_than_fetch_limit() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="market_scan_min_history_rows 不能大于 market_scan_kline_limit",
+    ):
+        Settings(market_scan_min_history_rows=120, market_scan_kline_limit=60)
+
+
+def test_settings_require_daily_retention_to_cover_the_scan_window() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="max_daily_kline_rows 不能小于 market_scan_kline_limit",
+    ):
+        Settings(market_scan_kline_limit=261, max_daily_kline_rows=260)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"max_quote_history_rows": 119}, "greater than or equal to 120"),
+        ({"runtime_maintenance_interval_seconds": 59}, "greater than or equal to 60"),
+        ({"max_runtime_backups": 1}, "greater than or equal to 2"),
+    ],
+)
+def test_settings_reject_retention_values_below_safe_boundaries(overrides: dict[str, int], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        Settings(**overrides)
 
 
 def test_settings_do_not_default_llm_endpoint_or_model(monkeypatch) -> None:

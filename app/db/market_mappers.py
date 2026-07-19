@@ -26,6 +26,7 @@ def row_to_quote(row: sqlite3.Row) -> Quote:
         timestamp=row["quote_timestamp"],
         source=f"{row['source']}·缓存",
         from_cache=True,
+        fallback_used=bool(row["fallback_used"]),
     )
 
 
@@ -44,6 +45,7 @@ def row_to_kline(row: sqlite3.Row) -> Kline:
         source=row["source"],
         fetched_at=row["fetched_at"],
         from_cache=True,
+        fallback_used=bool(row["fallback_used"]),
     )
 
 
@@ -61,6 +63,7 @@ def row_to_minute_kline(row: sqlite3.Row) -> MinuteKline:
         interval=row["interval"],
         fetched_at=row["fetched_at"],
         from_cache=True,
+        fallback_used=bool(row["fallback_used"]),
     )
 
 

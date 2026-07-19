@@ -30,6 +30,7 @@ from app.services.datahub_runtime import (
 from app.services.provider_errors import ProviderCoverageMiss, ProviderProtocolError
 from app.services.provider_utils import ensure_positive_limit
 from app.utils.market_data import filter_valid_klines, filter_valid_minute_klines
+from app.utils.market_time import market_local_naive, market_now_naive
 from app.utils.symbols import normalize_symbol
 
 
@@ -38,7 +39,9 @@ T = TypeVar("T", Kline, MinuteKline)
 MAX_DAILY_KLINE_LIMIT = 10_000
 DEFAULT_MAX_MINUTE_KLINE_LIMIT = 20_000
 DAILY_KLINE_PRESERVATION_MAX_AGE_SECONDS = 10**9
-DailyKlineContractKey = tuple[str, str, str, str]
+DAILY_KLINE_INCREMENTAL_REFRESH_ROWS = 40
+DAILY_KLINE_INCREMENTAL_MIN_OVERLAP_ROWS = 5
+DailyKlineContractKey = tuple[str, str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class _DailyProviderExhaustion:
 class _DailyFetchOutcome:
     rows: list[Kline] | None
     all_providers_short: bool = False
+    source: str | None = None
 
 
 class KlineCoordinator:
@@ -82,21 +86,15 @@ class KlineCoordinator:
         priority_rows = self.priority("kline")
         provider_chain = _provider_chain_key(priority_rows)
         if use_cache:
-            cached = await self._load_compatible_daily_cache(
+            cached = await self._fresh_daily_cache(
                 symbol,
-                self.settings.kline_cache_seconds,
+                limit=limit,
+                current=current,
+                normalized_symbol=normalized_symbol,
+                provider_chain=provider_chain,
             )
-            if (
-                cached
-                and _daily_cache_has_requested_coverage(
-                    cached,
-                    limit,
-                    known_exhaustion=self._daily_provider_exhaustion.get(normalized_symbol),
-                    provider_chain=provider_chain,
-                )
-                and _kline_cache_is_fresh(cached, now=current)
-            ):
-                return cached[-limit:]
+            if cached is not None:
+                return cached
 
         preserved = await self._load_compatible_daily_cache(
             symbol,
@@ -104,6 +102,68 @@ class KlineCoordinator:
         )
         fetch_limit = max(limit, len(preserved))
         errors: list[str] = []
+        if use_cache and len(preserved) >= limit:
+            incremental = await self._incremental_daily_refresh(
+                symbol=symbol,
+                normalized_symbol=normalized_symbol,
+                preserved=preserved,
+                priority_rows=priority_rows,
+                current=current,
+                errors=errors,
+            )
+            if incremental is not None:
+                return incremental[-limit:]
+
+        fetched = await self._full_daily_refresh(
+            symbol=symbol,
+            normalized_symbol=normalized_symbol,
+            fetch_limit=fetch_limit,
+            priority_rows=priority_rows,
+            provider_chain=provider_chain,
+            current=current,
+            errors=errors,
+        )
+        if fetched is not None:
+            return fetched[-limit:]
+
+        fallback = await self._daily_fallback(symbol, limit)
+        if fallback is not None:
+            return fallback
+        raise RuntimeError("所有K线数据源均不可用：" + "；".join(errors))
+
+    async def _fresh_daily_cache(
+        self,
+        symbol: str,
+        *,
+        limit: int,
+        current: datetime,
+        normalized_symbol: str,
+        provider_chain: tuple[str, ...],
+    ) -> list[Kline] | None:
+        cached = await self._load_compatible_daily_cache(
+            symbol,
+            self.settings.kline_cache_seconds,
+        )
+        if not cached or not _daily_cache_has_requested_coverage(
+            cached,
+            limit,
+            known_exhaustion=self._daily_provider_exhaustion.get(normalized_symbol),
+            provider_chain=provider_chain,
+        ):
+            return None
+        return cached[-limit:] if _kline_cache_is_fresh(cached, now=current) else None
+
+    async def _full_daily_refresh(
+        self,
+        *,
+        symbol: str,
+        normalized_symbol: str,
+        fetch_limit: int,
+        priority_rows: list[tuple[int, str]],
+        provider_chain: tuple[str, ...],
+        current: datetime,
+        errors: list[str],
+    ) -> list[Kline] | None:
         outcome = await self._fetch_daily_from_priority(
             priority_rows=priority_rows,
             errors=errors,
@@ -122,12 +182,59 @@ class KlineCoordinator:
                 provider_chain,
                 exhausted=outcome.all_providers_short,
             )
-            return fetched[-limit:]
+        return fetched
 
-        fallback = await self._daily_fallback(symbol, limit)
-        if fallback is not None:
-            return fallback
-        raise RuntimeError("所有K线数据源均不可用：" + "；".join(errors))
+    async def _incremental_daily_refresh(
+        self,
+        *,
+        symbol: str,
+        normalized_symbol: str,
+        preserved: list[Kline],
+        priority_rows: list[tuple[int, str]],
+        current: datetime,
+        errors: list[str],
+    ) -> list[Kline] | None:
+        refresh_limit = min(DAILY_KLINE_INCREMENTAL_REFRESH_ROWS, len(preserved))
+        outcome = await self._fetch_daily_from_priority(
+            priority_rows=priority_rows,
+            errors=errors,
+            fetch=lambda provider: _kline_call(provider, symbol, refresh_limit),
+            prepare=lambda rows, source: _prepare_daily_klines(
+                rows,
+                source,
+                symbol,
+                refresh_limit,
+                current,
+            ),
+            save=lambda _rows, _source: None,
+            requested_limit=refresh_limit,
+            request_key=(
+                normalized_symbol,
+                "incremental",
+                refresh_limit,
+                DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+            ),
+        )
+        if outcome.rows is None:
+            return None
+        merged = _merge_incremental_daily_klines(
+            preserved,
+            outcome.rows,
+            target_count=len(preserved),
+        )
+        if merged is None:
+            await _safe_log_kline_event(
+                self.cache,
+                "kline_incremental_rebase",
+                f"日K增量契约或 OHLCV 重叠校验未通过，改为全量刷新：{symbol}",
+            )
+            return None
+        await _save_rows_best_effort(
+            lambda rows, source: self.cache.save_klines(symbol, rows, source),
+            merged,
+            outcome.source or merged[-1].source or "日K增量刷新",
+        )
+        return merged
 
     async def _daily_fallback(self, symbol: str, limit: int) -> list[Kline] | None:
         fallback = await run_cache_io(
@@ -193,6 +300,7 @@ class KlineCoordinator:
         attempted_count = 0
         short_response_count = 0
         for attempt in self.runtime.attempts(priority_rows, self.providers, "kline", errors):
+            fallback_attempt = attempted_count > 0 or bool(errors)
             attempted_count += 1
             source = provider_source_name(attempt.provider, attempt.name)
             result = None
@@ -204,10 +312,17 @@ class KlineCoordinator:
                     request_key=request_key,
                 )
                 rows = prepare(result.value, source)
+                if fallback_attempt:
+                    rows = _tag_klines(
+                        rows,
+                        source,
+                        from_cache=False,
+                        fallback_used=True,
+                    )
                 await self.runtime.record_attempt_success_async(attempt, "kline", result.latency_ms)
                 if len(rows) >= requested_limit:
                     await _save_rows_best_effort(save, rows, source)
-                    return _DailyFetchOutcome(rows=rows)
+                    return _DailyFetchOutcome(rows=rows, source=source)
                 candidates.append((rows, source))
                 short_response_count += 1
             except asyncio.CancelledError:
@@ -228,6 +343,7 @@ class KlineCoordinator:
         return _DailyFetchOutcome(
             rows=rows,
             all_providers_short=all_providers_short,
+            source=source,
         )
 
     async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120, use_cache: bool = True) -> list[MinuteKline]:
@@ -265,6 +381,13 @@ class KlineCoordinator:
                 current,
             ),
             save=lambda rows, source: self.cache.save_minute_klines(symbol, normalized_interval, rows, source),
+            mark_fallback=lambda rows, source: _tag_minute_klines(
+                rows,
+                source,
+                normalized_interval,
+                from_cache=False,
+                fallback_used=True,
+            ),
             request_key=(normalized_symbol, normalized_interval, limit),
         )
         if fetched is not None:
@@ -290,9 +413,13 @@ class KlineCoordinator:
         fetch: Callable[[object], Awaitable[list[T]] | None],
         prepare: Callable[[list[T], str], list[T]],
         save: Callable[[list[T], str], None],
+        mark_fallback: Callable[[list[T], str], list[T]],
         request_key: Hashable,
     ) -> list[T] | None:
+        attempted_count = 0
         for attempt in self.runtime.attempts(self.priority(kind), self.providers, kind, errors):
+            fallback_attempt = attempted_count > 0 or bool(errors)
+            attempted_count += 1
             source = provider_source_name(attempt.provider, attempt.name)
             result = None
             try:
@@ -303,6 +430,8 @@ class KlineCoordinator:
                     request_key=request_key,
                 )
                 rows = prepare(result.value, source)
+                if fallback_attempt:
+                    rows = mark_fallback(rows, source)
                 await self.runtime.record_attempt_success_async(attempt, kind, result.latency_ms)
                 await _save_rows_best_effort(save, rows, source)
                 return rows
@@ -348,13 +477,14 @@ def _prepare_daily_klines(
     cleaned = _latest_daily_klines(rows, limit)
     if not cleaned:
         raise ProviderProtocolError("K线返回为空")
+    tagged = _tag_klines(cleaned, source, from_cache=False)
     _validate_daily_kline_contract(
-        cleaned,
+        tagged,
         expected_adjustment_mode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
     )
-    if not _kline_cache_is_fresh(cleaned, now=current):
-        raise ProviderProtocolError(f"{source} 日K业务时间无效或已过期：{cleaned[-1].date}")
-    return _tag_klines(cleaned, source, from_cache=False)
+    if not _kline_cache_is_fresh(tagged, now=current):
+        raise ProviderProtocolError(f"{source} 日K业务时间无效或已过期：{tagged[-1].date}")
+    return tagged
 
 
 def _prepare_minute_klines(
@@ -417,6 +547,7 @@ def _compatible_daily_klines(
         _validate_daily_kline_contract(
             rows,
             expected_adjustment_mode=expected_adjustment_mode,
+            allow_revision_chain=True,
         )
     except ProviderProtocolError:
         return []
@@ -445,12 +576,97 @@ def _daily_cache_has_requested_coverage(
 def _daily_contract_key(rows: list[Kline]) -> DailyKlineContractKey | None:
     if not rows:
         return None
-    item = rows[0]
+    item = rows[-1]
     return (
         item.adjustment_mode,
         str(item.as_of or "").strip(),
         item.data_version.strip(),
         item.contract_version.strip(),
+        str(item.source or "").strip(),
+    )
+
+
+def _merge_incremental_daily_klines(
+    preserved: list[Kline],
+    refresh: list[Kline],
+    *,
+    target_count: int,
+) -> list[Kline] | None:
+    if not preserved or not refresh or target_count <= 0:
+        return None
+    if not _incremental_daily_contracts_are_compatible(preserved, refresh):
+        return None
+    preserved_by_date = {item.date: item for item in preserved}
+    refresh_by_date = {item.date: item for item in refresh}
+    overlap_dates = sorted(preserved_by_date.keys() & refresh_by_date.keys())
+    required_overlap = min(
+        DAILY_KLINE_INCREMENTAL_MIN_OVERLAP_ROWS,
+        len(preserved),
+        len(refresh),
+    )
+    if (
+        len(overlap_dates) < required_overlap
+        or preserved[-1].date not in refresh_by_date
+        or any(not _same_adjusted_ohlcv(preserved_by_date[date], refresh_by_date[date]) for date in overlap_dates)
+    ):
+        return None
+
+    combined = {**preserved_by_date, **refresh_by_date}
+    return [combined[date] for date in sorted(combined)][-target_count:]
+
+
+def _incremental_daily_contracts_are_compatible(
+    preserved: list[Kline],
+    refresh: list[Kline],
+) -> bool:
+    try:
+        _validate_daily_kline_contract(
+            preserved,
+            expected_adjustment_mode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+            allow_revision_chain=True,
+        )
+        _validate_daily_kline_contract(
+            refresh,
+            expected_adjustment_mode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+        )
+    except ProviderProtocolError:
+        return False
+    if _daily_sources(preserved) != _daily_sources(refresh):
+        return False
+    preserved_as_of = max(_contract_as_of_key(item.as_of) for item in preserved)
+    refresh_as_of = max(_contract_as_of_key(item.as_of) for item in refresh)
+    return refresh_as_of >= preserved_as_of
+
+
+def _same_adjusted_ohlcv(left: Kline, right: Kline) -> bool:
+    return all(
+        _same_finite_number(left_value, right_value, rel_tol=rel_tol, abs_tol=abs_tol)
+        for left_value, right_value, rel_tol, abs_tol in (
+            (left.open, right.open, 1e-5, 1e-4),
+            (left.close, right.close, 1e-5, 1e-4),
+            (left.high, right.high, 1e-5, 1e-4),
+            (left.low, right.low, 1e-5, 1e-4),
+            (left.volume, right.volume, 1e-6, 1e-3),
+        )
+    )
+
+
+def _same_finite_number(
+    left: object,
+    right: object,
+    *,
+    rel_tol: float,
+    abs_tol: float,
+) -> bool:
+    try:
+        left_value = float(left)
+        right_value = float(right)
+    except (TypeError, ValueError):
+        return False
+    return (
+        math.isfinite(left_value)
+        and math.isfinite(right_value)
+        and math.isclose(left_value, right_value, rel_tol=rel_tol, abs_tol=abs_tol)
     )
 
 
@@ -462,8 +678,14 @@ def _validate_daily_kline_contract(
     rows: list[Kline],
     *,
     expected_adjustment_mode: KlineAdjustmentMode,
+    allow_revision_chain: bool = False,
 ) -> None:
     _require_adjustment_mode(rows, expected_adjustment_mode)
+    _require_uniform_contract_value(_daily_sources(rows), "日K序列 source 不一致或缺失")
+    _require_contract_version(rows)
+    if allow_revision_chain:
+        _require_compatible_revision_chain(rows)
+        return
     _require_uniform_contract_value(
         {str(item.as_of or "").strip() for item in rows},
         "日K序列 as_of 不一致或缺失",
@@ -473,7 +695,7 @@ def _validate_daily_kline_contract(
         "日K序列 data_version 不一致或缺失",
         rejected={UNKNOWN_KLINE_DATA_VERSION},
     )
-    _require_contract_version(rows)
+    _require_snapshot_as_of_covers_rows(rows)
 
 
 def _require_adjustment_mode(rows: list[Kline], expected: KlineAdjustmentMode) -> None:
@@ -503,6 +725,41 @@ def _require_contract_version(rows: list[Kline]) -> None:
     raise ProviderProtocolError(f"日K contract_version 不兼容：{label}")
 
 
+def _require_compatible_revision_chain(rows: list[Kline]) -> None:
+    revisions: list[tuple[datetime, datetime, str]] = []
+    for item in rows:
+        row_date = _sort_key(item.date)
+        as_of = _contract_as_of_key(item.as_of)
+        data_version = item.data_version.strip()
+        if row_date is None or as_of is None or as_of < row_date:
+            raise ProviderProtocolError("日K序列 as_of 无法证明覆盖对应行情日期")
+        if not data_version or data_version == UNKNOWN_KLINE_DATA_VERSION:
+            raise ProviderProtocolError("日K序列 data_version 不一致或缺失")
+        revisions.append((row_date, as_of, data_version))
+    revisions.sort(key=lambda item: item[0])
+    if any(current[1] < previous[1] for previous, current in zip(revisions, revisions[1:])):
+        raise ProviderProtocolError("日K序列 revision 链随行情日期倒退")
+
+
+def _require_snapshot_as_of_covers_rows(rows: list[Kline]) -> None:
+    as_of = _contract_as_of_key(rows[0].as_of)
+    for item in rows:
+        row_date = _sort_key(item.date)
+        if row_date is None or as_of < row_date:
+            raise ProviderProtocolError("日K序列 as_of 无法证明覆盖对应行情日期")
+
+
+def _daily_sources(rows: list[Kline]) -> set[str]:
+    return {str(item.source or "").strip() for item in rows}
+
+
+def _contract_as_of_key(value: object) -> datetime:
+    parsed = _sort_key(value)
+    if parsed is None:
+        raise ProviderProtocolError("日K序列 as_of 无法解析")
+    return parsed
+
+
 def _latest_minute_klines(rows: list[MinuteKline], limit: int) -> list[MinuteKline]:
     return _latest_rows(filter_valid_minute_klines(rows or []), limit, key=lambda row: row.timestamp)
 
@@ -522,7 +779,7 @@ def _sort_key(value: object) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
+        parsed = market_local_naive(parsed)
     return parsed
 
 
@@ -546,7 +803,7 @@ def _normalized_symbol_key(symbol: str) -> str:
 
 
 def _kline_now() -> datetime:
-    return datetime.now()
+    return market_now_naive()
 
 
 def _kind_label(kind: str) -> str:

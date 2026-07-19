@@ -51,7 +51,7 @@ def test_tencent_quote_payloads_ignore_unclosed_assignments() -> None:
 
 
 def test_tencent_quote_url_normalizes_symbols_and_keeps_request_order() -> None:
-    assert _tencent_quote_url(["600519.SH", "000001.SZ"]) == "https://qt.gtimg.cn/q=sh600519,sz000001"
+    assert _tencent_quote_url(["600519.SH", "000001.SZ", "920066.BJ"]) == "https://qt.gtimg.cn/q=sh600519,sz000001,bj920066"
     assert _tencent_quote_url([]) == ""
 
 
@@ -349,6 +349,23 @@ def test_parse_tencent_quote_maps_current_shenzhen_stock_flag() -> None:
 
     assert quote is not None
     assert quote.market == "SZ"
+
+
+def test_parse_tencent_quote_maps_beijing_stock_flag() -> None:
+    bj_stock = _quote_parts(flag="62", code="920066", name="科拜尔")
+
+    quote = _parse_tencent_quote_payload("~".join(bj_stock), "腾讯行情")
+
+    assert quote is not None
+    assert quote.market == "BJ"
+
+
+def test_parse_tencent_quote_rejects_market_flag_code_mismatch() -> None:
+    bj_as_sz = _quote_parts(flag="51", code="920066", name="科拜尔")
+    sh_as_bj = _quote_parts(flag="62", code="600519", name="贵州茅台")
+
+    assert _parse_tencent_quote_payload("~".join(bj_as_sz), "腾讯行情") is None
+    assert _parse_tencent_quote_payload("~".join(sh_as_bj), "腾讯行情") is None
 
 
 def test_parse_tencent_quote_rejects_unknown_market_and_short_rows() -> None:

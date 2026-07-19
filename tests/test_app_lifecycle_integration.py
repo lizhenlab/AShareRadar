@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,9 +24,11 @@ class _TrackingScheduler:
         *,
         start_error: Exception | None = None,
         stop_error: Exception | None = None,
+        close_events: list[str] | None = None,
     ) -> None:
         self.start_error = start_error
         self.stop_error = stop_error
+        self.close_events = close_events
         self.start_calls = 0
         self.stop_calls = 0
         self.start_thread_id: int | None = None
@@ -39,27 +42,65 @@ class _TrackingScheduler:
 
     async def stop(self) -> bool:
         self.stop_calls += 1
+        if self.close_events is not None:
+            self.close_events.append("runtime")
         if self.stop_error is not None:
             raise self.stop_error
         return True
 
 
 class _TrackingContexts(WorkbenchContextCache):
-    def __init__(self) -> None:
+    def __init__(self, close_events: list[str], *, close_error: Exception | None = None) -> None:
         super().__init__()
+        self.close_events = close_events
+        self.close_error = close_error
         self.closed = False
 
     async def aclose(self) -> None:
         self.closed = True
+        self.close_events.append("workbench")
         await super().aclose()
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _DataHubStub:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        close_events: list[str],
+        *,
+        close_error: Exception | None = None,
+        close_results: list[bool] | None = None,
+    ) -> None:
+        self.close_events = close_events
+        self.close_error = close_error
+        self.close_results = list(close_results or [])
         self.closed = False
+        self.close_calls = 0
 
-    async def aclose(self) -> None:
+    async def aclose(self) -> bool:
         self.closed = True
+        self.close_calls += 1
+        self.close_events.append("datahub")
+        if self.close_error is not None:
+            raise self.close_error
+        if self.close_results:
+            return self.close_results.pop(0)
+        return True
+
+
+class _StuckDataHubStub:
+    def __init__(self, close_events: list[str]) -> None:
+        self.close_events = close_events
+        self.close_calls = 0
+
+    async def aclose(self) -> bool:
+        self.close_calls += 1
+        self.close_events.append("datahub")
+        if self.close_calls == 1:
+            return False
+        await asyncio.Event().wait()
+        return False
 
 
 def _static_tree(root: Path) -> Path:
@@ -75,12 +116,24 @@ def _container(
     *,
     start_error: Exception | None = None,
     stop_error: Exception | None = None,
+    workbench_close_error: Exception | None = None,
+    datahub_close_error: Exception | None = None,
+    datahub_close_results: list[bool] | None = None,
 ) -> AppContainer:
-    contexts = _TrackingContexts()
+    close_events: list[str] = []
+    contexts = _TrackingContexts(close_events, close_error=workbench_close_error)
     return AppContainer(
         settings=settings,
-        datahub=_DataHubStub(),  # type: ignore[arg-type]
-        scheduler=_TrackingScheduler(start_error=start_error, stop_error=stop_error),  # type: ignore[arg-type]
+        datahub=_DataHubStub(
+            close_events,
+            close_error=datahub_close_error,
+            close_results=datahub_close_results,
+        ),  # type: ignore[arg-type]
+        scheduler=_TrackingScheduler(
+            start_error=start_error,
+            stop_error=stop_error,
+            close_events=close_events,
+        ),  # type: ignore[arg-type]
         workbench_contexts=contexts,
     )
 
@@ -127,6 +180,7 @@ def test_create_app_lifespan_routes_static_and_start_stop_are_integrated(tmp_pat
     assert first.scheduler.stop_calls == 1  # type: ignore[attr-defined]
     assert first.datahub.closed is True  # type: ignore[attr-defined]
     assert first.workbench_contexts.closed is True  # type: ignore[attr-defined]
+    assert first.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
     assert not settings.cache_path.exists()
 
     with TestClient(application):
@@ -138,6 +192,7 @@ def test_create_app_lifespan_routes_static_and_start_stop_are_integrated(tmp_pat
     assert second.scheduler.stop_calls == 1  # type: ignore[attr-defined]
     assert second.datahub.closed is True  # type: ignore[attr-defined]
     assert second.workbench_contexts.closed is True  # type: ignore[attr-defined]
+    assert second.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
 
 
 def test_separate_apps_receive_separate_lifespan_containers(tmp_path: Path) -> None:
@@ -173,6 +228,7 @@ def test_lifespan_cleans_up_when_scheduler_start_fails(tmp_path: Path) -> None:
     assert container.scheduler.stop_calls == 1  # type: ignore[attr-defined]
     assert container.datahub.closed is True  # type: ignore[attr-defined]
     assert container.workbench_contexts.closed is True  # type: ignore[attr-defined]
+    assert container.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
 
 
 def test_sync_api_repository_helper_offloads_from_event_loop() -> None:
@@ -199,6 +255,128 @@ def test_lifespan_closes_workbench_when_scheduler_stop_fails(tmp_path: Path) -> 
     assert container.scheduler.stop_calls == 1  # type: ignore[attr-defined]
     assert container.datahub.closed is True  # type: ignore[attr-defined]
     assert container.workbench_contexts.closed is True  # type: ignore[attr-defined]
+    assert container.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("failure", ["workbench", "datahub"])
+def test_lifespan_closes_both_resources_in_workbench_first_order_when_close_raises(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(cache_path=tmp_path / "never-created.sqlite3", scheduler_enabled=False)
+    expected = RuntimeError(f"{failure} close failed")
+    container = _container(
+        settings,
+        workbench_close_error=expected if failure == "workbench" else None,
+        datahub_close_error=expected if failure == "datahub" else None,
+    )
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+
+    with pytest.raises(RuntimeError, match=f"{failure} close failed"):
+        with TestClient(application):
+            pass
+
+    assert container.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
+    assert container.workbench_contexts.closed is True  # type: ignore[attr-defined]
+    assert container.datahub.closed is True  # type: ignore[attr-defined]
+
+
+def test_failed_start_closes_datahub_after_workbench_close_failure(tmp_path: Path) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(cache_path=tmp_path / "never-created.sqlite3", scheduler_enabled=False)
+    startup_error = RuntimeError("startup failed")
+    container = _container(
+        settings,
+        start_error=startup_error,
+        stop_error=RuntimeError("runtime stop failed"),
+        workbench_close_error=RuntimeError("workbench close failed"),
+        datahub_close_error=RuntimeError("datahub close failed"),
+    )
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+
+    with pytest.raises(RuntimeError, match="startup failed") as exc_info:
+        with TestClient(application):
+            pass
+
+    assert exc_info.value is startup_error
+    assert container.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
+    assert container.workbench_contexts.closed is True  # type: ignore[attr-defined]
+    assert container.datahub.closed is True  # type: ignore[attr-defined]
+
+
+def test_lifespan_drains_same_datahub_close_after_false_result(tmp_path: Path) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(cache_path=tmp_path / "never-created.sqlite3", scheduler_enabled=False)
+    container = _container(settings, datahub_close_results=[False, True])
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+
+    with TestClient(application):
+        pass
+
+    assert container.datahub.close_calls == 2  # type: ignore[attr-defined]
+    assert container.workbench_contexts.close_events == [  # type: ignore[attr-defined]
+        "runtime",
+        "workbench",
+        "datahub",
+        "datahub",
+    ]
+
+
+def test_lifespan_bounds_stuck_datahub_drain_and_warns_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(cache_path=tmp_path / "never-created.sqlite3", scheduler_enabled=False)
+    close_events: list[str] = []
+    datahub = _StuckDataHubStub(close_events)
+    container = AppContainer(
+        settings=settings,
+        datahub=datahub,  # type: ignore[arg-type]
+        scheduler=_TrackingScheduler(close_events=close_events),  # type: ignore[arg-type]
+        workbench_contexts=_TrackingContexts(close_events),
+    )
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+    monkeypatch.setattr("app.main.DATAHUB_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+    caplog.set_level("WARNING", logger="app.main")
+
+    with TestClient(application):
+        shutdown_started = time.monotonic()
+
+    assert time.monotonic() - shutdown_started < 0.5
+    assert datahub.close_calls == 2
+    assert close_events == ["runtime", "workbench", "datahub", "datahub"]
+    warnings = [record.getMessage() for record in caplog.records if record.name == "app.main"]
+    assert warnings == [
+        "DataHub shutdown did not finish within the bounded application shutdown window; "
+        "daemon workers may remain until process exit"
+    ]
+    assert "sqlite" not in warnings[0].lower()
+    assert "key" not in warnings[0].lower()
+
+
+def test_lifespan_groups_multiple_shutdown_errors_in_stable_order(tmp_path: Path) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(cache_path=tmp_path / "never-created.sqlite3", scheduler_enabled=False)
+    runtime_error = RuntimeError("runtime stop failed")
+    workbench_error = ValueError("workbench close failed")
+    datahub_error = LookupError("datahub close failed")
+    container = _container(
+        settings,
+        stop_error=runtime_error,
+        workbench_close_error=workbench_error,
+        datahub_close_error=datahub_error,
+    )
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        with TestClient(application):
+            pass
+
+    assert exc_info.value.exceptions == (runtime_error, workbench_error, datahub_error)
+    assert container.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
 
 
 def test_default_container_factory_uses_injected_temporary_sqlite(tmp_path: Path) -> None:

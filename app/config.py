@@ -4,9 +4,10 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 LLM_SHELL_ENV_PATH = Path.home() / ".zshrc"
@@ -20,15 +21,16 @@ LLM_SHELL_ENV_NAMES = {
     "ASHARE_RADAR_LLM_MODEL",
     "ASHARE_RADAR_LLM_TIMEOUT_SECONDS",
 }
+LLM_SHELL_SECRET_ENV_NAMES = {"ASHARE_RADAR_LLM_API_KEY"}
 DEFAULT_CORS_ALLOW_ORIGINS = ("http://127.0.0.1:8010", "http://localhost:8010")
 DEFAULT_ASHARE_RADAR_LLM_ENABLED = True
 DEFAULT_ASHARE_RADAR_LLM_TIMEOUT_SECONDS = 30.0
+MIN_QUOTE_HISTORY_RETENTION_ROWS = 120
+MIN_RUNTIME_BACKUP_COUNT = 2
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 _LLM_HTTP_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_SHELL_BLOCK_WORD_RE = re.compile(
-    r"(?:^|[;&|])\s*(if|for|while|until|case|select|repeat|fi|done|esac)\b"
-)
+_SHELL_BLOCK_WORD_RE = re.compile(r"(?:^|[;&|])\s*(if|for|while|until|case|select|repeat|fi|done|esac)\b")
 _SHELL_BLOCK_OPENERS = frozenset({"if", "for", "while", "until", "case", "select", "repeat"})
 
 
@@ -134,7 +136,21 @@ def _load_shell_env(path: Path, names: set[str]) -> dict[str, str]:
         group_depth, block_depth = _shell_nesting_after_control_text(control_text, group_depth, block_depth)
         heredocs.extend(_shell_heredoc_delimiters(line))
         continued = quote is not None or _shell_command_continues(line, control_text)
+    _validate_shell_secret_permissions(path, values)
     return values
+
+
+def _validate_shell_secret_permissions(path: Path, values: dict[str, str]) -> None:
+    if not any(values.get(name) for name in LLM_SHELL_SECRET_ENV_NAMES):
+        return
+    try:
+        metadata = path.stat()
+    except OSError:
+        raise ValueError("无法验证包含 LLM API Key 的 shell 配置文件权限") from None
+    owned_by_current_user = not hasattr(os, "getuid") or metadata.st_uid == os.getuid()
+    private_mode = stat.S_IMODE(metadata.st_mode) & 0o077 == 0
+    if not stat.S_ISREG(metadata.st_mode) or not owned_by_current_user or not private_mode:
+        raise ValueError("包含 LLM API Key 的 shell 配置文件权限过宽，请设置为仅当前用户可读写（chmod 600）")
 
 
 def _shell_env_lines(path: Path) -> tuple[str, ...]:
@@ -295,12 +311,8 @@ class Settings(BaseModel):
     minute_provider_priority: tuple[str, ...] = ("futu", "akshare")
     stock_provider_priority: tuple[str, ...] = ("akshare", "tushare", "baostock", "local")
     plate_provider_priority: tuple[str, ...] = ("akshare", "local")
-    cache_path: Path = Field(
-        default_factory=lambda: _env_path(CACHE_PATH_ENV_NAME, DEFAULT_CACHE_PATH, aliases=("CACHE_PATH",))
-    )
-    demo_provider_enabled: bool = Field(
-        default_factory=lambda: _env_bool("ASHARE_RADAR_DEMO_PROVIDER_ENABLED", False, aliases=("DEMO_PROVIDER_ENABLED",))
-    )
+    cache_path: Path = Field(default_factory=lambda: _env_path(CACHE_PATH_ENV_NAME, DEFAULT_CACHE_PATH, aliases=("CACHE_PATH",)))
+    demo_provider_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_DEMO_PROVIDER_ENABLED", False, aliases=("DEMO_PROVIDER_ENABLED",)))
     quote_cache_seconds: int = 8
     kline_cache_seconds: int = 60 * 60 * 6
     minute_kline_cache_seconds: int = Field(
@@ -329,16 +341,21 @@ class Settings(BaseModel):
             aliases=("STOCK_CONCEPT_CACHE_SECONDS",),
         )
     )
-    tushare_token: str | None = Field(
-        repr=False,
-        default_factory=lambda: _env_text("ASHARE_RADAR_TUSHARE_TOKEN", aliases=("TUSHARE_TOKEN",))
-    )
+    tushare_token: str | None = Field(repr=False, default_factory=lambda: _env_text("ASHARE_RADAR_TUSHARE_TOKEN", aliases=("TUSHARE_TOKEN",)))
     futu_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_FUTU_ENABLED", False, aliases=("FUTU_ENABLED",)))
     futu_host: str = Field(default_factory=lambda: str(_env_text("ASHARE_RADAR_FUTU_HOST", "127.0.0.1", aliases=("FUTU_HOST",))))
     futu_port: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_FUTU_PORT", 11111, minimum=1, aliases=("FUTU_PORT",)))
     quote_refresh_seconds: int = 3
     request_timeout_seconds: float = 8.0
     provider_call_timeout_seconds: float = 8.0
+    stock_pool_provider_timeout_seconds: float = Field(
+        default_factory=lambda: _env_float(
+            "ASHARE_RADAR_STOCK_POOL_PROVIDER_TIMEOUT_SECONDS",
+            60.0,
+            minimum=1.0,
+        ),
+        le=300,
+    )
     workbench_optional_timeout_seconds: float = 1.5
     provider_failure_cooldown_seconds: int = Field(
         default_factory=lambda: _env_int(
@@ -348,9 +365,7 @@ class Settings(BaseModel):
             aliases=("PROVIDER_FAILURE_COOLDOWN_SECONDS",),
         )
     )
-    llm_enabled: bool = Field(
-        default_factory=lambda: _env_bool("ASHARE_RADAR_LLM_ENABLED", DEFAULT_ASHARE_RADAR_LLM_ENABLED)
-    )
+    llm_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_LLM_ENABLED", DEFAULT_ASHARE_RADAR_LLM_ENABLED))
     llm_api_key: str | None = Field(
         default_factory=lambda: _env_text("ASHARE_RADAR_LLM_API_KEY"),
         repr=False,
@@ -413,8 +428,82 @@ class Settings(BaseModel):
             aliases=("SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS",),
         )
     )
+    market_scan_auto_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_MARKET_SCAN_AUTO_ENABLED", False))
+    market_scan_schedule_hour: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_SCHEDULE_HOUR", 16, minimum=0),
+        le=23,
+    )
+    market_scan_schedule_minute: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_SCHEDULE_MINUTE", 30, minimum=0),
+        le=59,
+    )
+    market_scan_batch_size: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_BATCH_SIZE", 50, minimum=1),
+        le=500,
+    )
+    market_scan_concurrency: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_CONCURRENCY", 5, minimum=1),
+        le=32,
+    )
+    market_scan_kline_limit: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_KLINE_LIMIT", 260, minimum=60),
+        le=1000,
+    )
+    market_scan_min_history_rows: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_MIN_HISTORY_ROWS", 60, minimum=60),
+        le=260,
+    )
+    market_scan_min_data_quality_score: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_MIN_DATA_QUALITY_SCORE", 50, minimum=0),
+        le=100,
+    )
+    market_scan_min_universe_count: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_MIN_UNIVERSE_COUNT", 4000, minimum=1))
+    market_scan_min_sh_count: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_MIN_SH_COUNT", 1800, minimum=1))
+    market_scan_min_sz_count: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_MIN_SZ_COUNT", 2500, minimum=1))
+    market_scan_min_bj_count: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_MIN_BJ_COUNT", 200, minimum=1))
+    market_scan_symbol_timeout_seconds: float = Field(
+        default_factory=lambda: _env_float("ASHARE_RADAR_MARKET_SCAN_SYMBOL_TIMEOUT_SECONDS", 30.0, minimum=0.1),
+        le=300,
+    )
+    market_scan_quote_batch_timeout_seconds: float = Field(
+        default_factory=lambda: _env_float(
+            "ASHARE_RADAR_MARKET_SCAN_QUOTE_BATCH_TIMEOUT_SECONDS",
+            60.0,
+            minimum=0.1,
+        ),
+        le=600,
+    )
+    market_scan_retry_attempts: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_RETRY_ATTEMPTS", 2, minimum=1),
+        le=5,
+    )
+    market_scan_retry_backoff_seconds: float = Field(
+        default_factory=lambda: _env_float("ASHARE_RADAR_MARKET_SCAN_RETRY_BACKOFF_SECONDS", 1.0, minimum=0),
+        le=30,
+    )
+    market_scan_new_stock_days: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_NEW_STOCK_DAYS", 120, minimum=1),
+        le=730,
+    )
     max_quote_history_rows: int = Field(
-        default_factory=lambda: _env_int("ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS", 50000, minimum=1, aliases=("MAX_QUOTE_HISTORY_ROWS",))
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS",
+            MIN_QUOTE_HISTORY_RETENTION_ROWS,
+            minimum=MIN_QUOTE_HISTORY_RETENTION_ROWS,
+            aliases=("MAX_QUOTE_HISTORY_ROWS",),
+        ),
+        ge=MIN_QUOTE_HISTORY_RETENTION_ROWS,
+        le=50000,
+    )
+    max_daily_kline_rows: int = Field(
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_MAX_DAILY_KLINE_ROWS",
+            260,
+            minimum=60,
+            aliases=("MAX_DAILY_KLINE_ROWS",),
+        ),
+        ge=60,
+        le=5000,
     )
     max_minute_kline_rows: int = Field(
         default_factory=lambda: _env_int("ASHARE_RADAR_MAX_MINUTE_KLINE_ROWS", 20000, minimum=1, aliases=("MAX_MINUTE_KLINE_ROWS",))
@@ -422,18 +511,13 @@ class Settings(BaseModel):
     max_stock_concept_rows: int = Field(
         default_factory=lambda: _env_int("ASHARE_RADAR_MAX_STOCK_CONCEPT_ROWS", 20000, minimum=1, aliases=("MAX_STOCK_CONCEPT_ROWS",))
     )
-    max_task_run_rows: int = Field(
-        default_factory=lambda: _env_int("ASHARE_RADAR_MAX_TASK_RUN_ROWS", 2000, minimum=1, aliases=("MAX_TASK_RUN_ROWS",))
-    )
+    max_task_run_rows: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MAX_TASK_RUN_ROWS", 2000, minimum=1, aliases=("MAX_TASK_RUN_ROWS",)))
+    max_market_scan_runs: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MAX_MARKET_SCAN_RUNS", 30, minimum=1))
     max_monitor_event_rows: int = Field(
         default_factory=lambda: _env_int("ASHARE_RADAR_MAX_MONITOR_EVENT_ROWS", 3000, minimum=1, aliases=("MAX_MONITOR_EVENT_ROWS",))
     )
-    max_cache_event_rows: int = Field(
-        default_factory=lambda: _env_int("ASHARE_RADAR_MAX_CACHE_EVENT_ROWS", 5000, minimum=1, aliases=("MAX_CACHE_EVENT_ROWS",))
-    )
-    max_alert_event_rows: int = Field(
-        default_factory=lambda: _env_int("ASHARE_RADAR_MAX_ALERT_EVENT_ROWS", 5000, minimum=1, aliases=("MAX_ALERT_EVENT_ROWS",))
-    )
+    max_cache_event_rows: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MAX_CACHE_EVENT_ROWS", 5000, minimum=1, aliases=("MAX_CACHE_EVENT_ROWS",)))
+    max_alert_event_rows: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_MAX_ALERT_EVENT_ROWS", 5000, minimum=1, aliases=("MAX_ALERT_EVENT_ROWS",)))
     max_advice_history_rows: int = Field(
         default_factory=lambda: _env_int("ASHARE_RADAR_MAX_ADVICE_HISTORY_ROWS", 20000, minimum=1, aliases=("MAX_ADVICE_HISTORY_ROWS",))
     )
@@ -443,6 +527,24 @@ class Settings(BaseModel):
             512,
             minimum=16,
         )
+    )
+    runtime_maintenance_interval_seconds: int = Field(
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_RUNTIME_MAINTENANCE_INTERVAL_SECONDS",
+            60 * 60,
+            minimum=60,
+        ),
+        ge=60,
+        le=7 * 24 * 60 * 60,
+    )
+    max_runtime_backups: int = Field(
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_MAX_RUNTIME_BACKUPS",
+            10,
+            minimum=MIN_RUNTIME_BACKUP_COUNT,
+        ),
+        ge=MIN_RUNTIME_BACKUP_COUNT,
+        le=100,
     )
     advice_history_dedupe_seconds: int = Field(
         default_factory=lambda: _env_int(
@@ -490,6 +592,14 @@ class Settings(BaseModel):
     @classmethod
     def _validate_llm_base_url(cls, value: str | None) -> str | None:
         return _normalized_llm_base_url(value)
+
+    @model_validator(mode="after")
+    def _validate_market_scan_limits(self) -> "Settings":
+        if self.market_scan_min_history_rows > self.market_scan_kline_limit:
+            raise ValueError("market_scan_min_history_rows 不能大于 market_scan_kline_limit")
+        if self.max_daily_kline_rows < self.market_scan_kline_limit:
+            raise ValueError("max_daily_kline_rows 不能小于 market_scan_kline_limit")
+        return self
 
 
 @lru_cache

@@ -232,7 +232,11 @@ class MinuteAnalysisTests(unittest.TestCase):
             hub.cache.save_stock_pool(
                 [
                     _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
-                    for index in range(1000)
+                    for index in range(998)
+                ]
+                + [
+                    _stock_info(code="000001", market="SZ").model_copy(update={"updated_at": fresh_time}),
+                    _stock_info(code="920001", market="BJ").model_copy(update={"updated_at": fresh_time}),
                 ]
             )
             calls = []

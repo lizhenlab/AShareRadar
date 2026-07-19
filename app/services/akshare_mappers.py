@@ -151,7 +151,9 @@ def minute_klines_from_hist_rows(rows: Any, *, interval: str, source_name: str) 
 
 
 def stock_info_from_code_name_row(row: Any, *, stamp: str, source_name: str) -> StockInfo | None:
-    code = akshare_code(pick(row, "code", "代码", "symbol", default=""))
+    code = akshare_code(
+        pick(row, "code", "代码", "symbol", "证券代码", "A股代码", default="")
+    )
     if not code:
         return None
     market = normalize_symbol(code)[1].upper()
@@ -159,10 +161,35 @@ def stock_info_from_code_name_row(row: Any, *, stamp: str, source_name: str) -> 
         symbol=standard_symbol(code),
         code=code,
         market=market,
-        name=str(pick(row, "name", "名称", default=code)),
+        name=str(pick(row, "name", "名称", "证券简称", "A股简称", default=code)),
+        industry=_optional_stock_text(pick(row, "industry", "所属行业", default="")),
+        list_date=_stock_list_date(
+            pick(row, "list_date", "上市日期", "A股上市日期", default="")
+        ),
         source=source_name,
         updated_at=stamp,
     )
+
+
+def _optional_stock_text(value: Any) -> str | None:
+    text = " ".join(str(value or "").split()).strip()
+    return None if text.casefold() in {"", "nan", "nat", "none"} else text
+
+
+def _stock_list_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        text = str(isoformat()).strip()[:10]
+    else:
+        text = str(value).strip()
+    if text.casefold() in {"", "nan", "nat", "none"}:
+        return None
+    compact = text.replace("-", "").replace("/", "")
+    if len(compact) == 8 and compact.isdigit():
+        return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+    return None
 
 
 __all__ = [

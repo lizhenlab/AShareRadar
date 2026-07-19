@@ -58,13 +58,15 @@ The current test suite is split by domain:
 - `tests/test_datahub_cache_modules.py`
 - `tests/test_datahub_klines_modules.py`
 - `tests/test_datahub_metadata_modules.py`
+- `tests/test_datahub_metadata_structure.py`: metadata facade compatibility, dependency acyclicity, module-size limits, and coverage/persistence use of the same normalized stock-pool set.
 - `tests/test_datahub_orderbook_modules.py`
 - `tests/test_datahub_quotes_modules.py`
-- `tests/test_datahub_runtime_modules.py`
+- `tests/test_datahub_runtime_modules.py`: request-key sharing/admission/orphan isolation, bounded daemon executor ownership, queued-work cancellation, idempotent and cancellation-safe deferred close, active-worker/provider-client ordering, automatic post-quiescence cleanup, and stuck-SDK subprocess exit.
 - `tests/test_datahub_source_plan_modules.py`
 - `tests/test_datahub_status_modules.py`
 - `tests/test_datahub_status_service_modules.py`
 - `tests/test_db_mappers.py`
+- `tests/test_fallback_logging.py`: allowlisted SQLite persistence-failure categories, stderr fallback visibility, and secret/raw-error suppression.
 - `tests/test_financial_health_modules.py`
 - `tests/test_financial_metrics_modules.py`
 - `tests/test_frontend_advice_timeline.py`
@@ -96,8 +98,14 @@ The current test suite is split by domain:
 - `tests/test_local_data_portability.py`: exact export allowlist, merge/replace dry runs, schema drift rejection, conflict behavior, and transactional rollback.
 - `tests/test_local_lifecycle.py`: local persistence/migrations, comparable advice-change unread counting, viewed-through watermark races, automatic user-history cleanup protection, and shared runtime invariants.
 - `tests/test_market_overview_modules.py`
-- `tests/test_market_quotes_modules.py`: quote persistence, fixed Shanghai event time, epoch freshness ordering across mixed timezone formats, and legacy UTC ISO cache compatibility.
+- `tests/test_market_quotes_modules.py`: quote persistence, fixed Shanghai event time, epoch ordering, equal-event fallback/completeness/fetched-at priority, and legacy UTC ISO compatibility.
 - `tests/test_market_sampling_modules.py`
+- `tests/test_market_scan_api.py`: asynchronous create/deduplication, lifecycle controls, no-store reads, validation, pagination, and full filter/sort forwarding.
+- `tests/test_market_scan_frontend.py`: split-module/version wiring, strict contracts, one-timer polling, bounded backoff, latest recovery, new-run pagination reset, online recovery, escaped rendering, and ARIA state.
+- `tests/test_market_scan_modules.py`: full-universe/per-market accounting, bounded concurrency, structured fallback degradation, unified retry plans, lifecycle release, cancel/restart recovery, terminal `BUSY`/`LOCKED` retry, owned post-worker recovery, foreign-leader protection, publish-time guard, and automatic-run suppression.
+- `tests/test_market_scan_repository.py`: transitions, batch invariants, atomic task creation/scan attachment and scan/task terminal writes, retry-copy rollback/concurrency guards, stable ranks, filters, immutable snapshots, structured degradation, idempotent repair, and active-run uniqueness.
+- `tests/test_market_scan_repository_structure.py`: repository facade compatibility, dependency direction/acyclicity, and production module-size limits.
+- `tests/test_market_scan_scoring.py`: deterministic versioned score, completed-`data_date` snapshot boundary, quote/K-line date and adjustment contracts, required liquidity inputs, missing/skip boundaries, and A-share-only universe tags/exclusions.
 - `tests/test_minute_analysis_modules.py`
 - `tests/test_optional_kline_parsing_modules.py`
 - `tests/test_optional_provider_concurrency.py`
@@ -133,9 +141,12 @@ The current test suite is split by domain:
 - `tests/test_research_validation_modules.py`
 - `tests/test_review_modules.py`
 - `tests/test_rules_alerts.py`
-- `tests/test_runtime_backup.py`: snapshot verification, tamper rejection, guarded restore/rollback, orphan reconciliation, cleanup preview parity, and review-linked advice retention protection.
+- `tests/test_runtime_backup.py`: snapshot verification, tamper rejection, unified/legacy guarded restore, fixed-order bounded operation leases, thread/process concurrent rotation, in-use bundle protection, set-based retention, retry/task lineage convergence, cleanup preview parity, and review-linked advice protection.
+- `tests/test_runtime_coordinator.py`: repeated cross-process leadership exclusion, shared scheduler/scanner ownership, standby takeover/status, retryable partial activation, pre-leadership service guards, and delayed takeover while a non-cooperative old task remains alive.
 - `tests/test_runtime_environment_modules.py`
-- `tests/test_scheduler_modules.py`
+- `tests/test_runtime_maintenance_regressions.py`: one-pass retry-lineage retention convergence and threshold-gated best-effort SQLite compaction.
+- `tests/test_scheduler_modules.py`: task execution/state, cancellation, degraded outcomes, bounded stop with quiescence-delayed guard release, maintenance throttling, persistence fallback, and runtime-leadership integration.
+- `tests/test_scheduler_structure.py`: scheduler facade compatibility, internal dependency acyclicity, and production module-size limits.
 - `tests/test_schema_compat.py`
 - `tests/test_scoring_modules.py`
 - `tests/test_static_assets.py`
@@ -151,8 +162,9 @@ The current test suite is split by domain:
 - `tests/test_symbol_modules.py`
 - `tests/test_system_diagnostics_modules.py`
 - `tests/test_tencent_provider_modules.py`
-- `tests/test_tool_inventory_modules.py`
+- `tests/test_tool_inventory_modules.py`: generated-document drift, test-plan completeness, machine-path guards, dependency layering, immutable action SHA pins, and Node 24 action-major guards.
 - `tests/test_trading_calendar_modules.py`
+- `tests/test_uvicorn_smoke.py`: real loopback Uvicorn startup with isolated SQLite, API/static responses and cache headers, plus a deliberately held-open quote SSE connection and traceback-free `SIGINT` shutdown bounded by the test's two-second graceful-shutdown setting.
 - `tests/test_valuation_modules.py`
 - `tests/test_watchlist_research_queue.py`: queue validation/order, mark-viewed state, comparable changed-advice unread increments, and viewed-through watermark preservation of later changes.
 - `tests/test_watchlist_scan.py`: explicit/current universes, as-of results, missing rows, versioned fixed rules, script rejection, and symbol caps.
@@ -166,7 +178,7 @@ Browser regression support is indexed separately:
 
 ## 4. Manual Smoke Test Checklist
 
-1. Start the app on `127.0.0.1:8010` and confirm `/api/health` succeeds.
+1. Start the app on `127.0.0.1:8010` with the documented single-worker `--timeout-graceful-shutdown 5` command and confirm `/api/health` succeeds; with an SSE stream open, stop it and confirm the listener exits within the bounded shutdown window.
 2. Type a Chinese name or partial code in both stock inputs; confirm the 250 ms autocomplete can be navigated by pointer and keyboard, and that loading, empty, and unavailable messages are distinct.
 3. Enter a complete valid 6-digit code and confirm it submits directly without `/api/stocks`; confirm a non-complete cache miss adds only its search request.
 4. Switch A-B-A between valid SH/SZ symbols and confirm the timeline and advice-review list retain only the newest request's state.
@@ -184,7 +196,11 @@ Browser regression support is indexed separately:
 16. Export user data, load the JSON in merge mode, and confirm commit stays disabled until the matching server dry-run preview succeeds. Confirm the commit reports a verified rollback backup; change the file, mode, or target user data after preview and confirm commit is rejected. Treat replace as destructive and verify it only against disposable data.
 17. Create and verify a runtime backup. Open cleanup preview and confirm user-history candidates trigger a verified pre-cleanup backup while review-linked advice is excluded. Run scheduled health cleanup and confirm alert/advice history is unchanged.
 18. Open diagnostics and confirm fetch/market freshness, storage budget, categorized rows, providers, scheduler, and trading-calendar guidance remain readable.
-19. Confirm invalid symbols stay in the query panel, while a failed valid-stock load clears the prior stock content and shows an explicit failure; then check desktop/mobile layouts for console errors.
+19. Open **全市场榜单**, start one scan, and confirm the request returns immediately while real processed/total progress changes. Repeat the click and confirm it follows the same active run. Cancel and retry, then confirm a new linked run is created, the original stays unchanged, clean successful rows are retained, and unfinished/degraded rows resume.
+20. On a disposable fake-provider run, include SH/SZ/BJ, ST/new, suspended, short-history, and failed-source rows. Confirm every eligible symbol becomes success/missing/skipped, only successful rows receive stable ranks, coverage matches counts, and page/filter/sort views never render the whole universe.
+21. Simulate a deleted active scan and repeated poll failures; confirm the UI returns to latest with bounded backoff, resets page/results when a different run appears, retries immediately after `online`, keeps one request/timer at a time, and announces progress/result milestones through one live region.
+22. With disposable dual processes, confirm only one owns `<SQLite path>.runtime-leader.lock`, scheduler and scanner never split ownership, and standby takes over both after the leader exits. Confirm restore refuses the unified lock and both legacy compatibility locks.
+23. Confirm invalid symbols stay in the query panel, while a failed valid-stock load clears the prior stock content and shows an explicit failure; then check desktop/mobile layouts for console errors.
 
 ## 5. Request And Browser Budgets
 
@@ -201,22 +217,28 @@ Browser regression support is indexed separately:
 | Daily/minute pointer, touch, or keyboard inspection | 0 |
 | Local research-activity filter switch | 0 |
 | Fixed-condition watchlist scan | 1 |
+| Opening the full-market workspace | 1 latest-run request; while visible and idle, 1 non-overlapping latest-run check every 30 seconds; one additional result request only for a terminal run |
+| Active full-market scan | 1 progress request per 2-second poll; no overlapping poll |
+| Full-market result page/filter change | 1 request, capped at 100 rendered rows |
 | Advice-review evaluation | 1 |
 | Expanding one advice-review history for the first time | 1 |
 | Each Tools-tab cleanup preview | 1 |
 | Enabling browser notifications | 1 immediate baseline page; later 30-second polls use as many 50-event keyset pages as needed, capped at 200 pages |
 
-Stock-search requests are not part of the four-request stock-switch baseline: only a debounced, uncached, non-complete user query may trigger one. A selected suggestion then follows the ordinary stock-load budget. The latest recorded desktop/mobile browser matrix is **20 passed, 4 skipped**; the skipped cases are intentional device-exclusive scenarios recorded by Playwright rather than treated as passes.
+Stock-search requests are not part of the four-request stock-switch baseline: only a debounced, uncached, non-complete user query may trigger one. A selected suggestion then follows the ordinary stock-load budget. The latest recorded desktop/mobile browser matrix is **28 passed, 4 skipped**; the skipped cases are intentional device-exclusive scenarios recorded by Playwright rather than treated as passes.
 
-Regression-sensitive boundaries include core-workbench-first cold-load dispatch under browser connection limits, fixed Shanghai market-event time and legacy UTC cache ordering, `qfq`/legacy K-line isolation, quote/minute session freshness, provider request-key single-flight and orphan isolation, the 15:15 daily publish threshold, server-current-time handling for today's review/scan and no-lookahead historical windows, rendered-symbol review ownership, single-use state-bound import previews, latest-owner file/import/cleanup UI state, post-import browser/SSE rehydration, serialized backup-before-import, automatic user-history cleanup exclusion, review-linked retention protection, successful alert-write reconciliation under failed readback, comparable-change unread watermarks, notification page/delivery cursor advancement, scheduler timeout lock ownership, stale companion responses, and request-budget drift.
+Regression-sensitive boundaries include core-workbench-first cold-load dispatch under browser connection limits, equal-event quote quality priority and legacy UTC ordering, `qfq`/legacy K-line isolation, quote/minute session freshness, provider request-key single-flight/orphan isolation plus daemon-worker process exit, the 15:15 daily publish threshold, full-market `data_date` snapshots, atomic task attachment and scan/task terminals, owned terminal-failure recovery, structured degradation and unified retry plans, normalized atomic stock-pool replacement, quiescence-delayed single runtime leadership and whole-service takeover, set-based retention with retry-lineage convergence, cross-process backup leases and explicit rotation/restore guards, scan contract/backoff/latest recovery and ARIA state, server-current-time handling for today's review/scan, rendered-symbol ownership, single-use import previews, latest-owner browser state, serialized backup-before-import, automatic user-history exclusion, review-linked retention, successful write reconciliation, comparable-change unread watermarks, notification cursor advancement, stale companion responses, immutable Node 24 action pins, and request-budget drift.
 
 ## 6. Latest Test Report
 
-The current shared worktree has completed the full Python, coverage, generated-document, static-analysis, dependency, and browser gates. Historical rows remain only for traceability.
+The first rows below audit the current shared worktree; older records remain for traceability. The current verification used an isolated locked Python environment, fake providers, temporary databases, and no credentials or live-provider dependency.
 
 | Date | Worktree State | Environment | Command | Scope | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2026-07-18 | Current shared worktree after review-plan deletion, alert id-cursor/retention alignment, notification enable/disable and bounded backlog draining, scheduler degraded outcomes, and metadata freshness diagnostics | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing` | Full Python suite with branch coverage | 1787 passed in 58.24s; 91.92% coverage | Coverage gate is 90%; no live provider, credential, persistent runtime-data, or outbound-network dependency. |
+| 2026-07-19 | Current worktree after stock-pool atomicity, structured degradation, scan/task transaction recovery, unified quiescent runtime leadership, bounded retention/backup leases, module splits, frontend recovery, and runtime-lock hygiene | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing --cov-report=xml` | Full Python suite with branch coverage | 2000 passed in 83.28s; 91.57% coverage | Coverage gate is 90%; includes real Uvicorn/SSE shutdown, multiprocess leadership/backup, 5,500-symbol retention, and scan consistency regressions. |
+| 2026-07-19 | Same current worktree | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `npm run check` | Python compile, pyflakes, JS syntax, full pytest suite | 2000 passed in 52.69s | Confirms the convenient local regression command against the final source and test inventory. |
+| 2026-07-18 | Audited full-market baseline with SH/SZ/BJ background scanning, per-market pool guards, deterministic ranking, immutable derived retry, explicit fallback degradation, persistence, API, and frontend workspace | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing` | Full Python suite with branch coverage | 1899 passed in 66.91s; 91.59% coverage | Coverage gate is 90%; predates the current runtime-leadership, structured-degradation, retention, and module-split changes. |
+| 2026-07-18 | Audited baseline after review-plan deletion, alert id-cursor/retention alignment, notification enable/disable and bounded backlog draining, scheduler degraded outcomes, and metadata freshness diagnostics | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing` | Full Python suite with branch coverage | 1787 passed in 58.24s; 91.92% coverage | Coverage gate is 90%; no live provider, credential, persistent runtime-data, or outbound-network dependency. |
 | 2026-07-17 | Current shared worktree after review/scan time ownership, local-data import/cleanup concurrency, alert readback, unread, notification, security, and provider-runtime hardening | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing` | Full Python suite with branch coverage | 1759 passed in 112.01s; 91.87% coverage | Coverage gate is 90%; installed from `requirements-dev-lock.txt` with `--require-hashes`; no live provider, credential, persistent runtime-data, or outbound-network dependency. |
 | 2026-07-16 | Historical source after autocomplete, chart inspection, and local activity; before the current feature set | macOS, Python 3.12, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider` | Full Python suite without coverage | 1633 passed in 35.06s | Retained as a baseline, not a result for the current shared worktree. |
 | 2026-07-15 | Historical baseline before the current three frontend additions | macOS, Python 3.12, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider` | Full Python suite without coverage | 1608 passed in 33.58s | Does not include the four new Python frontend test modules indexed above. |
@@ -226,6 +248,9 @@ Recent targeted checks kept for traceability:
 
 | Date | Command | Scope | Result | Why It Was Run |
 | --- | --- | --- | --- | --- |
+| 2026-07-19 | `npm run test:e2e` | Full desktop and mobile browser regression including scan failure recovery and online resynchronization | 28 passed, 4 skipped in 43.7s | Confirms strict response contracts, bounded one-timer polling, latest-run recovery, new-run pagination reset, responsive charts/layout, request budgets, and ARIA state. |
+| 2026-07-19 | `$PYTHON -m pip check`, `$PYTHON -m ruff check app tests tools`, `$PYTHON -m mypy`, both generated-inventory checks, and `git diff --check` | Dependency, static-analysis, type, generated-document, and patch-integrity gates | passed; mypy checked 44 source files; 14 inventory guard tests passed | Matches the quality job gates and confirms current Node 24 GitHub Action pins, portable documentation, complete test indexing, and ignored runtime data. |
+| 2026-07-18 | `npm run test:e2e` | Full desktop and mobile browser regression including the full-market background scan workspace | 24 passed, 4 skipped in 34.3s | Confirms immediate task progress, unpublished cancellation, derived-run retry, terminal degraded snapshots, bounded 100-row pagination, sorting/filters, keyboard scrolling, responsive layout, and existing workflows. |
 | 2026-07-18 | `npm run test:e2e` | Desktop and mobile browser regression after alert/review/runtime changes | 20 passed, 4 skipped in 19.3s | Confirms request budgets, responsive layouts, chart inspection, local activity, timeline, queue, and stale-response behavior remain intact. |
 | 2026-07-18 | `$PYTHON -m pytest -q <alert, review, scheduler, freshness, cleanup, notification, and inventory modules>` | Focused behavior and maintainability regressions | 180 passed in 13.22s; independent audit 132 passed | Confirms id-cursor retention, bounded notification backlog, partial degraded outcomes, plan deletion, metadata diagnostics, and generated-document guardrails. |
 | 2026-07-17 | `$PYTHON -m pytest -q <provider runtime, quote, K-line, metadata, scheduler, sampling, lifecycle, and workbench modules>` | Provider admission, request-key single-flight, cancellation/orphan isolation, and downstream concurrency regressions | 363 passed in 3.67s | Confirms concurrent stocks no longer reject healthy foreground calls and true background calls remain bounded. |

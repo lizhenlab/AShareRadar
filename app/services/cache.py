@@ -5,11 +5,14 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import date
 from pathlib import Path
+import sqlite3
+from typing import Any, cast
 
 from app.config import Settings, get_settings, resolve_project_path
 from app.db.connection import SQLiteConnectionFactory
 from app.db.schema import initialize_schema
 from app.models.market import DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE, KlineAdjustmentMode
+from app.models.market_scan import MarketScanResultWrite, MarketScanSeed
 from app.models.schemas import (
     AdviceHistoryItem,
     AdviceReviewDetail,
@@ -49,12 +52,15 @@ from app.repositories.alerts import AlertRepository
 from app.repositories.alerts import AlertStateDecision, AlertStateUpdateResult
 from app.repositories.cache_stats import CacheStatsRepository
 from app.repositories.market_data import MarketDataRepository
+from app.repositories.market_scan import MarketScanRepository
 from app.repositories.maintenance import RuntimeMaintenanceRepository
 from app.repositories.notes import StockNoteRepository
 from app.repositories.provider_status import ProviderStatusRepository
 from app.repositories.runtime import RuntimeEventRepository
 from app.repositories.watchlist import WatchlistRepository, WatchlistSymbolSelection
 from app.services.research_conclusion_change import build_conclusion_timeline
+from app.services.runtime_backup import destructive_local_data_lease
+from app.utils.fallback_logging import report_persistence_failure
 
 
 def resolve_cache_settings(
@@ -73,6 +79,54 @@ def resolve_cache_settings(
     return settings
 
 
+class _BorrowedTransactionConnection:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def execute(self, statement: str, parameters: Any = ()) -> sqlite3.Cursor:
+        normalized = statement.strip().rstrip(";").upper()
+        if normalized == "BEGIN IMMEDIATE":
+            return self._connection.execute("SELECT 1")
+        return self._connection.execute(statement, parameters)
+
+
+class _BorrowedTransactionConnections:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        borrowed = _BorrowedTransactionConnection(self._connection)
+        yield cast(sqlite3.Connection, borrowed)
+
+
+class ExclusiveLocalDataOperation:
+    def __init__(self, cache: SQLiteCache) -> None:
+        self._cache = cache
+        self._transaction_active = False
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        if self._transaction_active:
+            raise RuntimeError("本地数据破坏性事务不能嵌套")
+        self._transaction_active = True
+        try:
+            with self._cache._connections.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                repository = self._cache.maintenance_repo
+                original_connections = repository._connections
+                repository._connections = cast(
+                    SQLiteConnectionFactory,
+                    _BorrowedTransactionConnections(connection),
+                )
+                try:
+                    yield connection
+                finally:
+                    repository._connections = original_connections
+        finally:
+            self._transaction_active = False
+
+
 class SQLiteCache:
     def __init__(self, path: Path | None = None, *, settings: Settings | None = None) -> None:
         if path is None:
@@ -89,6 +143,7 @@ class SQLiteCache:
         self._init_schema()
         self.cache_stats_repo = CacheStatsRepository(self.path, self._lock)
         self.market_data_repo = MarketDataRepository(self.path, self._lock)
+        self.market_scan_repo = MarketScanRepository(self.path, self._lock)
         self.provider_status_repo = ProviderStatusRepository(self.path, self._lock)
         self.runtime_event_repo = RuntimeEventRepository(self.path, self._lock)
         self.watchlist_repo = WatchlistRepository(self.path, self._lock, settings=repository_settings)
@@ -110,9 +165,11 @@ class SQLiteCache:
         self.bind_settings(settings)
 
     @contextmanager
-    def exclusive_local_data_operation(self) -> Iterator[None]:
+    def exclusive_local_data_operation(self) -> Iterator[ExclusiveLocalDataOperation]:
+        # Lock order: process RLock -> destructive file lease -> backup leases -> SQLite transaction.
         with self._lock:
-            yield
+            with destructive_local_data_lease(self.path):
+                yield ExclusiveLocalDataOperation(self)
 
     def bind_settings(self, settings: Settings, *, owner: str = "cache") -> Settings:
         _require_settings_path(self.path, settings, owner)
@@ -168,11 +225,98 @@ class SQLiteCache:
     def save_stock_pool(self, rows: list[StockInfo]) -> None:
         self.market_data_repo.save_stock_pool(rows)
 
-    def get_stock_pool(self, max_age_seconds: int, limit: int = 5000, keyword: str | None = None) -> list[StockInfo]:
+    def replace_stock_pool(self, rows: list[StockInfo]) -> None:
+        self.market_data_repo.replace_stock_pool(rows)
+
+    def get_stock_pool(self, max_age_seconds: int, limit: int | None = 5000, keyword: str | None = None) -> list[StockInfo]:
         return self.market_data_repo.get_stock_pool(max_age_seconds, limit=limit, keyword=keyword)
 
     def stock_pool_count(self, max_age_seconds: int | None = None) -> int:
         return self.market_data_repo.stock_pool_count(max_age_seconds)
+
+    def create_market_scan_run(self, **kwargs):
+        return self.market_scan_repo.create_run(**kwargs)
+
+    def market_scan_run(self, run_id: int):
+        return self.market_scan_repo.run(run_id)
+
+    def active_market_scan_run(self):
+        return self.market_scan_repo.active_run()
+
+    def latest_market_scan_run(self):
+        return self.market_scan_repo.latest_run()
+
+    def market_scan_runs(self, *, page: int, page_size: int):
+        return self.market_scan_repo.list_runs(page=page, page_size=page_size)
+
+    def attach_market_scan_task_run(self, run_id: int, task_run_id: int) -> None:
+        self.market_scan_repo.attach_task_run(run_id, task_run_id)
+
+    def start_market_scan_task_run(self, run_id: int, task_name: str) -> int:
+        return self.market_scan_repo.create_and_attach_task_run(run_id, task_name)
+
+    def record_market_scan_stock_pool_source(self, run_id: int, source: str):
+        return self.market_scan_repo.record_stock_pool_source(run_id, source)
+
+    def start_market_scan_run(self, run_id: int):
+        return self.market_scan_repo.start_run(run_id)
+
+    def seed_market_scan_results(
+        self,
+        run_id: int,
+        seeds: list[MarketScanSeed],
+        *,
+        excluded_count: int,
+    ) -> int:
+        return self.market_scan_repo.seed_results(run_id, seeds, excluded_count=excluded_count)
+
+    def pending_market_scan_items(self, run_id: int):
+        return self.market_scan_repo.pending_items(run_id)
+
+    def refresh_pending_market_scan_metadata(
+        self,
+        run_id: int,
+        seeds: list[MarketScanSeed],
+    ) -> int:
+        return self.market_scan_repo.refresh_pending_metadata(run_id, seeds)
+
+    def save_market_scan_result_batch(self, run_id: int, results: list[MarketScanResultWrite]):
+        return self.market_scan_repo.save_result_batch(run_id, results)
+
+    def request_market_scan_cancel(self, run_id: int):
+        return self.market_scan_repo.request_cancel(run_id)
+
+    def market_scan_retry_plan(self, run_id: int):
+        return self.market_scan_repo.retry_plan(run_id)
+
+    def prepare_market_scan_retry(self, run_id: int, expected_plan=None):
+        return self.market_scan_repo.prepare_retry(run_id, expected_plan)
+
+    def finish_market_scan_run(
+        self,
+        run_id: int,
+        status,
+        *,
+        message: str,
+        error: str | None = None,
+        task_status: str | None = None,
+    ):
+        return self.market_scan_repo.finish_run(
+            run_id,
+            status,
+            message=message,
+            error=error,
+            task_status=task_status,
+        )
+
+    def market_scan_degraded_result_count(self, run_id: int) -> int:
+        return self.market_scan_repo.degraded_result_count(run_id)
+
+    def reconcile_incomplete_market_scans(self) -> int:
+        return self.market_scan_repo.reconcile_incomplete_runs()
+
+    def market_scan_results(self, run_id: int, **kwargs):
+        return self.market_scan_repo.results_page(run_id, **kwargs)
 
     def save_plate_rank(self, rows: list[PlateItem]) -> None:
         self.market_data_repo.save_plate_rank(rows)
@@ -219,8 +363,8 @@ class SQLiteCache:
     def log_event(self, category: str, message: str) -> None:
         try:
             self.runtime_event_repo.log_event(category, message)
-        except Exception:
-            pass
+        except Exception as exc:
+            report_persistence_failure("cache event persistence failed", exc)
 
     def start_task_run(self, task_name: str) -> int:
         return self.runtime_event_repo.start_task_run(task_name)

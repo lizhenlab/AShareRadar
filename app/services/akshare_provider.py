@@ -5,6 +5,7 @@ from contextlib import redirect_stderr
 from dataclasses import dataclass
 import importlib
 import io
+from typing import Any, cast
 
 from app.models.schemas import Kline, MinuteKline, PlateItem, ProviderCapability, Quote, StockConceptItem, StockInfo
 from app.runtime_environment import isolate_user_site_packages
@@ -20,6 +21,7 @@ from app.services.datahub_runtime import run_provider_io
 from app.services.provider_errors import ProviderProtocolError, sanitize_provider_error
 from app.services.provider_utils import ak_symbol, ensure_positive_limit, is_installed, pick, valid_ohlc
 from app.services.providers import stamp_daily_kline_contract
+from app.services.sina_client import SINA_BJ_STOCK_POOL_SOURCE_NAME, sina_bj_stock_pool_rows
 from app.utils.parsing import required_float, safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
 from app.utils.time import now_text
@@ -31,6 +33,78 @@ AKSHARE_MINUTE_PERIODS = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m":
 
 class AKShareFetchError(RuntimeError):
     """AKShare import or upstream request failed before row parsing."""
+
+
+@dataclass(frozen=True)
+class AkshareStockPoolBatch:
+    rows: Any
+    source_name: str
+
+
+def _akshare_stock_pool_frames(ak) -> list[AkshareStockPoolBatch]:
+    sh_loader = getattr(ak, "stock_info_sh_name_code", None)
+    sz_loader = getattr(ak, "stock_info_sz_name_code", None)
+    bj_loader = getattr(ak, "stock_info_bj_name_code", None)
+    if not all(callable(loader) for loader in (sh_loader, sz_loader, bj_loader)):
+        return [AkshareStockPoolBatch(ak.stock_info_a_code_name(), "AKShare")]
+    sh_loader = cast(Callable[..., Any], sh_loader)
+    sz_loader = cast(Callable[..., Any], sz_loader)
+    bj_loader = cast(Callable[..., Any], bj_loader)
+    try:
+        mainland_frames = [
+            AkshareStockPoolBatch(sh_loader(symbol="主板A股"), "AKShare"),
+            AkshareStockPoolBatch(sh_loader(symbol="科创板"), "AKShare"),
+            AkshareStockPoolBatch(sz_loader(symbol="A股列表"), "AKShare"),
+        ]
+    except Exception as exc:
+        return [_akshare_spot_stock_pool_frame(ak, exc)]
+    try:
+        return [*mainland_frames, AkshareStockPoolBatch(bj_loader(), "AKShare")]
+    except Exception as bj_exc:
+        fallback_errors = [bj_exc]
+        bj_spot_loader = getattr(ak, "stock_bj_a_spot_em", None)
+        if callable(bj_spot_loader):
+            try:
+                return [*mainland_frames, AkshareStockPoolBatch(bj_spot_loader(), "AKShare·东方财富")]
+            except Exception as exc:
+                fallback_errors.append(exc)
+        try:
+            return [
+                *mainland_frames,
+                AkshareStockPoolBatch(sina_bj_stock_pool_rows(), SINA_BJ_STOCK_POOL_SOURCE_NAME),
+            ]
+        except Exception as exc:
+            fallback_errors.append(exc)
+        detail = "；".join(sanitize_provider_error(exc) for exc in fallback_errors[:3])
+        return [_akshare_spot_stock_pool_frame(ak, AKShareFetchError(f"北交所列表多源失败：{detail}"))]
+
+
+def _akshare_spot_stock_pool_frame(ak, primary_error: Exception) -> AkshareStockPoolBatch:
+    loader = getattr(ak, "stock_zh_a_spot_em", None)
+    if not callable(loader):
+        raise AKShareFetchError(
+            f"AKShare交易所股票列表不可用：{sanitize_provider_error(primary_error)}"
+        ) from primary_error
+    try:
+        return AkshareStockPoolBatch(loader(), "AKShare·东方财富")
+    except Exception as fallback_error:
+        raise AKShareFetchError(
+            "AKShare交易所与综合行情股票列表均不可用："
+            f"{sanitize_provider_error(primary_error)}；"
+            f"{sanitize_provider_error(fallback_error)}"
+        ) from fallback_error
+
+
+def _stock_pool_rows(value: Any) -> Iterable[Any]:
+    iterrows = getattr(value, "iterrows", None)
+    if callable(iterrows):
+        for _, row in iterrows():
+            yield row
+        return
+    if isinstance(value, (list, tuple)):
+        yield from value
+        return
+    raise ProviderProtocolError("AKShare 股票列表返回结构异常")
 
 
 @dataclass(frozen=True)
@@ -110,16 +184,16 @@ class AKShareProvider:
 
         def load() -> list[StockInfo]:
             ak = _import_akshare()
-
             with _eastmoney_no_proxy():
-                df = ak.stock_info_a_code_name()
+                frames = _akshare_stock_pool_frames(ak)
             stamp = now_text()
-            result = []
-            for _, row in df.iterrows():
-                item = stock_info_from_code_name_row(row, stamp=stamp, source_name=self.source_name)
-                if item:
-                    result.append(item)
-            return result
+            by_symbol: dict[str, StockInfo] = {}
+            for batch in frames:
+                for row in _stock_pool_rows(batch.rows):
+                    item = stock_info_from_code_name_row(row, stamp=stamp, source_name=batch.source_name)
+                    if item:
+                        by_symbol[item.symbol] = item
+            return list(by_symbol.values())
 
         return await run_provider_io(load)
 

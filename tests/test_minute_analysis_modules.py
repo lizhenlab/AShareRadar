@@ -492,6 +492,7 @@ def test_minute_report_requires_eight_valid_price_samples() -> None:
 
 
 def test_minute_report_marks_cache_or_fallback_data_degraded() -> None:
+    primary_report = build_minute_analysis_report("600519.SH", _rows())
     rows = [row.model_copy(update={"from_cache": True, "fallback_used": True}) for row in _rows()]
 
     report = build_minute_analysis_report("600519.SH", rows)
@@ -504,6 +505,7 @@ def test_minute_report_marks_cache_or_fallback_data_degraded() -> None:
     assert report.t_plan.high_zone != "不可用"
     assert "仍可参考" in report.availability_reason
     assert report.missing_data == ["实时分钟K线（当前使用缓存或兜底数据）"]
+    assert report.t_plan.confidence == primary_report.t_plan.confidence - 12
 
 
 def test_minute_report_marks_missing_key_volume_input_degraded() -> None:

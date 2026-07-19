@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import unittest
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.models.schemas import CacheStats, ProviderCapability, ProviderCapabilityStatus, ProviderStatus, SchedulerStatus
+from app.services.cache import SQLiteCache
+from app.services.runtime_backup import create_runtime_backup, runtime_backup_storage
+from app.services.trading_calendar import TradeCalendarSource, TradeCalendarStatus
 from app.services.system_diagnostics import (
     _provider_diagnostic_decision,
     age_seconds,
@@ -48,7 +51,7 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         datahub = _DataHub(cache, capabilities=[_capability("tencent", realtime_quote=True)])
         scheduler = _Scheduler(running=False)
 
-        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+        with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
             diagnostics = build_system_diagnostics(datahub, scheduler, now=checked_base)
 
         self.assertTrue(any("报价市场数据过期" in item for item in diagnostics.warnings))
@@ -92,7 +95,7 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             table_counts={},
         )
 
-        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+        with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
             diagnostics = build_system_diagnostics(
                 _DataHub(cache, capabilities=[]),
                 _Scheduler(running=True),
@@ -129,12 +132,12 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             )
         )
 
-        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+        with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
             diagnostics = build_system_diagnostics(_DataHub(cache, capabilities=[]), scheduler)
 
         self.assertNotIn("存在本地预警但调度器未运行，建议启动调度器或手动评估。", diagnostics.suggestions)
 
-    def test_diagnostics_reports_missing_quote_demo_source_and_calendar_fallback(self) -> None:
+    def test_diagnostics_reports_demo_source_and_unavailable_calendar(self) -> None:
         now = datetime(2026, 5, 13, 10, 30, 0)
         cache = _Cache(
             CacheStats(
@@ -153,14 +156,79 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         )
         datahub = _DataHub(cache, capabilities=[_capability("demo", realtime_quote=True, reliability_level="演示")])
 
-        with patch("app.services.system_diagnostics.calendar_source", return_value="工作日兜底"):
+        with patch(
+            "app.services.system_diagnostics.calendar_status",
+            return_value=_calendar_status(TradeCalendarSource.UNAVAILABLE, covered=False),
+        ):
             diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
-        self.assertIn("尚未形成报价缓存或市场事件时间，无法判断报价业务新鲜度。", diagnostics.warnings)
-        self.assertIn("尚未形成行业背景缓存。", diagnostics.warnings)
         self.assertIn("演示行情源已启用，当前环境不适合输出真实个股建议。", diagnostics.warnings)
-        self.assertIn("交易日历未缓存，当前按普通工作日判断行情新鲜度。", diagnostics.warnings)
-        self.assertIn("刷新报价并检查行情源返回的市场事件时间。", diagnostics.suggestions)
+        self.assertIn("运行时交易日历与内置基线均不可用，已跳过行情交易日期判断并保守关闭交易任务。", diagnostics.warnings)
+        self.assertIn("检查 app/resources/trading_calendar.json 完整性，并调用交易日历刷新 API 重建 data/ 运行时缓存。", diagnostics.suggestions)
+        self.assertEqual(diagnostics.freshness.checked_domains, [])
+
+    def test_diagnostics_reports_out_of_coverage_calendar_with_annual_maintenance_action(self) -> None:
+        now = datetime(2027, 1, 4, 10, 30, 0)
+        cache = _Cache(
+            CacheStats(
+                path=":memory:",
+                quote_count=1,
+                quote_history_count=0,
+                kline_count=1,
+                stock_count=0,
+                plate_count=0,
+                provider_count=0,
+                latest_quote_timestamp="2026-12-31 15:00:00",
+                latest_daily_kline_date="2026-12-31",
+            ),
+            providers=[],
+            capability_statuses=[],
+            table_counts={},
+        )
+
+        with patch(
+            "app.services.system_diagnostics.calendar_status",
+            return_value=_calendar_status(TradeCalendarSource.OUT_OF_COVERAGE, covered=False),
+        ):
+            diagnostics = build_system_diagnostics(
+                _DataHub(cache, capabilities=[]),
+                _Scheduler(running=True),
+                now=now,
+            )
+
+        self.assertIn("交易日历未覆盖当前日期，已跳过依赖交易日期的行情新鲜度判断并保守关闭交易任务。", diagnostics.warnings)
+        self.assertIn("调用 POST /api/data/trading-calendar/refresh 刷新运行时日历；进入新年度前同时更新 bundled baseline。", diagnostics.suggestions)
+        self.assertEqual(diagnostics.freshness.market_freshness, {})
+
+    def test_diagnostics_reports_ignored_runtime_while_bundle_remains_usable(self) -> None:
+        cache = _Cache(
+            CacheStats(
+                path=":memory:",
+                quote_count=0,
+                quote_history_count=0,
+                kline_count=0,
+                stock_count=0,
+                plate_count=0,
+                provider_count=0,
+            ),
+            providers=[],
+            capability_statuses=[],
+            table_counts={},
+        )
+        calendar_warning = "运行时交易日历 JSON 损坏，已忽略该快照。"
+
+        with patch(
+            "app.services.system_diagnostics.calendar_status",
+            return_value=_calendar_status(TradeCalendarSource.BUNDLED_BASELINE, warning=calendar_warning),
+        ):
+            diagnostics = build_system_diagnostics(
+                _DataHub(cache, capabilities=[]),
+                _Scheduler(running=True),
+                now=datetime(2026, 5, 13, 10, 30, 0),
+            )
+
+        self.assertIn(calendar_warning, diagnostics.warnings)
+        self.assertIn("调用 POST /api/data/trading-calendar/refresh 重建运行时交易日历缓存。", diagnostics.suggestions)
 
     def test_diagnostics_reports_future_market_timestamps_separately_from_fetch_activity(self) -> None:
         now = datetime(2026, 5, 13, 10, 30, 0)
@@ -187,7 +255,7 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         )
         datahub = _DataHub(cache, capabilities=[_capability("tencent", realtime_quote=True)])
 
-        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+        with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
             diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
         self.assertEqual(diagnostics.freshness.latest_quote_age_seconds, 30)
@@ -232,7 +300,7 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             capabilities=[_capability("tencent", realtime_quote=True), _capability("futu", realtime_quote=True)],
         )
 
-        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+        with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
             diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
         self.assertEqual(diagnostics.freshness.latest_minute_kline_age_seconds, 30)
@@ -275,7 +343,7 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             capabilities=[_capability("tencent", realtime_quote=True), _capability(" tencent ", realtime_quote=True)],
         )
 
-        with patch("app.services.system_diagnostics.calendar_source", return_value="交易日历缓存"):
+        with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
             diagnostics = build_system_diagnostics(datahub, _Scheduler(running=True), now=now)
 
         self.assertEqual(diagnostics.suggestions.count("检查系统时间、抓取时间字段或清理异常缓存。"), 1)
@@ -303,9 +371,12 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
                 path,
                 {
                     "quote_history": 3,
+                    "kline_daily": 5,
                     "cache_event": 4,
                     "task_run": 2,
                     "monitor_event": 1,
+                    "market_scan_run": 7,
+                    "market_scan_result": 11,
                     "alert_event": 6,
                     "watchlist": 4,
                     "alert_rule": 5,
@@ -314,9 +385,17 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             )
 
         self.assertEqual(diagnostics.db_size_bytes, 1024)
-        self.assertEqual(diagnostics.cache_rows, 12)
-        self.assertEqual(diagnostics.runtime_rows, 7)
+        self.assertEqual(diagnostics.sqlite_size_bytes, 1024)
+        self.assertEqual(diagnostics.backup_size_bytes, 0)
+        self.assertEqual(diagnostics.managed_backup_count, 0)
+        self.assertEqual(diagnostics.cache_rows, 17)
+        self.assertEqual(diagnostics.runtime_rows, 25)
         self.assertEqual(diagnostics.user_rows, 15)
+        self.assertEqual(diagnostics.quote_rows, 3)
+        self.assertEqual(diagnostics.kline_rows, 5)
+        self.assertEqual(diagnostics.market_scan_rows, 18)
+        self.assertEqual(diagnostics.other_cache_rows, 9)
+        self.assertEqual(diagnostics.other_runtime_rows, 7)
         self.assertEqual(diagnostics.budget_bytes, 512 * 1024 * 1024)
         self.assertFalse(diagnostics.over_budget)
 
@@ -334,6 +413,27 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
             diagnostics.usage_pct,
             round(diagnostics.db_size_bytes / diagnostics.budget_bytes * 100, 2),
         )
+
+    def test_storage_diagnostics_reports_managed_backup_bytes_and_count(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime.sqlite3"
+            SQLiteCache(path)
+            create_runtime_backup(path, max_backups=2)
+            backup_storage = runtime_backup_storage(path)
+            sqlite_bytes = sum(
+                candidate.stat().st_size
+                for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
+                if candidate.exists()
+            )
+
+            diagnostics = storage_diagnostics(path, {})
+
+        self.assertEqual(backup_storage.managed_bundle_count, 1)
+        self.assertGreater(backup_storage.size_bytes, 0)
+        self.assertEqual(diagnostics.db_size_bytes, sqlite_bytes + backup_storage.size_bytes)
+        self.assertEqual(diagnostics.sqlite_size_bytes, sqlite_bytes)
+        self.assertEqual(diagnostics.backup_size_bytes, backup_storage.size_bytes)
+        self.assertEqual(diagnostics.managed_backup_count, 1)
 
     def test_storage_diagnostics_sanitizes_malformed_table_counts(self) -> None:
         diagnostics = storage_diagnostics(
@@ -447,6 +547,22 @@ class _Cache:
 
     def table_counts(self) -> dict[str, int]:
         return self._table_counts
+
+
+def _calendar_status(
+    source: TradeCalendarSource = TradeCalendarSource.RUNTIME_CACHE,
+    *,
+    covered: bool = True,
+    warning: str | None = None,
+) -> TradeCalendarStatus:
+    return TradeCalendarStatus(
+        target_date=date(2026, 5, 13),
+        source=source,
+        covered=covered,
+        min_date=date(1990, 12, 19) if covered else None,
+        max_date=date(2026, 12, 31) if covered else None,
+        warning=warning,
+    )
 
 
 class _DataHub:

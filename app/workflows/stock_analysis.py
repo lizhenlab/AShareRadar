@@ -83,20 +83,19 @@ async def _safe_save_advice_snapshot(datahub: DataHub, result: AnalysisResult, s
 
 
 async def _optional_plate_rank(datahub: DataHub, symbol: str) -> list:
-    failure: Exception | None = None
-
-    def empty_rows(exc: Exception) -> list:
-        nonlocal failure
-        failure = exc
+    try:
+        rows = await datahub.plate_rank(limit=20)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await _log_analysis_fallback(datahub, f"个股行业背景暂不可用：{symbol}；{short_error(exc)}")
         return []
-
-    rows = await optional_workflow_value(
-        datahub,
-        lambda: datahub.plate_rank(limit=20),
-        empty_rows,
-    )
-    if failure is not None:
-        await _log_analysis_fallback(datahub, f"个股行业背景暂不可用：{symbol}；{short_error(failure)}")
+    if any(bool(getattr(item, "fallback_used", False)) for item in rows):
+        await _log_analysis_fallback(
+            datahub,
+            f"个股行业背景使用过期缓存，仅保留归属提示且不参与强度评分：{symbol}",
+        )
+        return []
     return rows
 
 

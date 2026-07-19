@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 import threading
+import time
 from typing import Literal
 
 from app.config import Settings
 from app.repositories.base import SQLiteRepository
+from app.repositories.market_klines import DAILY_KLINE_RETENTION_ORDER_BY, DAILY_KLINE_RETENTION_PARTITION
 from app.repositories.watchlist import cap_watchlist_unread_change_counts_to_viewable
 
 
-CLEANUP_DELETE_BATCH_ROWS = 1_000
 CleanupLimitScope = Literal["global", "partition"]
 GLOBAL_LIMIT: CleanupLimitScope = "global"
 PARTITION_LIMIT: CleanupLimitScope = "partition"
+DATABASE_COMPACTION_MIN_FREE_BYTES = 8 * 1024 * 1024
+DATABASE_COMPACTION_MIN_FREE_RATIO = 0.25
+DATABASE_COMPACTION_BUSY_TIMEOUT_MS = 250
 
 
 @dataclass(frozen=True)
@@ -26,6 +31,8 @@ class RuntimeCleanupSpec:
     partition_by: tuple[str, ...] = ()
     limit_scope: CleanupLimitScope = GLOBAL_LIMIT
     protected_reference: tuple[str, str] | None = None
+    protect_references_from_retained_only: bool = False
+    protected_statuses: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.limit_scope not in {GLOBAL_LIMIT, PARTITION_LIMIT}:
@@ -34,6 +41,11 @@ class RuntimeCleanupSpec:
             raise ValueError("partition cleanup requires partition columns")
         if self.limit_scope == GLOBAL_LIMIT and self.partition_by:
             raise ValueError("global cleanup cannot declare partition columns")
+        if self.protect_references_from_retained_only:
+            if self.protected_reference is None or self.protected_reference[0] != self.table:
+                raise ValueError("retained-only reference protection requires a self-reference")
+            if self.limit_scope != GLOBAL_LIMIT:
+                raise ValueError("retained-only reference protection requires a global limit")
 
 
 REGENERABLE_RUNTIME_CLEANUP_SPECS = (
@@ -41,8 +53,16 @@ REGENERABLE_RUNTIME_CLEANUP_SPECS = (
         "quote_history",
         "max_quote_history_rows",
         "id",
-        "trade_date DESC",
+        "trade_date DESC, id DESC",
         partition_by=("symbol",),
+        limit_scope=PARTITION_LIMIT,
+    ),
+    RuntimeCleanupSpec(
+        "kline_daily",
+        "max_daily_kline_rows",
+        "rowid",
+        DAILY_KLINE_RETENTION_ORDER_BY,
+        partition_by=DAILY_KLINE_RETENTION_PARTITION,
         limit_scope=PARTITION_LIMIT,
     ),
     RuntimeCleanupSpec(
@@ -62,7 +82,25 @@ REGENERABLE_RUNTIME_CLEANUP_SPECS = (
         limit_scope=PARTITION_LIMIT,
     ),
     RuntimeCleanupSpec("cache_event", "max_cache_event_rows", "id", "created_at DESC, id DESC", limit_scope=GLOBAL_LIMIT),
-    RuntimeCleanupSpec("task_run", "max_task_run_rows", "id", "id DESC", limit_scope=GLOBAL_LIMIT),
+    RuntimeCleanupSpec(
+        "market_scan_run",
+        "max_market_scan_runs",
+        "id",
+        "id DESC",
+        limit_scope=GLOBAL_LIMIT,
+        protected_reference=("market_scan_run", "retry_of_run_id"),
+        protect_references_from_retained_only=True,
+        protected_statuses=("queued", "running", "cancelling"),
+    ),
+    RuntimeCleanupSpec(
+        "task_run",
+        "max_task_run_rows",
+        "id",
+        "id DESC",
+        limit_scope=GLOBAL_LIMIT,
+        protected_reference=("market_scan_run", "task_run_id"),
+        protected_statuses=("running",),
+    ),
     RuntimeCleanupSpec(
         "monitor_event",
         "max_monitor_event_rows",
@@ -100,6 +138,8 @@ TABLE_COUNT_NAMES = (
     "plate_rank",
     "stock_concept",
     "task_run",
+    "market_scan_run",
+    "market_scan_result",
     "monitor_event",
     "watchlist",
     "advice_history",
@@ -115,12 +155,23 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
     def __init__(self, path: Path, lock: threading.RLock, *, settings: Settings) -> None:
         super().__init__(path, lock)
         self.settings = settings
+        self._last_regenerable_cleanup_at: float | None = None
 
     def cleanup_runtime_rows(self) -> dict[str, int]:
-        return self._cleanup_specs(RUNTIME_CLEANUP_SPECS)
+        with self._lock:
+            removed = self._cleanup_specs(RUNTIME_CLEANUP_SPECS)
+            self._last_regenerable_cleanup_at = time.monotonic()
+            return removed
 
     def cleanup_regenerable_runtime_rows(self) -> dict[str, int]:
-        return self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
+        with self._lock:
+            now = time.monotonic()
+            interval = int(self.settings.runtime_maintenance_interval_seconds)
+            if self._last_regenerable_cleanup_at is not None and now - self._last_regenerable_cleanup_at < interval:
+                return {}
+            removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
+            self._last_regenerable_cleanup_at = time.monotonic()
+            return removed
 
     def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]:
         removed: dict[str, int] = {}
@@ -133,7 +184,32 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
                 if candidates:
                     deleted_symbols = _deleted_advice_symbols(conn, candidates)
                     cap_watchlist_unread_change_counts_to_viewable(conn, deleted_symbols)
+        if sum(removed.values()) > 0:
+            self._compact_database_if_worthwhile()
         return removed
+
+    def _compact_database_if_worthwhile(self) -> bool:
+        try:
+            with self._connect() as conn:
+                page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+                free_pages = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+                page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+                free_bytes = free_pages * page_size
+                if (
+                    page_count <= 0
+                    or free_bytes < DATABASE_COMPACTION_MIN_FREE_BYTES
+                    or free_pages / page_count < DATABASE_COMPACTION_MIN_FREE_RATIO
+                ):
+                    return False
+                conn.execute(f"PRAGMA busy_timeout = {DATABASE_COMPACTION_BUSY_TIMEOUT_MS}")
+                conn.execute("VACUUM")
+                with suppress(sqlite3.Error):
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                return True
+        except sqlite3.Error:
+            # Logical retention already committed. A competing reader/writer may
+            # make compaction temporarily unavailable, so retry on a later pass.
+            return False
 
     def preview_runtime_cleanup(self) -> dict[str, int]:
         with self._lock, self._connect() as conn:
@@ -157,34 +233,22 @@ def _cleanup_table(
     limit: int,
     delete_batch_rows: int | None = None,
 ) -> int:
-    delete_batch_rows = CLEANUP_DELETE_BATCH_ROWS if delete_batch_rows is None else delete_batch_rows
-    if limit <= 0 or delete_batch_rows <= 0:
+    del delete_batch_rows
+    if limit <= 0:
         return 0
-    if spec.limit_scope == PARTITION_LIMIT:
-        return sum(_cleanup_scope(conn, spec, limit, delete_batch_rows, partition_values) for partition_values in _partition_values(conn, spec))
-    return _cleanup_scope(conn, spec, limit, delete_batch_rows, ())
+    cursor = conn.execute(_cleanup_sql(spec), {"retention_limit": limit})
+    return max(0, int(cursor.rowcount))
 
 
 def _cleanup_candidate_count(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> int:
     if limit <= 0:
         return 0
-    if spec.protected_reference is not None:
-        partition_values = _partition_values(conn, spec) if spec.limit_scope == PARTITION_LIMIT else [()]
-        return sum(_protected_scope_candidate_count(conn, spec, limit, values) for values in partition_values)
-    if spec.limit_scope == GLOBAL_LIMIT:
-        count = int(conn.execute(f"SELECT COUNT(*) FROM {spec.table}").fetchone()[0])
-        return max(0, count - limit)
-    columns = ", ".join(spec.partition_by)
     row = conn.execute(
         f"""
-        SELECT COALESCE(SUM(CASE WHEN row_count > ? THEN row_count - ? ELSE 0 END), 0)
-        FROM (
-            SELECT COUNT(*) AS row_count
-            FROM {spec.table}
-            GROUP BY {columns}
-        )
+        SELECT COUNT(*)
+        FROM ({_retention_overflow_sql(spec)}) AS overflow
         """,
-        (limit, limit),
+        {"retention_limit": limit},
     ).fetchone()
     return max(0, int(row[0]))
 
@@ -198,11 +262,10 @@ def _cleanup_advice_candidates(
         return {}
     rows = conn.execute(
         f"""
-        SELECT candidate.{spec.keep_column}, candidate.symbol
-        FROM ({_advice_retention_overflow_sql(spec)}) AS candidate
-        {_protected_reference_where_sql(spec)}
+        SELECT overflow.retention_key, overflow.symbol
+        FROM ({_retention_overflow_sql(spec)}) AS overflow
         """,
-        (limit,),
+        {"retention_limit": limit},
     ).fetchall()
     return {int(row[0]): str(row["symbol"]) for row in rows}
 
@@ -223,133 +286,69 @@ def _deleted_advice_symbols(conn: sqlite3.Connection, candidates: dict[int, str]
     return {symbol for row_id, symbol in candidates.items() if row_id not in remaining_ids}
 
 
-def _cleanup_scope(
-    conn: sqlite3.Connection,
-    spec: RuntimeCleanupSpec,
-    limit: int,
-    delete_batch_rows: int,
-    partition_values: tuple[object, ...],
-) -> int:
-    removed = 0
-    while _scope_exceeds_limit(conn, spec, limit, partition_values):
-        params = (*partition_values, limit, delete_batch_rows) if spec.protected_reference is not None else (*partition_values, delete_batch_rows, limit)
-        cursor = conn.execute(
-            _cleanup_batch_sql(spec),
-            params,
-        )
-        batch_removed = max(0, int(cursor.rowcount))
-        removed += batch_removed
-        if batch_removed == 0:
-            break
-    return removed
-
-
-def _scope_exceeds_limit(
-    conn: sqlite3.Connection,
-    spec: RuntimeCleanupSpec,
-    limit: int,
-    partition_values: tuple[object, ...],
-) -> bool:
-    if spec.protected_reference is not None:
-        row = conn.execute(
-            f"""
-            SELECT 1
-            FROM ({_retention_overflow_sql(spec)}) AS candidate
-            {_protected_reference_where_sql(spec)}
-            LIMIT 1
-            """,
-            (*partition_values, limit),
-        ).fetchone()
-        return row is not None
-    where_sql = _partition_where_sql(spec)
-    row = conn.execute(
-        f"SELECT 1 FROM {spec.table}{where_sql} LIMIT 1 OFFSET ?",
-        (*partition_values, limit),
-    ).fetchone()
-    return row is not None
-
-
-def _cleanup_batch_sql(spec: RuntimeCleanupSpec) -> str:
-    if spec.protected_reference is not None:
-        return f"""
-            DELETE FROM {spec.table}
-            WHERE {spec.keep_column} IN (
-                SELECT candidate.{spec.keep_column}
-                FROM ({_retention_overflow_sql(spec)}) AS candidate
-                {_protected_reference_where_sql(spec)}
-                LIMIT ?
-            )
-        """
-    where_sql = _partition_where_sql(spec)
+def _cleanup_sql(spec: RuntimeCleanupSpec) -> str:
     return f"""
         DELETE FROM {spec.table}
         WHERE {spec.keep_column} IN (
-            SELECT {spec.keep_column}
-            FROM {spec.table}{where_sql}
-            ORDER BY {spec.order_by}
-            LIMIT ? OFFSET ?
+            SELECT overflow.retention_key
+            FROM ({_retention_overflow_sql(spec)}) AS overflow
         )
     """
-
-
-def _protected_scope_candidate_count(
-    conn: sqlite3.Connection,
-    spec: RuntimeCleanupSpec,
-    limit: int,
-    partition_values: tuple[object, ...],
-) -> int:
-    row = conn.execute(
-        f"""
-        SELECT COUNT(*)
-        FROM ({_retention_overflow_sql(spec)}) AS candidate
-        {_protected_reference_where_sql(spec)}
-        """,
-        (*partition_values, limit),
-    ).fetchone()
-    return max(0, int(row[0]))
 
 
 def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str:
+    partition = f"PARTITION BY {', '.join(spec.partition_by)} " if spec.limit_scope == PARTITION_LIMIT else ""
     return f"""
-        SELECT {spec.keep_column}
-        FROM {spec.table}{_partition_where_sql(spec)}
-        ORDER BY {spec.order_by}
-        LIMIT -1 OFFSET ?
+        SELECT candidate.*
+        FROM (
+            SELECT retained_source.{spec.keep_column} AS retention_key,
+                   retained_source.*,
+                   ROW_NUMBER() OVER ({partition}ORDER BY {spec.order_by}) AS retention_rank
+            FROM {spec.table} AS retained_source
+        ) AS candidate
+        WHERE candidate.retention_rank > :retention_limit
+        {_candidate_protection_sql(spec)}
     """
 
 
-def _advice_retention_overflow_sql(spec: RuntimeCleanupSpec) -> str:
-    return f"""
-        SELECT {spec.keep_column}, symbol
-        FROM {spec.table}{_partition_where_sql(spec)}
-        ORDER BY {spec.order_by}
-        LIMIT -1 OFFSET ?
-    """
+def _candidate_protection_sql(spec: RuntimeCleanupSpec) -> str:
+    predicates: list[str] = []
+    if spec.protected_reference is not None:
+        table, reference_column = spec.protected_reference
+        if spec.protect_references_from_retained_only:
+            statuses = _quoted_statuses(spec.protected_statuses)
+            retained_condition = "protected_reference.reference_retention_rank <= :retention_limit"
+            if statuses:
+                retained_condition += f" OR protected_reference.reference_status IN ({statuses})"
+            predicates.append(
+                f"""NOT EXISTS (
+                SELECT 1
+                FROM (
+                    SELECT retained_reference.{reference_column} AS protected_key,
+                           retained_reference.status AS reference_status,
+                           ROW_NUMBER() OVER (ORDER BY {spec.order_by}) AS reference_retention_rank
+                    FROM {table} AS retained_reference
+                ) AS protected_reference
+                WHERE protected_reference.protected_key = candidate.retention_key
+                  AND ({retained_condition})
+            )"""
+            )
+        else:
+            predicates.append(
+                f"""NOT EXISTS (
+                SELECT 1
+                FROM {table} AS protected_reference
+                WHERE protected_reference.{reference_column} = candidate.retention_key
+            )"""
+            )
+    if spec.protected_statuses:
+        statuses = _quoted_statuses(spec.protected_statuses)
+        predicates.append(f"candidate.status NOT IN ({statuses})")
+    return "\n        ".join(f"AND {predicate}" for predicate in predicates)
 
 
-def _protected_reference_where_sql(spec: RuntimeCleanupSpec) -> str:
-    if spec.protected_reference is None:
-        return ""
-    table, reference_column = spec.protected_reference
-    return f"""
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM {table} AS protected_reference
-            WHERE protected_reference.{reference_column} = candidate.{spec.keep_column}
-        )
-    """
-
-
-def _partition_values(conn: sqlite3.Connection, spec: RuntimeCleanupSpec) -> list[tuple[object, ...]]:
-    columns = ", ".join(spec.partition_by)
-    return [tuple(row) for row in conn.execute(f"SELECT DISTINCT {columns} FROM {spec.table}").fetchall()]
-
-
-def _partition_where_sql(spec: RuntimeCleanupSpec) -> str:
-    if not spec.partition_by:
-        return ""
-    predicates = " AND ".join(f"{column} = ?" for column in spec.partition_by)
-    return f" WHERE {predicates}"
+def _quoted_statuses(statuses: tuple[str, ...]) -> str:
+    return ", ".join("'" + status.replace("'", "''") + "'" for status in statuses)
 
 
 def _table_count(conn: sqlite3.Connection, table: str) -> int:

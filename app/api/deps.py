@@ -6,6 +6,7 @@ from app.api.container import AppContainer
 from app.config import Settings
 from app.services.datahub import DataHub
 from app.services.local_data_import_guard import LocalDataImportPreviewRegistry
+from app.services.market_scan_manager import MarketScanManager
 from app.services.scheduler import LocalDataScheduler
 from app.services.workbench_context import WorkbenchContextCache
 
@@ -27,6 +28,13 @@ def get_datahub(request: Request) -> DataHub:
 
 def get_scheduler(request: Request) -> LocalDataScheduler:
     return get_container(request).scheduler
+
+
+def get_market_scanner(request: Request) -> MarketScanManager:
+    scanner = get_container(request).market_scanner
+    if scanner is None:
+        raise RuntimeError("全市场扫描管理器尚未初始化")
+    return scanner
 
 
 def get_workbench_context_cache(request: Request) -> WorkbenchContextCache:

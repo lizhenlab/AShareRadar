@@ -41,6 +41,7 @@ class FutuProvider:
         requested = _standard_symbols(symbols)
         if not requested:
             return []
+        futu_symbols = [self._futu_symbol(symbol) for symbol in requested]
         self._ensure_ready()
 
         def load() -> list[Quote]:
@@ -48,7 +49,6 @@ class FutuProvider:
 
             ctx = OpenQuoteContext(host=self.host, port=self.port)
             try:
-                futu_symbols = [self._futu_symbol(symbol) for symbol in requested]
                 ret, data = ctx.get_market_snapshot(futu_symbols)
                 _ensure_futu_ok(ret, data, RET_OK)
                 return _ordered_snapshot_quotes(requested, data, source_name=self.source_name)
@@ -58,6 +58,7 @@ class FutuProvider:
         return await run_provider_io(load)
 
     async def order_book(self, symbol: str) -> OrderBook:
+        futu_symbol = self._futu_symbol(symbol)
         self._ensure_ready()
 
         def load() -> OrderBook:
@@ -65,7 +66,6 @@ class FutuProvider:
 
             ctx = OpenQuoteContext(host=self.host, port=self.port)
             try:
-                futu_symbol = self._futu_symbol(symbol)
                 ret, data = ctx.get_order_book(futu_symbol)
                 _ensure_futu_ok(ret, data, RET_OK)
                 return _order_book_from_response(symbol, data, source_name=self.source_name)
@@ -76,6 +76,7 @@ class FutuProvider:
 
     async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120) -> list[MinuteKline]:
         ensure_positive_limit(limit)
+        futu_symbol = self._futu_symbol(symbol)
         self._ensure_ready()
 
         def load() -> list[MinuteKline]:
@@ -85,7 +86,7 @@ class FutuProvider:
             try:
                 normalized_interval = _normalize_futu_interval(interval)
                 ktype = _futu_kltype(KLType, normalized_interval)
-                ret, data = ctx.get_cur_kline(self._futu_symbol(symbol), num=limit, ktype=ktype)
+                ret, data = ctx.get_cur_kline(futu_symbol, num=limit, ktype=ktype)
                 _ensure_futu_ok(ret, data, RET_OK)
                 return _minute_klines_from_response(data, interval=normalized_interval, source_name=self.source_name)
             finally:

@@ -36,6 +36,7 @@ _QUOTE_HISTORY_COLUMNS = (
     "pe",
     "pb",
     "market_cap",
+    "fallback_used",
     "source",
     "quote_timestamp",
     "trade_date",
@@ -81,6 +82,7 @@ _KLINE_DAILY_COLUMNS = (
     "as_of",
     "data_version",
     "contract_version",
+    "fallback_used",
     "source",
     "fetched_at",
 )
@@ -106,6 +108,16 @@ COMPAT_COLUMNS = {
         "pb": "REAL",
         "market_cap": "REAL",
         "trade_date": "TEXT NOT NULL DEFAULT ''",
+        "fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1))",
+    },
+    "quote_snapshot": {
+        "fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1))",
+    },
+    "kline_daily": {
+        "fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1))",
+    },
+    "kline_minute": {
+        "fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0, 1))",
     },
     "monitor_event": {
         "last_seen_at": "TEXT",
@@ -126,14 +138,22 @@ COMPAT_COLUMNS = {
     "stock_note": {
         "visible": "INTEGER NOT NULL DEFAULT 1",
     },
+    "market_scan_result": {
+        "metadata_source": "TEXT",
+        "quote_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (quote_fallback_used IN (0, 1))",
+        "kline_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (kline_fallback_used IN (0, 1))",
+        "metadata_degraded": "INTEGER NOT NULL DEFAULT 0 CHECK (metadata_degraded IN (0, 1))",
+        "degradation_reasons_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "market_scan_run": {
+        "retry_of_run_id": "INTEGER REFERENCES market_scan_run(id) ON DELETE SET NULL",
+        "stock_pool_source": "TEXT",
+    },
     "stock_concept": {
         "match_reason": "TEXT NOT NULL DEFAULT '概念成分匹配'",
     },
     "watchlist": {
-        "research_status": (
-            "TEXT NOT NULL DEFAULT 'watching' "
-            "CHECK (research_status IN ('to_research', 'watching', 'holding_research', 'excluded'))"
-        ),
+        "research_status": ("TEXT NOT NULL DEFAULT 'watching' " "CHECK (research_status IN ('to_research', 'watching', 'holding_research', 'excluded'))"),
         "priority": "TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('high', 'medium', 'low'))",
         "next_review_date": "TEXT",
         "last_viewed_at": "TEXT",
@@ -175,6 +195,46 @@ def _apply_compat_migrations(conn: sqlite3.Connection) -> None:
     _apply_kline_daily_migration(conn)
     _apply_quote_history_migrations(conn)
     _apply_monitor_event_migration(conn)
+    _apply_market_scan_degradation_migration(conn)
+
+
+def _apply_market_scan_degradation_migration(conn: sqlite3.Connection) -> None:
+    if not table_has_columns(
+        conn,
+        "market_scan_result",
+        "tags_json",
+        "list_date",
+        "quote_fallback_used",
+        "kline_fallback_used",
+        "metadata_degraded",
+        "degradation_reasons_json",
+    ):
+        return
+    _run_once(
+        conn,
+        "20260719_market_scan_structured_degradation",
+        """
+            UPDATE market_scan_result
+            SET
+                quote_fallback_used = CASE
+                    WHEN tags_json LIKE '%"兜底行情"%' THEN 1
+                    ELSE quote_fallback_used
+                END,
+                kline_fallback_used = CASE
+                    WHEN tags_json LIKE '%"兜底K线"%' THEN 1
+                    ELSE kline_fallback_used
+                END,
+                metadata_degraded = CASE
+                    WHEN list_date IS NULL OR tags_json LIKE '%"上市日期未知"%' THEN 1
+                    ELSE metadata_degraded
+                END,
+                degradation_reasons_json = CASE
+                    WHEN degradation_reasons_json IS NULL OR trim(degradation_reasons_json) = ''
+                    THEN '[]'
+                    ELSE degradation_reasons_json
+                END
+        """,
+    )
 
 
 def _apply_kline_daily_migration(conn: sqlite3.Connection) -> None:
@@ -194,40 +254,24 @@ def _kline_daily_requires_rebuild(conn: sqlite3.Connection) -> bool:
     if not set(_KLINE_DAILY_COLUMNS).issubset(columns):
         return True
     primary_key = tuple(
-        _pragma_column_name(row)
-        for row in sorted(rows, key=_pragma_column_primary_key_position)
-        if _pragma_column_primary_key_position(row) > 0
+        _pragma_column_name(row) for row in sorted(rows, key=_pragma_column_primary_key_position) if _pragma_column_primary_key_position(row) > 0
     )
     return primary_key != ("symbol", "adjustment_mode", "date")
 
 
 def _rebuild_kline_daily(conn: sqlite3.Connection) -> None:
-    existing = {
-        _pragma_column_name(row)
-        for row in conn.execute("PRAGMA table_info(kline_daily)").fetchall()
-    }
+    existing = {_pragma_column_name(row) for row in conn.execute("PRAGMA table_info(kline_daily)").fetchall()}
     contract_expressions = {
         "adjustment_mode": _kline_adjustment_expression(existing),
         "as_of": "NULLIF(trim(as_of), '')" if "as_of" in existing else "NULL",
-        "data_version": (
-            "COALESCE(NULLIF(trim(data_version), ''), 'legacy')"
-            if "data_version" in existing
-            else "'legacy'"
-        ),
-        "contract_version": (
-            "COALESCE(NULLIF(trim(contract_version), ''), 'legacy')"
-            if "contract_version" in existing
-            else "'legacy'"
-        ),
+        "data_version": ("COALESCE(NULLIF(trim(data_version), ''), 'legacy')" if "data_version" in existing else "'legacy'"),
+        "contract_version": ("COALESCE(NULLIF(trim(contract_version), ''), 'legacy')" if "contract_version" in existing else "'legacy'"),
+        "fallback_used": _fallback_used_expression(existing),
     }
-    select_columns = ", ".join(
-        contract_expressions.get(column, column) for column in _KLINE_DAILY_COLUMNS
-    )
+    select_columns = ", ".join(contract_expressions.get(column, column) for column in _KLINE_DAILY_COLUMNS)
     insert_columns = ", ".join(_KLINE_DAILY_COLUMNS)
     conn.execute(f"DROP TABLE IF EXISTS {_KLINE_DAILY_REBUILD_TABLE}")
-    conn.execute(
-        f"CREATE TABLE {_KLINE_DAILY_REBUILD_TABLE} ({KLINE_DAILY_COLUMN_DEFINITIONS})"
-    )
+    conn.execute(f"CREATE TABLE {_KLINE_DAILY_REBUILD_TABLE} ({KLINE_DAILY_COLUMN_DEFINITIONS})")
     conn.execute(
         f"""
         INSERT INTO {_KLINE_DAILY_REBUILD_TABLE} ({insert_columns})
@@ -242,10 +286,7 @@ def _rebuild_kline_daily(conn: sqlite3.Connection) -> None:
 def _kline_adjustment_expression(existing: set[str]) -> str:
     if "adjustment_mode" not in existing:
         return "'unknown'"
-    return (
-        "CASE WHEN adjustment_mode IN ('qfq', 'hfq', 'none', 'unknown') "
-        "THEN adjustment_mode ELSE 'unknown' END"
-    )
+    return "CASE WHEN adjustment_mode IN ('qfq', 'hfq', 'none', 'unknown') " "THEN adjustment_mode ELSE 'unknown' END"
 
 
 def _apply_quote_history_migrations(conn: sqlite3.Connection) -> None:
@@ -344,9 +385,7 @@ def _quote_history_requires_rebuild(conn: sqlite3.Connection) -> bool:
         return False
     if not _pragma_column_not_null(trade_date) or _pragma_column_default(trade_date) is not None:
         return True
-    table_sql_row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'quote_history'"
-    ).fetchone()
+    table_sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'quote_history'").fetchone()
     table_sql = "" if table_sql_row is None else str(table_sql_row[0] or "")
     compact_sql = "".join(table_sql.lower().split())
     if "check(length(trim(trade_date))>0)" not in compact_sql:
@@ -367,17 +406,15 @@ def _quote_history_requires_rebuild(conn: sqlite3.Connection) -> bool:
 
 def _rebuild_quote_history(conn: sqlite3.Connection) -> None:
     candidate = _quote_history_trade_date_expression()
+    existing = {_pragma_column_name(row) for row in conn.execute("PRAGMA table_info(quote_history)")}
     columns_without_trade_date = tuple(column for column in _QUOTE_HISTORY_COLUMNS if column != "trade_date")
     insert_columns = ", ".join(_QUOTE_HISTORY_COLUMNS)
-    select_columns = ", ".join(
-        "normalized_trade_date AS trade_date" if column == "trade_date" else column
-        for column in _QUOTE_HISTORY_COLUMNS
+    select_columns = ", ".join("normalized_trade_date AS trade_date" if column == "trade_date" else column for column in _QUOTE_HISTORY_COLUMNS)
+    source_columns = ", ".join(
+        f"{_fallback_used_expression(existing)} AS fallback_used" if column == "fallback_used" else column for column in columns_without_trade_date
     )
-    source_columns = ", ".join(columns_without_trade_date)
     conn.execute(f"DROP TABLE IF EXISTS {_QUOTE_HISTORY_REBUILD_TABLE}")
-    conn.execute(
-        f"CREATE TABLE {_QUOTE_HISTORY_REBUILD_TABLE} ({QUOTE_HISTORY_COLUMN_DEFINITIONS})"
-    )
+    conn.execute(f"CREATE TABLE {_QUOTE_HISTORY_REBUILD_TABLE} ({QUOTE_HISTORY_COLUMN_DEFINITIONS})")
     conn.execute(
         f"""
         WITH normalized AS (
@@ -422,20 +459,18 @@ def _delete_quote_history_duplicates(conn: sqlite3.Connection) -> None:
 
 
 def _quote_history_trade_date_expression() -> str:
-    return "COALESCE({})".format(
-        ", ".join(
-            _valid_date_expression(column)
-            for column in ("trade_date", "quote_timestamp", "fetched_at")
-        )
-    )
+    return "COALESCE({})".format(", ".join(_valid_date_expression(column) for column in ("trade_date", "quote_timestamp", "fetched_at")))
 
 
 def _valid_date_expression(column: str) -> str:
     normalized = f"replace(substr(trim(COALESCE({column}, '')), 1, 10), '/', '-')"
-    return (
-        f"CASE WHEN {normalized} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' "
-        f"AND date({normalized}) = {normalized} THEN {normalized} END"
-    )
+    return f"CASE WHEN {normalized} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' " f"AND date({normalized}) = {normalized} THEN {normalized} END"
+
+
+def _fallback_used_expression(existing: set[str]) -> str:
+    if "fallback_used" not in existing:
+        return "0"
+    return "CASE WHEN COALESCE(fallback_used, 0) <> 0 THEN 1 ELSE 0 END"
 
 
 def run_once(conn: sqlite3.Connection, name: str, sql: str) -> None:

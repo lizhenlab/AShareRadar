@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
+from app.services.provider_errors import ProviderCoverageMiss
 from app.utils.market_data import valid_ohlc as _valid_ohlc
 from app.utils.symbols import normalize_symbol
 
@@ -46,4 +47,6 @@ def ts_symbol(symbol: str) -> str:
 
 def bs_symbol(symbol: str) -> str:
     code, market = normalize_symbol(symbol)
+    if market == "bj":
+        raise ProviderCoverageMiss(f"BaoStock 当前不覆盖北交所股票：{code}.BJ")
     return f"{market}.{code}"

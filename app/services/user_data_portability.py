@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import json
 import math
 from pathlib import Path
 import re
 import sqlite3
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import JsonValue
 
@@ -81,6 +84,7 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
     },
 }
 _RowOperation = Literal["insert", "update", "unchanged"]
+ImportStateCallback = Callable[[str, LocalDataImportResult], None]
 
 
 @dataclass(frozen=True)
@@ -113,12 +117,17 @@ def export_user_data(path: Path) -> UserDataBundle:
     database_path = _require_database(path)
     with _connect(database_path) as conn:
         conn.execute("BEGIN")
-        table_names = available_user_tables(conn)
-        if not table_names:
-            raise ValueError("本地数据库中没有可导出的用户数据表")
-        tables = {name: _export_table(conn, name) for name in table_names}
-        schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+        bundle = _export_user_data_from_connection(conn)
         conn.rollback()
+    return bundle
+
+
+def _export_user_data_from_connection(conn: sqlite3.Connection) -> UserDataBundle:
+    table_names = available_user_tables(conn)
+    if not table_names:
+        raise ValueError("本地数据库中没有可导出的用户数据表")
+    tables = {name: _export_table(conn, name) for name in table_names}
+    schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
     return UserDataBundle(
         kind=LOCAL_DATA_BUNDLE_KIND,
         version=LOCAL_DATA_BUNDLE_VERSION,
@@ -129,12 +138,29 @@ def export_user_data(path: Path) -> UserDataBundle:
     )
 
 
+def user_data_state_digest(path: Path) -> str:
+    database_path = _require_database(path)
+    with _connect(database_path) as conn:
+        conn.execute("BEGIN")
+        digest = _user_data_state_digest_from_connection(conn)
+        conn.rollback()
+    return digest
+
+
+def _user_data_state_digest_from_connection(conn: sqlite3.Connection) -> str:
+    payload = _export_user_data_from_connection(conn).model_dump(mode="json")
+    payload.pop("exported_at", None)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def import_user_data(
     path: Path,
     bundle: UserDataBundle,
     *,
     mode: LocalDataImportMode = "merge",
     dry_run: bool = True,
+    on_validated_state: ImportStateCallback | None = None,
 ) -> LocalDataImportResult:
     if mode not in {"merge", "replace"}:
         raise ValueError("导入模式必须是 merge 或 replace")
@@ -143,27 +169,38 @@ def import_user_data(
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("PRAGMA defer_foreign_keys = ON")
+            database_digest = _user_data_state_digest_from_connection(conn)
             table_names, normalized_tables = _validate_bundle_for_database(conn, bundle, mode=mode)
             _validate_in_bundle_relationships(normalized_tables)
             prepared = _prepare_bundle(conn, normalized_tables, table_names, mode)
-            _apply_prepared_bundle(conn, prepared, table_names, mode)
-            _foreign_key_check(conn)
-            _validate_imported_relationships(conn, prepared)
-            conn.rollback() if dry_run else conn.commit()
+            previews = {name: prepared[name].preview for name in table_names}
+            result = LocalDataImportResult(
+                bundle_version=bundle.version,
+                mode=mode,
+                dry_run=dry_run,
+                committed=not dry_run,
+                conflict_strategy=CONFLICT_STRATEGY,
+                tables=previews,
+                totals=_sum_previews(previews.values()),
+            )
+            if dry_run:
+                _apply_prepared_bundle(conn, prepared, table_names, mode)
+                _foreign_key_check(conn)
+                _validate_imported_relationships(conn, prepared)
+                if on_validated_state is not None:
+                    on_validated_state(database_digest, result)
+                conn.rollback()
+            else:
+                if on_validated_state is not None:
+                    on_validated_state(database_digest, result)
+                _apply_prepared_bundle(conn, prepared, table_names, mode)
+                _foreign_key_check(conn)
+                _validate_imported_relationships(conn, prepared)
+                conn.commit()
         except BaseException:
             conn.rollback()
             raise
-    previews = {name: prepared[name].preview for name in table_names}
-    totals = _sum_previews(previews.values())
-    return LocalDataImportResult(
-        bundle_version=bundle.version,
-        mode=mode,
-        dry_run=dry_run,
-        committed=not dry_run,
-        conflict_strategy=CONFLICT_STRATEGY,
-        tables=previews,
-        totals=totals,
-    )
+    return result
 
 
 def available_user_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -486,7 +523,7 @@ def _surrogate_merge_state(
         existing_by_id=existing_by_id,
         existing_by_stable=existing_by_stable,
         used_ids=used_ids,
-        next_id=max((int(value) for value in (*used_ids, *source_ids)), default=0) + 1,
+        next_id=max((cast(int, value) for value in (*used_ids, *source_ids)), default=0) + 1,
         prepared_rows=[],
         id_map={},
     )
@@ -768,7 +805,9 @@ def _utc_now_text() -> str:
 
 __all__ = [
     "CONFLICT_STRATEGY",
+    "ImportStateCallback",
     "available_user_tables",
     "export_user_data",
     "import_user_data",
+    "user_data_state_digest",
 ]

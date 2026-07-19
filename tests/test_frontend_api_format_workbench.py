@@ -83,6 +83,22 @@ def test_fetch_json_normalizes_network_and_non_json_errors() -> None:
         throw new Error(`non-json error leaked raw details: ${nonJsonMessage}`);
       }
 
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 404,
+        async text() {
+          return JSON.stringify({ detail: "文案可以变化" });
+        },
+      });
+      try {
+        await fetchJson("/api/missing");
+        throw new Error("expected 404 to throw");
+      } catch (error) {
+        if (error.status !== 404 || error.message !== "文案可以变化") {
+          throw new Error(`HTTP status was not preserved: ${error.status} ${error.message}`);
+        }
+      }
+
       async function rejectedMessage(promise) {
         try {
           await promise;

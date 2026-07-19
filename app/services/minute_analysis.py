@@ -21,6 +21,7 @@ MAX_SAMPLE_CONFIDENCE_BONUS = 24
 LEVEL_CONFIDENCE_BONUS = 12
 DEFENSIVE_CONFIDENCE_PENALTY = 8
 UNCONFIRMED_ZONE_CONFIDENCE_PENALTY = 15
+DEGRADED_PROVENANCE_CONFIDENCE_PENALTY = 12
 VOLUME_SURGE_RATIO = 1.8
 VOLUME_SHRINK_RATIO = 0.55
 MIN_LEVEL_STRENGTH = 20
@@ -809,6 +810,8 @@ def _t_plan_confidence(
     confidence += LEVEL_CONFIDENCE_BONUS if supports and resistances and zones_confirmed else 0
     confidence -= DEFENSIVE_CONFIDENCE_PENALTY if decision.suitability == "不适合主动做T" else 0
     confidence -= UNCONFIRMED_ZONE_CONFIDENCE_PENALTY if not zones_confirmed else 0
+    if any(row.from_cache or row.fallback_used for row in rows):
+        confidence -= DEGRADED_PROVENANCE_CONFIDENCE_PENALTY
     return max(25, min(88, confidence))
 
 

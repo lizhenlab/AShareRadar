@@ -5,6 +5,7 @@ from math import isfinite
 
 from app.db.market_mappers import row_to_plate_item, row_to_stock_concept_item, row_to_stock_info
 from app.models.schemas import PlateItem, StockConceptItem, StockInfo
+from app.utils.stock_pool import normalize_stock_pool_rows
 from app.utils.symbols import standard_symbol
 
 
@@ -25,8 +26,7 @@ def _upsert_sql(table: str, columns: tuple[str, ...], conflict_columns: tuple[st
     return (
         f"INSERT INTO {table} ({_column_names(columns)}) "
         f"VALUES ({_placeholders(columns)}) "
-        f"ON CONFLICT({_column_names(conflict_columns)}) DO UPDATE SET "
-        + _update_assignments(update_columns)
+        f"ON CONFLICT({_column_names(conflict_columns)}) DO UPDATE SET " + _update_assignments(update_columns)
     )
 
 
@@ -69,11 +69,19 @@ _STOCK_MASTER_SELECT_COLUMNS = _column_names(STOCK_MASTER_COLUMNS)
 _PLATE_RANK_SELECT_COLUMNS = _column_names(PLATE_RANK_COLUMNS)
 _STOCK_CONCEPT_SELECT_COLUMNS = _column_names(STOCK_CONCEPT_COLUMNS)
 
-_STOCK_MASTER_UPSERT_SQL = _upsert_sql("stock_master", STOCK_MASTER_COLUMNS, ("symbol",))
-_PLATE_RANK_INSERT_SQL = (
-    f"INSERT INTO plate_rank ({_column_names(PLATE_RANK_COLUMNS)}) "
-    f"VALUES ({_placeholders(PLATE_RANK_COLUMNS)})"
-)
+_STOCK_MASTER_UPSERT_SQL = f"""
+INSERT INTO stock_master ({_column_names(STOCK_MASTER_COLUMNS)})
+VALUES ({_placeholders(STOCK_MASTER_COLUMNS)})
+ON CONFLICT(symbol) DO UPDATE SET
+    code = excluded.code,
+    market = excluded.market,
+    name = excluded.name,
+    industry = COALESCE(NULLIF(TRIM(excluded.industry), ''), stock_master.industry),
+    list_date = COALESCE(NULLIF(TRIM(excluded.list_date), ''), stock_master.list_date),
+    source = excluded.source,
+    updated_at = excluded.updated_at
+"""
+_PLATE_RANK_INSERT_SQL = f"INSERT INTO plate_rank ({_column_names(PLATE_RANK_COLUMNS)}) " f"VALUES ({_placeholders(PLATE_RANK_COLUMNS)})"
 _STOCK_CONCEPT_UPSERT_SQL = _upsert_sql("stock_concept", STOCK_CONCEPT_COLUMNS, ("symbol", "name"))
 
 
@@ -87,13 +95,27 @@ class MarketMetadataRepositoryMixin:
         with self._lock, self._connect() as conn:
             conn.executemany(_STOCK_MASTER_UPSERT_SQL, payload)
 
+    def replace_stock_pool(self, rows: list[StockInfo]) -> None:
+        """Replace the cached listing universe with one validated full snapshot."""
+        normalized_rows = normalize_stock_pool_rows(rows)
+        payload = [_stock_pool_row(item) for item in normalized_rows]
+        if not payload:
+            raise ValueError("完整股票池快照不能为空")
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM stock_master")
+            conn.executemany(_STOCK_MASTER_UPSERT_SQL, payload)
+            written_count = int(conn.execute("SELECT COUNT(*) FROM stock_master").fetchone()[0])
+            if written_count != len(normalized_rows):
+                raise RuntimeError(f"完整股票池写入数量不一致：期望 {len(normalized_rows)}，实际 {written_count}")
+
     def get_stock_pool(
         self,
         max_age_seconds: int,
-        limit: int = 5000,
+        limit: int | None = 5000,
         keyword: str | None = None,
     ) -> list[StockInfo]:
-        if limit <= 0:
+        if limit is not None and limit <= 0:
             return []
         window = self._time_window(max_age_seconds)
         if window is None:
@@ -105,14 +127,17 @@ class MarketMetadataRepositoryMixin:
             like = f"%{keyword_text}%"
             where += " AND (code LIKE ? OR name LIKE ? OR symbol LIKE ?)"
             params.extend([like, like, like])
-        params.append(limit)
+        limit_sql = ""
+        if limit is not None:
+            params.append(limit)
+            limit_sql = "LIMIT ?"
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT {_STOCK_MASTER_SELECT_COLUMNS} FROM stock_master
                 WHERE {where}
                 ORDER BY market ASC, code ASC, symbol ASC
-                LIMIT ?
+                {limit_sql}
                 """,
                 params,
             ).fetchall()
@@ -190,32 +215,19 @@ class MarketMetadataRepositoryMixin:
 
 
 def _stock_pool_rows(rows: Iterable[StockInfo]) -> list[tuple[object, ...]]:
-    payload: list[tuple[object, ...]] = []
-    for item in rows:
-        row = _stock_pool_row(item)
-        if row is not None:
-            payload.append(row)
-    return payload
+    return [_stock_pool_row(item) for item in normalize_stock_pool_rows(rows)]
 
 
-def _stock_pool_row(item: StockInfo) -> tuple[object, ...] | None:
-    symbol = _required_text(item.symbol)
-    code = _required_text(item.code)
-    market = _required_text(item.market)
-    name = _required_text(item.name)
-    source = _required_text(item.source)
-    updated_at = _required_text(item.updated_at)
-    if not all((symbol, code, market, name, source, updated_at)):
-        return None
+def _stock_pool_row(item: StockInfo) -> tuple[object, ...]:
     return (
-        symbol,
-        code,
-        market,
-        name,
-        _optional_text(item.industry),
-        _optional_text(item.list_date),
-        source,
-        updated_at,
+        item.symbol,
+        item.code,
+        item.market,
+        item.name,
+        item.industry,
+        item.list_date,
+        item.source,
+        item.updated_at,
     )
 
 

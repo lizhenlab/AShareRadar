@@ -79,6 +79,57 @@ test("three stock loads reuse global requests and add only five stock requests",
   ).toEqual([]);
 });
 
+test("Beijing name search joins the quote stream and rejects market conflicts", async ({ page }) => {
+  const workbenchSymbols = [];
+  const streamSymbols = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/stock/workbench") workbenchSymbols.push(url.searchParams.get("symbol"));
+    if (url.pathname === "/api/stream/quotes") streamSymbols.push(url.searchParams.get("symbols"));
+  });
+  await mockApi(page);
+
+  await page.goto("/");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  const input = page.locator("#symbolInput");
+  await input.fill("北交");
+  await expect(page.locator("#symbolSuggestions")).toContainText("北交样本");
+  await expect(page.locator("#symbolSuggestions")).toContainText("920066.BJ");
+  await page.locator("#symbolSuggestions button").click();
+  await expect(page.locator("#stockCode")).toHaveText("BJ920066");
+  await expect(page.locator("#stockName")).toHaveText("北交样本");
+  await expect.poll(() => workbenchSymbols).toEqual(["600519", "920066.BJ"]);
+  await expect.poll(() => streamSymbols.some((symbols) => symbols?.split(",").includes("920066.BJ"))).toBe(true);
+
+  await input.fill("920066.SH");
+  await page.locator("#searchForm button").click();
+  await expect(page.locator("#symbolError")).toBeVisible();
+  await expect(page.locator("#stockName")).toHaveText("北交样本");
+  expect(workbenchSymbols).toEqual(["600519", "920066.BJ"]);
+});
+
+test("stock search remains bound after a persisted pagehide lifecycle", async ({ page }) => {
+  const searchKeywords = [];
+  await mockApi(page, {
+    stocks(keyword) {
+      searchKeywords.push(keyword);
+      return stockSearchPayload(keyword);
+    },
+  });
+
+  await page.goto("/");
+  const input = page.locator("#symbolInput");
+  await input.fill("北交");
+  await expect(page.locator("#symbolSuggestions")).toContainText("北交样本");
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  });
+  await input.fill("平安");
+  await expect(page.locator("#symbolSuggestions")).toContainText("平安银行");
+  await expect.poll(() => searchKeywords).toEqual(["北交", "平安"]);
+});
+
 test("stock name suggestions select a canonical code without changing request baselines", async ({ page }) => {
   const apiRequests = [];
   const searchKeywords = [];
@@ -116,6 +167,10 @@ test("stock name suggestions select a canonical code without changing request ba
   await input.fill("平安");
   await expect(suggestions).toBeVisible();
   expect(searchKeywords).toEqual(["平安"]);
+  await input.evaluate((element) => element.blur());
+  await input.focus();
+  await page.waitForTimeout(150);
+  await expect(suggestions).toBeVisible();
   await input.press("ArrowDown");
   await expect(input).toHaveAttribute("aria-activedescendant", "symbolSuggestions-option-0");
   await expect(suggestions.getByRole("option")).toHaveAttribute("aria-selected", "true");
@@ -161,6 +216,326 @@ test("stock name suggestions select a canonical code without changing request ba
         && !url.startsWith("/api/stocks?")
     )
   ).toEqual([]);
+});
+
+test("full-market scan runs in background and renders a bounded responsive snapshot", async ({ page }, testInfo) => {
+  const mobileProject = Boolean(testInfo.project.use.isMobile);
+  await page.setViewportSize(mobileProject ? { width: 390, height: 844 } : { width: 1440, height: 900 });
+  const resultQueries = [];
+  let runPolls = 0;
+  let latestCalls = 0;
+  let starts = 0;
+  await mockApi(page, {
+    async api(url, request) {
+      if (url.pathname === "/api/market-scans/latest") {
+        latestCalls += 1;
+        return { payload: null };
+      }
+      if (url.pathname === "/api/market-scans" && request.method() === "POST") {
+        starts += 1;
+        await delay(120);
+        return { payload: { accepted: true, deduplicated: false, run: marketScanRunPayload("running", 20) } };
+      }
+      if (url.pathname === "/api/market-scans/42" && request.method() === "GET") {
+        runPolls += 1;
+        return { payload: marketScanRunPayload("degraded", 103) };
+      }
+      if (url.pathname === "/api/market-scans/42/results") {
+        resultQueries.push(Object.fromEntries(url.searchParams));
+        return { payload: marketScanResultPage(url.searchParams) };
+      }
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  await page.locator("#workspace-tab-market-scan").click();
+  await expect(page.locator("#workspace-panel-market-scan")).toBeVisible();
+  await expect(page.locator("#marketScanHeadline")).toHaveText("尚无全市场扫描记录");
+  await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-label", "全市场扫描进度");
+  await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#workspace-panel-market-scan [aria-live=polite]")).toHaveCount(1);
+  expect(latestCalls).toBe(1);
+  await page.locator("#workspace-tab-market-scan").click();
+  expect(latestCalls).toBe(1);
+  await page.locator("#workspace-tab-overview").click();
+  await page.locator("#workspace-tab-market-scan").click();
+  await expect.poll(() => latestCalls).toBe(2);
+
+  const controlMetrics = await page.evaluate(() => {
+    const metric = (selector) => {
+      const element = document.querySelector(selector);
+      return { fontSize: Number.parseFloat(getComputedStyle(element).fontSize), height: element.getBoundingClientRect().height };
+    };
+    return {
+      marketInput: metric("#marketScanIndustry"),
+      queryInput: metric("#symbolInput"),
+      scanButton: metric("#marketScanStart"),
+      queryButton: metric("#searchForm button"),
+    };
+  });
+  if (mobileProject) {
+    expect(controlMetrics.marketInput.fontSize).toBeGreaterThanOrEqual(16);
+    expect(controlMetrics.queryInput.fontSize).toBeGreaterThanOrEqual(16);
+    expect(controlMetrics.scanButton.height).toBeGreaterThanOrEqual(44);
+    expect(controlMetrics.queryButton.height).toBeGreaterThanOrEqual(44);
+  } else {
+    expect(controlMetrics.marketInput).toMatchObject({ fontSize: 12, height: 36 });
+    expect(controlMetrics.scanButton.height).toBe(36);
+  }
+
+  const versionedResources = await page.evaluate(() => performance.getEntriesByType("resource")
+    .map((entry) => entry.name)
+    .filter((url) => url.includes("20260719-frontend-correctness-2")));
+  expect(versionedResources.some((url) => url.includes("/static/app.js?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/css/market-scan.css?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/js/market-scan.js?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/js/market-scan-controller.js?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/js/market-scan-contracts.js?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/js/market-scan-polling.js?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/js/market-scan-view.js?v="))).toBe(true);
+
+  await page.locator("#marketScanStart").click();
+  await expect(page.locator("#workspace-panel-market-scan")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#marketScanMarket")).toBeFocused();
+  await expect(page.locator("#marketScanAnnouncement")).toContainText("开始扫描请求处理中");
+  await page.locator("#marketScanStart").evaluate((button) => button.click());
+  await expect(page.locator("#marketScanProgressText")).toHaveText("20/103 · 19.4%");
+  expect(starts).toBe(1);
+  await expect(page.locator("#workspace-panel-market-scan")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#marketScanStart")).toBeDisabled();
+  await expect(page.locator("#marketScanCancel")).toBeVisible();
+  await expect(page.locator("#marketScanResultState")).toContainText("稳定榜单");
+
+  await expect(page.locator("#marketScanProgressText")).toHaveText("103/103 · 100.0%", { timeout: 5000 });
+  await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#marketScanHeadline")).toContainText("降级完成");
+  await expect(page.locator("#marketScanCoverage")).toHaveText("98.1%");
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
+  await expect(page.locator("#marketScanPageText")).toHaveText("第 1/2 页 · 共 101 条");
+  await expect(page.locator("#marketScanAnnouncement")).toHaveText("榜单加载完成，第 1/2 页，本页 100 条，共 101 条。");
+  await expect(page.locator("#marketScanRows tr").first()).toContainText("北交样本");
+  expect(runPolls).toBe(1);
+  expect(resultQueries[0]).toMatchObject({ page: "1", page_size: "100", status: "success", sort: "rank", order: "asc" });
+
+  await expect(page.locator("#marketScanTableWrap")).toHaveAttribute("tabindex", "0");
+  if (mobileProject) {
+    await page.locator("#marketScanTableWrap").focus();
+    await page.keyboard.press("ArrowRight");
+    await expect.poll(() => page.locator("#marketScanTableWrap").evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  }
+
+  await page.locator("#marketScanNext").click();
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(1);
+  await expect(page.locator("#marketScanTableWrap")).toBeFocused();
+  expect(resultQueries.at(-1).page).toBe("2");
+  await page.locator("#marketScanPrev").click();
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
+
+  await page.locator("#marketScanSort").selectOption("score");
+  await expect(page.locator("#marketScanOrder")).toHaveValue("desc");
+  await page.locator("#marketScanOrder").selectOption("asc");
+  await page.locator("#marketScanFilters button[type=submit]").click();
+  await expect.poll(() => resultQueries.at(-1)).toMatchObject({ sort: "score", order: "asc" });
+  await expect(page.locator("#marketScanPagination")).toHaveAttribute("aria-busy", "false");
+  const visibleScores = await page.locator("#marketScanRows tr td:nth-child(4)").evaluateAll((cells) => cells.slice(0, 20).map((cell) => Number(cell.textContent)));
+  expect(visibleScores).toEqual([...visibleScores].sort((left, right) => left - right));
+
+  await page.locator("#marketScanMarket").selectOption("BJ");
+  await page.locator("#marketScanIndustry").fill("专用设备");
+  await page.locator("#marketScanSt").selectOption("true");
+  await page.locator("#marketScanNew").selectOption("true");
+  await page.locator("#marketScanQuality").fill("90");
+  await page.locator("#marketScanKeyword").fill("北交样本");
+  await page.locator("#marketScanFilters button[type=submit]").click();
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(1);
+  expect(resultQueries.at(-1)).toMatchObject({
+    market: "BJ",
+    industry: "专用设备",
+    is_st: "true",
+    is_new: "true",
+    min_data_quality_score: "90",
+    keyword: "北交样本",
+  });
+
+  await page.locator("#marketScanFilters button[type=reset]").click();
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
+  await page.locator("#marketScanStatus").selectOption("missing");
+  await page.locator("#marketScanFilters button[type=submit]").click();
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(1);
+  await expect(page.locator("#marketScanRows")).toContainText("行情缺失样本");
+  expect(resultQueries.at(-1).status).toBe("missing");
+
+  const layout = await page.locator("#workspace-panel-market-scan").evaluate((panel) => {
+    const rect = panel.getBoundingClientRect();
+    const tableWrap = panel.querySelector("#marketScanTableWrap");
+    return {
+      left: rect.left,
+      right: rect.right,
+      viewport: document.documentElement.clientWidth,
+      documentWidth: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
+      tableScrollable: tableWrap.scrollWidth >= tableWrap.clientWidth,
+    };
+  });
+  expect(layout.left).toBeGreaterThanOrEqual(-1);
+  expect(layout.right).toBeLessThanOrEqual(layout.viewport + 1);
+  expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewport);
+  expect(layout.tableScrollable).toBe(true);
+
+  await page.locator("#marketScanFilters button[type=reset]").click();
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
+  await page.locator('button[data-market-scan-symbol="920066.BJ"]').click();
+  await expect(page.locator("#workspace-panel-overview")).toBeVisible();
+  await expect(page.locator("#workspace-panel-market-scan")).toBeHidden();
+  await expect(page.locator("#stockName")).toHaveText("北交样本");
+  await expect(page.locator("#stockCode")).toHaveText("BJ920066");
+  await expect(page.locator("#stockWorkbench")).toBeFocused();
+});
+
+test("full-market scan cancellation stays unpublished and retry derives a new snapshot", async ({ page }) => {
+  let starts = 0;
+  let cancels = 0;
+  let retries = 0;
+  let polls = 0;
+  let resultCalls = 0;
+  await mockApi(page, {
+    async api(url, request) {
+      if (url.pathname === "/api/market-scans/latest") return { payload: null };
+      if (url.pathname === "/api/market-scans" && request.method() === "POST") {
+        starts += 1;
+        await delay(100);
+        return { payload: { accepted: true, deduplicated: false, run: marketScanRunPayload("running", 20, { id: 43 }) } };
+      }
+      if (url.pathname === "/api/market-scans/43/cancel" && request.method() === "POST") {
+        cancels += 1;
+        await delay(100);
+        return { payload: marketScanRunPayload("cancelled", 20, { id: 43, message: "全市场扫描已取消，可从断点重试" }) };
+      }
+      if (url.pathname === "/api/market-scans/43/retry" && request.method() === "POST") {
+        retries += 1;
+        await delay(100);
+        return {
+          payload: {
+            accepted: true,
+            deduplicated: false,
+            run: marketScanRunPayload("running", 20, {
+              id: 44,
+              retry_of_run_id: 43,
+              trigger: "retry",
+              retry_count: 1,
+            }),
+          },
+        };
+      }
+      if (url.pathname === "/api/market-scans/44" && request.method() === "GET") {
+        polls += 1;
+        return {
+          payload: marketScanRunPayload("degraded", 103, {
+            id: 44,
+            retry_of_run_id: 43,
+            trigger: "retry",
+            retry_count: 1,
+          }),
+        };
+      }
+      if (url.pathname === "/api/market-scans/44/results") {
+        resultCalls += 1;
+        return {
+          payload: marketScanResultPage(url.searchParams, {
+            id: 44,
+            retry_of_run_id: 43,
+            trigger: "retry",
+            retry_count: 1,
+          }),
+        };
+      }
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await page.locator("#workspace-tab-market-scan").click();
+  await page.locator("#marketScanStart").click();
+  await expect(page.locator("#marketScanStart")).toBeDisabled();
+  await page.locator("#marketScanStart").evaluate((button) => button.click());
+  expect(starts).toBe(1);
+
+  await page.locator("#marketScanCancel").click();
+  await expect(page.locator("#workspace-panel-market-scan")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#marketScanCancel")).toBeDisabled();
+  await page.locator("#marketScanCancel").evaluate((button) => button.click());
+  await expect(page.locator("#marketScanHeadline")).toContainText("已取消");
+  await expect(page.locator("#marketScanMarket")).toBeFocused();
+  await expect(page.locator("#marketScanResultState")).toContainText("未发布正式榜单");
+  await expect(page.locator("#marketScanRetry")).toBeVisible();
+  expect(cancels).toBe(1);
+  expect(resultCalls).toBe(0);
+
+  await page.locator("#marketScanRetry").click();
+  await expect(page.locator("#workspace-panel-market-scan")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#marketScanRetry")).toBeDisabled();
+  await page.locator("#marketScanRetry").evaluate((button) => button.click());
+  await expect(page.locator("#marketScanStart")).toBeDisabled();
+  await expect(page.locator("#marketScanMarket")).toBeFocused();
+  await expect(page.locator("#marketScanProgressText")).toHaveText("103/103 · 100.0%", { timeout: 5000 });
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
+  expect(retries).toBe(1);
+  expect(polls).toBe(1);
+  expect(resultCalls).toBe(1);
+});
+
+test("full-market scan recovers a stale run, rejects malformed results, and resyncs online", async ({ page }) => {
+  let latestCalls = 0;
+  let staleRunCalls = 0;
+  await mockApi(page, {
+    api(url) {
+      if (url.pathname === "/api/market-scans/latest") {
+        latestCalls += 1;
+        if (latestCalls === 1) {
+          return { payload: marketScanRunPayload("running", 10, { id: 91, message: "旧任务仍在运行" }) };
+        }
+        if (latestCalls === 2) {
+          return { payload: marketScanRunPayload("success", 103, { id: 92, message: "最近任务已完成" }) };
+        }
+        return { payload: marketScanRunPayload("running", 30, { id: 93, message: "网络恢复后的任务" }) };
+      }
+      if (url.pathname === "/api/market-scans/91") {
+        staleRunCalls += 1;
+        return { status: 404, payload: { detail: "全市场扫描批次不存在：91" } };
+      }
+      if (url.pathname === "/api/market-scans/92/results") {
+        return {
+          payload: {
+            run: marketScanRunPayload("success", 103, { id: 92, message: "最近任务已完成" }),
+            total: 0,
+            page: 1,
+            page_size: 100,
+            page_count: 0,
+          },
+        };
+      }
+      if (url.pathname === "/api/market-scans/93") {
+        return { payload: marketScanRunPayload("running", 30, { id: 93, message: "网络恢复后的任务" }) };
+      }
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await page.locator("#workspace-tab-market-scan").click();
+  await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#marketScanResultState")).toContainText("响应格式异常", { timeout: 5000 });
+  await expect(page.locator("#marketScanResultState")).toContainText("items 必须是数组");
+  await expect(page.locator("#marketScanTableWrap")).toBeHidden();
+  expect(staleRunCalls).toBe(1);
+  expect(latestCalls).toBe(2);
+
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect.poll(() => latestCalls).toBe(3);
+  await expect(page.locator("#marketScanHeadline")).toHaveText("网络已恢复，正在同步最近扫描。");
+  await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "true");
 });
 
 test("daily and minute chart controls redraw locally and preserve responsive state", async ({ page }, testInfo) => {
@@ -805,14 +1180,23 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   await expect(page.locator("#quickList button").first()).toBeFocused();
 
   const overviewTab = page.locator("#workspace-tab-overview");
+  const marketScanTab = page.locator("#workspace-tab-market-scan");
   const qaTab = page.locator("#workspace-tab-qa");
   const toolsTab = page.locator("#workspace-tab-tools");
   await overviewTab.focus();
   await page.keyboard.press("ArrowRight");
+  await expect(marketScanTab).toBeFocused();
+  await expect(marketScanTab).toHaveAttribute("aria-selected", "true");
+  await expect(marketScanTab).toHaveAttribute("tabindex", "0");
+  await expect(overviewTab).toHaveAttribute("tabindex", "-1");
+  await expect(page.locator("#workspace-panel-market-scan")).not.toHaveAttribute("hidden", "");
+  await expect(page.locator("#workspace-panel-overview")).toHaveAttribute("hidden", "");
+
+  await page.keyboard.press("ArrowRight");
   await expect(qaTab).toBeFocused();
   await expect(qaTab).toHaveAttribute("aria-selected", "true");
   await expect(qaTab).toHaveAttribute("tabindex", "0");
-  await expect(overviewTab).toHaveAttribute("tabindex", "-1");
+  await expect(marketScanTab).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("#workspace-panel-qa")).not.toHaveAttribute("hidden", "");
   await expect(page.locator("#workspace-panel-overview")).toHaveAttribute("hidden", "");
 
@@ -893,6 +1277,59 @@ test("background restore retries auxiliary failures without letting SSE hide deg
   await expect(page.locator("#dataStatus")).not.toContainText("部分辅助数据降级");
   await emitQuoteFrame(page);
   await expect(page.locator("#dataStatus")).toHaveText("核心分析快照已加载；观察报价流已收到有效帧");
+});
+
+test("online recovery replaces unfinished workbench loads and retries failures once", async ({ page }) => {
+  let delayFirstBankLoad = true;
+  let failNextWorkbench = false;
+  const workbenchRequests = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/stock/workbench") workbenchRequests.push(url.searchParams.get("symbol"));
+  });
+  await mockApi(page, {
+    api(url) {
+      if (url.pathname === "/api/stock/workbench" && failNextWorkbench) {
+        failNextWorkbench = false;
+        return { status: 503, payload: { detail: "temporary offline failure" } };
+      }
+      return null;
+    },
+    async workbench(symbol) {
+      if (symbol === "000001.SZ" && delayFirstBankLoad) {
+        delayFirstBankLoad = false;
+        await delay(500);
+      }
+      return workbenchPayload(symbol);
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  const input = page.locator("#symbolInput");
+  await input.fill("000001");
+  await page.locator("#searchForm button").click();
+  await expect.poll(() => workbenchRequests.length).toBe(2);
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("online"));
+  });
+  await expect(page.locator("#stockName")).toHaveText("平安银行");
+  await expect.poll(() => workbenchRequests.length).toBe(3);
+  await page.waitForTimeout(550);
+  expect(workbenchRequests).toHaveLength(3);
+
+  failNextWorkbench = true;
+  await input.fill("300750");
+  await page.locator("#searchForm button").click();
+  await expect(page.locator("#dataStatus")).toContainText("加载失败");
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("online"));
+  });
+  await expect(page.locator("#stockName")).toHaveText("宁德时代");
+  await expect.poll(() => workbenchRequests.length).toBe(5);
+  expect(workbenchRequests).toEqual(["600519", "000001.SZ", "000001.SZ", "300750.SZ", "300750.SZ"]);
 });
 
 async function canvasHasInk(locator) {
@@ -1182,6 +1619,15 @@ function stockSearchPayload(keyword) {
       source: "E2E股票检索",
       updated_at: "2026-07-15 10:00:00",
     },
+    {
+      symbol: "920066.BJ",
+      code: "920066",
+      market: "BJ",
+      name: "北交样本",
+      industry: "专用设备",
+      source: "E2E股票检索",
+      updated_at: "2026-07-15 10:00:00",
+    },
   ].filter((stock) => [stock.symbol, stock.code, stock.name].some((value) => value.toLowerCase().includes(query)));
 }
 
@@ -1299,8 +1745,160 @@ function stockDetails(symbol) {
   const rows = {
     "000001.SZ": { code: "000001", market: "SZ", name: "平安银行" },
     "300750.SZ": { code: "300750", market: "SZ", name: "宁德时代" },
+    "920066.BJ": { code: "920066", market: "BJ", name: "北交样本" },
   };
   return rows[symbol] || { code: "600519", market: "SH", name: "贵州茅台" };
+}
+
+function marketScanRunPayload(status, processedCount, overrides = {}) {
+  const totalCount = 103;
+  const published = status === "success" || status === "degraded";
+  const terminal = published || ["failed", "cancelled", "interrupted"].includes(status);
+  const successCount = status === "success" ? totalCount : status === "degraded" ? 101 : Math.min(processedCount, 20);
+  const progressPct = terminal && published ? 100 : Number(((processedCount / totalCount) * 100).toFixed(2));
+  const messages = {
+    success: `全市场扫描完成：成功 ${totalCount}/${totalCount}`,
+    degraded: "全市场扫描降级完成：成功 101/103，缺失 1，跳过 1",
+    failed: "全市场扫描失败",
+    cancelled: "全市场扫描已取消",
+    interrupted: "应用重启中断扫描",
+  };
+  return {
+    id: 42,
+    status,
+    trigger: "manual",
+    rule_version: "full-market-score-v1",
+    as_of: "2026-07-17 16:30:00",
+    data_date: "2026-07-17",
+    scope: "沪市 + 深市 + 北交所当前上市A股",
+    total_count: totalCount,
+    excluded_count: 2,
+    processed_count: processedCount,
+    success_count: successCount,
+    missing_count: status === "degraded" ? 1 : 0,
+    skipped_count: status === "degraded" ? 1 : 0,
+    retry_count: 0,
+    progress_pct: progressPct,
+    coverage_pct: Number(((successCount / totalCount) * 100).toFixed(2)),
+    created_at: "2026-07-17 16:30:00",
+    updated_at: terminal ? "2026-07-17 16:35:00" : "2026-07-17 16:31:00",
+    started_at: "2026-07-17 16:30:01",
+    finished_at: terminal ? "2026-07-17 16:35:00" : null,
+    duration_ms: terminal ? 299000 : null,
+    message: messages[status] || `已处理 ${processedCount} 只股票`,
+    ...overrides,
+  };
+}
+
+function marketScanResultPage(searchParams = new URLSearchParams(), runOverrides = {}) {
+  const run = marketScanRunPayload("degraded", 103, runOverrides);
+  let items = marketScanFixtureRows().map((item) => ({ ...item, run_id: run.id }));
+  const status = searchParams.get("status") || "success";
+  if (status !== "all") items = items.filter((item) => item.status === status);
+  const market = searchParams.get("market");
+  const industry = searchParams.get("industry");
+  const isSt = searchParams.get("is_st");
+  const isNew = searchParams.get("is_new");
+  const quality = Number(searchParams.get("min_data_quality_score"));
+  const keyword = (searchParams.get("keyword") || "").trim();
+  if (market) items = items.filter((item) => item.market === market);
+  if (industry) items = items.filter((item) => item.industry === industry);
+  if (isSt) items = items.filter((item) => item.is_st === (isSt === "true"));
+  if (isNew) items = items.filter((item) => item.is_new === (isNew === "true"));
+  if (Number.isFinite(quality)) items = items.filter((item) => item.data_quality_score >= quality);
+  if (keyword) items = items.filter((item) => `${item.symbol} ${item.code} ${item.name}`.includes(keyword));
+
+  const sort = searchParams.get("sort") || "rank";
+  const direction = searchParams.get("order") === "desc" ? -1 : 1;
+  items.sort((left, right) => marketScanResultCompare(left, right, sort, direction));
+  const pageSize = Number(searchParams.get("page_size")) || 100;
+  const page = Number(searchParams.get("page")) || 1;
+  const total = items.length;
+  const pageCount = total ? Math.ceil(total / pageSize) : 0;
+  const offset = (page - 1) * pageSize;
+  return {
+    run,
+    total,
+    page,
+    page_size: pageSize,
+    page_count: pageCount,
+    items: items.slice(offset, offset + pageSize),
+  };
+}
+
+function marketScanFixtureRows() {
+  const successes = Array.from({ length: 101 }, (_, index) => {
+    if (index === 0) {
+      return marketScanResult("920066.BJ", "*ST北交样本", "BJ", 1, 99, {
+        industry: "专用设备",
+        isSt: true,
+        isNew: true,
+        quality: 96,
+      });
+    }
+    if (index === 1) return marketScanResult("600519.SH", "贵州茅台", "SH", 2, 96, { industry: "白酒" });
+    const market = ["SH", "SZ", "BJ"][index % 3];
+    const code = market === "SH"
+      ? String(600000 + index)
+      : market === "SZ"
+        ? String(index + 1).padStart(6, "0")
+        : String(920000 + index);
+    return marketScanResult(`${code}.${market}`, `排名样本${index + 1}`, market, index + 1, 55 + ((index * 17) % 44), {
+      industry: index % 2 ? "银行" : "电子",
+      isSt: index % 31 === 0,
+      isNew: market === "BJ" && index % 4 === 0,
+      quality: 70 + (index % 27),
+    });
+  });
+  return [
+    ...successes,
+    marketScanResult("300999.SZ", "行情缺失样本", "SZ", null, null, { status: "missing", error: "批量行情缺失" }),
+    marketScanResult("600999.SH", "停牌样本", "SH", null, null, { status: "skipped", reason: "日K停留在前一交易日" }),
+  ];
+}
+
+function marketScanResultCompare(left, right, sort, direction) {
+  const leftValue = left[sort];
+  const rightValue = right[sort];
+  if (leftValue == null && rightValue != null) return 1;
+  if (leftValue != null && rightValue == null) return -1;
+  let compared = typeof leftValue === "string"
+    ? leftValue.localeCompare(rightValue)
+    : Number(leftValue || 0) - Number(rightValue || 0);
+  compared *= direction;
+  return compared || (left.rank ?? Number.MAX_SAFE_INTEGER) - (right.rank ?? Number.MAX_SAFE_INTEGER) || left.symbol.localeCompare(right.symbol);
+}
+
+function marketScanResult(symbol, name, market, rank, score, options = {}) {
+  const status = options.status || "success";
+  const success = status === "success";
+  return {
+    run_id: 42,
+    symbol,
+    code: symbol.slice(0, 6),
+    market,
+    name,
+    industry: options.industry || (market === "BJ" ? "专用设备" : "白酒"),
+    is_st: Boolean(options.isSt),
+    is_new: Boolean(options.isNew),
+    status,
+    rank,
+    score: success ? score : null,
+    trend_score: success ? score - 5 : null,
+    leader_score: success ? score : null,
+    data_quality_score: success ? (options.quality || 92) : null,
+    price: success ? 10.5 : null,
+    change_pct: success ? 1.2 : null,
+    turnover_rate: success ? 2.4 : null,
+    volume_ratio: success ? 1.1 : null,
+    amount: success ? 120000000 : null,
+    tags: success ? ["趋势向上"] : [],
+    metrics: {},
+    reason: options.reason || (success ? `综合分 ${score}` : null),
+    error: options.error || null,
+    data_date: "2026-07-17",
+    updated_at: "2026-07-17 16:35:00",
+  };
 }
 
 function watchlistItem(symbol, name) {

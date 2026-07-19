@@ -43,6 +43,10 @@ def market_local_naive(value: datetime) -> datetime:
     return value.astimezone(ASHARE_TIMEZONE).replace(tzinfo=None)
 
 
+def market_now_naive() -> datetime:
+    return datetime.now(ASHARE_TIMEZONE).replace(tzinfo=None)
+
+
 def _parse_compact_datetime(value: str) -> datetime | None:
     digits = value.split(".", 1)[0]
     date_format = {14: "%Y%m%d%H%M%S", 12: "%Y%m%d%H%M"}.get(len(digits))
@@ -105,5 +109,6 @@ __all__ = [
     "MARKET_DATETIME_FORMAT",
     "market_datetime_epoch",
     "market_local_naive",
+    "market_now_naive",
     "normalize_market_datetime",
 ]

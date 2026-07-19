@@ -83,6 +83,77 @@ def test_save_quotes_persists_snapshot_and_history_fields() -> None:
     assert history["market_cap"] == 1_000_000_000
 
 
+def test_save_quotes_round_trips_fallback_provenance_in_snapshot_and_history() -> None:
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "cache.sqlite3"
+        cache = SQLiteCache(path)
+        fallback_quote = make_quote(source="备用行情源").model_copy(update={"fallback_used": True})
+        cache.save_quotes([fallback_quote])
+
+        cached_quote = cache.get_quotes(["600519.SH"], max_age_seconds=3600)[0]
+        history = cache.quote_history("600519.SH", limit=5)[-1]
+        with sqlite3.connect(path) as conn:
+            persisted = (
+                conn.execute("SELECT fallback_used FROM quote_snapshot").fetchone()[0],
+                conn.execute("SELECT fallback_used FROM quote_history").fetchone()[0],
+            )
+
+    assert cached_quote.from_cache is True
+    assert cached_quote.fallback_used is True
+    assert history["fallback_used"] is True
+    assert persisted == (1, 1)
+
+
+def test_equal_timestamp_prefers_non_fallback_quote_regardless_of_fetch_order() -> None:
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "cache.sqlite3"
+        cache = SQLiteCache(path)
+        fallback = make_quote(timestamp="2026-05-13 14:00:00", price=1299.0).model_copy(update={"fallback_used": True})
+        clean = make_quote(timestamp="2026-05-13 14:00:00", price=1305.0, pe=28.5)
+        with patch(
+            "app.repositories.market_quotes.now_text",
+            side_effect=["2026-05-13 15:05:00", "2026-05-13 15:00:00", "2026-05-13 15:10:00"],
+        ):
+            cache.save_quotes([fallback])
+            cache.save_quotes([clean])
+            cache.save_quotes([fallback.model_copy(update={"price": 1298.0})])
+
+        with sqlite3.connect(path) as conn:
+            snapshot = conn.execute(
+                "SELECT price, fallback_used, source FROM quote_snapshot WHERE symbol = ?",
+                ("600519.SH",),
+            ).fetchone()
+            history = conn.execute(
+                "SELECT price, fallback_used, pe FROM quote_history WHERE symbol = ?",
+                ("600519.SH",),
+            ).fetchone()
+
+    assert snapshot == (1305.0, 0, clean.source)
+    assert history == (1305.0, 0, 28.5)
+
+
+def test_equal_timestamp_prefers_more_complete_quote_before_fetch_time() -> None:
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "cache.sqlite3"
+        cache = SQLiteCache(path)
+        partial = make_quote(timestamp="2026-05-13 14:00:00", pe=None, pb=None, market_cap=None)
+        complete = make_quote(timestamp="2026-05-13 14:00:00", pe=28.5, pb=4.2, market_cap=1_000_000_000)
+        with patch(
+            "app.repositories.market_quotes.now_text",
+            side_effect=["2026-05-13 15:05:00", "2026-05-13 15:00:00"],
+        ):
+            cache.save_quotes([partial])
+            cache.save_quotes([complete])
+
+        with sqlite3.connect(path) as conn:
+            snapshot = conn.execute(
+                "SELECT pe, pb, market_cap, fetched_at FROM quote_snapshot WHERE symbol = ?",
+                ("600519.SH",),
+            ).fetchone()
+
+    assert snapshot == (28.5, 4.2, 1_000_000_000, "2026-05-13 15:00:00")
+
+
 def test_save_quotes_does_not_replace_snapshot_with_out_of_order_quote() -> None:
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "cache.sqlite3"
@@ -219,9 +290,7 @@ def test_save_quotes_upserts_only_the_latest_daily_history_snapshot() -> None:
         cache.save_quotes([stale])
 
         with sqlite3.connect(path) as conn:
-            rows = conn.execute(
-                "SELECT id, price, pe, quote_timestamp, trade_date FROM quote_history"
-            ).fetchall()
+            rows = conn.execute("SELECT id, price, pe, quote_timestamp, trade_date FROM quote_history").fetchall()
         history = cache.quote_history("600519.SH", limit=5)
 
     assert rows == [(first_id, 1305.0, 28.5, "2026-05-13 14:00:00", "2026-05-13")]
@@ -357,14 +426,12 @@ def test_quote_history_rejects_non_positive_limit() -> None:
         assert cache.quote_history("600519.SH", limit=-1) == []
 
 
-def test_partition_cleanup_uses_explicit_limits_and_fixed_delete_batches() -> None:
+def test_partition_cleanup_uses_one_set_delete_for_5500_symbols() -> None:
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE sample_rows (id INTEGER PRIMARY KEY, bucket TEXT NOT NULL, created_at INTEGER NOT NULL)"
-    )
+    conn.execute("CREATE TABLE sample_rows (id INTEGER PRIMARY KEY, bucket TEXT NOT NULL, created_at INTEGER NOT NULL)")
     conn.executemany(
         "INSERT INTO sample_rows (bucket, created_at) VALUES (?, ?)",
-        [("hot", value) for value in range(7)] + [("cold", value) for value in range(2)],
+        ((f"symbol-{symbol:04d}", value) for symbol in range(5500) for value in range(3)),
     )
     spec = RuntimeCleanupSpec(
         "sample_rows",
@@ -377,26 +444,18 @@ def test_partition_cleanup_uses_explicit_limits_and_fixed_delete_batches() -> No
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
 
-    removed = _cleanup_table(conn, spec, limit=2, delete_batch_rows=2)
-    removed_again = _cleanup_table(conn, spec, limit=2, delete_batch_rows=2)
+    removed = _cleanup_table(conn, spec, limit=2)
     conn.set_trace_callback(None)
-    counts = dict(conn.execute("SELECT bucket, COUNT(*) FROM sample_rows GROUP BY bucket"))
-    remaining_hot = [
-        row[0]
-        for row in conn.execute(
-            "SELECT created_at FROM sample_rows WHERE bucket = 'hot' ORDER BY created_at"
-        )
-    ]
+    count_range = conn.execute(
+        "SELECT MIN(row_count), MAX(row_count), COUNT(*) FROM (SELECT COUNT(*) AS row_count FROM sample_rows GROUP BY bucket)"
+    ).fetchone()
     conn.close()
 
     delete_statements = [statement for statement in statements if statement.lstrip().upper().startswith("DELETE")]
-    assert removed == 5
-    assert removed_again == 0
-    assert counts == {"cold": 2, "hot": 2}
-    assert remaining_hot == [5, 6]
-    assert len(delete_statements) == 3
-    assert all("LIMIT 2 OFFSET 2" in statement for statement in delete_statements)
-    assert not any("COUNT(" in statement.upper() or "ROW_NUMBER" in statement.upper() for statement in statements)
+    assert removed == 5500
+    assert count_range == (2, 2, 5500)
+    assert len(delete_statements) == 1
+    assert "ROW_NUMBER() OVER (PARTITION BY bucket" in delete_statements[0]
 
 
 def test_global_cleanup_enforces_one_limit_across_all_rows() -> None:
@@ -419,7 +478,7 @@ def test_global_cleanup_enforces_one_limit_across_all_rows() -> None:
     assert remaining == [3, 4, 5]
 
 
-def test_cleanup_below_threshold_does_not_sort_or_delete() -> None:
+def test_cleanup_below_threshold_remains_a_single_bounded_statement() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE sample_events (id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL)")
     conn.executemany("INSERT INTO sample_events (created_at) VALUES (?)", [(value,) for value in range(3)])
@@ -436,5 +495,6 @@ def test_cleanup_below_threshold_does_not_sort_or_delete() -> None:
     assert _cleanup_table(conn, spec, limit=3) == 0
     conn.close()
 
-    assert not any("ORDER BY" in statement.upper() for statement in statements)
-    assert not any(statement.lstrip().upper().startswith("DELETE") for statement in statements)
+    delete_statements = [statement for statement in statements if statement.lstrip().upper().startswith("DELETE")]
+    assert len(delete_statements) == 1
+    assert "ROW_NUMBER() OVER (ORDER BY" in delete_statements[0]

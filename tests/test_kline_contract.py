@@ -102,3 +102,4 @@ def test_provider_contract_stamp_is_uniform_and_explicit() -> None:
     assert {item.as_of for item in stamped} == {"2026-05-13"}
     assert len({item.data_version for item in stamped}) == 1
     assert all(item.data_version != "unknown" for item in stamped)
+    assert {item.source for item in stamped} == {"test-provider"}

@@ -1,5 +1,7 @@
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .DS_Store
 .venv/
 node_modules/
@@ -11,9 +13,5 @@ coverage.xml
 htmlcov/
 playwright-report/
 test-results/
-data/*.db
-data/*.sqlite3
-data/*.sqlite3-*
-data/*.sqlite3.*
-data/trading_calendar.json
+data/*
 !data/.gitkeep

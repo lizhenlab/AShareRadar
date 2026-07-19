@@ -288,7 +288,13 @@ async def _load_order_book(datahub: DataHub, symbol: str) -> tuple[OrderBook | N
 
 
 async def _load_stock_concepts(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str | None]:
-    return await datahub.stock_concepts(symbol, limit=8), None
+    result_loader = getattr(datahub, "stock_concepts_result", None)
+    if not callable(result_loader):
+        return await datahub.stock_concepts(symbol, limit=8), None
+    result = await result_loader(symbol, limit=8)
+    if result.used_fallback_cache:
+        return [], "概念数据源不可用，过期缓存不参与主题与龙头强度评分。"
+    return result.rows, None
 
 
 def _unavailable_market_breadth_sample() -> MarketBreadthQuoteResult:

@@ -35,6 +35,7 @@ class LlmExplainerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            path.chmod(0o600)
 
             values = _load_shell_env(
                 path,
@@ -80,6 +81,7 @@ class LlmExplainerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            path.chmod(0o600)
 
             values = _load_shell_env(
                 path,
@@ -93,6 +95,25 @@ class LlmExplainerTests(unittest.TestCase):
                 "ASHARE_RADAR_LLM_MODEL": "top-level model",
             },
         )
+
+    def test_llm_shell_env_rejects_group_readable_api_key_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / ".zshrc"
+            path.write_text("export ASHARE_RADAR_LLM_API_KEY='private-key'\n", encoding="utf-8")
+            path.chmod(0o644)
+
+            with self.assertRaisesRegex(ValueError, "chmod 600"):
+                _load_shell_env(path, {"ASHARE_RADAR_LLM_API_KEY"})
+
+    def test_llm_shell_env_allows_non_secret_settings_in_group_readable_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / ".zshrc"
+            path.write_text("export ASHARE_RADAR_LLM_MODEL='test-model'\n", encoding="utf-8")
+            path.chmod(0o644)
+
+            values = _load_shell_env(path, {"ASHARE_RADAR_LLM_MODEL"})
+
+        self.assertEqual(values, {"ASHARE_RADAR_LLM_MODEL": "test-model"})
 
     def test_llm_explainer_falls_back_without_complete_configuration(self) -> None:
         analysis, rule_answer = _llm_test_case()

@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from app.services.provider_errors import ProviderProtocolError
+from app.services.provider_errors import ProviderCoverageMiss, ProviderProtocolError
 from app.services.futu_provider import (
     FutuProvider,
     _futu_kltype,
@@ -27,6 +27,13 @@ def test_futu_quotes_empty_request_does_not_require_optional_dependency() -> Non
     provider = FutuProvider(enabled=False)
 
     assert asyncio.run(provider.quotes([])) == []
+
+
+def test_futu_rejects_beijing_market_before_optional_dependency_checks() -> None:
+    provider = FutuProvider(enabled=False)
+
+    with pytest.raises(ProviderCoverageMiss, match="Futu OpenAPI.*不覆盖北交所.*920066.BJ"):
+        asyncio.run(provider.quotes(["920066.BJ"]))
 
 
 def test_order_book_levels_skip_malformed_prices_keep_zero_volume_and_cap_depth() -> None:
