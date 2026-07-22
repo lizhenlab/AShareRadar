@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 248 | 526 | 2873 | 683 | 53835 |
-| `tests/` | 141 | 148 | 1779 | 689 | 56644 |
+| `tests/` | 141 | 148 | 1779 | 689 | 56645 |
 | `tools/` | 3 | 4 | 47 | 0 | 707 |
 
 ## Python Function Health
@@ -6431,68 +6431,68 @@ Lines: 267
 
 #### `tests/test_datahub_klines_modules.py`
 
-Lines: 2595
+Lines: 2596
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `_fixed_kline_clock` | 42 | `def _fixed_kline_clock(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_latest_minute_rows_compare_aware_and_naive_times_in_shanghai_timezone` | 46 | `def test_latest_minute_rows_compare_aware_and_naive_times_in_shanghai_timezone() -> None` |
-| function | `test_kline_production_clock_is_independent_of_host_timezone` | 67 | `def test_kline_production_clock_is_independent_of_host_timezone() -> None` |
-| function | `test_daily_kline_coverage_miss_uses_fallback_without_global_failure` | 86 | `def test_daily_kline_coverage_miss_uses_fallback_without_global_failure() -> None` |
-| function | `test_daily_kline_reports_temporarily_unavailable_chain_without_cache` | 125 | `def test_daily_kline_reports_temporarily_unavailable_chain_without_cache() -> None` |
-| function | `test_required_daily_kline_reports_permanently_unavailable_chain_before_cache_fallback` | 160 | `def test_required_daily_kline_reports_permanently_unavailable_chain_before_cache_fallback() -> None` |
-| function | `test_required_daily_kline_treats_full_provider_capacity_as_retryable` | 194 | `def test_required_daily_kline_treats_full_provider_capacity_as_retryable() -> None` |
-| function | `test_daily_kline_transport_failure_is_retryable_even_when_cooldown_is_disabled` | 274 | `def test_daily_kline_transport_failure_is_retryable_even_when_cooldown_is_disabled() -> None` |
-| function | `test_daily_kline_protocol_failure_is_retryable_even_when_cooldown_is_disabled` | 301 | `def test_daily_kline_protocol_failure_is_retryable_even_when_cooldown_is_disabled() -> None` |
-| function | `test_daily_kline_instrument_error_does_not_mark_the_chain_unavailable` | 332 | `def test_daily_kline_instrument_error_does_not_mark_the_chain_unavailable() -> None` |
-| function | `test_daily_kline_allows_stale_rows_only_for_explicit_validation_callers` | 368 | `def test_daily_kline_allows_stale_rows_only_for_explicit_validation_callers() -> None` |
-| function | `test_market_scan_policy_does_not_hide_provider_outage_behind_old_cache` | 408 | `def test_market_scan_policy_does_not_hide_provider_outage_behind_old_cache() -> None` |
-| function | `test_daily_kline_none_response_is_protocol_failure_not_coverage_miss` | 446 | `def test_daily_kline_none_response_is_protocol_failure_not_coverage_miss() -> None` |
-| function | `test_backup_daily_klines_remain_fallback_when_second_request_uses_only_cache` | 485 | `def test_backup_daily_klines_remain_fallback_when_second_request_uses_only_cache() -> None` |
-| function | `test_stale_primary_daily_kline_uses_fresh_backup_before_success_or_save` | 541 | `def test_stale_primary_daily_kline_uses_fresh_backup_before_success_or_save() -> None` |
-| function | `test_daily_kline_fallback_cache_ignores_log_event_failure` | 587 | `def test_daily_kline_fallback_cache_ignores_log_event_failure() -> None` |
-| function | `test_minute_kline_records_provider_without_minute_method_and_uses_backup` | 623 | `def test_minute_kline_records_provider_without_minute_method_and_uses_backup() -> None` |
-| function | `test_minute_kline_coverage_miss_uses_fallback_without_global_failure` | 659 | `def test_minute_kline_coverage_miss_uses_fallback_without_global_failure() -> None` |
-| function | `test_minute_kline_fallback_provenance_roundtrips_with_false_default` | 699 | `def test_minute_kline_fallback_provenance_roundtrips_with_false_default() -> None` |
-| function | `test_stale_primary_minute_kline_uses_fresh_backup_before_success_or_save` | 733 | `def test_stale_primary_minute_kline_uses_fresh_backup_before_success_or_save() -> None` |
-| function | `test_all_stale_kline_sources_preserve_real_cache_fetched_at_and_mark_fallback` | 791 | `def test_all_stale_kline_sources_preserve_real_cache_fetched_at_and_mark_fallback() -> None` |
-| function | `test_all_stale_kline_sources_without_cache_raise_and_leave_tables_empty` | 861 | `def test_all_stale_kline_sources_without_cache_raise_and_leave_tables_empty() -> None` |
-| function | `test_minute_kline_fallback_cache_ignores_log_event_failure` | 924 | `def test_minute_kline_fallback_cache_ignores_log_event_failure() -> None` |
-| function | `test_daily_kline_returns_provider_rows_when_cache_write_fails` | 961 | `def test_daily_kline_returns_provider_rows_when_cache_write_fails() -> None` |
-| function | `test_kline_coordinator_offloads_daily_and_minute_cache_io` | 996 | `def test_kline_coordinator_offloads_daily_and_minute_cache_io() -> None` |
-| function | `test_short_cross_source_daily_refresh_does_not_splice_longer_history` | 1087 | `def test_short_cross_source_daily_refresh_does_not_splice_longer_history() -> None` |
-| function | `test_short_new_daily_data_version_does_not_replace_longer_stored_vintage` | 1142 | `def test_short_new_daily_data_version_does_not_replace_longer_stored_vintage() -> None` |
-| function | `test_equal_length_older_daily_vintages_cannot_replace_newer_cache` | 1171 | `def test_equal_length_older_daily_vintages_cannot_replace_newer_cache() -> None` |
-| function | `test_same_as_of_concurrent_writes_always_keep_non_fallback_quality` | 1219 | `def test_same_as_of_concurrent_writes_always_keep_non_fallback_quality(primary_delay: float, fallback_delay: float) -> None` |
-| function | `test_same_quality_daily_writes_use_fetched_at_not_provider_text` | 1292 | `def test_same_quality_daily_writes_use_fetched_at_not_provider_text(newer_first: bool) -> None` |
-| function | `test_short_new_vintage_provider_does_not_shrink_longer_cache` | 1333 | `def test_short_new_vintage_provider_does_not_shrink_longer_cache() -> None` |
-| function | `test_concurrent_short_new_vintage_cannot_overwrite_complete_replacement` | 1396 | `def test_concurrent_short_new_vintage_cannot_overwrite_complete_replacement() -> None` |
-| function | `test_concurrent_equal_length_daily_vintages_always_keep_newest` | 1458 | `def test_concurrent_equal_length_daily_vintages_always_keep_newest() -> None` |
-| function | `test_refresh_requests_full_existing_coverage_and_replaces_with_one_new_vintage` | 1509 | `def test_refresh_requests_full_existing_coverage_and_replaces_with_one_new_vintage() -> None` |
-| function | `test_stale_complete_cache_refreshes_with_verified_incremental_tail` | 1568 | `def test_stale_complete_cache_refreshes_with_verified_incremental_tail() -> None` |
-| function | `test_incremental_source_or_volume_mismatch_triggers_full_refresh` | 1652 | `def test_incremental_source_or_volume_mismatch_triggers_full_refresh(mismatch: str) -> None` |
-| function | `test_incremental_overlap_change_falls_back_to_full_history_refresh` | 1743 | `def test_incremental_overlap_change_falls_back_to_full_history_refresh() -> None` |
-| function | `test_insufficient_daily_cache_coverage_fetches_requested_history` | 1803 | `def test_insufficient_daily_cache_coverage_fetches_requested_history() -> None` |
-| function | `test_short_provider_history_marks_exhaustion_for_later_cache_reuse` | 1843 | `def test_short_provider_history_marks_exhaustion_for_later_cache_reuse() -> None` |
-| function | `test_daily_provider_chain_continues_from_short_primary_to_complete_backup` | 1882 | `def test_daily_provider_chain_continues_from_short_primary_to_complete_backup() -> None` |
-| function | `test_all_short_daily_providers_choose_longest_and_larger_request_retries` | 1942 | `def test_all_short_daily_providers_choose_longest_and_larger_request_retries() -> None` |
-| function | `test_insufficient_daily_history_refreshes_while_early_minute_cache_skips_provider` | 1996 | `def test_insufficient_daily_history_refreshes_while_early_minute_cache_skips_provider() -> None` |
-| function | `test_minute_kline_stale_business_timestamp_does_not_skip_provider` | 2055 | `def test_minute_kline_stale_business_timestamp_does_not_skip_provider() -> None` |
-| function | `test_unregistered_priority_provider_is_skipped_before_backup_without_status_noise` | 2095 | `def test_unregistered_priority_provider_is_skipped_before_backup_without_status_noise() -> None` |
-| function | `test_prepare_daily_klines_classifies_all_invalid_rows_as_instrument_failure` | 2127 | `def test_prepare_daily_klines_classifies_all_invalid_rows_as_instrument_failure() -> None` |
-| function | `test_invalid_provider_kline_rows_are_instrument_failure_before_backup` | 2140 | `def test_invalid_provider_kline_rows_are_instrument_failure_before_backup() -> None` |
-| function | `test_kline_coordinator_filters_sorts_and_limits_provider_rows_before_save` | 2179 | `def test_kline_coordinator_filters_sorts_and_limits_provider_rows_before_save() -> None` |
-| function | `test_kline_coordinator_preserves_real_zero_and_optional_empty_values` | 2228 | `def test_kline_coordinator_preserves_real_zero_and_optional_empty_values() -> None` |
-| function | `test_kline_coordinator_bounds_excessive_limits_before_provider_calls` | 2273 | `def test_kline_coordinator_bounds_excessive_limits_before_provider_calls() -> None` |
-| function | `test_kline_limit_bounds_ignore_invalid_max_settings` | 2313 | `def test_kline_limit_bounds_ignore_invalid_max_settings(dirty_limit) -> None` |
-| function | `test_kline_coordinator_rejects_non_positive_limits_before_provider_calls` | 2317 | `def test_kline_coordinator_rejects_non_positive_limits_before_provider_calls() -> None` |
-| function | `test_kline_coordinator_propagates_cancellation_without_provider_failure` | 2347 | `def test_kline_coordinator_propagates_cancellation_without_provider_failure() -> None` |
-| function | `test_kline_cache_rejects_non_positive_limits` | 2375 | `def test_kline_cache_rejects_non_positive_limits() -> None` |
-| function | `test_kline_cache_filters_invalid_ohlc_and_non_finite_rows` | 2400 | `def test_kline_cache_filters_invalid_ohlc_and_non_finite_rows() -> None` |
-| function | `test_kline_cache_limits_recent_rows_before_filtering_and_returns_chronological_rows` | 2439 | `def test_kline_cache_limits_recent_rows_before_filtering_and_returns_chronological_rows() -> None` |
-| function | `test_kline_cache_rejects_future_fetch_timestamps` | 2533 | `def test_kline_cache_rejects_future_fetch_timestamps() -> None` |
-| function | `test_cache_stats_keeps_daily_and_minute_kline_freshness_separate` | 2557 | `def test_cache_stats_keeps_daily_and_minute_kline_freshness_separate() -> None` |
-| function | `_minute_row` | 2585 | `def _minute_row(*, timestamp: str, interval: str) -> MinuteKline` |
+| function | `_fixed_kline_clock` | 43 | `def _fixed_kline_clock(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_latest_minute_rows_compare_aware_and_naive_times_in_shanghai_timezone` | 47 | `def test_latest_minute_rows_compare_aware_and_naive_times_in_shanghai_timezone() -> None` |
+| function | `test_kline_production_clock_is_independent_of_host_timezone` | 68 | `def test_kline_production_clock_is_independent_of_host_timezone() -> None` |
+| function | `test_daily_kline_coverage_miss_uses_fallback_without_global_failure` | 87 | `def test_daily_kline_coverage_miss_uses_fallback_without_global_failure() -> None` |
+| function | `test_daily_kline_reports_temporarily_unavailable_chain_without_cache` | 126 | `def test_daily_kline_reports_temporarily_unavailable_chain_without_cache() -> None` |
+| function | `test_required_daily_kline_reports_permanently_unavailable_chain_before_cache_fallback` | 161 | `def test_required_daily_kline_reports_permanently_unavailable_chain_before_cache_fallback() -> None` |
+| function | `test_required_daily_kline_treats_full_provider_capacity_as_retryable` | 195 | `def test_required_daily_kline_treats_full_provider_capacity_as_retryable() -> None` |
+| function | `test_daily_kline_transport_failure_is_retryable_even_when_cooldown_is_disabled` | 275 | `def test_daily_kline_transport_failure_is_retryable_even_when_cooldown_is_disabled() -> None` |
+| function | `test_daily_kline_protocol_failure_is_retryable_even_when_cooldown_is_disabled` | 302 | `def test_daily_kline_protocol_failure_is_retryable_even_when_cooldown_is_disabled() -> None` |
+| function | `test_daily_kline_instrument_error_does_not_mark_the_chain_unavailable` | 333 | `def test_daily_kline_instrument_error_does_not_mark_the_chain_unavailable() -> None` |
+| function | `test_daily_kline_allows_stale_rows_only_for_explicit_validation_callers` | 369 | `def test_daily_kline_allows_stale_rows_only_for_explicit_validation_callers() -> None` |
+| function | `test_market_scan_policy_does_not_hide_provider_outage_behind_old_cache` | 409 | `def test_market_scan_policy_does_not_hide_provider_outage_behind_old_cache() -> None` |
+| function | `test_daily_kline_none_response_is_protocol_failure_not_coverage_miss` | 447 | `def test_daily_kline_none_response_is_protocol_failure_not_coverage_miss() -> None` |
+| function | `test_backup_daily_klines_remain_fallback_when_second_request_uses_only_cache` | 486 | `def test_backup_daily_klines_remain_fallback_when_second_request_uses_only_cache() -> None` |
+| function | `test_stale_primary_daily_kline_uses_fresh_backup_before_success_or_save` | 542 | `def test_stale_primary_daily_kline_uses_fresh_backup_before_success_or_save() -> None` |
+| function | `test_daily_kline_fallback_cache_ignores_log_event_failure` | 588 | `def test_daily_kline_fallback_cache_ignores_log_event_failure() -> None` |
+| function | `test_minute_kline_records_provider_without_minute_method_and_uses_backup` | 624 | `def test_minute_kline_records_provider_without_minute_method_and_uses_backup() -> None` |
+| function | `test_minute_kline_coverage_miss_uses_fallback_without_global_failure` | 660 | `def test_minute_kline_coverage_miss_uses_fallback_without_global_failure() -> None` |
+| function | `test_minute_kline_fallback_provenance_roundtrips_with_false_default` | 700 | `def test_minute_kline_fallback_provenance_roundtrips_with_false_default() -> None` |
+| function | `test_stale_primary_minute_kline_uses_fresh_backup_before_success_or_save` | 734 | `def test_stale_primary_minute_kline_uses_fresh_backup_before_success_or_save() -> None` |
+| function | `test_all_stale_kline_sources_preserve_real_cache_fetched_at_and_mark_fallback` | 792 | `def test_all_stale_kline_sources_preserve_real_cache_fetched_at_and_mark_fallback() -> None` |
+| function | `test_all_stale_kline_sources_without_cache_raise_and_leave_tables_empty` | 862 | `def test_all_stale_kline_sources_without_cache_raise_and_leave_tables_empty() -> None` |
+| function | `test_minute_kline_fallback_cache_ignores_log_event_failure` | 925 | `def test_minute_kline_fallback_cache_ignores_log_event_failure() -> None` |
+| function | `test_daily_kline_returns_provider_rows_when_cache_write_fails` | 962 | `def test_daily_kline_returns_provider_rows_when_cache_write_fails() -> None` |
+| function | `test_kline_coordinator_offloads_daily_and_minute_cache_io` | 997 | `def test_kline_coordinator_offloads_daily_and_minute_cache_io() -> None` |
+| function | `test_short_cross_source_daily_refresh_does_not_splice_longer_history` | 1088 | `def test_short_cross_source_daily_refresh_does_not_splice_longer_history() -> None` |
+| function | `test_short_new_daily_data_version_does_not_replace_longer_stored_vintage` | 1143 | `def test_short_new_daily_data_version_does_not_replace_longer_stored_vintage() -> None` |
+| function | `test_equal_length_older_daily_vintages_cannot_replace_newer_cache` | 1172 | `def test_equal_length_older_daily_vintages_cannot_replace_newer_cache() -> None` |
+| function | `test_same_as_of_concurrent_writes_always_keep_non_fallback_quality` | 1220 | `def test_same_as_of_concurrent_writes_always_keep_non_fallback_quality(primary_delay: float, fallback_delay: float) -> None` |
+| function | `test_same_quality_daily_writes_use_fetched_at_not_provider_text` | 1293 | `def test_same_quality_daily_writes_use_fetched_at_not_provider_text(newer_first: bool) -> None` |
+| function | `test_short_new_vintage_provider_does_not_shrink_longer_cache` | 1334 | `def test_short_new_vintage_provider_does_not_shrink_longer_cache() -> None` |
+| function | `test_concurrent_short_new_vintage_cannot_overwrite_complete_replacement` | 1397 | `def test_concurrent_short_new_vintage_cannot_overwrite_complete_replacement() -> None` |
+| function | `test_concurrent_equal_length_daily_vintages_always_keep_newest` | 1459 | `def test_concurrent_equal_length_daily_vintages_always_keep_newest() -> None` |
+| function | `test_refresh_requests_full_existing_coverage_and_replaces_with_one_new_vintage` | 1510 | `def test_refresh_requests_full_existing_coverage_and_replaces_with_one_new_vintage() -> None` |
+| function | `test_stale_complete_cache_refreshes_with_verified_incremental_tail` | 1569 | `def test_stale_complete_cache_refreshes_with_verified_incremental_tail() -> None` |
+| function | `test_incremental_source_or_volume_mismatch_triggers_full_refresh` | 1653 | `def test_incremental_source_or_volume_mismatch_triggers_full_refresh(mismatch: str) -> None` |
+| function | `test_incremental_overlap_change_falls_back_to_full_history_refresh` | 1744 | `def test_incremental_overlap_change_falls_back_to_full_history_refresh() -> None` |
+| function | `test_insufficient_daily_cache_coverage_fetches_requested_history` | 1804 | `def test_insufficient_daily_cache_coverage_fetches_requested_history() -> None` |
+| function | `test_short_provider_history_marks_exhaustion_for_later_cache_reuse` | 1844 | `def test_short_provider_history_marks_exhaustion_for_later_cache_reuse() -> None` |
+| function | `test_daily_provider_chain_continues_from_short_primary_to_complete_backup` | 1883 | `def test_daily_provider_chain_continues_from_short_primary_to_complete_backup() -> None` |
+| function | `test_all_short_daily_providers_choose_longest_and_larger_request_retries` | 1943 | `def test_all_short_daily_providers_choose_longest_and_larger_request_retries() -> None` |
+| function | `test_insufficient_daily_history_refreshes_while_early_minute_cache_skips_provider` | 1997 | `def test_insufficient_daily_history_refreshes_while_early_minute_cache_skips_provider() -> None` |
+| function | `test_minute_kline_stale_business_timestamp_does_not_skip_provider` | 2056 | `def test_minute_kline_stale_business_timestamp_does_not_skip_provider() -> None` |
+| function | `test_unregistered_priority_provider_is_skipped_before_backup_without_status_noise` | 2096 | `def test_unregistered_priority_provider_is_skipped_before_backup_without_status_noise() -> None` |
+| function | `test_prepare_daily_klines_classifies_all_invalid_rows_as_instrument_failure` | 2128 | `def test_prepare_daily_klines_classifies_all_invalid_rows_as_instrument_failure() -> None` |
+| function | `test_invalid_provider_kline_rows_are_instrument_failure_before_backup` | 2141 | `def test_invalid_provider_kline_rows_are_instrument_failure_before_backup() -> None` |
+| function | `test_kline_coordinator_filters_sorts_and_limits_provider_rows_before_save` | 2180 | `def test_kline_coordinator_filters_sorts_and_limits_provider_rows_before_save() -> None` |
+| function | `test_kline_coordinator_preserves_real_zero_and_optional_empty_values` | 2229 | `def test_kline_coordinator_preserves_real_zero_and_optional_empty_values() -> None` |
+| function | `test_kline_coordinator_bounds_excessive_limits_before_provider_calls` | 2274 | `def test_kline_coordinator_bounds_excessive_limits_before_provider_calls() -> None` |
+| function | `test_kline_limit_bounds_ignore_invalid_max_settings` | 2314 | `def test_kline_limit_bounds_ignore_invalid_max_settings(dirty_limit) -> None` |
+| function | `test_kline_coordinator_rejects_non_positive_limits_before_provider_calls` | 2318 | `def test_kline_coordinator_rejects_non_positive_limits_before_provider_calls() -> None` |
+| function | `test_kline_coordinator_propagates_cancellation_without_provider_failure` | 2348 | `def test_kline_coordinator_propagates_cancellation_without_provider_failure() -> None` |
+| function | `test_kline_cache_rejects_non_positive_limits` | 2376 | `def test_kline_cache_rejects_non_positive_limits() -> None` |
+| function | `test_kline_cache_filters_invalid_ohlc_and_non_finite_rows` | 2401 | `def test_kline_cache_filters_invalid_ohlc_and_non_finite_rows() -> None` |
+| function | `test_kline_cache_limits_recent_rows_before_filtering_and_returns_chronological_rows` | 2440 | `def test_kline_cache_limits_recent_rows_before_filtering_and_returns_chronological_rows() -> None` |
+| function | `test_kline_cache_rejects_future_fetch_timestamps` | 2534 | `def test_kline_cache_rejects_future_fetch_timestamps() -> None` |
+| function | `test_cache_stats_keeps_daily_and_minute_kline_freshness_separate` | 2558 | `def test_cache_stats_keeps_daily_and_minute_kline_freshness_separate() -> None` |
+| function | `_minute_row` | 2586 | `def _minute_row(*, timestamp: str, interval: str) -> MinuteKline` |
 
 #### `tests/test_datahub_metadata_modules.py`
 

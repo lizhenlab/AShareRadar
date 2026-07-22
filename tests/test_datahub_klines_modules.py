@@ -31,6 +31,7 @@ from app.services.provider_errors import (
     ProviderProtocolError,
     ProviderTransportError,
 )
+from app.utils.market_time import market_now_naive
 from app.utils.time import now_text
 from tests.factories import make_kline
 
@@ -817,7 +818,7 @@ def test_all_stale_kline_sources_preserve_real_cache_fetched_at_and_mark_fallbac
             [_minute_row(timestamp="2026-05-13 14:30:00", interval="5m")],
             "真实旧缓存",
         )
-        stored_at = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        stored_at = (market_now_naive() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         with sqlite3.connect(path) as conn:
             conn.execute("UPDATE kline_daily SET fetched_at = ?", (stored_at,))
             conn.execute("UPDATE kline_minute SET fetched_at = ?", (stored_at,))
