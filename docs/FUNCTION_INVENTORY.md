@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 248 | 526 | 2873 | 683 | 53835 |
-| `tests/` | 141 | 148 | 1779 | 689 | 56645 |
+| `tests/` | 141 | 148 | 1779 | 689 | 56656 |
 | `tools/` | 3 | 4 | 47 | 0 | 707 |
 
 ## Python Function Health
@@ -6979,26 +6979,26 @@ Lines: 703
 
 #### `tests/test_frontend_notifications.py`
 
-Lines: 706
+Lines: 717
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `test_alert_notifications_baseline_new_event_and_deduplication` | 10 | `def test_alert_notifications_baseline_new_event_and_deduplication() -> None` |
 | function | `test_alert_notifications_collapse_bursts_into_one_summary` | 48 | `def test_alert_notifications_collapse_bursts_into_one_summary() -> None` |
 | function | `test_alert_notification_first_poll_establishes_newest_baseline` | 77 | `def test_alert_notification_first_poll_establishes_newest_baseline() -> None` |
-| function | `test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_cursor` | 117 | `def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_cursor() -> None` |
-| function | `test_alert_notification_backlog_advances_in_bounded_batches` | 166 | `def test_alert_notification_backlog_advances_in_bounded_batches() -> None` |
-| function | `test_alert_notification_poll_advances_by_id_when_new_event_has_older_created_at` | 220 | `def test_alert_notification_poll_advances_by_id_when_new_event_has_older_created_at() -> None` |
-| function | `test_alert_notification_poll_keeps_cursor_when_page_does_not_advance` | 259 | `def test_alert_notification_poll_keeps_cursor_when_page_does_not_advance() -> None` |
-| function | `test_alert_notification_delivery_failure_retries_without_skipping_later_events` | 303 | `def test_alert_notification_delivery_failure_retries_without_skipping_later_events() -> None` |
-| function | `test_notification_permission_is_requested_only_by_enable_action` | 379 | `def test_notification_permission_is_requested_only_by_enable_action() -> None` |
-| function | `test_notification_disable_persists_and_reenable_skips_muted_events` | 414 | `def test_notification_disable_persists_and_reenable_skips_muted_events() -> None` |
-| function | `test_notification_disable_invalidates_an_inflight_poll` | 477 | `def test_notification_disable_invalidates_an_inflight_poll() -> None` |
-| function | `test_notification_permission_request_failure_remains_retryable` | 504 | `def test_notification_permission_request_failure_remains_retryable() -> None` |
-| function | `test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor` | 528 | `def test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor() -> None` |
-| function | `test_notification_storage_changes_merge_cursor_and_stop_other_page_polling` | 590 | `def test_notification_storage_changes_merge_cursor_and_stop_other_page_polling() -> None` |
-| function | `test_notification_delivery_fails_closed_when_shared_storage_is_unavailable` | 661 | `def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable() -> None` |
-| function | `_run_node` | 699 | `def _run_node(script: str) -> None` |
+| function | `test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_cursor` | 118 | `def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_cursor() -> None` |
+| function | `test_alert_notification_backlog_advances_in_bounded_batches` | 168 | `def test_alert_notification_backlog_advances_in_bounded_batches() -> None` |
+| function | `test_alert_notification_poll_advances_by_id_when_new_event_has_older_created_at` | 225 | `def test_alert_notification_poll_advances_by_id_when_new_event_has_older_created_at() -> None` |
+| function | `test_alert_notification_poll_keeps_cursor_when_page_does_not_advance` | 265 | `def test_alert_notification_poll_keeps_cursor_when_page_does_not_advance() -> None` |
+| function | `test_alert_notification_delivery_failure_retries_without_skipping_later_events` | 309 | `def test_alert_notification_delivery_failure_retries_without_skipping_later_events() -> None` |
+| function | `test_notification_permission_is_requested_only_by_enable_action` | 386 | `def test_notification_permission_is_requested_only_by_enable_action() -> None` |
+| function | `test_notification_disable_persists_and_reenable_skips_muted_events` | 421 | `def test_notification_disable_persists_and_reenable_skips_muted_events() -> None` |
+| function | `test_notification_disable_invalidates_an_inflight_poll` | 485 | `def test_notification_disable_invalidates_an_inflight_poll() -> None` |
+| function | `test_notification_permission_request_failure_remains_retryable` | 512 | `def test_notification_permission_request_failure_remains_retryable() -> None` |
+| function | `test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor` | 536 | `def test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor() -> None` |
+| function | `test_notification_storage_changes_merge_cursor_and_stop_other_page_polling` | 598 | `def test_notification_storage_changes_merge_cursor_and_stop_other_page_polling() -> None` |
+| function | `test_notification_delivery_fails_closed_when_shared_storage_is_unavailable` | 669 | `def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable() -> None` |
+| function | `_run_node` | 707 | `def _run_node(script: str) -> None` |
 
 #### `tests/test_frontend_research_activity.py`
 

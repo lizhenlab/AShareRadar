@@ -95,8 +95,9 @@ def test_alert_notification_first_poll_establishes_newest_baseline() -> None:
         }
         const state = {};
         const storage = memoryStorage();
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
 
-        const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage });
+        const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
 
         assert(completed === true, "baseline poll failed");
@@ -139,9 +140,10 @@ def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_
         }
         const state = {};
         const storage = memoryStorage();
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
         deliverAlertNotifications(state, [event(1)], { NotificationApi: FakeNotification, storage });
 
-        const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage });
+        const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
 
         assert(completed === true, "paginated poll failed");
@@ -187,17 +189,20 @@ def test_alert_notification_backlog_advances_in_bounded_batches() -> None:
         }
         const state = {};
         const storage = memoryStorage();
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
         deliverAlertNotifications(state, [event(1)], { NotificationApi: FakeNotification, storage });
 
         const first = await pollAlertNotifications(state, {
           NotificationApi: FakeNotification,
           storage,
+          locks,
           maxPages: 2,
         });
         const firstCursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
         const second = await pollAlertNotifications(state, {
           NotificationApi: FakeNotification,
           storage,
+          locks,
           maxPages: 2,
         });
         const finalCursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
@@ -235,9 +240,10 @@ def test_alert_notification_poll_advances_by_id_when_new_event_has_older_created
         }
         const state = {};
         const storage = memoryStorage();
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
         deliverAlertNotifications(state, [event(5, "2026-07-16 10:00:00")], { NotificationApi: FakeNotification, storage });
 
-        const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage });
+        const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
 
         assert(completed === true, "backdated event poll failed");
@@ -339,9 +345,10 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
         }
         const state = {};
         const storage = memoryStorage();
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
         deliverAlertNotifications(state, [event(1)], { NotificationApi: FakeNotification, storage });
 
-        const firstCompleted = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage });
+        const firstCompleted = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const failedCursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
 
         assert(firstCompleted === false, "delivery failure was reported as a successful poll");
@@ -351,9 +358,9 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
         assert(elements.get("alertNotificationState").textContent.includes("投递失败"), "delivery failure state was not visible");
         assert(elements.get("alertNotificationState").dataset.tone === "warn", "delivery failure state did not use warning tone");
 
-        const retryCompleted = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage });
+        const retryCompleted = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const retryCursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
-        const finalCompleted = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage });
+        const finalCompleted = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
 
         assert(retryCompleted === true && finalCompleted === true, "retry did not recover polling");
         assert(requestedAfterIds.join(",") === "1,2,4", "retry did not resume from the last delivered event");
@@ -440,12 +447,13 @@ def test_notification_disable_persists_and_reenable_skips_muted_events() -> None
           constructor(title, options) { sent.push({ title, options }); }
         }
         const state = {};
+        const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
 
-        assert(await enableAlertNotifications(state, { NotificationApi: FakeNotification, storage }) === true, "initial enable failed");
+        assert(await enableAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks }) === true, "initial enable failed");
         assert(JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY)).id === 5, "initial baseline was not saved");
         disableAlertNotifications(state, { NotificationApi: FakeNotification, storage });
         newestId = 6;
-        const initialized = initializeAlertNotifications(state, { NotificationApi: FakeNotification, storage });
+        const initialized = initializeAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
 
         assert(initialized === false && state.alertNotificationTimer == null, "disabled preference restarted polling");
         assert(storage.getItem(ALERT_NOTIFICATION_ENABLED_KEY) === "0", "disabled preference was not persisted");
@@ -453,7 +461,7 @@ def test_notification_disable_persists_and_reenable_skips_muted_events() -> None
         assert(elements.get("enableAlertNotifications").textContent === "启用桌面提醒", "disabled action was not rendered");
         assert(elements.get("alertNotificationState").textContent === "应用内已停用", "disabled state was not explained");
 
-        assert(await enableAlertNotifications(state, { NotificationApi: FakeNotification, storage }) === true, "reenable failed");
+        assert(await enableAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks }) === true, "reenable failed");
         stopAlertNotificationPolling(state);
         assert(requests === 2, "disabled initialization unexpectedly polled events");
         assert(sent.length === 0, "reenable replayed an event created while notifications were disabled");
@@ -697,10 +705,13 @@ def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable()
 
 
 def _run_node(script: str) -> None:
-    subprocess.run(
+    result = subprocess.run(
         ["node", "--input-type=module", "--eval", script],
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "Node exited without output"
+        raise AssertionError(f"Node test script failed with exit code {result.returncode}:\n{detail}")
