@@ -54,7 +54,40 @@ jobs:
           python tools/architecture_inventory.py --check
 
       - name: Tests and coverage
-        run: python -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing --cov-report=xml
+        run: python -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing --cov-report=xml --junitxml=pytest-results.xml
+
+      - name: Report pytest failures
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path("pytest-results.xml")
+          if not report.is_file():
+              print("::error title=pytest::pytest failed before writing its JUnit report")
+              raise SystemExit(0)
+
+          def escape(value: str) -> str:
+              return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          failures = []
+          for case in ET.parse(report).getroot().iter("testcase"):
+              failure = case.find("failure")
+              if failure is None:
+                  failure = case.find("error")
+              if failure is None:
+                  continue
+              name = f"{case.get('classname', '')}::{case.get('name', '')}".strip(":")
+              detail = failure.get("message") or failure.text or "pytest failure"
+              failures.append((name, detail))
+
+          if not failures:
+              print("::error title=pytest::pytest exited unsuccessfully without a failed JUnit case")
+          for name, detail in failures[:20]:
+              message = escape(f"{name}: {detail}"[:4000])
+              print(f"::error title=pytest failure::{message}")
+          PY
 
   browser:
     runs-on: ubuntu-latest
