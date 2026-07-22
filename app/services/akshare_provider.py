@@ -18,10 +18,19 @@ from app.services.eastmoney_client import (
 )
 from app.services.data_quality_time import normalize_quote_event_time
 from app.services.datahub_runtime import run_provider_io
-from app.services.provider_errors import ProviderProtocolError, sanitize_provider_error
+from app.services.provider_errors import (
+    ProviderCoverageMiss,
+    ProviderInstrumentDataError,
+    ProviderProtocolError,
+    sanitize_provider_error,
+)
 from app.services.provider_utils import ak_symbol, ensure_positive_limit, is_installed, pick, valid_ohlc
 from app.services.providers import stamp_daily_kline_contract
-from app.services.sina_client import SINA_BJ_STOCK_POOL_SOURCE_NAME, sina_bj_stock_pool_rows
+from app.services.sina_client import (
+    SINA_BJ_STOCK_POOL_SOURCE_NAME,
+    sina_bj_stock_pool_rows,
+    sina_qfq_daily_klines,
+)
 from app.utils.parsing import required_float, safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
 from app.utils.time import now_text
@@ -155,9 +164,15 @@ class AKShareProvider:
             try:
                 df = _akshare_daily_hist_frame(symbol)
             except AKShareFetchError:
-                rows = _eastmoney_kline(symbol, period="101", limit=limit)
+                try:
+                    rows = _eastmoney_kline(symbol, period="101", limit=limit)
+                except Exception:
+                    rows = sina_qfq_daily_klines(symbol, limit=limit)
             else:
-                rows = _akshare_daily_klines_from_frame(df, limit)
+                try:
+                    rows = _akshare_daily_klines_from_frame(df, limit)
+                except ProviderCoverageMiss:
+                    rows = sina_qfq_daily_klines(symbol, limit=limit)
             return stamp_daily_kline_contract(
                 rows,
                 adjustment_mode="qfq",
@@ -329,10 +344,13 @@ def _akshare_minute_hist_frame(symbol: str, period: str):
 
 def _akshare_daily_klines_from_frame(frame, limit: int) -> list[Kline]:
     ensure_positive_limit(limit)
-    rows = [_akshare_daily_kline_from_row(row) for _, row in frame.tail(limit).iterrows()]
+    raw_rows = [row for _, row in frame.tail(limit).iterrows()]
+    if not raw_rows:
+        raise ProviderCoverageMiss("AKShare日K未覆盖请求股票或返回空序列")
+    rows = [_akshare_daily_kline_from_row(row) for row in raw_rows]
     result = [row for row in rows if row is not None]
     if not result:
-        raise RuntimeError("AKShare日K返回为空或全部无效")
+        raise ProviderInstrumentDataError("AKShare日K非空响应中没有有效行情记录")
     return result
 
 

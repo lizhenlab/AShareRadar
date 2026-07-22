@@ -129,6 +129,7 @@ export async function runAiQuestionSubmitSmoke() {
 
   const button = element("aiQuestionForm-button");
   assert(!button.disabled && button.textContent === "问一下", "AI question button did not recover after submit");
+  assert(element("aiQuestionForm").getAttribute("aria-busy") === "false", "AI question form did not leave busy state after submit");
   assert(fetchCalls.length === 1 && fetchCalls[0].url.endsWith("/api/stock/ask"), "AI question request was not sent");
 
   const body = JSON.parse(fetchCalls[0].options.body);
@@ -137,8 +138,10 @@ export async function runAiQuestionSubmitSmoke() {
   assert(
     answerHtml.includes("风险已识别&lt;script&gt;")
       && answerHtml.includes("回答可靠度 61/100")
+      && answerHtml.includes('role="status" aria-live="polite" aria-atomic="true"')
+      && (answerHtml.match(/aria-live=/g) || []).length === 1
       && !answerHtml.includes("置信度"),
-    "AI question answer was not inserted, escaped, or labeled with score semantics",
+    "AI question answer was not inserted, escaped, announced once, or labeled with score semantics",
   );
 }
 
@@ -154,9 +157,20 @@ function installStaticAssetDom() {
         onclick: null,
         value: "",
         disabled: false,
+        hidden: false,
         textContent: "问一下",
+        attributes: new Map(),
         addEventListener(type, handler) {
           this.listener = { type, handler };
+        },
+        setAttribute(name, value) {
+          this.attributes.set(name, String(value));
+        },
+        getAttribute(name) {
+          return this.attributes.get(name) ?? null;
+        },
+        focus() {
+          document.activeElement = this;
         },
         querySelector(selector) {
           if (selector === "button") return element(`${id}-button`);
@@ -174,6 +188,7 @@ function installStaticAssetDom() {
   }
 
   globalThis.document = {
+    activeElement: null,
     getElementById: element,
     querySelector() {
       return null;

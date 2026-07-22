@@ -138,6 +138,7 @@ class ScheduledTaskState(BaseModel):
     display_name: str
     interval_seconds: int
     running: bool
+    automatic_enabled: bool | None = None
     last_started_at: str | None = None
     last_finished_at: str | None = None
     next_run_at: str | None = None

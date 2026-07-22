@@ -45,13 +45,14 @@ def score_market_scan_item(
     min_data_quality_score: int,
 ) -> MarketScanResultWrite:
     _require_matching_quote(item, quote)
+    _require_quote_date(quote, expected_data_date)
     completed_rows, latest_date = _rankable_completed_rows(
         rows,
+        quote=quote,
         completed_cutoff=completed_cutoff,
         expected_data_date=expected_data_date,
         min_history_rows=min_history_rows,
     )
-    _require_quote_date(quote, expected_data_date)
     _require_rankable_liquidity(quote, completed_rows)
     quality = _market_scan_quality(
         quote,
@@ -151,6 +152,7 @@ def _market_scan_result(
 def _rankable_completed_rows(
     rows: list[Kline],
     *,
+    quote: Quote,
     completed_cutoff: date,
     expected_data_date: date,
     min_history_rows: int,
@@ -161,6 +163,11 @@ def _rankable_completed_rows(
         raise MarketScanSkipped(f"完整前复权日K不足：需要 {min_history_rows} 根，当前 {len(completed_rows)} 根")
     latest_date = date.fromisoformat(completed_rows[-1].date)
     if latest_date < expected_data_date:
+        if quote.volume > 0 and quote.amount > 0:
+            raise MarketScanDataMissing(
+                f"当日报价存在有效成交，但日K仅到 {latest_date.isoformat()}，"
+                f"早于应有交易日 {expected_data_date.isoformat()}"
+            )
         raise MarketScanSkipped(f"日K停留在 {latest_date.isoformat()}，早于应有交易日 {expected_data_date.isoformat()}，可能停牌")
     if latest_date > expected_data_date:
         raise MarketScanDataMissing(f"日K日期 {latest_date.isoformat()} 晚于应有交易日 {expected_data_date.isoformat()}")
@@ -222,6 +229,8 @@ def _require_quote_date(quote: Quote, expected_data_date: date) -> None:
 
 def _require_rankable_liquidity(quote: Quote, rows: list[Kline]) -> None:
     if quote.volume <= 0 or quote.amount <= 0:
+        if rows[-1].volume <= 0:
+            raise MarketScanSkipped("当日报价与日K均无有效成交，可能停牌")
         raise MarketScanDataMissing("报价缺少有效成交量或成交额")
     if quote.turnover_rate is None:
         raise MarketScanDataMissing("报价缺少换手率")

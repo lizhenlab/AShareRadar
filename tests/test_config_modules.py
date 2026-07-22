@@ -117,6 +117,21 @@ def test_settings_require_daily_retention_to_cover_the_scan_window() -> None:
         Settings(market_scan_kline_limit=261, max_daily_kline_rows=260)
 
 
+def test_settings_reject_auto_market_scan_when_scheduler_is_disabled() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="market_scan_auto_enabled 开启时必须同时开启 scheduler_enabled",
+    ):
+        Settings(market_scan_auto_enabled=True, scheduler_enabled=False)
+
+
+def test_settings_allow_manual_market_scan_when_scheduler_is_disabled() -> None:
+    settings = Settings(market_scan_auto_enabled=False, scheduler_enabled=False)
+
+    assert settings.scheduler_enabled is False
+    assert settings.market_scan_auto_enabled is False
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

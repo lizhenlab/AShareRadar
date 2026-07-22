@@ -18,6 +18,7 @@ from app.models.schemas import Kline, Quote
 from app.services.provider_errors import (
     ProviderCoverageMiss,
     ProviderError,
+    ProviderInstrumentDataError,
     ProviderProtocolError,
     ProviderTransportError,
     sanitize_provider_error,
@@ -30,6 +31,7 @@ from app.utils.time import now_text
 
 
 TENCENT_QUOTE_MIN_FIELDS = 45
+TENCENT_KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 TENCENT_MARKET_MAP = {"1": "SH", "0": "SZ", "2": "SZ", "51": "SZ", "52": "SZ", "62": "BJ"}
 TENCENT_AMOUNT_SCALE = 10000
 TENCENT_MARKET_CAP_SCALE = 100000000
@@ -63,6 +65,10 @@ class MarketDataProtocolError(ProviderProtocolError, MarketDataError):
     """腾讯行情返回内容无法安全使用。"""
 
 
+class MarketDataInstrumentDataError(ProviderInstrumentDataError, MarketDataError):
+    """腾讯返回的单只股票内容无法安全使用。"""
+
+
 class TencentMarketDataProvider:
     source_name = "腾讯行情"
 
@@ -87,7 +93,7 @@ class TencentMarketDataProvider:
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
         ensure_positive_limit(limit)
         code = tencent_symbol(symbol)
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,{limit},qfq"
+        url = f"{TENCENT_KLINE_URL}?param={code},day,,,{limit},qfq"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(url)
@@ -98,14 +104,15 @@ class TencentMarketDataProvider:
         except ValueError as exc:
             raise MarketDataProtocolError(f"K线响应解析失败：{sanitize_provider_error(exc)}") from exc
 
+        _validate_tencent_kline_envelope(data)
         rows = _tencent_kline_rows(data, code)
         if not rows:
             if _tencent_kline_response_is_coverage_miss(data, code):
                 raise MarketDataCoverageMiss(f"K线未覆盖请求股票：{symbol}")
-            raise MarketDataProtocolError("K线返回结构异常")
+            raise MarketDataInstrumentDataError("K线返回结构异常")
         klines = _tencent_klines_from_rows(rows)
         if not klines:
-            raise MarketDataProtocolError("K线有效数据为空")
+            raise MarketDataInstrumentDataError("K线有效数据为空")
         return stamp_daily_kline_contract(
             klines,
             adjustment_mode="qfq",
@@ -148,7 +155,11 @@ def _tencent_kline_rows(data: object, code: str) -> Iterable[object]:
     item = data_block.get(code)
     if not isinstance(item, dict):
         return []
-    rows = item.get("qfqday") or []
+    rows = item.get("qfqday")
+    if rows is None or rows == []:
+        # Tencent uses `day` for a qfq request when no adjustment event exists.
+        rows = item.get("day")
+    rows = rows or []
     return rows if isinstance(rows, (list, tuple)) else []
 
 
@@ -163,10 +174,26 @@ def _tencent_kline_response_is_coverage_miss(data: object, code: str) -> bool:
     item = data_block.get(code)
     if not isinstance(item, dict):
         return False
-    if "qfqday" not in item:
+    if "qfqday" not in item and "day" not in item:
         return False
-    rows = item["qfqday"]
+    rows = item.get("qfqday")
+    if rows is None or rows == []:
+        day_rows = item.get("day")
+        if day_rows is None and rows == []:
+            return True
+        rows = day_rows
     return isinstance(rows, (list, tuple)) and not rows
+
+
+def _validate_tencent_kline_envelope(data: object) -> None:
+    if not isinstance(data, dict):
+        raise MarketDataProtocolError("K线返回顶层结构异常")
+    code = data.get("code")
+    if code not in (None, 0, "0"):
+        message = sanitize_provider_error(data.get("msg") or "未知业务错误")
+        raise MarketDataProtocolError(f"K线接口业务错误 code={code}：{message[:160]}")
+    if not isinstance(data.get("data"), dict):
+        raise MarketDataProtocolError("K线返回 data 结构异常")
 
 
 def _tencent_klines_from_rows(rows: Iterable[object]) -> list[Kline]:

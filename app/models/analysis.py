@@ -249,6 +249,13 @@ class StockEventItem(BaseModel):
     action_hint: str | None = None
 
 
+class EventSourceCapability(BaseModel):
+    key: Literal["exchange_announcements", "lhb", "margin_financing", "research_reports"]
+    label: str
+    status: Literal["available", "unavailable"]
+    detail: str
+
+
 class StockEventSummary(BaseModel):
     symbol: str
     updated_at: str
@@ -256,6 +263,7 @@ class StockEventSummary(BaseModel):
     notes: list[str]
     missing_sources: list[str] = Field(default_factory=list)
     next_steps: list[str] = Field(default_factory=list)
+    source_capabilities: list[EventSourceCapability] = Field(default_factory=list)
 
 
 class StrategyCard(BaseModel):
@@ -338,6 +346,8 @@ class LhbSummary(BaseModel):
     action_items: list[str] = Field(default_factory=list)
     reliability: str = "前置推断"
     source: str
+    capability_status: Literal["available", "unavailable"] = "unavailable"
+    capability_message: str = "未接入真实龙虎榜数据源。"
 
 
 class AbnormalEventItem(BaseModel):

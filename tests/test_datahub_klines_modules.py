@@ -22,8 +22,15 @@ from app.services.datahub_klines import (
     _bounded_limit,
     _kline_now as production_kline_now,
     _latest_minute_klines,
+    _prepare_daily_klines,
 )
 from app.services.datahub_runtime import ProviderRuntime
+from app.services.provider_errors import (
+    ProviderChainUnavailable,
+    ProviderInstrumentDataError,
+    ProviderProtocolError,
+    ProviderTransportError,
+)
 from app.utils.time import now_text
 from tests.factories import make_kline
 
@@ -113,6 +120,327 @@ def test_daily_kline_coverage_miss_uses_fallback_without_global_failure() -> Non
     assert healthy is True
     assert success_count == 1
     assert failure_count == 0
+
+
+def test_daily_kline_reports_temporarily_unavailable_chain_without_cache() -> None:
+    class CoolingProvider:
+        source_name = "冷却日线源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            self.calls += 1
+            return [make_kline(date="2026-05-13")]
+
+    async def run_check(path: Path) -> int:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        provider = CoolingProvider()
+        runtime = ProviderRuntime(cache, settings)
+        runtime.record_failure("cooling", 1, RuntimeError("源站限流"), "kline")
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"cooling": provider},
+            runtime=runtime,
+            priority=lambda kind: [(1, "cooling")],
+        )
+
+        with pytest.raises(ProviderChainUnavailable, match="当前暂不可用"):
+            await coordinator.kline("600519.SH", limit=20, use_cache=False)
+        return provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == 0
+
+
+def test_required_daily_kline_reports_permanently_unavailable_chain_before_cache_fallback() -> None:
+    async def run_check(path: Path) -> float | None:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        cache.save_klines(
+            "600519.SH",
+            [make_kline(date="2026-05-12", source="旧缓存")],
+            "旧缓存",
+        )
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "missing")],
+            now=lambda: datetime(2026, 5, 13, 16, 0, 0),
+        )
+
+        with pytest.raises(ProviderChainUnavailable, match="数据源未注册") as exc_info:
+            await coordinator.kline(
+                "600519.SH",
+                limit=20,
+                use_cache=False,
+                allow_stale=True,
+                require_provider_response=True,
+            )
+        return exc_info.value.retry_after_seconds
+
+    with TemporaryDirectory() as tmpdir:
+        retry_after_seconds = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert retry_after_seconds is None
+
+
+def test_required_daily_kline_treats_full_provider_capacity_as_retryable() -> None:
+    class BusyProvider:
+        source_name = "繁忙日线源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            del symbol, limit
+            self.calls += 1
+            return [make_kline(date="2026-05-13")]
+
+    async def run_check(path: Path) -> tuple[float | None, int, bool]:
+        settings = Settings(
+            provider_call_timeout_seconds=0.02,
+            provider_failure_cooldown_seconds=60,
+        )
+        cache = SQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        provider = BusyProvider()
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"busy": provider},
+            runtime=runtime,
+            priority=lambda kind: [(1, "busy")],
+        )
+        release = asyncio.Event()
+        capacity_reached = asyncio.Event()
+        started = 0
+
+        async def blocking_call() -> None:
+            nonlocal started
+            started += 1
+            if started == 2:
+                capacity_reached.set()
+            await release.wait()
+
+        blockers = [
+            asyncio.create_task(
+                runtime.call_provider(
+                    "busy",
+                    "kline",
+                    blocking_call,
+                    request_key=f"block-{index}",
+                    timeout_seconds=1,
+                )
+            )
+            for index in range(2)
+        ]
+        try:
+            await asyncio.wait_for(capacity_reached.wait(), timeout=0.2)
+            with pytest.raises(ProviderChainUnavailable) as exc_info:
+                await coordinator.kline(
+                    "600519.SH",
+                    limit=20,
+                    use_cache=False,
+                    require_provider_response=True,
+                )
+            return (
+                exc_info.value.retry_after_seconds,
+                provider.calls,
+                runtime.is_cooling("busy", "kline"),
+            )
+        finally:
+            release.set()
+            await asyncio.gather(*blockers, return_exceptions=True)
+            await runtime.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        retry_after_seconds, provider_calls, cooling = asyncio.run(
+            run_check(Path(tmpdir) / "cache.sqlite3")
+        )
+
+    assert retry_after_seconds is not None
+    assert retry_after_seconds > 0
+    assert provider_calls == 0
+    assert cooling is False
+
+
+def test_daily_kline_transport_failure_is_retryable_even_when_cooldown_is_disabled() -> None:
+    class FailingProvider:
+        source_name = "失败日线源"
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            del symbol, limit
+            raise ProviderTransportError("连接被重置")
+
+    async def run_check(path: Path) -> None:
+        settings = Settings(provider_failure_cooldown_seconds=0)
+        cache = SQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failing": FailingProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "failing")],
+        )
+
+        with pytest.raises(ProviderChainUnavailable, match="所有日K数据源"):
+            await coordinator.kline("600519.SH", limit=20, use_cache=False)
+
+    with TemporaryDirectory() as tmpdir:
+        asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+
+def test_daily_kline_protocol_failure_is_retryable_even_when_cooldown_is_disabled() -> None:
+    class MalformedProvider:
+        source_name = "异常协议日线源"
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            del symbol, limit
+            raise ProviderProtocolError("响应顶层结构异常")
+
+    async def run_check(path: Path) -> None:
+        settings = Settings(provider_failure_cooldown_seconds=0)
+        cache = SQLiteCache(path)
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"malformed": MalformedProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "malformed")],
+        )
+
+        with pytest.raises(ProviderChainUnavailable, match="所有日K数据源"):
+            await coordinator.kline(
+                "600519.SH",
+                limit=20,
+                use_cache=False,
+                require_provider_response=True,
+            )
+
+    with TemporaryDirectory() as tmpdir:
+        asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+
+def test_daily_kline_instrument_error_does_not_mark_the_chain_unavailable() -> None:
+    class InvalidInstrumentProvider:
+        source_name = "单标的异常源"
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            del symbol, limit
+            raise ProviderInstrumentDataError("当前股票字段损坏")
+
+    async def run_check(path: Path) -> tuple[bool, int]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"invalid": InvalidInstrumentProvider()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "invalid")],
+        )
+
+        with pytest.raises(RuntimeError, match="所有K线数据源均不可用"):
+            await coordinator.kline("600519.SH", limit=20, use_cache=False)
+        status = next(
+            item
+            for item in cache.provider_capability_statuses()
+            if item.name == "invalid" and item.kind == "kline"
+        )
+        return runtime.is_cooling("invalid", "kline"), status.failure_count
+
+    with TemporaryDirectory() as tmpdir:
+        cooling, failure_count = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert cooling is False
+    assert failure_count == 1
+
+
+def test_daily_kline_allows_stale_rows_only_for_explicit_validation_callers() -> None:
+    class StaleProvider:
+        def __init__(self, source_name: str, latest: str) -> None:
+            self.source_name = source_name
+            self.latest = latest
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            del symbol, limit
+            return [make_kline(date=self.latest)]
+
+    async def run_check(path: Path) -> list[Kline]:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={
+                "newer": StaleProvider("较新停牌日线", "2026-05-12"),
+                "older": StaleProvider("较旧停牌日线", "2026-05-09"),
+            },
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "newer"), (2, "older")],
+            now=lambda: datetime(2026, 5, 13, 16, 0, 0),
+        )
+
+        return await coordinator.kline(
+            "600519.SH",
+            limit=20,
+            use_cache=False,
+            allow_stale=True,
+            require_provider_response=True,
+        )
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert rows[-1].date == "2026-05-12"
+    assert rows[-1].source == "较新停牌日线"
+
+
+def test_market_scan_policy_does_not_hide_provider_outage_behind_old_cache() -> None:
+    class FailingProvider:
+        source_name = "故障日线源"
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            del symbol, limit
+            raise ProviderTransportError("网络断开")
+
+    async def run_check(path: Path) -> None:
+        settings = Settings(provider_failure_cooldown_seconds=60)
+        cache = SQLiteCache(path)
+        cache.save_klines(
+            "600519.SH",
+            [make_kline(date="2026-05-12", source="旧缓存")],
+            "旧缓存",
+        )
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"failing": FailingProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "failing")],
+            now=lambda: datetime(2026, 5, 13, 16, 0, 0),
+        )
+
+        with pytest.raises(ProviderChainUnavailable, match="当前暂不可用"):
+            await coordinator.kline(
+                "600519.SH",
+                limit=20,
+                use_cache=False,
+                allow_stale=True,
+                require_provider_response=True,
+            )
+
+    with TemporaryDirectory() as tmpdir:
+        asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
 
 def test_daily_kline_none_response_is_protocol_failure_not_coverage_miss() -> None:
@@ -252,7 +580,7 @@ def test_stale_primary_daily_kline_uses_fresh_backup_before_success_or_save() ->
 
     assert [item.source for item in rows] == ["新日线后备源"]
     assert all(not item.from_cache and item.fallback_used for item in rows)
-    assert stale_status == (0, 1, "旧日线源 日K业务时间无效或已过期：2026-05-12")
+    assert stale_status == (1, 0, None)
     assert backup_status == (1, 0)
 
 
@@ -523,9 +851,9 @@ def test_all_stale_kline_sources_preserve_real_cache_fetched_at_and_mark_fallbac
     assert daily_db == [("2026-05-12", 100.0, "真实旧缓存", stored_at)]
     assert minute_db == [("2026-05-13 14:30:00", 101.0, "真实旧缓存", stored_at)]
     assert sorted(statuses) == [
-        ("stale_one", "kline", 0, 1),
+        ("stale_one", "kline", 1, 0),
         ("stale_one", "minute", 0, 1),
-        ("stale_two", "kline", 0, 1),
+        ("stale_two", "kline", 1, 0),
         ("stale_two", "minute", 0, 1),
     ]
 
@@ -586,9 +914,9 @@ def test_all_stale_kline_sources_without_cache_raise_and_leave_tables_empty() ->
     assert daily_count == 0
     assert minute_count == 0
     assert sorted(statuses) == [
-        ("stale_one", "kline", 0, 1),
+        ("stale_one", "kline", 1, 0),
         ("stale_one", "minute", 0, 1),
-        ("stale_two", "kline", 0, 1),
+        ("stale_two", "kline", 1, 0),
         ("stale_two", "minute", 0, 1),
     ]
 
@@ -1796,7 +2124,20 @@ def test_unregistered_priority_provider_is_skipped_before_backup_without_status_
     assert missing_status_exists is False
 
 
-def test_invalid_provider_kline_rows_are_rejected_before_backup() -> None:
+def test_prepare_daily_klines_classifies_all_invalid_rows_as_instrument_failure() -> None:
+    invalid = make_kline(date="2026-05-13").model_copy(update={"high": math.inf})
+
+    with pytest.raises(ProviderInstrumentDataError, match="坏K线源 日K没有有效记录：600519.SH"):
+        _prepare_daily_klines(
+            [invalid],
+            "坏K线源",
+            "600519.SH",
+            20,
+            KLINE_TEST_NOW,
+        )
+
+
+def test_invalid_provider_kline_rows_are_instrument_failure_before_backup() -> None:
     class InvalidKlineProvider:
         source_name = "坏K线源"
 
@@ -1809,7 +2150,7 @@ def test_invalid_provider_kline_rows_are_rejected_before_backup() -> None:
         async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
             return [make_kline(date="2026-05-13")]
 
-    async def run_check(path: Path) -> tuple[list[Kline], str | None]:
+    async def run_check(path: Path) -> tuple[list[Kline], bool, int, str | None]:
         settings = Settings(provider_failure_cooldown_seconds=60)
         cache = SQLiteCache(path)
         runtime = ProviderRuntime(cache, settings)
@@ -1823,14 +2164,16 @@ def test_invalid_provider_kline_rows_are_rejected_before_backup() -> None:
 
         rows = await coordinator.kline("600519.SH", limit=20, use_cache=False)
         status = next(item for item in cache.provider_capability_statuses() if item.name == "invalid" and item.kind == "kline")
-        return rows, status.last_error
+        return rows, runtime.is_cooling("invalid", "kline"), status.failure_count, status.last_error
 
     with TemporaryDirectory() as tmpdir:
-        rows, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+        rows, cooling, failure_count, last_error = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
     assert [item.source for item in rows] == ["备用K线源"]
     assert rows[0].fallback_used is True
-    assert last_error == "K线返回为空"
+    assert cooling is False
+    assert failure_count == 1
+    assert last_error == "坏K线源 日K没有有效记录：600519.SH"
 
 
 def test_kline_coordinator_filters_sorts_and_limits_provider_rows_before_save() -> None:
@@ -1944,7 +2287,7 @@ def test_kline_coordinator_bounds_excessive_limits_before_provider_calls() -> No
             return [_minute_row(timestamp="2026-05-13 10:15:00", interval=interval)]
 
     async def run_check(path: Path) -> tuple[list[int], list[int]]:
-        settings = Settings(max_minute_kline_rows=3)
+        settings = Settings(max_daily_kline_rows=333, max_minute_kline_rows=3)
         cache = SQLiteCache(path)
         provider = CapturingProvider()
         coordinator = KlineCoordinator(
@@ -1962,7 +2305,7 @@ def test_kline_coordinator_bounds_excessive_limits_before_provider_calls() -> No
     with TemporaryDirectory() as tmpdir:
         daily_limits, minute_limits = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
-    assert daily_limits == [MAX_DAILY_KLINE_LIMIT]
+    assert daily_limits == [333]
     assert minute_limits == [3]
 
 

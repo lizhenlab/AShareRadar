@@ -34,7 +34,7 @@ def build_event_digest_report(insights: StockInsightBundle) -> EventDigestReport
     impact = _impact_label(buckets)
     return EventDigestReport(
         impact_label=impact,
-        summary=f"{impact}。事件层主要来自异动、行业背景和龙虎榜前置判断，正式公告/研报源仍可继续增强。",
+        summary=f"{impact}。事件层仅统计已有数据形成的异动、行业背景和复盘记录；未接入的外部源不计作事件证据。",
         positive_events=_dedupe(buckets.positive)[:MAX_EVENT_ITEMS],
         negative_events=_dedupe(buckets.negative)[:MAX_EVENT_ITEMS],
         watch_events=_watch_events(buckets),

@@ -411,11 +411,26 @@ def test_workbench_renderer_escapes_events_and_signal_evidence_with_fake_dom() -
           }],
           next_steps: ["第一步<script>", "第二步", "第三步", "第四步", "第五步不显示"],
           missing_sources: ["研报<script>", "互动易"],
+          source_capabilities: [{
+            key: "lhb",
+            label: "龙虎榜席位<script>",
+            status: "unavailable",
+            detail: "不会根据行情推断上榜<script>",
+          }],
         },
         financial_health: { score: 60, level: "普通", source: "本地", summary: "财务摘要", metrics: [] },
         valuation: { score: 55, level: "中性", source: "本地", summary: "估值摘要", evidence: [], watch_points: [] },
         abnormal_events: { main_signal: "无明显异动", level: "普通", score: 50, events: [] },
-        lhb: { available: false, level: "待确认", source: "本地", summary: "龙虎榜待接入", reasons: [], action_items: [] },
+        lhb: {
+          available: false,
+          capability_status: "unavailable",
+          capability_message: "未接入真实龙虎榜源<script>",
+          level: "不可用",
+          source: "未接入真实源",
+          summary: "龙虎榜能力不可用",
+          reasons: ["量价异动<script>"],
+          action_items: ["异动核查建议<script>"],
+        },
         rule_matches: { matches: [] },
       };
 
@@ -430,11 +445,19 @@ def test_workbench_renderer_escapes_events_and_signal_evidence_with_fake_dom() -
         throw new Error("signal evidence did not render empty neutral state or escaped text");
       }
       const eventHtml = element("stockEvents").innerHTML;
-      if (!eventHtml.includes("公告&lt;script&gt;") || !eventHtml.includes("待补数据：研报&lt;script&gt; / 互动易")) {
+      if (
+        !eventHtml.includes("公告&lt;script&gt;") ||
+        !eventHtml.includes("待补数据：研报&lt;script&gt; / 互动易") ||
+        !eventHtml.includes("龙虎榜席位&lt;script&gt;: 不可用")
+      ) {
         throw new Error("stock events did not render escaped event and missing source details");
       }
       if (eventHtml.includes("第五步不显示") || eventHtml.includes("<script>")) {
         throw new Error("stock event follow-up list was not limited or escaped");
+      }
+      const lhbHtml = element("lhbPanel").innerHTML;
+      if (!lhbHtml.includes("数据能力不可用") || !lhbHtml.includes("非龙虎榜证据") || lhbHtml.includes("真实数据已接入") || lhbHtml.includes("<script>")) {
+        throw new Error("unavailable lhb capability was not rendered honestly or escaped");
       }
       if (!element("qualityPanel").innerHTML.includes("报价完整&lt;script&gt;")) {
         throw new Error("quality panel did not render escaped data-quality notes");

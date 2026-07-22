@@ -112,7 +112,7 @@ def test_market_scan_rejects_provider_bar_after_expected_trading_date() -> None:
         (lambda: _item(), lambda: _quote(), lambda: _rows(DATA_DATE, 59), MarketScanSkipped, "日K不足"),
         (
             lambda: _item(),
-            lambda: _quote(),
+            lambda: _quote().model_copy(update={"volume": 0.0, "amount": 0.0}),
             lambda: _rows(date(2026, 7, 16), 80),
             MarketScanSkipped,
             "可能停牌",
@@ -145,6 +145,37 @@ def test_market_scan_score_rejects_non_comparable_data(
             item_factory(),
             quote_factory(),
             rows_factory(),
+            as_of=AS_OF,
+            completed_cutoff=DATA_DATE,
+            expected_data_date=DATA_DATE,
+            min_history_rows=60,
+            min_data_quality_score=0,
+        )
+
+
+def test_current_trading_quote_does_not_turn_stale_kline_into_suspension() -> None:
+    with pytest.raises(MarketScanDataMissing, match="当日报价存在有效成交"):
+        score_market_scan_item(
+            _item(),
+            _quote(),
+            _rows(date(2026, 7, 16), 80),
+            as_of=AS_OF,
+            completed_cutoff=DATA_DATE,
+            expected_data_date=DATA_DATE,
+            min_history_rows=60,
+            min_data_quality_score=0,
+        )
+
+
+def test_current_zero_liquidity_quote_and_bar_are_classified_as_possible_suspension() -> None:
+    rows = _rows(DATA_DATE, 80)
+    rows[-1] = rows[-1].model_copy(update={"volume": 0.0})
+
+    with pytest.raises(MarketScanSkipped, match="可能停牌"):
+        score_market_scan_item(
+            _item(),
+            _quote().model_copy(update={"volume": 0.0, "amount": 0.0}),
+            rows,
             as_of=AS_OF,
             completed_cutoff=DATA_DATE,
             expected_data_date=DATA_DATE,

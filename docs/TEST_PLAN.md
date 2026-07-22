@@ -51,17 +51,17 @@ The current test suite is split by domain:
 - `tests/test_cache_freshness_modules.py`
 - `tests/test_cache_stats_modules.py`
 - `tests/test_chart_marks_modules.py`
-- `tests/test_config_modules.py`
+- `tests/test_config_modules.py`: environment parsing/validation and exact `ASHARE_RADAR_*` operations-document coverage.
 - `tests/test_container_settings_lifecycle.py`
 - `tests/test_data_quality_modules.py`
-- `tests/test_data_sources.py`
+- `tests/test_data_sources.py`: provider adapters and fallback ordering, including AKShare daily fallback through Eastmoney and final Sina `qfq` rows.
 - `tests/test_datahub_cache_modules.py`
-- `tests/test_datahub_klines_modules.py`
+- `tests/test_datahub_klines_modules.py`: daily/minute cache and provider contracts, including the distinction between stock coverage misses and a typed temporarily unavailable daily provider chain.
 - `tests/test_datahub_metadata_modules.py`
 - `tests/test_datahub_metadata_structure.py`: metadata facade compatibility, dependency acyclicity, module-size limits, and coverage/persistence use of the same normalized stock-pool set.
 - `tests/test_datahub_orderbook_modules.py`
 - `tests/test_datahub_quotes_modules.py`
-- `tests/test_datahub_runtime_modules.py`: request-key sharing/admission/orphan isolation, bounded daemon executor ownership, queued-work cancellation, idempotent and cancellation-safe deferred close, active-worker/provider-client ordering, automatic post-quiescence cleanup, and stuck-SDK subprocess exit.
+- `tests/test_datahub_runtime_modules.py`: request-key sharing/admission/orphan isolation, provider-chain ready/temporary/permanent state and retry hints, bounded daemon executor ownership, queued-work cancellation, idempotent and cancellation-safe deferred close, active-worker/provider-client ordering, automatic post-quiescence cleanup, and stuck-SDK subprocess exit.
 - `tests/test_datahub_source_plan_modules.py`
 - `tests/test_datahub_status_modules.py`
 - `tests/test_datahub_status_service_modules.py`
@@ -102,7 +102,7 @@ The current test suite is split by domain:
 - `tests/test_market_sampling_modules.py`
 - `tests/test_market_scan_api.py`: asynchronous create/deduplication, lifecycle controls, no-store reads, validation, pagination, and full filter/sort forwarding.
 - `tests/test_market_scan_frontend.py`: split-module/version wiring, strict contracts, one-timer polling, bounded backoff, latest recovery, new-run pagination reset, online recovery, escaped rendering, and ARIA state.
-- `tests/test_market_scan_modules.py`: full-universe/per-market accounting, bounded concurrency, structured fallback degradation, unified retry plans, lifecycle release, cancel/restart recovery, terminal `BUSY`/`LOCKED` retry, owned post-worker recovery, foreign-leader protection, publish-time guard, and automatic-run suppression.
+- `tests/test_market_scan_modules.py`: full-universe/per-market accounting, bounded concurrency, structured fallback degradation, pending preservation on system-wide quote/daily-K failure, pending-only batch recovery, unified retry plans, lifecycle release, cancel/restart recovery, terminal `BUSY`/`LOCKED` retry, owned post-worker recovery, foreign-leader protection, publish-time guard, and automatic-run suppression.
 - `tests/test_market_scan_repository.py`: transitions, batch invariants, atomic task creation/scan attachment and scan/task terminal writes, retry-copy rollback/concurrency guards, stable ranks, filters, immutable snapshots, structured degradation, idempotent repair, and active-run uniqueness.
 - `tests/test_market_scan_repository_structure.py`: repository facade compatibility, dependency direction/acyclicity, and production module-size limits.
 - `tests/test_market_scan_scoring.py`: deterministic versioned score, completed-`data_date` snapshot boundary, quote/K-line date and adjustment contracts, required liquidity inputs, missing/skip boundaries, and A-share-only universe tags/exclusions.
@@ -149,6 +149,7 @@ The current test suite is split by domain:
 - `tests/test_scheduler_structure.py`: scheduler facade compatibility, internal dependency acyclicity, and production module-size limits.
 - `tests/test_schema_compat.py`
 - `tests/test_scoring_modules.py`
+- `tests/test_sina_client.py`: SH/SZ/BJ symbol mapping, bounded/rate-limited requests, safe JSON and adjustment-factor parsing without `eval`, forward-filled `qfq` calculation, strict OHLC/volume/date validation, and provider error classification.
 - `tests/test_static_assets.py`
 - `tests/test_stock_abnormal_events.py`
 - `tests/test_stock_activity_modules.py`
@@ -161,7 +162,7 @@ The current test suite is split by domain:
 - `tests/test_stock_strategy_modules.py`
 - `tests/test_symbol_modules.py`
 - `tests/test_system_diagnostics_modules.py`
-- `tests/test_tencent_provider_modules.py`
+- `tests/test_tencent_provider_modules.py`: current Tencent quote behavior plus SH/SZ/BJ `newfqkline` requests, `qfqday`/unadjusted-day response handling, validation, and failure classification.
 - `tests/test_tool_inventory_modules.py`: generated-document drift, test-plan completeness, machine-path guards, dependency layering, immutable action SHA pins, and Node 24 action-major guards.
 - `tests/test_trading_calendar_modules.py`
 - `tests/test_uvicorn_smoke.py`: real loopback Uvicorn startup with isolated SQLite, API/static responses and cache headers, plus a deliberately held-open quote SSE connection and traceback-free `SIGINT` shutdown bounded by the test's two-second graceful-shutdown setting.
@@ -225,16 +226,19 @@ Browser regression support is indexed separately:
 | Each Tools-tab cleanup preview | 1 |
 | Enabling browser notifications | 1 immediate baseline page; later 30-second polls use as many 50-event keyset pages as needed, capped at 200 pages |
 
-Stock-search requests are not part of the four-request stock-switch baseline: only a debounced, uncached, non-complete user query may trigger one. A selected suggestion then follows the ordinary stock-load budget. The latest recorded desktop/mobile browser matrix is **28 passed, 4 skipped**; the skipped cases are intentional device-exclusive scenarios recorded by Playwright rather than treated as passes.
+Stock-search requests are not part of the four-request stock-switch baseline: only a debounced, uncached, non-complete user query may trigger one. A selected suggestion then follows the ordinary stock-load budget. The latest recorded desktop/mobile browser matrix is **33 passed, 5 skipped**; the skipped cases are intentional device-exclusive scenarios recorded by Playwright rather than treated as passes.
 
 Regression-sensitive boundaries include core-workbench-first cold-load dispatch under browser connection limits, equal-event quote quality priority and legacy UTC ordering, `qfq`/legacy K-line isolation, quote/minute session freshness, provider request-key single-flight/orphan isolation plus daemon-worker process exit, the 15:15 daily publish threshold, full-market `data_date` snapshots, atomic task attachment and scan/task terminals, owned terminal-failure recovery, structured degradation and unified retry plans, normalized atomic stock-pool replacement, quiescence-delayed single runtime leadership and whole-service takeover, set-based retention with retry-lineage convergence, cross-process backup leases and explicit rotation/restore guards, scan contract/backoff/latest recovery and ARIA state, server-current-time handling for today's review/scan, rendered-symbol ownership, single-use import previews, latest-owner browser state, serialized backup-before-import, automatic user-history exclusion, review-linked retention, successful write reconciliation, comparable-change unread watermarks, notification cursor advancement, stale companion responses, immutable Node 24 action pins, and request-budget drift.
 
 ## 6. Latest Test Report
 
-The first rows below audit the current shared worktree; older records remain for traceability. The current verification used an isolated locked Python environment, fake providers, temporary databases, and no credentials or live-provider dependency.
+Each row describes the exact worktree scope verified by its command; older records remain for traceability. Automated verification uses an isolated locked Python environment, fake providers/HTTP clients, temporary databases, and no credentials or live-provider dependency unless a row explicitly says otherwise.
 
 | Date | Worktree State | Environment | Command | Scope | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-22 | Final provider-reliability and full-market recovery worktree | macOS, project Python 3.12 `.venv`, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing --cov-report=xml` | Full Python suite with branch coverage | 2177 passed in 126.85s; 91.63% coverage | Coverage gate is 90%; includes provider-chain state/capacity, Tencent/Sina SH/SZ/BJ daily-K fallback, zero-volume and stale suspended-stock handling, bulk-response truncation protection, pending-only recovery, cancellation/write transactions, real Uvicorn/SSE shutdown, multiprocess coordination, and persistence regressions. |
+| 2026-07-22 | Same final worktree | macOS, project Python 3.12 `.venv` | `npm run check` | Python compile, pyflakes, JavaScript syntax, and full pytest suite | 2177 passed in 64.10s | Confirms the convenient local quality command against the final source and test inventory. |
+| 2026-07-22 | Current shared worktree after provider-chain pending/retry documentation and Tencent/Sina daily-K reliability changes | macOS, project Python 3.12 `.venv`, fake providers/HTTP clients | `$PYTHON -m pytest -q tests/test_config_modules.py tests/test_sina_client.py tests/test_datahub_runtime_modules.py <targeted daily-K, market-scan outage/recovery, and Tencent endpoint tests>` | Reliability-focused configuration, provider-chain, fallback, and scan regression subset | 135 passed in 1.60s | No outbound network; confirms exact environment-variable documentation, chain-state classification, false-missing prevention, pending-only recovery, safe Sina `qfq` parsing, and the Tencent SH/SZ/BJ endpoint contract. |
 | 2026-07-19 | Current worktree after stock-pool atomicity, structured degradation, scan/task transaction recovery, unified quiescent runtime leadership, bounded retention/backup leases, module splits, frontend recovery, and runtime-lock hygiene | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing --cov-report=xml` | Full Python suite with branch coverage | 2000 passed in 83.28s; 91.57% coverage | Coverage gate is 90%; includes real Uvicorn/SSE shutdown, multiprocess leadership/backup, 5,500-symbol retention, and scan consistency regressions. |
 | 2026-07-19 | Same current worktree | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `npm run check` | Python compile, pyflakes, JS syntax, full pytest suite | 2000 passed in 52.69s | Confirms the convenient local regression command against the final source and test inventory. |
 | 2026-07-18 | Audited full-market baseline with SH/SZ/BJ background scanning, per-market pool guards, deterministic ranking, immutable derived retry, explicit fallback degradation, persistence, API, and frontend workspace | macOS, isolated locked Python 3.12 environment, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing` | Full Python suite with branch coverage | 1899 passed in 66.91s; 91.59% coverage | Coverage gate is 90%; predates the current runtime-leadership, structured-degradation, retention, and module-split changes. |
@@ -248,6 +252,9 @@ Recent targeted checks kept for traceability:
 
 | Date | Command | Scope | Result | Why It Was Run |
 | --- | --- | --- | --- | --- |
+| 2026-07-22 | `npm run test:e2e` | Full desktop and mobile browser regression, including full-market run/retry/recovery and multi-page notification coordination | 33 passed, 5 skipped in 47.4s | Confirms responsive workbench behavior, strict response contracts, request budgets, scan lifecycle ownership, online recovery, accessibility state, and cross-page alert de-duplication. |
+| 2026-07-22 | `$PYTHON tools/api_inventory.py --check`, `$PYTHON tools/architecture_inventory.py --check`, then `$PYTHON -m pytest -q tests/test_tool_inventory_modules.py tests/test_config_modules.py` | Generated API/architecture references and documentation/configuration guardrails | passed; 55 tests passed in 11.48s | Confirms generated references match the final source tree and runtime settings remain documented without machine-specific paths or credentials. |
+| 2026-07-22 | `$PYTHON -m pip check`, `$PYTHON -m ruff check app tests tools`, `$PYTHON -m mypy`, and `git diff --check` | Dependency, static-analysis, type, and patch-integrity gates | passed; mypy checked 44 source files | Confirms the final dependency graph, lint rules, type contracts, and patch formatting are clean. |
 | 2026-07-19 | `npm run test:e2e` | Full desktop and mobile browser regression including scan failure recovery and online resynchronization | 28 passed, 4 skipped in 43.7s | Confirms strict response contracts, bounded one-timer polling, latest-run recovery, new-run pagination reset, responsive charts/layout, request budgets, and ARIA state. |
 | 2026-07-19 | `$PYTHON -m pip check`, `$PYTHON -m ruff check app tests tools`, `$PYTHON -m mypy`, both generated-inventory checks, and `git diff --check` | Dependency, static-analysis, type, generated-document, and patch-integrity gates | passed; mypy checked 44 source files; 14 inventory guard tests passed | Matches the quality job gates and confirms current Node 24 GitHub Action pins, portable documentation, complete test indexing, and ignored runtime data. |
 | 2026-07-18 | `npm run test:e2e` | Full desktop and mobile browser regression including the full-market background scan workspace | 24 passed, 4 skipped in 34.3s | Confirms immediate task progress, unpublished cancellation, derived-run retry, terminal degraded snapshots, bounded 100-row pagination, sorting/filters, keyboard scrolling, responsive layout, and existing workflows. |
@@ -260,6 +267,8 @@ Recent targeted checks kept for traceability:
 | 2026-07-16 | `$PYTHON -m pytest -q -p no:cacheprovider -k tool_inventory` | Documentation and generator guardrails | 13 passed | Historical guardrail result retained for traceability. |
 | 2026-07-16 | `$PYTHON tools/api_inventory.py --check` and `$PYTHON tools/architecture_inventory.py --check` | Generated API/function references | passed | Both generated references match the current source tree. |
 | 2026-07-16 | `npm run test:e2e` | Desktop and mobile browser regression | 20 passed, 4 skipped | Covers code/name search, exact chart inspection, local activity, request budgets, and existing desktop/mobile workflows. |
+
+Final live-provider verification completed on 2026-07-22 against the current SH/SZ/BJ universe. The terminal derived run processed **5529/5529** symbols: **5491 success**, **0 missing**, and **38 skipped**, for **99.31% ranked coverage**. The skipped set was audited as 34 recent listings with fewer than the required 60 completed daily bars plus 4 possible suspensions: one stale daily sequence and three current BaoStock rows with zero volume plus unavailable/zero-volume Tencent quotes. No provider-chain outage was converted into bulk per-symbol missing data; three successful symbols retained explicit fallback or metadata degradation provenance. SQLite `quick_check` and `foreign_key_check` passed after the run.
 
 ## 7. Coverage Gaps
 

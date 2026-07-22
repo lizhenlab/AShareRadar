@@ -26,6 +26,7 @@ from app.services.datahub_runtime import ProviderRuntime
 from app.services.datahub_source_plan import SourcePlanBuilder
 from app.services.datahub_status import _provider_error_text, _provider_source_key
 from app.services.akshare_provider import (
+    AKShareFetchError,
     ConceptBoardCandidate,
     _concept_constituents_contain,
     _em_concept_candidate,
@@ -52,7 +53,13 @@ from app.services.eastmoney_client import (
     eastmoney_history_json,
     merge_no_proxy,
 )
-from app.services.provider_errors import ProviderCoverageMiss, ProviderError, ProviderProtocolError, ProviderTransportError
+from app.services.provider_errors import (
+    ProviderCoverageMiss,
+    ProviderError,
+    ProviderInstrumentDataError,
+    ProviderProtocolError,
+    ProviderTransportError,
+)
 from app.services.provider_registry import provider_priority
 from app.services.providers import stamp_daily_kline_contract
 from app.services.provider_stock_mappers import stock_info_from_baostock_row
@@ -1040,6 +1047,37 @@ class DataSourceReliabilityTests(unittest.TestCase):
             ),
         )
 
+    def test_akshare_daily_kline_uses_sina_when_eastmoney_fallback_fails(self) -> None:
+        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        fallback_rows = [
+            Kline(
+                date="2026-05-15",
+                open=100,
+                close=101,
+                high=102,
+                low=99,
+                volume=1234,
+                source="新浪财经·前复权日K",
+            )
+        ]
+
+        with patch("app.services.akshare_provider.is_installed", return_value=True), patch(
+            "app.services.akshare_provider._akshare_daily_hist_frame",
+            side_effect=AKShareFetchError("AKShare 上游失败"),
+        ), patch(
+            "app.services.akshare_provider._eastmoney_kline",
+            side_effect=ProviderTransportError("东方财富连接失败"),
+        ) as eastmoney, patch(
+            "app.services.akshare_provider.sina_qfq_daily_klines",
+            return_value=fallback_rows,
+        ) as sina:
+            rows = asyncio.run(provider.kline("920066.BJ", limit=1))
+
+        eastmoney.assert_called_once_with("920066.BJ", period="101", limit=1)
+        sina.assert_called_once_with("920066.BJ", limit=1)
+        self.assertEqual(rows[0].source, "新浪财经·前复权日K")
+        self.assertEqual(rows[0].adjustment_mode, "qfq")
+
     def test_akshare_daily_kline_schema_error_does_not_use_light_fallback(self) -> None:
         provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
 
@@ -1062,6 +1100,56 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 asyncio.run(provider.kline("600519.SH", limit=1))
 
         fallback.assert_not_called()
+
+    def test_akshare_empty_daily_frame_uses_sina_before_reporting_coverage_miss(self) -> None:
+        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+
+        class EmptyFrame:
+            def tail(self, _limit):
+                return self
+
+            def iterrows(self):
+                return iter(())
+
+        with patch("app.services.akshare_provider.is_installed", return_value=True), patch(
+            "app.services.akshare_provider._akshare_daily_hist_frame",
+            return_value=EmptyFrame(),
+        ), patch("app.services.akshare_provider._eastmoney_kline") as fallback, patch(
+            "app.services.akshare_provider.sina_qfq_daily_klines",
+            side_effect=ProviderCoverageMiss("新浪未覆盖请求股票"),
+        ) as sina:
+            with self.assertRaisesRegex(ProviderCoverageMiss, "未覆盖请求股票"):
+                asyncio.run(provider.kline("920066.BJ", limit=20))
+
+        fallback.assert_not_called()
+        sina.assert_called_once_with("920066.BJ", limit=20)
+
+    def test_akshare_nonempty_fully_invalid_daily_frame_is_instrument_error(self) -> None:
+        class InvalidFrame:
+            def tail(self, _limit):
+                return self
+
+            def iterrows(self):
+                return iter(
+                    enumerate(
+                        [
+                            {
+                                "日期": "2026-05-15",
+                                "开盘": -1,
+                                "收盘": 101,
+                                "最高": 102,
+                                "最低": 99,
+                                "成交量": 1234,
+                            }
+                        ]
+                    )
+                )
+
+        with self.assertRaisesRegex(ProviderInstrumentDataError, "非空响应"):
+            __import__("app.services.akshare_provider", fromlist=["_akshare_daily_klines_from_frame"])._akshare_daily_klines_from_frame(
+                InvalidFrame(),
+                20,
+            )
 
     def test_akshare_minute_schema_error_does_not_use_light_fallback(self) -> None:
         provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()

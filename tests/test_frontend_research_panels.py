@@ -144,6 +144,67 @@ def test_factor_lab_renders_all_seven_production_factors_and_participation_note(
     _run_node_script(script)
 
 
+def test_ai_question_form_has_accessible_name_description_and_idle_state() -> None:
+    script = r'''
+      import { renderResearch } from "./static/js/research-panels.js";
+
+      const dom = installResearchPanelDom();
+      renderResearch(workbench(), { symbol: "600519.SH" });
+
+      const html = document.getElementById("aiDashboard").innerHTML;
+      for (const marker of [
+        '<label class="ai-visually-hidden" for="aiQuestionInput">个股问诊问题</label>',
+        'aria-describedby="aiQuestionHelp"',
+        'aria-errormessage="aiQuestionFeedback"',
+        'id="aiQuestionHelp">请输入一个不超过120个字符的具体问题。</span>',
+        'id="aiQuestionFeedback" hidden',
+        'id="aiQuestionForm" aria-busy="false"',
+      ]) {
+        if (!html.includes(marker)) throw new Error(`missing accessible AI question markup: ${marker}`);
+      }
+      if (dom.form().getAttribute("aria-busy") !== "false" || dom.input().getAttribute("aria-invalid") !== "false") {
+        throw new Error("AI question form did not begin in an accessible idle state");
+      }
+      if (html.includes("aria-live=")) throw new Error("idle AI question form should not contain a live announcement region");
+    '''
+    _run_node_script(script)
+
+
+def test_blank_ai_question_reports_inline_error_focuses_input_and_clears_on_edit() -> None:
+    script = r'''
+      import { renderResearch } from "./static/js/research-panels.js";
+
+      const dom = installResearchPanelDom();
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        return answerResponse("不应请求");
+      };
+
+      renderResearch(workbench(), { symbol: "600519.SH" });
+      dom.input().value = "   ";
+      await dom.form().listener.handler({ preventDefault() {}, currentTarget: dom.form() });
+
+      if (fetchCalls !== 0) throw new Error("blank AI question issued a request");
+      if (dom.feedback().hidden || dom.feedback().textContent !== "请输入要问的问题。") {
+        throw new Error("blank AI question did not show the inline error");
+      }
+      if (dom.input().getAttribute("aria-invalid") !== "true" || document.activeElement !== dom.input()) {
+        throw new Error("blank AI question did not expose invalid state and restore input focus");
+      }
+      if (dom.form().getAttribute("aria-busy") !== "false" || dom.button().disabled) {
+        throw new Error("validation error incorrectly entered the request busy state");
+      }
+
+      dom.input().value = "风险在哪里？";
+      dom.input().listener.handler({ currentTarget: dom.input() });
+      if (!dom.feedback().hidden || dom.feedback().textContent || dom.input().getAttribute("aria-invalid") !== "false") {
+        throw new Error("editing did not clear the AI question validation error");
+      }
+    '''
+    _run_node_script(script)
+
+
 def test_delayed_ai_answer_does_not_replace_rerendered_symbol_answer() -> None:
     script = r'''
       import { renderResearch } from "./static/js/research-panels.js";
@@ -161,7 +222,7 @@ def test_delayed_ai_answer_does_not_replace_rerendered_symbol_answer() -> None:
       dom.input().value = "旧个股问题";
       const pendingSubmit = dom.form().listener.handler({ preventDefault() {}, currentTarget: dom.form() });
 
-      if (!dom.button().disabled || dom.button().textContent !== "分析中") {
+      if (!dom.button().disabled || dom.button().textContent !== "分析中" || dom.form().getAttribute("aria-busy") !== "true") {
         throw new Error("submit did not enter busy state");
       }
       state.symbol = "000001.SZ";
@@ -192,7 +253,7 @@ def test_delayed_ai_answer_does_not_replace_rerendered_symbol_answer() -> None:
       if (dom.removedAnswers !== 0) {
         throw new Error("stale reply removed the current answer");
       }
-      if (dom.button().disabled || dom.button().textContent !== "问一下") {
+      if (dom.button().disabled || dom.button().textContent !== "问一下" || dom.form().getAttribute("aria-busy") !== "false") {
         throw new Error("current rerendered button should remain idle");
       }
     '''
@@ -231,7 +292,13 @@ def test_ai_question_submit_ignores_duplicate_submit_while_pending() -> None:
       if (!dom.answerHtml().includes("第一问回答")) {
         throw new Error("first request answer was not inserted after duplicate submit was ignored");
       }
-      if (dom.button().disabled || dom.button().textContent !== "问一下") {
+      if (!dom.answerHtml().includes('role="status" aria-live="polite" aria-atomic="true"')) {
+        throw new Error("successful AI answer was not announced as a single polite status");
+      }
+      if ((dom.answerHtml().match(/aria-live=/g) || []).length !== 1) {
+        throw new Error("successful AI answer contains duplicate live regions");
+      }
+      if (dom.button().disabled || dom.button().textContent !== "问一下" || dom.form().getAttribute("aria-busy") !== "false") {
         throw new Error("button did not recover after first request");
       }
     '''
@@ -247,7 +314,7 @@ def test_current_ai_question_error_still_renders() -> None:
       globalThis.fetch = async () => ({
         ok: false,
         async json() {
-          return { detail: "问诊暂不可用" };
+          return { detail: "问诊暂不可用<script>" };
         },
       });
 
@@ -255,8 +322,14 @@ def test_current_ai_question_error_still_renders() -> None:
       dom.input().value = "错误展示";
       await dom.form().listener.handler({ preventDefault() {}, currentTarget: dom.form() });
 
-      if (!dom.answerHtml().includes("问诊暂不可用")) {
-        throw new Error("current request error was not rendered");
+      if (!dom.answerHtml().includes("问诊暂不可用&lt;script&gt;") || dom.answerHtml().includes("问诊暂不可用<script>")) {
+        throw new Error("current request error was not rendered and escaped");
+      }
+      if (!dom.answerHtml().includes('role="alert" aria-live="assertive" aria-atomic="true"')) {
+        throw new Error("AI request failure was not announced as an assertive alert");
+      }
+      if ((dom.answerHtml().match(/aria-live=/g) || []).length !== 1) {
+        throw new Error("AI request failure contains duplicate live regions");
       }
       if (dom.button().disabled || dom.button().textContent !== "问一下") {
         throw new Error("button did not recover after error");
@@ -511,6 +584,8 @@ function installResearchPanelDom() {
       this.disabled = false;
       this.textContent = "";
       this.isConnected = true;
+      this.hidden = false;
+      this.attributes = new Map();
     }
 
     get innerHTML() {
@@ -523,6 +598,18 @@ function installResearchPanelDom() {
 
     addEventListener(type, handler) {
       this.listener = { type, handler };
+    }
+
+    setAttribute(name, value) {
+      this.attributes.set(name, String(value));
+    }
+
+    getAttribute(name) {
+      return this.attributes.get(name) ?? null;
+    }
+
+    focus() {
+      document.activeElement = this;
     }
 
     querySelector() {
@@ -541,8 +628,11 @@ function installResearchPanelDom() {
       currentInput = new InputElement();
       currentButton = new ButtonElement();
       currentForm = new FormElement(this);
+      const feedback = new BaseElement("aiQuestionFeedback");
+      feedback.hidden = true;
       elements.set("aiQuestionForm", currentForm);
       elements.set("aiQuestionInput", currentInput);
+      elements.set("aiQuestionFeedback", feedback);
       currentAnswer = value.includes("ai-card-wide") ? new AnswerElement(value) : null;
     }
 
@@ -560,6 +650,7 @@ function installResearchPanelDom() {
     constructor(dashboard) {
       super("aiQuestionForm");
       this.dashboard = dashboard;
+      this.setAttribute("aria-busy", "false");
     }
 
     querySelector(selector) {
@@ -584,6 +675,7 @@ function installResearchPanelDom() {
   class InputElement extends BaseElement {
     constructor() {
       super("aiQuestionInput");
+      this.setAttribute("aria-invalid", "false");
     }
   }
 
@@ -614,6 +706,7 @@ function installResearchPanelDom() {
   }
 
   globalThis.document = {
+    activeElement: null,
     getElementById: element,
     querySelector(selector) {
       if (selector === ".ai-card-wide") return currentAnswer;
@@ -632,6 +725,7 @@ function installResearchPanelDom() {
     form: () => currentForm,
     input: () => currentInput,
     button: () => currentButton,
+    feedback: () => elements.get("aiQuestionFeedback"),
     answerHtml: () => (currentAnswer ? currentAnswer.innerHTML : ""),
   };
 }

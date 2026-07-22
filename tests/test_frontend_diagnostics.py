@@ -113,6 +113,53 @@ def test_monitoring_partial_failures_are_reported_independently() -> None:
     _run_node_script(script)
 
 
+def test_market_scan_task_card_explains_automatic_schedule_state() -> None:
+    script = r'''
+      import { loadMonitoring } from "./static/js/diagnostics.js";
+
+      const { element } = installDom();
+      const state = { monitorTimer: null };
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        if (target === "/api/tasks/status") {
+          return jsonResponse({
+            enabled: true,
+            running: true,
+            tasks: [
+              {
+                name: "full_market_scan",
+                display_name: "全市场A股扫描",
+                automatic_enabled: true,
+                running: false,
+                next_run_at: "2026-07-23 16:30:00",
+              },
+              {
+                name: "full_market_scan_manual",
+                display_name: "手动扫描入口",
+                automatic_enabled: false,
+                running: false,
+                next_run_at: null,
+              },
+            ],
+          });
+        }
+        if (target === "/api/tasks/runs?limit=8") return jsonResponse([]);
+        if (target === "/api/monitor/events?limit=8") return jsonResponse([]);
+        throw new Error(`unexpected URL: ${target}`);
+      };
+
+      await loadMonitoring(state);
+      const html = element("taskCards").innerHTML;
+      if (!html.includes("自动：已开启 · 下次：2026-07-23 16:30:00")) {
+        throw new Error(`enabled automatic scan schedule was hidden: ${html}`);
+      }
+      if (!html.includes("自动：已关闭 · 可手动运行")) {
+        throw new Error(`disabled automatic scan state was hidden: ${html}`);
+      }
+    '''
+    _run_node_script(script)
+
+
 def test_monitoring_renders_standby_and_degraded_shared_task_run() -> None:
     script = r'''
       import { loadMonitoring } from "./static/js/diagnostics.js";

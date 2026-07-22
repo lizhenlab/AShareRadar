@@ -285,10 +285,16 @@ function renderTaskCard(task, recent) {
       <div>
         <strong>${escapeHtml(task.display_name)}</strong>
         <span>${escapeHtml(taskMessage(task, recent))}</span>
-        <small>下次：${escapeHtml(task.next_run_at || "--")}</small>
+        <small>${escapeHtml(taskScheduleText(task))}</small>
       </div>
       <i class="task-badge ${taskBadgeClass(task, recent)}">${escapeHtml(taskStatusText(task, recent))}</i>
     </div>`;
+}
+
+function taskScheduleText(task) {
+  if (task.automatic_enabled === false) return "自动：已关闭 · 可手动运行";
+  if (task.automatic_enabled === true) return `自动：已开启 · 下次：${task.next_run_at || "等待调度"}`;
+  return `下次：${task.next_run_at || "--"}`;
 }
 
 function taskStatusText(task, recent) {

@@ -6,6 +6,7 @@ from typing import Callable
 from app.models.schemas import (
     AbnormalEventSummary,
     AnalysisResult,
+    EventSourceCapability,
     LhbSummary,
     StockEventItem,
 )
@@ -15,10 +16,6 @@ from app.models.schemas import (
 class ExternalEventContext:
     analysis: AnalysisResult
     lhb: LhbSummary | None
-
-    @property
-    def quote_timestamp(self) -> str:
-        return self.analysis.quote.timestamp
 
     @property
     def change_pct(self) -> float:
@@ -33,7 +30,6 @@ class ExternalEventContext:
 class ExternalEventRule:
     name: str
     matches: Callable[[ExternalEventContext], bool]
-    event: Callable[[ExternalEventContext], StockEventItem]
     next_step: str
 
 
@@ -49,7 +45,6 @@ def collect_event_items(
     events.extend(abnormal_event_items(abnormal_events))
     events.extend(lhb_events(lhb))
     events.extend(data_quality_events(analysis))
-    events.extend(external_event_placeholders(analysis, lhb))
     return events
 
 
@@ -109,12 +104,12 @@ def abnormal_event_items(abnormal_events: AbnormalEventSummary | None) -> list[S
 
 
 def lhb_events(lhb: LhbSummary | None) -> list[StockEventItem]:
-    if not lhb or not lhb.available:
+    if not lhb or not lhb.available or lhb.capability_status != "available":
         return []
     return [
         StockEventItem(
             date=lhb.updated_at,
-            title="龙虎榜信号",
+            title="龙虎榜记录",
             category="龙虎榜",
             level=lhb.level,
             description=lhb.summary,
@@ -143,8 +138,38 @@ def data_quality_events(analysis: AnalysisResult) -> list[StockEventItem]:
 
 
 def external_event_placeholders(analysis: AnalysisResult, lhb: LhbSummary | None) -> list[StockEventItem]:
-    context = ExternalEventContext(analysis=analysis, lhb=lhb)
-    return [rule.event(context) for rule in EXTERNAL_EVENT_RULES if rule.matches(context)][:3]
+    """Backward-compatible hook that never fabricates events for unavailable sources."""
+    return []
+
+
+def external_source_capabilities(lhb: LhbSummary | None) -> list[EventSourceCapability]:
+    lhb_available = bool(lhb and lhb.available and lhb.capability_status == "available")
+    return [
+        EventSourceCapability(
+            key="exchange_announcements",
+            label="交易所公告",
+            status="unavailable",
+            detail="未接入公告原文源；价格波动不会被包装成公告事件。",
+        ),
+        EventSourceCapability(
+            key="lhb",
+            label="龙虎榜席位",
+            status="available" if lhb_available else "unavailable",
+            detail=f"已接入：{lhb.source}" if lhb_available and lhb else "未接入真实榜单与席位源；不会根据行情推断上榜事实。",
+        ),
+        EventSourceCapability(
+            key="margin_financing",
+            label="融资融券余额",
+            status="unavailable",
+            detail="未接入融资融券余额源；换手活跃不会被包装成两融事件。",
+        ),
+        EventSourceCapability(
+            key="research_reports",
+            label="研报摘要",
+            status="unavailable",
+            detail="未接入可核验研报源；不会生成研报占位事件。",
+        ),
+    ]
 
 
 def default_observation_event(analysis: AnalysisResult) -> StockEventItem:
@@ -154,7 +179,7 @@ def default_observation_event(analysis: AnalysisResult) -> StockEventItem:
         title="暂无高强度事件",
         category="观察",
         level="观察",
-        description="当前未从K线、行业和数据质量中识别出明显事件，公告/研报源接入后会补充。",
+        description="当前未从K线、行业和数据质量中识别出明显事件；未接入的外部源不会生成占位记录。",
         source="本地分析",
         reliability="本地推断",
         action_hint="继续观察行情、行业和数据质量变化。",
@@ -162,13 +187,13 @@ def default_observation_event(analysis: AnalysisResult) -> StockEventItem:
 
 
 def event_next_steps(analysis: AnalysisResult, lhb: LhbSummary | None) -> list[str]:
-    steps = ["优先确认数据质量，低质量行情下事件结论自动降权。"]
     context = ExternalEventContext(analysis=analysis, lhb=lhb)
+    steps = ["优先确认数据质量，低质量行情下事件结论自动降权。"]
     steps.extend(rule.next_step for rule in EXTERNAL_EVENT_RULES if rule.matches(context))
     return steps[:4]
 
 
-def _has_lhb_candidate(context: ExternalEventContext) -> bool:
+def _needs_lhb_verification(context: ExternalEventContext) -> bool:
     return bool(context.lhb and context.lhb.reasons)
 
 
@@ -180,65 +205,21 @@ def _needs_margin_check(context: ExternalEventContext) -> bool:
     return context.turnover_rate is not None and context.turnover_rate >= 8
 
 
-def _lhb_candidate_event(context: ExternalEventContext) -> StockEventItem:
-    assert context.lhb is not None
-    lhb = context.lhb
-    return StockEventItem(
-        date=context.quote_timestamp,
-        title="龙虎榜候选核查",
-        category="龙虎榜",
-        level=lhb.level,
-        description="已触发龙虎榜前置候选条件，但尚未接入正式席位明细。",
-        source=lhb.source,
-        reliability=lhb.reliability,
-        action_hint=(lhb.action_items or ["收盘后核查正式榜单。"])[0],
-    )
-
-
-def _announcement_check_event(context: ExternalEventContext) -> StockEventItem:
-    return StockEventItem(
-        date=context.quote_timestamp,
-        title="公告事件待核查",
-        category="公告",
-        level="观察" if context.change_pct >= 0 else "风险",
-        description="价格波动较大，建议核查是否有公告、监管问询、业绩预告或重大事项影响。",
-        source="预留接口·公告核查清单",
-        reliability="待接入",
-        action_hint="正式公告源接入前，不把消息面作为确定性结论。",
-    )
-
-
-def _margin_check_event(context: ExternalEventContext) -> StockEventItem:
-    return StockEventItem(
-        date=context.quote_timestamp,
-        title="融资融券待核查",
-        category="融资融券",
-        level="观察",
-        description="换手活跃，若融资余额快速上升，需警惕杠杆资金追涨；若融券增加，需关注分歧。",
-        source="预留接口·两融核查清单",
-        reliability="待接入",
-        action_hint="两融数据未接入前，仅作为下一步核查项。",
-    )
-
-
 EXTERNAL_EVENT_RULES = (
     ExternalEventRule(
-        name="lhb_candidate",
-        matches=_has_lhb_candidate,
-        event=_lhb_candidate_event,
-        next_step="收盘后核查龙虎榜席位、净买入额和机构/游资方向。",
+        name="lhb_verification",
+        matches=_needs_lhb_verification,
+        next_step="异动核查建议：如需确认是否上榜，请查询交易所正式龙虎榜。",
     ),
     ExternalEventRule(
-        name="announcement_check",
+        name="announcement_verification",
         matches=_needs_announcement_check,
-        event=_announcement_check_event,
-        next_step="核查交易所公告、业绩预告、监管问询和行业新闻。",
+        next_step="异动核查建议：价格波动较大，可核查交易所公告、业绩预告和监管问询。",
     ),
     ExternalEventRule(
-        name="margin_check",
+        name="margin_financing_verification",
         matches=_needs_margin_check,
-        event=_margin_check_event,
-        next_step="补充融资融券余额变化，判断活跃成交是否带有杠杆资金。",
+        next_step="异动核查建议：换手活跃，可到正式渠道核对融资融券余额变化。",
     ),
 )
 
@@ -251,6 +232,7 @@ __all__ = [
     "event_next_steps",
     "EXTERNAL_EVENT_RULES",
     "external_event_placeholders",
+    "external_source_capabilities",
     "industry_events",
     "lhb_events",
     "review_events",

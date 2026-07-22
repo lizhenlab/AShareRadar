@@ -238,6 +238,64 @@ def test_cancel_transitions_active_run_and_rejects_terminal_cancel(tmp_path: Pat
         repo.request_cancel(run.id)
 
 
+def test_result_batch_rechecks_cancellation_inside_write_transaction(tmp_path: Path) -> None:
+    repo, path = _repository(tmp_path)
+    independent_repo = MarketScanRepository(path, threading.RLock())
+    run = _seed_running_run(repo, _sample_seeds()[:2])
+    errors: list[Exception] = []
+    started = threading.Event()
+    finished = threading.Event()
+
+    def save_after_cancellation_starts() -> None:
+        started.set()
+        try:
+            independent_repo.save_result_batch(
+                run.id,
+                [_write("600001.SH", status="success", score=88, quality=95)],
+            )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    cancelling_conn = sqlite3.connect(path, timeout=5)
+    worker = threading.Thread(target=save_after_cancellation_starts, daemon=True)
+    try:
+        cancelling_conn.execute("BEGIN IMMEDIATE")
+        cancelling_conn.execute(
+            "UPDATE market_scan_run SET status = 'cancelling' WHERE id = ?",
+            (run.id,),
+        )
+        worker.start()
+        assert started.wait(timeout=1)
+        assert not finished.wait(timeout=0.1)
+        cancelling_conn.commit()
+    finally:
+        if cancelling_conn.in_transaction:
+            cancelling_conn.rollback()
+        cancelling_conn.close()
+
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "cancelling" in str(errors[0])
+
+    cancelled = repo.finish_run(run.id, "cancelled", message="用户取消")
+    with pytest.raises(ValueError, match="cancelled"):
+        repo.save_result_batch(
+            run.id,
+            [_write("000001.SZ", status="success", score=80, quality=90)],
+        )
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.processed_count == 0
+    assert cancelled.success_count == 0
+    pending = _results(repo, run.id, status="pending").items
+    assert [item.symbol for item in pending] == ["000001.SZ", "600001.SH"]
+    assert all(item.rank is None and item.score is None for item in pending)
+
+
 def test_historical_snapshots_are_isolated_and_terminal_finish_is_idempotent(tmp_path: Path) -> None:
     repo, _path = _repository(tmp_path)
     first = _seed_running_run(repo, [_sample_seeds()[0]])

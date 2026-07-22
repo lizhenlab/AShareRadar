@@ -31,9 +31,12 @@ export function renderAiDashboard(workbench, state, options = {}) {
       </div>
       <i>${escapeHtml(view.risk.overall_level || "风险待确认")}</i>
     </div>
-    <form class="ai-question-bar" id="aiQuestionForm">
-      <input id="aiQuestionInput" type="text" maxlength="120" placeholder="输入你想问这只个股的问题，例如：现在能不能买？" />
+    <form class="ai-question-bar" id="aiQuestionForm" aria-busy="false" novalidate>
+      <label class="ai-visually-hidden" for="aiQuestionInput">个股问诊问题</label>
+      <input id="aiQuestionInput" type="text" maxlength="120" aria-describedby="aiQuestionHelp" aria-errormessage="aiQuestionFeedback" aria-invalid="false" placeholder="输入你想问这只个股的问题，例如：现在能不能买？" />
+      <span class="ai-visually-hidden" id="aiQuestionHelp">请输入一个不超过120个字符的具体问题。</span>
       <button type="submit">问一下</button>
+      <p class="ai-question-feedback" id="aiQuestionFeedback" hidden></p>
     </form>
     <div class="ai-question-presets">${renderAiQuestionPresets()}</div>
     ${view.questionAnswer ? renderQuestionAnswerCard(view.questionAnswer) : ""}
@@ -74,6 +77,8 @@ function bindAiDashboard(el, state, options) {
   if (questionForm) {
     const requestContext = { current: null, options };
     questionForm.addEventListener("submit", (event) => handleAiQuestionSubmit(event, state, requestContext));
+    const { input, feedback } = aiQuestionControls(questionForm);
+    if (input) input.addEventListener("input", () => clearAiQuestionValidation(input, feedback));
   }
   el.onclick = handleAiDashboardClick;
 }
@@ -94,26 +99,47 @@ function aiQuestionFromEvent(event) {
 
 async function handleAiQuestionSubmit(event, state, requestContext) {
   event.preventDefault();
-  const { input, form, button } = aiQuestionControls(event.currentTarget);
-  const question = input ? input.value.trim() : "";
-  if (!question || !form) return;
+  const { input, form, button, feedback } = aiQuestionControls(event.currentTarget);
+  if (!input || !form) return;
   if (button && button.disabled) return;
+  const question = input.value.trim();
+  if (!question) {
+    showAiQuestionValidation(input, feedback);
+    return;
+  }
+  clearAiQuestionValidation(input, feedback);
   const request = beginAiQuestionRequest(state, form, requestContext);
   try {
-    setAiQuestionBusy(button, true);
+    setAiQuestionBusy(form, button, true);
     const answer = await requestAiQuestion(request, question);
     if (!isCurrentAiQuestionRequest(request, state, requestContext)) return;
-    replaceAiAnswer(form, renderQuestionAnswerCard(answer));
+    replaceAiAnswer(form, renderQuestionAnswerCard(answer, { announce: true }));
   } catch (error) {
     if (isAbortError(error)) return;
     if (!isCurrentAiQuestionRequest(request, state, requestContext)) return;
     replaceAiAnswer(form, renderAiQuestionError(error));
   } finally {
     if (isCurrentAiQuestionRequest(request, state, requestContext)) {
-      setAiQuestionBusy(button, false);
+      setAiQuestionBusy(form, button, false);
     }
     finishAiQuestionRequest(request, state, requestContext);
   }
+}
+
+function showAiQuestionValidation(input, feedback) {
+  input.setAttribute("aria-invalid", "true");
+  if (feedback) {
+    feedback.textContent = "请输入要问的问题。";
+    feedback.hidden = false;
+  }
+  input.focus();
+}
+
+function clearAiQuestionValidation(input, feedback) {
+  input.setAttribute("aria-invalid", "false");
+  if (!feedback) return;
+  feedback.textContent = "";
+  feedback.hidden = true;
 }
 
 function beginAiQuestionRequest(state, form, requestContext) {
@@ -174,10 +200,12 @@ function aiQuestionControls(submittedForm = null) {
     input: $("aiQuestionInput"),
     form,
     button: form ? form.querySelector("button") : null,
+    feedback: $("aiQuestionFeedback"),
   };
 }
 
-function setAiQuestionBusy(button, busy) {
+function setAiQuestionBusy(form, button, busy) {
+  if (form) form.setAttribute("aria-busy", String(busy));
   if (!button) return;
   button.disabled = busy;
   button.textContent = busy ? "分析中" : "问一下";
@@ -205,12 +233,14 @@ function removeExistingAiAnswer(form) {
 }
 
 function renderAiQuestionError(error) {
-  return `<section class="ai-card ai-card-wide"><strong>本次问诊</strong><span class="risk">${escapeHtml(error.message)}</span></section>`;
+  const message = error && error.message ? error.message : "问诊暂不可用，请稍后重试。";
+  return `<section class="ai-card ai-card-wide" role="alert" aria-live="assertive" aria-atomic="true"><strong>本次问诊</strong><span class="risk">${escapeHtml(message)}</span></section>`;
 }
 
-function renderQuestionAnswerCard(report) {
+function renderQuestionAnswerCard(report, { announce = false } = {}) {
+  const announcement = announce ? ` role="status" aria-live="polite" aria-atomic="true"` : "";
   return `
-    <section class="ai-card ai-card-wide">
+    <section class="ai-card ai-card-wide"${announcement}>
       <div class="ai-answer-head">
         <strong>本次问诊</strong>
         <i class="${questionAnswerTone(report)}">${escapeHtml(questionAnswerSource(report))}</i>

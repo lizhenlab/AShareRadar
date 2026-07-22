@@ -412,12 +412,15 @@ class LlmExplainerTests(unittest.TestCase):
 
         async def staged_call(*args, repair=False, **kwargs):
             calls.append(repair)
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(0.20 if repair else 0.15)
             if repair:
                 return _structured_json(analysis, rule_answer, "趋势仍需等待规则确认。")
             return "not-json"
 
-        settings = _llm_settings(llm_timeout_seconds=0.06)
+        # The total 0.30-second budget can finish either stage in isolation,
+        # but not both. Generous margins keep the shared-budget assertion
+        # deterministic on a busy CI runner.
+        settings = _llm_settings(llm_timeout_seconds=0.30)
         with patch("app.services.llm_explainer._call_llm", new=staged_call):
             result = asyncio.run(
                 enhance_stock_answer(settings=settings, rule_answer=rule_answer, analysis=analysis)

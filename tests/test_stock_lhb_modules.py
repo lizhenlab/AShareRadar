@@ -14,10 +14,13 @@ def test_lhb_summary_uses_default_reason_and_action_when_no_candidate_signal() -
 
     summary = build_lhb_summary(analysis)
 
-    assert summary.score == 42
-    assert summary.summary == "龙虎榜正式席位数据源待接入，当前先根据涨跌幅、换手和异动强度提示关注价值。"
-    assert summary.reasons == ["未触发明显龙虎榜前置观察条件。"]
-    assert summary.action_items == ["未触发强异动时，龙虎榜不是当前分析主线。"]
+    assert summary.available is False
+    assert summary.capability_status == "unavailable"
+    assert summary.score == 0
+    assert summary.level == "不可用"
+    assert "不会根据行情推断上榜事实" in summary.summary
+    assert summary.reasons == []
+    assert summary.action_items == ["当前未检测到需要额外核查的强量价异动。"]
     assert summary.missing_data == ["龙虎榜上榜日期", "买入席位", "卖出席位", "净买入额", "游资/机构标签"]
 
 
@@ -26,16 +29,17 @@ def test_lhb_summary_collects_move_turnover_and_amount_actions() -> None:
 
     summary = build_lhb_summary(analysis)
 
-    assert summary.score == 62
-    assert summary.summary == "存在短线异动特征，适合在正式龙虎榜源接入后重点核查买卖席位。"
+    assert summary.score == 0
+    assert "仅为异动核查建议" in summary.summary
+    assert "不构成龙虎榜证据" in summary.summary
     assert summary.reasons == [
-        "当日涨跌幅 8.20%，接近龙虎榜常见异动观察区。",
-        "换手率 13.50%，短线资金博弈强。",
+        "量价异动：当日涨跌幅 8.20%。",
+        "量价异动：换手率 13.50%，成交活跃。",
     ]
     assert summary.action_items == [
-        "收盘后核查是否进入龙虎榜异动名单。",
-        "重点看买一/卖一席位是否集中，机构与游资是否同向。",
-        "成交额较大时，核查榜单净买入额占成交额比例，避免只看绝对金额。",
+        "异动核查建议：如需判断是否上榜，请以交易所正式龙虎榜为准。",
+        "异动核查建议：若交易所确认上榜，再核对买卖席位、净买入额及机构/游资方向。",
+        "异动核查建议：若正式榜单可查，再比较净买入额与成交额，避免只看绝对金额。",
     ]
 
 
@@ -44,9 +48,9 @@ def test_lhb_summary_adds_strong_move_bonus_and_weak_trend_action() -> None:
 
     summary = build_lhb_summary(analysis)
 
-    assert summary.score == 60
-    assert summary.reasons == ["当日涨跌幅 -9.50%，接近龙虎榜常见异动观察区。"]
-    assert summary.action_items[-1] == "趋势偏弱时，即使上榜也先判断是修复还是出货。"
+    assert summary.score == 0
+    assert summary.reasons == ["量价异动：当日涨跌幅 -9.50%。"]
+    assert summary.action_items[-1] == "异动核查建议：趋势偏弱时，优先判断量价变化是短暂修复还是抛压释放。"
 
 
 def test_lhb_summary_includes_top_three_abnormal_events_as_reasons() -> None:
@@ -62,9 +66,9 @@ def test_lhb_summary_includes_top_three_abnormal_events_as_reasons() -> None:
 
     summary = build_lhb_summary(analysis, abnormal)
 
-    assert summary.score == 72
-    assert summary.reasons == ["异动0", "异动1", "异动2"]
-    assert "异动3" not in summary.reasons
+    assert summary.score == 0
+    assert summary.reasons == ["行情异动：异动0。", "行情异动：异动1。", "行情异动：异动2。"]
+    assert all("异动3" not in item for item in summary.reasons)
 
 
 def _analysis(*, change_pct: float, turnover_rate: float, amount: float, trend_score: int | None = None):

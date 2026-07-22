@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from functools import partial
 import threading
 import time
-from typing import Any, Generic, ParamSpec, TypeVar
+from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
 from app.services.datahub_status import _provider_error_text
 from app.services.daemon_executor import DaemonThreadPoolExecutor
 from app.services.provider_errors import (
     ProviderCoverageMiss,
+    ProviderInstrumentDataError,
     is_provider_coverage_miss,
     sanitize_provider_error,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "ProviderAttempt",
     "ProviderCallBusyError",
     "ProviderCallTimeoutError",
+    "ProviderChainState",
     "ProviderCoverageMiss",
     "ProviderRuntime",
     "TimedProviderCall",
@@ -37,6 +39,7 @@ __all__ = [
 
 PROVIDER_IO_MAX_WORKERS = 4
 PROVIDER_CAPABILITY_MAX_IN_FLIGHT = 2
+PROVIDER_BUSY_RETRY_AFTER_SECONDS = 0.25
 PROVIDER_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 _PROVIDER_IO_EXECUTOR: ContextVar[DaemonThreadPoolExecutor | None] = ContextVar(
     "ashare_radar_provider_io_executor",
@@ -92,6 +95,18 @@ class TimedProviderCall(Generic[T]):
     latency_ms: float
 
 
+ProviderChainStatus = Literal["ready", "temporary_unavailable", "permanent_unavailable"]
+
+
+@dataclass(frozen=True)
+class ProviderChainState:
+    status: ProviderChainStatus
+    retry_after_seconds: float | None
+    ready_providers: tuple[str, ...]
+    blocked_providers: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
 @dataclass
 class _ProviderCallState:
     task: asyncio.Future[Any]
@@ -101,6 +116,15 @@ class _ProviderCallState:
 
 class ProviderCallBusyError(RuntimeError):
     """Provider admission is full or an orphaned call is still running."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float = PROVIDER_BUSY_RETRY_AFTER_SECONDS,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = max(0.0, retry_after_seconds)
 
 
 class ProviderCallTimeoutError(TimeoutError):
@@ -331,13 +355,66 @@ class ProviderRuntime:
             yield ProviderAttempt(index=index, name=name, provider=provider)
 
     def is_cooling(self, name: str, kind: str = "general") -> bool:
-        until = self._cooldowns.get((name, kind))
+        return self.cooldown_remaining(name, kind) > 0
+
+    def cooldown_remaining(self, name: str, kind: str = "general") -> float:
+        key = (name, kind)
+        until = self._cooldowns.get(key)
         if until is None:
-            return False
-        if time.monotonic() < until:
-            return True
-        self._cooldowns.pop((name, kind), None)
-        return False
+            return 0.0
+        remaining = until - time.monotonic()
+        if remaining > 0:
+            return remaining
+        self._cooldowns.pop(key, None)
+        return 0.0
+
+    def chain_state(
+        self,
+        priority_rows: Iterable[tuple[int, str]],
+        providers: Mapping[str, object],
+        kind: str,
+    ) -> ProviderChainState:
+        ready: list[str] = []
+        blocked: list[str] = []
+        reasons: list[str] = []
+        retry_delays: list[float] = []
+        registered_count = 0
+        for _index, name in priority_rows:
+            if name not in providers:
+                blocked.append(name)
+                reasons.append(f"{name}: 数据源未注册")
+                continue
+            registered_count += 1
+            remaining = self.cooldown_remaining(name, kind)
+            if remaining > 0:
+                blocked.append(name)
+                retry_delays.append(remaining)
+                reasons.append(f"{name}: 最近失败，短暂冷却中")
+                continue
+            if self._provider_has_orphaned_call((name, kind)):
+                blocked.append(name)
+                retry_delays.append(PROVIDER_BUSY_RETRY_AFTER_SECONDS)
+                reasons.append(f"{name}: 上一次调用仍在后台执行")
+                continue
+            if self._active_provider_call_count((name, kind)) >= PROVIDER_CAPABILITY_MAX_IN_FLIGHT:
+                blocked.append(name)
+                retry_delays.append(PROVIDER_BUSY_RETRY_AFTER_SECONDS)
+                reasons.append(f"{name}: 当前并发槽位已满")
+                continue
+            ready.append(name)
+        if ready:
+            status: ProviderChainStatus = "ready"
+        elif registered_count:
+            status = "temporary_unavailable"
+        else:
+            status = "permanent_unavailable"
+        return ProviderChainState(
+            status=status,
+            retry_after_seconds=min(retry_delays) if retry_delays else None,
+            ready_providers=tuple(ready),
+            blocked_providers=tuple(blocked),
+            reasons=tuple(reasons),
+        )
 
     def provider_call_in_flight(self, name: str, kind: str) -> bool:
         key = (name, kind)
@@ -437,7 +514,7 @@ class ProviderRuntime:
         except Exception:
             pass
         cooldown_seconds = max(0, self.settings.provider_failure_cooldown_seconds)
-        if cooldown_seconds:
+        if cooldown_seconds and not isinstance(exc, ProviderInstrumentDataError):
             self._cooldowns[(name, kind)] = time.monotonic() + cooldown_seconds
 
     async def record_failure_async(self, name: str, index: int, exc: Exception, kind: str) -> None:
@@ -452,7 +529,7 @@ class ProviderRuntime:
             error_text,
         )
         cooldown_seconds = max(0, self.settings.provider_failure_cooldown_seconds)
-        if cooldown_seconds:
+        if cooldown_seconds and not isinstance(exc, ProviderInstrumentDataError):
             self._cooldowns[(name, kind)] = time.monotonic() + cooldown_seconds
 
     def record_attempt_failure(

@@ -75,6 +75,18 @@ class ProviderProtocolError(ProviderError):
     """The provider response was malformed, invalid, or unexpectedly stale."""
 
 
+class ProviderInstrumentDataError(ProviderProtocolError):
+    """One instrument's payload is invalid without proving the provider is down."""
+
+
+class ProviderChainUnavailable(ProviderError):
+    """No configured provider can currently accept the requested capability call."""
+
+    def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
 CoverageMissError = ProviderCoverageMiss
 
 

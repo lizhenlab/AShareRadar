@@ -17,6 +17,7 @@ from app.services.scheduler import (
     LocalDataScheduler,
     LocalTask,
 )
+from app.services.scheduler_execution import _next_market_scan_run_at
 from app.services.scheduler_health import _data_health_events, _runtime_cleanup_message
 from app.services.scheduler_schedule import _build_local_tasks, _reschedule_task, _task_state
 from app.utils.time import seconds_ago_text
@@ -506,6 +507,101 @@ def test_scheduler_loop_lets_market_scanner_use_its_shanghai_clock() -> None:
     asyncio.run(scheduler._loop())  # noqa: SLF001
 
     assert scanner.calls == [None]
+
+
+@pytest.mark.parametrize(
+    ("now", "hour", "minute", "expected"),
+    [
+        (datetime(2026, 7, 17, 14, 0), 14, 0, datetime(2026, 7, 17, 15, 15)),
+        (datetime(2026, 7, 17, 14, 0), 16, 30, datetime(2026, 7, 17, 16, 30)),
+        (datetime(2026, 7, 18, 10, 0), 14, 0, datetime(2026, 7, 20, 15, 15)),
+        (datetime(2026, 7, 17, 17, 0), 16, 30, datetime(2026, 7, 17, 17, 0)),
+    ],
+)
+def test_next_market_scan_run_respects_publish_floor_configured_time_and_trading_days(
+    now: datetime,
+    hour: int,
+    minute: int,
+    expected: datetime,
+) -> None:
+    settings = SimpleNamespace(
+        market_scan_schedule_hour=hour,
+        market_scan_schedule_minute=minute,
+    )
+
+    assert _next_market_scan_run_at(settings, None, now) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "trigger", "expected"),
+    [
+        ("success", "manual", datetime(2026, 7, 20, 16, 30)),
+        ("cancelled", "manual", datetime(2026, 7, 20, 16, 30)),
+        ("failed", "scheduled", datetime(2026, 7, 20, 16, 30)),
+        ("failed", "retry", datetime(2026, 7, 20, 16, 30)),
+        ("failed", "manual", datetime(2026, 7, 17, 17, 0)),
+        ("interrupted", "manual", datetime(2026, 7, 17, 17, 0)),
+    ],
+)
+def test_next_market_scan_run_matches_same_day_attempt_deduplication(
+    status: str,
+    trigger: str,
+    expected: datetime,
+) -> None:
+    settings = SimpleNamespace(
+        market_scan_schedule_hour=16,
+        market_scan_schedule_minute=30,
+    )
+    latest = SimpleNamespace(
+        data_date="2026-07-17",
+        status=status,
+        trigger=trigger,
+    )
+
+    assert _next_market_scan_run_at(settings, latest, datetime(2026, 7, 17, 17, 0)) == expected  # type: ignore[arg-type]
+
+
+def test_market_scan_task_status_reports_disabled_automation_without_hiding_manual_task() -> None:
+    hub = _SchedulerHub()
+    hub.settings.market_scan_auto_enabled = False
+    hub.settings.market_scan_schedule_hour = 16
+    hub.settings.market_scan_schedule_minute = 30
+    scheduler = LocalDataScheduler(hub, market_scanner=_StatusMarketScanner())  # type: ignore[arg-type]
+
+    status = scheduler.status()
+    scan = status.tasks[-1]
+
+    assert status.enabled is False
+    assert scan.name == "full_market_scan"
+    assert scan.automatic_enabled is False
+    assert scan.next_run_at is None
+
+
+def test_market_scan_task_status_reports_standby_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = _SchedulerHub()
+    hub.settings.scheduler_enabled = True
+    hub.settings.market_scan_auto_enabled = True
+    hub.settings.market_scan_schedule_hour = 14
+    hub.settings.market_scan_schedule_minute = 0
+    scheduler = LocalDataScheduler(
+        hub,
+        instance_guard=_HeldByOtherGuard(),
+        market_scanner=_StatusMarketScanner(),  # type: ignore[arg-type]
+    )
+    scheduler.set_runtime_standby(True)
+    monkeypatch.setattr(
+        "app.services.scheduler_execution.market_now_naive",
+        lambda: datetime(2026, 7, 17, 14, 0),
+    )
+
+    status = scheduler.status()
+    scan = status.tasks[-1]
+
+    assert status.standby is True
+    assert scan.automatic_enabled is True
+    assert scan.next_run_at == "2026-07-17 15:15:00"
 
 
 def test_build_local_tasks_clamps_invalid_interval_settings() -> None:
@@ -1334,6 +1430,14 @@ class _ScheduledTickScanner:
         self.on_tick()
 
 
+class _StatusMarketScanner:
+    def __init__(self, latest=None) -> None:
+        self.latest = latest
+
+    def latest_run(self):
+        return self.latest
+
+
 class _SelectionSchedulerCache(_SchedulerCache):
     def __init__(
         self,
@@ -1393,6 +1497,17 @@ class _ExclusiveGuard:
         assert self.acquired is True
         self.acquired = False
         self.release_calls += 1
+
+
+class _HeldByOtherGuard:
+    def acquire(self) -> bool:
+        return False
+
+    def release(self) -> None:
+        return None
+
+    def held_by_other(self) -> bool:
+        return True
 
 
 class _BlockingGuard(_ExclusiveGuard):

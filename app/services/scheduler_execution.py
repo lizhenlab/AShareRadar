@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 
+from app.models.market_scan import MarketScanRun
 from app.models.schemas import ScheduledTaskState, SchedulerStatus
 from app.services.market_scan_manager import MARKET_SCAN_TASK_LABEL, MARKET_SCAN_TASK_NAME
 from app.services.scheduler_contracts import (
@@ -29,6 +30,14 @@ from app.services.scheduler_schedule import (
     _task_state,
 )
 from app.services.task_run_lifecycle import start_task_run_cancel_safe
+from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
+from app.utils.market_time import market_local_naive, market_now_naive
+
+
+_MARKET_SCAN_SCHEDULE_CONSUMED_STATUSES = frozenset(
+    {"queued", "running", "cancelling", "success", "degraded", "cancelled"}
+)
+_MARKET_SCAN_SCHEDULE_LOOKAHEAD_DAYS = 370
 
 
 class SchedulerExecutionMixin(SchedulerRuntimeContext):
@@ -77,7 +86,12 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
         standby = bool(self.enabled and not running and self._standby and self._standby_lock_is_held())
         task_states = [_task_state(task) for task in _ordered_tasks(self.tasks)]
         if self.market_scanner is not None:
-            task_states.append(self._market_scan_task_state())
+            task_states.append(
+                self._market_scan_task_state(
+                    now=market_now_naive(),
+                    schedule_available=running or standby,
+                )
+            )
         return SchedulerStatus(
             enabled=self.enabled,
             running=running,
@@ -88,16 +102,26 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             tasks=task_states,
         )
 
-    def _market_scan_task_state(self) -> ScheduledTaskState:
+    def _market_scan_task_state(
+        self,
+        *,
+        now: datetime,
+        schedule_available: bool,
+    ) -> ScheduledTaskState:
         latest = self.market_scanner.latest_run() if self.market_scanner is not None else None
+        automatic_enabled = bool(self.settings.market_scan_auto_enabled)
+        next_run_at = None
+        if automatic_enabled and self.enabled and schedule_available:
+            next_run_at = _next_market_scan_run_at(self.settings, latest, now)
         return ScheduledTaskState(
             name=MARKET_SCAN_TASK_NAME,
             display_name=MARKET_SCAN_TASK_LABEL,
             interval_seconds=24 * 60 * 60,
             running=bool(latest and latest.status in {"queued", "running", "cancelling"}),
+            automatic_enabled=automatic_enabled,
             last_started_at=latest.started_at if latest else None,
             last_finished_at=latest.finished_at if latest else None,
-            next_run_at=None,
+            next_run_at=_text_at(next_run_at),
             last_status=latest.status if latest else None,
             last_message=latest.message if latest else None,
         )
@@ -184,3 +208,30 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             finished_at = datetime.now()
             task.last_finished_at = finished_at
             _reschedule_task(task, manual, finished_at)
+
+
+def _next_market_scan_run_at(
+    settings: object,
+    latest: MarketScanRun | None,
+    now: datetime,
+) -> datetime | None:
+    current = market_local_naive(now)
+    configured_time = time(
+        int(getattr(settings, "market_scan_schedule_hour")),
+        int(getattr(settings, "market_scan_schedule_minute")),
+    )
+    schedule_time = max(configured_time, DAILY_KLINE_PUBLISH_TIME)
+    candidate_date = current.date()
+    for _ in range(_MARKET_SCAN_SCHEDULE_LOOKAHEAD_DAYS):
+        if is_trading_day(candidate_date):
+            candidate = datetime.combine(candidate_date, schedule_time)
+            if not _market_scan_schedule_consumed(latest, candidate_date):
+                return current if candidate < current else candidate
+        candidate_date += timedelta(days=1)
+    return None
+
+
+def _market_scan_schedule_consumed(latest: MarketScanRun | None, data_date: date) -> bool:
+    if latest is None or latest.data_date != data_date.isoformat():
+        return False
+    return latest.status in _MARKET_SCAN_SCHEDULE_CONSUMED_STATUSES or latest.trigger in {"scheduled", "retry"}

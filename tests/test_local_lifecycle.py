@@ -1553,8 +1553,10 @@ class ThemeContextTests(unittest.TestCase):
 
         self.assertTrue(insights.lhb.action_items)
         self.assertIn("龙虎榜席位", insights.events.missing_sources)
-        self.assertTrue(any(item.category in {"龙虎榜", "公告", "融资融券"} for item in insights.events.events))
+        self.assertFalse(any(item.category in {"龙虎榜", "公告", "融资融券"} for item in insights.events.events))
         self.assertTrue(any(item.action_hint for item in insights.events.events))
+        event_factor = next(item for item in insights.overview.factors if item.name == "事件面")
+        self.assertFalse(any(item.startswith(("龙虎榜：", "公告：", "融资融券：")) for item in event_factor.evidence))
 
 
 class WorkbenchCacheTests(unittest.TestCase):

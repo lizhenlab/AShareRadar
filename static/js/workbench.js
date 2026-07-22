@@ -275,13 +275,17 @@ function renderAbnormalEvent(item) {
 function renderLhb(lhb) {
   const reasons = asArray(lhb.reasons);
   const actions = asArray(lhb.action_items);
+  const available = lhb.available === true && lhb.capability_status !== "unavailable";
+  const statusText = available ? "真实数据已接入" : "数据能力不可用";
+  const capabilityMessage = lhb.capability_message || lhb.source || "未接入真实龙虎榜数据源。";
   $("lhbPanel").innerHTML = `
     <div class="finance-head">
-      <strong>龙虎榜 ${escapeHtml(lhb.available ? "已接入" : "待接入")} · ${escapeHtml(lhb.level)}</strong>
-      <span>${escapeHtml(lhb.source)}</span>
+      <strong>龙虎榜 · ${escapeHtml(statusText)}</strong>
+      <span>${escapeHtml(available ? lhb.source : "未接入真实源")}</span>
     </div>
     <p>${escapeHtml(lhb.summary)}</p>
-    ${renderEscapedItems(reasons, "small", { limit: 4 })}
+    ${available ? "" : `<small>${escapeHtml(capabilityMessage)}</small>`}
+    ${reasons.length ? `<div class="event-actions"><small>量价异动核查依据（非龙虎榜证据）</small>${renderEscapedItems(reasons, "em", { limit: 4 })}</div>` : ""}
     ${actions.length ? `<div class="event-actions">${renderEscapedItems(actions, "em", { limit: 3 })}</div>` : ""}
     ${lhb.reliability ? `<small>可靠性：${escapeHtml(lhb.reliability)}</small>` : ""}
   `;
@@ -530,7 +534,7 @@ function renderStockEvents(summary) {
 
 function renderStockEventList(events) {
   return renderList(events, renderStockEventCard, {
-    empty: `<div class="stock-event"><strong>暂无事件</strong><p>等待更多行情、公告或研报数据。</p></div>`,
+    empty: `<div class="stock-event"><strong>暂无事件</strong><p>当前没有可展示的真实或本地识别事件；未接入的外部源不会生成占位事件。</p></div>`,
   });
 }
 
@@ -552,13 +556,26 @@ function eventMetaText(item) {
 function renderStockEventFollowup(summary) {
   const steps = asArray(summary.next_steps).slice(0, 4);
   const missingSources = asArray(summary.missing_sources);
-  if (!steps.length && !missingSources.length) return "";
+  const capabilities = asArray(summary.source_capabilities);
+  if (!steps.length && !missingSources.length && !capabilities.length) return "";
   return `
       <div class="stock-event event-followup">
         <strong>下一步核查<span>清单</span></strong>
         ${renderEscapedItems(steps, "p")}
+        ${renderEventSourceCapabilities(capabilities)}
         ${renderMissingSources(missingSources)}
       </div>`;
+}
+
+function renderEventSourceCapabilities(items) {
+  if (!items.length) return "";
+  return `<small>外部数据能力</small>${items
+    .map((item) => {
+      const capability = asObject(item);
+      const status = capability.status === "available" ? "可用" : "不可用";
+      return `<p><strong>${escapeHtml(capability.label || capability.key || "外部数据")}: ${status}</strong> ${escapeHtml(capability.detail || "")}</p>`;
+    })
+    .join("")}`;
 }
 
 function renderMissingSources(items) {

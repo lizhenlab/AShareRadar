@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Hashable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import math
 from typing import TypeVar
@@ -22,12 +22,19 @@ from app.services.datahub_cache import (
     _tag_minute_klines,
 )
 from app.services.datahub_runtime import (
+    ProviderAttempt,
+    ProviderCallBusyError,
     ProviderRuntime,
     provider_source_name,
     run_cache_io,
     run_cache_io_best_effort,
 )
-from app.services.provider_errors import ProviderCoverageMiss, ProviderProtocolError
+from app.services.provider_errors import (
+    ProviderChainUnavailable,
+    ProviderCoverageMiss,
+    ProviderInstrumentDataError,
+    ProviderProtocolError,
+)
 from app.services.provider_utils import ensure_positive_limit
 from app.utils.market_data import filter_valid_klines, filter_valid_minute_klines
 from app.utils.market_time import market_local_naive, market_now_naive
@@ -56,7 +63,35 @@ class _DailyProviderExhaustion:
 class _DailyFetchOutcome:
     rows: list[Kline] | None
     all_providers_short: bool = False
+    chain_unavailable: bool = False
+    retry_after_seconds: float | None = None
+    stale_rows: list[Kline] | None = None
     source: str | None = None
+
+
+@dataclass
+class _DailyFetchState:
+    candidates: list[tuple[list[Kline], str]] = field(default_factory=list)
+    stale_candidates: list[tuple[list[Kline], str]] = field(default_factory=list)
+    attempted_count: int = 0
+    short_response_count: int = 0
+    chain_failure_count: int = 0
+    retry_delays: list[float] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _DailyFetchRequest:
+    fetch: Callable[[object], Awaitable[list[Kline]] | None]
+    prepare: Callable[[list[Kline], str], list[Kline]]
+    save: Callable[[list[Kline], str], None]
+    requested_limit: int
+    request_key: Hashable
+
+
+class _StaleDailyKlines(ProviderCoverageMiss):
+    def __init__(self, message: str, rows: list[Kline]) -> None:
+        super().__init__(message)
+        self.rows = rows
 
 
 class KlineCoordinator:
@@ -78,9 +113,16 @@ class KlineCoordinator:
         self._now = now or _kline_now
         self._daily_provider_exhaustion: dict[str, _DailyProviderExhaustion] = {}
 
-    async def kline(self, symbol: str, limit: int = 120, use_cache: bool = True) -> list[Kline]:
-        ensure_positive_limit(limit)
-        limit = _bounded_limit(limit, getattr(self.settings, "max_kline_rows", MAX_DAILY_KLINE_LIMIT), MAX_DAILY_KLINE_LIMIT)
+    async def kline(
+        self,
+        symbol: str,
+        limit: int = 120,
+        use_cache: bool = True,
+        *,
+        allow_stale: bool = False,
+        require_provider_response: bool = False,
+    ) -> list[Kline]:
+        limit = _bounded_daily_limit(limit, self.settings.max_daily_kline_rows)
         normalized_symbol = _normalized_symbol_key(symbol)
         current = self._now()
         priority_rows = self.priority("kline")
@@ -114,7 +156,7 @@ class KlineCoordinator:
             if incremental is not None:
                 return incremental[-limit:]
 
-        fetched = await self._full_daily_refresh(
+        outcome = await self._full_daily_refresh(
             symbol=symbol,
             normalized_symbol=normalized_symbol,
             fetch_limit=fetch_limit,
@@ -123,12 +165,36 @@ class KlineCoordinator:
             current=current,
             errors=errors,
         )
-        if fetched is not None:
-            return fetched[-limit:]
+        return await self._resolve_daily_outcome(
+            symbol,
+            limit,
+            outcome,
+            errors,
+            allow_stale=allow_stale,
+            require_provider_response=require_provider_response,
+        )
 
+    async def _resolve_daily_outcome(
+        self,
+        symbol: str,
+        limit: int,
+        outcome: _DailyFetchOutcome,
+        errors: list[str],
+        *,
+        allow_stale: bool,
+        require_provider_response: bool,
+    ) -> list[Kline]:
+        if outcome.rows is not None:
+            return outcome.rows[-limit:]
+        if require_provider_response and outcome.chain_unavailable:
+            raise _daily_chain_unavailable(errors, outcome.retry_after_seconds)
         fallback = await self._daily_fallback(symbol, limit)
+        if allow_stale and outcome.stale_rows is not None:
+            return _most_current_daily_rows(outcome.stale_rows, fallback)[-limit:]
         if fallback is not None:
             return fallback
+        if outcome.chain_unavailable:
+            raise _daily_chain_unavailable(errors, outcome.retry_after_seconds)
         raise RuntimeError("所有K线数据源均不可用：" + "；".join(errors))
 
     async def _fresh_daily_cache(
@@ -163,7 +229,7 @@ class KlineCoordinator:
         provider_chain: tuple[str, ...],
         current: datetime,
         errors: list[str],
-    ) -> list[Kline] | None:
+    ) -> _DailyFetchOutcome:
         outcome = await self._fetch_daily_from_priority(
             priority_rows=priority_rows,
             errors=errors,
@@ -182,7 +248,7 @@ class KlineCoordinator:
                 provider_chain,
                 exhausted=outcome.all_providers_short,
             )
-        return fetched
+        return outcome
 
     async def _incremental_daily_refresh(
         self,
@@ -296,50 +362,131 @@ class KlineCoordinator:
         requested_limit: int,
         request_key: Hashable,
     ) -> _DailyFetchOutcome:
-        candidates: list[tuple[list[Kline], str]] = []
-        attempted_count = 0
-        short_response_count = 0
+        state = _DailyFetchState()
+        request = _DailyFetchRequest(
+            fetch=fetch,
+            prepare=prepare,
+            save=save,
+            requested_limit=requested_limit,
+            request_key=request_key,
+        )
         for attempt in self.runtime.attempts(priority_rows, self.providers, "kline", errors):
-            fallback_attempt = attempted_count > 0 or bool(errors)
-            attempted_count += 1
-            source = provider_source_name(attempt.provider, attempt.name)
-            result = None
-            try:
-                result = await self.runtime.timed_provider_call(
-                    attempt.name,
-                    "kline",
-                    lambda: _run_provider_fetch(fetch, attempt.provider, "kline"),
-                    request_key=request_key,
-                )
-                rows = prepare(result.value, source)
-                if fallback_attempt:
-                    rows = _tag_klines(
-                        rows,
-                        source,
-                        from_cache=False,
-                        fallback_used=True,
-                    )
-                await self.runtime.record_attempt_success_async(attempt, "kline", result.latency_ms)
-                if len(rows) >= requested_limit:
-                    await _save_rows_best_effort(save, rows, source)
-                    return _DailyFetchOutcome(rows=rows, source=source)
-                candidates.append((rows, source))
-                short_response_count += 1
-            except asyncio.CancelledError:
-                raise
-            except ProviderCoverageMiss as exc:
-                if result is not None:
-                    await self.runtime.record_attempt_success_async(attempt, "kline", result.latency_ms)
-                await self.runtime.record_attempt_failure_async(attempt, "kline", exc, errors)
-                short_response_count += 1
-            except Exception as exc:
-                await self.runtime.record_attempt_failure_async(attempt, "kline", exc, errors)
+            outcome = await self._fetch_daily_attempt(attempt, state, request, errors)
+            if outcome is not None:
+                return outcome
+        return await self._complete_daily_fetch(priority_rows, state, request)
 
-        if not candidates:
-            return _DailyFetchOutcome(rows=None)
-        rows, source = max(candidates, key=lambda candidate: len(candidate[0]))
-        await _save_rows_best_effort(save, rows, source)
-        all_providers_short = attempted_count == len(priority_rows) and short_response_count == attempted_count
+    async def _fetch_daily_attempt(
+        self,
+        attempt: ProviderAttempt,
+        state: _DailyFetchState,
+        request: _DailyFetchRequest,
+        errors: list[str],
+    ) -> _DailyFetchOutcome | None:
+        fallback_attempt = state.attempted_count > 0 or bool(errors)
+        state.attempted_count += 1
+        source = provider_source_name(attempt.provider, attempt.name)
+        result = None
+        try:
+            result = await self.runtime.timed_provider_call(
+                attempt.name,
+                "kline",
+                lambda: _run_provider_fetch(request.fetch, attempt.provider, "kline"),
+                request_key=request.request_key,
+            )
+            rows = request.prepare(result.value, source)
+            if fallback_attempt:
+                rows = _tag_klines(rows, source, from_cache=False, fallback_used=True)
+            await self.runtime.record_attempt_success_async(attempt, "kline", result.latency_ms)
+            if len(rows) >= request.requested_limit:
+                await _save_rows_best_effort(request.save, rows, source)
+                return _DailyFetchOutcome(rows=rows, source=source)
+            state.candidates.append((rows, source))
+            state.short_response_count += 1
+        except asyncio.CancelledError:
+            raise
+        except _StaleDailyKlines as exc:
+            await self._record_stale_daily_attempt(
+                attempt,
+                exc,
+                state,
+                errors,
+                source=source,
+                fallback_attempt=fallback_attempt,
+                latency_ms=result.latency_ms if result is not None else None,
+            )
+        except ProviderCoverageMiss as exc:
+            if result is not None:
+                await self.runtime.record_attempt_success_async(attempt, "kline", result.latency_ms)
+            await self.runtime.record_attempt_failure_async(attempt, "kline", exc, errors)
+            state.short_response_count += 1
+        except Exception as exc:
+            await self._record_daily_attempt_error(attempt, exc, state, errors)
+        return None
+
+    async def _record_daily_attempt_error(
+        self,
+        attempt: ProviderAttempt,
+        exc: Exception,
+        state: _DailyFetchState,
+        errors: list[str],
+    ) -> None:
+        if not isinstance(exc, ProviderInstrumentDataError):
+            state.chain_failure_count += 1
+        if isinstance(exc, ProviderCallBusyError) and exc.retry_after_seconds > 0:
+            state.retry_delays.append(exc.retry_after_seconds)
+        await self.runtime.record_attempt_failure_async(attempt, "kline", exc, errors)
+
+    async def _record_stale_daily_attempt(
+        self,
+        attempt: ProviderAttempt,
+        exc: _StaleDailyKlines,
+        state: _DailyFetchState,
+        errors: list[str],
+        *,
+        source: str,
+        fallback_attempt: bool,
+        latency_ms: float | None,
+    ) -> None:
+        if latency_ms is not None:
+            await self.runtime.record_attempt_success_async(attempt, "kline", latency_ms)
+        await self.runtime.record_attempt_failure_async(attempt, "kline", exc, errors)
+        rows = exc.rows
+        if fallback_attempt:
+            rows = _tag_klines(rows, source, from_cache=False, fallback_used=True)
+        state.stale_candidates.append((rows, source))
+
+    async def _complete_daily_fetch(
+        self,
+        priority_rows: list[tuple[int, str]],
+        state: _DailyFetchState,
+        request: _DailyFetchRequest,
+    ) -> _DailyFetchOutcome:
+        if not state.candidates:
+            chain_state = self.runtime.chain_state(priority_rows, self.providers, "kline")
+            stale_rows, stale_source = _best_stale_daily_candidate(state.stale_candidates)
+            return _DailyFetchOutcome(
+                rows=None,
+                chain_unavailable=(
+                    not state.stale_candidates
+                    and (
+                        state.chain_failure_count > 0
+                        or chain_state.status != "ready"
+                    )
+                ),
+                retry_after_seconds=_minimum_retry_delay(
+                    chain_state.retry_after_seconds,
+                    *state.retry_delays,
+                ),
+                stale_rows=stale_rows,
+                source=stale_source,
+            )
+        rows, source = max(state.candidates, key=lambda candidate: len(candidate[0]))
+        await _save_rows_best_effort(request.save, rows, source)
+        all_providers_short = (
+            state.attempted_count == len(priority_rows)
+            and state.short_response_count == state.attempted_count
+        )
         return _DailyFetchOutcome(
             rows=rows,
             all_providers_short=all_providers_short,
@@ -463,6 +610,11 @@ def _non_empty_rows(rows: list[T], error: str) -> list[T]:
     return rows
 
 
+def _bounded_daily_limit(limit: int, configured_max: object) -> int:
+    ensure_positive_limit(limit)
+    return _bounded_limit(limit, configured_max, MAX_DAILY_KLINE_LIMIT)
+
+
 def _prepare_daily_klines(
     rows: list[Kline],
     source: str,
@@ -476,15 +628,52 @@ def _prepare_daily_klines(
         raise ProviderCoverageMiss(f"{source} 日K未覆盖请求股票：{symbol}")
     cleaned = _latest_daily_klines(rows, limit)
     if not cleaned:
-        raise ProviderProtocolError("K线返回为空")
+        raise ProviderInstrumentDataError(f"{source} 日K没有有效记录：{symbol}")
     tagged = _tag_klines(cleaned, source, from_cache=False)
     _validate_daily_kline_contract(
         tagged,
         expected_adjustment_mode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
     )
     if not _kline_cache_is_fresh(tagged, now=current):
-        raise ProviderProtocolError(f"{source} 日K业务时间无效或已过期：{tagged[-1].date}")
+        raise _StaleDailyKlines(
+            f"{source} 日K业务时间无效或已过期：{tagged[-1].date}",
+            tagged,
+        )
     return tagged
+
+
+def _most_current_daily_rows(primary: list[Kline], fallback: list[Kline] | None) -> list[Kline]:
+    candidates = [primary]
+    if fallback:
+        candidates.append(fallback)
+    return max(candidates, key=lambda rows: (rows[-1].date, len(rows)))
+
+
+def _best_stale_daily_candidate(
+    candidates: list[tuple[list[Kline], str]],
+) -> tuple[list[Kline] | None, str | None]:
+    if not candidates:
+        return None, None
+    return max(
+        candidates,
+        key=lambda candidate: (candidate[0][-1].date, len(candidate[0])),
+    )
+
+
+def _daily_chain_unavailable(
+    errors: list[str],
+    retry_after_seconds: float | None,
+) -> ProviderChainUnavailable:
+    detail = "；".join(errors) or "没有可接收请求的数据源"
+    return ProviderChainUnavailable(
+        "所有日K数据源当前暂不可用：" + detail,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
+def _minimum_retry_delay(*values: float | None) -> float | None:
+    positive = [value for value in values if value is not None and value > 0]
+    return min(positive) if positive else None
 
 
 def _prepare_minute_klines(

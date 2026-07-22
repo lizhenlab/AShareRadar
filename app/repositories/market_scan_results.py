@@ -133,8 +133,9 @@ class MarketScanResultWriterMixin(MarketScanRepositoryContext):
             validate_result_write(result)
         stamp = now_text()
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             run = required_run_row(conn, run_id)
-            if run["status"] not in {"running", "cancelling"}:
+            if run["status"] != "running":
                 raise ValueError(f"扫描批次 {run_id} 当前状态不能写入结果：{run['status']}")
             placeholders = ", ".join("?" for _symbol in symbols)
             pending = {

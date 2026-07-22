@@ -10,6 +10,7 @@ from app.services.providers import (
     DemoMarketDataProvider,
     MarketDataError,
     MarketDataProtocolError,
+    TENCENT_KLINE_URL,
     TencentMarketDataProvider,
     _format_timestamp,
     _parse_tencent_quote_payload,
@@ -185,6 +186,20 @@ def test_tencent_kline_rows_handles_malformed_payload_shapes() -> None:
     assert list(_tencent_kline_rows({"data": {"sh600519": {"qfqday": "bad"}}}, "sh600519")) == []
 
 
+def test_tencent_kline_rows_accepts_day_key_when_qfq_has_no_adjustment_event() -> None:
+    rows = [["2026-07-22", "10", "10.5", "10.8", "9.9", "12345"]]
+
+    assert list(_tencent_kline_rows({"data": {"bj920011": {"day": rows}}}, "bj920011")) == rows
+
+
+def test_tencent_kline_rows_uses_day_when_qfq_series_is_empty() -> None:
+    rows = [["2026-07-22", "10", "10.5", "10.8", "9.9", "12345"]]
+    payload = {"data": {"bj920011": {"qfqday": [], "day": rows}}}
+
+    assert list(_tencent_kline_rows(payload, "bj920011")) == rows
+    assert _tencent_kline_response_is_coverage_miss(payload, "bj920011") is False
+
+
 def test_tencent_kline_empty_coverage_is_distinct_from_malformed_protocol() -> None:
     assert _tencent_kline_response_is_coverage_miss(
         {"data": {"sh600519": {"qfqday": []}}},
@@ -199,6 +214,8 @@ def test_tencent_kline_empty_coverage_is_distinct_from_malformed_protocol() -> N
 
 
 def test_tencent_provider_kline_raises_when_all_rows_are_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_urls: list[str] = []
+
     class FakeResponse:
         encoding = "utf-8"
 
@@ -219,12 +236,88 @@ def test_tencent_provider_kline_raises_when_all_rows_are_malformed(monkeypatch: 
             return None
 
         async def get(self, url: str) -> FakeResponse:
+            requested_urls.append(url)
             return FakeResponse()
 
     monkeypatch.setattr("app.services.providers.httpx.AsyncClient", FakeClient)
 
     with pytest.raises(MarketDataError, match="K线有效数据为空"):
         asyncio.run(TencentMarketDataProvider(timeout=8.0).kline("600519.SH", limit=1))
+
+    assert requested_urls == [f"{TENCENT_KLINE_URL}?param=sh600519,day,,,1,qfq"]
+
+
+def test_tencent_provider_rejects_nonzero_business_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"code": 429, "msg": "upstream throttled", "data": {}}
+
+    class FakeClient:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str) -> FakeResponse:
+            del url
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.providers.httpx.AsyncClient", FakeClient)
+
+    with pytest.raises(MarketDataProtocolError, match="code=429"):
+        asyncio.run(TencentMarketDataProvider(timeout=8.0).kline("600519.SH", limit=1))
+
+
+@pytest.mark.parametrize("symbol, provider_symbol", [("920000.BJ", "bj920000"), ("920066.BJ", "bj920066")])
+def test_tencent_provider_uses_new_qfq_endpoint_for_beijing_stocks(
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+    provider_symbol: str,
+) -> None:
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "data": {
+                    provider_symbol: {
+                        "qfqday": [["2026-07-22", "10", "10.5", "10.8", "9.9", "12345"]]
+                    }
+                }
+            }
+
+    class FakeClient:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str) -> FakeResponse:
+            requested_urls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.providers.httpx.AsyncClient", FakeClient)
+
+    rows = asyncio.run(TencentMarketDataProvider(timeout=8.0).kline(symbol, limit=260))
+
+    assert requested_urls == [f"{TENCENT_KLINE_URL}?param={provider_symbol},day,,,260,qfq"]
+    assert len(rows) == 1
+    assert rows[0].adjustment_mode == "qfq"
+    assert rows[0].date == "2026-07-22"
 
 
 def test_parse_tencent_quote_uses_backup_high_low_fields_and_optional_market_cap() -> None:

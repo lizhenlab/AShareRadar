@@ -47,6 +47,31 @@ def test_provider_runtime_attempts_report_cooling_without_provider_lookup() -> N
     assert errors == ["cooling: 最近失败，短暂冷却中"]
 
 
+def test_provider_runtime_chain_state_distinguishes_ready_temporary_and_permanent() -> None:
+    runtime = ProviderRuntime(
+        _FailingStatusCache(),
+        Settings(provider_failure_cooldown_seconds=30),
+    )
+    priority = [(1, "primary"), (2, "missing")]
+    providers = {"primary": object()}
+
+    ready = runtime.chain_state(priority, providers, "kline")
+    assert ready.status == "ready"
+    assert ready.ready_providers == ("primary",)
+    assert ready.blocked_providers == ("missing",)
+
+    runtime.record_failure("primary", 1, RuntimeError("上游暂不可用"), "kline")
+    temporary = runtime.chain_state(priority, providers, "kline")
+    assert temporary.status == "temporary_unavailable"
+    assert temporary.ready_providers == ()
+    assert temporary.retry_after_seconds is not None
+    assert 0 < temporary.retry_after_seconds <= 30
+
+    permanent = runtime.chain_state([(1, "missing")], {}, "kline")
+    assert permanent.status == "permanent_unavailable"
+    assert permanent.retry_after_seconds is None
+
+
 def test_provider_runtime_timed_call_returns_value_and_latency() -> None:
     async def run_check() -> tuple[str, float]:
         cache = _FailingStatusCache()
@@ -265,11 +290,24 @@ def test_provider_runtime_queue_timeout_busy_does_not_start_cooldown() -> None:
                     request_key="queued",
                 )
 
+            saturated = runtime.chain_state(
+                [(1, "limited")],
+                {"limited": object()},
+                "quote",
+            )
+
             errors: list[str] = []
             attempt = next(runtime.attempts([(1, "limited")], {"limited": object()}, "quote", errors))
             await runtime.record_attempt_failure_async(attempt, "quote", exc_info.value, errors)
 
             assert queued_calls == 0
+            assert saturated.status == "temporary_unavailable"
+            assert saturated.ready_providers == ()
+            assert saturated.blocked_providers == ("limited",)
+            assert saturated.reasons == ("limited: 当前并发槽位已满",)
+            assert saturated.retry_after_seconds is not None
+            assert saturated.retry_after_seconds > 0
+            assert exc_info.value.retry_after_seconds == saturated.retry_after_seconds
             assert errors == [f"limited: {exc_info.value}"]
             assert cache.failure_calls == []
             assert runtime.is_cooling("limited", "quote") is False

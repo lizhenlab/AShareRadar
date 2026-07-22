@@ -169,8 +169,25 @@ class DataHub:
             check_consistency=check_consistency,
         )
 
-    async def kline(self, symbol: str, limit: int = 120, use_cache: bool = True) -> list[Kline]:
-        return await self._kline_coordinator.kline(symbol, limit=limit, use_cache=use_cache)
+    async def kline(
+        self,
+        symbol: str,
+        limit: int = 120,
+        use_cache: bool = True,
+        *,
+        allow_stale: bool = False,
+        require_provider_response: bool = False,
+    ) -> list[Kline]:
+        return await self._kline_coordinator.kline(
+            symbol,
+            limit=limit,
+            use_cache=use_cache,
+            allow_stale=allow_stale,
+            require_provider_response=require_provider_response,
+        )
+
+    def provider_chain_state(self, kind: str):
+        return self._provider_runtime.chain_state(self._priority(kind), self.providers, kind)
 
     async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120, use_cache: bool = True) -> list[MinuteKline]:
         return await self._kline_coordinator.minute_kline(symbol, interval=interval, limit=limit, use_cache=use_cache)

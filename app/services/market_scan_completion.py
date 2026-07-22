@@ -27,6 +27,8 @@ _SENSITIVE_SETTING_MARKERS = (
 TERMINAL_WRITE_MAX_ATTEMPTS = 3
 TERMINAL_WRITE_RETRY_BASE_SECONDS = 0.05
 TERMINAL_WRITE_RETRY_MAX_SECONDS = 0.2
+MARKET_SCAN_BULK_QUOTE_MIN_SYMBOLS = 10
+MARKET_SCAN_BULK_QUOTE_MIN_COVERAGE_RATIO = 0.8
 _RETRYABLE_SQLITE_PRIMARY_CODES = {
     sqlite3.SQLITE_BUSY,
     sqlite3.SQLITE_LOCKED,
@@ -170,6 +172,14 @@ def quote_batch_error(
     return f"批量行情缺失 {missing_count} 只{suffix}"[:300]
 
 
+def bulk_quote_coverage_error(returned_count: int, requested_count: int) -> str | None:
+    if requested_count < MARKET_SCAN_BULK_QUOTE_MIN_SYMBOLS:
+        return None
+    if returned_count / requested_count >= MARKET_SCAN_BULK_QUOTE_MIN_COVERAGE_RATIO:
+        return None
+    return f"批量行情覆盖率异常：{returned_count}/{requested_count}"
+
+
 def sensitive_setting_values(settings: object) -> tuple[object, ...]:
     model_dump = getattr(settings, "model_dump", None)
     if callable(model_dump):
@@ -241,6 +251,7 @@ def _strip_url_parameters(match: re.Match[str]) -> str:
 
 __all__ = [
     "MarketScanFinalizer",
+    "bulk_quote_coverage_error",
     "completion_status",
     "is_retryable_sqlite_error",
     "quote_batch_error",

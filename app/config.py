@@ -481,6 +481,18 @@ class Settings(BaseModel):
         default_factory=lambda: _env_float("ASHARE_RADAR_MARKET_SCAN_RETRY_BACKOFF_SECONDS", 1.0, minimum=0),
         le=30,
     )
+    market_scan_batch_retry_attempts: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_BATCH_RETRY_ATTEMPTS", 3, minimum=1),
+        le=5,
+    )
+    market_scan_provider_wait_budget_seconds: float = Field(
+        default_factory=lambda: _env_float(
+            "ASHARE_RADAR_MARKET_SCAN_PROVIDER_WAIT_BUDGET_SECONDS",
+            120.0,
+            minimum=0,
+        ),
+        le=600,
+    )
     market_scan_new_stock_days: int = Field(
         default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_NEW_STOCK_DAYS", 120, minimum=1),
         le=730,
@@ -599,6 +611,8 @@ class Settings(BaseModel):
             raise ValueError("market_scan_min_history_rows 不能大于 market_scan_kline_limit")
         if self.max_daily_kline_rows < self.market_scan_kline_limit:
             raise ValueError("max_daily_kline_rows 不能小于 market_scan_kline_limit")
+        if self.market_scan_auto_enabled and not self.scheduler_enabled:
+            raise ValueError("market_scan_auto_enabled 开启时必须同时开启 scheduler_enabled")
         return self
 
 
