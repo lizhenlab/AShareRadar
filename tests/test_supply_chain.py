@@ -126,11 +126,19 @@ def test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke() -> None:
 def test_security_workflow_enforces_audits_history_redaction_and_sbom_diff() -> None:
     security = _read(".github/workflows/security.yml")
 
+    assert (
+        "python -m pip install --only-binary=:all: --require-hashes "
+        "-r requirements-security-lock.txt"
+    ) in security
+    assert "pip install --require-hashes -r requirements-dev-lock.txt" not in security
+    assert "requirements-security-lock.txt" in security
+    assert "npm ci --ignore-scripts" in security
     assert "python -m pip_audit" in security
     assert "--require-hashes" in security
     assert "--requirement requirements-lock.txt" in security
     assert "--requirement requirements-dev-lock.txt" in security
-    assert security.count("python -m pip_audit") == 2
+    assert "--requirement requirements-security-lock.txt" in security
+    assert security.count("python -m pip_audit") == 3
     assert "npm audit --audit-level=high" in security
     assert "fetch-depth: 0" in security
     assert security.count("--redact=100") == 2

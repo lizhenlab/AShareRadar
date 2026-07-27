@@ -397,8 +397,12 @@ npm run test:e2e
 The Security workflow is an additional required gate. Its local-equivalent dependency and reproducible-SBOM checks are:
 
 ```bash
+$PYTHON -m pip install --only-binary=:all: --require-hashes -r requirements-security-lock.txt
+$PYTHON -m pip check
+npm ci --ignore-scripts
 $PYTHON -m pip_audit --require-hashes --disable-pip --strict --progress-spinner off --requirement requirements-lock.txt
 $PYTHON -m pip_audit --require-hashes --disable-pip --strict --progress-spinner off --requirement requirements-dev-lock.txt
+$PYTHON -m pip_audit --require-hashes --disable-pip --strict --progress-spinner off --requirement requirements-security-lock.txt
 npm audit --audit-level=high
 first_dir="$(mktemp -d)"
 second_dir="$(mktemp -d)"
@@ -423,18 +427,22 @@ curl -sS 'http://127.0.0.1:8010/api/stock/workbench?symbol=600519'
 
 ## 6. Dependency and Documentation Maintenance
 
-Keep direct dependencies in the appropriate input file. Runtime libraries belong in `requirements.txt`; pytest, coverage, Ruff, mypy, pyflakes, and lock tooling belong in `requirements-dev.txt`. These input files are for lock generation: reproducible installs use `--require-hashes` and the generated lock files. A runtime-input change requires rebuilding both locks because `requirements-dev.txt` includes `requirements.txt`; a development-only input change requires rebuilding `requirements-dev-lock.txt`. Do not edit generated locks by hand. Verify the development lock in a clean Python 3.12 environment:
+Keep direct dependencies in the appropriate input file. Runtime libraries belong in `requirements.txt`; test, lint, type, and lock-compilation tools belong in `requirements-dev.txt`; only vulnerability-audit and SBOM generators belong in `requirements-security.txt`. These inputs are for lock generation: reproducible installs use `--require-hashes` and the generated locks. A runtime-input change requires rebuilding the runtime and development locks because `requirements-dev.txt` includes `requirements.txt`; a development-only or security-tool change requires rebuilding only its matching lock. Do not edit generated locks by hand. Verify the locks in clean Python 3.12 environments:
 
 ```bash
 $PYTHON -m piptools compile --generate-hashes \
   --output-file=requirements-lock.txt requirements.txt
 $PYTHON -m piptools compile --allow-unsafe --generate-hashes \
   --output-file=requirements-dev-lock.txt requirements-dev.txt
+$PYTHON -m piptools compile --allow-unsafe --generate-hashes \
+  --output-file=requirements-security-lock.txt requirements-security.txt
 $PYTHON -m pip install --require-hashes -r requirements-dev-lock.txt
+$PYTHON -m pip check
+$PYTHON -m pip install --only-binary=:all: --require-hashes -r requirements-security-lock.txt
 $PYTHON -m pip check
 ```
 
-After either lock changes, audit both Python locks, run `npm audit`, and regenerate both SBOMs. `tools/generate_sbom.py` consumes `requirements-lock.txt` and `package-lock.json`, validates CycloneDX JSON, removes volatile serial/timestamp fields, imposes deterministic ordering, and writes `python.cdx.json` plus `npm.cdx.json` atomically. The Security workflow generates twice and compares bytes before artifact upload. A reproducible SBOM is an inventory aid; it is not a signed release or provenance attestation.
+After any dependency lock changes, audit all three Python locks, run `npm audit`, and regenerate both SBOMs. `tools/generate_sbom.py` consumes `requirements-lock.txt` and `package-lock.json`, validates CycloneDX JSON, removes volatile serial/timestamp fields, imposes deterministic ordering, and writes `python.cdx.json` plus `npm.cdx.json` atomically. The Security workflow generates twice and compares bytes before artifact upload. Its separate tool lock prevents an audit-only Linux runner from building optional provider source distributions. A reproducible SBOM is an inventory aid; it is not a signed release or provenance attestation.
 
 Dependabot runs weekly for pip, npm, and GitHub Actions. Review generated changes through the same tests instead of merging solely because a version is newer. Keep every `uses:` reference pinned to a reviewed 40-character commit SHA and preserve `persist-credentials: false` for checkout.
 

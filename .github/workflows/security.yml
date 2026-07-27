@@ -35,17 +35,20 @@ jobs:
           cache-dependency-path: |
             requirements-lock.txt
             requirements-dev-lock.txt
+            requirements-security-lock.txt
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
           cache: npm
 
-      - name: Install locked audit tooling
+      - name: Install locked Python security tooling
         run: |
-          python -m pip install --require-hashes -r requirements-dev-lock.txt
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-security-lock.txt
           python -m pip check
-          npm ci --ignore-scripts
+
+      - name: Install locked npm dependencies
+        run: npm ci --ignore-scripts
 
       - name: Audit locked Python runtime dependencies
         run: >-
@@ -64,6 +67,15 @@ jobs:
           --strict
           --progress-spinner off
           --requirement requirements-dev-lock.txt
+
+      - name: Audit locked Python security-tool dependencies
+        run: >-
+          python -m pip_audit
+          --require-hashes
+          --disable-pip
+          --strict
+          --progress-spinner off
+          --requirement requirements-security-lock.txt
 
       - name: Audit npm dependencies
         run: npm audit --audit-level=high

@@ -9,8 +9,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 259 | 536 | 2925 | 701 | 56221 |
-| `tests/` | 151 | 151 | 1883 | 704 | 59441 |
-| `tools/` | 6 | 6 | 92 | 4 | 1721 |
+| `tests/` | 151 | 151 | 1883 | 704 | 59464 |
+| `tools/` | 6 | 6 | 92 | 4 | 1722 |
 
 ## Python Function Health
 
@@ -9337,7 +9337,7 @@ Lines: 74
 
 #### `tests/test_supply_chain.py`
 
-Lines: 166
+Lines: 174
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -9348,8 +9348,8 @@ Lines: 166
 | function | `test_every_github_action_is_sha_pinned_and_checkout_drops_credentials` | 93 | `def test_every_github_action_is_sha_pinned_and_checkout_drops_credentials() -> None` |
 | function | `test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke` | 113 | `def test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke() -> None` |
 | function | `test_security_workflow_enforces_audits_history_redaction_and_sbom_diff` | 126 | `def test_security_workflow_enforces_audits_history_redaction_and_sbom_diff() -> None` |
-| function | `test_dependabot_covers_all_dependency_ecosystems` | 147 | `def test_dependabot_covers_all_dependency_ecosystems() -> None` |
-| function | `test_supply_chain_files_contain_no_machine_specific_paths` | 154 | `def test_supply_chain_files_contain_no_machine_specific_paths() -> None` |
+| function | `test_dependabot_covers_all_dependency_ecosystems` | 155 | `def test_dependabot_covers_all_dependency_ecosystems() -> None` |
+| function | `test_supply_chain_files_contain_no_machine_specific_paths` | 162 | `def test_supply_chain_files_contain_no_machine_specific_paths() -> None` |
 
 #### `tests/test_symbol_modules.py`
 
@@ -9460,7 +9460,7 @@ Lines: 531
 
 #### `tests/test_tool_inventory_modules.py`
 
-Lines: 245
+Lines: 260
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -9474,10 +9474,10 @@ Lines: 245
 | function | `test_data_directory_ignores_every_runtime_artifact` | 130 | `def test_data_directory_ignores_every_runtime_artifact() -> None` |
 | function | `test_machine_specific_path_detection_is_cross_platform_and_user_agnostic` | 137 | `def test_machine_specific_path_detection_is_cross_platform_and_user_agnostic() -> None` |
 | function | `test_python_dependency_layers_keep_runtime_and_engineering_tools_separate` | 148 | `def test_python_dependency_layers_keep_runtime_and_engineering_tools_separate() -> None` |
-| function | `test_ci_keeps_the_incremental_quality_gates` | 178 | `def test_ci_keeps_the_incremental_quality_gates() -> None` |
-| function | `test_test_report_keeps_auditable_latest_verification_table` | 209 | `def test_test_report_keeps_auditable_latest_verification_table() -> None` |
-| function | `test_operations_documents_backup_before_runtime_data_deletion` | 217 | `def test_operations_documents_backup_before_runtime_data_deletion() -> None` |
-| function | `test_model_classes_do_not_repeat_field_names` | 230 | `def test_model_classes_do_not_repeat_field_names() -> None` |
+| function | `test_ci_keeps_the_incremental_quality_gates` | 193 | `def test_ci_keeps_the_incremental_quality_gates() -> None` |
+| function | `test_test_report_keeps_auditable_latest_verification_table` | 224 | `def test_test_report_keeps_auditable_latest_verification_table() -> None` |
+| function | `test_operations_documents_backup_before_runtime_data_deletion` | 232 | `def test_operations_documents_backup_before_runtime_data_deletion() -> None` |
+| function | `test_model_classes_do_not_repeat_field_names` | 245 | `def test_model_classes_do_not_repeat_field_names() -> None` |
 
 #### `tests/test_trading_calendar_modules.py`
 
@@ -9682,7 +9682,7 @@ Lines: 316
 
 #### `tools/generate_sbom.py`
 
-Lines: 190
+Lines: 191
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -9692,12 +9692,12 @@ Lines: 190
 | function | `canonical_bom_bytes` | 56 | `def canonical_bom_bytes(payload: dict[str, Any]) -> bytes` |
 | function | `_load_bom` | 63 | `def _load_bom(raw: str, *, source: str) -> dict[str, Any]` |
 | function | `_cyclonedx_executable` | 73 | `def _cyclonedx_executable() -> str` |
-| function | `_redact_error` | 85 | `def _redact_error(detail: str) -> str` |
-| function | `_run` | 94 | `def _run(command: Sequence[str], *, stdout: bool=False) -> str` |
-| function | `_write_atomic` | 110 | `def _write_atomic(path: Path, content: bytes) -> None` |
-| function | `generate_sboms` | 118 | `def generate_sboms(output_dir: Path) -> tuple[Path, Path]` |
-| function | `_parser` | 164 | `def _parser() -> argparse.ArgumentParser` |
-| function | `main` | 175 | `def main(argv: Sequence[str] \| None=None) -> int` |
+| function | `_redact_error` | 86 | `def _redact_error(detail: str) -> str` |
+| function | `_run` | 95 | `def _run(command: Sequence[str], *, stdout: bool=False) -> str` |
+| function | `_write_atomic` | 111 | `def _write_atomic(path: Path, content: bytes) -> None` |
+| function | `generate_sboms` | 119 | `def generate_sboms(output_dir: Path) -> tuple[Path, Path]` |
+| function | `_parser` | 165 | `def _parser() -> argparse.ArgumentParser` |
+| function | `main` | 176 | `def main(argv: Sequence[str] \| None=None) -> int` |
 
 #### `tools/provider_canary.py`
 

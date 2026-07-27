@@ -171,7 +171,7 @@ CLI 用临时 SQLite 创建 DataHub，关闭 scheduler，并在有界时间内�
 | 安全实践 | 当前实现 | 差距 |
 | --- | --- | --- |
 | 保护源码和 CI 凭据 | Action 全 SHA 固定；checkout `persist-credentials: false`；工作流只读权限 | 未记录分支保护、两人评审或组织级权限证据，不声明 SLSA Source 等级 |
-| 管理依赖漏洞 | `pip-audit` 分别扫描 runtime/dev hashed locks；`npm audit` high gate；Dependabot 覆盖 pip/npm/Actions | 没有独立 dependency-review PR gate 或漏洞修复 SLA |
+| 管理依赖漏洞 | 独立、provider-free、全哈希 security-tool lock 在 Linux wheel-only 安装；`pip-audit` 扫描 runtime/dev/security 三份 hashed locks；`npm audit` high gate；Dependabot 覆盖 pip/npm/Actions | 没有独立 dependency-review PR gate 或漏洞修复 SLA |
 | 发现硬编码凭据 | checksum-verified Gitleaks 扫当前树和完整 Git 历史，输出 `--redact=100` | 检测不等于 push protection；真实泄露仍必须撤销/轮换 |
 | 软件成分透明度 | 从 Python/npm 锁生成 CycloneDX JSON，去除波动字段、稳定排序、两次生成做字节比较并上传 | SBOM 未签名，未和发布物/commit 做可验证绑定 |
 | 应用安全控制 | 同源 mutation 边界、输入验证、错误脱敏、凭据不入项目文件、异常安全静态守卫 | 尚无逐项 ASVS profile、威胁模型、DAST/渗透测试证据 |

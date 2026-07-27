@@ -38,7 +38,7 @@ npx --no-install playwright install chromium
 npm run test:e2e
 ```
 
-`requirements.txt` and `requirements-dev.txt` are dependency inputs, not the reproducible installation entrypoints. Install the application from the hashed `requirements-lock.txt`; install development and CI environments from the hashed `requirements-dev-lock.txt`. The development lock includes runtime dependencies because `requirements-dev.txt` includes `requirements.txt`. JavaScript development dependencies are pinned by `package-lock.json` and installed with `npm ci`. `npm run check` remains the convenient local regression command; CI additionally enforces the runtime declaration, Ruff, ratcheted mypy, 90% branch coverage, `pip check`, JavaScript syntax, browser regression, and generated-document drift.
+The three `requirements*.txt` inputs define runtime, development, and isolated security-tool profiles; their matching `*-lock.txt` files are the reproducible installation entrypoints. Install the application from `requirements-lock.txt` and development/CI from `requirements-dev-lock.txt`. The development lock includes runtime dependencies, while `requirements-security-lock.txt` deliberately contains only vulnerability-audit and SBOM tooling so the Linux Security runner never builds optional market-provider SDKs. JavaScript development dependencies are pinned by `package-lock.json` and installed with `npm ci`. `npm run check` remains the convenient local regression command; CI additionally enforces the runtime declaration, Ruff, ratcheted mypy, 90% branch coverage, `pip check`, JavaScript syntax, browser regression, and generated-document drift.
 
 ## Documentation
 

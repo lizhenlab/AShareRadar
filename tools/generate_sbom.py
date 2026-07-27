@@ -78,7 +78,8 @@ def _cyclonedx_executable() -> str:
     if executable:
         return executable
     raise SbomGenerationError(
-        "cyclonedx-py is unavailable; install requirements-dev-lock.txt first"
+        "cyclonedx-py is unavailable; install requirements-security-lock.txt "
+        "or requirements-dev-lock.txt first"
     )
 
 

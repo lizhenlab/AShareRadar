@@ -257,7 +257,7 @@ For any functional change:
 5. Run Ruff, incremental mypy, JavaScript syntax, `pip check`, and the coverage-enabled pytest suite before delivery.
 6. Regenerate `docs/FUNCTION_INVENTORY.md` when Python functions/classes move, then run `tools/architecture_inventory.py --check`.
 7. Regenerate `docs/API_REFERENCE.md` when routes change, then run `tools/api_inventory.py --check`.
-8. Rebuild both Python 3.12 locks after a runtime dependency change, or `requirements-dev-lock.txt` after a development-only change; verify a clean `--require-hashes` install.
+8. Rebuild both runtime/development Python 3.12 locks after a runtime dependency change, the development lock after a development-only change, or the isolated security lock after an audit/SBOM-tool change; verify clean `--require-hashes` installs.
 9. Smoke test `/api/health` and at least one stock workbench request.
 
 ## 4. Code Ownership Map
@@ -336,7 +336,7 @@ For any functional change:
 | Browser alert notifications | `app/api/routes/alerts.py`, `app/repositories/alerts.py`, `static/js/notifications.js` (event-ID keyset pages, persisted enable/disable preference, fresh no-backfill baselines, disabled-period suppression, successful-prefix cursor advancement, and failed/later event retry) |
 | Scheduler, health, and monitoring | `app/services/scheduler.py`, `app/services/scheduler_contracts.py`, `app/services/scheduler_lifecycle.py`, `app/services/scheduler_execution.py`, `app/services/scheduler_tasks.py`, `app/services/scheduler_schedule.py`, `app/services/scheduler_health.py`, `app/services/scheduler_helpers.py`, `app/services/scheduler_service.py`, `app/services/runtime_coordinator.py`, `app/services/cache_freshness.py`, `app/services/system_diagnostics.py`, `app/api/routes/health.py`, `app/api/routes/monitoring.py`, `app/repositories/runtime.py` |
 | Reliability measurement | `app/models/reliability.py`, `app/repositories/reliability.py`, `app/services/reliability.py`, `app/workflows/individual.py`, `app/repositories/provider_status.py`, `app/services/cache.py` |
-| Runtime, time, configuration, and engineering gates | `app/runtime_environment.py`, `app/utils/clock.py`, `app/utils/audit_time.py`, `app/config.py`, `app/config_settings.py`, `app/config_shell.py`, `app/config_validation.py`, `requirements.txt`, `requirements-dev.txt`, `requirements-lock.txt`, `requirements-dev-lock.txt`, `package.json`, `package-lock.json`, `pyproject.toml`, `.python-version`, `.node-version`, `.github/workflows/ci.yml`, `.github/workflows/security.yml`, `.github/dependabot.yml`, `tools/runtime_contract.py`, `tools/provider_canary.py`, `tools/generate_sbom.py` |
+| Runtime, time, configuration, and engineering gates | `app/runtime_environment.py`, `app/utils/clock.py`, `app/utils/audit_time.py`, `app/config.py`, `app/config_settings.py`, `app/config_shell.py`, `app/config_validation.py`, `requirements*.txt`, `package*.json`, `pyproject.toml`, `.python-version`, `.node-version`, `.github/workflows/ci.yml`, `.github/workflows/security.yml`, `.github/dependabot.yml`, `tools/runtime_contract.py`, `tools/provider_canary.py`, `tools/generate_sbom.py` |
 | Frontend | `app/api/static_assets.py`, `static/app.js`, `static/js/*`, `static/styles.css`, `static/css/*`; scan-specific contracts/controller/polling/view are `static/js/market-scan-*.js` |
 
 ## 5. Invariants
