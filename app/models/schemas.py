@@ -1,8 +1,8 @@
 """Backward-compatible schema exports.
 
 The concrete Pydantic models live in domain modules under ``app.models``.
-Keep importing from this module in existing route and service code until a
-touchpoint is already being edited for a domain-specific import cleanup.
+Production code imports those modules directly; this module remains only for
+external callers that still depend on the former aggregate surface.
 """
 
 from __future__ import annotations

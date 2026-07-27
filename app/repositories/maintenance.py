@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 import threading
-import time
 from typing import Literal
 
 from app.config import Settings
 from app.repositories.base import SQLiteRepository
 from app.repositories.market_klines import DAILY_KLINE_RETENTION_ORDER_BY, DAILY_KLINE_RETENTION_PARTITION
 from app.repositories.watchlist import cap_watchlist_unread_change_counts_to_viewable
+from app.utils.clock import monotonic_now
 
 
 CleanupLimitScope = Literal["global", "partition"]
@@ -83,6 +83,13 @@ REGENERABLE_RUNTIME_CLEANUP_SPECS = (
     ),
     RuntimeCleanupSpec("cache_event", "max_cache_event_rows", "id", "created_at DESC, id DESC", limit_scope=GLOBAL_LIMIT),
     RuntimeCleanupSpec(
+        "reliability_bucket",
+        "max_reliability_bucket_rows",
+        "rowid",
+        "bucket_start_utc DESC, metric ASC, subject ASC, capability ASC",
+        limit_scope=GLOBAL_LIMIT,
+    ),
+    RuntimeCleanupSpec(
         "market_scan_run",
         "max_market_scan_runs",
         "id",
@@ -138,6 +145,7 @@ TABLE_COUNT_NAMES = (
     "plate_rank",
     "stock_concept",
     "task_run",
+    "reliability_bucket",
     "market_scan_run",
     "market_scan_result",
     "monitor_event",
@@ -160,17 +168,17 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
     def cleanup_runtime_rows(self) -> dict[str, int]:
         with self._lock:
             removed = self._cleanup_specs(RUNTIME_CLEANUP_SPECS)
-            self._last_regenerable_cleanup_at = time.monotonic()
+            self._last_regenerable_cleanup_at = monotonic_now()
             return removed
 
     def cleanup_regenerable_runtime_rows(self) -> dict[str, int]:
         with self._lock:
-            now = time.monotonic()
+            now = monotonic_now()
             interval = int(self.settings.runtime_maintenance_interval_seconds)
             if self._last_regenerable_cleanup_at is not None and now - self._last_regenerable_cleanup_at < interval:
                 return {}
             removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
-            self._last_regenerable_cleanup_at = time.monotonic()
+            self._last_regenerable_cleanup_at = monotonic_now()
             return removed
 
     def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]:

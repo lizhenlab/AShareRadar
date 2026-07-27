@@ -8,17 +8,21 @@ import logging
 import math
 
 from app.config import Settings
-from app.models.schemas import (
+from app.models.analysis import (
     DataQuality,
+)
+from app.models.system import (
     DataSourcePlan,
     DataStatus,
+    ProviderCapabilityStatus,
+    ProviderDecision,
+    ProviderStatus,
+)
+from app.models.market import (
     Kline,
     MinuteKline,
     OrderBook,
     ProviderCapability,
-    ProviderCapabilityStatus,
-    ProviderDecision,
-    ProviderStatus,
     Quote,
     StockInfo,
 )
@@ -41,6 +45,7 @@ from app.services.provider_registry import (
     provider_index,
     provider_priority,
 )
+from app.utils.clock import monotonic_now
 
 
 __all__ = ["DataHub", "_provider_error_text", "_provider_source_key"]
@@ -253,12 +258,11 @@ class DataHub:
 
     async def aclose(self, timeout: float = PROVIDER_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
         close_timeout = _bounded_close_timeout(timeout)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + close_timeout
+        deadline = monotonic_now() + close_timeout
         if self._providers_closed:
             return True
         close_task = self._get_or_create_provider_close_task()
-        remaining = max(0.0, deadline - loop.time())
+        remaining = max(0.0, deadline - monotonic_now())
         return await self._wait_for_provider_close(close_task, timeout=remaining)
 
     def _get_or_create_provider_close_task(self) -> asyncio.Task[bool]:

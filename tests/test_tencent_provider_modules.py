@@ -144,12 +144,10 @@ def test_demo_provider_klines_keep_open_and_close_inside_price_range() -> None:
 
 
 def test_demo_provider_kline_small_limit_on_monday_returns_previous_weekday(monkeypatch: pytest.MonkeyPatch) -> None:
-    class MondayDatetime(datetime):
-        @classmethod
-        def now(cls) -> datetime:
-            return cls(2026, 7, 6, 10, 0, 0)
-
-    monkeypatch.setattr("app.services.providers.datetime", MondayDatetime)
+    monkeypatch.setattr(
+        "app.services.providers.market_now_naive",
+        lambda: datetime(2026, 7, 6, 10, 0, 0),
+    )
     provider = DemoMarketDataProvider(enabled=True)
 
     klines = asyncio.run(provider.kline("600519.SH", limit=1))

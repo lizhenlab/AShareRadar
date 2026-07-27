@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from app.models.schemas import AbnormalEventItem
+from app.models.analysis import (
+    AbnormalEventItem,
+)
 from app.services.indicators import pct_change
 from app.services.stock_abnormal_context import AbnormalEventContext
 

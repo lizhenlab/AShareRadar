@@ -9,6 +9,7 @@ import {
   invalidateCachedJson,
   isAbortError,
 } from "./api.js";
+import { formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { compactErrorMessage } from "./errors.js";
 import { formatNumber } from "./format.js";
@@ -330,7 +331,7 @@ function renderMonitorEvents(items) {
         .map((item) => {
           const event = asObject(item);
           const repeat = event.repeat_count && event.repeat_count > 1 ? ` · 重复 ${event.repeat_count} 次` : "";
-          const seenAt = event.last_seen_at || event.created_at;
+          const seenAt = diagnosticTimestamp(event.last_seen_at || event.created_at);
           return `
           <div class="monitor-event ${event.level === "warning" ? "warn" : ""}">
             <strong>${escapeHtml(eventCategory(event.category))}${event.symbol ? ` · ${escapeHtml(event.symbol)}` : ""}</strong>
@@ -456,7 +457,7 @@ function disabledProviderDetail(item) {
 }
 
 function healthyProviderDetail(item) {
-  return item.last_success ? `最近成功：${item.last_success}${providerLatencyText(item)}` : "等待首次成功请求";
+  return item.last_success ? `最近成功：${diagnosticTimestamp(item.last_success)}${providerLatencyText(item)}` : "等待首次成功请求";
 }
 
 function providerLatencyText(item) {
@@ -469,7 +470,11 @@ function failedProviderDetail(item) {
 }
 
 function providerLastSuccessText(item) {
-  return item.last_success ? `；上次成功：${item.last_success}` : "";
+  return item.last_success ? `；上次成功：${diagnosticTimestamp(item.last_success)}` : "";
+}
+
+export function diagnosticTimestamp(value) {
+  return formatAuditTimestamp(value);
 }
 
 function capabilityKindLabel(kind) {

@@ -7,7 +7,9 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 from app.models.market import DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE
-from app.models.schemas import CacheStats
+from app.models.system import (
+    CacheStats,
+)
 from app.repositories.base import SQLiteRepository
 
 

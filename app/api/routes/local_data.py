@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from app.api.deps import get_datahub, get_local_data_import_previews
 from app.api.errors import run_sync_api_async
 from app.models.local_data import (
+    AuditTimestampMetadata,
     LocalDataImportResult,
     RuntimeCleanupPreview,
     RuntimeCleanupResult,
@@ -43,6 +44,7 @@ async def import_local_user_data(
     mode: Literal["merge", "replace"] = Query("merge"),
     dry_run: bool = Query(True),
     preview_token: str | None = Query(default=None, min_length=32, max_length=200),
+    legacy_audit_timezone: str | None = Query(default=None, min_length=1, max_length=128),
     datahub: DataHub = Depends(get_datahub),
     previews: LocalDataImportPreviewRegistry = Depends(get_local_data_import_previews),
 ) -> LocalDataImportResult:
@@ -53,6 +55,7 @@ async def import_local_user_data(
             mode=mode,
             dry_run=dry_run,
             preview_token=preview_token,
+            legacy_audit_timezone=legacy_audit_timezone,
             datahub=datahub,
             previews=previews,
         )
@@ -65,9 +68,11 @@ def _run_local_user_data_import(
     mode: Literal["merge", "replace"],
     dry_run: bool,
     preview_token: str | None,
+    legacy_audit_timezone: str | None,
     datahub: DataHub,
     previews: LocalDataImportPreviewRegistry,
 ) -> LocalDataImportResult:
+    payload = _bind_explicit_legacy_timezone(payload, legacy_audit_timezone)
     with datahub.cache.exclusive_local_data_operation():
         if dry_run:
             return _preview_local_user_data_import(payload, mode, datahub, previews)
@@ -139,6 +144,22 @@ def _commit_local_user_data_import(
     if backup_path is None:
         raise RuntimeError("本地数据导入已提交，但恢复备份结果缺失")
     return result.model_copy(update={"rollback_backup_path": backup_path})
+
+
+def _bind_explicit_legacy_timezone(
+    payload: UserDataBundle,
+    legacy_audit_timezone: str | None,
+) -> UserDataBundle:
+    if legacy_audit_timezone is None or payload.audit_timestamps is not None:
+        return payload
+    return payload.model_copy(
+        update={
+            "audit_timestamps": AuditTimestampMetadata(
+                semantics="legacy-naive",
+                legacy_timezone=legacy_audit_timezone,
+            )
+        }
+    )
 
 
 @router.get("/api/local-data/cleanup-preview", response_model=RuntimeCleanupPreview)

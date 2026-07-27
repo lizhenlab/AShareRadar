@@ -5,11 +5,20 @@ import math
 import sqlite3
 
 from app.db.user_mappers import row_to_alert_event, row_to_alert_rule
-from app.models.schemas import AlertEventItem, AlertRuleInput, AlertRuleItem, AlertRuleUpdate, Quote
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
+from app.models.user_data import (
+    AlertEventItem,
+    AlertRuleInput,
+    AlertRuleItem,
+    AlertRuleUpdate,
+)
+from app.models.market import (
+    Quote,
+)
 from app.repositories.base import SQLiteRepository
 from app.repositories.update_fields import FieldUpdate, present_updates, update_sql_parts
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text
 
 
 def _columns_sql(columns: tuple[str, ...]) -> str:
@@ -158,7 +167,7 @@ class AlertRepository(SQLiteRepository):
             clauses.append("enabled = 1")
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY enabled DESC, updated_at DESC, id DESC"
+        sql += f" ORDER BY enabled DESC, {SQLITE_AUDIT_EPOCH_FUNCTION}(updated_at) DESC, id DESC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)

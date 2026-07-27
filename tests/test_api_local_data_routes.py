@@ -22,6 +22,10 @@ from app.services.user_data_portability import export_user_data
 from tests.factories import make_quote
 
 
+PROCESS_START_TIMEOUT_SECONDS = 30
+PROCESS_RELEASE_TIMEOUT_SECONDS = 60
+
+
 def _hold_destructive_local_data_lease(
     database_path: str,
     attempting,
@@ -34,7 +38,7 @@ def _hold_destructive_local_data_lease(
         attempting.set()
         with cache.exclusive_local_data_operation():
             entered.set()
-            if not release.wait(timeout=20):
+            if not release.wait(timeout=PROCESS_RELEASE_TIMEOUT_SECONDS):
                 raise RuntimeError("lease worker release timed out")
         outcomes.put((True, ""))
     except BaseException as exc:
@@ -44,11 +48,14 @@ def _hold_destructive_local_data_lease(
 def _insert_alert_events_in_process(
     database_path: str,
     rule_id: int,
+    start,
     attempting,
     finished,
     outcomes,
 ) -> None:
     try:
+        if not start.wait(timeout=PROCESS_START_TIMEOUT_SECONDS):
+            raise RuntimeError("alert event writer start timed out")
         with sqlite3.connect(database_path, timeout=20) as conn:
             conn.execute("PRAGMA busy_timeout = 20000")
             attempting.set()
@@ -61,7 +68,11 @@ def _insert_alert_events_in_process(
                           'price_above', '触发', ?, 1301, 0.1, 1300, ?)
                 """,
                 [
-                    (rule_id, f"并发事件{index}", f"2026-07-16 11:0{index}:00")
+                    (
+                        rule_id,
+                        f"并发事件{index}",
+                        f"2026-07-16T03:0{index}:00.000000Z",
+                    )
                     for index in range(2)
                 ],
             )
@@ -126,6 +137,91 @@ def test_replace_import_requires_matching_preview_and_creates_verified_backup(tm
     backup_path = Path(committed.json()["rollback_backup_path"])
     assert verify_runtime_backup(backup_path).ok is True
     assert target.watchlist()[0].note == "source"
+
+
+def test_export_declares_fixed_utc_audit_timestamp_semantics(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "source.sqlite3")
+    cache.save_watchlist_item(make_quote(), note="source")
+    app = FastAPI()
+    app.include_router(local_data.router)
+    app.dependency_overrides[get_datahub] = lambda: _DataHubStub(cache)
+    client = TestClient(app)
+
+    response = client.post("/api/local-data/export")
+
+    assert response.status_code == 200
+    assert response.json()["audit_timestamps"] == {
+        "semantics": "utc-fixed",
+        "legacy_timezone": None,
+    }
+
+
+def test_api_requires_explicit_timezone_for_legacy_naive_bundle(tmp_path: Path) -> None:
+    source = SQLiteCache(tmp_path / "source.sqlite3")
+    target = SQLiteCache(tmp_path / "target.sqlite3")
+    source.save_watchlist_item(make_quote(), note="source")
+    bundle = export_user_data(source.path).model_dump(mode="json")
+    bundle.pop("audit_timestamps")
+    row = bundle["tables"]["watchlist"]["rows"][0]
+    row["created_at"] = "2026-07-24 09:30:00"
+    row["updated_at"] = "2026-07-24 09:30:00"
+    registry = LocalDataImportPreviewRegistry()
+    app = FastAPI()
+    app.include_router(local_data.router)
+    app.dependency_overrides[get_datahub] = lambda: _DataHubStub(target)
+    app.dependency_overrides[get_local_data_import_previews] = lambda: registry
+    client = TestClient(app)
+
+    rejected = client.post("/api/local-data/import?mode=merge&dry_run=true", json=bundle)
+    preview = client.post(
+        "/api/local-data/import",
+        params={
+            "mode": "merge",
+            "dry_run": "true",
+            "legacy_audit_timezone": "America/Los_Angeles",
+        },
+        json=bundle,
+    )
+    token = preview.json()["preview_token"]
+    wrong_timezone = client.post(
+        "/api/local-data/import",
+        params={
+            "mode": "merge",
+            "dry_run": "false",
+            "preview_token": token,
+            "legacy_audit_timezone": "Asia/Shanghai",
+        },
+        json=bundle,
+    )
+    fresh_preview = client.post(
+        "/api/local-data/import",
+        params={
+            "mode": "merge",
+            "dry_run": "true",
+            "legacy_audit_timezone": "America/Los_Angeles",
+        },
+        json=bundle,
+    ).json()
+    committed = client.post(
+        "/api/local-data/import",
+        params={
+            "mode": "merge",
+            "dry_run": "false",
+            "preview_token": fresh_preview["preview_token"],
+            "legacy_audit_timezone": "America/Los_Angeles",
+        },
+        json=bundle,
+    )
+
+    assert rejected.status_code == 400
+    assert "bundle 语义一致" in rejected.json()["detail"]
+    assert preview.status_code == 200
+    assert wrong_timezone.status_code == 400
+    assert committed.status_code == 200
+    with sqlite3.connect(target.path) as conn:
+        assert conn.execute("SELECT updated_at FROM watchlist").fetchone()[0] == (
+            "2026-07-24T16:30:00.000000Z"
+        )
 
 
 def test_import_preview_is_single_use_and_rejects_database_drift(tmp_path: Path) -> None:
@@ -222,7 +318,7 @@ def test_backup_io_failure_is_returned_as_stable_service_error(tmp_path: Path, m
 
 def test_expired_server_preview_token_is_rejected(tmp_path: Path, monkeypatch) -> None:
     clock = [100.0]
-    monkeypatch.setattr(import_guard_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(import_guard_module, "monotonic_now", lambda: clock[0])
     source = SQLiteCache(tmp_path / "source.sqlite3")
     target = SQLiteCache(tmp_path / "target.sqlite3")
     source.save_watchlist_item(make_quote(), note="source")
@@ -343,7 +439,7 @@ def test_manual_user_history_cleanup_creates_verified_pre_cleanup_backup(tmp_pat
                 ) VALUES (?, '600519.SH', '600519', 'SH', '贵州茅台', '测试提醒',
                           'price_above', '触发', ?, 1301, 0.1, 1300, ?)
                 """,
-                (rule.id, f"事件{index}", f"2026-07-16 10:0{index}:00"),
+                (rule.id, f"事件{index}", f"2026-07-16T02:0{index}:00.000000Z"),
             )
     app = FastAPI()
     app.include_router(local_data.router)
@@ -384,7 +480,7 @@ def test_cleanup_backup_failure_rolls_back_without_deleting_user_history(
                 ) VALUES (?, '600519.SH', '600519', 'SH', '贵州茅台', '测试提醒',
                           'price_above', '触发', ?, 1301, 0.1, 1300, ?)
                 """,
-                (rule.id, f"事件{index}", f"2026-07-16 10:0{index}:00"),
+                (rule.id, f"事件{index}", f"2026-07-16T02:0{index}:00.000000Z"),
             )
     monkeypatch.setattr(
         local_data.RuntimeBackupSession,
@@ -416,18 +512,22 @@ def test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision
         AlertRuleInput(symbol="600519.SH", condition_type="price_above", threshold=1300),
     )
     context = multiprocessing.get_context("spawn")
+    start = context.Event()
     attempting = context.Event()
     finished = context.Event()
     outcomes = context.Queue()
     process = context.Process(
         target=_insert_alert_events_in_process,
-        args=(str(path), rule.id, attempting, finished, outcomes),
+        args=(str(path), rule.id, start, attempting, finished, outcomes),
     )
     original_cleanup = cache.cleanup_runtime_rows
 
     def cleanup_with_late_writer() -> dict[str, int]:
-        process.start()
-        assert attempting.wait(timeout=10)
+        start.set()
+        assert attempting.wait(timeout=PROCESS_START_TIMEOUT_SECONDS), (
+            "alert writer did not reach SQLite; "
+            f"exitcode={process.exitcode}, finished={finished.is_set()}"
+        )
         time.sleep(0.1)
         assert finished.is_set() is False
         return original_cleanup()
@@ -437,6 +537,7 @@ def test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision
     app.include_router(local_data.router)
     app.dependency_overrides[get_datahub] = lambda: _DataHubStub(cache)
     client = TestClient(app)
+    process.start()
 
     try:
         cleaned = client.post("/api/local-data/cleanup?confirm=retention-cleanup")
@@ -481,7 +582,7 @@ def test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotati
                 ) VALUES (?, '600519.SH', '600519', 'SH', '贵州茅台', '测试提醒',
                           'price_above', '触发', ?, 1301, 0.1, 1300, ?)
                 """,
-                (rule.id, f"事件{index}", f"2026-07-16 10:0{index}:00"),
+                (rule.id, f"事件{index}", f"2026-07-16T02:0{index}:00.000000Z"),
             )
     create_runtime_backup(path, max_backups=2)
     create_runtime_backup(path, max_backups=2)

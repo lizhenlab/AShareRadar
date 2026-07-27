@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.models.schemas import AnalysisResult, FinancialMetric
+from app.models.analysis import (
+    AnalysisResult,
+    FinancialMetric,
+)
 from app.services.financial_metrics import (
     format_amount_text,
     liquidity_view,

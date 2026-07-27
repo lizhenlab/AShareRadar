@@ -4,7 +4,16 @@ from collections.abc import Iterable
 from typing import Protocol, cast
 
 from app.config import Settings
-from app.models.schemas import Kline, MinuteKline, OrderBook, PlateItem, ProviderCapability, Quote, StockConceptItem, StockInfo
+from app.models.market import (
+    Kline,
+    MinuteKline,
+    OrderBook,
+    PlateItem,
+    ProviderCapability,
+    Quote,
+    StockConceptItem,
+    StockInfo,
+)
 from app.runtime_environment import isolate_user_site_packages
 
 isolate_user_site_packages()

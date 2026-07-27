@@ -5,7 +5,9 @@
 - Verify stock lookup, quote/K-line acquisition, explicit daily adjustment provenance, analysis, research, and transparent degradation.
 - Verify local SQLite state, schema compatibility, advice review history/as-of evaluation, current/custom historical scans, preview-claimed imports, runtime backup/cleanup protection, scheduler, and diagnostics.
 - Verify browser request freshness, code/name autocomplete, exact chart inspection, local activity, review/scan reachability, notification retry, accessibility state, persistence isolation, and SSE behavior.
-- Verify process-environment-only LLM configuration, dependency, security, generated-document, and maintainability gates.
+- Verify Python 3.12 plus Node 22/24 runtime declarations, host-timezone-independent market/audit/duration semantics, backward-compatible SQLite migration, dependency direction, configuration boundaries, exception/cancellation safety, and ratcheted typing.
+- Verify liveness/readiness separation, bounded SQLite admission checks, low-cardinality reliability aggregation, explicit SLI/SLO sample floors, and optional isolated provider-canary contracts.
+- Verify process-environment-only LLM configuration, locked dependency audits, current/history secret scanning, reproducible CycloneDX SBOMs, immutable GitHub Action pins, generated-document drift, and maintainability gates.
 
 ## 2. Test Commands
 
@@ -16,16 +18,38 @@ export PYTHON="$PROJECT_ROOT/.venv/bin/python"
 export PYTHONNOUSERSITE=1
 $PYTHON -m pip install --require-hashes -r requirements-dev-lock.txt
 $PYTHON -m pip check
+npm ci
+$PYTHON tools/runtime_contract.py
 $PYTHON -m ruff check app tests tools
 $PYTHON -m mypy
 npm run check:js
 $PYTHON tools/api_inventory.py --check
 $PYTHON tools/architecture_inventory.py --check
 $PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing
-npm ci && npx --no-install playwright install chromium && npm run test:e2e
+npx --no-install playwright install chromium
+npm run test:e2e
 ```
 
-The development lock contains runtime and engineering dependencies. Tests run with Python 3.12, `PYTHONNOUSERSITE=1`, temporary SQLite files, and fake providers/clients; the automated suite must not require credentials, persistent runtime data, live providers, or outbound network access.
+The development lock contains runtime and engineering dependencies. Branch coverage fails below 90%. Tests run with Python 3.12, `PYTHONNOUSERSITE=1`, temporary SQLite files, and fake providers/clients; the automated suite must not require credentials, persistent runtime data, live providers, or outbound network access. `tools/provider_canary.py` is a separate optional live diagnostic and is not part of required pull-request CI.
+
+The Security workflow additionally runs both hashed Python lock audits, `npm audit --audit-level=high`, checksum-verified Gitleaks over the current tree and complete history with fully redacted output, and two independent SBOM generations followed by a recursive diff. Focused engineering-contract regression is available without a network:
+
+```bash
+$PYTHON -m pytest -q -p no:cacheprovider \
+  tests/test_architecture_boundaries.py \
+  tests/test_clock_modules.py \
+  tests/test_exception_safety.py \
+  tests/test_provider_canary.py \
+  tests/test_reliability_modules.py \
+  tests/test_supply_chain.py \
+  tests/test_typing_contract.py
+```
+
+Run the live canary only after required checks pass and only when network/provider evidence is wanted:
+
+```bash
+$PYTHON tools/provider_canary.py
+```
 
 ## 3. Current Automated Coverage
 
@@ -35,6 +59,7 @@ The current test suite is split by domain:
 - `tests/test_advice_review_window_contract.py`: trading-day completeness, 15:15 publication boundaries, cross-contract rejection, and weekend pending behavior.
 - `tests/test_analysis_research.py`
 - `tests/test_analysis_signal_modules.py`
+- `tests/test_architecture_boundaries.py`: lower-layer dependency direction, direct domain-model imports, application import acyclicity, and clock-adapter ownership of wall time.
 - `tests/test_api_alert_routes.py`
 - `tests/test_api_container_modules.py`
 - `tests/test_api_data_routes.py`
@@ -48,9 +73,12 @@ The current test suite is split by domain:
 - `tests/test_api_watchlist_research_queue.py`
 - `tests/test_api_watchlist_routes.py`
 - `tests/test_app_lifecycle_integration.py`
+- `tests/test_audit_epoch_repositories.py`: microsecond-preserving audit-time ordering for quote snapshot and history upserts.
+- `tests/test_cache_migration_guard.py`: explicit legacy timezone binding, runtime-leader exclusion, and migration disk-space preflight.
 - `tests/test_cache_freshness_modules.py`
 - `tests/test_cache_stats_modules.py`
 - `tests/test_chart_marks_modules.py`
+- `tests/test_clock_modules.py`: Shanghai market time, UTC audit serialization/parsing, monotonic/performance adapters, mixed timestamp compatibility, and legacy audit-column migration without market-field rewriting.
 - `tests/test_config_modules.py`: environment parsing/validation and exact `ASHARE_RADAR_*` operations-document coverage.
 - `tests/test_container_settings_lifecycle.py`
 - `tests/test_data_quality_modules.py`
@@ -66,10 +94,12 @@ The current test suite is split by domain:
 - `tests/test_datahub_status_modules.py`
 - `tests/test_datahub_status_service_modules.py`
 - `tests/test_db_mappers.py`
+- `tests/test_exception_safety.py`: reviewed `BaseException` ownership boundaries, cancellation propagation/terminal observers, provider sanitizer convergence, and static secret-output checks.
 - `tests/test_fallback_logging.py`: allowlisted SQLite persistence-failure categories, stderr fallback visibility, and secret/raw-error suppression.
 - `tests/test_financial_health_modules.py`
 - `tests/test_financial_metrics_modules.py`
 - `tests/test_frontend_advice_timeline.py`
+- `tests/test_frontend_audit_time.py`: host-timezone-independent parsing of fixed UTC, explicit offsets, and legacy Shanghai-naive audit timestamps, plus use by scan, alert, and diagnostics views.
 - `tests/test_frontend_api_format_workbench.py`: fetch parsing for 204/205, zero-length/empty success payloads, structured errors, and workbench formatting.
 - `tests/test_frontend_app_flow.py`: core-workbench-first cold-load order, stock/session orchestration, immediate advice-timeline loading ownership, A-B-A stale response rejection, SSE, persistence, companion request guards, and full browser-state/SSE refresh after user-data import.
 - `tests/test_frontend_chart_inspector.py`: immutable daily/minute inspection snapshots, plot-boundary hit testing, CSS-to-canvas pointer mapping, keyboard traversal, redraw clamping, and listener cleanup.
@@ -110,12 +140,14 @@ The current test suite is split by domain:
 - `tests/test_optional_kline_parsing_modules.py`
 - `tests/test_optional_provider_concurrency.py`
 - `tests/test_provider_errors_modules.py`
+- `tests/test_provider_canary.py`: SH/SZ/BJ quote plus five-row daily-K contracts, three-market stock-pool validation, timeout/cancellation/cleanup, temporary SQLite CLI wiring, sanitization, and complete/partial/failure exit codes.
 - `tests/test_provider_failure_status_modules.py`
 - `tests/test_provider_registry_modules.py`
 - `tests/test_provider_status_aggregation_modules.py`
 - `tests/test_provider_status_repository_modules.py`
 - `tests/test_provider_utils_modules.py`
 - `tests/test_quote_stream_modules.py`
+- `tests/test_reliability_modules.py`: UTC-hour aggregation, bounded dimensions, workbench/provider counters, scan/task exclusions, fixed windows/targets/sample floors, counter invariants, and deterministic nearest-rank percentiles.
 - `tests/test_research_alpha_modules.py`
 - `tests/test_research_breadth_modules.py`
 - `tests/test_research_chip_modules.py`
@@ -161,10 +193,12 @@ The current test suite is split by domain:
 - `tests/test_stock_rule_modules.py`
 - `tests/test_stock_strategy_modules.py`
 - `tests/test_symbol_modules.py`
+- `tests/test_supply_chain.py`: SHA-pinned actions, disabled checkout credentials, runtime/dev Python and npm audits, redacted current/history secret scanning, reproducible Python/npm CycloneDX SBOMs, Dependabot coverage, and portable files.
 - `tests/test_system_diagnostics_modules.py`
 - `tests/test_tencent_provider_modules.py`: current Tencent quote behavior plus SH/SZ/BJ `newfqkline` requests, `qfqday`/unadjusted-day response handling, validation, and failure classification.
 - `tests/test_tool_inventory_modules.py`: generated-document drift, test-plan completeness, machine-path guards, dependency layering, immutable action SHA pins, and Node 24 action-major guards.
 - `tests/test_trading_calendar_modules.py`
+- `tests/test_typing_contract.py`: explicit existing mypy file scope, non-shrinking ratchet, sorted uniqueness, and prohibition of hidden type errors.
 - `tests/test_uvicorn_smoke.py`: real loopback Uvicorn startup with isolated SQLite, API/static responses and cache headers, plus a deliberately held-open quote SSE connection and traceback-free `SIGINT` shutdown bounded by the test's two-second graceful-shutdown setting.
 - `tests/test_valuation_modules.py`
 - `tests/test_watchlist_research_queue.py`: queue validation/order, mark-viewed state, comparable changed-advice unread increments, and viewed-through watermark preservation of later changes.
@@ -179,7 +213,7 @@ Browser regression support is indexed separately:
 
 ## 4. Manual Smoke Test Checklist
 
-1. Start the app on `127.0.0.1:8010` with the documented single-worker `--timeout-graceful-shutdown 5` command and confirm `/api/health` succeeds; with an SSE stream open, stop it and confirm the listener exits within the bounded shutdown window.
+1. Start the app on `127.0.0.1:8010` with the documented single-worker `--timeout-graceful-shutdown 5` command. Confirm `/api/health/live` is process-only, `/api/health/ready` reports SQLite plus `leader`/`standby`/`single`, every health response is `no-store`, and readiness becomes `503` during shutdown; with an SSE stream open, stop it and confirm the listener exits within the bounded shutdown window.
 2. Type a Chinese name or partial code in both stock inputs; confirm the 250 ms autocomplete can be navigated by pointer and keyboard, and that loading, empty, and unavailable messages are distinct.
 3. Enter a complete valid 6-digit code and confirm it submits directly without `/api/stocks`; confirm a non-complete cache miss adds only its search request.
 4. Switch A-B-A between valid SH/SZ symbols and confirm the timeline and advice-review list retain only the newest request's state.
@@ -202,6 +236,8 @@ Browser regression support is indexed separately:
 21. Simulate a deleted active scan and repeated poll failures; confirm the UI returns to latest with bounded backoff, resets page/results when a different run appears, retries immediately after `online`, keeps one request/timer at a time, and announces progress/result milestones through one live region.
 22. With disposable dual processes, confirm only one owns `<SQLite path>.runtime-leader.lock`, scheduler and scanner never split ownership, and standby takes over both after the leader exits. Confirm restore refuses the unified lock and both legacy compatibility locks.
 23. Confirm invalid symbols stay in the query panel, while a failed valid-stock load clears the prior stock content and shows an explicit failure; then check desktop/mobile layouts for console errors.
+24. Generate enough disposable workbench/provider/task/scan observations to cross each sample floor. Confirm `/api/system/reliability` reports the documented 7/30-day targets, returns `insufficient_data` before the floor, excludes cancelled work and retry durations as documented, and keeps bucket rows hourly rather than request-specific.
+25. In an explicitly network-enabled environment, run `tools/provider_canary.py` with disposable or default SH/SZ/BJ representatives. Confirm stdout is sanitized JSON, the configured runtime database is untouched, quote/five-row daily-K/stock-pool summaries are present, and the exit status distinguishes complete, partial, and unavailable results.
 
 ## 5. Request And Browser Budgets
 
@@ -228,7 +264,7 @@ Browser regression support is indexed separately:
 
 Stock-search requests are not part of the four-request stock-switch baseline: only a debounced, uncached, non-complete user query may trigger one. A selected suggestion then follows the ordinary stock-load budget. The latest recorded desktop/mobile browser matrix is **33 passed, 5 skipped**; the skipped cases are intentional device-exclusive scenarios recorded by Playwright rather than treated as passes.
 
-Regression-sensitive boundaries include core-workbench-first cold-load dispatch under browser connection limits, equal-event quote quality priority and legacy UTC ordering, `qfq`/legacy K-line isolation, quote/minute session freshness, provider request-key single-flight/orphan isolation plus daemon-worker process exit, the 15:15 daily publish threshold, full-market `data_date` snapshots, atomic task attachment and scan/task terminals, owned terminal-failure recovery, structured degradation and unified retry plans, normalized atomic stock-pool replacement, quiescence-delayed single runtime leadership and whole-service takeover, set-based retention with retry-lineage convergence, cross-process backup leases and explicit rotation/restore guards, scan contract/backoff/latest recovery and ARIA state, server-current-time handling for today's review/scan, rendered-symbol ownership, single-use import previews, latest-owner browser state, serialized backup-before-import, automatic user-history exclusion, review-linked retention, successful write reconciliation, comparable-change unread watermarks, notification cursor advancement, stale companion responses, immutable Node 24 action pins, and request-budget drift.
+Regression-sensitive boundaries include Python/Node/npm declaration drift, host-timezone independence, Shanghai-to-UTC audit migration, monotonic durations, checked dependency direction and mypy-scope shrinkage, cancellation propagation, health admission semantics, reliability sample floors/cardinality/exclusions, isolated provider-canary state, runtime/dev dependency audits, redacted complete-history secret scanning, reproducible SBOMs, immutable Action pins, core-workbench-first cold-load dispatch under browser connection limits, equal-event quote quality priority and legacy UTC ordering, `qfq`/legacy K-line isolation, quote/minute session freshness, provider request-key single-flight/orphan isolation plus daemon-worker process exit, the 15:15 daily publish threshold, full-market `data_date` snapshots, atomic task attachment and scan/task terminals, owned terminal-failure recovery, structured degradation and unified retry plans, normalized atomic stock-pool replacement, quiescence-delayed single runtime leadership and whole-service takeover, set-based retention with retry-lineage convergence, cross-process backup leases and explicit rotation/restore guards, scan contract/backoff/latest recovery and ARIA state, server-current-time handling for today's review/scan, rendered-symbol ownership, single-use import previews, latest-owner browser state, serialized backup-before-import, automatic user-history exclusion, review-linked retention, successful write reconciliation, comparable-change unread watermarks, notification cursor advancement, stale companion responses, and request-budget drift.
 
 ## 6. Latest Test Report
 
@@ -236,6 +272,11 @@ Each row describes the exact worktree scope verified by its command; older recor
 
 | Date | Worktree State | Environment | Command | Scope | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-27 | Final engineering-quality convergence worktree | macOS, project Python 3.12 `.venv`, Node 24.14.1, npm 11.11.0, `TZ=UTC`, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-branch --cov-fail-under=90 --cov-report=term --cov-report=xml` | Full Python suite with branch coverage under the quality-job timezone, including real Uvicorn loopback smoke tests | 2271 passed and 64 subtests passed in 217.83s; 91.52% coverage | Includes fixed-width UTC migration, configurable legacy timezone, old-bundle import normalization, frontend Shanghai rendering, SLI sample semantics, strict canary contracts, architecture and supply-chain guards. |
+| 2026-07-27 | Same final worktree | macOS, project Python 3.12 `.venv`, Node 24.14.1, npm 11.11.0 | `npm run check` | Runtime declaration, Python compile/pyflakes, JavaScript syntax, and full pytest suite | 2271 passed and 64 subtests passed in 81.82s | Confirms the documented local quality command in the default host timezone. |
+| 2026-07-27 | Same final worktree | macOS, Playwright Chromium desktop and Pixel 7 projects | `npm run test:e2e` | Full responsive browser regression | 33 passed, 5 intentional device-exclusive skips in 49.0s | Confirms request ownership, scan lifecycle, charts, research activity, responsive layout, online recovery, and cross-page notification coordination. |
+| 2026-07-24 | Engineering-quality convergence worktree and synchronized documentation | macOS, project Python 3.12 `.venv`, Node 24.14.1, npm 11.11.0, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider <architecture, clock, exception-safety, provider-canary, reliability, supply-chain, and typing-contract modules>` | Runtime-independent engineering contracts with fake providers and temporary SQLite | 53 passed in 10.31s | Confirms dependency direction/acyclicity, UTC/Shanghai/monotonic semantics, legacy audit migration, reviewed cancellation boundaries, temporary-DB quote/five-row-daily-K/stock-pool canary behavior, SLO math/cardinality, supply-chain workflow contracts, and non-shrinking mypy scope. |
+| 2026-07-24 | Same current worktree after engineering documentation update | macOS, project Python 3.12 `.venv` | `$PYTHON -m pytest -q -p no:cacheprovider tests/test_tool_inventory_modules.py tests/test_config_modules.py tests/test_supply_chain.py` | Documentation path/index/configuration plus supply-chain guardrails | 65 passed in 15.79s | Confirms every current Python test module appears exactly once in the test index, all app/tool `ASHARE_RADAR_*` variables are documented, no machine-specific path is embedded in guarded documentation, and Security declares runtime/dev audits, redacted current/history scans, reproducible SBOMs, SHA-pinned actions, and no persisted checkout credentials. |
 | 2026-07-22 | Final provider-reliability and full-market recovery worktree | macOS, project Python 3.12 `.venv`, Node 22.23.1, `TZ=UTC`, `PYTHONNOUSERSITE=1` | `$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing --cov-report=xml` | Full Python suite with branch coverage under the GitHub quality-job runtime contract | 2177 passed in 95.27s; 91.67% coverage | Coverage gate is 90%; includes host-timezone-independent cache fixtures, explicit notification-lock test doubles that do not depend on Node 24 globals, provider-chain state/capacity, Tencent/Sina SH/SZ/BJ daily-K fallback, zero-volume and stale suspended-stock handling, bulk-response truncation protection, pending-only recovery, cancellation/write transactions, real Uvicorn/SSE shutdown, multiprocess coordination, and persistence regressions. |
 | 2026-07-22 | Same final worktree | macOS, project Python 3.12 `.venv` | `npm run check` | Python compile, pyflakes, JavaScript syntax, and full pytest suite | 2177 passed in 64.10s | Confirms the convenient local quality command against the final source and test inventory. |
 | 2026-07-22 | Current shared worktree after provider-chain pending/retry documentation and Tencent/Sina daily-K reliability changes | macOS, project Python 3.12 `.venv`, fake providers/HTTP clients | `$PYTHON -m pytest -q tests/test_config_modules.py tests/test_sina_client.py tests/test_datahub_runtime_modules.py <targeted daily-K, market-scan outage/recovery, and Tencent endpoint tests>` | Reliability-focused configuration, provider-chain, fallback, and scan regression subset | 135 passed in 1.60s | No outbound network; confirms exact environment-variable documentation, chain-state classification, false-missing prevention, pending-only recovery, safe Sina `qfq` parsing, and the Tencent SH/SZ/BJ endpoint contract. |
@@ -252,10 +293,15 @@ Recent targeted checks kept for traceability:
 
 | Date | Command | Scope | Result | Why It Was Run |
 | --- | --- | --- | --- | --- |
+| 2026-07-24 | Protected online backup of the active 458 MiB SQLite database, followed by `SQLiteCache` initialization and `PRAGMA quick_check; PRAGMA foreign_key_check;` on the copy | Existing-database UTC-v2 upgrade path without modifying live data | backup manifest integrity `ok`; migration 7.79s; post-migration checks `ok` | Confirms the fixed-width timestamp and schema-migration rebuilds are practical and structurally valid on approximately 1.42 million daily-K rows. |
+| 2026-07-27 | Runtime/dev `pip-audit --require-hashes --disable-pip`, `npm audit --audit-level=high`, two independent `tools/generate_sbom.py` runs followed by recursive diff, and checksum-verified Gitleaks 8.30.1 scans | Locked dependency vulnerability checks, reproducible CycloneDX output, and redacted current-source plus complete-history secret scanning | no known Python vulnerabilities; 0 npm vulnerabilities; SBOM directories byte-identical; no leaks in 121.83 MB current source or 13 Git commits | Confirms all local Security workflow gates against the final worktree and complete repository history. |
+| 2026-07-27 | Identical clock/cache/migration/frontend-audit regression command under `TZ=UTC` and `TZ=Asia/Shanghai` | Host-timezone independence for business, persisted audit, import, diagnostics, and cache semantics | 91 passed and 4 subtests passed in both environments | Confirms the same focused boundary suite and result count under both supported host timezone settings. |
+| 2026-07-24 | `$PYTHON tools/runtime_contract.py` | Installed runtime plus `.python-version`, `.node-version`, and `package.json` declaration consistency | passed on Python 3.12, Node 24.14.1, npm 11.11.0 | Confirms the current environment is inside the supported Python 3.12 / Node 22-or-24 / npm 10-or-11 contract. |
+| 2026-07-24 | `git diff --check` plus targeted machine-path and common credential-pattern scans over the six changed engineering documents | Patch integrity and documentation privacy | passed; no findings | Confirms the changed Markdown contains no whitespace errors, machine-specific home paths, common API-token/private-key forms, UUID-shaped credential values, or user information. |
 | 2026-07-22 | Node 22 and Node 24 runs of `$PYTHON -m pytest -q tests/test_frontend_notifications.py` | Deterministic notification polling, shared-lock coordination, cursor, retry, disable/re-enable, and delivery behavior across supported local/CI Node runtimes | 15 passed on Node 22.23.1; 15 passed on Node 24.14.1 | Confirms notification tests inject their browser lock dependency instead of accidentally borrowing a Node-version-specific global Web Locks implementation. |
 | 2026-07-22 | `npm run test:e2e` | Full desktop and mobile browser regression, including full-market run/retry/recovery and multi-page notification coordination | 33 passed, 5 skipped in 47.4s | Confirms responsive workbench behavior, strict response contracts, request budgets, scan lifecycle ownership, online recovery, accessibility state, and cross-page alert de-duplication. |
 | 2026-07-22 | `$PYTHON tools/api_inventory.py --check`, `$PYTHON tools/architecture_inventory.py --check`, then `$PYTHON -m pytest -q tests/test_tool_inventory_modules.py tests/test_config_modules.py` | Generated API/architecture references and documentation/configuration guardrails | passed; 55 tests passed in 11.48s | Confirms generated references match the final source tree and runtime settings remain documented without machine-specific paths or credentials. |
-| 2026-07-22 | `$PYTHON -m pip check`, `$PYTHON -m ruff check app tests tools`, `$PYTHON -m mypy`, and `git diff --check` | Dependency, static-analysis, type, and patch-integrity gates | passed; mypy checked 44 source files | Confirms the final dependency graph, lint rules, type contracts, and patch formatting are clean. |
+| 2026-07-27 | `$PYTHON -m ruff check --no-cache app tests tools`, `$PYTHON -m mypy`, both generated-inventory checks, and focused architecture/typing/supply-chain guards | Static analysis, expanded type scope, generated documentation, dependency direction, and supply-chain contracts | passed; mypy checked 74 source files; 29 focused tests passed | Confirms the final lint, type ratchet, generated references, acyclic boundaries, and workflow guardrails are clean. |
 | 2026-07-19 | `npm run test:e2e` | Full desktop and mobile browser regression including scan failure recovery and online resynchronization | 28 passed, 4 skipped in 43.7s | Confirms strict response contracts, bounded one-timer polling, latest-run recovery, new-run pagination reset, responsive charts/layout, request budgets, and ARIA state. |
 | 2026-07-19 | `$PYTHON -m pip check`, `$PYTHON -m ruff check app tests tools`, `$PYTHON -m mypy`, both generated-inventory checks, and `git diff --check` | Dependency, static-analysis, type, generated-document, and patch-integrity gates | passed; mypy checked 44 source files; 14 inventory guard tests passed | Matches the quality job gates and confirms current Node 24 GitHub Action pins, portable documentation, complete test indexing, and ignored runtime data. |
 | 2026-07-18 | `npm run test:e2e` | Full desktop and mobile browser regression including the full-market background scan workspace | 24 passed, 4 skipped in 34.3s | Confirms immediate task progress, unpublished cancellation, derived-run retry, terminal degraded snapshots, bounded 100-row pagination, sorting/filters, keyboard scrolling, responsive layout, and existing workflows. |
@@ -277,3 +323,6 @@ Final live-provider verification completed on 2026-07-22 against the current SH/
 - There are no SSE load tests or provider timeout-cascade performance tests.
 - SQLite compatibility helpers are covered, but there is no committed replay fixture for every historical database version.
 - Route-level response contracts focus on high-risk paths rather than every stock report endpoint.
+- Reliability math and persistence are covered with synthetic data, but no long-running representative dataset yet validates the provisional SLO targets or supports burn-rate alerting.
+- Required CI remains hermetic; live provider canary behavior depends on external endpoints and is intentionally evidenced only by an explicit optional run.
+- Supply-chain tests cover locks, audits, history scanning, immutable action references, and reproducible SBOMs, but there is no signed release artifact or generated/verified SLSA provenance.

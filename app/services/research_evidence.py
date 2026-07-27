@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import AlphaEvidenceReport, EvidenceChainReport, RiskRewardReport, SignalValidationReport, StockDiagnosis
+from app.models.research import (
+    AlphaEvidenceReport,
+    EvidenceChainReport,
+    RiskRewardReport,
+    SignalValidationReport,
+    StockDiagnosis,
+)
 
 
 def build_evidence_chain_report(

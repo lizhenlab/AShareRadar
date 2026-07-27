@@ -17,6 +17,7 @@ from app.services.datahub_cache import (
     _normalize_minute_interval,
     _stock_pool_cache_is_fresh,
 )
+from app.utils.clock import market_now_naive
 from tests.factories import make_kline
 
 
@@ -63,11 +64,11 @@ def test_minute_interval_normalization_rejects_unsupported_interval() -> None:
 
 def test_stock_pool_cache_freshness_rejects_invalid_windows_and_future_timestamps() -> None:
     fresh_cache = SimpleNamespace(
-        latest_stock_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        latest_stock_at=market_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
         stock_count=10,
     )
     future_cache = SimpleNamespace(
-        latest_stock_at=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+        latest_stock_at=(market_now_naive() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
         stock_count=10,
     )
 

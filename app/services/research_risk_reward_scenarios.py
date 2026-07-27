@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import math
 
-from app.models.schemas import (
+from app.models.analysis import (
     AnalysisResult,
-    FactorLabReport,
     FeatureSnapshot,
+)
+from app.models.research import (
+    FactorLabReport,
     MarketRegimeReport,
     ScenarioPlan,
     SignalValidationReport,

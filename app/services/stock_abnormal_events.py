@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.models.schemas import AbnormalEventSummary, AnalysisResult
+from app.models.analysis import (
+    AbnormalEventSummary,
+    AnalysisResult,
+)
 from app.services.stock_abnormal_context import build_abnormal_context
 from app.services.stock_abnormal_rules import detect_abnormal_events
 from app.services.stock_abnormal_summary import summarize_abnormal_events

@@ -4,7 +4,10 @@ from app.repositories.base import SQLiteRepository
 from app.repositories.market_klines import MarketKlineRepositoryMixin
 from app.repositories.market_metadata import MarketMetadataRepositoryMixin
 from app.repositories.market_quotes import MarketQuoteRepositoryMixin, _quote_trade_date
-from app.utils.time import now_text, seconds_ago_text
+from app.utils.audit_time import (
+    audit_now_text as now_text,
+    audit_seconds_ago_text as seconds_ago_text,
+)
 
 
 class MarketDataRepository(

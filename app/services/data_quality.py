@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.models.schemas import DataQuality, Kline, Quote
+from app.models.analysis import (
+    DataQuality,
+)
+from app.models.market import (
+    Kline,
+    Quote,
+)
 from app.services.data_quality_components import build_data_quality_report
 from app.services.data_quality_kline import (
     assess_kline_quality,
@@ -22,6 +28,7 @@ from app.services.data_quality_time import (
     quote_freshness_penalty as _quote_freshness_penalty,
     weekday_gap as _weekday_gap,
 )
+from app.utils.clock import market_now_naive
 
 
 def build_data_quality(
@@ -34,7 +41,7 @@ def build_data_quality(
     require_kline: bool = True,
     now: datetime | None = None,
 ) -> DataQuality:
-    current = now or datetime.now()
+    current = now or market_now_naive()
     return build_data_quality_report(
         quote,
         klines,

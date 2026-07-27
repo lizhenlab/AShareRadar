@@ -3,7 +3,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.models.schemas import AnalysisResult, FundFlowAnalysis, FundFlowWindow, Kline, OrderBook, OrderPressure
+from app.models.analysis import (
+    AnalysisResult,
+    FundFlowAnalysis,
+    FundFlowWindow,
+    OrderPressure,
+)
+from app.models.market import (
+    Kline,
+    OrderBook,
+)
 from app.services.indicators import pct_change
 from app.services.scoring import clamp_score, score_level
 from app.services.stock_abnormal_context import current_volume_metrics

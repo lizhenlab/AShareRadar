@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import ProviderCapabilityStatus, ProviderStatus
-from app.utils.time import now_text
+from app.models.system import (
+    ProviderCapabilityStatus,
+    ProviderStatus,
+)
+from app.utils.audit_time import audit_now_text as now_text, parse_audit_time
 
 DEFAULT_PROVIDER_PRIORITY = 99
 
@@ -87,7 +90,9 @@ def _aggregate_healthy(context: ProviderAggregationContext) -> bool:
 
 
 def _latest_success(statuses: list[ProviderCapabilityStatus], history: ProviderStatus | None) -> str | None:
-    return max((item.last_success for item in statuses if item.last_success), default=history.last_success if history else None)
+    candidates = [item.last_success for item in statuses if item.last_success]
+    default = history.last_success if history else None
+    return max(candidates, key=_timestamp_key, default=default)
 
 
 def _latest_error(statuses: list[ProviderCapabilityStatus], history: ProviderStatus | None) -> str | None:
@@ -101,12 +106,18 @@ def _latest_latency(statuses: list[ProviderCapabilityStatus], history: ProviderS
 
 
 def _latest_updated_at(statuses: list[ProviderCapabilityStatus], fallback: ProviderStatus | None) -> str:
-    return max((item.updated_at for item in statuses if item.updated_at), default=fallback.updated_at if fallback and fallback.updated_at else now_text())
+    candidates = [item.updated_at for item in statuses if item.updated_at]
+    default = fallback.updated_at if fallback and fallback.updated_at else now_text()
+    return max(candidates, key=_timestamp_key, default=default)
 
 
 def _latest_by_updated_at(statuses: list[ProviderCapabilityStatus]) -> ProviderCapabilityStatus | None:
     ordered_statuses = _sort_statuses(statuses)
-    latest_updated_at = max((item.updated_at or "" for item in ordered_statuses), default=None)
+    latest_updated_at = max(
+        (item.updated_at or "" for item in ordered_statuses),
+        key=_timestamp_key,
+        default=None,
+    )
     if latest_updated_at is None:
         return None
     return next((item for item in ordered_statuses if (item.updated_at or "") == latest_updated_at), None)
@@ -130,6 +141,13 @@ def _priority(value: int | None) -> int:
 
 def _count(value: int | None) -> int:
     return max(int(value or 0), 0)
+
+
+def _timestamp_key(value: str) -> tuple[float, str]:
+    try:
+        return parse_audit_time(value).timestamp(), value
+    except ValueError:
+        return float("-inf"), value
 
 
 __all__ = ["aggregate_provider_status", "capability_has_activity"]

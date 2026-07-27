@@ -1,15 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime
+from pathlib import Path
+import threading
 
 from app.db.system_mappers import row_to_monitor_event, row_to_task_run
-from app.models.schemas import MonitorEvent, TaskRun
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
+from app.models.system import (
+    MonitorEvent,
+    TaskRun,
+)
 from app.repositories.base import SQLiteRepository
+from app.utils.audit_time import audit_now_text as now_text
+from app.utils.clock import market_now_naive, monotonic_now
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text, parse_text_time
+from app.utils.time import parse_text_time
 
 
 class RuntimeEventRepository(SQLiteRepository):
+    def __init__(self, path: Path, lock: threading.RLock) -> None:
+        super().__init__(path, lock)
+        self._task_started_monotonic: dict[int, float] = {}
+
     def log_event(self, category: str, message: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -26,13 +37,18 @@ class RuntimeEventRepository(SQLiteRepository):
                 """,
                 (task_name, "running", now_text()),
             )
-            return int(cursor.lastrowid)
+            run_id = int(cursor.lastrowid)
+            self._task_started_monotonic[run_id] = monotonic_now()
+            return run_id
 
     def finish_task_run(self, run_id: int, status: str, message: str | None = None) -> None:
         finished_at = now_text()
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT started_at FROM task_run WHERE id = ?", (run_id,)).fetchone()
-            duration_ms = _task_duration_ms(row["started_at"] if row else None)
+            duration_ms = _task_duration_ms(
+                row["started_at"] if row else None,
+                started_monotonic=self._task_started_monotonic.get(run_id),
+            )
             conn.execute(
                 """
                 UPDATE task_run
@@ -41,6 +57,7 @@ class RuntimeEventRepository(SQLiteRepository):
                 """,
                 (status, finished_at, duration_ms, (message or "")[:800], run_id, status),
             )
+            self._task_started_monotonic.pop(run_id, None)
 
     def reconcile_orphaned_task_runs(self, message: str = "应用重启时终止遗留运行记录") -> int:
         finished_at = now_text()
@@ -66,9 +83,9 @@ class RuntimeEventRepository(SQLiteRepository):
             return []
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM task_run
-                ORDER BY started_at DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(started_at) DESC, id DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -81,10 +98,10 @@ class RuntimeEventRepository(SQLiteRepository):
         trimmed_message = message[:800]
         with self._lock, self._connect() as conn:
             recent = conn.execute(
-                """
+                f"""
                 SELECT id FROM monitor_event
                 WHERE level = ? AND category = ? AND symbol IS ? AND message = ?
-                ORDER BY COALESCE(last_seen_at, created_at) DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(COALESCE(last_seen_at, created_at)) DESC, id DESC
                 LIMIT 1
                 """,
                 (level, category, normalized_symbol, trimmed_message),
@@ -112,9 +129,9 @@ class RuntimeEventRepository(SQLiteRepository):
             return []
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM monitor_event
-                ORDER BY COALESCE(last_seen_at, created_at) DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(COALESCE(last_seen_at, created_at)) DESC, id DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -122,11 +139,13 @@ class RuntimeEventRepository(SQLiteRepository):
         return [row_to_monitor_event(row) for row in rows]
 
 
-def _task_duration_ms(started_at_text: object) -> int | None:
+def _task_duration_ms(started_at_text: object, *, started_monotonic: float | None = None) -> int | None:
+    if started_monotonic is not None:
+        return max(0, round((monotonic_now() - started_monotonic) * 1000))
     if not isinstance(started_at_text, str):
         return None
     try:
         started_at = parse_text_time(started_at_text)
     except ValueError:
         return None
-    return max(0, int((datetime.now() - started_at).total_seconds() * 1000))
+    return max(0, int((market_now_naive() - started_at).total_seconds() * 1000))

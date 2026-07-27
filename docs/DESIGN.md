@@ -37,6 +37,29 @@ flowchart TD
 - `app/api/errors.py` separates client request validation from internal model failure. `RequestValidationError` remains a Chinese `422`; a Pydantic `ValidationError` raised while mapping internal/provider/SQLite data is logged with traceback and returned as a generic `503` without exposing model input. Async routes use `run_sync_api_async()` for synchronous repository/diagnostic calls so SQLite work runs outside the event-loop thread while preserving the same not-found/domain/database error contract.
 - `static/js/symbols.js` mirrors the public stock-symbol rule used by the backend for UI search input: normalize legal SH/SZ symbols, but reject malformed or all-zero codes before starting a workbench request.
 
+### 2.1 Runtime Contract
+
+The supported interpreter contract is executable rather than prose-only:
+
+- Python must be 3.12.x. `.python-version`, Ruff, mypy, both hashed Python locks, and GitHub Actions use that baseline.
+- Node.js 22.x is the default declared by `.node-version`; Node.js 22.x and 24.x are supported for development checks. npm 10.x and 11.x are accepted.
+- `package.json` records `^22.0.0 || ^24.0.0` and `>=10 <12`; `tools/runtime_contract.py` verifies the installed versions and detects declaration drift across these files.
+- The primary macOS quality job uses Python 3.12 and Node 22. A separate macOS Node 24 job runs the runtime contract and JavaScript smoke checks. Browser regression remains an Ubuntu Chromium job and does not redefine the supported local runtime.
+
+Node is an engineering dependency for JavaScript checks, Playwright, npm auditing, and npm SBOM generation. It is not required by the FastAPI process at runtime.
+
+### 2.2 Time Semantics
+
+Time is separated by meaning and all direct wall-clock access is isolated in `app/utils/clock.py`:
+
+| Meaning | Representation | Owner | Examples |
+| --- | --- | --- | --- |
+| Market/event time | aware `Asia/Shanghai`; legacy/UI market text may be Shanghai-naive | `market_now()`, `market_now_naive()`, `app/utils/market_time.py` | trading sessions, quote event time, K-line business dates, 15:15 publication boundary |
+| Audit/persistence time | aware UTC serialized as ISO 8601 with `Z` | `utc_now()`, `app/utils/audit_time.py` | created/updated/fetched timestamps, task and scan lifecycle, provider status, health reports |
+| Elapsed time | process-local monotonic/performance seconds | `monotonic_now()`, `performance_now()` | TTLs, deadlines, retries, throttles, latency and duration measurements |
+
+`20260724_audit_timestamps_utc_v2` is an idempotent SQLite compatibility migration. For allowlisted audit columns only, it interprets historical `YYYY-MM-DD HH:MM:SS[.fraction]` values as Shanghai local time and rewrites them to UTC `...Z`, preserving fractions. Existing aware ISO values are left intact. Market-event columns are not bulk-converted, and `ashare_audit_epoch()` keeps mixed legacy/aware audit rows chronologically comparable during transition. Tests run with non-Shanghai host time zones to ensure business behavior does not depend on the machine setting.
+
 ## 3. Layer Responsibilities
 
 | Layer | Files | Responsibilities |
@@ -48,6 +71,8 @@ flowchart TD
 | Repositories | `app/repositories/*` | SQLite read/write boundaries per data domain. |
 | DB | `app/db/*` | Connection, schema, migrations, row-to-model mapping. |
 | Models | `app/models/*.py` | Pydantic API and internal transfer models grouped by domain, with `schemas.py` kept as a compatibility re-export layer. |
+
+The checked dependency direction is `API -> workflows -> services -> repositories/DB`, with domain models and utilities shared downward. `db`, `repositories`, `models`, and `utils` may not import `app.api`, `app.services`, or `app.workflows`; production code imports domain model modules directly rather than the `app.models.schemas` compatibility facade. Provider error contracts and advice/rule constants therefore live in lower-layer model/utility modules, while service modules may provide compatibility re-exports. `tests/test_architecture_boundaries.py` also rejects application import cycles and direct `datetime.now()` outside the clock adapter.
 
 ## 4. Main Request Flows
 
@@ -206,6 +231,7 @@ Repository boundaries:
 - `app/repositories/cache_stats.py` reports aggregate K-line rows for compatibility while exposing daily and minute K-line counts and timestamps separately. `latest_kline_at` is the daily K-line freshness timestamp used by trend-health checks; fresh minute K-line writes must not mask stale daily K-line cache.
 - `app/repositories/market_metadata.py` owns stock pool, plate rank, and stock concept cache reads/writes. Stock-pool replacement shares `app/utils/stock_pool.py` normalization with DataHub coverage checks, rejects malformed required identity/provenance fields, de-duplicates by canonical symbol, and atomically replaces plus verifies the authoritative set. Other metadata persistence uses explicit column lists, stable read ordering, concept-name de-duplication, and finite optional numeric-field cleaning so display-only amount/turnover/leader-change fields cannot poison later reports. Empty or all-invalid plate/concept write batches preserve the previous good cache instead of deleting usable fallback data.
 - `app/repositories/provider_status.py` owns provider/capability upserts and queries; runtime success/failure updates preserve configured capability `enabled` state and read status rows through explicit column lists with stable ordering. `app/services/provider_errors.py` sanitizes URL/userinfo/query/auth forms plus quoted sensitive keys in JSON- and Python-style mappings. Provider error text is sanitized and length-bounded before every general/capability write, while `app/db/system_mappers.py` sanitizes `last_error` again on read so historical dirty rows cannot leak credentials through status or diagnostics responses. `app/repositories/provider_status_aggregation.py` owns the policy for rolling capability state up to aggregate provider health. Aggregation first classifies enabled and active capabilities, normalizes invalid counts, then applies fallback history only when no enabled capability has runtime activity so disabled stale errors do not pollute current provider health.
+- `app/repositories/reliability.py` owns low-cardinality UTC-hour reliability buckets. Workbench observations are aggregated by fixed metric only; provider attempts add bounded provider/capability dimensions and commit in the same SQLite transaction as their capability-status update. Full-market and scheduler-task SLIs are derived from existing terminal run tables instead of duplicating events. Counter and duration inputs are normalized, cancelled work is excluded, retry scan durations are excluded from latency percentiles, and retention treats the bucket table as regenerable runtime data.
 - `app/repositories/update_fields.py` owns shared field-cleaning and SQL assignment generation used by user-data update methods.
 - `app/repositories/watchlist.py` owns watchlist identity and local research-queue state. `PATCH` applies only fields explicitly supplied by the client; queue reads sort active before excluded, due before not due, then high/medium/low priority, pinned state, update recency, and symbol. `mark_viewed()` records `last_viewed_at` without a provider call. When clearing is requested with a valid `viewed_through_advice_id`, it recomputes the remaining unread count from comparable conclusion changes after that displayed snapshot under `BEGIN IMMEDIATE`; a missing watermark preserves the count, and an unknown or foreign-symbol watermark is rejected. Symbols marked `excluded` are omitted from quote-refresh symbol lists.
 - `app/repositories/advice.py` owns advice-history persistence, conclusion snapshot provenance, timeline reads, and snapshot de-duplication. `save_snapshot()` opens `BEGIN IMMEDIATE` before reading the latest row and deciding update versus insert. A new advice row increments `watchlist.unread_change_count` in that same transaction only when comparison with the preceding row is both comparable and changed; first, unchanged, legacy, or version-changed snapshots do not increment it, and an unread-update exception rolls back the insert. A de-duplicated repeat updates `repeat_count` without incrementing unread. Dedupe compares the versioned conclusion identity rather than transient prose. Timeline assembly reads one extra baseline row, compares newest to oldest within the requested page, and labels no-previous, legacy, or version-changed rows as non-comparable instead of inventing changes. Malformed legacy rows remain displayable with mapper fallbacks but cannot swallow a fresh analysis snapshot.
@@ -237,6 +263,7 @@ Repository boundaries:
 | `task_run` | Scheduler task history. |
 | `monitor_event` | Runtime diagnostics and repeated warning merge. |
 | `trading_calendar` | Trading day cache. |
+| `reliability_bucket` | UTC-hour aggregates for bounded-cardinality workbench and provider reliability observations. |
 
 ## 6. Provider Design
 
@@ -446,13 +473,49 @@ External data text must be escaped before rendering, including review values and
 
 Runtime configuration uses the `ASHARE_RADAR_*` environment namespace. The complete variable table is maintained in [OPERATIONS.md](OPERATIONS.md); this design document records the ownership boundary rather than duplicating every runtime knob.
 
-LLM answers require `ASHARE_RADAR_LLM_API_KEY`, `ASHARE_RADAR_LLM_BASE_URL`, and `ASHARE_RADAR_LLM_MODEL`. Process environment values win; otherwise `app/config.py` accepts only simple top-level assignments for the allowlisted `ASHARE_RADAR_LLM_*` names in `$HOME/.zshrc`. The profile is parsed rather than executed, and there is no vendor default, project-file, browser, or imported-user-data fallback.
+LLM answers require `ASHARE_RADAR_LLM_API_KEY`, `ASHARE_RADAR_LLM_BASE_URL`, and `ASHARE_RADAR_LLM_MODEL`. Process environment values win; otherwise the shell reader accepts only simple top-level assignments for the five allowlisted `ASHARE_RADAR_LLM_*` names in `$HOME/.zshrc`. The profile is parsed rather than executed, command substitutions and nested shell constructs are ignored, and a profile containing the API key must be a regular current-user-owned file with no group/other permissions. There is no vendor default, project-file, browser, or imported-user-data fallback.
 
-Provider, scheduler, cache, retention, quality-threshold, and LLM settings are resolved through `app/config.py`. Provider credentials and switches are injected from `Settings` by `app/services/provider_registry.py`, so individual provider adapters do not read environment variables directly. Legacy aliases remain accepted where documented for local compatibility, but new settings use `ASHARE_RADAR_*`; LLM settings have no legacy aliases and only the bounded shell-profile fallback described above. Missing optional values use defaults, while present but malformed boolean/numeric values and unsafe LLM URLs fail fast. Configuration is process-scoped and requires restart after changes.
+Configuration ownership is split while `app/config.py` remains the stable import facade:
+
+- `app/config_settings.py` owns `Settings`, environment/default resolution, project-relative paths, and the lazy allowlisted shell fallback.
+- `app/config_shell.py` owns non-executing shell assignment parsing and secret-file permission checks.
+- `app/config_validation.py` owns security-sensitive LLM endpoint normalization and validation.
+- `app/config.py` re-exports the compatibility surface and contains no settings implementation.
+
+Provider, scheduler, cache, retention, quality-threshold, reliability-retention, and LLM settings are captured once in `Settings`. Provider credentials and switches are injected by `app/services/provider_registry.py`, so individual provider adapters do not read environment variables directly. Legacy aliases remain accepted where documented for local compatibility, but new settings use `ASHARE_RADAR_*`; LLM settings have no legacy aliases and only the bounded shell-profile fallback described above. Missing optional values use defaults, while present but malformed boolean/numeric values and unsafe LLM URLs fail fast without echoing secret input. Configuration is process-scoped and requires restart after changes.
 
 Python dependencies follow a four-file boundary: `requirements.txt` and `requirements-dev.txt` declare direct runtime and engineering inputs; `requirements-lock.txt` and `requirements-dev-lock.txt` pin complete, hashed Python 3.12 resolutions. Reproducible runtime installs use the runtime lock, while development and CI install the development lock directly because it already includes the runtime input. JavaScript development dependencies are installed from `package-lock.json` with `npm ci`. CI runs `pip check` and verifies generated API/function documents through non-mutating `--check` modes.
 
-## 14. Known Design Debt
+## 14. Health, Reliability, and Supply Chain
+
+Health probes have separate operational meanings:
+
+- `GET /api/health` is the backward-compatible summary.
+- `GET /api/health/live` is process liveness. It reads settings from application state and deliberately does not resolve the container, SQLite, scheduler, scanner, or providers.
+- `GET /api/health/ready` is admission readiness. Startup sets `accepting_requests=false`, flips it only after runtime startup, and resets it before shutdown. The probe then performs a read-only SQLite `SELECT 1` with a 250 ms SQLite busy timeout inside an overall one-second async bound. External provider reachability is not a readiness dependency; a runtime standby can be ready and reports `leader`, `standby`, or `single` separately.
+- Probe responses use `Cache-Control: no-store`; failed readiness returns generic component state rather than an exception or local path.
+
+`GET /api/system/reliability` reports project-local SLIs and provisional SLOs from UTC-hour aggregates plus existing terminal run history:
+
+| Indicator | Window | Objective | Minimum evidence |
+| --- | ---: | ---: | ---: |
+| Workbench usable | 7 days | 99% | 20 requests |
+| Workbench data quality at least 50 | 7 days | 95% | 20 requests |
+| Workbench quote/K-line freshness | 7 days | 95% | 20 requests |
+| Workbench without cache/provider fallback | 7 days | 80% | 20 requests |
+| Provider attempt success | 7 days | 95% | 20 attempts |
+| Ordinary scheduler task success or degraded completion | 7 days | 95% | 20 tasks |
+| Full-market success or degraded completion | 30 days | 90% | 3 terminal runs |
+| Full-market ranked-symbol coverage | 30 days | 95% | 3 terminal runs |
+| Full-market non-retry duration p95 | 30 days | at most 90 minutes | 3 durations |
+
+Every item exposes its target and sample floor. Below the floor, status is `insufficient_data`, not `met`. Cancelled tasks/scans do not count as failures; interrupted scans do, and retry durations do not distort the duration SLI. These objectives are initial local operating hypotheses, not an external SLA or evidence of provider availability.
+
+`tools/provider_canary.py` is an optional bounded live-provider contract check. It uses a temporary SQLite database, concurrently probes representative SH/SZ/BJ symbols with non-cached quotes and five-row completed daily-K requests, checks a stock pool containing all three markets, validates identities/timestamps/OHLCV/order, sanitizes errors, and closes DataHub within a bound. Exit codes distinguish complete (`0`), partial (`2`), and unavailable/cleanup failure (`1`). It is deliberately excluded from required pull-request CI because it uses volatile external systems and may require local provider configuration.
+
+Supply-chain automation is isolated in `.github/workflows/security.yml`. It audits both hashed Python runtime/development locks with `pip-audit`, audits the npm graph at high severity, scans the current tree and complete Git history with checksum-verified Gitleaks and fully redacted findings, generates normalized Python/npm CycloneDX SBOMs twice and requires byte equality, and uploads the SBOM artifacts. Dependabot covers pip, npm, and GitHub Actions. Every external action reference is a full commit SHA, and checkout never persists credentials. This provides dependency inventory and recurring detection; it does not currently generate signed release artifacts, build provenance attestations, or claim a SLSA level.
+
+## 15. Known Design Debt
 
 - `app/services/research.py` is now a thin compatibility facade. Keep new research behavior in domain modules and re-export only stable public builders from the facade.
 - Frontend JS and CSS are now split by surface, with shared render-helper modules for repeated escaped list/tag/metric output. Static tests guard against oversized JS functions and fake-DOM tests cover stale AI answers plus escaped workbench/research rendering, but the remaining frontend debt is browser-level visual regression coverage for high-risk layout changes.
@@ -461,3 +524,5 @@ Python dependencies follow a four-file boundary: `requirements.txt` and `require
 - Data quality is now split into response assembly, score components, quote-time freshness, and K-line freshness modules. Keep public compatibility imports in `app/services/data_quality.py`.
 - SQLite schema code is split into initialization, definitions, and guarded compatibility migrations. Keep `app/db/schema.py` as the stable import surface for cache initialization, keep `app/db/mappers.py` as the stable import surface for legacy row-mapper imports, and keep direct migration helpers safe for partial legacy databases.
 - Runtime data is intentionally outside source control. Keep database files, WAL/SHM files, and generated trading calendars under `data/` only as local state.
+- Reliability targets are code-defined initial objectives and have no burn-rate alerting or error-budget release policy yet. Revisit them only after representative sample volume exists.
+- The repository produces reproducible normalized SBOMs but does not yet sign distributable artifacts or emit/verify SLSA provenance. Do not describe current CI as release attestation.

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, ChipAnalysis, FactorCalibration, FeatureSnapshot, LeadershipReport, StandardFactor, StockInsightBundle
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    StockInsightBundle,
+)
+from app.models.research import (
+    ChipAnalysis,
+    FactorCalibration,
+    LeadershipReport,
+    StandardFactor,
+)
 from app.services.research_factor_scoring import (
     _build_factor,
     _chip_position_evidence,

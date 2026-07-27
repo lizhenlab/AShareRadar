@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from app.models.schemas import (
+from app.models.analysis import (
     AnalysisResult,
+)
+from app.models.research import (
     MarketRegimeReport,
     RiskRewardReport,
     StockDiagnosis,
-    StockConceptItem,
     StockQaItem,
     StockQaReport,
     ThemeContextReport,
     TStrategyAssistantReport,
+)
+from app.models.market import (
+    StockConceptItem,
 )
 from app.services.research_qa_utils import clean_text, dedupe, first_clean_items
 from app.utils.market_data import finite_float

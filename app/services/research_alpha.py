@@ -4,16 +4,18 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from app.models.schemas import (
+from app.models.research import (
     AlphaEvidencePoint,
     AlphaEvidenceReport,
-    AnalysisResult,
     FactorLabReport,
-    FeatureSnapshot,
     MarketRegimeReport,
     RiskRewardReport,
-    StockInsightBundle,
     TimeframeAlignmentReport,
+)
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    StockInsightBundle,
 )
 from app.services.research_alpha_points import collect_alpha_points
 from app.services.research_factors import _factor_missing_data

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import AbnormalEventItem, EventDigestReport, StockEventItem, StockInsightBundle
+from app.models.analysis import (
+    AbnormalEventItem,
+    StockEventItem,
+    StockInsightBundle,
+)
+from app.models.research import (
+    EventDigestReport,
+)
 
 
 MAX_EVENT_ITEMS = 4

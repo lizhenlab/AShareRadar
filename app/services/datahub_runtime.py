@@ -7,12 +7,12 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import partial
 import threading
-import time
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
 from app.services.datahub_status import _provider_error_text
 from app.services.daemon_executor import DaemonThreadPoolExecutor
-from app.services.provider_errors import (
+from app.utils.clock import monotonic_now, performance_now
+from app.utils.provider_errors import (
     ProviderCoverageMiss,
     ProviderInstrumentDataError,
     is_provider_coverage_miss,
@@ -178,14 +178,14 @@ class ProviderRuntime:
             else timeout_seconds
         )
         timeout = max(0.0, float(configured_timeout))
-        deadline = asyncio.get_running_loop().time() + timeout
+        deadline = monotonic_now() + timeout
         state = await self._admit_provider_call(
             capability_key,
             full_key,
             start,
             deadline=deadline,
         )
-        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        remaining = max(0.0, deadline - monotonic_now())
         return await self._wait_for_provider_task(
             capability_key,
             full_key,
@@ -256,7 +256,7 @@ class ProviderRuntime:
                     state.waiters = 1
                     return state
 
-                remaining = deadline - asyncio.get_running_loop().time()
+                remaining = deadline - monotonic_now()
                 if remaining <= 0:
                     raise ProviderCallBusyError(f"{capability_key[0]} {capability_key[1]} 当前并发请求较多")
                 try:
@@ -324,7 +324,7 @@ class ProviderRuntime:
         request_key: Hashable | None = None,
         timeout_seconds: float | None = None,
     ) -> TimedProviderCall[T]:
-        started = time.perf_counter()
+        started = performance_now()
         value = await self.call_provider(
             name,
             kind,
@@ -332,7 +332,7 @@ class ProviderRuntime:
             request_key=request_key,
             timeout_seconds=timeout_seconds,
         )
-        return TimedProviderCall(value=value, latency_ms=round((time.perf_counter() - started) * 1000, 2))
+        return TimedProviderCall(value=value, latency_ms=round((performance_now() - started) * 1000, 2))
 
     def attempts(
         self,
@@ -362,7 +362,7 @@ class ProviderRuntime:
         until = self._cooldowns.get(key)
         if until is None:
             return 0.0
-        remaining = until - time.monotonic()
+        remaining = until - monotonic_now()
         if remaining > 0:
             return remaining
         self._cooldowns.pop(key, None)
@@ -515,7 +515,7 @@ class ProviderRuntime:
             pass
         cooldown_seconds = max(0, self.settings.provider_failure_cooldown_seconds)
         if cooldown_seconds and not isinstance(exc, ProviderInstrumentDataError):
-            self._cooldowns[(name, kind)] = time.monotonic() + cooldown_seconds
+            self._cooldowns[(name, kind)] = monotonic_now() + cooldown_seconds
 
     async def record_failure_async(self, name: str, index: int, exc: Exception, kind: str) -> None:
         if is_provider_coverage_miss(exc) or isinstance(exc, ProviderCallBusyError):
@@ -530,7 +530,7 @@ class ProviderRuntime:
         )
         cooldown_seconds = max(0, self.settings.provider_failure_cooldown_seconds)
         if cooldown_seconds and not isinstance(exc, ProviderInstrumentDataError):
-            self._cooldowns[(name, kind)] = time.monotonic() + cooldown_seconds
+            self._cooldowns[(name, kind)] = monotonic_now() + cooldown_seconds
 
     def record_attempt_failure(
         self,

@@ -1,4 +1,5 @@
 import { $, escapeHtml } from "./dom.js";
+import { formatAuditTimestamp } from "./audit-time.js";
 
 const COMPARISON_STATUSES = new Set(["comparable", "no_previous", "legacy", "version_changed"]);
 const CATEGORY_LABELS = Object.freeze({
@@ -60,8 +61,10 @@ export function formatAdviceTime(item) {
   const createdAt = cleanScalarText(item.created_at, "", 80);
   const updatedAt = cleanScalarText(item.updated_at, "", 80);
   if (!createdAt && !updatedAt) return "--";
-  if (!createdAt || !updatedAt || createdAt === updatedAt) return createdAt || updatedAt;
-  return `${createdAt} 至 ${updatedAt}`;
+  const createdText = formatAuditTimestamp(createdAt, { fallback: createdAt });
+  const updatedText = formatAuditTimestamp(updatedAt, { fallback: updatedAt });
+  if (!createdAt || !updatedAt || createdAt === updatedAt) return createdText || updatedText;
+  return `${createdText} 至 ${updatedText}`;
 }
 
 function buildTimelineView(items) {

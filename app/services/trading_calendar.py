@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Iterable
 
 from app.config import env_bool
-from app.services.provider_errors import sanitize_provider_error
-from app.utils.market_time import ASHARE_TIMEZONE, market_local_naive
+from app.utils.provider_errors import sanitize_provider_error
+from app.utils.clock import ASHARE_TIMEZONE as _ASHARE_TIMEZONE, market_now_naive
+from app.utils.market_time import market_local_naive
 
 
+ASHARE_TIMEZONE = _ASHARE_TIMEZONE
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 CALENDAR_PATH = BASE_DIR / "data" / "trading_calendar.json"
 BUNDLED_CALENDAR_PATH = BASE_DIR / "app" / "resources" / "trading_calendar.json"
@@ -682,4 +684,4 @@ def _market_datetime(value: datetime | None) -> datetime:
 
 
 def _market_now() -> datetime:
-    return market_local_naive(datetime.now(ASHARE_TIMEZONE))
+    return market_now_naive()

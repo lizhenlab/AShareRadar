@@ -38,6 +38,7 @@ from app.api.routes import (
 from app.api.security import SameOriginMutationMiddleware
 from app.api.static_assets import RevalidatingStaticFiles
 from app.config import PROJECT_ROOT, Settings, get_settings, resolve_project_path
+from app.utils.clock import monotonic_now
 
 
 STATIC_DIR = PROJECT_ROOT / "static"
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.accepting_requests = False
     container: AppContainer = await run_in_threadpool(app.state.container_factory)
     await _validate_container_settings(app, container)
     app.state.container = container
@@ -56,9 +58,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except BaseException:
         await _cleanup_failed_start(container)
         raise
+    app.state.accepting_requests = True
     try:
         yield
     finally:
+        app.state.accepting_requests = False
         await _shutdown_container(container)
 
 
@@ -129,8 +133,7 @@ async def _close_datahub(datahub: object) -> None:
     close = getattr(datahub, "aclose", None)
     if not callable(close):
         return
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + DATAHUB_SHUTDOWN_TIMEOUT_SECONDS
+    deadline = monotonic_now() + DATAHUB_SHUTDOWN_TIMEOUT_SECONDS
     result, timed_out = await _call_close_before_deadline(close, deadline)
     if result is False and not timed_out:
         result, timed_out = await _call_close_before_deadline(close, deadline)
@@ -142,7 +145,7 @@ async def _close_datahub(datahub: object) -> None:
 
 
 async def _call_close_before_deadline(close: Callable[[], Awaitable[object]], deadline: float) -> tuple[object, bool]:
-    remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+    remaining = max(0.0, deadline - monotonic_now())
     if remaining <= 0:
         return False, True
     try:
@@ -172,6 +175,7 @@ def create_app(
     )
     app = FastAPI(title=resolved_settings.app_name, version="0.1.0", lifespan=lifespan)
     app.state.settings = resolved_settings
+    app.state.accepting_requests = False
     app.state.container_factory = resolved_container_factory
     app.add_middleware(
         CORSMiddleware,

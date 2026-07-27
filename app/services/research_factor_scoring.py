@@ -3,7 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import AnalysisResult, ChipAnalysis, FeatureSnapshot, StandardFactor, StockInsightBundle
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    StockInsightBundle,
+)
+from app.models.research import (
+    ChipAnalysis,
+    StandardFactor,
+)
 from app.services.indicators import pct_change
 from app.services.research_factor_calibration import _calibrate_factor, _calibration_buckets, _factor_percentile
 from app.services.research_factor_specs import FactorSpec

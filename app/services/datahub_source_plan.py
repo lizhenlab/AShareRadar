@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.models.schemas import (
+from app.models.system import (
     DataSourcePlan,
-    ProviderCapability,
     ProviderCapabilityStatus,
     ProviderDecision,
     ProviderStatus,
+)
+from app.models.market import (
+    ProviderCapability,
 )
 from app.services.datahub_status import (
     _capability_labels,
@@ -26,7 +28,7 @@ from app.services.datahub_status import (
     _source_plan_summary,
     _unhealthy_capability_labels,
 )
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 from app.services.provider_failure_status import provider_recently_failed
 
 

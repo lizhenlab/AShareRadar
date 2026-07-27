@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, SignalValidationReport, TimeframeAlignmentReport
+from app.models.analysis import (
+    AnalysisResult,
+)
+from app.models.research import (
+    SignalValidationReport,
+    TimeframeAlignmentReport,
+)
 from app.services.scoring import clamp_score as _clamp
 from app.utils.market_data import finite_float
 

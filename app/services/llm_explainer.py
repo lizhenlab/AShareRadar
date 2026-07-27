@@ -6,7 +6,12 @@ import math
 from typing import Any
 
 from app.config import Settings
-from app.models.schemas import AnalysisResult, StockQuestionAnswer
+from app.models.analysis import (
+    AnalysisResult,
+)
+from app.models.research import (
+    StockQuestionAnswer,
+)
 from app.services.llm_output_validation import (
     LlmOutputValidationError,
     _allowed_numbers as _allowed_numbers,
@@ -14,7 +19,7 @@ from app.services.llm_output_validation import (
     validate_and_render_answer,
 )
 from app.services.llm_prompt import build_chat_messages
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 
 
 __all__ = ["_allowed_numbers", "_call_llm", "enhance_stock_answer", "llm_available"]

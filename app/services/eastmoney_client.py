@@ -9,9 +9,13 @@ from urllib.parse import urlsplit
 
 import requests
 
-from app.models.schemas import Kline, MinuteKline, Quote
+from app.models.market import (
+    Kline,
+    MinuteKline,
+    Quote,
+)
 from app.services.data_quality_time import normalize_quote_event_time
-from app.services.provider_errors import (
+from app.utils.provider_errors import (
     ProviderCoverageMiss,
     ProviderError,
     ProviderProtocolError,

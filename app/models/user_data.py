@@ -208,7 +208,7 @@ class WatchlistItem(BaseModel):
     research_status: ResearchStatus = "watching"
     priority: WatchlistPriority = "medium"
     next_review_date: date | None = None
-    last_viewed_at: str | None = Field(default=None, max_length=19)
+    last_viewed_at: str | None = Field(default=None, max_length=40)
     unread_change_count: int = Field(default=0, ge=0)
     latest_price: float | None = None
     latest_change_pct: float | None = None

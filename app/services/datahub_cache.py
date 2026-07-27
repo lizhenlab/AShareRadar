@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable
 
-from app.models.schemas import Kline, MinuteKline, Quote, StockConceptItem, StockInfo
+from app.models.market import (
+    Kline,
+    MinuteKline,
+    Quote,
+    StockConceptItem,
+    StockInfo,
+)
 from app.services import trading_calendar
 from app.services.data_quality_time import (
     expected_quote_date,

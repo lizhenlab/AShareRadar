@@ -1,4 +1,5 @@
 import { escapeHtml } from "./dom.js";
+import { formatAuditTimestamp } from "./audit-time.js";
 import { changeClass, formatAmount, formatNumber } from "./format.js";
 import {
   isActiveMarketScanRun,
@@ -430,9 +431,8 @@ function scoreText(value) {
   return Number.isFinite(number) ? String(Math.round(number)) : "--";
 }
 
-function displayTimestamp(value) {
-  const text = String(value || "").trim().replace("T", " ");
-  return text ? text.slice(0, 16) : "--";
+export function displayTimestamp(value) {
+  return formatAuditTimestamp(value, { includeSeconds: false });
 }
 
 function integer(value) {

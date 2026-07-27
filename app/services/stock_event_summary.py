@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.models.schemas import (
+from app.models.analysis import (
     AbnormalEventSummary,
     AnalysisResult,
     LhbSummary,
@@ -13,7 +13,7 @@ from app.services.stock_event_sources import (
     external_event_placeholders,
     external_source_capabilities,
 )
-from app.utils.time import now_text
+from app.utils.audit_time import audit_now_text as now_text
 
 
 def build_event_summary(

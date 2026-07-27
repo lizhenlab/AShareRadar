@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.models.schemas import AnalysisResult, StockQuestionAnswer
+from app.models.analysis import (
+    AnalysisResult,
+)
+from app.models.research import (
+    StockQuestionAnswer,
+)
 from app.services.llm_output_validation import authority_bindings
 
 

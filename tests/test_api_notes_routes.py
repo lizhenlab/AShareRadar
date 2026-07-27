@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -61,11 +60,8 @@ def test_create_stock_note_route_rejects_non_finite_price() -> None:
 
         response = client.post(
             "/api/stock/notes",
-            json={
-                "symbol": "600519",
-                "content": "观察",
-                "price": math.inf,
-            },
+            content='{"symbol":"600519","content":"观察","price":1e9999}',
+            headers={"content-type": "application/json"},
         )
 
     assert response.status_code == 422

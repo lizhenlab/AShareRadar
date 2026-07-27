@@ -112,6 +112,13 @@ class MutationResult(BaseModel):
     removed: bool
 
 
+class HealthProbe(BaseModel):
+    status: str
+    app: str
+    checked_at: str
+    checks: dict[str, str] = Field(default_factory=dict)
+
+
 class TaskRun(BaseModel):
     id: int
     task_name: str

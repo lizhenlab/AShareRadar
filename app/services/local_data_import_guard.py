@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 import hashlib
 import json
 from pathlib import Path
 import secrets
 import threading
-import time
 
 from app.models.local_data import LocalDataImportMode, UserDataBundle
 from app.services.user_data_portability import user_data_state_digest
+from app.utils.audit_time import audit_datetime_to_text
+from app.utils.clock import monotonic_now, utc_now
 
 
 IMPORT_PREVIEW_TTL_SECONDS = 10 * 60
@@ -56,8 +57,8 @@ class LocalDataImportPreviewRegistry:
         *,
         database_digest: str | None = None,
     ) -> LocalDataImportPreviewClaim:
-        now_monotonic = time.monotonic()
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._ttl_seconds)
+        now_monotonic = monotonic_now()
+        expires_at = utc_now() + timedelta(seconds=self._ttl_seconds)
         claim = LocalDataImportPreviewClaim(
             token=secrets.token_urlsafe(32),
             database_path=str(Path(path).expanduser().resolve()),
@@ -65,7 +66,7 @@ class LocalDataImportPreviewRegistry:
             database_digest=database_digest or user_data_state_digest(path),
             mode=mode,
             expires_monotonic=now_monotonic + self._ttl_seconds,
-            expires_at=expires_at.isoformat().replace("+00:00", "Z"),
+            expires_at=audit_datetime_to_text(expires_at),
         )
         with self._lock:
             self._prune(now_monotonic)
@@ -87,7 +88,7 @@ class LocalDataImportPreviewRegistry:
         cleaned = str(token or "").strip()
         if not cleaned:
             raise LocalDataImportPreviewError("提交导入前必须先完成服务端预览")
-        now_monotonic = time.monotonic()
+        now_monotonic = monotonic_now()
         with self._lock:
             self._prune(now_monotonic)
             claim = self._claims.pop(cleaned, None)

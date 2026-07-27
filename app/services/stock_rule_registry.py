@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.models.schemas import (
+from app.models.analysis import (
     AbnormalEventSummary,
     AnalysisResult,
     FundFlowAnalysis,

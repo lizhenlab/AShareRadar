@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.market_scan import (
     MarketScanResultItem,
     MarketScanResultPage,
@@ -52,9 +53,9 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         with self._lock, self._connect() as conn:
             total = int(conn.execute("SELECT COUNT(*) FROM market_scan_run").fetchone()[0])
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM market_scan_run
-                ORDER BY created_at DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at) DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
                 (page_size, offset),

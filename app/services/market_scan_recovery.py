@@ -4,7 +4,8 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.services.provider_errors import ProviderChainUnavailable
+from app.utils.provider_errors import ProviderChainUnavailable
+from app.utils.clock import monotonic_now
 
 
 PROVIDER_RECOVERY_POLL_SECONDS = 0.5
@@ -34,8 +35,7 @@ async def wait_for_provider_recovery(
     budget = max(0.0, wait_budget.remaining_seconds)
     if budget <= 0 or delay > budget:
         raise errors[0]
-    loop = asyncio.get_running_loop()
-    started = loop.time()
+    started = monotonic_now()
     try:
         await _wait_until_ready_or_delay(
             errors[0],
@@ -47,7 +47,7 @@ async def wait_for_provider_recovery(
     finally:
         wait_budget.remaining_seconds = max(
             0.0,
-            wait_budget.remaining_seconds - (loop.time() - started),
+            wait_budget.remaining_seconds - (monotonic_now() - started),
         )
 
 
@@ -72,15 +72,14 @@ async def _wait_until_ready_or_delay(
     cancel_event: asyncio.Event,
     chain_state: Callable[[str], object | None],
 ) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + delay
+    deadline = monotonic_now() + delay
     while True:
         status = getattr(chain_state(kind), "status", None)
         if status == "ready":
             return
         if status == "permanent_unavailable":
             raise error
-        remaining = deadline - loop.time()
+        remaining = deadline - monotonic_now()
         if remaining <= 0:
             return
         try:

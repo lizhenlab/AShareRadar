@@ -8,22 +8,31 @@ import threading
 from typing import Any
 
 from app.config import Settings
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.db.user_mappers import row_to_advice, row_to_advice_timeline
-from app.models.schemas import AdviceHistoryItem, AdviceTimelineItem, AnalysisResult
+from app.models.user_data import (
+    AdviceHistoryItem,
+    AdviceTimelineItem,
+)
+from app.models.analysis import (
+    AnalysisResult,
+)
+from app.models.rule_versions import RULE_VERSION
 from app.repositories.base import SQLiteRepository
 from app.repositories.watchlist import increment_watchlist_unread_change_count
-from app.services.research_conclusion_change import (
+from app.models.advice_change import (
     CONCLUSION_BASIS,
     MODEL_VERSION,
     SNAPSHOT_CONTRACT_VERSION,
     compare_conclusions,
     conclusion_identity,
 )
-from app.services.stock_rule_contracts import RULE_VERSION
 from app.utils.market_data import valid_kline
 from app.utils.market_time import normalize_market_datetime
+from app.utils.clock import market_now_naive
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text, parse_text_time
+from app.utils.time import parse_text_time
 
 
 _ADVICE_INSERT_COLUMNS = (
@@ -155,10 +164,10 @@ class AdviceHistoryRepository(SQLiteRepository):
         normalized = standard_symbol(symbol)
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM advice_history
                 WHERE symbol = ?
-                ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(COALESCE(updated_at, created_at)) DESC, id DESC
                 LIMIT ?
                 """,
                 (normalized, limit),
@@ -171,10 +180,10 @@ class AdviceHistoryRepository(SQLiteRepository):
         normalized = standard_symbol(symbol)
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM advice_history
                 WHERE symbol = ?
-                ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(COALESCE(updated_at, created_at)) DESC, id DESC
                 LIMIT ?
                 """,
                 (normalized, limit),
@@ -201,7 +210,7 @@ def _snapshot_time(row: sqlite3.Row) -> datetime | None:
 
 
 def _within_dedupe_window(last_time: datetime, dedupe_seconds: int) -> bool:
-    elapsed = (datetime.now() - last_time).total_seconds()
+    elapsed = (market_now_naive() - last_time).total_seconds()
     return 0 <= elapsed <= dedupe_seconds
 
 
@@ -304,10 +313,10 @@ def _unknown_kline_provenance() -> dict[str, object | None]:
 
 def _latest_advice_snapshot(conn: sqlite3.Connection, symbol: str) -> sqlite3.Row | None:
     return conn.execute(
-        """
+        f"""
         SELECT * FROM advice_history
         WHERE symbol = ?
-        ORDER BY created_at DESC, id DESC
+        ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at) DESC, id DESC
         LIMIT 1
         """,
         (symbol,),

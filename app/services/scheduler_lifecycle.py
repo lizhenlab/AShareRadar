@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from typing import Iterable
 
 from app.services.scheduler_contracts import SchedulerRuntimeContext
@@ -11,6 +10,7 @@ from app.services.scheduler_helpers import (
     _wait_for_tasks_bounded,
 )
 from app.services.scheduler_schedule import _positive_float_or_default
+from app.utils.clock import market_now_naive
 from app.utils.fallback_logging import report_persistence_failure
 
 
@@ -65,7 +65,7 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
             self._standby = False
             try:
                 await self._reconcile_orphaned_task_runs()
-                self.started_at = datetime.now()
+                self.started_at = market_now_naive()
                 self._stop_event.clear()
                 self._runner = asyncio.create_task(self._loop(), name="local-data-scheduler")
                 self._runner.add_done_callback(_consume_future_exception)

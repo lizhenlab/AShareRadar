@@ -11,6 +11,7 @@ class MarketScanRepositoryContext:
 
     _lock: threading.RLock
     _connect: Callable[[], AbstractContextManager[sqlite3.Connection]]
+    _run_started_monotonic: dict[int, float]
 
 
 __all__ = ["MarketScanRepositoryContext"]

@@ -3,7 +3,16 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from app.models.schemas import AnalysisResult, FeatureSnapshot, StockConceptItem, ThemeContextReport
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+)
+from app.models.market import (
+    StockConceptItem,
+)
+from app.models.research import (
+    ThemeContextReport,
+)
 from app.services.scoring import clamp_score
 from app.utils.market_data import finite_float
 

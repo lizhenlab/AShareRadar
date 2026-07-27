@@ -13,7 +13,10 @@ from app.models.market import (
     KlineAdjustmentMode,
     UNKNOWN_KLINE_DATA_VERSION,
 )
-from app.models.schemas import Kline, MinuteKline
+from app.models.market import (
+    Kline,
+    MinuteKline,
+)
 from app.services.datahub_cache import (
     _kline_cache_is_fresh,
     _minute_kline_cache_is_fresh,
@@ -29,7 +32,7 @@ from app.services.datahub_runtime import (
     run_cache_io,
     run_cache_io_best_effort,
 )
-from app.services.provider_errors import (
+from app.utils.provider_errors import (
     ProviderChainUnavailable,
     ProviderCoverageMiss,
     ProviderInstrumentDataError,

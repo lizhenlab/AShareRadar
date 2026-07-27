@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import requests  # type: ignore[import-untyped]
 
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
-from app.services.provider_errors import (
+from app.utils.provider_errors import (
     ProviderCoverageMiss,
     ProviderError,
     ProviderProtocolError,

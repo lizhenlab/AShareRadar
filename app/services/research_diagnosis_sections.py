@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from app.models.schemas import (
+from app.models.research import (
     AlphaEvidenceReport,
-    AnalysisResult,
     FactorLabReport,
-    FeatureSnapshot,
     MarketRegimeReport,
     RiskRewardReport,
     SignalValidationReport,
-    StockInsightBundle,
     TimeframeAlignmentReport,
+)
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    StockInsightBundle,
 )
 from app.services.research_factors import _factor_confirmation_text, _factor_evidence_sufficiency, _factor_risk_text
 

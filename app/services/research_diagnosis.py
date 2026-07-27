@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from app.models.schemas import (
+from app.models.research import (
     AlphaEvidenceReport,
-    AnalysisResult,
     FactorLabReport,
-    FeatureSnapshot,
     MarketRegimeReport,
     RiskRewardReport,
     SignalValidationReport,
     StockDiagnosis,
-    StockInsightBundle,
     TimeframeAlignmentReport,
+)
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    StockInsightBundle,
 )
 from app.services.research_diagnosis_decisions import (
     diagnosis_confidence,

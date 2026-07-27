@@ -4,7 +4,11 @@ from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TypeVar
 
-from app.models.schemas import PlateItem, StockConceptItem, StockInfo
+from app.models.market import (
+    PlateItem,
+    StockConceptItem,
+    StockInfo,
+)
 from app.services.datahub_metadata_mapping import _prepare_concept_rows, _prepare_plate_rows
 from app.services.datahub_metadata_provider import (
     _metadata_error_detail,
@@ -27,7 +31,7 @@ from app.services.datahub_runtime import (
     run_cache_io,
 )
 from app.services.datahub_status import _provider_error_text
-from app.services.provider_errors import (
+from app.utils.provider_errors import (
     is_provider_coverage_miss,
     sanitize_provider_error,
 )

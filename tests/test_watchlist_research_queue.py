@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 import sqlite3
 
+from app.config import Settings
 from app.db.schema_migrations import COMPAT_COLUMNS
 from app.models.schemas import WatchlistUpdate
 from app.services.cache import SQLiteCache
@@ -46,7 +47,7 @@ def test_legacy_watchlist_migration_preserves_rows_and_matches_fresh_contract(tm
     conn.commit()
     conn.close()
 
-    legacy_cache = SQLiteCache(legacy_path)
+    legacy_cache = SQLiteCache(settings=Settings(cache_path=legacy_path))
     fresh_path = tmp_path / "fresh.sqlite3"
     SQLiteCache(fresh_path)
 
@@ -210,7 +211,7 @@ def test_watchlist_mapper_normalizes_dirty_queue_values_without_failing(tmp_path
     conn = sqlite3.connect(path)
     conn.executescript(
         """
-        CREATE TABLE watchlist (
+            CREATE TABLE watchlist (
             symbol TEXT PRIMARY KEY,
             code TEXT,
             market TEXT,
@@ -226,13 +227,21 @@ def test_watchlist_mapper_normalizes_dirty_queue_values_without_failing(tmp_path
             created_at TEXT,
             updated_at TEXT
         );
-        INSERT INTO watchlist VALUES (
+            INSERT INTO watchlist VALUES (
             '600519.SH', '600519', 'SH', NULL,
             'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-            '', 'not-a-bool', 'unknown', 'urgent', '2026-02-30', 'yesterday', -9, NULL, NULL
-        );
-        """
-    )
+                '', 'not-a-bool', 'unknown', 'urgent', '2026-02-30', 'yesterday', -9, NULL, NULL
+            );
+            CREATE TABLE schema_migration (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migration (name, applied_at) VALUES (
+                '20260724_audit_timestamps_utc_v2',
+                '2026-07-24T01:30:00.000000Z'
+            );
+            """
+        )
     conn.commit()
     conn.close()
 

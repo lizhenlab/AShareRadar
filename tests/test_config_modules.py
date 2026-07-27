@@ -1,23 +1,63 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from pydantic import ValidationError
 
-from app.config import PROJECT_ROOT, Settings
+from app.config import LLM_SHELL_SECRET_ENV_NAMES, PROJECT_ROOT, Settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_config_facade_preserves_shell_secret_name_contract() -> None:
+    assert LLM_SHELL_SECRET_ENV_NAMES == {"ASHARE_RADAR_LLM_API_KEY"}
+
+
+def test_importing_config_does_not_read_shell_profile(tmp_path: Path) -> None:
+    profile = tmp_path / ".zshrc"
+    profile.write_text('export ASHARE_RADAR_LLM_API_KEY="placeholder-secret-value"\n', encoding="utf-8")
+    profile.chmod(0o644)
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    for name in ("ASHARE_RADAR_LLM_API_KEY", "ASHARE_RADAR_LLM_BASE_URL", "ASHARE_RADAR_LLM_MODEL"):
+        env.pop(name, None)
+
+    imported = subprocess.run(
+        [sys.executable, "-c", "import app.config"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    instantiated = subprocess.run(
+        [sys.executable, "-c", "from app.config import Settings; Settings()"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert imported.returncode == 0
+    assert instantiated.returncode != 0
+    assert "chmod 600" in instantiated.stderr
+
+
 def test_operations_documents_every_ashare_radar_environment_variable() -> None:
-    app_text = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "app").rglob("*.py")))
+    runtime_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for source_root in (ROOT / "app", ROOT / "tools")
+        for path in sorted(source_root.rglob("*.py"))
+    )
     operations_text = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
 
-    config_names = set(re.findall(r"ASHARE_RADAR_[A-Z0-9_]+", app_text))
+    config_names = set(re.findall(r"ASHARE_RADAR_[A-Z0-9_]+", runtime_text))
     documented_names = set(re.findall(r"`(ASHARE_RADAR_[A-Z0-9_]+)`", operations_text))
 
     assert documented_names == config_names
@@ -37,6 +77,7 @@ def test_settings_reads_environment_when_instantiated(monkeypatch) -> None:
     monkeypatch.setenv("ASHARE_RADAR_MAX_DAILY_KLINE_ROWS", "320")
     monkeypatch.setenv("ASHARE_RADAR_RUNTIME_MAINTENANCE_INTERVAL_SECONDS", "7200")
     monkeypatch.setenv("ASHARE_RADAR_MAX_RUNTIME_BACKUPS", "12")
+    monkeypatch.setenv("ASHARE_RADAR_LEGACY_AUDIT_TIMEZONE", "America/Los_Angeles")
     monkeypatch.setenv("ASHARE_RADAR_TUSHARE_TOKEN", "new-token")
 
     settings = Settings()
@@ -54,6 +95,7 @@ def test_settings_reads_environment_when_instantiated(monkeypatch) -> None:
     assert settings.max_daily_kline_rows == 320
     assert settings.runtime_maintenance_interval_seconds == 7200
     assert settings.max_runtime_backups == 12
+    assert settings.legacy_audit_timezone == "America/Los_Angeles"
     assert settings.tushare_token == "new-token"
 
 
@@ -85,6 +127,11 @@ def test_settings_invalid_boolean_environment_value_reports_the_variable(monkeyp
 
     with pytest.raises(ValueError, match="ASHARE_RADAR_LLM_ENABLED 必须是布尔值"):
         Settings()
+
+
+def test_settings_reject_invalid_legacy_audit_timezone() -> None:
+    with pytest.raises(ValidationError, match="有效的 IANA 时区名称"):
+        Settings(legacy_audit_timezone="Mars/Olympus")
 
 
 @pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
@@ -146,7 +193,7 @@ def test_settings_reject_retention_values_below_safe_boundaries(overrides: dict[
 
 
 def test_settings_do_not_default_llm_endpoint_or_model(monkeypatch) -> None:
-    monkeypatch.setattr("app.config._SHELL_ENV_VALUES", {})
+    monkeypatch.setattr("app.config_settings._SHELL_ENV_VALUES", {})
     for name in (
         "ASHARE_RADAR_LLM_API_KEY",
         "ASHARE_RADAR_LLM_BASE_URL",

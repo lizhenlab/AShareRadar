@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import AnalysisResult, FeatureSnapshot, PeerComparisonReport, PeerSampleInfo, Quote, StockInsightBundle
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    PeerSampleInfo,
+    StockInsightBundle,
+)
+from app.models.research import (
+    PeerComparisonReport,
+)
+from app.models.market import (
+    Quote,
+)
 from app.utils.market_data import finite_float
 
 PEER_LEADER_LIMIT = 3

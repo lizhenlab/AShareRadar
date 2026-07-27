@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 
-from app.models.schemas import MonitorEvent, ProviderCapabilityStatus, ProviderStatus, TaskRun
-from app.services.provider_errors import sanitize_provider_error
+from app.models.system import (
+    MonitorEvent,
+    ProviderCapabilityStatus,
+    ProviderStatus,
+    TaskRun,
+)
+from app.utils.provider_errors import sanitize_provider_error
 
 
 def _sanitized_provider_error(value: object | None) -> str | None:

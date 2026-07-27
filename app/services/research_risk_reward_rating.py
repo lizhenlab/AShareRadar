@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from app.models.schemas import FactorLabReport, FeatureSnapshot, MarketRegimeReport, SignalValidationReport, TimeframeAlignmentReport
+from app.models.research import (
+    FactorLabReport,
+    MarketRegimeReport,
+    SignalValidationReport,
+    TimeframeAlignmentReport,
+)
+from app.models.analysis import (
+    FeatureSnapshot,
+)
 from app.services.research_risk_reward_contracts import (
     CONFIRMING_VALIDATION_STATUSES,
     TIMEFRAME_WAIT_LEVELS,

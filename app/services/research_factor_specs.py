@@ -4,7 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from app.models.schemas import Kline
+from app.models.market import (
+    Kline,
+)
 from app.services.indicator_volume import positive_volume_ratio
 from app.services.indicators import pct_change
 from app.services.scoring import clamp_score as _clamp

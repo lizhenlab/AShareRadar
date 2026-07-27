@@ -3,53 +3,61 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from app.models.schemas import (
+from app.models.analysis import (
     AbnormalEventSummary,
-    AlphaEvidenceReport,
-    AlertEventItem,
-    AlertRuleItem,
-    ChartMarkSummary,
-    ChipAnalysis,
-    EventDigestReport,
-    EvidenceChainReport,
-    FactorLabReport,
     FactorScore,
     FeatureSnapshot,
     FinancialHealth,
     FundFlowAnalysis,
-    LeadershipReport,
     LhbSummary,
-    MarketRegimeReport,
     OrderPressure,
-    PeerComparisonReport,
-    RiskRadarReport,
     RuleDefinition,
-    StockDiagnosis,
     StockEventSummary,
     StockInsightBundle,
     StockOverview,
+    StockRuleMatchSummary,
+    StrategyCard,
+    ValuationAnalysis,
+)
+from app.models.research import (
+    AlphaEvidenceReport,
+    ChipAnalysis,
+    EventDigestReport,
+    EvidenceChainReport,
+    FactorLabReport,
+    LeadershipReport,
+    MarketRegimeReport,
+    PeerComparisonReport,
+    RiskRadarReport,
+    StockDiagnosis,
     StockQaReport,
     StockQuestionAnswer,
     StockQuestionInput,
     StockReplayAnalysis,
-    StockRuleMatchSummary,
-    StockNoteItem,
-    StockWorkbench,
-    StrategyCard,
     TStrategyAssistantReport,
     ThemeContextReport,
-    ValuationAnalysis,
+)
+from app.models.user_data import (
+    AlertEventItem,
+    AlertRuleItem,
+    ChartMarkSummary,
+    StockNoteItem,
+)
+from app.models.workbench import (
+    StockWorkbench,
     WorkbenchDataWarning,
 )
 from app.services import chart_marks as chart_marks_service
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
+from app.services.data_quality_time import quote_event_time_error
 from app.services.llm_explainer import enhance_stock_answer
 from app.services.research import answer_stock_question
 from app.services.stock_insights import rule_definitions
 from app.services.workbench_context import WorkbenchContext, WorkbenchContextCache
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text
+from app.utils.audit_time import audit_now_text as now_text
+from app.utils.clock import performance_now
 from app.workflows.market_overview import market_overview, strong_stock_watch
 from app.workflows.stock_analysis import analyze_individual_stock, review_individual_stock, stock_minute_analysis
 from app.workflows.stock_lookup import confirmed_stock_profile as _confirmed_stock_profile
@@ -88,12 +96,82 @@ async def stock_insight_bundle(datahub: DataHub, symbol: str) -> StockInsightBun
 
 
 async def stock_workbench(datahub: DataHub, symbol: str) -> StockWorkbench:
-    context = await stock_workbench_context(datahub, symbol)
-    normalized = _workbench_symbol(context.insights.overview.symbol)
-    advice_warning = await _ensure_advice_snapshot(datahub, context)
-    local_state = await _workbench_local_state(datahub, normalized, context)
-    warnings = [item for item in [advice_warning, *local_state.warnings] if item is not None]
-    return _stock_workbench_response(context, normalized, local_state, warnings)
+    started = performance_now()
+    try:
+        context = await stock_workbench_context(datahub, symbol)
+        normalized = _workbench_symbol(context.insights.overview.symbol)
+        advice_warning = await _ensure_advice_snapshot(datahub, context)
+        local_state = await _workbench_local_state(datahub, normalized, context)
+        warnings = [item for item in [advice_warning, *local_state.warnings] if item is not None]
+        result = _stock_workbench_response(context, normalized, local_state, warnings)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        await _record_workbench_reliability(
+            datahub,
+            usable=False,
+            duration_ms=_elapsed_ms(started),
+        )
+        raise
+    await _record_workbench_reliability(
+        datahub,
+        usable=True,
+        duration_ms=_elapsed_ms(started),
+        quality=result.analysis.data_quality.score >= 50,
+        fresh=_workbench_is_fresh(result),
+        non_fallback=_workbench_is_non_fallback(result),
+    )
+    return result
+
+
+async def _record_workbench_reliability(
+    datahub: DataHub,
+    *,
+    usable: bool,
+    duration_ms: int,
+    quality: bool | None = None,
+    fresh: bool | None = None,
+    non_fallback: bool | None = None,
+) -> None:
+    recorder = getattr(datahub.cache, "record_workbench_reliability", None)
+    if callable(recorder):
+        await run_cache_io_best_effort(
+            recorder,
+            usable=usable,
+            duration_ms=duration_ms,
+            quality=quality,
+            fresh=fresh,
+            non_fallback=non_fallback,
+        )
+
+
+def _workbench_is_fresh(result: StockWorkbench) -> bool:
+    quality = result.analysis.data_quality
+    kline_quality = quality.kline_quality
+    return (
+        quote_event_time_error(result.analysis.quote.timestamp) is None
+        and kline_quality is not None
+        and kline_quality.days_behind_expected == 0
+    )
+
+
+def _workbench_is_non_fallback(result: StockWorkbench) -> bool:
+    quote = result.analysis.quote
+    kline_quality = result.analysis.data_quality.kline_quality
+    if kline_quality is None:
+        return False
+    return not any(
+        (
+            quote.from_cache,
+            quote.fallback_used,
+            kline_quality.from_cache,
+            kline_quality.fallback_used,
+        )
+    )
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((performance_now() - started) * 1000))
 
 
 async def _ensure_advice_snapshot(datahub: DataHub, context: WorkbenchContext) -> WorkbenchDataWarning | None:

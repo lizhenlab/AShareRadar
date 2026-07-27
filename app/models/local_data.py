@@ -7,6 +7,7 @@ import math
 from pathlib import PurePath
 import re
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
@@ -27,6 +28,7 @@ OPTIONAL_RESEARCH_USER_DATA_TABLES = (
 )
 USER_DATA_TABLE_ALLOWLIST = frozenset((*CORE_USER_DATA_TABLES, *OPTIONAL_RESEARCH_USER_DATA_TABLES))
 LocalDataImportMode = Literal["merge", "replace"]
+AuditTimestampSemantics = Literal["utc-fixed", "legacy-naive"]
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -76,11 +78,31 @@ class LocalDataTableBundle(StrictLocalDataModel):
         return self
 
 
+class AuditTimestampMetadata(StrictLocalDataModel):
+    semantics: AuditTimestampSemantics
+    legacy_timezone: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_semantics(self) -> AuditTimestampMetadata:
+        if self.semantics == "utc-fixed":
+            if self.legacy_timezone is not None:
+                raise ValueError("utc-fixed audit timestamps must not declare a legacy timezone")
+            return self
+        if not self.legacy_timezone:
+            raise ValueError("legacy-naive audit timestamps must declare their source timezone")
+        try:
+            ZoneInfo(self.legacy_timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            raise ValueError("legacy audit timezone must be a valid IANA timezone") from None
+        return self
+
+
 class UserDataBundle(StrictLocalDataModel):
     kind: Literal["ashare-radar-user-data"]
     version: Literal[1]
     exported_at: str
     source_schema_version: int = Field(ge=0)
+    audit_timestamps: AuditTimestampMetadata | None = None
     tables: dict[str, LocalDataTableBundle] = Field(min_length=1, max_length=64)
     row_counts: dict[str, int] = Field(min_length=1, max_length=64)
 
@@ -229,6 +251,8 @@ def _parse_aware_timestamp(value: str) -> datetime:
 
 
 __all__ = [
+    "AuditTimestampMetadata",
+    "AuditTimestampSemantics",
     "CORE_USER_DATA_TABLES",
     "LOCAL_DATA_BUNDLE_KIND",
     "LOCAL_DATA_BUNDLE_VERSION",

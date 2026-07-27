@@ -5,7 +5,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import math
 
-from app.models.schemas import StockInfo
+from app.models.market import (
+    StockInfo,
+)
 from app.services.datahub_cache import _stock_pool_rows_are_authoritative
 from app.services.datahub_metadata_mapping import (
     _match_stock_pool_keyword,
@@ -30,7 +32,7 @@ from app.services.datahub_runtime import (
     run_cache_io_best_effort,
 )
 from app.services.datahub_status import _provider_error_text
-from app.services.provider_errors import ProviderProtocolError, sanitize_provider_error
+from app.utils.provider_errors import ProviderProtocolError, sanitize_provider_error
 from app.services.provider_utils import ensure_positive_limit
 from app.utils.stock_pool import normalize_stock_pool_rows
 from app.utils.symbols import normalize_symbol

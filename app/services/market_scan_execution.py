@@ -6,7 +6,11 @@ from collections.abc import Iterable
 from datetime import date, datetime
 
 from app.models.market_scan import MarketScanResultItem, MarketScanResultWrite, MarketScanRun
-from app.models.schemas import Kline, Quote, StockInfo
+from app.models.market import (
+    Kline,
+    Quote,
+    StockInfo,
+)
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.services.data_quality_time import latest_expected_daily_kline_date
@@ -23,7 +27,7 @@ from app.services.market_scan_universe import (
     MarketScanUniverse,
     build_market_scan_universe,
 )
-from app.services.provider_errors import ProviderChainUnavailable
+from app.utils.provider_errors import ProviderChainUnavailable
 from app.utils.symbols import standard_symbol
 
 

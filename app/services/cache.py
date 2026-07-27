@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import shutil
 import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -11,40 +13,49 @@ from typing import Any, cast
 from app.config import Settings, get_settings, resolve_project_path
 from app.db.connection import SQLiteConnectionFactory
 from app.db.schema import initialize_schema
+from app.db.schema_migrations import audit_timestamp_migration_pending
 from app.models.market import DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE, KlineAdjustmentMode
 from app.models.market_scan import MarketScanResultWrite, MarketScanSeed
-from app.models.schemas import (
+from app.models.user_data import (
     AdviceHistoryItem,
+    AdviceTimelineItem,
+    AlertEventItem,
+    AlertRuleInput,
+    AlertRuleItem,
+    AlertRuleUpdate,
+    ResearchStatus,
+    StockNoteInput,
+    StockNoteItem,
+    StockNoteUpdate,
+    WatchlistItem,
+    WatchlistPriority,
+    WatchlistUpdate,
+)
+from app.models.reviews import (
     AdviceReviewDetail,
     AdviceReviewEvaluation,
     AdviceReviewEvaluationDraft,
     AdviceReviewPlan,
     AdviceReviewPlanInput,
     AdviceReviewPlanUpdate,
-    AdviceTimelineItem,
+)
+from app.models.analysis import (
     AnalysisResult,
-    AlertEventItem,
-    AlertRuleInput,
-    AlertRuleItem,
-    AlertRuleUpdate,
+)
+from app.models.system import (
     CacheStats,
-    Kline,
-    MinuteKline,
     MonitorEvent,
     ProviderCapabilityStatus,
-    PlateItem,
     ProviderStatus,
+    TaskRun,
+)
+from app.models.market import (
+    Kline,
+    MinuteKline,
+    PlateItem,
     Quote,
-    ResearchStatus,
     StockConceptItem,
     StockInfo,
-    StockNoteInput,
-    StockNoteItem,
-    StockNoteUpdate,
-    TaskRun,
-    WatchlistItem,
-    WatchlistPriority,
-    WatchlistUpdate,
 )
 from app.repositories.advice import AdviceHistoryRepository
 from app.repositories.advice_reviews import AdviceReviewRepository
@@ -56,11 +67,25 @@ from app.repositories.market_scan import MarketScanRepository
 from app.repositories.maintenance import RuntimeMaintenanceRepository
 from app.repositories.notes import StockNoteRepository
 from app.repositories.provider_status import ProviderStatusRepository
+from app.repositories.reliability import (
+    ReliabilityBucketStats,
+    ReliabilityRepository,
+    ReliabilityScanStats,
+    ReliabilityTaskStats,
+)
 from app.repositories.runtime import RuntimeEventRepository
 from app.repositories.watchlist import WatchlistRepository, WatchlistSymbolSelection
-from app.services.research_conclusion_change import build_conclusion_timeline
+from app.models.advice_change import build_conclusion_timeline
 from app.services.runtime_backup import destructive_local_data_lease
+from app.services.instance_guard import FileInstanceGuard
+from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
+from app.utils.clock import performance_now
 from app.utils.fallback_logging import report_persistence_failure
+
+
+LOGGER = logging.getLogger(__name__)
+AUDIT_MIGRATION_MINIMUM_FREE_BYTES = 64 * 1024 * 1024
+AUDIT_MIGRATION_FREE_SPACE_MULTIPLIER = 2
 
 
 def resolve_cache_settings(
@@ -136,15 +161,20 @@ class SQLiteCache:
         if settings is not None:
             _require_settings_path(resolved_path, settings, "cache")
         repository_settings = settings if settings is not None else Settings(cache_path=resolved_path)
+        settings_supplied = settings is not None
         self._settings = settings
         self.path = resolved_path
         self._connections = SQLiteConnectionFactory(self.path)
         self._lock = threading.RLock()
-        self._init_schema()
+        self._init_schema(
+            repository_settings.legacy_audit_timezone,
+            settings_supplied=settings_supplied,
+        )
         self.cache_stats_repo = CacheStatsRepository(self.path, self._lock)
         self.market_data_repo = MarketDataRepository(self.path, self._lock)
         self.market_scan_repo = MarketScanRepository(self.path, self._lock)
         self.provider_status_repo = ProviderStatusRepository(self.path, self._lock)
+        self.reliability_repo = ReliabilityRepository(self.path, self._lock)
         self.runtime_event_repo = RuntimeEventRepository(self.path, self._lock)
         self.watchlist_repo = WatchlistRepository(self.path, self._lock, settings=repository_settings)
         self.advice_repo = AdviceHistoryRepository(self.path, self._lock, settings=repository_settings)
@@ -186,9 +216,45 @@ class SQLiteCache:
     def _connect(self) -> AbstractContextManager:
         return self._connections.connect()
 
-    def _init_schema(self) -> None:
+    def _init_schema(
+        self,
+        legacy_audit_timezone: str,
+        *,
+        settings_supplied: bool,
+    ) -> None:
         with self._lock, self._connect() as conn:
-            initialize_schema(conn)
+            migration_pending = audit_timestamp_migration_pending(conn)
+            if migration_pending and not settings_supplied:
+                raise ValueError(
+                    "旧数据库审计时间迁移需要显式 Settings；"
+                    "请使用 SQLiteCache(settings=settings) 指定 legacy_audit_timezone"
+                )
+            migration_guard = _acquire_audit_migration_guard(self.path) if migration_pending else None
+            started_at = performance_now()
+            try:
+                if migration_pending:
+                    _require_audit_migration_disk_space(self.path)
+                    LOGGER.info("开始审计时间 UTC 迁移")
+                initialize_schema(
+                    conn,
+                    legacy_audit_timezone=legacy_audit_timezone,
+                )
+                if migration_pending:
+                    LOGGER.info(
+                        "审计时间 UTC 迁移完成 duration_seconds=%.3f",
+                        performance_now() - started_at,
+                    )
+            finally:
+                if migration_guard is not None:
+                    migration_guard.release()
+
+    def readiness_check(self) -> None:
+        uri = f"{self.path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=0.25) as conn:
+            conn.execute("PRAGMA busy_timeout = 250")
+            row = conn.execute("SELECT 1").fetchone()
+        if row is None or int(row[0]) != 1:
+            raise sqlite3.DatabaseError("SQLite readiness probe returned an invalid result")
 
     def save_quotes(self, quotes: list[Quote]) -> None:
         self.market_data_repo.save_quotes(quotes)
@@ -383,6 +449,55 @@ class SQLiteCache:
 
     def recent_monitor_events(self, limit: int = 30) -> list[MonitorEvent]:
         return self.runtime_event_repo.monitor_events(limit=limit)
+
+    def record_reliability(
+        self,
+        metric: str,
+        *,
+        subject: str = "",
+        capability: str = "",
+        good: bool,
+        degraded: bool = False,
+        failed: bool = False,
+        fallback: bool = False,
+        duration_ms: float | int | None = None,
+    ) -> None:
+        self.reliability_repo.record(
+            metric,
+            subject=subject,
+            capability=capability,
+            good=good,
+            degraded=degraded,
+            failed=failed,
+            fallback=fallback,
+            duration_ms=duration_ms,
+        )
+
+    def record_workbench_reliability(
+        self,
+        *,
+        usable: bool,
+        duration_ms: float | int,
+        quality: bool | None = None,
+        fresh: bool | None = None,
+        non_fallback: bool | None = None,
+    ) -> None:
+        self.reliability_repo.record_workbench(
+            usable=usable,
+            duration_ms=duration_ms,
+            quality=quality,
+            fresh=fresh,
+            non_fallback=non_fallback,
+        )
+
+    def reliability_bucket_stats(self, metric: str, since: str) -> ReliabilityBucketStats:
+        return self.reliability_repo.bucket_stats(metric, since)
+
+    def reliability_market_scan_stats(self, since: str) -> ReliabilityScanStats:
+        return self.reliability_repo.market_scan_stats(since)
+
+    def reliability_task_stats(self, since: str) -> ReliabilityTaskStats:
+        return self.reliability_repo.task_stats(since)
 
     def save_watchlist_item(
         self,
@@ -613,3 +728,24 @@ class SQLiteCache:
 def _require_settings_path(path: Path, settings: Settings, owner: str) -> None:
     if path != resolve_project_path(settings.cache_path):
         raise ValueError(f"{owner}.path 与 Settings.cache_path 配置不一致")
+
+
+def _acquire_audit_migration_guard(path: Path) -> FileInstanceGuard:
+    guard = FileInstanceGuard(Path(f"{path}{RUNTIME_LEADER_LOCK_SUFFIX}"))
+    if guard.acquire():
+        return guard
+    raise RuntimeError("检测到仍在运行的服务进程；请完全停止服务后再执行数据库迁移")
+
+
+def _require_audit_migration_disk_space(path: Path) -> None:
+    database_size = path.stat().st_size if path.exists() else 0
+    required_free = max(
+        AUDIT_MIGRATION_MINIMUM_FREE_BYTES,
+        database_size * AUDIT_MIGRATION_FREE_SPACE_MULTIPLIER,
+    )
+    available_free = shutil.disk_usage(path.parent).free
+    if available_free < required_free:
+        raise RuntimeError(
+            "数据库迁移磁盘空间不足："
+            f"至少需要 {required_free} 字节可用空间，当前仅 {available_free} 字节"
+        )

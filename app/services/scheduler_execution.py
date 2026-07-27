@@ -4,7 +4,10 @@ import asyncio
 from datetime import date, datetime, time, timedelta
 
 from app.models.market_scan import MarketScanRun
-from app.models.schemas import ScheduledTaskState, SchedulerStatus
+from app.models.system import (
+    ScheduledTaskState,
+    SchedulerStatus,
+)
 from app.services.market_scan_manager import MARKET_SCAN_TASK_LABEL, MARKET_SCAN_TASK_NAME
 from app.services.scheduler_contracts import (
     INSTANCE_GUARD_BUSY_MESSAGE,
@@ -31,7 +34,8 @@ from app.services.scheduler_schedule import (
 )
 from app.services.task_run_lifecycle import start_task_run_cancel_safe
 from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
-from app.utils.market_time import market_local_naive, market_now_naive
+from app.utils.clock import market_now_naive
+from app.utils.market_time import market_local_naive
 
 
 _MARKET_SCAN_SCHEDULE_CONSUMED_STATUSES = frozenset(
@@ -137,7 +141,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
 
     async def _loop(self) -> None:
         while not self._stop_event.is_set():
-            now = datetime.now()
+            now = market_now_naive()
             await self._tick_market_scan()
             due_tasks = [task for task in _ordered_tasks(self.tasks) if not task.running and task.next_run_at <= now]
             for task in due_tasks:
@@ -171,7 +175,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
         if task.running:
             return f"{task.display_name} 正在运行，已跳过重复触发"
         task.running = True
-        task.last_started_at = datetime.now()
+        task.last_started_at = market_now_naive()
         task.last_finished_at = None
         task.last_status = TASK_STATUS_RUNNING
         task.last_message = "执行中"
@@ -205,7 +209,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             return message
         finally:
             task.running = False
-            finished_at = datetime.now()
+            finished_at = market_now_naive()
             task.last_finished_at = finished_at
             _reschedule_task(task, manual, finished_at)
 

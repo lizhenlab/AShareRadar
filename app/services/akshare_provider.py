@@ -7,7 +7,15 @@ import importlib
 import io
 from typing import Any, cast
 
-from app.models.schemas import Kline, MinuteKline, PlateItem, ProviderCapability, Quote, StockConceptItem, StockInfo
+from app.models.market import (
+    Kline,
+    MinuteKline,
+    PlateItem,
+    ProviderCapability,
+    Quote,
+    StockConceptItem,
+    StockInfo,
+)
 from app.runtime_environment import isolate_user_site_packages
 from app.services.akshare_mappers import minute_klines_from_hist_rows, quote_from_spot_row, stock_info_from_code_name_row
 from app.services.eastmoney_client import (
@@ -18,7 +26,7 @@ from app.services.eastmoney_client import (
 )
 from app.services.data_quality_time import normalize_quote_event_time
 from app.services.datahub_runtime import run_provider_io
-from app.services.provider_errors import (
+from app.utils.provider_errors import (
     ProviderCoverageMiss,
     ProviderInstrumentDataError,
     ProviderProtocolError,
@@ -31,9 +39,9 @@ from app.services.sina_client import (
     sina_bj_stock_pool_rows,
     sina_qfq_daily_klines,
 )
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.parsing import required_float, safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
-from app.utils.time import now_text
 
 isolate_user_site_packages()
 

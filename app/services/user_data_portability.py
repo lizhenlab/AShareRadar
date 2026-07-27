@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -12,10 +11,13 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Literal, cast
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import JsonValue
 
 from app.models.local_data import (
+    AuditTimestampMetadata,
     CORE_USER_DATA_TABLES,
     LOCAL_DATA_BUNDLE_KIND,
     LOCAL_DATA_BUNDLE_VERSION,
@@ -26,11 +28,15 @@ from app.models.local_data import (
     USER_DATA_TABLE_ALLOWLIST,
     UserDataBundle,
 )
+from app.utils.audit_time import audit_now_text, normalize_audit_time_text
 
 
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 CONFLICT_STRATEGY = "remap_surrogate_ids_source_wins_on_stable_keys"
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_UTC_FIXED_AUDIT_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z"
+)
 _SURROGATE_PRIMARY_KEYS = {
     "alert_rule": "id",
     "alert_event": "id",
@@ -51,6 +57,17 @@ _RELATIONSHIPS = {
         ("plan_id", "advice_review_plan"),
         ("advice_id", "advice_history"),
     ),
+}
+_USER_DATA_AUDIT_TIMESTAMP_COLUMNS = {
+    "watchlist": frozenset({"created_at", "updated_at", "last_viewed_at"}),
+    "advice_history": frozenset({"created_at", "updated_at"}),
+    "alert_rule": frozenset(
+        {"last_checked_at", "last_triggered_at", "created_at", "updated_at"}
+    ),
+    "alert_event": frozenset({"created_at"}),
+    "stock_note": frozenset({"created_at", "updated_at"}),
+    "advice_review_plan": frozenset({"created_at", "updated_at"}),
+    "advice_review_result": frozenset({"evaluated_at"}),
 }
 _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
     "advice_history": {
@@ -133,6 +150,7 @@ def _export_user_data_from_connection(conn: sqlite3.Connection) -> UserDataBundl
         version=LOCAL_DATA_BUNDLE_VERSION,
         exported_at=_utc_now_text(),
         source_schema_version=schema_version,
+        audit_timestamps=AuditTimestampMetadata(semantics="utc-fixed"),
         tables=tables,
         row_counts={name: len(table.rows) for name, table in tables.items()},
     )
@@ -160,6 +178,7 @@ def import_user_data(
     *,
     mode: LocalDataImportMode = "merge",
     dry_run: bool = True,
+    legacy_audit_timezone: str | None = None,
     on_validated_state: ImportStateCallback | None = None,
 ) -> LocalDataImportResult:
     if mode not in {"merge", "replace"}:
@@ -170,7 +189,12 @@ def import_user_data(
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("PRAGMA defer_foreign_keys = ON")
             database_digest = _user_data_state_digest_from_connection(conn)
-            table_names, normalized_tables = _validate_bundle_for_database(conn, bundle, mode=mode)
+            table_names, normalized_tables = _validate_bundle_for_database(
+                conn,
+                bundle,
+                mode=mode,
+                legacy_audit_timezone=legacy_audit_timezone,
+            )
             _validate_in_bundle_relationships(normalized_tables)
             prepared = _prepare_bundle(conn, normalized_tables, table_names, mode)
             previews = {name: prepared[name].preview for name in table_names}
@@ -219,7 +243,13 @@ def _export_table(conn: sqlite3.Connection, table: str) -> LocalDataTableBundle:
         columns=list(columns),
         column_types={column: str(column_info[column]["type"] or "") for column in columns},
         primary_key=list(primary_key),
-        rows=[{column: _json_value(row[column], table, column) for column in columns} for row in rows],
+        rows=[
+            {
+                column: _export_value(row[column], table, column)
+                for column in columns
+            }
+            for row in rows
+        ],
     )
 
 
@@ -228,7 +258,12 @@ def _validate_bundle_for_database(
     bundle: UserDataBundle,
     *,
     mode: LocalDataImportMode,
+    legacy_audit_timezone: str | None,
 ) -> tuple[tuple[str, ...], dict[str, LocalDataTableBundle]]:
+    resolved_legacy_timezone = _resolve_legacy_audit_timezone(
+        bundle.audit_timestamps,
+        legacy_audit_timezone,
+    )
     ordered_available = available_user_tables(conn)
     available = set(ordered_available)
     requested = set(bundle.tables)
@@ -239,7 +274,16 @@ def _validate_bundle_for_database(
         missing = sorted(available - requested)
         raise ValueError("replace 模式必须包含全部用户数据表，缺少：" + "、".join(missing))
     table_names = tuple(name for name in ordered_available if name in requested)
-    normalized = {name: _validate_table_bundle(conn, name, bundle.tables[name]) for name in table_names}
+    normalized = {
+        name: _validate_table_bundle(
+            conn,
+            name,
+            bundle.tables[name],
+            audit_metadata=bundle.audit_timestamps,
+            legacy_audit_timezone=resolved_legacy_timezone,
+        )
+        for name in table_names
+    }
     return table_names, normalized
 
 
@@ -247,11 +291,22 @@ def _validate_table_bundle(
     conn: sqlite3.Connection,
     table: str,
     bundle: LocalDataTableBundle,
+    *,
+    audit_metadata: AuditTimestampMetadata | None,
+    legacy_audit_timezone: str | None,
 ) -> LocalDataTableBundle:
     columns, primary_key, column_info = _table_contract(conn, table)
     bundle = _with_v1_compat_columns(table, bundle, columns, column_info)
     target_types = _validated_target_types(table, bundle, columns, primary_key, column_info)
-    normalized_rows = _normalized_bundle_rows(table, bundle, columns, primary_key, column_info)
+    normalized_rows = _normalized_bundle_rows(
+        table,
+        bundle,
+        columns,
+        primary_key,
+        column_info,
+        audit_metadata=audit_metadata,
+        legacy_audit_timezone=legacy_audit_timezone,
+    )
     return bundle.model_copy(
         update={
             "columns": list(columns),
@@ -313,12 +368,101 @@ def _normalized_bundle_rows(
     columns: tuple[str, ...],
     primary_key: tuple[str, ...],
     column_info: dict[str, sqlite3.Row],
+    *,
+    audit_metadata: AuditTimestampMetadata | None,
+    legacy_audit_timezone: str | None,
 ) -> list[dict[str, JsonValue]]:
     if bundle.rows and not primary_key:
         raise ValueError(f"{table} 没有可携带的主键，不能安全导入")
-    normalized_rows = [{column: row[column] for column in columns} for row in bundle.rows]
+    normalized_rows = [
+        _normalize_bundle_audit_timestamps(
+            table,
+            {column: row[column] for column in columns},
+            audit_metadata=audit_metadata,
+            legacy_audit_timezone=legacy_audit_timezone,
+        )
+        for row in bundle.rows
+    ]
     _validate_normalized_rows(table, normalized_rows, primary_key, column_info)
     return normalized_rows
+
+
+def _normalize_bundle_audit_timestamps(
+    table: str,
+    row: dict[str, JsonValue],
+    *,
+    audit_metadata: AuditTimestampMetadata | None,
+    legacy_audit_timezone: str | None,
+) -> dict[str, JsonValue]:
+    for column in _USER_DATA_AUDIT_TIMESTAMP_COLUMNS.get(table, ()):
+        value = row.get(column)
+        if value is None or not isinstance(value, str):
+            continue
+        try:
+            row[column] = _normalize_imported_audit_timestamp(
+                value,
+                audit_metadata=audit_metadata,
+                legacy_audit_timezone=legacy_audit_timezone,
+            )
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{table}.{column} 不是与 bundle 语义一致的有效审计时间"
+            ) from None
+    return row
+
+
+def _export_value(value: object, table: str, column: str) -> JsonValue:
+    portable = _json_value(value, table, column)
+    if column not in _USER_DATA_AUDIT_TIMESTAMP_COLUMNS.get(table, ()) or portable is None:
+        return portable
+    if not isinstance(portable, str) or _UTC_FIXED_AUDIT_TIMESTAMP.fullmatch(portable) is None:
+        raise ValueError(f"{table}.{column} 必须先归一化为 UTC 固定格式再导出")
+    return portable
+
+
+def _resolve_legacy_audit_timezone(
+    metadata: AuditTimestampMetadata | None,
+    explicit_timezone: str | None,
+) -> str | None:
+    if metadata is not None:
+        return metadata.legacy_timezone
+    if explicit_timezone is None:
+        return None
+    try:
+        ZoneInfo(explicit_timezone)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ValueError("legacy_audit_timezone 必须是有效的 IANA 时区") from None
+    return explicit_timezone
+
+
+def _normalize_imported_audit_timestamp(
+    value: str,
+    *,
+    audit_metadata: AuditTimestampMetadata | None,
+    legacy_audit_timezone: str | None,
+) -> str:
+    parsed = _parse_bundle_audit_timestamp(value)
+    if audit_metadata is not None and audit_metadata.semantics == "utc-fixed":
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("utc-fixed audit timestamp must include UTC timezone")
+        if _UTC_FIXED_AUDIT_TIMESTAMP.fullmatch(value) is None:
+            raise ValueError("utc-fixed audit timestamp must use the fixed UTC format")
+        return value
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        if legacy_audit_timezone is None:
+            raise ValueError("legacy naive audit timestamp requires an explicit timezone")
+        return normalize_audit_time_text(
+            value,
+            legacy_timezone=legacy_audit_timezone,
+        )
+    return normalize_audit_time_text(value, legacy_timezone="UTC")
+
+
+def _parse_bundle_audit_timestamp(value: str) -> datetime:
+    text = value.strip()
+    if not text:
+        raise ValueError("audit timestamp is empty")
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
 def _validate_normalized_rows(
@@ -800,7 +944,7 @@ def _quote_identifier(value: str) -> str:
 
 
 def _utc_now_text() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return audit_now_text()
 
 
 __all__ = [

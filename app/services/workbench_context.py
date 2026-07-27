@@ -2,18 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import math
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from app.models.schemas import (
+from app.models.research import (
     AlphaEvidenceReport,
-    AnalysisResult,
     ChipAnalysis,
     EventDigestReport,
     EvidenceChainReport,
     FactorLabReport,
-    FeatureSnapshot,
     LeadershipReport,
     MarketRegimeReport,
     PeerComparisonReport,
@@ -21,13 +18,18 @@ from app.models.schemas import (
     RiskRewardReport,
     SignalValidationReport,
     StockDiagnosis,
-    StockInsightBundle,
     StockQaReport,
     StockReplayAnalysis,
     TStrategyAssistantReport,
     ThemeContextReport,
     TimeframeAlignmentReport,
 )
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    StockInsightBundle,
+)
+from app.utils.clock import monotonic_now
 from app.utils.symbols import normalize_symbol
 
 
@@ -130,7 +132,7 @@ class WorkbenchContextCache:
         if not cached:
             return None
         timestamp, context = cached
-        if time.monotonic() - timestamp <= self.ttl_seconds:
+        if monotonic_now() - timestamp <= self.ttl_seconds:
             return context
         self._entries.pop(normalized, None)
         return None
@@ -171,7 +173,7 @@ class WorkbenchContextCache:
             return
         if not owns_task:
             return
-        self._entries[normalized] = (time.monotonic(), context)
+        self._entries[normalized] = (monotonic_now(), context)
         self._trim_entries()
 
     def _trim_entries(self) -> None:

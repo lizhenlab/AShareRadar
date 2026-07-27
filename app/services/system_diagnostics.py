@@ -13,8 +13,12 @@ from app.services.provider_failure_status import (
 )
 from app.services.runtime_backup import runtime_backup_storage
 from app.services.trading_calendar import TradeCalendarSource, TradeCalendarStatus, calendar_status
+from app.utils.audit_time import audit_datetime_to_text, normalize_audit_time_text, parse_audit_time
+from app.utils.clock import market_now_naive
 from app.utils.market_data import finite_float
+from app.utils.market_time import market_local_naive
 from app.utils.text import clean_optional_text as _clean_text
+from app.utils.time import parse_text_time
 
 
 @dataclass(frozen=True)
@@ -31,7 +35,9 @@ OTHER_CACHE_DATA_TABLES = frozenset(
     {"provider_status", "provider_capability_status", "stock_master", "plate_rank", "stock_concept"}
 )
 CACHE_DATA_TABLES = QUOTE_STORAGE_TABLES | KLINE_STORAGE_TABLES | OTHER_CACHE_DATA_TABLES
-RUNTIME_STATE_TABLES = frozenset({"cache_event", "task_run", "monitor_event"}) | MARKET_SCAN_STORAGE_TABLES
+RUNTIME_STATE_TABLES = frozenset(
+    {"cache_event", "task_run", "monitor_event", "reliability_bucket"}
+) | MARKET_SCAN_STORAGE_TABLES
 SQLITE_STORAGE_COMPONENT_SUFFIXES = {
     "main": "",
     "wal": "-wal",
@@ -40,13 +46,13 @@ SQLITE_STORAGE_COMPONENT_SUFFIXES = {
 
 
 def build_system_diagnostics(datahub, scheduler, *, now: datetime | None = None) -> SystemDiagnostics:
-    current = now or datetime.now()
+    current = market_local_naive(now) if now is not None else market_now_naive()
     cache_stats = datahub.cache.stats()
     providers = datahub.cache.provider_statuses()
     capability_statuses = datahub.cache.provider_capability_statuses()
     table_counts = _normalized_table_counts(datahub.cache.table_counts())
     scheduler_status = scheduler.status()
-    checked_at = current.strftime("%Y-%m-%d %H:%M:%S")
+    checked_at = audit_datetime_to_text(current)
     trade_calendar = calendar_status(current.date())
     assessment = (
         assess_cache_freshness(
@@ -246,22 +252,27 @@ def _observation_model(observation: FreshnessObservation) -> FreshnessObservatio
 
 def _checked_datetime(value: str | datetime) -> datetime | None:
     if isinstance(value, datetime):
-        return value
+        return market_local_naive(value)
     try:
-        return datetime.fromisoformat(value)
+        return parse_text_time(value)
     except (TypeError, ValueError):
         return None
 
 
 def _checked_text(value: str | datetime) -> str:
-    return value.isoformat(sep=" ") if isinstance(value, datetime) else value
+    if isinstance(value, datetime):
+        return audit_datetime_to_text(value)
+    try:
+        return normalize_audit_time_text(value)
+    except (TypeError, ValueError):
+        return value
 
 
 def age_seconds(value: str | None, checked_at: str) -> int | None:
     if not value:
         return None
     try:
-        age = int((datetime.fromisoformat(checked_at) - datetime.fromisoformat(value)).total_seconds())
+        age = int((parse_audit_time(checked_at) - parse_audit_time(value)).total_seconds())
     except (TypeError, ValueError):
         return None
     if age < 0:

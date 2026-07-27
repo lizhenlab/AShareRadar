@@ -1,4 +1,5 @@
 import { DEFAULT_REQUEST_TIMEOUT_MS, createRequestScope, fetchJson, isAbortError } from "./api.js";
+import { formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { toggleInlineEditor } from "./inline-editor.js";
@@ -226,7 +227,7 @@ export function renderNotes(items) {
               <div>
               <strong>${escapeHtml(item.note_type)} · ${formatNumber(item.price)}</strong>
               <span>${escapeHtml(item.content)}</span>
-              <small>${escapeHtml(item.trade_date || item.created_at)}${item.visible ? "" : " · 已隐藏"}</small>
+              <small>${escapeHtml(item.trade_date || formatAuditTimestamp(item.created_at))}${item.visible ? "" : " · 已隐藏"}</small>
               </div>
               <div class="row-actions">
                 <button type="button" class="mini-button" aria-label="编辑笔记" aria-expanded="false" aria-controls="${editorId}" data-note-edit="${escapeHtml(item.id)}">编辑</button>

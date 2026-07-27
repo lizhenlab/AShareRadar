@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 
+from app.config import Settings
 from app.models.schemas import Kline
 from app.services.cache import SQLiteCache
 from app.services.providers import stamp_daily_kline_contract
@@ -41,7 +42,7 @@ def test_legacy_daily_rows_migrate_to_unknown_without_polluting_qfq(tmp_path: Pa
             ("600519.SH", "2026-05-13", 100, 101, 102, 99, 1000, "legacy", now_text()),
         )
 
-    cache = SQLiteCache(path)
+    cache = SQLiteCache(settings=Settings(cache_path=path))
     assert cache.get_klines("600519.SH", 10, 10**9) == []
     legacy = cache.get_klines("600519.SH", 10, 10**9, adjustment_mode="unknown")
     assert [item.date for item in legacy] == ["2026-05-13"]

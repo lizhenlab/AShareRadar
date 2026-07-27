@@ -4,13 +4,15 @@ from fastapi import APIRouter, Depends, Query, status
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api_async
-from app.models.schemas import (
+from app.models.reviews import (
     AdviceReviewDetail,
     AdviceReviewEvaluation,
     AdviceReviewEvaluationRequest,
     AdviceReviewPlan,
     AdviceReviewPlanInput,
     AdviceReviewPlanUpdate,
+)
+from app.models.system import (
     MutationResult,
 )
 from app.services.advice_review import (

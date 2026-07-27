@@ -4,9 +4,12 @@ import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from app.models.schemas import Quote, StockInfo
+from app.models.market import (
+    Quote,
+    StockInfo,
+)
 from app.services.datahub_runtime import run_cache_io_best_effort
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 from app.utils.symbols import standard_symbol_list
 
 

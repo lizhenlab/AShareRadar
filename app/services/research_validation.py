@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import (
+from app.models.analysis import (
     AnalysisResult,
-    FactorLabReport,
     FeatureSnapshot,
+)
+from app.models.research import (
+    FactorLabReport,
     MarketRegimeReport,
     SignalValidationItem,
     SignalValidationReport,

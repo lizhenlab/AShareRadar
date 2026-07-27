@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from app.models.schemas import AnalysisResult
+from app.models.analysis import (
+    AnalysisResult,
+)
 from app.services.financial_metrics import format_amount_text, market_cap_view, pb_view, pe_view
 from app.services.valuation_anchors import (
     peer_valuation_percentile,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 import hashlib
 import json
 import sqlite3
@@ -16,7 +16,10 @@ from app.models.market import (
     KlineAdjustmentMode,
     UNKNOWN_KLINE_DATA_VERSION,
 )
-from app.models.schemas import Kline, MinuteKline
+from app.models.market import (
+    Kline,
+    MinuteKline,
+)
 from app.utils.market_data import (
     filter_valid_klines,
     filter_valid_minute_klines,
@@ -24,7 +27,8 @@ from app.utils.market_data import (
     valid_non_negative_number,
     valid_ohlc,
 )
-from app.utils.market_time import market_local_naive, market_now_naive
+from app.utils.audit_time import audit_datetime_to_text, audit_now_text, audit_time_window, parse_audit_time
+from app.utils.market_time import market_local_naive
 from app.utils.symbols import standard_symbol
 
 
@@ -280,9 +284,9 @@ def _stored_daily_kline_contract(rows) -> _DailyKlineContract | None:
     parsed_fetched_at = [
         parsed
         for row in rows
-        if (parsed := _contract_as_of(str(row["fetched_at"] or ""))) is not None
+        if (parsed := _parsed_fetched_at(str(row["fetched_at"] or ""))) is not None
     ]
-    fetched_at = _datetime_text(max(parsed_fetched_at, default=datetime.min))
+    fetched_at = audit_datetime_to_text(max(parsed_fetched_at, default=datetime.min.replace(tzinfo=UTC)))
     return _daily_kline_contract(klines, klines[-1].source or "unknown", fetched_at)
 
 
@@ -290,16 +294,12 @@ def _daily_contract_quality_key(
     contract: _DailyKlineContract,
 ) -> tuple[datetime, int, datetime, str]:
     as_of = _contract_as_of(contract.as_of) or datetime.min
-    fetched_at = _required_contract_datetime(contract.fetched_at, "fetched_at")
+    fetched_at = _required_fetched_at(contract.fetched_at)
     return as_of, int(not contract.fallback_used), fetched_at, contract.content_revision
 
 
 def _market_time_window(max_age_seconds: int) -> tuple[str, str] | None:
-    if max_age_seconds <= 0:
-        return None
-    current = market_now_naive()
-    cutoff = current - timedelta(seconds=max_age_seconds)
-    return _datetime_text(cutoff), _datetime_text(current)
+    return audit_time_window(max_age_seconds)
 
 
 def _contract_as_of(value: str | None) -> datetime | None:
@@ -330,7 +330,9 @@ def _latest_rows_sql(spec: _KlineCacheSpec) -> str:
     return f"""
         SELECT {selected_columns} FROM (
             SELECT {selected_columns} FROM {spec.table}
-            WHERE {lookup_clause} AND fetched_at BETWEEN ? AND ?
+            WHERE {lookup_clause}
+              AND ashare_audit_epoch(fetched_at)
+                  BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)
             ORDER BY {spec.order_column} DESC
             LIMIT ?
         )
@@ -501,18 +503,32 @@ def _incoming_fetched_at(rows: Iterable[object]) -> str:
     for item in rows:
         row_count += 1
         value = str(getattr(item, "fetched_at", "") or "").strip()
-        if not value or _contract_as_of(value) is None:
+        if not value or _parsed_fetched_at(value) is None:
             missing_or_invalid = True
             continue
         values.append(value)
     if row_count == 0:
         raise ValueError("K线写入不能为空")
     if missing_or_invalid or not values:
-        values.append(_datetime_text(market_now_naive()))
+        values.append(audit_now_text())
     latest = max(
-        (_required_contract_datetime(value, "fetched_at") for value in values),
+        (_required_fetched_at(value) for value in values),
     )
-    return _datetime_text(latest)
+    return audit_datetime_to_text(latest)
+
+
+def _parsed_fetched_at(value: str) -> datetime | None:
+    try:
+        return parse_audit_time(value)
+    except ValueError:
+        return None
+
+
+def _required_fetched_at(value: object) -> datetime:
+    parsed = _parsed_fetched_at(str(value or ""))
+    if parsed is None:
+        raise ValueError("日K fetched_at 无法解析")
+    return parsed
 
 
 def _daily_content_revision(rows: list[Kline]) -> str:

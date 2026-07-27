@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from app.models.schemas import (
+from app.models.analysis import (
     AbnormalEventSummary,
     AnalysisResult,
     FundFlowAnalysis,
@@ -13,10 +13,9 @@ from app.models.schemas import (
     RuleMatch,
     ValuationAnalysis,
 )
+from app.models.rule_versions import RULE_VERSION, SCORE_VERSION
 
 
-RULE_VERSION = "rules.v2"
-SCORE_VERSION = "score.v2"
 STATUS_MATCHED = "命中"
 STATUS_CLOSE = "接近"
 STATUS_MISSED = "未触发"

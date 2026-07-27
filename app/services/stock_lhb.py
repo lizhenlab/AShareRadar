@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.models.schemas import AbnormalEventSummary, AnalysisResult, LhbSummary
+from app.models.analysis import (
+    AbnormalEventSummary,
+    AnalysisResult,
+    LhbSummary,
+)
 
 LHB_MOVE_THRESHOLD = 7
 LHB_TURNOVER_THRESHOLD = 12

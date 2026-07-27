@@ -16,7 +16,9 @@ from app.repositories.market_scan_results import (
     required_run_row,
     sync_run_counts,
 )
-from app.utils.time import now_text, parse_text_time
+from app.utils.audit_time import audit_now_text as now_text
+from app.utils.clock import monotonic_now
+from app.utils.time import parse_text_time
 
 
 ACTIVE_SCAN_STATUSES = ("queued", "running", "cancelling")
@@ -171,6 +173,7 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                 (stamp, stamp, run_id),
             )
             updated = required_run_row(conn, run_id)
+        self._run_started_monotonic[run_id] = monotonic_now()
         return run_from_row(updated)
 
     def request_cancel(self, run_id: int) -> MarketScanRun:
@@ -262,14 +265,20 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                     task_status=task_status,
                     stamp=str(row["finished_at"] or stamp),
                     message=str(row["message"] or message),
+                    duration_ms=row["duration_ms"],
                 )
+                self._run_started_monotonic.pop(run_id, None)
                 return run_from_row(row)
             sync_run_counts(conn, run_id, stamp=stamp)
             synced = required_run_row(conn, run_id)
             validate_terminal_status(conn, synced, status)
             if status in {"success", "degraded"}:
                 assign_result_ranks(conn, run_id)
-            duration_ms = _duration_ms(row["started_at"], stamp)
+            duration_ms = _duration_ms(
+                row["started_at"],
+                stamp,
+                started_monotonic=self._run_started_monotonic.get(run_id),
+            )
             conn.execute(
                 """
                 UPDATE market_scan_run
@@ -287,7 +296,9 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                 task_status=task_status,
                 stamp=stamp,
                 message=message,
+                duration_ms=duration_ms,
             )
+        self._run_started_monotonic.pop(run_id, None)
         return run_from_row(updated)
 
     def reconcile_incomplete_runs(self) -> int:
@@ -309,6 +320,7 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                     task_status=None,
                     stamp=str(row["finished_at"] or stamp),
                     message=str(row["message"] or "全市场扫描已结束"),
+                    duration_ms=row["duration_ms"],
                 )
             rows = conn.execute(
                 f"SELECT * FROM market_scan_run WHERE status IN ({placeholders})",
@@ -333,7 +345,9 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                     task_status="cancelled",
                     stamp=stamp,
                     message="应用重启时终止遗留全市场扫描记录",
+                    duration_ms=interrupted["duration_ms"],
                 )
+            self._run_started_monotonic.clear()
         return len(rows)
 
 
@@ -413,6 +427,7 @@ def finish_linked_task_run(
     task_status: str | None,
     stamp: str,
     message: str,
+    duration_ms: int | None = None,
 ) -> None:
     task_run_id = run["task_run_id"]
     if task_run_id is None:
@@ -422,14 +437,14 @@ def finish_linked_task_run(
         """
         UPDATE task_run
         SET status = ?, finished_at = ?,
-            duration_ms = CASE
+            duration_ms = COALESCE(?, CASE
                 WHEN julianday(started_at) IS NULL THEN NULL
                 ELSE MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER))
-            END,
+            END),
             message = ?
         WHERE id = ?
         """,
-        (resolved_status, stamp, stamp, message[:800], task_run_id),
+        (resolved_status, stamp, duration_ms, stamp, message[:800], task_run_id),
     )
 
 
@@ -443,7 +458,14 @@ def _required_lastrowid(cursor: sqlite3.Cursor, *, operation: str) -> int:
     return cursor.lastrowid
 
 
-def _duration_ms(started_at: str | None, finished_at: str) -> int | None:
+def _duration_ms(
+    started_at: str | None,
+    finished_at: str,
+    *,
+    started_monotonic: float | None = None,
+) -> int | None:
+    if started_monotonic is not None:
+        return max(0, round((monotonic_now() - started_monotonic) * 1000))
     if not started_at:
         return None
     try:

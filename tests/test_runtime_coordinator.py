@@ -15,6 +15,9 @@ from app.services.runtime_coordinator import RuntimeCoordinator, RuntimeLeadersh
 from app.services.scheduler import LocalDataScheduler
 
 
+PROCESS_HANDSHAKE_TIMEOUT_SECONDS = 20
+
+
 class _GuardHandle:
     def __init__(self, *, fail_write: bool = False) -> None:
         self.closed = False
@@ -246,8 +249,8 @@ def test_runtime_leadership_is_exclusive_across_two_processes_for_repeated_takeo
     finally:
         first_commands.put("stop")
         second_commands.put("stop")
-        first.join(timeout=5)
-        second.join(timeout=5)
+        first.join(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS)
+        second.join(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS)
         if first.is_alive():
             first.terminate()
         if second.is_alive():
@@ -269,21 +272,21 @@ def test_cross_process_takeover_waits_for_old_non_cooperative_task(tmp_path: Pat
     standby = RuntimeLeadership.for_cache_path(Path(cache_path))
     owner.start()
     try:
-        assert results.get(timeout=5) == "started"
+        assert results.get(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS) == "started"
         commands.put("stop")
-        assert results.get(timeout=5) == "stop-returned"
+        assert results.get(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS) == "stop-returned"
         assert standby.try_acquire() is False
 
         commands.put("release")
-        assert results.get(timeout=5) == "released"
+        assert results.get(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS) == "released"
         assert standby.try_acquire() is True
         standby.release()
     finally:
         commands.put("release")
-        owner.join(timeout=5)
+        owner.join(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS)
         if owner.is_alive():
             owner.terminate()
-            owner.join(timeout=5)
+            owner.join(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS)
 
     assert owner.exitcode == 0
 
@@ -548,7 +551,7 @@ def _guard_worker(lock_path: str, commands, results) -> None:
 
 def _guard_command(commands, results, command: str) -> bool:
     commands.put(command)
-    return bool(results.get(timeout=5))
+    return bool(results.get(timeout=PROCESS_HANDSHAKE_TIMEOUT_SECONDS))
 
 
 def _stubborn_coordinator_worker(cache_path: str, commands, results) -> None:

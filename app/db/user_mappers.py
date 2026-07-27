@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 import sqlite3
 
-from app.models.schemas import (
+from app.models.user_data import (
     AdviceHistoryItem,
     AdviceTimelineItem,
     AlertEventItem,
@@ -11,6 +11,7 @@ from app.models.schemas import (
     StockNoteItem,
     WatchlistItem,
 )
+from app.utils.audit_time import audit_datetime_to_text, parse_audit_time
 from app.utils.market_data import finite_float
 
 
@@ -28,7 +29,6 @@ _SUPPORTED_ALERT_CONDITIONS = frozenset(ALERT_CONDITION_LABELS)
 _WATCHLIST_RESEARCH_STATUSES = frozenset({"to_research", "watching", "holding_research", "excluded"})
 _WATCHLIST_PRIORITIES = frozenset({"high", "medium", "low"})
 _KLINE_ADJUSTMENT_MODES = frozenset({"qfq", "hfq", "none", "unknown"})
-_LOCAL_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def row_to_watchlist_item(row: sqlite3.Row) -> WatchlistItem:
@@ -88,10 +88,10 @@ def _iso_date_or_none(value: object) -> date | None:
 def _local_time_or_none(value: object) -> str | None:
     text = str(value or "").strip()
     try:
-        parsed = datetime.strptime(text, _LOCAL_TIME_FORMAT)
+        parsed = parse_audit_time(text)
     except ValueError:
         return None
-    return parsed.strftime(_LOCAL_TIME_FORMAT) if parsed.strftime(_LOCAL_TIME_FORMAT) == text else None
+    return audit_datetime_to_text(parsed)
 
 
 def row_to_advice(row: sqlite3.Row) -> AdviceHistoryItem:
@@ -122,8 +122,8 @@ def row_to_advice(row: sqlite3.Row) -> AdviceHistoryItem:
             "历史记录字段异常，已使用兜底展示。",
             500,
         ),
-        created_at=_clean_text_or_default(_row_value(row, "created_at"), "", 20),
-        updated_at=_clean_optional_text(_row_value(row, "updated_at"), 20),
+        created_at=_clean_text_or_default(_row_value(row, "created_at"), "", 40),
+        updated_at=_clean_optional_text(_row_value(row, "updated_at"), 40),
         repeat_count=_positive_int_or_default(_row_value(row, "repeat_count"), 1),
         kline_adjustment_mode=_kline_adjustment_mode(_row_value(row, "kline_adjustment_mode")),
         kline_anchor_date=_clean_optional_text(_row_value(row, "kline_anchor_date"), 10),
@@ -269,13 +269,13 @@ def row_to_alert_rule(row: sqlite3.Row) -> AlertRuleItem:
         threshold=threshold if threshold is not None else 0.0,
         note=_clean_optional_text(row["note"], 160),
         enabled=executable,
-        last_checked_at=_clean_optional_text(row["last_checked_at"], 20),
-        last_triggered_at=_clean_optional_text(row["last_triggered_at"], 20),
+        last_checked_at=_clean_optional_text(row["last_checked_at"], 40),
+        last_triggered_at=_clean_optional_text(row["last_triggered_at"], 40),
         last_state=_clean_text_or_default(row["last_state"], "等待", 20),
         trigger_count=_non_negative_int_or_default(row["trigger_count"]),
         cooldown_seconds=_bounded_int_or_default(row["cooldown_seconds"], 30, 86400, 300),
-        created_at=_clean_text_or_default(row["created_at"], "", 20),
-        updated_at=_clean_text_or_default(row["updated_at"], "", 20),
+        created_at=_clean_text_or_default(row["created_at"], "", 40),
+        updated_at=_clean_text_or_default(row["updated_at"], "", 40),
     )
 
 
@@ -295,7 +295,7 @@ def row_to_alert_event(row: sqlite3.Row) -> AlertEventItem:
         price=_finite_float_or_default(row["price"]),
         change_pct=_finite_float_or_default(row["change_pct"]),
         threshold=_finite_float_or_default(row["threshold"]),
-        created_at=_clean_text_or_default(row["created_at"], "", 20),
+        created_at=_clean_text_or_default(row["created_at"], "", 40),
     )
 
 
@@ -312,8 +312,8 @@ def row_to_stock_note(row: sqlite3.Row) -> StockNoteItem:
         trade_date=_clean_optional_text(row["trade_date"], 20),
         color=_clean_optional_text(row["color"], 20),
         visible=_bounded_int_or_default(row["visible"], 0, 1, 0) == 1,
-        created_at=_clean_text_or_default(row["created_at"], "", 20),
-        updated_at=_clean_text_or_default(row["updated_at"], "", 20),
+        created_at=_clean_text_or_default(row["created_at"], "", 40),
+        updated_at=_clean_text_or_default(row["updated_at"], "", 40),
     )
 
 

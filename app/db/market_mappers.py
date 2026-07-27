@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 
-from app.models.schemas import Kline, MinuteKline, PlateItem, Quote, StockConceptItem, StockInfo
+from app.models.market import (
+    Kline,
+    MinuteKline,
+    PlateItem,
+    Quote,
+    StockConceptItem,
+    StockInfo,
+)
 
 
 def row_to_quote(row: sqlite3.Row) -> Quote:

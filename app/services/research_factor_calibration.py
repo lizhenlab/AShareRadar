@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.models.schemas import CalibrationBucket, FactorCalibration
+from app.models.research import (
+    CalibrationBucket,
+    FactorCalibration,
+)
 from app.services.indicators import pct_change
 from app.services.research_factor_specs import FactorSpec, _trend_proxy_score_at
 from app.services.scoring import clamp_score as _clamp

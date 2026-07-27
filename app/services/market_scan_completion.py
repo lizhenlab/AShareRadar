@@ -9,7 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from app.models.market_scan import MarketScanRun, MarketScanRunStatus
 from app.services.datahub_runtime import run_cache_io
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 
 
 _URL_RE = re.compile(r"https?://[^\s<>{}\"']+", re.IGNORECASE)

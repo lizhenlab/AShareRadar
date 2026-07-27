@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import AnalysisResult, ChipAnalysis, ChipBand, FeatureSnapshot, Kline
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+)
+from app.models.research import (
+    ChipAnalysis,
+    ChipBand,
+)
+from app.models.market import (
+    Kline,
+)
 from app.services.indicators import pct_change
 from app.services.scoring import clamp_score
 from app.utils.market_data import finite_float

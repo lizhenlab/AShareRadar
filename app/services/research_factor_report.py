@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import FactorLabReport, FeatureSnapshot, StandardFactor
+from app.models.research import (
+    FactorLabReport,
+    StandardFactor,
+)
+from app.models.analysis import (
+    FeatureSnapshot,
+)
 from app.services.research_factor_scoring import (
     _factor_calibration_quality,
     _factor_participates_in_historical_aggregate,

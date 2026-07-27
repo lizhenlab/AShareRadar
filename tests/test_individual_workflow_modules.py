@@ -18,6 +18,7 @@ from app.workflows.individual import (
     WORKBENCH_CHART_MARK_LIMIT,
     WORKBENCH_NOTE_LIMIT,
     _ensure_advice_snapshot,
+    _workbench_is_non_fallback,
     _workbench_local_state,
 )
 
@@ -63,6 +64,58 @@ def test_services_do_not_expose_mutable_process_global_loader_registration() -> 
     assert not hasattr(alert_service, "configure_alert_analysis_loader")
     assert not hasattr(chart_marks_service, "_default_chart_context_loader")
     assert not hasattr(chart_marks_service, "configure_chart_context_loader")
+
+
+@pytest.mark.parametrize(
+    (
+        "quote_from_cache",
+        "quote_fallback_used",
+        "kline_from_cache",
+        "kline_fallback_used",
+        "expected",
+    ),
+    [
+        (False, False, False, False, True),
+        (True, False, False, False, False),
+        (False, True, False, False, False),
+        (False, False, True, False, False),
+        (False, False, False, True, False),
+    ],
+)
+def test_workbench_non_fallback_requires_uncached_primary_quote_and_kline(
+    quote_from_cache: bool,
+    quote_fallback_used: bool,
+    kline_from_cache: bool,
+    kline_fallback_used: bool,
+    expected: bool,
+) -> None:
+    result = SimpleNamespace(
+        analysis=SimpleNamespace(
+            quote=SimpleNamespace(
+                from_cache=quote_from_cache,
+                fallback_used=quote_fallback_used,
+            ),
+            data_quality=SimpleNamespace(
+                kline_quality=SimpleNamespace(
+                    from_cache=kline_from_cache,
+                    fallback_used=kline_fallback_used,
+                )
+            ),
+        )
+    )
+
+    assert _workbench_is_non_fallback(result) is expected  # type: ignore[arg-type]
+
+
+def test_workbench_non_fallback_rejects_missing_kline_quality() -> None:
+    result = SimpleNamespace(
+        analysis=SimpleNamespace(
+            quote=SimpleNamespace(from_cache=False, fallback_used=False),
+            data_quality=SimpleNamespace(kline_quality=None),
+        )
+    )
+
+    assert _workbench_is_non_fallback(result) is False  # type: ignore[arg-type]
 
 
 def _dependency_cycles(graph: dict[str, set[str]]) -> list[str]:

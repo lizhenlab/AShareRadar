@@ -2,19 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC
 import sqlite3
 import time
 
 from app.db.schema_definitions import (
     KLINE_DAILY_COLUMN_DEFINITIONS,
     QUOTE_HISTORY_COLUMN_DEFINITIONS,
+    SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL,
 )
+from app.utils.audit_time import normalize_audit_time_text
 
 
-SCHEMA_MIGRATION_SQL = """
+SCHEMA_MIGRATION_SQL = f"""
 CREATE TABLE IF NOT EXISTS schema_migration (
     name TEXT PRIMARY KEY,
-    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    applied_at TEXT NOT NULL DEFAULT {SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL}
 )
 """
 
@@ -23,6 +26,13 @@ JOURNAL_MODE_RETRY_COUNT = 5
 QUOTE_HISTORY_UNIQUE_INDEX = "uq_quote_history_symbol_trade_date"
 QUOTE_HISTORY_CONTRACT_MIGRATION = "20260715_quote_history_not_null_contract"
 KLINE_DAILY_CONTRACT_MIGRATION = "20260716_kline_daily_adjustment_contract"
+AUDIT_TIMESTAMP_UTC_MIGRATION = "20260724_audit_timestamps_utc_v2"
+ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION = "20260724_advice_review_audit_timestamps_utc_v2"
+SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION = "20260724_schema_migration_applied_at_utc_v2"
+DEFAULT_LEGACY_AUDIT_TIMEZONE = "Asia/Shanghai"
+_AUDIT_NORMALIZER_FUNCTION = "_ashare_normalize_audit_timestamp"
+_SCHEMA_MIGRATION_NORMALIZER_FUNCTION = "_ashare_normalize_schema_migration_timestamp"
+_SCHEMA_MIGRATION_REBUILD_TABLE = "schema_migration__utc_rebuild"
 _QUOTE_HISTORY_REBUILD_TABLE = "quote_history__compat_rebuild"
 _KLINE_DAILY_REBUILD_TABLE = "kline_daily__compat_rebuild"
 _QUOTE_HISTORY_COLUMNS = (
@@ -86,6 +96,42 @@ _KLINE_DAILY_COLUMNS = (
     "source",
     "fetched_at",
 )
+
+AUDIT_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
+    "provider_status": ("last_success", "updated_at"),
+    "provider_capability_status": ("last_success", "updated_at"),
+    "quote_snapshot": ("fetched_at",),
+    "quote_history": ("fetched_at",),
+    "kline_daily": ("fetched_at",),
+    "kline_minute": ("fetched_at",),
+    "cache_event": ("created_at",),
+    "task_run": ("started_at", "finished_at"),
+    "reliability_bucket": ("bucket_start_utc", "updated_at"),
+    "market_scan_run": (
+        "created_at",
+        "updated_at",
+        "started_at",
+        "finished_at",
+        "cancel_requested_at",
+    ),
+    "market_scan_result": ("updated_at",),
+    "monitor_event": ("created_at", "last_seen_at"),
+    "watchlist": ("created_at", "updated_at", "last_viewed_at"),
+    "advice_history": ("created_at", "updated_at"),
+    "alert_rule": (
+        "last_checked_at",
+        "last_triggered_at",
+        "created_at",
+        "updated_at",
+    ),
+    "alert_event": ("created_at",),
+    "stock_note": ("created_at", "updated_at"),
+    "stock_master": ("updated_at",),
+    "plate_rank": ("updated_at",),
+    "stock_concept": ("updated_at",),
+    "advice_review_plan": ("created_at", "updated_at"),
+    "advice_review_result": ("evaluated_at",),
+}
 
 COMPAT_COLUMNS = {
     "advice_history": {
@@ -162,7 +208,11 @@ COMPAT_COLUMNS = {
 }
 
 
-def apply_compat_schema(conn: sqlite3.Connection) -> None:
+def apply_compat_schema(
+    conn: sqlite3.Connection,
+    *,
+    legacy_audit_timezone: str = DEFAULT_LEGACY_AUDIT_TIMEZONE,
+) -> None:
     if not conn.in_transaction:
         _ensure_wal_mode(conn)
     with migration_transaction(conn):
@@ -172,7 +222,7 @@ def apply_compat_schema(conn: sqlite3.Connection) -> None:
                 continue
             for column, definition in columns.items():
                 ensure_column(conn, table, column, definition)
-        _apply_compat_migrations(conn)
+        _apply_compat_migrations(conn, legacy_audit_timezone=legacy_audit_timezone)
         ensure_compat_indexes(conn)
 
 
@@ -185,17 +235,143 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
-def apply_compat_migrations(conn: sqlite3.Connection) -> None:
+def apply_compat_migrations(
+    conn: sqlite3.Connection,
+    *,
+    legacy_audit_timezone: str = DEFAULT_LEGACY_AUDIT_TIMEZONE,
+) -> None:
     with migration_transaction(conn):
-        _apply_compat_migrations(conn)
+        _apply_compat_migrations(conn, legacy_audit_timezone=legacy_audit_timezone)
 
 
-def _apply_compat_migrations(conn: sqlite3.Connection) -> None:
+def _apply_compat_migrations(
+    conn: sqlite3.Connection,
+    *,
+    legacy_audit_timezone: str,
+) -> None:
     ensure_migration_table(conn)
+    _apply_schema_migration_applied_at_utc_migration(conn)
     _apply_kline_daily_migration(conn)
     _apply_quote_history_migrations(conn)
     _apply_monitor_event_migration(conn)
     _apply_market_scan_degradation_migration(conn)
+    _apply_audit_timestamp_utc_migration(
+        conn,
+        legacy_audit_timezone=legacy_audit_timezone,
+    )
+
+
+def _apply_schema_migration_applied_at_utc_migration(conn: sqlite3.Connection) -> None:
+    existing = conn.execute(
+        "SELECT 1 FROM schema_migration WHERE name = ?",
+        (SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,),
+    ).fetchone()
+    if existing is not None:
+        return
+    conn.create_function(
+        _SCHEMA_MIGRATION_NORMALIZER_FUNCTION,
+        1,
+        _normalize_schema_migration_timestamp,
+        deterministic=True,
+    )
+    conn.execute(f"DROP TABLE IF EXISTS {_SCHEMA_MIGRATION_REBUILD_TABLE}")
+    conn.execute(
+        f"""
+        CREATE TABLE {_SCHEMA_MIGRATION_REBUILD_TABLE} (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT {SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL}
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO {_SCHEMA_MIGRATION_REBUILD_TABLE} (name, applied_at)
+        SELECT name, {_SCHEMA_MIGRATION_NORMALIZER_FUNCTION}(applied_at)
+        FROM schema_migration
+        """
+    )
+    conn.execute("DROP TABLE schema_migration")
+    conn.execute(
+        f"ALTER TABLE {_SCHEMA_MIGRATION_REBUILD_TABLE} RENAME TO schema_migration"
+    )
+    conn.execute(
+        "INSERT INTO schema_migration (name) VALUES (?)",
+        (SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,),
+    )
+
+
+def _normalize_schema_migration_timestamp(value: object) -> str:
+    return normalize_audit_time_text(str(value or ""), legacy_timezone=UTC)
+
+
+def _apply_audit_timestamp_utc_migration(
+    conn: sqlite3.Connection,
+    *,
+    legacy_audit_timezone: str,
+) -> None:
+    existing = conn.execute(
+        "SELECT 1 FROM schema_migration WHERE name = ?",
+        (AUDIT_TIMESTAMP_UTC_MIGRATION,),
+    ).fetchone()
+    if existing is not None:
+        return
+    normalize_legacy_audit_timestamps(
+        conn,
+        AUDIT_TIMESTAMP_COLUMNS,
+        legacy_audit_timezone=legacy_audit_timezone,
+    )
+    conn.execute(
+        "INSERT INTO schema_migration (name) VALUES (?)",
+        (AUDIT_TIMESTAMP_UTC_MIGRATION,),
+    )
+
+
+def normalize_legacy_audit_timestamps(
+    conn: sqlite3.Connection,
+    columns_by_table: dict[str, tuple[str, ...]],
+    *,
+    legacy_audit_timezone: str = DEFAULT_LEGACY_AUDIT_TIMEZONE,
+) -> None:
+    conn.create_function(
+        _AUDIT_NORMALIZER_FUNCTION,
+        1,
+        _audit_timestamp_normalizer(legacy_audit_timezone),
+        deterministic=True,
+    )
+    for table, columns in columns_by_table.items():
+        existing_columns = {
+            _pragma_column_name(row)
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column in columns:
+            if column not in existing_columns:
+                continue
+            try:
+                conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET {column} = {_AUDIT_NORMALIZER_FUNCTION}({column})
+                    WHERE {column} IS NOT NULL
+                    """
+                )
+            except sqlite3.OperationalError as exc:
+                if "user-defined function" not in str(exc).lower():
+                    raise
+                raise ValueError(
+                    f"{table}.{column} contains an invalid audit timestamp"
+                ) from exc
+
+
+def _audit_timestamp_normalizer(legacy_audit_timezone: str):
+    def normalize(value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("audit timestamp must be text")
+        return normalize_audit_time_text(
+            value,
+            legacy_timezone=legacy_audit_timezone,
+        )
+
+    return normalize
 
 
 def _apply_market_scan_degradation_migration(conn: sqlite3.Connection) -> None:
@@ -497,6 +673,12 @@ def ensure_compat_indexes(conn: sqlite3.Connection) -> None:
     ):
         conn.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_kline_symbol_date
+                ON kline_daily(symbol, date DESC)
+            """
+        )
+        conn.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_kline_daily_adjustment_fetch
                 ON kline_daily(symbol, adjustment_mode, fetched_at, date)
             """
@@ -523,6 +705,34 @@ def ensure_compat_indexes(conn: sqlite3.Connection) -> None:
                 ON monitor_event(last_seen_at)
             """
         )
+
+
+def audit_timestamp_migration_pending(conn: sqlite3.Connection) -> bool:
+    """Return whether an existing database still needs audit-time normalization."""
+
+    if table_exists(conn, "schema_migration"):
+        try:
+            completed = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM schema_migration WHERE name IN (?, ?)",
+                    (
+                        AUDIT_TIMESTAMP_UTC_MIGRATION,
+                        ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION,
+                    ),
+                )
+            }
+        except sqlite3.DatabaseError:
+            return True
+        expected = {AUDIT_TIMESTAMP_UTC_MIGRATION}
+        if table_exists(conn, "advice_review_plan") or table_exists(
+            conn,
+            "advice_review_result",
+        ):
+            expected.add(ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION)
+        if expected.issubset(completed):
+            return False
+    return any(table_exists(conn, table) for table in AUDIT_TIMESTAMP_COLUMNS)
 
 
 def ensure_migration_table(conn: sqlite3.Connection) -> None:
@@ -662,6 +872,8 @@ def _pragma_index_column_name(row: sqlite3.Row | tuple) -> str:
 
 
 __all__ = [
+    "AUDIT_TIMESTAMP_COLUMNS",
+    "AUDIT_TIMESTAMP_UTC_MIGRATION",
     "COMPAT_COLUMNS",
     "JOURNAL_MODE_RETRY_COUNT",
     "KLINE_DAILY_CONTRACT_MIGRATION",
@@ -669,12 +881,14 @@ __all__ = [
     "QUOTE_HISTORY_CONTRACT_MIGRATION",
     "QUOTE_HISTORY_UNIQUE_INDEX",
     "SCHEMA_MIGRATION_SQL",
+    "SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION",
     "apply_compat_migrations",
     "apply_compat_schema",
     "ensure_column",
     "ensure_compat_indexes",
     "ensure_migration_table",
     "migration_transaction",
+    "normalize_legacy_audit_timestamps",
     "run_once",
     "table_exists",
     "table_has_columns",

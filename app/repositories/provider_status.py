@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import sqlite3
 
 from app.db.system_mappers import row_to_provider_capability_status, row_to_provider_status
-from app.models.schemas import ProviderCapabilityStatus, ProviderStatus
+from app.models.system import (
+    ProviderCapabilityStatus,
+    ProviderStatus,
+)
 from app.repositories.base import SQLiteRepository
 from app.repositories.provider_status_aggregation import (
     aggregate_provider_status as _aggregate_provider_status,
     capability_has_activity as _capability_has_activity,
 )
-from app.services.provider_errors import sanitize_provider_error
-from app.utils.time import now_text
+from app.repositories.reliability import upsert_reliability_bucket
+from app.utils.audit_time import audit_now_text as now_text
+from app.utils.provider_errors import sanitize_provider_error
 
 MAX_ERROR_LENGTH = 500
 
@@ -359,6 +364,7 @@ class ProviderStatusRepository(SQLiteRepository):
         updated_at = now_text()
         with self._lock, self._connect() as conn:
             _execute_runtime_upsert(conn, _PROVIDER_UPSERT_SQL, _runtime_update_values(update, updated_at), update)
+            _record_provider_reliability(conn, update, capability="general")
 
     def _upsert_capability(
         self,
@@ -393,6 +399,7 @@ class ProviderStatusRepository(SQLiteRepository):
                 _capability_runtime_update_values(update, kind, updated_at),
                 update,
             )
+            _record_provider_reliability(conn, update, capability=kind)
 
     def _sync_provider_from_capabilities(self, name: str, fallback_priority: int, *, preserve_enabled: bool) -> None:
         enabled_assignment = "provider_status.enabled" if preserve_enabled else "excluded.enabled"
@@ -415,5 +422,24 @@ class ProviderStatusRepository(SQLiteRepository):
                     ),
                 ),
             )
+
+
+def _record_provider_reliability(
+    conn: sqlite3.Connection,
+    update: ProviderRuntimeUpdate,
+    *,
+    capability: str,
+) -> None:
+    if update.success_delta <= 0 and update.failure_delta <= 0:
+        return
+    upsert_reliability_bucket(
+        conn,
+        metric="provider_attempt",
+        subject=update.name,
+        capability=capability,
+        good=update.success_delta > 0,
+        failed=update.failure_delta > 0,
+        duration_ms=update.latency_ms,
+    )
 
 __all__ = ["ProviderStatusRepository", "_aggregate_provider_status", "_capability_has_activity"]

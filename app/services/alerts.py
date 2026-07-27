@@ -6,12 +6,25 @@ from dataclasses import dataclass
 from importlib import import_module
 import math
 
-from app.models.schemas import AlertEvaluationItem, AlertEvaluationSummary, AlertEventItem, AlertRuleItem, AnalysisResult, DataQuality, Quote
+from app.models.user_data import (
+    AlertEvaluationItem,
+    AlertEvaluationSummary,
+    AlertEventItem,
+    AlertRuleItem,
+)
+from app.models.analysis import (
+    AnalysisResult,
+    DataQuality,
+)
+from app.models.market import (
+    Quote,
+)
 from app.repositories.alerts import AlertStateDecision, AlertStateUpdateResult
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
-from app.services.provider_errors import sanitize_provider_error
-from app.utils.time import now_text, parse_text_time
+from app.utils.audit_time import audit_now_text as now_text
+from app.utils.provider_errors import sanitize_provider_error
+from app.utils.time import parse_text_time
 
 
 AlertEvaluationResult = tuple[bool, float | None, str]

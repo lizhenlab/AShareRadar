@@ -7,7 +7,10 @@ import threading
 from typing import TYPE_CHECKING
 
 from app.db.market_mappers import row_to_quote
-from app.models.schemas import Quote
+from app.models.market import (
+    Quote,
+)
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.market_data import (
     QUOTE_OPTIONAL_FINITE_FIELDS,
     QUOTE_REQUIRED_FINITE_FIELDS,
@@ -17,7 +20,6 @@ from app.utils.market_data import (
 )
 from app.utils.market_time import normalize_market_datetime
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text
 
 
 def _column_names(columns: tuple[str, ...]) -> str:
@@ -35,8 +37,8 @@ def _update_assignments(columns: Iterable[str]) -> str:
 def _quote_freshness_guard(table: str, quality_columns: tuple[str, ...]) -> str:
     incoming_event = "COALESCE(ashare_market_epoch(excluded.quote_timestamp), -1)"
     stored_event = f"COALESCE(ashare_market_epoch({table}.quote_timestamp), -1)"
-    incoming_fetch = "COALESCE(ashare_market_epoch(excluded.fetched_at), -1)"
-    stored_fetch = f"COALESCE(ashare_market_epoch({table}.fetched_at), -1)"
+    incoming_fetch = "COALESCE(ashare_audit_epoch(excluded.fetched_at), -1)"
+    stored_fetch = f"COALESCE(ashare_audit_epoch({table}.fetched_at), -1)"
     incoming_fallback = "COALESCE(excluded.fallback_used, 1)"
     stored_fallback = f"COALESCE({table}.fallback_used, 1)"
     incoming_quality = _quote_completeness("excluded", quality_columns)
@@ -163,7 +165,9 @@ class MarketQuoteRepositoryMixin:
             rows = conn.execute(
                 f"""
                 SELECT * FROM quote_snapshot
-                WHERE symbol IN ({placeholders}) AND fetched_at BETWEEN ? AND ?
+                WHERE symbol IN ({placeholders})
+                  AND ashare_audit_epoch(fetched_at)
+                      BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)
                 """,
                 [*normalized, *window],
             ).fetchall()

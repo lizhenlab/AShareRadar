@@ -12,8 +12,10 @@ from app.models.reviews import (
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.services.research_replay import evaluate_advice_forward_window
+from app.utils.audit_time import audit_datetime_to_text
+from app.utils.clock import market_now_naive
 from app.utils.errors import NotFoundError
-from app.utils.market_time import ASHARE_TIMEZONE, market_local_naive
+from app.utils.market_time import market_local_naive
 
 
 MIN_REVIEW_KLINE_LIMIT = 120
@@ -90,7 +92,7 @@ async def evaluate_advice_review_plan(
         plan,
         rows,
         as_of=as_of_value,
-        evaluated_at=evaluated_at_value.strftime("%Y-%m-%d %H:%M:%S"),
+        evaluated_at=audit_datetime_to_text(evaluated_at_value),
     )
     return await run_cache_io(datahub.cache.save_advice_review_evaluation, evaluation)
 
@@ -101,7 +103,7 @@ def normalize_review_as_of(
     now: datetime | None = None,
     allow_future: bool = False,
 ) -> datetime:
-    current = market_local_naive(now or datetime.now(ASHARE_TIMEZONE))
+    current = market_local_naive(now) if now is not None else market_now_naive()
     parsed = market_local_naive(value) if value is not None else current
     if not allow_future and parsed > current:
         raise ValueError("as_of 不能晚于当前市场时间")

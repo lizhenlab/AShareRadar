@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import ScenarioPlan
+from app.models.research import (
+    ScenarioPlan,
+)
 
 
 CONFIRMING_VALIDATION_STATUSES = {"条件较好", "等待二次确认"}

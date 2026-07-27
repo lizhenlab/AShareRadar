@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from app.models.schemas import FactorLabReport, FeatureSnapshot, MarketRegimeReport
+from app.models.research import (
+    FactorLabReport,
+    MarketRegimeReport,
+)
+from app.models.analysis import (
+    FeatureSnapshot,
+)
 from app.services.indicators import pct_change
 from app.services.research_risk_reward_contracts import (
     DOWNSIDE_HIGH_RISK_BASE_LOSS_PCT,

@@ -6,13 +6,17 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 from typing import TypeVar
 
-from app.models.schemas import Kline, ProviderCapability, StockInfo
+from app.models.market import (
+    Kline,
+    ProviderCapability,
+    StockInfo,
+)
 from app.runtime_environment import isolate_user_site_packages
 from app.services.provider_utils import bs_symbol, ensure_positive_limit, is_installed, valid_ohlc
 from app.services.provider_stock_mappers import stock_info_from_baostock_row
 from app.services.providers import stamp_daily_kline_contract
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.parsing import required_float, safe_float
-from app.utils.time import now_text
 
 isolate_user_site_packages()
 

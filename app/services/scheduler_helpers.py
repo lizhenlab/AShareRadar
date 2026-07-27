@@ -5,7 +5,7 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Iterable, TypeVar
 
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 from app.services.scheduler_contracts import (
     KLINE_FAILURE_DETAIL_LIMIT,
     PROVIDER_FAILURE_DETAIL_LIMIT,

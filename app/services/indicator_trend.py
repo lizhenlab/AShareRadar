@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import Kline, Quote, SignalContribution
+from app.models.market import (
+    Kline,
+    Quote,
+)
+from app.models.analysis import (
+    SignalContribution,
+)
 from app.services.indicator_trend_components import (
     build_trend_context,
     change_impact as _change_impact,

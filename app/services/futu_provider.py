@@ -3,15 +3,21 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from app.models.schemas import MinuteKline, OrderBook, OrderBookLevel, ProviderCapability, Quote
+from app.models.market import (
+    MinuteKline,
+    OrderBook,
+    OrderBookLevel,
+    ProviderCapability,
+    Quote,
+)
 from app.services.data_quality_time import normalize_quote_event_time
 from app.services.datahub_runtime import run_provider_io
 from app.services.futu_mappers import futu_symbol, minute_kline_from_row, quote_from_snapshot_row
-from app.services.provider_errors import ProviderProtocolError
+from app.utils.audit_time import audit_now_text as now_text
+from app.utils.provider_errors import ProviderProtocolError
 from app.services.provider_utils import ensure_positive_limit, is_installed, pick
 from app.utils.parsing import safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
-from app.utils.time import now_text
 
 
 FUTU_KLINE_TYPE_BY_INTERVAL = {

@@ -12,10 +12,12 @@ from starlette.types import Receive, Scope, Send
 from app.api.deps import get_app_settings, get_datahub
 from app.api.errors import run_api, run_sync_api, run_sync_api_async
 from app.config import Settings
-from app.models.schemas import Quote
+from app.models.market import (
+    Quote,
+)
 from app.services.datahub import DataHub
 from app.services.datahub_status import _provider_error_text
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 from app.utils.symbols import normalize_symbol, standard_symbol_list
 
 

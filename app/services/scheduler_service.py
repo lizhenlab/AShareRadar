@@ -12,6 +12,7 @@ from app.services.scheduler_helpers import _default_instance_guard
 from app.services.scheduler_lifecycle import SchedulerLifecycleMixin
 from app.services.scheduler_schedule import _build_local_tasks
 from app.services.scheduler_tasks import SchedulerTaskHandlersMixin
+from app.utils.clock import market_now_naive
 
 
 class LocalDataScheduler(
@@ -45,7 +46,7 @@ class LocalDataScheduler(
         self._guard_release_task: asyncio.Task[None] | None = None
         self._quiescent_event = asyncio.Event()
         self._quiescent_event.set()
-        self.tasks = _build_local_tasks(self.settings, datetime.now(), self._task_handlers())
+        self.tasks = _build_local_tasks(self.settings, market_now_naive(), self._task_handlers())
 
     def bind_instance_guard(self, instance_guard: SchedulerInstanceGuard) -> None:
         if self._guard_acquired or self._runner is not None or self._active_tasks:

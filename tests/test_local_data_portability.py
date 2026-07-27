@@ -6,6 +6,8 @@ import sqlite3
 
 import pytest
 
+from app.config import Settings
+from app.db.schema_migrations import AUDIT_TIMESTAMP_UTC_MIGRATION
 from app.models.local_data import USER_DATA_TABLE_ALLOWLIST, UserDataBundle
 from app.services.cache import SQLiteCache
 from app.services.user_data_portability import export_user_data, import_user_data
@@ -25,6 +27,10 @@ def test_export_contains_only_exact_user_data_allowlist(tmp_path: Path) -> None:
     assert "schema_migration" not in bundle.tables
     assert bundle.tables["watchlist"].column_types is not None
     assert bundle.tables["watchlist"].column_types["symbol"] == "TEXT"
+    assert bundle.audit_timestamps is not None
+    assert bundle.audit_timestamps.semantics == "utc-fixed"
+    assert bundle.audit_timestamps.legacy_timezone is None
+    assert bundle.tables["watchlist"].rows[0]["created_at"].endswith(".000000Z")
 
 
 def test_merge_dry_run_reports_changes_without_writing_and_commit_is_source_wins(tmp_path: Path) -> None:
@@ -48,6 +54,27 @@ def test_merge_dry_run_reports_changes_without_writing_and_commit_is_source_wins
     assert result.conflict_strategy == "remap_surrogate_ids_source_wins_on_stable_keys"
     assert result.tables["watchlist"].remapped == 0
     assert _watchlist_note(target, "600519.SH") == "source"
+
+
+def test_v1_bundle_without_metadata_keeps_aware_audit_timestamps_compatible(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    SQLiteCache(source)
+    SQLiteCache(target)
+    _insert_watchlist(source, "600519.SH", note="legacy-aware")
+    payload = export_user_data(source).model_dump(mode="json")
+    payload.pop("audit_timestamps")
+
+    import_user_data(
+        target,
+        UserDataBundle.model_validate(payload),
+        mode="merge",
+        dry_run=False,
+    )
+
+    assert _watchlist_note(target, "600519.SH") == "legacy-aware"
 
 
 def test_replace_requires_complete_snapshot_and_removes_rows_absent_from_source(tmp_path: Path) -> None:
@@ -109,7 +136,14 @@ def test_migrated_export_imports_into_fresh_database_with_different_column_order
     source = tmp_path / "migrated.sqlite3"
     target = tmp_path / "fresh.sqlite3"
     _create_legacy_watchlist_database(source)
-    SQLiteCache(source)
+    SQLiteCache(
+        source,
+        settings=Settings(
+            cache_path=source,
+            scheduler_enabled=False,
+            legacy_audit_timezone="Asia/Shanghai",
+        ),
+    )
     SQLiteCache(target)
     _insert_watchlist(source, "600519.SH", note="migrated")
 
@@ -200,6 +234,158 @@ def test_repeated_merge_is_idempotent_for_surrogate_rows(tmp_path: Path) -> None
         assert preview.tables[table].remapped == 0
         assert preview.tables[table].unchanged == 1
         assert _table_count(target, table) == 1
+
+
+def test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    SQLiteCache(source)
+    target_cache = SQLiteCache(target)
+    _insert_watchlist(source, "600519.SH", note="older")
+    _insert_watchlist(source, "000001.SZ", note="newer")
+    payload = export_user_data(source).model_dump(mode="json")
+    rows = {
+        row["symbol"]: row
+        for row in payload["tables"]["watchlist"]["rows"]
+    }
+    rows["600519.SH"]["created_at"] = "2026-07-24T00:30:00Z"
+    rows["600519.SH"]["updated_at"] = "2026-07-24T00:30:00Z"
+    rows["000001.SZ"]["created_at"] = "2026-07-24 09:30:00.500000"
+    rows["000001.SZ"]["updated_at"] = "2026-07-24 09:30:00.500000"
+    payload.pop("audit_timestamps")
+    bundle = UserDataBundle.model_validate(payload)
+    with sqlite3.connect(target) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
+            (AUDIT_TIMESTAMP_UTC_MIGRATION,),
+        ).fetchone()[0] == 1
+
+    import_user_data(
+        target,
+        bundle,
+        mode="merge",
+        dry_run=False,
+        legacy_audit_timezone="Asia/Shanghai",
+    )
+
+    with sqlite3.connect(target) as conn:
+        stored = dict(conn.execute("SELECT symbol, updated_at FROM watchlist"))
+    assert stored == {
+        "000001.SZ": "2026-07-24T01:30:00.500000Z",
+        "600519.SH": "2026-07-24T00:30:00.000000Z",
+    }
+    with sqlite3.connect(target) as conn:
+        conn.execute(
+            "UPDATE watchlist SET updated_at = '2026-07-24T01:30:00.000000Z' "
+            "WHERE symbol = '600519.SH'"
+        )
+    assert target_cache.watchlist_repo.symbol_selection().active_symbols == (
+        "000001.SZ",
+        "600519.SH",
+    )
+
+
+def test_import_uses_configured_timezone_and_rejects_invalid_audit_text(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    SQLiteCache(source)
+    SQLiteCache(target)
+    _insert_watchlist(source, "600519.SH", note="source")
+    payload = export_user_data(source).model_dump(mode="json")
+    row = payload["tables"]["watchlist"]["rows"][0]
+    row["created_at"] = "2026-07-24 09:30:00"
+    row["updated_at"] = "2026-07-24 09:30:00"
+    payload.pop("audit_timestamps")
+    bundle = UserDataBundle.model_validate(payload)
+
+    with pytest.raises(ValueError, match="bundle 语义一致"):
+        import_user_data(target, bundle, mode="merge", dry_run=True)
+
+    import_user_data(
+        target,
+        bundle,
+        mode="merge",
+        dry_run=False,
+        legacy_audit_timezone="America/Los_Angeles",
+    )
+
+    with sqlite3.connect(target) as conn:
+        assert conn.execute("SELECT updated_at FROM watchlist").fetchone()[0] == "2026-07-24T16:30:00.000000Z"
+    row["updated_at"] = "not-a-timestamp"
+    invalid_bundle = UserDataBundle.model_validate(payload)
+    with pytest.raises(ValueError, match="watchlist.updated_at 不是与 bundle 语义一致"):
+        import_user_data(
+            target,
+            invalid_bundle,
+            mode="merge",
+            dry_run=True,
+            legacy_audit_timezone="America/Los_Angeles",
+        )
+
+
+def test_legacy_metadata_preserves_source_timezone_across_target_timezones(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    SQLiteCache(source)
+    SQLiteCache(target)
+    _insert_watchlist(source, "600519.SH", note="source")
+    payload = export_user_data(source).model_dump(mode="json")
+    payload["audit_timestamps"] = {
+        "semantics": "legacy-naive",
+        "legacy_timezone": "America/Los_Angeles",
+    }
+    row = payload["tables"]["watchlist"]["rows"][0]
+    row["created_at"] = "2026-07-24 09:30:00"
+    row["updated_at"] = "2026-07-24 09:30:00"
+
+    import_user_data(
+        target,
+        UserDataBundle.model_validate(payload),
+        mode="merge",
+        dry_run=False,
+        legacy_audit_timezone="Asia/Shanghai",
+    )
+
+    with sqlite3.connect(target) as conn:
+        assert conn.execute("SELECT updated_at FROM watchlist").fetchone()[0] == (
+            "2026-07-24T16:30:00.000000Z"
+        )
+
+
+def test_utc_semantics_reject_naive_or_non_fixed_audit_timestamps(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    SQLiteCache(source)
+    SQLiteCache(target)
+    _insert_watchlist(source, "600519.SH", note="source")
+    payload = export_user_data(source).model_dump(mode="json")
+
+    for invalid in ("2026-07-24 09:30:00", "2026-07-24T09:30:00+08:00"):
+        candidate = deepcopy(payload)
+        candidate["tables"]["watchlist"]["rows"][0]["updated_at"] = invalid
+        with pytest.raises(ValueError, match="bundle 语义一致"):
+            import_user_data(
+                target,
+                UserDataBundle.model_validate(candidate),
+                mode="merge",
+                dry_run=True,
+                legacy_audit_timezone="Asia/Shanghai",
+            )
+
+
+def test_bundle_rejects_invalid_audit_timestamp_semantics(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    SQLiteCache(source)
+    _insert_watchlist(source, "600519.SH", note="source")
+    payload = export_user_data(source).model_dump(mode="json")
+    payload["audit_timestamps"] = {"semantics": "local-time"}
+
+    with pytest.raises(ValueError, match="audit_timestamps.semantics"):
+        UserDataBundle.model_validate(payload)
 
 
 def test_merge_rejects_child_rows_without_bundled_surrogate_parent(
@@ -328,7 +514,15 @@ def _insert_watchlist(path: Path, symbol: str, *, note: str) -> None:
                 research_status, priority, unread_change_count, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, '默认', 0, 'watching', 'medium', 0, ?, ?)
             """,
-            (symbol, code, market, f"测试{code}", note, "2026-07-16 10:00:00", "2026-07-16 10:00:00"),
+            (
+                symbol,
+                code,
+                market,
+                f"测试{code}",
+                note,
+                "2026-07-16T02:00:00.000000Z",
+                "2026-07-16T02:00:00.000000Z",
+            ),
         )
 
 
@@ -342,7 +536,16 @@ def _insert_alert_chain(path: Path, symbol: str, *, marker: str) -> tuple[int, i
                 note, enabled, last_state, trigger_count, cooldown_seconds, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, 'price_above', 101, ?, 1, '等待', 0, 300, ?, ?)
             """,
-            (symbol, code, market, marker, marker, marker, "2026-07-16 10:00:00", "2026-07-16 10:00:00"),
+            (
+                symbol,
+                code,
+                market,
+                marker,
+                marker,
+                marker,
+                "2026-07-16T02:00:00.000000Z",
+                "2026-07-16T02:00:00.000000Z",
+            ),
         )
         event = conn.execute(
             """
@@ -351,7 +554,16 @@ def _insert_alert_chain(path: Path, symbol: str, *, marker: str) -> tuple[int, i
                 event_type, message, price, change_pct, threshold, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, 'price_above', '触发', ?, 102, 1, 101, ?)
             """,
-            (int(rule.lastrowid), symbol, code, market, marker, marker, marker, "2026-07-16 10:01:00"),
+            (
+                int(rule.lastrowid),
+                symbol,
+                code,
+                market,
+                marker,
+                marker,
+                marker,
+                "2026-07-16T02:01:00.000000Z",
+            ),
         )
         return int(rule.lastrowid), int(event.lastrowid)
 
@@ -365,7 +577,15 @@ def _insert_stock_note(path: Path, symbol: str, *, marker: str) -> int:
                 symbol, code, market, name, note_type, content, visible, created_at, updated_at
             ) VALUES (?, ?, ?, ?, 'research', ?, 1, ?, ?)
             """,
-            (symbol, code, market, marker, marker, "2026-07-16 10:00:00", "2026-07-16 10:00:00"),
+            (
+                symbol,
+                code,
+                market,
+                marker,
+                marker,
+                "2026-07-16T02:00:00.000000Z",
+                "2026-07-16T02:00:00.000000Z",
+            ),
         )
         return int(cursor.lastrowid)
 
@@ -383,7 +603,16 @@ def _insert_advice(path: Path, symbol: str, *, marker: str) -> int:
             ) VALUES (?, ?, ?, ?, '等待信号', 60, 55, '中性观察', '可控风险',
                       100, 0, 95, 110, 90, '优秀', ?, ?, ?, ?)
             """,
-            (symbol, code, market, marker, marker, marker, "2026-07-16 10:00:00", "2026-07-16 09:59:00"),
+            (
+                symbol,
+                code,
+                market,
+                marker,
+                marker,
+                marker,
+                "2026-07-16T02:00:00.000000Z",
+                "2026-07-16 09:59:00",
+            ),
         )
         return int(cursor.lastrowid)
 
@@ -404,7 +633,8 @@ def _insert_review_plan(
                 target_price, stop_price, horizon_days, evidence_refs_json,
                 revision, created_at, updated_at
             ) VALUES (?, ?, '2026-07-16 09:59:00', 100, ?, ?, ?, 110, 95, 5,
-                      '[]', 1, '2026-07-16 10:00:00', '2026-07-16 10:00:00')
+                      '[]', 1, '2026-07-16T02:00:00.000000Z',
+                      '2026-07-16T02:00:00.000000Z')
             """,
             (advice_id, symbol, marker, marker, marker),
         )
@@ -429,7 +659,7 @@ def _insert_review_result(
                 visible_bar_count, available_forward_days, target_hit, stop_hit
             ) VALUES (
                 ?, 1, ?, ?, '2026-07-16 09:59:00', '2026-07-17',
-                '2026-07-17 16:00:00', 'evaluated', 'horizon_gain', ?,
+                '2026-07-17T08:00:00.000000Z', 'evaluated', 'horizon_gain', ?,
                 100, 110, 95, 5, 1, 1, 0, 0
             )
             """,

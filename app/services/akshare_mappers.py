@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.models.schemas import MinuteKline, Quote, StockInfo
+from app.models.market import (
+    MinuteKline,
+    Quote,
+    StockInfo,
+)
 from app.services.provider_utils import pick, valid_ohlc
 from app.services.provider_stock_mappers import stock_code_from_value
 from app.utils.parsing import safe_float

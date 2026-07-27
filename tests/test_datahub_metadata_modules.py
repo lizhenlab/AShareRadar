@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 import math
 from pathlib import Path
 import sqlite3
@@ -23,6 +23,7 @@ from app.services.datahub_metadata import (
 )
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.local_metadata_provider import LocalIndividualStockProvider
+from app.utils.clock import market_now_naive
 from tests.factories import make_plate_item, make_stock_info
 
 
@@ -109,7 +110,7 @@ def test_plate_rank_result_marks_stale_cache_fallback_without_changing_list_api(
     async def run_check(path: Path):
         settings = Settings(provider_failure_cooldown_seconds=60)
         cache = SQLiteCache(path)
-        cache.save_plate_rank([make_plate_item().model_copy(update={"source": "本地缓存", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})])
+        cache.save_plate_rank([make_plate_item().model_copy(update={"source": "本地缓存", "updated_at": market_now_naive().strftime("%Y-%m-%d %H:%M:%S")})])
         coordinator = MetadataCoordinator(
             settings=settings,
             cache=cache,
@@ -301,7 +302,7 @@ def test_stock_pool_required_markets_skips_partial_provider_and_preserves_cached
                     update={
                         "industry": "白酒",
                         "list_date": "2001-08-27",
-                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "updated_at": market_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
                     }
                 )
             ]
@@ -388,7 +389,7 @@ def test_stock_pool_market_minimums_skip_truncated_three_market_provider() -> No
 
 
 def test_stock_pool_skips_provider_that_shrinks_against_authoritative_baseline() -> None:
-    fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
     baseline = [
         *(make_stock_info(code=f"600{index:03d}", market="SH") for index in range(60)),
         *(make_stock_info(code=f"000{index:03d}", market="SZ") for index in range(1, 51)),
@@ -505,7 +506,7 @@ def test_full_market_stock_pool_does_not_use_month_old_fallback() -> None:
     async def run_check(path: Path) -> None:
         settings = Settings(stock_pool_cache_seconds=1)
         cache = SQLiteCache(path)
-        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        stale_time = (market_now_naive() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
                 make_stock_info(code="600519", market="SH").model_copy(update={"updated_at": stale_time}),
@@ -543,7 +544,7 @@ def test_stock_pool_unlimited_fresh_cache_returns_every_row_without_provider_cal
     async def run_check(path: Path) -> tuple[list[StockInfo], int]:
         settings = Settings(stock_pool_cache_seconds=3600)
         cache = SQLiteCache(path)
-        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
                 make_stock_info(code="600519", market="SH").model_copy(update={"updated_at": fresh_time}),
@@ -581,7 +582,7 @@ def test_stock_pool_unlimited_stale_fallback_returns_every_keyword_match() -> No
     async def run_check(path: Path) -> tuple[list[StockInfo], int]:
         settings = Settings(stock_pool_cache_seconds=1)
         cache = SQLiteCache(path)
-        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        stale_time = (market_now_naive() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
                 make_stock_info(code="600000", market="SH").model_copy(update={"name": "浦发银行", "updated_at": stale_time}),
@@ -754,7 +755,7 @@ def test_stock_pool_stale_fallback_ignores_log_event_failure() -> None:
         cache.save_stock_pool(
             [
                 make_stock_info(code="600519", market="SH").model_copy(
-                    update={"source": "缓存股票池", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                    update={"source": "缓存股票池", "updated_at": market_now_naive().strftime("%Y-%m-%d %H:%M:%S")}
                 )
             ]
         )
@@ -1000,7 +1001,7 @@ def test_stock_pool_refresh_still_uses_stale_keyword_fallback_after_provider_fai
     async def run_check(path: Path) -> tuple[list[StockInfo], int, str | None]:
         settings = Settings(stock_pool_cache_seconds=1)
         cache = SQLiteCache(path)
-        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        stale_time = (market_now_naive() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool([make_stock_info(code="600706", market="SH").model_copy(update={"name": "曲江文旅", "updated_at": stale_time})])
         provider = FailingStockProvider()
         coordinator = MetadataCoordinator(
@@ -1289,7 +1290,7 @@ def test_local_stock_concepts_coverage_miss_preserves_stale_cache() -> None:
             "600706.SH",
             [
                 _concept(symbol="600706.SH", rank=1, name="历史概念", source="缓存概念").model_copy(
-                    update={"updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                    update={"updated_at": market_now_naive().strftime("%Y-%m-%d %H:%M:%S")}
                 )
             ],
         )
@@ -1407,7 +1408,7 @@ def test_authoritative_stock_profile_miss_is_not_overridden_by_local_provider() 
     async def run_check(path: Path) -> StockInfo | None:
         settings = Settings(stock_pool_cache_seconds=3600, stock_pool_authoritative_min_count=3)
         cache = SQLiteCache(path)
-        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
                 make_stock_info(code="600000", market="SH").model_copy(update={"updated_at": fresh_time}),
@@ -1438,8 +1439,8 @@ def test_authoritative_fresh_stock_pool_empty_result_is_not_overridden_by_stale_
     async def run_check(path: Path) -> tuple[list[StockInfo], StockInfo | None]:
         settings = Settings(stock_pool_cache_seconds=3600, stock_pool_authoritative_min_count=3)
         cache = SQLiteCache(path)
-        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
+        stale_time = (market_now_naive() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
                 make_stock_info(code="600000", market="SH").model_copy(update={"updated_at": fresh_time}),
@@ -1567,7 +1568,7 @@ def test_metadata_cache_rejects_non_positive_limits() -> None:
 def test_metadata_cache_and_repository_support_unlimited_stock_pool_keyword_reads() -> None:
     with TemporaryDirectory() as tmpdir:
         cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
-        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [
                 make_stock_info(code="600000", market="SH").model_copy(update={"name": "浦发银行", "updated_at": fresh_time}),
@@ -1590,7 +1591,7 @@ def test_metadata_cache_and_repository_support_unlimited_stock_pool_keyword_read
 def test_unlimited_stock_pool_cache_does_not_truncate_after_five_thousand_rows() -> None:
     with TemporaryDirectory() as tmpdir:
         cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
-        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
         cache.save_stock_pool(
             [make_stock_info(code=f"{600000 + index:06d}", market="SH").model_copy(update={"updated_at": fresh_time}) for index in range(5001)]
         )
@@ -1616,7 +1617,7 @@ def test_metadata_cache_rejects_future_update_timestamps() -> None:
         assert len(cache.get_plate_rank(max_age_seconds=10**9, limit=1)) == 1
         assert len(cache.get_stock_concepts("600519.SH", max_age_seconds=10**9, limit=1)) == 1
 
-        future = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        future = (market_now_naive() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
         with sqlite3.connect(path) as conn:
             conn.execute("UPDATE stock_master SET updated_at = ?", (future,))
             conn.execute("UPDATE plate_rank SET updated_at = ?", (future,))

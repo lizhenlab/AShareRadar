@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any
-from zoneinfo import ZoneInfo
-
-
-ASHARE_TIMEZONE = ZoneInfo("Asia/Shanghai")
+from app.utils.clock import ASHARE_TIMEZONE, market_now_naive
 MARKET_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -41,10 +38,6 @@ def market_local_naive(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=None)
     return value.astimezone(ASHARE_TIMEZONE).replace(tzinfo=None)
-
-
-def market_now_naive() -> datetime:
-    return datetime.now(ASHARE_TIMEZONE).replace(tzinfo=None)
 
 
 def _parse_compact_datetime(value: str) -> datetime | None:

@@ -1,4 +1,5 @@
 import { escapeHtml } from "./dom.js";
+import { auditTimestampEpoch, formatAuditTimestamp } from "./audit-time.js";
 
 const SOURCE_ORDER = Object.freeze(["advice", "alert", "note"]);
 const SOURCE_FIELDS = Object.freeze({
@@ -288,7 +289,7 @@ function renderActivityItem(item) {
     <article class="research-activity-item tone-${item.tone}" role="listitem" data-kind="${item.kind}" data-activity-id="${escapeHtml(item.id)}">
       <div class="research-activity-heading">
         <span class="research-activity-kind">${SOURCE_LABELS[item.kind]}</span>
-        <time datetime="${escapeHtml(item.occurredAt)}">${escapeHtml(item.occurredAt)}</time>
+        <time datetime="${escapeHtml(item.occurredAt)}">${escapeHtml(formatAuditTimestamp(item.occurredAt, { fallback: item.occurredAt }))}</time>
       </div>
       <h3 class="research-activity-title">${escapeHtml(item.title)}</h3>
       <p class="research-activity-summary">${escapeHtml(item.summary)}</p>
@@ -419,59 +420,9 @@ function requiredTime(value) {
   if (typeof value !== "string") throw new TypeError("invalid time");
   const occurredAt = value.trim();
   if (!occurredAt || occurredAt.length > MAX_LENGTH.occurredAt) throw new TypeError("invalid time");
-  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?(?:(Z)|([+-])(\d{2}):?(\d{2}))?)?$/.exec(occurredAt);
-  if (!match) throw new TypeError("invalid time");
-  const parts = timeParts(match);
-  validateTimeParts(parts);
-  const { year, month, day, hour, minute, second, millisecond } = parts;
-  const date = new Date(0);
-  date.setUTCFullYear(year, month - 1, day);
-  date.setUTCHours(hour, minute, second, millisecond);
-  if (!dateMatchesParts(date, parts)) throw new TypeError("invalid time");
-  const timestamp = date.getTime() - timeOffsetMilliseconds(match, parts);
-  if (!Number.isFinite(timestamp)) throw new TypeError("invalid time");
+  const timestamp = auditTimestampEpoch(occurredAt);
+  if (timestamp === null) throw new TypeError("invalid time");
   return { occurredAt, timestamp };
-}
-
-function timeParts(match) {
-  return {
-    year: Number(match[1]),
-    month: Number(match[2]),
-    day: Number(match[3]),
-    hour: numericMatchGroup(match, 4),
-    minute: numericMatchGroup(match, 5),
-    second: numericMatchGroup(match, 6),
-    millisecond: Number(String(match[7] ?? "0").padEnd(3, "0").slice(0, 3)),
-    offsetHour: numericMatchGroup(match, 10),
-    offsetMinute: numericMatchGroup(match, 11),
-  };
-}
-
-function numericMatchGroup(match, index) {
-  const value = match[index];
-  return value === undefined || value === "" ? 0 : Number(value);
-}
-
-function validateTimeParts(parts) {
-  const { year, month, day, hour, minute, second, offsetHour, offsetMinute } = parts;
-  if (year < 1000 || month < 1 || month > 12 || day < 1) throw new TypeError("invalid time");
-  if (hour > 23 || minute > 59 || second > 59) throw new TypeError("invalid time");
-  if (offsetHour > 23 || offsetMinute > 59) throw new TypeError("invalid time");
-}
-
-function dateMatchesParts(date, parts) {
-  return date.getUTCFullYear() === parts.year
-    && date.getUTCMonth() === parts.month - 1
-    && date.getUTCDate() === parts.day
-    && date.getUTCHours() === parts.hour
-    && date.getUTCMinutes() === parts.minute
-    && date.getUTCSeconds() === parts.second;
-}
-
-function timeOffsetMilliseconds(match, parts) {
-  if (match[8]) return 0;
-  const direction = match[9] === "-" ? -1 : 1;
-  return direction * (parts.offsetHour * 60 + parts.offsetMinute) * 60000;
 }
 
 function optionalTime(record, field) {

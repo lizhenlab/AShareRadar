@@ -4,7 +4,9 @@ from datetime import datetime, timedelta
 import math
 from typing import Any, Awaitable, Callable
 
-from app.models.schemas import ScheduledTaskState
+from app.models.system import (
+    ScheduledTaskState,
+)
 from app.services.scheduler_contracts import (
     TASK_STATUS_DEGRADED,
     TASK_STATUS_SUCCESS,

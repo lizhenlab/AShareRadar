@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 from app.utils.errors import NotFoundError
 
 

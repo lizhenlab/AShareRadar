@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 
-from app.models.schemas import PlateItem, Quote, StockInfo
+from app.models.market import (
+    PlateItem,
+    Quote,
+    StockInfo,
+)
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io_best_effort
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.errors import NotFoundError
 from app.utils.symbols import normalize_symbol
-from app.utils.time import now_text
 from app.workflows.optional_data import optional_timeout_seconds, short_error
 
 

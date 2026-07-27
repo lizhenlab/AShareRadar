@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from app.models.schemas import AnalysisResult, Kline, Quote
+from app.models.analysis import (
+    AnalysisResult,
+)
+from app.models.market import (
+    Kline,
+    Quote,
+)
 from app.services.indicators import average_volume
 from app.utils.market_data import finite_float, valid_positive_number
 

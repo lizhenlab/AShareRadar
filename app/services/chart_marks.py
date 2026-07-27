@@ -5,12 +5,20 @@ from datetime import datetime
 from importlib import import_module
 import math
 
-from app.models.schemas import ChartMarkItem, ChartMarkSummary, StockEventItem, StockInsightBundle, StockNoteItem
+from app.models.user_data import (
+    ChartMarkItem,
+    ChartMarkSummary,
+    StockNoteItem,
+)
+from app.models.analysis import (
+    StockEventItem,
+    StockInsightBundle,
+)
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.services.workbench_context import WorkbenchContext
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.symbols import normalize_symbol
-from app.utils.time import now_text
 
 
 ABNORMAL_EVENT_MARK_LIMIT = 8

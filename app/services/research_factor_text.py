@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from app.models.schemas import FactorCalibration, FactorLabReport, StandardFactor
+from app.models.research import (
+    FactorCalibration,
+    FactorLabReport,
+    StandardFactor,
+)
 from app.services.research_factor_scoring import _dedupe
 
 

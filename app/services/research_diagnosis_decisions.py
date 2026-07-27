@@ -3,15 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import (
+from app.models.research import (
     AlphaEvidenceReport,
-    AnalysisResult,
     FactorLabReport,
-    FeatureSnapshot,
     MarketRegimeReport,
     RiskRewardReport,
     SignalValidationReport,
     TimeframeAlignmentReport,
+)
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
 )
 from app.services.scoring import clamp_score as _clamp
 

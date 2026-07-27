@@ -14,8 +14,11 @@ from app.models.market import (
     DAILY_KLINE_CONTRACT_VERSION,
     KlineAdjustmentMode,
 )
-from app.models.schemas import Kline, Quote
-from app.services.provider_errors import (
+from app.models.market import (
+    Kline,
+    Quote,
+)
+from app.utils.provider_errors import (
     ProviderCoverageMiss,
     ProviderError,
     ProviderInstrumentDataError,
@@ -24,6 +27,7 @@ from app.services.provider_errors import (
     sanitize_provider_error,
 )
 from app.services.provider_utils import ensure_positive_limit, valid_ohlc
+from app.utils.clock import market_now_naive
 from app.utils.market_data import valid_kline
 from app.utils.parsing import MISSING_NUMERIC_VALUES, required_float
 from app.utils.symbols import normalize_symbol, tencent_symbol
@@ -257,7 +261,7 @@ class DemoMarketDataProvider:
     async def quotes(self, symbols: Iterable[str]) -> list[Quote]:
         self._ensure_enabled()
         now = now_text()
-        run_minute = datetime.now().minute
+        run_minute = market_now_naive().minute
         result = [_demo_quote(symbol, self._names, now, run_minute, self.source_name) for symbol in symbols]
         await asyncio.sleep(0)
         return result
@@ -270,7 +274,7 @@ class DemoMarketDataProvider:
         rng = random.Random(int(code))
         rows: list[Kline] = []
         close = base
-        today = datetime.now().date()
+        today = market_now_naive().date()
         trading_days = _previous_weekdays(today, limit)
         for index, day in enumerate(trading_days):
             if day.weekday() >= 5:
@@ -300,7 +304,9 @@ class DemoMarketDataProvider:
         )
 
     def capability(self):
-        from app.models.schemas import ProviderCapability
+        from app.models.market import (
+            ProviderCapability,
+        )
 
         return ProviderCapability(
             name="demo",

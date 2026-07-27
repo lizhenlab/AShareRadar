@@ -3,7 +3,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.models.schemas import AnalysisResult, FactorLabReport, FeatureSnapshot, Kline, TimeframeAlignmentReport, TimeframeTrend
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+)
+from app.models.research import (
+    FactorLabReport,
+    TimeframeAlignmentReport,
+    TimeframeTrend,
+)
+from app.models.market import (
+    Kline,
+)
 from app.services.indicators import max_drawdown, pct_change
 from app.services.scoring import clamp_score as _clamp, score_level as _score_level
 

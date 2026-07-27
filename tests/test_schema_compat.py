@@ -10,13 +10,154 @@ from unittest.mock import patch
 
 from app.db.schema import initialize_schema
 from app.db.schema_migrations import (
+    AUDIT_TIMESTAMP_UTC_MIGRATION,
     QUOTE_HISTORY_CONTRACT_MIGRATION,
     QUOTE_HISTORY_UNIQUE_INDEX,
+    SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,
     apply_compat_migrations,
 )
 
 
 class SchemaCompatibilityTests(unittest.TestCase):
+    def test_legacy_audit_timestamps_migrate_to_utc_without_changing_market_time(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        initialize_schema(conn)
+        conn.execute("DELETE FROM schema_migration WHERE name = ?", (AUDIT_TIMESTAMP_UTC_MIGRATION,))
+        conn.execute(
+            """
+            INSERT INTO task_run (task_name, status, started_at, finished_at)
+            VALUES ('legacy', 'success', '2026-07-24 09:30:00.123456', '2026-07-24 09:31:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                status, trigger, rule_version, as_of, data_date, scope,
+                created_at, updated_at
+            ) VALUES (
+                'success', 'manual', 'v1', '2026-07-24 15:00:00', '2026-07-24', 'all',
+                '2026-07-24 09:30:00', '2026-07-24 09:31:00'
+            )
+            """
+        )
+
+        apply_compat_migrations(conn)
+        apply_compat_migrations(conn)
+
+        task = conn.execute("SELECT started_at, finished_at FROM task_run WHERE task_name = 'legacy'").fetchone()
+        scan = conn.execute("SELECT as_of, created_at, updated_at FROM market_scan_run").fetchone()
+        self.assertEqual(task["started_at"], "2026-07-24T01:30:00.123456Z")
+        self.assertEqual(task["finished_at"], "2026-07-24T01:31:00.000000Z")
+        self.assertEqual(scan["as_of"], "2026-07-24 15:00:00")
+        self.assertEqual(scan["created_at"], "2026-07-24T01:30:00.000000Z")
+        self.assertEqual(scan["updated_at"], "2026-07-24T01:31:00.000000Z")
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
+                (AUDIT_TIMESTAMP_UTC_MIGRATION,),
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_legacy_audit_timezone_setting_drives_naive_database_migration(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        initialize_schema(conn)
+        conn.execute("DELETE FROM schema_migration WHERE name = ?", (AUDIT_TIMESTAMP_UTC_MIGRATION,))
+        conn.execute(
+            """
+            INSERT INTO task_run (task_name, status, started_at)
+            VALUES ('legacy-pacific', 'running', '2026-07-24 09:30:00')
+            """
+        )
+
+        apply_compat_migrations(conn, legacy_audit_timezone="America/Los_Angeles")
+
+        value = conn.execute(
+            "SELECT started_at FROM task_run WHERE task_name = 'legacy-pacific'"
+        ).fetchone()[0]
+        self.assertEqual(value, "2026-07-24T16:30:00.000000Z")
+
+    def test_invalid_legacy_audit_timestamp_aborts_without_claiming_migration(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        initialize_schema(conn)
+        conn.execute("DELETE FROM schema_migration WHERE name = ?", (AUDIT_TIMESTAMP_UTC_MIGRATION,))
+        conn.execute(
+            """
+            INSERT INTO task_run (task_name, status, started_at)
+            VALUES ('invalid-legacy', 'running', 'not-a-time')
+            """
+        )
+
+        with self.assertRaisesRegex(ValueError, "task_run.started_at"):
+            apply_compat_migrations(conn)
+
+        self.assertEqual(
+            conn.execute(
+                "SELECT started_at FROM task_run WHERE task_name = 'invalid-legacy'"
+            ).fetchone()[0],
+            "not-a-time",
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
+                (AUDIT_TIMESTAMP_UTC_MIGRATION,),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_schema_migration_history_treats_naive_values_as_utc_and_rebuilds_default(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        conn.executescript(
+            """
+            CREATE TABLE schema_migration (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO schema_migration (name, applied_at)
+            VALUES ('legacy-marker', '2026-07-24 01:30:00');
+            """
+        )
+
+        initialize_schema(conn, legacy_audit_timezone="America/Los_Angeles")
+        first_value = conn.execute(
+            "SELECT applied_at FROM schema_migration WHERE name = 'legacy-marker'"
+        ).fetchone()[0]
+        default_sql = next(
+            row[4]
+            for row in conn.execute("PRAGMA table_info(schema_migration)")
+            if row[1] == "applied_at"
+        )
+        conn.execute("INSERT INTO schema_migration (name) VALUES ('new-marker')")
+        new_value = conn.execute(
+            "SELECT applied_at FROM schema_migration WHERE name = 'new-marker'"
+        ).fetchone()[0]
+        initialize_schema(conn, legacy_audit_timezone="Asia/Tokyo")
+
+        self.assertEqual(first_value, "2026-07-24T01:30:00.000000Z")
+        self.assertIn("strftime", str(default_sql).lower())
+        self.assertRegex(new_value, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
+                (SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,),
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT applied_at FROM schema_migration WHERE name = 'legacy-marker'"
+            ).fetchone()[0],
+            first_value,
+        )
+
     def test_initialize_schema_adds_market_scan_tables_indexes_and_foreign_keys_idempotently(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -25,6 +166,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
         conn.execute("CREATE TABLE legacy_marker (value TEXT)")
 
         initialize_schema(conn)
+        self.assertIn("idx_kline_symbol_date", self._index_names(conn, "kline_daily"))
         initialize_schema(conn)
 
         tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -62,14 +204,20 @@ class SchemaCompatibilityTests(unittest.TestCase):
             """
             INSERT INTO market_scan_run (
                 status, trigger, rule_version, as_of, data_date, scope, created_at, updated_at
-            ) VALUES ('queued', 'manual', 'v1', '2026-07-17 16:30:00', '2026-07-17', 'test', 'now', 'now')
+            ) VALUES (
+                'queued', 'manual', 'v1', '2026-07-17 16:30:00', '2026-07-17', 'test',
+                '2026-07-17T08:30:00.000000Z', '2026-07-17T08:30:00.000000Z'
+            )
             """
         ).lastrowid
         conn.execute(
             """
             INSERT INTO market_scan_result (
                 run_id, symbol, code, market, name, status, updated_at
-            ) VALUES (?, '920066.BJ', '920066', 'BJ', '北交样本', 'pending', 'now')
+            ) VALUES (
+                ?, '920066.BJ', '920066', 'BJ', '北交样本', 'pending',
+                '2026-07-17T08:30:00.000000Z'
+            )
             """,
             (run_id,),
         )
@@ -85,7 +233,10 @@ class SchemaCompatibilityTests(unittest.TestCase):
             """
             INSERT INTO market_scan_run (
                 status, trigger, rule_version, as_of, data_date, scope, created_at, updated_at
-            ) VALUES ('degraded', 'manual', 'v1', '2026-07-17 16:30:00', '2026-07-17', 'test', 'now', 'now')
+            ) VALUES (
+                'degraded', 'manual', 'v1', '2026-07-17 16:30:00', '2026-07-17', 'test',
+                '2026-07-17T08:30:00.000000Z', '2026-07-17T08:30:00.000000Z'
+            )
             """
         ).lastrowid
         conn.execute(
@@ -93,7 +244,8 @@ class SchemaCompatibilityTests(unittest.TestCase):
             INSERT INTO market_scan_result (
                 run_id, symbol, code, market, name, status, tags_json, list_date, updated_at
             ) VALUES (?, '600519.SH', '600519', 'SH', '贵州茅台', 'success',
-                      '["兜底行情","兜底K线","上市日期未知"]', NULL, 'now')
+                      '["兜底行情","兜底K线","上市日期未知"]', NULL,
+                      '2026-07-17T08:30:00.000000Z')
             """,
             (run_id,),
         )
@@ -188,6 +340,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
         )
 
         initialize_schema(conn)
+        self.assertIn("idx_kline_symbol_date", self._index_names(conn, "kline_daily"))
         initialize_schema(conn)
 
         for table in ("quote_snapshot", "quote_history", "kline_daily", "kline_minute"):
@@ -445,7 +598,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
                     "legacy",
                     "2026/07/14 15:00:00",
                     "not-a-date",
-                    "",
+                    "2026/07/14 15:00:01",
                 ),
             ],
         )

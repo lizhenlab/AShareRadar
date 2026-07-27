@@ -10,8 +10,10 @@ node_modules/
 .coverage
 .coverage.*
 coverage.xml
+pytest-results.xml
 htmlcov/
 playwright-report/
 test-results/
+artifacts/
 data/*
 !data/.gitkeep

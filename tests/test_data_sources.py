@@ -25,6 +25,7 @@ from app.services.datahub_quotes import QuoteCoordinator
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.datahub_source_plan import SourcePlanBuilder
 from app.services.datahub_status import _provider_error_text, _provider_source_key
+from app.utils.clock import market_now_naive
 from app.services.akshare_provider import (
     AKShareFetchError,
     ConceptBoardCandidate,
@@ -2282,7 +2283,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             settings = Settings(stock_pool_cache_seconds=3600, stock_pool_authoritative_min_count=3)
             cache = SQLiteCache(path)
             provider = ExplodingStockPoolProvider()
-            fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
             cache.save_stock_pool(
                 [
                     _stock_info(code=code, market=market).model_copy(update={"updated_at": fresh_time})
@@ -2351,7 +2352,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
     def test_authoritative_stock_pool_miss_without_quote_confirmation_is_not_found(self) -> None:
         async def run_check(path: Path) -> str:
             hub = DataHub(cache=SQLiteCache(path))
-            fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
             hub.cache.save_stock_pool(
                 [
                     _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
@@ -2377,7 +2378,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
     def test_authoritative_stock_pool_miss_can_be_confirmed_by_matching_quote(self) -> None:
         async def run_check(path: Path) -> tuple[str | None, list[str]]:
             hub = DataHub(cache=SQLiteCache(path))
-            fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
             hub.cache.save_stock_pool(
                 [
                     _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
@@ -2404,8 +2405,8 @@ class DataSourceReliabilityTests(unittest.TestCase):
     def test_stale_stock_master_match_is_not_reported_as_missing(self) -> None:
         async def run_check(path: Path) -> tuple[list[str], str | None]:
             hub = DataHub(cache=SQLiteCache(path))
-            fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            stale_time = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+            fresh_time = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
+            stale_time = (market_now_naive() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
             fresh_rows = [
                 _stock_info(code=f"60{index:04d}", market="SH").model_copy(update={"updated_at": fresh_time})
                 for index in range(10)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import hashlib
 import logging
 import os
@@ -31,6 +31,8 @@ from app.models.local_data import (
 from app.services.instance_guard import FileInstanceGuard
 from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
 from app.services.user_data_portability import available_user_tables
+from app.utils.audit_time import audit_now_text
+from app.utils.clock import monotonic_now, utc_now
 
 
 BACKUP_DATABASE_NAME = "runtime.sqlite3"
@@ -126,14 +128,14 @@ def _runtime_backup_operation_lease(
     release_error: str = "运行时备份操作已结束，但释放操作租约失败，请重启服务后重试",
 ) -> Iterator[None]:
     paths = tuple(sorted({Path(path).expanduser().resolve() for path in lock_paths}, key=str))
-    deadline = time.monotonic() + max(0.0, BACKUP_OPERATION_LOCK_TIMEOUT_SECONDS)
+    deadline = monotonic_now() + max(0.0, BACKUP_OPERATION_LOCK_TIMEOUT_SECONDS)
     thread_locks: list[threading.Lock] = []
     file_guards: list[FileInstanceGuard] = []
     body_error: BaseException | None = None
     try:
         for path in paths:
             lock = _thread_operation_lock(path)
-            remaining = max(0.0, deadline - time.monotonic())
+            remaining = max(0.0, deadline - monotonic_now())
             if not lock.acquire(timeout=remaining):
                 raise RuntimeBackupError(timeout_error)
             thread_locks.append(lock)
@@ -188,7 +190,7 @@ def _acquire_operation_file_guard(
                 return guard
         except Exception:
             raise RuntimeBackupError(acquire_error) from None
-        remaining = deadline - time.monotonic()
+        remaining = deadline - monotonic_now()
         if remaining <= 0:
             raise RuntimeBackupError(timeout_error)
         time.sleep(min(max(0.001, BACKUP_OPERATION_LOCK_POLL_SECONDS), remaining))
@@ -783,12 +785,12 @@ def _backup_created_at(value: str, path: Path) -> datetime:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (AttributeError, ValueError):
         try:
-            return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            return datetime.fromtimestamp(path.stat().st_mtime, UTC)
         except OSError:
-            return datetime.min.replace(tzinfo=timezone.utc)
+            return datetime.min.replace(tzinfo=UTC)
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _directory_size(path: Path) -> int:
@@ -832,7 +834,7 @@ def _remove_stale_managed_backup_temporaries(source: Path) -> tuple[Path, ...]:
     except OSError:
         return ()
     pattern = _managed_backup_temporary_pattern(source)
-    now = time.time()
+    now = utc_now().timestamp()
     removed: list[Path] = []
     for child in children:
         try:
@@ -975,11 +977,11 @@ def _quote_identifier(value: str) -> str:
 
 
 def _utc_now_text() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return audit_now_text()
 
 
 def _filename_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    return utc_now().strftime("%Y%m%dT%H%M%S_%fZ")
 
 
 __all__ = [

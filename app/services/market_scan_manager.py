@@ -30,7 +30,7 @@ from app.services.market_scan_lifecycle import MarketScanLifecycle, MarketScanSt
 from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
-from app.utils.market_time import ASHARE_TIMEZONE
+from app.utils.clock import market_now
 from app.utils.time import datetime_to_text
 
 
@@ -459,7 +459,7 @@ def market_scan_rule_version(settings: object) -> str:
 
 
 def _market_now() -> datetime:
-    return datetime.now(ASHARE_TIMEZONE)
+    return market_now()
 
 
 __all__ = [

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models.schemas import MinuteKline, Quote
-from app.services.provider_errors import ProviderCoverageMiss
+from app.models.market import (
+    MinuteKline,
+    Quote,
+)
+from app.utils.provider_errors import ProviderCoverageMiss
 from app.services.provider_stock_mappers import stock_code_from_value
 from app.services.provider_utils import pick, valid_ohlc
 from app.utils.parsing import MISSING_NUMERIC_VALUES, required_float, safe_float

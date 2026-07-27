@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, FinancialHealth
+from app.models.analysis import (
+    AnalysisResult,
+    FinancialHealth,
+)
 from app.services.financial_health_components import build_financial_health_state, liquidity_metric_value
 from app.services.financial_metrics import financial_summary
 

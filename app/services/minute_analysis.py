@@ -7,7 +7,14 @@ from statistics import mean
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from app.models.schemas import MinuteAnalysisReport, MinuteKline, MinuteSupportResistance, MinuteTPlan
+from app.models.research import (
+    MinuteAnalysisReport,
+    MinuteSupportResistance,
+    MinuteTPlan,
+)
+from app.models.market import (
+    MinuteKline,
+)
 from app.services.indicators import pct_change
 from app.utils.market_data import filter_valid_minute_klines, finite_float
 from app.utils.time import now_text

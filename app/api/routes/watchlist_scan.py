@@ -4,7 +4,10 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api
-from app.models.schemas import WatchlistScanRequest, WatchlistScanResponse
+from app.models.reviews import (
+    WatchlistScanRequest,
+    WatchlistScanResponse,
+)
 from app.services.datahub import DataHub
 from app.services.watchlist_scan import scan_watchlist_conditions
 

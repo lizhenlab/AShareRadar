@@ -4,6 +4,7 @@ from datetime import date, datetime
 from typing import Any
 
 from app.services import trading_calendar
+from app.utils.clock import market_now_naive
 from app.utils.market_time import market_local_naive, normalize_market_datetime
 from app.utils.time import seconds_since_text
 
@@ -28,7 +29,7 @@ def latest_expected_daily_kline_date(now: datetime | None = None) -> date:
 
 
 def market_local_datetime(value: datetime | None = None) -> datetime:
-    return _local_naive_datetime(value or datetime.now())
+    return _local_naive_datetime(value or market_now_naive())
 
 
 def quote_delay_seconds(value: str, *, now: datetime | None = None) -> int | None:
@@ -65,7 +66,7 @@ def quote_freshness_penalty(value: str, now: datetime) -> FreshnessPenalty:
 
 
 def quote_event_time_error(value: str, *, now: datetime | None = None) -> str | None:
-    current = _local_naive_datetime(now or datetime.now())
+    current = _local_naive_datetime(now or market_now_naive())
     parsed = parse_quote_time(value)
     if parsed is None:
         return "报价事件时间无法解析"
@@ -93,7 +94,7 @@ def quote_event_time_error(value: str, *, now: datetime | None = None) -> str | 
 
 
 def quote_cache_lookup_seconds(now: datetime | None = None) -> int:
-    current = _local_naive_datetime(now or datetime.now())
+    current = _local_naive_datetime(now or market_now_naive())
     expected_start = datetime.combine(expected_quote_date(current), datetime.min.time())
     seconds_since_expected_start = max(0, int((current - expected_start).total_seconds()))
     return max(24 * 60 * 60, seconds_since_expected_start + 60 * 60)

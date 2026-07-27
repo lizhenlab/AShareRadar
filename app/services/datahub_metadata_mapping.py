@@ -3,7 +3,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from app.models.schemas import PlateItem, StockConceptItem, StockInfo
+from app.models.market import (
+    PlateItem,
+    StockConceptItem,
+    StockInfo,
+)
 from app.services.datahub_cache import _normalize_stock_concepts
 from app.services.datahub_metadata_provider import _non_empty_metadata_rows
 from app.services.datahub_runtime import ProviderAttempt, ProviderCoverageMiss

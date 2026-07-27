@@ -5,7 +5,14 @@ from fastapi import APIRouter, Depends, Query
 from app.api.deps import get_app_settings, get_datahub
 from app.api.errors import run_api
 from app.config import Settings
-from app.models.schemas import AnalysisResult, IndividualReview, MarketOverview, StrongStockWatchResponse
+from app.models.analysis import (
+    AnalysisResult,
+    IndividualReview,
+)
+from app.models.workbench import (
+    MarketOverview,
+    StrongStockWatchResponse,
+)
 from app.services.datahub import DataHub
 from app.workflows.individual import analyze_individual_stock, market_overview, review_individual_stock, strong_stock_watch
 

@@ -6,7 +6,16 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api_async
-from app.models.schemas import DataStatus, FutuStatusResponse, OrderBook, PlateItem, StockInfo, TradeCalendarRefreshResponse
+from app.models.system import (
+    DataStatus,
+    FutuStatusResponse,
+    TradeCalendarRefreshResponse,
+)
+from app.models.market import (
+    OrderBook,
+    PlateItem,
+    StockInfo,
+)
 from app.services.datahub import DataHub
 from app.services.trading_calendar import TradeCalendarRefreshResult, refresh_trade_calendar_result
 from app.utils.symbols import normalize_symbol

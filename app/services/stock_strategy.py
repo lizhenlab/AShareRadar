@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, FundFlowAnalysis, OrderPressure, SignalItem, StrategyCard
+from app.models.analysis import (
+    AnalysisResult,
+    FundFlowAnalysis,
+    OrderPressure,
+    SignalItem,
+    StrategyCard,
+)
 
 
 SEVERE_QUALITY_STRATEGY_STATUS = {

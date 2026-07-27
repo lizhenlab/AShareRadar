@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from app.models.schemas import PlateItem, ProviderCapability, StockConceptItem, StockInfo
+from app.models.market import (
+    PlateItem,
+    ProviderCapability,
+    StockConceptItem,
+    StockInfo,
+)
 from app.services.provider_utils import ensure_positive_limit
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.symbols import normalize_symbol, standard_symbol
-from app.utils.time import now_text
 
 
 class LocalIndividualStockProvider:

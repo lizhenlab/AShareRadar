@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import fcntl
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import json
 import multiprocessing
 import os
@@ -378,7 +378,7 @@ def test_rotation_only_removes_old_strict_temporary_directories_and_tolerates_ra
         original_rmtree(candidate, *args, **kwargs)
 
     monkeypatch.setattr(runtime_backup_module.shutil, "rmtree", racing_rmtree)
-    monkeypatch.setattr(runtime_backup_module.time, "time", lambda: now)
+    monkeypatch.setattr(runtime_backup_module, "utc_now", lambda: datetime.fromtimestamp(now, UTC))
 
     created = create_runtime_backup(target, max_backups=10)
 
@@ -951,7 +951,7 @@ def test_regenerable_cleanup_does_not_touch_watchlist_unread_state(tmp_path: Pat
 def test_regenerable_cleanup_is_throttled_between_health_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "runtime.sqlite3"
     clock = [1000.0]
-    monkeypatch.setattr(maintenance_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(maintenance_module, "monotonic_now", lambda: clock[0])
     settings = Settings(
         cache_path=path,
         max_cache_event_rows=1,

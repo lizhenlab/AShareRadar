@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import AbnormalEventSummary, AnalysisResult, FundFlowAnalysis, OrderPressure, RuleMatch
+from app.models.analysis import (
+    AbnormalEventSummary,
+    AnalysisResult,
+    FundFlowAnalysis,
+    OrderPressure,
+    RuleMatch,
+)
 from app.services.stock_rule_contracts import (
     LEVEL_CAUTIOUS,
     LEVEL_NEUTRAL,

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from statistics import mean
 
-from app.models.schemas import Kline
+from app.models.market import (
+    Kline,
+)
 from app.utils.market_data import filter_valid_klines, finite_float
 
 

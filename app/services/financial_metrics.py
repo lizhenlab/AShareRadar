@@ -4,7 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
 
-from app.models.schemas import FinancialMetric
+from app.models.analysis import (
+    FinancialMetric,
+)
 from app.services.scoring import clamp_score
 
 

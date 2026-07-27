@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from app.models.schemas import (
+from app.models.analysis import (
     AnalysisResult,
-    FactorLabReport,
     FeatureSnapshot,
-    MarketRegimeReport,
     StockInsightBundle,
+)
+from app.models.research import (
+    FactorLabReport,
+    MarketRegimeReport,
 )
 from app.services.research_breadth import MarketBreadthSnapshot, build_market_breadth_snapshot
 from app.services.research_factor_text import _factor_evidence_sufficiency

@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from app.runtime_environment import isolate_user_site_packages
+from tools.runtime_contract import declaration_errors, runtime_contract_errors
 
 
 def test_isolate_user_site_packages_removes_user_path(monkeypatch) -> None:
@@ -50,3 +51,32 @@ def test_app_import_isolates_provider_runtime_from_user_site_packages() -> None:
         package_path = Path(payload[package]).resolve()
         assert user_site not in str(package_path)
         assert any(package_path.is_relative_to(root) for root in runtime_roots)
+
+
+def test_runtime_contract_accepts_supported_lts_versions() -> None:
+    for node_version, npm_version in (("v22.23.1", "10.9.4"), ("v24.14.1", "11.11.0")):
+        assert runtime_contract_errors(
+            python_version=(3, 12),
+            node_version=node_version,
+            npm_version=npm_version,
+        ) == []
+
+
+def test_runtime_contract_rejects_undeclared_versions(monkeypatch) -> None:
+    monkeypatch.setattr("tools.runtime_contract.declaration_errors", lambda: [])
+
+    errors = runtime_contract_errors(
+        python_version=(3, 11),
+        node_version="v23.0.0",
+        npm_version="12.0.0",
+    )
+
+    assert errors == [
+        "Python 必须为 3.12.x，当前为 3.11",
+        "Node.js 必须为 22.x 或 24.x",
+        "npm 必须为 10.x 或 11.x",
+    ]
+
+
+def test_runtime_declaration_files_stay_synchronized() -> None:
+    assert declaration_errors() == []

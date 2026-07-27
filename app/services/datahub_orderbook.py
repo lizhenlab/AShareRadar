@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import time
 
-from app.models.schemas import OrderBook
+from app.models.market import (
+    OrderBook,
+)
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.datahub_status import _provider_error_text
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.clock import performance_now
+from app.utils.provider_errors import sanitize_provider_error
 from app.utils.symbols import standard_symbol
 
 
@@ -32,7 +34,7 @@ class OrderBookCoordinator:
         self._ensure_futu_enabled(provider)
         if self.runtime.is_cooling("futu", "order_book"):
             raise RuntimeError("Futu 盘口最近失败，短暂冷却中")
-        started = time.perf_counter()
+        started = performance_now()
         try:
             result = await self.runtime.call_provider(
                 "futu",
@@ -40,7 +42,7 @@ class OrderBookCoordinator:
                 lambda: provider.order_book(symbol),  # type: ignore[attr-defined]
                 request_key=("order_book", standard_symbol(symbol)),
             )
-            latency_ms = (time.perf_counter() - started) * 1000
+            latency_ms = (performance_now() - started) * 1000
             await self.runtime.record_success_async(
                 "futu",
                 self.provider_index("futu"),
@@ -60,7 +62,7 @@ class OrderBookCoordinator:
             self._ensure_futu_enabled(provider)
         except RuntimeError as exc:
             return {"ok": False, "message": str(exc), "latency_ms": None}
-        started = time.perf_counter()
+        started = performance_now()
         try:
             message = await self.runtime.call_provider(
                 "futu",
@@ -68,7 +70,7 @@ class OrderBookCoordinator:
                 lambda: provider.ping(),  # type: ignore[attr-defined]
                 request_key=("ping",),
             )
-            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            latency_ms = round((performance_now() - started) * 1000, 2)
             await self.runtime.record_success_async("futu", self.provider_index("futu"), latency_ms, "order_book")
             return {"ok": True, "message": message, "latency_ms": latency_ms}
         except Exception as exc:

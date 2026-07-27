@@ -4,12 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api_async
-from app.models.schemas import (
+from app.models.user_data import (
     AlertEvaluationSummary,
     AlertEventItem,
     AlertRuleInput,
     AlertRuleItem,
     AlertRuleUpdate,
+)
+from app.models.system import (
     MutationResult,
 )
 from app.repositories.alerts import MAX_ALERT_EVENT_PAGE_SIZE

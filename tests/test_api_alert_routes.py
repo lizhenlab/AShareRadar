@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -78,7 +77,8 @@ def test_update_alert_route_rejects_non_finite_threshold() -> None:
 
         response = client.patch(
             f"/api/alerts/{created.id}",
-            json={"threshold": math.inf},
+            content='{"threshold":1e9999}',
+            headers={"content-type": "application/json"},
         )
 
     assert response.status_code == 422
@@ -108,11 +108,11 @@ def test_create_alert_route_rejects_non_finite_threshold() -> None:
 
         response = client.post(
             "/api/alerts",
-            json={
-                "symbol": "600519",
-                "condition_type": "price_below",
-                "threshold": math.nan,
-            },
+            content=(
+                '{"symbol":"600519","condition_type":"price_below",'
+                '"threshold":-1e9999}'
+            ),
+            headers={"content-type": "application/json"},
         )
 
     assert response.status_code == 422

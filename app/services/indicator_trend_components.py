@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import Kline, Quote, SignalContribution
+from app.models.market import (
+    Kline,
+    Quote,
+)
+from app.models.analysis import (
+    SignalContribution,
+)
 from app.services.indicator_math import moving_average
 from app.services.indicator_volume import recent_volume_ratio
 from app.utils.market_data import filter_valid_klines

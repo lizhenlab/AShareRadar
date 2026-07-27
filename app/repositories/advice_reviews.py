@@ -12,6 +12,7 @@ from app.db.advice_review_schema import (
     ADVICE_REVIEW_SCHEMA_SQL,
     ADVICE_REVIEW_SCHEMA_VERSION,
 )
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.reviews import (
     AdviceReviewDetail,
     AdviceReviewEvaluation,
@@ -22,10 +23,10 @@ from app.models.reviews import (
     AdviceSnapshotRef,
 )
 from app.repositories.base import SQLiteRepository
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.errors import NotFoundError
 from app.utils.market_time import normalize_market_datetime
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text
 
 
 _PLAN_SELECT_COLUMNS = """
@@ -257,7 +258,7 @@ class AdviceReviewRepository(SQLiteRepository):
                 SELECT {_PLAN_SELECT_COLUMNS}
                 FROM advice_review_plan
                 {where_sql}
-                ORDER BY updated_at DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(updated_at) DESC, id DESC
                 LIMIT ?
                 """,
                 (*params, limit),
@@ -279,7 +280,7 @@ class AdviceReviewRepository(SQLiteRepository):
                 SELECT {_PLAN_SELECT_COLUMNS}
                 FROM advice_review_plan
                 {where_sql}
-                ORDER BY updated_at DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(updated_at) DESC, id DESC
                 LIMIT ?
                 """,
                 (*params, limit),
@@ -357,7 +358,7 @@ class AdviceReviewRepository(SQLiteRepository):
                 SELECT {_RESULT_SELECT_COLUMNS}
                 FROM advice_review_result
                 WHERE plan_id = ?
-                ORDER BY evaluated_at DESC, id DESC
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(evaluated_at) DESC, id DESC
                 LIMIT ?
                 """,
                 (plan_id, limit),
@@ -501,7 +502,7 @@ def _latest_result_row(conn: sqlite3.Connection, plan_id: int, revision: int) ->
         SELECT {_RESULT_SELECT_COLUMNS}
         FROM advice_review_result
         WHERE plan_id = ? AND plan_revision = ?
-        ORDER BY evaluated_at DESC, id DESC
+        ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(evaluated_at) DESC, id DESC
         LIMIT 1
         """,
         (plan_id, revision),
@@ -523,7 +524,7 @@ def _latest_result_rows(
             SELECT *,
                    ROW_NUMBER() OVER (
                        PARTITION BY plan_id, plan_revision
-                       ORDER BY evaluated_at DESC, id DESC
+                       ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(evaluated_at) DESC, id DESC
                    ) AS result_rank
             FROM advice_review_result
             WHERE plan_id IN ({placeholders})

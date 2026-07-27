@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime
 import math
 
-from app.models.schemas import DataQuality, Kline, Quote
+from app.models.analysis import (
+    DataQuality,
+)
+from app.models.market import (
+    Kline,
+    Quote,
+)
 from app.services.data_quality import build_data_quality
 from app.services.data_quality_time import parse_quote_time, quote_cache_lookup_seconds, quote_event_time_error
 from app.services.datahub_cache import _matched_quotes, _normalize_symbols, _tag_cached_quotes
@@ -18,7 +24,7 @@ from app.services.datahub_runtime import (
     run_cache_io_best_effort,
 )
 from app.services.datahub_status import _provider_source_key
-from app.services.provider_errors import (
+from app.utils.provider_errors import (
     ProviderCoverageMiss,
     ProviderProtocolError,
     is_provider_coverage_miss,

@@ -4,7 +4,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from app.models.schemas import Kline, KlineQuality
+from app.models.market import (
+    Kline,
+)
+from app.models.analysis import (
+    KlineQuality,
+)
 from app.services.data_quality_time import (
     expected_quote_date,
     latest_expected_daily_kline_date,

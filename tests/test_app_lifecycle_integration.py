@@ -77,6 +77,12 @@ class _DataHubStub:
         self.close_results = list(close_results or [])
         self.closed = False
         self.close_calls = 0
+        self.cache = self
+        self.readiness_error: Exception | None = None
+
+    def readiness_check(self) -> None:
+        if self.readiness_error is not None:
+            raise self.readiness_error
 
     async def aclose(self) -> bool:
         self.closed = True
@@ -168,6 +174,19 @@ def test_create_app_lifespan_routes_static_and_start_stop_are_integrated(tmp_pat
             "app": "IsolatedRadar",
             "provider": "datahub",
         }
+        assert client.get("/api/health").headers["cache-control"] == "no-store"
+        live = client.get("/api/health/live")
+        assert live.status_code == 200
+        assert live.json()["status"] == "ok"
+        assert live.headers["cache-control"] == "no-store"
+        ready = client.get("/api/health/ready")
+        assert ready.status_code == 200
+        assert ready.json()["checks"] == {
+            "container": "ready",
+            "database": "ready",
+            "runtime": "single",
+        }
+        assert ready.headers["cache-control"] == "no-store"
         index = client.get("/")
         assert index.status_code == 200
         assert "isolated app" in index.text
@@ -193,6 +212,30 @@ def test_create_app_lifespan_routes_static_and_start_stop_are_integrated(tmp_pat
     assert second.datahub.closed is True  # type: ignore[attr-defined]
     assert second.workbench_contexts.closed is True  # type: ignore[attr-defined]
     assert second.workbench_contexts.close_events == ["runtime", "workbench", "datahub"]  # type: ignore[attr-defined]
+
+
+def test_readiness_is_generic_and_unavailable_when_sqlite_probe_fails(tmp_path: Path) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(
+        cache_path=tmp_path / "never-created.sqlite3",
+        cors_allow_origins=(TEST_CLIENT_ORIGIN,),
+        scheduler_enabled=False,
+    )
+    container = _container(settings)
+    container.datahub.readiness_error = RuntimeError("database path /private/secret unavailable")  # type: ignore[attr-defined]
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+
+    with TestClient(application) as client:
+        response = client.get("/api/health/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+    assert response.json()["checks"] == {
+        "container": "ready",
+        "database": "unavailable",
+        "runtime": "single",
+    }
+    assert "/private/secret" not in response.text
 
 
 def test_separate_apps_receive_separate_lifespan_containers(tmp_path: Path) -> None:

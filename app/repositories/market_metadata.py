@@ -4,7 +4,11 @@ from collections.abc import Iterable
 from math import isfinite
 
 from app.db.market_mappers import row_to_plate_item, row_to_stock_concept_item, row_to_stock_info
-from app.models.schemas import PlateItem, StockConceptItem, StockInfo
+from app.models.market import (
+    PlateItem,
+    StockConceptItem,
+    StockInfo,
+)
 from app.utils.stock_pool import normalize_stock_pool_rows
 from app.utils.symbols import standard_symbol
 
@@ -121,7 +125,10 @@ class MarketMetadataRepositoryMixin:
         if window is None:
             return []
         params: list[object] = [*window]
-        where = "updated_at BETWEEN ? AND ?"
+        where = (
+            "ashare_audit_epoch(updated_at) "
+            "BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)"
+        )
         keyword_text = _required_text(keyword)
         if keyword_text:
             like = f"%{keyword_text}%"
@@ -152,7 +159,11 @@ class MarketMetadataRepositoryMixin:
                 return 0
             return int(
                 conn.execute(
-                    "SELECT COUNT(*) FROM stock_master WHERE updated_at BETWEEN ? AND ?",
+                    """
+                    SELECT COUNT(*) FROM stock_master
+                    WHERE ashare_audit_epoch(updated_at)
+                        BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)
+                    """,
                     window,
                 ).fetchone()[0]
             )
@@ -177,7 +188,8 @@ class MarketMetadataRepositoryMixin:
             rows = conn.execute(
                 f"""
                 SELECT {_PLATE_RANK_SELECT_COLUMNS} FROM plate_rank
-                WHERE updated_at BETWEEN ? AND ?
+                WHERE ashare_audit_epoch(updated_at)
+                    BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)
                 ORDER BY rank ASC, id ASC
                 LIMIT ?
                 """,
@@ -205,7 +217,9 @@ class MarketMetadataRepositoryMixin:
             rows = conn.execute(
                 f"""
                 SELECT {_STOCK_CONCEPT_SELECT_COLUMNS} FROM stock_concept
-                WHERE symbol = ? AND updated_at BETWEEN ? AND ?
+                WHERE symbol = ?
+                  AND ashare_audit_epoch(updated_at)
+                      BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)
                 ORDER BY change_pct DESC, rank ASC, name ASC
                 LIMIT ?
                 """,

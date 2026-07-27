@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import (
+from app.models.analysis import (
     AnalysisResult,
     FeatureSnapshot,
+    StockInsightBundle,
+)
+from app.models.research import (
     MarketRegimeReport,
     RiskRadarItem,
     RiskRadarReport,
     RiskRewardReport,
-    StockInsightBundle,
     TimeframeAlignmentReport,
 )
 from app.services.scoring import clamp_score

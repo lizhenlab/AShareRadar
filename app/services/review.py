@@ -3,7 +3,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.models.schemas import IndividualReview, Kline, Quote, ReviewEvent, ReviewPoint
+from app.models.analysis import (
+    IndividualReview,
+    ReviewEvent,
+    ReviewPoint,
+)
+from app.models.market import (
+    Kline,
+    Quote,
+)
 from app.services.indicators import max_drawdown, pct_change, trend_days, volatility
 
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.models.schemas import AbnormalEventItem, AbnormalEventSummary
+from app.models.analysis import (
+    AbnormalEventItem,
+    AbnormalEventSummary,
+)
 from app.services.scoring import clamp_score, score_level
 from app.services.stock_abnormal_context import AbnormalEventContext
 

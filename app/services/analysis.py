@@ -2,18 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import (
+from app.models.analysis import (
     ActionAdvice,
     AnalysisResult,
     DataQuality,
     IndividualReview,
-    Kline,
     PeerSampleInfo,
-    PlateItem,
-    Quote,
     SignalContribution,
     SignalItem,
     SignalSnapshot,
+)
+from app.models.market import (
+    Kline,
+    PlateItem,
+    Quote,
     StockInfo,
 )
 from app.services.analysis_signal_advice import action_advice, beginner_summary

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from app.models.schemas import StockInfo
+from app.models.market import (
+    StockInfo,
+)
 from app.utils.symbols import is_a_share_stock_code, standard_symbol
 
 

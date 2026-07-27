@@ -1,12 +1,19 @@
 {
   "name": "ashare-radar",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0",
+    "npm": ">=10 <12"
+  },
   "scripts": {
-    "check": "npm run check:py && npm run check:js && npm test",
+    "check": "npm run check:runtime && npm run check:py && npm run check:js && npm test",
+    "check:runtime": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/runtime_contract.py",
     "check:js": "node --check static/app.js && node --check static/js/*.js",
     "check:py": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; PYCACHE_DIR=$(mktemp -d /tmp/ashare-radar-pycache.XXXXXX); trap 'rm -rf \"$PYCACHE_DIR\"' EXIT; PYTHONPYCACHEPREFIX=$PYCACHE_DIR PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m compileall -q app tests tools && PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m pyflakes app tests tools",
     "clean:caches": "find app tests tools -type d -name __pycache__ -prune -exec rm -rf {} + && rm -rf .pytest_cache",
+    "sbom": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/generate_sbom.py",
     "test": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m pytest -q -p no:cacheprovider",
     "test:e2e": "playwright test"
   },

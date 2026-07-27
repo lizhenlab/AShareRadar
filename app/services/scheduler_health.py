@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable
 
-from app.models.schemas import CacheStats, ProviderCapabilityStatus, ProviderStatus
+from app.models.system import (
+    CacheStats,
+    ProviderCapabilityStatus,
+    ProviderStatus,
+)
 from app.services.cache_freshness import assess_cache_freshness
 from app.services.provider_failure_status import (
     capability_recently_failed as provider_capability_recently_failed,
@@ -11,6 +15,7 @@ from app.services.provider_failure_status import (
 )
 from app.services.scheduler_contracts import _CAPABILITY_LABELS, PROVIDER_FAILURE_DETAIL_LIMIT, HealthEvent
 from app.services.scheduler_schedule import _positive_int_or_zero
+from app.utils.clock import market_now_naive
 
 
 def _data_health_events(
@@ -23,7 +28,7 @@ def _data_health_events(
 ) -> list[HealthEvent]:
     assessment = assess_cache_freshness(
         stats,
-        now=now or datetime.now(),
+        now=now or market_now_naive(),
         stock_pool_cache_seconds=getattr(settings, "stock_pool_cache_seconds", 24 * 60 * 60),
         plate_rank_cache_seconds=getattr(settings, "plate_rank_cache_seconds", 10 * 60),
     )

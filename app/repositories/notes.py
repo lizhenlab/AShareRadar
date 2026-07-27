@@ -4,11 +4,19 @@ from datetime import datetime
 import math
 
 from app.db.user_mappers import row_to_stock_note
-from app.models.schemas import Quote, StockNoteInput, StockNoteItem, StockNoteUpdate
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
+from app.models.market import (
+    Quote,
+)
+from app.models.user_data import (
+    StockNoteInput,
+    StockNoteItem,
+    StockNoteUpdate,
+)
 from app.repositories.base import SQLiteRepository
 from app.repositories.update_fields import present_updates, update_sql_parts
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text
 
 
 def _columns_sql(columns: tuple[str, ...]) -> str:
@@ -139,7 +147,13 @@ class StockNoteRepository(SQLiteRepository):
                 f"""
                 SELECT {_STOCK_NOTE_SELECT_SQL} FROM stock_note
                 WHERE {" AND ".join(clauses)}
-                ORDER BY COALESCE(trade_date, created_at) DESC, created_at DESC, id DESC
+                ORDER BY
+                    COALESCE(
+                        trade_date,
+                        strftime('%Y-%m-%d', {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at), 'unixepoch', '+8 hours')
+                    ) DESC,
+                    {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at) DESC,
+                    id DESC
                 LIMIT ?
                 """,
                 (*params, limit),

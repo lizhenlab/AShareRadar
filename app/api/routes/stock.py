@@ -7,39 +7,43 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api
-from app.models.schemas import (
+from app.models.analysis import (
     AbnormalEventSummary,
+    FactorScore,
+    FeatureSnapshot,
+    FinancialHealth,
+    FundFlowAnalysis,
+    LhbSummary,
+    OrderPressure,
+    RuleDefinition,
+    StockEventSummary,
+    StockInsightBundle,
+    StockOverview,
+    StockRuleMatchSummary,
+    StrategyCard,
+    ValuationAnalysis,
+)
+from app.models.research import (
     AlphaEvidenceReport,
     ChipAnalysis,
     EventDigestReport,
     EvidenceChainReport,
     FactorLabReport,
-    FactorScore,
-    FeatureSnapshot,
-    FinancialHealth,
-    FundFlowAnalysis,
     LeadershipReport,
-    LhbSummary,
     MarketRegimeReport,
     MinuteAnalysisReport,
-    OrderPressure,
     PeerComparisonReport,
     RiskRadarReport,
-    RuleDefinition,
     StockDiagnosis,
-    StockEventSummary,
-    StockInsightBundle,
-    StockOverview,
     StockQaReport,
     StockQuestionAnswer,
     StockQuestionInput,
     StockReplayAnalysis,
-    StockRuleMatchSummary,
-    StockWorkbench,
-    StrategyCard,
     TStrategyAssistantReport,
     ThemeContextReport,
-    ValuationAnalysis,
+)
+from app.models.workbench import (
+    StockWorkbench,
 )
 from app.services.datahub import DataHub
 from app.workflows.individual import (

@@ -1,4 +1,5 @@
 import { DEFAULT_REQUEST_TIMEOUT_MS, createRequestScope, fetchJson, isAbortError } from "./api.js";
+import { formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { toggleInlineEditor } from "./inline-editor.js";
@@ -422,7 +423,7 @@ export function renderAlerts(items) {
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.condition_label)} ${formatNumber(item.threshold)} · ${escapeHtml(item.enabled ? item.last_state || "等待" : "已暂停")}</span>
               ${item.note ? `<small>${escapeHtml(item.note)}</small>` : ""}
-              <small>触发 ${escapeHtml(item.trigger_count)} 次 · 冷却 ${escapeHtml(item.cooldown_seconds || 300)} 秒 · ${escapeHtml(item.last_checked_at || "尚未检查")}</small>
+              <small>触发 ${escapeHtml(item.trigger_count)} 次 · 冷却 ${escapeHtml(item.cooldown_seconds || 300)} 秒 · ${escapeHtml(item.last_checked_at ? formatAuditTimestamp(item.last_checked_at) : "尚未检查")}</small>
               </div>
               <div class="row-actions">
                 <button type="button" class="mini-button" aria-label="编辑预警 ${escapeHtml(item.name)}" aria-expanded="false" aria-controls="${editorId}" data-alert-edit="${escapeHtml(item.id)}">编辑</button>
@@ -507,7 +508,7 @@ export function renderAlertEvents(items) {
           (item) => `
           <div class="alert-event ${item.event_type === "恢复" ? "recover" : ""}">
             <strong>${escapeHtml(item.name)} · ${escapeHtml(item.event_type || "触发")}</strong>
-            <span>${escapeHtml(item.created_at)} · ${formatNumber(item.price)} / ${formatNumber(item.change_pct)}%</span>
+            <span>${escapeHtml(formatAuditTimestamp(item.created_at))} · ${formatNumber(item.price)} / ${formatNumber(item.change_pct)}%</span>
             <p>${escapeHtml(item.message)}</p>
           </div>`
         )
@@ -557,7 +558,7 @@ export function renderAlertEvaluation(result, owner = null) {
   target.innerHTML = `
     <div class="alert-event ${failedCount ? "is-warning" : ""}">
       <strong>${failedCount ? "检查部分完成" : "检查完成"}</strong>
-      <span>${escapeHtml(result.checked_at)} · 成功 ${escapeHtml(completedCount)} / ${escapeHtml(result.checked_count)} · 触发 ${escapeHtml(result.triggered_count)}</span>
+      <span>${escapeHtml(formatAuditTimestamp(result.checked_at))} · 成功 ${escapeHtml(completedCount)} / ${escapeHtml(result.checked_count)} · 触发 ${escapeHtml(result.triggered_count)}</span>
       <p>新增触发记录 ${escapeHtml(result.new_event_count)} 条${failedCount ? `，失败 ${escapeHtml(failedCount)} 条，请稍后重试。` : "。"}</p>
     </div>
   `;

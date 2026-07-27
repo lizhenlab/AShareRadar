@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from app.models.schemas import (
+from app.models.analysis import (
     AnalysisResult,
+)
+from app.models.research import (
     EventDigestReport,
     EvidenceChainReport,
     MarketRegimeReport,

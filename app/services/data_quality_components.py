@@ -5,7 +5,14 @@ from datetime import datetime
 from math import isclose, isfinite
 from typing import Callable
 
-from app.models.schemas import DataQuality, Kline, KlineQuality, Quote
+from app.models.analysis import (
+    DataQuality,
+    KlineQuality,
+)
+from app.models.market import (
+    Kline,
+    Quote,
+)
 from app.services.data_quality_kline import assess_kline_quality, kline_quality_penalty
 from app.services.data_quality_time import quote_delay_seconds, quote_freshness_penalty
 from app.utils.time import datetime_to_text

@@ -7,14 +7,27 @@ import sqlite3
 import threading
 
 from app.config import Settings
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.db.user_mappers import row_to_advice_timeline, row_to_watchlist_item
-from app.models.schemas import Quote, ResearchStatus, WatchlistItem, WatchlistPriority, WatchlistUpdate
+from app.models.market import (
+    Quote,
+)
+from app.models.user_data import (
+    ResearchStatus,
+    WatchlistItem,
+    WatchlistPriority,
+    WatchlistUpdate,
+)
 from app.repositories.base import SQLiteRepository
 from app.repositories.update_fields import present_updates, update_sql_parts
-from app.services.research_conclusion_change import compare_conclusions
+from app.models.advice_change import compare_conclusions
+from app.utils.audit_time import (
+    audit_now_text as now_text,
+    audit_seconds_ago_text as seconds_ago_text,
+)
 from app.utils.market_data import finite_float
 from app.utils.symbols import standard_symbol
-from app.utils.time import now_text, seconds_ago_text
+from app.utils.time import parse_text_time
 
 
 @dataclass(frozen=True)
@@ -45,7 +58,7 @@ _PRIORITIES = frozenset({"high", "medium", "low"})
 
 # Stable queue order: active before excluded, due before not due, then priority,
 # pinned state, recency, and symbol as a deterministic final tie-breaker.
-_WATCHLIST_ORDER_SQL = """
+_WATCHLIST_ORDER_SQL = f"""
     CASE
         WHEN lower(trim(COALESCE(w.research_status, ''))) = 'excluded' THEN 1
         ELSE 0
@@ -61,7 +74,7 @@ _WATCHLIST_ORDER_SQL = """
         ELSE 1
     END ASC,
     CASE WHEN CAST(w.pinned AS INTEGER) = 1 THEN 1 ELSE 0 END DESC,
-    COALESCE(w.updated_at, '') DESC,
+    {SQLITE_AUDIT_EPOCH_FUNCTION}(COALESCE(w.updated_at, w.created_at)) DESC,
     w.symbol ASC
 """
 
@@ -168,7 +181,7 @@ class WatchlistRepository(SQLiteRepository):
 
     def items(self) -> list[WatchlistItem]:
         quote_join_sql, quote_params = _quote_snapshot_join(self.settings.quote_cache_seconds)
-        today = now_text()[:10]
+        today = parse_text_time(now_text()).date().isoformat()
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 f"""
@@ -284,7 +297,7 @@ class WatchlistRepository(SQLiteRepository):
     def symbol_selection(self) -> WatchlistSymbolSelection:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     symbol,
                     CASE
@@ -294,7 +307,7 @@ class WatchlistRepository(SQLiteRepository):
                 FROM watchlist
                 ORDER BY
                     CASE WHEN CAST(pinned AS INTEGER) = 1 THEN 1 ELSE 0 END DESC,
-                    COALESCE(updated_at, '') DESC,
+                    {SQLITE_AUDIT_EPOCH_FUNCTION}(COALESCE(updated_at, created_at)) DESC,
                     symbol ASC
                 """
             ).fetchall()
@@ -381,7 +394,11 @@ def _quote_snapshot_join(ttl_seconds: int) -> tuple[str, tuple[str, ...]]:
     window = _quote_cache_window(ttl_seconds)
     if window is None:
         return "LEFT JOIN quote_snapshot q ON 0", ()
-    return "LEFT JOIN quote_snapshot q ON q.symbol = w.symbol AND q.fetched_at BETWEEN ? AND ?", window
+    return (
+        "LEFT JOIN quote_snapshot q ON q.symbol = w.symbol "
+        "AND ashare_audit_epoch(q.fetched_at) BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)",
+        window,
+    )
 
 
 def _quote_cache_window(ttl_seconds: int) -> tuple[str, str] | None:

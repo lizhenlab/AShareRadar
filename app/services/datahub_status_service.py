@@ -3,17 +3,19 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
-from app.models.schemas import (
+from app.models.system import (
     CacheStats,
     DataSourcePlan,
     DataStatus,
-    ProviderCapability,
     ProviderCapabilityStatus,
     ProviderDecision,
     ProviderStatus,
 )
+from app.models.market import (
+    ProviderCapability,
+)
 from app.services.datahub_source_plan import SourcePlanBuilder
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 from app.services.provider_registry import (
     MarketProvider,
     provider_capabilities,

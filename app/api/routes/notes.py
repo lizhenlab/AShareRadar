@@ -4,7 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api_async
-from app.models.schemas import ChartMarkSummary, MutationResult, StockNoteInput, StockNoteItem, StockNoteUpdate
+from app.models.user_data import (
+    ChartMarkSummary,
+    StockNoteInput,
+    StockNoteItem,
+    StockNoteUpdate,
+)
+from app.models.system import (
+    MutationResult,
+)
 from app.services.chart_marks import build_chart_marks
 from app.services.datahub import DataHub
 from app.utils.symbols import normalize_symbol

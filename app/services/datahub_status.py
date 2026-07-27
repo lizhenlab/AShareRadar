@@ -7,7 +7,13 @@ import math
 import re
 import socket
 
-from app.models.schemas import ProviderCapability, ProviderCapabilityStatus, ProviderStatus
+from app.models.market import (
+    ProviderCapability,
+)
+from app.models.system import (
+    ProviderCapabilityStatus,
+    ProviderStatus,
+)
 from app.services.provider_failure_status import capability_recently_failed as provider_capability_recently_failed
 
 KIND_LABELS = {

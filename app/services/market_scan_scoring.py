@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from app.models.market_scan import MarketScanResultItem, MarketScanResultWrite
-from app.models.schemas import DataQuality, Kline, Quote
+from app.models.analysis import (
+    DataQuality,
+)
+from app.models.market import (
+    Kline,
+    Quote,
+)
 from app.services.data_quality import build_data_quality
 from app.services.data_quality_time import parse_quote_time
 from app.services.indicators import recent_volume_ratio, trend_score

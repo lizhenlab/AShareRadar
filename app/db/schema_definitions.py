@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 
+SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL = "(strftime('%Y-%m-%dT%H:%M:%f000Z', 'now'))"
+
+
 QUOTE_HISTORY_COLUMN_DEFINITIONS = """
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
@@ -136,6 +139,22 @@ CREATE TABLE IF NOT EXISTS task_run (
     finished_at TEXT,
     duration_ms INTEGER,
     message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS reliability_bucket (
+    bucket_start_utc TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    capability TEXT NOT NULL DEFAULT '',
+    samples INTEGER NOT NULL DEFAULT 0 CHECK (samples >= 0),
+    good INTEGER NOT NULL DEFAULT 0 CHECK (good >= 0),
+    degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded >= 0),
+    failures INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+    fallback INTEGER NOT NULL DEFAULT 0 CHECK (fallback >= 0),
+    duration_total_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_total_ms >= 0),
+    duration_max_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_max_ms >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (bucket_start_utc, metric, subject, capability)
 );
 
 CREATE TABLE IF NOT EXISTS market_scan_run (
@@ -373,7 +392,7 @@ CREATE TABLE IF NOT EXISTS stock_concept (
 
 CREATE TABLE IF NOT EXISTS schema_migration (
     name TEXT PRIMARY KEY,
-    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    applied_at TEXT NOT NULL DEFAULT {SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL}
 );
 
 -- Indexes that use compatibility-added columns are created after migrations.
@@ -389,6 +408,8 @@ CREATE INDEX IF NOT EXISTS idx_stock_concept_symbol_updated
     ON stock_concept(symbol, updated_at);
 CREATE INDEX IF NOT EXISTS idx_task_run_started
     ON task_run(started_at);
+CREATE INDEX IF NOT EXISTS idx_reliability_bucket_metric_time
+    ON reliability_bucket(metric, bucket_start_utc DESC);
 CREATE INDEX IF NOT EXISTS idx_market_scan_run_created
     ON market_scan_run(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_market_scan_run_status
@@ -423,5 +444,6 @@ COMMIT;
 __all__ = [
     "KLINE_DAILY_COLUMN_DEFINITIONS",
     "QUOTE_HISTORY_COLUMN_DEFINITIONS",
+    "SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL",
     "SCHEMA_SQL",
 ]

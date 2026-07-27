@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-from app.services.provider_errors import ProviderCoverageMiss
+from app.utils.provider_errors import ProviderCoverageMiss
 from app.utils.market_data import valid_ohlc as _valid_ohlc
 from app.utils.symbols import normalize_symbol
 

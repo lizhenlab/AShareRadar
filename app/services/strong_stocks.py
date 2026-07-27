@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import Kline, Quote, StrongStockItem
+from app.models.market import (
+    Kline,
+    Quote,
+)
+from app.models.workbench import (
+    StrongStockItem,
+)
 from app.services.indicators import recent_volume_ratio, trend_score
 from app.services.leader_scoring import (
     STRONG_STOCK_LEADER_PROFILE,

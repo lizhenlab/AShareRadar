@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import AbnormalEventItem, AbnormalEventSummary, AnalysisResult, RuleMatch, ValuationAnalysis
+from app.models.analysis import (
+    AbnormalEventItem,
+    AbnormalEventSummary,
+    AnalysisResult,
+    RuleMatch,
+    ValuationAnalysis,
+)
 from app.services.stock_rule_contracts import (
     LEVEL_RISK,
     LEVEL_WATCH,

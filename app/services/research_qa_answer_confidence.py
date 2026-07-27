@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, MarketRegimeReport, SignalValidationReport, StockDiagnosis, ThemeContextReport
+from app.models.analysis import (
+    AnalysisResult,
+)
+from app.models.research import (
+    MarketRegimeReport,
+    SignalValidationReport,
+    StockDiagnosis,
+    ThemeContextReport,
+)
 from app.services.research_qa_answer_contracts import ConfidenceContext, ConfidencePenaltyRule
 from app.services.research_qa_answer_formatters import _clean_answer_item, _clean_answer_items, _clean_topic
 from app.services.research_qa_utils import bounded_int

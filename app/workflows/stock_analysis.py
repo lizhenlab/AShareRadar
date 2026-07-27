@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
-from app.models.schemas import AnalysisResult, IndividualReview, MinuteAnalysisReport, PeerSampleInfo
+from app.models.analysis import (
+    AnalysisResult,
+    IndividualReview,
+    PeerSampleInfo,
+)
+from app.models.research import (
+    MinuteAnalysisReport,
+)
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.datahub import DataHub

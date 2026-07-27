@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, OrderBook, StockInsightBundle
+from app.models.analysis import (
+    AnalysisResult,
+    StockInsightBundle,
+)
+from app.models.market import (
+    OrderBook,
+)
 from app.services.financial_health import build_financial_health
 from app.services.stock_activity import build_fund_flow_analysis, build_order_pressure
 from app.services.stock_abnormal_events import build_abnormal_events

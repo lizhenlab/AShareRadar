@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 import math
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -357,6 +357,34 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
     def test_age_seconds_rejects_future_timestamps(self) -> None:
         self.assertEqual(age_seconds("2026-05-13 09:59:00", "2026-05-13 10:00:00"), 60)
         self.assertIsNone(age_seconds("2026-05-13 10:01:00", "2026-05-13 10:00:00"))
+
+    def test_diagnostics_checked_at_and_mixed_age_are_utc_aware(self) -> None:
+        cache = _Cache(
+            CacheStats(
+                path=":memory:",
+                quote_count=0,
+                quote_history_count=0,
+                kline_count=0,
+                stock_count=0,
+                plate_count=0,
+                provider_count=0,
+            ),
+            providers=[],
+            capability_statuses=[],
+            table_counts={},
+        )
+        with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
+            diagnostics = build_system_diagnostics(
+                _DataHub(cache, capabilities=[]),
+                _Scheduler(running=True),
+                now=datetime(2026, 5, 13, 2, 30, tzinfo=UTC),
+            )
+
+        self.assertEqual(diagnostics.checked_at, "2026-05-13T02:30:00.000000Z")
+        self.assertEqual(
+            age_seconds("2026-05-13 09:29:00", "2026-05-13T01:30:00.000000Z"),
+            60,
+        )
 
     def test_age_seconds_rejects_dirty_timestamp_values(self) -> None:
         self.assertIsNone(age_seconds(float("nan"), "2026-05-13 10:00:00"))  # type: ignore[arg-type]

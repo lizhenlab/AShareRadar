@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import DataQuality, SignalItem
+from app.models.analysis import (
+    DataQuality,
+    SignalItem,
+)
 
 
 LOW_CONFIDENCE_LEVELS = {"积极", "观察"}

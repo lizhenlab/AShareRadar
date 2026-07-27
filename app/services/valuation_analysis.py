@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, ValuationAnalysis
+from app.models.analysis import (
+    AnalysisResult,
+    ValuationAnalysis,
+)
 from app.services.financial_metrics import format_amount_text
 from app.services.scoring import clamp_score, score_level
 from app.services.valuation_anchors import (

@@ -2,7 +2,7 @@
 
 ## 1. Local Runtime
 
-Use Python 3.12 and a virtual environment owned by the checkout. Set `PROJECT_ROOT` to the repository location; the default below assumes a checkout directly under `$HOME`.
+Use Python 3.12 and a virtual environment owned by the checkout. Set `PROJECT_ROOT` to the repository location; the default below assumes a checkout directly under `$HOME`. The web process does not require Node.js; development and CI support Node.js 22.x or 24.x with npm 10.x or 11.x, and `.node-version` selects Node 22 by default.
 
 ```bash
 export PROJECT_ROOT="${PROJECT_ROOT:-$HOME/AShareRadar}"
@@ -13,6 +13,14 @@ export PYTHON="$PROJECT_ROOT/.venv/bin/python"
 export PYTHONNOUSERSITE=1
 $PYTHON -m pip install --require-hashes -r requirements-lock.txt
 ```
+
+After installing development dependencies and `npm ci`, verify the complete runtime declaration rather than relying on the current shell's version manager:
+
+```bash
+$PYTHON tools/runtime_contract.py
+```
+
+The command checks Python 3.12.x, Node 22.x/24.x, npm 10.x/11.x, and declaration consistency across `.python-version`, `.node-version`, and `package.json`.
 
 Start the app:
 
@@ -30,6 +38,10 @@ All supported starts use `--timeout-graceful-shutdown 5`. Without an explicit bo
 
 The scheduler and full-market scanner are in-process services owned by one non-blocking advisory lock at `<SQLite path>.runtime-leader.lock`. The leader starts both services; another process sharing the database remains available for ordinary reads, reports standby through both service views, and polls for leadership. On takeover it activates scheduler plus scanner together and reconciles orphaned scan rows before new scan mutation. Shutdown invokes both stop paths and returns after their configured bounded wait, but it keeps the runtime lease while any cancellation-resistant task remains alive; a deferred release occurs only after scheduler and scanner both report quiescence. A standby therefore cannot write in parallel with the old task. Partial activation uses restartable rollback, so a later takeover retry can start the same scanner instance. Operators must still confirm clean Uvicorn process exit before manual restart. Task-run completion is cancellation-dominant: `cancelled` may replace a success written during the cancellation race, while a late `success` or `failed` update cannot replace `cancelled`. Keep `--workers 1` because scheduler and scan status/control remain process-local; leadership prevents duplicate normal background ownership but does not make a multi-worker deployment supported. Disable the scheduler and automatic scan explicitly for short-lived smoke processes.
 
+Time semantics do not follow the host timezone. Trading sessions, market dates, and quote/K-line event interpretation use `Asia/Shanghai`; audit fields are written as UTC ISO 8601 text ending in `Z`; TTLs, retry deadlines, throttles, and measured durations use monotonic/performance clocks. During schema initialization, one idempotent migration interprets legacy naive audit text as Shanghai time and converts only allowlisted audit columns to UTC. It does not rewrite market-event fields, and existing aware ISO values remain readable. Invalid legacy audit text aborts and rolls back the migration instead of recording a false success marker.
+
+Treat the first UTC audit-time migration as an offline schema upgrade. Do not perform a rolling upgrade: stop every old AShareRadar process that can access the SQLite file, not only the HTTP listener, before starting the new version. The initializer refuses migration while the runtime-leader lease is held, requires an explicit `Settings` object for an existing legacy database so `ASHARE_RADAR_LEGACY_AUDIT_TIMEZONE` cannot be bound after conversion, and checks for free space equal to the larger of 64 MB or twice the database size. Before shutdown, create and verify a full runtime backup with `tools/runtime_data.py`; keep that backup until the migrated database has passed `quick_check`, foreign-key validation, and application smoke tests. The migration logs its elapsed time but never logs the database path.
+
 Synchronous container construction, route-level repository/diagnostic calls, workflow cache access, market-sampling and stock-confirmation event writes, SSE watchlist fallback reads, and scheduler SQLite work are offloaded from the asyncio event-loop thread. Blocking provider SDK work uses a separate four-worker `DaemonThreadPoolExecutor` owned by each `ProviderRuntime`, rather than the default SQLite executor. Provider calls carry a result-defining request key: identical concurrent requests share one task, while different requests use a bounded two-slot admission queue per provider capability before executor submission. A caller timeout or cancellation does not stop an already-running shared SDK task; once that task has no foreground waiter it is treated as orphaned, and different requests fail over until it exits. Admission pressure is not recorded as a provider outage or cooldown.
 
 On normal shutdown and startup failure, the lifespan cancels shared workbench builds before calling `DataHub.aclose()`: the runtime rejects new calls, cancels tracked async waiters and executor items that have not started, and waits only for its bounded timeout. A non-quiescent close returns `False` and leaves one tracked deferred close task; provider clients stay open while a worker is active, then close automatically after runtime quiescence without requiring a second shutdown call. Python cannot forcibly terminate a thread inside an uncooperative SDK call. These workers are daemon threads, so a call that never returns does not keep the Python process alive after shutdown reaches interpreter exit. This prevents process-exit hangs, but does not guarantee SDK cleanup, transaction completion, or an immediate in-process worker stop; use provider-level timeouts whenever the SDK supports them.
@@ -42,6 +54,8 @@ Check status:
 screen -ls
 lsof -nP -iTCP:8010 -sTCP:LISTEN
 curl -sS http://127.0.0.1:8010/api/health
+curl -sS http://127.0.0.1:8010/api/health/live
+curl -sS http://127.0.0.1:8010/api/health/ready
 ```
 
 Stop:
@@ -87,7 +101,7 @@ The Tools view exports a versioned JSON bundle containing only the local watchli
 
 Import supports `merge` and `replace`. In merge mode, supported stable keys identify logical rows and the source bundle wins when a stable key already exists. For surrogate-key tables, an incoming ID collision that does not identify the same row is remapped to an unused target ID, and bundled child foreign keys are rewritten to follow the remapped parent. Related parent and child tables must travel as a group: any non-empty child table requires every referenced surrogate-ID parent table in the same bundle. Rows whose stable key matches, or whose original surrogate ID and complete contents still match, are idempotent. A collision-remapped copy has no portable identity outside that import, so review a new dry run before deliberately importing the same bundle into the same non-empty database again.
 
-Column order may differ between the bundle and target database, but their column sets, declared column types, and primary-key definitions must be compatible. Version-1 bundles created before the review-price provenance columns were added receive only those known columns with conservative `unknown`/`null` defaults; other schema drift is rejected. Both modes validate row shapes and foreign-key relationships inside one transaction. Replace still requires a complete snapshot of every user-data table available in the target database and removes target rows absent from that snapshot. The UI requires a successful dry-run preview for the same file and mode before enabling commit; create a current export or full runtime backup before a replace.
+Column order may differ between the bundle and target database, but their column sets, declared column types, and primary-key definitions must be compatible. New exports declare `utc-fixed` audit-time semantics and reject non-fixed audit values before export. Older version-1 bundles without that metadata remain readable when their audit values are timezone-aware; a bundle containing naive audit values requires an explicit `legacy_audit_timezone` query parameter during preview and commit, and the preview token is bound to that timezone. Bundles carrying `legacy-naive` metadata use their declared IANA source timezone rather than the target host timezone. Version-1 bundles created before the review-price provenance columns were added receive only those known columns with conservative `unknown`/`null` defaults; other schema drift is rejected. Both modes validate row shapes and foreign-key relationships inside one transaction. Replace still requires a complete snapshot of every user-data table available in the target database and removes target rows absent from that snapshot. The UI requires a successful dry-run preview for the same file and mode before enabling commit; create a current export or full runtime backup before a replace.
 
 The equivalent endpoints are `POST /api/local-data/export` and `POST /api/local-data/import?mode=merge|replace&dry_run=true|false`.
 
@@ -152,7 +166,7 @@ curl -sS 'http://127.0.0.1:8010/api/stock/workbench?symbol=600519'
 
 ### Retention Cleanup
 
-Opening the Tools view loads `GET /api/local-data/cleanup-preview`. Cleanup removes only rows above configured retention targets for quote history, daily/minute K-lines, stock concepts, cache events, full-market scans/results, task runs, monitor events, alert events, and advice history. Quote rows are limited per symbol, daily K-lines per symbol and adjustment mode, minute K-lines per symbol and interval, and concepts per symbol; the remaining limits are global. Candidate selection uses SQLite window functions and each table is removed with one set-based `DELETE`, so thousands of partitions do not create one query loop per symbol. It does not directly delete watchlist rows, alert rules, stock notes, or advice-review plans. The preview reports per-table and total counts; when advice or alert history is included it sets `requires_user_backup=true`, and the UI asks for backup confirmation.
+Opening the Tools view loads `GET /api/local-data/cleanup-preview`. Cleanup removes only rows above configured retention targets for quote history, daily/minute K-lines, stock concepts, cache events, UTC-hour reliability buckets, full-market scans/results, task runs, monitor events, alert events, and advice history. Quote rows are limited per symbol, daily K-lines per symbol and adjustment mode, minute K-lines per symbol and interval, and concepts per symbol; the remaining limits are global. Candidate selection uses SQLite window functions and each table is removed with one set-based `DELETE`, so thousands of partitions do not create one query loop per symbol. It does not directly delete watchlist rows, alert rules, stock notes, or advice-review plans. The preview reports per-table and total counts; when advice or alert history is included it sets `requires_user_backup=true`, and the UI asks for backup confirmation.
 
 After reviewing the preview, the UI calls `POST /api/local-data/cleanup?confirm=retention-cleanup`. The preview is advisory: concurrent scheduler activity can change the committed count, so use the returned result as the deletion record. Export user data or create a full runtime backup before cleanup when user-history rows are listed.
 
@@ -215,6 +229,33 @@ Troubleshooting order:
 
 ## 3. Diagnostics and Browser Notifications
 
+### Health and Reliability
+
+Use the three health endpoints for different decisions:
+
+| Endpoint | Meaning | Dependencies | Failure handling |
+| --- | --- | --- | --- |
+| `GET /api/health` | Backward-compatible summary | Captured settings | Returns the existing `status/app/provider` payload. |
+| `GET /api/health/live` | Process liveness | Application state only | Does not resolve the container, SQLite, scheduler, scanner, or providers. |
+| `GET /api/health/ready` | Request admission readiness | Completed lifespan startup plus read-only SQLite `SELECT 1` | SQLite uses a 250 ms busy timeout inside a one-second outer bound; failure returns generic `503` state. |
+
+All three responses use `Cache-Control: no-store`. Provider reachability is deliberately not a readiness condition: a provider outage should degrade research data without causing a local process restart loop. A standby process can also be ready; the readiness payload reports runtime role as `leader`, `standby`, or `single`. During startup and before shutdown cleanup, `accepting_requests=false` makes readiness return `503`.
+
+`GET /api/system/reliability` returns local SLI/SLO evidence. Workbench usability, quality, freshness, non-fallback operation, provider attempts, and ordinary scheduler tasks use a seven-day rolling window with a 20-sample floor. Hourly aggregate queries round the seven-day start down to the containing UTC hour so the boundary bucket is not silently lost. Full-market scan success and ranked-symbol coverage use 30 days with a three-run floor; only runs with a non-empty universe count toward the coverage sample floor. Non-retry scan duration uses the same window and requires p95 at or below 90 minutes. The current ratio targets are:
+
+| Indicator | Target |
+| --- | ---: |
+| Workbench usable | 99% |
+| Workbench data quality at least 50 | 95% |
+| Workbench quote/K-line fresh | 95% |
+| Workbench without cache or fallback data | 80% |
+| Provider attempt successful | 95% |
+| Ordinary task successful or degraded | 95% |
+| Full-market run successful or degraded | 90% |
+| Full-market ranked-symbol coverage | 95% |
+
+Each response carries the actual window, target, minimum, samples, good count, ratio, and status. `insufficient_data` means the sample floor was not met and must not be treated as a passing SLO. Cancelled work is excluded; interrupted scans count as unsuccessful, and retry-run durations are excluded from the duration percentile. Observations are aggregated into UTC-hour `reliability_bucket` rows rather than retaining request-level identifiers. `ASHARE_RADAR_MAX_RELIABILITY_BUCKET_ROWS` bounds those regenerable rows.
+
 ### System Diagnostics
 
 The data-source/monitoring panel reads `GET /api/system/diagnostics`. The response separates cache fetch activity from market-data freshness and includes storage budget, scheduler state, provider status, table counts, bounded warnings, and remediation suggestions. Storage reports `sqlite_size_bytes` separately from managed `backup_size_bytes`/bundle count, with their sum as the budgeted total. Row details separate quotes, daily/minute K-lines, full-market scan runs/results, other cache, other runtime, and user data instead of exposing only broad totals. Freshness covers quotes, daily/minute K-lines, the stock pool, and plate metadata; a non-empty stock-pool or plate cache without a usable update timestamp is reported as missing freshness metadata rather than healthy. Storage warns at 80% of `ASHARE_RADAR_MAX_DATABASE_SIZE_MB` and reports an over-budget state above the configured limit. The monitoring surface also reads data-source status, recent task runs, and monitor events; its normal refresh interval is 15 seconds.
@@ -247,6 +288,7 @@ Use the `ASHARE_RADAR_*` namespace for new configuration. Legacy aliases are acc
 | `ASHARE_RADAR_DEMO_PROVIDER_ENABLED` | `0` | `DEMO_PROVIDER_ENABLED` | Demo data must stay disabled for real research. |
 | `ASHARE_RADAR_CORS_ALLOW_ORIGINS` | local 8010 origins | `CORS_ALLOW_ORIGINS` | Comma-separated CORS origins; for browser mutations/refresh writes, both the Host-derived origin and supplied Origin/Referer must be in this list. |
 | `ASHARE_RADAR_CACHE_PATH` | project `data/ashare_radar.sqlite3` | `CACHE_PATH` | Absolute path or project-root-relative SQLite path. |
+| `ASHARE_RADAR_LEGACY_AUDIT_TIMEZONE` | `Asia/Shanghai` | - | IANA timezone used only to interpret legacy naive audit timestamps during the first UTC migration and user-data import. Set it before first startup when an old database was written in another host timezone; new audit timestamps are fixed-width UTC `Z`. |
 | `ASHARE_RADAR_MINUTE_KLINE_CACHE_SECONDS` | `60` | `MINUTE_KLINE_CACHE_SECONDS` | Minute K-line cache TTL. |
 | `ASHARE_RADAR_STOCK_POOL_AUTHORITATIVE_MIN_COUNT` | `1000` | `STOCK_POOL_AUTHORITATIVE_MIN_COUNT` | Fresh cache count needed to confirm an empty stock search. |
 | `ASHARE_RADAR_STOCK_POOL_PROVIDER_TIMEOUT_SECONDS` | `60` | - | Timeout for one full stock-pool provider call; range 1-300 seconds. Kept separate from short quote/K-line calls because exchange-list fallbacks may require several pages. |
@@ -283,6 +325,7 @@ Use the `ASHARE_RADAR_*` namespace for new configuration. Legacy aliases are acc
 | `ASHARE_RADAR_MAX_MINUTE_KLINE_ROWS` | `20000` | `MAX_MINUTE_KLINE_ROWS` | Runtime retention cap. |
 | `ASHARE_RADAR_MAX_STOCK_CONCEPT_ROWS` | `20000` | `MAX_STOCK_CONCEPT_ROWS` | Runtime retention cap. |
 | `ASHARE_RADAR_MAX_TASK_RUN_ROWS` | `2000` | `MAX_TASK_RUN_ROWS` | Runtime retention cap. |
+| `ASHARE_RADAR_MAX_RELIABILITY_BUCKET_ROWS` | `10000` | - | Global retention cap for low-cardinality UTC-hour reliability aggregates; minimum `1`. |
 | `ASHARE_RADAR_MAX_MARKET_SCAN_RUNS` | `30` | - | Target count for unprotected historical scan runs. Active runs and ancestors referenced by retained retries are temporary safety exceptions; expired chains converge leaf-to-root and child results cascade with removed runs. |
 | `ASHARE_RADAR_MAX_MONITOR_EVENT_ROWS` | `3000` | `MAX_MONITOR_EVENT_ROWS` | Runtime retention cap. |
 | `ASHARE_RADAR_MAX_CACHE_EVENT_ROWS` | `5000` | `MAX_CACHE_EVENT_ROWS` | Runtime retention cap for cache/provider events. |
@@ -297,6 +340,30 @@ Use the `ASHARE_RADAR_*` namespace for new configuration. Legacy aliases are acc
 | `ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH` | `0` | `TRADE_CALENDAR_AUTO_FETCH` | Non-blocking single-flight background refresh when runtime is missing, invalid, stale for the current date, or cannot cover a target. The triggering call uses the current bundle/closed decision; later calls see a successful atomic runtime update. |
 
 Missing optional values use documented defaults. Present but malformed boolean, numeric, path, or LLM endpoint values fail configuration at startup instead of silently changing behavior. Restart after changing process variables or the allowlisted LLM assignments in `$HOME/.zshrc`.
+
+### Provider Canary Variables
+
+`tools/provider_canary.py` owns three tool-only environment variables. They are intentionally not `Settings` fields and are outside the application's configuration-document coverage contract:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ASHARE_RADAR_CANARY_SH_SYMBOL` | `600519.SH` | Representative Shanghai symbol. |
+| `ASHARE_RADAR_CANARY_SZ_SYMBOL` | `000001.SZ` | Representative Shenzhen symbol. |
+| `ASHARE_RADAR_CANARY_BJ_SYMBOL` | `920066.BJ` | Representative Beijing symbol. |
+
+Each value is normalized and must belong to the named market. Equivalent `--sh-symbol`, `--sz-symbol`, and `--bj-symbol` flags override the defaults. `--request-timeout` controls each market/stock-pool probe and `--overall-timeout` bounds the concurrent set.
+
+The CLI creates and removes a temporary SQLite database, disables the scheduler for that isolated DataHub, and concurrently checks:
+
+- one direct non-cached quote for each SH/SZ/BJ representative;
+- one direct five-row completed daily-K request per representative; the response must contain exactly five ordered usable rows and pass finite OHLCV, cache/fallback, future-date, and staleness validation;
+- a refreshed stock pool with valid unique identity rows and at least one SH, SZ, and BJ member.
+
+Output is one sanitized JSON object. Exit `0` means every market and the stock-pool contract were available, `2` means at least one market remained available but the full contract was partial, and `1` means no market was available or provider cleanup failed. This is a live-provider diagnostic, not a required CI test:
+
+```bash
+$PYTHON tools/provider_canary.py
+```
 
 ### LLM Remote Data Boundary
 
@@ -313,9 +380,10 @@ Run before delivery:
 ```bash
 $PYTHON -m pip install --require-hashes -r requirements-dev-lock.txt
 $PYTHON -m pip check
+npm ci
+$PYTHON tools/runtime_contract.py
 $PYTHON -m ruff check app tests tools
 $PYTHON -m mypy
-npm ci
 npm run check:js
 $PYTHON tools/api_inventory.py --check
 $PYTHON tools/architecture_inventory.py --check
@@ -324,12 +392,31 @@ npx --no-install playwright install chromium
 npm run test:e2e
 ```
 
-`requirements-dev-lock.txt` is installed directly because it includes both runtime and engineering dependencies. Tests run with `PYTHONNOUSERSITE=1` and must resolve packages from the active Python 3.12 runtime, never from a user-level or machine-specific interpreter path. Repository/database tests use temporary SQLite state and provider/network behavior is replaced with fakes at unit-test boundaries; live provider access belongs only in an explicit smoke check.
+`requirements-dev-lock.txt` is installed directly because it includes both runtime and engineering dependencies. Coverage fails below 90%. Tests run with `PYTHONNOUSERSITE=1` and must resolve packages from the active Python 3.12 runtime, never from a user-level or machine-specific interpreter path. Repository/database tests use temporary SQLite state and provider/network behavior is replaced with fakes at unit-test boundaries; live provider access belongs only in the optional canary.
+
+The Security workflow is an additional required gate. Its local-equivalent dependency and reproducible-SBOM checks are:
+
+```bash
+$PYTHON -m pip_audit --require-hashes --disable-pip --strict --progress-spinner off --requirement requirements-lock.txt
+$PYTHON -m pip_audit --require-hashes --disable-pip --strict --progress-spinner off --requirement requirements-dev-lock.txt
+npm audit --audit-level=high
+first_dir="$(mktemp -d)"
+second_dir="$(mktemp -d)"
+$PYTHON tools/generate_sbom.py --output-dir "$first_dir"
+$PYTHON tools/generate_sbom.py --output-dir "$second_dir"
+diff -ru "$first_dir" "$second_dir"
+rm -rf "$first_dir" "$second_dir"
+```
+
+CI additionally installs a checksum-verified Gitleaks binary, scans the current source and complete Git history with `--redact=100`, and uploads the normalized CycloneDX artifacts. Do not replace that history scan with a latest-tree grep. `tests/test_supply_chain.py` guards SHA-pinned actions, disabled checkout credential persistence, both Python lock audits, npm audit, redacted current/history scans, Dependabot ecosystems, and two-run SBOM comparison.
 
 Smoke checks:
 
 ```bash
 curl -sS http://127.0.0.1:8010/api/health
+curl -sS http://127.0.0.1:8010/api/health/live
+curl -sS http://127.0.0.1:8010/api/health/ready
+curl -sS http://127.0.0.1:8010/api/system/reliability
 curl -sS 'http://127.0.0.1:8010/api/stocks?keyword=600519&limit=5'
 curl -sS 'http://127.0.0.1:8010/api/stock/workbench?symbol=600519'
 ```
@@ -346,6 +433,10 @@ $PYTHON -m piptools compile --allow-unsafe --generate-hashes \
 $PYTHON -m pip install --require-hashes -r requirements-dev-lock.txt
 $PYTHON -m pip check
 ```
+
+After either lock changes, audit both Python locks, run `npm audit`, and regenerate both SBOMs. `tools/generate_sbom.py` consumes `requirements-lock.txt` and `package-lock.json`, validates CycloneDX JSON, removes volatile serial/timestamp fields, imposes deterministic ordering, and writes `python.cdx.json` plus `npm.cdx.json` atomically. The Security workflow generates twice and compares bytes before artifact upload. A reproducible SBOM is an inventory aid; it is not a signed release or provenance attestation.
+
+Dependabot runs weekly for pip, npm, and GitHub Actions. Review generated changes through the same tests instead of merging solely because a version is newer. Keep every `uses:` reference pinned to a reviewed 40-character commit SHA and preserve `persist-credentials: false` for checkout.
 
 Regenerate inventory files only when accepting their source changes. CI and review should use the non-mutating checks:
 

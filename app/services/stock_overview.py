@@ -3,7 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from app.models.schemas import AnalysisResult, FactorScore, FundFlowAnalysis, KeyPriceLevel, OrderPressure, StockEventSummary, StockOverview
+from app.models.analysis import (
+    AnalysisResult,
+    FactorScore,
+    FundFlowAnalysis,
+    KeyPriceLevel,
+    OrderPressure,
+    StockEventSummary,
+    StockOverview,
+)
 from app.services.scoring import clamp_score, score_level
 from app.utils.market_data import finite_float
 from app.utils.text import clean_optional_text as _clean_text

@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import AnalysisResult, FeatureSnapshot, LeadershipReport, StockConceptItem, StockInsightBundle
+from app.models.analysis import (
+    AnalysisResult,
+    FeatureSnapshot,
+    StockInsightBundle,
+)
+from app.models.research import (
+    LeadershipReport,
+)
+from app.models.market import (
+    StockConceptItem,
+)
 from app.services.indicators import average_true_range, daily_return_volatility, recent_volume_ratio
 from app.services.leader_scoring import (
     FEATURE_LEADER_PROFILE,

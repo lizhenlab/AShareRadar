@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from app.models.schemas import Kline, ProviderCapability, StockInfo
+from app.models.market import (
+    Kline,
+    ProviderCapability,
+    StockInfo,
+)
 from app.services.datahub_runtime import run_provider_io
 from app.services.provider_utils import ensure_positive_limit, is_installed, ts_symbol, valid_ohlc
 from app.services.provider_stock_mappers import stock_info_from_tushare_row
 from app.services.providers import stamp_daily_kline_contract
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.parsing import required_float, safe_float
-from app.utils.time import now_text
 
 
 class TushareProvider:

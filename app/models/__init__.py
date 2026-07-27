@@ -1,8 +1,7 @@
-"""Pydantic model package for AShareRadar."""
+"""Domain model package.
 
-from __future__ import annotations
+Import concrete contracts from their domain modules. Legacy callers that need
+the former aggregate surface can use :mod:`app.models.schemas` explicitly.
+"""
 
-from app.models import schemas as _schemas
-
-__all__ = list(_schemas.__all__)
-globals().update({name: getattr(_schemas, name) for name in __all__})
+__all__: list[str] = []

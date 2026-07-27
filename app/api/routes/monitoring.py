@@ -4,9 +4,17 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_datahub, get_scheduler
 from app.api.errors import run_api, run_sync_api_async
-from app.models.schemas import MonitorEvent, SchedulerStatus, SystemDiagnostics, TaskRun, TaskRunOnceResponse
+from app.models.system import (
+    MonitorEvent,
+    SchedulerStatus,
+    SystemDiagnostics,
+    TaskRun,
+    TaskRunOnceResponse,
+)
+from app.models.reliability import ReliabilityReport
 from app.services.datahub import DataHub
 from app.services.scheduler import LocalDataScheduler
+from app.services.reliability import build_reliability_report
 from app.services.system_diagnostics import build_system_diagnostics
 
 
@@ -52,3 +60,10 @@ async def system_diagnostics(
     scheduler: LocalDataScheduler = Depends(get_scheduler),
 ) -> SystemDiagnostics:
     return await run_sync_api_async(lambda: build_system_diagnostics(datahub, scheduler))
+
+
+@router.get("/api/system/reliability", response_model=ReliabilityReport)
+async def system_reliability(
+    datahub: DataHub = Depends(get_datahub),
+) -> ReliabilityReport:
+    return await run_sync_api_async(lambda: build_reliability_report(datahub.cache))

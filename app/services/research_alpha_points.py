@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import (
+from app.models.research import (
     AlphaEvidencePoint,
-    AnalysisResult,
     FactorLabReport,
     MarketRegimeReport,
     RiskRewardReport,
-    StockInsightBundle,
     TimeframeAlignmentReport,
+)
+from app.models.analysis import (
+    AnalysisResult,
+    StockInsightBundle,
 )
 from app.services.research_factors import (
     _factor_alpha_reason,

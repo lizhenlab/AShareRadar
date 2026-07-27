@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.models.schemas import StockInfo
+from app.models.market import (
+    StockInfo,
+)
 from app.services.provider_utils import pick
 from app.utils.symbols import normalize_symbol, standard_symbol
 

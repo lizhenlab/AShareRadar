@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.db.schema_migrations import ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION
+
 
 ADVICE_REVIEW_SCHEMA_VERSION = "20260716_advice_review_v1"
 ADVICE_REVIEW_PROVENANCE_SCHEMA_VERSION = "20260717_advice_review_price_provenance_v2"
@@ -130,7 +132,13 @@ _RESULT_PROVENANCE_COLUMNS = {
 }
 
 
-def apply_advice_review_compat_schema(conn) -> None:
+def apply_advice_review_compat_schema(
+    conn,
+    *,
+    legacy_audit_timezone: str = "Asia/Shanghai",
+) -> None:
+    from app.db.schema_migrations import normalize_legacy_audit_timestamps
+
     conn.execute("BEGIN IMMEDIATE")
     try:
         for column, definition in _PLAN_PROVENANCE_COLUMNS.items():
@@ -141,6 +149,23 @@ def apply_advice_review_compat_schema(conn) -> None:
             "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
             (ADVICE_REVIEW_PROVENANCE_SCHEMA_VERSION,),
         )
+        audit_migration = conn.execute(
+            "SELECT 1 FROM schema_migration WHERE name = ?",
+            (ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION,),
+        ).fetchone()
+        if audit_migration is None:
+            normalize_legacy_audit_timestamps(
+                conn,
+                {
+                    "advice_review_plan": ("created_at", "updated_at"),
+                    "advice_review_result": ("evaluated_at",),
+                },
+                legacy_audit_timezone=legacy_audit_timezone,
+            )
+            conn.execute(
+                "INSERT INTO schema_migration (name) VALUES (?)",
+                (ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION,),
+            )
     except BaseException:
         conn.rollback()
         raise
@@ -155,6 +180,7 @@ def _ensure_column(conn, table: str, column: str, definition: str) -> None:
 
 
 __all__ = [
+    "ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION",
     "ADVICE_REVIEW_INDEX_SQL",
     "ADVICE_REVIEW_PROVENANCE_SCHEMA_VERSION",
     "ADVICE_REVIEW_PLAN_TABLE_SQL",

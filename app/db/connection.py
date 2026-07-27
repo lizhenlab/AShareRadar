@@ -6,9 +6,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.utils.market_time import market_datetime_epoch
+from app.utils.audit_time import audit_time_epoch
 
 
 SQLITE_MARKET_EPOCH_FUNCTION = "ashare_market_epoch"
+SQLITE_AUDIT_EPOCH_FUNCTION = "ashare_audit_epoch"
 
 
 class SQLiteConnectionFactory:
@@ -21,6 +23,7 @@ class SQLiteConnectionFactory:
         conn = sqlite3.connect(self.path, timeout=15)
         conn.row_factory = sqlite3.Row
         conn.create_function(SQLITE_MARKET_EPOCH_FUNCTION, 1, market_datetime_epoch, deterministic=True)
+        conn.create_function(SQLITE_AUDIT_EPOCH_FUNCTION, 1, audit_time_epoch, deterministic=True)
         conn.execute("PRAGMA busy_timeout = 15000")
         conn.execute("PRAGMA foreign_keys = ON")
         try:

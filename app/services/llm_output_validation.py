@@ -5,7 +5,12 @@ import math
 import re
 from typing import Any
 
-from app.models.schemas import AnalysisResult, StockQuestionAnswer
+from app.models.analysis import (
+    AnalysisResult,
+)
+from app.models.research import (
+    StockQuestionAnswer,
+)
 
 
 _RESPONSE_FIELDS = frozenset(

@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 
 
 DEFAULT_OPTIONAL_WORKBENCH_TIMEOUT_SECONDS = 1.5

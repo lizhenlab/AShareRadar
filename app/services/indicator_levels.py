@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import Kline
+from app.models.market import (
+    Kline,
+)
 from app.services.indicator_math import quantile
 from app.utils.market_data import finite_float, valid_kline
 

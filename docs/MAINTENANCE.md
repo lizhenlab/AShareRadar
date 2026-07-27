@@ -5,6 +5,10 @@
 - Keep HTTP routes thin. Route files should validate inputs and call workflows/services.
 - Keep provider logic behind `DataHub` and `provider_registry`.
 - Keep SQLite access in repositories or `SQLiteCache`; do not write SQL in route handlers.
+- Preserve the checked layer direction: `db`, `repositories`, `models`, and `utils` must not import API, workflows, or services. Production modules import domain models directly, not `app.models.schemas`; that facade exists only for compatibility. Run `tests/test_architecture_boundaries.py` after moving contracts or changing imports.
+- Keep `app/config.py` as a stable facade. Put settings/default/environment ownership in `config_settings.py`, shell-profile parsing and permission checks in `config_shell.py`, and endpoint/security validation in `config_validation.py`. Do not add eager shell reads at module import or let adapters read environment variables directly.
+- Use `app/utils/clock.py` for every current-time or duration source. Market/calendar decisions use `market_now()` and `Asia/Shanghai`; audit/persistence text uses `audit_now_text()` and UTC `Z`; TTLs/deadlines/throttles use `monotonic_now()` and measured latency uses `performance_now()`. Never subtract wall clocks to calculate a duration, and never introduce direct `datetime.now()` outside the adapter.
+- Treat the audit-time migration as a one-way, offline compatibility boundary. New audit fields must be UTC-aware, added to `AUDIT_TIMESTAMP_COLUMNS` when legacy databases may contain Shanghai-naive text, and tested against aware ISO plus fractional legacy values. Existing databases with a pending migration must be opened with explicit `Settings`, under the runtime-leader migration lease, after a verified backup and with the documented disk-space reserve; invalid values must roll back without a success marker. Do not support rolling old/new writers across this boundary. Market-event fields must not be added to that migration merely because they contain a timestamp.
 - Keep provider routes behind `run_api()`. Async handlers that call synchronous repositories, scheduler state, or diagnostics must use `run_sync_api_async()`; reserve `run_sync_api()` for synchronous boundaries. Client `RequestValidationError` stays `422`, while internal Pydantic `ValidationError` must be logged and mapped to generic sanitized `503` detail.
 - Preserve `SameOriginMutationMiddleware` ahead of route side effects for `POST`/`PUT`/`PATCH`/`DELETE` and truthy `GET ...?refresh=...`. Browser-origin requests must separately validate the Host-derived request origin and supplied Origin/Referer against configured origins so a matching hostile Host cannot bypass the boundary through Host/DNS rebinding. Keep default-port normalization, metadata-only cross-site rejection, ordinary read-only access, and non-browser clients without origin metadata covered when changing middleware or CORS settings.
 - Keep user input/update Pydantic models strict about unknown fields unless a compatibility requirement explicitly says otherwise.
@@ -18,7 +22,12 @@
 - Do not store API keys in project files.
 - Keep the app runtime isolated from user-level Python packages; optional provider stacks such as pandas/numpy must resolve from the project runtime, not `~/.local`.
 - Keep direct runtime libraries in `requirements.txt` and direct engineering tools in `requirements-dev.txt`. Rebuild both Python 3.12 hashed locks when the runtime input changes, and rebuild the development lock when only the development input changes. Reproducible installs must use `--require-hashes` against a lock file.
+- Preserve the executable runtime declaration: Python 3.12.x, Node.js 22.x or 24.x, and npm 10.x or 11.x. `.python-version`, `.node-version`, `package.json`, locks, workflow setup, and `tools/runtime_contract.py` must move together. Node 22 is the default quality runtime; Node 24 has a separate compatibility smoke job.
 - Keep GitHub Actions pinned to immutable full SHAs. The current `checkout` 6.0.2, `setup-python` 6.2.0, and `setup-node` 6.4.0 releases use the Node 24 action runtime; do not regress them to Node 20-based majors when editing `.github/workflows/ci.yml`.
+- Preserve `persist-credentials: false`, least-privilege workflow permissions, checksum verification for downloaded scanners, fully redacted current-tree plus full-history secret scans, locked dependency audits, and two-run byte comparison for normalized CycloneDX SBOMs. A green audit is point-in-time evidence, not proof that dependencies are vulnerability-free forever.
+- Keep the live provider canary optional and outside required pull-request CI. It must use temporary runtime state, bounded per-request/overall/cleanup waits, direct non-cached quote and daily-K requests, explicit SH/SZ/BJ plus stock-pool contract validation, sanitized JSON output, and stable exit codes `0`/`2`/`1` for complete/partial/unavailable.
+- Preserve liveness/readiness separation. Liveness may not resolve the application container or touch SQLite/network providers. Readiness must follow the lifecycle admission flag and a bounded read-only SQLite check; provider outages and standby runtime role must remain observable without making the process unready. Health responses stay `no-store` and failures expose no exception or local path.
+- Reliability observations must stay low-cardinality UTC-hour aggregates. Do not add symbols, request IDs, exception text, or arbitrary URL labels. Preserve sample floors and `insufficient_data`, exclude cancelled work, exclude retry scans from duration percentiles, and update implementation, SLO documentation, retention, and tests together when changing a metric or target.
 - Keep one Uvicorn worker as the supported runtime topology, and keep every documented supported start on `--timeout-graceful-shutdown 5`. That server bound limits graceful draining of SSE and in-flight data requests; it is distinct from provider-runtime shutdown and must not be presented as force-cancelling a running SDK thread. Preserve the real-process smoke test that holds a quote SSE connection open while sending `SIGINT`; its two-second test setting must prove bounded, traceback-free exit. Preserve the single `<SQLite path>.runtime-leader.lock` lease: scheduler and scanner must activate, stand by, take over, stop, and release as one unit. A bounded stop may defer release, but the lease must remain held until both services report quiescence; partial activation rollback must leave the scanner restartable, and coordinator-owned standby state must remain visible. The `.scheduler.lock` and `.market-scan.lock` paths are restore-time legacy guards, not independent runtime ownership. Keep cancellation-dominant task history; `cancelled` may replace a racing `success`, but late `success`/`failed` updates must not replace `cancelled`.
 - Keep tests hermetic: use the active project runtime with `PYTHONNOUSERSITE=1`, temporary SQLite paths, fake providers/clients, and no required live network calls.
 - When adding a user-facing recommendation, include reason, risk, invalidation condition, or missing-data note.
@@ -33,6 +42,32 @@
 - Serve static assets with revalidation and keep one scan-module import-map version. Scan recovery must retain one timer, bounded backoff, `404`/repeated-failure fallback to latest, online recovery, new-run page reset, strict response validation, and synchronized ARIA state.
 - Treat `ASHARE_RADAR_LLM_TIMEOUT_SECONDS` as one total budget shared by initial generation, validation, and the optional correction; never reset the outer budget for the correction or add SDK retries.
 - Keep primary business functions short and stage-oriented; production Python functions in `app/` and `tools/` are test-guarded at 60 lines and 12 branch points, so split data preparation, rule decisions, persistence, and response assembly before crossing those limits.
+
+### Engineering Quality Change Protocol
+
+Use the smallest applicable focused checks while editing, then run the complete acceptance sequence before delivery:
+
+```bash
+$PYTHON tools/runtime_contract.py
+$PYTHON -m ruff check app tests tools
+$PYTHON -m mypy
+$PYTHON -m pytest -q -p no:cacheprovider \
+  tests/test_architecture_boundaries.py \
+  tests/test_clock_modules.py \
+  tests/test_exception_safety.py \
+  tests/test_reliability_modules.py \
+  tests/test_supply_chain.py \
+  tests/test_typing_contract.py
+```
+
+When a change crosses one of these boundaries:
+
+1. **Runtime declaration:** update all declaration files and both CI runtime paths; never weaken `runtime_contract.py` to accept the developer's current machine.
+2. **Timestamp storage:** classify the field as market event, audit event, or elapsed duration before choosing a representation. Include an old-SQLite migration fixture when changing persisted audit semantics.
+3. **Module movement:** move lower-layer contracts before their consumers and let architecture tests reject reverse imports or cycles. Compatibility facades may re-export downward; lower layers may not import the facade owner upward.
+4. **Health/SLI:** state the user-visible good event, failure event, exclusions, window, sample floor, target, and retention effect. Do not infer `met` from too little evidence.
+5. **Supply chain:** regenerate locks only from their inputs, run the relevant audit, produce SBOMs from locks, and keep workflow actions immutable. Rotating or removing a leaked secret is an incident task; deleting it only from the latest tree is insufficient because history is scanned.
+6. **Provider canary:** use it only as live environment evidence after hermetic tests pass. Record the timestamp, provider configuration class, and exit status without checking the generated JSON or temporary database into source control.
 
 ### Trading Calendar Annual Baseline
 
@@ -299,13 +334,21 @@ For any functional change:
 | Watchlist scans | `app/api/routes/watchlist_scan.py`, `app/services/watchlist_scan.py`, `static/js/watchlist-scan.js` (versioned fixed rules, active/custom universes, historical completed-bar cutoff, bounded concurrency/symbols, and missing-data isolation) |
 | Local-data portability, backup, and retention | `app/api/routes/local_data.py`, `app/services/local_data_import_guard.py`, `app/services/user_data_portability.py`, `app/services/runtime_backup.py` (rotation and unified/legacy restore guards), `app/repositories/maintenance.py` (set SQL, protection, throttle), `app/services/cache.py` (exclusive local-data lock), `tools/runtime_data.py` |
 | Browser alert notifications | `app/api/routes/alerts.py`, `app/repositories/alerts.py`, `static/js/notifications.js` (event-ID keyset pages, persisted enable/disable preference, fresh no-backfill baselines, disabled-period suppression, successful-prefix cursor advancement, and failed/later event retry) |
-| Scheduler and monitoring | `app/services/scheduler.py`, `app/services/scheduler_contracts.py`, `app/services/scheduler_lifecycle.py`, `app/services/scheduler_execution.py`, `app/services/scheduler_tasks.py`, `app/services/scheduler_schedule.py`, `app/services/scheduler_health.py`, `app/services/scheduler_helpers.py`, `app/services/scheduler_service.py`, `app/services/runtime_coordinator.py`, `app/services/cache_freshness.py`, `app/services/system_diagnostics.py`, `app/api/routes/monitoring.py`, `app/repositories/runtime.py` |
-| Runtime environment and engineering gates | `app/runtime_environment.py`, `requirements.txt`, `requirements-dev.txt`, `requirements-lock.txt`, `requirements-dev-lock.txt`, `package.json`, `package-lock.json`, `pyproject.toml`, `.github/workflows/ci.yml` |
+| Scheduler, health, and monitoring | `app/services/scheduler.py`, `app/services/scheduler_contracts.py`, `app/services/scheduler_lifecycle.py`, `app/services/scheduler_execution.py`, `app/services/scheduler_tasks.py`, `app/services/scheduler_schedule.py`, `app/services/scheduler_health.py`, `app/services/scheduler_helpers.py`, `app/services/scheduler_service.py`, `app/services/runtime_coordinator.py`, `app/services/cache_freshness.py`, `app/services/system_diagnostics.py`, `app/api/routes/health.py`, `app/api/routes/monitoring.py`, `app/repositories/runtime.py` |
+| Reliability measurement | `app/models/reliability.py`, `app/repositories/reliability.py`, `app/services/reliability.py`, `app/workflows/individual.py`, `app/repositories/provider_status.py`, `app/services/cache.py` |
+| Runtime, time, configuration, and engineering gates | `app/runtime_environment.py`, `app/utils/clock.py`, `app/utils/audit_time.py`, `app/config.py`, `app/config_settings.py`, `app/config_shell.py`, `app/config_validation.py`, `requirements.txt`, `requirements-dev.txt`, `requirements-lock.txt`, `requirements-dev-lock.txt`, `package.json`, `package-lock.json`, `pyproject.toml`, `.python-version`, `.node-version`, `.github/workflows/ci.yml`, `.github/workflows/security.yml`, `.github/dependabot.yml`, `tools/runtime_contract.py`, `tools/provider_canary.py`, `tools/generate_sbom.py` |
 | Frontend | `app/api/static_assets.py`, `static/app.js`, `static/js/*`, `static/styles.css`, `static/css/*`; scan-specific contracts/controller/polling/view are `static/js/market-scan-*.js` |
 
 ## 5. Invariants
 
 - `standard_symbol` format should remain `CODE.MARKET`, for example `600519.SH`.
+- Supported engineering runtimes remain Python 3.12.x, Node 22.x/24.x, and npm 10.x/11.x; declaration drift is a failing test.
+- Market time is Shanghai, audit time is UTC `Z`, and elapsed duration is monotonic. Host timezone and wall-clock jumps must not change trading rules, TTLs, or recorded durations.
+- Lower layers do not import API/workflows/services, application imports remain acyclic, and production code does not depend on the aggregate model compatibility facade.
+- Liveness is process-only; readiness is lifecycle admission plus read-only SQLite, not a live-provider check. A standby process can be ready.
+- Reliability status remains `insufficient_data` below its explicit sample floor. Bucket dimensions remain bounded and never contain symbols, request identifiers, exception text, credentials, or URLs.
+- Required CI stays hermetic. Live provider canary results are optional environment evidence and must never become a required pull-request gate.
+- Workflow actions remain SHA-pinned, checkout credentials are not persisted, current and historical secret scans stay redacted, and SBOM reproducibility is verified by generating twice from locked dependency manifests.
 - Cache fallback must be visible through source or quality notes.
 - Demo provider must remain disabled by default.
 - Alert triggers must honor cooldown.
@@ -345,3 +388,5 @@ For any functional change:
 ## 6. Known Non-Blocking Issues
 
 - Some external provider adapters use public endpoints that can change without notice.
+- Initial SLO targets are engineering hypotheses with no burn-rate alerting or enforced error-budget policy; representative production-like local samples are needed before tuning them.
+- CycloneDX SBOM generation and immutable action pins improve inventory and CI integrity, but release signing and SLSA provenance generation/verification are not implemented.

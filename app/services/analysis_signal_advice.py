@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.schemas import ActionAdvice, DataQuality, PlateItem, Quote, StockInfo
+from app.models.analysis import (
+    ActionAdvice,
+    DataQuality,
+)
+from app.models.market import (
+    PlateItem,
+    Quote,
+    StockInfo,
+)
 from app.services.analysis_signal_quality import quality_reason
 
 

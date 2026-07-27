@@ -1,4 +1,5 @@
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
+import { auditTimestampEpoch, formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { normalizeUiSymbol } from "./symbols.js";
@@ -377,7 +378,8 @@ function renderSnapshotOptions(state) {
 }
 
 function snapshotOption(item, planned) {
-  const label = `${item.market_time || item.created_at || "--"} · ${item.action || "建议"}${planned ? " · 已建计划" : ""}`;
+  const snapshotTime = item.market_time || formatAuditTimestamp(item.created_at);
+  const label = `${snapshotTime} · ${item.action || "建议"}${planned ? " · 已建计划" : ""}`;
   return `<option value="${escapeHtml(item.id)}"${planned ? " disabled" : ""}>${escapeHtml(label)}</option>`;
 }
 
@@ -484,7 +486,10 @@ function mergeEvaluationItems(primary, retained = []) {
     seen.add(identity);
     merged.push(item);
   });
-  return merged.sort((left, right) => evaluationSortKey(right).localeCompare(evaluationSortKey(left)));
+  return merged.sort((left, right) => {
+    const byTime = evaluationSortEpoch(right) - evaluationSortEpoch(left);
+    return byTime || Number(right?.id || 0) - Number(left?.id || 0);
+  });
 }
 
 function evaluationIdentity(item) {
@@ -492,8 +497,8 @@ function evaluationIdentity(item) {
   return [item?.plan_revision, item?.as_of, item?.rule_version].map((value) => String(value || "")).join(":");
 }
 
-function evaluationSortKey(item) {
-  return `${String(item?.evaluated_at || item?.as_of || "").padEnd(24, " ")}:${String(Number(item?.id) || 0).padStart(12, "0")}`;
+function evaluationSortEpoch(item) {
+  return auditTimestampEpoch(String(item?.evaluated_at || item?.as_of || "")) ?? Number.NEGATIVE_INFINITY;
 }
 
 function nextPlanSequence(state, field, planId) {

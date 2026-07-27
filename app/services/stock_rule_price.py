@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.models.schemas import AnalysisResult, RuleMatch
+from app.models.analysis import (
+    AnalysisResult,
+    RuleMatch,
+)
 from app.services.stock_rule_contracts import (
     LEVEL_POSITIVE,
     LEVEL_RISK,

@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Callable
 
-from app.models.schemas import DataQuality, Quote, SignalItem
+from app.models.analysis import (
+    DataQuality,
+    SignalItem,
+)
+from app.models.market import (
+    Quote,
+)
 
 
 QUALITY_HIGH_RISK_MAX = 50

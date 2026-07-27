@@ -8,8 +8,8 @@ from typing import Iterable
 from app.models.market_scan import MarketScanResultWrite, MarketScanRun, MarketScanSeed
 from app.repositories.market_scan_context import MarketScanRepositoryContext
 from app.repositories.market_scan_mapping import run_from_row
+from app.utils.audit_time import audit_now_text as now_text
 from app.utils.errors import NotFoundError
-from app.utils.time import now_text
 
 
 MARKET_SCAN_RESULT_SEED_SQL = """

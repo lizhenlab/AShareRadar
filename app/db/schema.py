@@ -14,11 +14,18 @@ from app.db.schema_migrations import (
 )
 
 
-def initialize_schema(conn: sqlite3.Connection) -> None:
+def initialize_schema(
+    conn: sqlite3.Connection,
+    *,
+    legacy_audit_timezone: str = "Asia/Shanghai",
+) -> None:
     conn.executescript(SCHEMA_SQL)
-    apply_compat_schema(conn)
+    apply_compat_schema(conn, legacy_audit_timezone=legacy_audit_timezone)
     conn.executescript(ADVICE_REVIEW_SCHEMA_SQL)
-    apply_advice_review_compat_schema(conn)
+    apply_advice_review_compat_schema(
+        conn,
+        legacy_audit_timezone=legacy_audit_timezone,
+    )
 
 
 __all__ = [

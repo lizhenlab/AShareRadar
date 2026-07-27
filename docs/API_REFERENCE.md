@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 89
+Total endpoints: 92
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -24,11 +24,13 @@ Total endpoints: 89
 | POST | `/api/data/trading-calendar/refresh` | - | `refresh_trading_calendar_api` | `TradeCalendarRefreshResponse` | `app/api/routes/data.py` |
 | GET | `/api/futu/status` | - | `futu_status` | `FutuStatusResponse` | `app/api/routes/data.py` |
 | GET | `/api/health` | - | `health` | `-` | `app/api/routes/health.py` |
+| GET | `/api/health/live` | - | `liveness` | `HealthProbe` | `app/api/routes/health.py` |
+| GET | `/api/health/ready` | - | `readiness` | `HealthProbe` | `app/api/routes/health.py` |
 | GET | `/api/leaderboard` | query `symbols: str \| None = None` | `leaderboard` | `StrongStockWatchResponse` | `app/api/routes/analysis.py` |
 | POST | `/api/local-data/cleanup` | query `confirm: Literal['retention-cleanup'] = ...` | `cleanup_local_data` | `RuntimeCleanupResult` | `app/api/routes/local_data.py` |
 | GET | `/api/local-data/cleanup-preview` | - | `preview_local_cleanup` | `RuntimeCleanupPreview` | `app/api/routes/local_data.py` |
 | POST | `/api/local-data/export` | - | `export_local_user_data` | `UserDataBundle` | `app/api/routes/local_data.py` |
-| POST | `/api/local-data/import` | body `payload: UserDataBundle`<br>query `mode: Literal['merge', 'replace'] = 'merge'`<br>query `dry_run: bool = True`<br>query `preview_token: str \| None = None` (min_length=32; max_length=200) | `import_local_user_data` | `LocalDataImportResult` | `app/api/routes/local_data.py` |
+| POST | `/api/local-data/import` | body `payload: UserDataBundle`<br>query `mode: Literal['merge', 'replace'] = 'merge'`<br>query `dry_run: bool = True`<br>query `preview_token: str \| None = None` (min_length=32; max_length=200)<br>query `legacy_audit_timezone: str \| None = None` (min_length=1; max_length=128) | `import_local_user_data` | `LocalDataImportResult` | `app/api/routes/local_data.py` |
 | GET | `/api/market` | - | `market` | `MarketOverview` | `app/api/routes/analysis.py` |
 | GET | `/api/market-scans` | query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `market_scan_runs` | `MarketScanRunPage` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans` | body `payload: MarketScanStartRequest \| None` | `create_market_scan` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
@@ -91,6 +93,7 @@ Total endpoints: 89
 | GET | `/api/stream/quotes` | query `symbols: str = '600519,000001,300750'` | `stream_quotes` | `-` | `app/api/routes/quotes.py` |
 | GET | `/api/strong-stocks` | query `symbols: str \| None = None` | `strong_stocks` | `StrongStockWatchResponse` | `app/api/routes/analysis.py` |
 | GET | `/api/system/diagnostics` | - | `system_diagnostics` | `SystemDiagnostics` | `app/api/routes/monitoring.py` |
+| GET | `/api/system/reliability` | - | `system_reliability` | `ReliabilityReport` | `app/api/routes/monitoring.py` |
 | POST | `/api/tasks/run-once` | query `task: str \| None = None` (description=任务名称，不填则按顺序执行全部本地刷新任务) | `run_task_once` | `TaskRunOnceResponse` | `app/api/routes/monitoring.py` |
 | GET | `/api/tasks/runs` | query `limit: int = 20` (ge=1; le=100) | `task_runs` | `list[TaskRun]` | `app/api/routes/monitoring.py` |
 | GET | `/api/tasks/status` | - | `task_status` | `SchedulerStatus` | `app/api/routes/monitoring.py` |

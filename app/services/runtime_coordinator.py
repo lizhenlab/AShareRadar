@@ -6,7 +6,7 @@ import sys
 import threading
 
 from app.services.instance_guard import FileInstanceGuard, InstanceGuard
-from app.services.provider_errors import sanitize_provider_error
+from app.utils.provider_errors import sanitize_provider_error
 
 
 RUNTIME_LEADER_LOCK_SUFFIX = ".runtime-leader.lock"
