@@ -38,6 +38,7 @@ MARKET_SCAN_TASK_NAME = "full_market_scan"
 MARKET_SCAN_TASK_LABEL = "全市场A股扫描"
 MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE = "已有其他进程负责全市场扫描，本进程不能修改扫描任务"
 HISTORICAL_SCAN_UNAVAILABLE_MESSAGE = "当前数据源只提供当前快照；历史榜单只能读取已持久化快照，不能新建历史扫描"
+DAILY_BAR_WINDOW_MESSAGE = "全市场扫描仅使用已完成日线，请在交易日 15:15 后启动"
 TERMINAL_RECOVERY_MESSAGE = "本地扫描任务已退出，终态写入失败后自动中断；可从断点重试"
 TERMINAL_RECOVERY_ERROR = "本地后台扫描已退出，但原终态未能持久化"
 
@@ -156,8 +157,7 @@ class MarketScanManager:
         busy_is_noop: bool,
     ) -> MarketScanStartResponse | None:
         normalized_as_of = normalize_review_as_of(as_of, now=current)
-        if is_trading_day(normalized_as_of.date()) and normalized_as_of.time() < DAILY_KLINE_PUBLISH_TIME:
-            raise ValueError("全市场扫描仅使用已完成日线，请在交易日 15:15 后启动")
+        _require_completed_daily_bar_window(normalized_as_of)
         data_date = latest_expected_daily_kline_date(normalized_as_of)
         if as_of is not None and data_date != latest_expected_daily_kline_date(current):
             raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
@@ -197,7 +197,10 @@ class MarketScanManager:
             await run_cache_io(self._recover_terminal_persistence_failures, run_id)
             candidate = await run_cache_io(self.cache.market_scan_run, run_id)
             retry_plan = await run_cache_io(self.cache.market_scan_retry_plan, run_id)
-            self._validate_retry_candidate(candidate, retry_plan)
+            current = self._current_time()
+            if retry_plan.needs_market_data:
+                _require_completed_daily_bar_window(current)
+            self._validate_retry_candidate(candidate, retry_plan, current=current)
             active = await run_cache_io(self.cache.active_market_scan_run)
             if active is not None:
                 return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
@@ -410,18 +413,30 @@ class MarketScanManager:
         if self.settings.market_scan_min_history_rows > self.settings.market_scan_kline_limit:
             raise ValueError("全市场扫描最少历史行数不能大于K线抓取行数")
 
-    def _validate_retry_candidate(self, run: MarketScanRun, plan: MarketScanRetryPlan) -> None:
+    def _validate_retry_candidate(
+        self,
+        run: MarketScanRun,
+        plan: MarketScanRetryPlan,
+        *,
+        current: datetime,
+    ) -> None:
         if run.status not in RETRYABLE_SCAN_STATUSES:
             raise ValueError(f"扫描批次 {run.id} 当前状态不能重试：{run.status}")
         effective_rule_version = market_scan_rule_version(self.settings)
         if run.rule_version != effective_rule_version:
             raise ValueError("扫描规则/评分配置已变更，请新建扫描；旧批次将保留为历史快照")
-        self._validate_retry_data_date(run, plan)
+        self._validate_retry_data_date(run, plan, current=current)
 
-    def _validate_retry_data_date(self, run: MarketScanRun, plan: MarketScanRetryPlan) -> None:
+    def _validate_retry_data_date(
+        self,
+        run: MarketScanRun,
+        plan: MarketScanRetryPlan,
+        *,
+        current: datetime,
+    ) -> None:
         if not plan.needs_market_data:
             return
-        current_data_date = latest_expected_daily_kline_date(self._current_time()).isoformat()
+        current_data_date = latest_expected_daily_kline_date(current).isoformat()
         if run.data_date != current_data_date:
             raise ValueError(f"批次数据日期 {run.data_date} 已过期，当前完整交易日为 {current_data_date}；" "请新建扫描，旧批次将保留为历史快照")
 
@@ -435,6 +450,11 @@ def _market_scan_shutdown_timeout(settings: object) -> float:
     except (TypeError, ValueError):
         return 5.0
     return timeout if math.isfinite(timeout) and timeout > 0 else 5.0
+
+
+def _require_completed_daily_bar_window(value: datetime) -> None:
+    if is_trading_day(value.date()) and value.time() < DAILY_KLINE_PUBLISH_TIME:
+        raise ValueError(DAILY_BAR_WINDOW_MESSAGE)
 
 
 def _consume_stop_exception(task: asyncio.Task[None]) -> None:

@@ -8,8 +8,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 259 | 536 | 2925 | 701 | 56221 |
-| `tests/` | 151 | 151 | 1883 | 704 | 59464 |
+| `app/` | 259 | 536 | 2926 | 701 | 56241 |
+| `tests/` | 151 | 151 | 1884 | 704 | 59494 |
 | `tools/` | 6 | 6 | 92 | 4 | 1722 |
 
 ## Python Function Health
@@ -2940,45 +2940,46 @@ Lines: 202
 
 #### `app/services/market_scan_manager.py`
 
-Lines: 472
+Lines: 492
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `MarketScanManager` | 45 | `class MarketScanManager` |
-| method | `MarketScanManager.__init__` | 48 | `def __init__(self, datahub: DataHub, *, instance_guard: InstanceGuard \| None=None, now: Callable[[], datetime] \| None=None) -> None` |
-| method | `MarketScanManager.start` | 67 | `async def start(self) -> int` |
-| method | `MarketScanManager.is_quiescent` | 73 | `def is_quiescent(self) -> bool` |
-| method | `MarketScanManager.wait_until_quiescent` | 76 | `async def wait_until_quiescent(self) -> None` |
-| method | `MarketScanManager.stop` | 79 | `async def stop(self) -> None` |
-| method | `MarketScanManager.rollback_activation` | 82 | `async def rollback_activation(self) -> None` |
-| method | `MarketScanManager._run_stop` | 87 | `async def _run_stop(self, *, close: bool, task_name: str) -> None` |
-| method | `MarketScanManager._stop` | 96 | `async def _stop(self, *, close: bool) -> None` |
-| method | `MarketScanManager._finish_stop` | 117 | `async def _finish_stop(self, snapshot: MarketScanStopSnapshot) -> None` |
-| method | `MarketScanManager.create_scan` | 133 | `async def create_scan(self, *, as_of: datetime \| None=None, trigger: MarketScanTrigger='manual') -> MarketScanStartResponse` |
-| method | `MarketScanManager._create_scan` | 150 | `async def _create_scan(self, *, as_of: datetime \| None, trigger: MarketScanTrigger, current: datetime, busy_is_noop: bool) -> MarketScanStartResponse \| None` |
+| class | `MarketScanManager` | 46 | `class MarketScanManager` |
+| method | `MarketScanManager.__init__` | 49 | `def __init__(self, datahub: DataHub, *, instance_guard: InstanceGuard \| None=None, now: Callable[[], datetime] \| None=None) -> None` |
+| method | `MarketScanManager.start` | 68 | `async def start(self) -> int` |
+| method | `MarketScanManager.is_quiescent` | 74 | `def is_quiescent(self) -> bool` |
+| method | `MarketScanManager.wait_until_quiescent` | 77 | `async def wait_until_quiescent(self) -> None` |
+| method | `MarketScanManager.stop` | 80 | `async def stop(self) -> None` |
+| method | `MarketScanManager.rollback_activation` | 83 | `async def rollback_activation(self) -> None` |
+| method | `MarketScanManager._run_stop` | 88 | `async def _run_stop(self, *, close: bool, task_name: str) -> None` |
+| method | `MarketScanManager._stop` | 97 | `async def _stop(self, *, close: bool) -> None` |
+| method | `MarketScanManager._finish_stop` | 118 | `async def _finish_stop(self, snapshot: MarketScanStopSnapshot) -> None` |
+| method | `MarketScanManager.create_scan` | 134 | `async def create_scan(self, *, as_of: datetime \| None=None, trigger: MarketScanTrigger='manual') -> MarketScanStartResponse` |
+| method | `MarketScanManager._create_scan` | 151 | `async def _create_scan(self, *, as_of: datetime \| None, trigger: MarketScanTrigger, current: datetime, busy_is_noop: bool) -> MarketScanStartResponse \| None` |
 | method | `MarketScanManager.retry_scan` | 193 | `async def retry_scan(self, run_id: int) -> MarketScanStartResponse` |
-| method | `MarketScanManager.cancel_scan` | 214 | `async def cancel_scan(self, run_id: int) -> MarketScanRun` |
-| method | `MarketScanManager.scheduled_tick` | 229 | `async def scheduled_tick(self, now: datetime \| None=None) -> MarketScanStartResponse \| None` |
-| method | `MarketScanManager.run` | 274 | `def run(self, run_id: int) -> MarketScanRun` |
-| method | `MarketScanManager.latest_run` | 278 | `def latest_run(self) -> MarketScanRun \| None` |
-| method | `MarketScanManager.runs` | 282 | `def runs(self, *, page: int, page_size: int) -> MarketScanRunPage` |
-| method | `MarketScanManager.results` | 286 | `def results(self, run_id: int, *, page: int, page_size: int, status: MarketScanResultStatus \| None, market: str \| None, industry: str \| None, is_st: bool \| None, is_new: bool \| None, min_data_quality_score: int \| None, keyword: str \| None, sort: MarketScanSort, order: MarketScanSortOrder) -> MarketScanResultPage` |
-| method | `MarketScanManager._launch` | 318 | `def _launch(self, run_id: int) -> None` |
-| method | `MarketScanManager._execute_run` | 321 | `async def _execute_run(self, run_id: int, cancel_event: asyncio.Event) -> None` |
-| method | `MarketScanManager._finish_cancelled` | 348 | `async def _finish_cancelled(self, run_id: int) -> None` |
-| method | `MarketScanManager._finish_interrupted` | 352 | `async def _finish_interrupted(self, run_id: int) -> None` |
-| method | `MarketScanManager._finish_failed` | 356 | `async def _finish_failed(self, run_id: int, exc: Exception) -> None` |
-| method | `MarketScanManager._track_terminal_persistence` | 360 | `def _track_terminal_persistence(self, run_id: int, persisted: bool) -> None` |
-| method | `MarketScanManager._recover_terminal_persistence_failures` | 367 | `def _recover_terminal_persistence_failures(self, run_id: int \| None=None) -> int` |
-| method | `MarketScanManager._owns_terminal_recovery_lease` | 397 | `def _owns_terminal_recovery_lease(self) -> bool` |
-| method | `MarketScanManager._validate_settings` | 409 | `def _validate_settings(self) -> None` |
-| method | `MarketScanManager._validate_retry_candidate` | 413 | `def _validate_retry_candidate(self, run: MarketScanRun, plan: MarketScanRetryPlan) -> None` |
-| method | `MarketScanManager._validate_retry_data_date` | 421 | `def _validate_retry_data_date(self, run: MarketScanRun, plan: MarketScanRetryPlan) -> None` |
-| method | `MarketScanManager._current_time` | 428 | `def _current_time(self, value: datetime \| None=None) -> datetime` |
-| function | `_market_scan_shutdown_timeout` | 432 | `def _market_scan_shutdown_timeout(settings: object) -> float` |
-| function | `_consume_stop_exception` | 440 | `def _consume_stop_exception(task: asyncio.Task[None]) -> None` |
-| function | `market_scan_rule_version` | 449 | `def market_scan_rule_version(settings: object) -> str` |
-| function | `_market_now` | 461 | `def _market_now() -> datetime` |
+| method | `MarketScanManager.cancel_scan` | 217 | `async def cancel_scan(self, run_id: int) -> MarketScanRun` |
+| method | `MarketScanManager.scheduled_tick` | 232 | `async def scheduled_tick(self, now: datetime \| None=None) -> MarketScanStartResponse \| None` |
+| method | `MarketScanManager.run` | 277 | `def run(self, run_id: int) -> MarketScanRun` |
+| method | `MarketScanManager.latest_run` | 281 | `def latest_run(self) -> MarketScanRun \| None` |
+| method | `MarketScanManager.runs` | 285 | `def runs(self, *, page: int, page_size: int) -> MarketScanRunPage` |
+| method | `MarketScanManager.results` | 289 | `def results(self, run_id: int, *, page: int, page_size: int, status: MarketScanResultStatus \| None, market: str \| None, industry: str \| None, is_st: bool \| None, is_new: bool \| None, min_data_quality_score: int \| None, keyword: str \| None, sort: MarketScanSort, order: MarketScanSortOrder) -> MarketScanResultPage` |
+| method | `MarketScanManager._launch` | 321 | `def _launch(self, run_id: int) -> None` |
+| method | `MarketScanManager._execute_run` | 324 | `async def _execute_run(self, run_id: int, cancel_event: asyncio.Event) -> None` |
+| method | `MarketScanManager._finish_cancelled` | 351 | `async def _finish_cancelled(self, run_id: int) -> None` |
+| method | `MarketScanManager._finish_interrupted` | 355 | `async def _finish_interrupted(self, run_id: int) -> None` |
+| method | `MarketScanManager._finish_failed` | 359 | `async def _finish_failed(self, run_id: int, exc: Exception) -> None` |
+| method | `MarketScanManager._track_terminal_persistence` | 363 | `def _track_terminal_persistence(self, run_id: int, persisted: bool) -> None` |
+| method | `MarketScanManager._recover_terminal_persistence_failures` | 370 | `def _recover_terminal_persistence_failures(self, run_id: int \| None=None) -> int` |
+| method | `MarketScanManager._owns_terminal_recovery_lease` | 400 | `def _owns_terminal_recovery_lease(self) -> bool` |
+| method | `MarketScanManager._validate_settings` | 412 | `def _validate_settings(self) -> None` |
+| method | `MarketScanManager._validate_retry_candidate` | 416 | `def _validate_retry_candidate(self, run: MarketScanRun, plan: MarketScanRetryPlan, *, current: datetime) -> None` |
+| method | `MarketScanManager._validate_retry_data_date` | 430 | `def _validate_retry_data_date(self, run: MarketScanRun, plan: MarketScanRetryPlan, *, current: datetime) -> None` |
+| method | `MarketScanManager._current_time` | 443 | `def _current_time(self, value: datetime \| None=None) -> datetime` |
+| function | `_market_scan_shutdown_timeout` | 447 | `def _market_scan_shutdown_timeout(settings: object) -> float` |
+| function | `_require_completed_daily_bar_window` | 455 | `def _require_completed_daily_bar_window(value: datetime) -> None` |
+| function | `_consume_stop_exception` | 460 | `def _consume_stop_exception(task: asyncio.Task[None]) -> None` |
+| function | `market_scan_rule_version` | 469 | `def market_scan_rule_version(settings: object) -> str` |
+| function | `_market_now` | 481 | `def _market_now() -> datetime` |
 
 #### `app/services/market_scan_recovery.py`
 
@@ -7797,7 +7798,7 @@ Lines: 1129
 
 #### `tests/test_market_scan_modules.py`
 
-Lines: 1575
+Lines: 1605
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -7843,21 +7844,22 @@ Lines: 1575
 | function | `test_market_scan_retry_fails_when_validated_pool_omits_pending_symbol` | 1192 | `def test_market_scan_retry_fails_when_validated_pool_omits_pending_symbol(tmp_path: Path) -> None` |
 | function | `test_market_scan_retry_rejects_changed_scoring_contract` | 1235 | `def test_market_scan_retry_rejects_changed_scoring_contract(tmp_path: Path) -> None` |
 | function | `test_market_scan_rejects_stale_retry_that_requires_new_market_data` | 1261 | `def test_market_scan_rejects_stale_retry_that_requires_new_market_data(tmp_path: Path) -> None` |
-| function | `test_market_scan_rejects_stale_retry_when_all_successes_used_fallback_data` | 1288 | `def test_market_scan_rejects_stale_retry_when_all_successes_used_fallback_data(tmp_path: Path) -> None` |
-| function | `test_market_scan_retry_validates_requested_run_before_returning_active_run` | 1340 | `def test_market_scan_retry_validates_requested_run_before_returning_active_run(tmp_path: Path) -> None` |
-| function | `test_market_scan_rejects_pool_missing_required_market` | 1365 | `def test_market_scan_rejects_pool_missing_required_market(tmp_path: Path) -> None` |
-| function | `test_market_scan_rejects_truncated_individual_market_pool` | 1383 | `def test_market_scan_rejects_truncated_individual_market_pool(tmp_path: Path) -> None` |
-| function | `test_market_scan_scheduler_respects_publish_floor_and_does_not_repeat_failed_auto_run` | 1400 | `def test_market_scan_scheduler_respects_publish_floor_and_does_not_repeat_failed_auto_run(tmp_path: Path) -> None` |
-| function | `test_market_scan_scheduler_respects_same_day_manual_cancellation` | 1435 | `def test_market_scan_scheduler_respects_same_day_manual_cancellation(tmp_path: Path) -> None` |
-| function | `test_market_scan_rejects_intraday_snapshot_before_daily_bars_are_complete` | 1466 | `def test_market_scan_rejects_intraday_snapshot_before_daily_bars_are_complete(tmp_path: Path) -> None` |
-| function | `test_market_scan_rejects_historical_as_of_before_any_side_effect` | 1476 | `def test_market_scan_rejects_historical_as_of_before_any_side_effect(tmp_path: Path) -> None` |
-| async function | `_wait_for_terminal` | 1494 | `async def _wait_for_terminal(scanner: MarketScanManager, run_id: int)` |
-| function | `_scanner` | 1502 | `def _scanner(hub: _MarketScanHub, *, now: datetime=SCAN_AS_OF) -> MarketScanManager` |
-| function | `_rule_version` | 1510 | `def _rule_version(hub: _MarketScanHub) -> str` |
-| function | `_configure_clean_full_market` | 1514 | `def _configure_clean_full_market(hub: _MarketScanHub) -> None` |
-| async function | `_wait_for_status` | 1528 | `async def _wait_for_status(scanner: MarketScanManager, run_id: int, statuses: set[str])` |
-| function | `_quote_for` | 1537 | `def _quote_for(code: str, market: str, name: str, *, change_pct: float) -> Quote` |
-| function | `_daily_rows` | 1557 | `def _daily_rows(latest: date, count: int) -> list[Kline]` |
+| function | `test_market_scan_retry_rejects_intraday_snapshot_before_daily_bars_are_complete` | 1288 | `def test_market_scan_retry_rejects_intraday_snapshot_before_daily_bars_are_complete(tmp_path: Path) -> None` |
+| function | `test_market_scan_rejects_stale_retry_when_all_successes_used_fallback_data` | 1318 | `def test_market_scan_rejects_stale_retry_when_all_successes_used_fallback_data(tmp_path: Path) -> None` |
+| function | `test_market_scan_retry_validates_requested_run_before_returning_active_run` | 1370 | `def test_market_scan_retry_validates_requested_run_before_returning_active_run(tmp_path: Path) -> None` |
+| function | `test_market_scan_rejects_pool_missing_required_market` | 1395 | `def test_market_scan_rejects_pool_missing_required_market(tmp_path: Path) -> None` |
+| function | `test_market_scan_rejects_truncated_individual_market_pool` | 1413 | `def test_market_scan_rejects_truncated_individual_market_pool(tmp_path: Path) -> None` |
+| function | `test_market_scan_scheduler_respects_publish_floor_and_does_not_repeat_failed_auto_run` | 1430 | `def test_market_scan_scheduler_respects_publish_floor_and_does_not_repeat_failed_auto_run(tmp_path: Path) -> None` |
+| function | `test_market_scan_scheduler_respects_same_day_manual_cancellation` | 1465 | `def test_market_scan_scheduler_respects_same_day_manual_cancellation(tmp_path: Path) -> None` |
+| function | `test_market_scan_rejects_intraday_snapshot_before_daily_bars_are_complete` | 1496 | `def test_market_scan_rejects_intraday_snapshot_before_daily_bars_are_complete(tmp_path: Path) -> None` |
+| function | `test_market_scan_rejects_historical_as_of_before_any_side_effect` | 1506 | `def test_market_scan_rejects_historical_as_of_before_any_side_effect(tmp_path: Path) -> None` |
+| async function | `_wait_for_terminal` | 1524 | `async def _wait_for_terminal(scanner: MarketScanManager, run_id: int)` |
+| function | `_scanner` | 1532 | `def _scanner(hub: _MarketScanHub, *, now: datetime=SCAN_AS_OF) -> MarketScanManager` |
+| function | `_rule_version` | 1540 | `def _rule_version(hub: _MarketScanHub) -> str` |
+| function | `_configure_clean_full_market` | 1544 | `def _configure_clean_full_market(hub: _MarketScanHub) -> None` |
+| async function | `_wait_for_status` | 1558 | `async def _wait_for_status(scanner: MarketScanManager, run_id: int, statuses: set[str])` |
+| function | `_quote_for` | 1567 | `def _quote_for(code: str, market: str, name: str, *, change_pct: float) -> Quote` |
+| function | `_daily_rows` | 1587 | `def _daily_rows(latest: date, count: int) -> list[Kline]` |
 
 #### `tests/test_market_scan_repository.py`
 

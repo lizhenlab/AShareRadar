@@ -1063,7 +1063,7 @@ def test_market_scan_retry_finalizes_fully_processed_interrupted_run(tmp_path: P
     )
 
     async def scenario():
-        scanner = _scanner(hub)
+        scanner = _scanner(hub, now=datetime(2026, 7, 20, 10, 30))
         assert await scanner.start() == 1
         assert scanner.run(run.id).status == "interrupted"
         retried = await scanner.retry_scan(run.id)
@@ -1283,6 +1283,36 @@ def test_market_scan_rejects_stale_retry_that_requires_new_market_data(tmp_path:
     assert current.status == "failed"
     assert current.retry_count == 0
     assert hub.cache.market_scan_runs(page=1, page_size=100).total == 1
+
+
+def test_market_scan_retry_rejects_intraday_snapshot_before_daily_bars_are_complete(
+    tmp_path: Path,
+) -> None:
+    hub = _MarketScanHub(tmp_path)
+    run = hub.cache.create_market_scan_run(
+        trigger="manual",
+        rule_version=_rule_version(hub),
+        as_of="2026-07-16 16:30:00",
+        data_date="2026-07-16",
+        scope="test",
+    )
+    hub.cache.start_market_scan_run(run.id)
+    hub.cache.finish_market_scan_run(run.id, "failed", message="等待次日重试")
+
+    async def scenario():
+        scanner = _scanner(hub, now=datetime(2026, 7, 17, 10, 30))
+        with pytest.raises(ValueError, match="15:15"):
+            await scanner.retry_scan(run.id)
+        current = scanner.run(run.id)
+        await scanner.stop()
+        return current
+
+    current = asyncio.run(scenario())
+
+    assert current.status == "failed"
+    assert current.retry_count == 0
+    assert hub.cache.market_scan_runs(page=1, page_size=100).total == 1
+    assert hub.stock_pool_calls == 0
 
 
 def test_market_scan_rejects_stale_retry_when_all_successes_used_fallback_data(tmp_path: Path) -> None:

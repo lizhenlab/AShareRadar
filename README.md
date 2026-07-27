@@ -104,7 +104,7 @@ Open **全市场榜单** and click **开始扫描**. The API immediately creates
 
 The scan workspace validates API response contracts, uses a single bounded exponential-backoff poller, falls back to the latest run after a missing run or repeated refresh failures, resets pagination when it discovers a new run, and resumes immediately when the browser returns online. Static assets are revalidated with `no-cache`, and the scan ES modules share one version mapping.
 
-On a trading day, manual scans are accepted only after the 15:15 completed-daily-bar boundary. Optional after-close scheduling, concurrency, timeouts, retention, degraded behavior, and troubleshooting are documented in the [Operations Guide](docs/OPERATIONS.md).
+On a trading day, manual starts and retries that still need market data are accepted only after the 15:15 completed-daily-bar boundary. Optional after-close scheduling, concurrency, timeouts, retention, degraded behavior, and troubleshooting are documented in the [Operations Guide](docs/OPERATIONS.md).
 
 ## Current Architecture
 
