@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,11 +17,18 @@ from app.models.market_scan import (
     MarketScanResultItem,
     MarketScanResultWrite,
     MarketScanRun,
+    MarketScanScoreDistribution,
     MarketScanSeed,
 )
 from app.models.schemas import Kline
 from app.services.cache import SQLiteCache
-from app.services.market_scan_completion import completion_status, publication_blockers
+from app.services.market_scan_completion import (
+    MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
+    MarketScanFinalizer,
+    assess_market_scan_score_distribution,
+    completion_status,
+    publication_blockers,
+)
 from app.services.market_scan_contracts import (
     MarketScanCacheProtocol,
     MarketScanDataHubProtocol,
@@ -28,6 +36,7 @@ from app.services.market_scan_contracts import (
 )
 from app.services.market_scan_execution import MarketScanExecutor
 from app.services.market_scan_manager import market_scan_rule_version
+from app.services import market_scan_manager
 from app.services.market_scan_scoring import (
     MarketScanReplayError,
     market_scan_score_spec,
@@ -52,9 +61,12 @@ def test_score_spec_hash_is_canonical_and_covers_every_ranking_contract_dimensio
     assert len(stable_score_spec_hash(spec)) == 64
 
     mutations = []
-    changed_weight = deepcopy(spec)
-    changed_weight["final_score"]["weights"]["leader_score"] = 0.84
-    mutations.append(changed_weight)
+    changed_penalty = deepcopy(spec)
+    changed_penalty["final_score"]["quality_penalty_per_missing_point"] = 0.14
+    mutations.append(changed_penalty)
+    changed_refinement = deepcopy(spec)
+    changed_refinement["ranking"]["refinement"]["weights"]["ma_alignment"] = 0.39
+    mutations.append(changed_refinement)
     changed_profile = deepcopy(spec)
     changed_profile["leader_profile"]["profile_id"] = "full-market-trend-only-v-next"
     mutations.append(changed_profile)
@@ -80,9 +92,22 @@ def test_rule_version_is_an_opaque_stable_hash_not_a_partial_config_string(tmp_p
 
     assert first == second
     prefix, digest = first.split(":", 1)
-    assert prefix == "full-market-scan-v3"
+    assert prefix == "full-market-scan-v4"
     assert len(digest) == 64
     assert "kline_limit=" not in first
+
+
+def test_rule_version_hash_covers_score_distribution_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(cache_path=tmp_path / "rule-distribution.sqlite3", scheduler_enabled=False)
+    baseline = market_scan_rule_version(settings)
+    changed = replace(
+        MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
+        degraded_top100_tie_ratio_at_least=0.45,
+    )
+
+    monkeypatch.setattr(market_scan_manager, "MARKET_SCAN_SCORE_DISTRIBUTION_POLICY", changed)
+
+    assert market_scan_manager.market_scan_rule_version(settings) != baseline
 
 
 def test_scoring_replay_details_survive_sqlite_round_trip(tmp_path: Path) -> None:
@@ -133,6 +158,7 @@ def test_scoring_replay_details_survive_sqlite_round_trip(tmp_path: Path) -> Non
     )
     assert restored.score_details["inputs"]["amount"] == pytest.approx(800_000_000)
     assert restored.score_details["components"]["leader_score"]["rule_deltas"] == {}
+    assert restored.score_details["components"]["rank_refinement"]["score"] <= 1
     assert restored.score_details["components"]["final_score"]["rounded"] == restored.score
     assert restored.score_details["ranking"]["tie_break_values"]["symbol"] == "600001.SH"
 
@@ -344,7 +370,7 @@ def test_quote_snapshot_span_blocks_when_one_market_exceeds_the_limit(tmp_path: 
     assert "快照跨度" in message
 
 
-def test_quote_snapshot_span_uses_worst_within_market_span_for_real_provider_times(
+def test_quote_snapshot_span_blocks_cross_market_time_mixing(
     tmp_path: Path,
 ) -> None:
     cache = _cache(tmp_path)
@@ -368,11 +394,11 @@ def test_quote_snapshot_span_uses_worst_within_market_span_for_real_provider_tim
     )
 
     assert summary.snapshot_started_at == "2026-07-17 15:35:00"
-    assert summary.snapshot_finished_at == "2026-07-17 15:35:50"
-    assert summary.snapshot_span_seconds == 50
-    assert publication_blockers(summary) == ()
-    assert status == "success"
-    assert "成功 6/6" in message
+    assert summary.snapshot_finished_at == "2026-07-17 16:15:59"
+    assert summary.snapshot_span_seconds == 40 * 60 + 59
+    assert publication_blockers(summary)
+    assert status == "failed"
+    assert "快照跨度" in message
 
 
 def test_snapshot_span_normalizes_equivalent_aware_and_naive_market_times(
@@ -394,7 +420,7 @@ def test_snapshot_span_normalizes_equivalent_aware_and_naive_market_times(
 
     summary = cache.market_scan_repo.publication_summary(run.id)
 
-    assert summary.snapshot_span_seconds == 0
+    assert summary.snapshot_span_seconds == 10 * 60
     assert summary.invalid_snapshot_timestamps == ()
     assert publication_blockers(summary) == ()
 
@@ -700,10 +726,11 @@ def _rows(latest: date, count: int = 80) -> list[Kline]:
             days.append(cursor)
         cursor -= timedelta(days=1)
     days.reverse()
+    first_close = 10.3 - (count - 1) * 0.03
     return [
         make_kline(
             date=day.isoformat(),
-            close=10 + index * 0.03,
+            close=first_close + index * 0.03,
             volume=1_000_000 + index * 10_000,
             source="测试前复权日K",
             as_of=latest.isoformat(),
@@ -771,3 +798,145 @@ async def _unexpected_process_pending(*_args) -> tuple[str, ...]:
 async def _slow_process_pending(*_args) -> tuple[str, ...]:
     await asyncio.sleep(0.1)
     return ()
+
+
+def test_constant_raw_scores_fail_publication_with_auditable_metrics() -> None:
+    raw_scores = [52.5] * 200
+    cache = _CompletionCache(raw_scores)
+
+    persisted = asyncio.run(
+        MarketScanFinalizer(cache).finish_completed(
+            _distribution_run(len(raw_scores)),
+            degraded_count=0,
+            warnings=(),
+        )
+    )
+
+    assert persisted is True
+    assert cache.finished is not None
+    status, message, error = cache.finished
+    assert status == "failed"
+    assert "raw_score 全部相同" in message
+    assert MARKET_SCAN_SCORE_DISTRIBUTION_POLICY.version in message
+    assert "distinct ratio 0.50%" in message
+    assert "最大并列组 200/200（100.00%）" in message
+    assert error is not None and "raw_score 全部相同" in error
+
+
+def test_top_100_fully_saturated_at_100_fails_publication() -> None:
+    raw_scores = [100.0] * 100 + [99.0 - index * 0.1 for index in range(200)]
+    distribution = _score_distribution(raw_scores)
+
+    assessment = assess_market_scan_score_distribution(distribution)
+    status, message = completion_status(
+        _distribution_run(len(raw_scores)),
+        score_distribution=distribution,
+    )
+
+    assert assessment.status == "failed"
+    assert assessment.reasons == ("前100名 raw_score 全部饱和在 100",)
+    assert distribution.saturation_ratio == 1 / 3
+    assert distribution.top100_tie_ratio == 1
+    assert status == "failed"
+    assert "前100名 raw_score 全部饱和在 100" in message
+
+
+def test_large_top_tie_degrades_instead_of_failing_publication() -> None:
+    raw_scores = [80.0] * 60 + [79.0 - index * 0.1 for index in range(140)]
+    distribution = _score_distribution(raw_scores)
+
+    assessment = assess_market_scan_score_distribution(distribution)
+    status, message = completion_status(
+        _distribution_run(len(raw_scores)),
+        score_distribution=distribution,
+    )
+
+    assert assessment.status == "degraded"
+    assert distribution.top100_tie_ratio == 0.6
+    assert status == "degraded"
+    assert "前100并列占比达到 60.00%" in message
+
+
+def test_normal_raw_score_distribution_passes_without_false_positive() -> None:
+    raw_scores = [20.0 + index * 0.1 for index in range(500)]
+    distribution = _score_distribution(raw_scores)
+
+    assessment = assess_market_scan_score_distribution(distribution)
+    status, message = completion_status(
+        _distribution_run(len(raw_scores)),
+        score_distribution=distribution,
+    )
+
+    assert assessment.status == "pass"
+    assert distribution.distinct_raw_score_ratio == 1
+    assert distribution.max_tie_group_ratio == 1 / 500
+    assert distribution.saturation_ratio == 0
+    assert distribution.top100_tie_ratio == 0
+    assert status == "success"
+    assert MARKET_SCAN_SCORE_DISTRIBUTION_POLICY.version in message
+
+
+def test_many_small_top_ties_are_measured_as_all_tied_rows() -> None:
+    raw_scores = [100 - index // 2 * 0.001 for index in range(100)] + [80 - index * 0.01 for index in range(100)]
+    distribution = _score_distribution(raw_scores)
+
+    assessment = assess_market_scan_score_distribution(distribution)
+
+    assert distribution.top100_max_tie_group_count == 2
+    assert distribution.top100_tied_count == 100
+    assert distribution.top100_tie_ratio == 1
+    assert assessment.status == "degraded"
+
+
+class _CompletionCache:
+    def __init__(self, raw_scores: list[float]) -> None:
+        self.raw_scores = raw_scores
+        self.finished: tuple[str, str, str | None] | None = None
+
+    def market_scan_results(self, run_id: int, **kwargs: object) -> SimpleNamespace:
+        assert run_id == 1
+        assert kwargs["status"] == "success"
+        assert kwargs["sort"] == "raw_score"
+        return SimpleNamespace(items=[SimpleNamespace(raw_score=value) for value in self.raw_scores])
+
+    def finish_market_scan_run(
+        self,
+        run_id: int,
+        status: str,
+        *,
+        message: str,
+        error: str | None = None,
+    ) -> None:
+        assert run_id == 1
+        self.finished = (status, message, error)
+
+
+def _distribution_run(count: int) -> MarketScanRun:
+    return MarketScanRun(
+        id=1,
+        status="running",
+        trigger="manual",
+        rule_version="test-rule-v1",
+        as_of="2026-07-29 16:30:00",
+        data_date="2026-07-29",
+        scope="test",
+        total_count=count,
+        excluded_count=0,
+        processed_count=count,
+        success_count=count,
+        missing_count=0,
+        skipped_count=0,
+        retry_count=0,
+        progress_pct=100,
+        coverage_pct=100,
+        created_at="2026-07-29 16:30:00",
+        updated_at="2026-07-29 16:31:00",
+    )
+
+
+def _score_distribution(raw_scores: list[float]) -> MarketScanScoreDistribution:
+    return MarketScanScoreDistribution.from_raw_scores(
+        raw_scores,
+        expected_count=len(raw_scores),
+        policy=MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
+    )

@@ -309,22 +309,19 @@ def _systemic_stale_cluster(
 def _snapshot_span(
     timestamp_rows: list[tuple[str, str]],
 ) -> tuple[str | None, str | None, float | None, tuple[str, ...]]:
-    parsed_by_market: dict[str, list[datetime]] = {}
+    parsed_times: list[datetime] = []
     invalid: list[str] = []
-    for market, value in timestamp_rows:
+    for _market, value in timestamp_rows:
         snapshot_time = _parse_snapshot_time(value)
         if snapshot_time is None:
             invalid.append(value)
         else:
-            parsed_by_market.setdefault(market, []).append(snapshot_time)
-    if not parsed_by_market:
+            parsed_times.append(snapshot_time)
+    if not parsed_times:
         return None, None, None, tuple(dict.fromkeys(invalid))
-    market_spans = []
-    for parsed in parsed_by_market.values():
-        started = min(parsed)
-        finished = max(parsed)
-        market_spans.append((max(0.0, (finished - started).total_seconds()), started, finished))
-    span, started, finished = max(market_spans, key=lambda item: item[0])
+    started = min(parsed_times)
+    finished = max(parsed_times)
+    span = max(0.0, (finished - started).total_seconds())
     return (
         started.isoformat(sep=" "),
         finished.isoformat(sep=" "),

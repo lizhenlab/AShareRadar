@@ -5,21 +5,24 @@ from app.models.research import (
     FactorLabReport,
     StandardFactor,
 )
-from app.services.research_factor_scoring import _dedupe
-
-
-MIN_FACTOR_CONFIRMATION_SAMPLES = 20
+from app.services.research_factor_scoring import MIN_FACTOR_CONFIRMATION_SAMPLES, _dedupe
 
 
 def _factor_score_impact(factor: StandardFactor) -> int:
     base = round((factor.score - 50) / 2)
     calibration = factor.calibration
-    if not calibration or calibration.sample_count <= 0:
+    if not calibration:
         return base
     if calibration.expected_level in {"较强", "偏正"}:
+        if calibration.sample_count < MIN_FACTOR_CONFIRMATION_SAMPLES:
+            return base
         return base + max(0, min(4, round((calibration.stability_score - 50) / 18)))
     if calibration.expected_level in {"偏弱", "风险"}:
+        if calibration.sample_count < 5:
+            return base
         return base - max(0, min(4, round((50 - calibration.stability_score) / 16)))
+    if calibration.sample_count < MIN_FACTOR_CONFIRMATION_SAMPLES:
+        return base
     return base + max(0, min(2, round((calibration.stability_score - 50) / 28)))
 
 
@@ -27,9 +30,13 @@ def _factor_calibration_impact(calibration: FactorCalibration) -> int:
     if calibration.sample_count < 5:
         return 0
     if calibration.expected_level in {"较强", "偏正"}:
+        if calibration.sample_count < MIN_FACTOR_CONFIRMATION_SAMPLES:
+            return 0
         return max(0, min(4, round((calibration.stability_score - 50) / 16)))
     if calibration.expected_level in {"偏弱", "风险"}:
         return -max(0, min(4, round((50 - calibration.stability_score) / 14)))
+    if calibration.sample_count < MIN_FACTOR_CONFIRMATION_SAMPLES:
+        return 0
     return max(0, min(2, round((calibration.stability_score - 50) / 24)))
 
 
@@ -49,7 +56,7 @@ def _factor_alpha_reason(factor: StandardFactor) -> str:
     calibration = factor.calibration
     if calibration and calibration.sample_count > 0:
         bucket_text = _factor_bucket_alpha_text(factor)
-        if calibration.sample_count < 5:
+        if calibration.sample_count < MIN_FACTOR_CONFIRMATION_SAMPLES:
             return (
                 f"{factor.value}；历史相似样本仅 {calibration.sample_count} 次，"
                 f"样本偏少，暂不把胜率用于提高结论权重。{bucket_text}"
@@ -69,7 +76,11 @@ def _factor_missing_data(factor_lab: FactorLabReport) -> list[str]:
 def _factor_bucket_alpha_text(factor: StandardFactor) -> str:
     if not factor.calibration_buckets:
         return ""
-    best = sorted(factor.calibration_buckets, key=lambda item: (item.sample_count >= 5, item.avg_forward_5d_return), reverse=True)[0]
+    best = sorted(
+        factor.calibration_buckets,
+        key=lambda item: (item.sample_count >= MIN_FACTOR_CONFIRMATION_SAMPLES, item.avg_forward_5d_return),
+        reverse=True,
+    )[0]
     return f"分层校准中「{best.name}」样本 {best.sample_count} 个，5日均值 {best.avg_forward_5d_return:.2f}%。"
 
 

@@ -27,6 +27,7 @@ from app.services.market_scan_completion import (
     MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
     MARKET_SCAN_PUBLISH_MIN_COVERAGE,
     MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
+    MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
     MarketScanFinalizer,
     sensitive_setting_values,
 )
@@ -525,7 +526,7 @@ def _consume_stop_exception(task: asyncio.Task[None]) -> None:
 
 def market_scan_rule_version(settings: object) -> str:
     contract = {
-        "schema_version": 3,
+        "schema_version": 4,
         "score_spec": market_scan_score_spec(
             min_data_quality_score=int(getattr(settings, "market_scan_min_data_quality_score")),
         ),
@@ -545,11 +546,12 @@ def market_scan_rule_version(settings: object) -> str:
             "excluded_denominator_statuses": ["skipped"],
             "minimum_coverage": MARKET_SCAN_PUBLISH_MIN_COVERAGE,
             "minimum_eligible_ratio": MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
-            "snapshot_span_scope": "per-market",
+            "snapshot_span_scope": "all-markets",
             "max_snapshot_span_seconds": MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
+            "score_distribution": MARKET_SCAN_SCORE_DISTRIBUTION_POLICY.spec(),
         },
     }
-    return f"full-market-scan-v3:{stable_score_spec_hash(contract)}"
+    return f"full-market-scan-v4:{stable_score_spec_hash(contract)}"
 
 
 def _market_now() -> datetime:

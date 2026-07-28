@@ -55,7 +55,7 @@ def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_pa
     assert started.accepted is True
     assert started.run.status == "queued"
     assert started.run.rule_version == _rule_version(hub)
-    assert started.run.rule_version.startswith("full-market-scan-v3:")
+    assert started.run.rule_version.startswith("full-market-scan-v4:")
     assert len(started.run.rule_version.rsplit(":", 1)[1]) == 64
     assert final.status == "failed"
     assert final.total_count == 3

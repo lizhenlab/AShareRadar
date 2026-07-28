@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -36,6 +37,7 @@ class MovingAverageRule:
     right_label: str
     positive_word: str
     negative_word: str
+    neutral_word: str
     positive_impact: int
     negative_impact: int
     left_value: Callable[[TrendContext], float]
@@ -48,6 +50,10 @@ class VolumeSignalRule:
     impact: int
     reason: Callable[[float], str]
     matches: Callable[[float, float], bool]
+
+
+RELATIVE_NEUTRAL_BAND_PCT = 0.10
+RELATIVE_FULL_EFFECT_PCT = 2.00
 
 
 def build_trend_context(quote: Quote, klines: list[Kline]) -> TrendContext:
@@ -100,28 +106,104 @@ def moving_average_contributions(context: TrendContext) -> list[SignalContributi
 def _moving_average_contribution(rule: MovingAverageRule, context: TrendContext) -> SignalContribution:
     left = rule.left_value(context)
     right = rule.right_value(context)
-    positive = left > right
-    impact = rule.positive_impact if positive else rule.negative_impact
-    word = rule.positive_word if positive else rule.negative_word
-    reason = f"{rule.left_label} {left:.2f} {word} {rule.right_label} {right:.2f}。"
+    impact, relative_pct = continuous_relative_impact(
+        left,
+        right,
+        positive_impact=rule.positive_impact,
+        negative_impact=rule.negative_impact,
+    )
+    word = relative_direction_word(
+        relative_pct,
+        positive_word=rule.positive_word,
+        negative_word=rule.negative_word,
+        neutral_word=rule.neutral_word,
+    )
+    reason = f"{rule.left_label} {left:.2f} {word} {rule.right_label} {right:.2f}（相对差 {format_relative_pct(relative_pct)}）。"
     return contribution("均线", rule.name, impact, reason)
 
 
 def slope_contributions(context: TrendContext) -> list[SignalContribution]:
+    short_impact, short_relative_pct = continuous_relative_impact(
+        context.ma5,
+        context.prev_ma5,
+        positive_impact=7,
+        negative_impact=-5,
+    )
+    wave_impact, wave_relative_pct = continuous_relative_impact(
+        context.ma20,
+        context.prev_ma20,
+        positive_impact=6,
+        negative_impact=-6,
+    )
     return [
         contribution(
             "斜率",
             "短线斜率",
-            7 if context.ma5 > context.prev_ma5 else -5,
-            f"5日线较前5日 {'抬升' if context.ma5 > context.prev_ma5 else '走弱'}。",
+            short_impact,
+            "5日线较前5日 "
+            f"{relative_direction_word(short_relative_pct, positive_word='抬升', negative_word='走弱', neutral_word='基本持平')}"
+            f"（相对变化 {format_relative_pct(short_relative_pct)}）。",
         ),
         contribution(
             "斜率",
             "波段斜率",
-            6 if context.ma20 >= context.prev_ma20 else -6,
-            f"20日线较前5日 {'稳定或抬升' if context.ma20 >= context.prev_ma20 else '下行'}。",
+            wave_impact,
+            "20日线较前5日 "
+            f"{relative_direction_word(wave_relative_pct, positive_word='抬升', negative_word='下行', neutral_word='基本持平')}"
+            f"（相对变化 {format_relative_pct(wave_relative_pct)}）。",
         ),
     ]
+
+
+def continuous_relative_impact(
+    value: float,
+    reference: float,
+    *,
+    positive_impact: int,
+    negative_impact: int,
+    neutral_band_pct: float = RELATIVE_NEUTRAL_BAND_PCT,
+    full_effect_pct: float = RELATIVE_FULL_EFFECT_PCT,
+) -> tuple[int, float | None]:
+    """Map a relative distance to a bounded integer impact without an equality cliff."""
+    if not math.isfinite(neutral_band_pct) or not math.isfinite(full_effect_pct) or neutral_band_pct < 0 or full_effect_pct <= neutral_band_pct:
+        raise ValueError("relative impact thresholds must satisfy 0 <= neutral < full effect")
+    if positive_impact < 0 or negative_impact > 0:
+        raise ValueError("relative impact bounds must satisfy negative <= 0 <= positive")
+
+    relative_pct = relative_change_pct(value, reference)
+    if relative_pct is None or abs(relative_pct) <= neutral_band_pct:
+        return 0, relative_pct
+
+    progress = min(1.0, (abs(relative_pct) - neutral_band_pct) / (full_effect_pct - neutral_band_pct))
+    cap = positive_impact if relative_pct > 0 else abs(negative_impact)
+    magnitude = min(cap, int(math.floor(cap * progress + 0.5)))
+    return (magnitude if relative_pct > 0 else -magnitude), relative_pct
+
+
+def relative_change_pct(value: float, reference: float) -> float | None:
+    if not math.isfinite(value) or not math.isfinite(reference) or reference == 0:
+        return None
+    return (value - reference) / abs(reference) * 100
+
+
+def relative_direction_word(
+    relative_pct: float | None,
+    *,
+    positive_word: str,
+    negative_word: str,
+    neutral_word: str,
+    neutral_band_pct: float = RELATIVE_NEUTRAL_BAND_PCT,
+) -> str:
+    if relative_pct is None or abs(relative_pct) <= neutral_band_pct:
+        return neutral_word
+    return positive_word if relative_pct > 0 else negative_word
+
+
+def format_relative_pct(relative_pct: float | None) -> str:
+    if relative_pct is None:
+        return "不可用"
+    normalized = 0.0 if abs(relative_pct) < 0.005 else relative_pct
+    return f"{normalized:+.2f}%"
 
 
 def price_change_contribution(context: TrendContext) -> SignalContribution:
@@ -212,9 +294,9 @@ def _volume_reason(volume_ratio: float, suffix: str) -> str:
 
 
 MOVING_AVERAGE_RULES = (
-    MovingAverageRule("现价与5日线", "现价", "5日线", "高于", "低于", 8, -8, lambda context: context.quote.price, lambda context: context.ma5),
-    MovingAverageRule("短线均线排列", "5日线", "10日线", "高于", "未高于", 10, -6, lambda context: context.ma5, lambda context: context.ma10),
-    MovingAverageRule("波段均线排列", "10日线", "20日线", "高于", "未高于", 12, -8, lambda context: context.ma10, lambda context: context.ma20),
+    MovingAverageRule("现价与5日线", "现价", "5日线", "高于", "低于", "贴近", 8, -8, lambda context: context.quote.price, lambda context: context.ma5),
+    MovingAverageRule("短线均线排列", "5日线", "10日线", "高于", "低于", "基本持平于", 10, -6, lambda context: context.ma5, lambda context: context.ma10),
+    MovingAverageRule("波段均线排列", "10日线", "20日线", "高于", "低于", "基本持平于", 12, -8, lambda context: context.ma10, lambda context: context.ma20),
 )
 
 
@@ -249,16 +331,21 @@ def trend_label(score: int) -> str:
 
 __all__ = [
     "MOVING_AVERAGE_RULES",
+    "RELATIVE_FULL_EFFECT_PCT",
+    "RELATIVE_NEUTRAL_BAND_PCT",
     "TrendContext",
     "VOLUME_SIGNAL_RULES",
     "build_trend_context",
     "change_impact",
+    "continuous_relative_impact",
     "contribution",
     "impact_level",
     "insufficient_sample_contributions",
     "moving_average_contributions",
     "position_contributions",
     "price_change_contribution",
+    "relative_change_pct",
+    "relative_direction_word",
     "slope_contributions",
     "trend_contributions",
     "trend_label",

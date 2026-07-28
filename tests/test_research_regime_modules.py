@@ -236,16 +236,16 @@ def test_factor_lab_does_not_reduce_risk_for_six_thin_overlapping_factor_samples
     assert _factor_lab_risk_adjustment(context) == 0
 
 
-def test_real_six_factor_sample_floor_reaches_factor_risk_reduction_rules() -> None:
+def test_real_non_overlapping_sample_floor_does_not_prematurely_reduce_risk() -> None:
     analysis, bundle, feature, factor_lab = _fully_calibrated_regime_inputs()
     context = _build_regime_context(analysis, bundle, feature, factor_lab, None)
 
     assert len(factor_lab.factors) == 7
-    assert factor_lab.calibration_sample_count >= MIN_FACTOR_RISK_REDUCTION_SAMPLES
+    assert factor_lab.calibration_sample_count < MIN_FACTOR_RISK_REDUCTION_SAMPLES
     assert factor_lab.factors[-1].id == "valuation_anchor"
     assert factor_lab.factors[-1].calibration is not None
     assert factor_lab.factors[-1].calibration.sample_count == 0
-    assert round(_factor_lab_risk_adjustment(context), 2) == -0.14
+    assert _factor_lab_risk_adjustment(context) == 0
 
 
 def test_regime_risk_adjustments_are_named_and_ignore_non_finite_values() -> None:

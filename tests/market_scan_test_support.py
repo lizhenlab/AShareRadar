@@ -213,10 +213,11 @@ def _daily_rows(latest: date, count: int) -> list[Kline]:
             days.append(cursor)
         cursor -= timedelta(days=1)
     days.reverse()
+    first_close = 10.3 - (count - 1) * 0.03
     return [
         make_kline(
             date=day.isoformat(),
-            close=10 + index * 0.03,
+            close=first_close + index * 0.03,
             volume=1_000_000 + index * 10_000,
             source="测试前复权日K",
             as_of=latest.isoformat(),

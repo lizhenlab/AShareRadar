@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from app.models.market import (
     Kline,
     Quote,
@@ -21,6 +23,10 @@ from app.services.indicator_trend_components import (
 from app.utils.market_data import filter_valid_klines
 
 
+TREND_SCORE_CENTER = 50
+TREND_SCORE_SOFT_CLIP_SCALE = 50.0
+
+
 def trend_score(quote: Quote, klines: list[Kline]) -> tuple[int, str]:
     score, label, _ = trend_score_snapshot(quote, klines)
     return score, label
@@ -31,9 +37,15 @@ def trend_score_snapshot(quote: Quote, klines: list[Kline]) -> tuple[int, str, l
     if len(valid_klines) < 20:
         return 50, "数据不足", insufficient_sample_contributions()
     contributions = trend_contributions(build_trend_context(quote, valid_klines))
-    score = 50 + sum(item.impact for item in contributions)
-    score = max(0, min(100, score))
+    score = trend_score_from_impact(sum(item.impact for item in contributions))
     return score, _trend_label(score), contributions
+
+
+def trend_score_from_impact(total_impact: int | float) -> int:
+    if not math.isfinite(total_impact):
+        return TREND_SCORE_CENTER
+    score = TREND_SCORE_CENTER + TREND_SCORE_CENTER * math.tanh(total_impact / TREND_SCORE_SOFT_CLIP_SCALE)
+    return max(0, min(100, round(score)))
 
 
 def _add_contribution(
@@ -55,5 +67,6 @@ __all__ = [
     "_turnover_signal",
     "_volume_signal",
     "trend_score",
+    "trend_score_from_impact",
     "trend_score_snapshot",
 ]

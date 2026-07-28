@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import Counter
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from math import isfinite
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,11 +39,7 @@ MarketScanSortOrder = Literal["asc", "desc"]
 MarketScanCoverageScope = Literal["ALL", "SH", "SZ", "BJ"]
 
 MARKET_SCAN_RANK_TIE_BREAK: Final[tuple[tuple[str, str], ...]] = (
-    ("score", "desc"),
     ("raw_score", "desc"),
-    ("trend_score", "desc"),
-    ("change_pct", "desc"),
-    ("amount", "desc"),
     ("symbol", "asc"),
 )
 MARKET_SCAN_METADATA_DEGRADATION_REASONS: Final[frozenset[str]] = frozenset(
@@ -156,6 +155,171 @@ class MarketScanPublicationSummary:
         return next((item for item in self.coverages if item.scope == scope), None)
 
 
+MarketScanScoreDistributionGateStatus = Literal["not-evaluated", "pass", "degraded", "failed"]
+
+
+@dataclass(frozen=True)
+class MarketScanScoreDistributionPolicy:
+    version: str = "raw-score-distribution-v2"
+    raw_score_decimals: int = 6
+    top_size: int = 100
+    minimum_sample_count: int = 100
+    failed_observed_ratio_below: float = 0.95
+    degraded_observed_ratio_below: float = 0.99
+    failed_max_tie_group_ratio_at_least: float = 0.95
+    failed_saturation_ratio_at_least: float = 0.95
+    failed_top100_upper_saturation_ratio_at_least: float = 1.0
+    degraded_distinct_ratio_at_most: float = 0.02
+    degraded_max_tie_group_ratio_at_least: float = 0.25
+    degraded_single_tie_group_ratio_at_least: float = 0.50
+    degraded_saturation_ratio_at_least: float = 0.50
+    degraded_top100_tie_ratio_at_least: float = 0.50
+
+    def spec(self) -> dict[str, object]:
+        return asdict(self)
+
+    def assess(self, distribution: MarketScanScoreDistribution) -> MarketScanScoreDistributionAssessment:
+        if distribution.expected_count < self.minimum_sample_count:
+            return MarketScanScoreDistributionAssessment("not-evaluated")
+        failed_reasons = self._failure_reasons(distribution)
+        if failed_reasons:
+            return MarketScanScoreDistributionAssessment("failed", failed_reasons)
+        degraded_reasons = self._degraded_reasons(distribution)
+        if degraded_reasons:
+            return MarketScanScoreDistributionAssessment("degraded", degraded_reasons)
+        return MarketScanScoreDistributionAssessment("pass")
+
+    def _failure_reasons(self, distribution: MarketScanScoreDistribution) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if distribution.sample_count < self.minimum_sample_count or distribution.observed_ratio < self.failed_observed_ratio_below:
+            reasons.append(
+                f"raw_score 可审计样本不足：{distribution.sample_count}/{distribution.expected_count}"
+                f"（{distribution.observed_ratio:.2%}）"
+            )
+        if distribution.distinct_count == 1:
+            reasons.append("成功结果 raw_score 全部相同")
+        elif distribution.max_tie_group_ratio >= self.failed_max_tie_group_ratio_at_least:
+            reasons.append(f"最大并列组占比 {distribution.max_tie_group_ratio:.2%}，接近常量分")
+        if distribution.saturation_ratio >= self.failed_saturation_ratio_at_least:
+            reasons.append(f"0/100 饱和率 {distribution.saturation_ratio:.2%}，评分大面积触及边界")
+        if distribution.top100_count >= self.top_size and distribution.top100_upper_saturation_ratio >= self.failed_top100_upper_saturation_ratio_at_least:
+            reasons.append("前100名 raw_score 全部饱和在 100")
+        return tuple(dict.fromkeys(reasons))
+
+    def _degraded_reasons(self, distribution: MarketScanScoreDistribution) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if distribution.observed_ratio < self.degraded_observed_ratio_below:
+            reasons.append(f"raw_score 可审计样本仅覆盖 {distribution.observed_ratio:.2%}")
+        if (
+            distribution.distinct_raw_score_ratio <= self.degraded_distinct_ratio_at_most
+            and distribution.max_tie_group_ratio >= self.degraded_max_tie_group_ratio_at_least
+        ):
+            reasons.append(
+                f"distinct raw score ratio 仅 {distribution.distinct_raw_score_ratio:.2%}，"
+                f"最大并列组占比 {distribution.max_tie_group_ratio:.2%}"
+            )
+        elif distribution.max_tie_group_ratio >= self.degraded_single_tie_group_ratio_at_least:
+            reasons.append(f"最大并列组占比达到 {distribution.max_tie_group_ratio:.2%}")
+        if distribution.saturation_ratio >= self.degraded_saturation_ratio_at_least:
+            reasons.append(f"0/100 饱和率达到 {distribution.saturation_ratio:.2%}")
+        if distribution.top100_tie_ratio >= self.degraded_top100_tie_ratio_at_least:
+            reasons.append(f"前100并列占比达到 {distribution.top100_tie_ratio:.2%}")
+        return tuple(dict.fromkeys(reasons))
+
+
+@dataclass(frozen=True)
+class MarketScanScoreDistribution:
+    policy_version: str
+    expected_count: int
+    sample_count: int
+    distinct_count: int
+    distinct_raw_score_ratio: float
+    max_tie_group_count: int
+    max_tie_group_ratio: float
+    saturation_count: int
+    saturation_ratio: float
+    top100_count: int
+    top100_max_tie_group_count: int
+    top100_tied_count: int
+    top100_tie_ratio: float
+    top100_upper_saturation_ratio: float
+
+    @classmethod
+    def from_raw_scores(
+        cls,
+        raw_scores: Iterable[object],
+        *,
+        expected_count: int,
+        policy: MarketScanScoreDistributionPolicy,
+    ) -> "MarketScanScoreDistribution":
+        values = sorted(
+            (
+                round(parsed, policy.raw_score_decimals)
+                for value in raw_scores
+                if (parsed := _parse_raw_score(value)) is not None
+            ),
+            reverse=True,
+        )
+        counts = Counter(values)
+        sample_count = len(values)
+        max_tie_count = max(counts.values(), default=0)
+        saturation_count = sum(counts.get(boundary, 0) for boundary in (0.0, 100.0))
+        top_values = values[: policy.top_size]
+        top_counts = Counter(top_values)
+        top_count = len(top_values)
+        top_max_tie_count = max(top_counts.values(), default=0)
+        top_tied_count = sum(1 for value in top_values if counts[value] > 1)
+        return cls(
+            policy_version=policy.version,
+            expected_count=max(0, expected_count),
+            sample_count=sample_count,
+            distinct_count=len(counts),
+            distinct_raw_score_ratio=_safe_ratio(len(counts), sample_count),
+            max_tie_group_count=max_tie_count,
+            max_tie_group_ratio=_safe_ratio(max_tie_count, sample_count),
+            saturation_count=saturation_count,
+            saturation_ratio=_safe_ratio(saturation_count, sample_count),
+            top100_count=top_count,
+            top100_max_tie_group_count=top_max_tie_count,
+            top100_tied_count=top_tied_count,
+            top100_tie_ratio=_safe_ratio(top_tied_count, top_count),
+            top100_upper_saturation_ratio=_safe_ratio(top_counts.get(100.0, 0), top_count),
+        )
+
+    @property
+    def observed_ratio(self) -> float:
+        return _safe_ratio(self.sample_count, self.expected_count)
+
+    def audit_text(self) -> str:
+        return (
+            f"评分分布门禁 {self.policy_version}：raw_score样本 {self.sample_count}/{self.expected_count}，"
+            f"distinct ratio {self.distinct_raw_score_ratio:.2%}，"
+            f"最大并列组 {self.max_tie_group_count}/{self.sample_count}（{self.max_tie_group_ratio:.2%}），"
+            f"0/100饱和 {self.saturation_count}/{self.sample_count}（{self.saturation_ratio:.2%}），"
+            f"前100并列 {self.top100_tied_count}/{self.top100_count}（{self.top100_tie_ratio:.2%}），"
+            f"最大组 {self.top100_max_tie_group_count}"
+        )
+
+
+@dataclass(frozen=True)
+class MarketScanScoreDistributionAssessment:
+    status: MarketScanScoreDistributionGateStatus
+    reasons: tuple[str, ...] = ()
+
+
+def _parse_raw_score(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    return parsed if isfinite(parsed) and 0 <= parsed <= 100 else None
+
+
+def _safe_ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return min(1.0, max(0.0, numerator / denominator))
+
+
 class MarketScanStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -260,6 +424,10 @@ __all__ = [
     "MarketScanCoverage",
     "MarketScanCoverageScope",
     "MarketScanPublicationSummary",
+    "MarketScanScoreDistribution",
+    "MarketScanScoreDistributionAssessment",
+    "MarketScanScoreDistributionGateStatus",
+    "MarketScanScoreDistributionPolicy",
     "MarketScanResultItem",
     "MarketScanResultPage",
     "MarketScanResultStatus",

@@ -16,8 +16,13 @@ from app.services.research_factor_report import (
     factor_risk_count,
     factor_support_count,
 )
+from app.services.research_factor_scoring import _factor_calibration_quality
 from app.services.research_factor_specs import _factor_specs
-from app.services.research_factor_text import _factor_confirmation_text, _factor_score_impact
+from app.services.research_factor_text import (
+    _factor_calibration_impact,
+    _factor_confirmation_text,
+    _factor_score_impact,
+)
 from app.services.research_features import build_feature_snapshot, build_leadership_report
 from app.services.stock_insights import build_stock_insight_bundle
 from tests.factories import make_kline, make_quote
@@ -89,7 +94,7 @@ def test_historical_aggregate_participation_is_independent_from_confidence_label
 
 
 def test_excluded_factor_stability_cannot_change_historical_evidence_aggregates() -> None:
-    included = _factor(1, sample_count=12, name="参与因子")
+    included = _factor(1, sample_count=20, name="参与因子")
     excluded_positive = _factor(
         2,
         sample_count=12,
@@ -125,7 +130,27 @@ def test_excluded_factor_stability_cannot_change_historical_evidence_aggregates(
     assert factor_risk_count([included, excluded_risk]) == factor_risk_count([included]) == 0
 
 
-def test_real_current_factors_keep_valuation_scored_without_blocking_six_factor_samples() -> None:
+def test_small_positive_calibration_cannot_inflate_scores_or_confidence() -> None:
+    small = _factor(1, sample_count=12, score=70, stability_score=100, expected_level="较强")
+    base_impact = round((small.score - 50) / 2)
+
+    assert _factor_score_impact(small) == base_impact
+    assert small.calibration is not None
+    assert _factor_calibration_impact(small.calibration) == 0
+    assert _factor_calibration_quality([small]) == 35
+    assert factor_support_count([small]) == 0
+
+
+def test_small_negative_calibration_can_reduce_but_not_inflate_score() -> None:
+    risk = _factor(1, sample_count=5, score=60, stability_score=10, expected_level="风险")
+    base_impact = round((risk.score - 50) / 2)
+
+    assert risk.calibration is not None
+    assert _factor_score_impact(risk) < base_impact
+    assert _factor_calibration_impact(risk.calibration) < 0
+
+
+def test_real_current_factors_only_aggregate_historically_replayable_definitions() -> None:
     analysis, insights, feature, chip, leadership = _fully_calibrated_factor_inputs()
 
     factors = build_current_factors(analysis, insights, feature, chip, leadership)
@@ -141,7 +166,11 @@ def test_real_current_factors_keep_valuation_scored_without_blocking_six_factor_
         "leadership_strength",
         "valuation_anchor",
     ]
-    calibration_samples = [factor.calibration.sample_count for factor in factors[:6] if factor.calibration]
+    calibration_samples = [
+        factor.calibration.sample_count
+        for factor in factors
+        if factor.calibration and factor.calibration.participates_in_historical_aggregate
+    ]
     valuation = factors[-1]
     trend = factors[0]
     volume = factors[1]
@@ -157,23 +186,28 @@ def test_real_current_factors_keep_valuation_scored_without_blocking_six_factor_
     assert flow_proxy.methodology and "不是真实资金流" in flow_proxy.methodology
     assert "量价热度评分（衍生）" in flow_proxy.value
     assert all("资金评分" not in item and "资金源" not in item for item in flow_proxy.evidence)
-    assert len(calibration_samples) == 6
-    assert min(calibration_samples) >= 24
+    assert len(calibration_samples) == 3
+    assert 6 <= min(calibration_samples) < 20
+    for factor in (factors[2], factors[4], factors[5]):
+        assert factor.calibration is not None
+        assert factor.calibration.sample_count == 0
+        assert factor.calibration.participates_in_historical_aggregate is False
+        assert factor.calibration.confidence_level == "当前口径不可回放"
     assert valuation.calibration is not None
     assert valuation.calibration.sample_count == 0
     assert valuation.calibration.confidence_level == "待补数据"
     assert valuation.calibration.participates_in_historical_aggregate is False
     assert metrics.scoring_factor_count == 7
-    assert metrics.calibration_factor_count == 6
-    assert metrics.uncalibrated_factor_names == ("估值锚",)
+    assert metrics.calibration_factor_count == 3
+    assert metrics.uncalibrated_factor_names == ("风险压力", "筹码位置", "龙头强度", "估值锚")
     assert report.calibration_sample_count == min(calibration_samples)
     assert report.evidence_sufficiency == report.calibrated_confidence
     assert report.composite_reliability_level in {"较高", "中等", "较低", "不足"}
     assert all("低置信" not in note for note in report.notes)
     assert any(
         "7 个因子参与评分" in note
-        and "6 个参与历史校准" in note
-        and "未校准项：估值锚" in note
+        and "3 个参与历史校准" in note
+        and "未校准项：风险压力、筹码位置、龙头强度、估值锚" in note
         for note in report.notes
     )
 
@@ -217,7 +251,7 @@ def _factor(
             max_adverse_return=-2.0,
             stability_score=stability_score,
             expected_level=expected_level,
-            confidence_level=confidence_level or ("较高" if sample_count >= 12 else "偏低"),
+            confidence_level=confidence_level or ("较高" if sample_count >= 20 else "偏低"),
             participates_in_historical_aggregate=participates_in_historical_aggregate,
             note="测试校准",
         ),

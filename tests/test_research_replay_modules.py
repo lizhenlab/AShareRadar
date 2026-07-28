@@ -16,6 +16,7 @@ from app.services.research_replay import (
     _replay_stats,
     build_replay_analysis,
 )
+from app.services.research_execution_model import MODELLED_ROUND_TRIP_FRICTION_PCT
 from tests.factories import make_kline, make_quote
 
 
@@ -40,13 +41,14 @@ def test_replay_analysis_treats_non_positive_window_as_empty() -> None:
 
 def test_replay_case_ignores_zero_entry_price() -> None:
     rows = [make_kline(date=f"2026-04-{index + 1:02d}", close=100, high=102, low=98, volume=1000) for index in range(20)]
-    rows.append(make_kline(date="2026-05-01", close=0, high=100, low=0, volume=2500))
-    rows.extend(make_kline(date=f"2026-05-{index + 2:02d}", close=95, high=96, low=94, volume=1000) for index in range(10))
+    rows.append(make_kline(date="2026-05-01", close=105, high=106, low=104, volume=2500))
+    rows.append(make_kline(date="2026-05-02", close=106, high=107, low=105, volume=1000).model_copy(update={"open": 0}))
+    rows.extend(make_kline(date=f"2026-05-{index + 3:02d}", close=107, high=108, low=106, volume=1000) for index in range(9))
 
     assert _replay_case(rows, 20) is None
 
 
-def test_replay_case_keeps_recent_signal_pending_until_forward_return_matures() -> None:
+def test_replay_case_excludes_latest_signal_without_an_executable_next_open() -> None:
     rows = [
         make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000)
         for index in range(20)
@@ -55,10 +57,42 @@ def test_replay_case_keeps_recent_signal_pending_until_forward_return_matures() 
 
     case = _replay_case(rows, 20)
 
+    assert case is None
+
+
+def test_replay_case_uses_next_open_and_keeps_immature_return_pending() -> None:
+    rows = [
+        make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000)
+        for index in range(20)
+    ]
+    rows.append(make_kline(date="2026-05-01", close=108, high=109, low=104, volume=1800))
+    rows.append(make_kline(date="2026-05-02", close=111, high=112, low=109, volume=1200).model_copy(update={"open": 110}))
+
+    case = _replay_case(rows, 20)
+
     assert case is not None
     assert case.pattern == "放量突破"
+    assert case.entry_price == 110
     assert case.forward_5d_return is None
     assert case.outcome == "待确认"
+
+
+def test_replay_case_returns_include_standardized_round_trip_friction() -> None:
+    rows = [
+        make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000)
+        for index in range(20)
+    ]
+    rows.append(make_kline(date="2026-05-01", close=108, high=109, low=104, volume=1800))
+    rows.extend(
+        make_kline(date=f"2026-05-{index + 2:02d}", close=110 + index, high=111 + index, low=109 + index, volume=1100)
+        for index in range(10)
+    )
+
+    case = _replay_case(rows, 20)
+
+    assert case is not None
+    expected = (rows[25].close / rows[21].open - 1) * 100 - MODELLED_ROUND_TRIP_FRICTION_PCT
+    assert case.forward_5d_return == round(expected, 2)
 
 
 def test_replay_case_keeps_invalid_forward_bar_pending() -> None:

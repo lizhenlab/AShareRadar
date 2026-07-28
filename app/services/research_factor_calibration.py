@@ -7,7 +7,7 @@ from app.models.research import (
     CalibrationBucket,
     FactorCalibration,
 )
-from app.services.indicators import pct_change
+from app.services.research_execution_model import net_forward_return, next_session_open
 from app.services.research_factor_specs import FactorSpec, _trend_proxy_score_at
 from app.services.scoring import clamp_score as _clamp
 from app.utils.market_data import finite_float, valid_kline
@@ -88,7 +88,7 @@ CALIBRATION_BUCKET_RULES = (
 )
 
 CALIBRATION_BUCKET_NOTE_RULES = (
-    CalibrationBucketNoteRule("样本偏少，只作参考。", lambda stats: stats.sample_count < 5),
+    CalibrationBucketNoteRule("样本偏少，只作参考。", lambda stats: stats.sample_count < 20),
     CalibrationBucketNoteRule("该场景历史表现偏正。", lambda stats: stats.win_rate >= 58 and stats.avg_5d > 0),
     CalibrationBucketNoteRule("该场景历史表现偏弱。", lambda stats: stats.win_rate < 45 or stats.avg_5d < 0),
     CalibrationBucketNoteRule("该场景历史表现中性。", lambda _: True),
@@ -102,9 +102,9 @@ CALIBRATION_LEVEL_RULES = (
 )
 
 CALIBRATION_CONFIDENCE_RULES = (
-    CalibrationConfidenceRule("较高", lambda sample_count, win_rate, avg_return: sample_count >= 12 and win_rate >= 58 and avg_return > 0.8),
-    CalibrationConfidenceRule("中等", lambda sample_count, win_rate, avg_return: sample_count >= 8 and win_rate >= 52 and avg_return >= 0),
-    CalibrationConfidenceRule("偏低", lambda sample_count, win_rate, avg_return: sample_count < 5),
+    CalibrationConfidenceRule("较高", lambda sample_count, win_rate, avg_return: sample_count >= 30 and win_rate >= 58 and avg_return > 0.8),
+    CalibrationConfidenceRule("中等", lambda sample_count, win_rate, avg_return: sample_count >= 20 and win_rate >= 52 and avg_return >= 0),
+    CalibrationConfidenceRule("偏低", lambda sample_count, _win_rate, _avg_return: sample_count < 20),
     CalibrationConfidenceRule("偏弱", lambda sample_count, win_rate, avg_return: win_rate < 45 or avg_return < -0.5),
 )
 
@@ -133,10 +133,7 @@ def _calibration_buckets(rows: list, spec: FactorSpec, current_score: int) -> li
     if len(rows) < MIN_BUCKET_ROWS:
         return []
     buckets = _empty_calibration_buckets()
-    for index in _calibration_indexes(rows):
-        sample = _calibration_sample_at(rows, spec, current_score, index)
-        if not sample:
-            continue
+    for index, sample in _non_overlapping_calibration_samples(rows, spec, current_score):
         _append_bucket_samples(buckets, _bucket_context(rows, index), sample)
     return [_bucket_summary(name, values) for name, values in buckets.items() if values][:4]
 
@@ -168,11 +165,24 @@ def _no_similar_sample_calibration(name: str) -> FactorCalibration:
 
 
 def _matching_calibration_samples(rows: list, spec: FactorSpec, current_score: int) -> list[CalibrationSample]:
-    return [
-        sample
-        for index in _calibration_indexes(rows)
-        if (sample := _calibration_sample_at(rows, spec, current_score, index))
-    ]
+    return [sample for _index, sample in _non_overlapping_calibration_samples(rows, spec, current_score)]
+
+
+def _non_overlapping_calibration_samples(
+    rows: list,
+    spec: FactorSpec,
+    current_score: int,
+) -> list[tuple[int, CalibrationSample]]:
+    samples: list[tuple[int, CalibrationSample]] = []
+    next_allowed_index = CALIBRATION_SCAN_START
+    for index in _calibration_indexes(rows):
+        if index < next_allowed_index:
+            continue
+        sample = _calibration_sample_at(rows, spec, current_score, index)
+        if sample is not None:
+            samples.append((index, sample))
+            next_allowed_index = index + FORWARD_10D_OFFSET
+    return samples
 
 
 def _calibration_indexes(rows: list) -> range:
@@ -180,17 +190,17 @@ def _calibration_indexes(rows: list) -> range:
 
 
 def _calibration_sample_at(rows: list, spec: FactorSpec, current_score: int, index: int) -> CalibrationSample | None:
-    entry_row = _valid_row_at(rows, index)
+    signal_row = _valid_row_at(rows, index)
     forward_5d_row = _valid_row_at(rows, index + FORWARD_5D_OFFSET)
     forward_10d_row = _valid_row_at(rows, index + FORWARD_10D_OFFSET)
-    if entry_row is None or forward_5d_row is None or forward_10d_row is None:
+    entry = next_session_open(rows, index)
+    if signal_row is None or entry is None or forward_5d_row is None or forward_10d_row is None:
         return None
     if not _trigger_matches(spec, rows, index, current_score):
         return None
-    entry = entry_row.close
     return CalibrationSample(
-        forward_5d=pct_change(forward_5d_row.close, entry),
-        forward_10d=pct_change(forward_10d_row.close, entry),
+        forward_5d=net_forward_return(forward_5d_row.close, entry),
+        forward_10d=net_forward_return(forward_10d_row.close, entry),
         adverse_return=_adverse_return(rows, index, entry),
     )
 
@@ -211,7 +221,7 @@ def _trigger_matches(spec: FactorSpec, rows: list, index: int, current_score: in
 
 def _adverse_return(rows: list, index: int, entry: float) -> float:
     lows = [item.low for item in rows[index + 1 : index + FORWARD_5D_OFFSET + 1] if valid_kline(item)]
-    return min(pct_change(low, entry) for low in lows) if lows else 0
+    return min(net_forward_return(low, entry) for low in lows) if lows else 0
 
 
 def _calibration_stats(samples: list[CalibrationSample]) -> CalibrationStats:
@@ -349,7 +359,7 @@ def _directional_returns(direction: str, avg_5d: float, avg_10d: float) -> tuple
 
 
 def _calibration_note(name: str, sample_count: int, win_rate: float, avg_return: float) -> str:
-    if sample_count < 5:
+    if sample_count < 20:
         return f"「{name}」相似样本只有 {sample_count} 次，暂不宜提高权重。"
     if win_rate >= 58 and avg_return > 0:
         return f"「{name}」在该股历史中表现偏正，可作为辅助确认。"

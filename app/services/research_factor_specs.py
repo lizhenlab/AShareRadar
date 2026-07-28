@@ -3,11 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import MappingProxyType
+from types import SimpleNamespace
 
 from app.models.market import (
     Kline,
 )
 from app.services.indicator_volume import positive_volume_ratio
+from app.services.indicator_trend import trend_score_from_impact
+from app.services.indicator_trend_components import TrendContext, trend_contributions
 from app.services.indicators import pct_change
 from app.services.scoring import clamp_score as _clamp
 from app.utils.market_data import finite_float, valid_kline
@@ -24,9 +27,6 @@ PRICE_RANGE_WINDOW = MA_LONG_WINDOW
 VOLUME_RECENT_WINDOW = 5
 VOLUME_BASE_WINDOW = 20
 
-TREND_BASE_SCORE = NEUTRAL_SCORE
-TREND_NEAR_HIGH_RATIO = 0.985
-TREND_NEAR_LOW_RATIO = 1.03
 TREND_STRONG_CURRENT_SCORE = 58
 TREND_WEAK_CURRENT_SCORE = 48
 TREND_TRIGGER_TOLERANCE = 8
@@ -105,6 +105,7 @@ class FactorSpec:
     direction: str
     evaluator: Callable[[list[Kline], int], float]
     trigger: Callable[[list[Kline], int, float], bool]
+    historically_replayable: bool = True
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class FactorScoreContext:
     ma10: float
     ma20: float
     prev_ma5: float
+    prev_ma20: float
     high_20: float
     low_20: float
     amplitude_pct: float
@@ -136,6 +138,7 @@ class FactorMovingAverages:
     ma10: float
     ma20: float
     prev_ma5: float
+    prev_ma20: float
 
 
 @dataclass(frozen=True)
@@ -152,14 +155,6 @@ class FlowMetrics:
 
 
 @dataclass(frozen=True)
-class BinaryScoreRule:
-    name: str
-    matches: Callable[[FactorScoreContext], bool]
-    positive_delta: int
-    negative_delta: int
-
-
-@dataclass(frozen=True)
 class ScoreAdjustmentRule:
     name: str
     matches: Callable[[FactorScoreContext], bool]
@@ -172,46 +167,6 @@ class DistanceScoreRule:
     matches: Callable[[float], bool]
     adjustment: int
 
-
-TREND_SCORE_RULES: tuple[BinaryScoreRule, ...] = (
-    BinaryScoreRule(
-        "close_above_ma5",
-        lambda context: context.current.close > context.ma5,
-        12,
-        -8,
-    ),
-    BinaryScoreRule(
-        "ma5_above_ma10",
-        lambda context: context.ma5 > context.ma10,
-        10,
-        -6,
-    ),
-    BinaryScoreRule(
-        "ma10_above_ma20",
-        lambda context: context.ma10 > context.ma20,
-        10,
-        -8,
-    ),
-    BinaryScoreRule(
-        "ma5_rising",
-        lambda context: context.ma5 >= context.prev_ma5,
-        7,
-        -5,
-    ),
-)
-
-TREND_POSITION_RULES: tuple[ScoreAdjustmentRule, ...] = (
-    ScoreAdjustmentRule(
-        "near_20d_high",
-        lambda context: context.current.close >= context.high_20 * TREND_NEAR_HIGH_RATIO,
-        lambda _context: 10,
-    ),
-    ScoreAdjustmentRule(
-        "near_20d_low",
-        lambda context: context.current.close <= context.low_20 * TREND_NEAR_LOW_RATIO,
-        lambda _context: -10,
-    ),
-)
 
 VOLUME_SCORE_RULES: tuple[ScoreAdjustmentRule, ...] = (
     ScoreAdjustmentRule(
@@ -326,6 +281,8 @@ def _validate_factor_spec(spec: FactorSpec) -> None:
         raise ValueError(f"factor spec {spec.id} evaluator must be callable")
     if not callable(getattr(spec, "trigger", None)):
         raise ValueError(f"factor spec {spec.id} trigger must be callable")
+    if not isinstance(spec.historically_replayable, bool):
+        raise ValueError(f"factor spec {spec.id} historically_replayable must be boolean")
 
 
 def _trend_proxy_score_at(rows: list[Kline], index: int) -> float:
@@ -336,10 +293,24 @@ def _trend_proxy_score_at(rows: list[Kline], index: int) -> float:
 
 
 def _trend_proxy_score_from_context(context: FactorScoreContext) -> float:
-    score = TREND_BASE_SCORE
-    score += _binary_rule_delta(context, TREND_SCORE_RULES)
-    score += _score_rule_delta(context, TREND_POSITION_RULES)
-    return _clamp(score)
+    trend_context = TrendContext(
+        quote=SimpleNamespace(
+            price=context.current.close,
+            change_pct=context.change_pct,
+            turnover_rate=None,
+        ),
+        klines=context.rows[: context.index + 1],
+        ma5=context.ma5,
+        ma10=context.ma10,
+        ma20=context.ma20,
+        prev_ma5=context.prev_ma5,
+        prev_ma20=context.prev_ma20,
+        recent_high=context.high_20,
+        recent_low=context.low_20,
+        volume_ratio=context.volume_ratio,
+    )
+    total_impact = sum(item.impact for item in trend_contributions(trend_context))
+    return trend_score_from_impact(total_impact)
 
 
 def _volume_proxy_score_at(rows: list[Kline], index: int) -> float:
@@ -437,9 +408,25 @@ def _moving_averages(rows: list[Kline], index: int) -> FactorMovingAverages | No
         if index >= MA_LONG_WINDOW + PREVIOUS_MA_OFFSET
         else ma5
     )
-    if _any_non_positive(ma5, ma10, ma20, prev_ma5):
+    prev_ma20 = (
+        _window_average_close(
+            rows,
+            index - PREVIOUS_MA_OFFSET,
+            MA_LONG_WINDOW,
+            min_count=MA_LONG_WINDOW,
+        )
+        if index >= MA_LONG_WINDOW + PREVIOUS_MA_OFFSET
+        else ma20
+    )
+    if _any_non_positive(ma5, ma10, ma20, prev_ma5, prev_ma20):
         return None
-    return FactorMovingAverages(ma5=ma5, ma10=ma10, ma20=ma20, prev_ma5=prev_ma5)
+    return FactorMovingAverages(
+        ma5=ma5,
+        ma10=ma10,
+        ma20=ma20,
+        prev_ma5=prev_ma5,
+        prev_ma20=prev_ma20,
+    )
 
 
 def _price_range(rows: list[Kline], index: int) -> FactorPriceRange | None:
@@ -471,6 +458,7 @@ def _build_score_context(
         ma10=averages.ma10,
         ma20=averages.ma20,
         prev_ma5=averages.prev_ma5,
+        prev_ma20=averages.prev_ma20,
         high_20=price_range.high_20,
         low_20=price_range.low_20,
         amplitude_pct=pct_change(score_rows.current.high, score_rows.current.low),
@@ -552,10 +540,6 @@ def _window_high_low(
     return (high or 0, low or 0)
 
 
-def _binary_rule_delta(context: FactorScoreContext, rules: tuple[BinaryScoreRule, ...]) -> int:
-    return sum(rule.positive_delta if rule.matches(context) else rule.negative_delta for rule in rules)
-
-
 def _score_rule_delta(context: FactorScoreContext, rules: tuple[ScoreAdjustmentRule, ...]) -> int:
     return sum(rule.adjustment(context) for rule in rules if rule.matches(context))
 
@@ -597,14 +581,14 @@ def _leadership_volume_delta(context: FactorScoreContext) -> int:
     return 8 if context.change_pct > 0 else -6 if context.change_pct < 0 else 0
 
 
-def _trigger_score(current_score: float) -> float | None:
+def _trigger_score(current_score: object) -> float | None:
     parsed = finite_float(current_score)
     if parsed is None:
         return None
     return max(0.0, min(100.0, parsed))
 
 
-def _trend_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
+def _trend_trigger(rows: list[Kline], index: int, current_score: float | None) -> bool:
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
@@ -616,7 +600,7 @@ def _trend_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
     return TREND_TRIGGER_NEUTRAL_LOW < score < TREND_TRIGGER_NEUTRAL_HIGH
 
 
-def _volume_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
+def _volume_trigger(rows: list[Kline], index: int, current_score: float | None) -> bool:
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
@@ -628,7 +612,7 @@ def _volume_trigger(rows: list[Kline], index: int, current_score: float) -> bool
     return VOLUME_WEAK_CURRENT_SCORE < score < VOLUME_TRIGGER_NEUTRAL_HIGH
 
 
-def _risk_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
+def _risk_trigger(rows: list[Kline], index: int, current_score: float | None) -> bool:
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
@@ -640,7 +624,7 @@ def _risk_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
     return RISK_TRIGGER_NEUTRAL_LOW < score < RISK_TRIGGER_NEUTRAL_HIGH
 
 
-def _fund_flow_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
+def _fund_flow_trigger(rows: list[Kline], index: int, current_score: float | None) -> bool:
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
@@ -652,7 +636,7 @@ def _fund_flow_trigger(rows: list[Kline], index: int, current_score: float) -> b
     return FLOW_WEAK_CURRENT_SCORE < score < FLOW_TRIGGER_NEUTRAL_HIGH
 
 
-def _chip_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
+def _chip_trigger(rows: list[Kline], index: int, current_score: float | None) -> bool:
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
@@ -660,7 +644,7 @@ def _chip_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
     return abs(score - current_score) <= CHIP_TRIGGER_TOLERANCE
 
 
-def _leadership_trigger(rows: list[Kline], index: int, current_score: float) -> bool:
+def _leadership_trigger(rows: list[Kline], index: int, current_score: float | None) -> bool:
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
@@ -736,6 +720,7 @@ RISK_FACTOR_SPECS: tuple[FactorSpec, ...] = (
         direction="正向",
         evaluator=_risk_proxy_score_at,
         trigger=_risk_trigger,
+        historically_replayable=False,
     ),
 )
 
@@ -748,6 +733,7 @@ POSITION_FACTOR_SPECS: tuple[FactorSpec, ...] = (
         direction="正向",
         evaluator=_chip_position_score_at,
         trigger=_chip_trigger,
+        historically_replayable=False,
     ),
 )
 
@@ -772,6 +758,7 @@ STRENGTH_FACTOR_SPECS: tuple[FactorSpec, ...] = (
         direction="正向",
         evaluator=_leadership_proxy_score_at,
         trigger=_leadership_trigger,
+        historically_replayable=False,
     ),
 )
 

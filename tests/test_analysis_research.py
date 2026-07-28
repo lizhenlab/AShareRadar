@@ -20,6 +20,7 @@ from app.services.analysis import build_analysis
 from app.services.data_quality import assess_kline_quality, build_data_quality
 from app.services.datahub import DataHub
 from app.services.indicators import max_drawdown, recent_volume_ratio, support_resistance, trend_score, trend_score_snapshot
+from app.services.indicator_trend import trend_score_from_impact
 from app.services.market_sampling import fetch_quotes_with_single_fallback, market_breadth_quotes, market_breadth_symbols
 from app.services.minute_analysis import build_minute_analysis_report
 from app.services.research import (
@@ -306,7 +307,7 @@ class MinuteAnalysisTests(unittest.TestCase):
 
         score, label, contributions = trend_score_snapshot(quote, klines)
         plain_score, plain_label = trend_score(quote, klines)
-        reconstructed = max(0, min(100, 50 + sum(item.impact for item in contributions)))
+        reconstructed = trend_score_from_impact(sum(item.impact for item in contributions))
 
         self.assertEqual(score, plain_score)
         self.assertEqual(label, plain_label)
@@ -523,7 +524,10 @@ class MinuteAnalysisTests(unittest.TestCase):
             assert factor.calibration is not None
             self.assertGreaterEqual(factor.calibration.stability_score, 0)
             self.assertLessEqual(factor.calibration.stability_score, 100)
-            self.assertIn(factor.calibration.expected_level, {"较强", "偏正", "观察", "偏弱", "风险", "待确认", "待补数据", "样本不足"})
+            self.assertIn(
+                factor.calibration.expected_level,
+                {"较强", "偏正", "观察", "偏弱", "风险", "待确认", "待补数据", "待补历史快照", "样本不足"},
+            )
             for bucket in factor.calibration_buckets:
                 self.assertGreater(bucket.sample_count, 0)
                 self.assertIn(bucket.name, {"强趋势", "弱趋势", "支撑附近", "压力附近"})

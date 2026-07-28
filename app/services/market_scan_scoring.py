@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from app.models.market_scan import (
+    MARKET_SCAN_RANK_TIE_BREAK,
     MarketScanResultItem,
     MarketScanResultWrite,
 )
@@ -37,33 +38,36 @@ from app.services.market_scan_replay import (
     stable_score_spec_hash,
     verify_score_details,
 )
+from app.services.market_scan_rank_refinement import (
+    MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION,
+    MARKET_SCAN_RANK_REFINEMENT_MAX_DISCOUNT,
+    MarketScanRankRefinement,
+    market_scan_rank_refinement,
+    market_scan_rank_refinement_spec,
+)
 from app.services.scoring import clamp_score
 from app.services.trading_calendar import is_trading_day
 from app.utils.market_data import valid_kline
+from app.utils.market_time import market_local_naive
 from app.utils.symbols import standard_symbol
 
 
-FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION = 3
-FULL_MARKET_SCORE_RULE_VERSION = "full-market-score-v3"
-FULL_MARKET_SCORE_ALGORITHM_VERSION = "weighted-trend-quality-v2"
-FULL_MARKET_TREND_ALGORITHM_VERSION = "trend-score-v1"
+FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION = 4
+FULL_MARKET_SCORE_RULE_VERSION = "full-market-score-v4"
+FULL_MARKET_SCORE_ALGORITHM_VERSION = "trend-quality-penalty-v3"
+FULL_MARKET_TREND_ALGORITHM_VERSION = "trend-score-v2-continuous-soft-clip"
 FULL_MARKET_VOLUME_RATIO_ALGORITHM_VERSION = "recent-volume-ratio-v2-explicit-windows"
 FULL_MARKET_DATA_QUALITY_ALGORITHM_VERSION = "data-quality-v2-cache-neutral"
-FULL_MARKET_LEADER_WEIGHT = 0.85
-FULL_MARKET_QUALITY_WEIGHT = 0.15
+FULL_MARKET_QUALITY_PENALTY_PER_MISSING_POINT = 0.15
 FULL_MARKET_METRIC_DECIMALS = 4
+FULL_MARKET_RAW_SCORE_DECIMALS = 6
+FULL_MARKET_MAX_CLOSE_GAP_PCT = 0.5
+FULL_MARKET_MAX_CLOSE_GAP_ABSOLUTE = 0.02
 FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW = 5
 FULL_MARKET_VOLUME_RATIO_BASE_WINDOW = 20
 FULL_MARKET_VOLUME_RATIO_MIN_COUNT = FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW + 1
 FULL_MARKET_VOLUME_RATIO_PRECISION = 2
-FULL_MARKET_SCORE_TIE_BREAK: tuple[tuple[str, str], ...] = (
-    ("score", "desc"),
-    ("raw_score", "desc"),
-    ("trend_score", "desc"),
-    ("change_pct", "desc"),
-    ("amount", "desc"),
-    ("symbol", "asc"),
-)
+FULL_MARKET_SCORE_TIE_BREAK = MARKET_SCAN_RANK_TIE_BREAK
 
 
 class MarketScanDataMissing(ValueError):
@@ -84,6 +88,10 @@ class _MarketScanScore:
     tags: tuple[str, ...]
     leader_inputs: LeaderScoreInput
     leader_breakdown: LeaderScoreBreakdown
+    rank_refinement: MarketScanRankRefinement
+    quality_penalty: float
+    base_score: float
+    rank_discount: float
     raw_score: float
     rounded_score: int
     score_spec: dict[str, object]
@@ -112,7 +120,7 @@ def score_market_scan_item(
     rule_version: str | None = None,
 ) -> MarketScanResultWrite:
     _require_matching_quote(item, quote)
-    _require_quote_date(quote, expected_data_date)
+    _require_quote_date(quote, expected_data_date, as_of=as_of)
     completed_rows, latest_date = _rankable_completed_rows(
         rows,
         quote=quote,
@@ -166,11 +174,18 @@ def _calculate_market_scan_score(
     )
     leader_breakdown = leader_score_breakdown(leader_inputs, FULL_MARKET_LEADER_PROFILE)
     leadership = leader_breakdown.score
-    raw_score = round(
-        leadership * FULL_MARKET_LEADER_WEIGHT + quality.score * FULL_MARKET_QUALITY_WEIGHT,
+    rank_refinement = market_scan_rank_refinement(quote, rows)
+    quality_penalty = round(
+        (100 - quality.score) * FULL_MARKET_QUALITY_PENALTY_PER_MISSING_POINT,
         FULL_MARKET_METRIC_DECIMALS,
     )
-    rounded_score = round(raw_score)
+    base_score = round(min(100.0, max(0.0, leadership - quality_penalty)), FULL_MARKET_METRIC_DECIMALS)
+    rank_discount = round(
+        (1 - rank_refinement.score) * MARKET_SCAN_RANK_REFINEMENT_MAX_DISCOUNT,
+        FULL_MARKET_RAW_SCORE_DECIMALS + 2,
+    )
+    raw_score = round(max(0.0, base_score - rank_discount), FULL_MARKET_RAW_SCORE_DECIMALS)
+    rounded_score = round(base_score)
     score = clamp_score(rounded_score)
     return _MarketScanScore(
         score=score,
@@ -181,6 +196,10 @@ def _calculate_market_scan_score(
         tags=tuple(leader_tags(leader_inputs, leadership, STRONG_STOCK_TAG_RULES, "观察")),
         leader_inputs=leader_inputs,
         leader_breakdown=leader_breakdown,
+        rank_refinement=rank_refinement,
+        quality_penalty=quality_penalty,
+        base_score=base_score,
+        rank_discount=rank_discount,
         raw_score=raw_score,
         rounded_score=rounded_score,
         score_spec=market_scan_score_spec(min_data_quality_score=min_data_quality_score),
@@ -217,19 +236,18 @@ def _market_scan_result(
             item=item,
             inputs=calculated.leader_inputs,
             leader_breakdown=calculated.leader_breakdown,
+            rank_refinement=calculated.rank_refinement,
             quality_score=calculated.quality.score,
+            quality_penalty=calculated.quality_penalty,
+            base_score=calculated.base_score,
+            rank_discount=calculated.rank_discount,
             score=calculated.score,
             raw_score=calculated.raw_score,
             rounded_score=calculated.rounded_score,
             score_spec=calculated.score_spec,
             rule_version=rule_version,
         ),
-        reason=_score_reason(
-            calculated.score,
-            calculated.trend,
-            calculated.quality.score,
-            calculated.volume_ratio,
-        ),
+        reason=_score_reason(calculated),
         data_date=latest_date.isoformat(),
         quote_timestamp=quote.timestamp,
         quote_source=quote.source,
@@ -301,6 +319,7 @@ def _rankable_completed_rows(
         raise MarketScanSkipped(f"日K停留在 {latest_date.isoformat()}，早于应有交易日 {expected_data_date.isoformat()}，可能停牌")
     if latest_date > expected_data_date:
         raise MarketScanDataMissing(f"日K日期 {latest_date.isoformat()} 晚于应有交易日 {expected_data_date.isoformat()}")
+    _require_quote_kline_close_consistency(quote, completed_rows[-1])
     return completed_rows, latest_date
 
 
@@ -320,7 +339,7 @@ def _market_scan_quality(
         now=as_of,
     )
     if quality.score < minimum_score:
-        raise MarketScanSkipped(f"数据质量 {quality.score} 分，低于排名门槛 {minimum_score} 分")
+        raise MarketScanDataMissing(f"数据质量 {quality.score} 分，低于排名门槛 {minimum_score} 分")
     return quality
 
 
@@ -329,6 +348,9 @@ def completed_market_scan_klines(rows: list[Kline], cutoff: date) -> list[Kline]
     for row in rows:
         row_date = _strict_date(row.date)
         if row_date is not None and row_date <= cutoff and is_trading_day(row_date) and valid_kline(row):
+            existing = by_date.get(row_date)
+            if existing is not None and _ranking_bar_signature(existing) != _ranking_bar_signature(row):
+                raise MarketScanDataMissing(f"同一交易日 {row_date.isoformat()} 存在冲突日K")
             by_date[row_date] = row
     return [row for _row_date, row in sorted(by_date.items(), key=lambda entry: entry[0])]
 
@@ -350,24 +372,44 @@ def _require_qfq_rows(rows: list[Kline]) -> None:
         raise MarketScanDataMissing("日K不是一致的前复权序列")
 
 
-def _require_quote_date(quote: Quote, expected_data_date: date) -> None:
+def _require_quote_date(quote: Quote, expected_data_date: date, *, as_of: datetime) -> None:
     quote_time = parse_quote_time(quote.timestamp)
     if quote_time is None:
         raise MarketScanDataMissing("报价时间无法解析")
     if quote_time.date() != expected_data_date:
-        raise MarketScanSkipped(f"报价日期 {quote_time.date().isoformat()} 与完整交易日 {expected_data_date.isoformat()} 不一致")
+        raise MarketScanDataMissing(f"报价日期 {quote_time.date().isoformat()} 与完整交易日 {expected_data_date.isoformat()} 不一致")
+    cutoff = market_local_naive(as_of)
+    if quote_time > cutoff:
+        raise MarketScanDataMissing(
+            f"报价时间 {quote_time.strftime('%Y-%m-%d %H:%M:%S')} 晚于批次截止时点 "
+            f"{cutoff.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
 
 def _require_rankable_liquidity(quote: Quote, rows: list[Kline]) -> None:
+    if quote.price <= 0:
+        raise MarketScanDataMissing("报价缺少有效价格")
     if quote.volume <= 0 or quote.amount <= 0:
         if rows[-1].volume <= 0:
             raise MarketScanSkipped("当日报价与日K均无有效成交，可能停牌")
         raise MarketScanDataMissing("报价缺少有效成交量或成交额")
+    if _is_single_price_session(quote):
+        raise MarketScanSkipped("当日全天单一价格，无法确认开盘可成交性")
     if quote.turnover_rate is None:
         raise MarketScanDataMissing("报价缺少换手率")
     recent_volumes = [row.volume for row in rows[-20:]]
     if len(recent_volumes) < 6 or any(volume <= 0 for volume in recent_volumes):
         raise MarketScanDataMissing("日K缺少连续有效成交量，无法计算量比")
+
+
+def _require_quote_kline_close_consistency(quote: Quote, latest: Kline) -> None:
+    absolute_gap = abs(quote.price - latest.close)
+    relative_limit = max(quote.price, latest.close) * FULL_MARKET_MAX_CLOSE_GAP_PCT / 100
+    if absolute_gap > max(FULL_MARKET_MAX_CLOSE_GAP_ABSOLUTE, relative_limit):
+        gap_pct = absolute_gap / latest.close * 100
+        raise MarketScanDataMissing(
+            f"报价收盘价与同日日K收盘价偏差 {gap_pct:.2f}%，数据快照可能不同步"
+        )
 
 
 def _metadata_tags(
@@ -440,6 +482,7 @@ def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
             "data_quality": FULL_MARKET_DATA_QUALITY_ALGORITHM_VERSION,
             "leader_score": LEADER_SCORE_ALGORITHM_VERSION,
             "final_score": FULL_MARKET_SCORE_ALGORITHM_VERSION,
+            "rank_refinement": MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION,
         },
         "leader_profile": leader_profile_spec(FULL_MARKET_LEADER_PROFILE),
         "tag_rules": leader_tag_rules_spec(STRONG_STOCK_TAG_RULES, "观察"),
@@ -458,22 +501,30 @@ def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
         },
         "eligibility": {
             "min_data_quality_score": int(min_data_quality_score),
+            "quote_timestamp_not_after_as_of": True,
+            "single_price_session_excluded": True,
+            "quote_kline_close_consistency": {
+                "max_relative_gap_pct": FULL_MARKET_MAX_CLOSE_GAP_PCT,
+                "max_absolute_gap": FULL_MARKET_MAX_CLOSE_GAP_ABSOLUTE,
+                "accept_when": "within-either-limit",
+            },
         },
         "final_score": {
-            "formula": "leader_score * leader_weight + data_quality_score * quality_weight",
-            "weights": {
-                "leader_score": FULL_MARKET_LEADER_WEIGHT,
-                "data_quality_score": FULL_MARKET_QUALITY_WEIGHT,
-            },
+            "formula": "leader_score - (100 - data_quality_score) * quality_penalty_per_missing_point",
+            "quality_policy": "penalty-only",
+            "quality_penalty_per_missing_point": FULL_MARKET_QUALITY_PENALTY_PER_MISSING_POINT,
             "clamp": [0, 100],
         },
         "rounding": {
             "mode": LEADER_SCORE_ROUNDING_MODE,
-            "component_stage": "after-trend-weight-and-final-weighted-sum",
-            "raw_score_decimals": FULL_MARKET_METRIC_DECIMALS,
+            "component_stage": "after-quality-penalty-before-rank-refinement",
+            "raw_score_decimals": FULL_MARKET_RAW_SCORE_DECIMALS,
             "metric_decimals": FULL_MARKET_METRIC_DECIMALS,
         },
         "ranking": {
+            "refinement": market_scan_rank_refinement_spec(),
+            "raw_score_formula": "base_score - (1 - refinement_score) * max_rank_discount",
+            "base_score_minimum_step": 0.05,
             "tie_break": [list(item) for item in FULL_MARKET_SCORE_TIE_BREAK],
         },
     }
@@ -484,7 +535,11 @@ def _score_details(
     item: MarketScanResultItem,
     inputs: LeaderScoreInput,
     leader_breakdown: LeaderScoreBreakdown,
+    rank_refinement: MarketScanRankRefinement,
     quality_score: int,
+    quality_penalty: float,
+    base_score: float,
+    rank_discount: float,
     score: int,
     raw_score: float,
     rounded_score: int,
@@ -497,14 +552,7 @@ def _score_details(
         "run_rule_version": rule_version or f"{FULL_MARKET_SCORE_RULE_VERSION}:{score_spec_hash}",
         "score_spec_hash": score_spec_hash,
         "score_spec": score_spec,
-        "inputs": {
-            "trend_score": inputs.trend_score,
-            "change_pct": inputs.change_pct,
-            "volume_ratio": inputs.volume_ratio,
-            "amount": inputs.amount,
-            "turnover_rate": inputs.turnover_rate,
-            "data_quality_score": inputs.data_quality_score,
-        },
+        "inputs": _score_input_details(inputs, rank_refinement),
         "components": {
             "leader_score": {
                 "base": leader_breakdown.base,
@@ -514,32 +562,95 @@ def _score_details(
                 "score": leader_breakdown.score,
             },
             "data_quality_score": quality_score,
-            "final_score": {
-                "weighted_terms": {
-                    "leader_score": leader_breakdown.score * FULL_MARKET_LEADER_WEIGHT,
-                    "data_quality_score": quality_score * FULL_MARKET_QUALITY_WEIGHT,
-                },
-                "raw": raw_score,
-                "rounded": rounded_score,
-                "score": score,
-            },
+            "rank_refinement": _rank_refinement_details(rank_refinement),
+            "final_score": _final_score_details(
+                quality_penalty,
+                base_score,
+                rank_discount,
+                raw_score,
+                rounded_score,
+                score,
+            ),
         },
         "ranking": {
             "tie_break": [list(entry) for entry in FULL_MARKET_SCORE_TIE_BREAK],
             "tie_break_values": {
-                "score": score,
                 "raw_score": raw_score,
-                "trend_score": inputs.trend_score,
-                "change_pct": inputs.change_pct,
-                "amount": inputs.amount,
                 "symbol": item.symbol,
             },
         },
     }
 
 
-def _score_reason(score: int, trend: int, quality: int, volume_ratio: float) -> str:
-    return f"短线强势分 {score}，趋势 {trend}，数据质量 {quality}，" f"近5日量比 {volume_ratio:.2f}"
+def _rank_refinement_details(refinement: MarketScanRankRefinement) -> dict[str, object]:
+    return {
+        "normalized_inputs": refinement.normalized_inputs,
+        "components": refinement.components,
+        "weighted_terms": refinement.weighted_terms,
+        "score": refinement.score,
+    }
+
+
+def _score_input_details(
+    inputs: LeaderScoreInput,
+    refinement: MarketScanRankRefinement,
+) -> dict[str, float | None]:
+    return {
+        "trend_score": inputs.trend_score,
+        "change_pct": inputs.change_pct,
+        "volume_ratio": inputs.volume_ratio,
+        "amount": inputs.amount,
+        "turnover_rate": inputs.turnover_rate,
+        "data_quality_score": inputs.data_quality_score,
+        **{f"rank_{name}": value for name, value in refinement.raw_inputs.items()},
+    }
+
+
+def _final_score_details(
+    quality_penalty: float,
+    base_score: float,
+    rank_discount: float,
+    raw_score: float,
+    rounded_score: int,
+    score: int,
+) -> dict[str, int | float]:
+    return {
+        "quality_penalty": quality_penalty,
+        "base": base_score,
+        "rank_discount": rank_discount,
+        "raw": raw_score,
+        "rounded": rounded_score,
+        "score": score,
+    }
+
+
+def _score_reason(calculated: _MarketScanScore) -> str:
+    dominant_name, dominant_value = max(
+        calculated.rank_refinement.weighted_terms.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+    dominant_labels = {
+        "ma_alignment": "均线结构",
+        "range_position_20d": "20日区间位置",
+        "return_20d_pct": "20日收益",
+        "return_5d_pct": "5日收益",
+    }
+    return (
+        f"短线强势分 {calculated.score}（基础 {calculated.base_score:.2f}，趋势 {calculated.trend}，"
+        f"质量扣分 {calculated.quality_penalty:.2f}）；中期精排 {calculated.rank_refinement.score:.3f}，"
+        f"主要项为{dominant_labels.get(dominant_name, dominant_name)} {dominant_value:.3f}，"
+        f"精排扣分 {calculated.rank_discount:.6f}；近5日量比 {calculated.volume_ratio:.2f}。完全同分按代码排序"
+    )
+
+
+def _ranking_bar_signature(row: Kline) -> tuple[float, float, float, float, float, str | None]:
+    return (row.open, row.close, row.high, row.low, row.volume, row.adjustment_mode)
+
+
+def _is_single_price_session(quote: Quote) -> bool:
+    prices = (quote.open, quote.high, quote.low, quote.price)
+    tolerance = max(0.0001, quote.price * 1e-8)
+    return max(prices) - min(prices) <= tolerance
 
 
 def _strict_date(value: object) -> date | None:

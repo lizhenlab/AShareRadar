@@ -82,7 +82,7 @@ def test_factor_specs_reject_invalid_registration_rows() -> None:
 def test_trend_proxy_score_preserves_strong_trend_components() -> None:
     rows = _rows([100 + index for index in range(40)])
 
-    assert _trend_proxy_score_at(rows, 30) == 99
+    assert _trend_proxy_score_at(rows, 30) == 89
 
 
 def test_trend_proxy_score_returns_neutral_for_malformed_current_bar() -> None:
@@ -269,7 +269,7 @@ def test_triggers_reject_non_finite_current_scores_and_clamp_boundaries() -> Non
 
     assert _trend_trigger(rows, 30, math.nan) is False
     assert _fund_flow_trigger(rows, 30, math.inf) is False
-    assert _trend_trigger(rows, 30, 200) is True
+    assert _trend_trigger(rows, 30, 200) is False
     assert _fund_flow_proxy_score_at(rows, 30) == 92
     assert _fund_flow_trigger(rows, 30, 120) is True
 

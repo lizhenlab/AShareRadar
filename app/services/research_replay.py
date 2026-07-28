@@ -5,6 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from math import isfinite
+from typing import TypeGuard
 
 from app.models.reviews import AdviceReviewEvaluationDraft, AdviceReviewPlan
 from app.models.analysis import (
@@ -19,6 +20,11 @@ from app.models.research import (
     StockReplayAnalysis,
 )
 from app.services.indicators import pct_change
+from app.services.research_execution_model import (
+    MODELLED_ROUND_TRIP_FRICTION_PCT,
+    net_forward_return,
+    next_session_open,
+)
 from app.services.trading_calendar import (
     DAILY_KLINE_PUBLISH_TIME,
     is_trading_day,
@@ -134,10 +140,13 @@ def _insufficient_replay_report(symbol: str, updated_at: str, row_count: int) ->
 
 def _replay_cases(rows: list[Kline]) -> list[ReplayCase]:
     cases: list[ReplayCase] = []
+    next_allowed_index: dict[str, int] = {}
     for index in _replay_candidate_indices(rows):
         case = _replay_case(rows, index)
-        if case:
-            cases.append(case)
+        if case is None or index < next_allowed_index.get(case.pattern, 0):
+            continue
+        cases.append(case)
+        next_allowed_index[case.pattern] = index + REPLAY_EVALUATION_DAYS
     return cases
 
 
@@ -149,8 +158,8 @@ def _replay_case(rows: list[Kline], index: int) -> ReplayCase | None:
     pattern = _detect_replay_pattern(rows, index)
     if not pattern:
         return None
-    entry = rows[index].close
-    if not _is_positive_finite(entry):
+    entry = next_session_open(rows, index)
+    if entry is None:
         return None
     returns = _forward_returns(rows, index, entry)
     outcome = _replay_outcome(returns.day5)
@@ -180,7 +189,7 @@ def _forward_return(rows: list[Kline], index: int, entry: float, days: int) -> f
         return None
     if not _valid_price_bar(rows[target_index]):
         return None
-    return pct_change(rows[target_index].close, entry)
+    return net_forward_return(rows[target_index].close, entry)
 
 
 def _replay_outcome(forward_5d: float | None) -> str:
@@ -276,11 +285,11 @@ def _average_positive_volume(rows: list[Kline]) -> float:
     return sum(values) / len(values) if values else 0
 
 
-def _is_finite_number(value: float | None) -> bool:
-    return value is not None and isfinite(value)
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
+    return not isinstance(value, bool) and isinstance(value, int | float) and isfinite(value)
 
 
-def _is_positive_finite(value: float | None) -> bool:
+def _is_positive_finite(value: object) -> bool:
     return _is_finite_number(value) and value > 0
 
 
@@ -384,9 +393,11 @@ def _replay_summary(row_count: int, cases: list[ReplayCase], success_rate: float
 def _replay_notes() -> list[str]:
     return [
         "回放只用于检验该股历史上相似信号的表现，不代表未来收益承诺。",
+        f"信号按当日收盘后确认，统一按下一交易日开盘模拟入场；收益已扣除 {MODELLED_ROUND_TRIP_FRICTION_PCT:.2f}% 标准化往返摩擦。",
         f"样本少于{STABLE_SAMPLE_THRESHOLD}个时只作为案例观察，不用于提高策略置信。",
+        f"同类信号按{REPLAY_EVALUATION_DAYS}个交易日观察窗去重，避免一段行情被重复计为多个样本。",
         f"未走完{REPLAY_EVALUATION_DAYS}个交易日，或缺少有效{REPLAY_EVALUATION_DAYS}日后价格的信号，会标记为待确认，不参与成熟样本胜率。",
-        "后续可加入信号版本、滑点和成交约束，形成更严谨的单股验证。",
+        "标准化摩擦不等于个人真实佣金；涨跌停排队、最低佣金和订单簿滑点仍未精确建模。",
     ]
 
 

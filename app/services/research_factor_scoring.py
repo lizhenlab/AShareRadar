@@ -10,6 +10,7 @@ from app.models.analysis import (
 )
 from app.models.research import (
     ChipAnalysis,
+    FactorCalibration,
     StandardFactor,
 )
 from app.services.indicators import pct_change
@@ -72,6 +73,7 @@ class RiskPressureRule:
 
 VOLUME_CONFIRMATION_BASE_SCORE = 52
 RISK_PRESSURE_BASE_SCORE = 72
+MIN_FACTOR_CONFIRMATION_SAMPLES = 20
 
 
 def _build_factor(
@@ -87,6 +89,7 @@ def _build_factor(
     methodology: str | None = None,
 ) -> StandardFactor:
     clean_score = _clamp(score)
+    calibration = _factor_calibration(spec, analysis, clean_score)
     return StandardFactor(
         id=spec.id,
         name=spec.name,
@@ -99,10 +102,35 @@ def _build_factor(
         weight=_adjusted_factor_weight(spec.id, spec.weight, weight_adjustments or {}),
         evidence=evidence[:4],
         missing_data=_dedupe(missing_data)[:6],
-        calibration=_calibrate_factor(analysis.klines, spec, clean_score),
-        calibration_buckets=_calibration_buckets(analysis.klines, spec, clean_score),
+        calibration=calibration,
+        calibration_buckets=(
+            _calibration_buckets(analysis.klines, spec, clean_score)
+            if spec.historically_replayable
+            else []
+        ),
         data_nature=data_nature,
         methodology=methodology,
+    )
+
+
+def _factor_calibration(
+    spec: FactorSpec,
+    analysis: AnalysisResult,
+    score: int,
+) -> FactorCalibration:
+    if spec.historically_replayable:
+        return _calibrate_factor(analysis.klines, spec, score)
+    return FactorCalibration(
+        sample_count=0,
+        win_rate=0,
+        avg_forward_5d_return=0,
+        avg_forward_10d_return=0,
+        max_adverse_return=0,
+        stability_score=0,
+        expected_level="待补历史快照",
+        confidence_level="当前口径不可回放",
+        participates_in_historical_aggregate=False,
+        note=f"「{spec.name}」含日K无法完整还原的当前数据，不纳入历史证据聚合。",
     )
 
 
@@ -124,7 +152,7 @@ def _factor_calibration_quality(factors: list[StandardFactor]) -> int:
     scored = [
         item.calibration
         for item in _historical_aggregate_factors(factors)
-        if item.calibration and item.calibration.sample_count > 0
+        if item.calibration and item.calibration.sample_count >= MIN_FACTOR_CONFIRMATION_SAMPLES
     ]
     if not scored:
         return 35

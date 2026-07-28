@@ -10,12 +10,14 @@ from app.models.analysis import (
     FeatureSnapshot,
 )
 from app.services.research_factor_scoring import (
+    MIN_FACTOR_CONFIRMATION_SAMPLES,
     _factor_calibration_quality,
     _factor_participates_in_historical_aggregate,
     _historical_aggregate_factors,
     _weighted_factor_score,
 )
 from app.services.research_factor_text import _factor_lab_summary, _factor_score_impact
+from app.services.research_execution_model import MODELLED_ROUND_TRIP_FRICTION_PCT
 from app.services.scoring import clamp_score as _clamp
 
 
@@ -85,7 +87,7 @@ def factor_support_count(factors: list[StandardFactor]) -> int:
         for item in _historical_aggregate_factors(factors)
         if item.score >= 60
         and item.calibration
-        and item.calibration.sample_count >= 5
+        and item.calibration.sample_count >= MIN_FACTOR_CONFIRMATION_SAMPLES
         and item.calibration.expected_level in {"偏正", "较强"}
     )
 
@@ -139,7 +141,10 @@ def factor_lab_notes(
     )
     return [
         "因子实验室只校验单只股票自身的历史相似状态，不做组合选股或自动交易。",
-        "历史校准使用日K向后5日/10日表现，样本少时只作为证据充分度较低的参考。",
+        (
+            "历史校准按信号后下一交易日开盘模拟入场，5日/10日收益扣除"
+            f" {MODELLED_ROUND_TRIP_FRICTION_PCT:.2f}% 标准化往返摩擦，并按10日窗口去重。"
+        ),
         f"当前画像为「{profile_label}」，因子权重已按画像动态调整。",
         *participation_notes,
         (

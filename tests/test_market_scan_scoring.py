@@ -129,11 +129,11 @@ def test_market_scan_metadata_degradation_keeps_industry_and_list_date_reasons_d
     assert result.degradation_reasons == ("industry_missing", "list_date_missing")
 
 
-def test_market_scan_v3_spec_serializes_cache_policy_profile_and_raw_tie_break() -> None:
+def test_market_scan_v4_spec_serializes_penalty_only_quality_and_continuous_refinement() -> None:
     spec = market_scan_score_spec(min_data_quality_score=50)
 
-    assert spec["schema_version"] == 3
-    assert spec["rule_version"] == "full-market-score-v3"
+    assert spec["schema_version"] == 4
+    assert spec["rule_version"] == "full-market-score-v4"
     assert spec["leader_profile"] == {
         "algorithm": "leader-score-additive-v1",
         "profile_id": "full-market-trend-only-v1",
@@ -143,11 +143,17 @@ def test_market_scan_v3_spec_serializes_cache_policy_profile_and_raw_tie_break()
     }
     assert spec["data_quality_policy"]["cached_quote"] == "neutral"
     assert spec["volume_ratio"] == {"recent_window": 5, "base_window": 20, "min_count": 6, "precision": 2}
+    assert spec["final_score"]["quality_policy"] == "penalty-only"
+    assert spec["final_score"]["quality_penalty_per_missing_point"] == 0.15
+    assert spec["ranking"]["refinement"]["algorithm"] == "bounded-medium-term-refinement-v1"
+    assert spec["ranking"]["refinement"]["max_rank_discount"] < spec["ranking"]["base_score_minimum_step"]
+    assert spec["rounding"]["raw_score_decimals"] == 6
+    assert spec["eligibility"]["single_price_session_excluded"] is True
     assert tuple(tuple(entry) for entry in spec["ranking"]["tie_break"]) == FULL_MARKET_SCORE_TIE_BREAK
-    assert FULL_MARKET_SCORE_TIE_BREAK[:2] == (("score", "desc"), ("raw_score", "desc"))
+    assert FULL_MARKET_SCORE_TIE_BREAK == (("raw_score", "desc"), ("symbol", "asc"))
 
 
-def test_market_scan_replay_validates_raw_score_and_compatibly_replays_v2_spec() -> None:
+def test_market_scan_replay_validates_raw_score_and_compatibly_replays_v2_v3_specs() -> None:
     result = score_market_scan_item(
         _item(),
         _quote(),
@@ -160,16 +166,19 @@ def test_market_scan_replay_validates_raw_score_and_compatibly_replays_v2_spec()
     )
     replay = replay_score_details(result.score_details)
 
-    assert replay.score_spec_schema_version == 3
+    assert replay.score_spec_schema_version == 4
     assert replay.raw_score == result.raw_score
-    assert replay.tie_break[:2] == (("score", "desc"), ("raw_score", "desc"))
+    assert replay.tie_break == (("raw_score", "desc"), ("symbol", "asc"))
 
     corrupted_raw = deepcopy(result.score_details)
     corrupted_raw["ranking"]["tie_break_values"]["raw_score"] += 0.1
     with pytest.raises(MarketScanReplayError, match="raw_score"):
         replay_score_details(corrupted_raw)
 
-    legacy = deepcopy(result.score_details)
+    v3 = _as_v3_score_details(result.score_details)
+    assert replay_score_details(v3).score_spec_schema_version == 3
+
+    legacy = deepcopy(v3)
     legacy_spec = legacy["score_spec"]
     legacy_spec["schema_version"] = 2
     legacy_spec["algorithms"]["volume_ratio"] = "recent-volume-ratio-v1"
@@ -187,28 +196,32 @@ def test_market_scan_replay_validates_raw_score_and_compatibly_replays_v2_spec()
     assert replay_score_details(legacy).score_spec_schema_version == 2
 
 
-def test_market_scan_replay_uses_raw_score_before_other_tie_breakers() -> None:
-    result = score_market_scan_item(
+def test_market_scan_replay_uses_continuous_medium_term_structure_before_symbol() -> None:
+    slow = score_market_scan_item(
         _item(),
         _quote(),
-        _rows(DATA_DATE, 80),
+        _trend_rows(DATA_DATE, 80, first_close=6.1, last_close=10.5),
         as_of=AS_OF,
         completed_cutoff=DATA_DATE,
         expected_data_date=DATA_DATE,
         min_history_rows=60,
         min_data_quality_score=0,
     )
-    leader_score = result.leader_score
-    assert leader_score is not None
-    quality_pair = next(
-        (high, high - 1)
-        for high in range(100, 0, -1)
-        if round(leader_score * 0.85 + high * 0.15) == round(leader_score * 0.85 + (high - 1) * 0.15)
+    fast = score_market_scan_item(
+        _item(),
+        _quote(),
+        _trend_rows(DATA_DATE, 80, first_close=6.0, last_close=10.5),
+        as_of=AS_OF,
+        completed_cutoff=DATA_DATE,
+        expected_data_date=DATA_DATE,
+        min_history_rows=60,
+        min_data_quality_score=0,
     )
-    higher = _score_details_with_quality(result.score_details, quality_pair[0], symbol="600002.SH")
-    lower = _score_details_with_quality(result.score_details, quality_pair[1], symbol="600001.SH")
+    higher = _score_details_with_symbol(fast.score_details, "600002.SH")
+    lower = _score_details_with_symbol(slow.score_details, "600001.SH")
 
-    assert higher["components"]["final_score"]["score"] == lower["components"]["final_score"]["score"]
+    assert fast.score == slow.score
+    assert fast.trend_score == slow.trend_score
     assert higher["components"]["final_score"]["raw"] > lower["components"]["final_score"]["raw"]
     assert rank_score_details([("600001.SH", lower), ("600002.SH", higher)]) == {
         "600002.SH": 1,
@@ -216,9 +229,9 @@ def test_market_scan_replay_uses_raw_score_before_other_tie_breakers() -> None:
     }
 
 
-def test_completed_market_scan_klines_excludes_future_invalid_and_deduplicates() -> None:
+def test_completed_market_scan_klines_excludes_future_invalid_and_identical_duplicates() -> None:
     earlier = make_kline(date="2026-07-16", close=10)
-    replacement = make_kline(date="2026-07-16", close=11)
+    replacement = earlier.model_copy(update={"source": "另一个来源"})
     current = make_kline(date="2026-07-17", close=12)
     future = make_kline(date="2026-07-18", close=13)
     invalid_date = make_kline(date="2026/07/17", close=14)
@@ -229,9 +242,18 @@ def test_completed_market_scan_klines_excludes_future_invalid_and_deduplicates()
     )
 
     assert [(row.date, row.close) for row in rows] == [
-        ("2026-07-16", 11),
+        ("2026-07-16", 10),
         ("2026-07-17", 12),
     ]
+
+
+def test_completed_market_scan_klines_rejects_conflicting_same_day_bars_regardless_of_order() -> None:
+    first = make_kline(date="2026-07-16", close=10)
+    conflicting = make_kline(date="2026-07-16", close=11)
+
+    for rows in ([first, conflicting], [conflicting, first]):
+        with pytest.raises(MarketScanDataMissing, match="存在冲突日K"):
+            completed_market_scan_klines(rows, DATA_DATE)
 
 
 def test_market_scan_rejects_provider_bar_after_expected_trading_date() -> None:
@@ -272,7 +294,7 @@ def test_market_scan_rejects_provider_bar_after_expected_trading_date() -> None:
             lambda: _item(),
             lambda: _quote(timestamp="2026-07-16 15:00:00"),
             lambda: _rows(DATA_DATE, 80),
-            MarketScanSkipped,
+            MarketScanDataMissing,
             "与完整交易日",
         ),
         (
@@ -335,20 +357,18 @@ def test_current_zero_liquidity_quote_and_bar_are_classified_as_possible_suspens
         )
 
 
-def test_market_scan_uses_data_date_as_the_end_of_day_snapshot_boundary() -> None:
-    result = score_market_scan_item(
-        _item(),
-        _quote(timestamp="2026-07-17 17:00:00"),
-        _rows(DATA_DATE, 80),
-        as_of=AS_OF,
-        completed_cutoff=DATA_DATE,
-        expected_data_date=DATA_DATE,
-        min_history_rows=60,
-        min_data_quality_score=0,
-    )
-
-    assert result.status == "success"
-    assert result.data_date == DATA_DATE.isoformat()
+def test_market_scan_rejects_quote_after_the_batch_as_of_boundary() -> None:
+    with pytest.raises(MarketScanDataMissing, match="晚于批次截止时点"):
+        score_market_scan_item(
+            _item(),
+            _quote(timestamp="2026-07-17 17:00:00"),
+            _rows(DATA_DATE, 80),
+            as_of=AS_OF,
+            completed_cutoff=DATA_DATE,
+            expected_data_date=DATA_DATE,
+            min_history_rows=60,
+            min_data_quality_score=0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -376,11 +396,44 @@ def test_market_scan_score_rejects_missing_rankable_quote_liquidity(
         )
 
 
+def test_market_scan_skips_single_price_session_with_uncertain_execution() -> None:
+    locked = _quote().model_copy(update={"open": 10.5, "high": 10.5, "low": 10.5, "price": 10.5})
+
+    with pytest.raises(MarketScanSkipped, match="全天单一价格"):
+        score_market_scan_item(
+            _item(),
+            locked,
+            _rows(DATA_DATE, 80),
+            as_of=AS_OF,
+            completed_cutoff=DATA_DATE,
+            expected_data_date=DATA_DATE,
+            min_history_rows=60,
+            min_data_quality_score=0,
+        )
+
+
 def test_market_scan_score_rejects_missing_recent_kline_volume() -> None:
     rows = _rows(DATA_DATE, 80)
     rows[-5] = rows[-5].model_copy(update={"volume": 0})
 
     with pytest.raises(MarketScanDataMissing, match="连续有效成交量"):
+        score_market_scan_item(
+            _item(),
+            _quote(),
+            rows,
+            as_of=AS_OF,
+            completed_cutoff=DATA_DATE,
+            expected_data_date=DATA_DATE,
+            min_history_rows=60,
+            min_data_quality_score=0,
+        )
+
+
+def test_market_scan_score_rejects_quote_and_same_day_kline_close_mismatch() -> None:
+    rows = _rows(DATA_DATE, 80)
+    rows[-1] = rows[-1].model_copy(update={"close": 10.0, "high": 10.2})
+
+    with pytest.raises(MarketScanDataMissing, match="收盘价偏差"):
         score_market_scan_item(
             _item(),
             _quote(),
@@ -430,32 +483,70 @@ def test_market_scan_universe_deduplicates_and_marks_st_new_and_delisted() -> No
     assert by_symbol["920066.BJ"].list_date == "2024-07-03"
 
 
-def _score_details_with_quality(
-    details: dict[str, object],
-    quality_score: int,
-    *,
-    symbol: str,
-) -> dict[str, object]:
+def _score_details_with_symbol(details: dict[str, object], symbol: str) -> dict[str, object]:
     updated = deepcopy(details)
+    updated["ranking"]["tie_break_values"]["symbol"] = symbol
+    return updated
+
+
+def _as_v3_score_details(details: dict[str, object]) -> dict[str, object]:
+    updated = deepcopy(details)
+    spec = updated["score_spec"]
     inputs = updated["inputs"]
     components = updated["components"]
     ranking = updated["ranking"]
     leader_score = components["leader_score"]["score"]
+    quality_score = inputs["data_quality_score"]
     raw_score = round(leader_score * 0.85 + quality_score * 0.15, 4)
     rounded_score = round(raw_score)
+    v3_tie_break = [
+        ["score", "desc"],
+        ["raw_score", "desc"],
+        ["trend_score", "desc"],
+        ["change_pct", "desc"],
+        ["amount", "desc"],
+        ["symbol", "asc"],
+    ]
 
-    inputs["data_quality_score"] = quality_score
-    components["data_quality_score"] = quality_score
-    components["final_score"]["weighted_terms"] = {
-        "leader_score": leader_score * 0.85,
-        "data_quality_score": quality_score * 0.15,
+    spec["schema_version"] = 3
+    spec["rule_version"] = "full-market-score-v3"
+    spec["algorithms"].pop("rank_refinement")
+    spec["algorithms"]["trend_score"] = "trend-score-v1"
+    spec["algorithms"]["final_score"] = "weighted-trend-quality-v2"
+    spec["eligibility"].pop("quote_kline_close_consistency")
+    spec["eligibility"].pop("quote_timestamp_not_after_as_of")
+    spec["eligibility"].pop("single_price_session_excluded")
+    spec["final_score"] = {
+        "formula": "leader_score * leader_weight + data_quality_score * quality_weight",
+        "weights": {"leader_score": 0.85, "data_quality_score": 0.15},
+        "clamp": [0, 100],
     }
-    components["final_score"]["raw"] = raw_score
-    components["final_score"]["rounded"] = rounded_score
-    components["final_score"]["score"] = rounded_score
-    ranking["tie_break_values"]["score"] = rounded_score
-    ranking["tie_break_values"]["raw_score"] = raw_score
-    ranking["tie_break_values"]["symbol"] = symbol
+    spec["rounding"]["component_stage"] = "after-trend-weight-and-final-weighted-sum"
+    spec["rounding"]["raw_score_decimals"] = 4
+    spec["ranking"] = {"tie_break": v3_tie_break}
+    for key in tuple(inputs):
+        if key.startswith("rank_"):
+            inputs.pop(key)
+    components.pop("rank_refinement")
+    components["final_score"] = {
+        "weighted_terms": {
+            "leader_score": leader_score * 0.85,
+            "data_quality_score": quality_score * 0.15,
+        },
+        "raw": raw_score,
+        "rounded": rounded_score,
+        "score": rounded_score,
+    }
+    ranking["tie_break"] = v3_tie_break
+    ranking["tie_break_values"] = {
+        "score": rounded_score,
+        "raw_score": raw_score,
+        "trend_score": inputs["trend_score"],
+        "change_pct": inputs["change_pct"],
+        "amount": inputs["amount"],
+        "symbol": ranking["tie_break_values"]["symbol"],
+    }
+    updated["score_spec_hash"] = stable_score_spec_hash(spec)
     return updated
 
 
@@ -509,6 +600,10 @@ def _quote(
 
 
 def _rows(latest: date, count: int) -> list[Kline]:
+    return _trend_rows(latest, count, first_close=10.5 - (count - 1) * 0.04, last_close=10.5)
+
+
+def _trend_rows(latest: date, count: int, *, first_close: float, last_close: float) -> list[Kline]:
     days: list[date] = []
     cursor = latest
     while len(days) < count:
@@ -516,10 +611,11 @@ def _rows(latest: date, count: int) -> list[Kline]:
             days.append(cursor)
         cursor -= timedelta(days=1)
     days.reverse()
+    step = (last_close - first_close) / max(1, count - 1)
     return [
         make_kline(
             date=day.isoformat(),
-            close=8 + index * 0.04,
+            close=first_close + index * step,
             volume=1_000_000 + index * 20_000,
             source="test-qfq",
             as_of=latest.isoformat(),
