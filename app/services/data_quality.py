@@ -39,6 +39,7 @@ def build_data_quality(
     consistency_notes: list[str] | None = None,
     consistency_penalty: int = 0,
     require_kline: bool = True,
+    penalize_cached_quote: bool = True,
     now: datetime | None = None,
 ) -> DataQuality:
     current = now or market_now_naive()
@@ -49,6 +50,7 @@ def build_data_quality(
         consistency_notes=consistency_notes,
         consistency_penalty=consistency_penalty,
         require_kline=require_kline,
+        penalize_cached_quote=penalize_cached_quote,
         now=current,
     )
 

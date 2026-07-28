@@ -873,7 +873,9 @@ def _is_stale_managed_backup_temporary(
         return False
     if child.is_symlink() or not child.is_dir() or child.resolve().parent != backup_directory:
         return False
-    if now - child.stat().st_mtime <= BACKUP_TEMPORARY_MIN_AGE_SECONDS:
+    # Compare whole-second age so datetime and filesystem subsecond precision cannot flip the boundary.
+    age_seconds = int(max(0.0, now - child.stat().st_mtime))
+    if age_seconds <= BACKUP_TEMPORARY_MIN_AGE_SECONDS:
         return False
     try:
         return _managed_backup_bundle(source, child) is None

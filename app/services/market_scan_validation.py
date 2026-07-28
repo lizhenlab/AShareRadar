@@ -157,7 +157,7 @@ def missing_quote_result(
     return MarketScanResultWrite(
         symbol=item.symbol,
         status="missing",
-        error=quote_error or "报价不可用，无法计算包含换手率和成交额的综合分",
+        error=quote_error or "报价不可用，无法计算短线强势分所需的换手率和成交额",
         **provenance,
     )
 

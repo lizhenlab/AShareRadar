@@ -17,7 +17,7 @@ from app.services.reliability import (
     _percentile,
     build_reliability_report,
 )
-from app.utils.audit_time import audit_now_text
+from app.utils.audit_time import audit_now_text, audit_seconds_ago_text
 
 
 def test_hourly_buckets_aggregate_without_request_cardinality(
@@ -144,6 +144,26 @@ def test_coverage_sample_gate_counts_only_runs_with_a_denominator(tmp_path: Path
     assert coverage.status == "insufficient_data"
 
 
+def test_market_scan_reliability_coverage_excludes_deterministic_skips(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "reliability.sqlite3")
+    with sqlite3.connect(cache.path) as conn:
+        _insert_scan(
+            conn,
+            status="degraded",
+            trigger="manual",
+            total=100,
+            success=90,
+            skipped=10,
+            duration_ms=100,
+        )
+
+    stats = cache.reliability_market_scan_stats(audit_seconds_ago_text(60))
+
+    assert stats.coverage_run_count == 1
+    assert stats.successful_symbols == 90
+    assert stats.total_symbols == 90
+
+
 def test_reliability_bucket_window_floors_only_the_rolling_start_to_utc_hour(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,15 +241,16 @@ def _insert_scan(
     total: int,
     success: int,
     duration_ms: int,
+    skipped: int = 0,
 ) -> None:
     now = audit_now_text()
     conn.execute(
         """
         INSERT INTO market_scan_run (
             status, trigger, rule_version, as_of, data_date, scope,
-            total_count, processed_count, success_count,
+            total_count, processed_count, success_count, skipped_count,
             created_at, updated_at, started_at, finished_at, duration_ms
-        ) VALUES (?, ?, 'test-v1', ?, ?, 'all', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 'test-v1', ?, ?, 'all', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             status,
@@ -239,6 +260,7 @@ def _insert_scan(
             total,
             total,
             success,
+            skipped,
             now,
             now,
             now,

@@ -60,6 +60,7 @@ files = [
     "app/services/datahub_quotes.py",
     "app/services/datahub_source_plan.py",
     "app/services/datahub_status_service.py",
+    "app/services/datahub_stock_pool_metadata.py",
     "app/services/discovery.py",
     "app/services/leader_scoring.py",
     "app/services/market_scan_automation.py",

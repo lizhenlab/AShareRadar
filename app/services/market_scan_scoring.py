@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from app.models.market_scan import (
-    MARKET_SCAN_RANK_TIE_BREAK,
     MarketScanResultItem,
     MarketScanResultWrite,
 )
@@ -19,9 +18,9 @@ from app.services.data_quality import build_data_quality
 from app.services.data_quality_time import parse_quote_time
 from app.services.indicators import recent_volume_ratio, trend_score
 from app.services.leader_scoring import (
+    FULL_MARKET_LEADER_PROFILE,
     LEADER_SCORE_ALGORITHM_VERSION,
     LEADER_SCORE_ROUNDING_MODE,
-    STRONG_STOCK_LEADER_PROFILE,
     STRONG_STOCK_TAG_RULES,
     LeaderScoreInput,
     LeaderScoreBreakdown,
@@ -44,14 +43,27 @@ from app.utils.market_data import valid_kline
 from app.utils.symbols import standard_symbol
 
 
-FULL_MARKET_SCORE_RULE_VERSION = "full-market-score-v2"
-FULL_MARKET_SCORE_ALGORITHM_VERSION = "weighted-leader-quality-v1"
+FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION = 3
+FULL_MARKET_SCORE_RULE_VERSION = "full-market-score-v3"
+FULL_MARKET_SCORE_ALGORITHM_VERSION = "weighted-trend-quality-v2"
 FULL_MARKET_TREND_ALGORITHM_VERSION = "trend-score-v1"
-FULL_MARKET_VOLUME_RATIO_ALGORITHM_VERSION = "recent-volume-ratio-v1"
-FULL_MARKET_DATA_QUALITY_ALGORITHM_VERSION = "data-quality-v1"
+FULL_MARKET_VOLUME_RATIO_ALGORITHM_VERSION = "recent-volume-ratio-v2-explicit-windows"
+FULL_MARKET_DATA_QUALITY_ALGORITHM_VERSION = "data-quality-v2-cache-neutral"
 FULL_MARKET_LEADER_WEIGHT = 0.85
 FULL_MARKET_QUALITY_WEIGHT = 0.15
 FULL_MARKET_METRIC_DECIMALS = 4
+FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW = 5
+FULL_MARKET_VOLUME_RATIO_BASE_WINDOW = 20
+FULL_MARKET_VOLUME_RATIO_MIN_COUNT = FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW + 1
+FULL_MARKET_VOLUME_RATIO_PRECISION = 2
+FULL_MARKET_SCORE_TIE_BREAK: tuple[tuple[str, str], ...] = (
+    ("score", "desc"),
+    ("raw_score", "desc"),
+    ("trend_score", "desc"),
+    ("change_pct", "desc"),
+    ("amount", "desc"),
+    ("symbol", "asc"),
+)
 
 
 class MarketScanDataMissing(ValueError):
@@ -82,6 +94,8 @@ class _MarketScanProvenance:
     quote_fallback_used: bool
     kline_fallback_used: bool
     metadata_degraded: bool
+    industry_missing: bool
+    list_date_missing: bool
     degradation_reasons: tuple[str, ...]
 
 
@@ -137,7 +151,11 @@ def _calculate_market_scan_score(
         minimum_score=min_data_quality_score,
     )
     trend, _trend_label = trend_score(quote, rows)
-    volume_ratio = recent_volume_ratio(rows)
+    volume_ratio = recent_volume_ratio(
+        rows,
+        recent_window=FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW,
+        base_window=FULL_MARKET_VOLUME_RATIO_BASE_WINDOW,
+    )
     leader_inputs = LeaderScoreInput(
         trend_score=trend,
         change_pct=quote.change_pct,
@@ -146,9 +164,12 @@ def _calculate_market_scan_score(
         turnover_rate=quote.turnover_rate,
         data_quality_score=quality.score,
     )
-    leader_breakdown = leader_score_breakdown(leader_inputs, STRONG_STOCK_LEADER_PROFILE)
+    leader_breakdown = leader_score_breakdown(leader_inputs, FULL_MARKET_LEADER_PROFILE)
     leadership = leader_breakdown.score
-    raw_score = leadership * FULL_MARKET_LEADER_WEIGHT + quality.score * FULL_MARKET_QUALITY_WEIGHT
+    raw_score = round(
+        leadership * FULL_MARKET_LEADER_WEIGHT + quality.score * FULL_MARKET_QUALITY_WEIGHT,
+        FULL_MARKET_METRIC_DECIMALS,
+    )
     rounded_score = round(raw_score)
     score = clamp_score(rounded_score)
     return _MarketScanScore(
@@ -181,6 +202,7 @@ def _market_scan_result(
         symbol=item.symbol,
         status="success",
         score=calculated.score,
+        raw_score=calculated.raw_score,
         trend_score=calculated.trend,
         leader_score=calculated.leadership,
         data_quality_score=calculated.quality.score,
@@ -227,15 +249,20 @@ def _market_scan_provenance(
 ) -> _MarketScanProvenance:
     quote_fallback_used = bool(quote.fallback_used)
     kline_fallback_used = any(row.fallback_used for row in rows)
-    metadata_degraded = item.list_date is None
+    industry_missing = not str(item.industry or "").strip()
+    list_date_missing = not str(item.list_date or "").strip()
+    metadata_degraded = industry_missing or list_date_missing
     return _MarketScanProvenance(
         quote_fallback_used=quote_fallback_used,
         kline_fallback_used=kline_fallback_used,
         metadata_degraded=metadata_degraded,
+        industry_missing=industry_missing,
+        list_date_missing=list_date_missing,
         degradation_reasons=_degradation_reasons(
             quote_fallback_used=quote_fallback_used,
             kline_fallback_used=kline_fallback_used,
-            metadata_degraded=metadata_degraded,
+            industry_missing=industry_missing,
+            list_date_missing=list_date_missing,
         ),
     )
 
@@ -250,7 +277,8 @@ def _metadata_tags_for_result(
         quality_score,
         quote_fallback_used=provenance.quote_fallback_used,
         kline_fallback_used=provenance.kline_fallback_used,
-        metadata_degraded=provenance.metadata_degraded,
+        industry_missing=provenance.industry_missing,
+        list_date_missing=provenance.list_date_missing,
     )
 
 
@@ -288,6 +316,7 @@ def _market_scan_quality(
         rows,
         consistency_level="批量扫描未执行多源一致性校验",
         consistency_notes=["全市场批量扫描按单一可用行情快照计算。"],
+        penalize_cached_quote=False,
         now=as_of,
     )
     if quality.score < minimum_score:
@@ -347,14 +376,17 @@ def _metadata_tags(
     *,
     quote_fallback_used: bool,
     kline_fallback_used: bool,
-    metadata_degraded: bool,
+    industry_missing: bool,
+    list_date_missing: bool,
 ) -> list[str]:
     tags: list[str] = []
     if item.is_st:
         tags.append("ST")
     if item.is_new:
         tags.append("新股")
-    if metadata_degraded:
+    if industry_missing:
+        tags.append("行业未知")
+    if list_date_missing:
         tags.append("上市日期未知")
     if quality_score < 70:
         tags.append("数据降权")
@@ -369,14 +401,16 @@ def _degradation_reasons(
     *,
     quote_fallback_used: bool,
     kline_fallback_used: bool,
-    metadata_degraded: bool,
+    industry_missing: bool,
+    list_date_missing: bool,
 ) -> tuple[str, ...]:
     return tuple(
         reason
         for enabled, reason in (
             (quote_fallback_used, "quote_fallback"),
             (kline_fallback_used, "kline_fallback"),
-            (metadata_degraded, "metadata_incomplete"),
+            (industry_missing, "industry_missing"),
+            (list_date_missing, "list_date_missing"),
         )
         if enabled
     )
@@ -398,7 +432,7 @@ def _scan_metrics(rows: list[Kline], volume_ratio: float) -> dict[str, float]:
 
 def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION,
         "rule_version": FULL_MARKET_SCORE_RULE_VERSION,
         "algorithms": {
             "trend_score": FULL_MARKET_TREND_ALGORITHM_VERSION,
@@ -407,8 +441,21 @@ def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
             "leader_score": LEADER_SCORE_ALGORITHM_VERSION,
             "final_score": FULL_MARKET_SCORE_ALGORITHM_VERSION,
         },
-        "leader_profile": leader_profile_spec(STRONG_STOCK_LEADER_PROFILE),
+        "leader_profile": leader_profile_spec(FULL_MARKET_LEADER_PROFILE),
         "tag_rules": leader_tag_rules_spec(STRONG_STOCK_TAG_RULES, "观察"),
+        "volume_ratio": {
+            "recent_window": FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW,
+            "base_window": FULL_MARKET_VOLUME_RATIO_BASE_WINDOW,
+            "min_count": FULL_MARKET_VOLUME_RATIO_MIN_COUNT,
+            "precision": FULL_MARKET_VOLUME_RATIO_PRECISION,
+        },
+        "data_quality_policy": {
+            "cached_quote": "neutral",
+            "fallback_quote": "penalize",
+            "stale_quote": "penalize",
+            "quote_field_anomalies": "penalize",
+            "kline_anomalies": "penalize",
+        },
         "eligibility": {
             "min_data_quality_score": int(min_data_quality_score),
         },
@@ -423,10 +470,11 @@ def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
         "rounding": {
             "mode": LEADER_SCORE_ROUNDING_MODE,
             "component_stage": "after-trend-weight-and-final-weighted-sum",
+            "raw_score_decimals": FULL_MARKET_METRIC_DECIMALS,
             "metric_decimals": FULL_MARKET_METRIC_DECIMALS,
         },
         "ranking": {
-            "tie_break": [list(item) for item in MARKET_SCAN_RANK_TIE_BREAK],
+            "tie_break": [list(item) for item in FULL_MARKET_SCORE_TIE_BREAK],
         },
     }
 
@@ -477,9 +525,10 @@ def _score_details(
             },
         },
         "ranking": {
-            "tie_break": [list(entry) for entry in MARKET_SCAN_RANK_TIE_BREAK],
+            "tie_break": [list(entry) for entry in FULL_MARKET_SCORE_TIE_BREAK],
             "tie_break_values": {
                 "score": score,
+                "raw_score": raw_score,
                 "trend_score": inputs.trend_score,
                 "change_pct": inputs.change_pct,
                 "amount": inputs.amount,
@@ -490,7 +539,7 @@ def _score_details(
 
 
 def _score_reason(score: int, trend: int, quality: int, volume_ratio: float) -> str:
-    return f"综合分 {score}，趋势 {trend}，数据质量 {quality}，" f"近5日量比 {volume_ratio:.2f}"
+    return f"短线强势分 {score}，趋势 {trend}，数据质量 {quality}，" f"近5日量比 {volume_ratio:.2f}"
 
 
 def _strict_date(value: object) -> date | None:
@@ -505,6 +554,8 @@ def _strict_date(value: object) -> date | None:
 __all__ = [
     "FULL_MARKET_SCORE_ALGORITHM_VERSION",
     "FULL_MARKET_SCORE_RULE_VERSION",
+    "FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION",
+    "FULL_MARKET_SCORE_TIE_BREAK",
     "MarketScanDataMissing",
     "MarketScanReplayError",
     "MarketScanScoreReplay",

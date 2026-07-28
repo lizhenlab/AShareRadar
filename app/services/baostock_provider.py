@@ -13,7 +13,10 @@ from app.models.market import (
 )
 from app.runtime_environment import isolate_user_site_packages
 from app.services.provider_utils import bs_symbol, ensure_positive_limit, is_installed, valid_ohlc
-from app.services.provider_stock_mappers import stock_info_from_baostock_row
+from app.services.provider_stock_mappers import (
+    stock_industry_from_baostock_row,
+    stock_info_from_baostock_row,
+)
 from app.services.providers import stamp_daily_kline_contract
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.parsing import required_float, safe_float
@@ -38,7 +41,7 @@ class BaoStockProvider:
         self._ensure_installed()
 
         def load() -> list[Kline]:
-            import baostock as bs
+            import baostock as bs  # type: ignore[import-untyped]
 
             lg = bs.login()
             if lg.error_code != "0":
@@ -74,6 +77,10 @@ class BaoStockProvider:
         self._ensure_installed()
         return await self._run_session(lambda: _load_baostock_stock_pool(self.source_name))
 
+    async def stock_industries(self) -> dict[str, str]:
+        self._ensure_installed()
+        return await self._run_session(_load_baostock_stock_industries)
+
     async def aclose(self) -> None:
         if self._closed:
             return
@@ -94,6 +101,7 @@ class BaoStockProvider:
             reliability_level="公开历史源",
             daily_kline=installed,
             stock_pool=installed,
+            stock_industry=installed,
             note="免费历史行情源，适合个股历史K线备份。",
         )
 
@@ -125,9 +133,47 @@ def _load_baostock_stock_pool(source_name: str) -> list[StockInfo]:
         result = bs.query_stock_basic()
         rows = _baostock_result_rows(result)
         _raise_baostock_error(result, "BaoStock股票池失败")
-        return _stock_pool_from_rows(rows, result.fields, source_name, now_text())
+        stocks = _stock_pool_from_rows(rows, result.fields, source_name, now_text())
+        try:
+            industries = _query_baostock_stock_industries(bs)
+        except Exception:
+            return stocks
+        return _merge_stock_pool_industries(stocks, industries)
     finally:
         bs.logout()
+
+
+def _load_baostock_stock_industries() -> dict[str, str]:
+    import baostock as bs
+
+    _login_baostock(bs)
+    try:
+        return _query_baostock_stock_industries(bs)
+    finally:
+        bs.logout()
+
+
+def _query_baostock_stock_industries(bs) -> dict[str, str]:
+    result = bs.query_stock_industry()
+    rows = _baostock_result_rows(result)
+    _raise_baostock_error(result, "BaoStock行业快照失败")
+    industries: dict[str, str] = {}
+    for row in rows:
+        item = stock_industry_from_baostock_row(dict(zip(result.fields, row)))
+        if item is not None:
+            industries.setdefault(*item)
+    if not industries:
+        raise RuntimeError("BaoStock行业快照返回为空")
+    return industries
+
+
+def _merge_stock_pool_industries(stocks: list[StockInfo], industries: dict[str, str]) -> list[StockInfo]:
+    return [
+        item.model_copy(update={"industry": industries[item.symbol]})
+        if not item.industry and item.symbol in industries
+        else item
+        for item in stocks
+    ]
 
 
 def _login_baostock(bs) -> None:

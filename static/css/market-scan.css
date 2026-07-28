@@ -206,6 +206,12 @@ body.market-scan-view-active .market-scan-global-progress {
   overflow-wrap: anywhere;
 }
 
+#marketScanRule {
+  font-size: 13px;
+  overflow-wrap: normal;
+  white-space: pre-line;
+}
+
 .discovery-preset-controls {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr) minmax(300px, auto);

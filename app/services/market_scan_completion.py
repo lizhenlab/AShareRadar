@@ -8,6 +8,7 @@ import sys
 from urllib.parse import urlsplit, urlunsplit
 
 from app.models.market_scan import (
+    MarketScanCoverageScope,
     MarketScanPublicationSummary,
     MarketScanRun,
     MarketScanRunStatus,
@@ -39,6 +40,13 @@ MARKET_SCAN_PUBLISH_MIN_COVERAGE = {
     "SZ": 0.95,
     "BJ": 0.95,
 }
+MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO = {
+    "ALL": 0.90,
+    "SH": 0.90,
+    "SZ": 0.90,
+    "BJ": 0.90,
+}
+MARKET_SCAN_PUBLICATION_SCOPES: tuple[MarketScanCoverageScope, ...] = ("ALL", "SH", "SZ", "BJ")
 MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS = 15 * 60
 _RETRYABLE_SQLITE_PRIMARY_CODES = {
     sqlite3.SQLITE_BUSY,
@@ -147,6 +155,9 @@ def completion_status(
     *,
     publication_summary: MarketScanPublicationSummary | None = None,
 ) -> tuple[MarketScanRunStatus, str]:
+    pending_count = max(0, run.total_count - run.processed_count)
+    if pending_count:
+        return "failed", f"全市场扫描尚有 {pending_count} 只待处理，不能发布"
     blockers = publication_blockers(publication_summary) if publication_summary is not None else ()
     if blockers:
         return "failed", "全市场扫描未达到发布可信度：" + "；".join(blockers)
@@ -154,6 +165,7 @@ def completion_status(
         return "failed", f"全市场扫描没有生成有效排名；缺失 {run.missing_count}，跳过 {run.skipped_count}"
     stale_stock_pool = run.stock_pool_source == "stale-fallback"
     if run.missing_count or run.skipped_count or run.processed_count < run.total_count or degraded_count or stale_stock_pool:
+        eligible_count = max(0, run.total_count - run.skipped_count)
         degraded_details: list[str] = []
         if degraded_count:
             degraded_details.append(f"降级结果 {degraded_count}")
@@ -161,7 +173,8 @@ def completion_status(
             degraded_details.append("股票池使用本地缓存")
         degraded_suffix = f"，{'，'.join(degraded_details)}" if degraded_details else ""
         return "degraded", (
-            f"全市场扫描降级完成：成功 {run.success_count}/{run.total_count}，" f"缺失 {run.missing_count}，跳过 {run.skipped_count}{degraded_suffix}"
+            f"全市场扫描降级完成：有效覆盖 {run.success_count}/{eligible_count}，"
+            f"缺失 {run.missing_count}，跳过 {run.skipped_count}{degraded_suffix}"
         )
     return "success", f"全市场扫描完成：成功 {run.success_count}/{run.total_count}"
 
@@ -180,7 +193,7 @@ def terminal_diagnostic(
     if run.stock_pool_source == "stale-fallback":
         details.append("股票池使用本地缓存（stale-fallback）")
     if degraded_count:
-        details.append(f"{degraded_count} 只结果使用备用数据或缺少上市日期")
+        details.append(f"{degraded_count} 只股票使用备用数据或元数据不完整")
     if run.missing_count or run.skipped_count:
         details.append(f"逐股结果含缺失 {run.missing_count}、跳过 {run.skipped_count}")
     if status == "failed" and not details:
@@ -189,6 +202,15 @@ def terminal_diagnostic(
 
 
 def publication_blockers(summary: MarketScanPublicationSummary) -> tuple[str, ...]:
+    blockers = list(_snapshot_publication_blockers(summary))
+    for scope in MARKET_SCAN_PUBLICATION_SCOPES:
+        blockers.extend(_scope_publication_blockers(summary, scope))
+    return tuple(blockers)
+
+
+def _snapshot_publication_blockers(
+    summary: MarketScanPublicationSummary,
+) -> tuple[str, ...]:
     blockers: list[str] = []
     cluster = summary.systemic_stale_cluster
     if cluster is not None:
@@ -205,18 +227,35 @@ def publication_blockers(summary: MarketScanPublicationSummary) -> tuple[str, ..
     span = summary.snapshot_span_seconds
     if span is not None and span > MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS:
         blockers.append(
-            f"报价快照跨度 {span:g} 秒超过 {MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS:g} 秒门槛"
+            f"分市场内报价快照跨度最大值 {span:g} 秒超过 "
+            f"{MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS:g} 秒门槛"
         )
-    for scope in ("ALL", "SH", "SZ", "BJ"):
-        coverage = summary.coverage_for(scope)  # type: ignore[arg-type]
-        threshold = MARKET_SCAN_PUBLISH_MIN_COVERAGE[scope]
-        if coverage is not None and coverage.coverage_ratio >= threshold:
-            continue
+    return tuple(blockers)
+
+
+def _scope_publication_blockers(
+    summary: MarketScanPublicationSummary,
+    scope: MarketScanCoverageScope,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    coverage = summary.coverage_for(scope)
+    coverage_threshold = MARKET_SCAN_PUBLISH_MIN_COVERAGE[scope]
+    if coverage is None or coverage.coverage_ratio < coverage_threshold:
         total = coverage.total_count if coverage is not None else 0
         success = coverage.success_count if coverage is not None else 0
         ratio = coverage.coverage_ratio if coverage is not None else 0.0
         blockers.append(
-            f"{scope} 发布覆盖不足：{success}/{total}（{ratio:.2%}，门槛 {threshold:.2%}）"
+            f"{scope} 发布覆盖不足：{success}/{total}"
+            f"（{ratio:.2%}，门槛 {coverage_threshold:.2%}）"
+        )
+    eligible_threshold = MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO[scope]
+    if coverage is None or coverage.eligible_ratio < eligible_threshold:
+        eligible = coverage.total_count if coverage is not None else 0
+        population = coverage.population_count if coverage is not None else 0
+        ratio = coverage.eligible_ratio if coverage is not None else 0.0
+        blockers.append(
+            f"{scope} 有效样本占比不足：{eligible}/{population}"
+            f"（{ratio:.2%}，门槛 {eligible_threshold:.2%}）"
         )
     return tuple(blockers)
 

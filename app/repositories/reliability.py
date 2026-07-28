@@ -137,7 +137,7 @@ class ReliabilityRepository(SQLiteRepository):
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT status, trigger, total_count, success_count, duration_ms
+                SELECT status, trigger, total_count, success_count, skipped_count, duration_ms
                 FROM market_scan_run
                 WHERE status IN ('success', 'degraded', 'failed', 'interrupted')
                   AND ashare_audit_epoch(COALESCE(finished_at, updated_at, created_at))
@@ -151,12 +151,16 @@ class ReliabilityRepository(SQLiteRepository):
             for row in rows
             if row["duration_ms"] is not None and str(row["trigger"]) != "retry"
         )
+        eligible_totals = [
+            max(0, int(row["total_count"] or 0) - int(row["skipped_count"] or 0))
+            for row in rows
+        ]
         return ReliabilityScanStats(
             good_runs=sum(str(row["status"]) in {"success", "degraded"} for row in rows),
             total_runs=len(rows),
-            coverage_run_count=sum(max(0, int(row["total_count"] or 0)) > 0 for row in rows),
+            coverage_run_count=sum(total > 0 for total in eligible_totals),
             successful_symbols=sum(max(0, int(row["success_count"] or 0)) for row in rows),
-            total_symbols=sum(max(0, int(row["total_count"] or 0)) for row in rows),
+            total_symbols=sum(eligible_totals),
             durations_ms=durations,
         )
 

@@ -12,6 +12,16 @@ const RUN_STATUSES = new Set([
 ]);
 const RUN_TRIGGERS = new Set(["manual", "scheduled", "retry"]);
 const RESULT_STATUSES = new Set(["pending", "success", "missing", "skipped"]);
+const MARKET_SCAN_TO_DISCOVERY_SORT = Object.freeze({
+  rank: "rank",
+  symbol: "symbol",
+  score: "score",
+  trend_score: "trend",
+  change_pct: "change",
+  turnover_rate: "turnover",
+  amount: "amount",
+  data_quality_score: "quality",
+});
 
 export function isActiveMarketScanRun(run) {
   return Boolean(run && ACTIVE_RUN_STATUSES.has(run.status));
@@ -107,6 +117,127 @@ export function validateResultPage(value, expectedRunId) {
   return page;
 }
 
+export function normalizeDiscoveryLeaderboard(value) {
+  const payload = discoveryObject(value, "筛选榜单响应");
+  const preset = validateDiscoveryPreset(payload.preset);
+  if (!Array.isArray(payload.items)) throw new Error("筛选榜单响应的 items 必须是数组");
+  const runId = discoveryPositiveInteger(payload.run_id, "筛选榜单运行批次");
+  return {
+    preset,
+    run_id: runId,
+    rule_version: String(payload.rule_version || ""),
+    items: payload.items.map((value) => {
+      const item = discoveryObject(value, "筛选榜单项目");
+      return {
+        ...item,
+        run_id: runId,
+        rank: item.position,
+        status: "success",
+        trend_score: item.trend,
+        change_pct: item.change,
+        turnover_rate: item.turnover,
+        data_quality_score: item.quality,
+      };
+    }),
+    total: discoveryNonNegativeInteger(payload.total, "筛选榜单总数"),
+    page: discoveryPositiveInteger(payload.page, "筛选榜单页码"),
+    page_size: discoveryPositiveInteger(payload.page_size, "筛选榜单分页大小"),
+    page_count: discoveryNonNegativeInteger(payload.page_count, "筛选榜单总页数"),
+  };
+}
+
+export function buildDiscoveryPresetDefinition(nameValue, elements) {
+  const name = String(nameValue || "").trim().slice(0, 80);
+  if (!name) throw new Error("请输入方案名称");
+  const unsupported = [];
+  if (discoveryElementValue(elements.status) !== "success") unsupported.push("状态");
+  if (discoveryElementValue(elements.keyword)) unsupported.push("搜索关键词");
+  if (unsupported.length) throw new Error(`筛选方案暂不支持保存${unsupported.join("、")}，请清除后再保存`);
+  const criteria = {};
+  const market = discoveryElementValue(elements.market);
+  const industry = discoveryElementValue(elements.industry);
+  const isSt = discoveryBooleanValue(elements.isSt);
+  const isNew = discoveryBooleanValue(elements.isNew);
+  const quality = discoveryOptionalScore(elements.quality);
+  if (market) criteria.market = [market];
+  if (industry) criteria.industry = [industry];
+  if (isSt !== null) criteria.is_st = isSt;
+  if (isNew !== null) criteria.is_new = isNew;
+  if (quality !== null) criteria.quality = { min: quality };
+  const field = MARKET_SCAN_TO_DISCOVERY_SORT[discoveryElementValue(elements.sort)];
+  if (!field) throw new Error("当前排序方式不能保存为筛选方案");
+  return {
+    name,
+    criteria,
+    sort: [{ field, order: discoveryElementValue(elements.order) === "asc" ? "asc" : "desc" }],
+  };
+}
+
+export function rankChangeLabel(value) {
+  const movement = value?.movement;
+  if (movement === "up") return `全市场排名上升 ${Math.abs(Number(value.rank_delta) || 0)}`;
+  if (movement === "down") return `全市场排名下降 ${Math.abs(Number(value.rank_delta) || 0)}`;
+  if (movement === "unchanged") return "全市场排名持平";
+  if (movement === "new") return "全市场排名新进";
+  if (movement === "exit") return "全市场排名离榜";
+  return "全市场排名变化不可用";
+}
+
+export function isDiscoveryPresetUiRepresentable(preset) {
+  const criteria = preset?.criteria;
+  if (!criteria || typeof criteria !== "object" || Array.isArray(criteria)) return false;
+  const supportedCriteria = new Set(["market", "industry", "is_st", "is_new", "quality"]);
+  if (Object.entries(criteria).some(([field, value]) => value != null && !supportedCriteria.has(field))) return false;
+  if ([criteria.market, criteria.industry].some((values) => values != null && (!Array.isArray(values) || values.length > 1))) {
+    return false;
+  }
+  if (criteria.quality != null) {
+    if (typeof criteria.quality !== "object" || Array.isArray(criteria.quality)) return false;
+    if (criteria.quality.max != null || Object.keys(criteria.quality).some((field) => !["min", "max"].includes(field))) {
+      return false;
+    }
+  }
+  const editableSortFields = new Set(["rank", "symbol", "score", "trend", "change", "turnover", "amount", "quality"]);
+  return Array.isArray(preset.sort)
+    && preset.sort.length === 1
+    && editableSortFields.has(preset.sort[0]?.field);
+}
+
+export function validateDiscoveryPresetPage(value) {
+  const payload = discoveryObject(value, "筛选方案列表响应");
+  if (!Array.isArray(payload.items)) throw new Error("筛选方案列表响应的 items 必须是数组");
+  return {
+    ...payload,
+    items: payload.items.map(validateDiscoveryPreset),
+    total: discoveryNonNegativeInteger(payload.total, "筛选方案总数"),
+  };
+}
+
+export function validateDiscoveryPreset(value) {
+  const preset = discoveryObject(value, "筛选方案响应");
+  const name = String(preset.name || "").trim().slice(0, 80);
+  if (!name) throw new Error("筛选方案响应缺少名称");
+  if (!preset.criteria || typeof preset.criteria !== "object" || Array.isArray(preset.criteria)) {
+    throw new Error("筛选方案响应缺少筛选条件");
+  }
+  if (!Array.isArray(preset.sort) || !preset.sort.length) throw new Error("筛选方案响应缺少排序规则");
+  return {
+    ...preset,
+    id: discoveryPositiveInteger(preset.id, "筛选方案 ID"),
+    name,
+    revision: discoveryPositiveInteger(preset.revision, "筛选方案修订号"),
+  };
+}
+
+export function validateDiscoveryRankChanges(value, runId) {
+  const payload = discoveryObject(value, "排名变化响应");
+  if (discoveryPositiveInteger(payload.current_run_id, "当前排名批次") !== runId) {
+    throw new Error("排名变化响应的运行批次不匹配");
+  }
+  if (!Array.isArray(payload.items)) throw new Error("排名变化响应的 items 必须是数组");
+  return payload;
+}
+
 export function marketScanContractError(message) {
   const error = new Error(`扫描接口响应格式异常：${message}`);
   error.name = "MarketScanContractError";
@@ -174,6 +305,40 @@ function requireObject(value, path) {
     throw marketScanContractError(`${path} 必须是对象`);
   }
   return value;
+}
+
+function discoveryObject(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}格式异常`);
+  return value;
+}
+
+function discoveryPositiveInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) throw new Error(`${label}格式异常`);
+  return number;
+}
+
+function discoveryNonNegativeInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) throw new Error(`${label}格式异常`);
+  return number;
+}
+
+function discoveryElementValue(element) {
+  return String(element?.value || "").trim();
+}
+
+function discoveryBooleanValue(element) {
+  const value = discoveryElementValue(element);
+  return value === "true" ? true : value === "false" ? false : null;
+}
+
+function discoveryOptionalScore(element) {
+  const value = discoveryElementValue(element);
+  if (!value) return null;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0 || number > 100) throw new Error("最低质量需为 0-100 的整数");
+  return number;
 }
 
 function requireString(value, path) {

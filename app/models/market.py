@@ -117,6 +117,7 @@ class ProviderCapability(BaseModel):
     daily_kline: bool = False
     minute_kline: bool = False
     stock_pool: bool = False
+    stock_industry: bool = False
     plate_rank: bool = False
     concept_board: bool = False
     order_book: bool = False

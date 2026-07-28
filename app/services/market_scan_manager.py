@@ -24,6 +24,9 @@ from app.services.datahub_runtime import run_cache_io
 from app.services.data_quality_time import latest_expected_daily_kline_date
 from app.services.instance_guard import InstanceGuard
 from app.services.market_scan_completion import (
+    MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
+    MARKET_SCAN_PUBLISH_MIN_COVERAGE,
+    MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
     MarketScanFinalizer,
     sensitive_setting_values,
 )
@@ -316,6 +319,10 @@ class MarketScanManager:
         self._recover_terminal_persistence_failures()
         return self.cache.latest_market_scan_run()
 
+    def latest_published_run(self) -> MarketScanRun | None:
+        self._recover_terminal_persistence_failures()
+        return self.cache.latest_published_market_scan_run()
+
     def next_automatic_run_at(self) -> datetime | None:
         return self._automation.next_due_at
 
@@ -518,7 +525,7 @@ def _consume_stop_exception(task: asyncio.Task[None]) -> None:
 
 def market_scan_rule_version(settings: object) -> str:
     contract = {
-        "schema_version": 2,
+        "schema_version": 3,
         "score_spec": market_scan_score_spec(
             min_data_quality_score=int(getattr(settings, "market_scan_min_data_quality_score")),
         ),
@@ -528,10 +535,21 @@ def market_scan_rule_version(settings: object) -> str:
             "min_history_rows": int(getattr(settings, "market_scan_min_history_rows")),
         },
         "universe": {
+            "classifier": "current-listed-a-share-v2",
+            "markets": ["SH", "SZ", "BJ"],
+            "authoritative_baseline_min_retain_ratio": 0.98,
             "new_stock_days": int(getattr(settings, "market_scan_new_stock_days")),
         },
+        "publication": {
+            "coverage_denominator_statuses": ["success", "missing"],
+            "excluded_denominator_statuses": ["skipped"],
+            "minimum_coverage": MARKET_SCAN_PUBLISH_MIN_COVERAGE,
+            "minimum_eligible_ratio": MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
+            "snapshot_span_scope": "per-market",
+            "max_snapshot_span_seconds": MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
+        },
     }
-    return f"full-market-scan-v2:{stable_score_spec_hash(contract)}"
+    return f"full-market-scan-v3:{stable_score_spec_hash(contract)}"
 
 
 def _market_now() -> datetime:

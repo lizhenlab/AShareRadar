@@ -5,7 +5,13 @@ import math
 import sqlite3
 from typing import Iterable
 
-from app.models.market_scan import MarketScanResultWrite, MarketScanRun, MarketScanSeed
+from app.models.market_scan import (
+    MARKET_SCAN_DEGRADATION_REASONS,
+    MARKET_SCAN_METADATA_DEGRADATION_REASONS,
+    MarketScanResultWrite,
+    MarketScanRun,
+    MarketScanSeed,
+)
 from app.repositories.market_scan_context import MarketScanRepositoryContext
 from app.repositories.market_scan_mapping import (
     encode_result_payload,
@@ -159,7 +165,7 @@ class MarketScanResultWriterMixin(MarketScanRepositoryContext):
             conn.executemany(
                 """
                 UPDATE market_scan_result
-                SET status = ?, rank = NULL, score = ?, trend_score = ?, leader_score = ?,
+                SET status = ?, rank = NULL, score = ?, raw_score = ?, trend_score = ?, leader_score = ?,
                     data_quality_score = ?, price = ?, change_pct = ?, turnover_rate = ?,
                     volume_ratio = ?, amount = ?, tags_json = ?, metrics_json = ?,
                     reason = ?, error = ?, data_date = ?, quote_timestamp = ?,
@@ -261,6 +267,7 @@ def validate_result_write(result: MarketScanResultWrite) -> None:
         result,
         (
             *score_values,
+            result.raw_score,
             result.price,
             result.change_pct,
             result.turnover_rate,
@@ -270,7 +277,9 @@ def validate_result_write(result: MarketScanResultWrite) -> None:
         ),
     )
     _require_valid_scores(result, score_values)
-    _require_valid_status_fields(result, score_values)
+    if result.raw_score is not None and not 0 <= result.raw_score <= 100:
+        raise ValueError(f"扫描原始评分超出 0-100：{result.symbol}")
+    _require_valid_status_fields(result, score_values, raw_score=result.raw_score)
     _require_valid_degradation_fields(result)
     _require_json_score_details(result)
 
@@ -291,11 +300,13 @@ def _require_valid_scores(result: MarketScanResultWrite, values: tuple[int | Non
 def _require_valid_status_fields(
     result: MarketScanResultWrite,
     scores: tuple[int | None, ...],
+    *,
+    raw_score: float | None,
 ) -> None:
     if result.status == "success":
-        _require_success_fields(result, scores)
+        _require_success_fields(result, scores, raw_score=raw_score)
         return
-    if any(value is not None for value in scores):
+    if any(value is not None for value in (*scores, raw_score)):
         raise ValueError(f"非成功扫描结果不得携带评分：{result.symbol}")
     if result.status == "missing" and not str(result.error or "").strip():
         raise ValueError(f"缺失扫描结果必须记录错误原因：{result.symbol}")
@@ -306,6 +317,8 @@ def _require_valid_status_fields(
 def _require_success_fields(
     result: MarketScanResultWrite,
     scores: tuple[int | None, ...],
+    *,
+    raw_score: float | None,
 ) -> None:
     if any(value is None for value in scores) or not result.data_date:
         raise ValueError(f"成功扫描结果缺少评分或数据日期：{result.symbol}")
@@ -324,16 +337,15 @@ def _require_valid_degradation_fields(result: MarketScanResultWrite) -> None:
     reasons = tuple(reason.strip() for reason in result.degradation_reasons)
     if any(not reason for reason in reasons) or len(reasons) != len(set(reasons)):
         raise ValueError(f"扫描结果降级原因无效或重复：{result.symbol}")
-    expected = {
-        reason
-        for enabled, reason in (
-            (result.quote_fallback_used, "quote_fallback"),
-            (result.kline_fallback_used, "kline_fallback"),
-            (result.metadata_degraded, "metadata_incomplete"),
-        )
-        if enabled
-    }
-    if set(reasons) != expected:
+    reason_set = set(reasons)
+    metadata_reasons = reason_set & MARKET_SCAN_METADATA_DEGRADATION_REASONS
+    flags_match = (
+        result.quote_fallback_used == ("quote_fallback" in reason_set)
+        and result.kline_fallback_used == ("kline_fallback" in reason_set)
+        and result.metadata_degraded == bool(metadata_reasons)
+    )
+    legacy_mixed_with_specific = "metadata_incomplete" in metadata_reasons and len(metadata_reasons) > 1
+    if reason_set - MARKET_SCAN_DEGRADATION_REASONS or not flags_match or legacy_mixed_with_specific:
         raise ValueError(f"扫描结果降级标记与原因不一致：{result.symbol}")
 
 
@@ -372,6 +384,7 @@ def _result_update_params(
     return (
         result.status,
         result.score,
+        result.raw_score if result.raw_score is not None else result.score,
         result.trend_score,
         result.leader_score,
         result.data_quality_score,

@@ -15,6 +15,7 @@ from app.models.discovery import (
     DiscoveryPresetCreate,
     DiscoveryPresetPortable,
     DiscoveryRankChangeItem,
+    DiscoveryRankMovement,
     DiscoveryResearchQueueItem,
     DiscoveryResearchQueueRequest,
     DiscoveryRunReference,
@@ -36,26 +37,28 @@ class DiscoveryPresetRevisionError(ValueError):
 _SORT_ADAPTER = TypeAdapter(list[DiscoverySort])
 _COMPLETED_RUN_STATUSES = frozenset({"success", "degraded"})
 _RANK_COMPARISON_CTE = """
-WITH current_ranked AS (
-    SELECT symbol, code, market, name, rank
+WITH current_rows AS (
+    SELECT symbol, code, market, name, status, rank
     FROM market_scan_result
-    WHERE run_id = ? AND status = 'success' AND rank IS NOT NULL
+    WHERE run_id = ?
 ),
-previous_ranked AS (
-    SELECT symbol, code, market, name, rank
+previous_rows AS (
+    SELECT symbol, code, market, name, status, rank
     FROM market_scan_result
-    WHERE run_id = ? AND status = 'success' AND rank IS NOT NULL
+    WHERE run_id = ?
 ),
 merged AS (
     SELECT c.symbol, c.code, c.market, c.name,
+           p.status AS previous_status, c.status AS current_status,
            p.rank AS previous_rank, c.rank AS current_rank
-    FROM current_ranked AS c
-    LEFT JOIN previous_ranked AS p ON p.symbol = c.symbol
+    FROM current_rows AS c
+    LEFT JOIN previous_rows AS p ON p.symbol = c.symbol
     UNION ALL
     SELECT p.symbol, p.code, p.market, p.name,
+           p.status AS previous_status, NULL AS current_status,
            p.rank AS previous_rank, NULL AS current_rank
-    FROM previous_ranked AS p
-    LEFT JOIN current_ranked AS c ON c.symbol = p.symbol
+    FROM previous_rows AS p
+    LEFT JOIN current_rows AS c ON c.symbol = p.symbol
     WHERE c.symbol IS NULL
 )
 """
@@ -216,7 +219,7 @@ class DiscoveryRepository(SQLiteRepository):
                        r.industry, r.is_st, r.is_new,
                        r.data_quality_score AS quality, r.trend_score AS trend,
                        r.change_pct AS change, r.turnover_rate AS turnover,
-                       r.amount, r.score
+                       r.amount, r.score, r.raw_score
                 FROM market_scan_result AS r
                 WHERE r.run_id = ? AND {where_sql}
                 ORDER BY {order_sql}
@@ -264,7 +267,8 @@ class DiscoveryRepository(SQLiteRepository):
             rows = conn.execute(
                 f"""
                 {_RANK_COMPARISON_CTE}
-                SELECT symbol, code, market, name, previous_rank, current_rank
+                SELECT symbol, code, market, name, previous_status, current_status,
+                       previous_rank, current_rank
                 FROM merged
                 ORDER BY (current_rank IS NULL) ASC, current_rank ASC,
                          previous_rank ASC, symbol ASC
@@ -463,21 +467,16 @@ def _existing_research_enqueue_time(
 
 
 def _rank_change_item(row: sqlite3.Row) -> DiscoveryRankChangeItem:
-    previous_rank = None if row["previous_rank"] is None else int(row["previous_rank"])
-    current_rank = None if row["current_rank"] is None else int(row["current_rank"])
-    rank_delta = None if previous_rank is None or current_rank is None else previous_rank - current_rank
-    if previous_rank is None:
-        movement = "new"
-    elif current_rank is None:
-        movement = "exit"
-    else:
-        assert rank_delta is not None
-        if rank_delta > 0:
-            movement = "up"
-        elif rank_delta < 0:
-            movement = "down"
-        else:
-            movement = "unchanged"
+    previous_rank = _optional_int(row["previous_rank"])
+    current_rank = _optional_int(row["current_rank"])
+    previous_status = _optional_str(row["previous_status"])
+    current_status = _optional_str(row["current_status"])
+    rank_delta, movement = _rank_change_state(
+        previous_rank=previous_rank,
+        current_rank=current_rank,
+        previous_status=previous_status,
+        current_status=current_status,
+    )
     return DiscoveryRankChangeItem(
         symbol=str(row["symbol"]),
         code=str(row["code"]),
@@ -488,6 +487,40 @@ def _rank_change_item(row: sqlite3.Row) -> DiscoveryRankChangeItem:
         rank_delta=rank_delta,
         movement=movement,
     )
+
+
+def _rank_change_state(
+    *,
+    previous_rank: int | None,
+    current_rank: int | None,
+    previous_status: str | None,
+    current_status: str | None,
+) -> tuple[int | None, DiscoveryRankMovement]:
+    if previous_status is None and current_status == "success":
+        return None, "new"
+    if current_status is None and previous_status == "success":
+        return None, "exit"
+    if previous_status != "success" or current_status != "success":
+        return None, "unavailable"
+    assert previous_rank is not None and current_rank is not None
+    rank_delta = previous_rank - current_rank
+    return rank_delta, _rank_delta_movement(rank_delta)
+
+
+def _rank_delta_movement(rank_delta: int) -> DiscoveryRankMovement:
+    if rank_delta > 0:
+        return "up"
+    if rank_delta < 0:
+        return "down"
+    return "unchanged"
+
+
+def _optional_int(value: int | float | str | bytes | bytearray | None) -> int | None:
+    return None if value is None else int(value)
+
+
+def _optional_str(value: object) -> str | None:
+    return None if value is None else str(value)
 
 
 __all__ = [

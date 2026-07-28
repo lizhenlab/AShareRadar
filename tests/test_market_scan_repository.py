@@ -42,6 +42,8 @@ def test_results_are_ranked_stably_paginated_and_filtered(tmp_path: Path) -> Non
         "600002.SH",
         "600003.SH",
     ]
+    assert _symbols(_results(repo, run.id, industry="%", status=None)) == []
+    assert _symbols(_results(repo, run.id, industry="_", status=None)) == []
     assert _symbols(_results(repo, run.id, is_st=True, status=None)) == [
         "000001.SZ",
         "600003.SH",
@@ -66,7 +68,7 @@ def test_retry_derives_new_run_and_keeps_original_snapshot_immutable(tmp_path: P
     seeds = _sample_seeds()[:3]
     run = _seed_running_run(repo, seeds)
     writes = [
-        _write("600001.SH", status="success", score=88, quality=95),
+        _write("600001.SH", status="success", score=88, raw_score=88.4, quality=95),
         _write("000001.SZ", status="missing", error="行情缺失"),
         _write("600002.SH", status="skipped", reason="停牌"),
     ]
@@ -92,6 +94,7 @@ def test_retry_derives_new_run_and_keeps_original_snapshot_immutable(tmp_path: P
     assert [item.symbol for item in pending] == ["600002.SH", "000001.SZ"]
     assert by_symbol["600001.SH"].status == "success"
     assert by_symbol["600001.SH"].score == 88
+    assert by_symbol["600001.SH"].raw_score == pytest.approx(88.4)
     assert by_symbol["600001.SH"].rank is None
     assert by_symbol["000001.SZ"].status == "pending"
     assert by_symbol["000001.SZ"].error is None
@@ -100,6 +103,57 @@ def test_retry_derives_new_run_and_keeps_original_snapshot_immutable(tmp_path: P
     assert repo.run(run.id) == original_before
     assert _results(repo, run.id, status=None).items == original_items_before
     assert original_items_before[0].rank == 1
+
+
+def test_failed_retry_recomputes_every_result_instead_of_mixing_snapshots(
+    tmp_path: Path,
+) -> None:
+    repo, _path = _repository(tmp_path)
+    run = _seed_running_run(repo, _sample_seeds()[:2])
+    repo.save_result_batch(
+        run.id,
+        [
+            _write("600001.SH", status="success", score=88, quality=95),
+            _write("000001.SZ", status="missing", error="行情缺失"),
+        ],
+    )
+    repo.finish_run(run.id, "failed", message="发布可信度不足")
+
+    plan = repo.retry_plan(run.id)
+    retried = repo.prepare_retry(run.id, plan)
+    items = _results(repo, retried.id, status=None).items
+
+    assert plan.preserved_success_count == 0
+    assert plan.pending_count == 2
+    assert retried.processed_count == 0
+    assert retried.success_count == 0
+    assert retried.message == "等待完整重算"
+    assert [item.status for item in items] == ["pending", "pending"]
+    assert all(item.score is None and item.quote_timestamp is None for item in items)
+
+
+@pytest.mark.parametrize("source_status", ("cancelled", "interrupted"))
+def test_cancelled_and_interrupted_retries_keep_clean_successes(
+    tmp_path: Path,
+    source_status: str,
+) -> None:
+    repo, _path = _repository(tmp_path)
+    run = _seed_running_run(repo, _sample_seeds()[:2])
+    repo.save_result_batch(
+        run.id,
+        [_write("600001.SH", status="success", score=88, quality=95)],
+    )
+    repo.finish_run(run.id, source_status, message="扫描中止")  # type: ignore[arg-type]
+
+    plan = repo.retry_plan(run.id)
+    retried = repo.prepare_retry(run.id, plan)
+
+    assert plan.preserved_success_count == 1
+    assert plan.pending_count == 1
+    assert retried.processed_count == 1
+    assert retried.success_count == 1
+    assert retried.message == "等待断点续跑"
+    assert [item.symbol for item in repo.pending_items(retried.id)] == ["000001.SZ"]
 
 
 def test_retry_plan_guard_and_result_copy_commit_atomically(tmp_path: Path) -> None:
@@ -333,6 +387,82 @@ def test_historical_snapshots_are_isolated_and_terminal_finish_is_idempotent(tmp
     assert repo.latest_run().id == second.id  # type: ignore[union-attr]
     assert [item.id for item in history.items] == [second.id, first.id]
     assert history.total == 2
+
+
+def test_latest_published_run_excludes_unpublished_and_uses_stable_recency_order(
+    tmp_path: Path,
+) -> None:
+    repo, path = _repository(tmp_path)
+    assert repo.latest_published_run() is None
+
+    older_data = _seed_running_run(
+        repo,
+        [_sample_seeds()[0]],
+        as_of="2026-07-16 16:30:00",
+    )
+    repo.save_result_batch(
+        older_data.id,
+        [_write("600001.SH", status="success", score=80, quality=90)],
+    )
+    repo.finish_run(older_data.id, "success", message="较早交易日")
+
+    later_finish = _seed_running_run(
+        repo,
+        _sample_seeds()[:2],
+        as_of="2026-07-17 16:30:00",
+    )
+    repo.save_result_batch(
+        later_finish.id,
+        [
+            _write("600001.SH", status="success", score=81, quality=90),
+            _write("000001.SZ", status="skipped", reason="历史数据不足"),
+        ],
+    )
+    repo.finish_run(later_finish.id, "degraded", message="同日较晚完成")
+
+    higher_id = _seed_running_run(
+        repo,
+        [_sample_seeds()[0]],
+        as_of="2026-07-17 17:00:00",
+    )
+    repo.save_result_batch(
+        higher_id.id,
+        [_write("600001.SH", status="success", score=82, quality=90)],
+    )
+    repo.finish_run(higher_id.id, "success", message="同交易日更高 ID")
+
+    failed = _seed_running_run(
+        repo,
+        [_sample_seeds()[0]],
+        as_of="2026-07-18 16:30:00",
+    )
+    repo.finish_run(failed.id, "failed", message="未发布")
+
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "UPDATE market_scan_run SET finished_at = ? WHERE id = ?",
+            (
+                ("2026-07-30 16:00:00", older_data.id),
+                ("2026-07-18 17:00:00", later_finish.id),
+                ("2026-07-18 16:00:00", higher_id.id),
+                ("2026-07-31 16:00:00", failed.id),
+            ),
+        )
+
+    latest = repo.latest_published_run()
+    assert latest is not None
+    assert latest.id == later_finish.id
+    assert latest.status == "degraded"
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE market_scan_run SET finished_at = ? WHERE id = ?",
+            ("2026-07-18 17:00:00", higher_id.id),
+        )
+
+    tied = repo.latest_published_run()
+    assert tied is not None
+    assert tied.id == higher_id.id
 
 
 def test_reconcile_orphaned_run_and_terminal_finish_are_idempotent(tmp_path: Path) -> None:
@@ -646,7 +776,7 @@ def _sample_seeds() -> list[MarketScanSeed]:
         MarketScanSeed("600002.SH", "600002", "SH", "沪电二号", "电力", "20010101"),
         MarketScanSeed("920066.BJ", "920066", "BJ", "北交新星", "高端装备", "20260701", False, True),
         MarketScanSeed("300001.SZ", "300001", "SZ", "新材料", "材料", "20260702", False, True),
-        MarketScanSeed("600003.SH", "600003", "SH", "*ST停牌", "电力", "20020101", True),
+        MarketScanSeed("600003.SH", "600003", "SH", "*ST停牌", "新能源电力", "20020101", True),
     ]
 
 
@@ -666,6 +796,7 @@ def _write(
     *,
     status: str,
     score: int | None = None,
+    raw_score: float | None = None,
     trend: int | None = None,
     change: float | None = None,
     amount: float | None = None,
@@ -677,6 +808,7 @@ def _write(
         symbol=symbol,
         status=status,  # type: ignore[arg-type]
         score=score,
+        raw_score=raw_score,
         trend_score=trend if trend is not None else score,
         leader_score=score,
         data_quality_score=quality,

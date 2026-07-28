@@ -55,7 +55,7 @@ def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_pa
     assert started.accepted is True
     assert started.run.status == "queued"
     assert started.run.rule_version == _rule_version(hub)
-    assert started.run.rule_version.startswith("full-market-scan-v2:")
+    assert started.run.rule_version.startswith("full-market-scan-v3:")
     assert len(started.run.rule_version.rsplit(":", 1)[1]) == 64
     assert final.status == "failed"
     assert final.total_count == 3
@@ -455,7 +455,7 @@ def test_full_market_scan_with_all_scores_still_degrades_for_fallback_data(tmp_p
     assert final.status == "degraded"
     assert final.success_count == final.total_count == 3
     assert "降级结果 1" in (final.message or "")
-    assert "1 只结果使用备用数据" in (final.last_error or "")
+    assert "1 只股票使用备用数据或元数据不完整" in (final.last_error or "")
     by_symbol = {item.symbol: item for item in results.items}
     assert "兜底K线" in by_symbol["600001.SH"].tags
 

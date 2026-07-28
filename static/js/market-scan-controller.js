@@ -25,22 +25,13 @@ export function createMarketScanController(options = {}) {
   const view = createMarketScanView(root);
   const { elements } = view;
   const state = {
-    activated: false,
-    actionBusy: false,
-    visible: !root.hidden,
-    run: null,
-    page: 1,
-    pageCount: 0,
-    pollTimer: null,
-    resetTimer: null,
-    renderedResultRunId: null,
-    consecutiveFailures: 0,
-    runRequest: null,
-    resultRequest: null,
-    actionRequest: null,
-    runRequestSeq: 0,
-    resultRequestSeq: 0,
-    actionRequestSeq: 0,
+    activated: false, actionBusy: false, visible: !root.hidden,
+    run: null, publishedRun: null,
+    page: 1, pageCount: 0,
+    pollTimer: null, resetTimer: null,
+    renderedResultRunId: null, consecutiveFailures: 0,
+    runRequest: null, resultRequest: null, actionRequest: null,
+    runRequestSeq: 0, resultRequestSeq: 0, actionRequestSeq: 0,
     onlineRecoveryPromise: null,
   };
   const polling = createMarketScanPolling({
@@ -87,12 +78,15 @@ export function createMarketScanController(options = {}) {
       });
       if (!isCurrentRequest("runRequestSeq", sequence)) return null;
       const run = validateMarketScanRun(payload, { allowNull: true, context: "最近扫描响应" });
+      applyRun(run, options.recoveryMessage || "");
+      const publishedRun = await resolvePublishedRun(run, state.runRequest.signal);
+      if (!isCurrentRequest("runRequestSeq", sequence)) return null;
       polling.resetFailures();
-      const runChanged = applyRun(run, options.recoveryMessage || "");
-      if (run && !isActiveMarketScanRun(run) && (runChanged || state.renderedResultRunId !== run.id)) {
+      const publishedChanged = applyPublishedRun(publishedRun);
+      if (publishedRun && (publishedChanged || state.renderedResultRunId !== publishedRun.id)) {
         const outcome = await loadResultsOnce();
         if (!outcome.ok) {
-          if (!outcome.aborted && state.run?.id === run.id) {
+          if (!outcome.aborted && state.publishedRun?.id === publishedRun.id) {
             polling.handleResultFailureAfterLatest(outcome.error);
           }
           return null;
@@ -117,8 +111,7 @@ export function createMarketScanController(options = {}) {
       const response = validateStartResponse(payload, "开始扫描响应");
       applyRun(
         response.run,
-        response.deduplicated ? "已有扫描任务正在运行，已继续跟踪该任务。" : "任务已创建，正在准备股票池。",
-        true
+        response.deduplicated ? "已有扫描任务正在运行，已继续跟踪该任务。" : "任务已创建，正在准备股票池。"
       );
       polling.scheduleDefault(state.run);
       return response;
@@ -133,7 +126,10 @@ export function createMarketScanController(options = {}) {
       async (payload) => {
         const run = validateMarketScanRun(payload, { context: "取消扫描响应" });
         applyRun(run);
-        if (!isActiveMarketScanRun(run)) await loadResults({ allowDuringAction: true });
+        if (!isActiveMarketScanRun(run)) {
+          applyPublishedRun(isPublishedMarketScanRun(run) ? run : state.publishedRun);
+          await loadResults({ allowDuringAction: true });
+        }
         else polling.scheduleDefault(state.run);
         return run;
       }
@@ -149,8 +145,7 @@ export function createMarketScanController(options = {}) {
         const response = validateStartResponse(payload, "重试扫描响应");
         applyRun(
           response.run,
-          response.deduplicated ? "已有扫描任务正在运行，已切换到该任务。" : "正在重试未完成或降级项。",
-          true
+          response.deduplicated ? "已有扫描任务正在运行，已切换到该任务。" : "正在重试未完成或降级项。"
         );
         polling.scheduleDefault(state.run);
         return response;
@@ -163,7 +158,6 @@ export function createMarketScanController(options = {}) {
     state.actionBusy = true;
     polling.clear();
     abortRequest("runRequest", "runRequestSeq");
-    abortRequest("resultRequest", "resultRequestSeq");
     const sequence = beginRequest("actionRequest", "actionRequestSeq");
     view.renderActionBusy(true, state.run, `${label}请求处理中。`);
     let completionMessage = "";
@@ -209,6 +203,7 @@ export function createMarketScanController(options = {}) {
       polling.resetFailures();
       if (marketScanRunStateChanged(previousRun, run)) {
         applyRun(run, "请求响应未确认，已从服务端恢复任务状态。");
+        if (isPublishedMarketScanRun(run)) applyPublishedRun(run);
         if (run && !isActiveMarketScanRun(run)) return await loadResults({ allowDuringAction: true });
       }
       polling.scheduleDefault(state.run);
@@ -229,46 +224,47 @@ export function createMarketScanController(options = {}) {
     const sequence = beginRequest("runRequest", "runRequestSeq");
     let recoveryError = null;
     try {
-      const payload = await request(`/api/market-scans/${encodeURIComponent(runId)}`, {
-        signal: state.runRequest.signal,
-        timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-      });
-      if (!isCurrentRequest("runRequestSeq", sequence) || state.run?.id !== runId) return null;
-      const run = validateMarketScanRun(payload, { context: "扫描进度响应" });
-      if (run.id !== runId) throw marketScanContractError("扫描进度响应的运行批次不匹配");
-      polling.resetFailures();
-      applyRun(run);
-      if (!isActiveMarketScanRun(run)) {
-        const outcome = await loadResultsOnce();
-        if (!outcome.ok) {
-          if (outcome.aborted) return null;
-          if (polling.handleScopedFailure(outcome.error, "results")) recoveryError = outcome.error;
-        } else {
-          polling.scheduleDefault(state.run);
-        }
-      } else {
-        polling.scheduleDefault(state.run);
-      }
+      const run = await requestPolledRun(runId, sequence);
+      if (!run) return null;
+      recoveryError = await processPolledRun(run);
       return run;
     } catch (error) {
-      if (!isAbortError(error) && isCurrentRequest("runRequestSeq", sequence)) {
-        const shouldRecover = polling.handleScopedFailure(error, "run");
-        const message = `进度刷新失败：${compactErrorMessage(error?.message)}，稍后自动重试。`;
-        view.renderHeadline(message, "error");
-        view.announce(message, `run-error:${runId}:${state.consecutiveFailures}`);
-        if (shouldRecover) recoveryError = error;
-      }
+      recoveryError = handlePollRunError(error, runId, sequence);
       return null;
     } finally {
       finishRequest("runRequest", "runRequestSeq", sequence);
       if (recoveryError && state.run?.id === runId) await recoverLatest(recoveryError);
     }
   }
-
+  async function requestPolledRun(runId, sequence) {
+    const payload = await request(`/api/market-scans/${encodeURIComponent(runId)}`, {
+      signal: state.runRequest.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS });
+    if (!isCurrentRequest("runRequestSeq", sequence) || state.run?.id !== runId) return null;
+    const run = validateMarketScanRun(payload, { context: "扫描进度响应" });
+    if (run.id !== runId) throw marketScanContractError("扫描进度响应的运行批次不匹配");
+    return run;
+  }
+  async function processPolledRun(run) {
+    polling.resetFailures(); applyRun(run);
+    if (isActiveMarketScanRun(run)) { polling.scheduleDefault(state.run); return null; }
+    applyPublishedRun(isPublishedMarketScanRun(run) ? run : state.publishedRun);
+    const outcome = await loadResultsOnce();
+    if (outcome.ok) { polling.scheduleDefault(state.run); return null; }
+    if (outcome.aborted) return null;
+    return polling.handleScopedFailure(outcome.error, "results") ? outcome.error : null;
+  }
+  function handlePollRunError(error, runId, sequence) {
+    if (isAbortError(error) || !isCurrentRequest("runRequestSeq", sequence)) return null;
+    const shouldRecover = polling.handleScopedFailure(error, "run");
+    const message = `进度刷新失败：${compactErrorMessage(error?.message)}，稍后自动重试。`;
+    view.renderHeadline(message, "error");
+    view.announce(message, `run-error:${runId}:${state.consecutiveFailures}`);
+    return shouldRecover ? error : null;
+  }
   async function loadResults(options = {}) {
     if (state.actionBusy && !options.allowDuringAction) return null;
     polling.clear();
-    const runId = state.run?.id ?? null;
+    const runId = resultRun()?.id ?? null;
     const outcome = await loadResultsOnce();
     if (outcome.ok) {
       polling.resetFailures();
@@ -282,24 +278,14 @@ export function createMarketScanController(options = {}) {
     }
     return null;
   }
-
   async function loadResultsOnce() {
-    if (!state.run) {
+    const publishedRun = resultRun();
+    if (!publishedRun) {
       state.renderedResultRunId = null;
-      view.renderResultState("暂无扫描记录");
+      view.resetResultPresentation(state.run);
       return { ok: true, payload: null };
     }
-    if (isActiveMarketScanRun(state.run)) {
-      state.renderedResultRunId = null;
-      view.renderResultState("扫描进行中，任务完成后将发布稳定榜单。", "loading");
-      return { ok: true, payload: null };
-    }
-    if (!isPublishedMarketScanRun(state.run)) {
-      state.renderedResultRunId = state.run.id;
-      view.renderResultState("该批次未发布正式榜单，可重试问题项或新建扫描。", "degraded");
-      return { ok: true, payload: null };
-    }
-    const runId = state.run.id;
+    const runId = publishedRun.id;
     const sequence = beginRequest("resultRequest", "resultRequestSeq");
     view.renderResultsLoading();
     try {
@@ -307,7 +293,7 @@ export function createMarketScanController(options = {}) {
         signal: state.resultRequest.signal,
         timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
       });
-      if (!isCurrentRequest("resultRequestSeq", sequence) || state.run?.id !== runId) {
+      if (!isCurrentRequest("resultRequestSeq", sequence) || resultRun()?.id !== runId) {
         return { ok: false, aborted: true, error: null };
       }
       const payload = validateResultPage(response, runId);
@@ -328,22 +314,42 @@ export function createMarketScanController(options = {}) {
       finishRequest("resultRequest", "resultRequestSeq", sequence);
     }
   }
-
-  function applyRun(run, overrideMessage = "", clearResults = false) {
+  function applyRun(run, overrideMessage = "") {
     const previousRun = state.run;
     const runChanged = marketScanRunIdentityChanged(previousRun, run);
-    if (runChanged) {
-      state.page = 1;
-      state.pageCount = 0;
-      state.renderedResultRunId = null;
-    }
     state.run = run || null;
     view.renderRun(state.run, overrideMessage);
     view.announceRunUpdate(previousRun, state.run, overrideMessage);
-    if (clearResults || runChanged) view.resetResultPresentation(state.run);
+    if (runChanged && !resultRun()) {
+      state.page = 1; state.pageCount = 0; state.renderedResultRunId = null;
+      view.resetResultPresentation(state.run);
+    }
     return runChanged;
   }
-
+  function applyPublishedRun(run) {
+    const changed = marketScanRunIdentityChanged(state.publishedRun, run);
+    state.publishedRun = run || null;
+    if (changed) {
+      state.page = 1; state.pageCount = 0;
+      state.renderedResultRunId = null;
+      view.resetResultPresentation(state.publishedRun || state.run);
+    }
+    return changed;
+  }
+  function resultRun() { return state.publishedRun || (isPublishedMarketScanRun(state.run) ? state.run : null); }
+  async function resolvePublishedRun(run, signal) {
+    if (isPublishedMarketScanRun(run)) return run;
+    try {
+      const payload = await request("/api/market-scans/latest-published", {
+        signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+      });
+      const published = validateMarketScanRun(payload, { allowNull: true, context: "最近已发布扫描响应" });
+      return isPublishedMarketScanRun(published) ? published : state.publishedRun;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      return state.publishedRun;
+    }
+  }
   async function recoverLatest(error) {
     if (!state.activated || !state.visible || state.actionBusy) return null;
     const message = polling.recoveryMessage(error);
@@ -351,17 +357,11 @@ export function createMarketScanController(options = {}) {
     abortRequest("resultRequest", "resultRequestSeq");
     return loadLatest({ recoveryMessage: message });
   }
-
   function clearResetTimer() {
     if (state.resetTimer !== null) clearTimeout(state.resetTimer);
     state.resetTimer = null;
   }
-
-  function clearControllerTimers() {
-    polling.clear();
-    clearResetTimer();
-  }
-
+  function clearControllerTimers() { polling.clear(); clearResetTimer(); }
   function bindEvents() {
     elements.start.addEventListener("click", () => void start());
     elements.cancel.addEventListener("click", () => void cancel());
@@ -445,6 +445,6 @@ function inertMarketScanController() {
     retry: async () => null,
     setVisible: noOp,
     start: async () => null,
-    state: { activated: false, run: null },
+    state: { activated: false, publishedRun: null, run: null },
   };
 }

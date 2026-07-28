@@ -29,6 +29,7 @@ MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
     WITH retry_source AS (
         SELECT result.*,
             CASE WHEN result.status = 'success'
+                AND run.status IN ('degraded', 'cancelled', 'interrupted')
                 AND result.quote_fallback_used = 0
                 AND result.kline_fallback_used = 0
                 AND result.metadata_degraded = 0
@@ -40,7 +41,7 @@ MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
     )
     INSERT INTO market_scan_result (
         run_id, symbol, code, market, name, industry, list_date,
-        is_st, is_new, metadata_source, status, rank, score, trend_score,
+        is_st, is_new, metadata_source, status, rank, score, raw_score, trend_score,
         leader_score, data_quality_score, price, change_pct, turnover_rate,
         volume_ratio, amount, tags_json, metrics_json, reason, error,
         data_date, quote_timestamp, quote_source, kline_source,
@@ -53,6 +54,7 @@ MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
         CASE WHEN preserve_success = 1 THEN 'success' ELSE 'pending' END,
         NULL,
         CASE WHEN preserve_success = 1 THEN score END,
+        CASE WHEN preserve_success = 1 THEN raw_score END,
         CASE WHEN preserve_success = 1 THEN trend_score END,
         CASE WHEN preserve_success = 1 THEN leader_score END,
         CASE WHEN preserve_success = 1 THEN data_quality_score END,
@@ -235,7 +237,7 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                     int(row["retry_count"] or 0) + 1,
                     stamp,
                     stamp,
-                    "等待断点续跑",
+                    "等待完整重算" if row["status"] == "failed" else "等待断点续跑",
                 ),
             )
             retry_run_id = _required_lastrowid(cursor, operation="创建重试批次")
@@ -352,7 +354,10 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
 
 
 def build_retry_plan(conn: sqlite3.Connection, run: sqlite3.Row) -> MarketScanRetryPlan:
-    force_recompute = str(run["stock_pool_source"] or "") == "stale-fallback"
+    force_recompute = (
+        str(run["status"]) == "failed"
+        or str(run["stock_pool_source"] or "") == "stale-fallback"
+    )
     counts = conn.execute(
         """
         SELECT

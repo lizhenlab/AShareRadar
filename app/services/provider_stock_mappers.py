@@ -7,6 +7,7 @@ from app.models.market import (
     StockInfo,
 )
 from app.services.provider_utils import pick
+from app.utils.stock_pool import normalize_stock_industry_text
 from app.utils.symbols import normalize_symbol, standard_symbol
 
 
@@ -46,6 +47,15 @@ def stock_info_from_baostock_row(row: dict[str, Any], *, stamp: str, source_name
     list_date = _compact_date(row.get("ipoDate", ""))
     name = str(row.get("code_name") or code)
     return _stock_info(code, market, name, None, list_date, stamp, source_name)
+
+
+def stock_industry_from_baostock_row(row: dict[str, Any]) -> tuple[str, str] | None:
+    market_code = _baostock_market_code(row.get("code", ""))
+    industry = normalize_stock_industry_text(row.get("industry"))
+    if market_code is None or industry is None:
+        return None
+    market, code = market_code
+    return standard_symbol(f"{code}.{market}"), industry
 
 
 def _baostock_market_code(value: Any) -> tuple[str, str] | None:
@@ -112,6 +122,7 @@ def _compact_date(value: Any) -> str | None:
 
 __all__ = [
     "stock_code_from_value",
+    "stock_industry_from_baostock_row",
     "stock_info_from_baostock_row",
     "stock_info_from_tushare_row",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from app.models.market import (
@@ -11,7 +12,34 @@ from app.models.market import (
 from app.services.provider_utils import pick, valid_ohlc
 from app.services.provider_stock_mappers import stock_code_from_value
 from app.utils.parsing import safe_float
+from app.utils.stock_pool import normalize_stock_industry_text, normalize_stock_metadata_text
 from app.utils.symbols import normalize_symbol, standard_symbol
+
+
+AKSHARE_STOCK_INDUSTRY_FIELDS = (
+    "industry",
+    "industry_name",
+    "industryName",
+    "所属行业",
+    "所属行业名称",
+    "行业",
+    "行业名称",
+    "行业分类",
+    "证监会行业",
+    "证监会行业名称",
+    "证监会行业分类",
+    "申万行业",
+    "申万一级行业",
+    "申万一级行业名称",
+)
+AKSHARE_STOCK_LIST_DATE_FIELDS = (
+    "list_date",
+    "上市日期",
+    "A股上市日期",
+    "上市时间",
+    "挂牌日期",
+    "首发上市日期",
+)
 
 
 @dataclass(frozen=True)
@@ -166,18 +194,59 @@ def stock_info_from_code_name_row(row: Any, *, stamp: str, source_name: str) -> 
         code=code,
         market=market,
         name=str(pick(row, "name", "名称", "证券简称", "A股简称", default=code)),
-        industry=_optional_stock_text(pick(row, "industry", "所属行业", default="")),
-        list_date=_stock_list_date(
-            pick(row, "list_date", "上市日期", "A股上市日期", default="")
-        ),
+        industry=_optional_stock_text(_stock_row_value(row, AKSHARE_STOCK_INDUSTRY_FIELDS)),
+        list_date=_stock_list_date_from_row(row),
         source=source_name,
         updated_at=stamp,
     )
 
 
 def _optional_stock_text(value: Any) -> str | None:
-    text = " ".join(str(value or "").split()).strip()
-    return None if text.casefold() in {"", "nan", "nat", "none"} else text
+    return normalize_stock_industry_text(value)
+
+
+def _stock_row_value(row: Any, fields: tuple[str, ...]) -> Any:
+    return next(iter(_stock_row_values(row, fields)), None)
+
+
+def _stock_row_values(row: Any, fields: tuple[str, ...]) -> list[Any]:
+    values: list[Any] = []
+    for field in fields:
+        value = _row_value(row, field)
+        if normalize_stock_metadata_text(value) is not None:
+            values.append(value)
+    normalized_fields = {_normalize_stock_field_name(field) for field in fields}
+    for key in _row_keys(row):
+        if str(key) in fields:
+            continue
+        if _normalize_stock_field_name(key) not in normalized_fields:
+            continue
+        value = _row_value(row, key)
+        if normalize_stock_metadata_text(value) is not None:
+            values.append(value)
+    return values
+
+
+def _row_value(row: Any, field: Any) -> Any:
+    try:
+        return row[field]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _row_keys(row: Any) -> tuple[Any, ...]:
+    keys = getattr(row, "keys", None)
+    if not callable(keys):
+        return ()
+    try:
+        return tuple(keys())
+    except (AttributeError, TypeError):
+        return ()
+
+
+def _normalize_stock_field_name(value: Any) -> str:
+    text = normalize_stock_metadata_text(value) or ""
+    return text.replace("_", "").replace("-", "").casefold()
 
 
 def _stock_list_date(value: Any) -> str | None:
@@ -187,16 +256,31 @@ def _stock_list_date(value: Any) -> str | None:
     if callable(isoformat):
         text = str(isoformat()).strip()[:10]
     else:
-        text = str(value).strip()
-    if text.casefold() in {"", "nan", "nat", "none"}:
+        text = normalize_stock_metadata_text(value) or ""
+    if not text:
         return None
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    if len(text) >= 10 and text[4:5] in {"-", "/"} and text[7:8] in {"-", "/"}:
+        text = text[:10]
     compact = text.replace("-", "").replace("/", "")
-    if len(compact) == 8 and compact.isdigit():
-        return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+    try:
+        return datetime.strptime(compact, "%Y%m%d").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _stock_list_date_from_row(row: Any) -> str | None:
+    for value in _stock_row_values(row, AKSHARE_STOCK_LIST_DATE_FIELDS):
+        list_date = _stock_list_date(value)
+        if list_date is not None:
+            return list_date
     return None
 
 
 __all__ = [
+    "AKSHARE_STOCK_INDUSTRY_FIELDS",
+    "AKSHARE_STOCK_LIST_DATE_FIELDS",
     "akshare_code",
     "minute_kline_from_hist_row",
     "minute_klines_from_hist_rows",

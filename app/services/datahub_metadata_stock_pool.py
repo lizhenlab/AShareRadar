@@ -5,9 +5,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import math
 
-from app.models.market import (
-    StockInfo,
-)
+from app.models.market import StockInfo
 from app.services.datahub_cache import _stock_pool_rows_are_authoritative
 from app.services.datahub_metadata_mapping import (
     _match_stock_pool_keyword,
@@ -31,17 +29,18 @@ from app.services.datahub_runtime import (
     run_cache_io,
     run_cache_io_best_effort,
 )
+from app.services.datahub_stock_pool_metadata import StockIndustryEnricher, merge_cached_stock_fields
 from app.services.datahub_status import _provider_error_text
 from app.utils.provider_errors import ProviderProtocolError, sanitize_provider_error
 from app.services.provider_utils import ensure_positive_limit
-from app.utils.stock_pool import normalize_stock_pool_rows
+from app.utils.stock_pool import StockPoolMetadataDiagnostic, diagnose_stock_pool_metadata, normalize_stock_pool_rows
 from app.utils.symbols import normalize_symbol
 
 
 STOCK_POOL_FALLBACK_SECONDS = 60 * 60 * 24 * 30
 STOCK_POOL_MARKETS = frozenset({"SH", "SZ", "BJ"})
 STOCK_POOL_BASELINE_COMPARISON_MIN_COUNT = 100
-STOCK_POOL_MIN_BASELINE_RETAIN_RATIO = 0.90
+STOCK_POOL_MIN_BASELINE_RETAIN_RATIO = 0.98
 
 
 def _ensure_optional_positive_limit(limit: int | None) -> None:
@@ -73,9 +72,7 @@ def _stock_pool_covers_markets(rows: Iterable[StockInfo], required_markets: froz
     return not required_markets or required_markets.issubset(_stock_pool_markets(rows))
 
 
-def _normalize_market_minimums(
-    values: Mapping[str, int] | None,
-) -> tuple[tuple[str, int], ...]:
+def _normalize_market_minimums(values: Mapping[str, int] | None) -> tuple[tuple[str, int], ...]:
     normalized: dict[str, int] = {}
     for raw_market, raw_count in (values or {}).items():
         market = str(raw_market).strip().upper()
@@ -117,16 +114,11 @@ def _stock_pool_covers_request(rows: list[StockInfo], request: "StockPoolRequest
 def _stock_pool_shrinkage_diagnostic(
     rows: list[StockInfo],
     cached: list[StockInfo],
-    *,
-    authoritative_min_count: int,
-    minimum_market_counts: tuple[tuple[str, int], ...],
+    *, authoritative_min_count: int, minimum_market_counts: tuple[tuple[str, int], ...],
 ) -> str | None:
     baseline_counts = _stock_pool_market_counts(cached)
     baseline_total = sum(baseline_counts.values())
-    comparison_floor = max(
-        STOCK_POOL_BASELINE_COMPARISON_MIN_COUNT,
-        authoritative_min_count,
-    )
+    comparison_floor = max(STOCK_POOL_BASELINE_COMPARISON_MIN_COUNT, authoritative_min_count)
     if baseline_total < comparison_floor or not _is_full_stock_pool_snapshot(
         cached,
         authoritative_min_count,
@@ -150,9 +142,7 @@ def _stock_pool_shrinkage_diagnostic(
 
 
 def _is_full_stock_pool_snapshot(
-    rows: list[StockInfo],
-    minimum_count: int,
-    minimum_market_counts: tuple[tuple[str, int], ...],
+    rows: list[StockInfo], minimum_count: int, minimum_market_counts: tuple[tuple[str, int], ...]
 ) -> bool:
     normalized_rows = normalize_stock_pool_rows(rows)
     return (
@@ -170,26 +160,6 @@ def _is_authoritative_query_snapshot(rows: list[StockInfo], minimum_count: int) 
     )
 
 
-def _merge_cached_stock_fields(rows: list[StockInfo], cached: list[StockInfo]) -> list[StockInfo]:
-    normalized_rows = normalize_stock_pool_rows(rows)
-    cached_by_symbol = {item.symbol: item for item in normalize_stock_pool_rows(cached)}
-    merged: list[StockInfo] = []
-    for item in normalized_rows:
-        previous = cached_by_symbol.get(item.symbol)
-        if previous is None:
-            merged.append(item)
-            continue
-        merged.append(
-            item.model_copy(
-                update={
-                    "industry": item.industry or previous.industry,
-                    "list_date": item.list_date or previous.list_date,
-                }
-            )
-        )
-    return normalize_stock_pool_rows(merged)
-
-
 @dataclass(frozen=True)
 class StockPoolRequest:
     keyword: str | None
@@ -204,10 +174,11 @@ class StockPoolResolution:
     resolved: bool
     reason: str
     rows: tuple[StockInfo, ...] = ()
+    metadata_diagnostic: StockPoolMetadataDiagnostic | None = None
 
     @classmethod
     def hit(cls, rows: list[StockInfo], reason: str) -> "StockPoolResolution":
-        return cls(resolved=True, reason=reason, rows=tuple(rows))
+        return cls(resolved=True, reason=reason, rows=tuple(rows), metadata_diagnostic=diagnose_stock_pool_metadata(rows))
 
     @classmethod
     def miss(cls, reason: str) -> "StockPoolResolution":
@@ -232,6 +203,13 @@ class StockPoolResolver:
         self.providers = providers
         self.runtime = runtime
         self.priority = priority
+        self.industry_enricher = StockIndustryEnricher(
+            settings=settings,
+            cache=cache,
+            providers=providers,
+            runtime=runtime,
+            priority=priority,
+        )
 
     async def stock_pool(
         self,
@@ -270,7 +248,7 @@ class StockPoolResolver:
         )
         cached = await run_cache_io(self._cache_result, request)
         if cached.resolved:
-            return cached
+            return await self._enrich_cached_resolution(cached)
 
         errors: list[str] = []
         provider_rows = await self._provider_result(request, errors)
@@ -349,6 +327,13 @@ class StockPoolResolver:
             self._append_coverage_error(attempt.name, rows, request, errors)
         return StockPoolResolution.miss("provider-miss")
 
+    async def _enrich_cached_resolution(self, resolution: StockPoolResolution) -> StockPoolResolution:
+        rows, filled_count = await self.industry_enricher.enrich(resolution.list_rows())
+        if not filled_count:
+            return resolution
+        await _save_metadata_best_effort(lambda items: self.cache.save_stock_pool(items), rows)
+        return StockPoolResolution.hit(rows, resolution.reason)
+
     @staticmethod
     def _append_coverage_error(
         provider_name: str,
@@ -405,7 +390,15 @@ class StockPoolResolver:
         )
         if shrinkage:
             raise ProviderProtocolError(shrinkage)
-        rows = _merge_cached_stock_fields(rows, cached or [])
+        rows = merge_cached_stock_fields(rows, cached or [])
+        rows, _filled_count = await self.industry_enricher.enrich(
+            rows,
+            primary_provider_name=attempt.name,
+        )
+        diagnostic = diagnose_stock_pool_metadata(rows)
+        if diagnostic.degraded:
+            message = f"{provider_source_name(attempt.provider, attempt.name)} 股票池元数据降级：{diagnostic.summary()}"
+            await _safe_log_metadata_event_async(self.cache, "provider", message)
         await self.runtime.record_attempt_success_async(attempt, "stock", result.latency_ms)
         return rows
 

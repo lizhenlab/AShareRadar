@@ -51,6 +51,44 @@ def test_adjacent_same_rule_runs_report_rank_delta_new_and_exit(tmp_path) -> Non
     assert second_page.items[1].previous_rank == 3
 
 
+def test_skipped_result_is_unavailable_instead_of_false_exit(tmp_path) -> None:
+    service, path = _service(tmp_path)
+    _seed_run(
+        path,
+        "rule-v1",
+        [("600001.SH", 1)],
+        data_date="2026-07-27",
+        as_of="2026-07-27 15:00:00",
+    )
+    current_id = _seed_run(
+        path,
+        "rule-v1",
+        [("600001.SH", 1)],
+        data_date="2026-07-28",
+        as_of="2026-07-28 15:00:00",
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            UPDATE market_scan_result
+            SET status = 'skipped', rank = NULL, score = NULL,
+                trend_score = NULL, data_quality_score = NULL
+            WHERE run_id = ? AND symbol = '600001.SH'
+            """,
+            (current_id,),
+        )
+
+    result = service.rank_changes(current_id, page=1, page_size=50)
+
+    assert result.comparable is True
+    assert result.total == 1
+    assert result.items[0].symbol == "600001.SH"
+    assert result.items[0].movement == "unavailable"
+    assert result.items[0].previous_rank == 1
+    assert result.items[0].current_rank is None
+    assert result.items[0].rank_delta is None
+
+
 def test_adjacent_different_rule_versions_are_explicitly_incomparable(tmp_path) -> None:
     service, path = _service(tmp_path)
     previous_id = _seed_run(

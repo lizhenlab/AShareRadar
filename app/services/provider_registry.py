@@ -42,6 +42,7 @@ CAPABILITY_FIELD_BY_KIND = {
     "kline": "daily_kline",
     "minute": "minute_kline",
     "stock": "stock_pool",
+    "stock_industry": "stock_industry",
     "plate": "plate_rank",
     "concept": "concept_board",
     "order_book": "order_book",

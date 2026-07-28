@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 103
+Total endpoints: 104
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -35,6 +35,7 @@ Total endpoints: 103
 | GET | `/api/market-scans` | query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `market_scan_runs` | `MarketScanRunPage` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans` | body `payload: MarketScanStartRequest \| None` | `create_market_scan` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/latest` | - | `latest_market_scan` | `MarketScanRun \| None` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/latest-published` | - | `latest_published_market_scan` | `MarketScanRun \| None` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}` | path `run_id: int` | `market_scan_run` | `MarketScanRun` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans/{run_id}/cancel` | path `run_id: int` | `cancel_market_scan` | `MarketScanRun` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/results` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200)<br>query `status: MarketScanStatusFilter = 'success'`<br>query `market: MarketCode \| None = None`<br>query `industry: str \| None = None` (max_length=80)<br>query `is_st: bool \| None = None`<br>query `is_new: bool \| None = None`<br>query `min_data_quality_score: int \| None = None` (ge=0; le=100)<br>query `keyword: str \| None = None` (max_length=80)<br>query `sort: MarketScanSort = 'rank'`<br>query `order: MarketScanSortOrder = 'asc'` | `market_scan_results` | `MarketScanResultPage` | `app/api/routes/market_scan.py` |

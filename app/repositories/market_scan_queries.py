@@ -57,6 +57,20 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
             row = conn.execute("SELECT * FROM market_scan_run ORDER BY id DESC LIMIT 1").fetchone()
         return run_from_row(row) if row is not None else None
 
+    def latest_published_run(self) -> MarketScanRun | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM market_scan_run
+                WHERE status IN ('success', 'degraded')
+                ORDER BY data_date DESC,
+                         {SQLITE_AUDIT_EPOCH_FUNCTION}(finished_at) DESC,
+                         id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return run_from_row(row) if row is not None else None
+
     def list_runs(self, *, page: int, page_size: int) -> MarketScanRunPage:
         offset = (page - 1) * page_size
         with self._lock, self._connect() as conn:
@@ -98,62 +112,10 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
     def publication_summary(self, run_id: int) -> MarketScanPublicationSummary:
         with self._lock, self._connect() as conn:
             run = required_run_row(conn, run_id)
-            coverage_rows = conn.execute(
-                """
-                SELECT market,
-                       COUNT(*) AS total_count,
-                       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-                       SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END) AS missing_count,
-                       SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count
-                FROM market_scan_result
-                WHERE run_id = ?
-                GROUP BY market
-                """,
-                (run_id,),
-            ).fetchall()
-            stale_rows = conn.execute(
-                """
-                SELECT data_date, COUNT(*) AS stale_count,
-                       GROUP_CONCAT(DISTINCT market) AS markets
-                FROM market_scan_result
-                WHERE run_id = ?
-                  AND status IN ('missing', 'skipped')
-                  AND data_date IS NOT NULL
-                  AND data_date < ?
-                GROUP BY data_date
-                ORDER BY stale_count DESC, data_date DESC
-                """,
-                (run_id, run["data_date"]),
-            ).fetchall()
-            timestamps = [
-                str(row[0])
-                for row in conn.execute(
-                    """
-                    SELECT quote_timestamp
-                    FROM market_scan_result
-                    WHERE run_id = ? AND quote_timestamp IS NOT NULL
-                    ORDER BY symbol ASC
-                    """,
-                    (run_id,),
-                ).fetchall()
-            ]
-        coverages = _coverage_summary(coverage_rows)
-        total_count = coverages[0].total_count
-        stale_cluster = _systemic_stale_cluster(stale_rows, total_count=total_count)
-        (
-            snapshot_started_at,
-            snapshot_finished_at,
-            snapshot_span_seconds,
-            invalid_snapshot_timestamps,
-        ) = _snapshot_span(timestamps)
-        return MarketScanPublicationSummary(
-            coverages=coverages,
-            systemic_stale_cluster=stale_cluster,
-            snapshot_started_at=snapshot_started_at,
-            snapshot_finished_at=snapshot_finished_at,
-            snapshot_span_seconds=snapshot_span_seconds,
-            invalid_snapshot_timestamps=invalid_snapshot_timestamps,
-        )
+            coverage_rows = _publication_coverage_rows(conn, run_id)
+            stale_rows = _publication_stale_rows(conn, run_id, data_date=run["data_date"])
+            timestamp_rows = _publication_timestamp_rows(conn, run_id)
+        return _publication_summary_from_rows(run, coverage_rows, stale_rows, timestamp_rows)
 
     def results_page(
         self,
@@ -175,7 +137,10 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         params: list[object] = [run_id]
         append_exact_filter(clauses, params, "status", status)
         append_exact_filter(clauses, params, "market", market)
-        append_exact_filter(clauses, params, "industry", industry)
+        industry_text = " ".join((industry or "").split()).strip()
+        if industry_text:
+            clauses.append("industry LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped_like(industry_text)}%")
         append_exact_filter(clauses, params, "is_st", int(is_st) if is_st is not None else None)
         append_exact_filter(clauses, params, "is_new", int(is_new) if is_new is not None else None)
         if min_data_quality_score is not None:
@@ -239,6 +204,76 @@ def _coverage_summary(rows: list[sqlite3.Row]) -> tuple[MarketScanCoverage, ...]
     return (overall, *markets)
 
 
+def _publication_coverage_rows(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT market,
+               SUM(CASE WHEN status IN ('success', 'missing') THEN 1 ELSE 0 END) AS total_count,
+               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+               SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END) AS missing_count,
+               SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count
+        FROM market_scan_result
+        WHERE run_id = ?
+        GROUP BY market
+        """,
+        (run_id,),
+    ).fetchall()
+
+
+def _publication_stale_rows(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    data_date: object,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT data_date, COUNT(*) AS stale_count,
+               GROUP_CONCAT(DISTINCT market) AS markets
+        FROM market_scan_result
+        WHERE run_id = ?
+          AND status IN ('missing', 'skipped')
+          AND data_date IS NOT NULL
+          AND data_date < ?
+        GROUP BY data_date
+        ORDER BY stale_count DESC, data_date DESC
+        """,
+        (run_id, data_date),
+    ).fetchall()
+
+
+def _publication_timestamp_rows(conn: sqlite3.Connection, run_id: int) -> list[tuple[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT market, quote_timestamp
+        FROM market_scan_result
+        WHERE run_id = ? AND quote_timestamp IS NOT NULL
+        ORDER BY market ASC, symbol ASC
+        """,
+        (run_id,),
+    ).fetchall()
+    return [(str(row["market"]), str(row["quote_timestamp"])) for row in rows]
+
+
+def _publication_summary_from_rows(
+    run: sqlite3.Row,
+    coverage_rows: list[sqlite3.Row],
+    stale_rows: list[sqlite3.Row],
+    timestamp_rows: list[tuple[str, str]],
+) -> MarketScanPublicationSummary:
+    snapshot_started_at, snapshot_finished_at, snapshot_span_seconds, invalid_timestamps = _snapshot_span(
+        timestamp_rows
+    )
+    return MarketScanPublicationSummary(
+        coverages=_coverage_summary(coverage_rows),
+        systemic_stale_cluster=_systemic_stale_cluster(stale_rows, total_count=int(run["total_count"] or 0)),
+        snapshot_started_at=snapshot_started_at,
+        snapshot_finished_at=snapshot_finished_at,
+        snapshot_span_seconds=snapshot_span_seconds,
+        invalid_snapshot_timestamps=invalid_timestamps,
+    )
+
+
 def _coverage_market(value: object) -> Literal["SH", "SZ", "BJ"] | None:
     market = str(value)
     if market == "SH":
@@ -272,24 +307,28 @@ def _systemic_stale_cluster(
 
 
 def _snapshot_span(
-    timestamps: list[str],
+    timestamp_rows: list[tuple[str, str]],
 ) -> tuple[str | None, str | None, float | None, tuple[str, ...]]:
-    parsed: list[datetime] = []
+    parsed_by_market: dict[str, list[datetime]] = {}
     invalid: list[str] = []
-    for value in timestamps:
+    for market, value in timestamp_rows:
         snapshot_time = _parse_snapshot_time(value)
         if snapshot_time is None:
             invalid.append(value)
         else:
-            parsed.append(snapshot_time)
-    if not parsed:
+            parsed_by_market.setdefault(market, []).append(snapshot_time)
+    if not parsed_by_market:
         return None, None, None, tuple(dict.fromkeys(invalid))
-    started = min(parsed)
-    finished = max(parsed)
+    market_spans = []
+    for parsed in parsed_by_market.values():
+        started = min(parsed)
+        finished = max(parsed)
+        market_spans.append((max(0.0, (finished - started).total_seconds()), started, finished))
+    span, started, finished = max(market_spans, key=lambda item: item[0])
     return (
         started.isoformat(sep=" "),
         finished.isoformat(sep=" "),
-        max(0.0, (finished - started).total_seconds()),
+        span,
         tuple(dict.fromkeys(invalid)),
     )
 

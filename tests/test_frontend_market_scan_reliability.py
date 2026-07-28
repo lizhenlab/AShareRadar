@@ -39,7 +39,7 @@ const row = marketScanResultRow({
   data_quality_score: 91,
   tags: ["趋势向上", "量价配合"],
 });
-const labels = ["排名", "股票", "市场 / 行业", "综合", "趋势", "涨跌幅", "换手率", "成交额", "质量", "状态 / 标签"];
+const labels = ["排名", "股票", "市场 / 行业", "短线强势", "趋势", "涨跌幅", "换手率", "成交额", "质量", "状态 / 标签"];
 for (const label of labels) assert.equal(row.includes(`data-label="${label}"`), true, label);
 '''
     )

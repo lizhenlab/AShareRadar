@@ -20,6 +20,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'id="marketScanProgressBar"' in html
     assert 'id="marketScanFinishedAt"' in html
     assert 'id="marketScanRows"' in html
+    assert '<span>有效覆盖率</span><strong id="marketScanCoverage">--</strong>' in html
     assert 'id="marketScanAnnouncement" role="status" aria-live="polite" aria-atomic="true" aria-relevant="text"' in html
     assert 'id="marketScanProgressBar" max="100" value="0" aria-label="全市场扫描进度"' in html
     assert 'aria-valuetext="尚无扫描进度" aria-busy="false"' in html
@@ -216,6 +217,7 @@ const controller = createMarketScanController({
   async fetcher(url) {
     calls.push(String(url));
     if (url === "/api/market-scans/latest") return latestRun;
+    if (url === "/api/market-scans/latest-published") return terminal;
     if (String(url).includes("/results?")) return resultPage;
     throw new Error(`unexpected request: ${url}`);
   },
@@ -228,26 +230,61 @@ assert.deepEqual(calls.map((url) => url.split("?")[0]), [
 ]);
 assert.equal(element("marketScanHeadline").textContent, "全市场扫描降级完成");
 assert.equal(element("marketScanProgressText").textContent, "3/3 · 100.0%");
+assert.equal(element("marketScanProgressBar").textContent, "100.0%");
+assert.equal(element("marketScanProgressBar")["aria-valuenow"], "100.00");
+assert.equal(element("marketScanProgressBar")["aria-valuetext"], "降级完成，3/3 · 100.0%");
 assert.equal(element("marketScanTotal").textContent, "3（排除 1）");
 assert.equal(element("marketScanCoverage").textContent, "66.7%");
 assert.equal(element("marketScanFinishedAt").textContent, "2026-07-17 16:45");
+assert.equal(element("marketScanRule").textContent, "v1");
+assert.equal(element("marketScanRule").title, "full-market-score-v1");
+assert.equal(element("marketScanRule")["aria-label"], "规则版本 full-market-score-v1");
 assert.equal(element("marketScanRows").innerHTML.includes("920066.BJ"), true);
 assert.equal(element("marketScanTableWrap").hidden, false);
 assert.equal(element("marketScanAnnouncement").textContent, "榜单加载完成，第 1/1 页，本页 1 条，共 1 条。");
 assert.equal(element("marketScanRetry").hidden, false);
 
-latestRun = { ...terminal, id: 11, status: "running", processed_count: 1, progress_pct: 10, message: "新扫描运行中" };
+latestRun = {
+  ...terminal,
+  id: 11,
+  status: "running",
+  processed_count: 1,
+  progress_pct: 10,
+  rule_version: "full-market-scan-v3:085ad66526be0b28",
+  message: "新扫描运行中",
+};
 controller.deactivate();
 await controller.activate();
 assert.equal(controller.state.run.id, 11);
 assert.equal(controller.state.run.status, "running");
-assert.equal(element("marketScanTableWrap").hidden, true);
-assert.equal(element("marketScanRows").innerHTML, "");
+assert.equal(element("marketScanProgressBar").textContent, "10.0%");
+assert.equal(element("marketScanProgressBar")["aria-valuenow"], "10.00");
+assert.equal(element("marketScanRule").textContent, "v3\n085ad665");
+assert.equal(element("marketScanRule").title, "full-market-scan-v3:085ad66526be0b28");
+assert.equal(controller.state.publishedRun.id, 9);
+assert.equal(element("marketScanTableWrap").hidden, false);
+assert.equal(element("marketScanRows").innerHTML.includes("920066.BJ"), true);
 assert.deepEqual(calls.map((url) => url.split("?")[0]), [
   "/api/market-scans/latest",
   "/api/market-scans/9/results",
   "/api/market-scans/latest",
+  "/api/market-scans/latest-published",
 ]);
+
+for (const [id, status, message] of [
+  [11, "failed", "新扫描失败"],
+  [12, "cancelled", "新扫描已取消"],
+]) {
+  latestRun = { ...terminal, id, status, message };
+  controller.deactivate();
+  await controller.activate();
+  assert.equal(controller.state.run.status, status);
+  assert.equal(controller.state.publishedRun.id, 9);
+  assert.equal(element("marketScanHeadline").textContent, message);
+  assert.equal(element("marketScanRows").innerHTML.includes("920066.BJ"), true);
+  assert.equal(element("marketScanTableWrap").hidden, false);
+  assert.equal(element("marketScanRetry").hidden, false);
+}
 
 const activeCalls = [];
 const activeController = createMarketScanController({
@@ -302,6 +339,7 @@ const unpublishedController = createMarketScanController({
   root: document,
   async fetcher(url) {
     if (url === "/api/market-scans/latest") return { ...terminal, id: 23, status: "cancelled", message: "用户取消" };
+    if (url === "/api/market-scans/latest-published") return null;
     if (String(url).includes("/results?")) unpublishedResultCalls += 1;
     throw new Error(`unexpected request: ${url}`);
   },
@@ -314,7 +352,7 @@ unpublishedController.deactivate();
     )
 
 
-def test_market_scan_controller_discovers_external_run_and_clears_previous_snapshot() -> None:
+def test_market_scan_controller_discovers_external_run_and_retains_published_snapshot() -> None:
     _run_node_script(
         r'''
 import assert from "node:assert/strict";
@@ -349,6 +387,7 @@ const firstActive = run(9, "running", "首轮扫描中");
 const firstTerminal = run(9, "success", "首轮扫描完成");
 const externalActive = run(11, "running", "调度扫描中");
 let latestCalls = 0;
+let publishedRun = null;
 const calls = [];
 const controller = createMarketScanController({
   root: document,
@@ -360,7 +399,11 @@ const controller = createMarketScanController({
       latestCalls += 1;
       return latestCalls === 1 ? firstActive : externalActive;
     }
-    if (url === "/api/market-scans/9") return firstTerminal;
+    if (url === "/api/market-scans/latest-published") return publishedRun;
+    if (url === "/api/market-scans/9") {
+      publishedRun = firstTerminal;
+      return firstTerminal;
+    }
     if (url === "/api/market-scans/11") return externalActive;
     if (String(url).includes("/api/market-scans/9/results?")) {
       return {
@@ -388,11 +431,11 @@ await timers.fireNext();
 assert.equal(latestCalls, 2);
 assert.equal(controller.state.run.id, 11);
 assert.equal(controller.state.run.status, "running");
-assert.equal(controller.state.page, 1);
-assert.equal(controller.state.pageCount, 0);
-assert.equal(element("marketScanRows").innerHTML, "");
-assert.equal(element("marketScanTableWrap").hidden, true);
-assert.equal(element("marketScanResultState").textContent.includes("稳定榜单"), true);
+assert.equal(controller.state.publishedRun.id, 9);
+assert.equal(controller.state.page, 5);
+assert.equal(controller.state.pageCount, 8);
+assert.equal(element("marketScanRows").innerHTML.includes("旧榜单股票"), true);
+assert.equal(element("marketScanTableWrap").hidden, false);
 assert.equal(calls.includes("/api/market-scans/9/results?page=1&page_size=100&status=success&sort=rank&order=asc"), true);
 controller.deactivate();
 assert.equal(timers.size(), 0);
@@ -650,6 +693,7 @@ const controller = createMarketScanController({
       latestCalls += 1;
       return scanRun(latestCalls === 1 ? 70 : latestCalls === 2 ? 71 : 72);
     }
+    if (url === "/api/market-scans/latest-published") return null;
     if (url === "/api/market-scans/70") {
       const error = new Error("全市场扫描批次不存在：70");
       error.status = 404;
@@ -680,7 +724,7 @@ assert.equal(latestCalls, 3);
 assert.equal(controller.state.run.id, 72);
 assert.equal(element("marketScanHeadline").textContent, "网络已恢复，正在同步最近扫描。");
 assert.equal(timers.size(), 1);
-assert.deepEqual(calls.slice(0, 4), [
+assert.deepEqual(calls.filter((url) => url !== "/api/market-scans/latest-published").slice(0, 4), [
   "/api/market-scans/latest",
   "/api/market-scans/70",
   "/api/market-scans/latest",
@@ -1077,7 +1121,7 @@ document.activeElement = element("marketScanRetry");
 const retrying = controller.retry();
 assert.equal(await controller.retry(), null, "duplicate retry was not rejected");
 assert.equal(calls.retry, 1);
-assert.equal(signals.results[0].aborted, true, "retry did not abort the old result read");
+assert.equal(signals.results[0].aborted, false, "task mutation cancelled an independent published-result read");
 staleResult.resolve({});
 await resultRead;
 retryResponse.resolve({ accepted: true, deduplicated: false, run: retried });

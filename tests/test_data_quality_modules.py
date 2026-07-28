@@ -196,6 +196,58 @@ class DataQualityModuleTests(unittest.TestCase):
         self.assertIn("当前报价来自兜底缓存，说明实时行情源本轮不可用。", fallback_cache.notes)
         self.assertIn("报价兜底缓存", fallback_cache.anomalies)
 
+    def test_cache_penalty_can_be_disabled_without_disabling_other_quality_checks(self) -> None:
+        now = datetime(2026, 5, 13, 16, 0, 0)
+        cached_quote = _quote(source="腾讯行情", timestamp="2026-05-13 15:00:00").model_copy(update={"from_cache": True})
+
+        standard = build_data_quality(cached_quote, [], require_kline=False, now=now)
+        cache_neutral = build_data_quality(
+            cached_quote,
+            [],
+            require_kline=False,
+            penalize_cached_quote=False,
+            now=now,
+        )
+        fallback = build_data_quality(
+            cached_quote.model_copy(update={"fallback_used": True}),
+            [],
+            require_kline=False,
+            penalize_cached_quote=False,
+            now=now,
+        )
+        stale = build_data_quality(
+            cached_quote.model_copy(update={"timestamp": "2026-05-12 15:00:00"}),
+            [],
+            require_kline=False,
+            penalize_cached_quote=False,
+            now=now,
+        )
+        invalid_fields = build_data_quality(
+            _quote(
+                source="腾讯行情",
+                price=120.0,
+                prev_close=100.0,
+                high=110.0,
+                low=90.0,
+                change_pct=20.0,
+                timestamp="2026-05-13 15:00:00",
+            ).model_copy(update={"from_cache": True}),
+            [],
+            require_kline=False,
+            penalize_cached_quote=False,
+            now=now,
+        )
+
+        self.assertEqual(standard.score, 92)
+        self.assertEqual(cache_neutral.score, 100)
+        self.assertIn("横截面评分仅按事件时间", "".join(cache_neutral.notes))
+        self.assertEqual(fallback.score, 84)
+        self.assertIn("报价兜底缓存", fallback.anomalies)
+        self.assertLess(stale.score, cache_neutral.score)
+        self.assertIn("报价轻微滞后", stale.anomalies)
+        self.assertLess(invalid_fields.score, cache_neutral.score)
+        self.assertIn("现价高于最高价", invalid_fields.anomalies)
+
     def test_required_missing_klines_only_reports_missing_not_count_shortage(self) -> None:
         quality = build_data_quality(
             _quote(timestamp="2026-05-13 15:00:00"),

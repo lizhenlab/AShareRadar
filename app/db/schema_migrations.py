@@ -186,6 +186,7 @@ COMPAT_COLUMNS = {
     },
     "market_scan_result": {
         "metadata_source": "TEXT",
+        "raw_score": "REAL CHECK (raw_score IS NULL OR raw_score BETWEEN 0 AND 100)",
         "quote_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (quote_fallback_used IN (0, 1))",
         "kline_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (kline_fallback_used IN (0, 1))",
         "metadata_degraded": "INTEGER NOT NULL DEFAULT 0 CHECK (metadata_degraded IN (0, 1))",

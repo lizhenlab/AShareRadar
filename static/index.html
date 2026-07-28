@@ -5,17 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AShareRadar</title>
     <noscript><link rel="stylesheet" href="/static/styles.css" /></noscript>
-    <link rel="stylesheet" href="/static/styles.css?v=20260728-research-loop-1" />
-    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260728-research-loop-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260728-market-scan-ui-2" />
+    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260728-market-scan-ui-2" />
     <script type="importmap">
       {
         "imports": {
-          "/static/js/discovery.js": "/static/js/discovery.js?v=20260728-research-loop-1",
-          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260728-research-loop-1",
-          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260728-research-loop-1",
-          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260728-research-loop-1",
-          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260728-research-loop-1",
-          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260728-research-loop-1"
+          "/static/js/discovery.js": "/static/js/discovery.js?v=20260728-market-scan-ui-2",
+          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260728-market-scan-ui-2",
+          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260728-market-scan-ui-2",
+          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260728-market-scan-ui-2",
+          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260728-market-scan-ui-2",
+          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260728-market-scan-ui-2"
         }
       }
     </script>
@@ -198,7 +198,7 @@
               <div><span>股票池</span><strong id="marketScanTotal">--</strong></div>
               <div><span>有效排名</span><strong id="marketScanSuccess">--</strong></div>
               <div><span>缺失 / 跳过</span><strong id="marketScanIssues">--</strong></div>
-              <div><span>数据覆盖率</span><strong id="marketScanCoverage">--</strong></div>
+              <div><span>有效覆盖率</span><strong id="marketScanCoverage">--</strong></div>
               <div><span>最近扫描</span><strong id="marketScanFinishedAt">--</strong></div>
               <div><span>规则版本</span><strong id="marketScanRule">--</strong></div>
             </div>
@@ -232,7 +232,7 @@
               <label><span>新股</span><select id="marketScanNew"><option value="">不限</option><option value="true">仅新股</option><option value="false">排除新股</option></select></label>
               <label><span>最低质量</span><input id="marketScanQuality" type="number" min="0" max="100" step="1" placeholder="0-100" /></label>
               <label><span>搜索</span><input id="marketScanKeyword" maxlength="80" placeholder="代码或名称" /></label>
-              <label><span>排序</span><select id="marketScanSort"><option value="rank">综合排名</option><option value="score">综合分</option><option value="trend_score">趋势分</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
+              <label><span>排序</span><select id="marketScanSort"><option value="rank">短线强势排名</option><option value="score">短线强势分</option><option value="trend_score">趋势分</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
               <label><span>方向</span><select id="marketScanOrder"><option value="asc">升序</option><option value="desc">降序</option></select></label>
               <div class="market-scan-filter-actions">
                 <button type="submit">应用</button>
@@ -244,7 +244,7 @@
             <div class="market-scan-result-state" id="marketScanResultState">暂无榜单数据</div>
             <div class="market-scan-table-wrap" id="marketScanTableWrap" role="region" aria-label="全市场扫描榜单，可横向滚动" aria-busy="false" tabindex="0" hidden>
               <table class="market-scan-table">
-                <thead><tr><th>排名</th><th>股票</th><th>市场 / 行业</th><th>综合</th><th>趋势</th><th>涨跌幅</th><th>换手率</th><th>成交额</th><th>质量</th><th>状态 / 标签</th></tr></thead>
+                <thead><tr><th>排名</th><th>股票</th><th>市场 / 行业</th><th>短线强势</th><th>趋势</th><th>涨跌幅</th><th>换手率</th><th>成交额</th><th>质量</th><th>状态 / 标签</th></tr></thead>
                 <tbody id="marketScanRows"></tbody>
               </table>
             </div>
@@ -588,6 +588,6 @@
       <span>研究辅助工具，不构成投资建议</span>
     </footer>
 
-    <script type="module" src="/static/app.js?v=20260728-research-loop-1"></script>
+    <script type="module" src="/static/app.js?v=20260728-market-scan-ui-2"></script>
   </body>
 </html>

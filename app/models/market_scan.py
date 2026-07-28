@@ -24,6 +24,7 @@ MarketScanTrigger = Literal["manual", "scheduled", "retry"]
 MarketScanSort = Literal[
     "rank",
     "score",
+    "raw_score",
     "trend_score",
     "change_pct",
     "amount",
@@ -36,10 +37,17 @@ MarketScanCoverageScope = Literal["ALL", "SH", "SZ", "BJ"]
 
 MARKET_SCAN_RANK_TIE_BREAK: Final[tuple[tuple[str, str], ...]] = (
     ("score", "desc"),
+    ("raw_score", "desc"),
     ("trend_score", "desc"),
     ("change_pct", "desc"),
     ("amount", "desc"),
     ("symbol", "asc"),
+)
+MARKET_SCAN_METADATA_DEGRADATION_REASONS: Final[frozenset[str]] = frozenset(
+    {"industry_missing", "list_date_missing", "metadata_incomplete"}
+)
+MARKET_SCAN_DEGRADATION_REASONS: Final[frozenset[str]] = frozenset(
+    {"quote_fallback", "kline_fallback", *MARKET_SCAN_METADATA_DEGRADATION_REASONS}
 )
 
 
@@ -61,6 +69,7 @@ class MarketScanResultWrite:
     symbol: str
     status: MarketScanResultStatus
     score: int | None = None
+    raw_score: float | None = None
     trend_score: int | None = None
     leader_score: int | None = None
     data_quality_score: int | None = None
@@ -108,6 +117,16 @@ class MarketScanCoverage:
         if self.total_count <= 0:
             return 0.0
         return min(1.0, max(0.0, self.success_count / self.total_count))
+
+    @property
+    def population_count(self) -> int:
+        return self.total_count + self.skipped_count
+
+    @property
+    def eligible_ratio(self) -> float:
+        if self.population_count <= 0:
+            return 0.0
+        return min(1.0, max(0.0, self.total_count / self.population_count))
 
 
 @dataclass(frozen=True)
@@ -193,6 +212,7 @@ class MarketScanResultItem(BaseModel):
     status: MarketScanResultStatus
     rank: int | None = Field(default=None, ge=1)
     score: int | None = Field(default=None, ge=0, le=100)
+    raw_score: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
     trend_score: int | None = Field(default=None, ge=0, le=100)
     leader_score: int | None = Field(default=None, ge=0, le=100)
     data_quality_score: int | None = Field(default=None, ge=0, le=100)

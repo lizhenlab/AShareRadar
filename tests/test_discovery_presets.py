@@ -100,7 +100,7 @@ def test_criteria_reject_unknown_unsafe_or_out_of_range_values(criteria: dict[st
 @pytest.mark.parametrize(
     "sort",
     [
-        [{"field": "rank", "order": "asc"}],
+        [{"field": "unknown", "order": "asc"}],
         [{"field": "score", "order": "sideways"}],
         [{"field": "score", "order": "desc"}, {"field": "score", "order": "asc"}],
         [],

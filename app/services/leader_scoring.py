@@ -25,6 +25,7 @@ class LeaderScoreInput:
 
 @dataclass(frozen=True)
 class LeaderScoreProfile:
+    profile_id: str
     base: int
     trend_weight: float
     rules: tuple["LeaderScoreRule", ...]
@@ -81,6 +82,7 @@ def leader_tags(inputs: LeaderScoreInput, score: int, rules: tuple[LeaderTagRule
 def leader_profile_spec(profile: LeaderScoreProfile) -> dict[str, object]:
     return {
         "algorithm": LEADER_SCORE_ALGORITHM_VERSION,
+        "profile_id": profile.profile_id,
         "base": profile.base,
         "trend_weight": profile.trend_weight,
         "rules": [
@@ -254,6 +256,7 @@ def _turnover_score_delta(turnover_rate: float | None, active: int, overheated: 
 
 
 FEATURE_LEADER_PROFILE = LeaderScoreProfile(
+    profile_id="feature-leader-v1",
     base=40,
     trend_weight=0.45,
     rules=(
@@ -268,6 +271,7 @@ FEATURE_LEADER_PROFILE = LeaderScoreProfile(
 )
 
 STRONG_STOCK_LEADER_PROFILE = LeaderScoreProfile(
+    profile_id="strong-stock-leader-v1",
     base=38,
     trend_weight=0.48,
     rules=(
@@ -276,6 +280,13 @@ STRONG_STOCK_LEADER_PROFILE = LeaderScoreProfile(
         _turnover_delta(active=6, overheated=-4),
         _amount_delta(large=8, mid=3),
     ),
+)
+
+FULL_MARKET_LEADER_PROFILE = LeaderScoreProfile(
+    profile_id="full-market-trend-only-v1",
+    base=50,
+    trend_weight=1.0,
+    rules=(),
 )
 
 FEATURE_TAG_RULES: tuple[LeaderTagRule, ...] = (
@@ -353,6 +364,7 @@ STRONG_STOCK_TAG_RULES: tuple[LeaderTagRule, ...] = (
 __all__ = [
     "FEATURE_LEADER_PROFILE",
     "FEATURE_TAG_RULES",
+    "FULL_MARKET_LEADER_PROFILE",
     "LEADER_SCORE_ALGORITHM_VERSION",
     "LEADER_SCORE_ROUNDING_MODE",
     "LeaderScoreBreakdown",

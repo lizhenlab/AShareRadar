@@ -73,7 +73,7 @@ export function marketScanResultRow(item, options = {}) {
     <td data-label="排名">${escapeHtml(view.rank)}</td>
     <td data-label="股票"><button type="button" class="market-scan-stock" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}"><strong>${escapeHtml(view.name)}</strong><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span></button></td>
     <td data-label="市场 / 行业"><span class="market-scan-meta">${escapeHtml(view.marketIndustry)}</span></td>
-    <td data-label="综合"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
+    <td data-label="短线强势"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
     <td data-label="趋势">${escapeHtml(scoreText(view.trendScore))}</td>
     <td data-label="涨跌幅" class="${escapeHtml(changeClass(view.changePct))}">${escapeHtml(signedPercentage(view.changePct))}</td>
     <td data-label="换手率">${escapeHtml(percentage(view.turnoverRate))}</td>
@@ -85,7 +85,7 @@ export function marketScanResultRow(item, options = {}) {
 
 function discoveryResultActions(view, options) {
   if (!options.discovery) return "";
-  const rankLabel = String(options.rankLabel || "暂无相邻排名");
+  const rankLabel = String(options.rankLabel || "全市场排名变化未查询");
   const movement = String(options.rankMovement || "unavailable");
   const queued = Boolean(options.queued);
   return `<div class="discovery-row-actions">
@@ -126,8 +126,7 @@ function renderEmptyRun(context) {
   const { elements } = context;
   renderHeadline(context, "尚无全市场扫描记录");
   setText(elements.progressText, "--");
-  elements.progressBar.value = 0;
-  setAttribute(elements.progressBar, "aria-valuetext", "尚无扫描进度");
+  renderProgressElement(elements.progressBar, 0, "尚无扫描进度");
   [
     elements.dataDate,
     elements.total,
@@ -135,9 +134,9 @@ function renderEmptyRun(context) {
     elements.issues,
     elements.coverage,
     elements.finishedAt,
-    elements.rule,
   ]
     .forEach((element) => setText(element, "--"));
+  renderRuleVersion(elements.rule, null);
   renderRunControls(context, null);
 }
 
@@ -149,8 +148,7 @@ function renderPopulatedRun(context, run, overrideMessage) {
   renderHeadline(context, headline, run.status === "degraded" ? "degraded" : run.status === "failed" ? "error" : "");
   const progressText = `${integer(run.processed_count)}/${integer(run.total_count)} · ${formatNumber(progress, 1)}%`;
   setText(elements.progressText, progressText);
-  elements.progressBar.value = progress;
-  setAttribute(elements.progressBar, "aria-valuetext", `${statusLabel}，${progressText}`);
+  renderProgressElement(elements.progressBar, progress, `${statusLabel}，${progressText}`);
   renderRunSummary(elements, run);
   renderRunControls(context, run);
 }
@@ -165,7 +163,24 @@ function renderRunSummary(elements, run) {
   setText(elements.issues, `${integer(run.missing_count)} / ${integer(run.skipped_count)}`);
   setText(elements.coverage, `${formatNumber(clampPercentage(run.coverage_pct), 1)}%`);
   setText(elements.finishedAt, displayTimestamp(run.finished_at || run.started_at || run.created_at));
-  setText(elements.rule, run.rule_version || "--");
+  renderRuleVersion(elements.rule, run.rule_version);
+}
+
+function renderRuleVersion(element, value) {
+  const fullVersion = String(value || "").trim();
+  if (!fullVersion) {
+    setText(element, "--");
+    setAttribute(element, "title", "");
+    setAttribute(element, "aria-label", "无规则版本");
+    return;
+  }
+  const versionMatch = fullVersion.match(/^full-market-(?:scan|score)-v(\d+)(?::([a-f0-9]{8,}))?/i);
+  const shortVersion = versionMatch
+    ? `v${versionMatch[1]}${versionMatch[2] ? `\n${versionMatch[2].slice(0, 8)}` : ""}`
+    : fullVersion.length > 24 ? `${fullVersion.slice(0, 21)}...` : fullVersion;
+  setText(element, shortVersion);
+  setAttribute(element, "title", fullVersion);
+  setAttribute(element, "aria-label", `规则版本 ${fullVersion}`);
 }
 
 function renderResults(context, payload) {
@@ -173,11 +188,13 @@ function renderResults(context, payload) {
   setResultsBusy(elements, false);
   if (!payload.items.length) {
     renderResultState(context, "当前筛选条件下没有结果");
+    setResultRunIdentity(elements, payload.run.id);
     renderPagination(context, payload, false);
     announceResults(context, payload, 0);
     return;
   }
   elements.rows.innerHTML = payload.items.map(marketScanResultRow).join("");
+  setResultRunIdentity(elements, payload.run.id);
   elements.tableWrap.hidden = false;
   elements.resultState.hidden = true;
   renderPagination(context, payload, true);
@@ -232,6 +249,7 @@ function renderResultState(context, message, kind = "") {
     focusVisibleControl(context, [elements.market, elements.start]);
   }
   elements.rows.innerHTML = "";
+  setResultRunIdentity(elements, null);
   elements.tableWrap.hidden = true;
   elements.pagination.hidden = true;
   elements.resultState.hidden = false;
@@ -278,20 +296,42 @@ function renderGlobalProgress(context, run) {
   elements.globalOpen.disabled = false;
   elements.globalCancel.disabled = context.actionBusy || run?.status === "cancelling";
   if (!active) {
-    elements.globalBar.value = 0;
+    renderProgressElement(elements.globalBar, 0, "等待任务状态");
     setText(elements.globalText, "等待任务状态");
     return;
   }
   const progress = clampPercentage(run.progress_pct);
   const progressText = `${integer(run.processed_count)}/${integer(run.total_count)} · ${formatNumber(progress, 1)}%`;
-  elements.globalBar.value = progress;
-  setAttribute(elements.globalBar, "aria-valuetext", `${marketScanRunStatusLabel(run.status)}，${progressText}`);
+  renderProgressElement(
+    elements.globalBar,
+    progress,
+    `${marketScanRunStatusLabel(run.status)}，${progressText}`,
+  );
   setText(elements.globalText, `${marketScanRunStatusLabel(run.status)} · ${progressText}`);
+}
+
+function renderProgressElement(element, progress, valueText) {
+  const normalized = clampPercentage(progress);
+  element.value = normalized;
+  setAttribute(element, "aria-valuenow", formatNumber(normalized, 2));
+  setAttribute(element, "aria-valuetext", valueText);
+  setText(element, `${formatNumber(normalized, 1)}%`);
 }
 
 function setResultsBusy(elements, busy) {
   setAttribute(elements.tableWrap, "aria-busy", busy ? "true" : "false");
   setAttribute(elements.pagination, "aria-busy", busy ? "true" : "false");
+}
+
+function setResultRunIdentity(elements, runId) {
+  if (runId === null || runId === undefined) {
+    elements.tableWrap.removeAttribute?.("data-market-scan-run-id");
+    if (elements.tableWrap.dataset) delete elements.tableWrap.dataset.marketScanRunId;
+    delete elements.tableWrap["data-market-scan-run-id"];
+    return;
+  }
+  setAttribute(elements.tableWrap, "data-market-scan-run-id", runId);
+  if (elements.tableWrap.dataset) elements.tableWrap.dataset.marketScanRunId = String(runId);
 }
 
 function setActionHidden(context, element, hidden) {

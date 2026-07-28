@@ -395,6 +395,44 @@ def test_auto_retry_excludes_degraded_single_stock_missing() -> None:
     assert decision.eligible is False
 
 
+def test_auto_retry_excludes_completed_run_with_only_deterministic_skips() -> None:
+    current = datetime(2026, 7, 17, 16, 40)
+    run = _market_scan_run(
+        total_count=332,
+        processed_count=332,
+        success_count=311,
+        skipped_count=21,
+    )
+    summary = MarketScanPublicationSummary(
+        coverages=(
+            MarketScanCoverage("ALL", 311, 311, skipped_count=21),
+            MarketScanCoverage("SH", 1, 1),
+            MarketScanCoverage("SZ", 1, 1),
+            MarketScanCoverage("BJ", 309, 309, skipped_count=21),
+        ),
+        snapshot_span_seconds=50,
+    )
+
+    decision = automatic_retry_decision(
+        run,
+        MarketScanRetryPlan(
+            source_run_id=run.id,
+            result_count=332,
+            preserved_success_count=0,
+            pending_count=332,
+            needs_market_data=True,
+            rule_version=run.rule_version,
+        ),
+        summary,
+        current=current,
+        delays_seconds=(600, 1800, 3600),
+        max_retry_attempts=3,
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "individual-or-non-retryable-failure"
+
+
 @pytest.mark.parametrize(
     ("retry_count", "expected_due"),
     [

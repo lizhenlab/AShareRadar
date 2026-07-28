@@ -130,7 +130,7 @@ class KlineCoordinator:
         current = self._now()
         priority_rows = self.priority("kline")
         provider_chain = _provider_chain_key(priority_rows)
-        if use_cache:
+        if use_cache and not require_provider_response:
             cached = await self._fresh_daily_cache(
                 symbol,
                 limit=limit,

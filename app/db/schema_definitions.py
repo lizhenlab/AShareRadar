@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS market_scan_result (
         CHECK (status IN ('pending', 'success', 'missing', 'skipped')),
     rank INTEGER CHECK (rank IS NULL OR rank > 0),
     score INTEGER CHECK (score IS NULL OR score BETWEEN 0 AND 100),
+    raw_score REAL CHECK (raw_score IS NULL OR raw_score BETWEEN 0 AND 100),
     trend_score INTEGER CHECK (trend_score IS NULL OR trend_score BETWEEN 0 AND 100),
     leader_score INTEGER CHECK (leader_score IS NULL OR leader_score BETWEEN 0 AND 100),
     data_quality_score INTEGER CHECK (data_quality_score IS NULL OR data_quality_score BETWEEN 0 AND 100),

@@ -3,10 +3,12 @@ from __future__ import annotations
 from app.services.leader_scoring import (
     FEATURE_LEADER_PROFILE,
     FEATURE_TAG_RULES,
+    FULL_MARKET_LEADER_PROFILE,
     STRONG_STOCK_LEADER_PROFILE,
     STRONG_STOCK_TAG_RULES,
     LeaderScoreInput,
     leader_score,
+    leader_profile_spec,
     leader_tags,
 )
 
@@ -52,6 +54,33 @@ def test_strong_stock_profile_preserves_ranking_score_components() -> None:
     )
 
     assert leader_score(inputs, STRONG_STOCK_LEADER_PROFILE) == 84
+
+
+def test_full_market_profile_is_trend_only_and_serializable() -> None:
+    baseline = LeaderScoreInput(
+        trend_score=73,
+        change_pct=-8.0,
+        volume_ratio=0.2,
+        amount=10_000_000,
+        turnover_rate=0.1,
+    )
+    active_variant = LeaderScoreInput(
+        trend_score=73,
+        change_pct=10.0,
+        volume_ratio=4.0,
+        amount=8_000_000_000,
+        turnover_rate=20.0,
+    )
+
+    assert leader_score(baseline, FULL_MARKET_LEADER_PROFILE) == 73
+    assert leader_score(active_variant, FULL_MARKET_LEADER_PROFILE) == 73
+    assert leader_profile_spec(FULL_MARKET_LEADER_PROFILE) == {
+        "algorithm": "leader-score-additive-v1",
+        "profile_id": "full-market-trend-only-v1",
+        "base": 50,
+        "trend_weight": 1.0,
+        "rules": [],
+    }
 
 
 def test_leader_tags_keep_context_specific_thresholds() -> None:

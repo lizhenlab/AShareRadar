@@ -12,6 +12,8 @@ DISCOVERY_PRESET_SCHEMA_VERSION = 1
 
 DiscoveryMarket = Literal["SH", "SZ", "BJ"]
 DiscoverySortField = Literal[
+    "rank",
+    "symbol",
     "market",
     "industry",
     "is_st",
@@ -22,9 +24,10 @@ DiscoverySortField = Literal[
     "turnover",
     "amount",
     "score",
+    "raw_score",
 ]
 DiscoverySortOrder = Literal["asc", "desc"]
-DiscoveryRankMovement = Literal["up", "down", "unchanged", "new", "exit"]
+DiscoveryRankMovement = Literal["up", "down", "unchanged", "new", "exit", "unavailable"]
 DiscoveryComparisonReason = Literal["no_previous_run", "rule_version_mismatch"]
 
 NameText = Annotated[str, Field(min_length=1, max_length=80)]
@@ -110,7 +113,7 @@ class DiscoverySort(_StrictModel):
 
 
 def _default_sort() -> list[DiscoverySort]:
-    return [DiscoverySort(field="score", order="desc")]
+    return [DiscoverySort(field="rank", order="asc")]
 
 
 class DiscoveryPresetDefinition(_StrictModel):
@@ -199,6 +202,7 @@ class DiscoveryLeaderboardItem(BaseModel):
     turnover: float | None = None
     amount: float | None = None
     score: int | None = Field(default=None, ge=0, le=100)
+    raw_score: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
 
 
 class DiscoveryLeaderboardPage(BaseModel):

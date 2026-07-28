@@ -58,6 +58,7 @@ The current test suite is split by domain:
 - `tests/test_active_research_review_backend.py`: bounded after-close watchlist refresh, per-symbol failure isolation, market-date and K-line provenance gates, watermark persistence, and same-day data-revision handling.
 - `tests/test_advice_reviews.py`: snapshot binding, no-lookahead windows, ambiguous barriers, pending/insufficient states, revision ownership, idempotent evaluation persistence, and cross-revision evaluation history.
 - `tests/test_advice_review_window_contract.py`: trading-day completeness, 15:15 publication boundaries, cross-contract rejection, and weekend pending behavior.
+- `tests/test_akshare_stock_metadata.py`: AKShare industry/list-date aliases, placeholder cleanup, and strict date normalization.
 - `tests/test_analysis_research.py`
 - `tests/test_analysis_signal_modules.py`
 - `tests/test_architecture_boundaries.py`: lower-layer dependency direction, direct domain-model imports, application import acyclicity, and clock-adapter ownership of wall time.
@@ -150,6 +151,7 @@ The current test suite is split by domain:
 - `tests/test_market_scan_scheduler.py`: publish-time guard, automatic-run suppression, stale-run recovery, and scheduler ownership.
 - `tests/test_market_scan_scoring.py`: deterministic versioned score, completed-`data_date` snapshot boundary, quote/K-line date and adjustment contracts, required liquidity inputs, missing/skip boundaries, and A-share-only universe tags/exclusions.
 - `tests/test_market_scan_trust_contract.py`: score-spec hash/replay, ALL/SH/SZ/BJ publication gates, snapshot span, trading-date drift, and whole-run deadlines.
+- `tests/test_market_scan_universe.py`: current-listed A-share filtering, future/unknown listing dates, new-stock boundaries, de-duplication, and precise ST-name recognition.
 - `tests/test_market_scan_validation.py`: market coverage thresholds, systemic data-failure guards, degradation accounting, and terminal publication decisions.
 - `tests/test_minute_analysis_modules.py`
 - `tests/test_optional_kline_parsing_modules.py`
@@ -206,6 +208,8 @@ The current test suite is split by domain:
 - `tests/test_stock_lhb_modules.py`
 - `tests/test_stock_lookup_modules.py`
 - `tests/test_stock_overview_modules.py`
+- `tests/test_stock_pool_metadata.py`: total and SH/SZ/BJ industry/list-date completeness diagnostics without blocking price-only ranking.
+- `tests/test_stock_pool_industry_enrichment.py`: one-shot BaoStock industry enrichment, source provenance, cache persistence, and non-fatal isolated capability failure.
 - `tests/test_stock_rule_modules.py`
 - `tests/test_stock_strategy_modules.py`
 - `tests/test_symbol_modules.py`
@@ -248,7 +252,7 @@ Browser regression support is indexed separately:
 17. Create and verify a runtime backup. Open cleanup preview and confirm user-history candidates trigger a verified pre-cleanup backup while review-linked advice is excluded. Run scheduled health cleanup and confirm alert/advice history is unchanged.
 18. Open diagnostics and confirm fetch/market freshness, storage budget, categorized rows, providers, scheduler, and trading-calendar guidance remain readable.
 19. Open **全市场榜单**, start one scan, and confirm the request returns immediately while real processed/total progress changes. Repeat the click and confirm it follows the same active run. Cancel and retry, then confirm a new linked run is created, the original stays unchanged, clean successful rows are retained, and unfinished/degraded rows resume.
-20. On a disposable fake-provider run, include SH/SZ/BJ, ST/new, suspended, short-history, and failed-source rows. Confirm every eligible symbol becomes success/missing/skipped, only successful rows receive stable ranks, coverage matches counts, and page/filter/sort views never render the whole universe.
+20. On a disposable fake-provider run, include SH/SZ/BJ, ST/new, suspended, short-history, and failed-source rows. Confirm only successful rows receive stable ranks, coverage uses `success + missing`, each market retains at least 90% eligible rows, mass skipping blocks publication, and page/filter/sort views remain bounded.
 21. Simulate a deleted active scan and repeated poll failures; confirm the UI returns to latest with bounded backoff, resets page/results when a different run appears, retries immediately after `online`, keeps one request/timer at a time, and announces progress/result milestones through one live region.
 22. With disposable dual processes, confirm only one owns `<SQLite path>.runtime-leader.lock`, scheduler and scanner never split ownership, and standby takes over both after the leader exits. Confirm restore refuses the unified lock and both legacy compatibility locks.
 23. Confirm invalid symbols stay in the query panel, while a failed valid-stock load clears the prior stock content and shows an explicit failure; then check desktop/mobile layouts for console errors.

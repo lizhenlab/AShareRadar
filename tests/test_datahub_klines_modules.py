@@ -192,6 +192,54 @@ def test_required_daily_kline_reports_permanently_unavailable_chain_before_cache
     assert retry_after_seconds is None
 
 
+def test_required_daily_kline_does_not_short_circuit_on_fresh_cache() -> None:
+    class LiveProvider:
+        source_name = "实时日线源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
+            del symbol
+            self.calls += 1
+            return [
+                make_kline(date=f"2026-05-{index + 1:02d}", source=self.source_name)
+                for index in range(13)
+            ][-limit:]
+
+    async def run_check(path: Path) -> int:
+        settings = Settings(kline_cache_seconds=3600)
+        cache = SQLiteCache(path)
+        cache.save_klines(
+            "600519.SH",
+            [make_kline(date=f"2026-05-{index + 1:02d}", source="缓存") for index in range(12)],
+            "缓存",
+        )
+        provider = LiveProvider()
+        coordinator = KlineCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"live": provider},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "live")],
+            now=lambda: datetime(2026, 5, 13, 16, 0, 0),
+        )
+
+        rows = await coordinator.kline(
+            "600519.SH",
+            limit=12,
+            use_cache=True,
+            require_provider_response=True,
+        )
+        assert rows[-1].date == "2026-05-13"
+        return provider.calls
+
+    with TemporaryDirectory() as tmpdir:
+        calls = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls >= 1
+
+
 def test_required_daily_kline_treats_full_provider_capacity_as_retryable() -> None:
     class BusyProvider:
         source_name = "繁忙日线源"

@@ -10,6 +10,8 @@ from app.models.discovery import DiscoveryCriteria, DiscoverySort
 
 
 _FIELD_COLUMNS = {
+    "rank": "rank",
+    "symbol": "symbol",
     "market": "market",
     "industry": "industry",
     "is_st": "is_st",
@@ -20,6 +22,7 @@ _FIELD_COLUMNS = {
     "turnover": "turnover_rate",
     "amount": "amount",
     "score": "score",
+    "raw_score": "raw_score",
 }
 
 

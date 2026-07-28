@@ -350,7 +350,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   if (mobileProject) {
     expect(responsiveTable.overflow).toBe(false);
     expect(responsiveTable.detailLabels).toEqual([
-      "排名", "股票", "市场 / 行业", "综合", "趋势", "涨跌幅", "换手率", "成交额", "质量", "状态 / 标签",
+      "排名", "股票", "市场 / 行业", "短线强势", "趋势", "涨跌幅", "换手率", "成交额", "质量", "状态 / 标签",
     ]);
   } else {
     expect(responsiveTable.headerPosition).toBe("sticky");
@@ -452,6 +452,12 @@ for (const viewport of [
     await page.locator("#marketScanSort").selectOption("trend_score");
     await page.locator("#marketScanOrder").selectOption("desc");
     await page.locator("#discoveryPresetName").fill(`高质量白酒-${viewport.name}`);
+    await page.locator("#discoveryPresetSave").click();
+    await expect(page.locator("#discoveryPresetFeedback")).toContainText("暂不支持保存状态、搜索关键词");
+    expect(discovery.calls.create).toHaveLength(0);
+
+    await page.locator("#marketScanStatus").selectOption("success");
+    await page.locator("#marketScanKeyword").fill("");
     await page.locator("#discoveryPresetSave").click();
 
     await expect(page.locator("#discoveryPresetFeedback")).toContainText("已保存");
@@ -2401,7 +2407,7 @@ function marketScanResult(symbol, name, market, rank, score, options = {}) {
     amount: success ? 120000000 : null,
     tags: success ? ["趋势向上"] : [],
     metrics: {},
-    reason: options.reason || (success ? `综合分 ${score}` : null),
+    reason: options.reason || (success ? `短线强势分 ${score}` : null),
     error: options.error || null,
     data_date: "2026-07-17",
     updated_at: "2026-07-17 16:35:00",

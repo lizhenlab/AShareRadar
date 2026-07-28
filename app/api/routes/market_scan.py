@@ -42,6 +42,15 @@ async def latest_market_scan(
     return await run_sync_api_async(scanner.latest_run)
 
 
+@router.get("/api/market-scans/latest-published", response_model=MarketScanRun | None)
+async def latest_published_market_scan(
+    response: Response,
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> MarketScanRun | None:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(scanner.latest_published_run)
+
+
 @router.get("/api/market-scans", response_model=MarketScanRunPage)
 async def market_scan_runs(
     response: Response,

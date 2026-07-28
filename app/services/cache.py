@@ -317,6 +317,9 @@ class SQLiteCache:
     def latest_market_scan_run(self):
         return self.market_scan_repo.latest_run()
 
+    def latest_published_market_scan_run(self):
+        return self.market_scan_repo.latest_published_run()
+
     def market_scan_runs(self, *, page: int, page_size: int):
         return self.market_scan_repo.list_runs(page=page, page_size=page_size)
 

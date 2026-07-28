@@ -5,6 +5,8 @@ import math
 import sqlite3
 
 from app.models.market_scan import (
+    MARKET_SCAN_DEGRADATION_REASONS,
+    MARKET_SCAN_METADATA_DEGRADATION_REASONS,
     MARKET_SCAN_RANK_TIE_BREAK,
     MarketScanResultItem,
     MarketScanRun,
@@ -13,7 +15,12 @@ from app.models.market_scan import (
 )
 
 
-DEGRADATION_DISPLAY_TAGS = frozenset({"兜底行情", "兜底K线", "上市日期未知"})
+DEGRADATION_DISPLAY_TAGS = frozenset({"兜底行情", "兜底K线", "行业未知", "上市日期未知"})
+METADATA_REASON_DISPLAY_TAGS = {
+    "industry_missing": "行业未知",
+    "list_date_missing": "上市日期未知",
+    "metadata_incomplete": "上市日期未知",
+}
 MARKET_SCAN_RESULT_PAYLOAD_SCHEMA = "market-scan-result-payload-v2"
 
 
@@ -21,6 +28,7 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
     total = int(row["total_count"] or 0)
     processed = int(row["processed_count"] or 0)
     success = int(row["success_count"] or 0)
+    skipped = int(row["skipped_count"] or 0)
     status = str(row["status"])
     progress = 100.0 if total == 0 and status in {"success", "degraded"} else percentage(processed, total)
     return MarketScanRun(
@@ -39,10 +47,10 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
         processed_count=processed,
         success_count=success,
         missing_count=int(row["missing_count"] or 0),
-        skipped_count=int(row["skipped_count"] or 0),
+        skipped_count=skipped,
         retry_count=int(row["retry_count"] or 0),
         progress_pct=progress,
-        coverage_pct=percentage(success, total),
+        coverage_pct=percentage(success, max(0, total - skipped)),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         started_at=row["started_at"],
@@ -70,6 +78,7 @@ def result_from_row(row: sqlite3.Row) -> MarketScanResultItem:
         status=row["status"],
         rank=row["rank"],
         score=row["score"],
+        raw_score=row["raw_score"],
         trend_score=row["trend_score"],
         leader_score=row["leader_score"],
         data_quality_score=row["data_quality_score"],
@@ -138,23 +147,35 @@ def _display_tags(row: sqlite3.Row) -> list[str]:
     for enabled, label in (
         (bool(row["quote_fallback_used"]), "兜底行情"),
         (bool(row["kline_fallback_used"]), "兜底K线"),
-        (bool(row["metadata_degraded"]), "上市日期未知"),
     ):
         if enabled:
             tags.append(label)
+    reasons = _structured_degradation_reasons(row)
+    tags.extend(
+        METADATA_REASON_DISPLAY_TAGS[reason]
+        for reason in reasons
+        if reason in METADATA_REASON_DISPLAY_TAGS
+    )
     return list(dict.fromkeys(tags))
 
 
 def _structured_degradation_reasons(row: sqlite3.Row) -> list[str]:
-    return [
+    persisted = [
         reason
-        for enabled, reason in (
-            (bool(row["quote_fallback_used"]), "quote_fallback"),
-            (bool(row["kline_fallback_used"]), "kline_fallback"),
-            (bool(row["metadata_degraded"]), "metadata_incomplete"),
-        )
-        if enabled
+        for reason in _json_string_list(row["degradation_reasons_json"])
+        if reason in MARKET_SCAN_DEGRADATION_REASONS
     ]
+    reasons: list[str] = []
+    if bool(row["quote_fallback_used"]):
+        reasons.append("quote_fallback")
+    if bool(row["kline_fallback_used"]):
+        reasons.append("kline_fallback")
+    if bool(row["metadata_degraded"]):
+        metadata_reasons = [
+            reason for reason in persisted if reason in MARKET_SCAN_METADATA_DEGRADATION_REASONS
+        ]
+        reasons.extend(metadata_reasons or ["metadata_incomplete"])
+    return list(dict.fromkeys(reasons))
 
 
 def _json_string_list(value: object) -> list[str]:

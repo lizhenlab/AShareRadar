@@ -48,6 +48,7 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     client = _client(scanner)
 
     latest = client.get("/api/market-scans/latest")
+    published = client.get("/api/market-scans/latest-published")
     history = client.get("/api/market-scans", params={"page": 2, "page_size": 1})
     detail = client.get(f"/api/market-scans/{scanner.active.id}")
     cancelled = client.post(f"/api/market-scans/{scanner.active.id}/cancel")
@@ -56,6 +57,9 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     assert latest.status_code == 200
     assert latest.headers["cache-control"] == "no-store"
     assert latest.json()["id"] == scanner.active.id
+    assert published.status_code == 200
+    assert published.headers["cache-control"] == "no-store"
+    assert published.json()["id"] == scanner.previous.id
     assert history.status_code == 200
     assert history.headers["cache-control"] == "no-store"
     assert history.json() == {
@@ -254,6 +258,9 @@ class _ScannerStub:
 
     def latest_run(self) -> MarketScanRun:
         return self.active
+
+    def latest_published_run(self) -> MarketScanRun:
+        return self.previous
 
     def runs(self, *, page: int, page_size: int) -> MarketScanRunPage:
         self.list_calls.append((page, page_size))

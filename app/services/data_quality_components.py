@@ -56,12 +56,13 @@ def build_data_quality_report(
     consistency_notes: list[str] | None,
     consistency_penalty: int,
     require_kline: bool,
+    penalize_cached_quote: bool,
     now: datetime,
 ) -> DataQuality:
     state = DataQualityScoreState()
     kline_quality = assess_kline_quality(klines, now=now) if require_kline or klines else None
 
-    apply_source_quality(state, quote)
+    apply_source_quality(state, quote, penalize_cached_quote=penalize_cached_quote)
     apply_kline_quality(state, klines, kline_quality, require_kline=require_kline)
     apply_quote_field_quality(state, quote)
     apply_quote_freshness(state, quote, now)
@@ -85,14 +86,21 @@ def build_data_quality_report(
     )
 
 
-def apply_source_quality(state: DataQualityScoreState, quote: Quote) -> None:
+def apply_source_quality(
+    state: DataQualityScoreState,
+    quote: Quote,
+    *,
+    penalize_cached_quote: bool = True,
+) -> None:
     source = quote.source or ""
     if quote.fallback_used or is_fallback_quote_source(source):
         state.penalize(16, note="当前报价来自兜底缓存，说明实时行情源本轮不可用。", anomaly="报价兜底缓存")
-    elif "短时缓存" in source:
+    elif penalize_cached_quote and "短时缓存" in source:
         state.penalize(8, note="当前报价来自短时缓存，需结合报价时间确认新鲜度。")
-    elif quote.from_cache or "缓存" in source:
+    elif penalize_cached_quote and (quote.from_cache or "缓存" in source):
         state.penalize(8, note="当前报价来自缓存，已结合报价时间评估新鲜度。")
+    elif quote.from_cache or "缓存" in source:
+        state.notes.append("当前报价命中缓存；横截面评分仅按事件时间、字段完整性和兜底状态评价质量。")
     if is_demo_quote_source(source):
         state.penalize(45, note="当前报价来自演示数据，不能作为真实行情依据。", anomaly="演示行情")
 

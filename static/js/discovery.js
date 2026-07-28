@@ -1,23 +1,36 @@
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { escapeHtml } from "./dom.js";
 import { compactErrorMessage } from "./errors.js";
+import {
+  buildDiscoveryPresetDefinition,
+  isDiscoveryPresetUiRepresentable,
+  normalizeDiscoveryLeaderboard,
+  rankChangeLabel,
+  validateDiscoveryPreset,
+  validateDiscoveryPresetPage,
+  validateDiscoveryRankChanges,
+} from "./market-scan-contracts.js";
 import { marketScanResultRow } from "./market-scan-view.js";
+export {
+  buildDiscoveryPresetDefinition,
+  isDiscoveryPresetUiRepresentable,
+  normalizeDiscoveryLeaderboard,
+  rankChangeLabel,
+} from "./market-scan-contracts.js";
 
 const DISCOVERY_PAGE_SIZE = 100;
 const RANK_CHANGE_PAGE_SIZE = 200;
 const COMPLETED_RUN_STATUSES = new Set(["success", "degraded"]);
-const SORT_TO_DISCOVERY = Object.freeze({
+const SORT_TO_MARKET = Object.freeze({
+  rank: "rank",
+  symbol: "symbol",
   score: "score",
-  trend_score: "trend",
-  change_pct: "change",
-  turnover_rate: "turnover",
+  trend: "trend_score",
+  change: "change_pct",
+  turnover: "turnover_rate",
   amount: "amount",
-  data_quality_score: "quality",
-  market: "market",
+  quality: "data_quality_score",
 });
-const SORT_TO_MARKET = Object.freeze(Object.fromEntries(
-  Object.entries(SORT_TO_DISCOVERY).map(([market, discovery]) => [discovery, market])
-));
 
 export function createDiscoveryController(options = {}) {
   const root = options.root || globalThis.document;
@@ -36,6 +49,8 @@ export function createDiscoveryController(options = {}) {
     selectedId: null,
     applied: null,
     sequence: 0,
+    appliedRequest: null,
+    appliedSequence: 0,
   };
 
   bindEvents();
@@ -49,7 +64,7 @@ export function createDiscoveryController(options = {}) {
 
   async function loadPresets() {
     return runOperation("正在读取筛选方案...", async () => {
-      const payload = validatePresetPage(await request(
+      const payload = validateDiscoveryPresetPage(await request(
         "/api/discovery/presets?page=1&page_size=100",
         requestOptions()
       ));
@@ -62,6 +77,10 @@ export function createDiscoveryController(options = {}) {
   }
 
   async function savePreset() {
+    if (selectedPreset() && !isDiscoveryPresetUiRepresentable(selectedPreset())) {
+      setFeedback("复杂方案按后端定义只读，不能用当前界面覆盖保存", "error");
+      return null;
+    }
     let definition;
     try {
       definition = buildDiscoveryPresetDefinition(elements.name.value, elements);
@@ -71,7 +90,7 @@ export function createDiscoveryController(options = {}) {
       return null;
     }
     return runOperation("正在保存筛选方案...", async () => {
-      const preset = validatePreset(await request("/api/discovery/presets", requestOptions({
+      const preset = validateDiscoveryPreset(await request("/api/discovery/presets", requestOptions({
         method: "POST",
         body: JSON.stringify(definition),
       })));
@@ -97,7 +116,7 @@ export function createDiscoveryController(options = {}) {
       return null;
     }
     return runOperation("正在重命名筛选方案...", async () => {
-      const renamed = validatePreset(await request(
+      const renamed = validateDiscoveryPreset(await request(
         `/api/discovery/presets/${encodeURIComponent(preset.id)}`,
         requestOptions({
           method: "PATCH",
@@ -137,53 +156,102 @@ export function createDiscoveryController(options = {}) {
   }
 
   async function applyPreset(page = 1) {
+    if (state.busy) return null;
+    const context = preparePresetApplication();
+    if (!context) return null;
+    const { editable, preset, run } = context;
+    const stage = editable ? "正在应用筛选方案..." : "正在按后端原定义只读应用复杂筛选方案...";
+    return runOperation(
+      stage,
+      () => executePresetApplication({ editable, page, preset, run }),
+      "筛选方案应用"
+    );
+  }
+
+  function preparePresetApplication() {
     const preset = selectedPreset();
-    if (!preset) return requirePreset();
-    const run = getRun();
-    if (!run || !COMPLETED_RUN_STATUSES.has(run.status)) {
+    if (!preset) {
+      requirePreset();
+      return null;
+    }
+    const run = leaderboardRun();
+    if (!run) {
       setFeedback("请先等待全市场扫描完成，再应用筛选方案", "error");
       return null;
     }
-    applyPresetFields(preset, elements);
-    return runOperation("正在应用筛选方案...", async () => {
-      const operation = request(
-        `/api/discovery/presets/${encodeURIComponent(preset.id)}/apply`,
-        requestOptions({
-          method: "POST",
-          body: JSON.stringify({ run_id: run.id, page, page_size: DISCOVERY_PAGE_SIZE }),
-        })
-      );
-      const ranking = request(
-        `/api/discovery/runs/${encodeURIComponent(run.id)}/rank-changes?page=1&page_size=${RANK_CHANGE_PAGE_SIZE}`,
-        requestOptions()
-      );
-      const [pageResult, rankingResult] = await Promise.allSettled([operation, ranking]);
+    const editable = isDiscoveryPresetUiRepresentable(preset);
+    if (editable) applyPresetFields(preset, elements);
+    return { editable, preset, run };
+  }
+
+  async function executePresetApplication({ editable, page, preset, run }) {
+    const identity = beginAppliedRequest(preset, run);
+    try {
+      const [pageResult, rankingResult] = await requestPresetApplication(identity, preset, run, page);
       if (pageResult.status === "rejected") throw pageResult.reason;
       const payload = normalizeDiscoveryLeaderboard(pageResult.value);
-      const rankPayload = rankingResult.status === "fulfilled"
-        ? validateRankChanges(rankingResult.value, run.id)
-        : null;
-      state.applied = {
-        page: payload.page,
-        pageCount: payload.page_count,
-        preset: payload.preset,
-        rankPayload,
-        runId: payload.run_id,
-        queued: state.applied?.runId === payload.run_id && state.applied?.preset.id === payload.preset.id
-          ? state.applied.queued
-          : new Set(),
-      };
-      upsertPreset(payload.preset);
-      state.selectedId = payload.preset.id;
-      renderPresetOptions();
+      const rankPayload = resolveRankChanges(rankingResult, run.id);
+      if (!acceptPresetApplication(identity, payload)) return null;
+      commitPresetApplication(payload, rankPayload);
       renderDiscoveryResults(payload, rankPayload);
-      if (rankingResult.status === "rejected") {
-        setFeedback(`方案已应用；排名变化暂不可用：${compactErrorMessage(rankingResult.reason?.message)}`, "warn");
-      } else {
-        setFeedback(`已应用筛选方案“${payload.preset.name}”`, "success");
-      }
+      reportPresetApplication(payload, rankingResult, editable);
       return payload;
-    }, "筛选方案应用");
+    } finally {
+      finishAppliedRequest(identity);
+    }
+  }
+
+  function requestPresetApplication(identity, preset, run, page) {
+    const options = requestOptions({ signal: identity.controller.signal });
+    const operation = request(`/api/discovery/presets/${encodeURIComponent(preset.id)}/apply`, {
+      ...options,
+      method: "POST",
+      body: JSON.stringify({ run_id: run.id, page, page_size: DISCOVERY_PAGE_SIZE }),
+    });
+    const ranking = request(
+      `/api/discovery/runs/${encodeURIComponent(run.id)}/rank-changes?page=1&page_size=${RANK_CHANGE_PAGE_SIZE}`,
+      options
+    );
+    return Promise.allSettled([operation, ranking]);
+  }
+
+  function resolveRankChanges(result, runId) {
+    return result.status === "fulfilled" ? validateDiscoveryRankChanges(result.value, runId) : null;
+  }
+
+  function acceptPresetApplication(identity, payload) {
+    if (isAppliedRequestCurrent(identity, payload)) return true;
+    if (identity.sequence === state.appliedSequence) {
+      setFeedback("榜单批次或筛选方案已变化，旧请求结果已忽略", "warn");
+    }
+    return false;
+  }
+
+  function commitPresetApplication(payload, rankPayload) {
+    const previous = state.applied;
+    state.applied = {
+      page: payload.page,
+      pageCount: payload.page_count,
+      preset: payload.preset,
+      rankPayload,
+      runId: payload.run_id,
+      queued: previous?.runId === payload.run_id && previous?.preset.id === payload.preset.id
+        ? previous.queued
+        : new Set(),
+    };
+    upsertPreset(payload.preset);
+    state.selectedId = payload.preset.id;
+    renderPresetOptions();
+  }
+
+  function reportPresetApplication(payload, rankingResult, editable) {
+    if (rankingResult.status === "rejected") {
+      setFeedback(`方案已应用；全市场排名变化暂不可用：${compactErrorMessage(rankingResult.reason?.message)}`, "warn");
+    } else if (editable) {
+      setFeedback(`已应用筛选方案“${payload.preset.name}”`, "success");
+    } else {
+      setFeedback(`已按后端原定义只读应用复杂方案“${payload.preset.name}”`, "success");
+    }
   }
 
   async function enqueueSymbol(symbol, button) {
@@ -239,6 +307,7 @@ export function createDiscoveryController(options = {}) {
 
   function renderDiscoveryResults(payload, rankPayload) {
     const rankBySymbol = new Map((rankPayload?.items || []).map((item) => [item.symbol, item]));
+    setDisplayedRunId(payload.run_id);
     elements.tableWrap.setAttribute("aria-busy", "false");
     elements.pagination.setAttribute("aria-busy", "false");
     if (!payload.items.length) {
@@ -253,7 +322,7 @@ export function createDiscoveryController(options = {}) {
         return marketScanResultRow(item, {
           discovery: true,
           queued: state.applied.queued.has(item.symbol),
-          rankLabel: change ? rankChangeLabel(change) : "暂无相邻排名",
+          rankLabel: change ? rankChangeLabel(change) : unavailableRankChangeLabel(item, rankPayload),
           rankMovement: change?.movement || "unavailable",
         });
       }).join("");
@@ -270,30 +339,31 @@ export function createDiscoveryController(options = {}) {
   function renderRankSummary(payload) {
     elements.rankSummary.hidden = false;
     if (!payload) {
-      elements.rankSummary.textContent = "相邻批次排名变化暂不可用";
+      elements.rankSummary.textContent = "全市场排名变化暂不可用（非方案内名次）";
     } else if (payload.comparable) {
-      elements.rankSummary.textContent = `相邻同规则批次 ${payload.previous_run_id} → ${payload.current_run_id} · 规则 ${payload.current_rule_version} · ${payload.total} 项变化`;
+      elements.rankSummary.textContent = `全市场排名变化（非方案内名次）· 相邻同规则批次 ${payload.previous_run_id} → ${payload.current_run_id} · 规则 ${payload.current_rule_version} · ${payload.total} 项变化`;
     } else if (payload.reason === "rule_version_mismatch") {
-      elements.rankSummary.textContent = `相邻批次规则不同（${payload.previous_rule_version || "--"} / ${payload.current_rule_version}），不比较排名`;
+      elements.rankSummary.textContent = `全市场相邻批次规则不同（${payload.previous_rule_version || "--"} / ${payload.current_rule_version}），不比较排名`;
     } else {
-      elements.rankSummary.textContent = "暂无可比较的上一批次同规则榜单";
+      elements.rankSummary.textContent = "暂无可比较的上一批次同规则全市场榜单";
     }
   }
 
   function renderPresetOptions() {
     const selected = String(state.selectedId || "");
     elements.select.innerHTML = `<option value="">选择已保存方案</option>${state.presets.map((preset) => (
-      `<option value="${preset.id}">${escapeHtml(preset.name)}</option>`
+      `<option value="${preset.id}">${escapeHtml(preset.name)}${isDiscoveryPresetUiRepresentable(preset) ? "" : "（只读）"}</option>`
     )).join("")}`;
     elements.select.value = state.presets.some((preset) => String(preset.id) === selected) ? selected : "";
     renderControls();
   }
 
   function renderControls() {
-    const selected = Boolean(selectedPreset());
+    const preset = selectedPreset();
+    const selected = Boolean(preset);
     elements.select.disabled = state.busy;
     elements.name.disabled = state.busy;
-    elements.save.disabled = state.busy;
+    elements.save.disabled = state.busy || Boolean(preset && !isDiscoveryPresetUiRepresentable(preset));
     elements.apply.disabled = state.busy || !selected;
     elements.rename.disabled = state.busy || !selected;
     elements.remove.disabled = state.busy || !selected;
@@ -333,6 +403,12 @@ export function createDiscoveryController(options = {}) {
   }
 
   function clearApplied() {
+    const hadPendingRequest = Boolean(state.appliedRequest);
+    invalidateAppliedRequest();
+    if (hadPendingRequest) {
+      state.sequence += 1;
+      if (state.busy) setBusy(false);
+    }
     state.applied = null;
     elements.rankSummary.hidden = true;
     elements.rankSummary.textContent = "";
@@ -345,12 +421,20 @@ export function createDiscoveryController(options = {}) {
     elements.name.value = preset?.name || "";
     clearApplied();
     renderControls();
-    setFeedback(preset ? `已选择筛选方案“${preset.name}”` : "");
+    setFeedback(preset
+      ? isDiscoveryPresetUiRepresentable(preset)
+        ? `已选择筛选方案“${preset.name}”`
+        : `已选择复杂方案“${preset.name}”：将按后端原定义只读应用，不会用当前界面覆盖保存`
+      : "");
     if (previousApplied) void loadStandardResults();
   }
 
   function handlePresetPagination(event, direction) {
     if (!state.applied) return;
+    if (leaderboardRun()?.id !== state.applied.runId) {
+      clearApplied();
+      return;
+    }
     event.preventDefault?.();
     event.stopImmediatePropagation?.();
     const page = state.applied.page + direction;
@@ -376,6 +460,62 @@ export function createDiscoveryController(options = {}) {
     });
   }
 
+  function leaderboardRun() {
+    const latest = getRun();
+    const displayedId = displayedRunId();
+    if (displayedId && (!latest || !COMPLETED_RUN_STATUSES.has(latest.status) || latest.id === displayedId)) {
+      return latest?.id === displayedId ? latest : { id: displayedId, status: "success" };
+    }
+    return latest && COMPLETED_RUN_STATUSES.has(latest.status) ? latest : null;
+  }
+
+  function beginAppliedRequest(preset, run) {
+    invalidateAppliedRequest();
+    const controller = new AbortController();
+    const identity = {
+      controller,
+      presetId: preset.id,
+      presetRevision: preset.revision,
+      runId: run.id,
+      sequence: state.appliedSequence,
+    };
+    state.appliedRequest = controller;
+    return identity;
+  }
+
+  function isAppliedRequestCurrent(identity, payload) {
+    const currentPreset = selectedPreset();
+    return state.appliedRequest === identity.controller
+      && state.appliedSequence === identity.sequence
+      && currentPreset?.id === identity.presetId
+      && currentPreset?.revision === identity.presetRevision
+      && leaderboardRun()?.id === identity.runId
+      && payload.run_id === identity.runId
+      && payload.preset.id === identity.presetId;
+  }
+
+  function finishAppliedRequest(identity) {
+    if (state.appliedRequest === identity.controller) state.appliedRequest = null;
+  }
+
+  function invalidateAppliedRequest() {
+    state.appliedRequest?.abort();
+    state.appliedRequest = null;
+    state.appliedSequence += 1;
+  }
+
+  function displayedRunId() {
+    const value = elements.tableWrap.dataset?.marketScanRunId
+      || elements.tableWrap["data-market-scan-run-id"];
+    const runId = Number(value);
+    return Number.isInteger(runId) && runId > 0 ? runId : null;
+  }
+
+  function setDisplayedRunId(runId) {
+    if (elements.tableWrap.dataset) elements.tableWrap.dataset.marketScanRunId = String(runId);
+    elements.tableWrap["data-market-scan-run-id"] = String(runId);
+  }
+
   return {
     activate,
     applyPreset,
@@ -387,67 +527,13 @@ export function createDiscoveryController(options = {}) {
   };
 }
 
-export function buildDiscoveryPresetDefinition(nameValue, elements) {
-  const name = normalizedName(nameValue);
-  if (!name) throw new Error("请输入方案名称");
-  const criteria = {};
-  const market = trimmedValue(elements.market);
-  const industry = trimmedValue(elements.industry);
-  const isSt = booleanValue(elements.isSt);
-  const isNew = booleanValue(elements.isNew);
-  const quality = optionalScore(elements.quality);
-  if (market) criteria.market = [market];
-  if (industry) criteria.industry = [industry];
-  if (isSt !== null) criteria.is_st = isSt;
-  if (isNew !== null) criteria.is_new = isNew;
-  if (quality !== null) criteria.quality = { min: quality };
-  return {
-    name,
-    criteria,
-    sort: [{
-      field: SORT_TO_DISCOVERY[trimmedValue(elements.sort)] || "score",
-      order: trimmedValue(elements.order) === "asc" ? "asc" : "desc",
-    }],
-  };
-}
-
-export function normalizeDiscoveryLeaderboard(value) {
-  const payload = objectValue(value, "筛选榜单响应");
-  const preset = validatePreset(payload.preset);
-  if (!Array.isArray(payload.items)) throw new Error("筛选榜单响应的 items 必须是数组");
-  const runId = positiveInteger(payload.run_id, "筛选榜单运行批次");
-  return {
-    preset,
-    run_id: runId,
-    rule_version: String(payload.rule_version || ""),
-    items: payload.items.map((value) => {
-      const item = objectValue(value, "筛选榜单项目");
-      return {
-        ...item,
-        run_id: runId,
-        rank: item.position,
-        status: "success",
-        trend_score: item.trend,
-        change_pct: item.change,
-        turnover_rate: item.turnover,
-        data_quality_score: item.quality,
-      };
-    }),
-    total: nonNegativeInteger(payload.total, "筛选榜单总数"),
-    page: positiveInteger(payload.page, "筛选榜单页码"),
-    page_size: positiveInteger(payload.page_size, "筛选榜单分页大小"),
-    page_count: nonNegativeInteger(payload.page_count, "筛选榜单总页数"),
-  };
-}
-
-export function rankChangeLabel(value) {
-  const movement = value?.movement;
-  if (movement === "up") return `上升 ${Math.abs(Number(value.rank_delta) || 0)}`;
-  if (movement === "down") return `下降 ${Math.abs(Number(value.rank_delta) || 0)}`;
-  if (movement === "unchanged") return "持平";
-  if (movement === "new") return "新进";
-  if (movement === "exit") return "离榜";
-  return "暂无相邻排名";
+function unavailableRankChangeLabel(item, payload) {
+  if (!payload?.comparable) return "全市场排名变化不可用";
+  const sourceRank = Number(item?.source_rank);
+  if (Number.isInteger(sourceRank) && sourceRank > RANK_CHANGE_PAGE_SIZE) {
+    return `全市场排名变化未查询（当前第 ${sourceRank} 名）`;
+  }
+  return "全市场排名变化未返回";
 }
 
 function applyPresetFields(preset, elements) {
@@ -462,37 +548,6 @@ function applyPresetFields(preset, elements) {
   const sort = Array.isArray(preset.sort) ? preset.sort[0] : null;
   elements.sort.value = SORT_TO_MARKET[sort?.field] || "score";
   elements.order.value = sort?.order === "asc" ? "asc" : "desc";
-}
-
-function validatePresetPage(value) {
-  const payload = objectValue(value, "筛选方案列表响应");
-  if (!Array.isArray(payload.items)) throw new Error("筛选方案列表响应的 items 必须是数组");
-  return { ...payload, items: payload.items.map(validatePreset), total: nonNegativeInteger(payload.total, "筛选方案总数") };
-}
-
-function validatePreset(value) {
-  const preset = objectValue(value, "筛选方案响应");
-  const name = normalizedName(preset.name);
-  if (!name) throw new Error("筛选方案响应缺少名称");
-  if (!preset.criteria || typeof preset.criteria !== "object" || Array.isArray(preset.criteria)) {
-    throw new Error("筛选方案响应缺少筛选条件");
-  }
-  if (!Array.isArray(preset.sort) || !preset.sort.length) throw new Error("筛选方案响应缺少排序规则");
-  return {
-    ...preset,
-    id: positiveInteger(preset.id, "筛选方案 ID"),
-    name,
-    revision: positiveInteger(preset.revision, "筛选方案修订号"),
-  };
-}
-
-function validateRankChanges(value, runId) {
-  const payload = objectValue(value, "排名变化响应");
-  if (positiveInteger(payload.current_run_id, "当前排名批次") !== runId) {
-    throw new Error("排名变化响应的运行批次不匹配");
-  }
-  if (!Array.isArray(payload.items)) throw new Error("排名变化响应的 items 必须是数组");
-  return payload;
 }
 
 function discoveryElements(root) {
@@ -544,40 +599,6 @@ function requestOptions(overrides = {}) {
 
 function normalizedName(value) {
   return String(value || "").trim().slice(0, 80);
-}
-
-function trimmedValue(element) {
-  return String(element?.value || "").trim();
-}
-
-function booleanValue(element) {
-  const value = trimmedValue(element);
-  return value === "true" ? true : value === "false" ? false : null;
-}
-
-function optionalScore(element) {
-  const value = trimmedValue(element);
-  if (!value) return null;
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 0 || number > 100) throw new Error("最低质量需为 0-100 的整数");
-  return number;
-}
-
-function objectValue(value, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}格式异常`);
-  return value;
-}
-
-function positiveInteger(value, label) {
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 1) throw new Error(`${label}格式异常`);
-  return number;
-}
-
-function nonNegativeInteger(value, label) {
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 0) throw new Error(`${label}格式异常`);
-  return number;
 }
 
 function inertDiscoveryController() {
