@@ -850,16 +850,21 @@ def _same_finite_number(
     rel_tol: float,
     abs_tol: float,
 ) -> bool:
-    try:
-        left_value = float(left)
-        right_value = float(right)
-    except (TypeError, ValueError):
+    left_value = _finite_float(left)
+    right_value = _finite_float(right)
+    if left_value is None or right_value is None:
         return False
-    return (
-        math.isfinite(left_value)
-        and math.isfinite(right_value)
-        and math.isclose(left_value, right_value, rel_tol=rel_tol, abs_tol=abs_tol)
-    )
+    return math.isclose(left_value, right_value, rel_tol=rel_tol, abs_tol=abs_tol)
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _provider_chain_key(priority_rows: list[tuple[int, str]]) -> tuple[str, ...]:
@@ -957,7 +962,11 @@ def _latest_minute_klines(rows: list[MinuteKline], limit: int) -> list[MinuteKli
 
 
 def _latest_rows(rows: list[T], limit: int, *, key: Callable[[T], object]) -> list[T]:
-    indexed = [item for item in ((_sort_key(key(row)), row) for row in rows) if item[0] is not None]
+    indexed: list[tuple[datetime, T]] = []
+    for row in rows:
+        sort_value = _sort_key(key(row))
+        if sort_value is not None:
+            indexed.append((sort_value, row))
     indexed.sort(key=lambda item: item[0])
     return [row for _sort_value, row in indexed[-limit:]]
 
@@ -980,11 +989,8 @@ def _bounded_limit(limit: int, max_limit: object, default: int) -> int:
 
 
 def _positive_int_or_default(value: object, default: int) -> int:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(numeric) or numeric <= 0:
+    numeric = _finite_float(value)
+    if numeric is None or numeric <= 0:
         return default
     return max(1, int(numeric))
 

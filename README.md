@@ -1,6 +1,6 @@
 # AShareRadar
 
-AShareRadar is a local A-share research workbench. It combines full-market SH/SZ/BJ scanning and deterministic ranking with code/name lookup, adjustment-aware daily K-lines, inspectable intraday charts, trend and risk analysis, versioned advice history, fixed-condition watchlist scans, notes, alerts, local data portability, and system diagnostics in a Chinese FastAPI web application backed by SQLite.
+AShareRadar is a local A-share research workbench. It combines trustworthy full-market SH/SZ/BJ scanning, replayable deterministic ranking, saved discovery presets, and a local research/review loop with code/name lookup, adjustment-aware daily K-lines, inspectable intraday charts, trend and risk analysis, versioned advice history, fixed-condition watchlist scans, notes, alerts, local data portability, and system diagnostics in a Chinese FastAPI web application backed by SQLite.
 
 It is a research assistant, not an automated trading system. It does not connect to brokerage accounts, place orders, or provide investment advice.
 
@@ -89,6 +89,18 @@ export ASHARE_RADAR_FUTU_HOST=127.0.0.1
 export ASHARE_RADAR_FUTU_PORT=11111
 ```
 
+Provider order can be overridden with comma-separated names:
+
+```bash
+export ASHARE_RADAR_QUOTE_PROVIDER_PRIORITY="tencent,futu,akshare"
+export ASHARE_RADAR_KLINE_PROVIDER_PRIORITY="tencent,akshare,tushare,baostock"
+```
+
+When configured and available, Futu joins the quote fallback chain and Tushare
+joins the daily-K fallback chain. Missing optional SDKs, a disabled Futu OpenD,
+or a missing Tushare token are skipped by capability rather than treated as
+provider failures.
+
 Legacy variables such as `TUSHARE_TOKEN`, `FUTU_ENABLED`, and `SCHEDULER_*` remain accepted as aliases. New configuration should use the `ASHARE_RADAR_*` namespace.
 
 ## Full-Market Ranking
@@ -97,14 +109,25 @@ Open **全市场榜单** and click **开始扫描**. The API immediately creates
 
 - The universe is the current listed A-share pool across SH, SZ, and BJ. It has no fixed 5,000-row truncation, rejects Shanghai/Shenzhen B shares, excludes delisted rows, and retains explicit ST/new-stock tags. Provider rows are normalized and de-duplicated once; coverage checks and the atomic cached-pool replacement use that same candidate set. Guards enforce both a 4,000-name total and configurable minimums for each market, and reject a large total or per-market drop from the latest authoritative snapshot before per-stock work begins.
 - Suspended stocks, short histories, stale quotes/K-lines, malformed rows, and genuine per-symbol coverage misses remain visible as `skipped` or `missing`; they never enter the ranking as zero-score stocks. A system-wide quote or daily-K provider-chain outage is different: the affected rows stay `pending`, the batch receives bounded retries within one cumulative provider-wait budget, and an unrecovered run fails in a retryable state instead of bulk-writing false `missing` results.
-- Every first-time symbol request asks DataHub for up to 260 completed `qfq` daily bars. The primary path uses Tencent's current `newfqkline` interface for SH, SZ, and BJ; normal provider fallback then reaches AKShare, whose daily adapter uses Eastmoney direct access and finally Sina forward-adjusted daily data when AKShare/Eastmoney are unavailable. Later runs reuse a compatible cache and perform a small overlap-verified incremental refresh; a detected adjustment rebase triggers a full refresh. Cache persistence retains quote/K-line fallback provenance, and older K-line vintages cannot replace newer equal-length snapshots.
-- `full-market-score-v1` combines the existing leader score at 85% and data quality at 15%. Leader inputs include trend, price change, volume ratio, amount, and turnover. Ties use trend score, change percentage, amount, then symbol in that order.
+- Every first-time symbol request asks DataHub for up to 260 completed `qfq` daily bars. The default chain is Tencent's current SH/SZ/BJ `newfqkline` interface, AKShare (with its internal Eastmoney-direct and final Sina-forward-adjusted fallbacks), optional token-backed Tushare, and BaoStock. Unavailable optional providers are skipped by capability. Later runs reuse a compatible cache and perform a small overlap-verified incremental refresh; a detected adjustment rebase triggers a full refresh. Cache persistence retains quote/K-line fallback provenance, and older K-line vintages cannot replace newer equal-length snapshots.
+- `full-market-score-v2` combines leader score at 85% and data quality at 15%. Its weights, thresholds, component algorithms, rounding mode, metric precision, tag rules, and tie-break order are serialized into a canonical specification with a stable SHA-256 hash. Every successful row stores its score inputs and component breakdown, so score and rank can be replayed from persisted data without provider access. Retries reject a changed scan contract instead of mixing scoring rules.
 - Runs and per-stock results are persisted with as-of/data dates, sources, metrics, structured degradation provenance, status, rank, coverage, and duration. The completed `data_date` is the frozen end-of-day snapshot boundary, so later revisions from that same market date remain eligible while another date does not. Active runs are de-duplicated, can be cancelled, and become `interrupted` rather than falsely remaining active after a restart. One repository-generated retry plan controls validation and atomic derived-run creation: the original stays immutable, clean successful rows are reused, and missing/skipped or degraded rows are recalculated. Task creation/attachment and scan/task terminal changes each commit atomically; transient SQLite lock conflicts are retried, while an owned local terminal failure is later converged to `interrupted` after its worker exits.
+- A run is publishable only when global and SH/SZ/BJ success coverage each reaches 95%, quote timestamps are parseable and span no more than 15 minutes, and no systemic same-day K-line lag cluster is detected. A 30-minute whole-run wall-clock budget and repeated completed-trading-date checks stop stale work while leaving pending rows available for retry.
+- Automatic after-close scans run a bounded SH/SZ/BJ stock-pool, quote, and five-row completed-daily-K preflight before creating a formal batch. Retryable scheduled failures resume the persisted pending subset after configured 10/30/60-minute delays, stop after the configured limit or trading-date change, and never restart a user-cancelled, manual, or merely degraded batch.
+- Batch pressure control starts at the configured concurrency, halves it on provider busy/timeout/retry-after or systemic unavailable signals, and restores one slot per healthy batch. All waits still consume the scan-wide provider budget; ordinary per-symbol coverage misses do not slow the whole market.
 - Full-market scoring is local and deterministic. It never calls an LLM per stock; LLM use remains an optional, on-demand explanation path for a selected stock.
 
 The scan workspace validates API response contracts, uses a single bounded exponential-backoff poller, falls back to the latest run after a missing run or repeated refresh failures, resets pagination when it discovers a new run, and resumes immediately when the browser returns online. Static assets are revalidated with `no-cache`, and the scan ES modules share one version mapping.
 
 On a trading day, manual starts and retries that still need market data are accepted only after the 15:15 completed-daily-bar boundary. Optional after-close scheduling, concurrency, timeouts, retention, degraded behavior, and troubleshooting are documented in the [Operations Guide](docs/OPERATIONS.md).
+
+## Discovery and Research Loop
+
+- Saved discovery presets filter only fields already persisted by a completed scan: market, industry, ST/new-stock state, quality, trend, change, turnover, amount, and score. Presets support create, apply, rename, delete, versioned import/export, and optimistic revision checks. Applying a preset never fetches another data source.
+- A filtered row can enter the watchlist research queue with immutable source run/preset/revision provenance. Adjacent completed runs are compared only when their rule versions match; otherwise the UI reports that ranking movement is not comparable instead of skipping to an older run.
+- Historical watchlist-condition scans render read-only evidence with the requested `as_of`, rule version, condition results, and stored metrics. Opening the current stock workbench is a separate explicit action, so present data is never presented as a historical snapshot.
+- After the daily-bar publication boundary, bounded scheduler tasks refresh advice for active, non-excluded watchlist rows without an LLM and evaluate due review plans. Each stock is isolated; stale dates, weak quality, invalid contracts, and unchanged conclusions do not create misleading snapshots. Mark-viewed uses the displayed advice ID as a watermark, preserving changes produced later.
+- Review plans merge snapshot-derived structured evidence with user notes. Evidence records carry an ID, value, direction, data date, nature, and rule version. Evaluation records executable trigger/invalidation bases, target/stop outcomes, return, MFE, and MAE, while `GET /api/reviews/summary` exposes a global local-only aggregate.
 
 ## Current Architecture
 
@@ -143,7 +166,7 @@ See [Software Design Description](docs/DESIGN.md) and [Maintenance and Refactor 
 
 ## Engineering Verification
 
-Required CI is hermetic and does not call live market providers. The optional canary uses an isolated temporary SQLite database and probes representative SH/SZ/BJ symbols with a non-cached quote request, a five-row completed daily-K request, and a three-market stock-pool request:
+Required CI is hermetic and does not call live market providers. The optional canary uses an isolated temporary SQLite database and probes representative SH/SZ/BJ symbols with a non-cached quote request, a five-row completed daily-K request, and a three-market stock-pool request. Market probes and the larger stock-pool refresh use their corresponding independent DataHub timeout settings under one overall deadline:
 
 ```bash
 $PYTHON tools/provider_canary.py

@@ -51,12 +51,14 @@ class DataStatusService:
         provider_names: Callable[[], list[str]],
         provider_index: Callable[[str], int],
         source_plan_builder: SourcePlanBuilder,
+        llm_available: Callable[[], bool] | None = None,
     ) -> None:
         self.cache = cache
         self.providers = providers
         self.provider_names = provider_names
         self.provider_index = provider_index
         self.source_plan_builder = source_plan_builder
+        self.llm_available = llm_available or (lambda: False)
 
     def status(self) -> DataStatus:
         providers = self.cache.provider_statuses()
@@ -69,6 +71,8 @@ class DataStatusService:
             capabilities=capabilities,
             capability_statuses=[_sanitized_capability_status(item) for item in capability_statuses],
             source_plan=source_plan,
+            llm_explanation_available=bool(self.llm_available()),
+            minute_analysis_available=source_plan.primary_minute_source is not None,
         )
 
     def capabilities(self) -> list[ProviderCapability]:

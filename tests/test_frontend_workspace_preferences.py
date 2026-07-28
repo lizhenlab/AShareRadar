@@ -148,6 +148,11 @@ const restored = {
   minuteChartInterval: "30m",
   mobileChartView: "minute",
 };
+let restoredTabScrolls = 0;
+tabs.find((tab) => tab.dataset.view === restored.workspaceView).scrollIntoView = (options) => {
+  restoredTabScrolls += 1;
+  assert.deepEqual(options, { block: "nearest", inline: "nearest" });
+};
 const values = new Map([[
   WORKSPACE_PREFERENCES_STORAGE_KEY,
   JSON.stringify({ version: WORKSPACE_PREFERENCES_VERSION, preferences: restored }),
@@ -176,6 +181,7 @@ assert.equal(element("dailyMa5Toggle").checked, false);
 assert.equal(element("dailyMa20Toggle").checked, true);
 assert.equal(element("chartWorkspace").dataset.mobileChart, "minute");
 assert.equal(writes.length, 0, "restoration should not rewrite storage once per setter");
+assert.equal(restoredTabScrolls, 1, "the restored active tab was not scrolled into view");
 
 __appTest.state.symbol = "600519.SH";
 __appTest.state.privateSessionToken = "never-store-state-wholesale";

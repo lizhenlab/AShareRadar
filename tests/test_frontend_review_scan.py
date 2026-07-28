@@ -286,7 +286,8 @@ def test_watchlist_scan_posts_only_checked_whitelisted_conditions_and_renders_re
             success: [{
               symbol: "600519.SH", data_date: "2026-07-16", matched: true,
               condition_results: { close_above_ma20: true, volume_surge_5d: true },
-              matched_conditions: ["close_above_ma20", "volume_surge_5d"], metrics: { close: 100 },
+              matched_conditions: ["close_above_ma20", "volume_surge_5d"],
+              metrics: { close: 100, ma20: 96.25, volume_ratio_5d: 1.72 },
             }], missing: [],
           }), { status: 200, headers: { "Content-Type": "application/json" } });
         };
@@ -298,6 +299,12 @@ def test_watchlist_scan_posts_only_checked_whitelisted_conditions_and_renders_re
         assert(completed === true && request.url === "/api/watchlist/scan", "scan request did not complete");
         assert(JSON.stringify(body.conditions) === JSON.stringify(["close_above_ma20", "volume_surge_5d"]), "scan sent unchecked or unknown conditions");
         assert(results.innerHTML.includes("600519.SH") && results.innerHTML.includes("满足全部条件"), "scan result was not rendered");
+        assert(results.innerHTML.includes("只读历史证据"), "scan result did not identify the snapshot as read-only evidence");
+        assert(results.innerHTML.includes("2026-07-16 15:00:00") && results.innerHTML.includes("watchlist-scan-v1"), "scan evidence lost as_of or rule_version");
+        assert(results.innerHTML.includes("收盘价") && results.innerHTML.includes("20日均线") && results.innerHTML.includes("5日量比"), "scan evidence did not render the captured metrics");
+        assert(results.innerHTML.includes("收盘高于20日均线：是") && results.innerHTML.includes("成交量达到5日均量1.5倍：是"), "scan evidence lost condition outcomes");
+        assert(results.innerHTML.includes('data-scan-current-symbol="600519.SH"') && results.innerHTML.includes("查看当前分析"), "scan evidence lacks an explicit current-analysis action");
+        assert(!results.innerHTML.includes('data-scan-symbol="600519.SH"'), "the whole historical evidence row still opens the current workbench");
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''
     )

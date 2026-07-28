@@ -33,6 +33,26 @@ def test_data_status_service_builds_status_without_sync_write_side_effects() -> 
     assert status.source_plan.primary_quote_source == "live"
 
 
+def test_data_status_service_exposes_user_facing_optional_capabilities() -> None:
+    cache = _StatusCache(
+        provider_rows=[ProviderStatus(name="minute", enabled=True, priority=1, healthy=True)],
+        capability_rows=[],
+    )
+    service = _service(
+        cache,
+        {"minute": _CapabilityProvider(_capability("minute", minute_kline=True))},
+        provider_names=lambda: ["minute"],
+        provider_index=lambda _name: 1,
+        priority=lambda kind: [(1, "minute")] if kind == "minute" else [],
+        llm_available=lambda: True,
+    )
+
+    status = service.status()
+
+    assert status.llm_explanation_available is True
+    assert status.minute_analysis_available is True
+
+
 def test_data_status_service_sanitizes_provider_errors_without_changing_source_plan_inputs() -> None:
     raw_error = "GET https://alice:secret@example.test/quote?token=raw-token failed"
     provider_status = ProviderStatus(
@@ -258,12 +278,14 @@ def _service(
     provider_names,
     provider_index,
     priority,
+    llm_available=lambda: False,
 ) -> DataStatusService:
     return DataStatusService(
         cache=cache,
         providers=providers,
         provider_names=provider_names,
         provider_index=provider_index,
+        llm_available=llm_available,
         source_plan_builder=SourcePlanBuilder(
             provider_names=provider_names,
             priority=priority,

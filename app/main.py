@@ -24,6 +24,7 @@ from app.api.routes import (
     alerts,
     analysis,
     data,
+    discovery,
     health,
     local_data,
     market_scan,
@@ -209,6 +210,7 @@ def _register_routes(app: FastAPI, static_dir: Path) -> None:
     app.include_router(data.router)
     app.include_router(local_data.router)
     app.include_router(market_scan.router)
+    app.include_router(discovery.router)
 
     @app.get("/")
     async def index() -> FileResponse:

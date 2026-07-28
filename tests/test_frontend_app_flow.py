@@ -167,8 +167,11 @@ def test_advice_timeline_failure_is_explicit_and_abort_is_silent() -> None:
       if (!element("adviceTimeline").innerHTML.includes("建议比较服务停用")) {
         throw new Error("failed timeline hid the service error");
       }
-      if (!element("dataStatus").textContent.includes("建议变化时间线暂不可用")) {
-        throw new Error(`timeline failure did not mark auxiliary degradation: ${element("dataStatus").textContent}`);
+      if (element("dataStatus").textContent !== "1 项辅助数据降级，详细信息见诊断区") {
+        throw new Error(`timeline failure was not aggregated in the top bar: ${element("dataStatus").textContent}`);
+      }
+      if (element("dataStatus").textContent.includes("建议变化时间线") || element("dataStatus").textContent.includes("建议比较服务停用")) {
+        throw new Error("timeline detail leaked into the aggregated top bar");
       }
 
       element("adviceTimeline").innerHTML = "current timeline";
@@ -185,6 +188,42 @@ def test_advice_timeline_failure_is_explicit_and_abort_is_silent() -> None:
       }
       if (Object.keys(__appTest.state.auxiliaryStatus.failures).length !== 0) {
         throw new Error("aborted timeline request surfaced as an auxiliary failure");
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_data_status_response_drives_initial_question_and_minute_capabilities() -> None:
+    script = r'''
+      import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
+
+      const { __appTest, element, jsonResponse } = await createAppHarness();
+      element("aiQuestionCapability").dataset.capabilitySource = "status";
+      let available = false;
+      globalThis.fetch = async (url) => {
+        if (String(url) !== "/api/data/status") throw new Error(`unexpected request: ${url}`);
+        return jsonResponse({
+          providers: [], source_plan: {}, cache: {}, capabilities: [], capability_statuses: [],
+          llm_explanation_available: available,
+          minute_analysis_available: available,
+        });
+      };
+
+      await __appTest.refreshDataStatus({ force: true });
+      if (element("aiQuestionCapability").textContent !== "规则问诊") {
+        throw new Error(`LLM capability did not follow data status: ${element("aiQuestionCapability").textContent}`);
+      }
+      if (element("minuteAnalysis").dataset.capability !== "unavailable" || !element("minuteAnalysis").textContent.includes("分钟分析能力未启用")) {
+        throw new Error(`minute capability did not follow data status: ${element("minuteAnalysis").textContent}`);
+      }
+
+      available = true;
+      await __appTest.refreshDataStatus({ force: true });
+      if (element("aiQuestionCapability").textContent !== "AI增强问诊") {
+        throw new Error(`enabled LLM capability was not reflected: ${element("aiQuestionCapability").textContent}`);
+      }
+      if (element("minuteAnalysis").dataset.capability !== "available") {
+        throw new Error("enabled minute capability was not reflected");
       }
     '''
     _run_node_script(script)
@@ -684,8 +723,14 @@ def test_stale_minute_and_chart_mark_requests_do_not_replace_current_panels() ->
       if (__appTest.state.chartMarks !== preservedMarks) {
         throw new Error("chart mark failure cleared the current symbol marks");
       }
-      if (!element("dataStatus").textContent.includes("图表标注暂不可用")) {
-        throw new Error("chart mark failure did not surface a scoped warning");
+      if (element("dataStatus").textContent !== "1 项辅助数据降级，详细信息见诊断区") {
+        throw new Error(`chart mark failure was not aggregated: ${element("dataStatus").textContent}`);
+      }
+      if (!element("chartMarksFeedback").textContent.includes("图表标注暂不可用") || !element("chartMarksFeedback").textContent.includes("chart marks down")) {
+        throw new Error(`chart mark detail was not kept beside chart controls: ${element("chartMarksFeedback").textContent}`);
+      }
+      if (element("dataStatus").textContent.includes("chart marks down")) {
+        throw new Error("chart mark detail leaked into the top bar");
       }
     '''
     _run_node_script(script)
@@ -1041,8 +1086,11 @@ def test_watchlist_write_error_clears_after_success_without_hiding_core_degradat
 
       await element("watchForm").listeners.submit({ preventDefault() {} });
       if (__appTest.state.mutationStatus.phase !== "error") throw new Error("watchlist write error was not transiently recorded");
-      if (!element("dataStatus").textContent.includes("核心数据质量降级") || !element("dataStatus").textContent.includes("自选股加入失败")) {
-        throw new Error(`watchlist error overwrote core degradation: ${element("dataStatus").textContent}`);
+      if (element("dataStatus").textContent !== "2 类状态需关注：数据质量、本地操作，详细信息见对应面板") {
+        throw new Error(`watchlist error was not aggregated with core degradation: ${element("dataStatus").textContent}`);
+      }
+      if (!element("watchlistFeedback").textContent.includes("加入失败：写入暂不可用")) {
+        throw new Error(`watchlist detail was not kept in the watchlist panel: ${element("watchlistFeedback").textContent}`);
       }
 
       shouldFail = false;
@@ -1464,7 +1512,7 @@ def test_committed_watchlist_delete_survives_stock_switch_and_refreshes_global_l
     _run_node_script(script)
 
 
-def test_workbench_load_failure_clears_previous_stock_content() -> None:
+def test_workbench_load_failure_restores_previous_stock_content() -> None:
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
@@ -1486,7 +1534,11 @@ def test_workbench_load_failure_clears_previous_stock_content() -> None:
         throw new Error(`side request should not run after workbench failure: ${url}`);
       };
 
-      __appTest.state.lastAnalysis = { quote: { code: "600519", market: "SH" }, klines: [] };
+      const previousAnalysis = { quote: { code: "600519", market: "SH", name: "贵州茅台" }, klines: [] };
+      __appTest.state.lastAnalysis = previousAnalysis;
+      __appTest.state.coreStatus = { phase: "ready", text: "核心数据已加载", kind: "" };
+      __appTest.state.dataQualityStatus = { phase: "ready", text: "", kind: "" };
+      element("stockCode").textContent = "SH600519";
       element("stockName").textContent = "贵州茅台";
       element("insightOverview").innerHTML = "旧股票内容";
 
@@ -1496,23 +1548,23 @@ def test_workbench_load_failure_clears_previous_stock_content() -> None:
       if (workbenchUrls.length !== 1 || !workbenchUrls[0].includes("symbol=600706.SH")) {
         throw new Error(`workbench request did not use normalized symbol: ${workbenchUrls.join(",")}`);
       }
-      if (element("dataStatus").textContent !== "600706.SH 加载失败") {
-        throw new Error(`status did not show requested symbol failure: ${element("dataStatus").textContent}`);
+      if (!element("dataStatus").textContent.includes("状态需关注") || !element("dataStatus").textContent.includes("本地操作")) {
+        throw new Error(`workbench failure was not summarized in the top bar: ${element("dataStatus").textContent}`);
       }
-      if (element("stockCode").textContent !== "600706.SH" || element("stockName").textContent !== "加载失败") {
-        throw new Error(`main card did not switch to failure shell: ${element("stockCode").textContent} ${element("stockName").textContent}`);
+      if (element("dataStatus").textContent.includes("600706.SH") || element("dataStatus").textContent.includes("所有K线数据源均不可用")) {
+        throw new Error("workbench failure detail leaked into the top bar");
       }
-      if (!element("summary").textContent.includes("所有K线数据源均不可用")) {
-        throw new Error(`failure detail was not shown in summary: ${element("summary").textContent}`);
+      if (element("stockCode").textContent !== "SH600519" || element("stockName").textContent !== "贵州茅台") {
+        throw new Error(`previous stock was not retained: ${element("stockCode").textContent} ${element("stockName").textContent}`);
       }
-      if (!element("insightOverview").innerHTML.includes("600706.SH 未加载成功") || element("insightOverview").innerHTML.includes("旧股票内容")) {
-        throw new Error(`previous stock content leaked into failure shell: ${element("insightOverview").innerHTML}`);
+      if (element("insightOverview").innerHTML !== "旧股票内容") {
+        throw new Error(`previous stock content was replaced: ${element("insightOverview").innerHTML}`);
       }
-      if (!element("sourceLine").textContent.includes("已隔离 600519.SH")) {
-        throw new Error(`previous stock isolation was not explained: ${element("sourceLine").textContent}`);
+      if (!element("sourceLine").textContent.includes("600706.SH") || !element("sourceLine").textContent.includes("所有K线数据源均不可用") || !element("sourceLine").textContent.includes("当前仍显示 贵州茅台")) {
+        throw new Error(`workbench failure detail was not retained in source diagnostics: ${element("sourceLine").textContent}`);
       }
-      if (__appTest.state.lastAnalysis !== null || !document.body.classList.contains("is-stale")) {
-        throw new Error("failed workbench did not clear analysis state and mark the page stale");
+      if (__appTest.state.lastAnalysis !== previousAnalysis || __appTest.state.symbol !== "600519.SH" || document.body.classList.contains("is-stale")) {
+        throw new Error("failed workbench did not restore the previous analysis state");
       }
     '''
     _run_node_script(script)
@@ -1655,8 +1707,8 @@ def test_auxiliary_failures_are_composed_and_clear_per_source() -> None:
       await __appTest.loadMarketPanels(91, "600519.SH");
       await __appTest.refreshDataStatus();
       const degradedStatus = element("dataStatus").textContent;
-      if (!degradedStatus.includes("市场概览暂不可用") || !degradedStatus.includes("强股排行暂不可用") || !degradedStatus.includes("数据源状态暂不可用")) {
-        throw new Error(`auxiliary failures were not composed: ${degradedStatus}`);
+      if (degradedStatus !== "3 项辅助数据降级，详细信息见诊断区") {
+        throw new Error(`auxiliary failures were not compactly aggregated: ${degradedStatus}`);
       }
       if (degradedStatus.includes("实时连接正常") || !element("dataStatus").className.includes("warn")) {
         throw new Error(`SSE success hid auxiliary degradation: ${degradedStatus}`);
@@ -1664,7 +1716,7 @@ def test_auxiliary_failures_are_composed_and_clear_per_source() -> None:
 
       degraded = false;
       await __appTest.loadMarketPanels(91, "600519.SH");
-      if (!element("dataStatus").textContent.includes("数据源状态暂不可用")) {
+      if (element("dataStatus").textContent !== "1 项辅助数据降级，详细信息见诊断区") {
         throw new Error("market recovery cleared an unrelated data-status failure");
       }
       await __appTest.refreshDataStatus();
@@ -2183,7 +2235,7 @@ def test_failed_global_panel_refresh_keeps_last_market_and_plate_values() -> Non
       if (!element("marketStrip").innerHTML.includes("保留指数")) throw new Error("market failure cleared the cached index");
       if (!element("leaderList").innerHTML.includes("保留股票")) throw new Error("strong-stock failure cleared the cached ranking");
       if (!element("plateList").innerHTML.includes("保留行业")) throw new Error("plate failure cleared the cached ranking");
-      if (!element("dataStatus").textContent.includes("市场概览暂不可用") || !element("dataStatus").textContent.includes("行业背景暂不可用")) {
+      if (element("dataStatus").textContent !== "3 项辅助数据降级，详细信息见诊断区") {
         throw new Error(`cached global panels did not surface degradation: ${element("dataStatus").textContent}`);
       }
     '''
@@ -2366,8 +2418,17 @@ def test_watchlist_open_marks_viewed_only_after_current_workbench_success() -> N
       const marksBeforeFailure = markUrls.length;
       const failingOpen = openButton("600000.SH");
       await element("watchList").listeners.click({ target: { closest() { return failingOpen; } } });
-      await waitFor(() => element("dataStatus").textContent.includes("600000.SH 加载失败"), "failed workbench status");
+      await waitFor(
+        () => element("sourceLine").textContent.includes("600000.SH") && element("sourceLine").textContent.includes("研究台加载失败"),
+        "failed workbench diagnostics"
+      );
       await Promise.resolve();
+      if (!element("dataStatus").textContent.includes("状态需关注") || !element("dataStatus").textContent.includes("本地操作") || element("dataStatus").textContent.includes("600000.SH")) {
+        throw new Error(`failed workbench was not aggregated in the top bar: ${element("dataStatus").textContent}`);
+      }
+      if (element("stockName").textContent !== "宁德时代") {
+        throw new Error("failed watchlist open did not retain the current workbench stock");
+      }
       if (markUrls.length !== marksBeforeFailure || watchlist.find((item) => item.symbol === "600000.SH").unread_change_count !== 5) {
         throw new Error("failed workbench load incorrectly cleared unread state");
       }

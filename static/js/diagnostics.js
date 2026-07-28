@@ -180,11 +180,15 @@ export async function loadDataStatus(state = standaloneDataStatusState, options 
     const status = await statusRequest(DATA_STATUS_ENDPOINT, request.signal, options);
     if (!isCurrent()) return false;
     renderDataStatus(status);
+    syncDataStatusResponse(state, status, options);
     return true;
   } catch (error) {
     if (isAbortError(error) || !isCurrent()) return false;
     const cached = getCachedJsonSnapshot(DATA_STATUS_ENDPOINT);
-    if (cached.found) renderDataStatus(cached.value);
+    if (cached.found) {
+      renderDataStatus(cached.value);
+      syncDataStatusResponse(state, cached.value, options);
+    }
     else {
       $("providerStatus").innerHTML = `<div class="provider-item"><strong>状态读取失败</strong><span>${escapeHtml(error.message)}</span></div>`;
     }
@@ -192,6 +196,23 @@ export async function loadDataStatus(state = standaloneDataStatusState, options 
   } finally {
     finishRequest(state, "dataStatusRequest", request);
   }
+}
+
+export function dataStatusResponseCapabilities(status) {
+  const payload = asObject(status);
+  return {
+    llmExplanationAvailable: typeof payload.llm_explanation_available === "boolean"
+      ? payload.llm_explanation_available
+      : null,
+    minuteAnalysisAvailable: typeof payload.minute_analysis_available === "boolean"
+      ? payload.minute_analysis_available
+      : null,
+  };
+}
+
+function syncDataStatusResponse(state, status, options) {
+  state.responseCapabilities = dataStatusResponseCapabilities(status);
+  if (typeof options.onStatus === "function") options.onStatus(status, state.responseCapabilities);
 }
 
 export async function loadSystemDiagnostics(state = standaloneDataStatusState, options = {}) {

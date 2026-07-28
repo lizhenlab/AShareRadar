@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import date
 from pathlib import Path
@@ -38,6 +38,7 @@ from app.models.reviews import (
     AdviceReviewPlan,
     AdviceReviewPlanInput,
     AdviceReviewPlanUpdate,
+    AdviceReviewSummary,
 )
 from app.models.analysis import (
     AnalysisResult,
@@ -62,6 +63,7 @@ from app.repositories.advice_reviews import AdviceReviewRepository
 from app.repositories.alerts import AlertRepository
 from app.repositories.alerts import AlertStateDecision, AlertStateUpdateResult
 from app.repositories.cache_stats import CacheStatsRepository
+from app.repositories.discovery import DiscoveryRepository
 from app.repositories.market_data import MarketDataRepository
 from app.repositories.market_scan import MarketScanRepository
 from app.repositories.maintenance import RuntimeMaintenanceRepository
@@ -77,6 +79,7 @@ from app.repositories.runtime import RuntimeEventRepository
 from app.repositories.watchlist import WatchlistRepository, WatchlistSymbolSelection
 from app.models.advice_change import build_conclusion_timeline
 from app.services.runtime_backup import destructive_local_data_lease
+from app.services.discovery import DiscoveryService
 from app.services.instance_guard import FileInstanceGuard
 from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
 from app.utils.clock import performance_now
@@ -171,6 +174,8 @@ class SQLiteCache:
             settings_supplied=settings_supplied,
         )
         self.cache_stats_repo = CacheStatsRepository(self.path, self._lock)
+        self.discovery_repo = DiscoveryRepository(self.path, self._lock)
+        self.discovery_service = DiscoveryService(self.discovery_repo)
         self.market_data_repo = MarketDataRepository(self.path, self._lock)
         self.market_scan_repo = MarketScanRepository(self.path, self._lock)
         self.provider_status_repo = ProviderStatusRepository(self.path, self._lock)
@@ -444,6 +449,9 @@ class SQLiteCache:
     def recent_task_runs(self, limit: int = 20) -> list[TaskRun]:
         return self.runtime_event_repo.task_runs(limit=limit)
 
+    def task_runs_for_name(self, task_name: str, limit: int = 20) -> list[TaskRun]:
+        return self.runtime_event_repo.task_runs_for_name(task_name, limit=limit)
+
     def save_monitor_event(self, level: str, category: str, message: str, symbol: str | None = None) -> None:
         self.runtime_event_repo.save_monitor_event(level, category, message, symbol=symbol)
 
@@ -556,8 +564,16 @@ class SQLiteCache:
     def watchlist_symbol_selection(self) -> WatchlistSymbolSelection:
         return self.watchlist_repo.symbol_selection()
 
-    def save_advice_snapshot(self, analysis: AnalysisResult) -> AdviceHistoryItem:
-        return self.advice_repo.save_snapshot(analysis)
+    def save_advice_snapshot(
+        self,
+        analysis: AnalysisResult,
+        *,
+        snapshot_market_time: str | None = None,
+    ) -> AdviceHistoryItem:
+        return self.advice_repo.save_snapshot(
+            analysis,
+            snapshot_market_time=snapshot_market_time,
+        )
 
     def advice_history_by_id(self, row_id: int) -> AdviceHistoryItem | None:
         return self.advice_repo.by_id(row_id)
@@ -570,6 +586,12 @@ class SQLiteCache:
             return []
         items = self.advice_repo.timeline_items(symbol, limit=limit + 1)
         return build_conclusion_timeline(items, limit)
+
+    def latest_advice_timeline_by_symbols(
+        self,
+        symbols: Iterable[str],
+    ) -> dict[str, AdviceTimelineItem]:
+        return self.advice_repo.latest_timeline_items(symbols)
 
     def create_advice_review_plan(self, payload: AdviceReviewPlanInput) -> AdviceReviewPlan:
         return self.advice_review_repo.create_plan(payload)
@@ -585,6 +607,17 @@ class SQLiteCache:
 
     def advice_review_details(self, *, symbol: str | None = None, limit: int = 100) -> list[AdviceReviewDetail]:
         return self.advice_review_repo.details(symbol=symbol, limit=limit)
+
+    def advice_review_evaluation_candidates(
+        self,
+        *,
+        as_of_date: str,
+        limit: int,
+    ) -> list[AdviceReviewDetail]:
+        return self.advice_review_repo.evaluation_candidates(
+            as_of_date=as_of_date,
+            limit=limit,
+        )
 
     def update_advice_review_plan(
         self,
@@ -614,6 +647,9 @@ class SQLiteCache:
         evaluation: AdviceReviewEvaluationDraft,
     ) -> AdviceReviewEvaluation:
         return self.advice_review_repo.save_evaluation(evaluation)
+
+    def advice_review_summary(self) -> AdviceReviewSummary:
+        return self.advice_review_repo.summary()
 
     def create_alert_rule(self, quote: Quote, payload: AlertRuleInput) -> AlertRuleItem:
         return self.alert_repo.create_rule(quote, payload)

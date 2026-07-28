@@ -23,26 +23,32 @@
 }
 
 @media (max-width: 820px) {
-  .topbar,
   .footer {
     flex-direction: column;
     align-items: stretch;
   }
 
   .topbar {
-    gap: 14px;
+    align-items: center;
+    gap: 12px;
+    justify-content: space-between;
     position: static;
   }
 
+  .topbar-copy p,
+  .topbar-status > span {
+    display: none;
+  }
+
   .topbar-status {
-    justify-items: stretch;
+    justify-items: end;
+    max-width: min(380px, 58vw);
   }
 
   .status-pill {
-    width: 100%;
+    width: auto;
     min-width: 0;
-    white-space: normal;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
   }
 
   .layout {
@@ -338,6 +344,15 @@
     flex-direction: column;
   }
 
+  .scan-evidence-banner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .tool-stock-context {
+    align-items: stretch;
+  }
+
   .local-data-actions {
     grid-template-columns: 1fr;
   }
@@ -400,6 +415,22 @@
   .watchlist-scan-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .scan-result header,
+  .scan-result footer,
+  .tool-stock-context {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .scan-result footer .mini-button,
+  .tool-stock-context button {
+    width: 100%;
+  }
+
+  .scan-metric-evidence {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .review-evaluate-row label,

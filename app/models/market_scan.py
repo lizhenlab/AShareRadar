@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +32,15 @@ MarketScanSort = Literal[
     "symbol",
 ]
 MarketScanSortOrder = Literal["asc", "desc"]
+MarketScanCoverageScope = Literal["ALL", "SH", "SZ", "BJ"]
+
+MARKET_SCAN_RANK_TIE_BREAK: Final[tuple[tuple[str, str], ...]] = (
+    ("score", "desc"),
+    ("trend_score", "desc"),
+    ("change_pct", "desc"),
+    ("amount", "desc"),
+    ("symbol", "asc"),
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +71,7 @@ class MarketScanResultWrite:
     amount: float | None = None
     tags: tuple[str, ...] = ()
     metrics: dict[str, float] = field(default_factory=dict)
+    score_details: dict[str, object] = field(default_factory=dict)
     reason: str | None = None
     error: str | None = None
     data_date: str | None = None
@@ -82,6 +92,49 @@ class MarketScanRetryPlan:
     preserved_success_count: int
     pending_count: int
     needs_market_data: bool
+    rule_version: str | None = None
+
+
+@dataclass(frozen=True)
+class MarketScanCoverage:
+    scope: MarketScanCoverageScope
+    total_count: int
+    success_count: int
+    missing_count: int = 0
+    skipped_count: int = 0
+
+    @property
+    def coverage_ratio(self) -> float:
+        if self.total_count <= 0:
+            return 0.0
+        return min(1.0, max(0.0, self.success_count / self.total_count))
+
+
+@dataclass(frozen=True)
+class MarketScanStaleCluster:
+    data_date: str
+    count: int
+    markets: tuple[str, ...]
+    total_count: int
+
+    @property
+    def ratio(self) -> float:
+        if self.total_count <= 0:
+            return 0.0
+        return min(1.0, max(0.0, self.count / self.total_count))
+
+
+@dataclass(frozen=True)
+class MarketScanPublicationSummary:
+    coverages: tuple[MarketScanCoverage, ...]
+    systemic_stale_cluster: MarketScanStaleCluster | None = None
+    snapshot_started_at: str | None = None
+    snapshot_finished_at: str | None = None
+    snapshot_span_seconds: float | None = None
+    invalid_snapshot_timestamps: tuple[str, ...] = ()
+
+    def coverage_for(self, scope: MarketScanCoverageScope) -> MarketScanCoverage | None:
+        return next((item for item in self.coverages if item.scope == scope), None)
 
 
 class MarketScanStartRequest(BaseModel):
@@ -150,6 +203,7 @@ class MarketScanResultItem(BaseModel):
     amount: float | None = None
     tags: list[str] = Field(default_factory=list)
     metrics: dict[str, float] = Field(default_factory=dict)
+    score_details: dict[str, object] = Field(default_factory=dict)
     reason: str | None = None
     error: str | None = None
     data_date: str | None = None
@@ -182,6 +236,10 @@ class MarketScanRunPage(BaseModel):
 
 
 __all__ = [
+    "MARKET_SCAN_RANK_TIE_BREAK",
+    "MarketScanCoverage",
+    "MarketScanCoverageScope",
+    "MarketScanPublicationSummary",
     "MarketScanResultItem",
     "MarketScanResultPage",
     "MarketScanResultStatus",
@@ -194,6 +252,7 @@ __all__ = [
     "MarketScanSortOrder",
     "MarketScanStartRequest",
     "MarketScanStartResponse",
+    "MarketScanStaleCluster",
     "MarketScanSeed",
     "MarketScanTrigger",
 ]

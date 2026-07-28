@@ -5,7 +5,7 @@ import math
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.config_shell import load_shell_env as _load_shell_env
 from app.config_validation import normalized_llm_base_url as _normalized_llm_base_url
@@ -32,6 +32,8 @@ MIN_QUOTE_HISTORY_RETENTION_ROWS = 120
 MIN_RUNTIME_BACKUP_COUNT = 2
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+REGISTERED_PROVIDER_NAMES = ("tencent", "akshare", "tushare", "baostock", "futu", "local", "demo")
+KNOWN_PROVIDER_NAMES = frozenset(REGISTERED_PROVIDER_NAMES)
 
 
 def _env_tuple(name: str, default: tuple[str, ...], *, aliases: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -40,6 +42,58 @@ def _env_tuple(name: str, default: tuple[str, ...], *, aliases: tuple[str, ...] 
         return default
     values = tuple(item.strip() for item in raw.split(",") if item.strip())
     return values or default
+
+
+def _env_int_tuple(
+    name: str,
+    default: tuple[int, ...],
+    *,
+    minimum: int,
+    maximum: int,
+) -> tuple[int, ...]:
+    raw = _env_text(name)
+    if raw is None:
+        return default
+    parts = tuple(item.strip() for item in raw.split(","))
+    if not parts or any(not item for item in parts):
+        raise ValueError(f"{name} 必须是逗号分隔的整数列表")
+    try:
+        values = tuple(int(item) for item in parts)
+    except ValueError:
+        raise ValueError(f"{name} 必须是逗号分隔的整数列表") from None
+    if any(value < minimum or value > maximum for value in values):
+        raise ValueError(f"{name} 中的每个值必须在 {minimum} 到 {maximum} 之间")
+    return values
+
+
+def _env_provider_priority(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    return _normalized_provider_priority(
+        _env_tuple(name, default),
+        setting_name=name,
+        reject_unknown=True,
+    )
+
+
+def _normalized_provider_priority(
+    value: object,
+    *,
+    setting_name: str,
+    reject_unknown: bool = False,
+) -> tuple[str, ...]:
+    raw_names = value.split(",") if isinstance(value, str) else value
+    if not isinstance(raw_names, (list, tuple)):
+        raise ValueError(f"{setting_name} 必须是数据源名称列表")
+    names: list[str] = []
+    for raw_name in raw_names:
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError(f"{setting_name} 包含空白或非文本的数据源名称")
+        name = raw_name.strip().lower()
+        if reject_unknown and name not in KNOWN_PROVIDER_NAMES:
+            allowed = ", ".join(sorted(KNOWN_PROVIDER_NAMES))
+            raise ValueError(f"{setting_name} 包含未知数据源 {name!r}；可选值：{allowed}")
+        if name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 def _env_text(name: str, default: str | None = None, *, aliases: tuple[str, ...] = ()) -> str | None:
@@ -139,11 +193,36 @@ class Settings(BaseModel):
         )
     )
     data_provider: str = "datahub"
-    quote_provider_priority: tuple[str, ...] = ("tencent", "akshare")
-    kline_provider_priority: tuple[str, ...] = ("tencent", "akshare", "baostock")
-    minute_provider_priority: tuple[str, ...] = ("futu", "akshare")
-    stock_provider_priority: tuple[str, ...] = ("akshare", "tushare", "baostock", "local")
-    plate_provider_priority: tuple[str, ...] = ("akshare", "local")
+    quote_provider_priority: tuple[str, ...] = Field(
+        default_factory=lambda: _env_provider_priority(
+            "ASHARE_RADAR_QUOTE_PROVIDER_PRIORITY",
+            ("tencent", "futu", "akshare"),
+        )
+    )
+    kline_provider_priority: tuple[str, ...] = Field(
+        default_factory=lambda: _env_provider_priority(
+            "ASHARE_RADAR_KLINE_PROVIDER_PRIORITY",
+            ("tencent", "akshare", "tushare", "baostock"),
+        )
+    )
+    minute_provider_priority: tuple[str, ...] = Field(
+        default_factory=lambda: _env_provider_priority(
+            "ASHARE_RADAR_MINUTE_PROVIDER_PRIORITY",
+            ("futu", "akshare"),
+        )
+    )
+    stock_provider_priority: tuple[str, ...] = Field(
+        default_factory=lambda: _env_provider_priority(
+            "ASHARE_RADAR_STOCK_PROVIDER_PRIORITY",
+            ("akshare", "tushare", "baostock", "local"),
+        )
+    )
+    plate_provider_priority: tuple[str, ...] = Field(
+        default_factory=lambda: _env_provider_priority(
+            "ASHARE_RADAR_PLATE_PROVIDER_PRIORITY",
+            ("akshare", "local"),
+        )
+    )
     cache_path: Path = Field(default_factory=lambda: _env_path(CACHE_PATH_ENV_NAME, DEFAULT_CACHE_PATH, aliases=("CACHE_PATH",)))
     legacy_audit_timezone: str = Field(
         default_factory=lambda: str(
@@ -270,6 +349,34 @@ class Settings(BaseModel):
         )
     )
     market_scan_auto_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_MARKET_SCAN_AUTO_ENABLED", False))
+    market_scan_preflight_enabled: bool = Field(
+        default_factory=lambda: _env_bool("ASHARE_RADAR_MARKET_SCAN_PREFLIGHT_ENABLED", True)
+    )
+    market_scan_preflight_timeout_seconds: float = Field(
+        default_factory=lambda: _env_float(
+            "ASHARE_RADAR_MARKET_SCAN_PREFLIGHT_TIMEOUT_SECONDS",
+            30.0,
+            minimum=0.1,
+        ),
+        le=300,
+    )
+    market_scan_auto_retry_delays_seconds: tuple[int, ...] = Field(
+        default_factory=lambda: _env_int_tuple(
+            "ASHARE_RADAR_MARKET_SCAN_AUTO_RETRY_DELAYS_SECONDS",
+            (600, 1800, 3600),
+            minimum=1,
+            maximum=86400,
+        ),
+        min_length=1,
+    )
+    market_scan_auto_retry_max_attempts: int = Field(
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_MARKET_SCAN_AUTO_RETRY_MAX_ATTEMPTS",
+            3,
+            minimum=0,
+        ),
+        le=10,
+    )
     market_scan_schedule_hour: int = Field(
         default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_SCHEDULE_HOUR", 16, minimum=0),
         le=23,
@@ -454,6 +561,27 @@ class Settings(BaseModel):
     def _validate_legacy_audit_timezone(cls, value: str) -> str:
         return _normalized_timezone_name(value)
 
+    @field_validator(
+        "quote_provider_priority",
+        "kline_provider_priority",
+        "minute_provider_priority",
+        "stock_provider_priority",
+        "plate_provider_priority",
+        mode="before",
+    )
+    @classmethod
+    def _validate_provider_priority(cls, value: object, info: ValidationInfo) -> tuple[str, ...]:
+        return _normalized_provider_priority(value, setting_name=str(info.field_name))
+
+    @field_validator("market_scan_auto_retry_delays_seconds")
+    @classmethod
+    def _validate_market_scan_auto_retry_delays(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(delay < 1 or delay > 86400 for delay in value):
+            raise ValueError("market_scan_auto_retry_delays_seconds 中的每个值必须在 1 到 86400 之间")
+        if any(current >= following for current, following in zip(value, value[1:], strict=False)):
+            raise ValueError("market_scan_auto_retry_delays_seconds 必须严格递增")
+        return value
+
     @model_validator(mode="after")
     def _validate_market_scan_limits(self) -> "Settings":
         if self.market_scan_min_history_rows > self.market_scan_kline_limit:
@@ -462,6 +590,11 @@ class Settings(BaseModel):
             raise ValueError("max_daily_kline_rows 不能小于 market_scan_kline_limit")
         if self.market_scan_auto_enabled and not self.scheduler_enabled:
             raise ValueError("market_scan_auto_enabled 开启时必须同时开启 scheduler_enabled")
+        if self.market_scan_auto_retry_max_attempts > len(self.market_scan_auto_retry_delays_seconds):
+            raise ValueError(
+                "market_scan_auto_retry_max_attempts 不能大于 "
+                "market_scan_auto_retry_delays_seconds 的数量"
+            )
         return self
 
 

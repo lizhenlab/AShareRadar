@@ -5,16 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AShareRadar</title>
     <noscript><link rel="stylesheet" href="/static/styles.css" /></noscript>
-    <link rel="stylesheet" href="/static/styles.css?v=20260719-frontend-correctness-2" />
-    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260719-frontend-correctness-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260728-research-loop-1" />
+    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260728-research-loop-1" />
     <script type="importmap">
       {
         "imports": {
-          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260719-frontend-correctness-2",
-          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260719-frontend-correctness-2",
-          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260719-frontend-correctness-2",
-          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260719-frontend-correctness-2",
-          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260719-frontend-correctness-2"
+          "/static/js/discovery.js": "/static/js/discovery.js?v=20260728-research-loop-1",
+          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260728-research-loop-1",
+          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260728-research-loop-1",
+          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260728-research-loop-1",
+          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260728-research-loop-1",
+          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260728-research-loop-1"
         }
       }
     </script>
@@ -140,10 +141,22 @@
           </section>
         </section>
 
+        <section class="market-scan-global-progress" id="marketScanGlobalProgress" aria-label="进行中的全市场扫描" aria-busy="false" hidden>
+          <div class="market-scan-global-copy">
+            <span>全市场扫描</span>
+            <strong id="marketScanGlobalText">等待任务状态</strong>
+          </div>
+          <progress id="marketScanGlobalBar" max="100" value="0" aria-label="后台全市场扫描进度">0%</progress>
+          <div class="market-scan-global-actions">
+            <button type="button" class="mini-button" id="marketScanGlobalOpen">返回扫描</button>
+            <button type="button" class="mini-button" id="marketScanGlobalCancel">取消</button>
+          </div>
+        </section>
+
         <section class="workspace-tabs" aria-label="工作台分区" role="tablist">
           <button type="button" class="active" id="workspace-tab-overview" data-view="overview" role="tab" aria-selected="true" aria-controls="workspace-panel-overview" tabindex="0">总览</button>
           <button type="button" id="workspace-tab-market-scan" data-view="market-scan" role="tab" aria-selected="false" aria-controls="workspace-panel-market-scan" tabindex="-1">全市场榜单</button>
-          <button type="button" id="workspace-tab-qa" data-view="qa" role="tab" aria-selected="false" aria-controls="workspace-panel-qa" tabindex="-1">AI问诊</button>
+          <button type="button" id="workspace-tab-qa" data-view="qa" role="tab" aria-selected="false" aria-controls="workspace-panel-qa" tabindex="-1">个股问诊</button>
           <button type="button" id="workspace-tab-strategy" data-view="strategy" role="tab" aria-selected="false" aria-controls="workspace-panel-strategy" tabindex="-1">策略风控</button>
           <button type="button" id="workspace-tab-finance" data-view="finance" role="tab" aria-selected="false" aria-controls="workspace-panel-finance" tabindex="-1">资金估值</button>
           <button type="button" id="workspace-tab-theme" data-view="theme" role="tab" aria-selected="false" aria-controls="workspace-panel-theme" tabindex="-1">题材强弱</button>
@@ -189,6 +202,27 @@
               <div><span>最近扫描</span><strong id="marketScanFinishedAt">--</strong></div>
               <div><span>规则版本</span><strong id="marketScanRule">--</strong></div>
             </div>
+
+            <section class="discovery-preset-controls" id="discoveryPresetControls" aria-label="榜单筛选方案" aria-busy="false">
+              <label>
+                <span>筛选方案</span>
+                <select id="discoveryPresetSelect" aria-describedby="discoveryPresetFeedback">
+                  <option value="">选择已保存方案</option>
+                </select>
+              </label>
+              <label class="discovery-preset-name">
+                <span>方案名称</span>
+                <input id="discoveryPresetName" maxlength="80" autocomplete="off" placeholder="输入方案名称" aria-describedby="discoveryPresetFeedback" />
+              </label>
+              <div class="discovery-preset-actions">
+                <button type="button" id="discoveryPresetSave">保存</button>
+                <button type="button" id="discoveryPresetApply" class="mini-button" disabled>应用方案</button>
+                <button type="button" id="discoveryPresetRename" class="mini-button" disabled>重命名</button>
+                <button type="button" id="discoveryPresetDelete" class="mini-button danger" disabled>删除</button>
+              </div>
+              <p id="discoveryPresetFeedback"></p>
+              <p id="discoveryRankSummary" hidden></p>
+            </section>
 
             <form class="market-scan-filters" id="marketScanFilters">
               <label><span>状态</span><select id="marketScanStatus"><option value="success">有效排名</option><option value="missing">数据缺失</option><option value="skipped">已跳过</option><option value="pending">待处理</option><option value="all">全部状态</option></select></label>
@@ -284,7 +318,7 @@
           </section>
           <section class="panel minute-panel">
             <div class="panel-title"><span>分钟做T</span><small id="minuteAnalysisPeriod">5分钟区间 / 盘中强弱</small></div>
-            <div class="minute-analysis" id="minuteAnalysis" aria-live="polite">正在加载分钟分析...</div>
+            <div class="minute-analysis" id="minuteAnalysis" aria-live="polite" aria-busy="true" data-availability="loading">正在加载分钟分析...</div>
           </section>
         </section>
 
@@ -328,7 +362,7 @@
           </section>
           <section class="panel watchlist-scan-panel">
             <div class="panel-title"><span>观察池条件扫描</span><small>固定规则 / 完整日K</small></div>
-            <form id="watchlistScanForm" class="watchlist-scan-form">
+            <form id="watchlistScanForm" class="watchlist-scan-form" aria-busy="false">
               <fieldset class="scan-universe-group">
                 <legend>扫描范围</legend>
                 <div class="scan-choice-list">
@@ -374,10 +408,18 @@
         </section>
 
         <section class="workspace-view" id="workspace-panel-tools" data-view-panel="tools" role="tabpanel" aria-labelledby="workspace-tab-tools">
+          <div class="tool-stock-context" id="toolsStockContext" aria-live="polite">
+            <div>
+              <span>当前股票</span>
+              <strong id="toolsStockName">等待分析</strong>
+              <small id="toolsStockCode">--</small>
+            </div>
+            <button type="button" class="mini-button" id="toolsStockOpen">查看当前分析</button>
+          </div>
           <section class="insight-grid">
             <section class="panel">
               <div class="panel-title"><span>本地预警</span><small>价格 / 涨跌幅 / 趋势</small></div>
-              <form class="alert-form" id="alertForm">
+              <form class="alert-form" id="alertForm" aria-busy="false" aria-describedby="alertFormFeedback">
                 <select id="alertType" aria-label="预警类型">
                   <option value="price_above">价格高于</option>
                   <option value="price_below">价格低于</option>
@@ -391,6 +433,7 @@
                 <input id="alertThreshold" type="number" step="0.01" placeholder="阈值；支撑/压力可留空" aria-label="预警阈值" />
                 <button type="submit">添加</button>
                 <button type="button" id="evaluateAlerts">检查</button>
+                <p class="form-action-feedback" id="alertFormFeedback" role="alert" hidden></p>
               </form>
               <div class="alert-list" id="alertList"></div>
               <div class="notification-control">
@@ -402,7 +445,7 @@
             </section>
             <section class="panel">
               <div class="panel-title"><span>个股笔记</span><small>图表标注</small></div>
-              <form class="note-form" id="noteForm">
+              <form class="note-form" id="noteForm" aria-busy="false" aria-describedby="noteFormFeedback">
                 <select id="noteType" aria-label="笔记类型">
                   <option value="观察">观察</option>
                   <option value="买点">买点</option>
@@ -412,8 +455,10 @@
                 </select>
                 <input id="noteContent" maxlength="500" placeholder="记录你的观察" autocomplete="off" aria-label="笔记内容" />
                 <button type="submit">保存</button>
+                <p class="form-action-feedback" id="noteFormFeedback" role="alert" hidden></p>
               </form>
               <div class="mark-filter-list" id="markFilters"></div>
+              <p class="chart-marks-feedback" id="chartMarksFeedback" role="status" aria-live="polite" hidden></p>
               <div class="note-list" id="noteList"></div>
             </section>
           </section>
@@ -543,6 +588,6 @@
       <span>研究辅助工具，不构成投资建议</span>
     </footer>
 
-    <script type="module" src="/static/app.js?v=20260719-frontend-correctness-2"></script>
+    <script type="module" src="/static/app.js?v=20260728-research-loop-1"></script>
   </body>
 </html>

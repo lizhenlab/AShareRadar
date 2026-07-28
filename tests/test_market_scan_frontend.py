@@ -47,6 +47,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/market-scan-contracts.js",
         "/static/js/market-scan-polling.js",
         "/static/js/market-scan-view.js",
+        "/static/js/discovery.js",
     }
     assert set(imports) == module_paths
     module_versions = [imports[path].split("?v=", 1)[1] for path in module_paths]

@@ -378,6 +378,7 @@ def build_retry_plan(conn: sqlite3.Connection, run: sqlite3.Row) -> MarketScanRe
         preserved_success_count=preserved,
         pending_count=pending,
         needs_market_data=result_count == 0 or pending > 0,
+        rule_version=str(run["rule_version"]),
     )
 
 

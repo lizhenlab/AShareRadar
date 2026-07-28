@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import Protocol, cast
 
 from app.config import Settings
+from app.config_settings import REGISTERED_PROVIDER_NAMES
 from app.models.market import (
     Kline,
     MinuteKline,
@@ -26,7 +27,7 @@ from app.services.tushare_provider import TushareProvider
 from app.services.providers import DemoMarketDataProvider, TencentMarketDataProvider
 
 
-CAPABILITY_PROVIDER_ORDER = ("tencent", "akshare", "tushare", "baostock", "futu", "local", "demo")
+CAPABILITY_PROVIDER_ORDER = REGISTERED_PROVIDER_NAMES
 DEFAULT_MARKET_PROVIDER_KINDS = ("quote", "kline")
 PRIORITY_SETTING_BY_KIND = {
     "quote": "quote_provider_priority",

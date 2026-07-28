@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.db.advice_review_evidence_schema import apply_advice_review_evidence_schema
 from app.db.schema_migrations import ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION
 
 
@@ -21,6 +22,10 @@ CREATE TABLE IF NOT EXISTS advice_review_plan (
     hypothesis TEXT NOT NULL CHECK (length(trim(hypothesis)) > 0),
     trigger_condition TEXT NOT NULL CHECK (length(trim(trigger_condition)) > 0),
     invalidation_condition TEXT NOT NULL CHECK (length(trim(invalidation_condition)) > 0),
+    trigger_basis TEXT NOT NULL DEFAULT 'daily_high_gte_target_price'
+        CHECK (trigger_basis = 'daily_high_gte_target_price'),
+    invalidation_basis TEXT NOT NULL DEFAULT 'daily_low_lte_stop_price'
+        CHECK (invalidation_basis = 'daily_low_lte_stop_price'),
     target_price REAL NOT NULL CHECK (target_price > 0),
     stop_price REAL NOT NULL CHECK (stop_price > 0),
     horizon_days INTEGER NOT NULL CHECK (horizon_days BETWEEN 1 AND 60),
@@ -57,6 +62,10 @@ CREATE TABLE IF NOT EXISTS advice_review_result (
         )
     ),
     rule_version TEXT NOT NULL,
+    trigger_basis TEXT NOT NULL DEFAULT 'daily_high_gte_target_price'
+        CHECK (trigger_basis = 'daily_high_gte_target_price'),
+    invalidation_basis TEXT NOT NULL DEFAULT 'daily_low_lte_stop_price'
+        CHECK (invalidation_basis = 'daily_low_lte_stop_price'),
     snapshot_adjustment_mode TEXT NOT NULL DEFAULT 'unknown',
     snapshot_anchor_date TEXT,
     snapshot_anchor_close REAL,
@@ -145,6 +154,7 @@ def apply_advice_review_compat_schema(
             _ensure_column(conn, "advice_review_plan", column, definition)
         for column, definition in _RESULT_PROVENANCE_COLUMNS.items():
             _ensure_column(conn, "advice_review_result", column, definition)
+        apply_advice_review_evidence_schema(conn)
         conn.execute(
             "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
             (ADVICE_REVIEW_PROVENANCE_SCHEMA_VERSION,),

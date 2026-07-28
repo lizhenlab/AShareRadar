@@ -44,11 +44,23 @@ _SURROGATE_PRIMARY_KEYS = {
     "advice_history": "id",
     "advice_review_plan": "id",
     "advice_review_result": "id",
+    "discovery_preset": "id",
+    "discovery_research_queue_source": "id",
 }
 _SOURCE_WINS_KEYS = {
     "watchlist": ("symbol",),
     "advice_review_plan": ("advice_id",),
     "advice_review_result": ("plan_id", "plan_revision", "as_of", "rule_version"),
+    "discovery_preset": ("name",),
+    "discovery_research_queue_source": (
+        "symbol",
+        "source_run_id",
+        "source_preset_id",
+        "source_preset_revision",
+    ),
+}
+_CASE_INSENSITIVE_STABLE_COLUMNS = {
+    "discovery_preset": frozenset({"name"}),
 }
 _RELATIONSHIPS = {
     "alert_event": (("rule_id", "alert_rule"),),
@@ -68,6 +80,8 @@ _USER_DATA_AUDIT_TIMESTAMP_COLUMNS = {
     "stock_note": frozenset({"created_at", "updated_at"}),
     "advice_review_plan": frozenset({"created_at", "updated_at"}),
     "advice_review_result": frozenset({"evaluated_at"}),
+    "discovery_preset": frozenset({"created_at", "updated_at"}),
+    "discovery_research_queue_source": frozenset({"enqueued_at"}),
 }
 _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
     "advice_history": {
@@ -83,6 +97,8 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
         "snapshot_anchor_close": None,
         "snapshot_data_version": "unknown",
         "snapshot_contract_version": "unknown",
+        "trigger_basis": "daily_high_gte_target_price",
+        "invalidation_basis": "daily_low_lte_stop_price",
     },
     "advice_review_result": {
         "snapshot_adjustment_mode": "unknown",
@@ -98,6 +114,8 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
         "normalized_entry_price": None,
         "normalized_target_price": None,
         "normalized_stop_price": None,
+        "trigger_basis": "daily_high_gte_target_price",
+        "invalidation_basis": "daily_low_lte_stop_price",
     },
 }
 _RowOperation = Literal["insert", "update", "unchanged"]
@@ -119,6 +137,7 @@ class _PreparedTable:
 
 @dataclass
 class _SurrogateMergeState:
+    table: str
     primary_key: str
     stable_columns: tuple[str, ...] | None
     existing_by_id: dict[object, dict[str, object]]
@@ -607,10 +626,14 @@ def _prepare_stable_merge_table(
     key_columns = _SOURCE_WINS_KEYS.get(table)
     if key_columns is None or tuple(bundle.primary_key) != key_columns:
         raise ValueError(f"{table} 没有受支持的稳定合并键")
-    existing = {_row_key(row, key_columns): row for row in _existing_rows(conn, table, bundle.columns)}
+    existing = {
+        _stable_row_key(table, row, key_columns): row
+        for row in _existing_rows(conn, table, bundle.columns)
+    }
     prepared_rows: list[_PreparedRow] = []
     for row in rows:
-        current = existing.get(_row_key(row, key_columns))
+        stable_key = _stable_row_key(table, row, key_columns)
+        current = existing.get(stable_key)
         operation: _RowOperation
         if current is None:
             operation = "insert"
@@ -619,7 +642,7 @@ def _prepare_stable_merge_table(
         else:
             operation = "update"
         prepared_rows.append(_PreparedRow(operation=operation, values=row))
-        existing[_row_key(row, key_columns)] = row
+        existing[stable_key] = row
     return _PreparedTable(
         bundle=bundle,
         rows=tuple(prepared_rows),
@@ -640,7 +663,7 @@ def _prepare_surrogate_merge_table(
     stable_columns = _SOURCE_WINS_KEYS.get(table)
     if stable_columns is not None:
         _validate_unique_stable_keys(table, rows, stable_columns)
-    state = _surrogate_merge_state(existing_rows, rows, primary_key, stable_columns)
+    state = _surrogate_merge_state(table, existing_rows, rows, primary_key, stable_columns)
     for source_row in rows:
         _append_surrogate_merge_row(state, source_row)
     plan = _PreparedTable(
@@ -652,6 +675,7 @@ def _prepare_surrogate_merge_table(
 
 
 def _surrogate_merge_state(
+    table: str,
     existing_rows: list[dict[str, object]],
     source_rows: tuple[dict[str, object], ...],
     primary_key: str,
@@ -660,8 +684,13 @@ def _surrogate_merge_state(
     existing_by_id = {row[primary_key]: row for row in existing_rows}
     used_ids = set(existing_by_id)
     source_ids = [row[primary_key] for row in source_rows]
-    existing_by_stable = {_row_key(row, stable_columns): row for row in existing_rows} if stable_columns is not None else {}
+    existing_by_stable = (
+        {_stable_row_key(table, row, stable_columns): row for row in existing_rows}
+        if stable_columns is not None
+        else {}
+    )
     return _SurrogateMergeState(
+        table=table,
         primary_key=primary_key,
         stable_columns=stable_columns,
         existing_by_id=existing_by_id,
@@ -678,7 +707,7 @@ def _append_surrogate_merge_row(
     source_row: dict[str, object],
 ) -> None:
     source_id = source_row[state.primary_key]
-    stable_key = _optional_row_key(source_row, state.stable_columns)
+    stable_key = _optional_row_key(state.table, source_row, state.stable_columns)
     stable_match = state.existing_by_stable.get(stable_key) if stable_key is not None else None
     if stable_match is not None:
         target_id = stable_match[state.primary_key]
@@ -710,10 +739,11 @@ def _available_surrogate_id(state: _SurrogateMergeState, source_id: object) -> o
 
 
 def _optional_row_key(
+    table: str,
     row: dict[str, object],
     columns: tuple[str, ...] | None,
 ) -> tuple[object, ...] | None:
-    return _row_key(row, columns) if columns is not None else None
+    return _stable_row_key(table, row, columns) if columns is not None else None
 
 
 def _validate_unique_stable_keys(
@@ -723,7 +753,7 @@ def _validate_unique_stable_keys(
 ) -> None:
     seen: set[tuple[object, ...]] = set()
     for row in rows:
-        key = _row_key(row, columns)
+        key = _stable_row_key(table, row, columns)
         if key in seen:
             raise ValueError(f"{table} 包含重复的稳定合并键")
         seen.add(key)
@@ -753,8 +783,18 @@ def _existing_rows(
     return [{column: row[column] for column in columns} for row in rows]
 
 
-def _row_key(row: dict[str, object], columns: tuple[str, ...]) -> tuple[object, ...]:
-    return tuple(row[column] for column in columns)
+def _stable_row_key(
+    table: str,
+    row: dict[str, object],
+    columns: tuple[str, ...],
+) -> tuple[object, ...]:
+    case_insensitive = _CASE_INSENSITIVE_STABLE_COLUMNS.get(table, frozenset())
+    return tuple(
+        row[column].casefold()
+        if column in case_insensitive and isinstance(row[column], str)
+        else row[column]
+        for column in columns
+    )
 
 
 def _apply_prepared_bundle(

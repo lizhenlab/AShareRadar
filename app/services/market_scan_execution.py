@@ -2,31 +2,28 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import date, datetime
 
 from app.models.market_scan import MarketScanResultItem, MarketScanResultWrite, MarketScanRun
-from app.models.market import (
-    Kline,
-    Quote,
-    StockInfo,
-)
-from app.services.datahub import DataHub
-from app.services.datahub_runtime import run_cache_io
+from app.models.market import Kline, Quote
+from app.services.datahub_runtime import ProviderCallBusyError, run_cache_io
 from app.services.data_quality_time import latest_expected_daily_kline_date
 from app.services.market_scan_completion import bulk_quote_coverage_error, quote_batch_error, short_scan_error
+from app.services.market_scan_contracts import MarketScanDataHubProtocol
+from app.services.market_scan_pressure import MarketScanPressureController, MarketScanPressureSnapshot
 from app.services.market_scan_recovery import ProviderWaitBudget, wait_for_provider_recovery
-from app.services.market_scan_scoring import (
-    MarketScanDataMissing,
-    MarketScanSkipped,
-    completed_market_scan_klines,
-    score_market_scan_item,
+from app.services.market_scan_scoring import MarketScanDataMissing, MarketScanSkipped, score_market_scan_item
+from app.services.market_scan_universe import FULL_MARKET_MARKETS, MarketScanUniverse, build_market_scan_universe
+from app.services.market_scan_validation import (
+    MarketScanRuntimeGuard,
+    failed_market_scan_result,
+    minimum_market_counts,
+    missing_quote_result,
+    raise_batch_outcome_error,
+    resolve_market_scan_stock_pool,
 )
-from app.services.market_scan_universe import (
-    FULL_MARKET_MARKETS,
-    MarketScanUniverse,
-    build_market_scan_universe,
-)
+from app.utils.clock import monotonic_now
 from app.utils.provider_errors import ProviderChainUnavailable
 from app.utils.symbols import standard_symbol
 
@@ -34,20 +31,58 @@ from app.utils.symbols import standard_symbol
 class MarketScanExecutor:
     """Resolve the scan universe and execute quote/K-line scoring batches."""
 
-    def __init__(self, datahub: DataHub, *, sensitive_values: Iterable[object] = ()) -> None:
+    def __init__(
+        self,
+        datahub: MarketScanDataHubProtocol,
+        *,
+        sensitive_values: Iterable[object] = (),
+        now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ) -> None:
         self.datahub = datahub
         self.cache = datahub.cache
         self.settings = datahub.settings
         self._sensitive_values = tuple(sensitive_values)
+        self._now = now
+        self._monotonic = monotonic or monotonic_now
+        self._pressure = MarketScanPressureController.from_datahub(self.datahub)
+
+    @property
+    def pressure_snapshot(self) -> MarketScanPressureSnapshot:
+        return self._pressure.snapshot()
+
+    @property
+    def pressure_warnings(self) -> tuple[str, ...]:
+        return self._pressure.terminal_warnings([])
 
     async def execute(self, run: MarketScanRun, cancel_event: asyncio.Event) -> tuple[str, ...]:
-        pending = await self._load_or_seed_pending(run, cancel_event)
-        if pending:
-            return await self._process_pending(run, pending, cancel_event)
-        current = await run_cache_io(self.cache.market_scan_run, run.id)
-        if current.total_count == 0 or current.processed_count != current.total_count:
-            raise RuntimeError("全市场股票池没有可恢复的待计算股票")
-        return ()
+        self._pressure.reset()
+        runtime_guard = MarketScanRuntimeGuard.create(
+            datetime.fromisoformat(run.data_date).date(),
+            self.settings,
+            now=self._now,
+            monotonic=self._monotonic,
+        )
+        wall_clock_budget = runtime_guard.wall_clock_budget_seconds
+        try:
+            async with asyncio.timeout(wall_clock_budget):
+                if run.retry_of_run_id is None or run.processed_count < run.total_count:
+                    runtime_guard.checkpoint()
+                pending = await self._load_or_seed_pending(run, cancel_event)
+                if pending:
+                    runtime_guard.checkpoint()
+                    return await self._process_pending(
+                        run,
+                        pending,
+                        cancel_event,
+                        runtime_guard,
+                    )
+                current = await run_cache_io(self.cache.market_scan_run, run.id)
+                if current.total_count == 0 or current.processed_count != current.total_count:
+                    raise RuntimeError("全市场股票池没有可恢复的待计算股票")
+                return ()
+        except TimeoutError:
+            raise RuntimeError(f"全市场扫描超过 {wall_clock_budget:g} 秒墙钟预算") from None
 
     async def _load_or_seed_pending(
         self,
@@ -90,7 +125,11 @@ class MarketScanExecutor:
     ) -> MarketScanUniverse:
         raise_if_scan_cancelled(cancel_event)
         minimum_counts = minimum_market_counts(self.settings)
-        stock_rows, stock_pool_source, resolved = await self._stock_pool_resolution(minimum_counts)
+        stock_rows, stock_pool_source, resolved = await resolve_market_scan_stock_pool(
+            self.datahub,
+            required_markets=FULL_MARKET_MARKETS,
+            minimum_counts=minimum_counts,
+        )
         if stock_pool_source:
             await run_cache_io(
                 self.cache.record_market_scan_stock_pool_source,
@@ -117,32 +156,13 @@ class MarketScanExecutor:
             raise RuntimeError("全市场股票池分市场覆盖不足：" + "，".join(insufficient))
         return universe
 
-    async def _stock_pool_resolution(
-        self,
-        minimum_counts: dict[str, int],
-    ) -> tuple[list[StockInfo], str | None, bool]:
-        kwargs = {
-            "limit": None,
-            "refresh": True,
-            "required_markets": FULL_MARKET_MARKETS,
-            "minimum_market_counts": minimum_counts,
-        }
-        resolve = getattr(self.datahub, "stock_pool_resolution", None)
-        if not callable(resolve):
-            return await self.datahub.stock_pool(**kwargs), None, True
-        resolution = await resolve(**kwargs)
-        reason = str(getattr(resolution, "reason", "")).strip() or "unknown"
-        list_rows = getattr(resolution, "list_rows", None)
-        rows = list_rows() if callable(list_rows) else list(getattr(resolution, "rows", ()))
-        return rows, reason, bool(getattr(resolution, "resolved", False))
-
     async def _process_pending(
         self,
         run: MarketScanRun,
         pending: list[MarketScanResultItem],
         cancel_event: asyncio.Event,
+        runtime_guard: MarketScanRuntimeGuard,
     ) -> tuple[str, ...]:
-        semaphore = asyncio.Semaphore(self.settings.market_scan_concurrency)
         warnings: list[str] = []
         batch_size = self.settings.market_scan_batch_size
         provider_wait_budget = ProviderWaitBudget(
@@ -152,12 +172,12 @@ class MarketScanExecutor:
         expected_data_date = latest_expected_daily_kline_date(as_of)
         cutoff = expected_data_date
         for index in range(0, len(pending), batch_size):
+            runtime_guard.checkpoint()
             raise_if_scan_cancelled(cancel_event)
             batch = pending[index : index + batch_size]
             batch_warnings = await self._process_batch(
                 run,
                 batch,
-                semaphore=semaphore,
                 cancel_event=cancel_event,
                 as_of=as_of,
                 cutoff=cutoff,
@@ -165,14 +185,14 @@ class MarketScanExecutor:
                 provider_wait_budget=provider_wait_budget,
             )
             warnings.extend(batch_warnings)
-        return tuple(dict.fromkeys(warnings))
+        runtime_guard.checkpoint()
+        return self._pressure.terminal_warnings(warnings)
 
     async def _process_batch(
         self,
         run: MarketScanRun,
         batch: list[MarketScanResultItem],
         *,
-        semaphore: asyncio.Semaphore,
         cancel_event: asyncio.Event,
         as_of: datetime,
         cutoff: date,
@@ -187,6 +207,7 @@ class MarketScanExecutor:
             try:
                 quote_map, quote_error = await self._quote_batch(remaining)
             except ProviderChainUnavailable as exc:
+                decision = self._pressure.observe_quote_failure(exc, len(remaining))
                 await self._wait_for_provider_recovery(
                     (exc,),
                     kind="quote",
@@ -194,10 +215,12 @@ class MarketScanExecutor:
                     max_attempts=max_attempts,
                     wait_budget=provider_wait_budget,
                     cancel_event=cancel_event,
+                    minimum_delay_seconds=decision.minimum_delay_seconds,
                 )
                 continue
             if quote_error:
                 warnings.append(quote_error)
+            semaphore = asyncio.Semaphore(self._pressure.current_concurrency)
             retry_pairs = await self._scan_and_persist_batch(
                 run,
                 remaining,
@@ -210,14 +233,18 @@ class MarketScanExecutor:
                 expected_data_date=expected_data_date,
             )
             if not retry_pairs:
+                self._pressure.complete_batch()
                 return tuple(dict.fromkeys(warnings))
+            retry_errors = tuple(outcome for _item, outcome in retry_pairs)
+            decision = self._pressure.observe_kline_failures(retry_errors, len(remaining))
             await self._wait_for_provider_recovery(
-                tuple(outcome for _item, outcome in retry_pairs),
+                retry_errors,
                 kind="kline",
                 attempt=attempt,
                 max_attempts=max_attempts,
                 wait_budget=provider_wait_budget,
                 cancel_event=cancel_event,
+                minimum_delay_seconds=decision.minimum_delay_seconds,
             )
             remaining = [item for item, _outcome in retry_pairs]
         raise RuntimeError("全市场扫描批次重试状态异常")
@@ -246,21 +273,18 @@ class MarketScanExecutor:
                     as_of=as_of,
                     cutoff=cutoff,
                     expected_data_date=expected_data_date,
+                    rule_version=run.rule_version,
                 )
                 for item in items
             ),
             return_exceptions=True,
         )
-        _raise_batch_outcome_error(outcomes)
+        raise_batch_outcome_error(outcomes)
         writes = [outcome for outcome in outcomes if isinstance(outcome, MarketScanResultWrite)]
         if writes:
             raise_if_scan_cancelled(cancel_event)
             await run_cache_io(self.cache.save_market_scan_result_batch, run.id, writes)
-        return [
-            (item, outcome)
-            for item, outcome in zip(items, outcomes)
-            if isinstance(outcome, ProviderChainUnavailable)
-        ]
+        return [(item, outcome) for item, outcome in zip(items, outcomes) if isinstance(outcome, ProviderChainUnavailable)]
 
     async def _wait_for_provider_recovery(
         self,
@@ -271,17 +295,22 @@ class MarketScanExecutor:
         max_attempts: int,
         wait_budget: ProviderWaitBudget,
         cancel_event: asyncio.Event,
+        minimum_delay_seconds: float = 0.0,
     ) -> None:
-        await wait_for_provider_recovery(
-            errors,
-            kind=kind,
-            attempt=attempt,
-            max_attempts=max_attempts,
-            wait_budget=wait_budget,
-            cancel_event=cancel_event,
-            retry_backoff_seconds=self.settings.market_scan_retry_backoff_seconds,
-            chain_state=self._provider_chain_state,
-        )
+        remaining_before = wait_budget.remaining_seconds
+        try:
+            await wait_for_provider_recovery(
+                self._pressure.recovery_errors(errors, minimum_delay_seconds),
+                kind=kind,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                wait_budget=wait_budget,
+                cancel_event=cancel_event,
+                retry_backoff_seconds=self.settings.market_scan_retry_backoff_seconds,
+                chain_state=self._pressure.provider_chain_state,
+            )
+        finally:
+            self._pressure.record_backoff(remaining_before - wait_budget.remaining_seconds)
 
     async def _quote_batch(
         self,
@@ -295,16 +324,12 @@ class MarketScanExecutor:
             )
         except asyncio.CancelledError:
             raise
-        except TimeoutError:
-            raise ProviderChainUnavailable(
-                f"批量行情请求超过 {self.settings.market_scan_quote_batch_timeout_seconds:g} 秒",
-                retry_after_seconds=self.settings.market_scan_retry_backoff_seconds,
-            ) from None
+        except TimeoutError as exc:
+            message = f"批量行情请求超过 {self.settings.market_scan_quote_batch_timeout_seconds:g} 秒"
+            raise self._pressure.unavailable_error(exc, message) from None
         except Exception as exc:
-            raise ProviderChainUnavailable(
-                short_scan_error(exc, sensitive_values=self._sensitive_values),
-                retry_after_seconds=self.settings.market_scan_retry_backoff_seconds,
-            ) from exc
+            message = short_scan_error(exc, sensitive_values=self._sensitive_values)
+            raise self._pressure.unavailable_error(exc, message) from exc
         quotes: dict[str, Quote] = {}
         for quote in available:
             try:
@@ -313,7 +338,7 @@ class MarketScanExecutor:
                 continue
         requested_count = len(set(symbols))
         missing_count = len(set(symbols) - quotes.keys())
-        chain_state = self._provider_chain_state("quote")
+        chain_state = self._pressure.provider_chain_state("quote")
         chain_status = getattr(chain_state, "status", None)
         if missing_count and chain_status in {
             "temporary_unavailable",
@@ -336,10 +361,6 @@ class MarketScanExecutor:
         )
         return quotes, error
 
-    def _provider_chain_state(self, kind: str):
-        inspect_state = getattr(self.datahub, "provider_chain_state", None)
-        return inspect_state(kind) if callable(inspect_state) else None
-
     async def _scan_one(
         self,
         item: MarketScanResultItem,
@@ -351,8 +372,10 @@ class MarketScanExecutor:
         as_of: datetime,
         cutoff: date,
         expected_data_date: date,
+        rule_version: str,
     ) -> MarketScanResultWrite:
         raise_if_scan_cancelled(cancel_event)
+        rows: list[Kline] = []
         try:
             async with semaphore:
                 rows = await self._fetch_kline(item.symbol, cancel_event)
@@ -373,20 +396,20 @@ class MarketScanExecutor:
                 expected_data_date=expected_data_date,
                 min_history_rows=self.settings.market_scan_min_history_rows,
                 min_data_quality_score=self.settings.market_scan_min_data_quality_score,
+                rule_version=rule_version,
             )
         except asyncio.CancelledError:
             raise
         except ProviderChainUnavailable:
             raise
-        except MarketScanSkipped as exc:
-            return MarketScanResultWrite(symbol=item.symbol, status="skipped", reason=str(exc))
-        except MarketScanDataMissing as exc:
-            return MarketScanResultWrite(symbol=item.symbol, status="missing", error=str(exc))
         except Exception as exc:
-            return MarketScanResultWrite(
-                symbol=item.symbol,
-                status="missing",
-                error=short_scan_error(exc, sensitive_values=self._sensitive_values),
+            return _failed_scan_result_for_exception(
+                item=item,
+                quote=quote,
+                rows=rows,
+                cutoff=cutoff,
+                exc=exc,
+                sensitive_values=self._sensitive_values,
             )
 
     async def _fetch_kline(self, symbol: str, cancel_event: asyncio.Event) -> list[Kline]:
@@ -409,6 +432,9 @@ class MarketScanExecutor:
                 raise
             except ProviderChainUnavailable:
                 raise
+            except (ProviderCallBusyError, TimeoutError) as exc:
+                message = short_scan_error(exc, sensitive_values=self._sensitive_values)
+                raise self._pressure.unavailable_error(exc, message) from exc
             except Exception as exc:
                 errors.append(short_scan_error(exc, sensitive_values=self._sensitive_values))
                 if attempt < attempts:
@@ -424,68 +450,45 @@ class MarketScanExecutor:
         expected_data_date: date,
         quote_error: str | None,
     ) -> MarketScanResultWrite:
-        completed = completed_market_scan_klines(rows, cutoff)
-        if len(completed) < self.settings.market_scan_min_history_rows:
-            return MarketScanResultWrite(
-                symbol=item.symbol,
-                status="skipped",
-                reason=(f"完整前复权日K不足：需要 {self.settings.market_scan_min_history_rows} 根，" f"当前 {len(completed)} 根"),
-            )
-        if {row.adjustment_mode for row in completed} != {"qfq"}:
-            return MarketScanResultWrite(symbol=item.symbol, status="missing", error="日K不是一致的前复权序列")
-        latest_date = datetime.fromisoformat(completed[-1].date).date()
-        if latest_date < expected_data_date:
-            return MarketScanResultWrite(
-                symbol=item.symbol,
-                status="skipped",
-                reason=(f"日K停留在 {latest_date.isoformat()}，早于应有交易日 " f"{expected_data_date.isoformat()}，可能停牌"),
-                data_date=latest_date.isoformat(),
-                kline_source=completed[-1].source,
-                adjustment_mode=completed[-1].adjustment_mode,
-            )
-        if completed[-1].volume <= 0:
-            return MarketScanResultWrite(
-                symbol=item.symbol,
-                status="skipped",
-                reason="当日日K成交量为 0 且报价不可用，可能停牌",
-                data_date=latest_date.isoformat(),
-                kline_source=completed[-1].source,
-                adjustment_mode=completed[-1].adjustment_mode,
-            )
-        return MarketScanResultWrite(
-            symbol=item.symbol,
-            status="missing",
-            error=quote_error or "报价不可用，无法计算包含换手率和成交额的综合分",
-            data_date=latest_date.isoformat(),
-            kline_source=completed[-1].source,
-            adjustment_mode=completed[-1].adjustment_mode,
+        return missing_quote_result(
+            item,
+            rows,
+            cutoff=cutoff,
+            expected_data_date=expected_data_date,
+            quote_error=quote_error,
+            min_history_rows=self.settings.market_scan_min_history_rows,
         )
 
 
-def _raise_batch_outcome_error(
-    outcomes: list[MarketScanResultWrite | BaseException],
-) -> None:
-    if any(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes):
-        raise asyncio.CancelledError
-    unexpected = next(
-        (
-            outcome
-            for outcome in outcomes
-            if isinstance(outcome, BaseException)
-            and not isinstance(outcome, ProviderChainUnavailable)
-        ),
-        None,
+def _failed_scan_result_for_exception(
+    *,
+    item: MarketScanResultItem,
+    quote: Quote | None,
+    rows: list[Kline],
+    cutoff: date,
+    exc: Exception,
+    sensitive_values: tuple[object, ...],
+) -> MarketScanResultWrite:
+    if isinstance(exc, MarketScanSkipped):
+        return failed_market_scan_result(
+            item.symbol,
+            "skipped",
+            quote,
+            rows,
+            cutoff=cutoff,
+            reason=str(exc),
+        )
+    error = str(exc)
+    if not isinstance(exc, MarketScanDataMissing):
+        error = short_scan_error(exc, sensitive_values=sensitive_values)
+    return failed_market_scan_result(
+        item.symbol,
+        "missing",
+        quote,
+        rows,
+        cutoff=cutoff,
+        error=error,
     )
-    if unexpected is not None:
-        raise unexpected
-
-
-def minimum_market_counts(settings: object) -> dict[str, int]:
-    return {
-        "SH": int(getattr(settings, "market_scan_min_sh_count")),
-        "SZ": int(getattr(settings, "market_scan_min_sz_count")),
-        "BJ": int(getattr(settings, "market_scan_min_bj_count")),
-    }
 
 
 def raise_if_scan_cancelled(event: asyncio.Event) -> None:

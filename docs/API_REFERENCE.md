@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 92
+Total endpoints: 103
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -53,6 +53,7 @@ Total endpoints: 92
 | PATCH | `/api/reviews/plans/{plan_id}` | path `plan_id: int`<br>body `payload: AdviceReviewPlanUpdate` | `update_review_plan` | `AdviceReviewPlan` | `app/api/routes/reviews.py` |
 | POST | `/api/reviews/plans/{plan_id}/evaluate` | path `plan_id: int`<br>body `payload: AdviceReviewEvaluationRequest \| None` | `evaluate_review_plan` | `AdviceReviewEvaluation` | `app/api/routes/reviews.py` |
 | GET | `/api/reviews/plans/{plan_id}/evaluations` | path `plan_id: int`<br>query `limit: int = 100` (ge=1; le=200) | `review_plan_evaluations` | `list[AdviceReviewEvaluation]` | `app/api/routes/reviews.py` |
+| GET | `/api/reviews/summary` | - | `review_summary` | `AdviceReviewSummary` | `app/api/routes/reviews.py` |
 | GET | `/api/rules` | - | `rules` | `list[RuleDefinition]` | `app/api/routes/stock.py` |
 | GET | `/api/stock/abnormal-events` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_abnormal_events` | `AbnormalEventSummary` | `app/api/routes/stock.py` |
 | GET | `/api/stock/alpha-evidence` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_alpha_evidence` | `AlphaEvidenceReport` | `app/api/routes/stock.py` |
@@ -103,6 +104,16 @@ Total endpoints: 92
 | DELETE | `/api/watchlist/{symbol}` | path `symbol: str` | `delete_watchlist_item` | `MutationResult` | `app/api/routes/watchlist.py` |
 | PATCH | `/api/watchlist/{symbol}` | path `symbol: str`<br>body `payload: WatchlistUpdate` | `update_watchlist_item` | `WatchlistItem` | `app/api/routes/watchlist.py` |
 | POST | `/api/watchlist/{symbol}/mark-viewed` | path `symbol: str`<br>body `payload: WatchlistMarkViewed` | `mark_watchlist_item_viewed` | `WatchlistItem` | `app/api/routes/watchlist.py` |
+| GET | `/presets` | query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `list_discovery_presets` | `DiscoveryPresetPage` | `app/api/routes/discovery.py` |
+| POST | `/presets` | body `payload: DiscoveryPresetCreate` | `create_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| POST | `/presets/import` | body `payload: DiscoveryPresetArchive` | `import_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| DELETE | `/presets/{preset_id}` | path `preset_id: int` (ge=1)<br>query `expected_revision: int = ...` (ge=1) | `delete_discovery_preset` | `DiscoveryPresetDeleteResponse` | `app/api/routes/discovery.py` |
+| GET | `/presets/{preset_id}` | path `preset_id: int` (ge=1) | `get_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| PATCH | `/presets/{preset_id}` | body `payload: DiscoveryPresetRename`<br>path `preset_id: int` (ge=1) | `rename_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| POST | `/presets/{preset_id}/apply` | body `payload: DiscoveryPresetApplyRequest`<br>path `preset_id: int` (ge=1) | `apply_discovery_preset` | `DiscoveryLeaderboardPage` | `app/api/routes/discovery.py` |
+| GET | `/presets/{preset_id}/export` | path `preset_id: int` (ge=1) | `export_discovery_preset` | `DiscoveryPresetArchive` | `app/api/routes/discovery.py` |
+| POST | `/presets/{preset_id}/research-queue` | body `payload: DiscoveryResearchQueueRequest`<br>path `preset_id: int` (ge=1) | `enqueue_discovery_research` | `DiscoveryResearchQueueResponse` | `app/api/routes/discovery.py` |
+| GET | `/runs/{run_id}/rank-changes` | path `run_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200) | `discovery_rank_changes` | `DiscoveryRankChangePage` | `app/api/routes/discovery.py` |
 
 ## Error Contract
 

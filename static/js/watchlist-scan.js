@@ -12,6 +12,13 @@ export const WATCHLIST_SCAN_LABELS = Object.freeze({
 
 export const MAX_WATCHLIST_SCAN_SYMBOLS = 50;
 
+const WATCHLIST_SCAN_METRIC_LABELS = Object.freeze({
+  close: "收盘价",
+  ma20: "20日均线",
+  previous_20d_high: "前20日高点",
+  volume_ratio_5d: "5日量比",
+});
+
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const SHANGHAI_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Shanghai",
@@ -31,7 +38,10 @@ export async function runWatchlistScan(state, options = {}) {
   }
   const sequence = Number(state.watchlistScanSeq || 0) + 1;
   state.watchlistScanSeq = sequence;
-  renderScanLoading(payload.universe);
+  const previousResult = state.watchlistScanResult || null;
+  const form = options.root || $("watchlistScanForm");
+  setScanFormBusy(form, true);
+  renderScanLoading(payload);
   try {
     const result = await fetchJson("/api/watchlist/scan", {
       method: "POST",
@@ -46,9 +56,15 @@ export async function runWatchlistScan(state, options = {}) {
     return true;
   } catch (error) {
     if (isAbortError(error) || !scanIsCurrent(state, sequence, options)) return false;
-    renderScanUnavailable(error);
+    if (previousResult) {
+      renderWatchlistScan(previousResult);
+    } else {
+      renderScanUnavailable(error);
+    }
     setScanFeedback(error?.message || "扫描失败，请稍后重试", "error");
     throw error;
+  } finally {
+    if (scanIsCurrent(state, sequence, options)) setScanFormBusy(form, false);
   }
 }
 
@@ -134,44 +150,64 @@ export function renderWatchlistScan(result) {
   }
   const ordered = [...success].sort((left, right) => Number(right.matched) - Number(left.matched));
   target.innerHTML = `
+    <div class="scan-evidence-banner">
+      <strong>只读历史证据</strong>
+      <span>截至 ${escapeHtml(result.as_of || "--")} · 规则版本 ${escapeHtml(result.rule_version || "--")}</span>
+    </div>
     <div class="scan-summary">
       <strong>${escapeHtml(ordered.filter((item) => item.matched).length)} / ${escapeHtml(universe.length)} 只满足全部条件</strong>
-      <span>数据截至 ${escapeHtml(result.as_of || "--")} · 规则 ${escapeHtml(result.rule_version || "--")}</span>
+      <span>条件结果和指标均来自该时点，不代表当前状态</span>
     </div>
-    <div class="scan-result-list">${ordered.map(scanItemHtml).join("")}${missing.map(scanMissingHtml).join("")}</div>`;
+    <div class="scan-result-list">${ordered.map((item) => scanItemHtml(item)).join("")}${missing.map(scanMissingHtml).join("")}</div>`;
   setScanBusy(target, false);
 }
 
 function scanItemHtml(item) {
   const matchedConditions = Array.isArray(item.matched_conditions) ? item.matched_conditions : [];
-  const details = Object.entries(item.condition_results || {})
-    .map(([condition, matched]) => `${WATCHLIST_SCAN_LABELS[condition] || condition}：${matched ? "是" : "否"}`)
-    .join(" · ");
+  const conditions = Object.entries(item.condition_results || {});
+  const metrics = Object.entries(item.metrics || {});
   return `
-    <button type="button" class="scan-result ${item.matched ? "is-matched" : ""}" data-scan-symbol="${escapeHtml(item.symbol)}">
-      <span><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.data_date || "--")}</small></span>
-      <span><b>${item.matched ? "满足" : "未全部满足"}</b><small>${escapeHtml(details || "无条件结果")}</small></span>
-      <span><small>收盘 ${escapeHtml(formatNumber(item.metrics?.close))}${matchedConditions.length ? ` · 命中 ${escapeHtml(matchedConditions.length)} 项` : ""}</small></span>
-    </button>`;
+    <article class="scan-result ${item.matched ? "is-matched" : ""}" data-scan-evidence-symbol="${escapeHtml(item.symbol)}">
+      <header>
+        <span><strong>${escapeHtml(item.symbol)}</strong><small>数据日期 ${escapeHtml(item.data_date || "--")}</small></span>
+        <b>${item.matched ? "满足全部条件" : "未全部满足"}</b>
+      </header>
+      <div class="scan-condition-evidence" aria-label="当时条件结果">
+        ${conditions.length
+          ? conditions.map(([condition, matched]) => `<span>${escapeHtml(WATCHLIST_SCAN_LABELS[condition] || condition)}：${matched ? "是" : "否"}</span>`).join("")
+          : `<span>无条件结果</span>`}
+      </div>
+      <div class="scan-metric-evidence" aria-label="当时指标">
+        ${metrics.length
+          ? metrics.map(([key, value]) => `<span><small>${escapeHtml(WATCHLIST_SCAN_METRIC_LABELS[key] || key)}</small><strong> ${escapeHtml(formatNumber(value))}</strong></span>`).join("")
+          : `<span><small>当时指标</small><strong>--</strong></span>`}
+      </div>
+      <footer>
+        <small>${matchedConditions.length ? `命中 ${escapeHtml(matchedConditions.length)} 项` : "未命中条件"}</small>
+        <button type="button" class="mini-button" data-scan-current-symbol="${escapeHtml(item.symbol)}">查看当前分析</button>
+      </footer>
+    </article>`;
 }
 
 function scanMissingHtml(item) {
   return `
-    <div class="scan-result is-missing">
+    <article class="scan-result is-missing">
       <span><strong>${escapeHtml(item.symbol || "--")}</strong><small>数据缺失</small></span>
       <span><small>${escapeHtml(item.reason || "日K数据不可用")}</small></span>
-    </div>`;
+    </article>`;
 }
 
 function scanIsCurrent(state, sequence, options) {
   return state.watchlistScanSeq === sequence && (!options.isCurrent || options.isCurrent());
 }
 
-function renderScanLoading(universe) {
+function renderScanLoading(payload) {
   const target = $("watchlistScanResults");
   if (!target) return;
   setScanBusy(target, true);
-  target.innerHTML = `<div class="scan-state"><strong>正在扫描${universe === "symbols" ? "自定义代码" : "当前观察池"}</strong></div>`;
+  const scope = payload.universe === "symbols" ? "自定义代码" : "当前观察池";
+  const stage = payload.as_of ? "正在读取历史日K并计算条件" : "正在读取完整日K并计算条件";
+  target.innerHTML = `<div class="scan-state loading"><strong>${escapeHtml(stage)}</strong><span>阶段 1/2 · 准备${escapeHtml(scope)}证据快照</span></div>`;
 }
 
 function renderScanUnavailable(error) {
@@ -227,6 +263,12 @@ function scanElement(root, id) {
 function setScanBusy(target, busy) {
   if (typeof target.setAttribute === "function") target.setAttribute("aria-busy", String(Boolean(busy)));
   else target.ariaBusy = String(Boolean(busy));
+}
+
+function setScanFormBusy(form, busy) {
+  if (!form) return;
+  if (typeof form.setAttribute === "function") form.setAttribute("aria-busy", String(Boolean(busy)));
+  else form.ariaBusy = String(Boolean(busy));
 }
 
 function setScanFeedback(message, tone = "") {

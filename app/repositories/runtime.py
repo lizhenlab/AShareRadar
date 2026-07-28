@@ -92,6 +92,22 @@ class RuntimeEventRepository(SQLiteRepository):
             ).fetchall()
         return [row_to_task_run(row) for row in rows]
 
+    def task_runs_for_name(self, task_name: str, limit: int = 20) -> list[TaskRun]:
+        normalized_name = str(task_name).strip()
+        if not normalized_name or limit <= 0:
+            return []
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM task_run
+                WHERE task_name = ?
+                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(started_at) DESC, id DESC
+                LIMIT ?
+                """,
+                (normalized_name, limit),
+            ).fetchall()
+        return [row_to_task_run(row) for row in rows]
+
     def save_monitor_event(self, level: str, category: str, message: str, symbol: str | None = None) -> None:
         timestamp = now_text()
         normalized_symbol = standard_symbol(symbol) if symbol else None

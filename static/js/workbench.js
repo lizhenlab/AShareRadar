@@ -331,6 +331,8 @@ export function renderMinuteAnalysis(report) {
   const el = $("minuteAnalysis");
   if (!el || !report) return;
   const view = minuteAnalysisView(report);
+  if (el.dataset) el.dataset.availability = view.availability;
+  el.setAttribute?.("aria-busy", "false");
   el.innerHTML = view.isUnavailable ? renderMinuteUnavailable(view) : renderMinuteDetails(view);
 }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -125,18 +126,41 @@ class AdviceHistoryRepository(SQLiteRepository):
         super().__init__(path, lock)
         self.settings = settings
 
-    def save_snapshot(self, analysis: AnalysisResult) -> AdviceHistoryItem:
-        return self.save_snapshot_with_status(analysis).item
+    def save_snapshot(
+        self,
+        analysis: AnalysisResult,
+        *,
+        snapshot_market_time: str | None = None,
+    ) -> AdviceHistoryItem:
+        return self.save_snapshot_with_status(
+            analysis,
+            snapshot_market_time=snapshot_market_time,
+        ).item
 
-    def save_snapshot_with_status(self, analysis: AnalysisResult) -> AdviceSnapshotSaveResult:
+    def save_snapshot_with_status(
+        self,
+        analysis: AnalysisResult,
+        *,
+        snapshot_market_time: str | None = None,
+    ) -> AdviceSnapshotSaveResult:
         quote = analysis.quote
         symbol = standard_symbol(f"{quote.market}{quote.code}")
         created_at = now_text()
-        params = _advice_snapshot_params(symbol, analysis, created_at)
+        params = _advice_snapshot_params(
+            symbol,
+            analysis,
+            created_at,
+            snapshot_market_time=snapshot_market_time,
+        )
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             latest = _latest_advice_snapshot(conn, symbol)
-            if latest and self._is_same_snapshot(latest, params, self.settings.advice_history_dedupe_seconds):
+            if latest and self._is_same_snapshot(
+                latest,
+                params,
+                self.settings.advice_history_dedupe_seconds,
+                require_same_provenance=snapshot_market_time is not None,
+            ):
                 row_id = int(latest["id"])
                 _update_advice_snapshot(conn, row_id, params)
                 return AdviceSnapshotSaveResult(
@@ -190,15 +214,65 @@ class AdviceHistoryRepository(SQLiteRepository):
             ).fetchall()
         return [row_to_advice_timeline(row) for row in rows]
 
+    def latest_timeline_items(self, symbols: Iterable[str]) -> dict[str, AdviceTimelineItem]:
+        normalized: list[str] = []
+        for symbol in symbols:
+            try:
+                item = standard_symbol(symbol)
+            except (TypeError, ValueError):
+                continue
+            if item not in normalized:
+                normalized.append(item)
+        if not normalized:
+            return {}
+        latest: dict[str, AdviceTimelineItem] = {}
+        with self._lock, self._connect() as conn:
+            for offset in range(0, len(normalized), 400):
+                chunk = normalized[offset : offset + 400]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM (
+                        SELECT
+                            advice_history.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY symbol
+                                ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(
+                                    COALESCE(updated_at, created_at)
+                                ) DESC, id DESC
+                            ) AS latest_rank
+                        FROM advice_history
+                        WHERE symbol IN ({placeholders})
+                    )
+                    WHERE latest_rank = 1
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    item = row_to_advice_timeline(row)
+                    latest[item.symbol] = item
+        return latest
+
     @staticmethod
-    def _is_same_snapshot(row: sqlite3.Row, params: dict[str, Any], dedupe_seconds: int) -> bool:
+    def _is_same_snapshot(
+        row: sqlite3.Row,
+        params: dict[str, Any],
+        dedupe_seconds: int,
+        *,
+        require_same_provenance: bool,
+    ) -> bool:
         if dedupe_seconds <= 0:
             return False
         last_time = _snapshot_time(row)
         return bool(
             last_time
             and _within_dedupe_window(last_time, dedupe_seconds)
-            and _same_snapshot_values(row, params)
+            and _same_snapshot_values(
+                row,
+                params,
+                require_same_provenance=require_same_provenance,
+            )
         )
 
 
@@ -214,10 +288,28 @@ def _within_dedupe_window(last_time: datetime, dedupe_seconds: int) -> bool:
     return 0 <= elapsed <= dedupe_seconds
 
 
-def _same_snapshot_values(row: sqlite3.Row, params: dict[str, Any]) -> bool:
+def _same_snapshot_values(
+    row: sqlite3.Row,
+    params: dict[str, Any],
+    *,
+    require_same_provenance: bool,
+) -> bool:
     previous_identity = conclusion_identity(row_to_advice_timeline(row))
     current_identity = conclusion_identity(params)
-    return previous_identity is not None and previous_identity == current_identity
+    return bool(
+        previous_identity is not None and previous_identity == current_identity and (not require_same_provenance or _same_kline_provenance(row, params))
+    )
+
+
+def _same_kline_provenance(row: sqlite3.Row, params: dict[str, Any]) -> bool:
+    fields = (
+        "kline_adjustment_mode",
+        "kline_anchor_date",
+        "kline_anchor_close",
+        "kline_data_version",
+        "kline_contract_version",
+    )
+    return all(row[field] == params[field] for field in fields)
 
 
 def _is_comparable_conclusion_change(
@@ -233,8 +325,17 @@ def _is_comparable_conclusion_change(
     return comparison.comparison_status == "comparable" and comparison.has_changes
 
 
-def _advice_snapshot_params(symbol: str, analysis: AnalysisResult, created_at: str) -> dict[str, Any]:
+def _advice_snapshot_params(
+    symbol: str,
+    analysis: AnalysisResult,
+    created_at: str,
+    *,
+    snapshot_market_time: str | None = None,
+) -> dict[str, Any]:
     quote = analysis.quote
+    market_time = normalize_market_datetime(snapshot_market_time or quote.timestamp)
+    if market_time is None:
+        raise ValueError("建议快照缺少有效 market_time")
     return {
         "symbol": symbol,
         "code": quote.code,
@@ -260,14 +361,18 @@ def _advice_snapshot_params(symbol: str, analysis: AnalysisResult, created_at: s
         "conclusion_basis": CONCLUSION_BASIS,
         "rule_version": RULE_VERSION,
         "model_version": MODEL_VERSION,
-        "market_time": quote.timestamp,
+        "market_time": market_time,
         "data_quality_source": analysis.data_quality.source,
-        **_advice_kline_provenance(analysis),
+        **_advice_kline_provenance(analysis, market_time=market_time),
     }
 
 
-def _advice_kline_provenance(analysis: AnalysisResult) -> dict[str, object | None]:
-    market_time = normalize_market_datetime(analysis.quote.timestamp)
+def _advice_kline_provenance(
+    analysis: AnalysisResult,
+    *,
+    market_time: str | None = None,
+) -> dict[str, object | None]:
+    market_time = normalize_market_datetime(market_time or analysis.quote.timestamp)
     cutoff = _completed_kline_cutoff(market_time)
     candidates = []
     for row in analysis.klines:

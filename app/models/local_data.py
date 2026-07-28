@@ -25,6 +25,8 @@ CORE_USER_DATA_TABLES = (
 OPTIONAL_RESEARCH_USER_DATA_TABLES = (
     "advice_review_plan",
     "advice_review_result",
+    "discovery_preset",
+    "discovery_research_queue_source",
 )
 USER_DATA_TABLE_ALLOWLIST = frozenset((*CORE_USER_DATA_TABLES, *OPTIONAL_RESEARCH_USER_DATA_TABLES))
 LocalDataImportMode = Literal["merge", "replace"]

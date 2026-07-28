@@ -492,9 +492,11 @@ def test_build_local_tasks_uses_explicit_specs_min_intervals_and_offsets() -> No
         "refresh_plate_rank",
         "check_data_health",
         "evaluate_alerts",
+        "refresh_research_queue",
+        "evaluate_due_reviews",
     ]
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30]
-    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30, 300, 300]
+    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20, 24, 28]
 
 
 def test_scheduler_loop_lets_market_scanner_use_its_shanghai_clock() -> None:
@@ -604,6 +606,28 @@ def test_market_scan_task_status_reports_standby_schedule(
     assert scan.next_run_at == "2026-07-17 15:15:00"
 
 
+def test_market_scan_task_status_prefers_persisted_automatic_retry_due_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = _SchedulerHub()
+    hub.settings.scheduler_enabled = True
+    hub.settings.market_scan_auto_enabled = True
+    scanner = _StatusMarketScanner(
+        next_automatic_run_at=datetime(2026, 7, 17, 17, 10),
+    )
+    scheduler = LocalDataScheduler(hub, market_scanner=scanner)  # type: ignore[arg-type]
+    scheduler.enabled = True
+    scheduler._runner = SimpleNamespace(done=lambda: False)  # type: ignore[assignment]  # noqa: SLF001
+    monkeypatch.setattr(
+        "app.services.scheduler_execution.market_now_naive",
+        lambda: datetime(2026, 7, 17, 17, 0),
+    )
+
+    scan = scheduler.status().tasks[-1]
+
+    assert scan.next_run_at == "2026-07-17 17:10:00"
+
+
 def test_build_local_tasks_clamps_invalid_interval_settings() -> None:
     now = datetime(2026, 5, 13, 9, 30, 0)
     settings = SimpleNamespace(
@@ -615,7 +639,7 @@ def test_build_local_tasks_clamps_invalid_interval_settings() -> None:
 
     tasks = _build_local_tasks(settings, now, _handlers())
 
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 45, 30]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 45, 30, 300, 300]
 
 
 def test_run_once_and_status_use_task_spec_order() -> None:
@@ -1372,6 +1396,8 @@ def _handlers():
         "refresh_plate_rank": _handler,
         "check_data_health": _handler,
         "evaluate_alerts": _handler,
+        "refresh_research_queue": _handler,
+        "evaluate_due_reviews": _handler,
     }
 
 
@@ -1431,11 +1457,15 @@ class _ScheduledTickScanner:
 
 
 class _StatusMarketScanner:
-    def __init__(self, latest=None) -> None:
+    def __init__(self, latest=None, next_automatic_run_at: datetime | None = None) -> None:
         self.latest = latest
+        self.automatic_due_at = next_automatic_run_at
 
     def latest_run(self):
         return self.latest
+
+    def next_automatic_run_at(self) -> datetime | None:
+        return self.automatic_due_at
 
 
 class _SelectionSchedulerCache(_SchedulerCache):

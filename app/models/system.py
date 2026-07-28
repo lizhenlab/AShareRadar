@@ -87,6 +87,8 @@ class DataStatus(BaseModel):
     capabilities: list[ProviderCapability] = Field(default_factory=list)
     capability_statuses: list[ProviderCapabilityStatus] = Field(default_factory=list)
     source_plan: DataSourcePlan | None = None
+    llm_explanation_available: bool = False
+    minute_analysis_available: bool = False
 
 
 class FutuStatusResponse(BaseModel):

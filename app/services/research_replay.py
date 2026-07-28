@@ -501,7 +501,7 @@ REPLAY_PATTERN_NOTE_RULES = (
 )
 
 
-ADVICE_REVIEW_RULE_VERSION = "advice-review-v2"
+ADVICE_REVIEW_RULE_VERSION = "advice-review-v4"
 
 
 @dataclass(frozen=True)
@@ -596,6 +596,8 @@ def _advice_review_evaluation_draft(
         status=status,
         conclusion=conclusion,
         rule_version=ADVICE_REVIEW_RULE_VERSION,
+        trigger_basis=plan.trigger_basis,
+        invalidation_basis=plan.invalidation_basis,
         snapshot_adjustment_mode=plan.snapshot_adjustment_mode,
         snapshot_anchor_date=plan.snapshot_anchor_date,
         snapshot_anchor_close=plan.snapshot_anchor_close,

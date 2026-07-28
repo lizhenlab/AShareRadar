@@ -5,6 +5,7 @@ import math
 import sqlite3
 
 from app.models.market_scan import (
+    MARKET_SCAN_RANK_TIE_BREAK,
     MarketScanResultItem,
     MarketScanRun,
     MarketScanSort,
@@ -13,6 +14,7 @@ from app.models.market_scan import (
 
 
 DEGRADATION_DISPLAY_TAGS = frozenset({"兜底行情", "兜底K线", "上市日期未知"})
+MARKET_SCAN_RESULT_PAYLOAD_SCHEMA = "market-scan-result-payload-v2"
 
 
 def run_from_row(row: sqlite3.Row) -> MarketScanRun:
@@ -53,6 +55,7 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
 
 
 def result_from_row(row: sqlite3.Row) -> MarketScanResultItem:
+    metrics, score_details = decode_result_payload(row["metrics_json"])
     return MarketScanResultItem(
         run_id=row["run_id"],
         symbol=row["symbol"],
@@ -76,7 +79,8 @@ def result_from_row(row: sqlite3.Row) -> MarketScanResultItem:
         volume_ratio=row["volume_ratio"],
         amount=row["amount"],
         tags=_display_tags(row),
-        metrics=_json_float_dict(row["metrics_json"]),
+        metrics=metrics,
+        score_details=score_details,
         reason=row["reason"],
         error=row["error"],
         data_date=row["data_date"],
@@ -116,7 +120,11 @@ def result_order_sql(sort: MarketScanSort, order: MarketScanSortOrder) -> str:
     primary = f"{sort} IS NULL ASC, {sort} {direction}"
     if sort == "rank":
         return f"{primary}, symbol ASC"
-    return f"{primary}, score DESC, trend_score DESC, change_pct DESC, amount DESC, symbol ASC"
+    return f"{primary}, {rank_order_sql()}"
+
+
+def rank_order_sql() -> str:
+    return ", ".join(f"{column} {direction.upper()}" for column, direction in MARKET_SCAN_RANK_TIE_BREAK)
 
 
 def percentage(numerator: int, denominator: int) -> float:
@@ -157,15 +165,42 @@ def _json_string_list(value: object) -> list[str]:
     return [str(item) for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
 
 
-def _json_float_dict(value: object) -> dict[str, float]:
+def encode_result_payload(
+    metrics: dict[str, float],
+    score_details: dict[str, object],
+) -> str:
+    return json.dumps(
+        {
+            "_schema": MARKET_SCAN_RESULT_PAYLOAD_SCHEMA,
+            "metrics": metrics,
+            "score_details": score_details,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def decode_result_payload(value: object) -> tuple[dict[str, float], dict[str, object]]:
     try:
         parsed = json.loads(str(value or "{}"))
     except (TypeError, ValueError):
-        return {}
+        return {}, {}
     if not isinstance(parsed, dict):
+        return {}, {}
+    if parsed.get("_schema") == MARKET_SCAN_RESULT_PAYLOAD_SCHEMA:
+        metrics = _finite_float_dict(parsed.get("metrics"))
+        score_details = parsed.get("score_details")
+        return metrics, score_details if isinstance(score_details, dict) else {}
+    return _finite_float_dict(parsed), {}
+
+
+def _finite_float_dict(value: object) -> dict[str, float]:
+    if not isinstance(value, dict):
         return {}
     result: dict[str, float] = {}
-    for key, item in parsed.items():
+    for key, item in value.items():
         if isinstance(key, str) and isinstance(item, (int, float)) and math.isfinite(float(item)):
             result[key] = float(item)
     return result
@@ -173,10 +208,14 @@ def _json_float_dict(value: object) -> dict[str, float]:
 
 __all__ = [
     "DEGRADATION_DISPLAY_TAGS",
+    "MARKET_SCAN_RESULT_PAYLOAD_SCHEMA",
     "append_exact_filter",
+    "decode_result_payload",
+    "encode_result_payload",
     "escaped_like",
     "page_count",
     "result_from_row",
     "result_order_sql",
+    "rank_order_sql",
     "run_from_row",
 ]

@@ -66,20 +66,32 @@ export function marketScanResultsUrl(runId, page, elements) {
   return buildMarketScanResultsUrl(runId, page, elements);
 }
 
-export function marketScanResultRow(item) {
+export function marketScanResultRow(item, options = {}) {
   const view = marketScanResultView(item);
+  const discovery = discoveryResultActions(view, options);
   return `<tr>
-    <td>${escapeHtml(view.rank)}</td>
-    <td><button type="button" class="market-scan-stock" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}"><strong>${escapeHtml(view.name)}</strong><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span></button></td>
-    <td><span class="market-scan-meta">${escapeHtml(view.marketIndustry)}</span></td>
-    <td><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
-    <td>${escapeHtml(scoreText(view.trendScore))}</td>
-    <td class="${escapeHtml(changeClass(view.changePct))}">${escapeHtml(signedPercentage(view.changePct))}</td>
-    <td>${escapeHtml(percentage(view.turnoverRate))}</td>
-    <td>${escapeHtml(formatAmount(view.amount))}</td>
-    <td>${escapeHtml(scoreText(view.qualityScore))}</td>
-    <td><span class="market-scan-status ${escapeHtml(view.status)}">${escapeHtml(marketScanResultStatusLabel(view.status))}</span><div class="market-scan-tags">${escapeHtml(view.detail)}</div></td>
+    <td data-label="排名">${escapeHtml(view.rank)}</td>
+    <td data-label="股票"><button type="button" class="market-scan-stock" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}"><strong>${escapeHtml(view.name)}</strong><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span></button></td>
+    <td data-label="市场 / 行业"><span class="market-scan-meta">${escapeHtml(view.marketIndustry)}</span></td>
+    <td data-label="综合"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
+    <td data-label="趋势">${escapeHtml(scoreText(view.trendScore))}</td>
+    <td data-label="涨跌幅" class="${escapeHtml(changeClass(view.changePct))}">${escapeHtml(signedPercentage(view.changePct))}</td>
+    <td data-label="换手率">${escapeHtml(percentage(view.turnoverRate))}</td>
+    <td data-label="成交额">${escapeHtml(formatAmount(view.amount))}</td>
+    <td data-label="质量">${escapeHtml(scoreText(view.qualityScore))}</td>
+    <td data-label="状态 / 标签"><span class="market-scan-status ${escapeHtml(view.status)}">${escapeHtml(marketScanResultStatusLabel(view.status))}</span><div class="market-scan-tags">${escapeHtml(view.detail)}</div>${discovery}</td>
   </tr>`;
+}
+
+function discoveryResultActions(view, options) {
+  if (!options.discovery) return "";
+  const rankLabel = String(options.rankLabel || "暂无相邻排名");
+  const movement = String(options.rankMovement || "unavailable");
+  const queued = Boolean(options.queued);
+  return `<div class="discovery-row-actions">
+    <span class="discovery-rank-change ${escapeHtml(movement)}">${escapeHtml(rankLabel)}</span>
+    <button type="button" class="mini-button" data-discovery-enqueue-symbol="${escapeHtml(view.dataSymbol)}"${queued ? " disabled" : ""}>${queued ? "已在研究队列" : "加入研究队列"}</button>
+  </div>`;
 }
 
 export function marketScanRunStatusLabel(status) {
@@ -255,6 +267,26 @@ function renderRunControls(context, run) {
   setAttribute(elements.progressBar, "aria-busy", context.actionBusy || active ? "true" : "false");
   setActionHidden(context, elements.cancel, !active);
   setActionHidden(context, elements.retry, !isRetryableMarketScanRun(run));
+  renderGlobalProgress(context, run);
+}
+
+function renderGlobalProgress(context, run) {
+  const { elements } = context;
+  const active = isActiveMarketScanRun(run);
+  elements.globalProgress.hidden = !active;
+  setAttribute(elements.globalProgress, "aria-busy", active ? "true" : "false");
+  elements.globalOpen.disabled = false;
+  elements.globalCancel.disabled = context.actionBusy || run?.status === "cancelling";
+  if (!active) {
+    elements.globalBar.value = 0;
+    setText(elements.globalText, "等待任务状态");
+    return;
+  }
+  const progress = clampPercentage(run.progress_pct);
+  const progressText = `${integer(run.processed_count)}/${integer(run.total_count)} · ${formatNumber(progress, 1)}%`;
+  elements.globalBar.value = progress;
+  setAttribute(elements.globalBar, "aria-valuetext", `${marketScanRunStatusLabel(run.status)}，${progressText}`);
+  setText(elements.globalText, `${marketScanRunStatusLabel(run.status)} · ${progressText}`);
 }
 
 function setResultsBusy(elements, busy) {
@@ -387,6 +419,11 @@ function marketScanElements(root) {
     pageText: requiredElement(root, "marketScanPageText"),
     prev: requiredElement(root, "marketScanPrev"),
     next: requiredElement(root, "marketScanNext"),
+    globalProgress: requiredElement(root, "marketScanGlobalProgress"),
+    globalText: requiredElement(root, "marketScanGlobalText"),
+    globalBar: requiredElement(root, "marketScanGlobalBar"),
+    globalOpen: requiredElement(root, "marketScanGlobalOpen"),
+    globalCancel: requiredElement(root, "marketScanGlobalCancel"),
   };
 }
 

@@ -7,7 +7,11 @@ import sqlite3
 import sys
 from urllib.parse import urlsplit, urlunsplit
 
-from app.models.market_scan import MarketScanRun, MarketScanRunStatus
+from app.models.market_scan import (
+    MarketScanPublicationSummary,
+    MarketScanRun,
+    MarketScanRunStatus,
+)
 from app.services.datahub_runtime import run_cache_io
 from app.utils.provider_errors import sanitize_provider_error
 
@@ -29,6 +33,13 @@ TERMINAL_WRITE_RETRY_BASE_SECONDS = 0.05
 TERMINAL_WRITE_RETRY_MAX_SECONDS = 0.2
 MARKET_SCAN_BULK_QUOTE_MIN_SYMBOLS = 10
 MARKET_SCAN_BULK_QUOTE_MIN_COVERAGE_RATIO = 0.8
+MARKET_SCAN_PUBLISH_MIN_COVERAGE = {
+    "ALL": 0.95,
+    "SH": 0.95,
+    "SZ": 0.95,
+    "BJ": 0.95,
+}
+MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS = 15 * 60
 _RETRYABLE_SQLITE_PRIMARY_CODES = {
     sqlite3.SQLITE_BUSY,
     sqlite3.SQLITE_LOCKED,
@@ -54,13 +65,24 @@ class MarketScanFinalizer:
         *,
         degraded_count: int,
         warnings: tuple[str, ...],
+        publication_summary: MarketScanPublicationSummary | None = None,
     ) -> bool:
-        status, message = completion_status(run, degraded_count)
+        status, message = completion_status(
+            run,
+            degraded_count,
+            publication_summary=publication_summary,
+        )
         return await self.finish(
             run.id,
             status,
             message=message,
-            error=terminal_diagnostic(run, status, degraded_count, warnings),
+            error=terminal_diagnostic(
+                run,
+                status,
+                degraded_count,
+                warnings,
+                publication_summary=publication_summary,
+            ),
         )
 
     async def finish_cancelled(self, run_id: int) -> bool:
@@ -119,7 +141,15 @@ class MarketScanFinalizer:
         return False
 
 
-def completion_status(run: MarketScanRun, degraded_count: int = 0) -> tuple[MarketScanRunStatus, str]:
+def completion_status(
+    run: MarketScanRun,
+    degraded_count: int = 0,
+    *,
+    publication_summary: MarketScanPublicationSummary | None = None,
+) -> tuple[MarketScanRunStatus, str]:
+    blockers = publication_blockers(publication_summary) if publication_summary is not None else ()
+    if blockers:
+        return "failed", "全市场扫描未达到发布可信度：" + "；".join(blockers)
     if run.success_count == 0:
         return "failed", f"全市场扫描没有生成有效排名；缺失 {run.missing_count}，跳过 {run.skipped_count}"
     stale_stock_pool = run.stock_pool_source == "stale-fallback"
@@ -141,8 +171,12 @@ def terminal_diagnostic(
     status: MarketScanRunStatus,
     degraded_count: int,
     warnings: tuple[str, ...],
+    *,
+    publication_summary: MarketScanPublicationSummary | None = None,
 ) -> str | None:
     details = list(warnings[:3])
+    if publication_summary is not None:
+        details.extend(publication_blockers(publication_summary))
     if run.stock_pool_source == "stale-fallback":
         details.append("股票池使用本地缓存（stale-fallback）")
     if degraded_count:
@@ -152,6 +186,39 @@ def terminal_diagnostic(
     if status == "failed" and not details:
         details.append("没有生成有效排名")
     return "；".join(dict.fromkeys(details))[:800] or None
+
+
+def publication_blockers(summary: MarketScanPublicationSummary) -> tuple[str, ...]:
+    blockers: list[str] = []
+    cluster = summary.systemic_stale_cluster
+    if cluster is not None:
+        markets = "/".join(cluster.markets) or "unknown"
+        blockers.append(
+            "系统性同日滞后："
+            f"{cluster.data_date} 有 {cluster.count}/{cluster.total_count} 只，涉及 {markets}"
+        )
+    if summary.invalid_snapshot_timestamps:
+        examples = "、".join(summary.invalid_snapshot_timestamps[:3])
+        blockers.append(
+            f"报价时间不可解析：{len(summary.invalid_snapshot_timestamps)} 个（{examples}）"
+        )
+    span = summary.snapshot_span_seconds
+    if span is not None and span > MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS:
+        blockers.append(
+            f"报价快照跨度 {span:g} 秒超过 {MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS:g} 秒门槛"
+        )
+    for scope in ("ALL", "SH", "SZ", "BJ"):
+        coverage = summary.coverage_for(scope)  # type: ignore[arg-type]
+        threshold = MARKET_SCAN_PUBLISH_MIN_COVERAGE[scope]
+        if coverage is not None and coverage.coverage_ratio >= threshold:
+            continue
+        total = coverage.total_count if coverage is not None else 0
+        success = coverage.success_count if coverage is not None else 0
+        ratio = coverage.coverage_ratio if coverage is not None else 0.0
+        blockers.append(
+            f"{scope} 发布覆盖不足：{success}/{total}（{ratio:.2%}，门槛 {threshold:.2%}）"
+        )
+    return tuple(blockers)
 
 
 def short_scan_error(exc: Exception, *, sensitive_values: Iterable[object] = ()) -> str:
@@ -250,11 +317,14 @@ def _strip_url_parameters(match: re.Match[str]) -> str:
 
 
 __all__ = [
+    "MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS",
+    "MARKET_SCAN_PUBLISH_MIN_COVERAGE",
     "MarketScanFinalizer",
     "bulk_quote_coverage_error",
     "completion_status",
     "is_retryable_sqlite_error",
     "quote_batch_error",
+    "publication_blockers",
     "report_terminal_persistence_failure",
     "sanitize_terminal_error",
     "sensitive_setting_values",

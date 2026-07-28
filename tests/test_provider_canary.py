@@ -184,6 +184,11 @@ async def _sleep_then_quote(symbol: str, delay: float = 1.0) -> object:
     return _quote(symbol)
 
 
+async def _sleep_then_stock_pool(delay: float = 0.03) -> list[SimpleNamespace]:
+    await asyncio.sleep(delay)
+    return _stock_pool()
+
+
 def test_default_and_overridden_symbols_cover_all_three_markets() -> None:
     assert resolve_market_symbols(DEFAULT_SYMBOLS) == DEFAULT_SYMBOLS
     assert resolve_market_symbols(
@@ -381,6 +386,29 @@ def test_per_request_timeout_is_bounded_and_partial_failure(tmp_path: Path) -> N
     assert summary["success_count"] == 2
 
 
+def test_stock_pool_uses_its_dedicated_timeout(tmp_path: Path) -> None:
+    datahub = FakeDataHub(
+        {},
+        stock_pool_behavior=lambda: _sleep_then_stock_pool(),
+    )
+
+    summary = asyncio.run(
+        run_canary(
+            _settings(tmp_path),
+            symbols=DEFAULT_SYMBOLS,
+            request_timeout=0.01,
+            stock_pool_timeout=0.1,
+            overall_timeout=0.2,
+            datahub_factory=lambda _settings: datahub,
+        )
+    )
+
+    assert summary["exit_code"] == EXIT_SUCCESS
+    assert summary["request_timeout_seconds"] == 0.01
+    assert summary["stock_pool_timeout_seconds"] == 0.1
+    assert summary["stock_pool"]["status"] == "success"
+
+
 def test_overall_timeout_cancels_and_drains_all_pending_markets(tmp_path: Path) -> None:
     datahub = FakeDataHub(
         {
@@ -559,6 +587,8 @@ def test_cli_overrides_emit_one_machine_readable_json_document(tmp_path: Path, c
             symbols["BJ"],
             "--request-timeout",
             "0.2",
+            "--stock-pool-timeout",
+            "0.3",
             "--overall-timeout",
             "0.5",
         ],
@@ -570,6 +600,7 @@ def test_cli_overrides_emit_one_machine_readable_json_document(tmp_path: Path, c
     payload = json.loads(captured.out)
     assert captured.err == ""
     assert exit_code == EXIT_SUCCESS
+    assert payload["stock_pool_timeout_seconds"] == 0.3
     assert {market: payload["markets"][market]["symbol"] for market in MARKETS} == symbols
     assert runtime_cache_paths[0] != configured_cache_path
     assert not runtime_cache_paths[0].exists()

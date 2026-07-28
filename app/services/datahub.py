@@ -39,6 +39,7 @@ from app.services.datahub_quotes import QuoteCoordinator
 from app.services.datahub_runtime import PROVIDER_SHUTDOWN_TIMEOUT_SECONDS, ProviderRuntime
 from app.services.workbench_context import WorkbenchContextCache
 from app.services.datahub_status_service import DataStatusService
+from app.services.llm_explainer import llm_available as llm_settings_available
 from app.services.provider_registry import (
     all_provider_names,
     build_providers,
@@ -100,6 +101,7 @@ def _build_coordinators(datahub: DataHub, runtime: ProviderRuntime) -> DataHubCo
             provider_names=lambda: datahub._all_provider_names(),
             provider_index=lambda name: datahub._provider_index(name),
             source_plan_builder=source_plan,
+            llm_available=lambda: llm_settings_available(datahub.settings),
         ),
         order_book=OrderBookCoordinator(
             providers=datahub.providers,

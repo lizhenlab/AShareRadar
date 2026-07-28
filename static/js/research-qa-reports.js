@@ -23,10 +23,14 @@ export function renderAiDashboard(workbench, state, options = {}) {
   const el = $("aiDashboard");
   if (!el || !workbench) return;
   const view = aiDashboardView(workbench);
+  const capability = questionAnswerCapability(
+    view.questionAnswer,
+    state?.responseCapabilities?.llmExplanationAvailable
+  );
   el.innerHTML = `
     <div class="ai-dashboard-head">
       <div>
-        <span>AI单股驾驶舱</span>
+        <span id="aiQuestionCapability" data-capability="${escapeHtml(capability)}" data-capability-source="${view.questionAnswer ? "answer" : "status"}">${escapeHtml(capability)}</span>
         <strong>${escapeHtml(view.qa.summary || "围绕当前个股生成可执行问诊。")}</strong>
       </div>
       <i>${escapeHtml(view.risk.overall_level || "风险待确认")}</i>
@@ -113,6 +117,7 @@ async function handleAiQuestionSubmit(event, state, requestContext) {
     setAiQuestionBusy(form, button, true);
     const answer = await requestAiQuestion(request, question);
     if (!isCurrentAiQuestionRequest(request, state, requestContext)) return;
+    syncAiQuestionCapability(answer);
     replaceAiAnswer(form, renderQuestionAnswerCard(answer, { announce: true }));
   } catch (error) {
     if (isAbortError(error)) return;
@@ -261,6 +266,35 @@ function renderQuestionAnswerCard(report, { announce = false } = {}) {
 
 function questionAnswerSource(report) {
   return report.answer_source || (report.llm_used ? "大模型解释增强" : "规则问诊");
+}
+
+function questionAnswerCapability(report, available = null) {
+  if (!report || typeof report !== "object") {
+    return available === true ? "AI增强问诊" : available === false ? "规则问诊" : "个股问诊";
+  }
+  return report.llm_used === true ? "AI增强问诊" : "规则问诊";
+}
+
+function syncAiQuestionCapability(report) {
+  const target = $("aiQuestionCapability");
+  if (!target) return;
+  const capability = questionAnswerCapability(report);
+  target.textContent = capability;
+  if (target.dataset) {
+    target.dataset.capability = capability;
+    target.dataset.capabilitySource = "answer";
+  }
+}
+
+export function syncAiQuestionCapabilityFromAvailability(available) {
+  const target = $("aiQuestionCapability");
+  if (!target || target.dataset?.capabilitySource === "answer" || typeof available !== "boolean") return;
+  const capability = questionAnswerCapability(null, available);
+  target.textContent = capability;
+  if (target.dataset) {
+    target.dataset.capability = capability;
+    target.dataset.capabilitySource = "status";
+  }
 }
 
 function questionAnswerTone(report) {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 import json
 import math
 import sqlite3
@@ -14,13 +15,16 @@ from app.db.advice_review_schema import (
 )
 from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.reviews import (
+    AdviceEvidenceRef,
     AdviceReviewDetail,
     AdviceReviewEvaluation,
     AdviceReviewEvaluationDraft,
     AdviceReviewPlan,
     AdviceReviewPlanInput,
     AdviceReviewPlanUpdate,
+    AdviceReviewSummary,
     AdviceSnapshotRef,
+    structured_advice_evidence_refs,
 )
 from app.repositories.base import SQLiteRepository
 from app.utils.audit_time import audit_now_text as now_text
@@ -43,6 +47,8 @@ _PLAN_SELECT_COLUMNS = """
     hypothesis,
     trigger_condition,
     invalidation_condition,
+    trigger_basis,
+    invalidation_basis,
     target_price,
     stop_price,
     horizon_days,
@@ -64,6 +70,8 @@ _RESULT_SELECT_COLUMNS = """
     status,
     conclusion,
     rule_version,
+    trigger_basis,
+    invalidation_basis,
     snapshot_adjustment_mode,
     snapshot_anchor_date,
     snapshot_anchor_close,
@@ -144,6 +152,8 @@ _RESULT_INSERT_FIELDS = (
     "status",
     "conclusion",
     "rule_version",
+    "trigger_basis",
+    "invalidation_basis",
     "snapshot_adjustment_mode",
     "snapshot_anchor_date",
     "snapshot_anchor_close",
@@ -190,6 +200,8 @@ _PLAN_INSERT_SQL = """
         hypothesis,
         trigger_condition,
         invalidation_condition,
+        trigger_basis,
+        invalidation_basis,
         target_price,
         stop_price,
         horizon_days,
@@ -210,6 +222,8 @@ _PLAN_INSERT_SQL = """
         :hypothesis,
         :trigger_condition,
         :invalidation_condition,
+        :trigger_basis,
+        :invalidation_basis,
         :target_price,
         :stop_price,
         :horizon_days,
@@ -218,6 +232,47 @@ _PLAN_INSERT_SQL = """
         :created_at,
         :updated_at
     )
+"""
+
+_EVALUATION_CANDIDATE_PLAN_SQL = f"""
+    SELECT {_PLAN_SELECT_COLUMNS}
+    FROM advice_review_plan
+    WHERE id IN (
+        WITH ranked_results AS (
+            SELECT
+                result.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY result.plan_id, result.plan_revision
+                    ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(result.evaluated_at) DESC,
+                             result.id DESC
+                ) AS result_rank
+            FROM advice_review_result result
+        )
+        SELECT plan.id
+        FROM advice_review_plan plan
+        LEFT JOIN ranked_results result
+          ON result.plan_id = plan.id
+         AND result.plan_revision = plan.revision
+         AND result.result_rank = 1
+        WHERE (result.id IS NULL OR result.status != 'evaluated')
+          AND date(
+                plan.snapshot_market_time,
+                '+' || plan.horizon_days || ' days'
+              ) <= date(?)
+        ORDER BY date(
+                     plan.snapshot_market_time,
+                     '+' || plan.horizon_days || ' days'
+                 ) ASC,
+                 plan.snapshot_market_time ASC,
+                 plan.id ASC
+        LIMIT ?
+    )
+    ORDER BY date(
+                 snapshot_market_time,
+                 '+' || horizon_days || ' days'
+             ) ASC,
+             snapshot_market_time ASC,
+             id ASC
 """
 
 
@@ -287,14 +342,22 @@ class AdviceReviewRepository(SQLiteRepository):
             ).fetchall()
             plans = [_plan_from_row(row) for row in plan_rows]
             result_rows = _latest_result_rows(conn, plans)
-        results = {(int(row["plan_id"]), int(row["plan_revision"])): _evaluation_from_row(row) for row in result_rows}
-        return [
-            AdviceReviewDetail(
-                plan=plan,
-                latest_evaluation=results.get((plan.id, plan.revision)),
-            )
-            for plan in plans
-        ]
+        return _review_details(plans, result_rows)
+
+    def evaluation_candidates(
+        self,
+        *,
+        as_of_date: str,
+        limit: int,
+    ) -> list[AdviceReviewDetail]:
+        if limit <= 0:
+            return []
+        cutoff = _strict_iso_date(as_of_date)
+        with self._lock, self._connect() as conn:
+            plan_rows = conn.execute(_EVALUATION_CANDIDATE_PLAN_SQL, (cutoff, limit)).fetchall()
+            plans = [_plan_from_row(row) for row in plan_rows]
+            result_rows = _latest_result_rows(conn, plans)
+        return _review_details(plans, result_rows)
 
     def update_plan(self, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan | None:
         requested = {field for field in payload.model_fields_set if field in _PLAN_MUTABLE_FIELDS}
@@ -392,6 +455,47 @@ class AdviceReviewRepository(SQLiteRepository):
             raise RuntimeError("建议复盘结果保存失败")
         return _evaluation_from_row(row)
 
+    def summary(self) -> AdviceReviewSummary:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                WITH ranked_results AS (
+                    SELECT
+                        result.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY result.plan_id, result.plan_revision
+                            ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(result.evaluated_at) DESC, result.id DESC
+                        ) AS result_rank
+                    FROM advice_review_result result
+                    JOIN advice_review_plan plan
+                      ON plan.id = result.plan_id
+                     AND plan.revision = result.plan_revision
+                )
+                SELECT
+                    plan.id AS plan_id,
+                    result.id AS result_id,
+                    result.status,
+                    result.conclusion,
+                    result.return_pct,
+                    result.max_favorable_excursion_pct,
+                    result.max_adverse_excursion_pct,
+                    result.target_hit,
+                    result.stop_hit,
+                    result.snapshot_adjustment_mode,
+                    result.snapshot_anchor_date,
+                    result.snapshot_anchor_close,
+                    result.snapshot_data_version,
+                    result.snapshot_contract_version
+                FROM advice_review_plan plan
+                LEFT JOIN ranked_results result
+                  ON result.plan_id = plan.id
+                 AND result.plan_revision = plan.revision
+                 AND result.result_rank = 1
+                ORDER BY plan.id ASC
+                """
+            ).fetchall()
+        return _review_summary_from_rows(rows)
+
 
 def _validate_snapshot_binding(
     snapshot: AdviceSnapshotRef,
@@ -408,6 +512,10 @@ def _validate_snapshot_binding(
         contract_version=snapshot.contract_version,
     ):
         raise ValueError("advice snapshot 缺少可复现的 qfq 价格基准，不能建立复盘计划")
+    if snapshot.advice_contract_version in _INVALID_PROVENANCE_VERSIONS:
+        raise ValueError("advice snapshot 合同版本无效，不能建立复盘计划")
+    if snapshot.rule_version in _INVALID_PROVENANCE_VERSIONS:
+        raise ValueError("advice snapshot 规则版本无效，不能建立复盘计划")
     _validate_plan_prices(payload.target_price, snapshot.price, payload.stop_price)
 
 
@@ -416,6 +524,10 @@ def _plan_insert_params(
     payload: AdviceReviewPlanInput,
     timestamp: str,
 ) -> dict[str, object]:
+    evidence_refs = _merged_evidence_refs(
+        structured_advice_evidence_refs(snapshot),
+        payload.evidence_refs,
+    )
     return {
         "advice_id": snapshot.advice_id,
         "symbol": snapshot.symbol,
@@ -429,10 +541,12 @@ def _plan_insert_params(
         "hypothesis": payload.hypothesis,
         "trigger_condition": payload.trigger_condition,
         "invalidation_condition": payload.invalidation_condition,
+        "trigger_basis": payload.trigger_basis,
+        "invalidation_basis": payload.invalidation_basis,
         "target_price": float(payload.target_price),
         "stop_price": float(payload.stop_price),
         "horizon_days": payload.horizon_days,
-        "evidence_refs_json": _evidence_refs_json(payload.evidence_refs),
+        "evidence_refs_json": _evidence_refs_json(evidence_refs),
         "created_at": timestamp,
         "updated_at": timestamp,
     }
@@ -449,9 +563,24 @@ def _insert_plan(conn: sqlite3.Connection, params: dict[str, object]) -> sqlite3
 
 
 def _required_advice_snapshot(conn: sqlite3.Connection, advice_id: int) -> AdviceSnapshotRef:
+    row = _required_advice_snapshot_row(conn, advice_id)
+    market_time = normalize_market_datetime(row["market_time"])
+    if market_time is None:
+        raise ValueError("advice snapshot 缺少有效 market_time，不能建立无前视复盘")
+    return _advice_snapshot_from_row(
+        row,
+        symbol=_snapshot_symbol(row["symbol"]),
+        market_time=market_time,
+        price=_positive_finite_float(row["price"], "advice snapshot 价格无效"),
+    )
+
+
+def _required_advice_snapshot_row(conn: sqlite3.Connection, advice_id: int) -> sqlite3.Row:
     row = conn.execute(
         """
         SELECT id, symbol, market_time, price,
+               action, trend_score, risk_level, support, resistance, data_quality_score,
+               snapshot_contract_version, rule_version,
                kline_adjustment_mode, kline_anchor_date, kline_anchor_close,
                kline_data_version, kline_contract_version
         FROM advice_history
@@ -461,25 +590,51 @@ def _required_advice_snapshot(conn: sqlite3.Connection, advice_id: int) -> Advic
     ).fetchone()
     if row is None:
         raise NotFoundError("advice snapshot 不存在")
-    market_time = normalize_market_datetime(row["market_time"])
-    if market_time is None:
-        raise ValueError("advice snapshot 缺少有效 market_time，不能建立无前视复盘")
+    return row
+
+
+def _snapshot_symbol(value: object) -> str:
     try:
-        symbol = standard_symbol(row["symbol"])
+        return standard_symbol(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("advice snapshot 的 symbol 无效") from exc
-    price = _positive_finite_float(row["price"], "advice snapshot 价格无效")
+
+
+def _advice_snapshot_from_row(
+    row: sqlite3.Row,
+    *,
+    symbol: str,
+    market_time: str,
+    price: float,
+) -> AdviceSnapshotRef:
     return AdviceSnapshotRef(
         advice_id=int(row["id"]),
         symbol=symbol,
         market_time=market_time,
         price=price,
-        adjustment_mode=str(row["kline_adjustment_mode"] or "unknown"),
+        adjustment_mode=_snapshot_text(row["kline_adjustment_mode"], "unknown"),
         anchor_date=row["kline_anchor_date"],
         anchor_close=_optional_float(row["kline_anchor_close"]),
-        data_version=str(row["kline_data_version"] or "unknown"),
-        contract_version=str(row["kline_contract_version"] or "unknown"),
+        data_version=_snapshot_text(row["kline_data_version"], "unknown"),
+        contract_version=_snapshot_text(row["kline_contract_version"], "unknown"),
+        advice_contract_version=_snapshot_text(row["snapshot_contract_version"], "legacy"),
+        rule_version=_snapshot_text(row["rule_version"], "unknown"),
+        action=_snapshot_optional_text(row["action"]),
+        trend_score=_optional_int(row["trend_score"]),
+        risk_level=_snapshot_optional_text(row["risk_level"]),
+        support=_optional_float(row["support"]),
+        resistance=_optional_float(row["resistance"]),
+        data_quality_score=_optional_int(row["data_quality_score"]),
     )
+
+
+def _snapshot_text(value: object, fallback: str) -> str:
+    return str(value or fallback)
+
+
+def _snapshot_optional_text(value: object) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
 
 
 def _plan_row(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row | None:
@@ -537,6 +692,20 @@ def _latest_result_rows(
     return [row for row in rows if (int(row["plan_id"]), int(row["plan_revision"])) in current_revisions]
 
 
+def _review_details(
+    plans: list[AdviceReviewPlan],
+    result_rows: list[sqlite3.Row],
+) -> list[AdviceReviewDetail]:
+    results = {(int(row["plan_id"]), int(row["plan_revision"])): _evaluation_from_row(row) for row in result_rows}
+    return [
+        AdviceReviewDetail(
+            plan=plan,
+            latest_evaluation=results.get((plan.id, plan.revision)),
+        )
+        for plan in plans
+    ]
+
+
 def _plan_from_row(row: sqlite3.Row) -> AdviceReviewPlan:
     return AdviceReviewPlan(
         id=int(row["id"]),
@@ -552,6 +721,8 @@ def _plan_from_row(row: sqlite3.Row) -> AdviceReviewPlan:
         hypothesis=str(row["hypothesis"]),
         trigger_condition=str(row["trigger_condition"]),
         invalidation_condition=str(row["invalidation_condition"]),
+        trigger_basis=str(row["trigger_basis"]),
+        invalidation_basis=str(row["invalidation_basis"]),
         target_price=float(row["target_price"]),
         stop_price=float(row["stop_price"]),
         horizon_days=int(row["horizon_days"]),
@@ -587,6 +758,8 @@ def _evaluation_from_row(row: sqlite3.Row) -> AdviceReviewEvaluation:
         status=result_values.status,
         conclusion=result_values.conclusion,
         rule_version=str(row["rule_version"]),
+        trigger_basis=str(row["trigger_basis"]),
+        invalidation_basis=str(row["invalidation_basis"]),
         snapshot_adjustment_mode=snapshot_adjustment_mode,
         snapshot_anchor_date=snapshot_anchor_date,
         snapshot_anchor_close=snapshot_anchor_close,
@@ -742,6 +915,8 @@ def _validate_evaluation_binding(plan: AdviceReviewPlan, evaluation: AdviceRevie
         plan.snapshot_anchor_close,
         plan.snapshot_data_version,
         plan.snapshot_contract_version,
+        plan.trigger_basis,
+        plan.invalidation_basis,
         plan.target_price,
         plan.stop_price,
         plan.horizon_days,
@@ -756,6 +931,8 @@ def _validate_evaluation_binding(plan: AdviceReviewPlan, evaluation: AdviceRevie
         evaluation.snapshot_anchor_close,
         evaluation.snapshot_data_version,
         evaluation.snapshot_contract_version,
+        evaluation.trigger_basis,
+        evaluation.invalidation_basis,
         evaluation.target_price,
         evaluation.stop_price,
         evaluation.horizon_days,
@@ -794,6 +971,17 @@ def _positive_finite_float(value: object, message: str) -> float:
     return parsed
 
 
+def _strict_iso_date(value: object) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("as_of_date 必须是 YYYY-MM-DD") from exc
+    if parsed.isoformat() != text:
+        raise ValueError("as_of_date 必须是 YYYY-MM-DD")
+    return text
+
+
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
@@ -801,18 +989,108 @@ def _optional_float(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed
+
+
 def _evidence_refs_json(values: object) -> str:
-    return json.dumps(list(values), ensure_ascii=False, separators=(",", ":"))
+    serialized = [item.model_dump(mode="json") if isinstance(item, AdviceEvidenceRef) else item for item in list(values)]
+    return json.dumps(serialized, ensure_ascii=False, separators=(",", ":"))
 
 
-def _evidence_refs_from_json(value: object) -> list[str]:
+def _merged_evidence_refs(
+    automatic: list[AdviceEvidenceRef],
+    custom: list[AdviceEvidenceRef | str],
+) -> list[AdviceEvidenceRef | str]:
+    merged: list[AdviceEvidenceRef | str] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*automatic, *custom]:
+        key = ("structured", item.id) if isinstance(item, AdviceEvidenceRef) else ("text", item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _evidence_refs_from_json(value: object) -> list[AdviceEvidenceRef | str]:
     try:
         parsed = json.loads(str(value or "[]"))
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
     if not isinstance(parsed, list):
         return []
-    return [str(item) for item in parsed if isinstance(item, str)]
+    refs: list[AdviceEvidenceRef | str] = []
+    for item in parsed:
+        if isinstance(item, str):
+            refs.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        try:
+            refs.append(AdviceEvidenceRef.model_validate(item))
+        except ValueError:
+            continue
+    return refs
+
+
+def _review_summary_from_rows(rows: list[sqlite3.Row]) -> AdviceReviewSummary:
+    conclusion_counts: dict[str, int] = {}
+    pending_count = 0
+    insufficient_count = 0
+    evaluated_count = 0
+    return_values: list[float] = []
+    mfe_values: list[float] = []
+    mae_values: list[float] = []
+    for row in rows:
+        has_result = row["result_id"] is not None
+        verifiable = has_result and _evaluation_snapshot_is_verifiable(row)
+        status = str(row["status"] or "pending") if verifiable else ("insufficient" if has_result else "pending")
+        conclusion = str(row["conclusion"] or "pending") if verifiable else ("insufficient_data" if has_result else "pending")
+        conclusion_counts[conclusion] = conclusion_counts.get(conclusion, 0) + 1
+        pending_count += int(status == "pending")
+        insufficient_count += int(status == "insufficient")
+        evaluated_count += int(status == "evaluated")
+        if status == "evaluated":
+            _append_finite(return_values, row["return_pct"])
+            _append_finite(mfe_values, row["max_favorable_excursion_pct"])
+            _append_finite(mae_values, row["max_adverse_excursion_pct"])
+    favorable_count = sum(conclusion_counts.get(item, 0) for item in ("target_hit", "horizon_gain"))
+    unfavorable_count = sum(conclusion_counts.get(item, 0) for item in ("stop_hit", "horizon_loss"))
+    decided_count = favorable_count + unfavorable_count
+    return AdviceReviewSummary(
+        generated_at=now_text(),
+        total_plan_count=len(rows),
+        pending_count=pending_count,
+        insufficient_count=insufficient_count,
+        evaluated_count=evaluated_count,
+        favorable_count=favorable_count,
+        unfavorable_count=unfavorable_count,
+        ambiguous_count=conclusion_counts.get("target_stop_ambiguous", 0),
+        target_hit_count=conclusion_counts.get("target_hit", 0),
+        stop_hit_count=conclusion_counts.get("stop_hit", 0),
+        favorable_rate_pct=round(favorable_count / decided_count * 100, 2) if decided_count else None,
+        average_return_pct=_average_or_none(return_values),
+        average_mfe_pct=_average_or_none(mfe_values),
+        average_mae_pct=_average_or_none(mae_values),
+        conclusion_counts=dict(sorted(conclusion_counts.items())),
+    )
+
+
+def _append_finite(values: list[float], value: object) -> None:
+    parsed = _optional_float(value)
+    if parsed is not None:
+        values.append(parsed)
+
+
+def _average_or_none(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 4) if values else None
 
 
 __all__ = [

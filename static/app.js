@@ -46,6 +46,7 @@ import {
   runMonitorTask,
 } from "./js/diagnostics.js";
 import { $, escapeHtml, setMetricTone } from "./js/dom.js";
+import { createDiscoveryController } from "./js/discovery.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
 import { createMarketScanController } from "./js/market-scan.js";
@@ -68,6 +69,7 @@ import {
   runRuntimeCleanup,
 } from "./js/local-data.js";
 import { renderResearch } from "./js/research-panels.js";
+import { syncAiQuestionCapabilityFromAvailability } from "./js/research-qa-reports.js";
 import { ACTIVITY_FILTERS, mergeResearchActivity, renderResearchActivity } from "./js/research-activity.js";
 import { createStockSearchController } from "./js/stock-search.js";
 import { normalizeUiSymbol, validateUiSymbol } from "./js/symbols.js";
@@ -139,6 +141,7 @@ const state = {
   loadSeq: 0,
   loadRequest: null,
   pendingLoad: null,
+  failedLoadSymbol: "",
   onlineRecoveryPromise: null,
   watchlist: [],
   researchActivitySymbol: "",
@@ -227,7 +230,7 @@ const WORKBENCH_PANEL_IDS = [
   "watchlistScanResults",
 ];
 
-function setWorkspaceView(view) {
+function setWorkspaceView(view, options = {}) {
   const buttons = Array.from(document.querySelectorAll(".workspace-tabs button[data-view]"));
   const supportedViews = WORKSPACE_PREFERENCE_OPTIONS.workspaceView;
   const requested = supportedViews.includes(view) ? view : DEFAULT_WORKSPACE_PREFERENCES.workspaceView;
@@ -248,9 +251,15 @@ function setWorkspaceView(view) {
     panel.classList.toggle("active", active);
     panel.hidden = !active;
   });
+  document.body.classList.toggle("market-scan-view-active", target === "market-scan");
   persistWorkspacePreferences();
-  if (target === "market-scan" && previousView !== target) void marketScanController.activate();
-  else if (target !== "market-scan" && marketScanController.state.activated) marketScanController.deactivate();
+  if (target === "market-scan" && previousView !== target) {
+    let refresh = Promise.resolve(marketScanController.state.run);
+    if (!marketScanController.state.activated) refresh = marketScanController.activate();
+    else if (options.refreshMarketScan !== false) refresh = marketScanController.loadLatest();
+    void refresh;
+    void discoveryController.activate();
+  }
   if (target === "tools") void loadRuntimeCleanupPreview().catch(() => {});
   const analysis = state.lastAnalysis;
   if (!analysis) return;
@@ -264,6 +273,7 @@ function setStatus(text, kind = "") {
   const el = $("dataStatus");
   el.textContent = text;
   el.className = `status-pill ${kind}`;
+  el.title = text;
 }
 
 function setCoreStatus(phase, text, kind = "") {
@@ -299,12 +309,12 @@ function compositeStatus() {
   const stream = state.sseStatus || {};
   if (core.phase === "loading" || core.phase === "error") return statusValue(core, "数据连接中");
   const degradations = [
-    quality.phase === "degraded" ? quality.text : "",
-    auxiliary.text,
-    ["error", "degraded"].includes(mutation.phase) ? mutation.text : "",
-    ["error", "invalid", "reconnecting"].includes(stream.phase) ? stream.text : "",
+    quality.phase === "degraded" ? { label: "数据质量", text: quality.text } : null,
+    auxiliary.count ? { label: `${auxiliary.count} 项辅助数据`, text: auxiliary.text } : null,
+    ["error", "degraded"].includes(mutation.phase) ? { label: "本地操作", text: mutation.text } : null,
+    ["error", "invalid", "reconnecting"].includes(stream.phase) ? { label: "报价流", text: stream.text } : null,
   ].filter(Boolean);
-  if (degradations.length) return { text: degradations.join("；"), kind: "warn" };
+  if (degradations.length) return aggregateDegradations(degradations, auxiliary.count);
   if (stream.phase === "ready" && stream.hasValidFrame) {
     return statusValue(stream, "核心分析快照已加载；观察报价流已收到有效帧");
   }
@@ -324,8 +334,23 @@ function statusValue(status, fallback) {
 function auxiliaryStatusValue() {
   const failures = Object.values((state.auxiliaryStatus && state.auxiliaryStatus.failures) || {});
   return {
-    text: failures.length ? `部分辅助数据降级：${failures.map((item) => item.text).join("；")}` : "",
+    count: failures.length,
+    text: failures.length ? `${failures.length} 项辅助数据降级，详细信息见诊断区` : "",
     kind: failures.length ? "warn" : "",
+  };
+}
+
+function aggregateDegradations(items, auxiliaryCount) {
+  if (items.length === 1) {
+    const only = items[0];
+    if (auxiliaryCount > 0 && only.label.endsWith("项辅助数据")) {
+      return { text: `${auxiliaryCount} 项辅助数据降级，详细信息见诊断区`, kind: "warn" };
+    }
+    return { text: only.text, kind: "warn" };
+  }
+  return {
+    text: `${items.length} 类状态需关注：${items.map((item) => item.label).join("、")}，详细信息见对应面板`,
+    kind: "warn",
   };
 }
 
@@ -376,7 +401,7 @@ async function loadCurrentWorkbench(request) {
     return await loadWorkbench(request.symbol, request.signal);
   } catch (error) {
     if (isAbortError(error)) return null;
-    if (!isStaleLoad(request)) markLoadFailure(error, request.symbol, request.previousSymbol, request.reveal);
+    if (!isStaleLoad(request)) markLoadFailure(error, request);
     return null;
   }
 }
@@ -443,6 +468,7 @@ function beginLoadRequest(options = {}) {
     signal: loadRequest.signal,
     reveal: Boolean(options.reveal),
   };
+  state.failedLoadSymbol = "";
   state.pendingLoad = request;
   state.coreStatus = { phase: "loading", text: "数据刷新中", kind: "warn" };
   state.dataQualityStatus = { phase: "unknown", text: "", kind: "" };
@@ -482,6 +508,19 @@ function syncSymbolInputs(symbol) {
   if (watchSymbolInput) watchSymbolInput.value = code;
 }
 
+function syncToolsStockContext(analysis = state.lastAnalysis) {
+  const quote = plainObject(analysis && analysis.quote);
+  const code = String(quote.code || "").trim();
+  const market = String(quote.market || "").trim().toUpperCase();
+  const name = String(quote.name || "").trim();
+  const context = $("toolsStockContext");
+  const nameTarget = $("toolsStockName");
+  const codeTarget = $("toolsStockCode");
+  if (nameTarget) nameTarget.textContent = name || "等待分析";
+  if (codeTarget) codeTarget.textContent = market || code ? `${market}${code}` : "--";
+  if (context) context.dataset.symbol = code && market ? `${code}.${market}` : "";
+}
+
 function loadWorkbench(symbol, signal) {
   return fetchJson(`/api/stock/workbench?symbol=${encodeURIComponent(symbol)}`, {
     signal,
@@ -500,6 +539,7 @@ function renderWorkbench(workbench) {
   renderAlerts(workbench.alert_rules || []);
   renderAlertEvents(workbench.alert_events || []);
   renderNotes(workbench.notes || []);
+  syncToolsStockContext(analysis);
   state.lastAnalysis = analysis;
   state.lastInsights = workbench.insights;
   drawKline(analysis.klines, analysis.ma5, analysis.ma20);
@@ -564,6 +604,7 @@ function resetWorkbenchState() {
   state.adviceReviewDetails = [];
   state.adviceReviewSnapshots = [];
   state.adviceReviewEditingPlanId = null;
+  syncToolsStockContext(null);
   resetResearchActivityState();
   clearKlineCanvas();
   clearMinuteKlineCanvas();
@@ -733,6 +774,7 @@ async function refreshDataStatus(options = {}) {
   const pending = loadDataStatus(state, {
     force: Boolean(options.force),
     ttlMs: GLOBAL_REFRESH_TTL_MS,
+    onStatus: (_status, capabilities) => syncResponseCapabilities(capabilities),
   });
   const requestId = state.dataStatusSeq;
   const loaded = await pending;
@@ -749,6 +791,20 @@ async function refreshDataStatus(options = {}) {
   markCompanionFailure(new Error("数据源状态读取失败"), "data-status", "数据源状态暂不可用");
   state.visibilityRefreshSources.add("data-status");
   return false;
+}
+
+function syncResponseCapabilities(capabilities = {}) {
+  syncAiQuestionCapabilityFromAvailability(capabilities.llmExplanationAvailable);
+  const target = $("minuteAnalysis");
+  if (!target || typeof capabilities.minuteAnalysisAvailable !== "boolean") return;
+  const available = capabilities.minuteAnalysisAvailable;
+  target.dataset.capability = available ? "available" : "unavailable";
+  if (available) return;
+  target.dataset.availability = "unavailable";
+  setElementAttribute(target, "aria-busy", "false");
+  target.textContent = "分钟分析能力未启用；当前数据源未提供分钟线能力，主分析和日线策略仍可使用。";
+  clearMinuteKlineCanvas();
+  setMinuteChartStatus(`${minuteIntervalLabel(state.minuteChartInterval)} · 能力未启用`, "unavailable");
 }
 
 async function refreshMonitoring(options = {}) {
@@ -890,12 +946,34 @@ function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
-function markLoadFailure(error, requestedSymbol = state.symbol, previousSymbol = "", reveal = false) {
+function markLoadFailure(error, request = {}) {
   const message = compactErrorMessage(error.message);
-  const requested = normalizeUiSymbol(requestedSymbol);
-  const displayed = previousSymbol || displayedAnalysisSymbol();
+  const requested = normalizeUiSymbol(request.symbol || state.symbol);
+  const displayed = request.previousSymbol || displayedAnalysisSymbol();
   stopStream();
   state.pendingLoad = null;
+  state.failedLoadSymbol = requested;
+  if (request.previousAnalysis && displayed) {
+    const previousQuote = plainObject(request.previousAnalysis.quote);
+    const previousName = previousQuote.name || displayed;
+    state.symbol = normalizeUiSymbol(displayed);
+    state.lastAnalysis = request.previousAnalysis;
+    state.coreStatus = request.previousCoreStatus || { phase: "ready", text: "核心数据已加载", kind: "" };
+    state.dataQualityStatus = request.previousDataQualityStatus || { phase: "unknown", text: "", kind: "" };
+    state.mutationStatus = {
+      phase: "error",
+      text: `${requested} 加载失败，仍显示${previousName}`,
+      kind: "warn",
+    };
+    syncSymbolInputs(state.symbol);
+    document.body.classList.remove("is-stale");
+    renderCompositeStatus();
+    const sourceLine = $("sourceLine");
+    if (sourceLine) sourceLine.textContent = `本次请求 ${requested} 失败：${message}；当前仍显示 ${previousName}（${displayed}）。`;
+    reconcileStreamSubscription({ context: currentLoadContext() });
+    if (request.reveal) revealMobileFeedback($("dataStatus"));
+    return;
+  }
   renderWorkbenchFailure(requested, message);
   document.body.classList.add("is-stale");
   state.dataQualityStatus = { phase: "unknown", text: "", kind: "" };
@@ -906,7 +984,7 @@ function markLoadFailure(error, requestedSymbol = state.symbol, previousSymbol =
       ? `本次请求 ${requested} 失败：${message}；已隔离 ${displayed} 的上次成功数据。`
       : `本次请求 ${requested} 失败：${message}`;
   }
-  if (reveal) revealMobileFeedback($("stockCode"));
+  if (request.reveal) revealMobileFeedback($("stockCode"));
 }
 
 function markRenderFailure(error, requestedSymbol = state.symbol, reveal = false) {
@@ -979,6 +1057,8 @@ async function loadMinuteAnalysis(request = currentLoadContext(), interval = sta
   const minuteRequest = beginMinuteAnalysisRequest(request, requestedInterval);
   state.lastMinuteReport = null;
   state.lastMinuteSymbol = "";
+  setElementAttribute(el, "aria-busy", "true");
+  el.dataset.availability = "loading";
   el.innerHTML = loadingState("分钟分析加载中", `正在读取${minuteIntervalLabel(requestedInterval)}K线，不影响主分析。`);
   clearMinuteKlineCanvas();
   setMinuteChartStatus(`${minuteIntervalLabel(requestedInterval)} · 加载中`, "loading");
@@ -992,6 +1072,7 @@ async function loadMinuteAnalysis(request = currentLoadContext(), interval = sta
     validateMinuteReport(report, requestedSymbol, requestedInterval);
     state.lastMinuteReport = report;
     state.lastMinuteSymbol = normalizeUiSymbol(requestedSymbol);
+    el.dataset.availability = minuteAvailabilityState(report).status;
     renderMinuteAnalysis(report);
     drawMinuteKline(report);
     clearAuxiliaryFailure("minute-analysis");
@@ -1001,6 +1082,7 @@ async function loadMinuteAnalysis(request = currentLoadContext(), interval = sta
     state.lastMinuteReport = null;
     state.lastMinuteSymbol = "";
     clearMinuteKlineCanvas();
+    el.dataset.availability = "unavailable";
     setMinuteChartStatus(`${minuteIntervalLabel(requestedInterval)} · 不可用`, "unavailable");
     el.innerHTML = `<div class="minute-empty"><strong>分钟分析暂不可用</strong><span>${escapeHtml(compactErrorMessage(error.message))}</span><span>当前不按分钟区间做T，主分析和日线策略仍可参考。</span></div>`;
     markCompanionFailure(error, "minute-analysis", "分钟分析暂不可用");
@@ -1008,7 +1090,10 @@ async function loadMinuteAnalysis(request = currentLoadContext(), interval = sta
   } finally {
     minuteRequest.scope.dispose();
     if (state.minuteRequest === minuteRequest.scope) state.minuteRequest = null;
-    if (!isStaleMinuteRequest(minuteRequest)) setElementAttribute($("minuteChartPane"), "aria-busy", "false");
+    if (!isStaleMinuteRequest(minuteRequest)) {
+      setElementAttribute($("minuteChartPane"), "aria-busy", "false");
+      setElementAttribute(el, "aria-busy", "false");
+    }
   }
 }
 
@@ -1054,6 +1139,7 @@ async function loadChartMarks(request = currentLoadContext()) {
     state.chartMarks = summary.marks || [];
     syncMarkCategories(summary.categories || []);
     renderMarkFilters();
+    clearChartMarksFeedback();
     if (state.lastAnalysis) {
       drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, state.lastAnalysis.ma20);
     }
@@ -1061,6 +1147,7 @@ async function loadChartMarks(request = currentLoadContext()) {
   } catch (error) {
     if (isAbortError(error)) return;
     if (isStaleContext(request)) return;
+    setChartMarksFeedback(error);
     markCompanionFailure(error, "chart-marks", "图表标注暂不可用");
   }
 }
@@ -1178,6 +1265,14 @@ function setInlineFeedback(id, error) {
   feedback.hidden = false;
 }
 
+function clearInlineFeedback(id) {
+  const feedback = $(id);
+  if (!feedback) return;
+  feedback.textContent = "";
+  feedback.dataset.tone = "";
+  feedback.hidden = true;
+}
+
 function setLocalDataRefreshWarning() {
   const feedback = $("localDataFeedback");
   if (!feedback) return;
@@ -1221,6 +1316,20 @@ function renderMarkFilters() {
         })
         .join("")
     : `<span>暂无图表标注</span>`;
+}
+
+function setChartMarksFeedback(error) {
+  const feedback = $("chartMarksFeedback");
+  if (!feedback) return;
+  feedback.textContent = `图表标注暂不可用：${compactErrorMessage(error.message)}`;
+  feedback.hidden = false;
+}
+
+function clearChartMarksFeedback() {
+  const feedback = $("chartMarksFeedback");
+  if (!feedback) return;
+  feedback.textContent = "";
+  feedback.hidden = true;
 }
 
 async function runButtonTask(button, task, options = {}) {
@@ -1268,12 +1377,14 @@ async function runSubmitTask(form, busyText, task) {
   if (button && button.disabled) return;
   const previousText = button ? button.textContent : "";
   try {
+    setElementAttribute(form, "aria-busy", "true");
     if (button) {
       button.disabled = true;
       button.textContent = busyText;
     }
     await task();
   } finally {
+    setElementAttribute(form, "aria-busy", "false");
     if (button) {
       button.disabled = false;
       button.textContent = previousText;
@@ -1860,10 +1971,21 @@ function restoreWorkspacePreferences() {
     setDailyChartOverlay("ma20", preferences.dailyChartMa20);
     void selectMinuteChartInterval(preferences.minuteChartInterval);
     setMobileChartView(preferences.mobileChartView);
+    if (preferences.workspaceView !== DEFAULT_WORKSPACE_PREFERENCES.workspaceView) {
+      scrollWorkspaceTabIntoView(preferences.workspaceView);
+    }
   } finally {
     restoringWorkspacePreferences = false;
   }
   return currentWorkspacePreferences();
+}
+
+function scrollWorkspaceTabIntoView(view) {
+  const tab = Array.from(document.querySelectorAll(".workspace-tabs button[data-view]"))
+    .find((button) => button.dataset.view === view);
+  if (!tab || typeof tab.scrollIntoView !== "function") return false;
+  requestAnimationFrame(() => tab.scrollIntoView({ block: "nearest", inline: "nearest" }));
+  return true;
 }
 
 function syncChartControls() {
@@ -2146,6 +2268,11 @@ const watchStockSearch = createStockSearchBinding({
 });
 
 const marketScanController = createMarketScanController({
+  onOpen() {
+    setWorkspaceView("market-scan", { refreshMarketScan: false });
+    const panel = $("workspace-panel-market-scan");
+    if (panel && typeof panel.focus === "function") requestAnimationFrame(() => panel.focus());
+  },
   onSelectStock(symbol) {
     clearSymbolError();
     setActiveSymbol(symbol);
@@ -2156,6 +2283,11 @@ const marketScanController = createMarketScanController({
       requestAnimationFrame(() => workbench.focus());
     }
   },
+});
+
+const discoveryController = createDiscoveryController({
+  getRun: () => marketScanController.state.run,
+  loadStandardResults: () => marketScanController.loadResults(),
 });
 
 $("searchForm").addEventListener("submit", (event) => {
@@ -2306,6 +2438,7 @@ initializeWatchlistScanControls();
 
 $("watchlistScanForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  clearInlineFeedback("watchlistScanFeedback");
   try {
     await runSubmitTask(event.currentTarget, "扫描中", () => runWatchlistScan(state));
   } catch (error) {
@@ -2317,11 +2450,23 @@ $("watchlistScanForm").addEventListener("submit", async (event) => {
 });
 
 $("watchlistScanResults").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-scan-symbol]");
+  const button = event.target.closest("button[data-scan-current-symbol]");
   if (!button) return;
-  setActiveSymbol(button.dataset.scanSymbol);
+  setActiveSymbol(button.dataset.scanCurrentSymbol);
   setWorkspaceView("overview");
-  loadAll({ reveal: true });
+  void loadAll({ reveal: true });
+  const workbench = $("stockWorkbench");
+  if (workbench && typeof workbench.focus === "function") {
+    requestAnimationFrame(() => workbench.focus());
+  }
+});
+
+$("toolsStockOpen").addEventListener("click", () => {
+  setWorkspaceView("overview");
+  const workbench = $("stockWorkbench");
+  if (workbench && typeof workbench.focus === "function") {
+    requestAnimationFrame(() => workbench.focus());
+  }
 });
 
 $("chartWorkspace").addEventListener("click", (event) => {
@@ -2487,13 +2632,16 @@ $("alertForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const options = currentWorkbenchMutationOptions();
   if (!options) return;
+  clearInlineFeedback("alertFormFeedback");
   try {
     await runSubmitTask(event.currentTarget, "添加中", () => addAlertRule(state, options));
+    setMutationStatus("idle");
     renderResearchActivityPanel();
   } catch (error) {
     if (!isAbortError(error) && options.isCurrent()) {
-      $("alertList").innerHTML = `<div class="alert-row"><strong>添加失败</strong><span>${escapeHtml(error.message)}</span></div>`;
-      revealMobileFeedback($("alertList"));
+      setInlineFeedback("alertFormFeedback", error);
+      setMutationStatus("error", "提醒写入失败，原列表和草稿已保留", "warn");
+      revealMobileFeedback($("alertForm"));
     }
   }
 });
@@ -2623,13 +2771,16 @@ $("noteForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const options = currentWorkbenchMutationOptions();
   if (!options) return;
+  clearInlineFeedback("noteFormFeedback");
   try {
     await runSubmitTask(event.currentTarget, "保存中", () => addStockNote(state, loadChartMarks, options));
+    setMutationStatus("idle");
     renderResearchActivityPanel();
   } catch (error) {
     if (!isAbortError(error) && options.isCurrent()) {
-      $("noteList").innerHTML = `<div class="note-row"><strong>保存失败</strong><span>${escapeHtml(error.message)}</span></div>`;
-      revealMobileFeedback($("noteList"));
+      setInlineFeedback("noteFormFeedback", error);
+      setMutationStatus("error", "笔记写入失败，原列表和草稿已保留", "warn");
+      revealMobileFeedback($("noteForm"));
     }
   }
 });
@@ -2731,6 +2882,7 @@ function workbenchNeedsOnlineRecovery() {
   const failures = state.auxiliaryStatus?.failures || {};
   return Boolean(
     state.pendingLoad
+    || state.failedLoadSymbol
     || phase === "loading"
     || phase === "error"
     || state.visibilityRefreshSources.size
@@ -2740,10 +2892,11 @@ function workbenchNeedsOnlineRecovery() {
 
 function handleWorkbenchOnline() {
   if (document.hidden || state.onlineRecoveryPromise || !workbenchNeedsOnlineRecovery()) return false;
-  const recoverCore = Boolean(state.pendingLoad)
+  const recoverCore = Boolean(state.pendingLoad || state.failedLoadSymbol)
     || ["loading", "error"].includes(state.coreStatus?.phase)
     || Object.keys(state.auxiliaryStatus?.failures || {}).length > 0;
   if (state.pendingLoad) invalidateActiveLoad();
+  if (state.failedLoadSymbol) setActiveSymbol(state.failedLoadSymbol);
   const task = recoverCore
     ? loadAll({ forceGlobal: true, waitForGlobal: true })
     : Promise.allSettled(Object.values(refreshGlobalPanels({ force: true })));
@@ -2833,6 +2986,7 @@ export const __appTest = {
   DAILY_CHART_RANGES,
   MINUTE_CHART_INTERVALS,
   marketScanController,
+  discoveryController,
 };
 
 if (!globalThis.__ASHARE_RADAR_DISABLE_AUTOLOAD__) {

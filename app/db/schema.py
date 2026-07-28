@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from app.db.advice_review_schema import ADVICE_REVIEW_SCHEMA_SQL, apply_advice_review_compat_schema
+from app.db.discovery_schema import apply_discovery_schema
 from app.db.schema_definitions import SCHEMA_SQL
 from app.db.schema_migrations import (
     COMPAT_COLUMNS,
@@ -20,6 +21,7 @@ def initialize_schema(
     legacy_audit_timezone: str = "Asia/Shanghai",
 ) -> None:
     conn.executescript(SCHEMA_SQL)
+    apply_discovery_schema(conn)
     apply_compat_schema(conn, legacy_audit_timezone=legacy_audit_timezone)
     conn.executescript(ADVICE_REVIEW_SCHEMA_SQL)
     apply_advice_review_compat_schema(

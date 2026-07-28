@@ -287,7 +287,11 @@ test("full-market scan runs in background and renders a bounded responsive snaps
 
   const versionedResources = await page.evaluate(() => performance.getEntriesByType("resource")
     .map((entry) => entry.name)
-    .filter((url) => url.includes("20260719-frontend-correctness-2")));
+    .filter((url) => {
+      const parsed = new URL(url);
+      return parsed.pathname.startsWith("/static/") && parsed.searchParams.has("v");
+    }));
+  expect(new Set(versionedResources.map((url) => new URL(url).searchParams.get("v"))).size).toBe(1);
   expect(versionedResources.some((url) => url.includes("/static/app.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/css/market-scan.css?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan.js?v="))).toBe(true);
@@ -309,8 +313,20 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await expect(page.locator("#marketScanCancel")).toBeVisible();
   await expect(page.locator("#marketScanResultState")).toContainText("稳定榜单");
 
+  await page.locator("#workspace-tab-overview").click();
+  const globalProgress = page.locator("#marketScanGlobalProgress");
+  await expect(globalProgress).toBeVisible();
+  await expect(globalProgress).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#marketScanGlobalText")).toContainText("扫描中");
+  await expect(page.locator("#marketScanGlobalText")).toContainText("20/103");
+  await expect(page.locator("#marketScanGlobalCancel")).toBeVisible();
+  await page.locator("#marketScanGlobalOpen").click();
+  await expect(page.locator("#workspace-panel-market-scan")).toBeVisible();
+
   await expect(page.locator("#marketScanProgressText")).toHaveText("103/103 · 100.0%", { timeout: 5000 });
   await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#workspace-panel-market-scan")).toHaveAttribute("aria-busy", "false");
+  await expect(globalProgress).toBeHidden();
   await expect(page.locator("#marketScanHeadline")).toContainText("降级完成");
   await expect(page.locator("#marketScanCoverage")).toHaveText("98.1%");
   await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
@@ -321,10 +337,24 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   expect(resultQueries[0]).toMatchObject({ page: "1", page_size: "100", status: "success", sort: "rank", order: "asc" });
 
   await expect(page.locator("#marketScanTableWrap")).toHaveAttribute("tabindex", "0");
+  const responsiveTable = await page.locator("#marketScanTableWrap").evaluate((element) => {
+    const header = element.querySelector("thead th:nth-child(2)");
+    const stock = element.querySelector("tbody td:nth-child(2)");
+    return {
+      overflow: element.scrollWidth > element.clientWidth + 1,
+      headerPosition: getComputedStyle(header).position,
+      stockPosition: getComputedStyle(stock).position,
+      detailLabels: Array.from(element.querySelectorAll("tbody tr:first-child td")).map((cell) => cell.dataset.label || ""),
+    };
+  });
   if (mobileProject) {
-    await page.locator("#marketScanTableWrap").focus();
-    await page.keyboard.press("ArrowRight");
-    await expect.poll(() => page.locator("#marketScanTableWrap").evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    expect(responsiveTable.overflow).toBe(false);
+    expect(responsiveTable.detailLabels).toEqual([
+      "排名", "股票", "市场 / 行业", "综合", "趋势", "涨跌幅", "换手率", "成交额", "质量", "状态 / 标签",
+    ]);
+  } else {
+    expect(responsiveTable.headerPosition).toBe("sticky");
+    expect(responsiveTable.stockPosition).toBe("sticky");
   }
 
   await page.locator("#marketScanNext").click();
@@ -376,13 +406,13 @@ test("full-market scan runs in background and renders a bounded responsive snaps
       right: rect.right,
       viewport: document.documentElement.clientWidth,
       documentWidth: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
-      tableScrollable: tableWrap.scrollWidth >= tableWrap.clientWidth,
+      tableScrollable: tableWrap.scrollWidth > tableWrap.clientWidth + 1,
     };
   });
   expect(layout.left).toBeGreaterThanOrEqual(-1);
   expect(layout.right).toBeLessThanOrEqual(layout.viewport + 1);
   expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewport);
-  expect(layout.tableScrollable).toBe(true);
+  expect(layout.tableScrollable).toBe(!mobileProject);
 
   await page.locator("#marketScanFilters button[type=reset]").click();
   await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
@@ -393,6 +423,100 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await expect(page.locator("#stockCode")).toHaveText("BJ920066");
   await expect(page.locator("#stockWorkbench")).toBeFocused();
 });
+
+for (const viewport of [
+  { name: "360", width: 360, height: 800 },
+  { name: "390", width: 390, height: 844 },
+  { name: "430", width: 430, height: 860 },
+  { name: "desktop", width: 1440, height: 900 },
+]) {
+  test(`discovery presets, research queue, and adjacent ranks work at ${viewport.name}`, async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium", "viewport matrix runs once in desktop Chromium");
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const discovery = discoveryApiHarness();
+    await mockApi(page, { api: discovery.api });
+    page.on("dialog", (dialog) => dialog.accept());
+
+    await page.goto("/");
+    await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+    await page.locator("#workspace-tab-market-scan").click();
+    await expect(page.locator("#marketScanRows tr")).toHaveCount(100);
+
+    await page.locator("#marketScanMarket").selectOption("SH");
+    await page.locator("#marketScanIndustry").fill("白酒");
+    await page.locator("#marketScanSt").selectOption("false");
+    await page.locator("#marketScanNew").selectOption("false");
+    await page.locator("#marketScanQuality").fill("85");
+    await page.locator("#marketScanStatus").selectOption("missing");
+    await page.locator("#marketScanKeyword").fill("600519");
+    await page.locator("#marketScanSort").selectOption("trend_score");
+    await page.locator("#marketScanOrder").selectOption("desc");
+    await page.locator("#discoveryPresetName").fill(`高质量白酒-${viewport.name}`);
+    await page.locator("#discoveryPresetSave").click();
+
+    await expect(page.locator("#discoveryPresetFeedback")).toContainText("已保存");
+    await expect(page.locator("#discoveryPresetSelect")).toHaveValue("7");
+    expect(discovery.calls.create).toHaveLength(1);
+    expect(discovery.calls.create[0]).toEqual({
+      name: `高质量白酒-${viewport.name}`,
+      criteria: {
+        market: ["SH"],
+        industry: ["白酒"],
+        is_st: false,
+        is_new: false,
+        quality: { min: 85 },
+      },
+      sort: [{ field: "trend", order: "desc" }],
+    });
+
+    await page.locator("#discoveryPresetApply").click();
+    await expect(page.locator("#marketScanRows tr")).toHaveCount(2);
+    await expect(page.locator("#marketScanRows tr").first()).toContainText("上升 1");
+    await expect(page.locator("#marketScanRows tr").nth(1)).toContainText("新进");
+    await expect(page.locator("#discoveryRankSummary")).toContainText("批次 41 → 42");
+    await expect(page.locator("#discoveryRankSummary")).toContainText("规则 leader-v2");
+    expect(discovery.calls.apply.at(-1)).toEqual({ run_id: 42, page: 1, page_size: 100 });
+    expect(discovery.calls.rankChanges).toBe(1);
+
+    const queueButton = page.locator('button[data-discovery-enqueue-symbol="600519.SH"]');
+    await expect(queueButton).toHaveText("加入研究队列");
+    await queueButton.click();
+    await expect(page.locator("#discoveryPresetFeedback")).toContainText("已加入研究队列");
+    expect(discovery.calls.enqueue.at(-1)).toEqual({
+      run_id: 42,
+      expected_preset_revision: 1,
+      symbols: ["600519.SH"],
+    });
+    await expect(queueButton).toBeDisabled();
+
+    await page.locator("#discoveryPresetName").fill(`白酒观察-${viewport.name}`);
+    await page.locator("#discoveryPresetRename").click();
+    await expect(page.locator("#discoveryPresetSelect option:checked")).toHaveText(`白酒观察-${viewport.name}`);
+    expect(discovery.calls.rename.at(-1)).toEqual({
+      name: `白酒观察-${viewport.name}`,
+      expected_revision: 1,
+    });
+
+    await page.locator("#discoveryPresetDelete").click();
+    await expect(page.locator("#discoveryPresetFeedback")).toContainText("已删除");
+    await expect(page.locator("#discoveryPresetSelect")).toHaveValue("");
+    expect(discovery.calls.remove.at(-1)).toEqual({ presetId: 7, revision: 2 });
+
+    const layout = await page.evaluate(() => {
+      const controls = document.querySelector("#discoveryPresetControls").getBoundingClientRect();
+      const viewportWidth = document.documentElement.clientWidth;
+      return {
+        controlsLeft: controls.left,
+        controlsRight: controls.right,
+        documentWidth: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
+        viewportWidth,
+      };
+    });
+    expect(layout.controlsLeft).toBeGreaterThanOrEqual(-1);
+    expect(layout.controlsRight).toBeLessThanOrEqual(layout.viewportWidth + 1);
+    expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
+  });
+}
 
 test("full-market scan cancellation stays unpublished and retry derives a new snapshot", async ({ page }) => {
   let starts = 0;
@@ -1150,6 +1274,245 @@ test("mobile actions show only current results and keep local errors in the quer
   await expect(input).toHaveAttribute("aria-invalid", "false");
 });
 
+test("historical watchlist scans stay read-only until current analysis is explicitly requested", async ({ page }) => {
+  const workbenchSymbols = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/stock/workbench") workbenchSymbols.push(url.searchParams.get("symbol"));
+  });
+  await mockApi(page, {
+    api(url, request) {
+      if (url.pathname === "/api/watchlist/scan" && request.method() === "POST") {
+        return {
+          payload: {
+            universe: ["000001.SZ"],
+            as_of: "2026-07-10 23:59:59",
+            rule_version: "watchlist-scan-v1",
+            conditions: ["close_above_ma20", "volume_surge_5d"],
+            success: [{
+              symbol: "000001.SZ",
+              data_date: "2026-07-10",
+              matched: false,
+              condition_results: { close_above_ma20: true, volume_surge_5d: false },
+              matched_conditions: ["close_above_ma20"],
+              metrics: { close: 12.34, ma20: 12.01, volume_ratio_5d: 1.18 },
+            }],
+            missing: [],
+          },
+        };
+      }
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  await page.locator("#workspace-tab-replay").click();
+  await page.locator("#watchlistScanAsOf").fill("2026-07-10");
+  await page.locator("#watchlistScanForm button[type=submit]").click();
+
+  const evidence = page.locator("#watchlistScanResults .scan-result");
+  await expect(evidence).toHaveCount(1);
+  await expect(evidence).toHaveJSProperty("tagName", "ARTICLE");
+  await expect(page.locator("#watchlistScanResults")).toContainText("只读历史证据");
+  await expect(page.locator("#watchlistScanResults")).toContainText("2026-07-10 23:59:59");
+  await expect(page.locator("#watchlistScanResults")).toContainText("watchlist-scan-v1");
+  await expect(evidence).toContainText("收盘价 12.34");
+  await expect(evidence).toContainText("20日均线 12.01");
+  await expect(evidence).toContainText("5日量比 1.18");
+  await expect(evidence).toContainText("成交量达到5日均量1.5倍：否");
+
+  await evidence.click({ position: { x: 6, y: 6 } });
+  await expect(page.locator("#workspace-panel-replay")).toBeVisible();
+  expect(workbenchSymbols).toEqual(["600519"]);
+
+  await evidence.getByRole("button", { name: "查看当前分析" }).click();
+  await expect(page.locator("#workspace-panel-overview")).toBeVisible();
+  await expect(page.locator("#stockName")).toHaveText("平安银行");
+  expect(workbenchSymbols).toEqual(["600519", "000001.SZ"]);
+});
+
+test("failed alert and note writes retain the rendered rows and drafts", async ({ page }) => {
+  await mockApi(page, {
+    async api(url, request) {
+      if (
+        request.method() === "POST"
+        && ["/api/alerts", "/api/stock/notes"].includes(url.pathname)
+      ) {
+        await delay(120);
+        return { status: 503, payload: { detail: "写入暂不可用，请稍后重试" } };
+      }
+      return null;
+    },
+    workbench(symbol) {
+      return {
+        ...workbenchPayload(symbol),
+        alert_rules: [{
+          id: 7,
+          name: "原有价格提醒",
+          condition_type: "price_above",
+          condition_label: "价格高于",
+          threshold: 120,
+          enabled: true,
+          trigger_count: 0,
+          cooldown_seconds: 300,
+          last_state: "等待",
+        }],
+        notes: [{
+          id: 9,
+          note_type: "观察",
+          content: "原有笔记证据",
+          price: 100,
+          trade_date: "2026-07-14",
+          created_at: "2026-07-14 10:00:00",
+          visible: true,
+        }],
+      };
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  await page.locator("#workspace-tab-tools").click();
+  await expect(page.locator("#alertList")).toContainText("原有价格提醒");
+  await expect(page.locator("#noteList")).toContainText("原有笔记证据");
+
+  await page.locator("#alertThreshold").fill("130.5");
+  await page.locator("#alertForm button[type=submit]").click();
+  await expect(page.locator("#alertForm")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#alertForm button[type=submit]")).toHaveText("添加中");
+  await expect(page.locator("#alertFormFeedback")).toContainText("写入暂不可用");
+  await expect(page.locator("#alertForm")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#alertList")).toContainText("原有价格提醒");
+  await expect(page.locator("#alertThreshold")).toHaveValue("130.5");
+
+  await page.locator("#noteContent").fill("失败后仍需保留的草稿");
+  await page.locator("#noteForm button[type=submit]").click();
+  await expect(page.locator("#noteForm")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#noteForm button[type=submit]")).toHaveText("保存中");
+  await expect(page.locator("#noteFormFeedback")).toContainText("写入暂不可用");
+  await expect(page.locator("#noteForm")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#noteList")).toContainText("原有笔记证据");
+  await expect(page.locator("#noteContent")).toHaveValue("失败后仍需保留的草稿");
+});
+
+test("restored tabs and tools retain the last successful current stock", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("ashare-radar.workspace-preferences", JSON.stringify({
+      version: 1,
+      preferences: {
+        workspaceView: "tools",
+        dailyChartRange: 60,
+        dailyChartMa5: true,
+        dailyChartMa20: true,
+        minuteChartInterval: "5m",
+        mobileChartView: "daily",
+      },
+    }));
+    window.__restoredTabScrolls = [];
+    Element.prototype.scrollIntoView = function scrollIntoView(options) {
+      window.__restoredTabScrolls.push({ id: this.id, options });
+    };
+  });
+  await mockApi(page, {
+    api(url) {
+      if (url.pathname === "/api/stock/workbench" && url.searchParams.get("symbol") === "000001.SZ") {
+        return { status: 503, payload: { detail: "银行分析暂不可用" } };
+      }
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#workspace-panel-tools")).toBeVisible();
+  await expect(page.locator("#workspace-tab-tools")).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => page.evaluate(() => window.__restoredTabScrolls)).toContainEqual({
+    id: "workspace-tab-tools",
+    options: { block: "nearest", inline: "nearest" },
+  });
+  await expect(page.locator("#toolsStockContext")).toContainText("当前股票");
+  await expect(page.locator("#toolsStockContext")).toContainText("贵州茅台");
+  await expect(page.locator("#toolsStockContext")).toContainText("SH600519");
+
+  await page.locator("#symbolInput").fill("000001");
+  await page.locator("#searchForm button").click();
+  await expect(page.locator("#dataStatus")).toContainText("仍显示贵州茅台");
+  await expect(page.locator("#toolsStockContext")).toContainText("贵州茅台");
+  await expect(page.locator("#toolsStockContext")).not.toContainText("平安银行");
+  await expect(page.locator("#symbolInput")).toHaveValue("600519");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+
+  await page.locator("#toolsStockOpen").click();
+  await expect(page.locator("#workspace-panel-overview")).toBeVisible();
+  await expect(page.locator("#stockWorkbench")).toBeFocused();
+});
+
+test("question and minute capability labels follow their response contracts", async ({ page }) => {
+  let questionCount = 0;
+  await mockApi(page, {
+    api(url, request) {
+      if (url.pathname === "/api/data/status") {
+        return {
+          payload: {
+            providers: [], source_plan: {}, cache: {}, capabilities: [], capability_statuses: [],
+            llm_explanation_available: false,
+            minute_analysis_available: true,
+          },
+        };
+      }
+      if (url.pathname === "/api/stock/minute-analysis") {
+        return {
+          payload: {
+            ...minuteAnalysisPayload(url.searchParams.get("interval") || "5m", url.searchParams.get("symbol") || "600519.SH"),
+            availability: "unavailable",
+            availability_reason: "分钟源当前无可验证样本",
+            reason_code: "provider_unavailable",
+            klines: [],
+            sample_count: 0,
+          },
+        };
+      }
+      if (url.pathname === "/api/stock/ask" && request.method() === "POST") {
+        questionCount += 1;
+        const llmUsed = questionCount === 2;
+        return {
+          payload: {
+            symbol: "600519.SH",
+            updated_at: "2026-07-14 10:00:00",
+            question: request.postDataJSON().question,
+            topic: "risk",
+            conclusion: llmUsed ? "AI解释" : "规则结论",
+            answer: llmUsed ? "AI增强回答" : "规则回答",
+            confidence: 70,
+            answer_source: llmUsed ? "本地模型解释增强" : "规则问诊",
+            llm_used: llmUsed,
+            llm_status: llmUsed ? "仅增强解释" : "未配置大模型API",
+            evidence: [], actions: [], invalidations: [], related_questions: [],
+          },
+        };
+      }
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#aiQuestionCapability")).toHaveText("规则问诊");
+  await expect(page.locator("#minuteAnalysis")).toHaveAttribute("data-capability", "available");
+  await expect(page.locator("#minuteAnalysis")).toHaveAttribute("data-availability", "unavailable");
+  await expect(page.locator("#minuteAnalysis")).toContainText("分钟源当前无可验证样本");
+  await page.locator("#workspace-tab-qa").click();
+  const input = page.locator("#aiQuestionInput");
+  await input.fill("风险在哪里？");
+  await page.locator("#aiQuestionForm button[type=submit]").click();
+  await expect(page.locator("#aiQuestionCapability")).toHaveText("规则问诊");
+  await expect(page.locator("#aiDashboard .ai-card-wide")).toContainText("规则回答");
+
+  await input.fill("再解释一次");
+  await page.locator("#aiQuestionForm button[type=submit]").click();
+  await expect(page.locator("#aiQuestionCapability")).toHaveText("AI增强问诊");
+  await expect(page.locator("#aiDashboard .ai-card-wide")).toContainText("AI增强回答");
+});
+
 test("mobile DOM order, focus order, tabs, filters, and width remain accessible", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.use.isMobile, "covered by the real mobile device project");
   await mockApi(page, {
@@ -1259,12 +1622,24 @@ test("background restore retries auxiliary failures without letting SSE hide deg
 
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect(page.locator("#dataStatus")).toContainText("市场概览暂不可用");
-  await expect(page.locator("#dataStatus")).toContainText("强股排行暂不可用");
-  await expect(page.locator("#dataStatus")).toContainText("数据源状态暂不可用");
+  await expect(page.locator("#dataStatus")).toHaveText("3 项辅助数据降级，详细信息见诊断区");
+  await expect(page.locator("#dataStatus")).not.toContainText("unavailable");
+  await expect(page.locator("#marketStrip")).toContainText("market unavailable");
+  await expect(page.locator("#leaderList")).toContainText("strong unavailable");
+  await expect(page.locator(".data-health")).toContainText("status unavailable");
+  const statusLayout = await page.locator(".topbar").evaluate((topbar) => {
+    const pill = topbar.querySelector("#dataStatus");
+    return {
+      topbarHeight: topbar.getBoundingClientRect().height,
+      pillWidth: pill.getBoundingClientRect().width,
+      viewport: document.documentElement.clientWidth,
+    };
+  });
+  expect(statusLayout.pillWidth).toBeLessThanOrEqual(Math.min(380, statusLayout.viewport));
+  expect(statusLayout.topbarHeight).toBeLessThanOrEqual(104);
   await emitQuoteFrame(page);
   await expect(page.locator("#dataStatus")).not.toContainText("实时连接正常");
-  await expect(page.locator("#dataStatus")).toContainText("部分辅助数据降级");
+  await expect(page.locator("#dataStatus")).toHaveText("3 项辅助数据降级，详细信息见诊断区");
 
   degraded = false;
   await page.evaluate(() => {
@@ -1468,6 +1843,135 @@ async function assertChartWorkspaceFits(page) {
   }
 }
 
+function discoveryApiHarness() {
+  let preset = null;
+  const calls = { apply: [], create: [], enqueue: [], rankChanges: 0, remove: [], rename: [] };
+  return {
+    calls,
+    async api(url, request) {
+      const pathname = url.pathname;
+      if (pathname === "/api/market-scans/latest") {
+        return { payload: marketScanRunPayload("success", 103) };
+      }
+      if (pathname === "/api/market-scans/42/results") {
+        return { payload: marketScanResultPage(url.searchParams) };
+      }
+      if (pathname === "/api/discovery/presets" && request.method() === "GET") {
+        return {
+          payload: {
+            items: preset ? [preset] : [],
+            total: preset ? 1 : 0,
+            page: 1,
+            page_size: 100,
+            page_count: preset ? 1 : 0,
+          },
+        };
+      }
+      if (pathname === "/api/discovery/presets" && request.method() === "POST") {
+        const payload = request.postDataJSON();
+        calls.create.push(payload);
+        preset = discoveryPreset(payload, 1);
+        return { payload: preset, status: 201 };
+      }
+      if (pathname === "/api/discovery/presets/7" && request.method() === "PATCH") {
+        const payload = request.postDataJSON();
+        calls.rename.push(payload);
+        preset = { ...preset, name: payload.name, revision: 2, updated_at: "2026-07-28T11:00:00Z" };
+        return { payload: preset };
+      }
+      if (pathname === "/api/discovery/presets/7" && request.method() === "DELETE") {
+        calls.remove.push({ presetId: 7, revision: Number(url.searchParams.get("expected_revision")) });
+        preset = null;
+        return { payload: { deleted: true, preset_id: 7 } };
+      }
+      if (pathname === "/api/discovery/presets/7/apply" && request.method() === "POST") {
+        const payload = request.postDataJSON();
+        calls.apply.push(payload);
+        return { payload: discoveryLeaderboard(preset, payload) };
+      }
+      if (pathname === "/api/discovery/presets/7/research-queue" && request.method() === "POST") {
+        const payload = request.postDataJSON();
+        calls.enqueue.push(payload);
+        return {
+          payload: {
+            items: payload.symbols.map((symbol) => ({
+              symbol,
+              source_run_id: payload.run_id,
+              source_preset_id: 7,
+              source_preset_revision: payload.expected_preset_revision,
+              source_preset_name: preset.name,
+              enqueued_at: "2026-07-28T11:10:00Z",
+              added: true,
+            })),
+            added_count: payload.symbols.length,
+            existing_count: 0,
+          },
+        };
+      }
+      if (pathname === "/api/discovery/runs/42/rank-changes") {
+        calls.rankChanges += 1;
+        return { payload: discoveryRankChanges() };
+      }
+      return null;
+    },
+  };
+}
+
+function discoveryPreset(payload, revision) {
+  return {
+    ...payload,
+    id: 7,
+    schema_version: 1,
+    revision,
+    created_at: "2026-07-28T10:00:00Z",
+    updated_at: "2026-07-28T10:00:00Z",
+  };
+}
+
+function discoveryLeaderboard(preset, payload) {
+  return {
+    preset,
+    run_id: payload.run_id,
+    rule_version: "leader-v2",
+    items: [
+      {
+        position: 1, source_rank: 1, symbol: "600519.SH", code: "600519", market: "SH",
+        name: "贵州茅台", industry: "白酒", is_st: false, is_new: false,
+        quality: 96, trend: 91, change: 2.4, turnover: 1.2, amount: 1800000000, score: 95,
+      },
+      {
+        position: 2, source_rank: 4, symbol: "600809.SH", code: "600809", market: "SH",
+        name: "山西汾酒", industry: "白酒", is_st: false, is_new: false,
+        quality: 93, trend: 89, change: 1.8, turnover: 0.9, amount: 920000000, score: 92,
+      },
+    ],
+    total: 2,
+    page: payload.page,
+    page_size: payload.page_size,
+    page_count: 1,
+  };
+}
+
+function discoveryRankChanges() {
+  return {
+    current_run_id: 42,
+    previous_run_id: 41,
+    current_rule_version: "leader-v2",
+    previous_rule_version: "leader-v2",
+    comparable: true,
+    reason: null,
+    items: [
+      { symbol: "600519.SH", code: "600519", market: "SH", name: "贵州茅台", previous_rank: 2, current_rank: 1, rank_delta: 1, movement: "up" },
+      { symbol: "600809.SH", code: "600809", market: "SH", name: "山西汾酒", previous_rank: null, current_rank: 4, rank_delta: null, movement: "new" },
+      { symbol: "000001.SZ", code: "000001", market: "SZ", name: "平安银行", previous_rank: 3, current_rank: null, rank_delta: null, movement: "exit" },
+    ],
+    total: 3,
+    page: 1,
+    page_size: 200,
+    page_count: 1,
+  };
+}
+
 async function mockApi(page, options = {}) {
   const watchlist = options.watchlist || [];
   await page.route("**/api/**", async (route) => {
@@ -1573,6 +2077,9 @@ function apiPayload(url) {
   const pathname = url.pathname;
   if (pathname === "/api/market") return { indices: [] };
   if (pathname === "/api/strong-stocks") return { items: [] };
+  if (pathname === "/api/discovery/presets") {
+    return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
+  }
   if (pathname === "/api/data/status") {
     return { providers: [], source_plan: {}, cache: {}, capabilities: [], capability_statuses: [] };
   }

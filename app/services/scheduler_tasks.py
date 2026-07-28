@@ -21,6 +21,13 @@ from app.services.scheduler_helpers import (
     _scheduler_cache_symbols,
     _short_task_error,
 )
+from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
+from app.utils.clock import market_now_naive
+from app.utils.market_time import market_local_naive
+
+
+RESEARCH_QUEUE_REFRESH_BATCH_LIMIT = 20
+DUE_REVIEW_EVALUATION_BATCH_LIMIT = 20
 
 
 class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
@@ -143,3 +150,57 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         if summary.failed_count:
             return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
+
+    async def _refresh_research_queue(self, *, now: datetime | None = None) -> str:
+        if not _research_maintenance_window_open(now):
+            message = "当前不在交易日盘后日K发布窗口，已跳过主动研究刷新"
+            await self._save_monitor_event("info", "research", message)
+            return message
+        from app.workflows.individual import refresh_active_research_queue
+
+        summary = await refresh_active_research_queue(
+            self.datahub,
+            now=now,
+            limit=RESEARCH_QUEUE_REFRESH_BATCH_LIMIT,
+        )
+        message = (
+            f"主动研究队列选取 {summary.selected_count}/{summary.active_count} 只，"
+            f"保存 {summary.saved_count} 只，未变化 {summary.unchanged_count} 只，"
+            f"跳过 {summary.skipped_count} 只，失败 {summary.failed_count} 只"
+        )
+        degraded = summary.failed_count > 0 or summary.skipped_count > 0
+        await self._save_monitor_event("warning" if degraded else "info", "research", message)
+        if summary.selected_count and summary.failed_count == summary.selected_count:
+            raise RuntimeError(message)
+        if degraded:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
+        return message
+
+    async def _evaluate_due_reviews(self, *, now: datetime | None = None) -> str:
+        if not _research_maintenance_window_open(now):
+            message = "当前不在交易日盘后日K发布窗口，已跳过到期研究计划评估"
+            await self._save_monitor_event("info", "review", message)
+            return message
+        from app.services.advice_review import evaluate_due_advice_reviews
+
+        summary = await evaluate_due_advice_reviews(
+            self.datahub,
+            as_of=now,
+            now=now,
+            limit=DUE_REVIEW_EVALUATION_BATCH_LIMIT,
+        )
+        message = (
+            f"到期研究计划候选 {summary.candidate_count} 条，"
+            f"本轮评估 {summary.evaluated_count} 条，失败 {summary.failed_count} 条"
+        )
+        await self._save_monitor_event("warning" if summary.failed_count else "info", "review", message)
+        if summary.attempted_count and summary.failed_count == summary.attempted_count:
+            raise RuntimeError(message)
+        if summary.failed_count:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
+        return message
+
+
+def _research_maintenance_window_open(now: datetime | None = None) -> bool:
+    current = market_local_naive(now) if now is not None else market_now_naive()
+    return is_trading_day(current.date()) and current.time() >= DAILY_KLINE_PUBLISH_TIME

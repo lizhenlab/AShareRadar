@@ -232,8 +232,8 @@ def test_repeated_merge_is_idempotent_for_surrogate_rows(tmp_path: Path) -> None
         assert preview.tables[table].inserted == 0
         assert preview.tables[table].updated == 0
         assert preview.tables[table].remapped == 0
-        assert preview.tables[table].unchanged == 1
-        assert _table_count(target, table) == 1
+        assert preview.tables[table].unchanged == bundle.row_counts[table]
+        assert _table_count(target, table) == bundle.row_counts[table]
 
 
 def test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch(
@@ -439,6 +439,8 @@ def test_v1_bundle_without_later_price_provenance_columns_is_upgraded(
             "snapshot_anchor_close",
             "snapshot_data_version",
             "snapshot_contract_version",
+            "trigger_basis",
+            "invalidation_basis",
         },
     )
     _remove_bundle_columns(
@@ -458,6 +460,8 @@ def test_v1_bundle_without_later_price_provenance_columns_is_upgraded(
             "normalized_entry_price",
             "normalized_target_price",
             "normalized_stop_price",
+            "trigger_basis",
+            "invalidation_basis",
         },
     )
 
@@ -470,17 +474,36 @@ def test_v1_bundle_without_later_price_provenance_columns_is_upgraded(
 
     with sqlite3.connect(target) as conn:
         advice = conn.execute("SELECT kline_adjustment_mode, kline_anchor_close FROM advice_history").fetchone()
-        plan = conn.execute("SELECT snapshot_adjustment_mode, snapshot_anchor_close FROM advice_review_plan").fetchone()
+        plan = conn.execute(
+            """
+            SELECT snapshot_adjustment_mode, snapshot_anchor_close,
+                   trigger_basis, invalidation_basis
+            FROM advice_review_plan
+            """
+        ).fetchone()
         result = conn.execute(
             """
             SELECT snapshot_adjustment_mode, evaluation_adjustment_mode,
-                   price_scale_factor, normalized_entry_price
+                   price_scale_factor, normalized_entry_price,
+                   trigger_basis, invalidation_basis
             FROM advice_review_result
             """
         ).fetchone()
     assert advice == ("unknown", None)
-    assert plan == ("unknown", None)
-    assert result == ("unknown", "unknown", None, None)
+    assert plan == (
+        "unknown",
+        None,
+        "daily_high_gte_target_price",
+        "daily_low_lte_stop_price",
+    )
+    assert result == (
+        "unknown",
+        "unknown",
+        None,
+        None,
+        "daily_high_gte_target_price",
+        "daily_low_lte_stop_price",
+    )
 
 
 def test_foreign_key_failure_rolls_back_every_table(tmp_path: Path) -> None:

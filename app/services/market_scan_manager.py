@@ -20,14 +20,19 @@ from app.models.market_scan import (
 )
 from app.repositories.market_scan import ACTIVE_SCAN_STATUSES, RETRYABLE_SCAN_STATUSES
 from app.services.advice_review import normalize_review_as_of
-from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.services.data_quality_time import latest_expected_daily_kline_date
 from app.services.instance_guard import InstanceGuard
-from app.services.market_scan_completion import MarketScanFinalizer, sensitive_setting_values
+from app.services.market_scan_completion import (
+    MarketScanFinalizer,
+    sensitive_setting_values,
+)
+from app.services.market_scan_contracts import MarketScanDataHubProtocol
 from app.services.market_scan_execution import MarketScanExecutor
 from app.services.market_scan_lifecycle import MarketScanLifecycle, MarketScanStopSnapshot
-from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION
+from app.services.market_scan_automation import MarketScanAutomaticAction
+from app.services.market_scan_automation_runner import MarketScanAutomationCoordinator
+from app.services.market_scan_scoring import market_scan_score_spec, stable_score_spec_hash
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
 from app.utils.clock import market_now
@@ -48,7 +53,7 @@ class MarketScanManager:
 
     def __init__(
         self,
-        datahub: DataHub,
+        datahub: MarketScanDataHubProtocol,
         *,
         instance_guard: InstanceGuard | None = None,
         now: Callable[[], datetime] | None = None,
@@ -56,12 +61,21 @@ class MarketScanManager:
         self.datahub = datahub
         self.cache = datahub.cache
         self.settings = datahub.settings
+        self._now = now or _market_now
         sensitive_values = sensitive_setting_values(self.settings)
-        self._executor = MarketScanExecutor(datahub, sensitive_values=sensitive_values)
+        self._sensitive_values = sensitive_values
+        self._executor = MarketScanExecutor(
+            datahub,
+            sensitive_values=sensitive_values,
+            now=self._current_time,
+        )
         self._finalizer = MarketScanFinalizer(self.cache, sensitive_values=sensitive_values)
         self._lifecycle = MarketScanLifecycle(self.cache, instance_guard=instance_guard)
+        self._automation = MarketScanAutomationCoordinator(
+            datahub,
+            sensitive_values=sensitive_values,
+        )
         self._deferred_stop_task: asyncio.Task[None] | None = None
-        self._now = now or _market_now
         self._terminal_failure_lock = threading.Lock()
         self._terminal_failure_run_ids: set[int] = set()
 
@@ -191,13 +205,20 @@ class MarketScanManager:
             return MarketScanStartResponse(accepted=True, run=run)
 
     async def retry_scan(self, run_id: int) -> MarketScanStartResponse:
+        return await self._retry_scan(run_id, current=self._current_time())
+
+    async def _retry_scan(
+        self,
+        run_id: int,
+        *,
+        current: datetime,
+    ) -> MarketScanStartResponse:
         async with self._lifecycle.lock:
             self._lifecycle.require_open()
             await self._lifecycle.require_instance_guard(MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE)
             await run_cache_io(self._recover_terminal_persistence_failures, run_id)
             candidate = await run_cache_io(self.cache.market_scan_run, run_id)
             retry_plan = await run_cache_io(self.cache.market_scan_retry_plan, run_id)
-            current = self._current_time()
             if retry_plan.needs_market_data:
                 _require_completed_daily_bar_window(current)
             self._validate_retry_candidate(candidate, retry_plan, current=current)
@@ -244,35 +265,48 @@ class MarketScanManager:
             publish_time,
         ):
             return None
+        if not await self._claim_automatic_ownership():
+            return None
+        data_date = latest_expected_daily_kline_date(current).isoformat()
+        return await self._automation.run(
+            current=current,
+            data_date=data_date,
+            start_action=self._start_automatic_action,
+            validate_retry=self._validate_automatic_retry,
+        )
+
+    async def _claim_automatic_ownership(self) -> bool:
         async with self._lifecycle.lock:
             acquired, _reconciled = await self._lifecycle.ensure_instance_guard()
             if not acquired:
-                return None
+                return False
             await run_cache_io(self._recover_terminal_persistence_failures)
-        data_date = latest_expected_daily_kline_date(current).isoformat()
-        latest = await run_cache_io(self.cache.latest_market_scan_run)
-        if (
-            latest is not None
-            and latest.data_date == data_date
-            and latest.status
-            in {
-                "queued",
-                "running",
-                "cancelling",
-                "success",
-                "degraded",
-                "cancelled",
-            }
-        ):
-            return None
-        if latest is not None and latest.data_date == data_date and latest.trigger in {"scheduled", "retry"}:
-            return None
-        return await self._create_scan(
+            return True
+
+    def _validate_automatic_retry(
+        self,
+        run: MarketScanRun,
+        retry_plan: MarketScanRetryPlan,
+        current: datetime,
+    ) -> None:
+        self._validate_retry_candidate(run, retry_plan, current=current)
+
+    async def _start_automatic_action(
+        self,
+        action: MarketScanAutomaticAction,
+        current: datetime,
+    ) -> MarketScanStartResponse:
+        if action.kind == "retry" and action.source_run_id is not None:
+            return await self._retry_scan(action.source_run_id, current=current)
+        response = await self._create_scan(
             as_of=current,
             trigger="scheduled",
             current=current,
             busy_is_noop=True,
         )
+        if response is None:
+            raise RuntimeError(MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE)
+        return response
 
     def run(self, run_id: int) -> MarketScanRun:
         self._recover_terminal_persistence_failures(run_id)
@@ -281,6 +315,9 @@ class MarketScanManager:
     def latest_run(self) -> MarketScanRun | None:
         self._recover_terminal_persistence_failures()
         return self.cache.latest_market_scan_run()
+
+    def next_automatic_run_at(self) -> datetime | None:
+        return self._automation.next_due_at
 
     def runs(self, *, page: int, page_size: int) -> MarketScanRunPage:
         self._recover_terminal_persistence_failures()
@@ -335,10 +372,15 @@ class MarketScanManager:
                 self.cache.market_scan_degraded_result_count,
                 run_id,
             )
+            publication_summary = await run_cache_io(
+                self.cache.market_scan_repo.publication_summary,
+                run_id,
+            )
             persisted = await self._finalizer.finish_completed(
                 current,
                 degraded_count=degraded_count,
                 warnings=warnings,
+                publication_summary=publication_summary,
             )
             self._track_terminal_persistence(run_id, persisted)
         except asyncio.CancelledError:
@@ -357,7 +399,13 @@ class MarketScanManager:
         self._track_terminal_persistence(run_id, persisted)
 
     async def _finish_failed(self, run_id: int, exc: Exception) -> None:
-        persisted = await self._finalizer.finish_failed(run_id, exc)
+        pressure_warnings = self._executor.pressure_warnings
+        failure = (
+            RuntimeError(f"{exc}；{pressure_warnings[0]}")
+            if pressure_warnings
+            else exc
+        )
+        persisted = await self._finalizer.finish_failed(run_id, failure)
         self._track_terminal_persistence(run_id, persisted)
 
     def _track_terminal_persistence(self, run_id: int, persisted: bool) -> None:
@@ -422,6 +470,8 @@ class MarketScanManager:
     ) -> None:
         if run.status not in RETRYABLE_SCAN_STATUSES:
             raise ValueError(f"扫描批次 {run.id} 当前状态不能重试：{run.status}")
+        if plan.rule_version != run.rule_version:
+            raise ValueError("扫描批次规则指纹在重试准备期间发生变化，请重新获取状态后再试")
         effective_rule_version = market_scan_rule_version(self.settings)
         if run.rule_version != effective_rule_version:
             raise ValueError("扫描规则/评分配置已变更，请新建扫描；旧批次将保留为历史快照")
@@ -467,15 +517,21 @@ def _consume_stop_exception(task: asyncio.Task[None]) -> None:
 
 
 def market_scan_rule_version(settings: object) -> str:
-    return "|".join(
-        (
-            FULL_MARKET_SCORE_RULE_VERSION,
-            f"kline_limit={int(getattr(settings, 'market_scan_kline_limit'))}",
-            f"min_history_rows={int(getattr(settings, 'market_scan_min_history_rows'))}",
-            f"min_data_quality_score={int(getattr(settings, 'market_scan_min_data_quality_score'))}",
-            f"new_stock_days={int(getattr(settings, 'market_scan_new_stock_days'))}",
-        )
-    )
+    contract = {
+        "schema_version": 2,
+        "score_spec": market_scan_score_spec(
+            min_data_quality_score=int(getattr(settings, "market_scan_min_data_quality_score")),
+        ),
+        "history": {
+            "adjustment_mode": "qfq",
+            "kline_limit": int(getattr(settings, "market_scan_kline_limit")),
+            "min_history_rows": int(getattr(settings, "market_scan_min_history_rows")),
+        },
+        "universe": {
+            "new_stock_days": int(getattr(settings, "market_scan_new_stock_days")),
+        },
+    }
+    return f"full-market-scan-v2:{stable_score_spec_hash(contract)}"
 
 
 def _market_now() -> datetime:

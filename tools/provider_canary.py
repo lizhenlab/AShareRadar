@@ -35,6 +35,7 @@ DEFAULT_SYMBOLS = {
     "BJ": "920066.BJ",
 }
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
+DEFAULT_STOCK_POOL_TIMEOUT_SECONDS = 75.0
 DEFAULT_OVERALL_TIMEOUT_SECONDS = 20.0
 DEFAULT_CLEANUP_TIMEOUT_SECONDS = 3.0
 CANARY_KLINE_LIMIT = 5
@@ -113,11 +114,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-market timeout; defaults to Settings.provider_call_timeout_seconds",
     )
     parser.add_argument(
+        "--stock-pool-timeout",
+        type=_positive_float,
+        default=None,
+        metavar="SECONDS",
+        help="Stock-pool timeout; defaults to Settings.stock_pool_provider_timeout_seconds",
+    )
+    parser.add_argument(
         "--overall-timeout",
         type=_positive_float,
         default=DEFAULT_OVERALL_TIMEOUT_SECONDS,
         metavar="SECONDS",
-        help="Deadline for the three concurrent market probes",
+        help="Deadline for all concurrent probes",
     )
     return parser
 
@@ -139,9 +147,16 @@ async def run_canary(
     symbols: Mapping[str, str],
     request_timeout: float,
     overall_timeout: float,
+    stock_pool_timeout: float | None = None,
     datahub_factory: DataHubFactory | None = None,
 ) -> dict[str, Any]:
     request_timeout = _validated_timeout(request_timeout, "request_timeout")
+    stock_pool_timeout = _validated_timeout(
+        stock_pool_timeout
+        if stock_pool_timeout is not None
+        else float(settings.stock_pool_provider_timeout_seconds),
+        "stock_pool_timeout",
+    )
     overall_timeout = _validated_timeout(overall_timeout, "overall_timeout")
     market_symbols = resolve_market_symbols(symbols)
     sensitive_values = _sensitive_setting_values(settings)
@@ -155,6 +170,7 @@ async def run_canary(
             datahub,
             market_symbols,
             request_timeout=request_timeout,
+            stock_pool_timeout=stock_pool_timeout,
             overall_timeout=overall_timeout,
             sensitive_values=sensitive_values,
         )
@@ -170,6 +186,7 @@ async def run_canary(
         started_at=started_at,
         started=started,
         request_timeout=request_timeout,
+        stock_pool_timeout=stock_pool_timeout,
         overall_timeout=overall_timeout,
         overall_timed_out=overall_timed_out,
         results=results,
@@ -183,6 +200,7 @@ def _build_canary_summary(
     started_at: str,
     started: float,
     request_timeout: float,
+    stock_pool_timeout: float,
     overall_timeout: float,
     overall_timed_out: bool,
     results: Mapping[str, dict[str, Any]],
@@ -206,6 +224,7 @@ def _build_canary_summary(
         "finished_at": audit_now_text(),
         "duration_ms": _elapsed_ms(started),
         "request_timeout_seconds": request_timeout,
+        "stock_pool_timeout_seconds": stock_pool_timeout,
         "overall_timeout_seconds": overall_timeout,
         "overall_timed_out": overall_timed_out,
         "success_count": success_count,
@@ -224,6 +243,7 @@ async def _run_contract_probes(
     symbols: Mapping[str, str],
     *,
     request_timeout: float,
+    stock_pool_timeout: float,
     overall_timeout: float,
     sensitive_values: tuple[object, ...],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], bool]:
@@ -242,11 +262,7 @@ async def _run_contract_probes(
         for market in MARKETS
     }
     stock_pool_task = asyncio.create_task(
-        _probe_stock_pool(
-            datahub,
-            request_timeout=request_timeout,
-            sensitive_values=sensitive_values,
-        ),
+        _probe_stock_pool(datahub, stock_pool_timeout=stock_pool_timeout, sensitive_values=sensitive_values),
         name="provider-canary-stock-pool",
     )
     all_tasks = (*market_tasks.values(), stock_pool_task)
@@ -361,12 +377,12 @@ def _available_result(
 async def _probe_stock_pool(
     datahub: CanaryDataHub,
     *,
-    request_timeout: float,
+    stock_pool_timeout: float,
     sensitive_values: tuple[object, ...],
 ) -> dict[str, Any]:
     started = monotonic_now()
     try:
-        async with asyncio.timeout(request_timeout):
+        async with asyncio.timeout(stock_pool_timeout):
             rows = await datahub.stock_pool(
                 limit=None,
                 refresh=True,
@@ -628,6 +644,7 @@ def _startup_failure_summary(
     *,
     symbols: Mapping[str, str],
     request_timeout: float,
+    stock_pool_timeout: float,
     overall_timeout: float,
     sensitive_values: tuple[object, ...],
 ) -> dict[str, Any]:
@@ -640,6 +657,7 @@ def _startup_failure_summary(
         "finished_at": audit_now_text(),
         "duration_ms": 0.0,
         "request_timeout_seconds": request_timeout,
+        "stock_pool_timeout_seconds": stock_pool_timeout,
         "overall_timeout_seconds": overall_timeout,
         "overall_timed_out": False,
         "success_count": 0,
@@ -685,11 +703,15 @@ def main(
     }
     settings: Settings | None = None
     request_timeout = args.request_timeout or DEFAULT_REQUEST_TIMEOUT_SECONDS
+    stock_pool_timeout = args.stock_pool_timeout or DEFAULT_STOCK_POOL_TIMEOUT_SECONDS
     # Provider SDK progress output must not corrupt the JSON-only CLI contract.
     with redirect_stderr(io.StringIO()):
         try:
             settings = settings_factory()
             request_timeout = args.request_timeout or float(settings.provider_call_timeout_seconds)
+            stock_pool_timeout = args.stock_pool_timeout or float(
+                settings.stock_pool_provider_timeout_seconds
+            )
             with TemporaryDirectory(prefix="ashare-radar-canary-") as temporary_directory:
                 runtime_settings = settings.model_copy(
                     update={
@@ -702,6 +724,7 @@ def main(
                         runtime_settings,
                         symbols=raw_symbols,
                         request_timeout=request_timeout,
+                        stock_pool_timeout=stock_pool_timeout,
                         overall_timeout=args.overall_timeout,
                         datahub_factory=datahub_factory,
                     )
@@ -716,6 +739,7 @@ def main(
                 exc,
                 symbols=raw_symbols,
                 request_timeout=request_timeout,
+                stock_pool_timeout=stock_pool_timeout,
                 overall_timeout=args.overall_timeout,
                 sensitive_values=sensitive_values,
             )

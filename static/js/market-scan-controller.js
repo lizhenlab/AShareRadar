@@ -20,6 +20,7 @@ export function createMarketScanController(options = {}) {
   if (!panel) return inertMarketScanController();
   const request = options.fetcher || fetchJson;
   const onSelectStock = typeof options.onSelectStock === "function" ? options.onSelectStock : () => {};
+  const onOpen = typeof options.onOpen === "function" ? options.onOpen : () => {};
   const connectivityTarget = options.connectivityTarget || root?.defaultView || globalThis.window;
   const view = createMarketScanView(root);
   const { elements } = view;
@@ -156,7 +157,6 @@ export function createMarketScanController(options = {}) {
       }
     );
   }
-
   async function mutate(label, url, init, apply) {
     if (state.actionBusy) return null;
     const previousRun = state.run ? { id: state.run.id, status: state.run.status } : null;
@@ -196,7 +196,6 @@ export function createMarketScanController(options = {}) {
       if (!state.actionBusy) polling.scheduleDefault(state.run);
     }
   }
-
   async function reconcileMutation(previousRun) {
     polling.clear();
     const sequence = beginRequest("runRequest", "runRequestSeq");
@@ -223,7 +222,6 @@ export function createMarketScanController(options = {}) {
       finishRequest("runRequest", "runRequestSeq", sequence);
     }
   }
-
   async function pollRun() {
     polling.clear();
     if (!state.activated || !state.visible || state.actionBusy || !isActiveMarketScanRun(state.run)) return null;
@@ -396,6 +394,8 @@ export function createMarketScanController(options = {}) {
       state.page += 1;
       void loadResults();
     });
+    elements.globalOpen.addEventListener("click", () => onOpen());
+    elements.globalCancel.addEventListener("click", () => void cancel());
     elements.rows.addEventListener("click", (event) => {
       const button = event.target.closest("button[data-market-scan-symbol]");
       if (!button) return;

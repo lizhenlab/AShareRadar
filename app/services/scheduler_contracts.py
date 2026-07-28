@@ -220,6 +220,22 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         handler_name="_evaluate_alerts",
         initial_delay_seconds=20,
     ),
+    TaskDefinition(
+        name="refresh_research_queue",
+        display_name="盘后刷新主动研究队列",
+        settings_interval_attr="scheduler_kline_interval_seconds",
+        min_interval_seconds=300,
+        handler_name="_refresh_research_queue",
+        initial_delay_seconds=24,
+    ),
+    TaskDefinition(
+        name="evaluate_due_reviews",
+        display_name="评估到期研究计划",
+        settings_interval_attr="scheduler_kline_interval_seconds",
+        min_interval_seconds=300,
+        handler_name="_evaluate_due_reviews",
+        initial_delay_seconds=28,
+    ),
 )
 _TASK_ORDER = tuple(definition.name for definition in _TASK_DEFINITIONS)
 

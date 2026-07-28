@@ -7,7 +7,11 @@ from typing import Iterable
 
 from app.models.market_scan import MarketScanResultWrite, MarketScanRun, MarketScanSeed
 from app.repositories.market_scan_context import MarketScanRepositoryContext
-from app.repositories.market_scan_mapping import run_from_row
+from app.repositories.market_scan_mapping import (
+    encode_result_payload,
+    rank_order_sql,
+    run_from_row,
+)
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.errors import NotFoundError
 
@@ -208,13 +212,13 @@ def sync_run_counts(conn: sqlite3.Connection, run_id: int, *, stamp: str) -> Non
 
 def assign_result_ranks(conn: sqlite3.Connection, run_id: int) -> None:
     conn.execute("UPDATE market_scan_result SET rank = NULL WHERE run_id = ?", (run_id,))
+    order_sql = rank_order_sql()
     conn.execute(
-        """
+        f"""
         WITH ranked AS (
             SELECT symbol,
                    ROW_NUMBER() OVER (
-                       ORDER BY score DESC, trend_score DESC, change_pct DESC,
-                                amount DESC, symbol ASC
+                       ORDER BY {order_sql}
                    ) AS calculated_rank
             FROM market_scan_result
             WHERE run_id = ? AND status = 'success' AND score IS NOT NULL
@@ -268,6 +272,7 @@ def validate_result_write(result: MarketScanResultWrite) -> None:
     _require_valid_scores(result, score_values)
     _require_valid_status_fields(result, score_values)
     _require_valid_degradation_fields(result)
+    _require_json_score_details(result)
 
 
 def _require_finite_values(
@@ -332,6 +337,33 @@ def _require_valid_degradation_fields(result: MarketScanResultWrite) -> None:
         raise ValueError(f"扫描结果降级标记与原因不一致：{result.symbol}")
 
 
+def _require_json_score_details(result: MarketScanResultWrite) -> None:
+    try:
+        _require_json_value(result.score_details)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"扫描评分明细不是有效 JSON：{result.symbol}") from exc
+
+
+def _require_json_value(value: object) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON 数值必须有限")
+        return
+    if isinstance(value, list | tuple):
+        for item in value:
+            _require_json_value(item)
+        return
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("JSON 对象键必须是字符串")
+        for item in value.values():
+            _require_json_value(item)
+        return
+    raise TypeError(f"不支持的 JSON 类型：{type(value).__name__}")
+
+
 def _result_update_params(
     run_id: int,
     result: MarketScanResultWrite,
@@ -349,7 +381,7 @@ def _result_update_params(
         result.volume_ratio,
         result.amount,
         json.dumps(list(result.tags), ensure_ascii=False, separators=(",", ":")),
-        json.dumps(result.metrics, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        encode_result_payload(result.metrics, result.score_details),
         (result.reason or "")[:800] or None,
         (result.error or "")[:800] or None,
         result.data_date,

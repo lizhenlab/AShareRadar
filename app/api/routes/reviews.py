@@ -11,6 +11,7 @@ from app.models.reviews import (
     AdviceReviewPlan,
     AdviceReviewPlanInput,
     AdviceReviewPlanUpdate,
+    AdviceReviewSummary,
 )
 from app.models.system import (
     MutationResult,
@@ -20,6 +21,7 @@ from app.services.advice_review import (
     delete_advice_review_plan,
     evaluate_advice_review_plan,
     get_advice_review_detail,
+    get_advice_review_summary,
     list_advice_review_details,
     list_advice_review_plans,
     update_advice_review_plan,
@@ -39,6 +41,11 @@ async def review_details(
     return await run_sync_api_async(
         lambda: list_advice_review_details(datahub.cache, symbol=symbol, limit=limit)
     )
+
+
+@router.get("/api/reviews/summary", response_model=AdviceReviewSummary)
+async def review_summary(datahub: DataHub = Depends(get_datahub)) -> AdviceReviewSummary:
+    return await run_sync_api_async(lambda: get_advice_review_summary(datahub.cache))
 
 
 @router.post(

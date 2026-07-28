@@ -84,6 +84,8 @@ select:focus-visible {
   display: grid;
   justify-items: end;
   gap: 7px;
+  min-width: 0;
+  max-width: min(380px, 46vw);
 }
 
 .topbar-status > span {
@@ -97,6 +99,7 @@ body.is-stale .topbar-status > span {
 }
 
 .status-pill {
+  max-width: 100%;
   min-width: 120px;
   padding: 9px 14px;
   border: 1px solid var(--line);
@@ -106,6 +109,9 @@ body.is-stale .topbar-status > span {
   background: #f8fafc;
   font-size: 13px;
   font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-pill.ok {

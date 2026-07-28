@@ -116,7 +116,9 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
         automatic_enabled = bool(self.settings.market_scan_auto_enabled)
         next_run_at = None
         if automatic_enabled and self.enabled and schedule_available:
-            next_run_at = _next_market_scan_run_at(self.settings, latest, now)
+            next_run_at = _scanner_automatic_due_at(self.market_scanner, now)
+            if next_run_at is None:
+                next_run_at = _next_market_scan_run_at(self.settings, latest, now)
         return ScheduledTaskState(
             name=MARKET_SCAN_TASK_NAME,
             display_name=MARKET_SCAN_TASK_LABEL,
@@ -239,3 +241,14 @@ def _market_scan_schedule_consumed(latest: MarketScanRun | None, data_date: date
     if latest is None or latest.data_date != data_date.isoformat():
         return False
     return latest.status in _MARKET_SCAN_SCHEDULE_CONSUMED_STATUSES or latest.trigger in {"scheduled", "retry"}
+
+
+def _scanner_automatic_due_at(scanner: object, now: datetime) -> datetime | None:
+    resolve = getattr(scanner, "next_automatic_run_at", None)
+    if not callable(resolve):
+        return None
+    due_at = resolve()
+    if not isinstance(due_at, datetime):
+        return None
+    normalized = market_local_naive(due_at)
+    return max(market_local_naive(now), normalized)
