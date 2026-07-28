@@ -446,6 +446,14 @@
   padding: 10px 12px;
 }
 
+.provider-status,
+.task-cards,
+.monitor-events {
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
 .source-plan {
   border-bottom: 1px solid var(--line);
 }

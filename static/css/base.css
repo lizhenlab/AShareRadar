@@ -16,6 +16,7 @@
   --amber-soft: #fff6df;
   --shadow: 0 8px 22px rgba(23, 36, 58, 0.06);
   --radius: 8px;
+  --topbar-sticky-height: 86px;
 }
 
 * {
@@ -60,7 +61,8 @@ select:focus-visible {
   justify-content: space-between;
   align-items: center;
   gap: 24px;
-  padding: 22px 32px 18px;
+  min-height: var(--topbar-sticky-height);
+  padding: 12px 24px 10px;
   background: #ffffff;
   border-bottom: 1px solid var(--line);
   position: sticky;
@@ -151,10 +153,13 @@ body.is-stale .topbar-status > span {
   padding: 18px;
 }
 
+.query-panel .panel-title {
+  padding: 0 4px 12px;
+}
+
 .control-panel {
   grid-area: controls;
-  position: sticky;
-  top: 18px;
+  position: static;
   align-self: start;
 }
 

@@ -4,7 +4,7 @@
 
 .market-scan-global-progress {
   position: sticky;
-  top: 84px;
+  top: calc(var(--topbar-sticky-height) + 8px);
   z-index: 12;
   display: grid;
   grid-template-columns: minmax(170px, auto) minmax(160px, 1fr) auto;
@@ -21,6 +21,10 @@
 .market-scan-global-progress[hidden],
 body.market-scan-view-active .market-scan-global-progress {
   display: none;
+}
+
+body:not(.market-scan-view-active) .market-scan-global-progress:not([hidden]) + .workspace-tabs {
+  top: calc(var(--topbar-sticky-height) + 72px);
 }
 
 .market-scan-global-copy {
@@ -619,13 +623,16 @@ body.market-scan-view-active .market-scan-global-progress {
   }
 
   .market-scan-summary > div:last-child {
+    grid-column: 1 / -1;
     border-right: 0;
     border-bottom: 0;
   }
 
   .market-scan-table-wrap {
-    max-height: none;
-    overflow: visible;
+    max-height: min(72vh, 680px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     padding: 10px;
   }
 
@@ -677,7 +684,18 @@ body.market-scan-view-active .market-scan-global-progress {
   }
 
   .market-scan-table td:nth-child(2),
+  .market-scan-table td:nth-child(3),
   .market-scan-table td:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .market-scan-table td:last-child .market-scan-status {
+    justify-self: start;
+    white-space: nowrap;
+  }
+
+  .market-scan-table td:last-child .market-scan-tags,
+  .market-scan-table td:last-child .discovery-row-actions {
     grid-column: 1 / -1;
   }
 
@@ -702,22 +720,17 @@ body.market-scan-view-active .market-scan-global-progress {
     width: 100%;
   }
 
-  .market-scan-table tr {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .market-scan-table td,
-  .market-scan-table td:nth-child(2),
-  .market-scan-table td:last-child {
-    grid-column: auto;
+  .market-scan-pagination {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .market-scan-actions,
   .market-scan-filter-actions,
-  .market-scan-pagination,
   .market-scan-pagination > div {
-    align-items: stretch;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
   }
 
   .market-scan-actions button,
@@ -728,7 +741,11 @@ body.market-scan-view-active .market-scan-global-progress {
   }
 
   .market-scan-filters {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .market-scan-filter-actions {
+    grid-column: 1 / -1;
   }
 
   .market-scan-pagination > div {
@@ -748,5 +765,17 @@ body.market-scan-view-active .market-scan-global-progress {
 
   .discovery-preset-actions button {
     width: 100%;
+  }
+}
+
+@media (max-width: 360px) {
+  .market-scan-table td,
+  .market-scan-table td:nth-child(2) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+  }
+
+  .market-scan-filters {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

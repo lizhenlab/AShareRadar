@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 275 | 604 | 3158 | 830 | 63253 |
-| `tests/` | 172 | 158 | 2061 | 727 | 65017 |
+| `tests/` | 172 | 158 | 2061 | 727 | 65020 |
 | `tools/` | 6 | 6 | 92 | 4 | 1746 |
 
 ## Python Function Health
@@ -7880,14 +7880,14 @@ Lines: 47
 
 #### `tests/test_frontend_market_scan_reliability.py`
 
-Lines: 70
+Lines: 73
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `test_global_market_scan_progress_is_wired_into_the_workspace` | 11 | `def test_global_market_scan_progress_is_wired_into_the_workspace() -> None` |
 | function | `test_market_scan_rows_expose_complete_mobile_labels` | 20 | `def test_market_scan_rows_expose_complete_mobile_labels() -> None` |
 | function | `test_market_scan_layout_freezes_desktop_headers_and_exposes_mobile_equivalent_details` | 48 | `def test_market_scan_layout_freezes_desktop_headers_and_exposes_mobile_equivalent_details() -> None` |
-| function | `_run_node_script` | 63 | `def _run_node_script(script: str) -> None` |
+| function | `_run_node_script` | 66 | `def _run_node_script(script: str) -> None` |
 
 #### `tests/test_frontend_notes_alerts_requests.py`
 

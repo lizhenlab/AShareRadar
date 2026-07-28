@@ -58,6 +58,9 @@ def test_market_scan_layout_freezes_desktop_headers_and_exposes_mobile_equivalen
     assert "min-width: 0" in mobile
     assert ".market-scan-table thead" in mobile
     assert "content: attr(data-label)" in mobile
+    assert "max-height: min(72vh, 680px)" in mobile
+    assert "overscroll-behavior: contain" in mobile
+    assert "scrollbar-gutter: stable" in mobile
 
 
 def _run_node_script(script: str) -> None:

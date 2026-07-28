@@ -29,7 +29,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'id="marketScanHeadline" role="status"' not in scan_panel
     assert 'id="marketScanResultState" role="status"' not in scan_panel
     assert 'id="marketScanTableWrap" role="region"' in html
-    assert 'aria-label="全市场扫描榜单，可横向滚动" aria-busy="false" tabindex="0"' in html
+    assert 'aria-label="全市场扫描榜单" aria-busy="false" tabindex="0"' in html
     assert 'id="marketScanPagination" aria-busy="false"' in html
     assert 'id="stockWorkbench" tabindex="-1" aria-labelledby="stockName"' in html
     assert 'id="marketScanStatus"' in html and 'value="all"' in html
