@@ -424,7 +424,7 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         self.assertEqual(diagnostics.market_scan_rows, 18)
         self.assertEqual(diagnostics.other_cache_rows, 9)
         self.assertEqual(diagnostics.other_runtime_rows, 7)
-        self.assertEqual(diagnostics.budget_bytes, 512 * 1024 * 1024)
+        self.assertEqual(diagnostics.budget_bytes, 2048 * 1024 * 1024)
         self.assertFalse(diagnostics.over_budget)
 
     def test_storage_diagnostics_includes_active_wal_and_shm_files(self) -> None:
@@ -487,7 +487,7 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
 
             diagnostics = storage_diagnostics(path, {}, budget_mb=0.0005)
 
-        self.assertEqual(diagnostics.budget_bytes, 512 * 1024 * 1024)
+        self.assertEqual(diagnostics.budget_bytes, 2048 * 1024 * 1024)
         self.assertFalse(diagnostics.over_budget)
 
         with TemporaryDirectory() as tmpdir:

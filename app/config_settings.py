@@ -30,6 +30,8 @@ DEFAULT_ASHARE_RADAR_LLM_TIMEOUT_SECONDS = 30.0
 DEFAULT_LEGACY_AUDIT_TIMEZONE = "Asia/Shanghai"
 MIN_QUOTE_HISTORY_RETENTION_ROWS = 120
 MIN_RUNTIME_BACKUP_COUNT = 2
+DEFAULT_MAX_DATABASE_SIZE_MB = 2048
+DEFAULT_MAX_RUNTIME_BACKUPS = MIN_RUNTIME_BACKUP_COUNT
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 REGISTERED_PROVIDER_NAMES = ("tencent", "akshare", "tushare", "baostock", "futu", "local", "demo")
@@ -487,7 +489,7 @@ class Settings(BaseModel):
     max_database_size_mb: int = Field(
         default_factory=lambda: _env_int(
             "ASHARE_RADAR_MAX_DATABASE_SIZE_MB",
-            512,
+            DEFAULT_MAX_DATABASE_SIZE_MB,
             minimum=16,
         )
     )
@@ -503,7 +505,7 @@ class Settings(BaseModel):
     max_runtime_backups: int = Field(
         default_factory=lambda: _env_int(
             "ASHARE_RADAR_MAX_RUNTIME_BACKUPS",
-            10,
+            DEFAULT_MAX_RUNTIME_BACKUPS,
             minimum=MIN_RUNTIME_BACKUP_COUNT,
         ),
         ge=MIN_RUNTIME_BACKUP_COUNT,

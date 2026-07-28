@@ -10,7 +10,13 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from app.config import LLM_SHELL_SECRET_ENV_NAMES, PROJECT_ROOT, Settings
+from app.config import (
+    DEFAULT_MAX_DATABASE_SIZE_MB,
+    DEFAULT_MAX_RUNTIME_BACKUPS,
+    LLM_SHELL_SECRET_ENV_NAMES,
+    PROJECT_ROOT,
+    Settings,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +24,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_config_facade_preserves_shell_secret_name_contract() -> None:
     assert LLM_SHELL_SECRET_ENV_NAMES == {"ASHARE_RADAR_LLM_API_KEY"}
+
+
+def test_full_market_storage_defaults_are_operationally_coherent(monkeypatch) -> None:
+    monkeypatch.delenv("ASHARE_RADAR_MAX_DATABASE_SIZE_MB", raising=False)
+    monkeypatch.delenv("ASHARE_RADAR_MAX_RUNTIME_BACKUPS", raising=False)
+
+    settings = Settings()
+
+    assert DEFAULT_MAX_DATABASE_SIZE_MB == 2048
+    assert DEFAULT_MAX_RUNTIME_BACKUPS == 2
+    assert settings.max_database_size_mb == DEFAULT_MAX_DATABASE_SIZE_MB
+    assert settings.max_runtime_backups == DEFAULT_MAX_RUNTIME_BACKUPS
 
 
 def test_importing_config_does_not_read_shell_profile(tmp_path: Path) -> None:

@@ -8,8 +8,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 275 | 604 | 3158 | 830 | 63242 |
-| `tests/` | 172 | 158 | 2060 | 727 | 64999 |
+| `app/` | 275 | 604 | 3158 | 830 | 63253 |
+| `tests/` | 172 | 158 | 2061 | 727 | 65017 |
 | `tools/` | 6 | 6 | 92 | 4 | 1746 |
 
 ## Python Function Health
@@ -305,31 +305,31 @@ Lines: 14
 
 #### `app/config_settings.py`
 
-Lines: 603
+Lines: 605
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `_env_tuple` | 39 | `def _env_tuple(name: str, default: tuple[str, ...], *, aliases: tuple[str, ...]=()) -> tuple[str, ...]` |
-| function | `_env_int_tuple` | 47 | `def _env_int_tuple(name: str, default: tuple[int, ...], *, minimum: int, maximum: int) -> tuple[int, ...]` |
-| function | `_env_provider_priority` | 69 | `def _env_provider_priority(name: str, default: tuple[str, ...]) -> tuple[str, ...]` |
-| function | `_normalized_provider_priority` | 77 | `def _normalized_provider_priority(value: object, *, setting_name: str, reject_unknown: bool=False) -> tuple[str, ...]` |
-| function | `_env_text` | 99 | `def _env_text(name: str, default: str \| None=None, *, aliases: tuple[str, ...]=()) -> str \| None` |
-| function | `_env_bool` | 107 | `def _env_bool(name: str, default: bool, *, aliases: tuple[str, ...]=()) -> bool` |
-| function | `env_bool` | 119 | `def env_bool(name: str, default: bool, *, aliases: tuple[str, ...]=()) -> bool` |
-| function | `_env_int` | 123 | `def _env_int(name: str, default: int, *, minimum: int \| None=None, aliases: tuple[str, ...]=()) -> int` |
-| function | `_env_float` | 136 | `def _env_float(name: str, default: float, *, minimum: float \| None=None, aliases: tuple[str, ...]=()) -> float` |
-| function | `resolve_project_path` | 151 | `def resolve_project_path(path: str \| Path) -> Path` |
-| function | `_env_path` | 158 | `def _env_path(name: str, default: Path, *, aliases: tuple[str, ...]=()) -> Path` |
-| function | `_first_env_value` | 163 | `def _first_env_value(name: str, aliases: tuple[str, ...]) -> str \| None` |
-| function | `_default_shell_env_values` | 180 | `def _default_shell_env_values() -> dict[str, str]` |
-| class | `Settings` | 184 | `class Settings(BaseModel)` |
-| method | `Settings._resolve_cache_path` | 551 | `def _resolve_cache_path(cls, value: Path) -> Path` |
-| method | `Settings._validate_llm_base_url` | 556 | `def _validate_llm_base_url(cls, value: str \| None) -> str \| None` |
-| method | `Settings._validate_legacy_audit_timezone` | 561 | `def _validate_legacy_audit_timezone(cls, value: str) -> str` |
-| method | `Settings._validate_provider_priority` | 573 | `def _validate_provider_priority(cls, value: object, info: ValidationInfo) -> tuple[str, ...]` |
-| method | `Settings._validate_market_scan_auto_retry_delays` | 578 | `def _validate_market_scan_auto_retry_delays(cls, value: tuple[int, ...]) -> tuple[int, ...]` |
-| method | `Settings._validate_market_scan_limits` | 586 | `def _validate_market_scan_limits(self) -> 'Settings'` |
-| function | `get_settings` | 602 | `def get_settings() -> Settings` |
+| function | `_env_tuple` | 41 | `def _env_tuple(name: str, default: tuple[str, ...], *, aliases: tuple[str, ...]=()) -> tuple[str, ...]` |
+| function | `_env_int_tuple` | 49 | `def _env_int_tuple(name: str, default: tuple[int, ...], *, minimum: int, maximum: int) -> tuple[int, ...]` |
+| function | `_env_provider_priority` | 71 | `def _env_provider_priority(name: str, default: tuple[str, ...]) -> tuple[str, ...]` |
+| function | `_normalized_provider_priority` | 79 | `def _normalized_provider_priority(value: object, *, setting_name: str, reject_unknown: bool=False) -> tuple[str, ...]` |
+| function | `_env_text` | 101 | `def _env_text(name: str, default: str \| None=None, *, aliases: tuple[str, ...]=()) -> str \| None` |
+| function | `_env_bool` | 109 | `def _env_bool(name: str, default: bool, *, aliases: tuple[str, ...]=()) -> bool` |
+| function | `env_bool` | 121 | `def env_bool(name: str, default: bool, *, aliases: tuple[str, ...]=()) -> bool` |
+| function | `_env_int` | 125 | `def _env_int(name: str, default: int, *, minimum: int \| None=None, aliases: tuple[str, ...]=()) -> int` |
+| function | `_env_float` | 138 | `def _env_float(name: str, default: float, *, minimum: float \| None=None, aliases: tuple[str, ...]=()) -> float` |
+| function | `resolve_project_path` | 153 | `def resolve_project_path(path: str \| Path) -> Path` |
+| function | `_env_path` | 160 | `def _env_path(name: str, default: Path, *, aliases: tuple[str, ...]=()) -> Path` |
+| function | `_first_env_value` | 165 | `def _first_env_value(name: str, aliases: tuple[str, ...]) -> str \| None` |
+| function | `_default_shell_env_values` | 182 | `def _default_shell_env_values() -> dict[str, str]` |
+| class | `Settings` | 186 | `class Settings(BaseModel)` |
+| method | `Settings._resolve_cache_path` | 553 | `def _resolve_cache_path(cls, value: Path) -> Path` |
+| method | `Settings._validate_llm_base_url` | 558 | `def _validate_llm_base_url(cls, value: str \| None) -> str \| None` |
+| method | `Settings._validate_legacy_audit_timezone` | 563 | `def _validate_legacy_audit_timezone(cls, value: str) -> str` |
+| method | `Settings._validate_provider_priority` | 575 | `def _validate_provider_priority(cls, value: object, info: ValidationInfo) -> tuple[str, ...]` |
+| method | `Settings._validate_market_scan_auto_retry_delays` | 580 | `def _validate_market_scan_auto_retry_delays(cls, value: tuple[int, ...]) -> tuple[int, ...]` |
+| method | `Settings._validate_market_scan_limits` | 588 | `def _validate_market_scan_limits(self) -> 'Settings'` |
+| function | `get_settings` | 604 | `def get_settings() -> Settings` |
 
 #### `app/config_shell.py`
 
@@ -5720,41 +5720,41 @@ Lines: 77
 
 #### `app/services/system_diagnostics.py`
 
-Lines: 406
+Lines: 411
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `DiagnosticDecision` | 25 | `class DiagnosticDecision` |
-| function | `build_system_diagnostics` | 48 | `def build_system_diagnostics(datahub, scheduler, *, now: datetime \| None=None) -> SystemDiagnostics` |
-| function | `_extend_cache_diagnostics` | 91 | `def _extend_cache_diagnostics(warnings: list[str], suggestions: list[str], assessment: CacheFreshnessAssessment) -> None` |
-| function | `_extend_provider_diagnostics` | 101 | `def _extend_provider_diagnostics(warnings: list[str], suggestions: list[str], providers, capability_statuses) -> None` |
-| function | `_provider_diagnostic_decision` | 109 | `def _provider_diagnostic_decision(providers, capability_statuses) -> DiagnosticDecision` |
-| function | `_unhealthy_capability_labels` | 125 | `def _unhealthy_capability_labels(capability_statuses) -> list[str]` |
-| function | `_capability_failure_label` | 129 | `def _capability_failure_label(item) -> str` |
-| function | `_unhealthy_provider_names` | 134 | `def _unhealthy_provider_names(providers) -> list[str]` |
-| function | `_join_limited` | 138 | `def _join_limited(items: list[str], limit: int) -> str` |
-| function | `_extend_capability_diagnostics` | 142 | `def _extend_capability_diagnostics(warnings: list[str], suggestions: list[str], capabilities) -> None` |
-| function | `_enabled_realtime_quote_source_count` | 152 | `def _enabled_realtime_quote_source_count(capabilities) -> int` |
-| function | `_real_realtime_quote_source_names` | 156 | `def _real_realtime_quote_source_names(capabilities) -> list[str]` |
-| function | `_is_real_realtime_quote_source` | 160 | `def _is_real_realtime_quote_source(item) -> bool` |
-| function | `_demo_capability_enabled` | 164 | `def _demo_capability_enabled(capabilities) -> bool` |
-| function | `_extend_environment_diagnostics` | 168 | `def _extend_environment_diagnostics(warnings: list[str], suggestions: list[str], table_counts, storage: StorageDiagnostics, scheduler_status, trade_calendar: TradeCalendarStatus) -> None` |
-| function | `cache_freshness` | 199 | `def cache_freshness(cache, checked_at: str \| datetime, *, assessment: CacheFreshnessAssessment \| None=None) -> CacheFreshness` |
-| function | `_observation_age` | 240 | `def _observation_age(observation: FreshnessObservation \| None) -> int \| None` |
-| function | `_observation_model` | 244 | `def _observation_model(observation: FreshnessObservation) -> FreshnessObservationModel` |
-| function | `_checked_datetime` | 253 | `def _checked_datetime(value: str \| datetime) -> datetime \| None` |
-| function | `_checked_text` | 262 | `def _checked_text(value: str \| datetime) -> str` |
-| function | `age_seconds` | 271 | `def age_seconds(value: str \| None, checked_at: str) -> int \| None` |
-| function | `storage_diagnostics` | 283 | `def storage_diagnostics(path: Path, table_counts: dict[str, int], *, budget_mb: object=512) -> StorageDiagnostics` |
-| function | `_table_group_count` | 325 | `def _table_group_count(table_counts: dict[str, int], tables: frozenset[str]) -> int` |
-| function | `_sqlite_component_sizes` | 329 | `def _sqlite_component_sizes(path: Path) -> dict[str, int]` |
-| function | `_file_size` | 333 | `def _file_size(path: Path) -> int` |
-| function | `_storage_budget_bytes` | 340 | `def _storage_budget_bytes(budget_mb: object) -> int` |
-| function | `_table_count` | 347 | `def _table_count(table_counts, table: str) -> int` |
-| function | `_positive_count` | 352 | `def _positive_count(raw_value: object) -> int` |
-| function | `_normalized_table_counts` | 359 | `def _normalized_table_counts(table_counts) -> dict[str, int]` |
-| function | `_unique_texts` | 371 | `def _unique_texts(items) -> list[str]` |
-| function | `capability_label` | 386 | `def capability_label(kind: object) -> str` |
+| class | `DiagnosticDecision` | 26 | `class DiagnosticDecision` |
+| function | `build_system_diagnostics` | 49 | `def build_system_diagnostics(datahub, scheduler, *, now: datetime \| None=None) -> SystemDiagnostics` |
+| function | `_extend_cache_diagnostics` | 96 | `def _extend_cache_diagnostics(warnings: list[str], suggestions: list[str], assessment: CacheFreshnessAssessment) -> None` |
+| function | `_extend_provider_diagnostics` | 106 | `def _extend_provider_diagnostics(warnings: list[str], suggestions: list[str], providers, capability_statuses) -> None` |
+| function | `_provider_diagnostic_decision` | 114 | `def _provider_diagnostic_decision(providers, capability_statuses) -> DiagnosticDecision` |
+| function | `_unhealthy_capability_labels` | 130 | `def _unhealthy_capability_labels(capability_statuses) -> list[str]` |
+| function | `_capability_failure_label` | 134 | `def _capability_failure_label(item) -> str` |
+| function | `_unhealthy_provider_names` | 139 | `def _unhealthy_provider_names(providers) -> list[str]` |
+| function | `_join_limited` | 143 | `def _join_limited(items: list[str], limit: int) -> str` |
+| function | `_extend_capability_diagnostics` | 147 | `def _extend_capability_diagnostics(warnings: list[str], suggestions: list[str], capabilities) -> None` |
+| function | `_enabled_realtime_quote_source_count` | 157 | `def _enabled_realtime_quote_source_count(capabilities) -> int` |
+| function | `_real_realtime_quote_source_names` | 161 | `def _real_realtime_quote_source_names(capabilities) -> list[str]` |
+| function | `_is_real_realtime_quote_source` | 165 | `def _is_real_realtime_quote_source(item) -> bool` |
+| function | `_demo_capability_enabled` | 169 | `def _demo_capability_enabled(capabilities) -> bool` |
+| function | `_extend_environment_diagnostics` | 173 | `def _extend_environment_diagnostics(warnings: list[str], suggestions: list[str], table_counts, storage: StorageDiagnostics, scheduler_status, trade_calendar: TradeCalendarStatus) -> None` |
+| function | `cache_freshness` | 204 | `def cache_freshness(cache, checked_at: str \| datetime, *, assessment: CacheFreshnessAssessment \| None=None) -> CacheFreshness` |
+| function | `_observation_age` | 245 | `def _observation_age(observation: FreshnessObservation \| None) -> int \| None` |
+| function | `_observation_model` | 249 | `def _observation_model(observation: FreshnessObservation) -> FreshnessObservationModel` |
+| function | `_checked_datetime` | 258 | `def _checked_datetime(value: str \| datetime) -> datetime \| None` |
+| function | `_checked_text` | 267 | `def _checked_text(value: str \| datetime) -> str` |
+| function | `age_seconds` | 276 | `def age_seconds(value: str \| None, checked_at: str) -> int \| None` |
+| function | `storage_diagnostics` | 288 | `def storage_diagnostics(path: Path, table_counts: dict[str, int], *, budget_mb: object=DEFAULT_MAX_DATABASE_SIZE_MB) -> StorageDiagnostics` |
+| function | `_table_group_count` | 330 | `def _table_group_count(table_counts: dict[str, int], tables: frozenset[str]) -> int` |
+| function | `_sqlite_component_sizes` | 334 | `def _sqlite_component_sizes(path: Path) -> dict[str, int]` |
+| function | `_file_size` | 338 | `def _file_size(path: Path) -> int` |
+| function | `_storage_budget_bytes` | 345 | `def _storage_budget_bytes(budget_mb: object) -> int` |
+| function | `_table_count` | 352 | `def _table_count(table_counts, table: str) -> int` |
+| function | `_positive_count` | 357 | `def _positive_count(raw_value: object) -> int` |
+| function | `_normalized_table_counts` | 364 | `def _normalized_table_counts(table_counts) -> dict[str, int]` |
+| function | `_unique_texts` | 376 | `def _unique_texts(items) -> list[str]` |
+| function | `capability_label` | 391 | `def capability_label(kind: object) -> str` |
 
 #### `app/services/task_run_lifecycle.py`
 
@@ -7022,34 +7022,35 @@ Lines: 75
 
 #### `tests/test_config_modules.py`
 
-Lines: 315
+Lines: 333
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_config_facade_preserves_shell_secret_name_contract` | 19 | `def test_config_facade_preserves_shell_secret_name_contract() -> None` |
-| function | `test_importing_config_does_not_read_shell_profile` | 23 | `def test_importing_config_does_not_read_shell_profile(tmp_path: Path) -> None` |
-| function | `test_operations_documents_every_ashare_radar_environment_variable` | 52 | `def test_operations_documents_every_ashare_radar_environment_variable() -> None` |
-| function | `test_settings_reads_environment_when_instantiated` | 66 | `def test_settings_reads_environment_when_instantiated(monkeypatch) -> None` |
-| function | `test_settings_invalid_numeric_environment_values_fail_fast` | 113 | `def test_settings_invalid_numeric_environment_values_fail_fast(monkeypatch, name: str, raw: str, message: str) -> None` |
-| function | `test_settings_invalid_boolean_environment_value_reports_the_variable` | 125 | `def test_settings_invalid_boolean_environment_value_reports_the_variable(monkeypatch) -> None` |
-| function | `test_settings_reject_invalid_legacy_audit_timezone` | 132 | `def test_settings_reject_invalid_legacy_audit_timezone() -> None` |
-| function | `test_settings_reject_non_finite_environment_floats` | 138 | `def test_settings_reject_non_finite_environment_floats(monkeypatch, raw: str) -> None` |
-| function | `test_settings_reject_non_finite_explicit_floats` | 146 | `def test_settings_reject_non_finite_explicit_floats(value: float) -> None` |
-| function | `test_settings_reject_market_scan_history_larger_than_fetch_limit` | 151 | `def test_settings_reject_market_scan_history_larger_than_fetch_limit() -> None` |
-| function | `test_settings_require_daily_retention_to_cover_the_scan_window` | 159 | `def test_settings_require_daily_retention_to_cover_the_scan_window() -> None` |
-| function | `test_settings_reject_auto_market_scan_when_scheduler_is_disabled` | 167 | `def test_settings_reject_auto_market_scan_when_scheduler_is_disabled() -> None` |
-| function | `test_settings_allow_manual_market_scan_when_scheduler_is_disabled` | 175 | `def test_settings_allow_manual_market_scan_when_scheduler_is_disabled() -> None` |
-| function | `test_settings_reject_retention_values_below_safe_boundaries` | 190 | `def test_settings_reject_retention_values_below_safe_boundaries(overrides: dict[str, int], message: str) -> None` |
-| function | `test_settings_do_not_default_llm_endpoint_or_model` | 195 | `def test_settings_do_not_default_llm_endpoint_or_model(monkeypatch) -> None` |
-| function | `test_settings_normalize_secure_or_loopback_llm_base_urls` | 221 | `def test_settings_normalize_secure_or_loopback_llm_base_urls(raw: str, expected: str) -> None` |
-| function | `test_settings_reject_insecure_or_non_absolute_llm_base_urls` | 236 | `def test_settings_reject_insecure_or_non_absolute_llm_base_urls(raw: str) -> None` |
-| function | `test_settings_reject_llm_base_url_userinfo_without_echoing_credentials` | 241 | `def test_settings_reject_llm_base_url_userinfo_without_echoing_credentials() -> None` |
-| function | `test_settings_validate_and_normalize_llm_base_url_from_environment` | 252 | `def test_settings_validate_and_normalize_llm_base_url_from_environment(monkeypatch) -> None` |
-| function | `test_settings_boolean_environment_values_are_explicit` | 258 | `def test_settings_boolean_environment_values_are_explicit(monkeypatch) -> None` |
-| function | `test_settings_keep_legacy_environment_aliases` | 270 | `def test_settings_keep_legacy_environment_aliases(monkeypatch) -> None` |
-| function | `test_settings_prefer_new_environment_names_over_legacy_aliases` | 284 | `def test_settings_prefer_new_environment_names_over_legacy_aliases(monkeypatch) -> None` |
-| function | `test_cache_paths_are_project_relative_and_environment_overridable` | 296 | `def test_cache_paths_are_project_relative_and_environment_overridable(monkeypatch, tmp_path: Path) -> None` |
-| function | `test_settings_repr_hides_secret_values` | 309 | `def test_settings_repr_hides_secret_values() -> None` |
+| function | `test_config_facade_preserves_shell_secret_name_contract` | 25 | `def test_config_facade_preserves_shell_secret_name_contract() -> None` |
+| function | `test_full_market_storage_defaults_are_operationally_coherent` | 29 | `def test_full_market_storage_defaults_are_operationally_coherent(monkeypatch) -> None` |
+| function | `test_importing_config_does_not_read_shell_profile` | 41 | `def test_importing_config_does_not_read_shell_profile(tmp_path: Path) -> None` |
+| function | `test_operations_documents_every_ashare_radar_environment_variable` | 70 | `def test_operations_documents_every_ashare_radar_environment_variable() -> None` |
+| function | `test_settings_reads_environment_when_instantiated` | 84 | `def test_settings_reads_environment_when_instantiated(monkeypatch) -> None` |
+| function | `test_settings_invalid_numeric_environment_values_fail_fast` | 131 | `def test_settings_invalid_numeric_environment_values_fail_fast(monkeypatch, name: str, raw: str, message: str) -> None` |
+| function | `test_settings_invalid_boolean_environment_value_reports_the_variable` | 143 | `def test_settings_invalid_boolean_environment_value_reports_the_variable(monkeypatch) -> None` |
+| function | `test_settings_reject_invalid_legacy_audit_timezone` | 150 | `def test_settings_reject_invalid_legacy_audit_timezone() -> None` |
+| function | `test_settings_reject_non_finite_environment_floats` | 156 | `def test_settings_reject_non_finite_environment_floats(monkeypatch, raw: str) -> None` |
+| function | `test_settings_reject_non_finite_explicit_floats` | 164 | `def test_settings_reject_non_finite_explicit_floats(value: float) -> None` |
+| function | `test_settings_reject_market_scan_history_larger_than_fetch_limit` | 169 | `def test_settings_reject_market_scan_history_larger_than_fetch_limit() -> None` |
+| function | `test_settings_require_daily_retention_to_cover_the_scan_window` | 177 | `def test_settings_require_daily_retention_to_cover_the_scan_window() -> None` |
+| function | `test_settings_reject_auto_market_scan_when_scheduler_is_disabled` | 185 | `def test_settings_reject_auto_market_scan_when_scheduler_is_disabled() -> None` |
+| function | `test_settings_allow_manual_market_scan_when_scheduler_is_disabled` | 193 | `def test_settings_allow_manual_market_scan_when_scheduler_is_disabled() -> None` |
+| function | `test_settings_reject_retention_values_below_safe_boundaries` | 208 | `def test_settings_reject_retention_values_below_safe_boundaries(overrides: dict[str, int], message: str) -> None` |
+| function | `test_settings_do_not_default_llm_endpoint_or_model` | 213 | `def test_settings_do_not_default_llm_endpoint_or_model(monkeypatch) -> None` |
+| function | `test_settings_normalize_secure_or_loopback_llm_base_urls` | 239 | `def test_settings_normalize_secure_or_loopback_llm_base_urls(raw: str, expected: str) -> None` |
+| function | `test_settings_reject_insecure_or_non_absolute_llm_base_urls` | 254 | `def test_settings_reject_insecure_or_non_absolute_llm_base_urls(raw: str) -> None` |
+| function | `test_settings_reject_llm_base_url_userinfo_without_echoing_credentials` | 259 | `def test_settings_reject_llm_base_url_userinfo_without_echoing_credentials() -> None` |
+| function | `test_settings_validate_and_normalize_llm_base_url_from_environment` | 270 | `def test_settings_validate_and_normalize_llm_base_url_from_environment(monkeypatch) -> None` |
+| function | `test_settings_boolean_environment_values_are_explicit` | 276 | `def test_settings_boolean_environment_values_are_explicit(monkeypatch) -> None` |
+| function | `test_settings_keep_legacy_environment_aliases` | 288 | `def test_settings_keep_legacy_environment_aliases(monkeypatch) -> None` |
+| function | `test_settings_prefer_new_environment_names_over_legacy_aliases` | 302 | `def test_settings_prefer_new_environment_names_over_legacy_aliases(monkeypatch) -> None` |
+| function | `test_cache_paths_are_project_relative_and_environment_overridable` | 314 | `def test_cache_paths_are_project_relative_and_environment_overridable(monkeypatch, tmp_path: Path) -> None` |
+| function | `test_settings_repr_hides_secret_values` | 327 | `def test_settings_repr_hides_secret_values() -> None` |
 
 #### `tests/test_container_settings_lifecycle.py`
 

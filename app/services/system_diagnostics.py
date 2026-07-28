@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app.config import DEFAULT_MAX_DATABASE_SIZE_MB
 from app.models.local_data import USER_DATA_TABLE_ALLOWLIST
 from app.models.system import CacheFreshness, FreshnessObservation as FreshnessObservationModel, StorageDiagnostics, SystemDiagnostics
 from app.services.cache_freshness import CacheFreshnessAssessment, FreshnessObservation, assess_cache_freshness
@@ -65,7 +66,11 @@ def build_system_diagnostics(datahub, scheduler, *, now: datetime | None = None)
         else CacheFreshnessAssessment(domains=(), availability_issues=(), checked_domains=())
     )
     freshness = cache_freshness(cache_stats, checked_at, assessment=assessment)
-    budget_mb = getattr(getattr(datahub, "settings", None), "max_database_size_mb", 512)
+    budget_mb = getattr(
+        getattr(datahub, "settings", None),
+        "max_database_size_mb",
+        DEFAULT_MAX_DATABASE_SIZE_MB,
+    )
     storage = storage_diagnostics(Path(cache_stats.path), table_counts, budget_mb=budget_mb)
 
     warnings: list[str] = []
@@ -284,7 +289,7 @@ def storage_diagnostics(
     path: Path,
     table_counts: dict[str, int],
     *,
-    budget_mb: object = 512,
+    budget_mb: object = DEFAULT_MAX_DATABASE_SIZE_MB,
 ) -> StorageDiagnostics:
     table_counts = _normalized_table_counts(table_counts)
     component_sizes = _sqlite_component_sizes(path)
@@ -340,7 +345,7 @@ def _file_size(path: Path) -> int:
 def _storage_budget_bytes(budget_mb: object) -> int:
     value = finite_float(budget_mb)
     if value is None or value < 16:
-        value = 512
+        value = DEFAULT_MAX_DATABASE_SIZE_MB
     return int(value * 1024 * 1024)
 
 
