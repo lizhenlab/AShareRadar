@@ -230,12 +230,12 @@ ON CONFLICT(name, kind) DO UPDATE SET
 
 class ProviderStatusRepository(SQLiteRepository):
     def enabled(self, name: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = conn.execute("SELECT enabled FROM provider_status WHERE name = ?", (name,)).fetchone()
         return bool(row["enabled"]) if row else True
 
     def capability_enabled(self, name: str, kind: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = conn.execute(
                 "SELECT enabled FROM provider_capability_status WHERE name = ? AND kind = ?",
                 (name, kind),
@@ -316,7 +316,7 @@ class ProviderStatusRepository(SQLiteRepository):
             )
 
     def items(self) -> list[ProviderStatus]:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             rows = conn.execute(f"{_PROVIDER_SELECT_SQL} ORDER BY {PROVIDER_STATUS_ORDER_BY}").fetchall()
             capability_rows = conn.execute(
                 f"{_PROVIDER_CAPABILITY_SELECT_SQL} ORDER BY {PROVIDER_CAPABILITY_STATUS_ORDER_BY}",
@@ -331,7 +331,7 @@ class ProviderStatusRepository(SQLiteRepository):
         return sorted(by_name.values(), key=lambda item: (item.priority, item.name))
 
     def capability_items(self) -> list[ProviderCapabilityStatus]:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             rows = conn.execute(
                 f"{_PROVIDER_CAPABILITY_SELECT_SQL} ORDER BY {PROVIDER_CAPABILITY_STATUS_ORDER_BY}",
             ).fetchall()

@@ -8,8 +8,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 277 | 609 | 3193 | 838 | 64231 |
-| `tests/` | 172 | 159 | 2081 | 736 | 65475 |
+| `app/` | 277 | 609 | 3194 | 841 | 64262 |
+| `tests/` | 172 | 159 | 2084 | 736 | 65577 |
 | `tools/` | 6 | 6 | 92 | 4 | 1746 |
 
 ## Python Function Health
@@ -380,13 +380,14 @@ Lines: 201
 
 #### `app/db/connection.py`
 
-Lines: 36
+Lines: 43
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | class | `SQLiteConnectionFactory` | 16 | `class SQLiteConnectionFactory` |
 | method | `SQLiteConnectionFactory.__init__` | 17 | `def __init__(self, path: Path) -> None` |
 | method | `SQLiteConnectionFactory.connect` | 22 | `def connect(self) -> Iterator[sqlite3.Connection]` |
+| method | `SQLiteConnectionFactory.read_snapshot` | 39 | `def read_snapshot(self) -> Iterator[sqlite3.Connection]` |
 
 #### `app/db/discovery_schema.py`
 
@@ -1026,17 +1027,18 @@ Lines: 549
 
 #### `app/repositories/base.py`
 
-Lines: 18
+Lines: 21
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | class | `SQLiteRepository` | 11 | `class SQLiteRepository` |
 | method | `SQLiteRepository.__init__` | 12 | `def __init__(self, path: Path, lock: threading.RLock) -> None` |
 | method | `SQLiteRepository._connect` | 17 | `def _connect(self) -> AbstractContextManager[sqlite3.Connection]` |
+| method | `SQLiteRepository._read_snapshot` | 20 | `def _read_snapshot(self) -> AbstractContextManager[sqlite3.Connection]` |
 
 #### `app/repositories/cache_stats.py`
 
-Lines: 193
+Lines: 209
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -1049,9 +1051,10 @@ Lines: 193
 | function | `_read_cache_times` | 106 | `def _read_cache_times(conn: sqlite3.Connection) -> _CacheTimes` |
 | function | `_select_count` | 146 | `def _select_count(conn: sqlite3.Connection, query: str, parameters: tuple[object, ...]=()) -> int` |
 | function | `_select_optional_text` | 150 | `def _select_optional_text(conn: sqlite3.Connection, query: str, parameters: tuple[object, ...]=()) -> str \| None` |
-| function | `_normalize_market_datetime` | 158 | `def _normalize_market_datetime(value: object) -> str \| None` |
-| function | `_parse_market_datetime` | 166 | `def _parse_market_datetime(value: object) -> datetime \| None` |
-| function | `_parse_market_datetime_text` | 183 | `def _parse_market_datetime_text(value: str) -> datetime \| None` |
+| function | `_select_latest_market_datetime` | 158 | `def _select_latest_market_datetime(conn: sqlite3.Connection, distinct_values_query: str, parameters: tuple[object, ...]=()) -> str \| None` |
+| function | `_normalize_market_datetime` | 173 | `def _normalize_market_datetime(value: object) -> str \| None` |
+| function | `_parse_market_datetime` | 181 | `def _parse_market_datetime(value: object) -> datetime \| None` |
+| function | `_parse_market_datetime_text` | 199 | `def _parse_market_datetime_text(value: str) -> datetime \| None` |
 
 #### `app/repositories/discovery.py`
 
@@ -1103,7 +1106,7 @@ Lines: 90
 
 #### `app/repositories/maintenance.py`
 
-Lines: 363
+Lines: 367
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -1112,20 +1115,21 @@ Lines: 363
 | class | `RuntimeMaintenanceRepository` | 162 | `class RuntimeMaintenanceRepository(SQLiteRepository)` |
 | method | `RuntimeMaintenanceRepository.__init__` | 163 | `def __init__(self, path: Path, lock: threading.RLock, *, settings: Settings) -> None` |
 | method | `RuntimeMaintenanceRepository.cleanup_runtime_rows` | 168 | `def cleanup_runtime_rows(self) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository.cleanup_regenerable_runtime_rows` | 174 | `def cleanup_regenerable_runtime_rows(self) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository._cleanup_specs` | 184 | `def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository._compact_database_if_worthwhile` | 199 | `def _compact_database_if_worthwhile(self) -> bool` |
-| method | `RuntimeMaintenanceRepository.preview_runtime_cleanup` | 222 | `def preview_runtime_cleanup(self) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository.table_counts` | 233 | `def table_counts(self) -> dict[str, int]` |
-| function | `_cleanup_table` | 238 | `def _cleanup_table(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int, delete_batch_rows: int \| None=None) -> int` |
-| function | `_cleanup_candidate_count` | 251 | `def _cleanup_candidate_count(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> int` |
-| function | `_cleanup_advice_candidates` | 264 | `def _cleanup_advice_candidates(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> dict[int, str]` |
-| function | `_deleted_advice_symbols` | 281 | `def _deleted_advice_symbols(conn: sqlite3.Connection, candidates: dict[int, str]) -> set[str]` |
-| function | `_cleanup_sql` | 297 | `def _cleanup_sql(spec: RuntimeCleanupSpec) -> str` |
-| function | `_retention_overflow_sql` | 307 | `def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str` |
-| function | `_candidate_protection_sql` | 322 | `def _candidate_protection_sql(spec: RuntimeCleanupSpec) -> str` |
-| function | `_quoted_statuses` | 358 | `def _quoted_statuses(statuses: tuple[str, ...]) -> str` |
-| function | `_table_count` | 362 | `def _table_count(conn: sqlite3.Connection, table: str) -> int` |
+| method | `RuntimeMaintenanceRepository.cleanup_regenerable_runtime_rows` | 175 | `def cleanup_regenerable_runtime_rows(self) -> dict[str, int]` |
+| method | `RuntimeMaintenanceRepository._cleanup_specs` | 186 | `def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]` |
+| method | `RuntimeMaintenanceRepository._compact_after_cleanup` | 199 | `def _compact_after_cleanup(self, removed: dict[str, int]) -> None` |
+| method | `RuntimeMaintenanceRepository._compact_database_if_worthwhile` | 203 | `def _compact_database_if_worthwhile(self) -> bool` |
+| method | `RuntimeMaintenanceRepository.preview_runtime_cleanup` | 226 | `def preview_runtime_cleanup(self) -> dict[str, int]` |
+| method | `RuntimeMaintenanceRepository.table_counts` | 237 | `def table_counts(self) -> dict[str, int]` |
+| function | `_cleanup_table` | 242 | `def _cleanup_table(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int, delete_batch_rows: int \| None=None) -> int` |
+| function | `_cleanup_candidate_count` | 255 | `def _cleanup_candidate_count(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> int` |
+| function | `_cleanup_advice_candidates` | 268 | `def _cleanup_advice_candidates(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> dict[int, str]` |
+| function | `_deleted_advice_symbols` | 285 | `def _deleted_advice_symbols(conn: sqlite3.Connection, candidates: dict[int, str]) -> set[str]` |
+| function | `_cleanup_sql` | 301 | `def _cleanup_sql(spec: RuntimeCleanupSpec) -> str` |
+| function | `_retention_overflow_sql` | 311 | `def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str` |
+| function | `_candidate_protection_sql` | 326 | `def _candidate_protection_sql(spec: RuntimeCleanupSpec) -> str` |
+| function | `_quoted_statuses` | 362 | `def _quoted_statuses(statuses: tuple[str, ...]) -> str` |
+| function | `_table_count` | 366 | `def _table_count(conn: sqlite3.Connection, table: str) -> int` |
 
 #### `app/repositories/market_data.py`
 
@@ -1258,7 +1262,7 @@ Lines: 39
 
 #### `app/repositories/market_scan_context.py`
 
-Lines: 17
+Lines: 18
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -7037,19 +7041,21 @@ Lines: 84
 
 #### `tests/test_cache_stats_modules.py`
 
-Lines: 233
+Lines: 302
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_cache_stats_exposes_fetch_and_market_times_without_changing_legacy_aliases` | 12 | `def test_cache_stats_exposes_fetch_and_market_times_without_changing_legacy_aliases(tmp_path) -> None` |
-| function | `test_market_datetime_normalization_supports_legacy_compact_and_iso_values` | 57 | `def test_market_datetime_normalization_supports_legacy_compact_and_iso_values(value: str) -> None` |
-| function | `test_cache_stats_selects_latest_real_market_datetime_and_ignores_dirty_values` | 61 | `def test_cache_stats_selects_latest_real_market_datetime_and_ignores_dirty_values(tmp_path) -> None` |
-| function | `test_cache_stats_returns_none_when_all_market_times_are_invalid_or_empty` | 100 | `def test_cache_stats_returns_none_when_all_market_times_are_invalid_or_empty(tmp_path) -> None` |
-| function | `test_cache_stats_primary_daily_fields_ignore_unknown_and_other_adjustments` | 116 | `def test_cache_stats_primary_daily_fields_ignore_unknown_and_other_adjustments(tmp_path) -> None` |
-| function | `_save_market_times` | 174 | `def _save_market_times(cache: SQLiteCache, *, quote_values: list[str], daily_values: list[str], minute_values: list[str]) -> None` |
-| function | `_quote` | 191 | `def _quote(timestamp: str, *, code: str, market: str) -> Quote` |
-| function | `_daily_kline` | 210 | `def _daily_kline(value: str) -> Kline` |
-| function | `_minute_kline` | 224 | `def _minute_kline(timestamp: str) -> MinuteKline` |
+| function | `test_cache_stats_exposes_fetch_and_market_times_without_changing_legacy_aliases` | 18 | `def test_cache_stats_exposes_fetch_and_market_times_without_changing_legacy_aliases(tmp_path) -> None` |
+| function | `test_market_datetime_normalization_supports_legacy_compact_and_iso_values` | 63 | `def test_market_datetime_normalization_supports_legacy_compact_and_iso_values(value: str) -> None` |
+| function | `test_cache_stats_selects_latest_real_market_datetime_and_ignores_dirty_values` | 67 | `def test_cache_stats_selects_latest_real_market_datetime_and_ignores_dirty_values(tmp_path) -> None` |
+| function | `test_cache_stats_returns_none_when_all_market_times_are_invalid_or_empty` | 106 | `def test_cache_stats_returns_none_when_all_market_times_are_invalid_or_empty(tmp_path) -> None` |
+| function | `test_latest_market_datetime_normalizes_only_distinct_values` | 122 | `def test_latest_market_datetime_normalizes_only_distinct_values(monkeypatch) -> None` |
+| function | `test_dashboard_read_snapshots_do_not_wait_for_unrelated_repository_lock` | 159 | `def test_dashboard_read_snapshots_do_not_wait_for_unrelated_repository_lock(tmp_path) -> None` |
+| function | `test_cache_stats_primary_daily_fields_ignore_unknown_and_other_adjustments` | 185 | `def test_cache_stats_primary_daily_fields_ignore_unknown_and_other_adjustments(tmp_path) -> None` |
+| function | `_save_market_times` | 243 | `def _save_market_times(cache: SQLiteCache, *, quote_values: list[str], daily_values: list[str], minute_values: list[str]) -> None` |
+| function | `_quote` | 260 | `def _quote(timestamp: str, *, code: str, market: str) -> Quote` |
+| function | `_daily_kline` | 279 | `def _daily_kline(value: str) -> Kline` |
+| function | `_minute_kline` | 293 | `def _minute_kline(timestamp: str) -> MinuteKline` |
 
 #### `tests/test_chart_marks_modules.py`
 
@@ -9803,12 +9809,13 @@ Lines: 82
 
 #### `tests/test_runtime_maintenance_regressions.py`
 
-Lines: 69
+Lines: 102
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_deep_market_scan_retry_chain_keeps_only_retained_leaf_and_direct_parent` | 10 | `def test_deep_market_scan_retry_chain_keeps_only_retained_leaf_and_direct_parent(tmp_path: Path) -> None` |
-| function | `test_runtime_cleanup_compacts_database_when_free_page_budget_is_large` | 43 | `def test_runtime_cleanup_compacts_database_when_free_page_budget_is_large(tmp_path: Path, monkeypatch) -> None` |
+| function | `test_deep_market_scan_retry_chain_keeps_only_retained_leaf_and_direct_parent` | 11 | `def test_deep_market_scan_retry_chain_keeps_only_retained_leaf_and_direct_parent(tmp_path: Path) -> None` |
+| function | `test_runtime_cleanup_compacts_database_when_free_page_budget_is_large` | 44 | `def test_runtime_cleanup_compacts_database_when_free_page_budget_is_large(tmp_path: Path, monkeypatch) -> None` |
+| function | `test_runtime_compaction_does_not_hold_shared_repository_lock` | 73 | `def test_runtime_compaction_does_not_hold_shared_repository_lock(tmp_path: Path, monkeypatch) -> None` |
 
 #### `tests/test_scheduler_modules.py`
 

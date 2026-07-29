@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
+import threading
 
 from app.config import Settings
 from app.services.cache import SQLiteCache
@@ -67,3 +68,35 @@ def test_runtime_cleanup_compacts_database_when_free_page_budget_is_large(
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert int(conn.execute("PRAGMA freelist_count").fetchone()[0]) < 10
+
+
+def test_runtime_compaction_does_not_hold_shared_repository_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "runtime.sqlite3"
+    cache = SQLiteCache(path, settings=Settings(cache_path=path, max_cache_event_rows=1))
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO cache_event (category, message, created_at) VALUES ('test', ?, ?)",
+            [("event", f"2026-07-19 12:00:{index:02d}") for index in range(3)],
+        )
+    compaction_started = threading.Event()
+    release_compaction = threading.Event()
+
+    def block_compaction() -> bool:
+        compaction_started.set()
+        assert release_compaction.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(cache.maintenance_repo, "_compact_database_if_worthwhile", block_compaction)
+    cleanup = threading.Thread(target=cache.cleanup_runtime_rows)
+    cleanup.start()
+    assert compaction_started.wait(timeout=1)
+
+    presets = cache.discovery_service.list_presets(page=1, page_size=20)
+
+    release_compaction.set()
+    cleanup.join(timeout=2)
+    assert cleanup.is_alive() is False
+    assert presets.items == []

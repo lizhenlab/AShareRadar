@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
 from app.models.schemas import Kline, MinuteKline, Quote
-from app.repositories.cache_stats import _normalize_market_datetime
+from app.repositories import cache_stats as cache_stats_module
+from app.repositories.cache_stats import (
+    SQLITE_MARKET_DATETIME_FUNCTION,
+    _normalize_market_datetime,
+    _select_latest_market_datetime,
+)
 from app.services.cache import SQLiteCache
 
 
@@ -111,6 +117,69 @@ def test_cache_stats_returns_none_when_all_market_times_are_invalid_or_empty(tmp
     assert stats.latest_quote_timestamp is None
     assert stats.latest_daily_kline_date is None
     assert stats.latest_minute_kline_timestamp is None
+
+
+def test_latest_market_datetime_normalizes_only_distinct_values(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE samples (market_time TEXT)")
+    values = [
+        "2026-05-13 10:32:00",
+        "2026/05/13 10:33:00",
+        "not-a-date",
+    ]
+    conn.executemany(
+        "INSERT INTO samples (market_time) VALUES (?)",
+        [(value,) for value in values for _repeat in range(500)],
+    )
+    normalized_values: list[object] = []
+    original = cache_stats_module._normalize_market_datetime
+
+    def count_normalization(value: object) -> str | None:
+        normalized_values.append(value)
+        return original(value)
+
+    monkeypatch.setattr(cache_stats_module, "_normalize_market_datetime", count_normalization)
+    conn.create_function(
+        SQLITE_MARKET_DATETIME_FUNCTION,
+        1,
+        cache_stats_module._normalize_market_datetime,
+        deterministic=True,
+    )
+
+    latest = _select_latest_market_datetime(
+        conn,
+        "SELECT DISTINCT market_time FROM samples",
+    )
+
+    assert latest == "2026-05-13 10:33:00"
+    assert sorted(str(value) for value in normalized_values) == sorted(values)
+    conn.close()
+
+
+def test_dashboard_read_snapshots_do_not_wait_for_unrelated_repository_lock(tmp_path) -> None:
+    cache = SQLiteCache(tmp_path / "cache.sqlite3")
+    finished = threading.Event()
+    outcomes: list[object] = []
+
+    def read_dashboard_snapshots() -> None:
+        outcomes.extend(
+            (
+                cache.stats(),
+                cache.provider_statuses(),
+                cache.provider_capability_statuses(),
+                cache.latest_market_scan_run(),
+            )
+        )
+        finished.set()
+
+    with cache._lock:
+        thread = threading.Thread(target=read_dashboard_snapshots)
+        thread.start()
+        assert finished.wait(timeout=1)
+
+    thread.join(timeout=1)
+    assert len(outcomes) == 4
+    assert outcomes[1:] == [[], [], None]
 
 
 def test_cache_stats_primary_daily_fields_ignore_unknown_and_other_adjustments(tmp_path) -> None:

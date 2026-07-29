@@ -48,7 +48,7 @@ class _CacheTimes:
 
 class CacheStatsRepository(SQLiteRepository):
     def stats(self) -> CacheStats:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             _register_market_datetime_function(conn)
             counts = _read_cache_counts(conn)
             times = _read_cache_times(conn)
@@ -111,22 +111,22 @@ def _read_cache_times(conn: sqlite3.Connection) -> _CacheTimes:
         (DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,),
     )
     latest_minute_kline_fetched_at = _select_optional_text(conn, "SELECT MAX(fetched_at) FROM kline_minute")
-    latest_quote_timestamp = _select_optional_text(
+    latest_quote_timestamp = _select_latest_market_datetime(
         conn,
-        f"SELECT MAX({SQLITE_MARKET_DATETIME_FUNCTION}(quote_timestamp)) FROM quote_snapshot",
+        "SELECT DISTINCT quote_timestamp AS market_time FROM quote_snapshot",
     )
-    latest_daily_kline_datetime = _select_optional_text(
+    latest_daily_kline_datetime = _select_latest_market_datetime(
         conn,
-        f"""
-        SELECT MAX({SQLITE_MARKET_DATETIME_FUNCTION}(date))
+        """
+        SELECT DISTINCT date AS market_time
         FROM kline_daily
         WHERE adjustment_mode = ?
         """,
         (DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,),
     )
-    latest_minute_kline_timestamp = _select_optional_text(
+    latest_minute_kline_timestamp = _select_latest_market_datetime(
         conn,
-        f"SELECT MAX({SQLITE_MARKET_DATETIME_FUNCTION}(timestamp)) FROM kline_minute",
+        "SELECT DISTINCT timestamp AS market_time FROM kline_minute",
     )
     latest_stock_at = _select_optional_text(conn, "SELECT MAX(updated_at) FROM stock_master")
     latest_plate_rank_at = _select_optional_text(conn, "SELECT MAX(updated_at) FROM plate_rank")
@@ -155,6 +155,21 @@ def _select_optional_text(
     return cast(str | None, conn.execute(query, parameters).fetchone()[0])
 
 
+def _select_latest_market_datetime(
+    conn: sqlite3.Connection,
+    distinct_values_query: str,
+    parameters: tuple[object, ...] = (),
+) -> str | None:
+    return _select_optional_text(
+        conn,
+        f"""
+        SELECT MAX({SQLITE_MARKET_DATETIME_FUNCTION}(market_time))
+        FROM ({distinct_values_query}) AS distinct_market_times
+        """,
+        parameters,
+    )
+
+
 def _normalize_market_datetime(value: object) -> str | None:
     parsed = _parse_market_datetime(value)
     if parsed is None:
@@ -164,6 +179,7 @@ def _normalize_market_datetime(value: object) -> str | None:
 
 
 def _parse_market_datetime(value: object) -> datetime | None:
+    parsed: datetime | None
     if isinstance(value, datetime):
         parsed = value
     elif isinstance(value, date):

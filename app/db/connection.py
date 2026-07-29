@@ -34,3 +34,10 @@ class SQLiteConnectionFactory:
             raise
         finally:
             conn.close()
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[sqlite3.Connection]:
+        with self.connect() as conn:
+            conn.execute("PRAGMA query_only = ON")
+            conn.execute("BEGIN")
+            yield conn

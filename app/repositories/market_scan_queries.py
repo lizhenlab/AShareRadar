@@ -34,7 +34,7 @@ from app.utils.market_time import normalize_market_datetime
 
 class MarketScanQueryMixin(MarketScanRepositoryContext):
     def run(self, run_id: int) -> MarketScanRun:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = required_run_row(conn, run_id)
         return run_from_row(row)
 
@@ -53,12 +53,12 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         return run_from_row(row) if row is not None else None
 
     def latest_run(self) -> MarketScanRun | None:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = conn.execute("SELECT * FROM market_scan_run ORDER BY id DESC LIMIT 1").fetchone()
         return run_from_row(row) if row is not None else None
 
     def latest_published_run(self) -> MarketScanRun | None:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = conn.execute(
                 f"""
                 SELECT * FROM market_scan_run
@@ -73,7 +73,7 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
 
     def list_runs(self, *, page: int, page_size: int) -> MarketScanRunPage:
         offset = (page - 1) * page_size
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             total = int(conn.execute("SELECT COUNT(*) FROM market_scan_run").fetchone()[0])
             rows = conn.execute(
                 f"""
@@ -154,7 +154,7 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         where = " AND ".join(clauses)
         order_sql = result_order_sql(sort, order)
         offset = (page - 1) * page_size
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             run_row = required_run_row(conn, run_id)
             total = int(conn.execute(f"SELECT COUNT(*) FROM market_scan_result WHERE {where}", params).fetchone()[0])
             rows = conn.execute(

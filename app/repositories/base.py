@@ -16,3 +16,6 @@ class SQLiteRepository:
 
     def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         return self._connections.connect()
+
+    def _read_snapshot(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._connections.read_snapshot()
