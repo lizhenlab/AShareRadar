@@ -1604,6 +1604,7 @@ test("mobile actions show only current results and keep local errors in the quer
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
   await expect(page.locator("#searchForm")).toBeInViewport();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   const input = page.locator("#symbolInput");
   await input.fill("000001");
   await page.locator("#searchForm button").click();
@@ -1776,10 +1777,6 @@ test("restored tabs and tools retain the last successful current stock", async (
         mobileChartView: "daily",
       },
     }));
-    window.__restoredTabScrolls = [];
-    Element.prototype.scrollIntoView = function scrollIntoView(options) {
-      window.__restoredTabScrolls.push({ id: this.id, options });
-    };
   });
   await mockApi(page, {
     api(url) {
@@ -1794,10 +1791,8 @@ test("restored tabs and tools retain the last successful current stock", async (
   await expect(page.locator("#workspace-panel-tools")).toBeVisible();
   await expect(page.locator("#workspace-tab-tools")).toHaveAttribute("aria-selected", "true");
   await expectPrimaryView(page, "review");
-  await expect.poll(() => page.evaluate(() => window.__restoredTabScrolls)).toContainEqual({
-    id: "workspace-tab-tools",
-    options: { block: "nearest", inline: "nearest" },
-  });
+  await expect(page.locator("#workspace-tab-tools")).toBeInViewport();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator("#toolsStockContext")).toContainText("当前股票");
   await expect(page.locator("#toolsStockContext")).toContainText("贵州茅台");
   await expect(page.locator("#toolsStockContext")).toContainText("SH600519");

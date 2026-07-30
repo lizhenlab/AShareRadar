@@ -222,10 +222,13 @@ const restored = {
   minuteChartInterval: "30m",
   mobileChartView: "minute",
 };
-let restoredTabScrolls = 0;
-tabs.find((tab) => tab.dataset.view === restored.workspaceView).scrollIntoView = (options) => {
-  restoredTabScrolls += 1;
-  assert.deepEqual(options, { block: "nearest", inline: "nearest" });
+const tabsContainer = element("workspaceTabs");
+tabsContainer.scrollLeft = 0;
+tabsContainer.getBoundingClientRect = () => ({ left: 0, right: 200 });
+const restoredTab = tabs.find((tab) => tab.dataset.view === restored.workspaceView);
+restoredTab.getBoundingClientRect = () => ({ left: 240, right: 320 });
+restoredTab.scrollIntoView = () => {
+  throw new Error("workspace restoration must not scroll the page vertically");
 };
 const values = new Map([[
   WORKSPACE_PREFERENCES_STORAGE_KEY,
@@ -257,7 +260,7 @@ assert.equal(element("dailyMa5Toggle").checked, false);
 assert.equal(element("dailyMa20Toggle").checked, true);
 assert.equal(element("chartWorkspace").dataset.mobileChart, "minute");
 assert.equal(writes.length, 0, "restoration should not rewrite storage once per setter");
-assert.equal(restoredTabScrolls, 1, "the restored active tab was not scrolled into view");
+assert.equal(tabsContainer.scrollLeft, 120, "the restored active tab was not scrolled horizontally into view");
 
 const writesBeforePrimarySelection = writes.length;
 assert.equal(__appTest.setPrimaryView("monitor"), "monitor");

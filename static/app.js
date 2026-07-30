@@ -2036,8 +2036,18 @@ function restoreWorkspacePreferences() {
 function scrollWorkspaceTabIntoView(view) {
   const tab = Array.from(document.querySelectorAll(".workspace-tabs button[data-view]"))
     .find((button) => button.dataset.view === view);
-  if (!tab || tab.hidden || typeof tab.scrollIntoView !== "function") return false;
-  requestAnimationFrame(() => tab.scrollIntoView({ block: "nearest", inline: "nearest" }));
+  const tabs = document.querySelector(".workspace-tabs");
+  if (!tab || tab.hidden || !tabs) return false;
+  requestAnimationFrame(() => {
+    const tabRect = tab.getBoundingClientRect?.();
+    const tabsRect = tabs.getBoundingClientRect?.();
+    if (!tabRect || !tabsRect) return;
+    if (tabRect.left < tabsRect.left) {
+      tabs.scrollLeft -= tabsRect.left - tabRect.left;
+    } else if (tabRect.right > tabsRect.right) {
+      tabs.scrollLeft += tabRect.right - tabsRect.right;
+    }
+  });
   return true;
 }
 
