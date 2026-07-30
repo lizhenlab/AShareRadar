@@ -5,21 +5,27 @@ const VIEWPORTS = [
     name: "desktop 1440x900",
     width: 1440,
     height: 900,
-    layout: "three-column",
-    scanColumns: { summary: 7, presets: 3, filters: 5, table: 10 },
+    layout: "split",
+    scanScrollable: false,
+    sideColumns: 1,
+    scanColumns: { summary: 9, presets: 3, filters: 5, table: 10 },
   },
   {
     name: "compact desktop 1024x768",
     width: 1024,
     height: 768,
-    layout: "two-column",
-    scanColumns: { summary: 4, presets: 2, filters: 3, table: 10 },
+    layout: "split",
+    scanScrollable: true,
+    sideColumns: 2,
+    scanColumns: { summary: 3, presets: 2, filters: 3, table: 10 },
   },
   {
     name: "tablet 768x900",
     width: 768,
     height: 900,
     layout: "stacked",
+    scanScrollable: false,
+    sideColumns: 1,
     scanColumns: { summary: 2, presets: 2, filters: 2, table: 2 },
   },
   {
@@ -27,6 +33,8 @@ const VIEWPORTS = [
     width: 390,
     height: 844,
     layout: "stacked",
+    scanScrollable: false,
+    sideColumns: 1,
     scanColumns: { summary: 2, presets: 1, filters: 2, table: 2 },
   },
 ];
@@ -50,20 +58,26 @@ test.describe("responsive layout regression", () => {
       await settleLayout(page);
 
       await assertNoDocumentOverflow(page);
+      await assertPrimaryNavigationFits(page, viewport);
       await assertHeaderAndQueryFit(page, viewport);
       await assertWorkspaceTabsAreReachable(page, viewport);
       await assertGlobalProgressDoesNotCoverTabs(page, viewport);
       await assertChartToolbarFits(page, viewport);
-      await assertPrimaryLayout(page, viewport);
+      await assertResearchLayout(page, viewport);
 
-      await page.locator("#workspace-tab-market-scan").click();
+      await selectPrimaryView(page, "market");
       await expect(page.locator("#workspace-panel-market-scan")).toBeVisible();
-      await expect(page.locator("#marketScanRows tr")).toHaveCount(3);
+      await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(3);
       await settleLayout(page);
 
       await assertNoDocumentOverflow(page);
+      await assertMarketPrimaryLayout(page, viewport);
       await assertMarketScanLayout(page, viewport);
-      await assertPrimaryLayout(page, viewport);
+
+      await selectPrimaryView(page, "monitor");
+      await settleLayout(page);
+      await assertNoDocumentOverflow(page);
+      await assertMonitorLayout(page, viewport);
       await assertSideToolsAreReachable(page, viewport);
     });
   }
@@ -75,6 +89,32 @@ async function assertNoDocumentOverflow(page) {
     const documentWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
     return documentWidth - viewportWidth;
   })).toBeLessThanOrEqual(1);
+}
+
+async function assertPrimaryNavigationFits(page, viewport) {
+  const metrics = await page.locator("#primaryNavigation").evaluate((navigation) => {
+    const inner = navigation.querySelector(".primary-navigation-inner");
+    return {
+      navigation: window.__layoutRect(navigation),
+      inner: window.__layoutRect(inner),
+      innerClientWidth: inner.clientWidth,
+      innerScrollWidth: inner.scrollWidth,
+      buttons: Array.from(inner.querySelectorAll("button[data-primary-view]")).map((button) => ({
+        view: button.dataset.primaryView,
+        rect: window.__layoutRect(button),
+      })),
+    };
+  });
+  expectWithinViewport(metrics.navigation, viewport.width);
+  expectWithinViewport(metrics.inner, viewport.width);
+  expect(metrics.buttons.map((item) => item.view)).toEqual(["research", "market", "review", "monitor"]);
+  for (const item of metrics.buttons) {
+    expect(item.rect.height).toBeGreaterThanOrEqual(40);
+    expect(item.rect.width).toBeGreaterThan(0);
+    expect(item.rect.left).toBeGreaterThanOrEqual(metrics.inner.left - 1);
+    expect(item.rect.right).toBeLessThanOrEqual(metrics.inner.right + 1);
+  }
+  expect(metrics.innerScrollWidth).toBeLessThanOrEqual(metrics.innerClientWidth + 1);
 }
 
 async function assertHeaderAndQueryFit(page, viewport) {
@@ -105,9 +145,13 @@ async function assertHeaderAndQueryFit(page, viewport) {
 async function assertWorkspaceTabsAreReachable(page, viewport) {
   const tabs = page.locator(".workspace-tabs");
   const first = page.locator("#workspace-tab-overview");
-  const last = page.locator("#workspace-tab-tools");
+  const last = page.locator("#workspace-tab-theme");
   await expect(tabs).toBeVisible();
   await expect(first).toBeVisible();
+  await expect(page.locator(".workspace-tabs button:visible")).toHaveCount(5);
+  await expect(page.locator("#workspace-tab-market-scan")).toBeHidden();
+  await expect(page.locator("#workspace-tab-replay")).toBeHidden();
+  await expect(page.locator("#workspace-tab-tools")).toBeHidden();
 
   const initial = await tabs.evaluate((element) => ({
     clientWidth: element.clientWidth,
@@ -132,7 +176,7 @@ async function assertWorkspaceTabsAreReachable(page, viewport) {
   });
   const end = await page.evaluate(() => ({
     tabs: window.__layoutRect(document.querySelector(".workspace-tabs")),
-    last: window.__layoutRect(document.querySelector("#workspace-tab-tools")),
+    last: window.__layoutRect(document.querySelector("#workspace-tab-theme")),
   }));
   expect(end.last.left).toBeGreaterThanOrEqual(end.tabs.left - 1);
   expect(end.last.right).toBeLessThanOrEqual(end.tabs.right + 1);
@@ -146,6 +190,7 @@ async function assertGlobalProgressDoesNotCoverTabs(page, viewport) {
   const progress = page.locator("#marketScanGlobalProgress");
   await progress.evaluate((element) => {
     element.hidden = false;
+    document.body.classList.add("market-scan-global-active");
   });
   await settleLayout(page);
   const metrics = await page.evaluate(() => {
@@ -160,6 +205,7 @@ async function assertGlobalProgressDoesNotCoverTabs(page, viewport) {
   expect(metrics.tabsTop).toBeGreaterThanOrEqual(metrics.progressTop + metrics.progressHeight - 1);
   await progress.evaluate((element) => {
     element.hidden = true;
+    document.body.classList.remove("market-scan-global-active");
   });
 }
 
@@ -200,70 +246,109 @@ async function assertChartToolbarFits(page, viewport) {
   }
 }
 
-async function assertPrimaryLayout(page, viewport) {
+async function assertResearchLayout(page, viewport) {
   const layout = await page.evaluate(() => {
-    const elementRect = (selector) => window.__layoutRect(document.querySelector(selector));
-    const sidePanels = Array.from(document.querySelectorAll(".side-column > .panel")).map(window.__layoutRect);
+    const rect = (selector) => window.__layoutRect(document.querySelector(selector));
     const layoutElement = document.querySelector("main.layout");
-    const sideColumn = document.querySelector(".side-column");
     return {
+      primaryView: document.body.dataset.primaryView,
       display: getComputedStyle(layoutElement).display,
       viewportWidth: document.documentElement.clientWidth,
-      query: elementRect(".query-panel"),
-      workspace: elementRect(".workspace"),
-      controls: elementRect(".control-panel"),
-      side: elementRect(".side-column"),
-      sidePanels,
-      sideColumnCount: window.__layoutGridColumnCount(sideColumn),
+      query: rect(".query-panel"),
+      queryPosition: getComputedStyle(document.querySelector(".query-panel")).position,
+      queryStickyTop: Number.parseFloat(getComputedStyle(document.querySelector(".query-panel")).top),
+      workspace: rect(".workspace"),
+      controlsHidden: document.querySelector(".control-panel").hidden,
+      sideHidden: document.querySelector(".side-column").hidden,
       marketColumnCount: window.__layoutGridColumnCount(document.querySelector(".market-strip")),
     };
   });
 
-  for (const target of [layout.query, layout.workspace, layout.controls, layout.side, ...layout.sidePanels]) {
-    expectWithinViewport(target, layout.viewportWidth);
-  }
+  expect(layout.primaryView).toBe("research");
+  expect(layout.controlsHidden).toBe(true);
+  expect(layout.sideHidden).toBe(true);
+  expectWithinViewport(layout.query, layout.viewportWidth);
+  expectWithinViewport(layout.workspace, layout.viewportWidth);
   expect(layout.marketColumnCount).toBe(3);
 
-  if (viewport.layout === "three-column") {
+  if (viewport.layout === "split") {
     expect(layout.display).toBe("grid");
     expect(layout.query.right).toBeLessThanOrEqual(layout.workspace.left - 17);
-    expect(layout.workspace.right).toBeLessThanOrEqual(layout.side.left - 17);
-    expect(layout.query.top).toBeCloseTo(layout.workspace.top, 0);
-    expect(layout.workspace.top).toBeCloseTo(layout.side.top, 0);
-    expect(layout.controls.left).toBeCloseTo(layout.query.left, 0);
-    expect(layout.controls.width).toBeCloseTo(layout.query.width, 0);
-    expect(layout.sideColumnCount).toBe(1);
-    expect(layout.sidePanels[1].top).toBeGreaterThan(layout.sidePanels[0].bottom);
-    return;
-  }
-
-  if (viewport.layout === "two-column") {
-    expect(layout.display).toBe("grid");
-    expect(layout.query.right).toBeLessThanOrEqual(layout.workspace.left - 17);
-    expect(layout.query.top).toBeCloseTo(layout.workspace.top, 0);
-    expect(layout.controls.left).toBeCloseTo(layout.query.left, 0);
-    expect(layout.controls.width).toBeCloseTo(layout.query.width, 0);
-    expect(layout.side.left).toBeCloseTo(layout.query.left, 0);
-    expect(layout.side.right).toBeCloseTo(layout.workspace.right, 0);
-    expect(layout.side.top).toBeGreaterThan(layout.workspace.top);
-    expect(layout.sideColumnCount).toBe(2);
-    expect(layout.sidePanels[0].top).toBeCloseTo(layout.sidePanels[1].top, 0);
-    expect(layout.sidePanels[0].right).toBeLessThanOrEqual(layout.sidePanels[1].left - 17);
+    expect(layout.queryPosition).toBe("sticky");
+    expect(layout.query.top).toBeCloseTo(layout.queryStickyTop, 0);
+    expect(layout.query.top).toBeGreaterThanOrEqual(layout.workspace.top);
     return;
   }
 
   expect(layout.display).toBe("flex");
   expect(layout.query.top).toBeLessThan(layout.workspace.top);
-  expect(layout.workspace.top).toBeLessThan(layout.controls.top);
-  expect(layout.workspace.top).toBeLessThan(layout.side.top);
-  const auxiliarySections = [layout.controls, layout.side].sort((left, right) => left.top - right.top);
-  expect(auxiliarySections[0].bottom).toBeLessThanOrEqual(auxiliarySections[1].top - 17);
-  for (const target of [layout.workspace, layout.controls, layout.side]) {
-    expect(target.left).toBeCloseTo(layout.query.left, 0);
-    expect(target.width).toBeCloseTo(layout.query.width, 0);
+  expect(layout.workspace.left).toBeCloseTo(layout.query.left, 0);
+  expect(layout.workspace.width).toBeCloseTo(layout.query.width, 0);
+}
+
+async function assertMarketPrimaryLayout(page, viewport) {
+  const layout = await page.evaluate(() => {
+    const rect = (selector) => window.__layoutRect(document.querySelector(selector));
+    const layoutElement = document.querySelector("main.layout");
+    return {
+      primaryView: document.body.dataset.primaryView,
+      display: getComputedStyle(layoutElement).display,
+      viewportWidth: document.documentElement.clientWidth,
+      workspace: rect(".workspace"),
+      queryHidden: document.querySelector(".query-panel").hidden,
+      workbenchHidden: document.querySelector("#stockWorkbench").hidden,
+      controlsHidden: document.querySelector(".control-panel").hidden,
+      sideHidden: document.querySelector(".side-column").hidden,
+    };
+  });
+
+  expect(layout.primaryView).toBe("market");
+  expect(layout.queryHidden).toBe(true);
+  expect(layout.workbenchHidden).toBe(true);
+  expect(layout.controlsHidden).toBe(true);
+  expect(layout.sideHidden).toBe(true);
+  expectWithinViewport(layout.workspace, layout.viewportWidth);
+  expect(layout.display).toBe(viewport.layout === "split" ? "grid" : "flex");
+}
+
+async function assertMonitorLayout(page, viewport) {
+  const layout = await page.evaluate(() => {
+    const rect = (selector) => window.__layoutRect(document.querySelector(selector));
+    const layoutElement = document.querySelector("main.layout");
+    const controls = document.querySelector(".control-panel");
+    const side = document.querySelector(".side-column");
+    return {
+      primaryView: document.body.dataset.primaryView,
+      display: getComputedStyle(layoutElement).display,
+      viewportWidth: document.documentElement.clientWidth,
+      controls: rect(".control-panel"),
+      side: rect(".side-column"),
+      queryHidden: document.querySelector(".query-panel").hidden,
+      workspaceHidden: document.querySelector(".workspace").hidden,
+      controlColumns: window.__layoutGridColumnCount(controls),
+      sideColumns: window.__layoutGridColumnCount(side),
+    };
+  });
+
+  expect(layout.primaryView).toBe("monitor");
+  expect(layout.queryHidden).toBe(true);
+  expect(layout.workspaceHidden).toBe(true);
+  expectWithinViewport(layout.controls, layout.viewportWidth);
+  expectWithinViewport(layout.side, layout.viewportWidth);
+  expect(layout.controlColumns).toBe(viewport.layout === "split" ? 2 : 1);
+  expect(layout.sideColumns).toBe(viewport.sideColumns);
+
+  if (viewport.layout === "split") {
+    expect(layout.display).toBe("grid");
+    expect(layout.controls.right).toBeLessThanOrEqual(layout.side.left - 17);
+    expect(layout.controls.top).toBeCloseTo(layout.side.top, 0);
+    return;
   }
-  expect(layout.sideColumnCount).toBe(1);
-  expect(layout.sidePanels[1].top).toBeGreaterThan(layout.sidePanels[0].bottom);
+
+  expect(layout.display).toBe("flex");
+  expect(layout.controls.bottom).toBeLessThanOrEqual(layout.side.top - 17);
+  expect(layout.side.left).toBeCloseTo(layout.controls.left, 0);
+  expect(layout.side.width).toBeCloseTo(layout.controls.width, 0);
 }
 
 async function assertMarketScanLayout(page, viewport) {
@@ -271,7 +356,7 @@ async function assertMarketScanLayout(page, viewport) {
     const rect = (selector) => window.__layoutRect(panel.querySelector(selector));
     const tableWrap = panel.querySelector("#marketScanTableWrap");
     const table = panel.querySelector(".market-scan-table");
-    const firstRow = panel.querySelector("#marketScanRows tr");
+    const firstRow = panel.querySelector("#marketScanRows tr.market-scan-result-row");
     const actions = panel.querySelector(".market-scan-actions");
     const start = panel.querySelector("#marketScanStart");
     return {
@@ -330,7 +415,7 @@ async function assertMarketScanLayout(page, viewport) {
     expect(metrics.tableClientHeight).toBeLessThanOrEqual(metrics.tableMaxHeight + 1);
   } else {
     expect(metrics.tableDisplay).toBe("table");
-    expect(metrics.tableScrollable).toBe(true);
+    expect(metrics.tableScrollable).toBe(viewport.scanScrollable);
   }
 }
 
@@ -357,6 +442,13 @@ function expectWithinViewport(rect, viewportWidth) {
   expect(rect.width).toBeGreaterThan(0);
   expect(rect.left).toBeGreaterThanOrEqual(-1);
   expect(rect.right).toBeLessThanOrEqual(viewportWidth + 1);
+}
+
+async function selectPrimaryView(page, view) {
+  const button = page.locator(`#primaryNavigation button[data-primary-view="${view}"]`);
+  await button.click();
+  await expect(page.locator("body")).toHaveAttribute("data-primary-view", view);
+  await expect(button).toHaveAttribute("aria-current", "page");
 }
 
 async function settleLayout(page) {
@@ -574,9 +666,11 @@ function marketScanRun() {
     id: 42,
     status: "success",
     trigger: "manual",
+    mode: "official",
     rule_version: "full-market-score-v3:085ad665",
     as_of: "2026-07-28 16:30:00",
     data_date: "2026-07-28",
+    quote_date: "2026-07-28",
     scope: "沪市 + 深市 + 北交所当前上市A股",
     total_count: 3,
     excluded_count: 0,

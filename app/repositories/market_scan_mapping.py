@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections.abc import Sequence
+from typing import cast
 
 from app.models.market_scan import (
     MARKET_SCAN_DEGRADATION_REASONS,
@@ -10,9 +12,13 @@ from app.models.market_scan import (
     MARKET_SCAN_RANK_TIE_BREAK,
     MarketScanResultItem,
     MarketScanRun,
+    MarketScanMarketProgress,
+    MarketScanStage,
+    MarketScanStageMetric,
     MarketScanSort,
     MarketScanSortOrder,
 )
+from app.utils.time import non_negative_seconds_since_text
 
 
 DEGRADATION_DISPLAY_TAGS = frozenset({"兜底行情", "兜底K线", "行业未知", "上市日期未知"})
@@ -30,16 +36,19 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
     success = int(row["success_count"] or 0)
     skipped = int(row["skipped_count"] or 0)
     status = str(row["status"])
-    progress = 100.0 if total == 0 and status in {"success", "degraded"} else percentage(processed, total)
+    elapsed_seconds = _run_elapsed_seconds(row, status)
+    throughput = _run_throughput(processed, elapsed_seconds)
     return MarketScanRun(
         id=row["id"],
         task_run_id=row["task_run_id"],
         retry_of_run_id=row["retry_of_run_id"],
         status=status,
         trigger=row["trigger"],
+        mode=_text_or(row["mode"], "official"),
         rule_version=row["rule_version"],
         as_of=row["as_of"],
         data_date=row["data_date"],
+        quote_date=_text_or(row["quote_date"], str(row["data_date"])),
         scope=row["scope"],
         stock_pool_source=row["stock_pool_source"],
         total_count=total,
@@ -49,17 +58,98 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
         missing_count=int(row["missing_count"] or 0),
         skipped_count=skipped,
         retry_count=int(row["retry_count"] or 0),
-        progress_pct=progress,
+        progress_pct=_run_progress(total, processed, status),
         coverage_pct=percentage(success, max(0, total - skipped)),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         duration_ms=row["duration_ms"],
+        current_stage=row["current_stage"],
+        stage_started_at=row["stage_started_at"],
+        stage_metrics=_stage_metrics(row["stage_metrics_json"]),
+        market_progress=_market_progress(row["market_progress_json"]),
+        elapsed_seconds=elapsed_seconds,
+        throughput_per_second=throughput,
+        eta_seconds=_run_eta(total, processed, elapsed_seconds, throughput),
         message=row["message"],
         last_error=row["last_error"],
         cancel_requested_at=row["cancel_requested_at"],
     )
+
+
+def _text_or(value: object, fallback: str) -> str:
+    return str(value) if value else fallback
+
+
+def _run_progress(total: int, processed: int, status: str) -> float:
+    if total == 0 and status in {"success", "degraded"}:
+        return 100.0
+    return percentage(processed, total)
+
+
+def _run_throughput(processed: int, elapsed_seconds: float | None) -> float | None:
+    if processed <= 0 or elapsed_seconds is None or elapsed_seconds < 1:
+        return None
+    return processed / elapsed_seconds
+
+
+def _run_eta(
+    total: int,
+    processed: int,
+    elapsed_seconds: float | None,
+    throughput: float | None,
+) -> float | None:
+    if throughput is None or elapsed_seconds is None:
+        return None
+    if processed < 20 or elapsed_seconds < 5 or total <= processed:
+        return None
+    return max(0.0, (total - processed) / throughput)
+
+
+def _run_elapsed_seconds(row: sqlite3.Row, status: str) -> float | None:
+    duration_ms = row["duration_ms"]
+    if status not in {"queued", "running", "cancelling"} and duration_ms is not None:
+        return max(0.0, float(duration_ms) / 1000)
+    return non_negative_seconds_since_text(row["started_at"])
+
+
+def _stage_metrics(value: object) -> dict[MarketScanStage, MarketScanStageMetric]:
+    parsed = _json_value(value, {})
+    if not isinstance(parsed, dict):
+        return {}
+    allowed = {"stock_pool", "bulk_quotes", "klines", "scoring", "persistence", "publication"}
+    metrics: dict[MarketScanStage, MarketScanStageMetric] = {}
+    for stage, metric in parsed.items():
+        if str(stage) not in allowed:
+            continue
+        try:
+            metrics[cast(MarketScanStage, str(stage))] = MarketScanStageMetric.model_validate(metric)
+        except (TypeError, ValueError):
+            continue
+    return metrics
+
+
+def _market_progress(value: object) -> list[MarketScanMarketProgress]:
+    parsed = _json_value(value, [])
+    if not isinstance(parsed, list):
+        return []
+    progress: list[MarketScanMarketProgress] = []
+    for item in parsed:
+        try:
+            progress.append(MarketScanMarketProgress.model_validate(item))
+        except (TypeError, ValueError):
+            continue
+    return progress
+
+
+def _json_value(value: object, fallback: object) -> object:
+    if not isinstance(value, str):
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def result_from_row(row: sqlite3.Row) -> MarketScanResultItem:
@@ -124,12 +214,25 @@ def escaped_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def result_order_sql(sort: MarketScanSort, order: MarketScanSortOrder) -> str:
-    direction = "ASC" if order == "asc" else "DESC"
-    primary = f"{sort} IS NULL ASC, {sort} {direction}"
-    if sort == "rank":
-        return f"{primary}, symbol ASC"
-    return f"{primary}, {rank_order_sql()}"
+def result_order_sql(
+    sort: MarketScanSort | Sequence[MarketScanSort],
+    order: MarketScanSortOrder | Sequence[MarketScanSortOrder],
+) -> str:
+    sorts = (sort,) if isinstance(sort, str) else tuple(sort)
+    orders = (order,) if isinstance(order, str) else tuple(order)
+    if not sorts or len(sorts) != len(orders) or len(sorts) > 3:
+        raise ValueError("排序字段和方向必须一一对应，且最多三级")
+    if len(set(sorts)) != len(sorts):
+        raise ValueError("排序字段不能重复")
+    parts: list[str] = []
+    for field, sort_order in zip(sorts, orders, strict=True):
+        direction = "ASC" if sort_order == "asc" else "DESC"
+        parts.extend((f"{field} IS NULL ASC", f"{field} {direction}"))
+    if len(sorts) == 1 and sorts[0] == "rank":
+        parts.append("symbol ASC")
+    else:
+        parts.append(rank_order_sql())
+    return ", ".join(parts)
 
 
 def rank_order_sql() -> str:

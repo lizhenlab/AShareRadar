@@ -151,6 +151,40 @@ def test_rule_comparison_does_not_skip_an_intervening_incompatible_run(tmp_path)
     assert result.items == []
 
 
+def test_rank_comparison_skips_other_mode_and_uses_previous_same_mode_run(tmp_path) -> None:
+    service, path = _service(tmp_path)
+    previous_official_id = _seed_run(
+        path,
+        "official-rule-v1",
+        [("600001.SH", 3)],
+        data_date="2026-07-15",
+        as_of="2026-07-15 16:00:00",
+        mode="official",
+    )
+    _seed_run(
+        path,
+        "intraday-rule-v1",
+        [("600001.SH", 2)],
+        data_date="2026-07-16",
+        as_of="2026-07-16 10:00:00",
+        mode="intraday",
+    )
+    current_id = _seed_run(
+        path,
+        "official-rule-v1",
+        [("600001.SH", 1)],
+        data_date="2026-07-17",
+        as_of="2026-07-17 16:00:00",
+        mode="official",
+    )
+
+    result = service.rank_changes(current_id, page=1, page_size=50)
+
+    assert result.comparable is True
+    assert result.previous_run_id == previous_official_id
+    assert result.items[0].rank_delta == 2
+
+
 def test_first_completed_run_has_no_previous_comparison(tmp_path) -> None:
     service, path = _service(tmp_path)
     current_id = _seed_run(
@@ -266,17 +300,18 @@ def _seed_run(
     data_date: str,
     as_of: str,
     scope: str = "ALL",
+    mode: str = "official",
 ) -> int:
     timestamp = "2026-07-28T01:00:00.000000Z"
     with sqlite3.connect(path) as conn:
         run_id = conn.execute(
             """
             INSERT INTO market_scan_run (
-                status, trigger, rule_version, as_of, data_date, scope,
+                status, trigger, mode, rule_version, as_of, data_date, scope,
                 created_at, updated_at, finished_at
-            ) VALUES ('success', 'manual', ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ('success', 'manual', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (rule_version, as_of, data_date, scope, timestamp, timestamp, timestamp),
+            (mode, rule_version, as_of, data_date, scope, timestamp, timestamp, timestamp),
         ).lastrowid
         assert run_id is not None
         for symbol, rank in rows:

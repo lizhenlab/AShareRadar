@@ -54,6 +54,7 @@ def test_css_entrypoint_imports_existing_modules_in_order() -> None:
         "interactions.css",
         "side-footer.css",
         "responsive.css",
+        "primary-navigation.css",
     ]
     for filename in imports:
         path = STATIC_DIR / "css" / filename

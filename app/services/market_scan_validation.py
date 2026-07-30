@@ -8,13 +8,19 @@ import math
 from typing import Literal
 
 from app.models.market import Kline, Quote, StockInfo
-from app.models.market_scan import MarketScanResultItem, MarketScanResultWrite
+from app.models.market_scan import MarketScanMode, MarketScanResultItem, MarketScanResultWrite
 from app.services.data_quality_time import latest_expected_daily_kline_date
+from app.services.market_scan_completion import short_scan_error
 from app.services.market_scan_contracts import (
     MarketScanDataHubProtocol,
     MarketScanStockPoolResolutionProtocol,
 )
-from app.services.market_scan_scoring import completed_market_scan_klines
+from app.services.market_scan_scoring import (
+    MarketScanDataMissing,
+    MarketScanSkipped,
+    completed_market_scan_klines,
+)
+from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME
 from app.utils.clock import market_now, monotonic_now
 from app.utils.provider_errors import ProviderChainUnavailable
 
@@ -25,6 +31,8 @@ MARKET_SCAN_WALL_CLOCK_BUDGET_SECONDS = 30 * 60.0
 @dataclass(frozen=True)
 class MarketScanRuntimeGuard:
     data_date: date
+    quote_date: date
+    mode: MarketScanMode
     wall_clock_budget_seconds: float
     now: Callable[[], datetime]
     monotonic: Callable[[], float]
@@ -34,6 +42,8 @@ class MarketScanRuntimeGuard:
     def create(
         cls,
         data_date: date,
+        quote_date: date,
+        mode: MarketScanMode,
         settings: object,
         *,
         now: Callable[[], datetime] | None = None,
@@ -42,6 +52,8 @@ class MarketScanRuntimeGuard:
         monotonic_clock = monotonic or monotonic_now
         return cls(
             data_date=data_date,
+            quote_date=quote_date,
+            mode=mode,
             wall_clock_budget_seconds=market_scan_wall_clock_budget_seconds(settings),
             now=now or market_now,
             monotonic=monotonic_clock,
@@ -54,7 +66,13 @@ class MarketScanRuntimeGuard:
             raise RuntimeError(
                 f"全市场扫描超过 {self.wall_clock_budget_seconds:g} 秒墙钟预算"
             )
-        current_data_date = latest_expected_daily_kline_date(self.now())
+        current = self.now()
+        if self.mode == "intraday" and (
+            current.date() != self.quote_date
+            or current.time() >= DAILY_KLINE_PUBLISH_TIME
+        ):
+            raise RuntimeError("盘中临时扫描已越过当日行情窗口，停止发布")
+        current_data_date = latest_expected_daily_kline_date(current)
         if current_data_date != self.data_date:
             raise RuntimeError(
                 "扫描运行期间完整交易日已从 "
@@ -187,6 +205,37 @@ def failed_market_scan_result(
     )
 
 
+def failed_scan_result_for_exception(
+    *,
+    item: MarketScanResultItem,
+    quote: Quote | None,
+    rows: list[Kline],
+    cutoff: date,
+    exc: Exception,
+    sensitive_values: tuple[object, ...],
+) -> MarketScanResultWrite:
+    if isinstance(exc, MarketScanSkipped):
+        return failed_market_scan_result(
+            item.symbol,
+            "skipped",
+            quote,
+            rows,
+            cutoff=cutoff,
+            reason=str(exc),
+        )
+    error = str(exc)
+    if not isinstance(exc, MarketScanDataMissing):
+        error = short_scan_error(exc, sensitive_values=sensitive_values)
+    return failed_market_scan_result(
+        item.symbol,
+        "missing",
+        quote,
+        rows,
+        cutoff=cutoff,
+        error=error,
+    )
+
+
 def raise_batch_outcome_error(
     outcomes: list[MarketScanResultWrite | BaseException],
 ) -> None:
@@ -208,6 +257,7 @@ def raise_batch_outcome_error(
 __all__ = [
     "MARKET_SCAN_WALL_CLOCK_BUDGET_SECONDS",
     "MarketScanRuntimeGuard",
+    "failed_scan_result_for_exception",
     "failed_market_scan_result",
     "market_scan_wall_clock_budget_seconds",
     "minimum_market_counts",

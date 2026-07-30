@@ -42,15 +42,23 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
 
           const value = (value) => ({ value });
           const elements = {
-            market: value("SH"),
-            industry: value("白酒"),
+            market: value("SH,SZ"),
+            industry: value("白酒，饮料"),
             isSt: value("false"),
             isNew: value("true"),
             quality: value("88"),
+            qualityMax: value("99"),
+            scoreMin: value("70"), scoreMax: value("95"),
+            trendMin: value("60"), trendMax: value("90"),
+            changeMin: value("-2.5"), changeMax: value("9.5"),
+            turnoverMin: value("1"), turnoverMax: value("20"),
+            amountMin: value("1000000"), amountMax: value("500000000"),
             status: value("missing"),
             keyword: value("600519"),
             sort: value("trend_score"),
             order: value("desc"),
+            sort2: value("score"), order2: value("desc"),
+            sort3: value("symbol"), order3: value("asc"),
           };
           let unsupportedMessage = "";
           try {
@@ -63,6 +71,8 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
           const definition = buildDiscoveryPresetDefinition("高质量白酒", elements);
           elements.sort.value = "rank";
           elements.order.value = "asc";
+          elements.sort2.value = "";
+          elements.sort3.value = "";
           const rankSort = buildDiscoveryPresetDefinition("短线强势顺序", elements).sort;
           elements.sort.value = "symbol";
           const symbolSort = buildDiscoveryPresetDefinition("代码顺序", elements).sort;
@@ -124,19 +134,28 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
     assert payload["definition"] == {
         "name": "高质量白酒",
         "criteria": {
-            "market": ["SH"],
-            "industry": ["白酒"],
+            "market": ["SH", "SZ"],
+            "industry": ["白酒", "饮料"],
             "is_st": False,
             "is_new": True,
-            "quality": {"min": 88},
+            "quality": {"min": 88, "max": 99},
+            "score": {"min": 70, "max": 95},
+            "trend": {"min": 60, "max": 90},
+            "change": {"min": -2.5, "max": 9.5},
+            "turnover": {"min": 1, "max": 20},
+            "amount": {"min": 1_000_000, "max": 500_000_000},
         },
-        "sort": [{"field": "trend", "order": "desc"}],
+        "sort": [
+            {"field": "trend", "order": "desc"},
+            {"field": "score", "order": "desc"},
+            {"field": "symbol", "order": "asc"},
+        ],
     }
     assert "状态" in payload["unsupportedMessage"]
     assert "搜索关键词" in payload["unsupportedMessage"]
     assert payload["rankSort"] == [{"field": "rank", "order": "asc"}]
     assert payload["symbolSort"] == [{"field": "symbol", "order": "asc"}]
-    assert payload["representable"] == [True, False, False]
+    assert payload["representable"] == [True, True, True]
     assert payload["item"] | {
         "run_id": 42,
         "status": "success",
@@ -156,7 +175,7 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
     ]
 
 
-def test_discovery_invalidates_stale_requests_and_keeps_complex_presets_read_only() -> None:
+def test_discovery_invalidates_stale_requests_and_fully_edits_complex_presets() -> None:
     _run_node(
         r'''
           import assert from "node:assert/strict";
@@ -178,7 +197,7 @@ def test_discovery_invalidates_stale_requests_and_keeps_complex_presets_read_onl
           };
           let currentRun = { id: 42, status: "success" };
           let pending = null;
-          let createCalls = 0;
+          const updateBodies = [];
           const signals = [];
           const controller = createDiscoveryController({
             root: document,
@@ -188,9 +207,10 @@ def test_discovery_invalidates_stale_requests_and_keeps_complex_presets_read_onl
               if (target.startsWith("/api/discovery/presets?page=")) {
                 return { items: [editable, complex], total: 2, page: 1, page_size: 100, page_count: 1 };
               }
-              if (target === "/api/discovery/presets") {
-                createCalls += 1;
-                throw new Error("复杂方案不应覆盖保存");
+              if (target === "/api/discovery/presets/8" && options.method === "PUT") {
+                const body = JSON.parse(options.body);
+                updateBodies.push(body);
+                return { ...complex, ...body, revision: 4 };
               }
               if (target.includes("/apply")) {
                 signals.push(options.signal);
@@ -256,22 +276,29 @@ def test_discovery_invalidates_stale_requests_and_keeps_complex_presets_read_onl
           assert.equal(paginationEvent.stopped, false);
 
           selectPreset(8);
-          assert.equal(element("discoveryPresetSave").disabled, true);
-          assert.match(element("discoveryPresetFeedback").textContent, /后端原定义只读应用/);
-          element("marketScanMarket").value = "BJ";
-          element("marketScanSort").value = "symbol";
+          assert.equal(element("discoveryPresetSave").disabled, false);
+          assert.match(element("discoveryPresetFeedback").textContent, /已选择筛选方案/);
           pending = deferredPair();
           const complexApply = controller.applyPreset(1);
           await flushPromises();
-          assert.equal(element("marketScanMarket").value, "BJ");
-          assert.equal(element("marketScanSort").value, "symbol");
+          assert.equal(element("marketScanMarket").value, "SH");
+          assert.equal(element("marketScanScoreMin").value, "80");
+          assert.equal(element("marketScanSort").value, "score");
+          assert.equal(element("marketScanSort2").value, "turnover_rate");
           pending.page.resolve(leaderboard(complex, 44));
           pending.rank.resolve(rankChanges(44));
           await complexApply;
           assert.equal(controller.state.applied.preset.id, 8);
-          assert.match(element("discoveryPresetFeedback").textContent, /后端原定义只读应用/);
-          assert.equal(await controller.savePreset(), null);
-          assert.equal(createCalls, 0);
+          assert.match(element("discoveryPresetFeedback").textContent, /已应用筛选方案/);
+          element("marketScanMarket").value = "BJ";
+          element("marketScanSort").value = "symbol";
+          element("marketScanSort2").value = "";
+          const updated = await controller.savePreset();
+          assert.equal(updated.revision, 4);
+          assert.equal(updateBodies.length, 1);
+          assert.equal(updateBodies[0].expected_revision, 3);
+          assert.deepEqual(updateBodies[0].criteria.market, ["BJ"]);
+          assert.deepEqual(updateBodies[0].sort, [{ field: "symbol", order: "desc" }]);
 
           function selectPreset(id) {
             element("discoveryPresetSelect").value = String(id);
@@ -308,6 +335,112 @@ def test_discovery_invalidates_stale_requests_and_keeps_complex_presets_read_onl
           }
           async function flushPromises() {
             for (let index = 0; index < 20; index += 1) await Promise.resolve();
+          }
+        '''
+    )
+
+
+def test_discovery_bulk_queue_and_preset_import_export_preserve_provenance() -> None:
+    _run_node(
+        r'''
+          import assert from "node:assert/strict";
+          import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+          import { createDiscoveryController } from "./static/js/discovery.js";
+
+          const { element, elements } = installAppDom({ canvasContext: null });
+          for (const node of elements.values()) {
+            node.setAttribute = function setAttribute(name, value) { this[name] = String(value); };
+          }
+          const preset = {
+            id: 7, name: "批量研究", revision: 3,
+            criteria: { market: ["SH", "SZ"], score: { min: 80 } },
+            sort: [{ field: "score", order: "desc" }, { field: "symbol", order: "asc" }],
+          };
+          const archive = {
+            format: "ashare-radar.discovery-preset", schema_version: 1,
+            checksum_algorithm: "sha256", checksum: "a".repeat(64),
+            exported_at: "2026-07-29T10:00:00Z",
+            preset: { name: preset.name, criteria: preset.criteria, sort: preset.sort },
+          };
+          const queueBodies = [];
+          const applyPages = [];
+          const controller = createDiscoveryController({
+            root: document,
+            getRun: () => ({ id: 42, status: "success", mode: "official" }),
+            async fetcher(url, options = {}) {
+              const target = String(url);
+              if (target.startsWith("/api/discovery/presets?page=")) {
+                return { items: [preset], total: 1, page: 1, page_size: 100, page_count: 1 };
+              }
+              if (target === "/api/discovery/presets/7/export") return archive;
+              if (target === "/api/discovery/presets/import") {
+                return { ...preset, id: 8, name: "导入方案", revision: 1 };
+              }
+              if (target.includes("/rank-changes")) return rankChanges();
+              if (target.endsWith("/apply")) {
+                const page = JSON.parse(options.body).page;
+                applyPages.push(page);
+                return leaderboard(page);
+              }
+              if (target.endsWith("/research-queue")) {
+                const body = JSON.parse(options.body);
+                queueBodies.push(body);
+                return { items: [], added_count: body.symbols.length, existing_count: 0 };
+              }
+              throw new Error(`unexpected request: ${target}`);
+            },
+          });
+          for (const node of elements.values()) {
+            node.setAttribute = function setAttribute(name, value) { this[name] = String(value); };
+          }
+
+          await controller.activate();
+          element("discoveryPresetSelect").value = "7";
+          element("discoveryPresetSelect").listeners.change();
+          element("marketScanTableWrap").dataset.marketScanRunId = "42";
+          await controller.applyPreset(1);
+          assert.equal(controller.state.applied.payload.items.length, 100);
+
+          controller.state.applied.selected.add(controller.state.applied.payload.items[0].symbol);
+          controller.state.applied.selected.add(controller.state.applied.payload.items[1].symbol);
+          await controller.enqueueSelected();
+          assert.deepEqual(queueBodies[0].symbols.length, 2);
+
+          const bulk = await controller.enqueueAllFiltered();
+          assert.equal(bulk.total, 205);
+          assert.deepEqual(queueBodies.slice(1).map((body) => body.symbols.length), [100, 100, 5]);
+          assert.equal(queueBodies.every((body) => body.run_id === 42), true);
+          assert.equal(queueBodies.every((body) => body.expected_preset_revision === 3), true);
+          assert.deepEqual(applyPages, [1, 1, 2, 3]);
+
+          assert.deepEqual(await controller.exportPreset(), archive);
+          const imported = await controller.importPreset({ async text() { return JSON.stringify(archive); } });
+          assert.equal(imported.id, 8);
+          assert.equal(controller.state.selectedId, 8);
+
+          function leaderboard(page) {
+            const start = (page - 1) * 100;
+            const count = Math.min(100, 205 - start);
+            return {
+              preset, run_id: 42, rule_version: "leader-v2", total: 205,
+              page, page_size: 100, page_count: 3,
+              items: Array.from({ length: count }, (_, index) => item(start + index + 1)),
+            };
+          }
+          function item(position) {
+            const code = String(position).padStart(6, "0");
+            return {
+              position, source_rank: position, symbol: `${code}.SH`, code, market: "SH",
+              name: `样本${code}`, industry: "半导体", is_st: false, is_new: false,
+              quality: 90, trend: 85, change: 2, turnover: 3, amount: 100000000, score: 88,
+            };
+          }
+          function rankChanges() {
+            return {
+              current_run_id: 42, previous_run_id: 41, comparable: true, reason: null,
+              current_rule_version: "leader-v2", previous_rule_version: "leader-v2",
+              items: [], total: 205, page: 1, page_size: 200, page_count: 2,
+            };
           }
         '''
     )

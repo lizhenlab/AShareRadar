@@ -55,7 +55,7 @@ def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_pa
     assert started.accepted is True
     assert started.run.status == "queued"
     assert started.run.rule_version == _rule_version(hub)
-    assert started.run.rule_version.startswith("full-market-scan-v4:")
+    assert started.run.rule_version.startswith("full-market-scan-v5:")
     assert len(started.run.rule_version.rsplit(":", 1)[1]) == 64
     assert final.status == "failed"
     assert final.total_count == 3
@@ -65,6 +65,16 @@ def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_pa
     assert final.missing_count == 2
     assert final.skipped_count == 0
     assert final.coverage_pct == 33.33
+    assert final.current_stage is None
+    assert {"stock_pool", "bulk_quotes", "klines", "scoring", "persistence", "publication"}.issubset(
+        final.stage_metrics
+    )
+    assert final.stage_metrics["bulk_quotes"].calls >= 1
+    assert final.stage_metrics["klines"].items >= 3
+    assert final.stage_metrics["scoring"].items == 3
+    assert {item.market for item in final.market_progress} == {"SH", "SZ", "BJ"}
+    assert sum(item.processed_count for item in final.market_progress) == 3
+    assert final.elapsed_seconds is not None
     assert {item.symbol for item in page.items} == {"600001.SH", "000001.SZ", "920066.BJ"}
     by_symbol = {item.symbol: item for item in page.items}
     assert by_symbol["600001.SH"].status == "success"
@@ -79,6 +89,63 @@ def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_pa
     assert "行情" in (by_symbol["920066.BJ"].error or "")
     assert "测试行情源部分缺失" in (by_symbol["920066.BJ"].error or "")
     assert hub.max_active_klines <= hub.settings.market_scan_concurrency
+
+
+def test_market_scan_prefetches_each_batch_but_still_refreshes_every_symbol(
+    tmp_path: Path,
+) -> None:
+    class PrefetchHub(_MarketScanHub):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.prefetch_batches: list[tuple[str, ...]] = []
+            self.provider_refreshes: list[tuple[str, bool, bool]] = []
+
+        async def prefetch_market_scan_klines(
+            self,
+            symbols: list[str],
+            *,
+            limit: int,
+        ) -> dict[str, list[Kline]]:
+            self.prefetch_batches.append(tuple(symbols))
+            return {
+                symbol: self.klines_by_symbol.get(symbol, [])[-limit:]
+                for symbol in symbols
+            }
+
+        async def market_scan_kline_from_prefetch(
+            self,
+            symbol: str,
+            prefetched_cache: list[Kline],
+            *,
+            limit: int,
+            allow_stale: bool,
+            require_provider_response: bool,
+        ) -> list[Kline]:
+            self.provider_refreshes.append(
+                (symbol, allow_stale, require_provider_response)
+            )
+            assert prefetched_cache == self.klines_by_symbol.get(symbol, [])[-limit:]
+            return await super().kline(
+                symbol,
+                limit=limit,
+                allow_stale=allow_stale,
+                require_provider_response=require_provider_response,
+            )
+
+    async def scenario() -> PrefetchHub:
+        hub = PrefetchHub(tmp_path)
+        scanner = _scanner(hub)
+        await scanner.start()
+        started = await scanner.create_scan(as_of=SCAN_AS_OF)
+        await _wait_for_terminal(scanner, started.run.id)
+        await scanner.stop()
+        return hub
+
+    hub = asyncio.run(scenario())
+
+    assert [len(batch) for batch in hub.prefetch_batches] == [2, 1]
+    assert len(hub.provider_refreshes) == 3
+    assert all(allow_stale and required for _, allow_stale, required in hub.provider_refreshes)
 
 
 def test_market_scan_stops_without_persisting_false_missing_rows_when_provider_chain_is_cooling(

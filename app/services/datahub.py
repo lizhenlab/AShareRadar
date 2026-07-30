@@ -193,6 +193,32 @@ class DataHub:
             require_provider_response=require_provider_response,
         )
 
+    async def prefetch_market_scan_klines(
+        self,
+        symbols: list[str],
+        *,
+        limit: int,
+    ) -> dict[str, list[Kline]]:
+        return await self._kline_coordinator.prefetch_daily_cache(symbols, limit=limit)
+
+    async def market_scan_kline_from_prefetch(
+        self,
+        symbol: str,
+        prefetched_cache: list[Kline],
+        *,
+        limit: int,
+        allow_stale: bool,
+        require_provider_response: bool,
+    ) -> list[Kline]:
+        return await self._kline_coordinator.kline(
+            symbol,
+            limit=limit,
+            use_cache=True,
+            allow_stale=allow_stale,
+            require_provider_response=require_provider_response,
+            prefetched_cache=prefetched_cache,
+        )
+
     def provider_chain_state(self, kind: str):
         return self._provider_runtime.chain_state(self._priority(kind), self.providers, kind)
 

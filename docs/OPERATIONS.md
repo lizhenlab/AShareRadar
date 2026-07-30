@@ -188,18 +188,50 @@ SQLite persistence has two ordering guarantees worth preserving during recovery 
 
 ### Full-Market Scan
 
-The **全市场榜单** workspace is the normal manual entrypoint. It creates a background run and returns immediately; keep the page open to see progress, or inspect the same state from a shell:
+The top-level **全市场选股** workspace is the normal manual entrypoint. It creates a background run and returns immediately; keep the page open to see progress, or inspect the same state from a shell:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8010/api/market-scans \
-  -H 'Content-Type: application/json' -d '{}'
-curl -sS http://127.0.0.1:8010/api/market-scans/latest
-curl -sS 'http://127.0.0.1:8010/api/market-scans/1/results?page=1&page_size=100&status=success&sort=rank&order=asc'
+  -H 'Content-Type: application/json' -d '{"mode":"official"}'
+curl -sS 'http://127.0.0.1:8010/api/market-scans/latest?mode=official'
+curl -sS 'http://127.0.0.1:8010/api/market-scans/latest-published?mode=intraday'
+curl -sS 'http://127.0.0.1:8010/api/market-scans?page=1&page_size=100&mode=official&status=published&data_date=2026-07-29'
+curl -sS 'http://127.0.0.1:8010/api/market-scans/1/results?page=1&page_size=100&status=success&market=SH&market=BJ&industry=%E9%93%B6%E8%A1%8C&min_score=80&max_score=100&sort=score&sort=trend_score&order=desc&order=desc'
+curl -fL -o market-scan.xlsx 'http://127.0.0.1:8010/api/market-scans/1/export.xlsx?status=success&market=SH&market=BJ&min_score=80&sort=score&order=desc'
 curl -sS -X POST http://127.0.0.1:8010/api/market-scans/1/cancel
 curl -sS -X POST http://127.0.0.1:8010/api/market-scans/1/retry
 ```
 
 Replace `1` with the returned run ID. `queued`, `running`, and `cancelling` are active states. `success` means every seeded stock produced a clean ranked row from a current stock pool. `degraded` also covers a locally cached `stale-fallback` stock pool even when every per-stock score succeeds; run diagnostics and `stock_pool_source` retain that provenance. Per-result decisions use structured `quote_fallback_used`, `kline_fallback_used`, `metadata_degraded`, and `degradation_reasons` fields; Chinese display tags are derived and do not control retry or terminal status. `failed` means no usable ranking or a run-level prerequisite failed; `cancelled` and `interrupted` can be retried. Repeated starts return the existing active run rather than creating overlapping work. Runtime-leader startup or takeover changes orphaned active rows to `interrupted` before mutation.
+
+Omitting `mode` on `latest`, `latest-published`, and the run list preserves the original global behavior. The browser always shows two identities: the globally active/background task and the selected leaderboard mode. If an `official` request reuses an already active `intraday` task (or the reverse), the task mode is displayed explicitly and the selected-mode published leaderboard stays intact. Selecting a history run binds filters, paging, export, snapshot evidence, and discovery/research provenance to that run until **最近发布** is selected again.
+
+Result and export queries accept repeated `market` values, repeated substring-matched `industry` values, `min_`/`max_` pairs for `score`, `trend_score`, `change_pct`, `turnover_rate`, `amount`, and `data_quality_score`, plus up to three aligned repeated `sort`/`order` values. Duplicate sort fields, unmatched order counts, invalid ranges, more than three sorts/markets, or more than 20 industries return `422`. SQL remains parameterized and result pages remain capped.
+
+Excel export accepts the exact same normalized filter and multi-sort parameters as the browser leaderboard, without pagination. Only `success` or `degraded` runs are exportable. The download contains `榜单`, `评分明细`, and `导出信息` sheets; it reads the persisted snapshot and does not contact providers or recompute ranks. Stock codes stay text and provider/user-derived cells are protected against formula injection. The API returns `Cache-Control: no-store`, an attachment filename, and the standard XLSX media type.
+
+Every run exposes `current_stage`, `stage_metrics`, `market_progress`, `elapsed_seconds`, effective `throughput_per_second`, and optional `eta_seconds`. The six stages are stock pool, bulk quotes, K-line acquisition, scoring, persistence, and publication. Wall duration and accumulated work duration can differ because concurrent K-line and scoring work overlaps. ETA is intentionally `null` until at least 20 rows and five seconds are observed; clients must display `估算中`, not invent precision. SH/SZ/BJ progress reports total/processed/success/missing/skipped and coverage separately. A terminal provider/coverage/span/distribution diagnosis should be acted on by restoring the source or retrying pending rows, never by lowering publication guards.
+
+Run the provider-free, repeatable cache-path benchmark against the configured database:
+
+```bash
+python tools/benchmark_market_scan.py \
+  --database data/ashare_radar.sqlite3 \
+  --iterations 3 \
+  --output docs/research/FULL_MARKET_SELECTION_PERFORMANCE_2026.json
+```
+
+The source database is checked for size/mtime mutation. The cold case uses an empty temporary cache of the same symbol cardinality; the warm case reads persisted K-lines. It compares the legacy connection-per-symbol path with production batch prefetch and reports historical complete-run median separately. The recorded 5,532-symbol evidence improved the cold local cache-read median from 3.043701 s to 0.078691 s (97.41%) and the warm median from 13.828884 s to 11.129911 s (19.52%). Ten historical complete scans had a 599.633 s median, so the safe local change contributes an estimated 0.45% end-to-end ceiling; provider refresh remains the measured limiting factor. No provider concurrency, date/coverage gate, incomplete-bar rule, or 30-minute deadline was changed.
+
+Produce a read-only effectiveness research report with:
+
+```bash
+python tools/evaluate_market_scan.py \
+  --database data/ashare_radar.sqlite3 \
+  --output market-scan-evaluation.json
+```
+
+Optional repeated `--run-id`, `--mode`, `--minimum-sample`, and `--complete-coverage` flags narrow the study. The evaluator opens SQLite in URI read-only/query-only mode, starts from frozen published ranks, and uses only later complete persisted trading days. Every Top-N/horizon/stratum cohort is either `ok` or `insufficient_data`; missing later days are not backfilled from current providers. This report is research evidence only. Do not change production weights without a reviewed new `rule_version`.
 
 Retry creates a new run whose `retry_of_run_id` points to the frozen original. The repository returns one `MarketScanRetryPlan`, and both manager validation and atomic copy use that same plan; a concurrent change aborts retry rather than mixing decisions. A never-published `failed` run is fully recalculated because its partial cross-sectional snapshot is not reusable. A `degraded`, `cancelled`, or `interrupted` run may copy only clean successes; unresolved, fallback-derived, metadata-degraded, or stale-pool rows return to pending. When pending rows exist, retry validates a complete same-data-date stock pool and refreshes metadata only on those symbols. A fully processed clean interrupted run can be finalized without another provider read. `rule_version` is a stable hash over score, K-line/history, universe, metadata, and publication rules. Retry requires an exact contract match; after a contract change, create a new scan instead of mixing scores.
 

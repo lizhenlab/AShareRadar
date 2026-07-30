@@ -21,6 +21,7 @@ files = [
     "app/api/errors.py",
     "app/api/routes/discovery.py",
     "app/api/routes/health.py",
+    "app/api/routes/market_scan.py",
     "app/api/routes/monitoring.py",
     "app/api/routes/quotes.py",
     "app/api/security.py",
@@ -43,7 +44,9 @@ files = [
     "app/repositories/market_quotes.py",
     "app/repositories/market_scan.py",
     "app/repositories/market_scan_context.py",
+    "app/repositories/market_scan_filtering.py",
     "app/repositories/market_scan_lifecycle.py",
+    "app/repositories/market_scan_lifecycle_support.py",
     "app/repositories/market_scan_mapping.py",
     "app/repositories/market_scan_queries.py",
     "app/repositories/market_scan_results.py",
@@ -67,15 +70,19 @@ files = [
     "app/services/market_scan_automation_runner.py",
     "app/services/market_scan_completion.py",
     "app/services/market_scan_contracts.py",
+    "app/services/market_scan_evaluation.py",
     "app/services/market_scan_execution.py",
+    "app/services/market_scan_export.py",
     "app/services/market_scan_lifecycle.py",
     "app/services/market_scan_manager.py",
+    "app/services/market_scan_modes.py",
     "app/services/market_scan_preflight.py",
     "app/services/market_scan_preflight_state.py",
     "app/services/market_scan_pressure.py",
     "app/services/market_scan_recovery.py",
     "app/services/market_scan_replay.py",
     "app/services/market_scan_scoring.py",
+    "app/services/market_scan_stock_evaluation.py",
     "app/services/market_scan_universe.py",
     "app/services/market_scan_validation.py",
     "app/services/optional_providers.py",
@@ -108,6 +115,8 @@ files = [
     "app/utils/time.py",
     "tools/api_inventory.py",
     "tools/architecture_inventory.py",
+    "tools/benchmark_market_scan.py",
+    "tools/evaluate_market_scan.py",
 ]
 follow_imports = "skip"
 check_untyped_defs = true
@@ -115,6 +124,10 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 show_error_codes = true
 pretty = true
+
+[[tool.mypy.overrides]]
+module = ["openpyxl", "openpyxl.*"]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 branch = true

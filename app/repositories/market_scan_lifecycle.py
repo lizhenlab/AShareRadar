@@ -1,29 +1,34 @@
 from __future__ import annotations
 
-import sqlite3
+import json
 
 from app.models.market_scan import (
     MarketScanRetryPlan,
+    MarketScanMode,
     MarketScanRun,
     MarketScanRunStatus,
+    MarketScanStage,
     MarketScanTrigger,
 )
 from app.repositories.market_scan_context import MarketScanRepositoryContext
-from app.repositories.market_scan_mapping import run_from_row
-from app.repositories.market_scan_results import (
-    assign_result_ranks,
-    count_degraded_results,
-    required_run_row,
-    sync_run_counts,
+from app.repositories.market_scan_lifecycle_support import (
+    ACTIVE_SCAN_STATUSES,
+    RETRYABLE_SCAN_STATUSES,
+    TERMINAL_SCAN_STATUSES,
+    _decoded_stage_metrics,
+    _duration_ms,
+    _finish_stage_metric,
+    _required_lastrowid,
+    _stage_metric,
+    build_retry_plan,
+    finish_linked_task_run,
+    finish_run_row,
+    validate_terminal_status,
 )
+from app.repositories.market_scan_mapping import run_from_row
+from app.repositories.market_scan_results import required_run_row
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.clock import monotonic_now
-from app.utils.time import parse_text_time
-
-
-ACTIVE_SCAN_STATUSES = ("queued", "running", "cancelling")
-TERMINAL_SCAN_STATUSES = ("success", "degraded", "failed", "cancelled", "interrupted")
-RETRYABLE_SCAN_STATUSES = ("degraded", "failed", "cancelled", "interrupted")
 
 MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
     WITH retry_source AS (
@@ -86,21 +91,24 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
         self,
         *,
         trigger: MarketScanTrigger,
+        mode: MarketScanMode = "official",
         rule_version: str,
         as_of: str,
         data_date: str,
+        quote_date: str | None = None,
         scope: str,
     ) -> MarketScanRun:
         stamp = now_text()
+        message = "等待盘中临时扫描" if mode == "intraday" else "等待盘后正式扫描"
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO market_scan_run (
-                    status, trigger, rule_version, as_of, data_date, scope,
+                    status, trigger, mode, rule_version, as_of, data_date, quote_date, scope,
                     created_at, updated_at, message
-                ) VALUES ('queued', ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES ('queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (trigger, rule_version, as_of, data_date, scope, stamp, stamp, "等待全市场扫描"),
+                (trigger, mode, rule_version, as_of, data_date, quote_date or data_date, scope, stamp, stamp, message),
             )
             created_run_id = _required_lastrowid(cursor, operation="创建扫描批次")
             row = required_run_row(conn, created_run_id)
@@ -157,6 +165,53 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
             updated = required_run_row(conn, run_id)
         return run_from_row(updated)
 
+    def update_observability(
+        self,
+        run_id: int,
+        *,
+        stage: MarketScanStage,
+        stage_items: int = 0,
+        work_metrics: dict[MarketScanStage, tuple[int, int]] | None = None,
+        message: str | None = None,
+    ) -> MarketScanRun:
+        stamp = now_text()
+        with self._lock, self._connect() as conn:
+            row = required_run_row(conn, run_id)
+            if row["status"] not in {"queued", "running", "cancelling"}:
+                return run_from_row(row)
+            metrics = _decoded_stage_metrics(row["stage_metrics_json"])
+            current_stage = str(row["current_stage"] or "") or None
+            stage_started_at = row["stage_started_at"]
+            if current_stage != stage:
+                _finish_stage_metric(metrics, current_stage, stage_started_at, stamp)
+                metric = _stage_metric(metrics, stage)
+                metric["calls"] += 1
+                stage_started_at = stamp
+            if stage_items > 0:
+                _stage_metric(metrics, stage)["items"] += stage_items
+            for metric_stage, (duration_ms, item_count) in (work_metrics or {}).items():
+                metric = _stage_metric(metrics, metric_stage)
+                metric["work_duration_ms"] += max(0, int(duration_ms))
+                metric["items"] += max(0, int(item_count))
+            conn.execute(
+                """
+                UPDATE market_scan_run
+                SET current_stage = ?, stage_started_at = ?, stage_metrics_json = ?,
+                    updated_at = ?, message = COALESCE(?, message)
+                WHERE id = ?
+                """,
+                (
+                    stage,
+                    stage_started_at,
+                    json.dumps(metrics, ensure_ascii=False, separators=(",", ":")),
+                    stamp,
+                    message[:800] if message else None,
+                    run_id,
+                ),
+            )
+            updated = required_run_row(conn, run_id)
+        return run_from_row(updated)
+
     def start_run(self, run_id: int) -> MarketScanRun:
         stamp = now_text()
         with self._lock, self._connect() as conn:
@@ -168,11 +223,13 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                 UPDATE market_scan_run
                 SET status = 'running', started_at = COALESCE(started_at, ?),
                     finished_at = NULL, duration_ms = NULL, updated_at = ?,
+                    current_stage = 'stock_pool', stage_started_at = ?,
+                    stage_metrics_json = '{"stock_pool":{"duration_ms":0,"work_duration_ms":0,"calls":1,"items":0}}',
                     message = '正在加载全市场股票池', last_error = NULL,
                     cancel_requested_at = NULL
                 WHERE id = ?
                 """,
-                (stamp, stamp, run_id),
+                (stamp, stamp, stamp, run_id),
             )
             updated = required_run_row(conn, run_id)
         self._run_started_monotonic[run_id] = monotonic_now()
@@ -217,17 +274,19 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
             cursor = conn.execute(
                 """
                 INSERT INTO market_scan_run (
-                    retry_of_run_id, status, trigger, rule_version, as_of, data_date,
+                    retry_of_run_id, status, trigger, mode, rule_version, as_of, data_date, quote_date,
                     scope, stock_pool_source, total_count, excluded_count,
                     processed_count, success_count, retry_count, created_at,
                     updated_at, message
-                ) VALUES (?, 'queued', 'retry', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, 'queued', 'retry', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
+                    row["mode"],
                     row["rule_version"],
                     row["as_of"],
                     row["data_date"],
+                    row["quote_date"] or row["data_date"],
                     row["scope"],
                     row["stock_pool_source"],
                     row["total_count"],
@@ -259,46 +318,15 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
         stamp = now_text()
         with self._lock, self._connect() as conn:
             row = required_run_row(conn, run_id)
-            if row["status"] in TERMINAL_SCAN_STATUSES:
-                finish_linked_task_run(
-                    conn,
-                    row,
-                    scan_status=str(row["status"]),
-                    task_status=task_status,
-                    stamp=str(row["finished_at"] or stamp),
-                    message=str(row["message"] or message),
-                    duration_ms=row["duration_ms"],
-                )
-                self._run_started_monotonic.pop(run_id, None)
-                return run_from_row(row)
-            sync_run_counts(conn, run_id, stamp=stamp)
-            synced = required_run_row(conn, run_id)
-            validate_terminal_status(conn, synced, status)
-            if status in {"success", "degraded"}:
-                assign_result_ranks(conn, run_id)
-            duration_ms = _duration_ms(
-                row["started_at"],
-                stamp,
-                started_monotonic=self._run_started_monotonic.get(run_id),
-            )
-            conn.execute(
-                """
-                UPDATE market_scan_run
-                SET status = ?, updated_at = ?, finished_at = ?, duration_ms = ?,
-                    message = ?, last_error = ?
-                WHERE id = ?
-                """,
-                (status, stamp, stamp, duration_ms, message[:800], (error or "")[:800] or None, run_id),
-            )
-            updated = required_run_row(conn, run_id)
-            finish_linked_task_run(
+            updated = finish_run_row(
                 conn,
-                updated,
-                scan_status=status,
-                task_status=task_status,
+                row,
+                status,
                 stamp=stamp,
                 message=message,
-                duration_ms=duration_ms,
+                error=error,
+                task_status=task_status,
+                started_monotonic=self._run_started_monotonic.get(run_id),
             )
         self._run_started_monotonic.pop(run_id, None)
         return run_from_row(updated)
@@ -351,133 +379,6 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                 )
             self._run_started_monotonic.clear()
         return len(rows)
-
-
-def build_retry_plan(conn: sqlite3.Connection, run: sqlite3.Row) -> MarketScanRetryPlan:
-    force_recompute = (
-        str(run["status"]) == "failed"
-        or str(run["stock_pool_source"] or "") == "stale-fallback"
-    )
-    counts = conn.execute(
-        """
-        SELECT
-            COUNT(*) AS result_count,
-            SUM(CASE
-                WHEN status = 'success'
-                 AND quote_fallback_used = 0
-                 AND kline_fallback_used = 0
-                 AND metadata_degraded = 0
-                THEN 1 ELSE 0
-            END) AS clean_success_count
-        FROM market_scan_result
-        WHERE run_id = ?
-        """,
-        (run["id"],),
-    ).fetchone()
-    result_count = int(counts["result_count"] or 0)
-    preserved = 0 if force_recompute else int(counts["clean_success_count"] or 0)
-    pending = result_count - preserved
-    return MarketScanRetryPlan(
-        source_run_id=int(run["id"]),
-        result_count=result_count,
-        preserved_success_count=preserved,
-        pending_count=pending,
-        needs_market_data=result_count == 0 or pending > 0,
-        rule_version=str(run["rule_version"]),
-    )
-
-
-def validate_terminal_status(
-    conn: sqlite3.Connection,
-    row: sqlite3.Row,
-    status: MarketScanRunStatus,
-) -> None:
-    if status not in {"success", "degraded"}:
-        return
-    total = int(row["total_count"] or 0)
-    processed = int(row["processed_count"] or 0)
-    success = int(row["success_count"] or 0)
-    degraded = count_degraded_results(conn, int(row["id"]))
-    fallback_pool = row["stock_pool_source"] == "stale-fallback"
-    _validate_complete_coverage(total, processed)
-    if status == "success":
-        _validate_clean_success(total, success, degraded, fallback_pool)
-        return
-    _validate_degraded_success(total, success, degraded, fallback_pool)
-
-
-def _validate_complete_coverage(total: int, processed: int) -> None:
-    if total <= 0 or processed != total:
-        raise ValueError("成功或降级批次必须完成全部股票记录")
-
-
-def _validate_clean_success(total: int, success: int, degraded: int, fallback_pool: bool) -> None:
-    if success != total:
-        raise ValueError("成功批次不得包含缺失或跳过记录")
-    if degraded or fallback_pool:
-        raise ValueError("含兜底或元数据不完整结果的批次必须标记为降级")
-
-
-def _validate_degraded_success(total: int, success: int, degraded: int, fallback_pool: bool) -> None:
-    has_partial_coverage = 0 < success < total
-    has_degraded_success = success == total and (degraded > 0 or fallback_pool)
-    if not has_partial_coverage and not has_degraded_success:
-        raise ValueError("降级批次必须包含缺失、跳过或明确的降级结果")
-
-
-def finish_linked_task_run(
-    conn: sqlite3.Connection,
-    run: sqlite3.Row,
-    *,
-    scan_status: str,
-    task_status: str | None,
-    stamp: str,
-    message: str,
-    duration_ms: int | None = None,
-) -> None:
-    task_run_id = run["task_run_id"]
-    if task_run_id is None:
-        return
-    resolved_status = task_status or _task_status_for_scan(scan_status)
-    conn.execute(
-        """
-        UPDATE task_run
-        SET status = ?, finished_at = ?,
-            duration_ms = COALESCE(?, CASE
-                WHEN julianday(started_at) IS NULL THEN NULL
-                ELSE MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER))
-            END),
-            message = ?
-        WHERE id = ?
-        """,
-        (resolved_status, stamp, duration_ms, stamp, message[:800], task_run_id),
-    )
-
-
-def _task_status_for_scan(scan_status: str) -> str:
-    return "cancelled" if scan_status in {"cancelled", "interrupted"} else scan_status
-
-
-def _required_lastrowid(cursor: sqlite3.Cursor, *, operation: str) -> int:
-    if cursor.lastrowid is None:
-        raise RuntimeError(f"{operation}未返回记录 ID")
-    return cursor.lastrowid
-
-
-def _duration_ms(
-    started_at: str | None,
-    finished_at: str,
-    *,
-    started_monotonic: float | None = None,
-) -> int | None:
-    if started_monotonic is not None:
-        return max(0, round((monotonic_now() - started_monotonic) * 1000))
-    if not started_at:
-        return None
-    try:
-        return max(0, round((parse_text_time(finished_at) - parse_text_time(started_at)).total_seconds() * 1000))
-    except ValueError:
-        return None
 
 
 __all__ = [

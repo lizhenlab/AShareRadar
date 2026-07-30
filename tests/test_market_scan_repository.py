@@ -57,6 +57,28 @@ def test_results_are_ranked_stably_paginated_and_filtered(tmp_path: Path) -> Non
         "600001.SH",
         "000001.SZ",
     ]
+    assert _symbols(
+        _results(
+            repo,
+            run.id,
+            market=("SZ", "BJ"),
+            industry=("银行", "高端装备"),
+            min_score=70,
+            max_score=80,
+            min_trend_score=60,
+            max_trend_score=70,
+            min_change_pct=2,
+            max_change_pct=3,
+            min_turnover_rate=2,
+            max_turnover_rate=4,
+            min_amount=150,
+            max_amount=350,
+            min_data_quality_score=70,
+            max_data_quality_score=95,
+            sort=("amount", "score", "symbol"),
+            order=("desc", "desc", "asc"),
+        )
+    ) == ["920066.BJ", "000001.SZ"]
     assert _symbols(_results(repo, run.id, keyword="  600002  ")) == ["600002.SH"]
     assert _symbols(_results(repo, run.id, keyword="北交")) == ["920066.BJ"]
     assert _symbols(_results(repo, run.id, keyword="%", status=None)) == []
@@ -465,6 +487,45 @@ def test_latest_published_run_excludes_unpublished_and_uses_stable_recency_order
     assert tied.id == higher_id.id
 
 
+def test_run_queries_filter_mode_status_and_data_date_without_changing_legacy_defaults(
+    tmp_path: Path,
+) -> None:
+    repo, _path = _repository(tmp_path)
+    official = _seed_running_run(repo, [_sample_seeds()[0]], as_of="2026-07-17 16:30:00")
+    repo.save_result_batch(official.id, [_write("600001.SH", status="success", score=80, quality=90)])
+    repo.finish_run(official.id, "success", message="正式榜单")
+
+    intraday = _seed_running_run(
+        repo,
+        _sample_seeds()[:2],
+        as_of="2026-07-18 10:30:00",
+        mode="intraday",
+    )
+    repo.save_result_batch(
+        intraday.id,
+        [
+            _write("600001.SH", status="success", score=82, quality=90),
+            _write("000001.SZ", status="skipped", reason="盘中不可交易"),
+        ],
+    )
+    repo.finish_run(intraday.id, "degraded", message="盘中榜单")
+
+    assert repo.latest_run().id == intraday.id  # type: ignore[union-attr]
+    assert repo.latest_run(mode="official").id == official.id  # type: ignore[union-attr]
+    assert repo.latest_published_run(mode="intraday").id == intraday.id  # type: ignore[union-attr]
+    assert repo.list_runs(page=1, page_size=10).total == 2
+    official_history = repo.list_runs(
+        page=1,
+        page_size=10,
+        mode="official",
+        status="published",
+        data_date="2026-07-17",
+    )
+    assert [run.id for run in official_history.items] == [official.id]
+    assert repo.list_runs(page=1, page_size=10, status="success").total == 1
+    assert repo.list_runs(page=1, page_size=10, status="failed").total == 0
+
+
 def test_reconcile_orphaned_run_and_terminal_finish_are_idempotent(tmp_path: Path) -> None:
     repo, _path = _repository(tmp_path)
     run = _seed_running_run(repo, [_sample_seeds()[0]])
@@ -752,8 +813,9 @@ def _seed_running_run(
     seeds: list[MarketScanSeed],
     *,
     as_of: str = "2026-07-17 16:30:00",
+    mode: str = "official",
 ):
-    run = repo.create_run(**_run_values(as_of=as_of))
+    run = repo.create_run(**_run_values(as_of=as_of), mode=mode)
     repo.start_run(run.id)
     repo.seed_results(run.id, seeds, excluded_count=2)
     return repo.run(run.id)
@@ -836,14 +898,25 @@ def _results(
     page: int = 1,
     page_size: int = 100,
     status: str | None = "success",
-    market: str | None = None,
-    industry: str | None = None,
+    market: str | tuple[str, ...] | None = None,
+    industry: str | tuple[str, ...] | None = None,
     is_st: bool | None = None,
     is_new: bool | None = None,
+    min_score: int | None = None,
+    max_score: int | None = None,
+    min_trend_score: int | None = None,
+    max_trend_score: int | None = None,
+    min_change_pct: float | None = None,
+    max_change_pct: float | None = None,
+    min_turnover_rate: float | None = None,
+    max_turnover_rate: float | None = None,
+    min_amount: float | None = None,
+    max_amount: float | None = None,
     min_data_quality_score: int | None = None,
+    max_data_quality_score: int | None = None,
     keyword: str | None = None,
-    sort: str = "rank",
-    order: str = "asc",
+    sort: str | tuple[str, ...] = "rank",
+    order: str | tuple[str, ...] = "asc",
 ):
     return repo.results_page(
         run_id,
@@ -854,7 +927,18 @@ def _results(
         industry=industry,
         is_st=is_st,
         is_new=is_new,
+        min_score=min_score,
+        max_score=max_score,
+        min_trend_score=min_trend_score,
+        max_trend_score=max_trend_score,
+        min_change_pct=min_change_pct,
+        max_change_pct=max_change_pct,
+        min_turnover_rate=min_turnover_rate,
+        max_turnover_rate=max_turnover_rate,
+        min_amount=min_amount,
+        max_amount=max_amount,
         min_data_quality_score=min_data_quality_score,
+        max_data_quality_score=max_data_quality_score,
         keyword=keyword,
         sort=sort,  # type: ignore[arg-type]
         order=order,  # type: ignore[arg-type]

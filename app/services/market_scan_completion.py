@@ -212,9 +212,10 @@ def completion_status(
     publication_summary: MarketScanPublicationSummary | None = None,
     score_distribution: MarketScanScoreDistribution | None = None,
 ) -> tuple[MarketScanRunStatus, str]:
+    scan_label = _scan_label(run)
     pending_count = max(0, run.total_count - run.processed_count)
     if pending_count:
-        return "failed", f"全市场扫描尚有 {pending_count} 只待处理，不能发布"
+        return "failed", f"{scan_label}尚有 {pending_count} 只待处理，不能发布"
     distribution_assessment = (
         assess_market_scan_score_distribution(score_distribution)
         if score_distribution is not None
@@ -224,9 +225,9 @@ def completion_status(
     if distribution_assessment.status == "failed":
         blockers.extend(distribution_assessment.reasons)
     if blockers:
-        return "failed", "全市场扫描未达到发布可信度：" + "；".join(blockers) + _score_distribution_audit_suffix(score_distribution)
+        return "failed", f"{scan_label}未达到发布可信度：" + "；".join(blockers) + _score_distribution_audit_suffix(score_distribution)
     if run.success_count == 0:
-        return "failed", f"全市场扫描没有生成有效排名；缺失 {run.missing_count}，跳过 {run.skipped_count}"
+        return "failed", f"{scan_label}没有生成有效排名；缺失 {run.missing_count}，跳过 {run.skipped_count}"
     stale_stock_pool = run.stock_pool_source == "stale-fallback"
     distribution_degraded = distribution_assessment.status == "degraded"
     if run.missing_count or run.skipped_count or run.processed_count < run.total_count or degraded_count or stale_stock_pool or distribution_degraded:
@@ -240,14 +241,18 @@ def completion_status(
             degraded_details.append("评分分布退化：" + "、".join(distribution_assessment.reasons))
         degraded_suffix = f"，{'，'.join(degraded_details)}" if degraded_details else ""
         return "degraded", (
-            f"全市场扫描降级完成：有效覆盖 {run.success_count}/{eligible_count}，"
+            f"{scan_label}降级完成：有效覆盖 {run.success_count}/{eligible_count}，"
             f"缺失 {run.missing_count}，跳过 {run.skipped_count}{degraded_suffix}"
             f"{_score_distribution_audit_suffix(score_distribution)}"
         )
     return "success", (
-        f"全市场扫描完成：成功 {run.success_count}/{run.total_count}"
+        f"{scan_label}完成：成功 {run.success_count}/{run.total_count}"
         f"{_score_distribution_audit_suffix(score_distribution)}"
     )
+
+
+def _scan_label(run: MarketScanRun) -> str:
+    return "盘中临时扫描" if run.mode == "intraday" else "盘后正式扫描"
 
 
 def terminal_diagnostic(

@@ -15,6 +15,9 @@ def test_global_market_scan_progress_is_wired_into_the_workspace() -> None:
     assert 'id="marketScanGlobalText"' in html
     assert 'id="marketScanGlobalOpen"' in html
     assert 'id="marketScanGlobalCancel"' in html
+    assert '<fieldset class="market-scan-mode-control" id="marketScanModeControl">' in html
+    assert '<legend>浏览和新建榜单模式</legend>' in html
+    assert html.count('name="marketScanMode"') == 2
 
 
 def test_market_scan_rows_expose_complete_mobile_labels() -> None:
@@ -61,6 +64,15 @@ def test_market_scan_layout_freezes_desktop_headers_and_exposes_mobile_equivalen
     assert "max-height: min(72vh, 680px)" in mobile
     assert "overscroll-behavior: contain" in mobile
     assert "scrollbar-gutter: stable" in mobile
+    assert ".market-scan-mode-options span" in mobile
+    assert re.search(
+        r"\.market-scan-mode-options\s+input:focus-visible\s*\+\s*span\s*\{[^}]*outline:",
+        styles,
+        re.DOTALL,
+    )
+    compact = styles.split("@media (max-width: 480px)", 1)[1]
+    assert ".market-scan-mode-control" in compact
+    assert "grid-column: 1 / -1" in compact
 
 
 def _run_node_script(script: str) -> None:

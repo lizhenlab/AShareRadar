@@ -14,6 +14,7 @@ from app.models.discovery import (
     DiscoveryPreset,
     DiscoveryPresetCreate,
     DiscoveryPresetPortable,
+    DiscoveryPresetUpdate,
     DiscoveryRankChangeItem,
     DiscoveryRankMovement,
     DiscoveryResearchQueueItem,
@@ -145,6 +146,42 @@ class DiscoveryRepository(SQLiteRepository):
             row = _preset_row(conn, preset_id)
         return _preset_from_row(row)
 
+    def update_preset(
+        self,
+        preset_id: int,
+        payload: DiscoveryPresetUpdate,
+        *,
+        timestamp: str,
+    ) -> DiscoveryPreset:
+        criteria_json = canonical_model_json(payload.criteria)
+        sort_json = canonical_json([item.model_dump(mode="json") for item in payload.sort])
+        with self._lock, self._connect() as conn:
+            try:
+                cursor = conn.execute(
+                    """
+                    UPDATE discovery_preset
+                    SET name = ?, criteria_json = ?, sort_json = ?,
+                        revision = revision + 1, updated_at = ?
+                    WHERE id = ? AND revision = ?
+                    """,
+                    (
+                        payload.name,
+                        criteria_json,
+                        sort_json,
+                        timestamp,
+                        preset_id,
+                        payload.expected_revision,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                if "discovery_preset.name" in str(exc):
+                    raise DiscoveryPresetNameExistsError(f"筛选方案名称已存在：{payload.name}") from exc
+                raise
+            if cursor.rowcount != 1:
+                _raise_missing_or_revision(conn, preset_id, payload.expected_revision)
+            row = _preset_row(conn, preset_id)
+        return _preset_from_row(row)
+
     def delete_preset(self, preset_id: int, *, expected_revision: int) -> None:
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
@@ -158,7 +195,7 @@ class DiscoveryRepository(SQLiteRepository):
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, status, rule_version, scope, data_date, as_of
+                SELECT id, status, mode, rule_version, scope, data_date, as_of
                 FROM market_scan_run WHERE id = ?
                 """,
                 (run_id,),
@@ -167,21 +204,26 @@ class DiscoveryRepository(SQLiteRepository):
             raise NotFoundError(f"全市场扫描批次不存在：{run_id}")
         return DiscoveryRunReference.model_validate(dict(row))
 
-    def previous_completed_run_any_rule(self, current: DiscoveryRunReference) -> DiscoveryRunReference | None:
+    def previous_completed_run_same_mode_any_rule(
+        self,
+        current: DiscoveryRunReference,
+    ) -> DiscoveryRunReference | None:
         parameters: list[object] = [
             current.id,
             current.scope,
+            current.mode,
             current.data_date,
             current.as_of,
         ]
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT id, status, rule_version, scope, data_date, as_of
+                SELECT id, status, mode, rule_version, scope, data_date, as_of
                 FROM market_scan_run
                 WHERE id != ?
                   AND status IN ('success', 'degraded')
                   AND scope = ?
+                  AND mode = ?
                   AND data_date < ?
                   AND {SQLITE_MARKET_EPOCH_FUNCTION}(as_of)
                       < {SQLITE_MARKET_EPOCH_FUNCTION}(?)

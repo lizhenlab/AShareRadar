@@ -6,6 +6,7 @@
 @import url("/static/css/interactions.css");
 @import url("/static/css/side-footer.css");
 @import url("/static/css/responsive.css");
+@import url("/static/css/primary-navigation.css");
 
 .alert-form button:disabled,
 .note-form button:disabled {

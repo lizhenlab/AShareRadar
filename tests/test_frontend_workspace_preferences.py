@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,7 @@ const storage = {
   setItem: (key, value) => values.set(key, value),
 };
 const expected = {
+  primaryView: "research",
   workspaceView: "strategy",
   dailyChartRange: 120,
   dailyChartMa5: false,
@@ -82,6 +84,7 @@ for (const raw of malformedValues) {
 const partlyValid = {
   version: WORKSPACE_PREFERENCES_VERSION,
   preferences: {
+    primaryView: "administrator",
     workspaceView: "finance",
     dailyChartRange: "120",
     dailyChartMa5: false,
@@ -94,6 +97,7 @@ const partlyValid = {
 assert.deepEqual(loadWorkspacePreferences({
   getItem: () => JSON.stringify(partlyValid),
 }), {
+  primaryView: "research",
   workspaceView: "finance",
   dailyChartRange: 60,
   dailyChartMa5: false,
@@ -113,6 +117,70 @@ assert.equal(saveWorkspacePreferences(defaults, null), false);
     )
 
 
+def test_legacy_workspace_view_preferences_migrate_to_the_matching_primary_view() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import {
+  WORKSPACE_PREFERENCES_VERSION,
+  loadWorkspacePreferences,
+  sanitizeWorkspacePreferences,
+} from "./static/js/workspace-preferences.js";
+
+const legacyMarketPreferences = {
+  workspaceView: "market-scan",
+  dailyChartRange: 120,
+  dailyChartMa5: false,
+  dailyChartMa20: true,
+  minuteChartInterval: "30m",
+  mobileChartView: "minute",
+};
+const migrated = loadWorkspacePreferences({
+  getItem: () => JSON.stringify({
+    version: WORKSPACE_PREFERENCES_VERSION,
+    preferences: legacyMarketPreferences,
+  }),
+});
+assert.deepEqual(migrated, {
+  primaryView: "market",
+  ...legacyMarketPreferences,
+});
+
+assert.equal(sanitizeWorkspacePreferences({ workspaceView: "tools" }).primaryView, "review");
+assert.equal(sanitizeWorkspacePreferences({ workspaceView: "qa" }).primaryView, "research");
+assert.equal(sanitizeWorkspacePreferences({ primaryView: "market", workspaceView: "overview" }).primaryView, "market");
+for (const invalid of ["", "MARKET", "market ", "admin", null, 1, {}, []]) {
+  assert.equal(
+    sanitizeWorkspacePreferences({ primaryView: invalid, workspaceView: "market-scan" }).primaryView,
+    "market",
+  );
+}
+'''
+    )
+
+
+def test_primary_navigation_static_contract_exposes_exactly_four_functional_areas() -> None:
+    html = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    app = (ROOT / "static/app.js").read_text(encoding="utf-8")
+
+    assert 'id="primaryNavigation"' in html
+    navigation = re.search(r'<nav[^>]+id="primaryNavigation".*?</nav>', html, re.DOTALL)
+    assert navigation is not None
+    assert re.findall(r'data-primary-view="([^"]+)"', navigation.group(0)) == [
+        "research",
+        "market",
+        "review",
+        "monitor",
+    ]
+    assert 'id="stockWorkbench"' in html and 'data-primary-regions="research"' in html
+    assert 'class="panel query-panel" data-primary-regions="research review"' in html
+    assert 'id="workspace-tab-market-scan" data-view="market-scan" data-primary-regions="market"' in html
+    assert 'id="workspace-tab-replay" data-view="replay" data-primary-regions="review"' in html
+    assert 'id="workspace-tab-tools" data-view="tools" data-primary-regions="review"' in html
+    assert "createPrimaryNavigation" in app
+    assert "setPrimaryView" in app
+
+
 def test_app_restores_and_persists_preferences_through_existing_setters() -> None:
     _run_node_script(
         r'''
@@ -127,11 +195,16 @@ const { element } = installAppDom({ canvasContext: null });
 const views = ["overview", "qa", "strategy", "finance", "theme", "replay", "tools"];
 const tabs = views.map((view) => control(`workspace-tab-${view}`, "view", view));
 const panels = views.map((view) => control(`workspace-panel-${view}`, "viewPanel", view));
+const primaryViews = ["research", "market", "review", "monitor"];
+const primaryButtons = primaryViews.map((view) => control(`primary-${view}`, "primaryView", view));
+const primaryRegions = primaryViews.map((view) => control(`primary-region-${view}`, "primaryRegions", view));
 const dailyRanges = [20, 60, 120, 240].map((range) => control(`daily-${range}`, "dailyRange", String(range)));
 const minuteIntervals = ["5m", "15m", "30m", "60m"].map((interval) => control(`minute-${interval}`, "minuteInterval", interval));
 const mobileViews = ["daily", "minute"].map((view) => control(`mobile-${view}`, "chartView", view));
 
 const selectorResults = new Map([
+  [".primary-navigation button[data-primary-view]", primaryButtons],
+  ["[data-primary-regions]", primaryRegions],
   [".workspace-tabs button[data-view]", tabs],
   [".workspace-view[data-view-panel]", panels],
   ["button[data-daily-range]", dailyRanges],
@@ -141,6 +214,7 @@ const selectorResults = new Map([
 globalThis.document.querySelectorAll = (selector) => selectorResults.get(selector) || [];
 
 const restored = {
+  primaryView: "research",
   workspaceView: "strategy",
   dailyChartRange: 120,
   dailyChartMa5: false,
@@ -174,7 +248,9 @@ globalThis.fetch = async (url) => {
 
 const { __appTest } = await import("./static/app.js");
 assert.deepEqual(__appTest.currentWorkspacePreferences(), restored);
+assert.equal(__appTest.state.primaryView, "research");
 assert.equal(__appTest.state.workspaceView, "strategy");
+assert.equal(element("body").dataset.primaryView, "research");
 assert.equal(tabs.find((tab) => tab.dataset.view === "strategy").classList.contains("active"), true);
 assert.equal(panels.find((panel) => panel.dataset.viewPanel === "strategy").hidden, false);
 assert.equal(element("dailyMa5Toggle").checked, false);
@@ -182,6 +258,16 @@ assert.equal(element("dailyMa20Toggle").checked, true);
 assert.equal(element("chartWorkspace").dataset.mobileChart, "minute");
 assert.equal(writes.length, 0, "restoration should not rewrite storage once per setter");
 assert.equal(restoredTabScrolls, 1, "the restored active tab was not scrolled into view");
+
+const writesBeforePrimarySelection = writes.length;
+assert.equal(__appTest.setPrimaryView("monitor"), "monitor");
+assert.equal(__appTest.state.primaryView, "monitor");
+assert.equal(element("body").dataset.primaryView, "monitor");
+assert.equal(writes.length, writesBeforePrimarySelection + 1, "setPrimaryView did not persist its selection");
+assert.deepEqual(JSON.parse(values.get(WORKSPACE_PREFERENCES_STORAGE_KEY)).preferences, {
+  ...restored,
+  primaryView: "monitor",
+});
 
 __appTest.state.symbol = "600519.SH";
 __appTest.state.privateSessionToken = "never-store-state-wholesale";
@@ -199,6 +285,7 @@ const payload = JSON.parse(values.get(WORKSPACE_PREFERENCES_STORAGE_KEY));
 assert.deepEqual(payload, {
   version: WORKSPACE_PREFERENCES_VERSION,
   preferences: {
+    primaryView: "review",
     workspaceView: "tools",
     dailyChartRange: 240,
     dailyChartMa5: true,

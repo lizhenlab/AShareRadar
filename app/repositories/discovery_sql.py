@@ -33,8 +33,12 @@ def discovery_filter_sql(criteria: DiscoveryCriteria, *, alias: str = "r") -> tu
         clauses.append(f"{alias}.market IN ({_placeholders(criteria.market)})")
         parameters.extend(criteria.market)
     if criteria.industry is not None:
-        clauses.append(f"{alias}.industry IN ({_placeholders(criteria.industry)})")
-        parameters.extend(criteria.industry)
+        clauses.append(
+            "(" + " OR ".join(
+                f"{alias}.industry LIKE ? ESCAPE '\\'" for _industry in criteria.industry
+            ) + ")"
+        )
+        parameters.extend(f"%{_escaped_like(industry)}%" for industry in criteria.industry)
     if criteria.is_st is not None:
         clauses.append(f"{alias}.is_st = ?")
         parameters.append(int(criteria.is_st))
@@ -80,6 +84,10 @@ def canonical_json(value: Any) -> str:
 
 def _placeholders(values: Sequence[object]) -> str:
     return ",".join("?" for _ in values)
+
+
+def _escaped_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 __all__ = [

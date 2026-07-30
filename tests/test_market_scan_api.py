@@ -16,6 +16,11 @@ from app.models.market_scan import (
     MarketScanRunPage,
     MarketScanStartResponse,
 )
+from app.services.market_scan_export import (
+    XLSX_MEDIA_TYPE,
+    MarketScanExportFilters,
+    MarketScanWorkbookExport,
+)
 from app.utils.errors import NotFoundError
 
 
@@ -38,9 +43,19 @@ def test_create_scan_returns_202_with_queued_run_and_deduplicates_active_request
     assert duplicate.json()["deduplicated"] is True
     assert duplicate.json()["run"]["id"] == first.json()["run"]["id"]
     assert scanner.create_calls == [
-        datetime.fromisoformat("2026-07-17T16:30:00+08:00"),
-        None,
+        (datetime.fromisoformat("2026-07-17T16:30:00+08:00"), "official"),
+        (None, "official"),
     ]
+
+
+def test_create_scan_forwards_explicit_intraday_mode() -> None:
+    scanner = _ScannerStub()
+    client = _client(scanner)
+
+    response = client.post("/api/market-scans", json={"mode": "intraday"})
+
+    assert response.status_code == 202
+    assert scanner.create_calls == [(None, "intraday")]
 
 
 def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
@@ -79,10 +94,45 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     assert retried.json()["accepted"] is True
     assert retried.json()["run"]["status"] == "queued"
     assert retried.json()["run"]["trigger"] == "retry"
-    assert scanner.list_calls == [(2, 1)]
+    assert scanner.latest_calls == [(None, False), (None, True)]
+    assert scanner.list_calls == [(2, 1, None, None, None)]
     assert scanner.detail_calls == [scanner.active.id]
     assert scanner.cancel_calls == [scanner.active.id]
     assert scanner.retry_calls == [scanner.active.id]
+
+
+def test_latest_and_history_routes_forward_mode_status_and_date_filters() -> None:
+    scanner = _ScannerStub()
+    client = _client(scanner)
+
+    latest = client.get("/api/market-scans/latest", params={"mode": "intraday"})
+    published = client.get("/api/market-scans/latest-published", params={"mode": "official"})
+    history = client.get(
+        "/api/market-scans",
+        params={
+            "page": 1,
+            "page_size": 50,
+            "mode": "intraday",
+            "status": "published",
+            "data_date": "2026-07-16",
+        },
+    )
+
+    assert latest.status_code == 200
+    assert published.status_code == 200
+    assert history.status_code == 200
+    assert scanner.latest_calls == [("intraday", False), ("official", True)]
+    assert scanner.list_calls == [(1, 50, "intraday", "published", "2026-07-16")]
+
+
+def test_history_route_rejects_invalid_mode_status_and_date() -> None:
+    scanner = _ScannerStub()
+    client = _client(scanner)
+
+    assert client.get("/api/market-scans/latest", params={"mode": "bad"}).status_code == 422
+    assert client.get("/api/market-scans", params={"status": "pending-result"}).status_code == 422
+    assert client.get("/api/market-scans", params={"data_date": "2026-02-30"}).status_code == 422
+    assert scanner.calls == []
 
 
 def test_results_route_forwards_pagination_sorting_and_every_filter() -> None:
@@ -95,14 +145,25 @@ def test_results_route_forwards_pagination_sorting_and_every_filter() -> None:
             "page": 3,
             "page_size": 25,
             "status": "missing",
-            "market": "BJ",
-            "industry": "高端装备",
+            "market": ["BJ", "SZ"],
+            "industry": ["高端装备", "银行"],
             "is_st": "true",
             "is_new": "false",
+            "min_score": 60,
+            "max_score": 95,
+            "min_trend_score": 55,
+            "max_trend_score": 90,
+            "min_change_pct": -2.5,
+            "max_change_pct": 9.5,
+            "min_turnover_rate": 1.5,
+            "max_turnover_rate": 30,
+            "min_amount": 1_000_000,
+            "max_amount": 500_000_000,
             "min_data_quality_score": 77,
+            "max_data_quality_score": 99,
             "keyword": "920066",
-            "sort": "amount",
-            "order": "desc",
+            "sort": ["amount", "score", "symbol"],
+            "order": ["desc", "desc", "asc"],
         },
     )
 
@@ -117,14 +178,25 @@ def test_results_route_forwards_pagination_sorting_and_every_filter() -> None:
                 "page": 3,
                 "page_size": 25,
                 "status": "missing",
-                "market": "BJ",
-                "industry": "高端装备",
+                "market": ("BJ", "SZ"),
+                "industry": ("高端装备", "银行"),
                 "is_st": True,
                 "is_new": False,
+                "min_score": 60,
+                "max_score": 95,
+                "min_trend_score": 55,
+                "max_trend_score": 90,
+                "min_change_pct": -2.5,
+                "max_change_pct": 9.5,
+                "min_turnover_rate": 1.5,
+                "max_turnover_rate": 30.0,
+                "min_amount": 1_000_000.0,
+                "max_amount": 500_000_000.0,
                 "min_data_quality_score": 77,
+                "max_data_quality_score": 99,
                 "keyword": "920066",
-                "sort": "amount",
-                "order": "desc",
+                "sort": ("amount", "score", "symbol"),
+                "order": ("desc", "desc", "asc"),
             },
         )
     ]
@@ -144,6 +216,76 @@ def test_results_route_maps_all_status_filter_to_unfiltered_query() -> None:
     assert scanner.result_calls[0][1]["page_size"] == 100
 
 
+def test_export_route_returns_xlsx_attachment_and_forwards_current_filters() -> None:
+    scanner = _ScannerStub()
+    client = _client(scanner)
+
+    response = client.get(
+        f"/api/market-scans/{scanner.previous.id}/export.xlsx",
+        params={
+            "status": "all",
+            "market": "SZ",
+            "industry": "银行",
+            "is_st": "false",
+            "is_new": "true",
+            "min_data_quality_score": 80,
+            "keyword": "000001",
+            "sort": "score",
+            "order": "desc",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"xlsx-content"
+    assert response.headers["content-type"] == XLSX_MEDIA_TYPE
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-disposition"] == 'attachment; filename="market-scan.xlsx"'
+    assert scanner.export_calls == [
+        (
+            scanner.previous.id,
+            MarketScanExportFilters(
+                status=None,
+                market=("SZ",),
+                industry=("银行",),
+                is_st=False,
+                is_new=True,
+                min_data_quality_score=80,
+                keyword="000001",
+                sort=("score",),
+                order=("desc",),
+            ),
+        )
+    ]
+
+
+def test_export_and_results_routes_share_the_same_filter_and_sort_contract() -> None:
+    parameters = _client(_ScannerStub()).app.openapi()["paths"]
+    results = {item["name"] for item in parameters["/api/market-scans/{run_id}/results"]["get"]["parameters"] if item["in"] == "query"}
+    exported = {item["name"] for item in parameters["/api/market-scans/{run_id}/export.xlsx"]["get"]["parameters"] if item["in"] == "query"}
+
+    assert exported == results - {"page", "page_size"}
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "min_score=90&max_score=80",
+        "min_change_pct=5&max_change_pct=-1",
+        "market=SH&market=SH",
+        "sort=score&sort=score&order=desc&order=asc",
+        "sort=score&sort=amount&order=desc",
+        "sort=score&sort=amount&sort=symbol&sort=rank&order=desc&order=desc&order=asc&order=asc",
+    ],
+)
+def test_advanced_filter_contract_rejects_inverted_duplicate_or_misaligned_values(query: str) -> None:
+    scanner = _ScannerStub()
+    response = _client(scanner).get(f"/api/market-scans/7/results?{query}")
+
+    assert response.status_code == 422
+    assert scanner.result_calls == []
+
+
 @pytest.mark.parametrize(
     ("method", "path", "json_body"),
     [
@@ -160,7 +302,13 @@ def test_results_route_maps_all_status_filter_to_unfiltered_query() -> None:
         ("get", "/api/market-scans/7/results?is_st=perhaps", None),
         ("get", f"/api/market-scans/7/results?industry={'x' * 81}", None),
         ("get", f"/api/market-scans/7/results?keyword={'x' * 81}", None),
+        ("get", "/api/market-scans/7/export.xlsx?status=unknown", None),
+        ("get", "/api/market-scans/7/export.xlsx?market=HK", None),
+        ("get", "/api/market-scans/7/export.xlsx?min_data_quality_score=101", None),
+        ("get", f"/api/market-scans/7/export.xlsx?keyword={'x' * 81}", None),
+        ("get", "/api/market-scans/7/export.xlsx?sort=unknown", None),
         ("post", "/api/market-scans", {"as_of": "not-a-datetime"}),
+        ("post", "/api/market-scans", {"mode": "live"}),
         ("post", "/api/market-scans", {"as_fo": "2026-07-17T16:30:00+08:00"}),
     ],
 )
@@ -227,10 +375,12 @@ class _ScannerStub:
     def __init__(self) -> None:
         self.active = _run()
         self.previous = _run(6, status="degraded")
-        self.create_calls: list[datetime | None] = []
-        self.list_calls: list[tuple[int, int]] = []
+        self.create_calls: list[tuple[datetime | None, str]] = []
+        self.latest_calls: list[tuple[str | None, bool]] = []
+        self.list_calls: list[tuple[int, int, str | None, str | None, str | None]] = []
         self.detail_calls: list[int] = []
         self.result_calls: list[tuple[int, dict[str, object]]] = []
+        self.export_calls: list[tuple[int, MarketScanExportFilters]] = []
         self.cancel_calls: list[int] = []
         self.retry_calls: list[int] = []
 
@@ -238,16 +388,24 @@ class _ScannerStub:
     def calls(self) -> list[object]:
         return [
             *self.create_calls,
+            *self.latest_calls,
             *self.list_calls,
             *self.detail_calls,
             *self.result_calls,
+            *self.export_calls,
             *self.cancel_calls,
             *self.retry_calls,
         ]
 
-    async def create_scan(self, *, as_of: datetime | None, trigger: str) -> MarketScanStartResponse:
+    async def create_scan(
+        self,
+        *,
+        as_of: datetime | None,
+        trigger: str,
+        mode: str,
+    ) -> MarketScanStartResponse:
         assert trigger == "manual"
-        self.create_calls.append(as_of)
+        self.create_calls.append((as_of, mode))
         if len(self.create_calls) > 1:
             return MarketScanStartResponse(
                 accepted=False,
@@ -256,14 +414,24 @@ class _ScannerStub:
             )
         return MarketScanStartResponse(accepted=True, run=self.active)
 
-    def latest_run(self) -> MarketScanRun:
+    def latest_run(self, *, mode: str | None = None) -> MarketScanRun:
+        self.latest_calls.append((mode, False))
         return self.active
 
-    def latest_published_run(self) -> MarketScanRun:
+    def latest_published_run(self, *, mode: str | None = None) -> MarketScanRun:
+        self.latest_calls.append((mode, True))
         return self.previous
 
-    def runs(self, *, page: int, page_size: int) -> MarketScanRunPage:
-        self.list_calls.append((page, page_size))
+    def runs(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: str | None = None,
+        status: str | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage:
+        self.list_calls.append((page, page_size, mode, status, data_date))
         return MarketScanRunPage(
             items=[self.active],
             total=2,
@@ -288,6 +456,10 @@ class _ScannerStub:
             page_size=int(kwargs["page_size"]),
             page_count=0,
         )
+
+    def export_results(self, run_id: int, *, filters: MarketScanExportFilters) -> MarketScanWorkbookExport:
+        self.export_calls.append((run_id, filters))
+        return MarketScanWorkbookExport(content=b"xlsx-content", filename="market-scan.xlsx", row_count=0)
 
     async def cancel_scan(self, run_id: int) -> MarketScanRun:
         self.cancel_calls.append(run_id)

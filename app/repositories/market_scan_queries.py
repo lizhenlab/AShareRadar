@@ -8,21 +8,24 @@ from typing import Literal
 from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.market_scan import (
     MarketScanCoverage,
+    MarketScanFilterValues,
+    MarketScanMode,
     MarketScanPublicationSummary,
     MarketScanResultItem,
     MarketScanResultPage,
     MarketScanResultStatus,
     MarketScanRun,
     MarketScanRunPage,
-    MarketScanSort,
-    MarketScanSortOrder,
+    MarketScanRunStatus,
+    MarketScanSortOrderValues,
+    MarketScanSortValues,
     MarketScanStaleCluster,
 )
 from app.repositories.market_scan_context import MarketScanRepositoryContext
+from app.repositories.market_scan_filtering import market_scan_result_filter_sql
 from app.repositories.market_scan_lifecycle import ACTIVE_SCAN_STATUSES
 from app.repositories.market_scan_mapping import (
     append_exact_filter,
-    escaped_like,
     page_count,
     result_from_row,
     result_order_sql,
@@ -52,36 +55,70 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
             ).fetchone()
         return run_from_row(row) if row is not None else None
 
-    def latest_run(self) -> MarketScanRun | None:
+    def latest_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
+        where = "WHERE mode = ?" if mode is not None else ""
+        parameters: tuple[object, ...] = (mode,) if mode is not None else ()
         with self._read_snapshot() as conn:
-            row = conn.execute("SELECT * FROM market_scan_run ORDER BY id DESC LIMIT 1").fetchone()
+            row = conn.execute(
+                f"SELECT * FROM market_scan_run {where} ORDER BY id DESC LIMIT 1",
+                parameters,
+            ).fetchone()
         return run_from_row(row) if row is not None else None
 
-    def latest_published_run(self) -> MarketScanRun | None:
+    def latest_published_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
+        clauses = ["status IN ('success', 'degraded')"]
+        parameters: list[object] = []
+        if mode is not None:
+            clauses.append("mode = ?")
+            parameters.append(mode)
         with self._read_snapshot() as conn:
             row = conn.execute(
                 f"""
                 SELECT * FROM market_scan_run
-                WHERE status IN ('success', 'degraded')
+                WHERE {' AND '.join(clauses)}
                 ORDER BY data_date DESC,
                          {SQLITE_AUDIT_EPOCH_FUNCTION}(finished_at) DESC,
                          id DESC
                 LIMIT 1
-                """
+                """,
+                parameters,
             ).fetchone()
         return run_from_row(row) if row is not None else None
 
-    def list_runs(self, *, page: int, page_size: int) -> MarketScanRunPage:
+    def list_runs(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None = None,
+        status: MarketScanRunStatus | Literal["published"] | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        append_exact_filter(clauses, parameters, "mode", mode)
+        if status == "published":
+            clauses.append("status IN ('success', 'degraded')")
+        else:
+            append_exact_filter(clauses, parameters, "status", status)
+        append_exact_filter(clauses, parameters, "data_date", data_date)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         offset = (page - 1) * page_size
         with self._read_snapshot() as conn:
-            total = int(conn.execute("SELECT COUNT(*) FROM market_scan_run").fetchone()[0])
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM market_scan_run {where}",
+                    parameters,
+                ).fetchone()[0]
+            )
             rows = conn.execute(
                 f"""
                 SELECT * FROM market_scan_run
+                {where}
                 ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at) DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
-                (page_size, offset),
+                (*parameters, page_size, offset),
             ).fetchall()
         return MarketScanRunPage(
             items=[run_from_row(row) for row in rows],
@@ -124,34 +161,35 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         page: int,
         page_size: int,
         status: MarketScanResultStatus | None,
-        market: str | None,
-        industry: str | None,
+        market: MarketScanFilterValues,
+        industry: MarketScanFilterValues,
         is_st: bool | None,
         is_new: bool | None,
-        min_data_quality_score: int | None,
+        min_score: int | None = None, max_score: int | None = None,
+        min_trend_score: int | None = None, max_trend_score: int | None = None,
+        min_change_pct: float | None = None, max_change_pct: float | None = None,
+        min_turnover_rate: float | None = None, max_turnover_rate: float | None = None,
+        min_amount: float | None = None, max_amount: float | None = None,
+        min_data_quality_score: int | None, max_data_quality_score: int | None = None,
         keyword: str | None,
-        sort: MarketScanSort,
-        order: MarketScanSortOrder,
+        sort: MarketScanSortValues,
+        order: MarketScanSortOrderValues,
     ) -> MarketScanResultPage:
-        clauses = ["run_id = ?"]
-        params: list[object] = [run_id]
-        append_exact_filter(clauses, params, "status", status)
-        append_exact_filter(clauses, params, "market", market)
-        industry_text = " ".join((industry or "").split()).strip()
-        if industry_text:
-            clauses.append("industry LIKE ? ESCAPE '\\'")
-            params.append(f"%{escaped_like(industry_text)}%")
-        append_exact_filter(clauses, params, "is_st", int(is_st) if is_st is not None else None)
-        append_exact_filter(clauses, params, "is_new", int(is_new) if is_new is not None else None)
-        if min_data_quality_score is not None:
-            clauses.append("data_quality_score >= ?")
-            params.append(min_data_quality_score)
-        keyword_text = " ".join((keyword or "").split()).strip()
-        if keyword_text:
-            like = f"%{escaped_like(keyword_text)}%"
-            clauses.append("(symbol LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\' " "OR name LIKE ? ESCAPE '\\')")
-            params.extend((like, like, like))
-        where = " AND ".join(clauses)
+        where, params = market_scan_result_filter_sql(
+            run_id,
+            status=status,
+            market=market,
+            industry=industry,
+            is_st=is_st,
+            is_new=is_new,
+            min_score=min_score, max_score=max_score,
+            min_trend_score=min_trend_score, max_trend_score=max_trend_score,
+            min_change_pct=min_change_pct, max_change_pct=max_change_pct,
+            min_turnover_rate=min_turnover_rate, max_turnover_rate=max_turnover_rate,
+            min_amount=min_amount, max_amount=max_amount,
+            min_data_quality_score=min_data_quality_score, max_data_quality_score=max_data_quality_score,
+            keyword=keyword,
+        )
         order_sql = result_order_sql(sort, order)
         offset = (page - 1) * page_size
         with self._read_snapshot() as conn:

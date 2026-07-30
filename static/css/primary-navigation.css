@@ -1,0 +1,172 @@
+:root {
+  --primary-navigation-height: 57px;
+}
+
+.primary-navigation {
+  position: sticky;
+  top: var(--topbar-sticky-height);
+  z-index: 18;
+  min-height: var(--primary-navigation-height);
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(8px);
+}
+
+.primary-navigation-inner {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(104px, 1fr));
+  gap: 8px;
+  max-width: 920px;
+  min-width: 0;
+  padding: 8px 24px;
+}
+
+.primary-navigation button {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: #475467;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.primary-navigation button:hover {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--soft);
+}
+
+.primary-navigation button.active,
+.primary-navigation button[aria-current="page"] {
+  color: var(--blue);
+  border-color: #bfd0fb;
+  background: var(--blue-soft);
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+
+body[data-primary-view="research"] .layout,
+body[data-primary-view="review"] .layout {
+  grid-template-columns: 272px minmax(0, 1fr);
+  grid-template-areas: "query workspace";
+}
+
+body[data-primary-view="market"] .layout {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "workspace";
+}
+
+body[data-primary-view="monitor"] .layout {
+  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-areas: "controls side";
+}
+
+body[data-primary-view="research"] .query-panel,
+body[data-primary-view="review"] .query-panel {
+  position: sticky;
+  top: calc(var(--topbar-sticky-height) + var(--primary-navigation-height) + 18px);
+}
+
+body[data-primary-view="monitor"] .control-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+body[data-primary-view="monitor"] .side-column {
+  grid-area: side;
+}
+
+body[data-primary-view="monitor"] .control-panel > * {
+  margin-top: 0;
+}
+
+body[data-primary-view="monitor"] .watchlist-box,
+body[data-primary-view="monitor"] .notice {
+  grid-column: 1 / -1;
+}
+
+.workspace-tabs {
+  top: calc(var(--topbar-sticky-height) + var(--primary-navigation-height));
+}
+
+.market-scan-global-progress {
+  top: calc(var(--topbar-sticky-height) + var(--primary-navigation-height) + 8px);
+}
+
+body.market-scan-global-active:not(.market-scan-view-active) .workspace-tabs {
+  top: calc(var(--topbar-sticky-height) + var(--primary-navigation-height) + 72px);
+}
+
+@media (max-width: 1180px) {
+  body[data-primary-view="research"] .layout,
+  body[data-primary-view="review"] .layout {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
+  body[data-primary-view="monitor"] .layout {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
+
+@media (max-width: 820px) {
+  :root {
+    --primary-navigation-height: 53px;
+  }
+
+  .primary-navigation {
+    top: 0;
+  }
+
+  .primary-navigation-inner {
+    grid-template-columns: repeat(4, minmax(78px, 1fr));
+    gap: 6px;
+    max-width: none;
+    padding: 6px 12px;
+    overflow-x: auto;
+  }
+
+  .primary-navigation button {
+    min-height: 40px;
+    padding: 0 8px;
+    font-size: 13px;
+  }
+
+  body[data-primary-view="research"] .layout,
+  body[data-primary-view="market"] .layout,
+  body[data-primary-view="review"] .layout,
+  body[data-primary-view="monitor"] .layout {
+    display: flex;
+    flex-direction: column;
+  }
+
+  body[data-primary-view="research"] .query-panel,
+  body[data-primary-view="review"] .query-panel {
+    position: static;
+  }
+
+  body[data-primary-view="monitor"] .control-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  body[data-primary-view="monitor"] .watchlist-box,
+  body[data-primary-view="monitor"] .notice {
+    grid-column: auto;
+  }
+
+  .market-scan-global-progress {
+    top: calc(var(--primary-navigation-height) + 8px);
+    margin-right: 12px;
+    margin-left: 12px;
+  }
+}
+
+@media (max-width: 390px) {
+  .primary-navigation-inner {
+    grid-template-columns: repeat(4, minmax(76px, 1fr));
+  }
+}

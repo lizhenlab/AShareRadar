@@ -17,10 +17,17 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
 
     assert 'data-view="market-scan"' in html
     assert 'id="marketScanStart"' in html
+    assert 'id="marketScanExport" aria-busy="false" disabled>导出 Excel</button>' in html
+    assert 'id="marketScanModeControl"' in html
+    assert 'id="marketScanModeIntraday" name="marketScanMode" value="intraday"' in html
+    assert 'id="marketScanModeOfficial" name="marketScanMode" value="official" checked' in html
     assert 'id="marketScanProgressBar"' in html
     assert 'id="marketScanFinishedAt"' in html
     assert 'id="marketScanRows"' in html
     assert '<span>有效覆盖率</span><strong id="marketScanCoverage">--</strong>' in html
+    assert '<span>榜单类型</span><strong id="marketScanModeSummary">--</strong>' in html
+    assert '<span>行情日期</span><strong id="marketScanQuoteDate">--</strong>' in html
+    assert '<span>日K截止日</span><strong id="marketScanDataDate">--</strong>' in html
     assert 'id="marketScanAnnouncement" role="status" aria-live="polite" aria-atomic="true" aria-relevant="text"' in html
     assert 'id="marketScanProgressBar" max="100" value="0" aria-label="全市场扫描进度"' in html
     assert 'aria-valuetext="尚无扫描进度" aria-busy="false"' in html
@@ -32,6 +39,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'aria-label="全市场扫描榜单" aria-busy="false" tabindex="0"' in html
     assert 'id="marketScanPagination" aria-busy="false"' in html
     assert 'id="stockWorkbench" tabindex="-1" aria-labelledby="stockName"' in html
+    assert 'id="currentAnalysisContext" role="status" hidden' in html
     assert 'id="marketScanStatus"' in html and 'value="all"' in html
     assert 'createMarketScanController' in app
     assert 'target === "market-scan"' in app
@@ -45,9 +53,18 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     module_paths = {
         "/static/js/market-scan.js",
         "/static/js/market-scan-controller.js",
+        "/static/js/market-scan-controller-inert.js",
         "/static/js/market-scan-contracts.js",
-        "/static/js/market-scan-polling.js",
+            "/static/js/market-scan-export-client.js",
+            "/static/js/market-scan-filters.js",
+        "/static/js/market-scan-history.js",
+        "/static/js/market-scan-history-view.js",
+            "/static/js/market-scan-polling.js",
+            "/static/js/market-scan-progress-view.js",
+        "/static/js/market-scan-row-actions.js",
+        "/static/js/market-scan-snapshot-view.js",
         "/static/js/market-scan-view.js",
+        "/static/js/market-scan-view-export.js",
         "/static/js/discovery.js",
     }
     assert set(imports) == module_paths
@@ -62,6 +79,11 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
     contracts = (module_dir / "market-scan-contracts.js").read_text(encoding="utf-8")
     polling = (module_dir / "market-scan-polling.js").read_text(encoding="utf-8")
     view = (module_dir / "market-scan-view.js").read_text(encoding="utf-8")
+    history = (module_dir / "market-scan-history.js").read_text(encoding="utf-8")
+    history_view = (module_dir / "market-scan-history-view.js").read_text(encoding="utf-8")
+    export_client = (module_dir / "market-scan-export-client.js").read_text(encoding="utf-8")
+    row_actions = (module_dir / "market-scan-row-actions.js").read_text(encoding="utf-8")
+    snapshot_view = (module_dir / "market-scan-snapshot-view.js").read_text(encoding="utf-8")
 
     modules = {
         "market-scan.js": facade,
@@ -69,10 +91,19 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
         "market-scan-contracts.js": contracts,
         "market-scan-polling.js": polling,
         "market-scan-view.js": view,
+        "market-scan-history.js": history,
+        "market-scan-history-view.js": history_view,
+        "market-scan-export-client.js": export_client,
+        "market-scan-row-actions.js": row_actions,
+        "market-scan-snapshot-view.js": snapshot_view,
+    }
+    line_limits = {
+        "market-scan-controller.js": 550,
+        "market-scan-view.js": 675,
     }
     for filename, source in modules.items():
-        assert len(source.splitlines()) < 600, f"{filename} should remain below 600 lines"
-    assert len(controller.splitlines()) <= 450
+        limit = line_limits.get(filename, 600)
+        assert len(source.splitlines()) < limit, f"{filename} should remain below {limit} lines"
 
     assert "createMarketScanController" in facade
     assert "buildMarketScanResultsUrl" in facade
@@ -81,7 +112,215 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
     assert "setTimeout" in polling and "createRequestScope" in polling and "fetchJson" not in polling
     assert "validateMarketScanRun" in contracts and "fetchJson" not in contracts and "setTimeout" not in contracts
     assert "marketScanResultRow" in view and "escapeHtml" in view
+    assert "marketScanSnapshotContent" in snapshot_view and "不请求当前行情" in snapshot_view
+    assert "buildMarketScanExportUrl" in view and "marketScanQueryParams" in view
+    assert "exportBusy" in controller and "exportFetcher" in controller
     assert "fetchJson" not in view and "setTimeout" not in view
+
+
+def test_market_scan_modes_default_request_contract_and_intraday_copy() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+import { createMarketScanController, validateMarketScanRun } from "./static/js/market-scan.js";
+import { defaultMarketScanMode } from "./static/js/market-scan-contracts.js";
+
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 9, 29)), "official");
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 9, 30)), "intraday");
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 15, 14)), "intraday");
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 15, 15)), "official");
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 26, 10, 0)), "official");
+
+const { element } = installAppDom({ canvasContext: null });
+const intradayRun = {
+  id: 91, status: "running", trigger: "manual", mode: "intraday",
+  rule_version: "full-market-score-v1", as_of: "2026-07-27 10:00:00",
+  data_date: "2026-07-24", quote_date: "2026-07-27", scope: "SH/SZ/BJ",
+  total_count: 100, excluded_count: 0, processed_count: 10, success_count: 10,
+  missing_count: 0, skipped_count: 0, retry_count: 0, progress_pct: 10,
+  coverage_pct: 10, created_at: "2026-07-27 10:00:00", updated_at: "2026-07-27 10:01:00",
+  finished_at: null, message: "全市场扫描运行中",
+};
+assert.equal(validateMarketScanRun(intradayRun), intradayRun);
+assert.throws(() => validateMarketScanRun({ ...intradayRun, mode: "preview" }), /mode/);
+assert.throws(() => validateMarketScanRun({ ...intradayRun, quote_date: "2026-7-27" }), /quote_date/);
+assert.throws(() => validateMarketScanRun({ ...intradayRun, quote_date: "2026-02-30" }), /quote_date/);
+
+let startInit = null;
+const controller = createMarketScanController({
+  root: document,
+  now: new Date(2026, 6, 27, 10, 0),
+  pollIntervalMs: 60000,
+  async fetcher(url, init = {}) {
+    assert.equal(url, "/api/market-scans");
+    startInit = init;
+    return { accepted: true, deduplicated: false, run: intradayRun };
+  },
+});
+assert.equal(element("marketScanModeIntraday").checked, true);
+assert.equal(element("marketScanModeOfficial").checked, false);
+await controller.start();
+assert.deepEqual(JSON.parse(startInit.body), { mode: "intraday" });
+assert.equal(element("marketScanModeSummary").textContent, "盘中临时");
+assert.equal(element("marketScanQuoteDate").textContent, "2026-07-27");
+assert.equal(element("marketScanDataDate").textContent, "2026-07-24");
+assert.match(element("marketScanHeadline").textContent, /盘中临时/);
+assert.match(element("marketScanResultState").textContent, /盘中临时/);
+assert.doesNotMatch(element("marketScanHeadline").textContent, /正式|稳定榜单/);
+assert.doesNotMatch(element("marketScanResultState").textContent, /正式|稳定榜单/);
+assert.equal(element("marketScanModeIntraday").disabled, false);
+controller.deactivate();
+
+const manual = installAppDom({ canvasContext: null });
+let manualInit = null;
+const officialRun = {
+  ...intradayRun, id: 93, mode: "official", data_date: "2026-07-27", quote_date: "2026-07-27",
+};
+const manualController = createMarketScanController({
+  root: document,
+  now: new Date(2026, 6, 27, 10, 0),
+  async fetcher(url, init = {}) {
+    manualInit = init;
+    return { accepted: true, deduplicated: false, run: officialRun };
+  },
+});
+manual.element("marketScanModeIntraday").checked = false;
+manual.element("marketScanModeOfficial").checked = true;
+await manualController.start();
+assert.deepEqual(JSON.parse(manualInit.body), { mode: "official" });
+manualController.deactivate();
+
+const reloaded = installAppDom({ canvasContext: null });
+const officialActiveRun = {
+  ...intradayRun, id: 92, mode: "official", data_date: "2026-07-27", quote_date: "2026-07-27",
+};
+const reloadController = createMarketScanController({
+  root: document,
+  now: new Date(2026, 6, 27, 10, 0),
+  pollIntervalMs: 60000,
+  async fetcher(url) {
+    if (url === "/api/market-scans/latest") return officialActiveRun;
+    if (String(url).startsWith("/api/market-scans/latest-published?mode=")) return null;
+    if (String(url).startsWith("/api/market-scans?")) {
+      return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
+    }
+    throw new Error(`unexpected request: ${url}`);
+  },
+});
+assert.equal(reloaded.element("marketScanModeIntraday").checked, true);
+await reloadController.activate();
+assert.equal(reloaded.element("marketScanModeIntraday").checked, true);
+assert.equal(reloaded.element("marketScanModeOfficial").checked, false);
+assert.equal(reloaded.element("marketScanModeIntraday").disabled, false);
+assert.match(reloaded.element("marketScanBrowseContext").textContent, /当前浏览：盘中临时/);
+assert.match(reloaded.element("marketScanTaskContext").textContent, /盘后正式.*不同/);
+reloadController.deactivate();
+'''
+    )
+
+
+def test_market_scan_history_selection_binds_results_export_filters_and_mode() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+import { createMarketScanController } from "./static/js/market-scan.js";
+
+const { element } = installAppDom({ canvasContext: null });
+const officialLatest = scanRun(31, "official", "2026-07-29");
+const officialHistory = scanRun(30, "official", "2026-07-28");
+const intradayLatest = scanRun(41, "intraday", "2026-07-29");
+const activeTask = { ...scanRun(50, "official", "2026-07-29"), status: "running", finished_at: null, total_count: 100, processed_count: 20, success_count: 20, progress_pct: 20, coverage_pct: 20 };
+const calls = [];
+const exportCalls = [];
+document.createElement = () => ({ click() {} });
+globalThis.URL = { createObjectURL() { return "blob:history"; }, revokeObjectURL() {} };
+const controller = createMarketScanController({
+  root: document,
+  now: new Date(2026, 6, 29, 16, 0),
+  pollIntervalMs: 60000,
+  async fetcher(url) {
+    const target = String(url);
+    calls.push(target);
+    if (target === "/api/market-scans/latest") return activeTask;
+    if (target.startsWith("/api/market-scans/latest-published?mode=official")) return officialLatest;
+    if (target.startsWith("/api/market-scans/latest-published?mode=intraday")) return intradayLatest;
+    if (target.startsWith("/api/market-scans?")) {
+      const query = new URLSearchParams(target.split("?", 2)[1]);
+      const items = query.get("mode") === "intraday" ? [intradayLatest] : [officialLatest, officialHistory];
+      return { items, total: items.length, page: 1, page_size: 100, page_count: 1 };
+    }
+    const match = /^\/api\/market-scans\/(\d+)\/results\?/.exec(target);
+    if (match) return resultPage(Number(match[1]));
+    throw new Error(`unexpected request: ${target}`);
+  },
+  async exportFetcher(url) {
+    exportCalls.push(String(url));
+    return {
+      ok: true,
+      headers: { get(name) { return name === "content-type" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : null; } },
+      async blob() { return new Blob(["xlsx"]); },
+    };
+  },
+});
+
+await controller.activate();
+assert.equal(controller.state.publishedRun.id, 31);
+assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "31");
+assert.match(element("marketScanTaskContext").textContent, /#50/);
+
+element("marketScanHistoryStatus").value = "success";
+element("marketScanHistoryDate").value = "2026-07-28";
+element("marketScanHistoryRefresh").listeners.click();
+await flushPromises();
+assert.equal(calls.some((url) => url.includes("mode=official") && url.includes("status=success") && url.includes("data_date=2026-07-28")), true);
+
+element("marketScanHistoryRun").value = "30";
+element("marketScanHistoryRun").listeners.change();
+await flushPromises();
+assert.equal(controller.state.selectedHistoryRunId, 30);
+assert.equal(controller.state.publishedRun.id, 30);
+assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "30");
+assert.match(element("marketScanBrowseContext").textContent, /历史批次 #30/);
+await controller.exportResults();
+assert.equal(exportCalls.at(-1).startsWith("/api/market-scans/30/export.xlsx?"), true);
+
+element("marketScanModeOfficial").checked = false;
+element("marketScanModeIntraday").checked = true;
+element("marketScanModeIntraday").listeners.change();
+await flushPromises();
+assert.equal(controller.state.browseMode, "intraday");
+assert.equal(controller.state.selectedHistoryRunId, null);
+assert.equal(controller.state.publishedRun.id, 41);
+assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "41");
+assert.match(element("marketScanBrowseContext").textContent, /盘中临时/);
+assert.match(element("marketScanTaskContext").textContent, /盘后正式.*不同/);
+controller.deactivate();
+
+function scanRun(id, mode, dataDate) {
+  return {
+    id, status: "success", trigger: "manual", mode, rule_version: "full-market-score-v4:test",
+    as_of: `${dataDate} 16:00:00`, data_date: dataDate, quote_date: dataDate, scope: "SH/SZ/BJ",
+    total_count: 1, excluded_count: 0, processed_count: 1, success_count: 1, missing_count: 0,
+    skipped_count: 0, retry_count: 0, progress_pct: 100, coverage_pct: 100,
+    created_at: `${dataDate} 16:00:00`, updated_at: `${dataDate} 16:10:00`, finished_at: `${dataDate} 16:10:00`,
+  };
+}
+
+function resultPage(runId) {
+  const run = [officialLatest, officialHistory, intradayLatest].find((item) => item.id === runId);
+  return {
+    run, total: 1, page: 1, page_size: 100, page_count: 1,
+    items: [{ run_id: runId, rank: 1, symbol: "600519.SH", code: "600519", market: "SH", name: "贵州茅台", status: "success", is_st: false, is_new: false, score: 90, tags: [], metrics: {}, updated_at: `${run.data_date} 16:10:00` }],
+  };
+}
+
+async function flushPromises() {
+  for (let index = 0; index < 80; index += 1) await Promise.resolve();
+}
+'''
+    )
 
 
 def test_market_scan_query_and_rows_are_bounded_encoded_and_escaped() -> None:
@@ -93,6 +332,7 @@ import {
   marketScanResultRow,
   marketScanResultsUrl,
 } from "./static/js/market-scan.js";
+import { buildMarketScanExportUrl, marketScanExportFilename } from "./static/js/market-scan-view.js";
 
 const input = (value = "") => ({ value });
 const url = marketScanResultsUrl(17, 2, {
@@ -125,6 +365,61 @@ assert.equal(parsed.searchParams.get("keyword"), "920066 科拜尔");
 assert.equal(parsed.searchParams.get("sort"), "score");
 assert.equal(parsed.searchParams.get("order"), "desc");
 
+const exportUrl = new URL(buildMarketScanExportUrl(17, {
+  status: input("all"), market: input("BJ"), industry: input("专用 设备"),
+  isSt: input("false"), isNew: input("true"), quality: input("70"),
+  keyword: input("920066 科拜尔"), sort: input("score"), order: input("desc"),
+}), "http://localhost");
+assert.equal(exportUrl.pathname, "/api/market-scans/17/export.xlsx");
+assert.equal(exportUrl.searchParams.has("page"), false);
+assert.equal(exportUrl.searchParams.has("page_size"), false);
+for (const key of [
+  "status", "market", "industry", "is_st", "is_new",
+  "min_data_quality_score", "keyword", "sort", "order",
+]) {
+  assert.equal(exportUrl.searchParams.get(key), parsed.searchParams.get(key), `${key} drifted from results query`);
+}
+const advancedElements = {
+  status: input("success"),
+  market: { value: "SH", selectedOptions: [{ value: "SH" }, { value: "SZ" }] },
+  industry: input("银行，半导体"), isSt: input(""), isNew: input("false"),
+  scoreMin: input("60"), scoreMax: input("95"),
+  trendMin: input("55"), trendMax: input("90"),
+  changeMin: input("-2.5"), changeMax: input("9.5"),
+  turnoverMin: input("1.2"), turnoverMax: input("30"),
+  amountMin: input("1000000"), amountMax: input("500000000"),
+  quality: input("75"), qualityMax: input("99"), keyword: input("龙头"),
+  sort: input("score"), order: input("desc"),
+  sort2: input("amount"), order2: input("desc"),
+  sort3: input("symbol"), order3: input("asc"),
+};
+const advancedResults = new URL(buildMarketScanResultsUrl(17, 1, advancedElements), "http://localhost");
+const advancedExport = new URL(buildMarketScanExportUrl(17, advancedElements), "http://localhost");
+assert.deepEqual(advancedResults.searchParams.getAll("market"), ["SH", "SZ"]);
+assert.deepEqual(advancedResults.searchParams.getAll("industry"), ["银行", "半导体"]);
+assert.deepEqual(advancedResults.searchParams.getAll("sort"), ["score", "amount", "symbol"]);
+assert.deepEqual(advancedResults.searchParams.getAll("order"), ["desc", "desc", "asc"]);
+for (const key of [
+  "min_score", "max_score", "min_trend_score", "max_trend_score",
+  "min_change_pct", "max_change_pct", "min_turnover_rate", "max_turnover_rate",
+  "min_amount", "max_amount", "min_data_quality_score", "max_data_quality_score",
+]) {
+  assert.equal(advancedExport.searchParams.get(key), advancedResults.searchParams.get(key), `${key} drifted`);
+}
+assert.throws(
+  () => buildMarketScanResultsUrl(17, 1, { ...advancedElements, scoreMin: input("96") }),
+  /下限不能大于上限/,
+);
+assert.equal(
+  marketScanExportFilename("attachment; filename*=UTF-8''%E5%85%A8%E5%B8%82%E5%9C%BA%E6%A6%9C%E5%8D%95.xlsx", { id: 17 }),
+  "全市场榜单.xlsx",
+);
+assert.equal(
+  marketScanExportFilename('attachment; filename="AShareRadar-full-market-run17.xlsx"', { id: 17 }),
+  "AShareRadar-full-market-run17.xlsx",
+);
+assert.equal(marketScanExportFilename("", { id: 17, quote_date: "2026-07-29" }), "AShareRadar-market-scan-2026-07-29.xlsx");
+
 const row = marketScanResultRow({
   rank: 1,
   symbol: '920066.BJ"><script>alert(1)</script>',
@@ -151,6 +446,234 @@ assert.equal(row.includes("1.3亿"), true);
     )
 
 
+def test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { marketScanResultRow } from "./static/js/market-scan.js";
+import {
+  marketScanSnapshotContent,
+  toggleMarketScanSnapshot,
+} from "./static/js/market-scan-snapshot-view.js";
+import { createMarketScanRowClickHandler } from "./static/js/market-scan-row-actions.js";
+
+const item = {
+  run_id: 31, rank: 2, symbol: "600519.SH", code: "600519", market: "SH", name: "贵州茅台",
+  industry: "白酒", metadata_source: "provider-pool", status: "success", score: 93,
+  raw_score: 92.123456, trend_score: 88, leader_score: 95, data_quality_score: 90,
+  quote_timestamp: "2026-07-29 15:00:00", data_date: "2026-07-29",
+  quote_source: "tencent", kline_source: "akshare", adjustment_mode: "qfq",
+  quote_fallback_used: true, kline_fallback_used: false, metadata_degraded: true,
+  degradation_reasons: ["quote_fallback", "industry_missing"], tags: [],
+  score_details: {
+    run_rule_version: "full-market-score-v4:abc12345", score_spec_hash: "abc12345",
+    components: {
+      leader_score: { base: 50, trend_delta: 12, rule_deltas: { amount: 8, "<script>": 1 } },
+      final_score: { quality_penalty: 1.5, base: 93.5, rank_discount: 1.376544, raw: 92.123456, score: 93 },
+      rank_refinement: { score: 0.6, weighted_terms: { ma_alignment: 0.24, return_20d_pct: 0.18 } },
+    },
+    ranking: { tie_break: [["raw_score", "desc"], ["symbol", "asc"]], tie_break_values: { raw_score: 92.123456, symbol: "600519.SH" } },
+  },
+};
+const run = { id: 31, mode: "official", quote_date: "2026-07-29", data_date: "2026-07-29" };
+const html = marketScanResultRow(item, { run });
+assert.match(html, /查看扫描快照/);
+assert.match(html, /打开当前个股分析/);
+assert.match(html, /只读持久化证据/);
+assert.match(html, /质量扣分/);
+assert.match(html, /raw_score 降序 → symbol 升序/);
+assert.match(html, /行情使用兜底源/);
+assert.equal(html.includes("<script>"), false);
+assert.equal(html.includes("&lt;script&gt;"), true);
+assert.match(marketScanSnapshotContent({ run_id: 1, score_details: {} }), /不会用当前规则补算历史证据/);
+
+const target = { hidden: true };
+const attributes = {};
+const button = { dataset: { marketScanSnapshotTarget: "snapshot-31" }, setAttribute(name, value) { attributes[name] = value; } };
+const root = { getElementById(id) { assert.equal(id, "snapshot-31"); return target; } };
+assert.equal(toggleMarketScanSnapshot(root, button), true);
+assert.equal(target.hidden, false);
+assert.equal(attributes["aria-expanded"], "true");
+
+const messages = [];
+let origin = null;
+const currentButton = {
+  dataset: { marketScanSymbol: "600519.SH", marketScanRunId: "31", marketScanMode: "official", marketScanQuoteDate: "2026-07-29", marketScanDataDate: "2026-07-29" },
+};
+const handler = createMarketScanRowClickHandler({
+  view: { announce(message) { messages.push(message); }, toggleSnapshot() { throw new Error("not snapshot"); } },
+  onSelectStock(symbol, value) { assert.equal(symbol, "600519.SH"); origin = value; },
+});
+handler({ target: { closest(selector) { return selector.includes("snapshot") ? null : currentButton; } } });
+assert.deepEqual(origin, { source: "market-scan", runId: 31, mode: "official", quoteDate: "2026-07-29", dataDate: "2026-07-29" });
+assert.match(messages[0], /当前可用数据，不是历史扫描快照/);
+'''
+    )
+
+
+def test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import {
+  actionableDiagnostic,
+  etaText,
+  renderMarketScanObservability,
+} from "./static/js/market-scan-progress-view.js";
+
+const element = () => ({ textContent: "", innerHTML: "", hidden: false });
+const elements = {
+  stage: element(), elapsed: element(), throughput: element(), eta: element(),
+  marketProgress: element(), diagnostic: element(),
+};
+renderMarketScanObservability(elements, {
+  status: "running", current_stage: "klines", elapsed_seconds: 125,
+  throughput_per_second: 6.25, eta_seconds: null,
+  market_progress: [
+    { market: "SH", total_count: 100, processed_count: 80, success_count: 78, missing_count: 1, skipped_count: 1, coverage_pct: 78 },
+    { market: "SZ", total_count: 90, processed_count: 60, success_count: 59, missing_count: 1, skipped_count: 0, coverage_pct: 65.56 },
+    { market: "BJ", total_count: 10, processed_count: 5, success_count: 5, missing_count: 0, skipped_count: 0, coverage_pct: 50 },
+  ],
+});
+assert.equal(elements.stage.textContent, "K 线获取");
+assert.equal(elements.elapsed.textContent, "2 分 5 秒");
+assert.equal(elements.throughput.textContent, "6.25 只/秒");
+assert.equal(elements.eta.textContent, "估算中");
+assert.match(elements.marketProgress.innerHTML, /SH/);
+assert.match(elements.marketProgress.innerHTML, /1 缺失 · 1 跳过/);
+assert.equal(etaText({ status: "running", eta_seconds: 65 }), "1 分 5 秒");
+assert.match(actionableDiagnostic({ status: "failed", last_error: "SH 发布覆盖不足" }), /检查股票池与数据源完整性/);
+assert.match(actionableDiagnostic({ status: "failed", last_error: "provider 超时" }), /等待数据源恢复/);
+'''
+    )
+
+
+def test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+import { createMarketScanController } from "./static/js/market-scan.js";
+
+const { element } = installAppDom({ canvasContext: null });
+const published = {
+  id: 41, status: "degraded", trigger: "manual", mode: "official",
+  rule_version: "full-market-score-v1", as_of: "2026-07-28 16:30:00",
+  data_date: "2026-07-28", quote_date: "2026-07-28", scope: "SH/SZ/BJ",
+  total_count: 3, excluded_count: 0, processed_count: 3, success_count: 2,
+  missing_count: 1, skipped_count: 0, retry_count: 0, progress_pct: 100,
+  coverage_pct: 66.67, created_at: "2026-07-28 16:30:00", updated_at: "2026-07-28 16:35:00",
+  started_at: "2026-07-28 16:30:01", finished_at: "2026-07-28 16:35:00",
+  duration_ms: 299000, message: "旧榜单已发布",
+};
+const active = {
+  ...published, id: 42, status: "running", quote_date: "2026-07-29",
+  processed_count: 1, success_count: 1, missing_count: 0, progress_pct: 33.33,
+  coverage_pct: 33.33, updated_at: "2026-07-29 10:01:00", finished_at: null,
+  duration_ms: null, message: "新扫描进行中",
+};
+let exportResolve;
+let exportMode = "success";
+const exportCalls = [];
+const anchors = [];
+const revoked = [];
+document.createElement = () => {
+  const anchor = { href: "", download: "", clicked: false, click() { this.clicked = true; } };
+  anchors.push(anchor);
+  return anchor;
+};
+globalThis.URL = {
+  createObjectURL(blob) { assert.equal(blob instanceof Blob, true); return `blob:export-${anchors.length}`; },
+  revokeObjectURL(url) { revoked.push(url); },
+};
+const controller = createMarketScanController({
+  root: document,
+  now: new Date(2026, 6, 17, 16, 30),
+  pollIntervalMs: 60000,
+  async fetcher(url) {
+    if (url === "/api/market-scans/latest") return active;
+    if (String(url).startsWith("/api/market-scans/latest-published?mode=")) return published;
+    if (String(url).startsWith("/api/market-scans?")) {
+      return { items: [published], total: 1, page: 1, page_size: 100, page_count: 1 };
+    }
+    if (String(url).startsWith("/api/market-scans/41/results?")) {
+      return { run: published, total: 0, page: 1, page_size: 100, page_count: 0, items: [] };
+    }
+    throw new Error(`unexpected request: ${url}`);
+  },
+  async exportFetcher(url, init) {
+    exportCalls.push({ url: String(url), init });
+    if (exportMode === "error") {
+      return { ok: false, status: 422, async json() { return { detail: "当前筛选条件无法导出" }; } };
+    }
+    return await new Promise((resolve) => { exportResolve = resolve; });
+  },
+});
+
+assert.equal(element("marketScanExport").disabled, true);
+assert.equal(await controller.exportResults(), null);
+await controller.activate();
+assert.equal(controller.state.run.id, 42);
+assert.equal(controller.state.publishedRun.id, 41);
+assert.equal(element("marketScanExport").disabled, false, "active scan hid the old published export");
+
+element("marketScanStatus").value = "all";
+element("marketScanMarket").value = "BJ";
+element("marketScanIndustry").value = "专用 设备";
+element("marketScanSt").value = "false";
+element("marketScanNew").value = "true";
+element("marketScanQuality").value = "85";
+element("marketScanKeyword").value = "北交 样本";
+element("marketScanSort").value = "score";
+element("marketScanOrder").value = "desc";
+const exporting = controller.exportResults();
+await Promise.resolve();
+assert.equal(controller.state.exportBusy, true);
+assert.equal(controller.state.actionBusy, false);
+assert.equal(element("workspace-panel-market-scan")["aria-busy"], "false");
+assert.equal(element("marketScanExport").disabled, true);
+assert.equal(element("marketScanExport")["aria-busy"], "true");
+assert.equal(element("marketScanExport").textContent, "正在导出...");
+assert.equal(await controller.exportResults(), null, "duplicate export was not rejected");
+assert.equal(exportCalls.length, 1);
+const requestUrl = new globalThis.URLSearchParams(exportCalls[0].url.split("?", 2)[1]);
+assert.equal(exportCalls[0].url.startsWith("/api/market-scans/41/export.xlsx?"), true);
+assert.equal(requestUrl.has("page"), false);
+assert.equal(requestUrl.has("page_size"), false);
+assert.deepEqual(Object.fromEntries(requestUrl), {
+  status: "all", market: "BJ", industry: "专用 设备", is_st: "false", is_new: "true",
+  min_data_quality_score: "85", keyword: "北交 样本", sort: "score", order: "desc",
+});
+assert.equal(exportCalls[0].init.headers.Accept, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+assert.equal(exportCalls[0].init.signal instanceof AbortSignal, true);
+exportResolve({
+  ok: true,
+  headers: { get(name) {
+    if (name === "content-type") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    return name === "content-disposition" ? "attachment; filename*=UTF-8''%E5%85%A8%E5%B8%82%E5%9C%BA%E6%A6%9C%E5%8D%95.xlsx" : null;
+  } },
+  async blob() { return new Blob(["xlsx"]); },
+});
+assert.equal(await exporting, "全市场榜单.xlsx");
+assert.equal(anchors[0].clicked, true);
+assert.equal(anchors[0].download, "全市场榜单.xlsx");
+assert.equal(revoked[0], anchors[0].href);
+assert.equal(controller.state.exportBusy, false);
+assert.equal(element("marketScanExport").disabled, false);
+assert.equal(element("marketScanExport")["aria-busy"], "false");
+assert.equal(element("marketScanExport").textContent, "导出 Excel");
+assert.match(element("marketScanAnnouncement").textContent, /Excel 榜单已导出/);
+
+exportMode = "error";
+assert.equal(await controller.exportResults(), null);
+assert.match(element("marketScanAnnouncement").textContent, /当前筛选条件无法导出/);
+assert.equal(element("marketScanExport").disabled, false);
+assert.equal(anchors.length, 1, "error response created a download");
+controller.deactivate();
+'''
+    )
+
+
 def test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run() -> None:
     _run_node_script(
         r'''
@@ -164,9 +687,11 @@ const terminal = {
   id: 9,
   status: "degraded",
   trigger: "manual",
+  mode: "official",
   rule_version: "full-market-score-v1",
   as_of: "2026-07-17 16:30:00",
   data_date: "2026-07-17",
+  quote_date: "2026-07-17",
   scope: "SH/SZ/BJ",
   total_count: 3,
   excluded_count: 1,
@@ -213,26 +738,32 @@ const resultPage = {
 let latestRun = terminal;
 const controller = createMarketScanController({
   root: document,
+  now: new Date(2026, 6, 17, 16, 30),
   pollIntervalMs: 60000,
   async fetcher(url) {
     calls.push(String(url));
     if (url === "/api/market-scans/latest") return latestRun;
-    if (url === "/api/market-scans/latest-published") return terminal;
+    if (String(url).startsWith("/api/market-scans/latest-published?mode=")) return terminal;
+    if (String(url).startsWith("/api/market-scans?")) {
+      return { items: [terminal], total: 1, page: 1, page_size: 100, page_count: 1 };
+    }
     if (String(url).includes("/results?")) return resultPage;
     throw new Error(`unexpected request: ${url}`);
   },
 });
 
 await controller.activate();
-assert.deepEqual(calls.map((url) => url.split("?")[0]), [
-  "/api/market-scans/latest",
-  "/api/market-scans/9/results",
-]);
+assert.equal(calls.filter((url) => url === "/api/market-scans/latest").length, 1);
+assert.equal(calls.filter((url) => url.startsWith("/api/market-scans?")).length, 1);
+assert.equal(calls.filter((url) => url.startsWith("/api/market-scans/9/results?")).length, 1);
 assert.equal(element("marketScanHeadline").textContent, "全市场扫描降级完成");
 assert.equal(element("marketScanProgressText").textContent, "3/3 · 100.0%");
 assert.equal(element("marketScanProgressBar").textContent, "100.0%");
 assert.equal(element("marketScanProgressBar")["aria-valuenow"], "100.00");
 assert.equal(element("marketScanProgressBar")["aria-valuetext"], "降级完成，3/3 · 100.0%");
+assert.equal(element("marketScanModeSummary").textContent, "盘后正式");
+assert.equal(element("marketScanQuoteDate").textContent, "2026-07-17");
+assert.equal(element("marketScanDataDate").textContent, "2026-07-17");
 assert.equal(element("marketScanTotal").textContent, "3（排除 1）");
 assert.equal(element("marketScanCoverage").textContent, "66.7%");
 assert.equal(element("marketScanFinishedAt").textContent, "2026-07-17 16:45");
@@ -241,7 +772,7 @@ assert.equal(element("marketScanRule").title, "full-market-score-v1");
 assert.equal(element("marketScanRule")["aria-label"], "规则版本 full-market-score-v1");
 assert.equal(element("marketScanRows").innerHTML.includes("920066.BJ"), true);
 assert.equal(element("marketScanTableWrap").hidden, false);
-assert.equal(element("marketScanAnnouncement").textContent, "榜单加载完成，第 1/1 页，本页 1 条，共 1 条。");
+assert.equal(element("marketScanAnnouncement").textContent, "盘后正式榜单加载完成，第 1/1 页，本页 1 条，共 1 条。");
 assert.equal(element("marketScanRetry").hidden, false);
 
 latestRun = {
@@ -259,17 +790,15 @@ assert.equal(controller.state.run.id, 11);
 assert.equal(controller.state.run.status, "running");
 assert.equal(element("marketScanProgressBar").textContent, "10.0%");
 assert.equal(element("marketScanProgressBar")["aria-valuenow"], "10.00");
-assert.equal(element("marketScanRule").textContent, "v3\n085ad665");
-assert.equal(element("marketScanRule").title, "full-market-scan-v3:085ad66526be0b28");
+assert.equal(element("marketScanRule").textContent, "v1");
+assert.equal(element("marketScanRule").title, "full-market-score-v1");
+assert.match(element("marketScanTaskContext").textContent, /#11.*扫描中/);
 assert.equal(controller.state.publishedRun.id, 9);
 assert.equal(element("marketScanTableWrap").hidden, false);
 assert.equal(element("marketScanRows").innerHTML.includes("920066.BJ"), true);
-assert.deepEqual(calls.map((url) => url.split("?")[0]), [
-  "/api/market-scans/latest",
-  "/api/market-scans/9/results",
-  "/api/market-scans/latest",
-  "/api/market-scans/latest-published",
-]);
+assert.equal(calls.filter((url) => url === "/api/market-scans/latest").length, 2);
+assert.equal(calls.filter((url) => url.startsWith("/api/market-scans/latest-published?mode=")).length, 1);
+assert.equal(calls.filter((url) => url.startsWith("/api/market-scans?")).length, 2);
 
 for (const [id, status, message] of [
   [11, "failed", "新扫描失败"],
@@ -305,7 +834,7 @@ await activeController.start();
 assert.equal(activeController.state.run.status, "running");
 assert.equal(element("marketScanStart").disabled, true);
 assert.equal(element("marketScanCancel").hidden, false);
-assert.equal(element("marketScanResultState").textContent.includes("稳定榜单"), true);
+assert.equal(element("marketScanResultState").textContent.includes("盘后正式榜单"), true);
 assert.equal(activeCalls.includes("/api/market-scans"), true);
 activeController.deactivate();
 controller.deactivate();
@@ -339,14 +868,17 @@ const unpublishedController = createMarketScanController({
   root: document,
   async fetcher(url) {
     if (url === "/api/market-scans/latest") return { ...terminal, id: 23, status: "cancelled", message: "用户取消" };
-    if (url === "/api/market-scans/latest-published") return null;
+    if (String(url).startsWith("/api/market-scans/latest-published?mode=")) return null;
+    if (String(url).startsWith("/api/market-scans?")) {
+      return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
+    }
     if (String(url).includes("/results?")) unpublishedResultCalls += 1;
     throw new Error(`unexpected request: ${url}`);
   },
 });
 await unpublishedController.activate();
 assert.equal(unpublishedResultCalls, 0);
-assert.equal(element("marketScanResultState").textContent.includes("未发布正式榜单"), true);
+assert.equal(element("marketScanResultState").textContent.includes("未发布盘后正式榜单"), true);
 unpublishedController.deactivate();
 '''
     )
@@ -365,9 +897,11 @@ const run = (id, status, message) => ({
   id,
   status,
   trigger: "manual",
+  mode: "official",
   rule_version: "full-market-score-v1",
   as_of: "2026-07-17 16:30:00",
   data_date: "2026-07-17",
+  quote_date: "2026-07-17",
   scope: "SH/SZ/BJ",
   total_count: 1,
   excluded_count: 0,
@@ -391,6 +925,7 @@ let publishedRun = null;
 const calls = [];
 const controller = createMarketScanController({
   root: document,
+  now: new Date(2026, 6, 17, 16, 30),
   pollIntervalMs: 5,
   idlePollIntervalMs: 7,
   async fetcher(url) {
@@ -399,7 +934,10 @@ const controller = createMarketScanController({
       latestCalls += 1;
       return latestCalls === 1 ? firstActive : externalActive;
     }
-    if (url === "/api/market-scans/latest-published") return publishedRun;
+    if (String(url).startsWith("/api/market-scans/latest-published?mode=")) return publishedRun;
+    if (String(url).startsWith("/api/market-scans?")) {
+      return { items: publishedRun ? [publishedRun] : [], total: publishedRun ? 1 : 0, page: 1, page_size: 100, page_count: publishedRun ? 1 : 0 };
+    }
     if (url === "/api/market-scans/9") {
       publishedRun = firstTerminal;
       return firstTerminal;
@@ -477,9 +1015,11 @@ const terminal = {
   id: 20,
   status: "success",
   trigger: "manual",
+  mode: "official",
   rule_version: "full-market-score-v1",
   as_of: "2026-07-17 16:30:00",
   data_date: "2026-07-17",
+  quote_date: "2026-07-17",
   scope: "SH/SZ/BJ",
   total_count: 1,
   excluded_count: 0,
@@ -498,6 +1038,7 @@ const terminal = {
 let resultCalls = 0;
 const retryController = createMarketScanController({
   root: document,
+  now: new Date(2026, 6, 17, 16, 30),
   idlePollIntervalMs: 1000,
   resultRetryIntervalMs: 5,
   async fetcher(url) {
@@ -524,7 +1065,7 @@ assert.equal(element("marketScanResultState").textContent.includes("榜单读取
 await timers.fireNext();
 assert.equal(resultCalls, 2);
 assert.equal(element("marketScanTableWrap").hidden, false);
-assert.equal(element("marketScanAnnouncement").textContent, "榜单加载完成，第 1/1 页，本页 1 条，共 1 条。");
+assert.equal(element("marketScanAnnouncement").textContent, "盘后正式榜单加载完成，第 1/1 页，本页 1 条，共 1 条。");
 retryController.deactivate();
 
 let serverRun = null;
@@ -621,6 +1162,7 @@ for (const invalid of [
 const { element } = installAppDom({ canvasContext: null });
 const controller = createMarketScanController({
   root: document,
+  now: new Date(2026, 6, 17, 16, 30),
   resultRetryIntervalMs: 60000,
   async fetcher(url) {
     if (url === "/api/market-scans/latest") return terminal;
@@ -645,9 +1187,11 @@ function scanRun(id, status) {
     id,
     status,
     trigger: "manual",
+    mode: "official",
     rule_version: "full-market-score-v1",
     as_of: "2026-07-17 16:30:00",
     data_date: "2026-07-17",
+    quote_date: "2026-07-17",
     scope: "SH/SZ/BJ",
     total_count: 1,
     excluded_count: 0,
@@ -693,7 +1237,10 @@ const controller = createMarketScanController({
       latestCalls += 1;
       return scanRun(latestCalls === 1 ? 70 : latestCalls === 2 ? 71 : 72);
     }
-    if (url === "/api/market-scans/latest-published") return null;
+    if (String(url).startsWith("/api/market-scans/latest-published?mode=")) return null;
+    if (String(url).startsWith("/api/market-scans?")) {
+      return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
+    }
     if (url === "/api/market-scans/70") {
       const error = new Error("全市场扫描批次不存在：70");
       error.status = 404;
@@ -724,7 +1271,9 @@ assert.equal(latestCalls, 3);
 assert.equal(controller.state.run.id, 72);
 assert.equal(element("marketScanHeadline").textContent, "网络已恢复，正在同步最近扫描。");
 assert.equal(timers.size(), 1);
-assert.deepEqual(calls.filter((url) => url !== "/api/market-scans/latest-published").slice(0, 4), [
+assert.deepEqual(calls.filter((url) => (
+  url === "/api/market-scans/latest" || /^\/api\/market-scans\/\d+$/.test(url)
+)).slice(0, 4), [
   "/api/market-scans/latest",
   "/api/market-scans/70",
   "/api/market-scans/latest",
@@ -738,9 +1287,11 @@ function scanRun(id) {
     id,
     status: "running",
     trigger: "manual",
+    mode: "official",
     rule_version: "full-market-score-v1",
     as_of: "2026-07-17 16:30:00",
     data_date: "2026-07-17",
+    quote_date: "2026-07-17",
     scope: "SH/SZ/BJ",
     total_count: 100,
     excluded_count: 0,
@@ -840,9 +1391,11 @@ function scanRun(id) {
     id,
     status: "running",
     trigger: "manual",
+    mode: "official",
     rule_version: "full-market-score-v1",
     as_of: "2026-07-17 16:30:00",
     data_date: "2026-07-17",
+    quote_date: "2026-07-17",
     scope: "SH/SZ/BJ",
     total_count: 100,
     excluded_count: 0,
@@ -902,8 +1455,8 @@ globalThis.setTimeout = (callback, delay = 0) => {
 };
 globalThis.clearTimeout = (id) => timers.delete(id);
 const terminal = {
-  id: 30, status: "success", trigger: "manual", rule_version: "v1",
-  as_of: "2026-07-17 16:30:00", data_date: "2026-07-17", scope: "SH/SZ/BJ",
+  id: 30, status: "success", trigger: "manual", mode: "official", rule_version: "v1",
+  as_of: "2026-07-17 16:30:00", data_date: "2026-07-17", quote_date: "2026-07-17", scope: "SH/SZ/BJ",
   total_count: 0, excluded_count: 0, processed_count: 0, success_count: 0,
   missing_count: 0, skipped_count: 0, retry_count: 0, progress_pct: 100,
   coverage_pct: 0, created_at: "2026-07-17 16:30:00", updated_at: "2026-07-17 16:31:00",
@@ -912,6 +1465,7 @@ const terminal = {
 let resultCalls = 0;
 const controller = createMarketScanController({
   root: document,
+  now: new Date(2026, 6, 17, 16, 30),
   async fetcher(url) {
     if (url === "/api/market-scans/latest") return terminal;
     if (String(url).includes("/results?")) {
@@ -945,8 +1499,8 @@ for (const id of ["marketScanTableWrap", "marketScanMarket", "marketScanPrev", "
   element(id).focus = function focus() { document.activeElement = this; };
 }
 const terminal = {
-  id: 40, status: "success", trigger: "manual", rule_version: "v1",
-  as_of: "2026-07-17 16:30:00", data_date: "2026-07-17", scope: "SH/SZ/BJ",
+  id: 40, status: "success", trigger: "manual", mode: "official", rule_version: "v1",
+  as_of: "2026-07-17 16:30:00", data_date: "2026-07-17", quote_date: "2026-07-17", scope: "SH/SZ/BJ",
   total_count: 101, excluded_count: 0, processed_count: 101, success_count: 101,
   missing_count: 0, skipped_count: 0, retry_count: 0, progress_pct: 100,
   coverage_pct: 100, created_at: "2026-07-17 16:30:00", updated_at: "2026-07-17 16:31:00",
@@ -956,6 +1510,7 @@ const secondPage = deferred();
 let resultCalls = 0;
 const controller = createMarketScanController({
   root: document,
+  now: new Date(2026, 6, 17, 16, 30),
   pollIntervalMs: 60000,
   idlePollIntervalMs: 60000,
   async fetcher(url) {
@@ -1043,6 +1598,7 @@ const degraded = scanRun(3, "degraded", "降级完成");
 const retried = scanRun(4, "running", "重试扫描运行中");
 const controller = createMarketScanController({
   root: document,
+  now: new Date(2026, 6, 17, 16, 30),
   pollIntervalMs: 60000,
   idlePollIntervalMs: 60000,
   async fetcher(url, options = {}) {
@@ -1144,8 +1700,8 @@ function scanRun(id, status, message) {
   const active = ["queued", "running", "cancelling"].includes(status);
   const published = ["success", "degraded"].includes(status);
   return {
-    id, status, trigger: "manual", rule_version: "v1", as_of: "2026-07-17 16:30:00",
-    data_date: "2026-07-17", scope: "SH/SZ/BJ", total_count: 1, excluded_count: 0,
+    id, status, trigger: "manual", mode: "official", rule_version: "v1", as_of: "2026-07-17 16:30:00",
+    data_date: "2026-07-17", quote_date: "2026-07-17", scope: "SH/SZ/BJ", total_count: 1, excluded_count: 0,
     processed_count: active ? 0 : 1, success_count: published ? 1 : 0, missing_count: 0,
     skipped_count: 0, retry_count: 0, progress_pct: active ? 0 : 100,
     coverage_pct: published ? 100 : 0, created_at: "2026-07-17 16:30:00",

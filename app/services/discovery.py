@@ -14,6 +14,7 @@ from app.models.discovery import (
     DiscoveryPresetPage,
     DiscoveryPresetPortable,
     DiscoveryPresetRename,
+    DiscoveryPresetUpdate,
     DiscoveryRankChangePage,
     DiscoveryResearchQueueRequest,
     DiscoveryResearchQueueResponse,
@@ -67,6 +68,16 @@ class DiscoveryService:
                 preset_id,
                 name=payload.name,
                 expected_revision=payload.expected_revision,
+                timestamp=audit_now_text(),
+            )
+        except (DiscoveryPresetNameExistsError, DiscoveryPresetRevisionError) as exc:
+            raise DiscoveryConflictError(str(exc)) from exc
+
+    def update_preset(self, preset_id: int, payload: DiscoveryPresetUpdate) -> DiscoveryPreset:
+        try:
+            return self.repository.update_preset(
+                preset_id,
+                payload,
                 timestamp=audit_now_text(),
             )
         except (DiscoveryPresetNameExistsError, DiscoveryPresetRevisionError) as exc:
@@ -162,7 +173,7 @@ class DiscoveryService:
     def rank_changes(self, run_id: int, *, page: int, page_size: int) -> DiscoveryRankChangePage:
         current = self.repository.run_reference(run_id)
         _require_completed_run(current.id, current.status)
-        previous = self.repository.previous_completed_run_any_rule(current)
+        previous = self.repository.previous_completed_run_same_mode_any_rule(current)
         if previous is None:
             return _empty_rank_change_page(
                 current_run_id=current.id,

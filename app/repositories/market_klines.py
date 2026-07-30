@@ -177,6 +177,38 @@ class MarketKlineRepositoryMixin:
         )
         return filter_valid_klines(row_to_kline(row) for row in rows if _valid_raw_kline_row(row))
 
+    def get_klines_many(
+        self,
+        symbols: Iterable[str],
+        limit: int,
+        max_age_seconds: int,
+        adjustment_mode: KlineAdjustmentMode = DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+    ) -> dict[str, list[Kline]]:
+        """Load bounded daily-K windows for many symbols through one connection.
+
+        Full-market scans still refresh every symbol through a provider. This method
+        only removes the repeated connection/query setup used to obtain the
+        compatible preservation cache before that refresh.
+        """
+        if limit <= 0:
+            return {}
+        normalized_symbols = tuple(dict.fromkeys(standard_symbol(symbol) for symbol in symbols))
+        if not normalized_symbols:
+            return {}
+        window = _market_time_window(max_age_seconds)
+        if window is None:
+            return {}
+        mode = _validated_adjustment_mode(adjustment_mode)
+        grouped: dict[str, list[Kline]] = {}
+        sql = _latest_rows_sql(_DAILY_SPEC)
+        with self._lock, self._connect() as conn:
+            for symbol in normalized_symbols:
+                rows = conn.execute(sql, (symbol, mode, *window, limit)).fetchall()
+                grouped[symbol] = filter_valid_klines(
+                    row_to_kline(row) for row in rows if _valid_raw_kline_row(row)
+                )
+        return grouped
+
     def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None:
         valid_rows = filter_valid_minute_klines(rows)
         if not valid_rows:

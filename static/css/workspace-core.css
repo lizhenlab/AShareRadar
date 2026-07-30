@@ -39,6 +39,20 @@
   padding-bottom: 18px;
 }
 
+.current-analysis-context {
+  margin: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid #f3d28b;
+  color: #7c4a03;
+  background: #fff8e7;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.current-analysis-context[hidden] {
+  display: none;
+}
+
 .section-tabs,
 .workspace-tabs {
   position: sticky;

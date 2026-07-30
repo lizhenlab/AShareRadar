@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from app.models.market_scan import (
     MARKET_SCAN_RANK_TIE_BREAK,
+    MarketScanMode,
     MarketScanResultItem,
     MarketScanResultWrite,
 )
@@ -115,18 +116,21 @@ def score_market_scan_item(
     as_of: datetime,
     completed_cutoff: date,
     expected_data_date: date,
+    expected_quote_date: date | None = None,
     min_history_rows: int,
     min_data_quality_score: int,
+    mode: MarketScanMode = "official",
     rule_version: str | None = None,
 ) -> MarketScanResultWrite:
     _require_matching_quote(item, quote)
-    _require_quote_date(quote, expected_data_date, as_of=as_of)
+    _require_quote_date(quote, expected_quote_date or expected_data_date, as_of=as_of)
     completed_rows, latest_date = _rankable_completed_rows(
         rows,
         quote=quote,
         completed_cutoff=completed_cutoff,
         expected_data_date=expected_data_date,
         min_history_rows=min_history_rows,
+        mode=mode,
     )
     _require_rankable_liquidity(quote, completed_rows)
     calculated = _calculate_market_scan_score(
@@ -307,6 +311,7 @@ def _rankable_completed_rows(
     completed_cutoff: date,
     expected_data_date: date,
     min_history_rows: int,
+    mode: MarketScanMode,
 ) -> tuple[list[Kline], date]:
     completed_rows = completed_market_scan_klines(rows, completed_cutoff)
     _require_qfq_rows(completed_rows)
@@ -319,7 +324,7 @@ def _rankable_completed_rows(
         raise MarketScanSkipped(f"日K停留在 {latest_date.isoformat()}，早于应有交易日 {expected_data_date.isoformat()}，可能停牌")
     if latest_date > expected_data_date:
         raise MarketScanDataMissing(f"日K日期 {latest_date.isoformat()} 晚于应有交易日 {expected_data_date.isoformat()}")
-    _require_quote_kline_close_consistency(quote, completed_rows[-1])
+    _require_quote_kline_close_consistency(quote, completed_rows[-1], mode=mode)
     return completed_rows, latest_date
 
 
@@ -372,12 +377,15 @@ def _require_qfq_rows(rows: list[Kline]) -> None:
         raise MarketScanDataMissing("日K不是一致的前复权序列")
 
 
-def _require_quote_date(quote: Quote, expected_data_date: date, *, as_of: datetime) -> None:
+def _require_quote_date(quote: Quote, expected_quote_date: date, *, as_of: datetime) -> None:
     quote_time = parse_quote_time(quote.timestamp)
     if quote_time is None:
         raise MarketScanDataMissing("报价时间无法解析")
-    if quote_time.date() != expected_data_date:
-        raise MarketScanDataMissing(f"报价日期 {quote_time.date().isoformat()} 与完整交易日 {expected_data_date.isoformat()} 不一致")
+    if quote_time.date() != expected_quote_date:
+        raise MarketScanDataMissing(
+            f"报价日期 {quote_time.date().isoformat()} 与完整交易日/应有行情日 "
+            f"{expected_quote_date.isoformat()} 不一致"
+        )
     cutoff = market_local_naive(as_of)
     if quote_time > cutoff:
         raise MarketScanDataMissing(
@@ -402,13 +410,20 @@ def _require_rankable_liquidity(quote: Quote, rows: list[Kline]) -> None:
         raise MarketScanDataMissing("日K缺少连续有效成交量，无法计算量比")
 
 
-def _require_quote_kline_close_consistency(quote: Quote, latest: Kline) -> None:
-    absolute_gap = abs(quote.price - latest.close)
-    relative_limit = max(quote.price, latest.close) * FULL_MARKET_MAX_CLOSE_GAP_PCT / 100
+def _require_quote_kline_close_consistency(
+    quote: Quote,
+    latest: Kline,
+    *,
+    mode: MarketScanMode,
+) -> None:
+    reference_price = quote.prev_close if mode == "intraday" else quote.price
+    absolute_gap = abs(reference_price - latest.close)
+    relative_limit = max(reference_price, latest.close) * FULL_MARKET_MAX_CLOSE_GAP_PCT / 100
     if absolute_gap > max(FULL_MARKET_MAX_CLOSE_GAP_ABSOLUTE, relative_limit):
         gap_pct = absolute_gap / latest.close * 100
+        label = "报价昨收价与上一完整日K收盘价" if mode == "intraday" else "报价收盘价与同日日K收盘价"
         raise MarketScanDataMissing(
-            f"报价收盘价与同日日K收盘价偏差 {gap_pct:.2f}%，数据快照可能不同步"
+            f"{label}偏差 {gap_pct:.2f}%，数据快照可能不同步"
         )
 
 

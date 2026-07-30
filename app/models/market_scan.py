@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from math import isfinite
 from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 MarketScanRunStatus = Literal[
@@ -24,6 +24,7 @@ MarketScanRunStatus = Literal[
 ]
 MarketScanResultStatus = Literal["pending", "success", "missing", "skipped"]
 MarketScanTrigger = Literal["manual", "scheduled", "retry"]
+MarketScanMode = Literal["official", "intraday"]
 MarketScanSort = Literal[
     "rank",
     "score",
@@ -37,6 +38,17 @@ MarketScanSort = Literal[
 ]
 MarketScanSortOrder = Literal["asc", "desc"]
 MarketScanCoverageScope = Literal["ALL", "SH", "SZ", "BJ"]
+MarketScanStage = Literal[
+    "stock_pool",
+    "bulk_quotes",
+    "klines",
+    "scoring",
+    "persistence",
+    "publication",
+]
+MarketScanFilterValues = str | Sequence[str] | None
+MarketScanSortValues = MarketScanSort | Sequence[MarketScanSort]
+MarketScanSortOrderValues = MarketScanSortOrder | Sequence[MarketScanSortOrder]
 
 MARKET_SCAN_RANK_TIE_BREAK: Final[tuple[tuple[str, str], ...]] = (
     ("raw_score", "desc"),
@@ -324,6 +336,24 @@ class MarketScanStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     as_of: datetime | None = None
+    mode: MarketScanMode = "official"
+
+
+class MarketScanStageMetric(BaseModel):
+    duration_ms: int = Field(default=0, ge=0)
+    work_duration_ms: int = Field(default=0, ge=0)
+    calls: int = Field(default=0, ge=0)
+    items: int = Field(default=0, ge=0)
+
+
+class MarketScanMarketProgress(BaseModel):
+    market: Literal["SH", "SZ", "BJ"]
+    total_count: int = Field(default=0, ge=0)
+    processed_count: int = Field(default=0, ge=0)
+    success_count: int = Field(default=0, ge=0)
+    missing_count: int = Field(default=0, ge=0)
+    skipped_count: int = Field(default=0, ge=0)
+    coverage_pct: float = Field(default=0, ge=0, le=100)
 
 
 class MarketScanRun(BaseModel):
@@ -332,9 +362,11 @@ class MarketScanRun(BaseModel):
     retry_of_run_id: int | None = Field(default=None, ge=1)
     status: MarketScanRunStatus
     trigger: MarketScanTrigger
+    mode: MarketScanMode = "official"
     rule_version: str
     as_of: str
     data_date: str
+    quote_date: str = ""
     scope: str
     stock_pool_source: str | None = None
     total_count: int = Field(ge=0)
@@ -351,9 +383,22 @@ class MarketScanRun(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     duration_ms: int | None = Field(default=None, ge=0)
+    current_stage: MarketScanStage | None = None
+    stage_started_at: str | None = None
+    stage_metrics: dict[MarketScanStage, MarketScanStageMetric] = Field(default_factory=dict)
+    market_progress: list[MarketScanMarketProgress] = Field(default_factory=list)
+    elapsed_seconds: float | None = Field(default=None, ge=0)
+    throughput_per_second: float | None = Field(default=None, ge=0)
+    eta_seconds: float | None = Field(default=None, ge=0)
     message: str | None = None
     last_error: str | None = None
     cancel_requested_at: str | None = None
+
+    @model_validator(mode="after")
+    def default_quote_date_to_data_date(self) -> "MarketScanRun":
+        if not self.quote_date:
+            self.quote_date = self.data_date
+        return self
 
 
 class MarketScanStartResponse(BaseModel):
@@ -423,6 +468,9 @@ __all__ = [
     "MARKET_SCAN_RANK_TIE_BREAK",
     "MarketScanCoverage",
     "MarketScanCoverageScope",
+    "MarketScanFilterValues",
+    "MarketScanMode",
+    "MarketScanMarketProgress",
     "MarketScanPublicationSummary",
     "MarketScanScoreDistribution",
     "MarketScanScoreDistributionAssessment",
@@ -438,6 +486,10 @@ __all__ = [
     "MarketScanRunStatus",
     "MarketScanSort",
     "MarketScanSortOrder",
+    "MarketScanSortOrderValues",
+    "MarketScanSortValues",
+    "MarketScanStage",
+    "MarketScanStageMetric",
     "MarketScanStartRequest",
     "MarketScanStartResponse",
     "MarketScanStaleCluster",

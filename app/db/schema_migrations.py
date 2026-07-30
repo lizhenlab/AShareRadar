@@ -195,6 +195,13 @@ COMPAT_COLUMNS = {
     "market_scan_run": {
         "retry_of_run_id": "INTEGER REFERENCES market_scan_run(id) ON DELETE SET NULL",
         "stock_pool_source": "TEXT",
+        "mode": "TEXT NOT NULL DEFAULT 'official' CHECK (mode IN ('official', 'intraday'))",
+        "quote_date": "TEXT",
+        "current_stage": ("TEXT CHECK (current_stage IS NULL OR current_stage IN "
+                          "('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication'))"),
+        "stage_started_at": "TEXT",
+        "stage_metrics_json": "TEXT NOT NULL DEFAULT '{}'",
+        "market_progress_json": "TEXT NOT NULL DEFAULT '[]'",
     },
     "stock_concept": {
         "match_reason": "TEXT NOT NULL DEFAULT '概念成分匹配'",
@@ -256,6 +263,7 @@ def _apply_compat_migrations(
     _apply_quote_history_migrations(conn)
     _apply_monitor_event_migration(conn)
     _apply_market_scan_degradation_migration(conn)
+    _apply_market_scan_mode_migration(conn)
     _apply_audit_timestamp_utc_migration(
         conn,
         legacy_audit_timezone=legacy_audit_timezone,
@@ -410,6 +418,23 @@ def _apply_market_scan_degradation_migration(conn: sqlite3.Connection) -> None:
                     THEN '[]'
                     ELSE degradation_reasons_json
                 END
+        """,
+    )
+
+
+def _apply_market_scan_mode_migration(conn: sqlite3.Connection) -> None:
+    if not table_has_columns(conn, "market_scan_run", "mode", "quote_date", "data_date"):
+        return
+    _run_once(
+        conn,
+        "20260729_market_scan_modes_v1",
+        """
+            UPDATE market_scan_run
+            SET mode = CASE
+                    WHEN mode IN ('official', 'intraday') THEN mode
+                    ELSE 'official'
+                END,
+                quote_date = COALESCE(NULLIF(trim(quote_date), ''), data_date)
         """,
     )
 

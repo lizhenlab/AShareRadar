@@ -13,6 +13,7 @@ from app.models.discovery import (
     DiscoveryPresetDeleteResponse,
     DiscoveryPresetPage,
     DiscoveryPresetRename,
+    DiscoveryPresetUpdate,
     DiscoveryRankChangePage,
     DiscoveryResearchQueueRequest,
     DiscoveryResearchQueueResponse,
@@ -72,6 +73,15 @@ async def rename_discovery_preset(
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryPreset:
     return await run_sync_api_async(lambda: service.rename_preset(preset_id, payload))
+
+
+@router.put("/presets/{preset_id}", response_model=DiscoveryPreset)
+async def update_discovery_preset(
+    payload: DiscoveryPresetUpdate,
+    preset_id: int = Path(ge=1),
+    service: DiscoveryService = Depends(get_discovery_service),
+) -> DiscoveryPreset:
+    return await run_sync_api_async(lambda: service.update_preset(preset_id, payload))
 
 
 @router.delete("/presets/{preset_id}", response_model=DiscoveryPresetDeleteResponse)

@@ -10,6 +10,7 @@ import {
   validateDiscoveryPresetPage,
   validateDiscoveryRankChanges,
 } from "./market-scan-contracts.js";
+import { applyDiscoveryPresetFields, marketScanFilterElements } from "./market-scan-filters.js";
 import { marketScanResultRow } from "./market-scan-view.js";
 export {
   buildDiscoveryPresetDefinition,
@@ -21,17 +22,6 @@ export {
 const DISCOVERY_PAGE_SIZE = 100;
 const RANK_CHANGE_PAGE_SIZE = 200;
 const COMPLETED_RUN_STATUSES = new Set(["success", "degraded"]);
-const SORT_TO_MARKET = Object.freeze({
-  rank: "rank",
-  symbol: "symbol",
-  score: "score",
-  trend: "trend_score",
-  change: "change_pct",
-  turnover: "turnover_rate",
-  amount: "amount",
-  quality: "data_quality_score",
-});
-
 export function createDiscoveryController(options = {}) {
   const root = options.root || globalThis.document;
   const controls = root?.getElementById?.("discoveryPresetControls");
@@ -77,10 +67,7 @@ export function createDiscoveryController(options = {}) {
   }
 
   async function savePreset() {
-    if (selectedPreset() && !isDiscoveryPresetUiRepresentable(selectedPreset())) {
-      setFeedback("复杂方案按后端定义只读，不能用当前界面覆盖保存", "error");
-      return null;
-    }
+    const existing = selectedPreset();
     let definition;
     try {
       definition = buildDiscoveryPresetDefinition(elements.name.value, elements);
@@ -90,17 +77,22 @@ export function createDiscoveryController(options = {}) {
       return null;
     }
     return runOperation("正在保存筛选方案...", async () => {
-      const preset = validateDiscoveryPreset(await request("/api/discovery/presets", requestOptions({
-        method: "POST",
-        body: JSON.stringify(definition),
-      })));
+      const preset = validateDiscoveryPreset(await request(
+        existing ? `/api/discovery/presets/${encodeURIComponent(existing.id)}` : "/api/discovery/presets",
+        requestOptions({
+          method: existing ? "PUT" : "POST",
+          body: JSON.stringify(existing
+            ? { ...definition, expected_revision: existing.revision }
+            : definition),
+        })
+      ));
       const hadAppliedPreset = Boolean(state.applied);
       upsertPreset(preset);
       state.selectedId = preset.id;
       clearApplied();
       renderPresetOptions();
       elements.name.value = preset.name;
-      setFeedback(`已保存筛选方案“${preset.name}”`, "success");
+      setFeedback(`${existing ? "已更新" : "已保存"}筛选方案“${preset.name}”`, "success");
       if (hadAppliedPreset) void loadStandardResults();
       return preset;
     }, "筛选方案保存");
@@ -133,6 +125,41 @@ export function createDiscoveryController(options = {}) {
     }, "筛选方案重命名");
   }
 
+  async function exportPreset() {
+    const preset = selectedPreset();
+    if (!preset) return requirePreset();
+    return runOperation("正在导出筛选方案...", async () => {
+      const archive = await request(
+        `/api/discovery/presets/${encodeURIComponent(preset.id)}/export`,
+        requestOptions()
+      );
+      savePresetArchive(root, archive, preset.name);
+      setFeedback(`已导出筛选方案“${preset.name}”`, "success");
+      return archive;
+    }, "筛选方案导出");
+  }
+
+  async function importPreset(file = elements.importFile.files?.[0]) {
+    if (!file) {
+      setFeedback("请选择筛选方案 JSON 文件", "error");
+      return null;
+    }
+    return runOperation("正在导入筛选方案...", async () => {
+      const archive = JSON.parse(await file.text());
+      const preset = validateDiscoveryPreset(await request(
+        "/api/discovery/presets/import",
+        requestOptions({ method: "POST", body: JSON.stringify(archive) })
+      ));
+      upsertPreset(preset);
+      state.selectedId = preset.id;
+      renderPresetOptions();
+      elements.name.value = preset.name;
+      if (isDiscoveryPresetUiRepresentable(preset)) applyDiscoveryPresetFields(preset, elements);
+      setFeedback(`已导入筛选方案“${preset.name}”`, "success");
+      return preset;
+    }, "筛选方案导入");
+  }
+
   async function deletePreset() {
     const preset = selectedPreset();
     if (!preset) return requirePreset();
@@ -160,7 +187,7 @@ export function createDiscoveryController(options = {}) {
     const context = preparePresetApplication();
     if (!context) return null;
     const { editable, preset, run } = context;
-    const stage = editable ? "正在应用筛选方案..." : "正在按后端原定义只读应用复杂筛选方案...";
+    const stage = editable ? "正在应用筛选方案..." : "正在按原定义应用筛选方案...";
     return runOperation(
       stage,
       () => executePresetApplication({ editable, page, preset, run }),
@@ -180,7 +207,7 @@ export function createDiscoveryController(options = {}) {
       return null;
     }
     const editable = isDiscoveryPresetUiRepresentable(preset);
-    if (editable) applyPresetFields(preset, elements);
+    if (editable) applyDiscoveryPresetFields(preset, elements);
     return { editable, preset, run };
   }
 
@@ -235,8 +262,12 @@ export function createDiscoveryController(options = {}) {
       preset: payload.preset,
       rankPayload,
       runId: payload.run_id,
+      payload,
       queued: previous?.runId === payload.run_id && previous?.preset.id === payload.preset.id
         ? previous.queued
+        : new Set(),
+      selected: previous?.runId === payload.run_id && previous?.preset.id === payload.preset.id
+        ? previous.selected
         : new Set(),
     };
     upsertPreset(payload.preset);
@@ -250,7 +281,7 @@ export function createDiscoveryController(options = {}) {
     } else if (editable) {
       setFeedback(`已应用筛选方案“${payload.preset.name}”`, "success");
     } else {
-      setFeedback(`已按后端原定义只读应用复杂方案“${payload.preset.name}”`, "success");
+      setFeedback(`已按原定义应用筛选方案“${payload.preset.name}”`, "success");
     }
   }
 
@@ -273,7 +304,9 @@ export function createDiscoveryController(options = {}) {
         })
       );
       applied.queued.add(symbol);
+      applied.selected.delete(symbol);
       button.textContent = "已在研究队列";
+      renderBulkControls(applied.payload);
       setFeedback(
         payload?.added_count ? `${symbol} 已加入研究队列` : `${symbol} 已在研究队列中`,
         "success"
@@ -285,6 +318,88 @@ export function createDiscoveryController(options = {}) {
       return null;
     } finally {
       button.setAttribute?.("aria-busy", "false");
+    }
+  }
+
+  async function enqueueSelected() {
+    const symbols = [...(state.applied?.selected || [])];
+    if (!symbols.length) {
+      setFeedback("请先选择要加入研究队列的股票", "error");
+      return null;
+    }
+    return enqueueMany(symbols, "已选股票");
+  }
+
+  async function enqueueAllFiltered() {
+    const applied = state.applied;
+    if (!applied) return null;
+    return runOperation("正在读取当前筛选结果...", async () => {
+      const symbols = await allFilteredSymbols(applied);
+      return enqueueSymbolBatches(applied, symbols, "当前筛选结果");
+    }, "批量加入研究队列");
+  }
+
+  async function enqueueMany(symbols, label) {
+    const applied = state.applied;
+    if (!applied || state.busy) return null;
+    return runOperation(`正在批量加入${label}...`, () => (
+      enqueueSymbolBatches(applied, symbols, label)
+    ), "批量加入研究队列");
+  }
+
+  async function enqueueSymbolBatches(applied, symbols, label) {
+    let added = 0;
+    let existing = 0;
+    const unique = [...new Set(symbols)].filter(Boolean);
+    for (let index = 0; index < unique.length; index += 100) {
+      requireCurrentApplied(applied);
+      const chunk = unique.slice(index, index + 100);
+      const payload = await request(
+        `/api/discovery/presets/${encodeURIComponent(applied.preset.id)}/research-queue`,
+        requestOptions({
+          method: "POST",
+          body: JSON.stringify({
+            run_id: applied.runId,
+            expected_preset_revision: applied.preset.revision,
+            symbols: chunk,
+          }),
+        })
+      );
+      chunk.forEach((symbol) => applied.queued.add(symbol));
+      added += Number(payload?.added_count) || 0;
+      existing += Number(payload?.existing_count) || 0;
+      setFeedback(`正在批量加入${label}：${Math.min(index + chunk.length, unique.length)}/${unique.length}`);
+    }
+    unique.forEach((symbol) => applied.selected.delete(symbol));
+    renderDiscoveryResults(applied.payload, applied.rankPayload);
+    setFeedback(`${label}处理完成：新增 ${added}，已存在 ${existing}`, "success");
+    return { added_count: added, existing_count: existing, total: unique.length };
+  }
+
+  async function allFilteredSymbols(applied) {
+    const symbols = [];
+    const totalPages = Math.max(1, applied.pageCount);
+    for (let page = 1; page <= totalPages; page += 1) {
+      requireCurrentApplied(applied);
+      const payload = normalizeDiscoveryLeaderboard(await request(
+        `/api/discovery/presets/${encodeURIComponent(applied.preset.id)}/apply`,
+        requestOptions({
+          method: "POST",
+          body: JSON.stringify({ run_id: applied.runId, page, page_size: DISCOVERY_PAGE_SIZE }),
+        })
+      ));
+      if (payload.run_id !== applied.runId || payload.preset.revision !== applied.preset.revision) {
+        throw new Error("筛选方案或榜单批次已变化，请重新应用方案");
+      }
+      symbols.push(...payload.items.map((item) => item.symbol));
+      setFeedback(`正在读取当前筛选结果：${Math.min(symbols.length, payload.total)}/${payload.total}`);
+    }
+    return symbols;
+  }
+
+  function requireCurrentApplied(applied) {
+    if (state.applied !== applied || leaderboardRun()?.id !== applied.runId) {
+      throw new Error("筛选方案或榜单批次已变化，请重新应用方案");
     }
   }
 
@@ -322,6 +437,8 @@ export function createDiscoveryController(options = {}) {
         return marketScanResultRow(item, {
           discovery: true,
           queued: state.applied.queued.has(item.symbol),
+          selected: state.applied.selected.has(item.symbol),
+          run: leaderboardRun(),
           rankLabel: change ? rankChangeLabel(change) : unavailableRankChangeLabel(item, rankPayload),
           rankMovement: change?.movement || "unavailable",
         });
@@ -333,7 +450,20 @@ export function createDiscoveryController(options = {}) {
     elements.pageText.textContent = `第 ${payload.page}/${Math.max(payload.page_count, 1)} 页 · 共 ${payload.total} 条`;
     elements.prev.disabled = payload.page <= 1;
     elements.next.disabled = payload.page_count === 0 || payload.page >= payload.page_count;
+    renderBulkControls(payload);
     renderRankSummary(rankPayload);
+  }
+
+  function renderBulkControls(payload) {
+    const applied = state.applied;
+    elements.bulkControls.hidden = !applied;
+    const visible = payload.items.map((item) => item.symbol).filter((symbol) => !applied.queued.has(symbol));
+    const selectedVisible = visible.filter((symbol) => applied.selected.has(symbol));
+    elements.selectPage.checked = visible.length > 0 && selectedVisible.length === visible.length;
+    elements.selectPage.indeterminate = selectedVisible.length > 0 && selectedVisible.length < visible.length;
+    elements.selectedCount.textContent = `已选 ${applied.selected.size} 项`;
+    elements.enqueueSelected.disabled = state.busy || applied.selected.size === 0;
+    elements.enqueueAll.disabled = state.busy || payload.total === 0;
   }
 
   function renderRankSummary(payload) {
@@ -352,7 +482,7 @@ export function createDiscoveryController(options = {}) {
   function renderPresetOptions() {
     const selected = String(state.selectedId || "");
     elements.select.innerHTML = `<option value="">选择已保存方案</option>${state.presets.map((preset) => (
-      `<option value="${preset.id}">${escapeHtml(preset.name)}${isDiscoveryPresetUiRepresentable(preset) ? "" : "（只读）"}</option>`
+      `<option value="${preset.id}">${escapeHtml(preset.name)}${isDiscoveryPresetUiRepresentable(preset) ? "" : "（兼容模式）"}</option>`
     )).join("")}`;
     elements.select.value = state.presets.some((preset) => String(preset.id) === selected) ? selected : "";
     renderControls();
@@ -363,9 +493,11 @@ export function createDiscoveryController(options = {}) {
     const selected = Boolean(preset);
     elements.select.disabled = state.busy;
     elements.name.disabled = state.busy;
-    elements.save.disabled = state.busy || Boolean(preset && !isDiscoveryPresetUiRepresentable(preset));
+    elements.save.disabled = state.busy;
     elements.apply.disabled = state.busy || !selected;
     elements.rename.disabled = state.busy || !selected;
+    elements.exportButton.disabled = state.busy || !selected;
+    elements.importButton.disabled = state.busy;
     elements.remove.disabled = state.busy || !selected;
   }
 
@@ -373,6 +505,7 @@ export function createDiscoveryController(options = {}) {
     state.busy = Boolean(busy);
     controls.setAttribute("aria-busy", state.busy ? "true" : "false");
     renderControls();
+    if (state.applied) renderBulkControls(state.applied.payload);
   }
 
   function setFeedback(message, kind) {
@@ -410,6 +543,7 @@ export function createDiscoveryController(options = {}) {
       if (state.busy) setBusy(false);
     }
     state.applied = null;
+    elements.bulkControls.hidden = true;
     elements.rankSummary.hidden = true;
     elements.rankSummary.textContent = "";
   }
@@ -419,12 +553,13 @@ export function createDiscoveryController(options = {}) {
     state.selectedId = elements.select.value ? Number(elements.select.value) : null;
     const preset = selectedPreset();
     elements.name.value = preset?.name || "";
+    if (preset && isDiscoveryPresetUiRepresentable(preset)) applyDiscoveryPresetFields(preset, elements);
     clearApplied();
     renderControls();
     setFeedback(preset
       ? isDiscoveryPresetUiRepresentable(preset)
         ? `已选择筛选方案“${preset.name}”`
-        : `已选择复杂方案“${preset.name}”：将按后端原定义只读应用，不会用当前界面覆盖保存`
+        : `已选择兼容方案“${preset.name}”：将按保存时的原定义应用`
       : "");
     if (previousApplied) void loadStandardResults();
   }
@@ -447,6 +582,9 @@ export function createDiscoveryController(options = {}) {
     elements.save.addEventListener("click", () => void savePreset());
     elements.apply.addEventListener("click", () => void applyPreset(1));
     elements.rename.addEventListener("click", () => void renamePreset());
+    elements.exportButton.addEventListener("click", () => void exportPreset());
+    elements.importButton.addEventListener("click", () => elements.importFile.click?.());
+    elements.importFile.addEventListener("change", () => void importPreset());
     elements.remove.addEventListener("click", () => void deletePreset());
     elements.prev.addEventListener("click", (event) => handlePresetPagination(event, -1), true);
     elements.next.addEventListener("click", (event) => handlePresetPagination(event, 1), true);
@@ -458,6 +596,26 @@ export function createDiscoveryController(options = {}) {
       const button = event.target.closest?.("button[data-discovery-enqueue-symbol]");
       if (button) void enqueueSymbol(button.dataset.discoveryEnqueueSymbol, button);
     });
+    elements.rows.addEventListener("change", (event) => {
+      const checkbox = event.target.closest?.("input[data-discovery-select-symbol]");
+      const applied = state.applied;
+      if (!checkbox || !applied) return;
+      if (checkbox.checked) applied.selected.add(checkbox.dataset.discoverySelectSymbol);
+      else applied.selected.delete(checkbox.dataset.discoverySelectSymbol);
+      renderBulkControls(applied.payload);
+    });
+    elements.selectPage.addEventListener("change", () => {
+      const applied = state.applied;
+      if (!applied) return;
+      applied.payload.items.forEach((item) => {
+        if (applied.queued.has(item.symbol)) return;
+        if (elements.selectPage.checked) applied.selected.add(item.symbol);
+        else applied.selected.delete(item.symbol);
+      });
+      renderDiscoveryResults(applied.payload, applied.rankPayload);
+    });
+    elements.enqueueSelected.addEventListener("click", () => void enqueueSelected());
+    elements.enqueueAll.addEventListener("click", () => void enqueueAllFiltered());
   }
 
   function leaderboardRun() {
@@ -520,6 +678,10 @@ export function createDiscoveryController(options = {}) {
     activate,
     applyPreset,
     deletePreset,
+    exportPreset,
+    importPreset,
+    enqueueAllFiltered,
+    enqueueSelected,
     loadPresets,
     renamePreset,
     savePreset,
@@ -536,20 +698,6 @@ function unavailableRankChangeLabel(item, payload) {
   return "全市场排名变化未返回";
 }
 
-function applyPresetFields(preset, elements) {
-  const criteria = preset.criteria || {};
-  elements.status.value = "success";
-  elements.keyword.value = "";
-  elements.market.value = Array.isArray(criteria.market) && criteria.market.length === 1 ? criteria.market[0] : "";
-  elements.industry.value = Array.isArray(criteria.industry) && criteria.industry.length === 1 ? criteria.industry[0] : "";
-  elements.isSt.value = typeof criteria.is_st === "boolean" ? String(criteria.is_st) : "";
-  elements.isNew.value = typeof criteria.is_new === "boolean" ? String(criteria.is_new) : "";
-  elements.quality.value = criteria.quality?.min ?? "";
-  const sort = Array.isArray(preset.sort) ? preset.sort[0] : null;
-  elements.sort.value = SORT_TO_MARKET[sort?.field] || "score";
-  elements.order.value = sort?.order === "asc" ? "asc" : "desc";
-}
-
 function discoveryElements(root) {
   const byId = (id) => {
     const element = root.getElementById(id);
@@ -563,20 +711,19 @@ function discoveryElements(root) {
     save: byId("discoveryPresetSave"),
     apply: byId("discoveryPresetApply"),
     rename: byId("discoveryPresetRename"),
+    exportButton: byId("discoveryPresetExport"),
+    importButton: byId("discoveryPresetImport"),
+    importFile: byId("discoveryPresetImportFile"),
     remove: byId("discoveryPresetDelete"),
     feedback: byId("discoveryPresetFeedback"),
     announcement: byId("marketScanAnnouncement"),
     rankSummary: byId("discoveryRankSummary"),
-    filters: byId("marketScanFilters"),
-    status: byId("marketScanStatus"),
-    market: byId("marketScanMarket"),
-    industry: byId("marketScanIndustry"),
-    isSt: byId("marketScanSt"),
-    isNew: byId("marketScanNew"),
-    quality: byId("marketScanQuality"),
-    keyword: byId("marketScanKeyword"),
-    sort: byId("marketScanSort"),
-    order: byId("marketScanOrder"),
+    bulkControls: byId("discoveryBulkControls"),
+    selectPage: byId("discoverySelectPage"),
+    selectedCount: byId("discoverySelectedCount"),
+    enqueueSelected: byId("discoveryEnqueueSelected"),
+    enqueueAll: byId("discoveryEnqueueAll"),
+    ...marketScanFilterElements(root, (_root, id) => byId(id)),
     start: byId("marketScanStart"),
     retry: byId("marketScanRetry"),
     resultState: byId("marketScanResultState"),
@@ -601,12 +748,29 @@ function normalizedName(value) {
   return String(value || "").trim().slice(0, 80);
 }
 
+function savePresetArchive(root, archive, name) {
+  const createUrl = root?.defaultView?.URL?.createObjectURL || globalThis.URL?.createObjectURL;
+  const revokeUrl = root?.defaultView?.URL?.revokeObjectURL || globalThis.URL?.revokeObjectURL;
+  if (typeof root?.createElement !== "function" || typeof createUrl !== "function") return;
+  const blob = new Blob([JSON.stringify(archive, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = createUrl(blob);
+  const anchor = root.createElement("a");
+  anchor.href = url;
+  anchor.download = `${String(name || "discovery-preset").replace(/[\\/:*?"<>|]+/g, "-")}.json`;
+  anchor.click();
+  if (typeof revokeUrl === "function") setTimeout(() => revokeUrl(url), 0);
+}
+
 function inertDiscoveryController() {
   const noOp = async () => null;
   return {
     activate: noOp,
     applyPreset: noOp,
     deletePreset: noOp,
+    exportPreset: noOp,
+    importPreset: noOp,
+    enqueueAllFiltered: noOp,
+    enqueueSelected: noOp,
     loadPresets: noOp,
     renamePreset: noOp,
     savePreset: noOp,

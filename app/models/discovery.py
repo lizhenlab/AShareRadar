@@ -11,6 +11,7 @@ DISCOVERY_PRESET_FORMAT = "ashare-radar.discovery-preset"
 DISCOVERY_PRESET_SCHEMA_VERSION = 1
 
 DiscoveryMarket = Literal["SH", "SZ", "BJ"]
+DiscoveryRunMode = Literal["official", "intraday"]
 DiscoverySortField = Literal[
     "rank",
     "symbol",
@@ -140,6 +141,10 @@ class DiscoveryPresetCreate(DiscoveryPresetDefinition):
     pass
 
 
+class DiscoveryPresetUpdate(DiscoveryPresetDefinition):
+    expected_revision: int = Field(ge=1)
+
+
 class DiscoveryPresetPortable(DiscoveryPresetDefinition):
     pass
 
@@ -253,6 +258,7 @@ class DiscoveryPresetDeleteResponse(BaseModel):
 class DiscoveryRunReference(BaseModel):
     id: int = Field(ge=1)
     status: str
+    mode: DiscoveryRunMode
     rule_version: str
     scope: str
     data_date: str
@@ -315,6 +321,7 @@ __all__ = [
     "DiscoveryPresetPage",
     "DiscoveryPresetPortable",
     "DiscoveryPresetRename",
+    "DiscoveryPresetUpdate",
     "DiscoveryRankChangeItem",
     "DiscoveryRankChangePage",
     "DiscoveryResearchQueueItem",

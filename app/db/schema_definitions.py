@@ -165,9 +165,12 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
         CHECK (status IN ('queued', 'running', 'cancelling', 'success', 'degraded', 'failed', 'cancelled', 'interrupted')),
     trigger TEXT NOT NULL
         CHECK (trigger IN ('manual', 'scheduled', 'retry')),
+    mode TEXT NOT NULL DEFAULT 'official'
+        CHECK (mode IN ('official', 'intraday')),
     rule_version TEXT NOT NULL,
     as_of TEXT NOT NULL,
     data_date TEXT NOT NULL,
+    quote_date TEXT,
     scope TEXT NOT NULL,
     stock_pool_source TEXT,
     total_count INTEGER NOT NULL DEFAULT 0 CHECK (total_count >= 0),
@@ -182,6 +185,11 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     started_at TEXT,
     finished_at TEXT,
     duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    current_stage TEXT
+        CHECK (current_stage IS NULL OR current_stage IN ('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication')),
+    stage_started_at TEXT,
+    stage_metrics_json TEXT NOT NULL DEFAULT '{{}}',
+    market_progress_json TEXT NOT NULL DEFAULT '[]',
     message TEXT,
     last_error TEXT,
     cancel_requested_at TEXT,

@@ -1,4 +1,8 @@
 import { validateUiSymbol } from "./symbols.js";
+export {
+  buildDiscoveryPresetDefinition,
+  isDiscoveryPresetUiRepresentable,
+} from "./market-scan-filters.js";
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "cancelling"]);
 const PUBLISHED_RUN_STATUSES = new Set(["success", "degraded"]);
@@ -11,17 +15,9 @@ const RUN_STATUSES = new Set([
   "interrupted",
 ]);
 const RUN_TRIGGERS = new Set(["manual", "scheduled", "retry"]);
+const MARKET_SCAN_MODES = new Set(["official", "intraday"]);
 const RESULT_STATUSES = new Set(["pending", "success", "missing", "skipped"]);
-const MARKET_SCAN_TO_DISCOVERY_SORT = Object.freeze({
-  rank: "rank",
-  symbol: "symbol",
-  score: "score",
-  trend_score: "trend",
-  change_pct: "change",
-  turnover_rate: "turnover",
-  amount: "amount",
-  data_quality_score: "quality",
-});
+const MARKET_SCAN_STAGES = new Set(["stock_pool", "bulk_quotes", "klines", "scoring", "persistence", "publication"]);
 
 export function isActiveMarketScanRun(run) {
   return Boolean(run && ACTIVE_RUN_STATUSES.has(run.status));
@@ -33,6 +29,19 @@ export function isPublishedMarketScanRun(run) {
 
 export function isRetryableMarketScanRun(run) {
   return Boolean(run && RETRYABLE_RUN_STATUSES.has(run.status));
+}
+
+export function defaultMarketScanMode(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "official";
+  const weekday = date.getDay() >= 1 && date.getDay() <= 5;
+  const minutes = (date.getHours() * 60) + date.getMinutes();
+  const intradayWindow = minutes >= (9 * 60) + 30 && minutes < (15 * 60) + 15;
+  return weekday && intradayWindow ? "intraday" : "official";
+}
+
+export function marketScanModeLabel(mode) {
+  return mode === "intraday" ? "盘中临时" : "盘后正式";
 }
 
 export function marketScanRunIdentityChanged(previousRun, nextRun) {
@@ -51,6 +60,8 @@ export function validateMarketScanRun(value, options = {}) {
   requireInteger(run.id, `${context}.id`, { min: 1 });
   requireEnum(run.status, RUN_STATUSES, `${context}.status`);
   requireEnum(run.trigger, RUN_TRIGGERS, `${context}.trigger`);
+  requireEnum(run.mode, MARKET_SCAN_MODES, `${context}.mode`);
+  requireIsoDate(run.quote_date, `${context}.quote_date`);
   for (const field of ["rule_version", "as_of", "data_date", "scope", "created_at", "updated_at"]) {
     requireString(run[field], `${context}.${field}`);
   }
@@ -72,6 +83,17 @@ export function validateMarketScanRun(value, options = {}) {
     requireNullableInteger(run[field], `${context}.${field}`, { min: 1 });
   }
   requireNullableInteger(run.duration_ms, `${context}.duration_ms`, { min: 0 });
+  if (run.current_stage !== undefined && run.current_stage !== null) {
+    requireEnum(run.current_stage, MARKET_SCAN_STAGES, `${context}.current_stage`);
+  }
+  if (run.stage_started_at !== undefined) requireNullableString(run.stage_started_at, `${context}.stage_started_at`);
+  for (const field of ["elapsed_seconds", "throughput_per_second", "eta_seconds"]) {
+    if (run[field] !== undefined && run[field] !== null) requireNumber(run[field], `${context}.${field}`, { min: 0 });
+  }
+  if (run.stage_metrics !== undefined) requireObject(run.stage_metrics, `${context}.stage_metrics`);
+  if (run.market_progress !== undefined && !Array.isArray(run.market_progress)) {
+    throw marketScanContractError(`${context}.market_progress 必须是数组`);
+  }
   for (const field of [
     "stock_pool_source",
     "started_at",
@@ -94,6 +116,20 @@ export function validateStartResponse(value, context = "扫描任务响应") {
   requireBoolean(response.deduplicated, `${context}.deduplicated`);
   validateMarketScanRun(response.run, { context: `${context}.run` });
   return response;
+}
+
+export function validateMarketScanRunPage(value, options = {}) {
+  const context = options.context || "扫描批次列表响应";
+  const payload = requireObject(value, context);
+  if (!Array.isArray(payload.items)) throw marketScanContractError(`${context}.items 必须是数组`);
+  const items = payload.items.map((item, index) => validateMarketScanRun(item, {
+    context: `${context}.items[${index}]`,
+  }));
+  const total = requireInteger(payload.total, `${context}.total`, { min: 0 });
+  const page = requireInteger(payload.page, `${context}.page`, { min: 1 });
+  const pageSize = requireInteger(payload.page_size, `${context}.page_size`, { min: 1 });
+  const pageCount = requireInteger(payload.page_count, `${context}.page_count`, { min: 0 });
+  return { ...payload, items, total, page, page_size: pageSize, page_count: pageCount };
 }
 
 export function validateResultPage(value, expectedRunId) {
@@ -146,33 +182,6 @@ export function normalizeDiscoveryLeaderboard(value) {
   };
 }
 
-export function buildDiscoveryPresetDefinition(nameValue, elements) {
-  const name = String(nameValue || "").trim().slice(0, 80);
-  if (!name) throw new Error("请输入方案名称");
-  const unsupported = [];
-  if (discoveryElementValue(elements.status) !== "success") unsupported.push("状态");
-  if (discoveryElementValue(elements.keyword)) unsupported.push("搜索关键词");
-  if (unsupported.length) throw new Error(`筛选方案暂不支持保存${unsupported.join("、")}，请清除后再保存`);
-  const criteria = {};
-  const market = discoveryElementValue(elements.market);
-  const industry = discoveryElementValue(elements.industry);
-  const isSt = discoveryBooleanValue(elements.isSt);
-  const isNew = discoveryBooleanValue(elements.isNew);
-  const quality = discoveryOptionalScore(elements.quality);
-  if (market) criteria.market = [market];
-  if (industry) criteria.industry = [industry];
-  if (isSt !== null) criteria.is_st = isSt;
-  if (isNew !== null) criteria.is_new = isNew;
-  if (quality !== null) criteria.quality = { min: quality };
-  const field = MARKET_SCAN_TO_DISCOVERY_SORT[discoveryElementValue(elements.sort)];
-  if (!field) throw new Error("当前排序方式不能保存为筛选方案");
-  return {
-    name,
-    criteria,
-    sort: [{ field, order: discoveryElementValue(elements.order) === "asc" ? "asc" : "desc" }],
-  };
-}
-
 export function rankChangeLabel(value) {
   const movement = value?.movement;
   if (movement === "up") return `全市场排名上升 ${Math.abs(Number(value.rank_delta) || 0)}`;
@@ -181,26 +190,6 @@ export function rankChangeLabel(value) {
   if (movement === "new") return "全市场排名新进";
   if (movement === "exit") return "全市场排名离榜";
   return "全市场排名变化不可用";
-}
-
-export function isDiscoveryPresetUiRepresentable(preset) {
-  const criteria = preset?.criteria;
-  if (!criteria || typeof criteria !== "object" || Array.isArray(criteria)) return false;
-  const supportedCriteria = new Set(["market", "industry", "is_st", "is_new", "quality"]);
-  if (Object.entries(criteria).some(([field, value]) => value != null && !supportedCriteria.has(field))) return false;
-  if ([criteria.market, criteria.industry].some((values) => values != null && (!Array.isArray(values) || values.length > 1))) {
-    return false;
-  }
-  if (criteria.quality != null) {
-    if (typeof criteria.quality !== "object" || Array.isArray(criteria.quality)) return false;
-    if (criteria.quality.max != null || Object.keys(criteria.quality).some((field) => !["min", "max"].includes(field))) {
-      return false;
-    }
-  }
-  const editableSortFields = new Set(["rank", "symbol", "score", "trend", "change", "turnover", "amount", "quality"]);
-  return Array.isArray(preset.sort)
-    && preset.sort.length === 1
-    && editableSortFields.has(preset.sort[0]?.field);
 }
 
 export function validateDiscoveryPresetPage(value) {
@@ -287,7 +276,7 @@ function validateResultItem(value, expectedRunId, context) {
   for (const field of ["score", "trend_score", "leader_score", "data_quality_score"]) {
     requireNullableInteger(item[field], `${context}.${field}`, { min: 0, max: 100 });
   }
-  for (const field of ["price", "change_pct", "turnover_rate", "volume_ratio", "amount"]) {
+  for (const field of ["raw_score", "price", "change_pct", "turnover_rate", "volume_ratio", "amount"]) {
     requireNullableNumber(item[field], `${context}.${field}`);
   }
   if (!Array.isArray(item.tags) || item.tags.some((tag) => typeof tag !== "string")) {
@@ -297,6 +286,14 @@ function validateResultItem(value, expectedRunId, context) {
   if (Object.values(metrics).some((metric) => typeof metric !== "number" || !Number.isFinite(metric))) {
     throw marketScanContractError(`${context}.metrics 必须只包含有限数值`);
   }
+  if (item.score_details !== undefined) requireObject(item.score_details, `${context}.score_details`);
+  for (const field of ["quote_fallback_used", "kline_fallback_used", "metadata_degraded"]) {
+    if (item[field] !== undefined) requireBoolean(item[field], `${context}.${field}`);
+  }
+  if (
+    item.degradation_reasons !== undefined
+    && (!Array.isArray(item.degradation_reasons) || item.degradation_reasons.some((reason) => typeof reason !== "string"))
+  ) throw marketScanContractError(`${context}.degradation_reasons 必须是字符串数组`);
   return item;
 }
 
@@ -324,23 +321,6 @@ function discoveryNonNegativeInteger(value, label) {
   return number;
 }
 
-function discoveryElementValue(element) {
-  return String(element?.value || "").trim();
-}
-
-function discoveryBooleanValue(element) {
-  const value = discoveryElementValue(element);
-  return value === "true" ? true : value === "false" ? false : null;
-}
-
-function discoveryOptionalScore(element) {
-  const value = discoveryElementValue(element);
-  if (!value) return null;
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 0 || number > 100) throw new Error("最低质量需为 0-100 的整数");
-  return number;
-}
-
 function requireString(value, path) {
   if (typeof value !== "string" || !value.trim()) throw marketScanContractError(`${path} 必须是非空字符串`);
   return value;
@@ -349,6 +329,21 @@ function requireString(value, path) {
 function requireNullableString(value, path) {
   if (value !== null && value !== undefined && typeof value !== "string") {
     throw marketScanContractError(`${path} 必须是字符串或 null`);
+  }
+  return value;
+}
+
+function requireIsoDate(value, path) {
+  requireString(value, path);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) throw marketScanContractError(`${path} 必须是 YYYY-MM-DD 日期`);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]) {
+    throw marketScanContractError(`${path} 不是有效日期`);
   }
   return value;
 }

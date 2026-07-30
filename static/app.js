@@ -50,6 +50,7 @@ import { createDiscoveryController } from "./js/discovery.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
 import { createMarketScanController } from "./js/market-scan.js";
+import { createPrimaryNavigation } from "./js/primary-navigation.js";
 import {
   addStockNote,
   removeStockNote,
@@ -101,9 +102,13 @@ import {
   renderStrongStocks,
 } from "./js/workbench.js";
 import {
+  DEFAULT_WORKSPACE_VIEW_BY_PRIMARY,
   DEFAULT_WORKSPACE_PREFERENCES,
+  PRIMARY_VIEW_OPTIONS,
+  PRIMARY_WORKSPACE_VIEWS,
   WORKSPACE_PREFERENCE_OPTIONS,
   loadWorkspacePreferences,
+  primaryViewForWorkspace,
   saveWorkspacePreferences,
 } from "./js/workspace-preferences.js";
 
@@ -120,6 +125,7 @@ const state = {
   lastMinuteSymbol: "",
   dailyChartInspection: null,
   minuteChartInspection: null,
+  primaryView: DEFAULT_WORKSPACE_PREFERENCES.primaryView,
   workspaceView: DEFAULT_WORKSPACE_PREFERENCES.workspaceView,
   dailyChartRange: DEFAULT_WORKSPACE_PREFERENCES.dailyChartRange,
   dailyChartMa5: DEFAULT_WORKSPACE_PREFERENCES.dailyChartMa5,
@@ -171,6 +177,7 @@ const state = {
 
 const stockSearchBindings = [];
 let restoringWorkspacePreferences = false;
+let primaryNavigation = null;
 
 export const GLOBAL_REFRESH_TTL_MS = GLOBAL_DATA_TTL_MS;
 export const GLOBAL_ENDPOINTS = Object.freeze([
@@ -230,6 +237,33 @@ const WORKBENCH_PANEL_IDS = [
   "watchlistScanResults",
 ];
 
+function applyPrimaryView(view) {
+  const target = PRIMARY_VIEW_OPTIONS.includes(view) ? view : DEFAULT_WORKSPACE_PREFERENCES.primaryView;
+  state.primaryView = primaryNavigation?.render(target) || target;
+  document.body?.classList?.toggle("market-scan-view-active", state.primaryView === "market");
+  return state.primaryView;
+}
+
+function setPrimaryView(view, options = {}) {
+  const previousView = state.primaryView;
+  const target = applyPrimaryView(view);
+  const supportedWorkspaceViews = PRIMARY_WORKSPACE_VIEWS[target];
+  if (
+    options.selectWorkspace !== false
+    && supportedWorkspaceViews.length > 0
+    && !supportedWorkspaceViews.includes(state.workspaceView)
+  ) {
+    setWorkspaceView(DEFAULT_WORKSPACE_VIEW_BY_PRIMARY[target], {
+      refreshMarketScan: options.refreshMarketScan,
+      syncPrimary: false,
+    });
+  } else {
+    persistWorkspacePreferences();
+  }
+  if (previousView !== target && state.lastAnalysis) requestAnimationFrame(redrawResearchCharts);
+  return target;
+}
+
 function setWorkspaceView(view, options = {}) {
   const buttons = Array.from(document.querySelectorAll(".workspace-tabs button[data-view]"));
   const supportedViews = WORKSPACE_PREFERENCE_OPTIONS.workspaceView;
@@ -240,6 +274,7 @@ function setWorkspaceView(view, options = {}) {
     : fallback?.dataset.view || DEFAULT_WORKSPACE_PREFERENCES.workspaceView;
   const previousView = state.workspaceView;
   state.workspaceView = target;
+  if (options.syncPrimary !== false) applyPrimaryView(primaryViewForWorkspace(target));
   buttons.forEach((button) => {
     const active = button.dataset.view === target;
     button.classList.toggle("active", active);
@@ -251,7 +286,7 @@ function setWorkspaceView(view, options = {}) {
     panel.classList.toggle("active", active);
     panel.hidden = !active;
   });
-  document.body.classList.toggle("market-scan-view-active", target === "market-scan");
+  document.body?.classList?.toggle("market-scan-view-active", state.primaryView === "market");
   persistWorkspacePreferences();
   if (target === "market-scan" && previousView !== target) {
     let refresh = Promise.resolve(marketScanController.state.run);
@@ -496,8 +531,24 @@ function isStaleLoad(request) {
 
 function setActiveSymbol(symbol) {
   state.symbol = normalizeUiSymbol(symbol);
+  renderCurrentAnalysisContext(null);
   stockSearchBindings.forEach((binding) => binding.close());
   syncSymbolInputs(state.symbol);
+}
+
+function renderCurrentAnalysisContext(origin) {
+  const target = $("currentAnalysisContext");
+  if (!target) return;
+  if (!origin || origin.source !== "market-scan") {
+    target.hidden = true;
+    target.textContent = "";
+    return;
+  }
+  const mode = origin.mode === "intraday" ? "盘中临时" : "盘后正式";
+  const run = origin.runId ? `批次 #${origin.runId}` : "所选扫描批次";
+  const date = origin.quoteDate || origin.dataDate || "--";
+  target.textContent = `当前个股分析使用此刻可用的最新数据，不是${run} 的冻结快照（${mode}，行情日 ${date}）。历史入榜证据请返回“全市场选股”查看。`;
+  target.hidden = false;
 }
 
 function syncSymbolInputs(symbol) {
@@ -1947,6 +1998,7 @@ function setMobileChartView(value) {
 
 function currentWorkspacePreferences() {
   return {
+    primaryView: state.primaryView,
     workspaceView: state.workspaceView,
     dailyChartRange: state.dailyChartRange,
     dailyChartMa5: state.dailyChartMa5,
@@ -1965,14 +2017,15 @@ function restoreWorkspacePreferences() {
   const preferences = loadWorkspacePreferences();
   restoringWorkspacePreferences = true;
   try {
-    setWorkspaceView(preferences.workspaceView);
+    setWorkspaceView(preferences.workspaceView, { syncPrimary: false });
+    setPrimaryView(preferences.primaryView);
     selectDailyChartRange(preferences.dailyChartRange);
     setDailyChartOverlay("ma5", preferences.dailyChartMa5);
     setDailyChartOverlay("ma20", preferences.dailyChartMa20);
     void selectMinuteChartInterval(preferences.minuteChartInterval);
     setMobileChartView(preferences.mobileChartView);
-    if (preferences.workspaceView !== DEFAULT_WORKSPACE_PREFERENCES.workspaceView) {
-      scrollWorkspaceTabIntoView(preferences.workspaceView);
+    if (state.primaryView !== "market" && state.primaryView !== "monitor") {
+      scrollWorkspaceTabIntoView(state.workspaceView);
     }
   } finally {
     restoringWorkspacePreferences = false;
@@ -1983,7 +2036,7 @@ function restoreWorkspacePreferences() {
 function scrollWorkspaceTabIntoView(view) {
   const tab = Array.from(document.querySelectorAll(".workspace-tabs button[data-view]"))
     .find((button) => button.dataset.view === view);
-  if (!tab || typeof tab.scrollIntoView !== "function") return false;
+  if (!tab || tab.hidden || typeof tab.scrollIntoView !== "function") return false;
   requestAnimationFrame(() => tab.scrollIntoView({ block: "nearest", inline: "nearest" }));
   return true;
 }
@@ -2236,7 +2289,8 @@ function cancelPendingLoadForValidation() {
 function handleWorkspaceTabKeydown(event) {
   const current = event.target.closest("button[data-view]");
   if (!current) return;
-  const tabs = Array.from(document.querySelectorAll(".workspace-tabs button[data-view]"));
+  const tabs = Array.from(document.querySelectorAll(".workspace-tabs button[data-view]"))
+    .filter((tab) => !tab.hidden);
   const index = tabs.indexOf(current);
   if (index < 0) return;
   let targetIndex;
@@ -2273,9 +2327,10 @@ const marketScanController = createMarketScanController({
     const panel = $("workspace-panel-market-scan");
     if (panel && typeof panel.focus === "function") requestAnimationFrame(() => panel.focus());
   },
-  onSelectStock(symbol) {
+  onSelectStock(symbol, origin) {
     clearSymbolError();
     setActiveSymbol(symbol);
+    renderCurrentAnalysisContext(origin);
     setWorkspaceView("overview");
     void loadAll({ reveal: true });
     const workbench = $("stockWorkbench");
@@ -2288,6 +2343,10 @@ const marketScanController = createMarketScanController({
 const discoveryController = createDiscoveryController({
   getRun: () => marketScanController.state.run,
   loadStandardResults: () => marketScanController.loadResults(),
+});
+
+primaryNavigation = createPrimaryNavigation({
+  onSelect: (view) => setPrimaryView(view),
 });
 
 $("searchForm").addEventListener("submit", (event) => {
@@ -2531,6 +2590,7 @@ $("watchList").addEventListener("click", async (event) => {
   if (button.dataset.action === "open") {
     clearWatchlistFeedback();
     setActiveSymbol(symbol);
+    setWorkspaceView("overview");
     const workbenchLoad = loadAll({ reveal: true, waitForAdviceTimeline: true });
     const loadContext = { symbol: state.symbol, loadSeq: state.loadSeq };
     void Promise.resolve(workbenchLoad)
@@ -2974,6 +3034,7 @@ export const __appTest = {
   handleVisibilityChange,
   reconcileStreamSubscription,
   setActiveSymbol,
+  setPrimaryView,
   setWorkspaceView,
   currentWorkspacePreferences,
   restoreWorkspacePreferences,

@@ -82,10 +82,18 @@ class MarketScanResultWriterMixin(MarketScanRepositoryContext):
                 """
                 UPDATE market_scan_run
                 SET total_count = ?, excluded_count = ?, updated_at = ?,
+                    market_progress_json = ?,
                     message = ?
                 WHERE id = ?
                 """,
-                (total_count, excluded_count, stamp, f"已加载 {total_count} 只股票，开始分批计算", run_id),
+                (
+                    total_count,
+                    excluded_count,
+                    stamp,
+                    _market_progress_json(conn, run_id),
+                    f"已加载 {total_count} 只股票，开始分批计算",
+                    run_id,
+                ),
             )
         return total_count
 
@@ -209,11 +217,65 @@ def sync_run_counts(conn: sqlite3.Connection, run_id: int, *, stamp: str) -> Non
         """
         UPDATE market_scan_run
         SET processed_count = ?, success_count = ?, missing_count = ?,
-            skipped_count = ?, updated_at = ?, message = ?
+            skipped_count = ?, market_progress_json = ?, updated_at = ?, message = ?
         WHERE id = ?
         """,
-        (processed, success, missing, skipped, stamp, f"已处理 {processed} 只股票", run_id),
+        (
+            processed,
+            success,
+            missing,
+            skipped,
+            _market_progress_json(conn, run_id),
+            stamp,
+            f"已处理 {processed} 只股票",
+            run_id,
+        ),
     )
+
+
+def _market_progress_json(conn: sqlite3.Connection, run_id: int) -> str:
+    rows = conn.execute(
+        """
+        SELECT market,
+               COUNT(*) AS total_count,
+               SUM(CASE WHEN status != 'pending' THEN 1 ELSE 0 END) AS processed_count,
+               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+               SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END) AS missing_count,
+               SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count
+        FROM market_scan_result
+        WHERE run_id = ?
+        GROUP BY market
+        """,
+        (run_id,),
+    ).fetchall()
+    by_market = {str(row["market"]): row for row in rows}
+    payload = [_market_progress_item(market, by_market.get(market)) for market in ("SH", "SZ", "BJ")]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _market_progress_item(market: str, row: sqlite3.Row | None) -> dict[str, object]:
+    if row is None:
+        return {
+            "market": market,
+            "total_count": 0,
+            "processed_count": 0,
+            "success_count": 0,
+            "missing_count": 0,
+            "skipped_count": 0,
+            "coverage_pct": 0.0,
+        }
+    total = int(row["total_count"] or 0)
+    success = int(row["success_count"] or 0)
+    coverage = success / total * 100 if total else 0.0
+    return {
+        "market": market,
+        "total_count": total,
+        "processed_count": int(row["processed_count"] or 0),
+        "success_count": success,
+        "missing_count": int(row["missing_count"] or 0),
+        "skipped_count": int(row["skipped_count"] or 0),
+        "coverage_pct": min(100.0, max(0.0, coverage)),
+    }
 
 
 def assign_result_ranks(conn: sqlite3.Connection, run_id: int) -> None:

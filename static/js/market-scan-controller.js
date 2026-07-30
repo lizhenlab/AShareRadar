@@ -12,26 +12,39 @@ import {
   validateStartResponse,
 } from "./market-scan-contracts.js";
 import { createMarketScanPolling } from "./market-scan-polling.js";
-import { buildMarketScanResultsUrl, createMarketScanView } from "./market-scan-view.js";
-export { buildMarketScanResultsUrl, marketScanResultsUrl } from "./market-scan-view.js";
+import { createMarketScanHistory } from "./market-scan-history.js";
+import {
+  exportTimeoutScope,
+  MARKET_SCAN_XLSX_MEDIA_TYPE,
+  marketScanExportError,
+  marketScanExportMediaType,
+} from "./market-scan-export-client.js";
+import { inertMarketScanController } from "./market-scan-controller-inert.js";
+import { createMarketScanRowClickHandler } from "./market-scan-row-actions.js";
+import { buildMarketScanExportUrl, buildMarketScanResultsUrl, createMarketScanView } from "./market-scan-view.js";
+export { buildMarketScanExportUrl, buildMarketScanResultsUrl, marketScanResultsUrl } from "./market-scan-view.js";
+
 export function createMarketScanController(options = {}) {
   const root = options.root || globalThis.document;
   const panel = root?.getElementById?.("workspace-panel-market-scan");
   if (!panel) return inertMarketScanController();
   const request = options.fetcher || fetchJson;
+  const exportRequest = options.exportFetcher || globalThis.fetch;
   const onSelectStock = typeof options.onSelectStock === "function" ? options.onSelectStock : () => {};
   const onOpen = typeof options.onOpen === "function" ? options.onOpen : () => {};
   const connectivityTarget = options.connectivityTarget || root?.defaultView || globalThis.window;
-  const view = createMarketScanView(root);
+  const view = createMarketScanView(root, options.now);
   const { elements } = view;
   const state = {
-    activated: false, actionBusy: false, visible: !root.hidden,
+    activated: false, actionBusy: false, exportBusy: false, visible: !root.hidden,
     run: null, publishedRun: null,
+    browseMode: view.selectedMode(), selectedHistoryRunId: null, historyRuns: [],
     page: 1, pageCount: 0,
     pollTimer: null, resetTimer: null,
     renderedResultRunId: null, consecutiveFailures: 0,
     runRequest: null, resultRequest: null, actionRequest: null,
     runRequestSeq: 0, resultRequestSeq: 0, actionRequestSeq: 0,
+    historyRequest: null, historyRequestSeq: 0,
     onlineRecoveryPromise: null,
   };
   const polling = createMarketScanPolling({
@@ -41,18 +54,31 @@ export function createMarketScanController(options = {}) {
     isEnabled: () => state.activated && state.visible && !state.actionBusy,
   });
   const { abortRequest, beginRequest, finishRequest, isCurrentRequest } = polling;
+  const history = createMarketScanHistory({
+    applyPublishedRun,
+    abortResults: () => abortRequest("resultRequest", "resultRequestSeq"),
+    loadLatest,
+    loadResults,
+    request,
+    state,
+    view,
+  });
+  const handleRowClick = createMarketScanRowClickHandler({ onSelectStock, view });
   bindEvents();
   view.renderRun(null);
+  view.renderExportBusy(false, null);
+  syncBrowsingContext();
   function activate() {
     if (state.activated) return Promise.resolve(state.run);
     state.activated = true;
-    return loadLatest();
+    return Promise.all([loadLatest(), history.load()]).then(([run]) => run);
   }
   function deactivate() {
     state.activated = false;
     clearControllerTimers();
     abortRequest("runRequest", "runRequestSeq");
     abortRequest("resultRequest", "resultRequestSeq");
+    history.abort();
   }
   function setVisible(visible) {
     state.visible = Boolean(visible);
@@ -60,6 +86,7 @@ export function createMarketScanController(options = {}) {
       clearControllerTimers();
       abortRequest("runRequest", "runRequestSeq");
       abortRequest("resultRequest", "resultRequestSeq");
+      history.abort();
       return;
     }
     if (!state.activated || state.actionBusy) return;
@@ -107,11 +134,18 @@ export function createMarketScanController(options = {}) {
     }
   }
   async function start() {
-    return mutate("开始扫描", "/api/market-scans", { method: "POST" }, async (payload) => {
+    const requestedMode = view.selectedMode();
+    state.browseMode = requestedMode;
+    return mutate("开始扫描", "/api/market-scans", { method: "POST", body: JSON.stringify({ mode: requestedMode }) }, async (payload) => {
       const response = validateStartResponse(payload, "开始扫描响应");
+      const reusedOtherMode = response.deduplicated && response.run.mode !== requestedMode;
       applyRun(
         response.run,
-        response.deduplicated ? "已有扫描任务正在运行，已继续跟踪该任务。" : "任务已创建，正在准备股票池。"
+        reusedOtherMode
+          ? `请求的是${view.modeLabel(requestedMode)}；当前已有${view.modeLabel(response.run.mode)}任务，已继续跟踪该任务。`
+          : response.deduplicated
+            ? "已有同模式扫描任务正在运行，已继续跟踪该任务。"
+            : "任务已创建，正在准备股票池。"
       );
       polling.scheduleDefault(state.run);
       return response;
@@ -151,6 +185,42 @@ export function createMarketScanController(options = {}) {
         return response;
       }
     );
+  }
+  async function exportResults() {
+    const publishedRun = resultRun();
+    if (!publishedRun || state.exportBusy) return null;
+    state.exportBusy = true;
+    view.renderExportBusy(true, publishedRun);
+    view.announce("正在导出当前筛选条件下的 Excel 榜单。", `export:start:${publishedRun.id}`);
+    const timeout = exportTimeoutScope();
+    try {
+      const response = await exportRequest(buildMarketScanExportUrl(publishedRun.id, elements), {
+        headers: { Accept: MARKET_SCAN_XLSX_MEDIA_TYPE },
+        signal: timeout.signal,
+      });
+      if (!response?.ok) throw new Error(await marketScanExportError(response));
+      if (marketScanExportMediaType(response) !== MARKET_SCAN_XLSX_MEDIA_TYPE) {
+        throw new Error("服务返回的不是 Excel 文件");
+      }
+      const blob = await response.blob();
+      if (!blob?.size) throw new Error("服务返回了空的 Excel 文件");
+      const filename = view.saveExport(
+        blob,
+        response.headers?.get?.("content-disposition") || "",
+        publishedRun,
+      );
+      view.announce(`Excel 榜单已导出：${filename}`, `export:success:${publishedRun.id}:${filename}`);
+      return filename;
+    } catch (error) {
+      const detail = timeout.didTimeout() ? "请求超时，请稍后重试" : compactErrorMessage(error?.message);
+      const message = `导出 Excel 失败：${detail}`;
+      view.announce(message, `export:error:${publishedRun.id}:${String(error?.message || "")}`);
+      return null;
+    } finally {
+      timeout.dispose();
+      state.exportBusy = false;
+      view.renderExportBusy(false, resultRun());
+    }
   }
   async function mutate(label, url, init, apply) {
     if (state.actionBusy) return null;
@@ -247,7 +317,14 @@ export function createMarketScanController(options = {}) {
   async function processPolledRun(run) {
     polling.resetFailures(); applyRun(run);
     if (isActiveMarketScanRun(run)) { polling.scheduleDefault(state.run); return null; }
-    applyPublishedRun(isPublishedMarketScanRun(run) ? run : state.publishedRun);
+    if (
+      state.selectedHistoryRunId === null
+      && isPublishedMarketScanRun(run)
+      && run.mode === state.browseMode
+    ) {
+      applyPublishedRun(run);
+      void history.load();
+    }
     const outcome = await loadResultsOnce();
     if (outcome.ok) { polling.scheduleDefault(state.run); return null; }
     if (outcome.aborted) return null;
@@ -319,6 +396,8 @@ export function createMarketScanController(options = {}) {
     const runChanged = marketScanRunIdentityChanged(previousRun, run);
     state.run = run || null;
     view.renderRun(state.run, overrideMessage);
+    view.renderExportBusy(state.exportBusy, resultRun());
+    syncBrowsingContext();
     view.announceRunUpdate(previousRun, state.run, overrideMessage);
     if (runChanged && !resultRun()) {
       state.page = 1; state.pageCount = 0; state.renderedResultRunId = null;
@@ -327,8 +406,11 @@ export function createMarketScanController(options = {}) {
     return runChanged;
   }
   function applyPublishedRun(run) {
+    if (run && run.mode !== state.browseMode) return false;
     const changed = marketScanRunIdentityChanged(state.publishedRun, run);
     state.publishedRun = run || null;
+    view.renderExportBusy(state.exportBusy, resultRun());
+    syncBrowsingContext();
     if (changed) {
       state.page = 1; state.pageCount = 0;
       state.renderedResultRunId = null;
@@ -336,19 +418,37 @@ export function createMarketScanController(options = {}) {
     }
     return changed;
   }
-  function resultRun() { return state.publishedRun || (isPublishedMarketScanRun(state.run) ? state.run : null); }
+  function resultRun() {
+    if (state.publishedRun?.mode === state.browseMode) return state.publishedRun;
+    if (
+      state.selectedHistoryRunId === null
+      && isPublishedMarketScanRun(state.run)
+      && state.run.mode === state.browseMode
+    ) return state.run;
+    return null;
+  }
   async function resolvePublishedRun(run, signal) {
-    if (isPublishedMarketScanRun(run)) return run;
+    if (state.selectedHistoryRunId !== null) return resultRun();
+    if (isPublishedMarketScanRun(run) && run.mode === state.browseMode) return run;
     try {
-      const payload = await request("/api/market-scans/latest-published", {
+      const payload = await request(`/api/market-scans/latest-published?mode=${encodeURIComponent(state.browseMode)}`, {
         signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
       });
       const published = validateMarketScanRun(payload, { allowNull: true, context: "最近已发布扫描响应" });
-      return isPublishedMarketScanRun(published) ? published : state.publishedRun;
+      return isPublishedMarketScanRun(published) && published.mode === state.browseMode ? published : null;
     } catch (error) {
       if (isAbortError(error)) throw error;
-      return state.publishedRun;
+      return state.publishedRun?.mode === state.browseMode ? state.publishedRun : null;
     }
+  }
+
+  function syncBrowsingContext() {
+    view.renderBrowsingContext(
+      state.run,
+      resultRun(),
+      state.browseMode,
+      state.selectedHistoryRunId !== null,
+    );
   }
   async function recoverLatest(error) {
     if (!state.activated || !state.visible || state.actionBusy) return null;
@@ -363,9 +463,13 @@ export function createMarketScanController(options = {}) {
   }
   function clearControllerTimers() { polling.clear(); clearResetTimer(); }
   function bindEvents() {
+    elements.modeInputs.forEach((input) => input.addEventListener("change", () => void history.changeMode()));
+    elements.historyRun.addEventListener("change", () => void history.select());
+    elements.historyRefresh.addEventListener("click", () => void history.refresh());
     elements.start.addEventListener("click", () => void start());
     elements.cancel.addEventListener("click", () => void cancel());
     elements.retry.addEventListener("click", () => void retry());
+    elements.exportButton.addEventListener("click", () => void exportResults());
     elements.filters.addEventListener("submit", (event) => {
       event.preventDefault();
       clearResetTimer();
@@ -396,11 +500,7 @@ export function createMarketScanController(options = {}) {
     });
     elements.globalOpen.addEventListener("click", () => onOpen());
     elements.globalCancel.addEventListener("click", () => void cancel());
-    elements.rows.addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-market-scan-symbol]");
-      if (!button) return;
-      onSelectStock(button.dataset.marketScanSymbol);
-    });
+    elements.rows.addEventListener("click", handleRowClick);
     connectivityTarget?.addEventListener?.("online", handleOnline);
   }
 
@@ -410,10 +510,14 @@ export function createMarketScanController(options = {}) {
     polling.resetFailures();
     abortRequest("runRequest", "runRequestSeq");
     abortRequest("resultRequest", "resultRequestSeq");
+    history.abort();
     const message = "网络已恢复，正在同步最近扫描。";
     view.renderHeadline(message, "loading");
     view.announce(message, "network:online");
-    const recovery = Promise.resolve(loadLatest({ recoveryMessage: message })).finally(() => {
+    const recovery = Promise.all([
+      loadLatest({ recoveryMessage: message }),
+      history.load(),
+    ]).finally(() => {
       if (state.onlineRecoveryPromise === recovery) state.onlineRecoveryPromise = null;
     });
     state.onlineRecoveryPromise = recovery;
@@ -425,26 +529,13 @@ export function createMarketScanController(options = {}) {
     activate,
     cancel,
     deactivate,
+    exportResults,
+    loadHistory: history.load,
     loadLatest,
     loadResults,
     retry,
     setVisible,
     start,
     state,
-  };
-}
-
-function inertMarketScanController() {
-  const noOp = () => null;
-  return {
-    activate: async () => null,
-    cancel: async () => null,
-    deactivate: noOp,
-    loadLatest: async () => null,
-    loadResults: async () => null,
-    retry: async () => null,
-    setVisible: noOp,
-    start: async () => null,
-    state: { activated: false, publishedRun: null, run: null },
   };
 }

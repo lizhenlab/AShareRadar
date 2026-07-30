@@ -6,15 +6,19 @@ from datetime import datetime
 import math
 import sqlite3
 import threading
+from typing import Literal
 
 from app.models.market_scan import (
+    MarketScanFilterValues,
+    MarketScanMode,
     MarketScanResultPage,
     MarketScanResultStatus,
     MarketScanRetryPlan,
     MarketScanRun,
     MarketScanRunPage,
-    MarketScanSort,
-    MarketScanSortOrder,
+    MarketScanRunStatus,
+    MarketScanSortOrderValues,
+    MarketScanSortValues,
     MarketScanStartResponse,
     MarketScanTrigger,
 )
@@ -33,7 +37,17 @@ from app.services.market_scan_completion import (
 )
 from app.services.market_scan_contracts import MarketScanDataHubProtocol
 from app.services.market_scan_execution import MarketScanExecutor
+from app.services.market_scan_export import (
+    PUBLISHED_MARKET_SCAN_STATUSES,
+    MarketScanExportFilters,
+    MarketScanWorkbookExport,
+    build_market_scan_workbook,
+)
 from app.services.market_scan_lifecycle import MarketScanLifecycle, MarketScanStopSnapshot
+from app.services.market_scan_modes import (
+    OFFICIAL_SCAN_WINDOW_MESSAGE,
+    market_scan_temporal_contract,
+)
 from app.services.market_scan_automation import MarketScanAutomaticAction
 from app.services.market_scan_automation_runner import MarketScanAutomationCoordinator
 from app.services.market_scan_scoring import market_scan_score_spec, stable_score_spec_hash
@@ -47,7 +61,7 @@ MARKET_SCAN_TASK_NAME = "full_market_scan"
 MARKET_SCAN_TASK_LABEL = "全市场A股扫描"
 MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE = "已有其他进程负责全市场扫描，本进程不能修改扫描任务"
 HISTORICAL_SCAN_UNAVAILABLE_MESSAGE = "当前数据源只提供当前快照；历史榜单只能读取已持久化快照，不能新建历史扫描"
-DAILY_BAR_WINDOW_MESSAGE = "全市场扫描仅使用已完成日线，请在交易日 15:15 后启动"
+DAILY_BAR_WINDOW_MESSAGE = OFFICIAL_SCAN_WINDOW_MESSAGE
 TERMINAL_RECOVERY_MESSAGE = "本地扫描任务已退出，终态写入失败后自动中断；可从断点重试"
 TERMINAL_RECOVERY_ERROR = "本地后台扫描已退出，但原终态未能持久化"
 
@@ -154,11 +168,13 @@ class MarketScanManager:
         *,
         as_of: datetime | None = None,
         trigger: MarketScanTrigger = "manual",
+        mode: MarketScanMode = "official",
     ) -> MarketScanStartResponse:
         current = self._current_time()
         response = await self._create_scan(
             as_of=as_of,
             trigger=trigger,
+            mode=mode,
             current=current,
             busy_is_noop=False,
         )
@@ -171,14 +187,19 @@ class MarketScanManager:
         *,
         as_of: datetime | None,
         trigger: MarketScanTrigger,
+        mode: MarketScanMode,
         current: datetime,
         busy_is_noop: bool,
     ) -> MarketScanStartResponse | None:
         normalized_as_of = normalize_review_as_of(as_of, now=current)
-        _require_completed_daily_bar_window(normalized_as_of)
-        data_date = latest_expected_daily_kline_date(normalized_as_of)
-        if as_of is not None and data_date != latest_expected_daily_kline_date(current):
-            raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
+        temporal = market_scan_temporal_contract(normalized_as_of, mode)
+        if as_of is not None:
+            current_temporal = market_scan_temporal_contract(current, mode)
+            if (
+                temporal.data_date != current_temporal.data_date
+                or temporal.quote_date != current_temporal.quote_date
+            ):
+                raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
         self._validate_settings()
         async with self._lifecycle.lock:
             self._lifecycle.require_open()
@@ -195,9 +216,11 @@ class MarketScanManager:
                 run = await run_cache_io(
                     self.cache.create_market_scan_run,
                     trigger=trigger,
-                    rule_version=market_scan_rule_version(self.settings),
+                    mode=mode,
+                    rule_version=market_scan_rule_version(self.settings, mode=mode),
                     as_of=datetime_to_text(normalized_as_of),
-                    data_date=data_date.isoformat(),
+                    data_date=temporal.data_date.isoformat(),
+                    quote_date=temporal.quote_date.isoformat(),
                     scope=FULL_MARKET_SCOPE,
                 )
             except sqlite3.IntegrityError:
@@ -224,7 +247,7 @@ class MarketScanManager:
             candidate = await run_cache_io(self.cache.market_scan_run, run_id)
             retry_plan = await run_cache_io(self.cache.market_scan_retry_plan, run_id)
             if retry_plan.needs_market_data:
-                _require_completed_daily_bar_window(current)
+                market_scan_temporal_contract(current, candidate.mode)
             self._validate_retry_candidate(candidate, retry_plan, current=current)
             active = await run_cache_io(self.cache.active_market_scan_run)
             if active is not None:
@@ -305,6 +328,7 @@ class MarketScanManager:
         response = await self._create_scan(
             as_of=current,
             trigger="scheduled",
+            mode="official",
             current=current,
             busy_is_noop=True,
         )
@@ -316,20 +340,34 @@ class MarketScanManager:
         self._recover_terminal_persistence_failures(run_id)
         return self.cache.market_scan_run(run_id)
 
-    def latest_run(self) -> MarketScanRun | None:
+    def latest_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
         self._recover_terminal_persistence_failures()
-        return self.cache.latest_market_scan_run()
+        return self.cache.latest_market_scan_run(mode=mode)
 
-    def latest_published_run(self) -> MarketScanRun | None:
+    def latest_published_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
         self._recover_terminal_persistence_failures()
-        return self.cache.latest_published_market_scan_run()
+        return self.cache.latest_published_market_scan_run(mode=mode)
 
     def next_automatic_run_at(self) -> datetime | None:
         return self._automation.next_due_at
 
-    def runs(self, *, page: int, page_size: int) -> MarketScanRunPage:
+    def runs(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None = None,
+        status: MarketScanRunStatus | Literal["published"] | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage:
         self._recover_terminal_persistence_failures()
-        return self.cache.market_scan_runs(page=page, page_size=page_size)
+        return self.cache.market_scan_runs(
+            page=page,
+            page_size=page_size,
+            mode=mode,
+            status=status,
+            data_date=data_date,
+        )
 
     def results(
         self,
@@ -338,14 +376,25 @@ class MarketScanManager:
         page: int,
         page_size: int,
         status: MarketScanResultStatus | None,
-        market: str | None,
-        industry: str | None,
+        market: MarketScanFilterValues,
+        industry: MarketScanFilterValues,
         is_st: bool | None,
         is_new: bool | None,
+        min_score: int | None = None,
+        max_score: int | None = None,
+        min_trend_score: int | None = None,
+        max_trend_score: int | None = None,
+        min_change_pct: float | None = None,
+        max_change_pct: float | None = None,
+        min_turnover_rate: float | None = None,
+        max_turnover_rate: float | None = None,
+        min_amount: float | None = None,
+        max_amount: float | None = None,
         min_data_quality_score: int | None,
+        max_data_quality_score: int | None = None,
         keyword: str | None,
-        sort: MarketScanSort,
-        order: MarketScanSortOrder,
+        sort: MarketScanSortValues,
+        order: MarketScanSortOrderValues,
     ) -> MarketScanResultPage:
         self._recover_terminal_persistence_failures(run_id)
         return self.cache.market_scan_results(
@@ -357,11 +406,59 @@ class MarketScanManager:
             industry=industry,
             is_st=is_st,
             is_new=is_new,
+            min_score=min_score,
+            max_score=max_score,
+            min_trend_score=min_trend_score,
+            max_trend_score=max_trend_score,
+            min_change_pct=min_change_pct,
+            max_change_pct=max_change_pct,
+            min_turnover_rate=min_turnover_rate,
+            max_turnover_rate=max_turnover_rate,
+            min_amount=min_amount,
+            max_amount=max_amount,
             min_data_quality_score=min_data_quality_score,
+            max_data_quality_score=max_data_quality_score,
             keyword=keyword,
             sort=sort,
             order=order,
         )
+
+    def export_results(
+        self,
+        run_id: int,
+        *,
+        filters: MarketScanExportFilters,
+    ) -> MarketScanWorkbookExport:
+        filters = filters.normalized()
+        run = self.run(run_id)
+        if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
+            raise ValueError("只有已发布的全市场榜单可以导出 Excel")
+        page = self.results(
+            run_id,
+            page=1,
+            page_size=max(1, run.total_count),
+            status=filters.status,
+            market=filters.market,
+            industry=filters.industry,
+            is_st=filters.is_st,
+            is_new=filters.is_new,
+            min_score=filters.min_score,
+            max_score=filters.max_score,
+            min_trend_score=filters.min_trend_score,
+            max_trend_score=filters.max_trend_score,
+            min_change_pct=filters.min_change_pct,
+            max_change_pct=filters.max_change_pct,
+            min_turnover_rate=filters.min_turnover_rate,
+            max_turnover_rate=filters.max_turnover_rate,
+            min_amount=filters.min_amount,
+            max_amount=filters.max_amount,
+            min_data_quality_score=filters.min_data_quality_score,
+            max_data_quality_score=filters.max_data_quality_score,
+            keyword=filters.keyword,
+            sort=filters.sort,
+            order=filters.order,
+        )
+        return build_market_scan_workbook(page, filters, exported_at=self._current_time())
 
     def _launch(self, run_id: int) -> None:
         self._lifecycle.launch(run_id, self._execute_run)
@@ -375,6 +472,12 @@ class MarketScanManager:
             )
             run = await run_cache_io(self.cache.start_market_scan_run, run_id)
             warnings = await self._executor.execute(run, cancel_event)
+            await run_cache_io(
+                self.cache.update_market_scan_observability,
+                run_id,
+                stage="publication",
+                message="正在执行发布门槛验证",
+            )
             current = await run_cache_io(self.cache.market_scan_run, run_id)
             degraded_count = await run_cache_io(
                 self.cache.market_scan_degraded_result_count,
@@ -480,7 +583,7 @@ class MarketScanManager:
             raise ValueError(f"扫描批次 {run.id} 当前状态不能重试：{run.status}")
         if plan.rule_version != run.rule_version:
             raise ValueError("扫描批次规则指纹在重试准备期间发生变化，请重新获取状态后再试")
-        effective_rule_version = market_scan_rule_version(self.settings)
+        effective_rule_version = market_scan_rule_version(self.settings, mode=run.mode)
         if run.rule_version != effective_rule_version:
             raise ValueError("扫描规则/评分配置已变更，请新建扫描；旧批次将保留为历史快照")
         self._validate_retry_data_date(run, plan, current=current)
@@ -494,9 +597,15 @@ class MarketScanManager:
     ) -> None:
         if not plan.needs_market_data:
             return
-        current_data_date = latest_expected_daily_kline_date(current).isoformat()
-        if run.data_date != current_data_date:
-            raise ValueError(f"批次数据日期 {run.data_date} 已过期，当前完整交易日为 {current_data_date}；" "请新建扫描，旧批次将保留为历史快照")
+        temporal = market_scan_temporal_contract(current, run.mode)
+        current_data_date = temporal.data_date.isoformat()
+        current_quote_date = temporal.quote_date.isoformat()
+        if run.data_date != current_data_date or run.quote_date != current_quote_date:
+            raise ValueError(
+                f"批次日K/行情日期 {run.data_date}/{run.quote_date} 已过期，"
+                f"当前应为 {current_data_date}/{current_quote_date}；"
+                "请新建扫描，旧批次将保留为历史快照"
+            )
 
     def _current_time(self, value: datetime | None = None) -> datetime:
         return normalize_review_as_of(value if value is not None else self._now(), allow_future=True)
@@ -510,11 +619,6 @@ def _market_scan_shutdown_timeout(settings: object) -> float:
     return timeout if math.isfinite(timeout) and timeout > 0 else 5.0
 
 
-def _require_completed_daily_bar_window(value: datetime) -> None:
-    if is_trading_day(value.date()) and value.time() < DAILY_KLINE_PUBLISH_TIME:
-        raise ValueError(DAILY_BAR_WINDOW_MESSAGE)
-
-
 def _consume_stop_exception(task: asyncio.Task[None]) -> None:
     if task.cancelled():
         return
@@ -524,9 +628,19 @@ def _consume_stop_exception(task: asyncio.Task[None]) -> None:
         pass
 
 
-def market_scan_rule_version(settings: object) -> str:
+def market_scan_rule_version(
+    settings: object,
+    *,
+    mode: MarketScanMode = "official",
+) -> str:
     contract = {
-        "schema_version": 4,
+        "schema_version": 5,
+        "mode": {
+            "id": mode,
+            "quote_date": "current-trading-day" if mode == "intraday" else "completed-daily-bar-date",
+            "daily_kline_cutoff": "previous-completed-trading-day" if mode == "intraday" else "same-completed-trading-day",
+            "quote_kline_consistency": "previous-close" if mode == "intraday" else "same-day-close",
+        },
         "score_spec": market_scan_score_spec(
             min_data_quality_score=int(getattr(settings, "market_scan_min_data_quality_score")),
         ),
@@ -551,7 +665,7 @@ def market_scan_rule_version(settings: object) -> str:
             "score_distribution": MARKET_SCAN_SCORE_DISTRIBUTION_POLICY.spec(),
         },
     }
-    return f"full-market-scan-v4:{stable_score_spec_hash(contract)}"
+    return f"full-market-scan-v5:{stable_score_spec_hash(contract)}"
 
 
 def _market_now() -> datetime:

@@ -92,7 +92,7 @@ def test_rule_version_is_an_opaque_stable_hash_not_a_partial_config_string(tmp_p
 
     assert first == second
     prefix, digest = first.split(":", 1)
-    assert prefix == "full-market-scan-v4"
+    assert prefix == "full-market-scan-v5"
     assert len(digest) == 64
     assert "kline_limit=" not in first
 

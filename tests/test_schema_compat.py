@@ -181,8 +181,16 @@ class SchemaCompatibilityTests(unittest.TestCase):
                 "degradation_reasons_json",
             }.issubset(result_columns)
         )
-        self.assertIn("retry_of_run_id", self._column_names(conn, "market_scan_run"))
-        self.assertIn("stock_pool_source", self._column_names(conn, "market_scan_run"))
+        run_columns = self._column_names(conn, "market_scan_run")
+        self.assertIn("retry_of_run_id", run_columns)
+        self.assertIn("stock_pool_source", run_columns)
+        self.assertIn("mode", run_columns)
+        self.assertIn("quote_date", run_columns)
+        self.assertTrue(
+            {"current_stage", "stage_started_at", "stage_metrics_json", "market_progress_json"}.issubset(
+                run_columns
+            )
+        )
         run_indexes = self._index_names(conn, "market_scan_run")
         result_indexes = self._index_names(conn, "market_scan_result")
         self.assertIn("uq_market_scan_single_active", run_indexes)

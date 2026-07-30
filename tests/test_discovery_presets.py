@@ -11,6 +11,7 @@ from app.models.discovery import (
     DiscoveryPresetArchive,
     DiscoveryPresetCreate,
     DiscoveryPresetRename,
+    DiscoveryPresetUpdate,
     DiscoveryResearchQueueRequest,
 )
 from app.repositories.discovery import DiscoveryRepository
@@ -48,22 +49,36 @@ def test_preset_crud_and_application_are_persisted_and_paginated(tmp_path) -> No
     assert result.run_id == run_id
     assert result.rule_version == "discovery-v1"
 
+    updated = service.update_preset(
+        created.id,
+        DiscoveryPresetUpdate(
+            name="高质量半导体增强版",
+            criteria={"market": ["BJ"], "score": {"min": 95}},
+            sort=[{"field": "amount", "order": "desc"}],
+            expected_revision=1,
+        ),
+    )
+    assert updated.revision == 2
+    assert updated.criteria.market == ["BJ"]
+    assert updated.criteria.score is not None and updated.criteria.score.min == 95
+    assert updated.sort[0].field == "amount"
+
     renamed = service.rename_preset(
         created.id,
-        DiscoveryPresetRename(name="高质量半导体", expected_revision=1),
+        DiscoveryPresetRename(name="高质量半导体", expected_revision=2),
     )
     assert renamed.name == "高质量半导体"
-    assert renamed.revision == 2
+    assert renamed.revision == 3
 
     with pytest.raises(DiscoveryConflictError, match="修订"):
         service.rename_preset(
             created.id,
-            DiscoveryPresetRename(name="过期写入", expected_revision=1),
+            DiscoveryPresetRename(name="过期写入", expected_revision=2),
         )
     with pytest.raises(DiscoveryConflictError, match="修订"):
-        service.delete_preset(created.id, expected_revision=1)
+        service.delete_preset(created.id, expected_revision=2)
 
-    service.delete_preset(created.id, expected_revision=2)
+    service.delete_preset(created.id, expected_revision=3)
     with pytest.raises(NotFoundError, match="筛选方案不存在"):
         service.get_preset(created.id)
 
@@ -74,6 +89,33 @@ def test_preset_names_are_unique_case_insensitively(tmp_path) -> None:
 
     with pytest.raises(DiscoveryConflictError, match="名称已存在"):
         service.create_preset(_preset_payload(name="alpha"))
+
+
+def test_preset_industry_filter_matches_ordinary_leaderboard_semantics_and_escapes_like(tmp_path) -> None:
+    path, service = _service(tmp_path)
+    run_id = _seed_run(
+        path,
+        rule_version="discovery-v1",
+        rows=[
+            _result("600001.SH", rank=1, market="SH", score=92, quality=90, industry="功率半导体"),
+            _result("000002.SZ", rank=2, market="SZ", score=90, quality=90, industry="银行"),
+        ],
+    )
+    partial = service.create_preset(
+        _preset_payload(name="行业部分匹配").model_copy(
+            update={"criteria": DiscoveryCriteria(industry=["半导体"])}
+        )
+    )
+    escaped = service.create_preset(
+        _preset_payload(name="转义通配符").model_copy(
+            update={"criteria": DiscoveryCriteria(industry=["%"])}
+        )
+    )
+
+    assert [item.symbol for item in service.apply_preset(partial.id, run_id=run_id, page=1, page_size=20).items] == [
+        "600001.SH"
+    ]
+    assert service.apply_preset(escaped.id, run_id=run_id, page=1, page_size=20).items == []
 
 
 @pytest.mark.parametrize(

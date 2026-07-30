@@ -124,6 +124,7 @@ class KlineCoordinator:
         *,
         allow_stale: bool = False,
         require_provider_response: bool = False,
+        prefetched_cache: list[Kline] | None = None,
     ) -> list[Kline]:
         limit = _bounded_daily_limit(limit, self.settings.max_daily_kline_rows)
         normalized_symbol = _normalized_symbol_key(symbol)
@@ -141,10 +142,7 @@ class KlineCoordinator:
             if cached is not None:
                 return cached
 
-        preserved = await self._load_compatible_daily_cache(
-            symbol,
-            DAILY_KLINE_PRESERVATION_MAX_AGE_SECONDS,
-        )
+        preserved = await self._preserved_daily_cache(symbol, prefetched_cache)
         fetch_limit = max(limit, len(preserved))
         errors: list[str] = []
         if use_cache and len(preserved) >= limit:
@@ -176,6 +174,35 @@ class KlineCoordinator:
             allow_stale=allow_stale,
             require_provider_response=require_provider_response,
         )
+
+    async def _preserved_daily_cache(
+        self,
+        symbol: str,
+        prefetched_cache: list[Kline] | None,
+    ) -> list[Kline]:
+        if prefetched_cache is None:
+            return await self._load_compatible_daily_cache(
+                symbol,
+                DAILY_KLINE_PRESERVATION_MAX_AGE_SECONDS,
+            )
+        return _compatible_daily_klines(
+            prefetched_cache,
+            expected_adjustment_mode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+        )
+
+    async def prefetch_daily_cache(
+        self,
+        symbols: list[str],
+        *,
+        limit: int,
+    ) -> dict[str, list[Kline]]:
+        cached = await run_cache_io_best_effort(
+            self.cache.get_klines_many,
+            symbols,
+            limit,
+            DAILY_KLINE_PRESERVATION_MAX_AGE_SECONDS,
+        )
+        return cached or {}
 
     async def _resolve_daily_outcome(
         self,

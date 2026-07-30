@@ -37,20 +37,36 @@ def test_discovery_preset_routes_expose_typed_crud_and_export_contract(tmp_path)
     assert created.json()["revision"] == 1
 
     listed = client.get("/api/discovery/presets", params={"page": 1, "page_size": 10})
+    updated = client.put(
+        f"/api/discovery/presets/{preset_id}",
+        json={
+            **_payload(),
+            "name": "更新方案",
+            "criteria": {"market": ["SH", "SZ"], "score": {"min": 85}},
+            "sort": [
+                {"field": "score", "order": "desc"},
+                {"field": "symbol", "order": "asc"},
+            ],
+            "expected_revision": 1,
+        },
+    )
     renamed = client.patch(
         f"/api/discovery/presets/{preset_id}",
-        json={"name": "重命名方案", "expected_revision": 1},
+        json={"name": "重命名方案", "expected_revision": 2},
     )
     exported = client.get(f"/api/discovery/presets/{preset_id}/export")
     deleted = client.delete(
         f"/api/discovery/presets/{preset_id}",
-        params={"expected_revision": 2},
+        params={"expected_revision": 3},
     )
 
     assert listed.status_code == 200
     assert listed.json()["total"] == 1
+    assert updated.status_code == 200
+    assert updated.json()["revision"] == 2
+    assert updated.json()["criteria"]["market"] == ["SH", "SZ"]
     assert renamed.status_code == 200
-    assert renamed.json()["revision"] == 2
+    assert renamed.json()["revision"] == 3
     assert exported.status_code == 200
     assert exported.json()["schema_version"] == 1
     assert deleted.status_code == 200

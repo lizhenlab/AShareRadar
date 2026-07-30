@@ -2446,6 +2446,39 @@ def test_kline_cache_rejects_non_positive_limits() -> None:
             assert cache.get_minute_klines("600519.SH", "5m", limit=2, max_age_seconds=max_age_seconds) == []
 
 
+def test_daily_kline_batch_lookup_matches_individual_cache_contract() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        symbols = ("600519.SH", "000001.SZ", "920066.BJ")
+        for offset, symbol in enumerate(symbols):
+            cache.save_klines(
+                symbol,
+                [
+                    make_kline(
+                        date=f"2026-05-{day:02d}",
+                        close=100 + offset + day,
+                    )
+                    for day in range(1, 6)
+                ],
+                "测试日线",
+            )
+
+        batch = cache.get_klines_many(
+            (*symbols, symbols[0], "300001.SZ"),
+            limit=3,
+            max_age_seconds=10**9,
+        )
+
+        assert set(batch) == {*symbols, "300001.SZ"}
+        for symbol in symbols:
+            assert batch[symbol] == cache.get_klines(
+                symbol,
+                limit=3,
+                max_age_seconds=10**9,
+            )
+        assert batch["300001.SZ"] == []
+
+
 def test_kline_cache_filters_invalid_ohlc_and_non_finite_rows() -> None:
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "cache.sqlite3"

@@ -287,6 +287,20 @@ class SQLiteCache:
             adjustment_mode=adjustment_mode,
         )
 
+    def get_klines_many(
+        self,
+        symbols: Iterable[str],
+        limit: int,
+        max_age_seconds: int,
+        adjustment_mode: KlineAdjustmentMode = DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+    ) -> dict[str, list[Kline]]:
+        return self.market_data_repo.get_klines_many(
+            symbols,
+            limit,
+            max_age_seconds,
+            adjustment_mode=adjustment_mode,
+        )
+
     def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None:
         self.market_data_repo.save_minute_klines(symbol, interval, rows, source)
 
@@ -314,14 +328,20 @@ class SQLiteCache:
     def active_market_scan_run(self):
         return self.market_scan_repo.active_run()
 
-    def latest_market_scan_run(self):
-        return self.market_scan_repo.latest_run()
+    def latest_market_scan_run(self, *, mode=None):
+        return self.market_scan_repo.latest_run(mode=mode)
 
-    def latest_published_market_scan_run(self):
-        return self.market_scan_repo.latest_published_run()
+    def latest_published_market_scan_run(self, *, mode=None):
+        return self.market_scan_repo.latest_published_run(mode=mode)
 
-    def market_scan_runs(self, *, page: int, page_size: int):
-        return self.market_scan_repo.list_runs(page=page, page_size=page_size)
+    def market_scan_runs(self, *, page: int, page_size: int, mode=None, status=None, data_date=None):
+        return self.market_scan_repo.list_runs(
+            page=page,
+            page_size=page_size,
+            mode=mode,
+            status=status,
+            data_date=data_date,
+        )
 
     def attach_market_scan_task_run(self, run_id: int, task_run_id: int) -> None:
         self.market_scan_repo.attach_task_run(run_id, task_run_id)
@@ -331,6 +351,9 @@ class SQLiteCache:
 
     def record_market_scan_stock_pool_source(self, run_id: int, source: str):
         return self.market_scan_repo.record_stock_pool_source(run_id, source)
+
+    def update_market_scan_observability(self, run_id: int, **kwargs):
+        return self.market_scan_repo.update_observability(run_id, **kwargs)
 
     def start_market_scan_run(self, run_id: int):
         return self.market_scan_repo.start_run(run_id)

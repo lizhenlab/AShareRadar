@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "benchmark": "full_market_daily_kline_preservation_cache",
+  "provider_calls": 0,
+  "read_only_source_database": true,
+  "symbol_count": 5532,
+  "kline_limit": 260,
+  "batch_size": 50,
+  "iterations": 3,
+  "cold_empty_cache": {
+    "legacy_seconds": [
+      3.106729,
+      3.036607,
+      3.043701
+    ],
+    "prefetched_seconds": [
+      0.07881,
+      0.077504,
+      0.078691
+    ],
+    "legacy_median_seconds": 3.043701,
+    "prefetched_median_seconds": 0.078691,
+    "median_improvement_pct": 97.41,
+    "row_count": 0,
+    "equivalent": true
+  },
+  "warm_persisted_cache": {
+    "legacy_seconds": [
+      13.93426,
+      13.818451,
+      13.828884
+    ],
+    "prefetched_seconds": [
+      11.129911,
+      11.624525,
+      11.105868
+    ],
+    "legacy_median_seconds": 13.828884,
+    "prefetched_median_seconds": 11.129911,
+    "median_improvement_pct": 19.52,
+    "row_count": 1417436,
+    "equivalent": true
+  },
+  "historical_live_scans": {
+    "sample_count": 10,
+    "median_seconds": 599.633,
+    "stage_medians_ms": {}
+  },
+  "estimated_end_to_end_improvement_ceiling_pct": 0.45,
+  "assessment": "local_target_not_met",
+  "limitations": [
+    "基准只测量扫描前置日 K 缓存读取，不调用 provider，也不代表端到端扫描耗时。",
+    "冷缓存使用同规模空数据库；暖缓存使用源数据库中的持久化日 K。",
+    "端到端改善上限仅按历史中位耗时与本地节省量估算，需由后续真实扫描阶段指标复核。",
+    "不得据此提高 provider 并发、降低数据门槛或接受未完成日 K。"
+  ]
+}

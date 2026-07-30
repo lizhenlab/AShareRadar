@@ -2,11 +2,25 @@ import { escapeHtml } from "./dom.js";
 import { formatAuditTimestamp } from "./audit-time.js";
 import { changeClass, formatAmount, formatNumber } from "./format.js";
 import {
+  defaultMarketScanMode,
   isActiveMarketScanRun,
   isPublishedMarketScanRun,
   isRetryableMarketScanRun,
+  marketScanModeLabel,
   marketScanRunIdentityChanged,
 } from "./market-scan-contracts.js";
+import {
+  marketScanHistoryFilters,
+  renderMarketScanHistory,
+  renderMarketScanHistoryError,
+  renderMarketScanHistoryLoading,
+  selectedMarketScanHistoryRunId,
+} from "./market-scan-history-view.js";
+import { saveMarketScanExport } from "./market-scan-view-export.js";
+import { marketScanFilterElements, marketScanQueryParams } from "./market-scan-filters.js";
+import { renderMarketScanObservability } from "./market-scan-progress-view.js";
+import { marketScanSnapshotRow, marketScanSnapshotTargetId, toggleMarketScanSnapshot } from "./market-scan-snapshot-view.js";
+export { marketScanExportFilename } from "./market-scan-view-export.js";
 
 const DEFAULT_PAGE_SIZE = 100;
 const PROGRESS_ANNOUNCEMENT_STEP = 10;
@@ -29,37 +43,50 @@ const RESULT_STATUS_LABELS = Object.freeze({
   skipped: "已跳过",
 });
 
-export function createMarketScanView(root) {
-  const context = { actionBusy: false, announcementKey: "", elements: marketScanElements(root), root };
+export function createMarketScanView(root, now = new Date()) {
+  const elements = marketScanElements(root);
+  initializeModeSelection(elements, now);
+  const context = { actionBusy: false, announcementKey: "", elements, root };
   return {
     announce: (message, key) => announce(context, message, key),
     announceRunUpdate: (previousRun, run, message) => announceRunUpdate(context, previousRun, run, message),
     elements: context.elements,
     renderActionBusy: (busy, run, message) => renderActionBusy(context, busy, run, message),
+    renderExportBusy: (busy, run) => renderExportBusy(context, busy, run),
+    renderBrowsingContext: (taskRun, displayedRun, mode, historical) => (
+      renderBrowsingContext(context, taskRun, displayedRun, mode, historical)
+    ),
     renderHeadline: (message, kind) => renderHeadline(context, message, kind),
+    renderHistory: (payload, selectedRunId) => (
+      renderMarketScanHistory(elements, payload, selectedRunId, selectedMarketScanMode(elements))
+    ),
+    renderHistoryError: (message) => renderMarketScanHistoryError(elements, message),
+    renderHistoryLoading: () => renderMarketScanHistoryLoading(elements),
     renderResults: (payload) => renderResults(context, payload),
     renderResultsLoading: () => renderResultsLoading(context),
     renderResultState: (message, kind) => renderResultState(context, message, kind),
     renderRun: (run, message) => renderRun(context, run, message),
     resetResultPresentation: (run) => resetResultPresentation(context, run),
+    saveExport: (blob, disposition, run) => saveMarketScanExport(context, blob, disposition, run),
+    historyFilters: () => marketScanHistoryFilters(elements),
+    modeLabel: (mode) => marketScanModeLabel(mode),
+    selectedHistoryRunId: () => selectedMarketScanHistoryRunId(elements),
+    selectedMode: () => selectedMarketScanMode(elements),
+    toggleSnapshot: (button) => toggleMarketScanSnapshot(root, button),
   };
 }
 
 export function buildMarketScanResultsUrl(runId, page, elements) {
-  const params = new URLSearchParams({
+  const params = marketScanQueryParams(elements, {
     page: String(positiveInteger(page, 1)),
     page_size: String(DEFAULT_PAGE_SIZE),
-    status: elements.status.value || "success",
-    sort: elements.sort.value || "rank",
-    order: elements.order.value || "asc",
   });
-  addParam(params, "market", elements.market.value);
-  addParam(params, "industry", elements.industry.value.trim());
-  addParam(params, "is_st", elements.isSt.value);
-  addParam(params, "is_new", elements.isNew.value);
-  addParam(params, "min_data_quality_score", elements.quality.value);
-  addParam(params, "keyword", elements.keyword.value.trim());
   return `/api/market-scans/${encodeURIComponent(runId)}/results?${params.toString()}`;
+}
+
+export function buildMarketScanExportUrl(runId, elements) {
+  const params = marketScanQueryParams(elements);
+  return `/api/market-scans/${encodeURIComponent(runId)}/export.xlsx?${params.toString()}`;
 }
 
 export function marketScanResultsUrl(runId, page, elements) {
@@ -69,9 +96,11 @@ export function marketScanResultsUrl(runId, page, elements) {
 export function marketScanResultRow(item, options = {}) {
   const view = marketScanResultView(item);
   const discovery = discoveryResultActions(view, options);
-  return `<tr>
+  const snapshotTarget = marketScanSnapshotTargetId(item);
+  const run = options.run && typeof options.run === "object" ? options.run : {};
+  return `<tr class="market-scan-result-row">
     <td data-label="排名">${escapeHtml(view.rank)}</td>
-    <td data-label="股票"><button type="button" class="market-scan-stock" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}"><strong>${escapeHtml(view.name)}</strong><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span></button></td>
+    <td data-label="股票"><div class="market-scan-stock"><strong>${escapeHtml(view.name)}</strong><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span><div class="market-scan-stock-actions"><button type="button" class="mini-button" data-market-scan-snapshot-target="${escapeHtml(snapshotTarget)}" aria-controls="${escapeHtml(snapshotTarget)}" aria-expanded="false">查看扫描快照</button><button type="button" class="mini-button" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" data-market-scan-mode="${escapeHtml(run.mode || "")}" data-market-scan-quote-date="${escapeHtml(run.quote_date || "")}" data-market-scan-data-date="${escapeHtml(run.data_date || item.data_date || "")}" title="使用当前可用数据打开个股分析，不代表历史扫描快照">打开当前个股分析</button></div></div></td>
     <td data-label="市场 / 行业"><span class="market-scan-meta">${escapeHtml(view.marketIndustry)}</span></td>
     <td data-label="短线强势"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
     <td data-label="趋势">${escapeHtml(scoreText(view.trendScore))}</td>
@@ -80,7 +109,7 @@ export function marketScanResultRow(item, options = {}) {
     <td data-label="成交额">${escapeHtml(formatAmount(view.amount))}</td>
     <td data-label="质量">${escapeHtml(scoreText(view.qualityScore))}</td>
     <td data-label="状态 / 标签"><span class="market-scan-status ${escapeHtml(view.status)}">${escapeHtml(marketScanResultStatusLabel(view.status))}</span><div class="market-scan-tags">${escapeHtml(view.detail)}</div>${discovery}</td>
-  </tr>`;
+  </tr>${marketScanSnapshotRow(item)}`;
 }
 
 function discoveryResultActions(view, options) {
@@ -88,8 +117,10 @@ function discoveryResultActions(view, options) {
   const rankLabel = String(options.rankLabel || "全市场排名变化未查询");
   const movement = String(options.rankMovement || "unavailable");
   const queued = Boolean(options.queued);
+  const selected = Boolean(options.selected);
   return `<div class="discovery-row-actions">
     <span class="discovery-rank-change ${escapeHtml(movement)}">${escapeHtml(rankLabel)}</span>
+    <label class="discovery-select-row"><input type="checkbox" data-discovery-select-symbol="${escapeHtml(view.dataSymbol)}"${selected ? " checked" : ""}${queued ? " disabled" : ""} />选择</label>
     <button type="button" class="mini-button" data-discovery-enqueue-symbol="${escapeHtml(view.dataSymbol)}"${queued ? " disabled" : ""}>${queued ? "已在研究队列" : "加入研究队列"}</button>
   </div>`;
 }
@@ -106,11 +137,17 @@ function resetResultPresentation(context, run) {
   if (!run) {
     renderResultState(context, "暂无扫描记录");
   } else if (isActiveMarketScanRun(run)) {
-    renderResultState(context, "扫描进行中，任务完成后将发布稳定榜单。", "loading");
+    const message = run.mode === "intraday"
+      ? "盘中临时扫描进行中，完成后将生成盘中临时榜单。"
+      : "盘后正式扫描进行中，完成后将发布盘后正式榜单。";
+    renderResultState(context, message, "loading");
   } else if (isPublishedMarketScanRun(run)) {
-    renderResultState(context, "正在读取榜单...", "loading");
+    renderResultState(context, `正在读取${marketScanModeLabel(run.mode)}榜单...`, "loading");
   } else {
-    renderResultState(context, "该批次未发布正式榜单，可重试问题项或新建扫描。", "degraded");
+    const message = run.mode === "intraday"
+      ? "该批次未生成盘中临时榜单，可重试问题项或新建扫描。"
+      : "该批次未发布盘后正式榜单，可重试问题项或新建扫描。";
+    renderResultState(context, message, "degraded");
   }
 }
 
@@ -128,6 +165,8 @@ function renderEmptyRun(context) {
   setText(elements.progressText, "--");
   renderProgressElement(elements.progressBar, 0, "尚无扫描进度");
   [
+    elements.modeSummary,
+    elements.quoteDate,
     elements.dataDate,
     elements.total,
     elements.success,
@@ -137,6 +176,7 @@ function renderEmptyRun(context) {
   ]
     .forEach((element) => setText(element, "--"));
   renderRuleVersion(elements.rule, null);
+  renderMarketScanObservability(elements, null);
   renderRunControls(context, null);
 }
 
@@ -144,16 +184,20 @@ function renderPopulatedRun(context, run, overrideMessage) {
   const { elements } = context;
   const progress = clampPercentage(run.progress_pct);
   const statusLabel = marketScanRunStatusLabel(run.status);
-  const headline = overrideMessage || run.message || `${statusLabel} · 数据日期 ${run.data_date || "--"}`;
+  const detail = overrideMessage || run.message || `${statusLabel} · 日K截止日 ${run.data_date || "--"}`;
+  const headline = modeAwareRunMessage(run, detail);
   renderHeadline(context, headline, run.status === "degraded" ? "degraded" : run.status === "failed" ? "error" : "");
   const progressText = `${integer(run.processed_count)}/${integer(run.total_count)} · ${formatNumber(progress, 1)}%`;
   setText(elements.progressText, progressText);
-  renderProgressElement(elements.progressBar, progress, `${statusLabel}，${progressText}`);
+  renderProgressElement(elements.progressBar, progress, modeAwareRunMessage(run, `${statusLabel}，${progressText}`));
   renderRunSummary(elements, run);
+  renderMarketScanObservability(elements, run);
   renderRunControls(context, run);
 }
 
 function renderRunSummary(elements, run) {
+  setText(elements.modeSummary, marketScanModeLabel(run.mode));
+  setText(elements.quoteDate, run.quote_date || "--");
   setText(elements.dataDate, run.data_date || "--");
   setText(
     elements.total,
@@ -164,6 +208,40 @@ function renderRunSummary(elements, run) {
   setText(elements.coverage, `${formatNumber(clampPercentage(run.coverage_pct), 1)}%`);
   setText(elements.finishedAt, displayTimestamp(run.finished_at || run.started_at || run.created_at));
   renderRuleVersion(elements.rule, run.rule_version);
+}
+
+function renderBrowsingContext(context, taskRun, displayedRun, selectedMode, historical) {
+  const { elements } = context;
+  if (displayedRun) renderRunSummary(elements, displayedRun);
+  else if (taskRun?.mode === selectedMode) renderRunSummary(elements, taskRun);
+  else clearRunSummary(elements);
+  const browseLabel = marketScanModeLabel(selectedMode);
+  const browseSource = displayedRun
+    ? `${historical ? "历史批次" : "最近发布"} #${displayedRun.id} · 行情日 ${displayedRun.quote_date || "--"}`
+    : "暂无已发布榜单";
+  setText(elements.browseContext, `当前浏览：${browseLabel} · ${browseSource}`);
+  let taskText = "后台任务：暂无扫描任务";
+  if (taskRun) {
+    taskText = `后台任务：${marketScanModeLabel(taskRun.mode)} #${taskRun.id} · ${marketScanRunStatusLabel(taskRun.status)}`;
+  }
+  const mismatch = Boolean(taskRun && isActiveMarketScanRun(taskRun) && taskRun.mode !== selectedMode);
+  if (mismatch) taskText += `；与当前浏览的${browseLabel}不同`;
+  setText(elements.taskContext, taskText);
+  elements.context.classList?.toggle("mismatch", mismatch);
+}
+
+function clearRunSummary(elements) {
+  [
+    elements.modeSummary,
+    elements.quoteDate,
+    elements.dataDate,
+    elements.total,
+    elements.success,
+    elements.issues,
+    elements.coverage,
+    elements.finishedAt,
+  ].forEach((element) => setText(element, "--"));
+  renderRuleVersion(elements.rule, null);
 }
 
 function renderRuleVersion(element, value) {
@@ -193,7 +271,7 @@ function renderResults(context, payload) {
     announceResults(context, payload, 0);
     return;
   }
-  elements.rows.innerHTML = payload.items.map(marketScanResultRow).join("");
+  elements.rows.innerHTML = payload.items.map((item) => marketScanResultRow(item, { run: payload.run })).join("");
   setResultRunIdentity(elements, payload.run.id);
   elements.tableWrap.hidden = false;
   elements.resultState.hidden = true;
@@ -203,9 +281,10 @@ function renderResults(context, payload) {
 
 function announceResults(context, payload, visibleCount) {
   const pageCount = payload.page_count;
+  const mode = marketScanModeLabel(payload.run.mode);
   announce(
     context,
-    `榜单加载完成，第 ${payload.page}/${Math.max(pageCount, 1)} 页，本页 ${visibleCount} 条，共 ${payload.total} 条。`,
+    `${mode}榜单加载完成，第 ${payload.page}/${Math.max(pageCount, 1)} 页，本页 ${visibleCount} 条，共 ${payload.total} 条。`,
     `results:${payload.run.id}:${payload.page}:${pageCount}:${visibleCount}:${payload.total}`
   );
 }
@@ -269,6 +348,12 @@ function renderActionBusy(context, busy, run, message = "") {
   if (message) announce(context, message, `action-busy:${message}`);
 }
 
+function renderExportBusy({ elements }, busy, publishedRun) {
+  elements.exportButton.disabled = Boolean(busy) || !isPublishedMarketScanRun(publishedRun);
+  setAttribute(elements.exportButton, "aria-busy", busy ? "true" : "false");
+  setText(elements.exportButton, busy ? "正在导出..." : "导出 Excel");
+}
+
 function renderRunControls(context, run) {
   const { elements } = context;
   const active = isActiveMarketScanRun(run);
@@ -279,6 +364,8 @@ function renderRunControls(context, run) {
     focusVisibleControl(context, [elements.market, elements.tableWrap]);
   }
   elements.start.disabled = context.actionBusy || active;
+  elements.modeInputs.forEach((input) => { input.disabled = context.actionBusy; });
+  setAttribute(elements.modeControl, "aria-disabled", context.actionBusy ? "true" : "false");
   elements.cancel.disabled = context.actionBusy || run?.status === "cancelling";
   elements.retry.disabled = context.actionBusy;
   setAttribute(elements.panel, "aria-busy", context.actionBusy ? "true" : "false");
@@ -292,6 +379,7 @@ function renderGlobalProgress(context, run) {
   const { elements } = context;
   const active = isActiveMarketScanRun(run);
   elements.globalProgress.hidden = !active;
+  context.root?.body?.classList?.toggle("market-scan-global-active", active);
   setAttribute(elements.globalProgress, "aria-busy", active ? "true" : "false");
   elements.globalOpen.disabled = false;
   elements.globalCancel.disabled = context.actionBusy || run?.status === "cancelling";
@@ -305,9 +393,9 @@ function renderGlobalProgress(context, run) {
   renderProgressElement(
     elements.globalBar,
     progress,
-    `${marketScanRunStatusLabel(run.status)}，${progressText}`,
+    modeAwareRunMessage(run, `${marketScanRunStatusLabel(run.status)}，${progressText}`),
   );
-  setText(elements.globalText, `${marketScanRunStatusLabel(run.status)} · ${progressText}`);
+  setText(elements.globalText, modeAwareRunMessage(run, `${marketScanRunStatusLabel(run.status)} · ${progressText}`));
 }
 
 function renderProgressElement(element, progress, valueText) {
@@ -362,7 +450,7 @@ function announceRunUpdate(context, previousRun, run, overrideMessage = "") {
   } else if (runChanged || statusChanged || overrideMessage) {
     announce(
       context,
-      overrideMessage || run.message || marketScanRunStatusLabel(run.status),
+      modeAwareRunMessage(run, overrideMessage || run.message || marketScanRunStatusLabel(run.status)),
       `run:${run.id}:${run.status}:terminal`
     );
   }
@@ -374,7 +462,7 @@ function announceActiveRun(context, previousRun, run, overrideMessage, runChange
   if (!runChanged && !statusChanged && milestone <= previousMilestone) return;
   announce(
     context,
-    overrideMessage || activeRunAnnouncement(run, milestone),
+    overrideMessage ? modeAwareRunMessage(run, overrideMessage) : activeRunAnnouncement(run, milestone),
     `run:${run.id}:${run.status}:${milestone}`
   );
 }
@@ -388,7 +476,10 @@ function announce(context, message, key = message) {
 
 function activeRunAnnouncement(run, milestone) {
   const detail = run.message ? `。${run.message}` : "";
-  return `${marketScanRunStatusLabel(run.status)}，已处理 ${integer(run.processed_count)}/${integer(run.total_count)}，进度 ${milestone}%${detail}`;
+  return modeAwareRunMessage(
+    run,
+    `${marketScanRunStatusLabel(run.status)}，已处理 ${integer(run.processed_count)}/${integer(run.total_count)}，进度 ${milestone}%${detail}`,
+  );
 }
 
 function progressMilestone(value) {
@@ -426,14 +517,38 @@ function marketScanResultDetail(item) {
 }
 
 function marketScanElements(root) {
+  const modeIntraday = requiredElement(root, "marketScanModeIntraday");
+  const modeOfficial = requiredElement(root, "marketScanModeOfficial");
   return {
     panel: requiredElement(root, "workspace-panel-market-scan"),
     headline: requiredElement(root, "marketScanHeadline"),
     start: requiredElement(root, "marketScanStart"),
+    modeControl: requiredElement(root, "marketScanModeControl"),
+    modeIntraday,
+    modeOfficial,
+    modeInputs: [modeIntraday, modeOfficial],
     cancel: requiredElement(root, "marketScanCancel"),
     retry: requiredElement(root, "marketScanRetry"),
+    exportButton: requiredElement(root, "marketScanExport"),
+    context: requiredElement(root, "marketScanContext"),
+    browseContext: requiredElement(root, "marketScanBrowseContext"),
+    taskContext: requiredElement(root, "marketScanTaskContext"),
+    history: requiredElement(root, "marketScanHistory"),
+    historyRun: requiredElement(root, "marketScanHistoryRun"),
+    historyStatus: requiredElement(root, "marketScanHistoryStatus"),
+    historyDate: requiredElement(root, "marketScanHistoryDate"),
+    historyRefresh: requiredElement(root, "marketScanHistoryRefresh"),
+    historyFeedback: requiredElement(root, "marketScanHistoryFeedback"),
     progressText: requiredElement(root, "marketScanProgressText"),
     progressBar: requiredElement(root, "marketScanProgressBar"),
+    stage: requiredElement(root, "marketScanStage"),
+    elapsed: requiredElement(root, "marketScanElapsed"),
+    throughput: requiredElement(root, "marketScanThroughput"),
+    eta: requiredElement(root, "marketScanEta"),
+    marketProgress: requiredElement(root, "marketScanMarketProgress"),
+    diagnostic: requiredElement(root, "marketScanDiagnostic"),
+    modeSummary: requiredElement(root, "marketScanModeSummary"),
+    quoteDate: requiredElement(root, "marketScanQuoteDate"),
     dataDate: requiredElement(root, "marketScanDataDate"),
     total: requiredElement(root, "marketScanTotal"),
     success: requiredElement(root, "marketScanSuccess"),
@@ -441,16 +556,7 @@ function marketScanElements(root) {
     coverage: requiredElement(root, "marketScanCoverage"),
     finishedAt: requiredElement(root, "marketScanFinishedAt"),
     rule: requiredElement(root, "marketScanRule"),
-    filters: requiredElement(root, "marketScanFilters"),
-    status: requiredElement(root, "marketScanStatus"),
-    market: requiredElement(root, "marketScanMarket"),
-    industry: requiredElement(root, "marketScanIndustry"),
-    isSt: requiredElement(root, "marketScanSt"),
-    isNew: requiredElement(root, "marketScanNew"),
-    quality: requiredElement(root, "marketScanQuality"),
-    keyword: requiredElement(root, "marketScanKeyword"),
-    sort: requiredElement(root, "marketScanSort"),
-    order: requiredElement(root, "marketScanOrder"),
+    ...marketScanFilterElements(root, requiredElement),
     announcement: requiredElement(root, "marketScanAnnouncement"),
     resultState: requiredElement(root, "marketScanResultState"),
     tableWrap: requiredElement(root, "marketScanTableWrap"),
@@ -467,16 +573,34 @@ function marketScanElements(root) {
   };
 }
 
+function initializeModeSelection(elements, now) {
+  setModeSelection(elements, defaultMarketScanMode(now));
+}
+
+function setModeSelection(elements, mode) {
+  elements.modeIntraday.checked = mode === "intraday";
+  elements.modeOfficial.checked = mode === "official";
+}
+
+function selectedMarketScanMode(elements) {
+  return elements.modeIntraday.checked ? "intraday" : "official";
+}
+
+function modeAwareRunMessage(run, message) {
+  const value = String(message || "").trim();
+  if (run?.mode !== "intraday") return value;
+  const safe = value
+    .replaceAll("盘后正式", "盘中临时")
+    .replaceAll("正式榜单", "盘中临时榜单")
+    .replaceAll("稳定榜单", "盘中临时榜单")
+    .replaceAll("正式扫描", "盘中临时扫描");
+  return safe.includes("盘中临时") ? safe : `盘中临时 · ${safe}`;
+}
+
 function requiredElement(root, id) {
   const element = root.getElementById(id);
   if (!element) throw new Error(`缺少全市场扫描界面元素：${id}`);
   return element;
-}
-
-function addParam(params, key, value) {
-  if (value !== null && value !== undefined && String(value).trim() !== "") {
-    params.set(key, String(value).trim());
-  }
 }
 
 function setText(element, value) {

@@ -1,6 +1,20 @@
 export const WORKSPACE_PREFERENCES_VERSION = 1;
 export const WORKSPACE_PREFERENCES_STORAGE_KEY = "ashare-radar.workspace-preferences";
 
+export const PRIMARY_VIEW_OPTIONS = Object.freeze(["research", "market", "review", "monitor"]);
+export const PRIMARY_WORKSPACE_VIEWS = Object.freeze({
+  research: Object.freeze(["overview", "qa", "strategy", "finance", "theme"]),
+  market: Object.freeze(["market-scan"]),
+  review: Object.freeze(["replay", "tools"]),
+  monitor: Object.freeze([]),
+});
+export const DEFAULT_WORKSPACE_VIEW_BY_PRIMARY = Object.freeze({
+  research: "overview",
+  market: "market-scan",
+  review: "replay",
+  monitor: null,
+});
+
 export const WORKSPACE_PREFERENCE_OPTIONS = Object.freeze({
   workspaceView: Object.freeze(["overview", "market-scan", "qa", "strategy", "finance", "theme", "replay", "tools"]),
   dailyChartRange: Object.freeze([20, 60, 120, 240]),
@@ -9,6 +23,7 @@ export const WORKSPACE_PREFERENCE_OPTIONS = Object.freeze({
 });
 
 export const DEFAULT_WORKSPACE_PREFERENCES = Object.freeze({
+  primaryView: "research",
   workspaceView: "overview",
   dailyChartRange: 60,
   dailyChartMa5: true,
@@ -47,10 +62,14 @@ export function saveWorkspacePreferences(preferences, storage = browserStorage()
 
 export function sanitizeWorkspacePreferences(candidate) {
   const value = isRecord(candidate) ? candidate : {};
+  const workspaceView = allowed("workspaceView", value.workspaceView)
+    ? value.workspaceView
+    : DEFAULT_WORKSPACE_PREFERENCES.workspaceView;
   return {
-    workspaceView: allowed("workspaceView", value.workspaceView)
-      ? value.workspaceView
-      : DEFAULT_WORKSPACE_PREFERENCES.workspaceView,
+    primaryView: PRIMARY_VIEW_OPTIONS.includes(value.primaryView)
+      ? value.primaryView
+      : primaryViewForWorkspace(workspaceView),
+    workspaceView,
     dailyChartRange: allowed("dailyChartRange", value.dailyChartRange)
       ? value.dailyChartRange
       : DEFAULT_WORKSPACE_PREFERENCES.dailyChartRange,
@@ -67,6 +86,11 @@ export function sanitizeWorkspacePreferences(candidate) {
       ? value.mobileChartView
       : DEFAULT_WORKSPACE_PREFERENCES.mobileChartView,
   };
+}
+
+export function primaryViewForWorkspace(view) {
+  return PRIMARY_VIEW_OPTIONS.find((primaryView) => PRIMARY_WORKSPACE_VIEWS[primaryView].includes(view))
+    || DEFAULT_WORKSPACE_PREFERENCES.primaryView;
 }
 
 function allowed(name, value) {

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from app.models.market import Kline, Quote, StockInfo
 from app.models.market_scan import (
+    MarketScanFilterValues,
     MarketScanPublicationSummary,
+    MarketScanMode,
     MarketScanResultItem,
     MarketScanResultPage,
     MarketScanResultStatus,
@@ -15,8 +17,9 @@ from app.models.market_scan import (
     MarketScanRunPage,
     MarketScanRunStatus,
     MarketScanSeed,
-    MarketScanSort,
-    MarketScanSortOrder,
+    MarketScanSortOrderValues,
+    MarketScanSortValues,
+    MarketScanStage,
     MarketScanTrigger,
 )
 from app.services.datahub_metadata import StockPoolResolution
@@ -65,9 +68,11 @@ class MarketScanCacheProtocol(Protocol):
         self,
         *,
         trigger: MarketScanTrigger,
+        mode: MarketScanMode,
         rule_version: str,
         as_of: str,
         data_date: str,
+        quote_date: str,
         scope: str,
     ) -> MarketScanRun: ...
 
@@ -81,9 +86,9 @@ class MarketScanCacheProtocol(Protocol):
         task_status: str | None = None,
     ) -> MarketScanRun: ...
 
-    def latest_market_scan_run(self) -> MarketScanRun | None: ...
+    def latest_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...
 
-    def latest_published_market_scan_run(self) -> MarketScanRun | None: ...
+    def latest_published_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...
 
     def market_scan_degraded_result_count(self, run_id: int) -> int: ...
 
@@ -94,21 +99,40 @@ class MarketScanCacheProtocol(Protocol):
         page: int,
         page_size: int,
         status: MarketScanResultStatus | None,
-        market: str | None,
-        industry: str | None,
+        market: MarketScanFilterValues,
+        industry: MarketScanFilterValues,
         is_st: bool | None,
         is_new: bool | None,
+        min_score: int | None = None,
+        max_score: int | None = None,
+        min_trend_score: int | None = None,
+        max_trend_score: int | None = None,
+        min_change_pct: float | None = None,
+        max_change_pct: float | None = None,
+        min_turnover_rate: float | None = None,
+        max_turnover_rate: float | None = None,
+        min_amount: float | None = None,
+        max_amount: float | None = None,
         min_data_quality_score: int | None,
+        max_data_quality_score: int | None = None,
         keyword: str | None,
-        sort: MarketScanSort,
-        order: MarketScanSortOrder,
+        sort: MarketScanSortValues,
+        order: MarketScanSortOrderValues,
     ) -> MarketScanResultPage: ...
 
     def market_scan_retry_plan(self, run_id: int) -> MarketScanRetryPlan: ...
 
     def market_scan_run(self, run_id: int) -> MarketScanRun: ...
 
-    def market_scan_runs(self, *, page: int, page_size: int) -> MarketScanRunPage: ...
+    def market_scan_runs(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None = None,
+        status: MarketScanRunStatus | Literal["published"] | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage: ...
 
     def pending_market_scan_items(self, run_id: int) -> list[MarketScanResultItem]: ...
 
@@ -119,6 +143,16 @@ class MarketScanCacheProtocol(Protocol):
     ) -> MarketScanRun: ...
 
     def record_market_scan_stock_pool_source(self, run_id: int, source: str) -> MarketScanRun: ...
+
+    def update_market_scan_observability(
+        self,
+        run_id: int,
+        *,
+        stage: MarketScanStage,
+        stage_items: int = 0,
+        work_metrics: dict[MarketScanStage, tuple[int, int]] | None = None,
+        message: str | None = None,
+    ) -> MarketScanRun: ...
 
     def refresh_pending_market_scan_metadata(
         self,
@@ -182,6 +216,26 @@ class MarketScanDataHubProtocol(Protocol):
 
 
 @runtime_checkable
+class MarketScanKlinePrefetchProtocol(Protocol):
+    async def prefetch_market_scan_klines(
+        self,
+        symbols: list[str],
+        *,
+        limit: int,
+    ) -> dict[str, list[Kline]]: ...
+
+    async def market_scan_kline_from_prefetch(
+        self,
+        symbol: str,
+        prefetched_cache: list[Kline],
+        *,
+        limit: int,
+        allow_stale: bool,
+        require_provider_response: bool,
+    ) -> list[Kline]: ...
+
+
+@runtime_checkable
 class MarketScanStockPoolResolutionProtocol(Protocol):
     async def stock_pool_resolution(
         self,
@@ -201,6 +255,7 @@ class MarketScanProviderStateProtocol(Protocol):
 __all__ = [
     "MarketScanCacheProtocol",
     "MarketScanDataHubProtocol",
+    "MarketScanKlinePrefetchProtocol",
     "MarketScanProviderStateProtocol",
     "MarketScanPublicationRepositoryProtocol",
     "MarketScanSettingsProtocol",
