@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 283 | 620 | 3283 | 867 | 66667 |
-| `tests/` | 176 | 159 | 2125 | 737 | 67612 |
+| `tests/` | 176 | 159 | 2125 | 737 | 67615 |
 | `tools/` | 8 | 6 | 109 | 4 | 2152 |
 
 ## Python Function Health
@@ -8271,7 +8271,7 @@ Lines: 557
 
 #### `tests/test_frontend_workspace_preferences.py`
 
-Lines: 317
+Lines: 320
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -8280,7 +8280,7 @@ Lines: 317
 | function | `test_legacy_workspace_view_preferences_migrate_to_the_matching_primary_view` | 120 | `def test_legacy_workspace_view_preferences_migrate_to_the_matching_primary_view() -> None` |
 | function | `test_primary_navigation_static_contract_exposes_exactly_four_functional_areas` | 162 | `def test_primary_navigation_static_contract_exposes_exactly_four_functional_areas() -> None` |
 | function | `test_app_restores_and_persists_preferences_through_existing_setters` | 184 | `def test_app_restores_and_persists_preferences_through_existing_setters() -> None` |
-| function | `_run_node_script` | 310 | `def _run_node_script(script: str) -> None` |
+| function | `_run_node_script` | 313 | `def _run_node_script(script: str) -> None` |
 
 #### `tests/test_futu_provider_modules.py`
 
