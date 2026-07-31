@@ -531,7 +531,6 @@ def _account_from_row(row: sqlite3.Row) -> PaperTradingAccount:
 
 
 def _strategy_from_row(row: sqlite3.Row) -> PaperStrategy:
-    optional_float = lambda name: float(row[name]) if row[name] is not None else None
     return PaperStrategy(
         id=int(row["id"]),
         plan_id=int(row["plan_id"]),
@@ -546,27 +545,27 @@ def _strategy_from_row(row: sqlite3.Row) -> PaperStrategy:
         snapshot_price=float(row["snapshot_price"]),
         snapshot_adjustment_mode=str(row["snapshot_adjustment_mode"]),
         snapshot_anchor_date=str(row["snapshot_anchor_date"]) if row["snapshot_anchor_date"] is not None else None,
-        snapshot_anchor_close=optional_float("snapshot_anchor_close"),
+        snapshot_anchor_close=_optional_float(row, "snapshot_anchor_close"),
         snapshot_data_version=str(row["snapshot_data_version"]),
         snapshot_contract_version=str(row["snapshot_contract_version"]),
         target_price=float(row["target_price"]),
         stop_price=float(row["stop_price"]),
         horizon_days=int(row["horizon_days"]),
         status=str(row["status"]),
-        normalized_target_price=optional_float("normalized_target_price"),
-        normalized_stop_price=optional_float("normalized_stop_price"),
+        normalized_target_price=_optional_float(row, "normalized_target_price"),
+        normalized_stop_price=_optional_float(row, "normalized_stop_price"),
         entry_date=str(row["entry_date"]) if row["entry_date"] is not None else None,
-        entry_price=optional_float("entry_price"),
+        entry_price=_optional_float(row, "entry_price"),
         quantity=int(row["quantity"]),
         buy_friction=float(row["buy_friction"]),
         held_sessions=int(row["held_sessions"]),
-        last_price=optional_float("last_price"),
+        last_price=_optional_float(row, "last_price"),
         exit_date=str(row["exit_date"]) if row["exit_date"] is not None else None,
-        exit_price=optional_float("exit_price"),
+        exit_price=_optional_float(row, "exit_price"),
         exit_reason=str(row["exit_reason"]) if row["exit_reason"] is not None else None,
         sell_friction=float(row["sell_friction"]),
-        realized_pnl=optional_float("realized_pnl"),
-        return_pct=optional_float("return_pct"),
+        realized_pnl=_optional_float(row, "realized_pnl"),
+        return_pct=_optional_float(row, "return_pct"),
         error_message=str(row["error_message"]) if row["error_message"] is not None else None,
         last_processed_date=str(row["last_processed_date"]) if row["last_processed_date"] is not None else None,
         created_at=str(row["created_at"]),
@@ -596,34 +595,32 @@ def _strategies_for_run(
 def _strategy_with_result(source: PaperStrategy, row: sqlite3.Row | None) -> PaperStrategy:
     if row is None:
         return source
-    optional_float = lambda name: float(row[name]) if row[name] is not None else None
-    optional_text = lambda name: str(row[name]) if row[name] is not None else None
     return source.model_copy(
         update={
             "status": str(row["status"]),
             "allocation_order": int(row["allocation_order"]) if row["allocation_order"] is not None else None,
-            "normalized_target_price": optional_float("normalized_target_price"),
-            "normalized_stop_price": optional_float("normalized_stop_price"),
+            "normalized_target_price": _optional_float(row, "normalized_target_price"),
+            "normalized_stop_price": _optional_float(row, "normalized_stop_price"),
             "entry_wait_sessions": int(row["entry_wait_sessions"]),
-            "entry_date": optional_text("entry_date"),
-            "entry_price": optional_float("entry_price"),
+            "entry_date": _optional_text(row, "entry_date"),
+            "entry_price": _optional_float(row, "entry_price"),
             "quantity": int(row["quantity"]),
             "buy_friction": float(row["buy_friction"]),
             "held_sessions": int(row["held_sessions"]),
-            "last_price": optional_float("last_price"),
-            "pending_exit_reason": optional_text("pending_exit_reason"),
-            "pending_exit_date": optional_text("pending_exit_date"),
-            "exit_date": optional_text("exit_date"),
-            "exit_price": optional_float("exit_price"),
-            "exit_reason": optional_text("exit_reason"),
+            "last_price": _optional_float(row, "last_price"),
+            "pending_exit_reason": _optional_text(row, "pending_exit_reason"),
+            "pending_exit_date": _optional_text(row, "pending_exit_date"),
+            "exit_date": _optional_text(row, "exit_date"),
+            "exit_price": _optional_float(row, "exit_price"),
+            "exit_reason": _optional_text(row, "exit_reason"),
             "sell_friction": float(row["sell_friction"]),
-            "gross_realized_pnl": optional_float("gross_realized_pnl"),
-            "realized_pnl": optional_float("realized_pnl"),
-            "return_pct": optional_float("return_pct"),
-            "rule_profile_id": optional_text("rule_profile_id"),
+            "gross_realized_pnl": _optional_float(row, "gross_realized_pnl"),
+            "realized_pnl": _optional_float(row, "realized_pnl"),
+            "return_pct": _optional_float(row, "return_pct"),
+            "rule_profile_id": _optional_text(row, "rule_profile_id"),
             "rule_data_degraded": bool(row["rule_data_degraded"]),
-            "error_message": optional_text("error_message"),
-            "last_processed_date": optional_text("last_processed_date"),
+            "error_message": _optional_text(row, "error_message"),
+            "last_processed_date": _optional_text(row, "last_processed_date"),
         }
     )
 
@@ -698,7 +695,6 @@ def _event_from_row(row: sqlite3.Row) -> PaperTradingEvent:
 
 
 def _equity_from_row(row: sqlite3.Row) -> PaperEquityPoint:
-    optional_float = lambda name: float(row[name]) if row[name] is not None else None
     return PaperEquityPoint(
         id=int(row["id"]),
         run_id=int(row["run_id"]),
@@ -713,13 +709,21 @@ def _equity_from_row(row: sqlite3.Row) -> PaperEquityPoint:
         unrealized_pnl=float(row["unrealized_pnl"]),
         return_pct=float(row["return_pct"]),
         gross_return_pct=float(row["gross_return_pct"]),
-        benchmark_equity=optional_float("benchmark_equity"),
-        benchmark_return_pct=optional_float("benchmark_return_pct"),
-        excess_return_pct=optional_float("excess_return_pct"),
+        benchmark_equity=_optional_float(row, "benchmark_equity"),
+        benchmark_return_pct=_optional_float(row, "benchmark_return_pct"),
+        excess_return_pct=_optional_float(row, "excess_return_pct"),
         exposure_pct=float(row["exposure_pct"]),
         drawdown_pct=float(row["drawdown_pct"]),
         created_at=str(row["created_at"]),
     )
+
+
+def _optional_float(row: sqlite3.Row, name: str) -> float | None:
+    return float(row[name]) if row[name] is not None else None
+
+
+def _optional_text(row: sqlite3.Row, name: str) -> str | None:
+    return str(row[name]) if row[name] is not None else None
 
 
 def _run_from_row(row: sqlite3.Row) -> PaperTradingRun:

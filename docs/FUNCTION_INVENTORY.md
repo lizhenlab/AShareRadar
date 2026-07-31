@@ -8,7 +8,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 295 | 670 | 3515 | 898 | 73123 |
+| `app/` | 295 | 670 | 3517 | 898 | 73127 |
 | `tests/` | 181 | 161 | 2189 | 743 | 69754 |
 | `tools/` | 9 | 6 | 111 | 4 | 2239 |
 
@@ -1536,7 +1536,7 @@ Lines: 207
 
 #### `app/repositories/paper_trading.py`
 
-Lines: 1013
+Lines: 1017
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -1562,29 +1562,31 @@ Lines: 1013
 | function | `_account_row` | 498 | `def _account_row(conn: sqlite3.Connection, *, create: bool) -> sqlite3.Row \| None` |
 | function | `_account_from_row` | 521 | `def _account_from_row(row: sqlite3.Row) -> PaperTradingAccount` |
 | function | `_strategy_from_row` | 533 | `def _strategy_from_row(row: sqlite3.Row) -> PaperStrategy` |
-| function | `_strategies_for_run` | 577 | `def _strategies_for_run(conn: sqlite3.Connection, sources: list[PaperStrategy], run_id: int \| None) -> list[PaperStrategy]` |
-| function | `_strategy_with_result` | 596 | `def _strategy_with_result(source: PaperStrategy, row: sqlite3.Row \| None) -> PaperStrategy` |
-| function | `_trades_for_run` | 631 | `def _trades_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperTrade]` |
-| function | `_events_for_run` | 641 | `def _events_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperTradingEvent]` |
-| function | `_equity_for_run` | 651 | `def _equity_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperEquityPoint]` |
-| function | `_trade_from_row` | 661 | `def _trade_from_row(row: sqlite3.Row) -> PaperTrade` |
-| function | `_event_from_row` | 682 | `def _event_from_row(row: sqlite3.Row) -> PaperTradingEvent` |
-| function | `_equity_from_row` | 700 | `def _equity_from_row(row: sqlite3.Row) -> PaperEquityPoint` |
-| function | `_run_from_row` | 725 | `def _run_from_row(row: sqlite3.Row) -> PaperTradingRun` |
-| function | `_performance` | 757 | `def _performance(account: PaperTradingAccount, strategies: list[PaperStrategy], equity: list[PaperEquityPoint], trades: list[PaperTrade]) -> PaperTradingPerformance` |
-| function | `_closed_metrics` | 817 | `def _closed_metrics(closed: list[PaperStrategy]) -> _ClosedMetrics` |
-| function | `_payoff_ratio` | 835 | `def _payoff_ratio(average_win: float \| None, average_loss: float \| None) -> float \| None` |
-| function | `_latest_metrics` | 841 | `def _latest_metrics(initial_cash: float, equity: list[PaperEquityPoint]) -> _LatestMetrics` |
-| function | `_exposure_metrics` | 860 | `def _exposure_metrics(equity: list[PaperEquityPoint]) -> tuple[float, float]` |
-| function | `_sample_warning` | 867 | `def _sample_warning(closed_count: int, observation_count: int) -> str \| None` |
-| function | `_risk_metrics` | 875 | `def _risk_metrics(initial_cash: float, equity: list[PaperEquityPoint], closed_count: int) -> dict[str, object]` |
-| function | `_drawdown_durations` | 912 | `def _drawdown_durations(equity: list[PaperEquityPoint]) -> tuple[int, int \| None]` |
-| function | `_positions` | 935 | `def _positions(strategies: list[PaperStrategy], profile: PaperCostProfile) -> list[PaperPosition]` |
-| function | `_cost_profile_from_run` | 970 | `def _cost_profile_from_run(run: PaperTradingRun \| None) -> PaperCostProfile` |
-| function | `_optional_delta` | 984 | `def _optional_delta(right: float \| None, left: float \| None) -> float \| None` |
-| function | `_json_dump` | 990 | `def _json_dump(value: object) -> str` |
-| function | `_json_load` | 994 | `def _json_load(value: str, fallback: object) -> object` |
-| function | `_required_row` | 1001 | `def _required_row(row: sqlite3.Row \| None, message: str) -> sqlite3.Row` |
+| function | `_strategies_for_run` | 576 | `def _strategies_for_run(conn: sqlite3.Connection, sources: list[PaperStrategy], run_id: int \| None) -> list[PaperStrategy]` |
+| function | `_strategy_with_result` | 595 | `def _strategy_with_result(source: PaperStrategy, row: sqlite3.Row \| None) -> PaperStrategy` |
+| function | `_trades_for_run` | 628 | `def _trades_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperTrade]` |
+| function | `_events_for_run` | 638 | `def _events_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperTradingEvent]` |
+| function | `_equity_for_run` | 648 | `def _equity_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperEquityPoint]` |
+| function | `_trade_from_row` | 658 | `def _trade_from_row(row: sqlite3.Row) -> PaperTrade` |
+| function | `_event_from_row` | 679 | `def _event_from_row(row: sqlite3.Row) -> PaperTradingEvent` |
+| function | `_equity_from_row` | 697 | `def _equity_from_row(row: sqlite3.Row) -> PaperEquityPoint` |
+| function | `_optional_float` | 721 | `def _optional_float(row: sqlite3.Row, name: str) -> float \| None` |
+| function | `_optional_text` | 725 | `def _optional_text(row: sqlite3.Row, name: str) -> str \| None` |
+| function | `_run_from_row` | 729 | `def _run_from_row(row: sqlite3.Row) -> PaperTradingRun` |
+| function | `_performance` | 761 | `def _performance(account: PaperTradingAccount, strategies: list[PaperStrategy], equity: list[PaperEquityPoint], trades: list[PaperTrade]) -> PaperTradingPerformance` |
+| function | `_closed_metrics` | 821 | `def _closed_metrics(closed: list[PaperStrategy]) -> _ClosedMetrics` |
+| function | `_payoff_ratio` | 839 | `def _payoff_ratio(average_win: float \| None, average_loss: float \| None) -> float \| None` |
+| function | `_latest_metrics` | 845 | `def _latest_metrics(initial_cash: float, equity: list[PaperEquityPoint]) -> _LatestMetrics` |
+| function | `_exposure_metrics` | 864 | `def _exposure_metrics(equity: list[PaperEquityPoint]) -> tuple[float, float]` |
+| function | `_sample_warning` | 871 | `def _sample_warning(closed_count: int, observation_count: int) -> str \| None` |
+| function | `_risk_metrics` | 879 | `def _risk_metrics(initial_cash: float, equity: list[PaperEquityPoint], closed_count: int) -> dict[str, object]` |
+| function | `_drawdown_durations` | 916 | `def _drawdown_durations(equity: list[PaperEquityPoint]) -> tuple[int, int \| None]` |
+| function | `_positions` | 939 | `def _positions(strategies: list[PaperStrategy], profile: PaperCostProfile) -> list[PaperPosition]` |
+| function | `_cost_profile_from_run` | 974 | `def _cost_profile_from_run(run: PaperTradingRun \| None) -> PaperCostProfile` |
+| function | `_optional_delta` | 988 | `def _optional_delta(right: float \| None, left: float \| None) -> float \| None` |
+| function | `_json_dump` | 994 | `def _json_dump(value: object) -> str` |
+| function | `_json_load` | 998 | `def _json_load(value: str, fallback: object) -> object` |
+| function | `_required_row` | 1005 | `def _required_row(row: sqlite3.Row \| None, message: str) -> sqlite3.Row` |
 
 #### `app/repositories/provider_status.py`
 
