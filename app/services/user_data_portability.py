@@ -25,7 +25,7 @@ from app.models.local_data import (
     LocalDataImportResult,
     LocalDataTableBundle,
     LocalDataTableImportPreview,
-    USER_DATA_TABLE_ALLOWLIST,
+    OPTIONAL_RESEARCH_USER_DATA_TABLES,
     UserDataBundle,
 )
 from app.utils.audit_time import audit_now_text, normalize_audit_time_text
@@ -44,8 +44,15 @@ _SURROGATE_PRIMARY_KEYS = {
     "advice_history": "id",
     "advice_review_plan": "id",
     "advice_review_result": "id",
+    "watchlist_scan_history": "id",
     "discovery_preset": "id",
     "discovery_research_queue_source": "id",
+    "paper_strategy": "id",
+    "paper_trading_run": "id",
+    "paper_strategy_result": "id",
+    "paper_trade": "id",
+    "paper_equity_snapshot": "id",
+    "paper_trading_event": "id",
 }
 _SOURCE_WINS_KEYS = {
     "watchlist": ("symbol",),
@@ -58,6 +65,12 @@ _SOURCE_WINS_KEYS = {
         "source_preset_id",
         "source_preset_revision",
     ),
+    "paper_trading_account": ("id",),
+    "paper_strategy": ("plan_id", "plan_revision"),
+    "paper_strategy_result": ("run_id", "strategy_id"),
+    "paper_trade": ("run_id", "strategy_id", "side"),
+    "paper_equity_snapshot": ("run_id", "as_of_date"),
+    "paper_trading_event": ("run_id", "sequence"),
 }
 _CASE_INSENSITIVE_STABLE_COLUMNS = {
     "discovery_preset": frozenset({"name"}),
@@ -68,6 +81,23 @@ _RELATIONSHIPS = {
     "advice_review_result": (
         ("plan_id", "advice_review_plan"),
         ("advice_id", "advice_history"),
+    ),
+    "paper_strategy": (
+        ("plan_id", "advice_review_plan"),
+        ("advice_id", "advice_history"),
+    ),
+    "paper_strategy_result": (
+        ("run_id", "paper_trading_run"),
+        ("strategy_id", "paper_strategy"),
+    ),
+    "paper_trade": (
+        ("run_id", "paper_trading_run"),
+        ("strategy_id", "paper_strategy"),
+    ),
+    "paper_equity_snapshot": (("run_id", "paper_trading_run"),),
+    "paper_trading_event": (
+        ("run_id", "paper_trading_run"),
+        ("strategy_id", "paper_strategy"),
     ),
 }
 _USER_DATA_AUDIT_TIMESTAMP_COLUMNS = {
@@ -80,8 +110,16 @@ _USER_DATA_AUDIT_TIMESTAMP_COLUMNS = {
     "stock_note": frozenset({"created_at", "updated_at"}),
     "advice_review_plan": frozenset({"created_at", "updated_at"}),
     "advice_review_result": frozenset({"evaluated_at"}),
+    "watchlist_scan_history": frozenset({"created_at"}),
     "discovery_preset": frozenset({"created_at", "updated_at"}),
     "discovery_research_queue_source": frozenset({"enqueued_at"}),
+    "paper_trading_account": frozenset({"created_at", "updated_at"}),
+    "paper_strategy": frozenset({"created_at", "updated_at"}),
+    "paper_trading_run": frozenset({"created_at"}),
+    "paper_strategy_result": frozenset({"created_at"}),
+    "paper_trade": frozenset({"created_at"}),
+    "paper_equity_snapshot": frozenset({"created_at"}),
+    "paper_trading_event": frozenset({"created_at"}),
 }
 _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
     "advice_history": {
@@ -116,6 +154,29 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
         "normalized_stop_price": None,
         "trigger_basis": "daily_high_gte_target_price",
         "invalidation_basis": "daily_low_lte_stop_price",
+    },
+    "paper_trading_account": {
+        "default_cost_profile": "base",
+    },
+    "paper_strategy": {
+        "priority": 0,
+        "entry_expiry_sessions": 5,
+    },
+    "paper_trading_run": {
+        "cost_profile_id": "legacy",
+        "cost_profile_name": "legacy",
+        "cost_profile_version": "legacy",
+        "benchmark_symbol": None,
+        "benchmark_status": "unavailable",
+        "benchmark_message": None,
+        "input_fingerprint": "",
+        "strategy_snapshot_hash": "",
+        "market_data_hash": "",
+        "data_start_date": None,
+        "data_end_date": None,
+        "configuration_json": "{}",
+        "rule_profiles_json": "[]",
+        "data_sources_json": "[]",
     },
 }
 _RowOperation = Literal["insert", "update", "unchanged"]
@@ -249,7 +310,11 @@ def import_user_data(
 def available_user_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     existing = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'").fetchall()}
     core = [name for name in CORE_USER_DATA_TABLES if name in existing]
-    optional = sorted((existing & USER_DATA_TABLE_ALLOWLIST) - set(CORE_USER_DATA_TABLES))
+    optional = [
+        name
+        for name in OPTIONAL_RESEARCH_USER_DATA_TABLES
+        if name in existing and name not in CORE_USER_DATA_TABLES
+    ]
     return tuple((*core, *optional))
 
 
@@ -532,7 +597,10 @@ def _validate_child_bundle_relationships(
             continue
         parent_key = _SURROGATE_PRIMARY_KEYS[parent_table]
         parent_ids = {row[parent_key] for row in parent.rows}
-        if any(row[child_column] not in parent_ids for row in child.rows):
+        if any(
+            row[child_column] is not None and row[child_column] not in parent_ids
+            for row in child.rows
+        ):
             raise ValueError(f"{child_table}.{child_column} 包含无效的外键约束")
 
 
@@ -576,6 +644,8 @@ def _remap_foreign_keys(
     row: dict[str, object] = dict(source_row)
     for column, parent_table in _RELATIONSHIPS.get(table, ()):
         if parent_table not in tables:
+            continue
+        if row[column] is None:
             continue
         parent_map = id_maps.get(parent_table)
         if parent_map is None or row[column] not in parent_map:
@@ -888,10 +958,14 @@ def _validate_imported_child_rows(
     for prepared_row in child.rows:
         row = prepared_row.values
         for child_column, parent_table in relationships:
+            if row[child_column] is None:
+                continue
             parent = parent_rows[parent_table].get(row[child_column])
             if parent is None:
                 raise ValueError(f"{child_table}.{child_column} 导入后违反外键约束")
-            if _row_symbol(row) != _row_symbol(parent):
+            child_symbol = _row_symbol(row)
+            parent_symbol = _row_symbol(parent)
+            if child_symbol is not None and parent_symbol is not None and child_symbol != parent_symbol:
                 raise ValueError(f"{child_table}.{child_column} 导入后关联到错误的父记录")
 
 

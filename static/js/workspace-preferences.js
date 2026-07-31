@@ -5,7 +5,7 @@ export const PRIMARY_VIEW_OPTIONS = Object.freeze(["research", "market", "review
 export const PRIMARY_WORKSPACE_VIEWS = Object.freeze({
   research: Object.freeze(["overview", "qa", "strategy", "finance", "theme"]),
   market: Object.freeze(["market-scan"]),
-  review: Object.freeze(["replay", "tools"]),
+  review: Object.freeze(["replay", "paper", "tools", "data"]),
   monitor: Object.freeze([]),
 });
 export const DEFAULT_WORKSPACE_VIEW_BY_PRIMARY = Object.freeze({
@@ -16,7 +16,7 @@ export const DEFAULT_WORKSPACE_VIEW_BY_PRIMARY = Object.freeze({
 });
 
 export const WORKSPACE_PREFERENCE_OPTIONS = Object.freeze({
-  workspaceView: Object.freeze(["overview", "market-scan", "qa", "strategy", "finance", "theme", "replay", "tools"]),
+  workspaceView: Object.freeze(["overview", "market-scan", "qa", "strategy", "finance", "theme", "replay", "paper", "tools", "data"]),
   dailyChartRange: Object.freeze([20, 60, 120, 240]),
   minuteChartInterval: Object.freeze(["5m", "15m", "30m", "60m"]),
   mobileChartView: Object.freeze(["daily", "minute"]),

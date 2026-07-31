@@ -156,6 +156,14 @@ TABLE_COUNT_NAMES = (
     "stock_note",
     "advice_review_plan",
     "advice_review_result",
+    "watchlist_scan_history",
+    "paper_trading_account",
+    "paper_strategy",
+    "paper_strategy_result",
+    "paper_trade",
+    "paper_equity_snapshot",
+    "paper_trading_run",
+    "paper_trading_event",
 )
 
 

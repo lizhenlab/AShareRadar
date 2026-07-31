@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from math import isfinite
-from typing import TypeGuard
+from typing import Protocol, TypeGuard
 
 from app.models.reviews import AdviceReviewEvaluationDraft, AdviceReviewPlan
 from app.models.analysis import (
@@ -17,6 +17,7 @@ from app.models.market import (
 from app.models.research import (
     ReplayCase,
     ReplayPatternStat,
+    ReplayRegimeStat,
     StockReplayAnalysis,
 )
 from app.services.indicators import pct_change
@@ -105,16 +106,25 @@ def build_replay_analysis(analysis: AnalysisResult, window_days: int = 120) -> S
     if len(rows) < MIN_REPLAY_KLINES:
         return _insufficient_replay_report(symbol, analysis.quote.timestamp, len(rows))
     cases = _replay_cases(rows)
-    stats = _replay_stats(cases)
+    baseline_returns = _baseline_forward_returns(rows)
+    baseline_average = _average_return(baseline_returns)
+    stats = _replay_stats(cases, baseline_average=baseline_average)
     success_rate = _replay_success_rate(cases)
+    signal_returns = _valid_forward_5d_returns(cases)
+    signal_average = _average_return(signal_returns)
     return StockReplayAnalysis(
         symbol=symbol,
         updated_at=analysis.quote.timestamp,
         window_days=len(rows),
         sample_count=len(cases),
         success_rate=success_rate,
+        baseline_win_rate=round(_forward_return_win_rate(baseline_returns), 1),
+        baseline_avg_forward_5d_return=round(baseline_average, 2),
+        excess_vs_baseline_pct=round(signal_average - baseline_average, 2) if signal_returns else None,
+        modelled_round_trip_friction_pct=MODELLED_ROUND_TRIP_FRICTION_PCT,
         summary=_replay_summary(len(rows), cases, success_rate),
         pattern_stats=stats,
+        regime_stats=_replay_regime_stats(cases),
         cases=cases[-DISPLAY_CASE_LIMIT:],
         notes=_replay_notes(),
     )
@@ -172,6 +182,7 @@ def _replay_case(rows: list[Kline], index: int) -> ReplayCase | None:
         forward_10d_return=_round_optional(returns.day10),
         outcome=outcome,
         note=_replay_case_note(pattern, outcome),
+        trend_regime=_replay_trend_regime(rows, index),
     )
 
 
@@ -315,7 +326,7 @@ REPLAY_PATTERN_RULES = (
 )
 
 
-def _replay_stats(cases: list[ReplayCase]) -> list[ReplayPatternStat]:
+def _replay_stats(cases: list[ReplayCase], *, baseline_average: float = 0) -> list[ReplayPatternStat]:
     grouped: dict[str, list[ReplayCase]] = defaultdict(list)
     for item in cases:
         grouped[item.pattern].append(item)
@@ -331,6 +342,7 @@ def _replay_stats(cases: list[ReplayCase]) -> list[ReplayPatternStat]:
                 sample_count=len(rows),
                 win_rate=round(win_rate, 1),
                 avg_forward_5d_return=round(avg_return, 2),
+                excess_vs_baseline_pct=round(avg_return - baseline_average, 2) if valid_returns else None,
                 note=_replay_pattern_note(
                     pattern,
                     len(rows),
@@ -341,6 +353,59 @@ def _replay_stats(cases: list[ReplayCase]) -> list[ReplayPatternStat]:
             )
         )
     return sorted(stats, key=lambda item: (item.sample_count, item.win_rate), reverse=True)
+
+
+def _baseline_forward_returns(rows: list[Kline]) -> list[float]:
+    returns: list[float] = []
+    for index in _replay_candidate_indices(rows):
+        entry = next_session_open(rows, index)
+        if entry is None:
+            continue
+        value = _forward_return(rows, index, entry, REPLAY_EVALUATION_DAYS)
+        if _is_finite_number(value):
+            returns.append(value)
+    return returns
+
+
+def _average_return(values: list[float]) -> float:
+    finite = [value for value in values if _is_finite_number(value)]
+    return sum(finite) / len(finite) if finite else 0
+
+
+def _replay_trend_regime(rows: list[Kline], index: int) -> str:
+    if index < PATTERN_LOOKBACK_DAYS:
+        return "样本不足"
+    closes = [row.close for row in rows[index - PATTERN_LOOKBACK_DAYS + 1 : index + 1]]
+    previous = [row.close for row in rows[index - PATTERN_LOOKBACK_DAYS : index]]
+    if len(closes) < PATTERN_LOOKBACK_DAYS or len(previous) < PATTERN_LOOKBACK_DAYS:
+        return "样本不足"
+    current_ma = sum(closes) / len(closes)
+    previous_ma = sum(previous) / len(previous)
+    close = rows[index].close
+    if close >= current_ma and current_ma >= previous_ma:
+        return "强势趋势"
+    if close < current_ma and current_ma < previous_ma:
+        return "弱势趋势"
+    return "震荡环境"
+
+
+def _replay_regime_stats(cases: list[ReplayCase]) -> list[ReplayRegimeStat]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    counts: dict[str, int] = defaultdict(int)
+    for item in cases:
+        counts[item.trend_regime] += 1
+        if _is_finite_number(item.forward_5d_return):
+            grouped[item.trend_regime].append(item.forward_5d_return)
+    return [
+        ReplayRegimeStat(
+            regime=regime,
+            sample_count=counts[regime],
+            evaluated_count=len(grouped[regime]),
+            win_rate=round(_forward_return_win_rate(grouped[regime]), 1) if grouped[regime] else None,
+            avg_forward_5d_return=round(_average_return(grouped[regime]), 2) if grouped[regime] else None,
+        )
+        for regime in sorted(counts)
+    ]
 
 
 def _forward_return_win_rate(valid_returns: list[float]) -> float:
@@ -556,6 +621,16 @@ class AdviceReviewPriceContext:
     stop_price: float
 
 
+class AdviceReviewPricePlan(Protocol):
+    snapshot_price: float
+    snapshot_adjustment_mode: str
+    snapshot_anchor_date: str | None
+    snapshot_anchor_close: float | None
+    snapshot_contract_version: str
+    target_price: float
+    stop_price: float
+
+
 def evaluate_advice_forward_window(
     plan: AdviceReviewPlan,
     rows: list[Kline],
@@ -730,7 +805,19 @@ def _review_market_datetime(value: str) -> datetime:
         raise ValueError("研究计划缺少有效 snapshot_market_time") from exc
 
 
-def _advice_review_price_context(plan: AdviceReviewPlan, rows: list[Kline]) -> AdviceReviewPriceContext | None:
+def normalized_advice_review_prices(
+    plan: AdviceReviewPricePlan,
+    rows: list[Kline],
+) -> AdviceReviewPriceContext | None:
+    """Rebase frozen qfq price levels onto the current reproducible data vintage."""
+
+    return _advice_review_price_context(plan, rows)
+
+
+def _advice_review_price_context(
+    plan: AdviceReviewPricePlan,
+    rows: list[Kline],
+) -> AdviceReviewPriceContext | None:
     snapshot_anchor = _review_snapshot_anchor(plan)
     if snapshot_anchor is None:
         return None
@@ -761,7 +848,7 @@ def _advice_review_price_context(plan: AdviceReviewPlan, rows: list[Kline]) -> A
     )
 
 
-def _review_snapshot_anchor(plan: AdviceReviewPlan) -> float | None:
+def _review_snapshot_anchor(plan: AdviceReviewPricePlan) -> float | None:
     value = plan.snapshot_anchor_close
     if plan.snapshot_adjustment_mode != "qfq" or not plan.snapshot_anchor_date:
         return None

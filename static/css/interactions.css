@@ -632,6 +632,107 @@
   border-bottom: 1px solid var(--line);
 }
 
+.review-dashboard-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.review-dashboard-actions label,
+.review-dashboard-actions label > span {
+  display: block;
+}
+
+.review-dashboard-actions label > span {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.review-dashboard-actions input,
+.review-dashboard-actions select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--text);
+}
+
+.review-dashboard-actions > button {
+  align-self: end;
+  min-height: 36px;
+}
+
+#reviewDashboardFeedback {
+  margin: 10px 14px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#reviewDashboardFeedback[data-tone="ok"] {
+  color: var(--green);
+}
+
+#reviewDashboardFeedback[data-tone="error"] {
+  color: var(--red);
+}
+
+.review-dashboard-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 14px;
+}
+
+.review-dashboard-summary > span {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.review-dashboard-summary small,
+.review-dashboard-item small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.review-dashboard-summary strong {
+  font-size: 18px;
+}
+
+.review-dashboard-queue {
+  display: grid;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
+.review-dashboard-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.review-dashboard-item > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.review-plan-pagination {
+  padding: 0 14px 14px;
+  text-align: center;
+}
+
 .review-plan-form label,
 .review-plan-form label > span {
   display: block;
@@ -654,6 +755,55 @@
   background: #fff;
   color: var(--text);
   font: inherit;
+}
+
+.review-execution-basis {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #bfd0fb;
+  border-radius: 10px;
+  color: #344054;
+  background: var(--blue-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.review-execution-basis strong,
+.review-execution-basis b {
+  margin-right: 8px;
+  color: var(--blue);
+}
+
+.review-evaluation-evidence,
+.review-plan-evidence > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.review-evaluation-evidence span,
+.review-plan-evidence span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--soft);
+}
+
+.review-evaluation-evidence small,
+.review-plan-evidence small,
+.review-plan-evidence em,
+.review-provenance p {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.review-plan-evidence,
+.review-provenance {
+  margin-top: 10px;
 }
 
 .review-plan-form textarea {
@@ -882,6 +1032,48 @@
   gap: 8px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
+}
+
+.watchlist-scan-history-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) repeat(3, auto);
+  align-items: end;
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+
+.watchlist-scan-history-controls label,
+.watchlist-scan-history-controls label > span {
+  display: block;
+}
+
+.watchlist-scan-history-controls label > span {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.watchlist-scan-history-controls select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.watchlist-scan-comparison {
+  display: grid;
+  gap: 5px;
+  margin: 10px 14px 0;
+  padding: 10px 12px;
+  border: 1px solid #bfd0fb;
+  border-radius: 10px;
+  background: var(--blue-soft);
+  font-size: 12px;
+}
+
+.watchlist-scan-comparison[hidden] {
+  display: none;
 }
 
 .scan-universe-group,
@@ -1176,6 +1368,17 @@
 
 .tool-stock-context button {
   flex: 0 0 auto;
+}
+
+.local-data-intro {
+  margin: 12px 14px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(217, 119, 6, 0.25);
+  border-radius: var(--radius);
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.09);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .local-data-actions {

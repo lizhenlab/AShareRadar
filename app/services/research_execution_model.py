@@ -1,14 +1,8 @@
 from __future__ import annotations
 
+from app.models.execution import MODELLED_ROUND_TRIP_FRICTION_PCT
 from app.services.indicators import pct_change
 from app.utils.market_data import finite_float, valid_kline
-
-
-# A stable research assumption that covers basic A-share statutory fees and a
-# small execution allowance. It intentionally does not claim to model a user's
-# broker commission, minimum commission, or order-book slippage exactly.
-MODELLED_ROUND_TRIP_FRICTION_PCT = 0.10
-
 
 def next_session_open(rows: list, signal_index: int) -> float | None:
     entry_index = signal_index + 1

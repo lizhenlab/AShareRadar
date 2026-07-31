@@ -27,6 +27,7 @@ from app.services import advice_review
 from app.services.advice_review import (
     build_advice_evidence_refs,
     evaluate_due_advice_reviews,
+    list_due_advice_reviews,
 )
 from app.services.analysis import build_analysis
 from app.services.cache import SQLiteCache
@@ -402,6 +403,26 @@ def test_due_review_batch_is_bounded_and_isolates_plan_failures(monkeypatch) -> 
     assert summary.evaluated_count == 1
     assert summary.failed_count == 1
     assert [item.plan_id for item in summary.items] == [1, 2]
+
+
+def test_due_review_list_exposes_due_date_and_overdue_trading_days() -> None:
+    detail = AdviceReviewDetail(
+        plan=_review_plan(plan_id=1, advice_id=11, symbol="600001.SH", horizon_days=1)
+    )
+    cache = _DueReviewCache([detail], expected_as_of_date="2026-07-21")
+
+    items = asyncio.run(
+        list_due_advice_reviews(
+            SimpleNamespace(cache=cache),
+            as_of=datetime(2026, 7, 21, 16),
+            limit=10,
+        )
+    )
+
+    assert len(items) == 1
+    assert items[0].plan.id == 1
+    assert items[0].due_date == "2026-07-17"
+    assert items[0].overdue_trading_days == 2
 
 
 def test_due_review_repository_prioritizes_old_unfinished_plan_over_many_recent_not_due(
@@ -808,9 +829,15 @@ class _ResearchQueueCache:
 
 
 class _DueReviewCache:
-    def __init__(self, details: list[AdviceReviewDetail]) -> None:
+    def __init__(
+        self,
+        details: list[AdviceReviewDetail],
+        *,
+        expected_as_of_date: str = "2026-07-17",
+    ) -> None:
         self.details = details
+        self.expected_as_of_date = expected_as_of_date
 
     def advice_review_evaluation_candidates(self, *, as_of_date: str, limit: int):
-        assert as_of_date == "2026-07-17"
+        assert as_of_date == self.expected_as_of_date
         return self.details[:limit]

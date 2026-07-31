@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 
 from app.models.analysis import (
     IndividualReview,
@@ -18,6 +19,8 @@ from app.services.indicators import max_drawdown, pct_change, trend_days, volati
 MIN_REVIEW_ROWS = 2
 MAX_REVIEW_EVENTS = 8
 REVIEW_WICK_EVENT_THRESHOLD = 6
+REVIEW_VOLUME_SURGE_RATIO = 1.5
+REVIEW_VOLUME_LOOKBACK_DAYS = 5
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class ReviewEventContext:
     current: Kline
     change_pct: float
     amplitude_pct: float
+    volume_ratio_5d: float | None
 
 
 @dataclass(frozen=True)
@@ -53,8 +57,20 @@ REVIEW_EVENT_RULES: tuple[ReviewEventRule, ...] = (
     ReviewEventRule(
         title="放量上攻日",
         level="积极",
+        matches=lambda context: (
+            context.change_pct >= 4
+            and context.volume_ratio_5d is not None
+            and context.volume_ratio_5d >= REVIEW_VOLUME_SURGE_RATIO
+        ),
+        description=lambda context: (
+            f"收盘上涨 {context.change_pct:.2f}%，成交量为前5日均量的 {context.volume_ratio_5d:.2f} 倍。"
+        ),
+    ),
+    ReviewEventRule(
+        title="明显上涨日",
+        level="积极",
         matches=lambda context: context.change_pct >= 4,
-        description=lambda context: f"收盘上涨 {context.change_pct:.2f}%，可回看当日是否伴随成交放大。",
+        description=lambda context: f"收盘上涨 {context.change_pct:.2f}%，但未达到放量确认口径。",
     ),
     ReviewEventRule(
         title="明显回撤日",
@@ -195,18 +211,41 @@ def _review_events(rows: list[Kline]) -> list[ReviewEvent]:
     if len(valid_rows) < MIN_REVIEW_ROWS:
         return events
     for index in range(1, len(valid_rows)):
-        if event := _review_event_at(valid_rows[index - 1], valid_rows[index]):
+        if event := _review_event_at(valid_rows, index):
             events.append(event)
     return events[-MAX_REVIEW_EVENTS:]
 
 
-def _review_event_at(prev: Kline, current: Kline) -> ReviewEvent | None:
+def _review_event_at(rows: list[Kline], index: int) -> ReviewEvent | None:
+    prev = rows[index - 1]
+    current = rows[index]
     context = ReviewEventContext(
         current=current,
         change_pct=pct_change(current.close, prev.close),
         amplitude_pct=pct_change(current.high, current.low),
+        volume_ratio_5d=_review_volume_ratio(rows, index),
     )
     return next((_event_from_rule(context, rule) for rule in REVIEW_EVENT_RULES if rule.matches(context)), None)
+
+
+def _review_volume_ratio(rows: list[Kline], index: int) -> float | None:
+    start = index - REVIEW_VOLUME_LOOKBACK_DAYS
+    if start < 0 or _invalid_review_volume(rows[index].volume):
+        return None
+    volumes = [row.volume for row in rows[start:index]]
+    if len(volumes) != REVIEW_VOLUME_LOOKBACK_DAYS or any(_invalid_review_volume(value) for value in volumes):
+        return None
+    average = sum(volumes) / len(volumes)
+    return rows[index].volume / average if average > 0 else None
+
+
+def _invalid_review_volume(value: object) -> bool:
+    return (
+        not isinstance(value, int | float)
+        or isinstance(value, bool)
+        or not isfinite(value)
+        or value <= 0
+    )
 
 
 def _event_from_rule(context: ReviewEventContext, rule: ReviewEventRule) -> ReviewEvent:

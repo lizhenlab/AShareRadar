@@ -25,8 +25,16 @@ CORE_USER_DATA_TABLES = (
 OPTIONAL_RESEARCH_USER_DATA_TABLES = (
     "advice_review_plan",
     "advice_review_result",
+    "watchlist_scan_history",
     "discovery_preset",
     "discovery_research_queue_source",
+    "paper_trading_account",
+    "paper_strategy",
+    "paper_trading_run",
+    "paper_strategy_result",
+    "paper_trade",
+    "paper_equity_snapshot",
+    "paper_trading_event",
 )
 USER_DATA_TABLE_ALLOWLIST = frozenset((*CORE_USER_DATA_TABLES, *OPTIONAL_RESEARCH_USER_DATA_TABLES))
 LocalDataImportMode = Literal["merge", "replace"]

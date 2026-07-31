@@ -82,6 +82,7 @@ files = [
     "app/services/market_scan_recovery.py",
     "app/services/market_scan_replay.py",
     "app/services/market_scan_scoring.py",
+    "app/services/market_scan_shadow_scoring.py",
     "app/services/market_scan_stock_evaluation.py",
     "app/services/market_scan_universe.py",
     "app/services/market_scan_validation.py",
@@ -117,6 +118,7 @@ files = [
     "tools/architecture_inventory.py",
     "tools/benchmark_market_scan.py",
     "tools/evaluate_market_scan.py",
+    "tools/evaluate_market_scan_shadow.py",
 ]
 follow_imports = "skip"
 check_untyped_defs = true

@@ -477,8 +477,16 @@ export function renderReplay(replay) {
       <span>样本 ${escapeHtml(replay.sample_count)} / ${escapeHtml(replay.window_days)} 日</span>
     </div>
     <p>${escapeHtml(replay.summary)}</p>
+    <div class="replay-baseline">
+      <span><small>信号相对基准</small><strong>${formatSignedReplayReturn(replay.excess_vs_baseline_pct)}</strong></span>
+      <span><small>同期基准5日</small><strong>${formatReplayReturn(replay.baseline_avg_forward_5d_return)}</strong></span>
+      <span><small>基准胜率</small><strong>${formatNumber(replay.baseline_win_rate, 1)}%</strong></span>
+      <span><small>模型往返摩擦</small><strong>${formatNumber(replay.modelled_round_trip_friction_pct, 2)}%</strong></span>
+    </div>
     <div class="replay-stats">${renderReplayStats(replay.pattern_stats)}</div>
+    <div class="replay-regimes">${renderReplayRegimes(replay.regime_stats)}</div>
     <div class="replay-cases">${renderReplayCases(replay.cases)}</div>
+    <div class="replay-notes">${asArray(replay.notes).map((item) => `<small>${escapeHtml(item)}</small>`).join("")}</div>
   `;
 }
 
@@ -491,7 +499,7 @@ function renderReplayStat(item) {
   return `
     <div>
       <strong>${escapeHtml(item.pattern)}</strong>
-      <span>${escapeHtml(item.sample_count)}次 · 胜率 ${formatNumber(item.win_rate, 1)}% · 5日 ${formatNumber(item.avg_forward_5d_return)}%</span>
+      <span>${escapeHtml(item.sample_count)}次 · 胜率 ${formatNumber(item.win_rate, 1)}% · 5日 ${formatNumber(item.avg_forward_5d_return)}% · 超额 ${formatSignedReplayReturn(item.excess_vs_baseline_pct)}</span>
       <small>${escapeHtml(item.note)}</small>
     </div>`;
 }
@@ -500,11 +508,29 @@ function renderReplayCases(items) {
   return asArray(items).slice(-5).map(renderReplayCase).join("");
 }
 
+function renderReplayRegimes(items) {
+  const rows = asArray(items);
+  if (!rows.length) return "";
+  return rows.map((item) => `<span><b>${escapeHtml(item.regime)}</b><small>${escapeHtml(item.sample_count)}次 / 已评估 ${escapeHtml(item.evaluated_count ?? 0)}次 · 胜率 ${formatOptionalPercent(item.win_rate, 1)} · 5日 ${formatReplayReturn(item.avg_forward_5d_return)}</small></span>`).join("");
+}
+
 function renderReplayCase(item) {
   item = asObject(item);
   return `
     <span>
       <b>${escapeHtml(item.date)} · ${escapeHtml(item.pattern)} · ${escapeHtml(item.outcome)}</b>
+      <em>${escapeHtml(item.trend_regime || "未分类")}</em>
       <small>3日 ${formatReplayReturn(item.forward_3d_return)} / 5日 ${formatReplayReturn(item.forward_5d_return)}</small>
     </span>`;
+}
+
+function formatSignedReplayReturn(value) {
+  if (value === null || value === undefined) return "--";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return `${number > 0 ? "+" : ""}${formatNumber(number)}%`;
+}
+
+function formatOptionalPercent(value, digits = 2) {
+  return value === null || value === undefined ? "--" : `${formatNumber(value, digits)}%`;
 }

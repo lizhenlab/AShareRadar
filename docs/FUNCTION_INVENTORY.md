@@ -8,9 +8,9 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 283 | 620 | 3283 | 867 | 66667 |
-| `tests/` | 176 | 159 | 2125 | 737 | 67615 |
-| `tools/` | 8 | 6 | 109 | 4 | 2152 |
+| `app/` | 295 | 670 | 3515 | 898 | 73123 |
+| `tests/` | 181 | 161 | 2189 | 743 | 69754 |
+| `tools/` | 9 | 6 | 111 | 4 | 2239 |
 
 ## Python Function Health
 
@@ -213,6 +213,25 @@ Lines: 94
 | async function | `update_stock_note` | 74 | `async def update_stock_note(note_id: int, payload: StockNoteUpdate, datahub: DataHub=Depends(get_datahub)) -> StockNoteItem` |
 | async function | `chart_marks` | 89 | `async def chart_marks(symbol: str=Query('600519', description='6位A股代码'), limit: int=Query(80, ge=1, le=300), datahub: DataHub=Depends(get_datahub)) -> ChartMarkSummary` |
 
+#### `app/api/routes/paper_trading.py`
+
+Lines: 193
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| async function | `paper_trading_dashboard` | 39 | `async def paper_trading_dashboard(response: Response, run_id: int \| None=Query(default=None, gt=0), datahub: DataHub=Depends(get_datahub)) -> PaperTradingDashboard` |
+| async function | `patch_paper_trading_account` | 49 | `async def patch_paper_trading_account(payload: PaperTradingAccountUpdate, datahub: DataHub=Depends(get_datahub)) -> PaperTradingAccount` |
+| async function | `post_paper_strategy` | 61 | `async def post_paper_strategy(payload: PaperStrategyCreate, datahub: DataHub=Depends(get_datahub)) -> PaperStrategy` |
+| async function | `delete_paper_strategy` | 69 | `async def delete_paper_strategy(strategy_id: int, datahub: DataHub=Depends(get_datahub)) -> MutationResult` |
+| async function | `run_paper_trading` | 81 | `async def run_paper_trading(payload: PaperSimulationRequest, datahub: DataHub=Depends(get_datahub)) -> PaperSimulationSummary` |
+| async function | `paper_trading_runs` | 89 | `async def paper_trading_runs(response: Response, limit: int=Query(default=100, ge=1, le=500), datahub: DataHub=Depends(get_datahub)) -> list[PaperTradingRun]` |
+| async function | `compare_paper_trading_runs` | 99 | `async def compare_paper_trading_runs(left_run_id: int=Query(gt=0), right_run_id: int=Query(gt=0), datahub: DataHub=Depends(get_datahub)) -> PaperRunComparison` |
+| async function | `paper_trading_run_dashboard` | 110 | `async def paper_trading_run_dashboard(run_id: int, response: Response, datahub: DataHub=Depends(get_datahub)) -> PaperTradingDashboard` |
+| async function | `export_paper_trading_run_json` | 120 | `async def export_paper_trading_run_json(run_id: int, response: Response, datahub: DataHub=Depends(get_datahub)) -> PaperRunExport` |
+| async function | `export_paper_trading_run_csv` | 131 | `async def export_paper_trading_run_csv(run_id: int, dataset: Literal['trades', 'events']=Query(default='trades'), datahub: DataHub=Depends(get_datahub)) -> Response` |
+| function | `_paper_csv` | 148 | `def _paper_csv(exported: PaperRunExport, dataset: Literal['trades', 'events']) -> str` |
+| function | `_safe_csv` | 189 | `def _safe_csv(value: str) -> str` |
+
 #### `app/api/routes/quotes.py`
 
 Lines: 206
@@ -241,19 +260,21 @@ Lines: 206
 
 #### `app/api/routes/reviews.py`
 
-Lines: 135
+Lines: 161
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| async function | `review_details` | 36 | `async def review_details(symbol: str \| None=Query(default=None, description='可选，A股代码'), limit: int=Query(20, ge=1, le=100), datahub: DataHub=Depends(get_datahub)) -> list[AdviceReviewDetail]` |
-| async function | `review_summary` | 47 | `async def review_summary(datahub: DataHub=Depends(get_datahub)) -> AdviceReviewSummary` |
-| async function | `create_review_plan` | 56 | `async def create_review_plan(payload: AdviceReviewPlanInput, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewPlan` |
-| async function | `review_plans` | 64 | `async def review_plans(symbol: str \| None=Query(default=None, description='可选，A股代码'), limit: int=Query(100, ge=1, le=200), datahub: DataHub=Depends(get_datahub)) -> list[AdviceReviewPlan]` |
-| async function | `review_plan_detail` | 75 | `async def review_plan_detail(plan_id: int, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewDetail` |
-| async function | `update_review_plan` | 83 | `async def update_review_plan(plan_id: int, payload: AdviceReviewPlanUpdate, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewPlan` |
-| async function | `delete_review_plan` | 94 | `async def delete_review_plan(plan_id: int, datahub: DataHub=Depends(get_datahub)) -> MutationResult` |
-| async function | `evaluate_review_plan` | 109 | `async def evaluate_review_plan(plan_id: int, payload: AdviceReviewEvaluationRequest \| None=None, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewEvaluation` |
-| async function | `review_plan_evaluations` | 126 | `async def review_plan_evaluations(plan_id: int, limit: int=Query(100, ge=1, le=200), datahub: DataHub=Depends(get_datahub)) -> list[AdviceReviewEvaluation]` |
+| async function | `review_details` | 42 | `async def review_details(symbol: str \| None=Query(default=None, description='可选，A股代码'), limit: int=Query(20, ge=1, le=100), offset: int=Query(0, ge=0, le=100000), datahub: DataHub=Depends(get_datahub)) -> list[AdviceReviewDetail]` |
+| async function | `review_summary` | 54 | `async def review_summary(datahub: DataHub=Depends(get_datahub)) -> AdviceReviewSummary` |
+| async function | `due_reviews` | 59 | `async def due_reviews(as_of: datetime \| None=Query(default=None), limit: int=Query(100, ge=1, le=200), datahub: DataHub=Depends(get_datahub)) -> list[AdviceReviewDueItem]` |
+| async function | `evaluate_due_reviews` | 68 | `async def evaluate_due_reviews(payload: AdviceReviewEvaluationRequest, limit: int=Query(20, ge=1, le=100), datahub: DataHub=Depends(get_datahub)) -> AdviceReviewBatchSummary` |
+| async function | `create_review_plan` | 81 | `async def create_review_plan(payload: AdviceReviewPlanInput, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewPlan` |
+| async function | `review_plans` | 89 | `async def review_plans(symbol: str \| None=Query(default=None, description='可选，A股代码'), limit: int=Query(100, ge=1, le=200), offset: int=Query(0, ge=0, le=100000), datahub: DataHub=Depends(get_datahub)) -> list[AdviceReviewPlan]` |
+| async function | `review_plan_detail` | 101 | `async def review_plan_detail(plan_id: int, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewDetail` |
+| async function | `update_review_plan` | 109 | `async def update_review_plan(plan_id: int, payload: AdviceReviewPlanUpdate, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewPlan` |
+| async function | `delete_review_plan` | 120 | `async def delete_review_plan(plan_id: int, datahub: DataHub=Depends(get_datahub)) -> MutationResult` |
+| async function | `evaluate_review_plan` | 135 | `async def evaluate_review_plan(plan_id: int, payload: AdviceReviewEvaluationRequest \| None=None, datahub: DataHub=Depends(get_datahub)) -> AdviceReviewEvaluation` |
+| async function | `review_plan_evaluations` | 152 | `async def review_plan_evaluations(plan_id: int, limit: int=Query(100, ge=1, le=200), datahub: DataHub=Depends(get_datahub)) -> list[AdviceReviewEvaluation]` |
 
 #### `app/api/routes/stock.py`
 
@@ -282,11 +303,13 @@ Lines: 124
 
 #### `app/api/routes/watchlist_scan.py`
 
-Lines: 26
+Lines: 51
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| async function | `scan_watchlist` | 19 | `async def scan_watchlist(payload: WatchlistScanRequest, datahub: DataHub=Depends(get_datahub)) -> WatchlistScanResponse` |
+| async function | `scan_watchlist` | 21 | `async def scan_watchlist(payload: WatchlistScanRequest, datahub: DataHub=Depends(get_datahub)) -> WatchlistScanRecord` |
+| async function | `watchlist_scan_history` | 33 | `async def watchlist_scan_history(limit: int=Query(20, ge=1, le=100), datahub: DataHub=Depends(get_datahub)) -> list[WatchlistScanHistoryItem]` |
+| async function | `watchlist_scan_record` | 41 | `async def watchlist_scan_record(scan_id: int, datahub: DataHub=Depends(get_datahub)) -> WatchlistScanRecord` |
 
 #### `app/api/security.py`
 
@@ -382,12 +405,12 @@ Lines: 42
 
 #### `app/db/advice_review_schema.py`
 
-Lines: 201
+Lines: 224
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `apply_advice_review_compat_schema` | 144 | `def apply_advice_review_compat_schema(conn, *, legacy_audit_timezone: str='Asia/Shanghai') -> None` |
-| function | `_ensure_column` | 186 | `def _ensure_column(conn, table: str, column: str, definition: str) -> None` |
+| function | `apply_advice_review_compat_schema` | 165 | `def apply_advice_review_compat_schema(conn, *, legacy_audit_timezone: str='Asia/Shanghai') -> None` |
+| function | `_ensure_column` | 207 | `def _ensure_column(conn, table: str, column: str, definition: str) -> None` |
 
 #### `app/db/connection.py`
 
@@ -421,13 +444,30 @@ Lines: 127
 | function | `row_to_plate_item` | 90 | `def row_to_plate_item(row: sqlite3.Row) -> PlateItem` |
 | function | `row_to_stock_concept_item` | 104 | `def row_to_stock_concept_item(row: sqlite3.Row) -> StockConceptItem` |
 
-#### `app/db/schema.py`
+#### `app/db/paper_trading_schema.py`
 
-Lines: 42
+Lines: 376
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `initialize_schema` | 18 | `def initialize_schema(conn: sqlite3.Connection, *, legacy_audit_timezone: str='Asia/Shanghai') -> None` |
+| function | `apply_paper_trading_schema` | 209 | `def apply_paper_trading_schema(conn: sqlite3.Connection) -> None` |
+| function | `_migrate_trade_table` | 227 | `def _migrate_trade_table(conn: sqlite3.Connection) -> None` |
+| function | `_migrate_equity_table` | 250 | `def _migrate_equity_table(conn: sqlite3.Connection) -> None` |
+| function | `_legacy_run_id` | 280 | `def _legacy_run_id(conn: sqlite3.Connection, *, needed: bool) -> int \| None` |
+| function | `_backfill_legacy_strategy_results` | 308 | `def _backfill_legacy_strategy_results(conn: sqlite3.Connection) -> None` |
+| function | `_create_indexes` | 334 | `def _create_indexes(conn: sqlite3.Connection) -> None` |
+| function | `_ensure_column` | 353 | `def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None` |
+| function | `_column_names` | 358 | `def _column_names(conn: sqlite3.Connection, table: str) -> set[str]` |
+| function | `_row_count` | 362 | `def _row_count(conn: sqlite3.Connection, table: str) -> int` |
+| function | `_table_sql` | 366 | `def _table_sql(table: str) -> str` |
+
+#### `app/db/schema.py`
+
+Lines: 44
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `initialize_schema` | 19 | `def initialize_schema(conn: sqlite3.Connection, *, legacy_audit_timezone: str='Asia/Shanghai') -> None` |
 
 #### `app/db/schema_migrations.py`
 
@@ -525,22 +565,22 @@ Lines: 341
 
 #### `app/main.py`
 
-Lines: 220
+Lines: 222
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| async function | `lifespan` | 52 | `async def lifespan(app: FastAPI) -> AsyncIterator[None]` |
-| async function | `_validate_container_settings` | 70 | `async def _validate_container_settings(app: FastAPI, container: AppContainer) -> None` |
-| async function | `_start_runtime` | 77 | `async def _start_runtime(container: AppContainer) -> None` |
-| async function | `_stop_runtime` | 86 | `async def _stop_runtime(container: AppContainer) -> None` |
-| async function | `_cleanup_failed_start` | 103 | `async def _cleanup_failed_start(container: AppContainer) -> None` |
-| async function | `_close_container_resources_safely` | 109 | `async def _close_container_resources_safely(container: AppContainer) -> None` |
-| async function | `_shutdown_container` | 116 | `async def _shutdown_container(container: AppContainer) -> None` |
-| async function | `_close_datahub` | 133 | `async def _close_datahub(datahub: object) -> None` |
-| async function | `_call_close_before_deadline` | 148 | `async def _call_close_before_deadline(close: Callable[[], Awaitable[object]], deadline: float) -> tuple[object, bool]` |
-| function | `_raise_cleanup_errors` | 158 | `def _raise_cleanup_errors(message: str, errors: list[BaseException]) -> None` |
-| function | `create_app` | 166 | `def create_app(*, settings: Settings \| None=None, container_factory: ContainerFactory \| None=None, static_dir: str \| Path \| None=None) -> FastAPI` |
-| function | `_register_routes` | 199 | `def _register_routes(app: FastAPI, static_dir: Path) -> None` |
+| async function | `lifespan` | 53 | `async def lifespan(app: FastAPI) -> AsyncIterator[None]` |
+| async function | `_validate_container_settings` | 71 | `async def _validate_container_settings(app: FastAPI, container: AppContainer) -> None` |
+| async function | `_start_runtime` | 78 | `async def _start_runtime(container: AppContainer) -> None` |
+| async function | `_stop_runtime` | 87 | `async def _stop_runtime(container: AppContainer) -> None` |
+| async function | `_cleanup_failed_start` | 104 | `async def _cleanup_failed_start(container: AppContainer) -> None` |
+| async function | `_close_container_resources_safely` | 110 | `async def _close_container_resources_safely(container: AppContainer) -> None` |
+| async function | `_shutdown_container` | 117 | `async def _shutdown_container(container: AppContainer) -> None` |
+| async function | `_close_datahub` | 134 | `async def _close_datahub(datahub: object) -> None` |
+| async function | `_call_close_before_deadline` | 149 | `async def _call_close_before_deadline(close: Callable[[], Awaitable[object]], deadline: float) -> tuple[object, bool]` |
+| function | `_raise_cleanup_errors` | 159 | `def _raise_cleanup_errors(message: str, errors: list[BaseException]) -> None` |
+| function | `create_app` | 167 | `def create_app(*, settings: Settings \| None=None, container_factory: ContainerFactory \| None=None, static_dir: str \| Path \| None=None) -> FastAPI` |
+| function | `_register_routes` | 200 | `def _register_routes(app: FastAPI, static_dir: Path) -> None` |
 
 #### `app/models/advice_change.py`
 
@@ -653,35 +693,35 @@ Lines: 334
 
 #### `app/models/local_data.py`
 
-Lines: 275
+Lines: 283
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `StrictLocalDataModel` | 38 | `class StrictLocalDataModel(BaseModel)` |
-| class | `LocalDataTableBundle` | 42 | `class LocalDataTableBundle(StrictLocalDataModel)` |
-| method | `LocalDataTableBundle._validate_columns` | 50 | `def _validate_columns(cls, values: list[str]) -> list[str]` |
-| method | `LocalDataTableBundle._validate_column_types` | 59 | `def _validate_column_types(cls, values: dict[str, str] \| None) -> dict[str, str] \| None` |
-| method | `LocalDataTableBundle._validate_rows` | 69 | `def _validate_rows(self) -> LocalDataTableBundle` |
-| class | `AuditTimestampMetadata` | 83 | `class AuditTimestampMetadata(StrictLocalDataModel)` |
-| method | `AuditTimestampMetadata._validate_semantics` | 88 | `def _validate_semantics(self) -> AuditTimestampMetadata` |
-| class | `UserDataBundle` | 102 | `class UserDataBundle(StrictLocalDataModel)` |
-| method | `UserDataBundle._validate_exported_at` | 113 | `def _validate_exported_at(cls, value: str) -> str` |
-| method | `UserDataBundle._validate_tables` | 118 | `def _validate_tables(self) -> UserDataBundle` |
-| class | `LocalDataTableImportPreview` | 129 | `class LocalDataTableImportPreview(StrictLocalDataModel)` |
-| class | `LocalDataImportResult` | 138 | `class LocalDataImportResult(StrictLocalDataModel)` |
-| method | `LocalDataImportResult._validate_preview_expiry` | 152 | `def _validate_preview_expiry(cls, value: str \| None) -> str \| None` |
-| class | `RuntimeCleanupPreview` | 158 | `class RuntimeCleanupPreview(StrictLocalDataModel)` |
-| class | `RuntimeCleanupResult` | 165 | `class RuntimeCleanupResult(RuntimeCleanupPreview)` |
-| class | `RuntimeBackupManifest` | 170 | `class RuntimeBackupManifest(StrictLocalDataModel)` |
-| method | `RuntimeBackupManifest._validate_created_at` | 185 | `def _validate_created_at(cls, value: str) -> str` |
-| method | `RuntimeBackupManifest._validate_database_file` | 191 | `def _validate_database_file(cls, value: str) -> str` |
-| method | `RuntimeBackupManifest._validate_sha256` | 198 | `def _validate_sha256(cls, value: str) -> str` |
-| method | `RuntimeBackupManifest._validate_counts` | 204 | `def _validate_counts(self) -> RuntimeBackupManifest` |
-| class | `RuntimeBackupResult` | 214 | `class RuntimeBackupResult(StrictLocalDataModel)` |
-| class | `RuntimeBackupVerification` | 221 | `class RuntimeBackupVerification(StrictLocalDataModel)` |
-| class | `RuntimeRestoreResult` | 231 | `class RuntimeRestoreResult(StrictLocalDataModel)` |
-| function | `_portable_scalar` | 239 | `def _portable_scalar(value: JsonValue) -> bool` |
-| function | `_parse_aware_timestamp` | 245 | `def _parse_aware_timestamp(value: str) -> datetime` |
+| class | `StrictLocalDataModel` | 46 | `class StrictLocalDataModel(BaseModel)` |
+| class | `LocalDataTableBundle` | 50 | `class LocalDataTableBundle(StrictLocalDataModel)` |
+| method | `LocalDataTableBundle._validate_columns` | 58 | `def _validate_columns(cls, values: list[str]) -> list[str]` |
+| method | `LocalDataTableBundle._validate_column_types` | 67 | `def _validate_column_types(cls, values: dict[str, str] \| None) -> dict[str, str] \| None` |
+| method | `LocalDataTableBundle._validate_rows` | 77 | `def _validate_rows(self) -> LocalDataTableBundle` |
+| class | `AuditTimestampMetadata` | 91 | `class AuditTimestampMetadata(StrictLocalDataModel)` |
+| method | `AuditTimestampMetadata._validate_semantics` | 96 | `def _validate_semantics(self) -> AuditTimestampMetadata` |
+| class | `UserDataBundle` | 110 | `class UserDataBundle(StrictLocalDataModel)` |
+| method | `UserDataBundle._validate_exported_at` | 121 | `def _validate_exported_at(cls, value: str) -> str` |
+| method | `UserDataBundle._validate_tables` | 126 | `def _validate_tables(self) -> UserDataBundle` |
+| class | `LocalDataTableImportPreview` | 137 | `class LocalDataTableImportPreview(StrictLocalDataModel)` |
+| class | `LocalDataImportResult` | 146 | `class LocalDataImportResult(StrictLocalDataModel)` |
+| method | `LocalDataImportResult._validate_preview_expiry` | 160 | `def _validate_preview_expiry(cls, value: str \| None) -> str \| None` |
+| class | `RuntimeCleanupPreview` | 166 | `class RuntimeCleanupPreview(StrictLocalDataModel)` |
+| class | `RuntimeCleanupResult` | 173 | `class RuntimeCleanupResult(RuntimeCleanupPreview)` |
+| class | `RuntimeBackupManifest` | 178 | `class RuntimeBackupManifest(StrictLocalDataModel)` |
+| method | `RuntimeBackupManifest._validate_created_at` | 193 | `def _validate_created_at(cls, value: str) -> str` |
+| method | `RuntimeBackupManifest._validate_database_file` | 199 | `def _validate_database_file(cls, value: str) -> str` |
+| method | `RuntimeBackupManifest._validate_sha256` | 206 | `def _validate_sha256(cls, value: str) -> str` |
+| method | `RuntimeBackupManifest._validate_counts` | 212 | `def _validate_counts(self) -> RuntimeBackupManifest` |
+| class | `RuntimeBackupResult` | 222 | `class RuntimeBackupResult(StrictLocalDataModel)` |
+| class | `RuntimeBackupVerification` | 229 | `class RuntimeBackupVerification(StrictLocalDataModel)` |
+| class | `RuntimeRestoreResult` | 239 | `class RuntimeRestoreResult(StrictLocalDataModel)` |
+| function | `_portable_scalar` | 247 | `def _portable_scalar(value: JsonValue) -> bool` |
+| function | `_parse_aware_timestamp` | 253 | `def _parse_aware_timestamp(value: str) -> datetime` |
 
 #### `app/models/market.py`
 
@@ -738,6 +778,51 @@ Lines: 498
 | class | `MarketScanResultPage` | 450 | `class MarketScanResultPage(BaseModel)` |
 | class | `MarketScanRunPage` | 459 | `class MarketScanRunPage(BaseModel)` |
 
+#### `app/models/paper_trading.py`
+
+Lines: 485
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `PaperTradingInput` | 33 | `class PaperTradingInput(BaseModel)` |
+| class | `PaperCostOverrides` | 37 | `class PaperCostOverrides(PaperTradingInput)` |
+| class | `PaperStrategyCreate` | 46 | `class PaperStrategyCreate(PaperTradingInput)` |
+| class | `PaperTradingAccountUpdate` | 53 | `class PaperTradingAccountUpdate(PaperTradingInput)` |
+| method | `PaperTradingAccountUpdate._require_change` | 58 | `def _require_change(self) -> PaperTradingAccountUpdate` |
+| class | `PaperSimulationRequest` | 64 | `class PaperSimulationRequest(PaperTradingInput)` |
+| class | `PaperTradingAccount` | 71 | `class PaperTradingAccount(BaseModel)` |
+| class | `PaperCostProfile` | 81 | `class PaperCostProfile(BaseModel)` |
+| class | `PaperTradeRuleProfile` | 96 | `class PaperTradeRuleProfile(BaseModel)` |
+| class | `PaperInstrumentMetadata` | 110 | `class PaperInstrumentMetadata(BaseModel)` |
+| class | `PaperStrategy` | 120 | `class PaperStrategy(BaseModel)` |
+| class | `PaperPosition` | 168 | `class PaperPosition(BaseModel)` |
+| class | `PaperTrade` | 186 | `class PaperTrade(BaseModel)` |
+| class | `PaperTradingEvent` | 205 | `class PaperTradingEvent(BaseModel)` |
+| class | `PaperEquityPoint` | 220 | `class PaperEquityPoint(BaseModel)` |
+| class | `PaperTradingPerformance` | 242 | `class PaperTradingPerformance(BaseModel)` |
+| class | `PaperTradingRun` | 286 | `class PaperTradingRun(BaseModel)` |
+| class | `PaperTradingDashboard` | 313 | `class PaperTradingDashboard(BaseModel)` |
+| class | `PaperSimulationSummary` | 328 | `class PaperSimulationSummary(BaseModel)` |
+| class | `PaperRunComparison` | 337 | `class PaperRunComparison(BaseModel)` |
+| class | `PaperRunExport` | 345 | `class PaperRunExport(BaseModel)` |
+| class | `PaperStrategySimulation` | 354 | `class PaperStrategySimulation(BaseModel)` |
+| class | `PaperTradeDraft` | 382 | `class PaperTradeDraft(BaseModel)` |
+| class | `PaperTradingEventDraft` | 398 | `class PaperTradingEventDraft(BaseModel)` |
+| class | `PaperEquityPointDraft` | 410 | `class PaperEquityPointDraft(BaseModel)` |
+| class | `PaperSimulationDraft` | 429 | `class PaperSimulationDraft(BaseModel)` |
+
+#### `app/models/paper_trading_costs.py`
+
+Lines: 127
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `PaperTradeCosts` | 53 | `class PaperTradeCosts` |
+| method | `PaperTradeCosts.total` | 60 | `def total(self) -> float` |
+| function | `available_cost_profiles` | 64 | `def available_cost_profiles() -> list[PaperCostProfile]` |
+| function | `resolve_cost_profile` | 68 | `def resolve_cost_profile(name: CostProfileName, overrides: PaperCostOverrides \| None=None) -> PaperCostProfile` |
+| function | `trade_costs` | 100 | `def trade_costs(profile: PaperCostProfile, *, side: str, gross_amount: float) -> PaperTradeCosts` |
+
 #### `app/models/reliability.py`
 
 Lines: 46
@@ -750,7 +835,7 @@ Lines: 46
 
 #### `app/models/research.py`
 
-Lines: 458
+Lines: 473
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -786,16 +871,17 @@ Lines: 458
 | class | `LeadershipReport` | 336 | `class LeadershipReport(BaseModel)` |
 | class | `ThemeContextReport` | 347 | `class ThemeContextReport(BaseModel)` |
 | class | `ReplayPatternStat` | 364 | `class ReplayPatternStat(BaseModel)` |
-| class | `ReplayCase` | 372 | `class ReplayCase(BaseModel)` |
-| class | `StockReplayAnalysis` | 383 | `class StockReplayAnalysis(BaseModel)` |
-| class | `MinuteSupportResistance` | 395 | `class MinuteSupportResistance(BaseModel)` |
-| class | `MinuteTPlan` | 402 | `class MinuteTPlan(BaseModel)` |
-| class | `MinuteAnalysisReport` | 413 | `class MinuteAnalysisReport(BaseModel)` |
-| method | `MinuteAnalysisReport.model_post_init` | 442 | `def model_post_init(self, __context: object) -> None` |
+| class | `ReplayCase` | 373 | `class ReplayCase(BaseModel)` |
+| class | `ReplayRegimeStat` | 385 | `class ReplayRegimeStat(BaseModel)` |
+| class | `StockReplayAnalysis` | 393 | `class StockReplayAnalysis(BaseModel)` |
+| class | `MinuteSupportResistance` | 410 | `class MinuteSupportResistance(BaseModel)` |
+| class | `MinuteTPlan` | 417 | `class MinuteTPlan(BaseModel)` |
+| class | `MinuteAnalysisReport` | 428 | `class MinuteAnalysisReport(BaseModel)` |
+| method | `MinuteAnalysisReport.model_post_init` | 457 | `def model_post_init(self, __context: object) -> None` |
 
 #### `app/models/reviews.py`
 
-Lines: 531
+Lines: 558
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -819,24 +905,27 @@ Lines: 531
 | method | `AdviceReviewEvaluationDraft.populate_outcome_evidence` | 244 | `def populate_outcome_evidence(self) -> AdviceReviewEvaluationDraft` |
 | class | `AdviceReviewEvaluation` | 252 | `class AdviceReviewEvaluation(AdviceReviewEvaluationDraft)` |
 | class | `AdviceReviewDetail` | 256 | `class AdviceReviewDetail(BaseModel)` |
-| class | `ResearchQueueRefreshItem` | 261 | `class ResearchQueueRefreshItem(BaseModel)` |
-| class | `ResearchQueueRefreshSummary` | 270 | `class ResearchQueueRefreshSummary(BaseModel)` |
-| class | `AdviceReviewBatchItem` | 284 | `class AdviceReviewBatchItem(BaseModel)` |
-| class | `AdviceReviewBatchSummary` | 293 | `class AdviceReviewBatchSummary(BaseModel)` |
-| class | `AdviceReviewSummary` | 302 | `class AdviceReviewSummary(BaseModel)` |
-| class | `WatchlistScanRequest` | 320 | `class WatchlistScanRequest(ReviewInputModel)` |
-| class | `WatchlistScanItem` | 328 | `class WatchlistScanItem(BaseModel)` |
-| class | `WatchlistScanMissing` | 337 | `class WatchlistScanMissing(BaseModel)` |
-| class | `WatchlistScanResponse` | 342 | `class WatchlistScanResponse(BaseModel)` |
-| function | `_required_text` | 351 | `def _required_text(value: str) -> str` |
-| function | `_clean_evidence_refs` | 358 | `def _clean_evidence_refs(values: list[AdviceEvidenceRefValue]) -> list[AdviceEvidenceRefValue]` |
-| function | `structured_advice_evidence_refs` | 379 | `def structured_advice_evidence_refs(snapshot: object) -> list[AdviceEvidenceRef]` |
-| function | `_snapshot_data_date` | 420 | `def _snapshot_data_date(snapshot: object) -> str \| None` |
-| function | `_strict_iso_date_text` | 434 | `def _strict_iso_date_text(value: str, message: str) -> str` |
-| function | `_score_direction` | 445 | `def _score_direction(value: object, *, positive: int, negative: int) -> AdviceEvidenceDirection` |
-| function | `_text_direction` | 461 | `def _text_direction(value: object) -> AdviceEvidenceDirection` |
-| function | `_risk_direction` | 470 | `def _risk_direction(value: object) -> AdviceEvidenceDirection` |
-| function | `_review_outcome_evidence` | 479 | `def _review_outcome_evidence(evaluation: AdviceReviewEvaluationDraft, *, trigger: bool) -> AdviceReviewOutcomeEvidence` |
+| class | `AdviceReviewDueItem` | 261 | `class AdviceReviewDueItem(AdviceReviewDetail)` |
+| class | `ResearchQueueRefreshItem` | 266 | `class ResearchQueueRefreshItem(BaseModel)` |
+| class | `ResearchQueueRefreshSummary` | 275 | `class ResearchQueueRefreshSummary(BaseModel)` |
+| class | `AdviceReviewBatchItem` | 289 | `class AdviceReviewBatchItem(BaseModel)` |
+| class | `AdviceReviewBatchSummary` | 298 | `class AdviceReviewBatchSummary(BaseModel)` |
+| class | `AdviceReviewSummary` | 307 | `class AdviceReviewSummary(BaseModel)` |
+| class | `WatchlistScanRequest` | 325 | `class WatchlistScanRequest(ReviewInputModel)` |
+| class | `WatchlistScanItem` | 333 | `class WatchlistScanItem(BaseModel)` |
+| class | `WatchlistScanMissing` | 342 | `class WatchlistScanMissing(BaseModel)` |
+| class | `WatchlistScanResponse` | 347 | `class WatchlistScanResponse(BaseModel)` |
+| class | `WatchlistScanRecord` | 356 | `class WatchlistScanRecord(WatchlistScanResponse)` |
+| class | `WatchlistScanHistoryItem` | 362 | `class WatchlistScanHistoryItem(BaseModel)` |
+| function | `_required_text` | 375 | `def _required_text(value: str) -> str` |
+| function | `_clean_evidence_refs` | 382 | `def _clean_evidence_refs(values: list[AdviceEvidenceRefValue]) -> list[AdviceEvidenceRefValue]` |
+| function | `structured_advice_evidence_refs` | 403 | `def structured_advice_evidence_refs(snapshot: object) -> list[AdviceEvidenceRef]` |
+| function | `_snapshot_data_date` | 444 | `def _snapshot_data_date(snapshot: object) -> str \| None` |
+| function | `_strict_iso_date_text` | 458 | `def _strict_iso_date_text(value: str, message: str) -> str` |
+| function | `_score_direction` | 469 | `def _score_direction(value: object, *, positive: int, negative: int) -> AdviceEvidenceDirection` |
+| function | `_text_direction` | 485 | `def _text_direction(value: object) -> AdviceEvidenceDirection` |
+| function | `_risk_direction` | 494 | `def _risk_direction(value: object) -> AdviceEvidenceDirection` |
+| function | `_review_outcome_evidence` | 503 | `def _review_outcome_evidence(evaluation: AdviceReviewEvaluationDraft, *, trigger: bool) -> AdviceReviewOutcomeEvidence` |
 
 #### `app/models/system.py`
 
@@ -936,7 +1025,7 @@ Lines: 443
 
 #### `app/repositories/advice_reviews.py`
 
-Lines: 1103
+Lines: 1117
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -945,53 +1034,53 @@ Lines: 1103
 | method | `AdviceReviewRepository.create_plan` | 280 | `def create_plan(self, payload: AdviceReviewPlanInput) -> AdviceReviewPlan` |
 | method | `AdviceReviewRepository.plan` | 291 | `def plan(self, plan_id: int) -> AdviceReviewPlan \| None` |
 | method | `AdviceReviewRepository.plan_by_advice` | 296 | `def plan_by_advice(self, advice_id: int) -> AdviceReviewPlan \| None` |
-| method | `AdviceReviewRepository.plans` | 301 | `def plans(self, *, symbol: str \| None=None, limit: int=100) -> list[AdviceReviewPlan]` |
-| method | `AdviceReviewRepository.details` | 323 | `def details(self, *, symbol: str \| None=None, limit: int=100) -> list[AdviceReviewDetail]` |
-| method | `AdviceReviewRepository.evaluation_candidates` | 347 | `def evaluation_candidates(self, *, as_of_date: str, limit: int) -> list[AdviceReviewDetail]` |
-| method | `AdviceReviewRepository.update_plan` | 362 | `def update_plan(self, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan \| None` |
-| method | `AdviceReviewRepository.delete_plan` | 390 | `def delete_plan(self, plan_id: int) -> bool` |
-| method | `AdviceReviewRepository.detail` | 395 | `def detail(self, plan_id: int) -> AdviceReviewDetail \| None` |
-| method | `AdviceReviewRepository.evaluation` | 407 | `def evaluation(self, evaluation_id: int) -> AdviceReviewEvaluation \| None` |
-| method | `AdviceReviewRepository.evaluation_history` | 415 | `def evaluation_history(self, plan_id: int, limit: int=100) -> list[AdviceReviewEvaluation]` |
-| method | `AdviceReviewRepository.save_evaluation` | 431 | `def save_evaluation(self, evaluation: AdviceReviewEvaluationDraft) -> AdviceReviewEvaluation` |
-| method | `AdviceReviewRepository.summary` | 458 | `def summary(self) -> AdviceReviewSummary` |
-| function | `_validate_snapshot_binding` | 500 | `def _validate_snapshot_binding(snapshot: AdviceSnapshotRef, normalized_symbol: str, payload: AdviceReviewPlanInput) -> None` |
-| function | `_plan_insert_params` | 522 | `def _plan_insert_params(snapshot: AdviceSnapshotRef, payload: AdviceReviewPlanInput, timestamp: str) -> dict[str, object]` |
-| function | `_insert_plan` | 555 | `def _insert_plan(conn: sqlite3.Connection, params: dict[str, object]) -> sqlite3.Cursor` |
-| function | `_required_advice_snapshot` | 565 | `def _required_advice_snapshot(conn: sqlite3.Connection, advice_id: int) -> AdviceSnapshotRef` |
-| function | `_required_advice_snapshot_row` | 578 | `def _required_advice_snapshot_row(conn: sqlite3.Connection, advice_id: int) -> sqlite3.Row` |
-| function | `_snapshot_symbol` | 596 | `def _snapshot_symbol(value: object) -> str` |
-| function | `_advice_snapshot_from_row` | 603 | `def _advice_snapshot_from_row(row: sqlite3.Row, *, symbol: str, market_time: str, price: float) -> AdviceSnapshotRef` |
-| function | `_snapshot_text` | 631 | `def _snapshot_text(value: object, fallback: str) -> str` |
-| function | `_snapshot_optional_text` | 635 | `def _snapshot_optional_text(value: object) -> str \| None` |
-| function | `_plan_row` | 640 | `def _plan_row(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row \| None` |
-| function | `_plan_row_by_advice` | 647 | `def _plan_row_by_advice(conn: sqlite3.Connection, advice_id: int) -> sqlite3.Row \| None` |
-| function | `_latest_result_row` | 654 | `def _latest_result_row(conn: sqlite3.Connection, plan_id: int, revision: int) -> sqlite3.Row \| None` |
-| function | `_latest_result_rows` | 667 | `def _latest_result_rows(conn: sqlite3.Connection, plans: list[AdviceReviewPlan]) -> list[sqlite3.Row]` |
-| function | `_review_details` | 695 | `def _review_details(plans: list[AdviceReviewPlan], result_rows: list[sqlite3.Row]) -> list[AdviceReviewDetail]` |
-| function | `_plan_from_row` | 709 | `def _plan_from_row(row: sqlite3.Row) -> AdviceReviewPlan` |
-| function | `_required_plan_from_row` | 736 | `def _required_plan_from_row(row: sqlite3.Row \| None, message: str) -> AdviceReviewPlan` |
-| function | `_evaluation_from_row` | 742 | `def _evaluation_from_row(row: sqlite3.Row) -> AdviceReviewEvaluation` |
-| function | `_evaluation_result_values` | 796 | `def _evaluation_result_values(row: sqlite3.Row) -> _EvaluationResultValues` |
-| function | `_stored_evaluation_result_values` | 802 | `def _stored_evaluation_result_values(row: sqlite3.Row) -> _EvaluationResultValues` |
-| function | `_legacy_sanitized_result_values` | 827 | `def _legacy_sanitized_result_values() -> _EvaluationResultValues` |
-| function | `_evaluation_snapshot_is_verifiable` | 852 | `def _evaluation_snapshot_is_verifiable(row: sqlite3.Row) -> bool` |
-| function | `_has_verifiable_snapshot_provenance` | 862 | `def _has_verifiable_snapshot_provenance(*, adjustment_mode: str, anchor_date: object, anchor_close: float \| None, data_version: str, contract_version: str) -> bool` |
-| function | `_normalized_plan_updates` | 881 | `def _normalized_plan_updates(current: AdviceReviewPlan, payload: AdviceReviewPlanUpdate, requested: set[str]) -> dict[str, object]` |
-| function | `_validate_plan_prices` | 897 | `def _validate_plan_prices(target_price: float, snapshot_price: float, stop_price: float) -> None` |
-| function | `_validate_evaluation_binding` | 905 | `def _validate_evaluation_binding(plan: AdviceReviewPlan, evaluation: AdviceReviewEvaluationDraft) -> None` |
-| function | `_evaluation_insert_values` | 944 | `def _evaluation_insert_values(evaluation: AdviceReviewEvaluationDraft) -> dict[str, object \| None]` |
-| function | `_evaluation_upsert_sql` | 951 | `def _evaluation_upsert_sql() -> str` |
-| function | `_positive_finite_float` | 964 | `def _positive_finite_float(value: object, message: str) -> float` |
-| function | `_strict_iso_date` | 974 | `def _strict_iso_date(value: object) -> str` |
-| function | `_optional_float` | 985 | `def _optional_float(value: object) -> float \| None` |
-| function | `_optional_int` | 992 | `def _optional_int(value: object) -> int \| None` |
-| function | `_evidence_refs_json` | 1002 | `def _evidence_refs_json(values: object) -> str` |
-| function | `_merged_evidence_refs` | 1007 | `def _merged_evidence_refs(automatic: list[AdviceEvidenceRef], custom: list[AdviceEvidenceRef \| str]) -> list[AdviceEvidenceRef \| str]` |
-| function | `_evidence_refs_from_json` | 1022 | `def _evidence_refs_from_json(value: object) -> list[AdviceEvidenceRef \| str]` |
-| function | `_review_summary_from_rows` | 1043 | `def _review_summary_from_rows(rows: list[sqlite3.Row]) -> AdviceReviewSummary` |
-| function | `_append_finite` | 1086 | `def _append_finite(values: list[float], value: object) -> None` |
-| function | `_average_or_none` | 1092 | `def _average_or_none(values: list[float]) -> float \| None` |
+| method | `AdviceReviewRepository.plans` | 301 | `def plans(self, *, symbol: str \| None=None, limit: int=100, offset: int=0) -> list[AdviceReviewPlan]` |
+| method | `AdviceReviewRepository.details` | 330 | `def details(self, *, symbol: str \| None=None, limit: int=100, offset: int=0) -> list[AdviceReviewDetail]` |
+| method | `AdviceReviewRepository.evaluation_candidates` | 361 | `def evaluation_candidates(self, *, as_of_date: str, limit: int) -> list[AdviceReviewDetail]` |
+| method | `AdviceReviewRepository.update_plan` | 376 | `def update_plan(self, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan \| None` |
+| method | `AdviceReviewRepository.delete_plan` | 404 | `def delete_plan(self, plan_id: int) -> bool` |
+| method | `AdviceReviewRepository.detail` | 409 | `def detail(self, plan_id: int) -> AdviceReviewDetail \| None` |
+| method | `AdviceReviewRepository.evaluation` | 421 | `def evaluation(self, evaluation_id: int) -> AdviceReviewEvaluation \| None` |
+| method | `AdviceReviewRepository.evaluation_history` | 429 | `def evaluation_history(self, plan_id: int, limit: int=100) -> list[AdviceReviewEvaluation]` |
+| method | `AdviceReviewRepository.save_evaluation` | 445 | `def save_evaluation(self, evaluation: AdviceReviewEvaluationDraft) -> AdviceReviewEvaluation` |
+| method | `AdviceReviewRepository.summary` | 472 | `def summary(self) -> AdviceReviewSummary` |
+| function | `_validate_snapshot_binding` | 514 | `def _validate_snapshot_binding(snapshot: AdviceSnapshotRef, normalized_symbol: str, payload: AdviceReviewPlanInput) -> None` |
+| function | `_plan_insert_params` | 536 | `def _plan_insert_params(snapshot: AdviceSnapshotRef, payload: AdviceReviewPlanInput, timestamp: str) -> dict[str, object]` |
+| function | `_insert_plan` | 569 | `def _insert_plan(conn: sqlite3.Connection, params: dict[str, object]) -> sqlite3.Cursor` |
+| function | `_required_advice_snapshot` | 579 | `def _required_advice_snapshot(conn: sqlite3.Connection, advice_id: int) -> AdviceSnapshotRef` |
+| function | `_required_advice_snapshot_row` | 592 | `def _required_advice_snapshot_row(conn: sqlite3.Connection, advice_id: int) -> sqlite3.Row` |
+| function | `_snapshot_symbol` | 610 | `def _snapshot_symbol(value: object) -> str` |
+| function | `_advice_snapshot_from_row` | 617 | `def _advice_snapshot_from_row(row: sqlite3.Row, *, symbol: str, market_time: str, price: float) -> AdviceSnapshotRef` |
+| function | `_snapshot_text` | 645 | `def _snapshot_text(value: object, fallback: str) -> str` |
+| function | `_snapshot_optional_text` | 649 | `def _snapshot_optional_text(value: object) -> str \| None` |
+| function | `_plan_row` | 654 | `def _plan_row(conn: sqlite3.Connection, plan_id: int) -> sqlite3.Row \| None` |
+| function | `_plan_row_by_advice` | 661 | `def _plan_row_by_advice(conn: sqlite3.Connection, advice_id: int) -> sqlite3.Row \| None` |
+| function | `_latest_result_row` | 668 | `def _latest_result_row(conn: sqlite3.Connection, plan_id: int, revision: int) -> sqlite3.Row \| None` |
+| function | `_latest_result_rows` | 681 | `def _latest_result_rows(conn: sqlite3.Connection, plans: list[AdviceReviewPlan]) -> list[sqlite3.Row]` |
+| function | `_review_details` | 709 | `def _review_details(plans: list[AdviceReviewPlan], result_rows: list[sqlite3.Row]) -> list[AdviceReviewDetail]` |
+| function | `_plan_from_row` | 723 | `def _plan_from_row(row: sqlite3.Row) -> AdviceReviewPlan` |
+| function | `_required_plan_from_row` | 750 | `def _required_plan_from_row(row: sqlite3.Row \| None, message: str) -> AdviceReviewPlan` |
+| function | `_evaluation_from_row` | 756 | `def _evaluation_from_row(row: sqlite3.Row) -> AdviceReviewEvaluation` |
+| function | `_evaluation_result_values` | 810 | `def _evaluation_result_values(row: sqlite3.Row) -> _EvaluationResultValues` |
+| function | `_stored_evaluation_result_values` | 816 | `def _stored_evaluation_result_values(row: sqlite3.Row) -> _EvaluationResultValues` |
+| function | `_legacy_sanitized_result_values` | 841 | `def _legacy_sanitized_result_values() -> _EvaluationResultValues` |
+| function | `_evaluation_snapshot_is_verifiable` | 866 | `def _evaluation_snapshot_is_verifiable(row: sqlite3.Row) -> bool` |
+| function | `_has_verifiable_snapshot_provenance` | 876 | `def _has_verifiable_snapshot_provenance(*, adjustment_mode: str, anchor_date: object, anchor_close: float \| None, data_version: str, contract_version: str) -> bool` |
+| function | `_normalized_plan_updates` | 895 | `def _normalized_plan_updates(current: AdviceReviewPlan, payload: AdviceReviewPlanUpdate, requested: set[str]) -> dict[str, object]` |
+| function | `_validate_plan_prices` | 911 | `def _validate_plan_prices(target_price: float, snapshot_price: float, stop_price: float) -> None` |
+| function | `_validate_evaluation_binding` | 919 | `def _validate_evaluation_binding(plan: AdviceReviewPlan, evaluation: AdviceReviewEvaluationDraft) -> None` |
+| function | `_evaluation_insert_values` | 958 | `def _evaluation_insert_values(evaluation: AdviceReviewEvaluationDraft) -> dict[str, object \| None]` |
+| function | `_evaluation_upsert_sql` | 965 | `def _evaluation_upsert_sql() -> str` |
+| function | `_positive_finite_float` | 978 | `def _positive_finite_float(value: object, message: str) -> float` |
+| function | `_strict_iso_date` | 988 | `def _strict_iso_date(value: object) -> str` |
+| function | `_optional_float` | 999 | `def _optional_float(value: object) -> float \| None` |
+| function | `_optional_int` | 1006 | `def _optional_int(value: object) -> int \| None` |
+| function | `_evidence_refs_json` | 1016 | `def _evidence_refs_json(values: object) -> str` |
+| function | `_merged_evidence_refs` | 1021 | `def _merged_evidence_refs(automatic: list[AdviceEvidenceRef], custom: list[AdviceEvidenceRef \| str]) -> list[AdviceEvidenceRef \| str]` |
+| function | `_evidence_refs_from_json` | 1036 | `def _evidence_refs_from_json(value: object) -> list[AdviceEvidenceRef \| str]` |
+| function | `_review_summary_from_rows` | 1057 | `def _review_summary_from_rows(rows: list[sqlite3.Row]) -> AdviceReviewSummary` |
+| function | `_append_finite` | 1100 | `def _append_finite(values: list[float], value: object) -> None` |
+| function | `_average_or_none` | 1106 | `def _average_or_none(values: list[float]) -> float \| None` |
 
 #### `app/repositories/alerts.py`
 
@@ -1124,30 +1213,30 @@ Lines: 98
 
 #### `app/repositories/maintenance.py`
 
-Lines: 367
+Lines: 375
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | class | `RuntimeCleanupSpec` | 26 | `class RuntimeCleanupSpec` |
 | method | `RuntimeCleanupSpec.__post_init__` | 37 | `def __post_init__(self) -> None` |
-| class | `RuntimeMaintenanceRepository` | 162 | `class RuntimeMaintenanceRepository(SQLiteRepository)` |
-| method | `RuntimeMaintenanceRepository.__init__` | 163 | `def __init__(self, path: Path, lock: threading.RLock, *, settings: Settings) -> None` |
-| method | `RuntimeMaintenanceRepository.cleanup_runtime_rows` | 168 | `def cleanup_runtime_rows(self) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository.cleanup_regenerable_runtime_rows` | 175 | `def cleanup_regenerable_runtime_rows(self) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository._cleanup_specs` | 186 | `def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository._compact_after_cleanup` | 199 | `def _compact_after_cleanup(self, removed: dict[str, int]) -> None` |
-| method | `RuntimeMaintenanceRepository._compact_database_if_worthwhile` | 203 | `def _compact_database_if_worthwhile(self) -> bool` |
-| method | `RuntimeMaintenanceRepository.preview_runtime_cleanup` | 226 | `def preview_runtime_cleanup(self) -> dict[str, int]` |
-| method | `RuntimeMaintenanceRepository.table_counts` | 237 | `def table_counts(self) -> dict[str, int]` |
-| function | `_cleanup_table` | 242 | `def _cleanup_table(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int, delete_batch_rows: int \| None=None) -> int` |
-| function | `_cleanup_candidate_count` | 255 | `def _cleanup_candidate_count(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> int` |
-| function | `_cleanup_advice_candidates` | 268 | `def _cleanup_advice_candidates(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> dict[int, str]` |
-| function | `_deleted_advice_symbols` | 285 | `def _deleted_advice_symbols(conn: sqlite3.Connection, candidates: dict[int, str]) -> set[str]` |
-| function | `_cleanup_sql` | 301 | `def _cleanup_sql(spec: RuntimeCleanupSpec) -> str` |
-| function | `_retention_overflow_sql` | 311 | `def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str` |
-| function | `_candidate_protection_sql` | 326 | `def _candidate_protection_sql(spec: RuntimeCleanupSpec) -> str` |
-| function | `_quoted_statuses` | 362 | `def _quoted_statuses(statuses: tuple[str, ...]) -> str` |
-| function | `_table_count` | 366 | `def _table_count(conn: sqlite3.Connection, table: str) -> int` |
+| class | `RuntimeMaintenanceRepository` | 170 | `class RuntimeMaintenanceRepository(SQLiteRepository)` |
+| method | `RuntimeMaintenanceRepository.__init__` | 171 | `def __init__(self, path: Path, lock: threading.RLock, *, settings: Settings) -> None` |
+| method | `RuntimeMaintenanceRepository.cleanup_runtime_rows` | 176 | `def cleanup_runtime_rows(self) -> dict[str, int]` |
+| method | `RuntimeMaintenanceRepository.cleanup_regenerable_runtime_rows` | 183 | `def cleanup_regenerable_runtime_rows(self) -> dict[str, int]` |
+| method | `RuntimeMaintenanceRepository._cleanup_specs` | 194 | `def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]` |
+| method | `RuntimeMaintenanceRepository._compact_after_cleanup` | 207 | `def _compact_after_cleanup(self, removed: dict[str, int]) -> None` |
+| method | `RuntimeMaintenanceRepository._compact_database_if_worthwhile` | 211 | `def _compact_database_if_worthwhile(self) -> bool` |
+| method | `RuntimeMaintenanceRepository.preview_runtime_cleanup` | 234 | `def preview_runtime_cleanup(self) -> dict[str, int]` |
+| method | `RuntimeMaintenanceRepository.table_counts` | 245 | `def table_counts(self) -> dict[str, int]` |
+| function | `_cleanup_table` | 250 | `def _cleanup_table(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int, delete_batch_rows: int \| None=None) -> int` |
+| function | `_cleanup_candidate_count` | 263 | `def _cleanup_candidate_count(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> int` |
+| function | `_cleanup_advice_candidates` | 276 | `def _cleanup_advice_candidates(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> dict[int, str]` |
+| function | `_deleted_advice_symbols` | 293 | `def _deleted_advice_symbols(conn: sqlite3.Connection, candidates: dict[int, str]) -> set[str]` |
+| function | `_cleanup_sql` | 309 | `def _cleanup_sql(spec: RuntimeCleanupSpec) -> str` |
+| function | `_retention_overflow_sql` | 319 | `def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str` |
+| function | `_candidate_protection_sql` | 334 | `def _candidate_protection_sql(spec: RuntimeCleanupSpec) -> str` |
+| function | `_quoted_statuses` | 370 | `def _quoted_statuses(statuses: tuple[str, ...]) -> str` |
+| function | `_table_count` | 374 | `def _table_count(conn: sqlite3.Connection, table: str) -> int` |
 
 #### `app/repositories/market_data.py`
 
@@ -1445,6 +1534,58 @@ Lines: 207
 | function | `_stock_note_insert_values` | 187 | `def _stock_note_insert_values(quote: Quote, payload: StockNoteInput, timestamp: str) -> dict[str, object \| None]` |
 | function | `_required_bool_int` | 204 | `def _required_bool_int(value: bool \| None, message: str) -> int` |
 
+#### `app/repositories/paper_trading.py`
+
+Lines: 1013
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `_ClosedMetrics` | 54 | `class _ClosedMetrics` |
+| class | `_LatestMetrics` | 65 | `class _LatestMetrics` |
+| class | `PaperTradingRepository` | 79 | `class PaperTradingRepository(SQLiteRepository)` |
+| method | `PaperTradingRepository.account` | 80 | `def account(self) -> PaperTradingAccount` |
+| method | `PaperTradingRepository.update_account` | 85 | `def update_account(self, payload: PaperTradingAccountUpdate) -> PaperTradingAccount` |
+| method | `PaperTradingRepository.create_strategy` | 105 | `def create_strategy(self, plan: AdviceReviewPlan, payload: PaperStrategyCreate, *, activation_market_time: str) -> PaperStrategy` |
+| method | `PaperTradingRepository.delete_pending_strategy` | 158 | `def delete_pending_strategy(self, strategy_id: int) -> bool` |
+| method | `PaperTradingRepository.strategies` | 174 | `def strategies(self) -> list[PaperStrategy]` |
+| method | `PaperTradingRepository.save_simulation` | 184 | `def save_simulation(self, draft: PaperSimulationDraft) -> PaperTradingDashboard` |
+| method | `PaperTradingRepository.dashboard` | 197 | `def dashboard(self, *, run_id: int \| None=None) -> PaperTradingDashboard` |
+| method | `PaperTradingRepository.runs` | 229 | `def runs(self, *, limit: int=100) -> list[PaperTradingRun]` |
+| method | `PaperTradingRepository.run_export` | 237 | `def run_export(self, run_id: int) -> PaperRunExport` |
+| method | `PaperTradingRepository.compare_runs` | 251 | `def compare_runs(self, left_run_id: int, right_run_id: int) -> PaperRunComparison` |
+| function | `_validate_simulation_strategy_ids` | 285 | `def _validate_simulation_strategy_ids(conn: sqlite3.Connection, expected_ids: list[int]) -> None` |
+| function | `_insert_paper_run` | 291 | `def _insert_paper_run(conn: sqlite3.Connection, draft: PaperSimulationDraft, timestamp: str) -> int` |
+| function | `_insert_strategy_results` | 334 | `def _insert_strategy_results(conn: sqlite3.Connection, run_id: int, strategies: list[PaperStrategySimulation], timestamp: str) -> None` |
+| function | `_insert_paper_trades` | 387 | `def _insert_paper_trades(conn: sqlite3.Connection, run_id: int, trades: list[PaperTradeDraft], timestamp: str) -> None` |
+| function | `_insert_paper_equity` | 424 | `def _insert_paper_equity(conn: sqlite3.Connection, run_id: int, points: list[PaperEquityPointDraft], timestamp: str) -> None` |
+| function | `_insert_paper_events` | 466 | `def _insert_paper_events(conn: sqlite3.Connection, run_id: int, events: list[PaperTradingEventDraft], timestamp: str) -> None` |
+| function | `_account_row` | 498 | `def _account_row(conn: sqlite3.Connection, *, create: bool) -> sqlite3.Row \| None` |
+| function | `_account_from_row` | 521 | `def _account_from_row(row: sqlite3.Row) -> PaperTradingAccount` |
+| function | `_strategy_from_row` | 533 | `def _strategy_from_row(row: sqlite3.Row) -> PaperStrategy` |
+| function | `_strategies_for_run` | 577 | `def _strategies_for_run(conn: sqlite3.Connection, sources: list[PaperStrategy], run_id: int \| None) -> list[PaperStrategy]` |
+| function | `_strategy_with_result` | 596 | `def _strategy_with_result(source: PaperStrategy, row: sqlite3.Row \| None) -> PaperStrategy` |
+| function | `_trades_for_run` | 631 | `def _trades_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperTrade]` |
+| function | `_events_for_run` | 641 | `def _events_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperTradingEvent]` |
+| function | `_equity_for_run` | 651 | `def _equity_for_run(conn: sqlite3.Connection, run_id: int \| None) -> list[PaperEquityPoint]` |
+| function | `_trade_from_row` | 661 | `def _trade_from_row(row: sqlite3.Row) -> PaperTrade` |
+| function | `_event_from_row` | 682 | `def _event_from_row(row: sqlite3.Row) -> PaperTradingEvent` |
+| function | `_equity_from_row` | 700 | `def _equity_from_row(row: sqlite3.Row) -> PaperEquityPoint` |
+| function | `_run_from_row` | 725 | `def _run_from_row(row: sqlite3.Row) -> PaperTradingRun` |
+| function | `_performance` | 757 | `def _performance(account: PaperTradingAccount, strategies: list[PaperStrategy], equity: list[PaperEquityPoint], trades: list[PaperTrade]) -> PaperTradingPerformance` |
+| function | `_closed_metrics` | 817 | `def _closed_metrics(closed: list[PaperStrategy]) -> _ClosedMetrics` |
+| function | `_payoff_ratio` | 835 | `def _payoff_ratio(average_win: float \| None, average_loss: float \| None) -> float \| None` |
+| function | `_latest_metrics` | 841 | `def _latest_metrics(initial_cash: float, equity: list[PaperEquityPoint]) -> _LatestMetrics` |
+| function | `_exposure_metrics` | 860 | `def _exposure_metrics(equity: list[PaperEquityPoint]) -> tuple[float, float]` |
+| function | `_sample_warning` | 867 | `def _sample_warning(closed_count: int, observation_count: int) -> str \| None` |
+| function | `_risk_metrics` | 875 | `def _risk_metrics(initial_cash: float, equity: list[PaperEquityPoint], closed_count: int) -> dict[str, object]` |
+| function | `_drawdown_durations` | 912 | `def _drawdown_durations(equity: list[PaperEquityPoint]) -> tuple[int, int \| None]` |
+| function | `_positions` | 935 | `def _positions(strategies: list[PaperStrategy], profile: PaperCostProfile) -> list[PaperPosition]` |
+| function | `_cost_profile_from_run` | 970 | `def _cost_profile_from_run(run: PaperTradingRun \| None) -> PaperCostProfile` |
+| function | `_optional_delta` | 984 | `def _optional_delta(right: float \| None, left: float \| None) -> float \| None` |
+| function | `_json_dump` | 990 | `def _json_dump(value: object) -> str` |
+| function | `_json_load` | 994 | `def _json_load(value: str, fallback: object) -> object` |
+| function | `_required_row` | 1001 | `def _required_row(row: sqlite3.Row \| None, message: str) -> sqlite3.Row` |
+
 #### `app/repositories/provider_status.py`
 
 Lines: 445
@@ -1603,6 +1744,19 @@ Lines: 622
 | function | `_clean_unread_change_count` | 564 | `def _clean_unread_change_count(value: object) -> int` |
 | function | `_upsert_watchlist_row` | 589 | `def _upsert_watchlist_row(conn: sqlite3.Connection, values: WatchlistSaveValues) -> None` |
 
+#### `app/repositories/watchlist_scans.py`
+
+Lines: 107
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `WatchlistScanRepository` | 19 | `class WatchlistScanRepository(SQLiteRepository)` |
+| method | `WatchlistScanRepository.save` | 20 | `def save(self, payload: WatchlistScanRequest, result: WatchlistScanResponse) -> WatchlistScanRecord` |
+| method | `WatchlistScanRepository.items` | 61 | `def items(self, *, limit: int=20) -> list[WatchlistScanHistoryItem]` |
+| method | `WatchlistScanRepository.record` | 71 | `def record(self, row_id: int) -> WatchlistScanRecord \| None` |
+| function | `_history_item_from_row` | 77 | `def _history_item_from_row(row: sqlite3.Row) -> WatchlistScanHistoryItem` |
+| function | `_record_from_row` | 93 | `def _record_from_row(row: sqlite3.Row) -> WatchlistScanRecord` |
+
 #### `app/runtime_environment.py`
 
 Lines: 14
@@ -1613,29 +1767,32 @@ Lines: 14
 
 #### `app/services/advice_review.py`
 
-Lines: 290
+Lines: 345
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `create_advice_review_plan` | 35 | `def create_advice_review_plan(cache: object, payload: AdviceReviewPlanInput) -> AdviceReviewPlan` |
-| function | `update_advice_review_plan` | 39 | `def update_advice_review_plan(cache: object, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan` |
-| function | `delete_advice_review_plan` | 50 | `def delete_advice_review_plan(cache: object, plan_id: int) -> None` |
-| function | `get_advice_review_detail` | 55 | `def get_advice_review_detail(cache: object, plan_id: int) -> AdviceReviewDetail` |
-| function | `list_advice_review_plans` | 62 | `def list_advice_review_plans(cache: object, *, symbol: str \| None=None, limit: int=100) -> list[AdviceReviewPlan]` |
-| function | `list_advice_review_details` | 71 | `def list_advice_review_details(cache: object, *, symbol: str \| None=None, limit: int=100) -> list[AdviceReviewDetail]` |
-| function | `build_advice_evidence_refs` | 80 | `def build_advice_evidence_refs(snapshot: object) -> list[AdviceEvidenceRef]` |
-| function | `get_advice_review_summary` | 84 | `def get_advice_review_summary(cache: object) -> AdviceReviewSummary` |
-| async function | `evaluate_advice_review_plan` | 88 | `async def evaluate_advice_review_plan(datahub: DataHub, plan_id: int, *, as_of: datetime \| None=None, now: datetime \| None=None) -> AdviceReviewEvaluation` |
-| async function | `evaluate_due_advice_reviews` | 117 | `async def evaluate_due_advice_reviews(datahub: DataHub, *, as_of: datetime \| None=None, now: datetime \| None=None, limit: int=20) -> AdviceReviewBatchSummary` |
-| async function | `_evaluate_due_review` | 152 | `async def _evaluate_due_review(datahub: DataHub, detail: AdviceReviewDetail, *, as_of: datetime, evaluated_at: datetime, sensitive_values: tuple[object, ...]) -> AdviceReviewBatchItem` |
-| function | `_due_review_summary` | 186 | `def _due_review_summary(as_of: datetime, candidates: list[AdviceReviewDetail], items: list[AdviceReviewBatchItem]) -> AdviceReviewBatchSummary` |
-| function | `normalize_review_as_of` | 201 | `def normalize_review_as_of(value: datetime \| None, *, now: datetime \| None=None, allow_future: bool=False) -> datetime` |
-| function | `_snapshot_datetime` | 214 | `def _snapshot_datetime(value: str) -> datetime` |
-| function | `_stable_review_as_of` | 221 | `def _stable_review_as_of(value: datetime) -> datetime` |
-| function | `_review_detail_is_due` | 226 | `def _review_detail_is_due(detail: AdviceReviewDetail, as_of: datetime) -> bool` |
-| function | `_short_review_error` | 244 | `def _short_review_error(exc: Exception, *, sensitive_values: tuple[object, ...]=()) -> str` |
-| function | `_background_sensitive_values` | 253 | `def _background_sensitive_values(datahub: object) -> tuple[object, ...]` |
-| function | `_review_kline_limit` | 266 | `def _review_kline_limit(plan: AdviceReviewPlan, snapshot_time: datetime, as_of: datetime) -> int` |
+| function | `create_advice_review_plan` | 36 | `def create_advice_review_plan(cache: object, payload: AdviceReviewPlanInput) -> AdviceReviewPlan` |
+| function | `update_advice_review_plan` | 40 | `def update_advice_review_plan(cache: object, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan` |
+| function | `delete_advice_review_plan` | 51 | `def delete_advice_review_plan(cache: object, plan_id: int) -> None` |
+| function | `get_advice_review_detail` | 56 | `def get_advice_review_detail(cache: object, plan_id: int) -> AdviceReviewDetail` |
+| function | `list_advice_review_plans` | 63 | `def list_advice_review_plans(cache: object, *, symbol: str \| None=None, limit: int=100, offset: int=0) -> list[AdviceReviewPlan]` |
+| function | `list_advice_review_details` | 75 | `def list_advice_review_details(cache: object, *, symbol: str \| None=None, limit: int=100, offset: int=0) -> list[AdviceReviewDetail]` |
+| function | `build_advice_evidence_refs` | 87 | `def build_advice_evidence_refs(snapshot: object) -> list[AdviceEvidenceRef]` |
+| function | `get_advice_review_summary` | 91 | `def get_advice_review_summary(cache: object) -> AdviceReviewSummary` |
+| async function | `evaluate_advice_review_plan` | 95 | `async def evaluate_advice_review_plan(datahub: DataHub, plan_id: int, *, as_of: datetime \| None=None, now: datetime \| None=None) -> AdviceReviewEvaluation` |
+| async function | `evaluate_due_advice_reviews` | 124 | `async def evaluate_due_advice_reviews(datahub: DataHub, *, as_of: datetime \| None=None, now: datetime \| None=None, limit: int=20) -> AdviceReviewBatchSummary` |
+| async function | `list_due_advice_reviews` | 159 | `async def list_due_advice_reviews(datahub: DataHub, *, as_of: datetime \| None=None, now: datetime \| None=None, limit: int=100) -> list[AdviceReviewDueItem]` |
+| async function | `_evaluate_due_review` | 179 | `async def _evaluate_due_review(datahub: DataHub, detail: AdviceReviewDetail, *, as_of: datetime, evaluated_at: datetime, sensitive_values: tuple[object, ...]) -> AdviceReviewBatchItem` |
+| function | `_due_review_summary` | 213 | `def _due_review_summary(as_of: datetime, candidates: list[AdviceReviewDetail], items: list[AdviceReviewBatchItem]) -> AdviceReviewBatchSummary` |
+| function | `normalize_review_as_of` | 228 | `def normalize_review_as_of(value: datetime \| None, *, now: datetime \| None=None, allow_future: bool=False) -> datetime` |
+| function | `_snapshot_datetime` | 241 | `def _snapshot_datetime(value: str) -> datetime` |
+| function | `_stable_review_as_of` | 248 | `def _stable_review_as_of(value: datetime) -> datetime` |
+| function | `_review_detail_is_due` | 253 | `def _review_detail_is_due(detail: AdviceReviewDetail, as_of: datetime) -> bool` |
+| function | `_due_review_item` | 271 | `def _due_review_item(detail: AdviceReviewDetail, as_of: datetime) -> AdviceReviewDueItem` |
+| function | `_review_due_date` | 288 | `def _review_due_date(plan: AdviceReviewPlan) -> date` |
+| function | `_short_review_error` | 298 | `def _short_review_error(exc: Exception, *, sensitive_values: tuple[object, ...]=()) -> str` |
+| function | `_background_sensitive_values` | 307 | `def _background_sensitive_values(datahub: object) -> tuple[object, ...]` |
+| function | `_review_kline_limit` | 320 | `def _review_kline_limit(plan: AdviceReviewPlan, snapshot_time: datetime, as_of: datetime) -> int` |
 
 #### `app/services/akshare_mappers.py`
 
@@ -1929,137 +2086,150 @@ Lines: 217
 
 #### `app/services/cache.py`
 
-Lines: 813
+Lines: 901
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `resolve_cache_settings` | 94 | `def resolve_cache_settings(cache: SQLiteCache \| None=None, settings: Settings \| None=None, *, owner: str='cache') -> Settings` |
-| class | `_BorrowedTransactionConnection` | 110 | `class _BorrowedTransactionConnection` |
-| method | `_BorrowedTransactionConnection.__init__` | 111 | `def __init__(self, connection: sqlite3.Connection) -> None` |
-| method | `_BorrowedTransactionConnection.execute` | 114 | `def execute(self, statement: str, parameters: Any=()) -> sqlite3.Cursor` |
-| class | `_BorrowedTransactionConnections` | 121 | `class _BorrowedTransactionConnections` |
-| method | `_BorrowedTransactionConnections.__init__` | 122 | `def __init__(self, connection: sqlite3.Connection) -> None` |
-| method | `_BorrowedTransactionConnections.connect` | 126 | `def connect(self) -> Iterator[sqlite3.Connection]` |
-| class | `ExclusiveLocalDataOperation` | 131 | `class ExclusiveLocalDataOperation` |
-| method | `ExclusiveLocalDataOperation.__init__` | 132 | `def __init__(self, cache: SQLiteCache) -> None` |
-| method | `ExclusiveLocalDataOperation.transaction` | 137 | `def transaction(self) -> Iterator[sqlite3.Connection]` |
-| class | `SQLiteCache` | 158 | `class SQLiteCache` |
-| method | `SQLiteCache.__init__` | 159 | `def __init__(self, path: Path \| None=None, *, settings: Settings \| None=None) -> None` |
-| method | `SQLiteCache.settings` | 192 | `def settings(self) -> Settings \| None` |
-| method | `SQLiteCache.settings` | 196 | `def settings(self, settings: Settings \| None) -> None` |
-| method | `SQLiteCache.exclusive_local_data_operation` | 203 | `def exclusive_local_data_operation(self) -> Iterator[ExclusiveLocalDataOperation]` |
-| method | `SQLiteCache.bind_settings` | 209 | `def bind_settings(self, settings: Settings, *, owner: str='cache') -> Settings` |
-| method | `SQLiteCache._connect` | 221 | `def _connect(self) -> AbstractContextManager` |
-| method | `SQLiteCache._init_schema` | 224 | `def _init_schema(self, legacy_audit_timezone: str, *, settings_supplied: bool) -> None` |
-| method | `SQLiteCache.readiness_check` | 256 | `def readiness_check(self) -> None` |
-| method | `SQLiteCache.save_quotes` | 264 | `def save_quotes(self, quotes: list[Quote]) -> None` |
-| method | `SQLiteCache.get_quotes` | 267 | `def get_quotes(self, symbols: list[str], max_age_seconds: int) -> list[Quote]` |
-| method | `SQLiteCache.quote_history` | 270 | `def quote_history(self, symbol: str, limit: int=120) -> list[dict[str, float \| str \| None]]` |
-| method | `SQLiteCache.save_klines` | 273 | `def save_klines(self, symbol: str, klines: list[Kline], source: str) -> None` |
-| method | `SQLiteCache.get_klines` | 276 | `def get_klines(self, symbol: str, limit: int, max_age_seconds: int, adjustment_mode: KlineAdjustmentMode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE) -> list[Kline]` |
-| method | `SQLiteCache.get_klines_many` | 290 | `def get_klines_many(self, symbols: Iterable[str], limit: int, max_age_seconds: int, adjustment_mode: KlineAdjustmentMode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE) -> dict[str, list[Kline]]` |
-| method | `SQLiteCache.save_minute_klines` | 304 | `def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None` |
-| method | `SQLiteCache.get_minute_klines` | 307 | `def get_minute_klines(self, symbol: str, interval: str, limit: int, max_age_seconds: int) -> list[MinuteKline]` |
-| method | `SQLiteCache.save_stock_pool` | 310 | `def save_stock_pool(self, rows: list[StockInfo]) -> None` |
-| method | `SQLiteCache.replace_stock_pool` | 313 | `def replace_stock_pool(self, rows: list[StockInfo]) -> None` |
-| method | `SQLiteCache.get_stock_pool` | 316 | `def get_stock_pool(self, max_age_seconds: int, limit: int \| None=5000, keyword: str \| None=None) -> list[StockInfo]` |
-| method | `SQLiteCache.stock_pool_count` | 319 | `def stock_pool_count(self, max_age_seconds: int \| None=None) -> int` |
-| method | `SQLiteCache.create_market_scan_run` | 322 | `def create_market_scan_run(self, **kwargs)` |
-| method | `SQLiteCache.market_scan_run` | 325 | `def market_scan_run(self, run_id: int)` |
-| method | `SQLiteCache.active_market_scan_run` | 328 | `def active_market_scan_run(self)` |
-| method | `SQLiteCache.latest_market_scan_run` | 331 | `def latest_market_scan_run(self, *, mode=None)` |
-| method | `SQLiteCache.latest_published_market_scan_run` | 334 | `def latest_published_market_scan_run(self, *, mode=None)` |
-| method | `SQLiteCache.market_scan_runs` | 337 | `def market_scan_runs(self, *, page: int, page_size: int, mode=None, status=None, data_date=None)` |
-| method | `SQLiteCache.attach_market_scan_task_run` | 346 | `def attach_market_scan_task_run(self, run_id: int, task_run_id: int) -> None` |
-| method | `SQLiteCache.start_market_scan_task_run` | 349 | `def start_market_scan_task_run(self, run_id: int, task_name: str) -> int` |
-| method | `SQLiteCache.record_market_scan_stock_pool_source` | 352 | `def record_market_scan_stock_pool_source(self, run_id: int, source: str)` |
-| method | `SQLiteCache.update_market_scan_observability` | 355 | `def update_market_scan_observability(self, run_id: int, **kwargs)` |
-| method | `SQLiteCache.start_market_scan_run` | 358 | `def start_market_scan_run(self, run_id: int)` |
-| method | `SQLiteCache.seed_market_scan_results` | 361 | `def seed_market_scan_results(self, run_id: int, seeds: list[MarketScanSeed], *, excluded_count: int) -> int` |
-| method | `SQLiteCache.pending_market_scan_items` | 370 | `def pending_market_scan_items(self, run_id: int)` |
-| method | `SQLiteCache.refresh_pending_market_scan_metadata` | 373 | `def refresh_pending_market_scan_metadata(self, run_id: int, seeds: list[MarketScanSeed]) -> int` |
-| method | `SQLiteCache.save_market_scan_result_batch` | 380 | `def save_market_scan_result_batch(self, run_id: int, results: list[MarketScanResultWrite])` |
-| method | `SQLiteCache.request_market_scan_cancel` | 383 | `def request_market_scan_cancel(self, run_id: int)` |
-| method | `SQLiteCache.market_scan_retry_plan` | 386 | `def market_scan_retry_plan(self, run_id: int)` |
-| method | `SQLiteCache.prepare_market_scan_retry` | 389 | `def prepare_market_scan_retry(self, run_id: int, expected_plan=None)` |
-| method | `SQLiteCache.finish_market_scan_run` | 392 | `def finish_market_scan_run(self, run_id: int, status, *, message: str, error: str \| None=None, task_status: str \| None=None)` |
-| method | `SQLiteCache.market_scan_degraded_result_count` | 409 | `def market_scan_degraded_result_count(self, run_id: int) -> int` |
-| method | `SQLiteCache.reconcile_incomplete_market_scans` | 412 | `def reconcile_incomplete_market_scans(self) -> int` |
-| method | `SQLiteCache.market_scan_results` | 415 | `def market_scan_results(self, run_id: int, **kwargs)` |
-| method | `SQLiteCache.save_plate_rank` | 418 | `def save_plate_rank(self, rows: list[PlateItem]) -> None` |
-| method | `SQLiteCache.get_plate_rank` | 421 | `def get_plate_rank(self, max_age_seconds: int, limit: int=20) -> list[PlateItem]` |
-| method | `SQLiteCache.save_stock_concepts` | 424 | `def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None` |
-| method | `SQLiteCache.get_stock_concepts` | 427 | `def get_stock_concepts(self, symbol: str, max_age_seconds: int, limit: int=8) -> list[StockConceptItem]` |
-| method | `SQLiteCache.provider_enabled` | 430 | `def provider_enabled(self, name: str) -> bool` |
-| method | `SQLiteCache.update_provider_success` | 433 | `def update_provider_success(self, name: str, priority: int, latency_ms: float) -> None` |
-| method | `SQLiteCache.update_provider_failure` | 436 | `def update_provider_failure(self, name: str, priority: int, error: str) -> None` |
-| method | `SQLiteCache.update_provider_capability_success` | 439 | `def update_provider_capability_success(self, name: str, kind: str, priority: int, latency_ms: float) -> None` |
-| method | `SQLiteCache.update_provider_capability_failure` | 442 | `def update_provider_capability_failure(self, name: str, kind: str, priority: int, error: str) -> None` |
-| method | `SQLiteCache.ensure_provider` | 445 | `def ensure_provider(self, name: str, priority: int, enabled: bool=True) -> None` |
-| method | `SQLiteCache.ensure_provider_capability` | 448 | `def ensure_provider_capability(self, name: str, kind: str, priority: int, enabled: bool=True) -> None` |
-| method | `SQLiteCache.provider_statuses` | 451 | `def provider_statuses(self) -> list[ProviderStatus]` |
-| method | `SQLiteCache.provider_capability_statuses` | 454 | `def provider_capability_statuses(self) -> list[ProviderCapabilityStatus]` |
-| method | `SQLiteCache.stats` | 457 | `def stats(self) -> CacheStats` |
-| method | `SQLiteCache.log_event` | 460 | `def log_event(self, category: str, message: str) -> None` |
-| method | `SQLiteCache.start_task_run` | 466 | `def start_task_run(self, task_name: str) -> int` |
-| method | `SQLiteCache.finish_task_run` | 469 | `def finish_task_run(self, run_id: int, status: str, message: str \| None=None) -> None` |
-| method | `SQLiteCache.reconcile_orphaned_task_runs` | 472 | `def reconcile_orphaned_task_runs(self) -> int` |
-| method | `SQLiteCache.recent_task_runs` | 475 | `def recent_task_runs(self, limit: int=20) -> list[TaskRun]` |
-| method | `SQLiteCache.task_runs_for_name` | 478 | `def task_runs_for_name(self, task_name: str, limit: int=20) -> list[TaskRun]` |
-| method | `SQLiteCache.save_monitor_event` | 481 | `def save_monitor_event(self, level: str, category: str, message: str, symbol: str \| None=None) -> None` |
-| method | `SQLiteCache.recent_monitor_events` | 484 | `def recent_monitor_events(self, limit: int=30) -> list[MonitorEvent]` |
-| method | `SQLiteCache.record_reliability` | 487 | `def record_reliability(self, metric: str, *, subject: str='', capability: str='', good: bool, degraded: bool=False, failed: bool=False, fallback: bool=False, duration_ms: float \| int \| None=None) -> None` |
-| method | `SQLiteCache.record_workbench_reliability` | 510 | `def record_workbench_reliability(self, *, usable: bool, duration_ms: float \| int, quality: bool \| None=None, fresh: bool \| None=None, non_fallback: bool \| None=None) -> None` |
-| method | `SQLiteCache.reliability_bucket_stats` | 527 | `def reliability_bucket_stats(self, metric: str, since: str) -> ReliabilityBucketStats` |
-| method | `SQLiteCache.reliability_market_scan_stats` | 530 | `def reliability_market_scan_stats(self, since: str) -> ReliabilityScanStats` |
-| method | `SQLiteCache.reliability_task_stats` | 533 | `def reliability_task_stats(self, since: str) -> ReliabilityTaskStats` |
-| method | `SQLiteCache.save_watchlist_item` | 536 | `def save_watchlist_item(self, quote: Quote, note: str \| None=None, group_name: str \| None=None, pinned: bool \| None=None, research_status: ResearchStatus \| None=None, priority: WatchlistPriority \| None=None, next_review_date: date \| str \| None=None) -> WatchlistItem` |
-| method | `SQLiteCache.watchlist_item` | 556 | `def watchlist_item(self, symbol: str) -> WatchlistItem \| None` |
-| method | `SQLiteCache.watchlist` | 559 | `def watchlist(self) -> list[WatchlistItem]` |
-| method | `SQLiteCache.update_watchlist_item` | 562 | `def update_watchlist_item(self, symbol: str, payload: WatchlistUpdate) -> WatchlistItem \| None` |
-| method | `SQLiteCache.mark_watchlist_viewed` | 565 | `def mark_watchlist_viewed(self, symbol: str, *, clear_unread: bool=True, viewed_through_advice_id: int \| None=None) -> WatchlistItem \| None` |
-| method | `SQLiteCache.adjust_watchlist_unread_count` | 578 | `def adjust_watchlist_unread_count(self, symbol: str, delta: int) -> WatchlistItem \| None` |
-| method | `SQLiteCache.increment_watchlist_unread_count` | 581 | `def increment_watchlist_unread_count(self, symbol: str, amount: int=1) -> WatchlistItem \| None` |
-| method | `SQLiteCache.delete_watchlist_item` | 584 | `def delete_watchlist_item(self, symbol: str) -> bool` |
-| method | `SQLiteCache.watchlist_symbols` | 587 | `def watchlist_symbols(self) -> list[str]` |
-| method | `SQLiteCache.watchlist_symbol_selection` | 590 | `def watchlist_symbol_selection(self) -> WatchlistSymbolSelection` |
-| method | `SQLiteCache.save_advice_snapshot` | 593 | `def save_advice_snapshot(self, analysis: AnalysisResult, *, snapshot_market_time: str \| None=None) -> AdviceHistoryItem` |
-| method | `SQLiteCache.advice_history_by_id` | 604 | `def advice_history_by_id(self, row_id: int) -> AdviceHistoryItem \| None` |
-| method | `SQLiteCache.advice_history` | 607 | `def advice_history(self, symbol: str, limit: int=30) -> list[AdviceHistoryItem]` |
-| method | `SQLiteCache.advice_timeline` | 610 | `def advice_timeline(self, symbol: str, limit: int=30) -> list[AdviceTimelineItem]` |
-| method | `SQLiteCache.latest_advice_timeline_by_symbols` | 616 | `def latest_advice_timeline_by_symbols(self, symbols: Iterable[str]) -> dict[str, AdviceTimelineItem]` |
-| method | `SQLiteCache.create_advice_review_plan` | 622 | `def create_advice_review_plan(self, payload: AdviceReviewPlanInput) -> AdviceReviewPlan` |
-| method | `SQLiteCache.advice_review_plan` | 625 | `def advice_review_plan(self, plan_id: int) -> AdviceReviewPlan \| None` |
-| method | `SQLiteCache.advice_review_plan_by_advice` | 628 | `def advice_review_plan_by_advice(self, advice_id: int) -> AdviceReviewPlan \| None` |
-| method | `SQLiteCache.advice_review_plans` | 631 | `def advice_review_plans(self, *, symbol: str \| None=None, limit: int=100) -> list[AdviceReviewPlan]` |
-| method | `SQLiteCache.advice_review_details` | 634 | `def advice_review_details(self, *, symbol: str \| None=None, limit: int=100) -> list[AdviceReviewDetail]` |
-| method | `SQLiteCache.advice_review_evaluation_candidates` | 637 | `def advice_review_evaluation_candidates(self, *, as_of_date: str, limit: int) -> list[AdviceReviewDetail]` |
-| method | `SQLiteCache.update_advice_review_plan` | 648 | `def update_advice_review_plan(self, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan \| None` |
-| method | `SQLiteCache.delete_advice_review_plan` | 655 | `def delete_advice_review_plan(self, plan_id: int) -> bool` |
-| method | `SQLiteCache.advice_review_detail` | 658 | `def advice_review_detail(self, plan_id: int) -> AdviceReviewDetail \| None` |
-| method | `SQLiteCache.advice_review_evaluation` | 661 | `def advice_review_evaluation(self, evaluation_id: int) -> AdviceReviewEvaluation \| None` |
-| method | `SQLiteCache.advice_review_evaluation_history` | 664 | `def advice_review_evaluation_history(self, plan_id: int, limit: int=100) -> list[AdviceReviewEvaluation]` |
-| method | `SQLiteCache.save_advice_review_evaluation` | 671 | `def save_advice_review_evaluation(self, evaluation: AdviceReviewEvaluationDraft) -> AdviceReviewEvaluation` |
-| method | `SQLiteCache.advice_review_summary` | 677 | `def advice_review_summary(self) -> AdviceReviewSummary` |
-| method | `SQLiteCache.create_alert_rule` | 680 | `def create_alert_rule(self, quote: Quote, payload: AlertRuleInput) -> AlertRuleItem` |
-| method | `SQLiteCache.alert_rules` | 683 | `def alert_rules(self, symbol: str \| None=None, include_disabled: bool=True, limit: int \| None=None) -> list[AlertRuleItem]` |
-| method | `SQLiteCache.alert_rule` | 691 | `def alert_rule(self, row_id: int) -> AlertRuleItem \| None` |
-| method | `SQLiteCache.delete_alert_rule` | 694 | `def delete_alert_rule(self, row_id: int) -> bool` |
-| method | `SQLiteCache.update_alert_rule` | 697 | `def update_alert_rule(self, row_id: int, payload: AlertRuleUpdate) -> AlertRuleItem \| None` |
-| method | `SQLiteCache.update_alert_rule_state` | 700 | `def update_alert_rule_state(self, rule: AlertRuleItem, *, checked_at: str, state: str, triggered: bool, message: str, quote: Quote, event_type: str \| None=None, force_event: bool=False, decision: AlertStateDecision \| None=None) -> AlertEventItem \| None` |
-| method | `SQLiteCache.update_alert_rule_state_checked` | 725 | `def update_alert_rule_state_checked(self, rule: AlertRuleItem, *, checked_at: str, state: str, triggered: bool, message: str, quote: Quote, event_type: str \| None=None, force_event: bool=False, decision: AlertStateDecision \| None=None) -> AlertStateUpdateResult` |
-| method | `SQLiteCache.alert_events` | 750 | `def alert_events(self, symbol: str \| None=None, limit: int=100, *, after_created_at: str \| None=None, after_id: int \| None=None) -> list[AlertEventItem]` |
-| method | `SQLiteCache.create_stock_note` | 765 | `def create_stock_note(self, quote: Quote, payload: StockNoteInput) -> StockNoteItem` |
-| method | `SQLiteCache.stock_notes` | 768 | `def stock_notes(self, symbol: str, limit: int=100, visible_only: bool=False) -> list[StockNoteItem]` |
-| method | `SQLiteCache.stock_note` | 771 | `def stock_note(self, row_id: int) -> StockNoteItem \| None` |
-| method | `SQLiteCache.update_stock_note` | 774 | `def update_stock_note(self, row_id: int, payload: StockNoteUpdate) -> StockNoteItem \| None` |
-| method | `SQLiteCache.delete_stock_note` | 777 | `def delete_stock_note(self, row_id: int) -> bool` |
-| method | `SQLiteCache.cleanup_runtime_rows` | 780 | `def cleanup_runtime_rows(self) -> dict[str, int]` |
-| method | `SQLiteCache.preview_runtime_cleanup` | 783 | `def preview_runtime_cleanup(self) -> dict[str, int]` |
-| method | `SQLiteCache.table_counts` | 786 | `def table_counts(self) -> dict[str, int]` |
-| function | `_require_settings_path` | 790 | `def _require_settings_path(path: Path, settings: Settings, owner: str) -> None` |
-| function | `_acquire_audit_migration_guard` | 795 | `def _acquire_audit_migration_guard(path: Path) -> FileInstanceGuard` |
-| function | `_require_audit_migration_disk_space` | 802 | `def _require_audit_migration_disk_space(path: Path) -> None` |
+| function | `resolve_cache_settings` | 111 | `def resolve_cache_settings(cache: SQLiteCache \| None=None, settings: Settings \| None=None, *, owner: str='cache') -> Settings` |
+| class | `_BorrowedTransactionConnection` | 127 | `class _BorrowedTransactionConnection` |
+| method | `_BorrowedTransactionConnection.__init__` | 128 | `def __init__(self, connection: sqlite3.Connection) -> None` |
+| method | `_BorrowedTransactionConnection.execute` | 131 | `def execute(self, statement: str, parameters: Any=()) -> sqlite3.Cursor` |
+| class | `_BorrowedTransactionConnections` | 138 | `class _BorrowedTransactionConnections` |
+| method | `_BorrowedTransactionConnections.__init__` | 139 | `def __init__(self, connection: sqlite3.Connection) -> None` |
+| method | `_BorrowedTransactionConnections.connect` | 143 | `def connect(self) -> Iterator[sqlite3.Connection]` |
+| class | `ExclusiveLocalDataOperation` | 148 | `class ExclusiveLocalDataOperation` |
+| method | `ExclusiveLocalDataOperation.__init__` | 149 | `def __init__(self, cache: SQLiteCache) -> None` |
+| method | `ExclusiveLocalDataOperation.transaction` | 154 | `def transaction(self) -> Iterator[sqlite3.Connection]` |
+| class | `SQLiteCache` | 175 | `class SQLiteCache` |
+| method | `SQLiteCache.__init__` | 176 | `def __init__(self, path: Path \| None=None, *, settings: Settings \| None=None) -> None` |
+| method | `SQLiteCache.settings` | 212 | `def settings(self) -> Settings \| None` |
+| method | `SQLiteCache.settings` | 216 | `def settings(self, settings: Settings \| None) -> None` |
+| method | `SQLiteCache.exclusive_local_data_operation` | 223 | `def exclusive_local_data_operation(self) -> Iterator[ExclusiveLocalDataOperation]` |
+| method | `SQLiteCache.bind_settings` | 229 | `def bind_settings(self, settings: Settings, *, owner: str='cache') -> Settings` |
+| method | `SQLiteCache._connect` | 241 | `def _connect(self) -> AbstractContextManager` |
+| method | `SQLiteCache._init_schema` | 244 | `def _init_schema(self, legacy_audit_timezone: str, *, settings_supplied: bool) -> None` |
+| method | `SQLiteCache.readiness_check` | 276 | `def readiness_check(self) -> None` |
+| method | `SQLiteCache.save_quotes` | 284 | `def save_quotes(self, quotes: list[Quote]) -> None` |
+| method | `SQLiteCache.get_quotes` | 287 | `def get_quotes(self, symbols: list[str], max_age_seconds: int) -> list[Quote]` |
+| method | `SQLiteCache.quote_history` | 290 | `def quote_history(self, symbol: str, limit: int=120) -> list[dict[str, float \| str \| None]]` |
+| method | `SQLiteCache.save_klines` | 293 | `def save_klines(self, symbol: str, klines: list[Kline], source: str) -> None` |
+| method | `SQLiteCache.get_klines` | 296 | `def get_klines(self, symbol: str, limit: int, max_age_seconds: int, adjustment_mode: KlineAdjustmentMode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE) -> list[Kline]` |
+| method | `SQLiteCache.get_klines_many` | 310 | `def get_klines_many(self, symbols: Iterable[str], limit: int, max_age_seconds: int, adjustment_mode: KlineAdjustmentMode=DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE) -> dict[str, list[Kline]]` |
+| method | `SQLiteCache.save_minute_klines` | 324 | `def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None` |
+| method | `SQLiteCache.get_minute_klines` | 327 | `def get_minute_klines(self, symbol: str, interval: str, limit: int, max_age_seconds: int) -> list[MinuteKline]` |
+| method | `SQLiteCache.save_stock_pool` | 330 | `def save_stock_pool(self, rows: list[StockInfo]) -> None` |
+| method | `SQLiteCache.replace_stock_pool` | 333 | `def replace_stock_pool(self, rows: list[StockInfo]) -> None` |
+| method | `SQLiteCache.get_stock_pool` | 336 | `def get_stock_pool(self, max_age_seconds: int, limit: int \| None=5000, keyword: str \| None=None) -> list[StockInfo]` |
+| method | `SQLiteCache.stock_pool_count` | 339 | `def stock_pool_count(self, max_age_seconds: int \| None=None) -> int` |
+| method | `SQLiteCache.create_market_scan_run` | 342 | `def create_market_scan_run(self, **kwargs)` |
+| method | `SQLiteCache.market_scan_run` | 345 | `def market_scan_run(self, run_id: int)` |
+| method | `SQLiteCache.active_market_scan_run` | 348 | `def active_market_scan_run(self)` |
+| method | `SQLiteCache.latest_market_scan_run` | 351 | `def latest_market_scan_run(self, *, mode=None)` |
+| method | `SQLiteCache.latest_published_market_scan_run` | 354 | `def latest_published_market_scan_run(self, *, mode=None)` |
+| method | `SQLiteCache.market_scan_runs` | 357 | `def market_scan_runs(self, *, page: int, page_size: int, mode=None, status=None, data_date=None)` |
+| method | `SQLiteCache.attach_market_scan_task_run` | 366 | `def attach_market_scan_task_run(self, run_id: int, task_run_id: int) -> None` |
+| method | `SQLiteCache.start_market_scan_task_run` | 369 | `def start_market_scan_task_run(self, run_id: int, task_name: str) -> int` |
+| method | `SQLiteCache.record_market_scan_stock_pool_source` | 372 | `def record_market_scan_stock_pool_source(self, run_id: int, source: str)` |
+| method | `SQLiteCache.update_market_scan_observability` | 375 | `def update_market_scan_observability(self, run_id: int, **kwargs)` |
+| method | `SQLiteCache.start_market_scan_run` | 378 | `def start_market_scan_run(self, run_id: int)` |
+| method | `SQLiteCache.seed_market_scan_results` | 381 | `def seed_market_scan_results(self, run_id: int, seeds: list[MarketScanSeed], *, excluded_count: int) -> int` |
+| method | `SQLiteCache.pending_market_scan_items` | 390 | `def pending_market_scan_items(self, run_id: int)` |
+| method | `SQLiteCache.refresh_pending_market_scan_metadata` | 393 | `def refresh_pending_market_scan_metadata(self, run_id: int, seeds: list[MarketScanSeed]) -> int` |
+| method | `SQLiteCache.save_market_scan_result_batch` | 400 | `def save_market_scan_result_batch(self, run_id: int, results: list[MarketScanResultWrite])` |
+| method | `SQLiteCache.request_market_scan_cancel` | 403 | `def request_market_scan_cancel(self, run_id: int)` |
+| method | `SQLiteCache.market_scan_retry_plan` | 406 | `def market_scan_retry_plan(self, run_id: int)` |
+| method | `SQLiteCache.prepare_market_scan_retry` | 409 | `def prepare_market_scan_retry(self, run_id: int, expected_plan=None)` |
+| method | `SQLiteCache.finish_market_scan_run` | 412 | `def finish_market_scan_run(self, run_id: int, status, *, message: str, error: str \| None=None, task_status: str \| None=None)` |
+| method | `SQLiteCache.market_scan_degraded_result_count` | 429 | `def market_scan_degraded_result_count(self, run_id: int) -> int` |
+| method | `SQLiteCache.reconcile_incomplete_market_scans` | 432 | `def reconcile_incomplete_market_scans(self) -> int` |
+| method | `SQLiteCache.market_scan_results` | 435 | `def market_scan_results(self, run_id: int, **kwargs)` |
+| method | `SQLiteCache.save_plate_rank` | 438 | `def save_plate_rank(self, rows: list[PlateItem]) -> None` |
+| method | `SQLiteCache.get_plate_rank` | 441 | `def get_plate_rank(self, max_age_seconds: int, limit: int=20) -> list[PlateItem]` |
+| method | `SQLiteCache.save_stock_concepts` | 444 | `def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None` |
+| method | `SQLiteCache.get_stock_concepts` | 447 | `def get_stock_concepts(self, symbol: str, max_age_seconds: int, limit: int=8) -> list[StockConceptItem]` |
+| method | `SQLiteCache.provider_enabled` | 450 | `def provider_enabled(self, name: str) -> bool` |
+| method | `SQLiteCache.update_provider_success` | 453 | `def update_provider_success(self, name: str, priority: int, latency_ms: float) -> None` |
+| method | `SQLiteCache.update_provider_failure` | 456 | `def update_provider_failure(self, name: str, priority: int, error: str) -> None` |
+| method | `SQLiteCache.update_provider_capability_success` | 459 | `def update_provider_capability_success(self, name: str, kind: str, priority: int, latency_ms: float) -> None` |
+| method | `SQLiteCache.update_provider_capability_failure` | 462 | `def update_provider_capability_failure(self, name: str, kind: str, priority: int, error: str) -> None` |
+| method | `SQLiteCache.ensure_provider` | 465 | `def ensure_provider(self, name: str, priority: int, enabled: bool=True) -> None` |
+| method | `SQLiteCache.ensure_provider_capability` | 468 | `def ensure_provider_capability(self, name: str, kind: str, priority: int, enabled: bool=True) -> None` |
+| method | `SQLiteCache.provider_statuses` | 471 | `def provider_statuses(self) -> list[ProviderStatus]` |
+| method | `SQLiteCache.provider_capability_statuses` | 474 | `def provider_capability_statuses(self) -> list[ProviderCapabilityStatus]` |
+| method | `SQLiteCache.stats` | 477 | `def stats(self) -> CacheStats` |
+| method | `SQLiteCache.log_event` | 480 | `def log_event(self, category: str, message: str) -> None` |
+| method | `SQLiteCache.start_task_run` | 486 | `def start_task_run(self, task_name: str) -> int` |
+| method | `SQLiteCache.finish_task_run` | 489 | `def finish_task_run(self, run_id: int, status: str, message: str \| None=None) -> None` |
+| method | `SQLiteCache.reconcile_orphaned_task_runs` | 492 | `def reconcile_orphaned_task_runs(self) -> int` |
+| method | `SQLiteCache.recent_task_runs` | 495 | `def recent_task_runs(self, limit: int=20) -> list[TaskRun]` |
+| method | `SQLiteCache.task_runs_for_name` | 498 | `def task_runs_for_name(self, task_name: str, limit: int=20) -> list[TaskRun]` |
+| method | `SQLiteCache.save_monitor_event` | 501 | `def save_monitor_event(self, level: str, category: str, message: str, symbol: str \| None=None) -> None` |
+| method | `SQLiteCache.recent_monitor_events` | 504 | `def recent_monitor_events(self, limit: int=30) -> list[MonitorEvent]` |
+| method | `SQLiteCache.record_reliability` | 507 | `def record_reliability(self, metric: str, *, subject: str='', capability: str='', good: bool, degraded: bool=False, failed: bool=False, fallback: bool=False, duration_ms: float \| int \| None=None) -> None` |
+| method | `SQLiteCache.record_workbench_reliability` | 530 | `def record_workbench_reliability(self, *, usable: bool, duration_ms: float \| int, quality: bool \| None=None, fresh: bool \| None=None, non_fallback: bool \| None=None) -> None` |
+| method | `SQLiteCache.reliability_bucket_stats` | 547 | `def reliability_bucket_stats(self, metric: str, since: str) -> ReliabilityBucketStats` |
+| method | `SQLiteCache.reliability_market_scan_stats` | 550 | `def reliability_market_scan_stats(self, since: str) -> ReliabilityScanStats` |
+| method | `SQLiteCache.reliability_task_stats` | 553 | `def reliability_task_stats(self, since: str) -> ReliabilityTaskStats` |
+| method | `SQLiteCache.save_watchlist_item` | 556 | `def save_watchlist_item(self, quote: Quote, note: str \| None=None, group_name: str \| None=None, pinned: bool \| None=None, research_status: ResearchStatus \| None=None, priority: WatchlistPriority \| None=None, next_review_date: date \| str \| None=None) -> WatchlistItem` |
+| method | `SQLiteCache.watchlist_item` | 576 | `def watchlist_item(self, symbol: str) -> WatchlistItem \| None` |
+| method | `SQLiteCache.watchlist` | 579 | `def watchlist(self) -> list[WatchlistItem]` |
+| method | `SQLiteCache.update_watchlist_item` | 582 | `def update_watchlist_item(self, symbol: str, payload: WatchlistUpdate) -> WatchlistItem \| None` |
+| method | `SQLiteCache.mark_watchlist_viewed` | 585 | `def mark_watchlist_viewed(self, symbol: str, *, clear_unread: bool=True, viewed_through_advice_id: int \| None=None) -> WatchlistItem \| None` |
+| method | `SQLiteCache.adjust_watchlist_unread_count` | 598 | `def adjust_watchlist_unread_count(self, symbol: str, delta: int) -> WatchlistItem \| None` |
+| method | `SQLiteCache.increment_watchlist_unread_count` | 601 | `def increment_watchlist_unread_count(self, symbol: str, amount: int=1) -> WatchlistItem \| None` |
+| method | `SQLiteCache.delete_watchlist_item` | 604 | `def delete_watchlist_item(self, symbol: str) -> bool` |
+| method | `SQLiteCache.watchlist_symbols` | 607 | `def watchlist_symbols(self) -> list[str]` |
+| method | `SQLiteCache.watchlist_symbol_selection` | 610 | `def watchlist_symbol_selection(self) -> WatchlistSymbolSelection` |
+| method | `SQLiteCache.save_advice_snapshot` | 613 | `def save_advice_snapshot(self, analysis: AnalysisResult, *, snapshot_market_time: str \| None=None) -> AdviceHistoryItem` |
+| method | `SQLiteCache.advice_history_by_id` | 624 | `def advice_history_by_id(self, row_id: int) -> AdviceHistoryItem \| None` |
+| method | `SQLiteCache.advice_history` | 627 | `def advice_history(self, symbol: str, limit: int=30) -> list[AdviceHistoryItem]` |
+| method | `SQLiteCache.advice_timeline` | 630 | `def advice_timeline(self, symbol: str, limit: int=30) -> list[AdviceTimelineItem]` |
+| method | `SQLiteCache.latest_advice_timeline_by_symbols` | 636 | `def latest_advice_timeline_by_symbols(self, symbols: Iterable[str]) -> dict[str, AdviceTimelineItem]` |
+| method | `SQLiteCache.create_advice_review_plan` | 642 | `def create_advice_review_plan(self, payload: AdviceReviewPlanInput) -> AdviceReviewPlan` |
+| method | `SQLiteCache.advice_review_plan` | 645 | `def advice_review_plan(self, plan_id: int) -> AdviceReviewPlan \| None` |
+| method | `SQLiteCache.advice_review_plan_by_advice` | 648 | `def advice_review_plan_by_advice(self, advice_id: int) -> AdviceReviewPlan \| None` |
+| method | `SQLiteCache.advice_review_plans` | 651 | `def advice_review_plans(self, *, symbol: str \| None=None, limit: int=100, offset: int=0) -> list[AdviceReviewPlan]` |
+| method | `SQLiteCache.advice_review_details` | 660 | `def advice_review_details(self, *, symbol: str \| None=None, limit: int=100, offset: int=0) -> list[AdviceReviewDetail]` |
+| method | `SQLiteCache.advice_review_evaluation_candidates` | 669 | `def advice_review_evaluation_candidates(self, *, as_of_date: str, limit: int) -> list[AdviceReviewDetail]` |
+| method | `SQLiteCache.update_advice_review_plan` | 680 | `def update_advice_review_plan(self, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan \| None` |
+| method | `SQLiteCache.delete_advice_review_plan` | 687 | `def delete_advice_review_plan(self, plan_id: int) -> bool` |
+| method | `SQLiteCache.advice_review_detail` | 690 | `def advice_review_detail(self, plan_id: int) -> AdviceReviewDetail \| None` |
+| method | `SQLiteCache.advice_review_evaluation` | 693 | `def advice_review_evaluation(self, evaluation_id: int) -> AdviceReviewEvaluation \| None` |
+| method | `SQLiteCache.advice_review_evaluation_history` | 696 | `def advice_review_evaluation_history(self, plan_id: int, limit: int=100) -> list[AdviceReviewEvaluation]` |
+| method | `SQLiteCache.save_advice_review_evaluation` | 703 | `def save_advice_review_evaluation(self, evaluation: AdviceReviewEvaluationDraft) -> AdviceReviewEvaluation` |
+| method | `SQLiteCache.advice_review_summary` | 709 | `def advice_review_summary(self) -> AdviceReviewSummary` |
+| method | `SQLiteCache.paper_trading_account` | 712 | `def paper_trading_account(self) -> PaperTradingAccount` |
+| method | `SQLiteCache.update_paper_trading_account` | 715 | `def update_paper_trading_account(self, payload: PaperTradingAccountUpdate) -> PaperTradingAccount` |
+| method | `SQLiteCache.create_paper_strategy` | 721 | `def create_paper_strategy(self, plan: AdviceReviewPlan, payload: PaperStrategyCreate, *, activation_market_time: str) -> PaperStrategy` |
+| method | `SQLiteCache.delete_pending_paper_strategy` | 734 | `def delete_pending_paper_strategy(self, strategy_id: int) -> bool` |
+| method | `SQLiteCache.paper_strategies` | 737 | `def paper_strategies(self) -> list[PaperStrategy]` |
+| method | `SQLiteCache.save_paper_simulation` | 740 | `def save_paper_simulation(self, draft: PaperSimulationDraft) -> PaperTradingDashboard` |
+| method | `SQLiteCache.paper_trading_dashboard` | 743 | `def paper_trading_dashboard(self, *, run_id: int \| None=None) -> PaperTradingDashboard` |
+| method | `SQLiteCache.paper_trading_runs` | 746 | `def paper_trading_runs(self, *, limit: int=100) -> list[PaperTradingRun]` |
+| method | `SQLiteCache.paper_trading_run_export` | 749 | `def paper_trading_run_export(self, run_id: int) -> PaperRunExport` |
+| method | `SQLiteCache.compare_paper_trading_runs` | 752 | `def compare_paper_trading_runs(self, left_run_id: int, right_run_id: int) -> PaperRunComparison` |
+| method | `SQLiteCache.save_watchlist_scan` | 755 | `def save_watchlist_scan(self, payload: WatchlistScanRequest, result: WatchlistScanResponse) -> WatchlistScanRecord` |
+| method | `SQLiteCache.watchlist_scan_history` | 762 | `def watchlist_scan_history(self, *, limit: int=20) -> list[WatchlistScanHistoryItem]` |
+| method | `SQLiteCache.watchlist_scan_record` | 765 | `def watchlist_scan_record(self, row_id: int) -> WatchlistScanRecord \| None` |
+| method | `SQLiteCache.create_alert_rule` | 768 | `def create_alert_rule(self, quote: Quote, payload: AlertRuleInput) -> AlertRuleItem` |
+| method | `SQLiteCache.alert_rules` | 771 | `def alert_rules(self, symbol: str \| None=None, include_disabled: bool=True, limit: int \| None=None) -> list[AlertRuleItem]` |
+| method | `SQLiteCache.alert_rule` | 779 | `def alert_rule(self, row_id: int) -> AlertRuleItem \| None` |
+| method | `SQLiteCache.delete_alert_rule` | 782 | `def delete_alert_rule(self, row_id: int) -> bool` |
+| method | `SQLiteCache.update_alert_rule` | 785 | `def update_alert_rule(self, row_id: int, payload: AlertRuleUpdate) -> AlertRuleItem \| None` |
+| method | `SQLiteCache.update_alert_rule_state` | 788 | `def update_alert_rule_state(self, rule: AlertRuleItem, *, checked_at: str, state: str, triggered: bool, message: str, quote: Quote, event_type: str \| None=None, force_event: bool=False, decision: AlertStateDecision \| None=None) -> AlertEventItem \| None` |
+| method | `SQLiteCache.update_alert_rule_state_checked` | 813 | `def update_alert_rule_state_checked(self, rule: AlertRuleItem, *, checked_at: str, state: str, triggered: bool, message: str, quote: Quote, event_type: str \| None=None, force_event: bool=False, decision: AlertStateDecision \| None=None) -> AlertStateUpdateResult` |
+| method | `SQLiteCache.alert_events` | 838 | `def alert_events(self, symbol: str \| None=None, limit: int=100, *, after_created_at: str \| None=None, after_id: int \| None=None) -> list[AlertEventItem]` |
+| method | `SQLiteCache.create_stock_note` | 853 | `def create_stock_note(self, quote: Quote, payload: StockNoteInput) -> StockNoteItem` |
+| method | `SQLiteCache.stock_notes` | 856 | `def stock_notes(self, symbol: str, limit: int=100, visible_only: bool=False) -> list[StockNoteItem]` |
+| method | `SQLiteCache.stock_note` | 859 | `def stock_note(self, row_id: int) -> StockNoteItem \| None` |
+| method | `SQLiteCache.update_stock_note` | 862 | `def update_stock_note(self, row_id: int, payload: StockNoteUpdate) -> StockNoteItem \| None` |
+| method | `SQLiteCache.delete_stock_note` | 865 | `def delete_stock_note(self, row_id: int) -> bool` |
+| method | `SQLiteCache.cleanup_runtime_rows` | 868 | `def cleanup_runtime_rows(self) -> dict[str, int]` |
+| method | `SQLiteCache.preview_runtime_cleanup` | 871 | `def preview_runtime_cleanup(self) -> dict[str, int]` |
+| method | `SQLiteCache.table_counts` | 874 | `def table_counts(self) -> dict[str, int]` |
+| function | `_require_settings_path` | 878 | `def _require_settings_path(path: Path, settings: Settings, owner: str) -> None` |
+| function | `_acquire_audit_migration_guard` | 883 | `def _acquire_audit_migration_guard(path: Path) -> FileInstanceGuard` |
+| function | `_require_audit_migration_disk_space` | 890 | `def _require_audit_migration_disk_space(path: Path) -> None` |
 
 #### `app/services/cache_freshness.py`
 
@@ -3329,39 +3499,95 @@ Lines: 263
 
 #### `app/services/market_scan_evaluation.py`
 
-Lines: 580
+Lines: 1667
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `EvaluationConfig` | 23 | `class EvaluationConfig` |
-| method | `EvaluationConfig.__post_init__` | 29 | `def __post_init__(self) -> None` |
-| class | `_Observation` | 41 | `class _Observation` |
-| class | `_RunSnapshot` | 56 | `class _RunSnapshot` |
-| function | `evaluate_market_scan_rankings` | 66 | `def evaluate_market_scan_rankings(database_path: Path, *, config: EvaluationConfig \| None=None, mode: Literal['official', 'intraday'] \| None=None, run_ids: Sequence[int] \| None=None) -> dict[str, object]` |
-| function | `_portable_database_label` | 122 | `def _portable_database_label(path: Path) -> str` |
-| function | `_readonly_connection` | 130 | `def _readonly_connection(path: Path) -> Iterator[sqlite3.Connection]` |
-| function | `_published_runs` | 140 | `def _published_runs(conn: sqlite3.Connection, *, mode: str \| None, run_ids: Sequence[int] \| None) -> list[sqlite3.Row]` |
-| function | `_evaluate_run` | 178 | `def _evaluate_run(conn: sqlite3.Connection, run: sqlite3.Row, config: EvaluationConfig) -> _RunSnapshot \| None` |
-| function | `_forward_bars` | 224 | `def _forward_bars(conn: sqlite3.Connection, run_id: int, quote_date: str) -> dict[str, tuple[sqlite3.Row, ...]]` |
-| function | `_eligible_trading_dates` | 250 | `def _eligible_trading_dates(bars: dict[str, tuple[sqlite3.Row, ...]], snapshot_count: int, config: EvaluationConfig) -> tuple[str, ...]` |
-| function | `_observation_from_rows` | 263 | `def _observation_from_rows(run: sqlite3.Row, result: sqlite3.Row, bars: tuple[sqlite3.Row, ...], eligible_dates: tuple[str, ...], regime: str, config: EvaluationConfig) -> _Observation \| None` |
-| function | `_cohort_metrics` | 301 | `def _cohort_metrics(observations: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
-| function | `_cohort_slices` | 311 | `def _cohort_slices(observations: tuple[_Observation, ...]) -> list[tuple[dict[str, str], tuple[_Observation, ...]]]` |
-| function | `_contract_cohort_slices` | 327 | `def _contract_cohort_slices(contract: dict[str, str], rows: tuple[_Observation, ...]) -> list[tuple[dict[str, str], tuple[_Observation, ...]]]` |
-| function | `_cohort_slice_metrics` | 341 | `def _cohort_slice_metrics(dimensions: dict[str, str], rows: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
-| function | `_metric_record` | 354 | `def _metric_record(dimensions: dict[str, str], selected: tuple[_Observation, ...], benchmark_rows: tuple[_Observation, ...], top_n: int, horizon: int, config: EvaluationConfig) -> dict[str, object]` |
-| function | `_benchmark_returns` | 390 | `def _benchmark_returns(rows: Iterable[_Observation], horizon: int) -> dict[int, float]` |
-| function | `_monotonicity_metrics` | 398 | `def _monotonicity_metrics(observations: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
-| function | `_contract_monotonicity` | 422 | `def _contract_monotonicity(mode: str, scope: str, rule_version: str, rows: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
-| function | `_monotonicity_record` | 435 | `def _monotonicity_record(mode: str, scope: str, rule_version: str, rows: tuple[_Observation, ...], horizon: int, minimum_sample_size: int) -> dict[str, object]` |
-| function | `_band_return_summary` | 461 | `def _band_return_summary(label: str, rows: tuple[_Observation, ...], horizon: int, minimum_rank: int, maximum_rank: int) -> dict[str, object]` |
-| function | `_bands_have_minimum_samples` | 480 | `def _bands_have_minimum_samples(summaries: list[dict[str, object]], minimum_sample_size: int) -> bool` |
-| function | `_band_means_descend` | 487 | `def _band_means_descend(summaries: list[dict[str, object]]) -> bool` |
-| function | `_stability_metrics` | 492 | `def _stability_metrics(snapshots: tuple[_RunSnapshot, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
-| function | `_spearman_rank_stability` | 525 | `def _spearman_rank_stability(previous: dict[str, int], current: dict[str, int], common: list[str]) -> float \| None` |
-| function | `_market_regime` | 537 | `def _market_regime(rows: Sequence[sqlite3.Row]) -> str` |
-| function | `_quality_bucket` | 547 | `def _quality_bucket(value: object) -> str` |
-| function | `_run_summary` | 558 | `def _run_summary(snapshot: _RunSnapshot, config: EvaluationConfig) -> dict[str, object]` |
+| class | `EvaluationConfig` | 52 | `class EvaluationConfig` |
+| method | `EvaluationConfig.__post_init__` | 64 | `def __post_init__(self) -> None` |
+| function | `_require_positive_sequence` | 76 | `def _require_positive_sequence(values: Sequence[int], label: str) -> None` |
+| function | `_require_positive` | 81 | `def _require_positive(value: float, label: str) -> None` |
+| function | `_require_unit_interval` | 86 | `def _require_unit_interval(value: float, label: str) -> None` |
+| function | `_require_minimum` | 91 | `def _require_minimum(value: int, minimum: int, label: str) -> None` |
+| class | `_ExecutionOutcome` | 97 | `class _ExecutionOutcome` |
+| class | `_ExecutionEntry` | 110 | `class _ExecutionEntry` |
+| class | `_Observation` | 123 | `class _Observation` |
+| class | `_RunSnapshot` | 145 | `class _RunSnapshot` |
+| function | `evaluate_market_scan_rankings` | 157 | `def evaluate_market_scan_rankings(database_path: Path, *, config: EvaluationConfig \| None=None, mode: Literal['official', 'intraday'] \| None=None, run_ids: Sequence[int] \| None=None) -> dict[str, object]` |
+| function | `evaluate_market_scan_shadow_rankings` | 176 | `def evaluate_market_scan_shadow_rankings(database_path: Path, *, variant: ShadowScoreVariant='v5_full', config: EvaluationConfig \| None=None, mode: Literal['official', 'intraday'] \| None=None, run_ids: Sequence[int] \| None=None) -> dict[str, object]` |
+| function | `evaluate_market_scan_shadow_comparison` | 228 | `def evaluate_market_scan_shadow_comparison(database_path: Path, *, config: EvaluationConfig \| None=None, mode: Literal['official', 'intraday'] \| None=None, run_ids: Sequence[int] \| None=None, variants: Sequence[ShadowScoreVariant]=SHADOW_SCORE_VARIANTS) -> dict[str, object]` |
+| function | `_maximum_contract_session_count` | 285 | `def _maximum_contract_session_count(report: dict[str, object]) -> int` |
+| function | `_build_report` | 297 | `def _build_report(path: Path, runs: Sequence[sqlite3.Row], snapshots: tuple[_RunSnapshot, ...], settings: EvaluationConfig, *, ranking_source: str='persisted_market_scan_result') -> dict[str, object]` |
+| function | `_report_config` | 329 | `def _report_config(settings: EvaluationConfig) -> dict[str, object]` |
+| function | `_report_source` | 344 | `def _report_source(path: Path, runs: Sequence[sqlite3.Row], snapshots: Sequence[_RunSnapshot], observations: Sequence[_Observation], eligible_runs: int, ranking_source: str) -> dict[str, object]` |
+| function | `_report_limitations` | 365 | `def _report_limitations() -> list[str]` |
+| function | `_portable_database_label` | 379 | `def _portable_database_label(path: Path) -> str` |
+| function | `_readonly_connection` | 387 | `def _readonly_connection(path: Path) -> Iterator[sqlite3.Connection]` |
+| function | `_published_runs` | 397 | `def _published_runs(conn: sqlite3.Connection, *, mode: str \| None, run_ids: Sequence[int] \| None) -> list[sqlite3.Row]` |
+| function | `_deduplicate_shadow_sessions` | 435 | `def _deduplicate_shadow_sessions(runs: Sequence[sqlite3.Row]) -> list[sqlite3.Row]` |
+| function | `_evaluate_shadow_run` | 447 | `def _evaluate_shadow_run(conn: sqlite3.Connection, run: sqlite3.Row, config: EvaluationConfig, variant: ShadowScoreVariant) -> tuple[_RunSnapshot, ShadowScoreBatch] \| None` |
+| function | `_shadow_result_rows` | 478 | `def _shadow_result_rows(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]` |
+| function | `_shadow_score_inputs` | 493 | `def _shadow_score_inputs(result_rows: Sequence[sqlite3.Row], history: dict[str, tuple[Kline, ...]], quote_date: str, data_date: str) -> list[ShadowScoreInput]` |
+| function | `_shadow_score_input` | 509 | `def _shadow_score_input(row: sqlite3.Row, rows: tuple[Kline, ...], quote_date: str, data_date: str) -> ShadowScoreInput` |
+| function | `_shadow_snapshot` | 528 | `def _shadow_snapshot(run: sqlite3.Row, result_rows: Sequence[sqlite3.Row], batch: ShadowScoreBatch, forward: dict[str, tuple[sqlite3.Row, ...]], eligible_dates: tuple[str, ...], quote_date: str, data_date: str, config: EvaluationConfig) -> _RunSnapshot` |
+| function | `_shadow_run_proxy` | 556 | `def _shadow_run_proxy(run: sqlite3.Row, candidate_id: str, quote_date: str, data_date: str) -> sqlite3.Row` |
+| function | `_shadow_observations` | 570 | `def _shadow_observations(shadow_run: sqlite3.Row, rows_by_symbol: dict[str, sqlite3.Row], batch: ShadowScoreBatch, forward: dict[str, tuple[sqlite3.Row, ...]], eligible_dates: tuple[str, ...], regime: str, config: EvaluationConfig) -> tuple[_Observation, ...]` |
+| function | `_shadow_history_bars` | 593 | `def _shadow_history_bars(conn: sqlite3.Connection, run_id: int, data_date: str) -> dict[str, tuple[Kline, ...]]` |
+| function | `_ranking_digest` | 617 | `def _ranking_digest(batch: ShadowScoreBatch) -> str` |
+| function | `_evaluate_run` | 622 | `def _evaluate_run(conn: sqlite3.Connection, run: sqlite3.Row, config: EvaluationConfig) -> _RunSnapshot \| None` |
+| function | `_forward_bars` | 677 | `def _forward_bars(conn: sqlite3.Connection, run_id: int, data_date: str) -> dict[str, tuple[sqlite3.Row, ...]]` |
+| function | `_eligible_trading_dates` | 705 | `def _eligible_trading_dates(bars: dict[str, tuple[sqlite3.Row, ...]], snapshot_count: int, quote_date: str, config: EvaluationConfig) -> tuple[str, ...]` |
+| function | `_observation_from_rows` | 720 | `def _observation_from_rows(run: sqlite3.Row, result: sqlite3.Row, bars: tuple[sqlite3.Row, ...], eligible_dates: tuple[str, ...], regime: str, config: EvaluationConfig) -> _Observation \| None` |
+| function | `_forward_performance` | 770 | `def _forward_performance(bars: Sequence[sqlite3.Row], eligible_dates: Sequence[str], entry: float, horizons: Sequence[int]) -> tuple[dict[int, float], dict[int, float]]` |
+| function | `_result_raw_score` | 791 | `def _result_raw_score(result: sqlite3.Row) -> float` |
+| function | `_execution_outcomes` | 799 | `def _execution_outcomes(*, symbol: str, market: str, list_date: object, is_st: bool, is_new: bool, quote_date: str, amount: float, bars: tuple[sqlite3.Row, ...], eligible_dates: tuple[str, ...], config: EvaluationConfig) -> dict[int, _ExecutionOutcome]` |
+| function | `_prepare_execution_entry` | 829 | `def _prepare_execution_entry(*, symbol: str, market: str, list_date: object, is_st: bool, is_new: bool, quote_date: str, amount: float, bars: tuple[sqlite3.Row, ...], eligible_dates: tuple[str, ...], config: EvaluationConfig) -> _ExecutionEntry \| _ExecutionOutcome` |
+| function | `_execution_metadata` | 885 | `def _execution_metadata(symbol: str, market: str, list_date: object, is_st: bool, quote_date: str) -> PaperInstrumentMetadata` |
+| function | `_repeat_outcome` | 902 | `def _repeat_outcome(horizons: Sequence[int], outcome: _ExecutionOutcome) -> dict[int, _ExecutionOutcome]` |
+| function | `_execution_horizon` | 906 | `def _execution_horizon(entry: _ExecutionEntry, horizon: int, symbol: str, market: str, is_st: bool, is_new: bool, bars: Sequence[sqlite3.Row], eligible_dates: Sequence[str], config: EvaluationConfig) -> _ExecutionOutcome` |
+| function | `_sellable_exit` | 933 | `def _sellable_exit(entry: _ExecutionEntry, symbol: str, market: str, is_st: bool, is_new: bool, bars: Sequence[sqlite3.Row], exit_date: str) -> tuple[float, bool] \| None` |
+| function | `_modelled_execution` | 961 | `def _modelled_execution(entry: _ExecutionEntry, exit_date: str, exit_price: float, delay: int, exit_model_limited: bool) -> _ExecutionOutcome` |
+| function | `_previous_row` | 980 | `def _previous_row(rows: Sequence[sqlite3.Row], row_date: str) -> sqlite3.Row \| None` |
+| function | `_to_kline` | 985 | `def _to_kline(row: sqlite3.Row) -> Kline` |
+| function | `_model_quantity` | 1003 | `def _model_quantity(notional: float, price: float, minimum: int, step: int) -> int` |
+| function | `_evaluation_trade_profile` | 1011 | `def _evaluation_trade_profile(symbol: str, market: str, trade_date: date, metadata: PaperInstrumentMetadata, *, is_st: bool, is_new: bool) -> PaperTradeRuleProfile` |
+| function | `_standard_evaluation_trade_profile` | 1026 | `def _standard_evaluation_trade_profile(board: str, trade_date: str) -> PaperTradeRuleProfile` |
+| function | `_cohort_metrics` | 1046 | `def _cohort_metrics(observations: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
+| function | `_cohort_slices` | 1056 | `def _cohort_slices(observations: tuple[_Observation, ...]) -> list[tuple[dict[str, str], tuple[_Observation, ...]]]` |
+| function | `_contract_cohort_slices` | 1072 | `def _contract_cohort_slices(contract: dict[str, str], rows: tuple[_Observation, ...]) -> list[tuple[dict[str, str], tuple[_Observation, ...]]]` |
+| function | `_cohort_slice_metrics` | 1107 | `def _cohort_slice_metrics(dimensions: dict[str, str], rows: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
+| function | `_metric_record` | 1120 | `def _metric_record(dimensions: dict[str, str], selected: tuple[_Observation, ...], benchmark_rows: tuple[_Observation, ...], top_n: int, horizon: int, config: EvaluationConfig) -> dict[str, object]` |
+| function | `_return_statistics` | 1150 | `def _return_statistics(dimensions: dict[str, str], selected: tuple[_Observation, ...], benchmark_rows: tuple[_Observation, ...], values: list[tuple[_Observation, float]], top_n: int, horizon: int, config: EvaluationConfig) -> dict[str, object]` |
+| function | `_compounded_maximum_drawdown` | 1193 | `def _compounded_maximum_drawdown(returns: Sequence[float]) -> float \| None` |
+| function | `_execution_summary` | 1206 | `def _execution_summary(rows: Iterable[_Observation], horizon: int) -> dict[str, object]` |
+| function | `_execution_aggregates` | 1225 | `def _execution_aggregates(rows: Sequence[_Observation], horizon: int) -> tuple[dict[int, list[float]], list[float], int, int]` |
+| function | `_returns_by_run` | 1246 | `def _returns_by_run(values: Iterable[tuple[_Observation, float]]) -> dict[int, list[float]]` |
+| function | `_insufficient_reasons` | 1253 | `def _insufficient_reasons(enough_samples: bool, enough_sessions: bool) -> list[str]` |
+| function | `_benchmark_returns` | 1262 | `def _benchmark_returns(rows: Iterable[_Observation], horizon: int) -> dict[int, float]` |
+| function | `_cluster_bootstrap_ci` | 1270 | `def _cluster_bootstrap_ci(values: Sequence[float], seed_text: str, samples: int) -> list[float] \| None` |
+| function | `_monotonicity_metrics` | 1284 | `def _monotonicity_metrics(observations: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
+| function | `_monotonicity_record` | 1297 | `def _monotonicity_record(mode: str, scope: str, rule_version: str, rows: tuple[_Observation, ...], horizon: int, config: EvaluationConfig) -> dict[str, object]` |
+| function | `_band_return_summary` | 1327 | `def _band_return_summary(label: str, rows: tuple[_Observation, ...], horizon: int, minimum_rank: int, maximum_rank: int) -> dict[str, object]` |
+| function | `_band_means_descend` | 1350 | `def _band_means_descend(summaries: list[dict[str, object]]) -> bool` |
+| function | `_decile_metrics` | 1355 | `def _decile_metrics(observations: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
+| function | `_decile_record` | 1367 | `def _decile_record(mode: str, scope: str, rule_version: str, rows: tuple[_Observation, ...], run_sizes: Counter[int], horizon: int, config: EvaluationConfig) -> dict[str, object]` |
+| function | `_decile_band` | 1390 | `def _decile_band(rows: Sequence[_Observation], run_sizes: Counter[int], horizon: int, decile: int) -> dict[str, object]` |
+| function | `_decile_band_sufficient` | 1412 | `def _decile_band_sufficient(item: dict[str, object], config: EvaluationConfig) -> bool` |
+| function | `_descending` | 1419 | `def _descending(values: Sequence[float]) -> bool` |
+| function | `_rank_ic_metrics` | 1423 | `def _rank_ic_metrics(observations: tuple[_Observation, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
+| function | `_contract_rows` | 1462 | `def _contract_rows(observations: tuple[_Observation, ...]) -> list[tuple[str, str, str, tuple[_Observation, ...]]]` |
+| function | `_stability_metrics` | 1481 | `def _stability_metrics(snapshots: tuple[_RunSnapshot, ...], config: EvaluationConfig) -> list[dict[str, object]]` |
+| function | `_stability_record` | 1497 | `def _stability_record(mode: str, previous: _RunSnapshot, current: _RunSnapshot, top_n: int, comparable: bool, config: EvaluationConfig) -> dict[str, object]` |
+| function | `_spearman_rank_stability` | 1525 | `def _spearman_rank_stability(previous: dict[str, int], current: dict[str, int], common: list[str]) -> float \| None` |
+| function | `_spearman` | 1533 | `def _spearman(pairs: Sequence[tuple[float, float]]) -> float \| None` |
+| function | `_midranks` | 1547 | `def _midranks(values: Sequence[float]) -> list[float]` |
+| function | `_market_regime` | 1562 | `def _market_regime(rows: Sequence[sqlite3.Row]) -> str` |
+| function | `_quality_bucket` | 1572 | `def _quality_bucket(value: object) -> str` |
+| function | `_liquidity_bucket` | 1583 | `def _liquidity_bucket(value: object) -> str` |
+| function | `_scan_time_bucket` | 1595 | `def _scan_time_bucket(value: object, mode: str) -> str` |
+| function | `_board` | 1608 | `def _board(symbol: str, market: str) -> str` |
+| function | `_percentile` | 1619 | `def _percentile(values: Sequence[float], probability: float) -> float` |
+| function | `_run_summary` | 1631 | `def _run_summary(snapshot: _RunSnapshot, config: EvaluationConfig) -> dict[str, object]` |
 
 #### `app/services/market_scan_execution.py`
 
@@ -3707,6 +3933,54 @@ Lines: 696
 | function | `_is_single_price_session` | 665 | `def _is_single_price_session(quote: Quote) -> bool` |
 | function | `_strict_date` | 671 | `def _strict_date(value: object) -> date \| None` |
 
+#### `app/services/market_scan_shadow_scoring.py`
+
+Lines: 779
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `ShadowScoreReplayError` | 44 | `class ShadowScoreReplayError(ValueError)` |
+| class | `ShadowScoreInput` | 49 | `class ShadowScoreInput` |
+| class | `ShadowScoreResult` | 70 | `class ShadowScoreResult` |
+| class | `ShadowScoreBatch` | 83 | `class ShadowScoreBatch` |
+| class | `_RawFactors` | 93 | `class _RawFactors` |
+| function | `score_shadow_market` | 106 | `def score_shadow_market(items: Sequence[ShadowScoreInput], *, variant: ShadowScoreVariant='v5_full') -> ShadowScoreBatch` |
+| function | `replay_shadow_score_details` | 164 | `def replay_shadow_score_details(details: Mapping[str, object]) -> float` |
+| function | `verify_shadow_score_batch` | 196 | `def verify_shadow_score_batch(batch: ShadowScoreBatch) -> None` |
+| function | `market_scan_shadow_score_spec` | 209 | `def market_scan_shadow_score_spec(*, variant: ShadowScoreVariant='v5_full') -> dict[str, object]` |
+| function | `_shadow_component_spec` | 251 | `def _shadow_component_spec(enabled: Mapping[str, bool]) -> dict[str, object]` |
+| function | `stable_shadow_spec_hash` | 282 | `def stable_shadow_spec_hash(spec: Mapping[str, object]) -> str` |
+| function | `_raw_factors` | 287 | `def _raw_factors(item: ShadowScoreInput) -> _RawFactors` |
+| function | `_overextension_penalty` | 334 | `def _overextension_penalty(change_pct: float, limit_pct: float \| None, ma5_atr: float, ma20_atr: float, range20: float) -> float` |
+| function | `_risk_penalty` | 353 | `def _risk_penalty(rows: Sequence[Kline], closes: Sequence[float], atr_pct: float) -> tuple[float, float, float, float]` |
+| function | `_confidence_penalty` | 376 | `def _confidence_penalty(item: ShadowScoreInput, history_rows: int) -> float` |
+| function | `_factor_inputs` | 385 | `def _factor_inputs(item: ShadowScoreInput, board: str, history_rows: int, return20: float, return60: float, ma20_slope10: float, ma5: float, ma20: float, ma60: float, atr_pct: float, ma5_atr: float, ma20_atr: float, range20: float, downside_vol: float, drawdown: float, gap_frequency: float, limit_pct: float \| None) -> dict[str, float \| int \| str \| bool \| None]` |
+| function | `_normalize_trend_by_board` | 417 | `def _normalize_trend_by_board(factors: Sequence[_RawFactors]) -> tuple[dict[str, float], dict[str, object]]` |
+| function | `_score_one` | 451 | `def _score_one(factors: _RawFactors, *, normalized_trend: float, variant: ShadowScoreVariant, candidate_id: str, spec: dict[str, object], spec_hash: str, normalization: dict[str, object]) -> ShadowScoreResult` |
+| function | `_score_details` | 507 | `def _score_details(factors: _RawFactors, *, normalized_trend: float, candidate_id: str, spec: dict[str, object], spec_hash: str, normalization: dict[str, object], penalties: dict[str, float], applied: tuple[bool, bool, bool], total_penalty: float, raw_score: float) -> dict[str, object]` |
+| function | `_validated_history` | 550 | `def _validated_history(item: ShadowScoreInput) -> tuple[Kline, ...]` |
+| function | `_history_rows` | 561 | `def _history_rows(source: Sequence[Kline], cutoff: date) -> tuple[Kline, ...]` |
+| function | `_validate_history_coverage` | 573 | `def _validate_history_coverage(item: ShadowScoreInput, rows: Sequence[Kline]) -> None` |
+| function | `_validate_snapshot_input` | 582 | `def _validate_snapshot_input(item: ShadowScoreInput) -> None` |
+| function | `_valid_bar` | 598 | `def _valid_bar(row: Kline) -> bool` |
+| function | `_liquidity_penalty` | 610 | `def _liquidity_penalty(amount: float, turnover_rate: float \| None) -> float` |
+| function | `_midrank_percentiles` | 620 | `def _midrank_percentiles(values: Sequence[tuple[str, float]]) -> dict[str, float]` |
+| function | `_normalization_digest_from_details` | 638 | `def _normalization_digest_from_details(results: Sequence[ShadowScoreResult]) -> str` |
+| function | `_pairs_digest` | 649 | `def _pairs_digest(values: Sequence[tuple[str, float]]) -> str` |
+| function | `_quantile` | 654 | `def _quantile(values: Sequence[float], probability: float) -> float` |
+| function | `_atr` | 666 | `def _atr(rows: Sequence[Kline]) -> float` |
+| function | `_max_drawdown` | 678 | `def _max_drawdown(values: Sequence[float]) -> float` |
+| function | `_range_position` | 687 | `def _range_position(value: float, low: float, high: float) -> float` |
+| function | `_pct_change` | 691 | `def _pct_change(value: float, reference: float) -> float` |
+| function | `_return` | 695 | `def _return(value: float, reference: float) -> float` |
+| function | `_unit` | 699 | `def _unit(value: float, lower: float, upper: float) -> float` |
+| function | `_clamp` | 705 | `def _clamp(value: float, lower: float, upper: float) -> float` |
+| function | `_board` | 709 | `def _board(symbol: str, market: str) -> str` |
+| function | `_price_limit_pct` | 721 | `def _price_limit_pct(item: ShadowScoreInput, board: str) -> float \| None` |
+| function | `_standard_price_limit` | 728 | `def _standard_price_limit(board: str, quote_date: str) -> float \| None` |
+| function | `_mapping` | 753 | `def _mapping(value: object, label: str) -> Mapping[str, object]` |
+| function | `_finite` | 759 | `def _finite(value: object, label: str) -> float` |
+
 #### `app/services/market_scan_stock_evaluation.py`
 
 Lines: 209
@@ -3843,6 +4117,100 @@ Lines: 891
 | function | `_t_plan_zones_confirmed` | 869 | `def _t_plan_zones_confirmed(zones: MinuteTPlanZones) -> bool` |
 | function | `_zone_text` | 873 | `def _zone_text(price: float, latest_price: float, *, lower: bool) -> str` |
 | function | `_quantile` | 882 | `def _quantile(values: list[float], ratio: float) -> float` |
+
+#### `app/services/paper_trading.py`
+
+Lines: 1403
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `_PreparedBar` | 63 | `class _PreparedBar` |
+| class | `_PaperState` | 70 | `class _PaperState` |
+| class | `_EventRecorder` | 99 | `class _EventRecorder` |
+| method | `_EventRecorder.add` | 102 | `def add(self, state: _PaperState \| None, event_date: str, event_code: str, category: str, severity: str, message: str, **details: object) -> None` |
+| class | `_SimulationProvenance` | 133 | `class _SimulationProvenance` |
+| class | `_PortfolioValuation` | 144 | `class _PortfolioValuation` |
+| function | `get_paper_trading_dashboard` | 151 | `def get_paper_trading_dashboard(cache: object, *, run_id: int \| None=None) -> PaperTradingDashboard` |
+| function | `update_paper_trading_account` | 157 | `def update_paper_trading_account(cache: object, payload: PaperTradingAccountUpdate) -> PaperTradingAccount` |
+| function | `create_paper_strategy` | 164 | `def create_paper_strategy(cache: object, payload: PaperStrategyCreate, *, now: datetime \| None=None) -> PaperStrategy` |
+| function | `delete_pending_paper_strategy` | 181 | `def delete_pending_paper_strategy(cache: object, strategy_id: int) -> None` |
+| async function | `run_paper_simulation` | 185 | `async def run_paper_simulation(datahub: DataHub, payload: PaperSimulationRequest, *, now: datetime \| None=None) -> PaperSimulationSummary` |
+| async function | `_paper_market_data` | 235 | `async def _paper_market_data(datahub: DataHub, strategies: list[PaperStrategy], as_of: datetime) -> tuple[dict[str, list[Kline]], dict[str, str], dict[str, PaperInstrumentMetadata]]` |
+| async function | `_load_strategy_klines` | 252 | `async def _load_strategy_klines(datahub: DataHub, strategies: list[PaperStrategy], symbol: str, as_of: datetime) -> tuple[str, list[Kline], str \| None]` |
+| async function | `_load_strategy_metadata` | 269 | `async def _load_strategy_metadata(datahub: DataHub, symbol: str) -> tuple[str, PaperInstrumentMetadata \| None]` |
+| function | `_instrument_metadata` | 285 | `def _instrument_metadata(symbol: str, profile: object \| None) -> PaperInstrumentMetadata \| None` |
+| async function | `_benchmark_market_data` | 300 | `async def _benchmark_market_data(datahub: DataHub, benchmark_symbol: str \| None, as_of: datetime, strategies: list[PaperStrategy], rows_by_symbol: dict[str, list[Kline]], errors: dict[str, str]) -> tuple[list[Kline], str \| None]` |
+| function | `_paper_kline_limit` | 326 | `def _paper_kline_limit(strategy: PaperStrategy, as_of: datetime) -> int` |
+| function | `simulate_paper_portfolio` | 332 | `def simulate_paper_portfolio(account: PaperTradingAccount, strategies: list[PaperStrategy], rows_by_symbol: dict[str, list[Kline]], *, as_of: datetime, data_errors: dict[str, str] \| None=None, metadata_by_symbol: dict[str, PaperInstrumentMetadata] \| None=None, cost_profile: PaperCostProfile \| None=None, benchmark_symbol: str \| None=DEFAULT_BENCHMARK_SYMBOL, benchmark_rows: list[Kline] \| None=None, benchmark_error: str \| None=None) -> PaperSimulationDraft` |
+| function | `_paper_simulation_draft` | 390 | `def _paper_simulation_draft(*, strategies: list[PaperStrategy], simulations: list[PaperStrategySimulation], trades: list[PaperTradeDraft], equity: list[PaperEquityPointDraft], recorder: _EventRecorder, profile: PaperCostProfile, rule_profiles: list[PaperTradeRuleProfile], benchmark: _BenchmarkSeries, benchmark_symbol: str \| None, provenance: _SimulationProvenance, as_of: datetime, closed_count: int, unavailable_count: int) -> PaperSimulationDraft` |
+| function | `_ordered_strategies` | 432 | `def _ordered_strategies(strategies: list[PaperStrategy]) -> list[PaperStrategy]` |
+| function | `_simulation_provenance` | 444 | `def _simulation_provenance(strategies: list[PaperStrategy], rows_by_symbol: dict[str, list[Kline]], benchmark_rows: list[Kline], metadata: dict[str, PaperInstrumentMetadata], as_of: datetime, profile: PaperCostProfile, rule_profiles: list[PaperTradeRuleProfile], benchmark_symbol: str \| None) -> _SimulationProvenance` |
+| function | `_simulation_configuration` | 473 | `def _simulation_configuration(profile: PaperCostProfile) -> dict[str, object]` |
+| function | `_data_extent_and_sources` | 485 | `def _data_extent_and_sources(rows_by_symbol: dict[str, list[Kline]], benchmark_rows: list[Kline], as_of: datetime) -> tuple[str \| None, str \| None, list[str]]` |
+| function | `_valid_row_through` | 502 | `def _valid_row_through(row: Kline, cutoff: date) -> bool` |
+| function | `_prepare_paper_states` | 507 | `def _prepare_paper_states(strategies: list[PaperStrategy], rows_by_symbol: dict[str, list[Kline]], as_of: datetime, errors: dict[str, str], metadata: dict[str, PaperInstrumentMetadata], recorder: _EventRecorder) -> tuple[dict[int, _PaperState], dict[int, dict[str, _PreparedBar]], list[PaperTradeRuleProfile]]` |
+| function | `_prepare_strategy` | 535 | `def _prepare_strategy(source: PaperStrategy, allocation_order: int, rows: list[Kline], as_of: datetime, data_error: str \| None, metadata: PaperInstrumentMetadata \| None, recorder: _EventRecorder) -> tuple[_PaperState, dict[str, _PreparedBar]]` |
+| function | `_record_strategy_activation` | 576 | `def _record_strategy_activation(state: _PaperState, activation_date: date, recorder: _EventRecorder) -> None` |
+| function | `_mark_strategy_unavailable` | 593 | `def _mark_strategy_unavailable(state: _PaperState, event_date: date, event_code: str, message: str, recorder: _EventRecorder) -> None` |
+| function | `_prepared_strategy_bars` | 605 | `def _prepared_strategy_bars(source: PaperStrategy, rows: list[Kline], cutoff: date, activation_date: date, metadata: PaperInstrumentMetadata \| None) -> tuple[dict[str, _PreparedBar], set[str]]` |
+| function | `_apply_rule_degradation` | 637 | `def _apply_rule_degradation(state: _PaperState, bars: dict[str, _PreparedBar], degraded_reasons: set[str], activation_date: date, recorder: _EventRecorder) -> None` |
+| function | `_simulate_trade_days` | 660 | `def _simulate_trade_days(account: PaperTradingAccount, states: dict[int, _PaperState], bars: dict[int, dict[str, _PreparedBar]], cost_profile: PaperCostProfile, benchmark: _BenchmarkSeries, recorder: _EventRecorder) -> tuple[list[PaperTradeDraft], list[PaperEquityPointDraft]]` |
+| function | `_process_open_positions` | 701 | `def _process_open_positions(states: dict[int, _PaperState], bars: dict[int, dict[str, _PreparedBar]], trade_date: str, cash: float, cost_profile: PaperCostProfile, trades: list[PaperTradeDraft], recorder: _EventRecorder) -> float` |
+| function | `_process_entries` | 760 | `def _process_entries(states: dict[int, _PaperState], bars: dict[int, dict[str, _PreparedBar]], trade_date: str, cash: float, initial_cash: float, cost_profile: PaperCostProfile, trades: list[PaperTradeDraft], recorder: _EventRecorder) -> float` |
+| function | `_process_single_entry` | 787 | `def _process_single_entry(state: _PaperState, prepared: _PreparedBar, trade_date: str, cash: float, initial_cash: float, cost_profile: PaperCostProfile, trades: list[PaperTradeDraft], recorder: _EventRecorder) -> float` |
+| function | `_record_unbuyable_entry` | 830 | `def _record_unbuyable_entry(state: _PaperState, row: Kline, assessment: DailyTradeability, recorder: _EventRecorder) -> None` |
+| function | `_record_insufficient_cash` | 848 | `def _record_insufficient_cash(state: _PaperState, row: Kline, cash: float, budget: float, rule: PaperTradeRuleProfile, recorder: _EventRecorder) -> None` |
+| function | `_fill_entry` | 872 | `def _fill_entry(state: _PaperState, prepared: _PreparedBar, assessment: DailyTradeability, quantity: int, cash: float, cost_profile: PaperCostProfile, trades: list[PaperTradeDraft], recorder: _EventRecorder) -> float` |
+| function | `_finish_waiting_day` | 905 | `def _finish_waiting_day(state: _PaperState, row: Kline, recorder: _EventRecorder) -> None` |
+| function | `_open_position` | 926 | `def _open_position(state: _PaperState, row: Kline, quantity: int, friction: float) -> None` |
+| function | `_latch_entry_day_exit_signal` | 936 | `def _latch_entry_day_exit_signal(state: _PaperState, row: Kline, recorder: _EventRecorder) -> None` |
+| function | `_close_position` | 960 | `def _close_position(state: _PaperState, row: Kline, price: float, reason: str, cost_profile: PaperCostProfile, trades: list[PaperTradeDraft], recorder: _EventRecorder, assessment: DailyTradeability, message: str) -> float` |
+| function | `_record_blocked_exit` | 1006 | `def _record_blocked_exit(state: _PaperState, prepared: _PreparedBar, assessment: DailyTradeability, recorder: _EventRecorder) -> None` |
+| function | `_exit_decision` | 1023 | `def _exit_decision(state: _PaperState, row: Kline) -> tuple[str \| None, float \| None]` |
+| function | `_stop_exit_price` | 1034 | `def _stop_exit_price(state: _PaperState, row: Kline) -> float` |
+| function | `_target_exit_price` | 1039 | `def _target_exit_price(state: _PaperState, row: Kline) -> float` |
+| function | `_barrier_reason` | 1044 | `def _barrier_reason(state: _PaperState, row: Kline) -> str \| None` |
+| function | `_open_barrier_reason` | 1056 | `def _open_barrier_reason(state: _PaperState, row: Kline) -> str \| None` |
+| function | `_intraday_barrier_reason` | 1064 | `def _intraday_barrier_reason(state: _PaperState, row: Kline) -> str \| None` |
+| function | `_skip_entry` | 1073 | `def _skip_entry(state: _PaperState, row: Kline, reason: str, recorder: _EventRecorder) -> None` |
+| class | `_BenchmarkSeries` | 1095 | `class _BenchmarkSeries` |
+| method | `_BenchmarkSeries.starting_at` | 1101 | `def starting_at(self, trade_date: str) -> _BenchmarkSeries` |
+| method | `_BenchmarkSeries.values` | 1107 | `def values(self, trade_date: str, initial_cash: float) -> tuple[float \| None, float \| None]` |
+| function | `_prepare_benchmark` | 1118 | `def _prepare_benchmark(rows: list[Kline], as_of: datetime, error: str \| None) -> _BenchmarkSeries` |
+| function | `_paper_equity_point` | 1136 | `def _paper_equity_point(trade_date: str, cash: float, initial_cash: float, cost_profile: PaperCostProfile, states: Iterable[_PaperState], trades: list[PaperTradeDraft], benchmark: _BenchmarkSeries, peak_equity: float) -> tuple[PaperEquityPointDraft, float]` |
+| function | `_portfolio_valuation` | 1178 | `def _portfolio_valuation(states: list[_PaperState], cost_profile: PaperCostProfile) -> _PortfolioValuation` |
+| function | `_optional_difference` | 1196 | `def _optional_difference(value: float, baseline: float \| None) -> float \| None` |
+| function | `_unrealized_pnl` | 1200 | `def _unrealized_pnl(state: _PaperState, cost_profile: PaperCostProfile) -> float` |
+| function | `_trade` | 1207 | `def _trade(state: _PaperState, side: str, trade_date: str, price: float, quantity: int, gross: float, costs: PaperTradeCosts, reason: str) -> PaperTradeDraft` |
+| function | `_simulation_from_state` | 1234 | `def _simulation_from_state(state: _PaperState) -> PaperStrategySimulation` |
+| function | `_board_lot_quantity` | 1264 | `def _board_lot_quantity(budget: float, price: float, cost_profile: PaperCostProfile, rule: PaperTradeRuleProfile) -> int` |
+| function | `_allocation_ordered_states` | 1289 | `def _allocation_ordered_states(states: dict[int, _PaperState]) -> list[_PaperState]` |
+| function | `_strategy_fingerprint_values` | 1293 | `def _strategy_fingerprint_values(item: PaperStrategy) -> dict[str, object]` |
+| function | `_market_fingerprint_values` | 1317 | `def _market_fingerprint_values(rows_by_symbol: dict[str, list[Kline]], benchmark_rows: list[Kline], metadata: dict[str, PaperInstrumentMetadata], as_of: datetime) -> dict[str, object]` |
+| function | `_stable_hash` | 1355 | `def _stable_hash(value: object) -> str` |
+| function | `_is_current_st_name` | 1360 | `def _is_current_st_name(name: str \| None) -> bool \| None` |
+| function | `_market_date` | 1367 | `def _market_date(value: str) -> date` |
+| function | `_date_or_none` | 1374 | `def _date_or_none(value: object) -> date \| None` |
+| function | `_simulation_message` | 1382 | `def _simulation_message(strategies: int, executions: int, closed: int, unavailable: int) -> str` |
+| function | `_money` | 1386 | `def _money(value: float) -> float` |
+| function | `_price` | 1390 | `def _price(value: float \| None) -> float \| None` |
+
+#### `app/services/paper_trading_rules.py`
+
+Lines: 333
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `DailyTradeability` | 25 | `class DailyTradeability` |
+| class | `_RuleTemplate` | 34 | `class _RuleTemplate` |
+| function | `resolve_trade_rule_profile` | 166 | `def resolve_trade_rule_profile(symbol: str, trade_date: date, metadata: PaperInstrumentMetadata \| None) -> PaperTradeRuleProfile` |
+| function | `_effective_price_limit` | 191 | `def _effective_price_limit(template: _RuleTemplate, trade_date: date, metadata: PaperInstrumentMetadata \| None) -> tuple[float \| None, list[str]]` |
+| function | `_status_price_limit` | 222 | `def _status_price_limit(limit_pct: float \| None, metadata: PaperInstrumentMetadata \| None) -> tuple[float \| None, list[str]]` |
+| function | `assess_daily_tradeability` | 233 | `def assess_daily_tradeability(row: Kline, *, previous_close: float \| None, profile: PaperTradeRuleProfile) -> DailyTradeability` |
+| function | `_rule_template` | 290 | `def _rule_template(symbol: str, trade_date: date) -> _RuleTemplate` |
+| function | `_rule_book_key` | 300 | `def _rule_book_key(symbol: str) -> tuple[str, str]` |
+| function | `_one_price_bar` | 309 | `def _one_price_bar(row: Kline) -> bool` |
+| function | `_date_or_none` | 317 | `def _date_or_none(value: object) -> date \| None` |
 
 #### `app/services/provider_failure_status.py`
 
@@ -4249,12 +4617,12 @@ Lines: 40
 
 #### `app/services/research_execution_model.py`
 
-Lines: 33
+Lines: 27
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `next_session_open` | 13 | `def next_session_open(rows: list, signal_index: int) -> float \| None` |
-| function | `net_forward_return` | 25 | `def net_forward_return(exit_price: float, entry_price: float) -> float` |
+| function | `next_session_open` | 7 | `def next_session_open(rows: list, signal_index: int) -> float \| None` |
+| function | `net_forward_return` | 19 | `def net_forward_return(exit_price: float, entry_price: float) -> float` |
 
 #### `app/services/research_factor_calibration.py`
 
@@ -4823,84 +5191,90 @@ Lines: 666
 
 #### `app/services/research_replay.py`
 
-Lines: 897
+Lines: 984
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `ForwardReturns` | 51 | `class ForwardReturns` |
-| class | `ReplayPatternContext` | 58 | `class ReplayPatternContext` |
-| class | `ReplayPatternRows` | 68 | `class ReplayPatternRows` |
-| class | `ReplayVolumeContext` | 75 | `class ReplayVolumeContext` |
-| class | `ReplayPatternRule` | 81 | `class ReplayPatternRule` |
-| class | `ReplayPatternNoteContext` | 87 | `class ReplayPatternNoteContext` |
-| class | `ReplayPatternNoteRule` | 97 | `class ReplayPatternNoteRule` |
-| function | `build_replay_analysis` | 102 | `def build_replay_analysis(analysis: AnalysisResult, window_days: int=120) -> StockReplayAnalysis` |
-| function | `_replay_window` | 123 | `def _replay_window(rows: list[Kline], window_days: int) -> list[Kline]` |
-| function | `_insufficient_replay_report` | 129 | `def _insufficient_replay_report(symbol: str, updated_at: str, row_count: int) -> StockReplayAnalysis` |
-| function | `_replay_cases` | 141 | `def _replay_cases(rows: list[Kline]) -> list[ReplayCase]` |
-| function | `_replay_candidate_indices` | 153 | `def _replay_candidate_indices(rows: list[Kline]) -> range` |
-| function | `_replay_case` | 157 | `def _replay_case(rows: list[Kline], index: int) -> ReplayCase \| None` |
-| function | `_forward_returns` | 178 | `def _forward_returns(rows: list[Kline], index: int, entry: float) -> ForwardReturns` |
-| function | `_forward_return` | 186 | `def _forward_return(rows: list[Kline], index: int, entry: float, days: int) -> float \| None` |
-| function | `_replay_outcome` | 195 | `def _replay_outcome(forward_5d: float \| None) -> str` |
-| function | `_round_optional` | 205 | `def _round_optional(value: float \| None) -> float \| None` |
-| function | `_detect_replay_pattern` | 211 | `def _detect_replay_pattern(rows: list[Kline], index: int) -> str \| None` |
-| function | `_replay_pattern_context` | 218 | `def _replay_pattern_context(rows: list[Kline], index: int) -> ReplayPatternContext \| None` |
-| function | `_replay_pattern_rows` | 228 | `def _replay_pattern_rows(rows: list[Kline], index: int) -> ReplayPatternRows \| None` |
-| function | `_replay_pattern_index_is_valid` | 240 | `def _replay_pattern_index_is_valid(rows: list[Kline], index: int) -> bool` |
-| function | `_valid_price_window` | 244 | `def _valid_price_window(rows: list[Kline]) -> bool` |
-| function | `_replay_volume_context` | 248 | `def _replay_volume_context(rows: list[Kline], index: int, current: Kline) -> ReplayVolumeContext \| None` |
-| function | `_build_replay_pattern_context` | 257 | `def _build_replay_pattern_context(pattern_rows: ReplayPatternRows, volume_context: ReplayVolumeContext) -> ReplayPatternContext` |
-| function | `_valid_price_bar` | 272 | `def _valid_price_bar(row: Kline) -> bool` |
-| function | `_average_positive_volume` | 279 | `def _average_positive_volume(rows: list[Kline]) -> float` |
-| function | `_is_finite_number` | 288 | `def _is_finite_number(value: object) -> TypeGuard[int \| float]` |
-| function | `_is_positive_finite` | 292 | `def _is_positive_finite(value: object) -> bool` |
-| function | `_is_volume_breakout` | 296 | `def _is_volume_breakout(context: ReplayPatternContext) -> bool` |
-| function | `_is_support_rebound` | 300 | `def _is_support_rebound(context: ReplayPatternContext) -> bool` |
-| function | `_is_volume_pullback` | 307 | `def _is_volume_pullback(context: ReplayPatternContext) -> bool` |
-| function | `_replay_stats` | 318 | `def _replay_stats(cases: list[ReplayCase]) -> list[ReplayPatternStat]` |
-| function | `_forward_return_win_rate` | 346 | `def _forward_return_win_rate(valid_returns: list[float]) -> float` |
-| function | `_replay_success_rate` | 353 | `def _replay_success_rate(cases: list[ReplayCase]) -> float` |
-| function | `_evaluated_replay_cases` | 363 | `def _evaluated_replay_cases(cases: list[ReplayCase]) -> list[ReplayCase]` |
-| function | `_valid_forward_5d_returns` | 367 | `def _valid_forward_5d_returns(cases: list[ReplayCase]) -> list[float]` |
-| function | `_replay_summary` | 376 | `def _replay_summary(row_count: int, cases: list[ReplayCase], success_rate: float) -> str` |
-| function | `_replay_notes` | 393 | `def _replay_notes() -> list[str]` |
-| function | `_replay_case_note` | 412 | `def _replay_case_note(pattern: str, outcome: str) -> str` |
-| function | `_replay_pattern_note` | 417 | `def _replay_pattern_note(pattern: str, sample_count: int, win_rate: float, avg_return: float, *, evaluated_count: int \| None=None) -> str` |
-| function | `_replay_pattern_note_context` | 435 | `def _replay_pattern_note_context(pattern: str, sample_count: int, win_rate: float, avg_return: float, *, evaluated_count: int \| None) -> ReplayPatternNoteContext` |
-| function | `_completed_replay_count` | 454 | `def _completed_replay_count(sample_count: int, evaluated_count: int \| None) -> int` |
-| function | `_pending_replay_suffix` | 460 | `def _pending_replay_suffix(sample_count: int, completed_count: int) -> str` |
-| function | `_finite_metric` | 467 | `def _finite_metric(value: float) -> float` |
-| function | `_has_no_completed_replay` | 471 | `def _has_no_completed_replay(context: ReplayPatternNoteContext) -> bool` |
-| function | `_has_small_completed_sample` | 475 | `def _has_small_completed_sample(context: ReplayPatternNoteContext) -> bool` |
-| function | `_has_strong_replay_history` | 479 | `def _has_strong_replay_history(context: ReplayPatternNoteContext) -> bool` |
-| function | `_has_weak_replay_history` | 483 | `def _has_weak_replay_history(context: ReplayPatternNoteContext) -> bool` |
-| function | `_always_note` | 487 | `def _always_note(_: ReplayPatternNoteContext) -> bool` |
-| class | `AdviceReviewWindow` | 519 | `class AdviceReviewWindow` |
-| class | `AdviceReviewForwardCoverage` | 527 | `class AdviceReviewForwardCoverage` |
-| method | `AdviceReviewForwardCoverage.complete` | 533 | `def complete(self) -> bool` |
-| class | `AdviceReviewBarrierOutcome` | 538 | `class AdviceReviewBarrierOutcome` |
-| class | `AdviceReviewPriceContext` | 548 | `class AdviceReviewPriceContext` |
-| function | `evaluate_advice_forward_window` | 559 | `def evaluate_advice_forward_window(plan: AdviceReviewPlan, rows: list[Kline], *, as_of: datetime, evaluated_at: str) -> AdviceReviewEvaluationDraft` |
-| function | `_advice_review_evaluation_draft` | 587 | `def _advice_review_evaluation_draft(plan: AdviceReviewPlan, window: AdviceReviewWindow, evaluation_rows: list[Kline], barrier: AdviceReviewBarrierOutcome, prices: AdviceReviewPriceContext \| None, status: str, conclusion: str, metrics: tuple[float \| None, float \| None, float \| None], as_of: datetime, evaluated_at: str) -> AdviceReviewEvaluationDraft` |
-| function | `advice_review_window` | 645 | `def advice_review_window(rows: list[Kline], *, snapshot_time: datetime, as_of: datetime) -> AdviceReviewWindow` |
-| function | `completed_daily_bar_cutoff` | 667 | `def completed_daily_bar_cutoff(value: datetime) -> date` |
-| function | `_advice_review_forward_coverage` | 675 | `def _advice_review_forward_coverage(window: AdviceReviewWindow, horizon_days: int) -> AdviceReviewForwardCoverage` |
-| function | `_expected_review_dates` | 694 | `def _expected_review_dates(snapshot_date: date, as_of_cutoff: date, horizon_days: int) -> tuple[date, ...]` |
-| function | `_valid_unique_daily_rows` | 708 | `def _valid_unique_daily_rows(rows: list[Kline]) -> list[tuple[date, Kline]]` |
-| function | `_strict_daily_date` | 717 | `def _strict_daily_date(value: object) -> date \| None` |
-| function | `_review_market_datetime` | 726 | `def _review_market_datetime(value: str) -> datetime` |
-| function | `_advice_review_price_context` | 733 | `def _advice_review_price_context(plan: AdviceReviewPlan, rows: list[Kline]) -> AdviceReviewPriceContext \| None` |
-| function | `_review_snapshot_anchor` | 764 | `def _review_snapshot_anchor(plan: AdviceReviewPlan) -> float \| None` |
-| function | `_review_evaluation_contract` | 773 | `def _review_evaluation_contract(rows: list[tuple[date, Kline]], expected_adjustment_mode: str, expected_contract_version: str) -> tuple[str, str, str] \| None` |
-| function | `_review_evaluation_anchor_close` | 790 | `def _review_evaluation_anchor_close(rows: list[tuple[date, Kline]], anchor_date: str) -> float \| None` |
-| function | `_advice_review_barrier_outcome` | 800 | `def _advice_review_barrier_outcome(rows: list[Kline], prices: AdviceReviewPriceContext \| None) -> AdviceReviewBarrierOutcome` |
-| function | `_terminal_review_rows` | 846 | `def _terminal_review_rows(rows: list[Kline], terminal_index: int \| None) -> list[Kline]` |
-| function | `_advice_review_status_and_conclusion` | 850 | `def _advice_review_status_and_conclusion(coverage: AdviceReviewForwardCoverage, rows: list[Kline], horizon_days: int, barrier_conclusion: str \| None, prices: AdviceReviewPriceContext \| None) -> tuple[str, str]` |
-| function | `_horizon_review_conclusion` | 870 | `def _horizon_review_conclusion(close: float, entry_price: float) -> str` |
-| function | `_advice_review_metrics` | 879 | `def _advice_review_metrics(rows: list[Kline], entry_price: float) -> tuple[float \| None, float \| None, float \| None]` |
-| function | `_first_row_date` | 892 | `def _first_row_date(rows: list[Kline]) -> str \| None` |
-| function | `_last_row_date` | 896 | `def _last_row_date(rows: list[Kline]) -> str \| None` |
+| class | `ForwardReturns` | 52 | `class ForwardReturns` |
+| class | `ReplayPatternContext` | 59 | `class ReplayPatternContext` |
+| class | `ReplayPatternRows` | 69 | `class ReplayPatternRows` |
+| class | `ReplayVolumeContext` | 76 | `class ReplayVolumeContext` |
+| class | `ReplayPatternRule` | 82 | `class ReplayPatternRule` |
+| class | `ReplayPatternNoteContext` | 88 | `class ReplayPatternNoteContext` |
+| class | `ReplayPatternNoteRule` | 98 | `class ReplayPatternNoteRule` |
+| function | `build_replay_analysis` | 103 | `def build_replay_analysis(analysis: AnalysisResult, window_days: int=120) -> StockReplayAnalysis` |
+| function | `_replay_window` | 133 | `def _replay_window(rows: list[Kline], window_days: int) -> list[Kline]` |
+| function | `_insufficient_replay_report` | 139 | `def _insufficient_replay_report(symbol: str, updated_at: str, row_count: int) -> StockReplayAnalysis` |
+| function | `_replay_cases` | 151 | `def _replay_cases(rows: list[Kline]) -> list[ReplayCase]` |
+| function | `_replay_candidate_indices` | 163 | `def _replay_candidate_indices(rows: list[Kline]) -> range` |
+| function | `_replay_case` | 167 | `def _replay_case(rows: list[Kline], index: int) -> ReplayCase \| None` |
+| function | `_forward_returns` | 189 | `def _forward_returns(rows: list[Kline], index: int, entry: float) -> ForwardReturns` |
+| function | `_forward_return` | 197 | `def _forward_return(rows: list[Kline], index: int, entry: float, days: int) -> float \| None` |
+| function | `_replay_outcome` | 206 | `def _replay_outcome(forward_5d: float \| None) -> str` |
+| function | `_round_optional` | 216 | `def _round_optional(value: float \| None) -> float \| None` |
+| function | `_detect_replay_pattern` | 222 | `def _detect_replay_pattern(rows: list[Kline], index: int) -> str \| None` |
+| function | `_replay_pattern_context` | 229 | `def _replay_pattern_context(rows: list[Kline], index: int) -> ReplayPatternContext \| None` |
+| function | `_replay_pattern_rows` | 239 | `def _replay_pattern_rows(rows: list[Kline], index: int) -> ReplayPatternRows \| None` |
+| function | `_replay_pattern_index_is_valid` | 251 | `def _replay_pattern_index_is_valid(rows: list[Kline], index: int) -> bool` |
+| function | `_valid_price_window` | 255 | `def _valid_price_window(rows: list[Kline]) -> bool` |
+| function | `_replay_volume_context` | 259 | `def _replay_volume_context(rows: list[Kline], index: int, current: Kline) -> ReplayVolumeContext \| None` |
+| function | `_build_replay_pattern_context` | 268 | `def _build_replay_pattern_context(pattern_rows: ReplayPatternRows, volume_context: ReplayVolumeContext) -> ReplayPatternContext` |
+| function | `_valid_price_bar` | 283 | `def _valid_price_bar(row: Kline) -> bool` |
+| function | `_average_positive_volume` | 290 | `def _average_positive_volume(rows: list[Kline]) -> float` |
+| function | `_is_finite_number` | 299 | `def _is_finite_number(value: object) -> TypeGuard[int \| float]` |
+| function | `_is_positive_finite` | 303 | `def _is_positive_finite(value: object) -> bool` |
+| function | `_is_volume_breakout` | 307 | `def _is_volume_breakout(context: ReplayPatternContext) -> bool` |
+| function | `_is_support_rebound` | 311 | `def _is_support_rebound(context: ReplayPatternContext) -> bool` |
+| function | `_is_volume_pullback` | 318 | `def _is_volume_pullback(context: ReplayPatternContext) -> bool` |
+| function | `_replay_stats` | 329 | `def _replay_stats(cases: list[ReplayCase], *, baseline_average: float=0) -> list[ReplayPatternStat]` |
+| function | `_baseline_forward_returns` | 358 | `def _baseline_forward_returns(rows: list[Kline]) -> list[float]` |
+| function | `_average_return` | 370 | `def _average_return(values: list[float]) -> float` |
+| function | `_replay_trend_regime` | 375 | `def _replay_trend_regime(rows: list[Kline], index: int) -> str` |
+| function | `_replay_regime_stats` | 392 | `def _replay_regime_stats(cases: list[ReplayCase]) -> list[ReplayRegimeStat]` |
+| function | `_forward_return_win_rate` | 411 | `def _forward_return_win_rate(valid_returns: list[float]) -> float` |
+| function | `_replay_success_rate` | 418 | `def _replay_success_rate(cases: list[ReplayCase]) -> float` |
+| function | `_evaluated_replay_cases` | 428 | `def _evaluated_replay_cases(cases: list[ReplayCase]) -> list[ReplayCase]` |
+| function | `_valid_forward_5d_returns` | 432 | `def _valid_forward_5d_returns(cases: list[ReplayCase]) -> list[float]` |
+| function | `_replay_summary` | 441 | `def _replay_summary(row_count: int, cases: list[ReplayCase], success_rate: float) -> str` |
+| function | `_replay_notes` | 458 | `def _replay_notes() -> list[str]` |
+| function | `_replay_case_note` | 477 | `def _replay_case_note(pattern: str, outcome: str) -> str` |
+| function | `_replay_pattern_note` | 482 | `def _replay_pattern_note(pattern: str, sample_count: int, win_rate: float, avg_return: float, *, evaluated_count: int \| None=None) -> str` |
+| function | `_replay_pattern_note_context` | 500 | `def _replay_pattern_note_context(pattern: str, sample_count: int, win_rate: float, avg_return: float, *, evaluated_count: int \| None) -> ReplayPatternNoteContext` |
+| function | `_completed_replay_count` | 519 | `def _completed_replay_count(sample_count: int, evaluated_count: int \| None) -> int` |
+| function | `_pending_replay_suffix` | 525 | `def _pending_replay_suffix(sample_count: int, completed_count: int) -> str` |
+| function | `_finite_metric` | 532 | `def _finite_metric(value: float) -> float` |
+| function | `_has_no_completed_replay` | 536 | `def _has_no_completed_replay(context: ReplayPatternNoteContext) -> bool` |
+| function | `_has_small_completed_sample` | 540 | `def _has_small_completed_sample(context: ReplayPatternNoteContext) -> bool` |
+| function | `_has_strong_replay_history` | 544 | `def _has_strong_replay_history(context: ReplayPatternNoteContext) -> bool` |
+| function | `_has_weak_replay_history` | 548 | `def _has_weak_replay_history(context: ReplayPatternNoteContext) -> bool` |
+| function | `_always_note` | 552 | `def _always_note(_: ReplayPatternNoteContext) -> bool` |
+| class | `AdviceReviewWindow` | 584 | `class AdviceReviewWindow` |
+| class | `AdviceReviewForwardCoverage` | 592 | `class AdviceReviewForwardCoverage` |
+| method | `AdviceReviewForwardCoverage.complete` | 598 | `def complete(self) -> bool` |
+| class | `AdviceReviewBarrierOutcome` | 603 | `class AdviceReviewBarrierOutcome` |
+| class | `AdviceReviewPriceContext` | 613 | `class AdviceReviewPriceContext` |
+| class | `AdviceReviewPricePlan` | 624 | `class AdviceReviewPricePlan(Protocol)` |
+| function | `evaluate_advice_forward_window` | 634 | `def evaluate_advice_forward_window(plan: AdviceReviewPlan, rows: list[Kline], *, as_of: datetime, evaluated_at: str) -> AdviceReviewEvaluationDraft` |
+| function | `_advice_review_evaluation_draft` | 662 | `def _advice_review_evaluation_draft(plan: AdviceReviewPlan, window: AdviceReviewWindow, evaluation_rows: list[Kline], barrier: AdviceReviewBarrierOutcome, prices: AdviceReviewPriceContext \| None, status: str, conclusion: str, metrics: tuple[float \| None, float \| None, float \| None], as_of: datetime, evaluated_at: str) -> AdviceReviewEvaluationDraft` |
+| function | `advice_review_window` | 720 | `def advice_review_window(rows: list[Kline], *, snapshot_time: datetime, as_of: datetime) -> AdviceReviewWindow` |
+| function | `completed_daily_bar_cutoff` | 742 | `def completed_daily_bar_cutoff(value: datetime) -> date` |
+| function | `_advice_review_forward_coverage` | 750 | `def _advice_review_forward_coverage(window: AdviceReviewWindow, horizon_days: int) -> AdviceReviewForwardCoverage` |
+| function | `_expected_review_dates` | 769 | `def _expected_review_dates(snapshot_date: date, as_of_cutoff: date, horizon_days: int) -> tuple[date, ...]` |
+| function | `_valid_unique_daily_rows` | 783 | `def _valid_unique_daily_rows(rows: list[Kline]) -> list[tuple[date, Kline]]` |
+| function | `_strict_daily_date` | 792 | `def _strict_daily_date(value: object) -> date \| None` |
+| function | `_review_market_datetime` | 801 | `def _review_market_datetime(value: str) -> datetime` |
+| function | `normalized_advice_review_prices` | 808 | `def normalized_advice_review_prices(plan: AdviceReviewPricePlan, rows: list[Kline]) -> AdviceReviewPriceContext \| None` |
+| function | `_advice_review_price_context` | 817 | `def _advice_review_price_context(plan: AdviceReviewPricePlan, rows: list[Kline]) -> AdviceReviewPriceContext \| None` |
+| function | `_review_snapshot_anchor` | 851 | `def _review_snapshot_anchor(plan: AdviceReviewPricePlan) -> float \| None` |
+| function | `_review_evaluation_contract` | 860 | `def _review_evaluation_contract(rows: list[tuple[date, Kline]], expected_adjustment_mode: str, expected_contract_version: str) -> tuple[str, str, str] \| None` |
+| function | `_review_evaluation_anchor_close` | 877 | `def _review_evaluation_anchor_close(rows: list[tuple[date, Kline]], anchor_date: str) -> float \| None` |
+| function | `_advice_review_barrier_outcome` | 887 | `def _advice_review_barrier_outcome(rows: list[Kline], prices: AdviceReviewPriceContext \| None) -> AdviceReviewBarrierOutcome` |
+| function | `_terminal_review_rows` | 933 | `def _terminal_review_rows(rows: list[Kline], terminal_index: int \| None) -> list[Kline]` |
+| function | `_advice_review_status_and_conclusion` | 937 | `def _advice_review_status_and_conclusion(coverage: AdviceReviewForwardCoverage, rows: list[Kline], horizon_days: int, barrier_conclusion: str \| None, prices: AdviceReviewPriceContext \| None) -> tuple[str, str]` |
+| function | `_horizon_review_conclusion` | 957 | `def _horizon_review_conclusion(close: float, entry_price: float) -> str` |
+| function | `_advice_review_metrics` | 966 | `def _advice_review_metrics(rows: list[Kline], entry_price: float) -> tuple[float \| None, float \| None, float \| None]` |
+| function | `_first_row_date` | 979 | `def _first_row_date(rows: list[Kline]) -> str \| None` |
+| function | `_last_row_date` | 983 | `def _last_row_date(rows: list[Kline]) -> str \| None` |
 
 #### `app/services/research_risk.py`
 
@@ -5210,26 +5584,28 @@ Lines: 485
 
 #### `app/services/review.py`
 
-Lines: 218
+Lines: 257
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `ReviewMetrics` | 24 | `class ReviewMetrics` |
-| class | `ReviewEventContext` | 38 | `class ReviewEventContext` |
-| class | `ReviewEventRule` | 45 | `class ReviewEventRule` |
-| function | `build_individual_review` | 74 | `def build_individual_review(quote: Quote, klines: list[Kline], period_days: int=60) -> IndividualReview` |
-| function | `_review_rows` | 99 | `def _review_rows(klines: list[Kline], period_days: int) -> list[Kline]` |
-| function | `_valid_review_bar` | 106 | `def _valid_review_bar(row: Kline) -> bool` |
-| function | `_insufficient_review` | 110 | `def _insufficient_review(quote: Quote, row_count: int) -> IndividualReview` |
-| function | `_review_metrics` | 131 | `def _review_metrics(rows: list[Kline]) -> ReviewMetrics` |
-| function | `_review_returns` | 154 | `def _review_returns(closes: list[float]) -> list[float]` |
-| function | `_review_summary` | 158 | `def _review_summary(quote: Quote, metrics: ReviewMetrics) -> str` |
-| function | `_review_key_points` | 165 | `def _review_key_points(metrics: ReviewMetrics) -> list[ReviewPoint]` |
-| function | `_review_label` | 174 | `def _review_label(return_pct: float, max_drawdown_pct: float, days_above_ma5: int) -> str` |
-| function | `_level_by_return` | 184 | `def _level_by_return(value: float) -> str` |
-| function | `_review_events` | 192 | `def _review_events(rows: list[Kline]) -> list[ReviewEvent]` |
-| function | `_review_event_at` | 203 | `def _review_event_at(prev: Kline, current: Kline) -> ReviewEvent \| None` |
-| function | `_event_from_rule` | 212 | `def _event_from_rule(context: ReviewEventContext, rule: ReviewEventRule) -> ReviewEvent` |
+| class | `ReviewMetrics` | 27 | `class ReviewMetrics` |
+| class | `ReviewEventContext` | 41 | `class ReviewEventContext` |
+| class | `ReviewEventRule` | 49 | `class ReviewEventRule` |
+| function | `build_individual_review` | 90 | `def build_individual_review(quote: Quote, klines: list[Kline], period_days: int=60) -> IndividualReview` |
+| function | `_review_rows` | 115 | `def _review_rows(klines: list[Kline], period_days: int) -> list[Kline]` |
+| function | `_valid_review_bar` | 122 | `def _valid_review_bar(row: Kline) -> bool` |
+| function | `_insufficient_review` | 126 | `def _insufficient_review(quote: Quote, row_count: int) -> IndividualReview` |
+| function | `_review_metrics` | 147 | `def _review_metrics(rows: list[Kline]) -> ReviewMetrics` |
+| function | `_review_returns` | 170 | `def _review_returns(closes: list[float]) -> list[float]` |
+| function | `_review_summary` | 174 | `def _review_summary(quote: Quote, metrics: ReviewMetrics) -> str` |
+| function | `_review_key_points` | 181 | `def _review_key_points(metrics: ReviewMetrics) -> list[ReviewPoint]` |
+| function | `_review_label` | 190 | `def _review_label(return_pct: float, max_drawdown_pct: float, days_above_ma5: int) -> str` |
+| function | `_level_by_return` | 200 | `def _level_by_return(value: float) -> str` |
+| function | `_review_events` | 208 | `def _review_events(rows: list[Kline]) -> list[ReviewEvent]` |
+| function | `_review_event_at` | 219 | `def _review_event_at(rows: list[Kline], index: int) -> ReviewEvent \| None` |
+| function | `_review_volume_ratio` | 231 | `def _review_volume_ratio(rows: list[Kline], index: int) -> float \| None` |
+| function | `_invalid_review_volume` | 242 | `def _invalid_review_volume(value: object) -> bool` |
+| function | `_event_from_rule` | 251 | `def _event_from_rule(context: ReviewEventContext, rule: ReviewEventRule) -> ReviewEvent` |
 
 #### `app/services/runtime_backup.py`
 
@@ -6087,67 +6463,67 @@ Lines: 114
 
 #### `app/services/user_data_portability.py`
 
-Lines: 997
+Lines: 1071
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `_PreparedRow` | 126 | `class _PreparedRow` |
-| class | `_PreparedTable` | 132 | `class _PreparedTable` |
-| class | `_SurrogateMergeState` | 139 | `class _SurrogateMergeState` |
-| function | `export_user_data` | 152 | `def export_user_data(path: Path) -> UserDataBundle` |
-| function | `_export_user_data_from_connection` | 161 | `def _export_user_data_from_connection(conn: sqlite3.Connection) -> UserDataBundle` |
-| function | `user_data_state_digest` | 178 | `def user_data_state_digest(path: Path) -> str` |
-| function | `_user_data_state_digest_from_connection` | 187 | `def _user_data_state_digest_from_connection(conn: sqlite3.Connection) -> str` |
-| function | `import_user_data` | 194 | `def import_user_data(path: Path, bundle: UserDataBundle, *, mode: LocalDataImportMode='merge', dry_run: bool=True, legacy_audit_timezone: str \| None=None, on_validated_state: ImportStateCallback \| None=None) -> LocalDataImportResult` |
-| function | `available_user_tables` | 249 | `def available_user_tables(conn: sqlite3.Connection) -> tuple[str, ...]` |
-| function | `_export_table` | 256 | `def _export_table(conn: sqlite3.Connection, table: str) -> LocalDataTableBundle` |
-| function | `_validate_bundle_for_database` | 275 | `def _validate_bundle_for_database(conn: sqlite3.Connection, bundle: UserDataBundle, *, mode: LocalDataImportMode, legacy_audit_timezone: str \| None) -> tuple[tuple[str, ...], dict[str, LocalDataTableBundle]]` |
-| function | `_validate_table_bundle` | 309 | `def _validate_table_bundle(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> LocalDataTableBundle` |
-| function | `_with_v1_compat_columns` | 338 | `def _with_v1_compat_columns(table: str, bundle: LocalDataTableBundle, target_columns: tuple[str, ...], column_info: dict[str, sqlite3.Row]) -> LocalDataTableBundle` |
-| function | `_validated_target_types` | 364 | `def _validated_target_types(table: str, bundle: LocalDataTableBundle, columns: tuple[str, ...], primary_key: tuple[str, ...], column_info: dict[str, sqlite3.Row]) -> dict[str, str]` |
-| function | `_normalized_bundle_rows` | 384 | `def _normalized_bundle_rows(table: str, bundle: LocalDataTableBundle, columns: tuple[str, ...], primary_key: tuple[str, ...], column_info: dict[str, sqlite3.Row], *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> list[dict[str, JsonValue]]` |
-| function | `_normalize_bundle_audit_timestamps` | 409 | `def _normalize_bundle_audit_timestamps(table: str, row: dict[str, JsonValue], *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> dict[str, JsonValue]` |
-| function | `_export_value` | 433 | `def _export_value(value: object, table: str, column: str) -> JsonValue` |
-| function | `_resolve_legacy_audit_timezone` | 442 | `def _resolve_legacy_audit_timezone(metadata: AuditTimestampMetadata \| None, explicit_timezone: str \| None) -> str \| None` |
-| function | `_normalize_imported_audit_timestamp` | 457 | `def _normalize_imported_audit_timestamp(value: str, *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> str` |
-| function | `_parse_bundle_audit_timestamp` | 480 | `def _parse_bundle_audit_timestamp(value: str) -> datetime` |
-| function | `_validate_normalized_rows` | 487 | `def _validate_normalized_rows(table: str, rows: list[dict[str, JsonValue]], primary_key: tuple[str, ...], column_info: dict[str, sqlite3.Row]) -> None` |
-| function | `_validate_row_types` | 502 | `def _validate_row_types(table: str, row: dict[str, object], column_info: dict[str, sqlite3.Row]) -> None` |
-| function | `_validate_in_bundle_relationships` | 513 | `def _validate_in_bundle_relationships(tables: dict[str, LocalDataTableBundle]) -> None` |
-| function | `_validate_child_bundle_relationships` | 521 | `def _validate_child_bundle_relationships(tables: dict[str, LocalDataTableBundle], child_table: str, child: LocalDataTableBundle, relationships: tuple[tuple[str, str], ...]) -> None` |
-| function | `_validate_review_bundle_relationships` | 539 | `def _validate_review_bundle_relationships(tables: dict[str, LocalDataTableBundle]) -> None` |
-| function | `_prepare_bundle` | 549 | `def _prepare_bundle(conn: sqlite3.Connection, tables: dict[str, LocalDataTableBundle], table_names: tuple[str, ...], mode: LocalDataImportMode) -> dict[str, _PreparedTable]` |
-| function | `_remap_foreign_keys` | 570 | `def _remap_foreign_keys(table: str, source_row: dict[str, JsonValue], tables: dict[str, LocalDataTableBundle], id_maps: dict[str, dict[object, object]]) -> dict[str, object]` |
-| function | `_prepare_replace_table` | 587 | `def _prepare_replace_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...]) -> tuple[_PreparedTable, dict[object, object] \| None]` |
-| function | `_prepare_merge_table` | 608 | `def _prepare_merge_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...]) -> tuple[_PreparedTable, dict[object, object] \| None]` |
-| function | `_prepare_stable_merge_table` | 620 | `def _prepare_stable_merge_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...]) -> _PreparedTable` |
-| function | `_prepare_surrogate_merge_table` | 653 | `def _prepare_surrogate_merge_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...], primary_key: str) -> tuple[_PreparedTable, dict[object, object]]` |
-| function | `_surrogate_merge_state` | 677 | `def _surrogate_merge_state(table: str, existing_rows: list[dict[str, object]], source_rows: tuple[dict[str, object], ...], primary_key: str, stable_columns: tuple[str, ...] \| None) -> _SurrogateMergeState` |
-| function | `_append_surrogate_merge_row` | 705 | `def _append_surrogate_merge_row(state: _SurrogateMergeState, source_row: dict[str, object]) -> None` |
-| function | `_available_surrogate_id` | 731 | `def _available_surrogate_id(state: _SurrogateMergeState, source_id: object) -> object` |
-| function | `_optional_row_key` | 741 | `def _optional_row_key(table: str, row: dict[str, object], columns: tuple[str, ...] \| None) -> tuple[object, ...] \| None` |
-| function | `_validate_unique_stable_keys` | 749 | `def _validate_unique_stable_keys(table: str, rows: tuple[dict[str, object], ...], columns: tuple[str, ...]) -> None` |
-| function | `_preview_for_rows` | 762 | `def _preview_for_rows(rows: list[_PreparedRow], *, remapped: int) -> LocalDataTableImportPreview` |
-| function | `_existing_rows` | 777 | `def _existing_rows(conn: sqlite3.Connection, table: str, columns: list[str]) -> list[dict[str, object]]` |
-| function | `_stable_row_key` | 786 | `def _stable_row_key(table: str, row: dict[str, object], columns: tuple[str, ...]) -> tuple[object, ...]` |
-| function | `_apply_prepared_bundle` | 800 | `def _apply_prepared_bundle(conn: sqlite3.Connection, prepared: dict[str, _PreparedTable], table_names: tuple[str, ...], mode: LocalDataImportMode) -> None` |
-| function | `_insert_row` | 818 | `def _insert_row(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, row: dict[str, object]) -> None` |
-| function | `_update_row` | 832 | `def _update_row(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, row: dict[str, object]) -> None` |
-| function | `_foreign_key_check` | 850 | `def _foreign_key_check(conn: sqlite3.Connection) -> None` |
-| function | `_validate_imported_relationships` | 857 | `def _validate_imported_relationships(conn: sqlite3.Connection, prepared: dict[str, _PreparedTable]) -> None` |
-| function | `_imported_parent_rows` | 869 | `def _imported_parent_rows(conn: sqlite3.Connection, prepared: dict[str, _PreparedTable]) -> dict[str, dict[object, sqlite3.Row]]` |
-| function | `_validate_imported_child_rows` | 882 | `def _validate_imported_child_rows(child_table: str, child: _PreparedTable, relationships: tuple[tuple[str, str], ...], parent_rows: dict[str, dict[object, sqlite3.Row]]) -> None` |
-| function | `_row_symbol` | 898 | `def _row_symbol(row) -> object \| None` |
-| function | `_validate_imported_review_rows` | 902 | `def _validate_imported_review_rows(results: _PreparedTable \| None, parent_rows: dict[str, dict[object, sqlite3.Row]]) -> None` |
-| function | `_table_contract` | 915 | `def _table_contract(conn: sqlite3.Connection, table: str) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, sqlite3.Row]]` |
-| function | `_normalize_declared_type` | 928 | `def _normalize_declared_type(value: str) -> str` |
-| function | `_matches_affinity` | 932 | `def _matches_affinity(value: object, declared_type: str) -> bool` |
-| function | `_json_value` | 945 | `def _json_value(value: object, table: str, column: str) -> JsonValue` |
-| function | `_sum_previews` | 953 | `def _sum_previews(previews) -> LocalDataTableImportPreview` |
-| function | `_connect` | 965 | `def _connect(path: Path) -> sqlite3.Connection` |
-| function | `_require_database` | 973 | `def _require_database(path: Path) -> Path` |
-| function | `_quote_identifier` | 980 | `def _quote_identifier(value: str) -> str` |
-| function | `_utc_now_text` | 986 | `def _utc_now_text() -> str` |
+| class | `_PreparedRow` | 187 | `class _PreparedRow` |
+| class | `_PreparedTable` | 193 | `class _PreparedTable` |
+| class | `_SurrogateMergeState` | 200 | `class _SurrogateMergeState` |
+| function | `export_user_data` | 213 | `def export_user_data(path: Path) -> UserDataBundle` |
+| function | `_export_user_data_from_connection` | 222 | `def _export_user_data_from_connection(conn: sqlite3.Connection) -> UserDataBundle` |
+| function | `user_data_state_digest` | 239 | `def user_data_state_digest(path: Path) -> str` |
+| function | `_user_data_state_digest_from_connection` | 248 | `def _user_data_state_digest_from_connection(conn: sqlite3.Connection) -> str` |
+| function | `import_user_data` | 255 | `def import_user_data(path: Path, bundle: UserDataBundle, *, mode: LocalDataImportMode='merge', dry_run: bool=True, legacy_audit_timezone: str \| None=None, on_validated_state: ImportStateCallback \| None=None) -> LocalDataImportResult` |
+| function | `available_user_tables` | 310 | `def available_user_tables(conn: sqlite3.Connection) -> tuple[str, ...]` |
+| function | `_export_table` | 321 | `def _export_table(conn: sqlite3.Connection, table: str) -> LocalDataTableBundle` |
+| function | `_validate_bundle_for_database` | 340 | `def _validate_bundle_for_database(conn: sqlite3.Connection, bundle: UserDataBundle, *, mode: LocalDataImportMode, legacy_audit_timezone: str \| None) -> tuple[tuple[str, ...], dict[str, LocalDataTableBundle]]` |
+| function | `_validate_table_bundle` | 374 | `def _validate_table_bundle(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> LocalDataTableBundle` |
+| function | `_with_v1_compat_columns` | 403 | `def _with_v1_compat_columns(table: str, bundle: LocalDataTableBundle, target_columns: tuple[str, ...], column_info: dict[str, sqlite3.Row]) -> LocalDataTableBundle` |
+| function | `_validated_target_types` | 429 | `def _validated_target_types(table: str, bundle: LocalDataTableBundle, columns: tuple[str, ...], primary_key: tuple[str, ...], column_info: dict[str, sqlite3.Row]) -> dict[str, str]` |
+| function | `_normalized_bundle_rows` | 449 | `def _normalized_bundle_rows(table: str, bundle: LocalDataTableBundle, columns: tuple[str, ...], primary_key: tuple[str, ...], column_info: dict[str, sqlite3.Row], *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> list[dict[str, JsonValue]]` |
+| function | `_normalize_bundle_audit_timestamps` | 474 | `def _normalize_bundle_audit_timestamps(table: str, row: dict[str, JsonValue], *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> dict[str, JsonValue]` |
+| function | `_export_value` | 498 | `def _export_value(value: object, table: str, column: str) -> JsonValue` |
+| function | `_resolve_legacy_audit_timezone` | 507 | `def _resolve_legacy_audit_timezone(metadata: AuditTimestampMetadata \| None, explicit_timezone: str \| None) -> str \| None` |
+| function | `_normalize_imported_audit_timestamp` | 522 | `def _normalize_imported_audit_timestamp(value: str, *, audit_metadata: AuditTimestampMetadata \| None, legacy_audit_timezone: str \| None) -> str` |
+| function | `_parse_bundle_audit_timestamp` | 545 | `def _parse_bundle_audit_timestamp(value: str) -> datetime` |
+| function | `_validate_normalized_rows` | 552 | `def _validate_normalized_rows(table: str, rows: list[dict[str, JsonValue]], primary_key: tuple[str, ...], column_info: dict[str, sqlite3.Row]) -> None` |
+| function | `_validate_row_types` | 567 | `def _validate_row_types(table: str, row: dict[str, object], column_info: dict[str, sqlite3.Row]) -> None` |
+| function | `_validate_in_bundle_relationships` | 578 | `def _validate_in_bundle_relationships(tables: dict[str, LocalDataTableBundle]) -> None` |
+| function | `_validate_child_bundle_relationships` | 586 | `def _validate_child_bundle_relationships(tables: dict[str, LocalDataTableBundle], child_table: str, child: LocalDataTableBundle, relationships: tuple[tuple[str, str], ...]) -> None` |
+| function | `_validate_review_bundle_relationships` | 607 | `def _validate_review_bundle_relationships(tables: dict[str, LocalDataTableBundle]) -> None` |
+| function | `_prepare_bundle` | 617 | `def _prepare_bundle(conn: sqlite3.Connection, tables: dict[str, LocalDataTableBundle], table_names: tuple[str, ...], mode: LocalDataImportMode) -> dict[str, _PreparedTable]` |
+| function | `_remap_foreign_keys` | 638 | `def _remap_foreign_keys(table: str, source_row: dict[str, JsonValue], tables: dict[str, LocalDataTableBundle], id_maps: dict[str, dict[object, object]]) -> dict[str, object]` |
+| function | `_prepare_replace_table` | 657 | `def _prepare_replace_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...]) -> tuple[_PreparedTable, dict[object, object] \| None]` |
+| function | `_prepare_merge_table` | 678 | `def _prepare_merge_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...]) -> tuple[_PreparedTable, dict[object, object] \| None]` |
+| function | `_prepare_stable_merge_table` | 690 | `def _prepare_stable_merge_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...]) -> _PreparedTable` |
+| function | `_prepare_surrogate_merge_table` | 723 | `def _prepare_surrogate_merge_table(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, rows: tuple[dict[str, object], ...], primary_key: str) -> tuple[_PreparedTable, dict[object, object]]` |
+| function | `_surrogate_merge_state` | 747 | `def _surrogate_merge_state(table: str, existing_rows: list[dict[str, object]], source_rows: tuple[dict[str, object], ...], primary_key: str, stable_columns: tuple[str, ...] \| None) -> _SurrogateMergeState` |
+| function | `_append_surrogate_merge_row` | 775 | `def _append_surrogate_merge_row(state: _SurrogateMergeState, source_row: dict[str, object]) -> None` |
+| function | `_available_surrogate_id` | 801 | `def _available_surrogate_id(state: _SurrogateMergeState, source_id: object) -> object` |
+| function | `_optional_row_key` | 811 | `def _optional_row_key(table: str, row: dict[str, object], columns: tuple[str, ...] \| None) -> tuple[object, ...] \| None` |
+| function | `_validate_unique_stable_keys` | 819 | `def _validate_unique_stable_keys(table: str, rows: tuple[dict[str, object], ...], columns: tuple[str, ...]) -> None` |
+| function | `_preview_for_rows` | 832 | `def _preview_for_rows(rows: list[_PreparedRow], *, remapped: int) -> LocalDataTableImportPreview` |
+| function | `_existing_rows` | 847 | `def _existing_rows(conn: sqlite3.Connection, table: str, columns: list[str]) -> list[dict[str, object]]` |
+| function | `_stable_row_key` | 856 | `def _stable_row_key(table: str, row: dict[str, object], columns: tuple[str, ...]) -> tuple[object, ...]` |
+| function | `_apply_prepared_bundle` | 870 | `def _apply_prepared_bundle(conn: sqlite3.Connection, prepared: dict[str, _PreparedTable], table_names: tuple[str, ...], mode: LocalDataImportMode) -> None` |
+| function | `_insert_row` | 888 | `def _insert_row(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, row: dict[str, object]) -> None` |
+| function | `_update_row` | 902 | `def _update_row(conn: sqlite3.Connection, table: str, bundle: LocalDataTableBundle, row: dict[str, object]) -> None` |
+| function | `_foreign_key_check` | 920 | `def _foreign_key_check(conn: sqlite3.Connection) -> None` |
+| function | `_validate_imported_relationships` | 927 | `def _validate_imported_relationships(conn: sqlite3.Connection, prepared: dict[str, _PreparedTable]) -> None` |
+| function | `_imported_parent_rows` | 939 | `def _imported_parent_rows(conn: sqlite3.Connection, prepared: dict[str, _PreparedTable]) -> dict[str, dict[object, sqlite3.Row]]` |
+| function | `_validate_imported_child_rows` | 952 | `def _validate_imported_child_rows(child_table: str, child: _PreparedTable, relationships: tuple[tuple[str, str], ...], parent_rows: dict[str, dict[object, sqlite3.Row]]) -> None` |
+| function | `_row_symbol` | 972 | `def _row_symbol(row) -> object \| None` |
+| function | `_validate_imported_review_rows` | 976 | `def _validate_imported_review_rows(results: _PreparedTable \| None, parent_rows: dict[str, dict[object, sqlite3.Row]]) -> None` |
+| function | `_table_contract` | 989 | `def _table_contract(conn: sqlite3.Connection, table: str) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, sqlite3.Row]]` |
+| function | `_normalize_declared_type` | 1002 | `def _normalize_declared_type(value: str) -> str` |
+| function | `_matches_affinity` | 1006 | `def _matches_affinity(value: object, declared_type: str) -> bool` |
+| function | `_json_value` | 1019 | `def _json_value(value: object, table: str, column: str) -> JsonValue` |
+| function | `_sum_previews` | 1027 | `def _sum_previews(previews) -> LocalDataTableImportPreview` |
+| function | `_connect` | 1039 | `def _connect(path: Path) -> sqlite3.Connection` |
+| function | `_require_database` | 1047 | `def _require_database(path: Path) -> Path` |
+| function | `_quote_identifier` | 1054 | `def _quote_identifier(value: str) -> str` |
+| function | `_utc_now_text` | 1060 | `def _utc_now_text() -> str` |
 
 #### `app/services/valuation_analysis.py`
 
@@ -6211,7 +6587,7 @@ Lines: 303
 
 #### `app/services/watchlist_scan.py`
 
-Lines: 189
+Lines: 192
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -6220,13 +6596,13 @@ Lines: 189
 | async function | `scan_watchlist_conditions` | 47 | `async def scan_watchlist_conditions(datahub: DataHub, payload: WatchlistScanRequest, *, now: datetime \| None=None) -> WatchlistScanResponse` |
 | async function | `_scan_universe` | 80 | `async def _scan_universe(datahub: DataHub, payload: WatchlistScanRequest) -> list[str]` |
 | function | `_unique_conditions` | 97 | `def _unique_conditions(conditions: list[WatchlistScanCondition]) -> list[WatchlistScanCondition]` |
-| function | `_evaluate_scan_symbol` | 101 | `def _evaluate_scan_symbol(symbol: str, rows: list[Kline], conditions: list[WatchlistScanCondition], as_of: datetime) -> WatchlistScanItem` |
-| function | `_completed_scan_rows` | 131 | `def _completed_scan_rows(rows: list[Kline], cutoff: date) -> list[Kline]` |
-| function | `_strict_date` | 140 | `def _strict_date(value: object) -> date \| None` |
-| function | `_close_above_ma20` | 149 | `def _close_above_ma20(rows: list[Kline]) -> ScanEvaluation` |
-| function | `_close_below_ma20` | 155 | `def _close_below_ma20(rows: list[Kline]) -> ScanEvaluation` |
-| function | `_breakout_20d_high` | 161 | `def _breakout_20d_high(rows: list[Kline]) -> ScanEvaluation` |
-| function | `_volume_surge_5d` | 167 | `def _volume_surge_5d(rows: list[Kline]) -> ScanEvaluation` |
+| function | `_evaluate_scan_symbol` | 104 | `def _evaluate_scan_symbol(symbol: str, rows: list[Kline], conditions: list[WatchlistScanCondition], as_of: datetime) -> WatchlistScanItem` |
+| function | `_completed_scan_rows` | 134 | `def _completed_scan_rows(rows: list[Kline], cutoff: date) -> list[Kline]` |
+| function | `_strict_date` | 143 | `def _strict_date(value: object) -> date \| None` |
+| function | `_close_above_ma20` | 152 | `def _close_above_ma20(rows: list[Kline]) -> ScanEvaluation` |
+| function | `_close_below_ma20` | 158 | `def _close_below_ma20(rows: list[Kline]) -> ScanEvaluation` |
+| function | `_breakout_20d_high` | 164 | `def _breakout_20d_high(rows: list[Kline]) -> ScanEvaluation` |
+| function | `_volume_surge_5d` | 170 | `def _volume_surge_5d(rows: list[Kline]) -> ScanEvaluation` |
 
 #### `app/services/workbench_context.py`
 
@@ -6637,41 +7013,42 @@ Lines: 227
 
 #### `tests/test_active_research_review_backend.py`
 
-Lines: 816
+Lines: 843
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_active_research_refresh_is_bounded_excludes_symbols_and_isolates_failures` | 43 | `def test_active_research_refresh_is_bounded_excludes_symbols_and_isolates_failures(monkeypatch) -> None` |
-| function | `test_active_research_refresh_rejects_stale_low_quality_and_invalid_contract` | 84 | `def test_active_research_refresh_rejects_stale_low_quality_and_invalid_contract(monkeypatch) -> None` |
-| function | `test_active_research_refresh_runs_only_after_daily_bar_publication` | 127 | `def test_active_research_refresh_runs_only_after_daily_bar_publication(monkeypatch) -> None` |
-| function | `test_active_research_refresh_rotates_candidates_across_two_bounded_rounds` | 154 | `def test_active_research_refresh_rotates_candidates_across_two_bounded_rounds(monkeypatch) -> None` |
-| function | `test_active_research_same_day_revision_is_not_mistaken_for_unchanged` | 184 | `def test_active_research_same_day_revision_is_not_mistaken_for_unchanged(tmp_path: Path, monkeypatch) -> None` |
-| function | `test_plan_created_from_advice_snapshot_has_structured_evidence_refs` | 238 | `def test_plan_created_from_advice_snapshot_has_structured_evidence_refs(tmp_path: Path) -> None` |
-| function | `test_plan_custom_evidence_refs_are_merged_with_snapshot_evidence` | 279 | `def test_plan_custom_evidence_refs_are_merged_with_snapshot_evidence(tmp_path: Path) -> None` |
-| function | `test_structured_risk_evidence_direction` | 305 | `def test_structured_risk_evidence_direction(risk_level: str, expected_direction: str) -> None` |
-| function | `test_forward_evaluation_exposes_trigger_and_invalidation_evidence_with_excursions` | 326 | `def test_forward_evaluation_exposes_trigger_and_invalidation_evidence_with_excursions() -> None` |
-| function | `test_review_price_evidence_does_not_claim_mismatched_free_text_condition` | 352 | `def test_review_price_evidence_does_not_claim_mismatched_free_text_condition() -> None` |
-| function | `test_due_review_batch_is_bounded_and_isolates_plan_failures` | 379 | `def test_due_review_batch_is_bounded_and_isolates_plan_failures(monkeypatch) -> None` |
-| function | `test_due_review_repository_prioritizes_old_unfinished_plan_over_many_recent_not_due` | 407 | `def test_due_review_repository_prioritizes_old_unfinished_plan_over_many_recent_not_due(tmp_path: Path) -> None` |
-| function | `test_due_review_candidates_order_by_conservative_due_key_before_snapshot` | 458 | `def test_due_review_candidates_order_by_conservative_due_key_before_snapshot(tmp_path: Path, monkeypatch) -> None` |
-| function | `test_background_refresh_and_review_errors_redact_configured_secrets` | 511 | `def test_background_refresh_and_review_errors_redact_configured_secrets(monkeypatch) -> None` |
-| function | `test_review_summary_api_exposes_global_local_contract` | 549 | `def test_review_summary_api_exposes_global_local_contract() -> None` |
-| function | `test_review_summary_uses_persisted_current_revision_results` | 579 | `def test_review_summary_uses_persisted_current_revision_results(tmp_path: Path) -> None` |
-| function | `test_opened_timeline_watermark_keeps_a_later_refresh_unread` | 613 | `def test_opened_timeline_watermark_keeps_a_later_refresh_unread(tmp_path: Path) -> None` |
-| function | `test_scheduler_registers_bounded_research_refresh_and_due_review_tasks` | 649 | `def test_scheduler_registers_bounded_research_refresh_and_due_review_tasks() -> None` |
-| function | `_valid_analysis` | 658 | `def _valid_analysis(code: str)` |
-| function | `_valid_analysis_on_date` | 684 | `def _valid_analysis_on_date(code: str, data_date: str)` |
-| function | `_review_plan` | 703 | `def _review_plan(*, plan_id: int=1, advice_id: int=1, symbol: str='600519.SH', horizon_days: int=3) -> AdviceReviewPlan` |
-| function | `_plan_input` | 734 | `def _plan_input(advice_id: int, symbol: str) -> AdviceReviewPlanInput` |
-| class | `_ResearchQueueCache` | 747 | `class _ResearchQueueCache` |
-| method | `_ResearchQueueCache.__init__` | 748 | `def __init__(self, *, active_symbols: tuple[str, ...], excluded_symbols: tuple[str, ...]=()) -> None` |
-| method | `_ResearchQueueCache.watchlist_symbol_selection` | 763 | `def watchlist_symbol_selection(self)` |
-| method | `_ResearchQueueCache.advice_timeline` | 766 | `def advice_timeline(self, symbol: str, limit: int=1)` |
-| method | `_ResearchQueueCache.latest_advice_timeline_by_symbols` | 771 | `def latest_advice_timeline_by_symbols(self, symbols)` |
-| method | `_ResearchQueueCache.save_advice_snapshot` | 774 | `def save_advice_snapshot(self, analysis, *, snapshot_market_time: str \| None=None)` |
-| class | `_DueReviewCache` | 810 | `class _DueReviewCache` |
-| method | `_DueReviewCache.__init__` | 811 | `def __init__(self, details: list[AdviceReviewDetail]) -> None` |
-| method | `_DueReviewCache.advice_review_evaluation_candidates` | 814 | `def advice_review_evaluation_candidates(self, *, as_of_date: str, limit: int)` |
+| function | `test_active_research_refresh_is_bounded_excludes_symbols_and_isolates_failures` | 44 | `def test_active_research_refresh_is_bounded_excludes_symbols_and_isolates_failures(monkeypatch) -> None` |
+| function | `test_active_research_refresh_rejects_stale_low_quality_and_invalid_contract` | 85 | `def test_active_research_refresh_rejects_stale_low_quality_and_invalid_contract(monkeypatch) -> None` |
+| function | `test_active_research_refresh_runs_only_after_daily_bar_publication` | 128 | `def test_active_research_refresh_runs_only_after_daily_bar_publication(monkeypatch) -> None` |
+| function | `test_active_research_refresh_rotates_candidates_across_two_bounded_rounds` | 155 | `def test_active_research_refresh_rotates_candidates_across_two_bounded_rounds(monkeypatch) -> None` |
+| function | `test_active_research_same_day_revision_is_not_mistaken_for_unchanged` | 185 | `def test_active_research_same_day_revision_is_not_mistaken_for_unchanged(tmp_path: Path, monkeypatch) -> None` |
+| function | `test_plan_created_from_advice_snapshot_has_structured_evidence_refs` | 239 | `def test_plan_created_from_advice_snapshot_has_structured_evidence_refs(tmp_path: Path) -> None` |
+| function | `test_plan_custom_evidence_refs_are_merged_with_snapshot_evidence` | 280 | `def test_plan_custom_evidence_refs_are_merged_with_snapshot_evidence(tmp_path: Path) -> None` |
+| function | `test_structured_risk_evidence_direction` | 306 | `def test_structured_risk_evidence_direction(risk_level: str, expected_direction: str) -> None` |
+| function | `test_forward_evaluation_exposes_trigger_and_invalidation_evidence_with_excursions` | 327 | `def test_forward_evaluation_exposes_trigger_and_invalidation_evidence_with_excursions() -> None` |
+| function | `test_review_price_evidence_does_not_claim_mismatched_free_text_condition` | 353 | `def test_review_price_evidence_does_not_claim_mismatched_free_text_condition() -> None` |
+| function | `test_due_review_batch_is_bounded_and_isolates_plan_failures` | 380 | `def test_due_review_batch_is_bounded_and_isolates_plan_failures(monkeypatch) -> None` |
+| function | `test_due_review_list_exposes_due_date_and_overdue_trading_days` | 408 | `def test_due_review_list_exposes_due_date_and_overdue_trading_days() -> None` |
+| function | `test_due_review_repository_prioritizes_old_unfinished_plan_over_many_recent_not_due` | 428 | `def test_due_review_repository_prioritizes_old_unfinished_plan_over_many_recent_not_due(tmp_path: Path) -> None` |
+| function | `test_due_review_candidates_order_by_conservative_due_key_before_snapshot` | 479 | `def test_due_review_candidates_order_by_conservative_due_key_before_snapshot(tmp_path: Path, monkeypatch) -> None` |
+| function | `test_background_refresh_and_review_errors_redact_configured_secrets` | 532 | `def test_background_refresh_and_review_errors_redact_configured_secrets(monkeypatch) -> None` |
+| function | `test_review_summary_api_exposes_global_local_contract` | 570 | `def test_review_summary_api_exposes_global_local_contract() -> None` |
+| function | `test_review_summary_uses_persisted_current_revision_results` | 600 | `def test_review_summary_uses_persisted_current_revision_results(tmp_path: Path) -> None` |
+| function | `test_opened_timeline_watermark_keeps_a_later_refresh_unread` | 634 | `def test_opened_timeline_watermark_keeps_a_later_refresh_unread(tmp_path: Path) -> None` |
+| function | `test_scheduler_registers_bounded_research_refresh_and_due_review_tasks` | 670 | `def test_scheduler_registers_bounded_research_refresh_and_due_review_tasks() -> None` |
+| function | `_valid_analysis` | 679 | `def _valid_analysis(code: str)` |
+| function | `_valid_analysis_on_date` | 705 | `def _valid_analysis_on_date(code: str, data_date: str)` |
+| function | `_review_plan` | 724 | `def _review_plan(*, plan_id: int=1, advice_id: int=1, symbol: str='600519.SH', horizon_days: int=3) -> AdviceReviewPlan` |
+| function | `_plan_input` | 755 | `def _plan_input(advice_id: int, symbol: str) -> AdviceReviewPlanInput` |
+| class | `_ResearchQueueCache` | 768 | `class _ResearchQueueCache` |
+| method | `_ResearchQueueCache.__init__` | 769 | `def __init__(self, *, active_symbols: tuple[str, ...], excluded_symbols: tuple[str, ...]=()) -> None` |
+| method | `_ResearchQueueCache.watchlist_symbol_selection` | 784 | `def watchlist_symbol_selection(self)` |
+| method | `_ResearchQueueCache.advice_timeline` | 787 | `def advice_timeline(self, symbol: str, limit: int=1)` |
+| method | `_ResearchQueueCache.latest_advice_timeline_by_symbols` | 792 | `def latest_advice_timeline_by_symbols(self, symbols)` |
+| method | `_ResearchQueueCache.save_advice_snapshot` | 795 | `def save_advice_snapshot(self, analysis, *, snapshot_market_time: str \| None=None)` |
+| class | `_DueReviewCache` | 831 | `class _DueReviewCache` |
+| method | `_DueReviewCache.__init__` | 832 | `def __init__(self, details: list[AdviceReviewDetail], *, expected_as_of_date: str='2026-07-17') -> None` |
+| method | `_DueReviewCache.advice_review_evaluation_candidates` | 841 | `def advice_review_evaluation_candidates(self, *, as_of_date: str, limit: int)` |
 
 #### `tests/test_advice_review_window_contract.py`
 
@@ -6990,6 +7367,32 @@ Lines: 198
 | class | `_DeleteCache` | 193 | `class _DeleteCache` |
 | method | `_DeleteCache.__init__` | 194 | `def __init__(self, *, removed: bool) -> None` |
 | method | `_DeleteCache.delete_stock_note` | 197 | `def delete_stock_note(self, note_id: int) -> bool` |
+
+#### `tests/test_api_paper_trading_routes.py`
+
+Lines: 271
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `test_paper_dashboard_is_no_store_and_account_can_be_updated` | 26 | `def test_paper_dashboard_is_no_store_and_account_can_be_updated() -> None` |
+| function | `test_paper_strategy_route_freezes_plan_and_deletes_pending_strategy` | 40 | `def test_paper_strategy_route_freezes_plan_and_deletes_pending_strategy() -> None` |
+| function | `test_paper_strategy_route_validates_allocation` | 58 | `def test_paper_strategy_route_validates_allocation() -> None` |
+| function | `test_paper_routes_publish_explicit_response_models` | 67 | `def test_paper_routes_publish_explicit_response_models() -> None` |
+| function | `test_historical_run_compare_and_export_routes_use_immutable_snapshots` | 80 | `def test_historical_run_compare_and_export_routes_use_immutable_snapshots(tmp_path: Path) -> None` |
+| function | `_client` | 142 | `def _client(cache: object) -> TestClient` |
+| class | `_DataHubStub` | 150 | `class _DataHubStub` |
+| class | `_PaperCache` | 154 | `class _PaperCache` |
+| method | `_PaperCache.__init__` | 155 | `def __init__(self) -> None` |
+| method | `_PaperCache.paper_trading_dashboard` | 160 | `def paper_trading_dashboard(self) -> PaperTradingDashboard` |
+| method | `_PaperCache.update_paper_trading_account` | 163 | `def update_paper_trading_account(self, payload) -> PaperTradingAccount` |
+| method | `_PaperCache.advice_review_plan` | 167 | `def advice_review_plan(self, plan_id: int) -> AdviceReviewPlan \| None` |
+| method | `_PaperCache.create_paper_strategy` | 170 | `def create_paper_strategy(self, plan, payload, *, activation_market_time: str) -> PaperStrategy` |
+| method | `_PaperCache.delete_pending_paper_strategy` | 174 | `def delete_pending_paper_strategy(self, strategy_id: int) -> bool` |
+| function | `_dashboard` | 179 | `def _dashboard(initial_cash: float) -> PaperTradingDashboard` |
+| function | `_account` | 201 | `def _account(initial_cash: float) -> PaperTradingAccount` |
+| function | `_plan` | 211 | `def _plan() -> AdviceReviewPlan` |
+| function | `_bar` | 235 | `def _bar(day: str, open_price: float, high: float, low: float, close: float) -> Kline` |
+| function | `_strategy` | 249 | `def _strategy(plan: AdviceReviewPlan, allocation: float, activation: str) -> PaperStrategy` |
 
 #### `tests/test_api_review_routes.py`
 
@@ -8174,6 +8577,19 @@ Lines: 717
 | function | `test_notification_delivery_fails_closed_when_shared_storage_is_unavailable` | 669 | `def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable() -> None` |
 | function | `_run_node` | 707 | `def _run_node(script: str) -> None` |
 
+#### `tests/test_frontend_paper_trading.py`
+
+Lines: 266
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `test_paper_dashboard_renders_escaped_strategy_equity_and_model_notes` | 10 | `def test_paper_dashboard_renders_escaped_strategy_equity_and_model_notes() -> None` |
+| function | `test_paper_strategy_creation_uses_frozen_plan_endpoint_and_refreshes_dashboard` | 65 | `def test_paper_strategy_creation_uses_frozen_plan_endpoint_and_refreshes_dashboard() -> None` |
+| function | `test_paper_dashboard_renders_run_history_events_benchmark_and_exports` | 111 | `def test_paper_dashboard_renders_run_history_events_benchmark_and_exports() -> None` |
+| function | `test_paper_dashboard_load_failure_renders_actionable_error_state` | 219 | `def test_paper_dashboard_load_failure_renders_actionable_error_state() -> None` |
+| function | `test_paper_trading_workspace_is_present_in_static_markup` | 245 | `def test_paper_trading_workspace_is_present_in_static_markup() -> None` |
+| function | `_run_node` | 259 | `def _run_node(script: str) -> None` |
+
 #### `tests/test_frontend_research_activity.py`
 
 Lines: 414
@@ -8213,7 +8629,7 @@ Lines: 732
 
 #### `tests/test_frontend_review_scan.py`
 
-Lines: 620
+Lines: 720
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -8229,8 +8645,10 @@ Lines: 620
 | function | `test_advice_review_history_handles_error_retry_empty_and_stale_stock_response` | 471 | `def test_advice_review_history_handles_error_retry_empty_and_stale_stock_response() -> None` |
 | function | `test_watchlist_scan_posts_custom_symbols_and_historical_as_of_exactly` | 520 | `def test_watchlist_scan_posts_custom_symbols_and_historical_as_of_exactly() -> None` |
 | function | `test_watchlist_scan_rejects_empty_invalid_oversized_and_future_custom_input` | 569 | `def test_watchlist_scan_rejects_empty_invalid_oversized_and_future_custom_input() -> None` |
-| function | `test_review_and_scan_controls_are_accessible_in_static_markup` | 603 | `def test_review_and_scan_controls_are_accessible_in_static_markup() -> None` |
-| function | `_run_node` | 613 | `def _run_node(script: str) -> None` |
+| function | `test_review_dashboard_loads_global_summary_due_queue_and_all_pages` | 603 | `def test_review_dashboard_loads_global_summary_due_queue_and_all_pages() -> None` |
+| function | `test_watchlist_scan_history_load_compare_and_export_are_reachable` | 645 | `def test_watchlist_scan_history_load_compare_and_export_are_reachable() -> None` |
+| function | `test_review_and_scan_controls_are_accessible_in_static_markup` | 703 | `def test_review_and_scan_controls_are_accessible_in_static_markup() -> None` |
+| function | `_run_node` | 713 | `def _run_node(script: str) -> None` |
 
 #### `tests/test_frontend_stock_search.py`
 
@@ -8271,16 +8689,16 @@ Lines: 557
 
 #### `tests/test_frontend_workspace_preferences.py`
 
-Lines: 320
+Lines: 323
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `test_workspace_preferences_round_trip_uses_a_strict_allowlist` | 11 | `def test_workspace_preferences_round_trip_uses_a_strict_allowlist() -> None` |
 | function | `test_workspace_preferences_recover_from_bad_storage_and_validate_each_value` | 58 | `def test_workspace_preferences_recover_from_bad_storage_and_validate_each_value() -> None` |
 | function | `test_legacy_workspace_view_preferences_migrate_to_the_matching_primary_view` | 120 | `def test_legacy_workspace_view_preferences_migrate_to_the_matching_primary_view() -> None` |
-| function | `test_primary_navigation_static_contract_exposes_exactly_four_functional_areas` | 162 | `def test_primary_navigation_static_contract_exposes_exactly_four_functional_areas() -> None` |
-| function | `test_app_restores_and_persists_preferences_through_existing_setters` | 184 | `def test_app_restores_and_persists_preferences_through_existing_setters() -> None` |
-| function | `_run_node_script` | 313 | `def _run_node_script(script: str) -> None` |
+| function | `test_primary_navigation_static_contract_exposes_exactly_four_functional_areas` | 163 | `def test_primary_navigation_static_contract_exposes_exactly_four_functional_areas() -> None` |
+| function | `test_app_restores_and_persists_preferences_through_existing_setters` | 187 | `def test_app_restores_and_persists_preferences_through_existing_setters() -> None` |
+| function | `_run_node_script` | 316 | `def _run_node_script(script: str) -> None` |
 
 #### `tests/test_futu_provider_modules.py`
 
@@ -8442,41 +8860,43 @@ Lines: 691
 
 #### `tests/test_local_data_portability.py`
 
-Lines: 778
+Lines: 876
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_export_contains_only_exact_user_data_allowlist` | 16 | `def test_export_contains_only_exact_user_data_allowlist(tmp_path: Path) -> None` |
-| function | `test_merge_dry_run_reports_changes_without_writing_and_commit_is_source_wins` | 36 | `def test_merge_dry_run_reports_changes_without_writing_and_commit_is_source_wins(tmp_path: Path) -> None` |
-| function | `test_v1_bundle_without_metadata_keeps_aware_audit_timestamps_compatible` | 59 | `def test_v1_bundle_without_metadata_keeps_aware_audit_timestamps_compatible(tmp_path: Path) -> None` |
-| function | `test_replace_requires_complete_snapshot_and_removes_rows_absent_from_source` | 80 | `def test_replace_requires_complete_snapshot_and_removes_rows_absent_from_source(tmp_path: Path) -> None` |
-| function | `test_import_rejects_column_type_and_primary_key_drift_before_writing` | 101 | `def test_import_rejects_column_type_and_primary_key_drift_before_writing(tmp_path: Path) -> None` |
-| function | `test_migrated_export_imports_into_fresh_database_with_different_column_order` | 133 | `def test_migrated_export_imports_into_fresh_database_with_different_column_order(tmp_path: Path) -> None` |
-| function | `test_merge_remaps_colliding_surrogate_ids_and_dependent_relationships` | 166 | `def test_merge_remaps_colliding_surrogate_ids_and_dependent_relationships(tmp_path: Path) -> None` |
-| function | `test_repeated_merge_is_idempotent_for_surrogate_rows` | 215 | `def test_repeated_merge_is_idempotent_for_surrogate_rows(tmp_path: Path) -> None` |
-| function | `test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch` | 239 | `def test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch(tmp_path: Path) -> None` |
-| function | `test_import_uses_configured_timezone_and_rejects_invalid_audit_text` | 290 | `def test_import_uses_configured_timezone_and_rejects_invalid_audit_text(tmp_path: Path) -> None` |
-| function | `test_legacy_metadata_preserves_source_timezone_across_target_timezones` | 328 | `def test_legacy_metadata_preserves_source_timezone_across_target_timezones(tmp_path: Path) -> None` |
-| function | `test_utc_semantics_reject_naive_or_non_fixed_audit_timestamps` | 359 | `def test_utc_semantics_reject_naive_or_non_fixed_audit_timestamps(tmp_path: Path) -> None` |
-| function | `test_bundle_rejects_invalid_audit_timestamp_semantics` | 380 | `def test_bundle_rejects_invalid_audit_timestamp_semantics(tmp_path: Path) -> None` |
-| function | `test_merge_rejects_child_rows_without_bundled_surrogate_parent` | 391 | `def test_merge_rejects_child_rows_without_bundled_surrogate_parent(tmp_path: Path) -> None` |
-| function | `test_v1_bundle_without_later_price_provenance_columns_is_upgraded` | 411 | `def test_v1_bundle_without_later_price_provenance_columns_is_upgraded(tmp_path: Path) -> None` |
-| function | `test_foreign_key_failure_rolls_back_every_table` | 509 | `def test_foreign_key_failure_rolls_back_every_table(tmp_path: Path) -> None` |
-| function | `_insert_watchlist` | 530 | `def _insert_watchlist(path: Path, symbol: str, *, note: str) -> None` |
-| function | `_insert_alert_chain` | 552 | `def _insert_alert_chain(path: Path, symbol: str, *, marker: str) -> tuple[int, int]` |
-| function | `_insert_stock_note` | 594 | `def _insert_stock_note(path: Path, symbol: str, *, marker: str) -> int` |
-| function | `_insert_advice` | 616 | `def _insert_advice(path: Path, symbol: str, *, marker: str) -> int` |
-| function | `_insert_review_plan` | 643 | `def _insert_review_plan(path: Path, advice_id: int, symbol: str, *, marker: str) -> int` |
-| function | `_insert_review_result` | 667 | `def _insert_review_result(path: Path, plan_id: int, advice_id: int, symbol: str, *, marker: str) -> int` |
-| function | `_create_legacy_watchlist_database` | 694 | `def _create_legacy_watchlist_database(path: Path) -> None` |
-| function | `_remove_bundle_columns` | 713 | `def _remove_bundle_columns(payload: dict, table: str, columns: set[str]) -> None` |
-| function | `_watchlist_note` | 723 | `def _watchlist_note(path: Path, symbol: str) -> str \| None` |
-| function | `_watchlist_symbols` | 729 | `def _watchlist_symbols(path: Path) -> list[str]` |
-| function | `_table_columns` | 734 | `def _table_columns(path: Path, table: str) -> list[str]` |
-| function | `_table_count` | 739 | `def _table_count(path: Path, table: str) -> int` |
-| function | `_joined_alert_markers` | 744 | `def _joined_alert_markers(path: Path) -> set[tuple[str, str]]` |
-| function | `_joined_review_markers` | 758 | `def _joined_review_markers(path: Path) -> set[tuple[str, str, str]]` |
-| function | `_stock_note_markers` | 776 | `def _stock_note_markers(path: Path) -> set[str]` |
+| function | `test_export_contains_only_exact_user_data_allowlist` | 20 | `def test_export_contains_only_exact_user_data_allowlist(tmp_path: Path) -> None` |
+| function | `test_merge_dry_run_reports_changes_without_writing_and_commit_is_source_wins` | 40 | `def test_merge_dry_run_reports_changes_without_writing_and_commit_is_source_wins(tmp_path: Path) -> None` |
+| function | `test_v1_bundle_without_metadata_keeps_aware_audit_timestamps_compatible` | 63 | `def test_v1_bundle_without_metadata_keeps_aware_audit_timestamps_compatible(tmp_path: Path) -> None` |
+| function | `test_replace_requires_complete_snapshot_and_removes_rows_absent_from_source` | 84 | `def test_replace_requires_complete_snapshot_and_removes_rows_absent_from_source(tmp_path: Path) -> None` |
+| function | `test_import_rejects_column_type_and_primary_key_drift_before_writing` | 105 | `def test_import_rejects_column_type_and_primary_key_drift_before_writing(tmp_path: Path) -> None` |
+| function | `test_migrated_export_imports_into_fresh_database_with_different_column_order` | 137 | `def test_migrated_export_imports_into_fresh_database_with_different_column_order(tmp_path: Path) -> None` |
+| function | `test_merge_remaps_colliding_surrogate_ids_and_dependent_relationships` | 170 | `def test_merge_remaps_colliding_surrogate_ids_and_dependent_relationships(tmp_path: Path) -> None` |
+| function | `test_repeated_merge_is_idempotent_for_surrogate_rows` | 219 | `def test_repeated_merge_is_idempotent_for_surrogate_rows(tmp_path: Path) -> None` |
+| function | `test_populated_paper_run_round_trips_with_all_relationships` | 243 | `def test_populated_paper_run_round_trips_with_all_relationships(tmp_path: Path) -> None` |
+| function | `test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch` | 317 | `def test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch(tmp_path: Path) -> None` |
+| function | `test_import_uses_configured_timezone_and_rejects_invalid_audit_text` | 368 | `def test_import_uses_configured_timezone_and_rejects_invalid_audit_text(tmp_path: Path) -> None` |
+| function | `test_legacy_metadata_preserves_source_timezone_across_target_timezones` | 406 | `def test_legacy_metadata_preserves_source_timezone_across_target_timezones(tmp_path: Path) -> None` |
+| function | `test_utc_semantics_reject_naive_or_non_fixed_audit_timestamps` | 437 | `def test_utc_semantics_reject_naive_or_non_fixed_audit_timestamps(tmp_path: Path) -> None` |
+| function | `test_bundle_rejects_invalid_audit_timestamp_semantics` | 458 | `def test_bundle_rejects_invalid_audit_timestamp_semantics(tmp_path: Path) -> None` |
+| function | `test_merge_rejects_child_rows_without_bundled_surrogate_parent` | 469 | `def test_merge_rejects_child_rows_without_bundled_surrogate_parent(tmp_path: Path) -> None` |
+| function | `test_v1_bundle_without_later_price_provenance_columns_is_upgraded` | 489 | `def test_v1_bundle_without_later_price_provenance_columns_is_upgraded(tmp_path: Path) -> None` |
+| function | `test_foreign_key_failure_rolls_back_every_table` | 587 | `def test_foreign_key_failure_rolls_back_every_table(tmp_path: Path) -> None` |
+| function | `_insert_watchlist` | 608 | `def _insert_watchlist(path: Path, symbol: str, *, note: str) -> None` |
+| function | `_insert_alert_chain` | 630 | `def _insert_alert_chain(path: Path, symbol: str, *, marker: str) -> tuple[int, int]` |
+| function | `_insert_stock_note` | 672 | `def _insert_stock_note(path: Path, symbol: str, *, marker: str) -> int` |
+| function | `_insert_advice` | 694 | `def _insert_advice(path: Path, symbol: str, *, marker: str) -> int` |
+| function | `_insert_review_plan` | 721 | `def _insert_review_plan(path: Path, advice_id: int, symbol: str, *, marker: str) -> int` |
+| function | `_insert_review_result` | 745 | `def _insert_review_result(path: Path, plan_id: int, advice_id: int, symbol: str, *, marker: str) -> int` |
+| function | `_paper_bar` | 772 | `def _paper_bar(day: str, open_price: float, high: float, low: float, close: float) -> Kline` |
+| function | `_create_legacy_watchlist_database` | 792 | `def _create_legacy_watchlist_database(path: Path) -> None` |
+| function | `_remove_bundle_columns` | 811 | `def _remove_bundle_columns(payload: dict, table: str, columns: set[str]) -> None` |
+| function | `_watchlist_note` | 821 | `def _watchlist_note(path: Path, symbol: str) -> str \| None` |
+| function | `_watchlist_symbols` | 827 | `def _watchlist_symbols(path: Path) -> list[str]` |
+| function | `_table_columns` | 832 | `def _table_columns(path: Path, table: str) -> list[str]` |
+| function | `_table_count` | 837 | `def _table_count(path: Path, table: str) -> int` |
+| function | `_joined_alert_markers` | 842 | `def _joined_alert_markers(path: Path) -> set[tuple[str, str]]` |
+| function | `_joined_review_markers` | 856 | `def _joined_review_markers(path: Path) -> set[tuple[str, str, str]]` |
+| function | `_stock_note_markers` | 874 | `def _stock_note_markers(path: Path) -> set[str]` |
 
 #### `tests/test_local_lifecycle.py`
 
@@ -8783,18 +9203,25 @@ Lines: 630
 
 #### `tests/test_market_scan_evaluation.py`
 
-Lines: 333
+Lines: 674
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days` | 22 | `def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(tmp_path: Path) -> None` |
-| function | `test_evaluation_reports_insufficient_samples_and_same_rule_rank_turnover` | 87 | `def test_evaluation_reports_insufficient_samples_and_same_rule_rank_turnover(tmp_path: Path) -> None` |
-| function | `test_evaluation_keeps_only_the_last_same_contract_session_snapshot` | 154 | `def test_evaluation_keeps_only_the_last_same_contract_session_snapshot(tmp_path: Path) -> None` |
-| function | `test_evaluation_cli_emits_json_without_mutating_database` | 190 | `def test_evaluation_cli_emits_json_without_mutating_database(tmp_path: Path) -> None` |
-| function | `_cohort` | 232 | `def _cohort(report: dict[str, object], *, dimensions: dict[str, str], top_n: int, horizon: int) -> dict[str, object]` |
-| function | `_initialize` | 249 | `def _initialize(path: Path) -> None` |
-| function | `_seed_run` | 254 | `def _seed_run(path: Path, *, mode: str, rule_version: str, quote_date: str, ranks: tuple[str, ...], changes: tuple[float, ...] \| None=None) -> int` |
-| function | `_seed_forward_prices` | 314 | `def _seed_forward_prices(path: Path, *, dates: tuple[str, ...], closes: dict[str, tuple[float, ...]], lows: dict[str, tuple[float, ...]] \| None=None) -> None` |
+| function | `test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days` | 25 | `def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(tmp_path: Path) -> None` |
+| function | `test_evaluation_reports_insufficient_samples_and_same_rule_rank_turnover` | 97 | `def test_evaluation_reports_insufficient_samples_and_same_rule_rank_turnover(tmp_path: Path) -> None` |
+| function | `test_evaluation_keeps_only_the_last_same_contract_session_snapshot` | 164 | `def test_evaluation_keeps_only_the_last_same_contract_session_snapshot(tmp_path: Path) -> None` |
+| function | `test_evaluation_cli_emits_json_without_mutating_database` | 200 | `def test_evaluation_cli_emits_json_without_mutating_database(tmp_path: Path) -> None` |
+| function | `test_one_cross_section_cannot_satisfy_independent_session_gate` | 244 | `def test_one_cross_section_cannot_satisfy_independent_session_gate(tmp_path: Path) -> None` |
+| function | `test_rank_ic_deciles_and_clustered_metrics_use_sessions` | 284 | `def test_rank_ic_deciles_and_clustered_metrics_use_sessions(tmp_path: Path) -> None` |
+| function | `test_stability_uses_frozen_rankings_even_when_current_run_has_no_forward_data` | 327 | `def test_stability_uses_frozen_rankings_even_when_current_run_has_no_forward_data(tmp_path: Path) -> None` |
+| function | `test_execution_metrics_apply_next_open_t1_costs_and_tradeability` | 364 | `def test_execution_metrics_apply_next_open_t1_costs_and_tradeability(tmp_path: Path) -> None` |
+| function | `test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes` | 443 | `def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_path: Path) -> None` |
+| function | `_cohort` | 519 | `def _cohort(report: dict[str, object], *, dimensions: dict[str, str], top_n: int, horizon: int) -> dict[str, object]` |
+| function | `_initialize` | 536 | `def _initialize(path: Path) -> None` |
+| function | `_seed_run` | 541 | `def _seed_run(path: Path, *, mode: str, rule_version: str, quote_date: str, ranks: tuple[str, ...], changes: tuple[float, ...] \| None=None) -> int` |
+| function | `_seed_forward_prices` | 603 | `def _seed_forward_prices(path: Path, *, dates: tuple[str, ...], closes: dict[str, tuple[float, ...]], lows: dict[str, tuple[float, ...]] \| None=None) -> None` |
+| function | `_seed_bars` | 634 | `def _seed_bars(path: Path, symbol: str, rows: tuple[tuple[str, float, float, float, float, float], ...]) -> None` |
+| function | `_seed_shadow_history` | 662 | `def _seed_shadow_history(path: Path, symbol: str, *, end: date, slope: float) -> None` |
 
 #### `tests/test_market_scan_execution.py`
 
@@ -9012,6 +9439,22 @@ Lines: 625
 | function | `_rows` | 602 | `def _rows(latest: date, count: int) -> list[Kline]` |
 | function | `_trend_rows` | 606 | `def _trend_rows(latest: date, count: int, *, first_close: float, last_close: float) -> list[Kline]` |
 
+#### `tests/test_market_scan_shadow_scoring.py`
+
+Lines: 205
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `test_shadow_score_is_deterministic_and_input_order_independent` | 23 | `def test_shadow_score_is_deterministic_and_input_order_independent() -> None` |
+| function | `test_shadow_quality_and_special_status_are_penalty_only` | 38 | `def test_shadow_quality_and_special_status_are_penalty_only() -> None` |
+| function | `test_shadow_ablation_versions_remove_only_the_named_penalty` | 59 | `def test_shadow_ablation_versions_remove_only_the_named_penalty() -> None` |
+| function | `test_shadow_score_ignores_rows_after_data_date` | 81 | `def test_shadow_score_ignores_rows_after_data_date() -> None` |
+| function | `test_shadow_score_rejects_non_finite_and_short_history` | 90 | `def test_shadow_score_rejects_non_finite_and_short_history(value: float) -> None` |
+| function | `test_shadow_score_handles_board_rules_single_price_and_zero_volume` | 98 | `def test_shadow_score_handles_board_rules_single_price_and_zero_volume() -> None` |
+| function | `test_shadow_replay_detects_corrupted_components_and_batch_context` | 130 | `def test_shadow_replay_detects_corrupted_components_and_batch_context() -> None` |
+| function | `_item` | 143 | `def _item(index: int, *, symbol: str \| None=None, market: str='SH', slope: float=0.001, price: float \| None=None, change_pct: float=1.5, amount: float=200000000, turnover_rate: float \| None=4, volume_ratio: float=1.2, data_quality_score: int=100, volatility: float=0.01, is_st: bool=False, is_new: bool=False, quote_fallback_used: bool=False, kline_fallback_used: bool=False, metadata_degraded: bool=False) -> ShadowScoreInput` |
+| function | `_rows` | 184 | `def _rows(*, slope: float, volatility: float) -> tuple` |
+
 #### `tests/test_market_scan_trust_contract.py`
 
 Lines: 942
@@ -9159,6 +9602,43 @@ Lines: 203
 | function | `test_baostock_cancelled_lock_waiter_never_starts_sdk_session` | 118 | `def test_baostock_cancelled_lock_waiter_never_starts_sdk_session() -> None` |
 | function | `test_baostock_running_cancellation_keeps_session_serialized_until_logout` | 148 | `def test_baostock_running_cancellation_keeps_session_serialized_until_logout() -> None` |
 | function | `test_tushare_client_uses_clean_token_without_mutating_global_state` | 182 | `def test_tushare_client_uses_clean_token_without_mutating_global_state() -> None` |
+
+#### `tests/test_paper_trading.py`
+
+Lines: 546
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `test_paper_simulation_is_no_lookahead_and_deterministic` | 23 | `def test_paper_simulation_is_no_lookahead_and_deterministic() -> None` |
+| function | `test_entry_day_double_barrier_is_deferred_by_t1_and_exits_next_session_open` | 64 | `def test_entry_day_double_barrier_is_deferred_by_t1_and_exits_next_session_open() -> None` |
+| function | `test_entry_day_target_signal_stays_open_until_next_completed_bar` | 85 | `def test_entry_day_target_signal_stays_open_until_next_completed_bar() -> None` |
+| function | `test_t1_deferred_exit_waits_through_next_session_suspension` | 104 | `def test_t1_deferred_exit_waits_through_next_session_suspension() -> None` |
+| function | `test_zero_volume_blocks_entry_and_records_event` | 126 | `def test_zero_volume_blocks_entry_and_records_event() -> None` |
+| function | `test_entry_wait_expiry_is_configurable_and_does_not_create_a_fill` | 145 | `def test_entry_wait_expiry_is_configurable_and_does_not_create_a_fill() -> None` |
+| function | `test_locked_limit_up_blocks_buy_and_locked_limit_down_delays_sell` | 172 | `def test_locked_limit_up_blocks_buy_and_locked_limit_down_delays_sell() -> None` |
+| function | `test_board_profiles_and_star_quantity_do_not_use_universal_hundred_share_lot` | 223 | `def test_board_profiles_and_star_quantity_do_not_use_universal_hundred_share_lot() -> None` |
+| function | `test_waiting_strategy_is_invalidated_and_priority_order_is_not_database_id_order` | 267 | `def test_waiting_strategy_is_invalidated_and_priority_order_is_not_database_id_order() -> None` |
+| function | `test_cost_profiles_are_split_and_monotonic` | 310 | `def test_cost_profiles_are_split_and_monotonic() -> None` |
+| function | `test_repository_appends_immutable_runs_and_same_inputs_keep_fingerprint` | 323 | `def test_repository_appends_immutable_runs_and_same_inputs_keep_fingerprint(tmp_path: Path) -> None` |
+| function | `test_benchmark_and_excess_returns_are_persisted_and_reported` | 360 | `def test_benchmark_and_excess_returns_are_persisted_and_reported(tmp_path: Path) -> None` |
+| function | `test_paper_repository_freezes_plan_and_rejects_duplicate` | 405 | `def test_paper_repository_freezes_plan_and_rejects_duplicate(tmp_path: Path) -> None` |
+| function | `test_paper_tables_are_in_runtime_diagnostics` | 429 | `def test_paper_tables_are_in_runtime_diagnostics(tmp_path: Path) -> None` |
+| function | `_account` | 439 | `def _account() -> PaperTradingAccount` |
+| function | `_strategy` | 449 | `def _strategy(*, horizon_days: int=20, strategy_id: int=1, plan_id: int=10, symbol: str='600519', activation_market_time: str='2026-07-01 10:00:00', allocation_pct: float=10, priority: int=0, entry_expiry_sessions: int=5, target_price: float=110, stop_price: float=90, snapshot_price: float=100, snapshot_anchor_close: float=100) -> PaperStrategy` |
+| function | `_bar` | 490 | `def _bar(day: str, open_price: float, high: float, low: float, close: float, *, volume: float=1000) -> Kline` |
+| function | `_metadata` | 512 | `def _metadata(symbol: str) -> PaperInstrumentMetadata` |
+| function | `_review_plan` | 525 | `def _review_plan() -> AdviceReviewPlan` |
+
+#### `tests/test_paper_trading_schema.py`
+
+Lines: 214
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `test_v1_paper_ledger_migrates_in_place_and_is_idempotent` | 12 | `def test_v1_paper_ledger_migrates_in_place_and_is_idempotent(tmp_path: Path) -> None` |
+| function | `_v2_counts` | 55 | `def _v2_counts(conn: sqlite3.Connection) -> tuple[int, int, int, int]` |
+| function | `_create_v1_schema` | 67 | `def _create_v1_schema(conn: sqlite3.Connection) -> None` |
+| function | `_insert_v1_ledger` | 162 | `def _insert_v1_ledger(conn: sqlite3.Connection) -> None` |
 
 #### `tests/test_provider_canary.py`
 
@@ -9691,7 +10171,7 @@ Lines: 438
 
 #### `tests/test_research_replay_modules.py`
 
-Lines: 285
+Lines: 291
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -9707,17 +10187,17 @@ Lines: 285
 | function | `test_replay_stats_and_success_rate_ignore_non_finite_forward_returns` | 131 | `def test_replay_stats_and_success_rate_ignore_non_finite_forward_returns() -> None` |
 | function | `test_replay_stats_uses_only_valid_forward_returns_for_win_rate` | 148 | `def test_replay_stats_uses_only_valid_forward_returns_for_win_rate() -> None` |
 | function | `test_replay_analysis_detects_volume_breakout_case` | 162 | `def test_replay_analysis_detects_volume_breakout_case() -> None` |
-| function | `test_replay_pattern_ignores_malformed_lookback_bar` | 175 | `def test_replay_pattern_ignores_malformed_lookback_bar() -> None` |
-| function | `test_replay_pattern_context_rejects_non_finite_price_values` | 183 | `def test_replay_pattern_context_rejects_non_finite_price_values() -> None` |
-| function | `test_replay_pattern_context_builds_window_and_volume_metrics` | 200 | `def test_replay_pattern_context_builds_window_and_volume_metrics() -> None` |
-| function | `test_replay_pattern_context_rejects_invalid_boundaries_and_empty_volume_window` | 223 | `def test_replay_pattern_context_rejects_invalid_boundaries_and_empty_volume_window() -> None` |
-| function | `test_replay_pattern_context_requires_complete_valid_volume_window` | 235 | `def test_replay_pattern_context_requires_complete_valid_volume_window() -> None` |
-| function | `test_support_rebound_must_close_back_near_support` | 246 | `def test_support_rebound_must_close_back_near_support() -> None` |
-| function | `test_replay_case_note_distinguishes_pending_outcome` | 253 | `def test_replay_case_note_distinguishes_pending_outcome() -> None` |
-| function | `test_replay_pattern_note_keeps_rule_priority_explicit` | 257 | `def test_replay_pattern_note_keeps_rule_priority_explicit() -> None` |
-| function | `test_replay_pattern_note_bounds_completed_count_to_observed_samples` | 264 | `def test_replay_pattern_note_bounds_completed_count_to_observed_samples() -> None` |
-| function | `test_replay_pattern_note_does_not_promote_non_finite_metrics` | 273 | `def test_replay_pattern_note_does_not_promote_non_finite_metrics() -> None` |
-| function | `_analysis_with_klines` | 280 | `def _analysis_with_klines(klines)` |
+| function | `test_replay_pattern_ignores_malformed_lookback_bar` | 181 | `def test_replay_pattern_ignores_malformed_lookback_bar() -> None` |
+| function | `test_replay_pattern_context_rejects_non_finite_price_values` | 189 | `def test_replay_pattern_context_rejects_non_finite_price_values() -> None` |
+| function | `test_replay_pattern_context_builds_window_and_volume_metrics` | 206 | `def test_replay_pattern_context_builds_window_and_volume_metrics() -> None` |
+| function | `test_replay_pattern_context_rejects_invalid_boundaries_and_empty_volume_window` | 229 | `def test_replay_pattern_context_rejects_invalid_boundaries_and_empty_volume_window() -> None` |
+| function | `test_replay_pattern_context_requires_complete_valid_volume_window` | 241 | `def test_replay_pattern_context_requires_complete_valid_volume_window() -> None` |
+| function | `test_support_rebound_must_close_back_near_support` | 252 | `def test_support_rebound_must_close_back_near_support() -> None` |
+| function | `test_replay_case_note_distinguishes_pending_outcome` | 259 | `def test_replay_case_note_distinguishes_pending_outcome() -> None` |
+| function | `test_replay_pattern_note_keeps_rule_priority_explicit` | 263 | `def test_replay_pattern_note_keeps_rule_priority_explicit() -> None` |
+| function | `test_replay_pattern_note_bounds_completed_count_to_observed_samples` | 270 | `def test_replay_pattern_note_bounds_completed_count_to_observed_samples() -> None` |
+| function | `test_replay_pattern_note_does_not_promote_non_finite_metrics` | 279 | `def test_replay_pattern_note_does_not_promote_non_finite_metrics() -> None` |
+| function | `_analysis_with_klines` | 286 | `def _analysis_with_klines(klines)` |
 
 #### `tests/test_research_risk_modules.py`
 
@@ -9868,7 +10348,7 @@ Lines: 253
 
 #### `tests/test_review_modules.py`
 
-Lines: 73
+Lines: 92
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -9876,8 +10356,9 @@ Lines: 73
 | function | `test_review_filters_malformed_klines_before_metrics` | 15 | `def test_review_filters_malformed_klines_before_metrics() -> None` |
 | function | `test_review_uses_only_last_period_after_filtering` | 26 | `def test_review_uses_only_last_period_after_filtering() -> None` |
 | function | `test_review_event_rules_keep_price_move_priority_over_amplitude` | 35 | `def test_review_event_rules_keep_price_move_priority_over_amplitude() -> None` |
-| function | `test_review_events_ignore_malformed_bars_and_keep_latest_limit` | 48 | `def test_review_events_ignore_malformed_bars_and_keep_latest_limit() -> None` |
-| function | `_rows` | 63 | `def _rows(closes: list[float])` |
+| function | `test_review_volume_attack_requires_a_real_five_day_volume_surge` | 48 | `def test_review_volume_attack_requires_a_real_five_day_volume_surge() -> None` |
+| function | `test_review_events_ignore_malformed_bars_and_keep_latest_limit` | 67 | `def test_review_events_ignore_malformed_bars_and_keep_latest_limit() -> None` |
+| function | `_rows` | 82 | `def _rows(closes: list[float])` |
 
 #### `tests/test_rules_alerts.py`
 
@@ -10694,7 +11175,7 @@ Lines: 531
 
 #### `tests/test_tool_inventory_modules.py`
 
-Lines: 260
+Lines: 263
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -10702,16 +11183,16 @@ Lines: 260
 | function | `test_architecture_inventory_source_collection_matches_config` | 49 | `def test_architecture_inventory_source_collection_matches_config() -> None` |
 | function | `test_production_python_functions_stay_reviewable` | 58 | `def test_production_python_functions_stay_reviewable() -> None` |
 | function | `test_api_inventory_documents_business_api_scope` | 73 | `def test_api_inventory_documents_business_api_scope() -> None` |
-| function | `test_test_plan_indexes_every_test_module_once` | 90 | `def test_test_plan_indexes_every_test_module_once() -> None` |
-| function | `test_inventory_check_mode_detects_missing_current_and_stale_output` | 100 | `def test_inventory_check_mode_detects_missing_current_and_stale_output(tmp_path, monkeypatch) -> None` |
-| function | `test_documentation_does_not_embed_machine_specific_paths` | 118 | `def test_documentation_does_not_embed_machine_specific_paths() -> None` |
-| function | `test_data_directory_ignores_every_runtime_artifact` | 130 | `def test_data_directory_ignores_every_runtime_artifact() -> None` |
-| function | `test_machine_specific_path_detection_is_cross_platform_and_user_agnostic` | 137 | `def test_machine_specific_path_detection_is_cross_platform_and_user_agnostic() -> None` |
-| function | `test_python_dependency_layers_keep_runtime_and_engineering_tools_separate` | 148 | `def test_python_dependency_layers_keep_runtime_and_engineering_tools_separate() -> None` |
-| function | `test_ci_keeps_the_incremental_quality_gates` | 193 | `def test_ci_keeps_the_incremental_quality_gates() -> None` |
-| function | `test_test_report_keeps_auditable_latest_verification_table` | 224 | `def test_test_report_keeps_auditable_latest_verification_table() -> None` |
-| function | `test_operations_documents_backup_before_runtime_data_deletion` | 232 | `def test_operations_documents_backup_before_runtime_data_deletion() -> None` |
-| function | `test_model_classes_do_not_repeat_field_names` | 245 | `def test_model_classes_do_not_repeat_field_names() -> None` |
+| function | `test_test_plan_indexes_every_test_module_once` | 93 | `def test_test_plan_indexes_every_test_module_once() -> None` |
+| function | `test_inventory_check_mode_detects_missing_current_and_stale_output` | 103 | `def test_inventory_check_mode_detects_missing_current_and_stale_output(tmp_path, monkeypatch) -> None` |
+| function | `test_documentation_does_not_embed_machine_specific_paths` | 121 | `def test_documentation_does_not_embed_machine_specific_paths() -> None` |
+| function | `test_data_directory_ignores_every_runtime_artifact` | 133 | `def test_data_directory_ignores_every_runtime_artifact() -> None` |
+| function | `test_machine_specific_path_detection_is_cross_platform_and_user_agnostic` | 140 | `def test_machine_specific_path_detection_is_cross_platform_and_user_agnostic() -> None` |
+| function | `test_python_dependency_layers_keep_runtime_and_engineering_tools_separate` | 151 | `def test_python_dependency_layers_keep_runtime_and_engineering_tools_separate() -> None` |
+| function | `test_ci_keeps_the_incremental_quality_gates` | 196 | `def test_ci_keeps_the_incremental_quality_gates() -> None` |
+| function | `test_test_report_keeps_auditable_latest_verification_table` | 227 | `def test_test_report_keeps_auditable_latest_verification_table() -> None` |
+| function | `test_operations_documents_backup_before_runtime_data_deletion` | 235 | `def test_operations_documents_backup_before_runtime_data_deletion() -> None` |
+| function | `test_model_classes_do_not_repeat_field_names` | 248 | `def test_model_classes_do_not_repeat_field_names() -> None` |
 
 #### `tests/test_trading_calendar_modules.py`
 
@@ -10803,16 +11284,18 @@ Lines: 312
 
 #### `tests/test_watchlist_scan.py`
 
-Lines: 71
+Lines: 111
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `_ScanHub` | 14 | `class _ScanHub` |
-| method | `_ScanHub.__init__` | 15 | `def __init__(self, rows_by_symbol: dict[str, list]) -> None` |
-| method | `_ScanHub.kline` | 18 | `async def kline(self, symbol: str, *, limit: int, use_cache: bool)` |
-| function | `_rising_rows` | 25 | `def _rising_rows() -> list` |
-| function | `test_explicit_watchlist_scan_reports_success_missing_and_as_of` | 38 | `def test_explicit_watchlist_scan_reports_success_missing_and_as_of() -> None` |
-| function | `test_watchlist_scan_contract_rejects_scripts_and_large_universes` | 59 | `def test_watchlist_scan_contract_rejects_scripts_and_large_universes() -> None` |
+| class | `_ScanHub` | 16 | `class _ScanHub` |
+| method | `_ScanHub.__init__` | 17 | `def __init__(self, rows_by_symbol: dict[str, list]) -> None` |
+| method | `_ScanHub.kline` | 20 | `async def kline(self, symbol: str, *, limit: int, use_cache: bool)` |
+| function | `_rising_rows` | 27 | `def _rising_rows() -> list` |
+| function | `test_explicit_watchlist_scan_reports_success_missing_and_as_of` | 40 | `def test_explicit_watchlist_scan_reports_success_missing_and_as_of() -> None` |
+| function | `test_watchlist_scan_contract_rejects_scripts_and_large_universes` | 61 | `def test_watchlist_scan_contract_rejects_scripts_and_large_universes() -> None` |
+| function | `test_watchlist_scan_rejects_mutually_exclusive_ma20_conditions` | 76 | `def test_watchlist_scan_rejects_mutually_exclusive_ma20_conditions() -> None` |
+| function | `test_watchlist_scan_history_persists_full_reproducible_result` | 87 | `def test_watchlist_scan_history_persists_full_reproducible_result(tmp_path: Path) -> None` |
 
 #### `tests/test_workbench_context_cache_modules.py`
 
@@ -10854,7 +11337,7 @@ Lines: 201
 
 #### `tools/api_inventory.py`
 
-Lines: 303
+Lines: 322
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -10864,22 +11347,23 @@ Lines: 303
 | function | `check_output` | 61 | `def check_output(rendered: str) -> int` |
 | function | `collect_endpoints` | 68 | `def collect_endpoints() -> list[Endpoint]` |
 | function | `route_decorator_endpoints` | 78 | `def route_decorator_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]` |
-| function | `parse_route_decorator` | 92 | `def parse_route_decorator(node: ast.expr) -> tuple[str, str, str] \| None` |
-| function | `stock_registry_endpoints` | 109 | `def stock_registry_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]` |
-| function | `endpoint_inputs` | 135 | `def endpoint_inputs(node: ast.FunctionDef \| ast.AsyncFunctionDef, path: str) -> tuple[str, ...]` |
-| function | `endpoint_input` | 150 | `def endpoint_input(arg: ast.arg, default: ast.expr \| object, path: str) -> str \| None` |
-| function | `annotation_text` | 168 | `def annotation_text(arg: ast.arg) -> str` |
-| function | `should_skip_client_input` | 172 | `def should_skip_client_input(name: str, annotation: str, default: ast.expr \| object) -> bool` |
-| function | `input_location` | 178 | `def input_location(name: str, annotation: str, default: ast.expr \| object, path: str) -> str` |
-| function | `primitive_annotation` | 192 | `def primitive_annotation(annotation: str) -> bool` |
-| function | `is_fastapi_call` | 198 | `def is_fastapi_call(node: ast.expr \| object, name: str) -> bool` |
-| function | `parameter_default_text` | 209 | `def parameter_default_text(default: ast.expr \| object) -> str` |
-| function | `fastapi_parameter_factory` | 224 | `def fastapi_parameter_factory(node: ast.Call) -> str \| None` |
-| function | `parameter_details` | 233 | `def parameter_details(default: ast.expr \| object) -> tuple[str, ...]` |
-| function | `clean_literal` | 243 | `def clean_literal(node: ast.expr) -> str` |
-| function | `render` | 249 | `def render(endpoints: list[Endpoint]) -> str` |
-| function | `input_cell` | 292 | `def input_cell(inputs: tuple[str, ...]) -> str` |
-| function | `escape` | 298 | `def escape(value: str) -> str` |
+| function | `module_router_prefix` | 95 | `def module_router_prefix(tree: ast.Module) -> str` |
+| function | `parse_route_decorator` | 111 | `def parse_route_decorator(node: ast.expr) -> tuple[str, str, str] \| None` |
+| function | `stock_registry_endpoints` | 128 | `def stock_registry_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]` |
+| function | `endpoint_inputs` | 154 | `def endpoint_inputs(node: ast.FunctionDef \| ast.AsyncFunctionDef, path: str) -> tuple[str, ...]` |
+| function | `endpoint_input` | 169 | `def endpoint_input(arg: ast.arg, default: ast.expr \| object, path: str) -> str \| None` |
+| function | `annotation_text` | 187 | `def annotation_text(arg: ast.arg) -> str` |
+| function | `should_skip_client_input` | 191 | `def should_skip_client_input(name: str, annotation: str, default: ast.expr \| object) -> bool` |
+| function | `input_location` | 197 | `def input_location(name: str, annotation: str, default: ast.expr \| object, path: str) -> str` |
+| function | `primitive_annotation` | 211 | `def primitive_annotation(annotation: str) -> bool` |
+| function | `is_fastapi_call` | 217 | `def is_fastapi_call(node: ast.expr \| object, name: str) -> bool` |
+| function | `parameter_default_text` | 228 | `def parameter_default_text(default: ast.expr \| object) -> str` |
+| function | `fastapi_parameter_factory` | 243 | `def fastapi_parameter_factory(node: ast.Call) -> str \| None` |
+| function | `parameter_details` | 252 | `def parameter_details(default: ast.expr \| object) -> tuple[str, ...]` |
+| function | `clean_literal` | 262 | `def clean_literal(node: ast.expr) -> str` |
+| function | `render` | 268 | `def render(endpoints: list[Endpoint]) -> str` |
+| function | `input_cell` | 311 | `def input_cell(inputs: tuple[str, ...]) -> str` |
+| function | `escape` | 317 | `def escape(value: str) -> str` |
 
 #### `tools/architecture_inventory.py`
 
@@ -10939,11 +11423,19 @@ Lines: 357
 
 #### `tools/evaluate_market_scan.py`
 
-Lines: 49
+Lines: 57
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `main` | 18 | `def main() -> int` |
+
+#### `tools/evaluate_market_scan_shadow.py`
+
+Lines: 60
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `main` | 19 | `def main() -> int` |
 
 #### `tools/generate_sbom.py`
 

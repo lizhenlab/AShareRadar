@@ -16,6 +16,17 @@ from app.db.schema import initialize_schema
 from app.db.schema_migrations import audit_timestamp_migration_pending
 from app.models.market import DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE, KlineAdjustmentMode
 from app.models.market_scan import MarketScanResultWrite, MarketScanSeed
+from app.models.paper_trading import (
+    PaperRunComparison,
+    PaperRunExport,
+    PaperSimulationDraft,
+    PaperStrategy,
+    PaperStrategyCreate,
+    PaperTradingAccount,
+    PaperTradingAccountUpdate,
+    PaperTradingDashboard,
+    PaperTradingRun,
+)
 from app.models.user_data import (
     AdviceHistoryItem,
     AdviceTimelineItem,
@@ -39,6 +50,10 @@ from app.models.reviews import (
     AdviceReviewPlanInput,
     AdviceReviewPlanUpdate,
     AdviceReviewSummary,
+    WatchlistScanHistoryItem,
+    WatchlistScanRecord,
+    WatchlistScanRequest,
+    WatchlistScanResponse,
 )
 from app.models.analysis import (
     AnalysisResult,
@@ -68,6 +83,7 @@ from app.repositories.market_data import MarketDataRepository
 from app.repositories.market_scan import MarketScanRepository
 from app.repositories.maintenance import RuntimeMaintenanceRepository
 from app.repositories.notes import StockNoteRepository
+from app.repositories.paper_trading import PaperTradingRepository
 from app.repositories.provider_status import ProviderStatusRepository
 from app.repositories.reliability import (
     ReliabilityBucketStats,
@@ -77,6 +93,7 @@ from app.repositories.reliability import (
 )
 from app.repositories.runtime import RuntimeEventRepository
 from app.repositories.watchlist import WatchlistRepository, WatchlistSymbolSelection
+from app.repositories.watchlist_scans import WatchlistScanRepository
 from app.models.advice_change import build_conclusion_timeline
 from app.services.runtime_backup import destructive_local_data_lease
 from app.services.discovery import DiscoveryService
@@ -184,6 +201,9 @@ class SQLiteCache:
         self.watchlist_repo = WatchlistRepository(self.path, self._lock, settings=repository_settings)
         self.advice_repo = AdviceHistoryRepository(self.path, self._lock, settings=repository_settings)
         self.advice_review_repo = AdviceReviewRepository(self.path, self._lock)
+        self.paper_trading_repo = PaperTradingRepository(self.path, self._lock)
+        self.paper_trading_repo.account()
+        self.watchlist_scan_repo = WatchlistScanRepository(self.path, self._lock)
         self.alert_repo = AlertRepository(self.path, self._lock)
         self.note_repo = StockNoteRepository(self.path, self._lock)
         self.maintenance_repo = RuntimeMaintenanceRepository(self.path, self._lock, settings=repository_settings)
@@ -628,11 +648,23 @@ class SQLiteCache:
     def advice_review_plan_by_advice(self, advice_id: int) -> AdviceReviewPlan | None:
         return self.advice_review_repo.plan_by_advice(advice_id)
 
-    def advice_review_plans(self, *, symbol: str | None = None, limit: int = 100) -> list[AdviceReviewPlan]:
-        return self.advice_review_repo.plans(symbol=symbol, limit=limit)
+    def advice_review_plans(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AdviceReviewPlan]:
+        return self.advice_review_repo.plans(symbol=symbol, limit=limit, offset=offset)
 
-    def advice_review_details(self, *, symbol: str | None = None, limit: int = 100) -> list[AdviceReviewDetail]:
-        return self.advice_review_repo.details(symbol=symbol, limit=limit)
+    def advice_review_details(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AdviceReviewDetail]:
+        return self.advice_review_repo.details(symbol=symbol, limit=limit, offset=offset)
 
     def advice_review_evaluation_candidates(
         self,
@@ -676,6 +708,62 @@ class SQLiteCache:
 
     def advice_review_summary(self) -> AdviceReviewSummary:
         return self.advice_review_repo.summary()
+
+    def paper_trading_account(self) -> PaperTradingAccount:
+        return self.paper_trading_repo.account()
+
+    def update_paper_trading_account(
+        self,
+        payload: PaperTradingAccountUpdate,
+    ) -> PaperTradingAccount:
+        return self.paper_trading_repo.update_account(payload)
+
+    def create_paper_strategy(
+        self,
+        plan: AdviceReviewPlan,
+        payload: PaperStrategyCreate,
+        *,
+        activation_market_time: str,
+    ) -> PaperStrategy:
+        return self.paper_trading_repo.create_strategy(
+            plan,
+            payload,
+            activation_market_time=activation_market_time,
+        )
+
+    def delete_pending_paper_strategy(self, strategy_id: int) -> bool:
+        return self.paper_trading_repo.delete_pending_strategy(strategy_id)
+
+    def paper_strategies(self) -> list[PaperStrategy]:
+        return self.paper_trading_repo.strategies()
+
+    def save_paper_simulation(self, draft: PaperSimulationDraft) -> PaperTradingDashboard:
+        return self.paper_trading_repo.save_simulation(draft)
+
+    def paper_trading_dashboard(self, *, run_id: int | None = None) -> PaperTradingDashboard:
+        return self.paper_trading_repo.dashboard(run_id=run_id)
+
+    def paper_trading_runs(self, *, limit: int = 100) -> list[PaperTradingRun]:
+        return self.paper_trading_repo.runs(limit=limit)
+
+    def paper_trading_run_export(self, run_id: int) -> PaperRunExport:
+        return self.paper_trading_repo.run_export(run_id)
+
+    def compare_paper_trading_runs(self, left_run_id: int, right_run_id: int) -> PaperRunComparison:
+        return self.paper_trading_repo.compare_runs(left_run_id, right_run_id)
+
+    def save_watchlist_scan(
+        self,
+        payload: WatchlistScanRequest,
+        result: WatchlistScanResponse,
+    ) -> WatchlistScanRecord:
+        return self.watchlist_scan_repo.save(payload, result)
+
+    def watchlist_scan_history(self, *, limit: int = 20) -> list[WatchlistScanHistoryItem]:
+        return self.watchlist_scan_repo.items(limit=limit)
+
+    def watchlist_scan_record(self, row_id: int) -> WatchlistScanRecord | None:
+        return self.watchlist_scan_repo.record(row_id)
 
     def create_alert_rule(self, quote: Quote, payload: AlertRuleInput) -> AlertRuleItem:
         return self.alert_repo.create_rule(quote, payload)

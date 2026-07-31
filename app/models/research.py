@@ -366,6 +366,7 @@ class ReplayPatternStat(BaseModel):
     sample_count: int
     win_rate: float
     avg_forward_5d_return: float
+    excess_vs_baseline_pct: float | None = None
     note: str
 
 
@@ -378,6 +379,15 @@ class ReplayCase(BaseModel):
     forward_10d_return: float | None = None
     outcome: str
     note: str
+    trend_regime: str = "未分类"
+
+
+class ReplayRegimeStat(BaseModel):
+    regime: str
+    sample_count: int
+    evaluated_count: int
+    win_rate: float | None = None
+    avg_forward_5d_return: float | None = None
 
 
 class StockReplayAnalysis(BaseModel):
@@ -386,8 +396,13 @@ class StockReplayAnalysis(BaseModel):
     window_days: int
     sample_count: int
     success_rate: float
+    baseline_win_rate: float = 0
+    baseline_avg_forward_5d_return: float = 0
+    excess_vs_baseline_pct: float | None = None
+    modelled_round_trip_friction_pct: float = 0
     summary: str
     pattern_stats: list[ReplayPatternStat] = Field(default_factory=list)
+    regime_stats: list[ReplayRegimeStat] = Field(default_factory=list)
     cases: list[ReplayCase] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 

@@ -11,6 +11,7 @@ export const WATCHLIST_SCAN_LABELS = Object.freeze({
 });
 
 export const MAX_WATCHLIST_SCAN_SYMBOLS = 50;
+export const WATCHLIST_SCAN_TIMEOUT_MS = 60000;
 
 const WATCHLIST_SCAN_METRIC_LABELS = Object.freeze({
   close: "收盘价",
@@ -47,12 +48,14 @@ export async function runWatchlistScan(state, options = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+      timeoutMs: WATCHLIST_SCAN_TIMEOUT_MS,
       signal: options.signal,
     });
     if (!scanIsCurrent(state, sequence, options)) return false;
     state.watchlistScanResult = result;
+    state.watchlistScanComparison = null;
     renderWatchlistScan(result);
+    renderWatchlistScanComparison(null);
     return true;
   } catch (error) {
     if (isAbortError(error) || !scanIsCurrent(state, sequence, options)) return false;
@@ -66,6 +69,83 @@ export async function runWatchlistScan(state, options = {}) {
   } finally {
     if (scanIsCurrent(state, sequence, options)) setScanFormBusy(form, false);
   }
+}
+
+export async function loadWatchlistScanHistory(state, options = {}) {
+  try {
+    const items = await fetchJson("/api/watchlist/scans?limit=20", {
+      signal: options.signal,
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
+    if (!Array.isArray(items)) throw new TypeError("扫描历史格式异常");
+    state.watchlistScanHistory = items;
+    renderWatchlistScanHistory(items, state.watchlistScanResult?.id, null, Boolean(state.watchlistScanResult));
+    return true;
+  } catch (error) {
+    if (isAbortError(error)) return false;
+    renderWatchlistScanHistory([], null, error, Boolean(state.watchlistScanResult));
+    return false;
+  }
+}
+
+export async function loadWatchlistScanRecord(state, scanId, options = {}) {
+  const id = positiveScanId(scanId);
+  const result = await fetchJson(`/api/watchlist/scans/${id}`, {
+    signal: options.signal,
+    timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+  });
+  state.watchlistScanResult = result;
+  state.watchlistScanComparison = null;
+  renderWatchlistScan(result);
+  renderWatchlistScanComparison(null);
+  renderWatchlistScanHistory(state.watchlistScanHistory || [], result.id, null, true);
+  return result;
+}
+
+export async function compareWatchlistScanHistory(state, scanId, options = {}) {
+  if (!state.watchlistScanResult) throw new Error("请先运行或载入一个扫描结果");
+  const id = positiveScanId(scanId);
+  const baseline = await fetchJson(`/api/watchlist/scans/${id}`, {
+    signal: options.signal,
+    timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+  });
+  const comparison = buildWatchlistScanComparison(state.watchlistScanResult, baseline);
+  state.watchlistScanComparison = comparison;
+  renderWatchlistScanComparison(comparison);
+  return comparison;
+}
+
+export function exportWatchlistScanResult(state, options = {}) {
+  const result = state.watchlistScanResult;
+  if (!result) throw new Error("当前没有可导出的扫描结果");
+  const content = JSON.stringify(result, null, 2);
+  if (typeof options.save === "function") {
+    options.save(content, watchlistScanExportName(result));
+    return true;
+  }
+  const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = watchlistScanExportName(result);
+  anchor.click?.();
+  URL.revokeObjectURL(url);
+  return true;
+}
+
+export function buildWatchlistScanComparison(current, baseline) {
+  const currentMatched = matchedSymbolSet(current);
+  const baselineMatched = matchedSymbolSet(baseline);
+  return {
+    current_id: current?.id || null,
+    baseline_id: baseline?.id || null,
+    current_as_of: current?.as_of || "--",
+    baseline_as_of: baseline?.as_of || "--",
+    current_matched_count: currentMatched.size,
+    baseline_matched_count: baselineMatched.size,
+    newly_matched: [...currentMatched].filter((symbol) => !baselineMatched.has(symbol)).sort(),
+    no_longer_matched: [...baselineMatched].filter((symbol) => !currentMatched.has(symbol)).sort(),
+  };
 }
 
 export function initializeWatchlistScanControls(root = $("watchlistScanForm"), options = {}) {
@@ -84,9 +164,23 @@ export function syncWatchlistScanUniverse(root = $("watchlistScanForm")) {
   return custom;
 }
 
+export function syncWatchlistScanConditions(root = $("watchlistScanForm"), changed = null) {
+  const value = changed?.value;
+  if (!changed?.checked || !["close_above_ma20", "close_below_ma20"].includes(value)) return false;
+  const opposite = value === "close_above_ma20" ? "close_below_ma20" : "close_above_ma20";
+  const input = typeof root?.querySelector === "function"
+    ? root.querySelector(`input[data-scan-condition][value="${opposite}"]`)
+    : null;
+  if (input?.checked) input.checked = false;
+  return Boolean(input);
+}
+
 export function watchlistScanPayload(root = $("watchlistScanForm"), options = {}) {
   const conditions = selectedScanConditions(root);
   if (!conditions.length) throw new Error("请至少选择一个扫描条件");
+  if (conditions.includes("close_above_ma20") && conditions.includes("close_below_ma20")) {
+    throw new Error("高于20日均线与低于20日均线不能同时选择");
+  }
   const universe = selectedScanUniverse(root);
   const payload = { universe, conditions };
   if (universe === "symbols") payload.symbols = customScanSymbols(root);
@@ -146,6 +240,7 @@ export function renderWatchlistScan(result) {
   if (!universe.length) {
     setScanBusy(target, false);
     target.innerHTML = `<div class="scan-state"><strong>当前范围暂无可扫描股票</strong></div>`;
+    syncScanHistoryButtons(Boolean(result));
     return;
   }
   const ordered = [...success].sort((left, right) => Number(right.matched) - Number(left.matched));
@@ -160,6 +255,62 @@ export function renderWatchlistScan(result) {
     </div>
     <div class="scan-result-list">${ordered.map((item) => scanItemHtml(item)).join("")}${missing.map(scanMissingHtml).join("")}</div>`;
   setScanBusy(target, false);
+  syncScanHistoryButtons(Boolean(result));
+}
+
+function renderWatchlistScanHistory(items, selectedId = null, error = null, hasResult = false) {
+  const select = $("watchlistScanHistory");
+  if (!select) return;
+  const rows = Array.isArray(items) ? items : [];
+  select.innerHTML = rows.length
+    ? rows.map((item) => `<option value="${escapeHtml(item.id)}"${Number(item.id) === Number(selectedId) ? " selected" : ""}>#${escapeHtml(item.id)} · ${escapeHtml(item.as_of || "--")} · ${escapeHtml(item.matched_count || 0)}/${escapeHtml(item.universe_count || 0)} 命中</option>`).join("")
+    : `<option value="">${escapeHtml(error ? "历史读取失败" : "暂无历史记录")}</option>`;
+  select.disabled = !rows.length;
+  syncScanHistoryButtons(hasResult);
+}
+
+function renderWatchlistScanComparison(comparison) {
+  const target = $("watchlistScanComparison");
+  if (!target) return;
+  if (!comparison) {
+    target.hidden = true;
+    target.innerHTML = "";
+    return;
+  }
+  const gained = comparison.newly_matched || [];
+  const lost = comparison.no_longer_matched || [];
+  target.hidden = false;
+  target.innerHTML = `
+    <strong>扫描对比：${escapeHtml(comparison.baseline_as_of)} → ${escapeHtml(comparison.current_as_of)}</strong>
+    <span>命中数 ${escapeHtml(comparison.baseline_matched_count)} → ${escapeHtml(comparison.current_matched_count)}</span>
+    <span>新增命中：${escapeHtml(gained.slice(0, 12).join("、") || "无")}${gained.length > 12 ? ` 等 ${gained.length} 只` : ""}</span>
+    <span>不再命中：${escapeHtml(lost.slice(0, 12).join("、") || "无")}${lost.length > 12 ? ` 等 ${lost.length} 只` : ""}</span>`;
+}
+
+function syncScanHistoryButtons(hasResult = false) {
+  const selected = Number($("watchlistScanHistory")?.value);
+  const hasSelected = Number.isInteger(selected) && selected > 0;
+  const load = $("loadWatchlistScanHistoryRecord");
+  const compare = $("compareWatchlistScanHistory");
+  const exportButton = $("exportWatchlistScanResult");
+  if (load) load.disabled = !hasSelected;
+  if (compare) compare.disabled = !hasSelected || !hasResult;
+  if (exportButton) exportButton.disabled = !hasResult;
+}
+
+function matchedSymbolSet(result) {
+  return new Set((Array.isArray(result?.success) ? result.success : []).filter((item) => item?.matched).map((item) => item.symbol));
+}
+
+function positiveScanId(value) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) throw new Error("请选择有效扫描历史");
+  return id;
+}
+
+function watchlistScanExportName(result) {
+  const date = String(result?.as_of || "scan").slice(0, 10).replaceAll("-", "");
+  return `watchlist-scan-${date}-${result?.id || "current"}.json`;
 }
 
 function scanItemHtml(item) {

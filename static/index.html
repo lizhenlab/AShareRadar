@@ -5,26 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AShareRadar</title>
     <noscript><link rel="stylesheet" href="/static/styles.css" /></noscript>
-    <link rel="stylesheet" href="/static/styles.css?v=20260729-market-export-1" />
-    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260729-market-export-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260730-paper-trading-2" />
+    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260730-paper-trading-2" />
     <script type="importmap">
       {
         "imports": {
-          "/static/js/discovery.js": "/static/js/discovery.js?v=20260729-market-export-1",
-          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260729-market-export-1",
-          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260729-market-export-1",
-          "/static/js/market-scan-controller-inert.js": "/static/js/market-scan-controller-inert.js?v=20260729-market-export-1",
-          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260729-market-export-1",
-          "/static/js/market-scan-export-client.js": "/static/js/market-scan-export-client.js?v=20260729-market-export-1",
-          "/static/js/market-scan-filters.js": "/static/js/market-scan-filters.js?v=20260729-market-export-1",
-          "/static/js/market-scan-history.js": "/static/js/market-scan-history.js?v=20260729-market-export-1",
-          "/static/js/market-scan-history-view.js": "/static/js/market-scan-history-view.js?v=20260729-market-export-1",
-          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260729-market-export-1",
-          "/static/js/market-scan-progress-view.js": "/static/js/market-scan-progress-view.js?v=20260729-market-export-1",
-          "/static/js/market-scan-row-actions.js": "/static/js/market-scan-row-actions.js?v=20260729-market-export-1",
-          "/static/js/market-scan-snapshot-view.js": "/static/js/market-scan-snapshot-view.js?v=20260729-market-export-1",
-          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260729-market-export-1",
-          "/static/js/market-scan-view-export.js": "/static/js/market-scan-view-export.js?v=20260729-market-export-1"
+          "/static/js/discovery.js": "/static/js/discovery.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-controller-inert.js": "/static/js/market-scan-controller-inert.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-export-client.js": "/static/js/market-scan-export-client.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-filters.js": "/static/js/market-scan-filters.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-history.js": "/static/js/market-scan-history.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-history-view.js": "/static/js/market-scan-history-view.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-progress-view.js": "/static/js/market-scan-progress-view.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-row-actions.js": "/static/js/market-scan-row-actions.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-snapshot-view.js": "/static/js/market-scan-snapshot-view.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260730-paper-trading-2",
+          "/static/js/market-scan-view-export.js": "/static/js/market-scan-view-export.js?v=20260730-paper-trading-2"
         }
       }
     </script>
@@ -180,7 +180,9 @@
           <button type="button" id="workspace-tab-finance" data-view="finance" data-primary-regions="research" role="tab" aria-selected="false" aria-controls="workspace-panel-finance" tabindex="-1">资金估值</button>
           <button type="button" id="workspace-tab-theme" data-view="theme" data-primary-regions="research" role="tab" aria-selected="false" aria-controls="workspace-panel-theme" tabindex="-1">题材强弱</button>
           <button type="button" id="workspace-tab-replay" data-view="replay" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-replay" tabindex="-1" hidden>复盘验证</button>
+          <button type="button" id="workspace-tab-paper" data-view="paper" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-paper" tabindex="-1" hidden>模拟交易</button>
           <button type="button" id="workspace-tab-tools" data-view="tools" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-tools" tabindex="-1" hidden>工具记录</button>
+          <button type="button" id="workspace-tab-data" data-view="data" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-data" tabindex="-1" hidden>数据管理</button>
         </section>
 
         <section class="workspace-view active" id="workspace-panel-overview" data-view-panel="overview" role="tabpanel" aria-labelledby="workspace-tab-overview">
@@ -427,6 +429,22 @@
         </section>
 
         <section class="workspace-view" id="workspace-panel-replay" data-view-panel="replay" role="tabpanel" aria-labelledby="workspace-tab-replay">
+          <section class="panel review-dashboard-panel" aria-labelledby="reviewDashboardTitle">
+            <div class="panel-title">
+              <span id="reviewDashboardTitle">全局复盘看板</span>
+              <small>全部计划 / 到期队列 / 当前版本统计</small>
+            </div>
+            <div class="review-dashboard-actions">
+              <label><span>状态</span><select id="reviewDashboardStatus"><option value="all">全部</option><option value="due">已到期</option><option value="pending">待评估</option><option value="evaluated">已评估</option><option value="insufficient">数据不足</option></select></label>
+              <label><span>股票</span><input id="reviewDashboardSymbol" placeholder="代码筛选" maxlength="20" /></label>
+              <label><span>快照起始日</span><input id="reviewDashboardFrom" type="date" /></label>
+              <label><span>周期</span><select id="reviewDashboardHorizon"><option value="all">全部</option><option value="5">5日</option><option value="10">10日</option><option value="20">20日</option><option value="30">30日</option><option value="60">60日</option></select></label>
+              <button type="button" class="mini-button primary" id="evaluateDueReviews">批量评估到期计划</button>
+            </div>
+            <p id="reviewDashboardFeedback" role="status" aria-live="polite" hidden></p>
+            <div id="reviewDashboardSummary" class="review-dashboard-summary"><div class="review-plan-state"><strong>正在读取全局复盘统计</strong></div></div>
+            <div id="reviewDashboardQueue" class="review-dashboard-queue"></div>
+          </section>
           <section class="panel advice-review-panel">
             <div class="panel-title"><span>建议复盘计划</span><small>快照绑定 / 无前视评估</small></div>
             <form id="reviewPlanForm" class="review-plan-form">
@@ -435,8 +453,9 @@
               <label><span>止损价</span><input id="reviewStop" type="number" min="0.01" step="0.01" required /></label>
               <label><span>观察日</span><input id="reviewHorizon" type="number" min="1" max="60" step="1" value="20" required /></label>
               <label class="review-plan-wide"><span>研究假设</span><textarea id="reviewHypothesis" maxlength="1000" required></textarea></label>
-              <label class="review-plan-wide"><span>触发条件</span><input id="reviewTrigger" maxlength="1000" required /></label>
-              <label class="review-plan-wide"><span>失效条件</span><input id="reviewInvalidation" maxlength="1000" required /></label>
+              <label class="review-plan-wide"><span>触发说明（研究备注）</span><input id="reviewTrigger" maxlength="1000" required /></label>
+              <label class="review-plan-wide"><span>失效说明（研究备注）</span><input id="reviewInvalidation" maxlength="1000" required /></label>
+              <p class="review-execution-basis review-plan-wide"><strong>自动评估口径</strong> 日最高价达到目标价视为触发；日最低价达到止损价视为失效。上述研究备注不会被当作可执行公式。</p>
               <div class="review-plan-actions review-plan-wide">
                 <p id="reviewPlanFeedback" role="status" aria-live="polite" hidden></p>
                 <span>
@@ -446,9 +465,17 @@
               </div>
             </form>
             <div id="reviewPlanList" class="review-plan-list"></div>
+            <div class="review-plan-pagination"><button type="button" class="mini-button" id="reviewPlanLoadMore" hidden>加载更早计划</button></div>
           </section>
           <section class="panel watchlist-scan-panel">
             <div class="panel-title"><span>观察池条件扫描</span><small>固定规则 / 完整日K</small></div>
+            <div class="watchlist-scan-history-controls">
+              <label><span>扫描历史</span><select id="watchlistScanHistory"><option value="">暂无历史记录</option></select></label>
+              <button type="button" class="mini-button" id="loadWatchlistScanHistoryRecord" disabled>载入</button>
+              <button type="button" class="mini-button" id="compareWatchlistScanHistory" disabled>与当前对比</button>
+              <button type="button" class="mini-button" id="exportWatchlistScanResult" disabled>导出当前结果</button>
+            </div>
+            <div id="watchlistScanComparison" class="watchlist-scan-comparison" hidden></div>
             <form id="watchlistScanForm" class="watchlist-scan-form" aria-busy="false">
               <fieldset class="scan-universe-group">
                 <legend>扫描范围</legend>
@@ -491,6 +518,83 @@
           <section class="panel event-panel">
             <div class="panel-title"><span>事件摘要</span><small>行情复盘 + 行业 + 数据提醒</small></div>
             <div class="event-list" id="stockEvents"></div>
+          </section>
+        </section>
+
+        <section class="workspace-view" id="workspace-panel-paper" data-view-panel="paper" role="tabpanel" aria-labelledby="workspace-tab-paper">
+          <section class="panel paper-trading-panel" aria-labelledby="paperTradingTitle">
+            <div class="panel-title">
+              <span id="paperTradingTitle">模拟交易账户</span>
+              <small>复盘计划 / 无前视日线撮合 / 不连接券商</small>
+            </div>
+            <p class="paper-trading-disclaimer"><strong>纸面交易：</strong>使用真实历史行情验证冻结策略，但不会发送真实委托，也不能替代实盘成交和风险管理。</p>
+            <div class="paper-account-actions">
+              <label><span>初始资金</span><input id="paperInitialCash" type="number" min="10000" max="1000000000" step="10000" value="1000000" /></label>
+              <label><span>账户默认成本</span><select id="paperDefaultCostProfile"><option value="base">基础成本</option><option value="conservative">保守成本</option><option value="stress">压力成本</option></select></label>
+              <button type="button" class="mini-button" id="savePaperAccount">保存资金</button>
+              <label><span>模拟截至日</span><input id="paperRunAsOf" type="date" /></label>
+              <label><span>本次成本情景</span><select id="paperCostProfile"><option value="base">基础成本</option><option value="conservative">保守成本</option><option value="stress">压力成本</option></select></label>
+              <label><span>比较基准</span><input id="paperBenchmarkSymbol" type="text" maxlength="24" value="000300.SH" placeholder="例如 000300.SH" /></label>
+              <button type="button" class="mini-button primary" id="runPaperTrading">运行模拟</button>
+            </div>
+            <p id="paperTradingFeedback" role="status" aria-live="polite" hidden></p>
+            <div id="paperTradingSummary" class="paper-trading-summary"><div class="review-plan-state"><strong>正在读取模拟账户</strong></div></div>
+          </section>
+
+          <section class="panel paper-strategy-create-panel">
+            <div class="panel-title"><span>加入冻结策略</span><small>激活后的首个完整交易日开盘入场</small></div>
+            <form id="paperStrategyForm" class="paper-strategy-form">
+              <label><span>复盘计划</span><select id="paperReviewPlan" required><option value="">等待复盘计划</option></select></label>
+              <label><span>资金占比</span><input id="paperAllocationPct" type="number" min="1" max="100" step="1" value="10" required /></label>
+              <label><span>策略优先级</span><input id="paperPriority" type="number" min="-1000" max="1000" step="1" value="0" required /></label>
+              <label><span>入场有效期</span><input id="paperEntryExpirySessions" type="number" min="1" max="60" step="1" value="5" required /></label>
+              <button type="submit">加入模拟</button>
+            </form>
+            <div id="paperStrategyList" class="paper-strategy-list"></div>
+          </section>
+
+          <section class="panel paper-run-panel">
+            <div class="panel-title"><span>不可变运行</span><small>历史切换 / 情景对比 / 导出</small></div>
+            <div class="paper-run-actions">
+              <label><span>当前查看</span><select id="paperRunHistory"><option value="">选择运行</option></select></label>
+              <button type="button" class="mini-button" id="loadPaperRun">加载运行</button>
+              <label><span>左侧运行</span><select id="paperCompareLeft"><option value="">选择运行</option></select></label>
+              <label><span>右侧运行</span><select id="paperCompareRight"><option value="">选择运行</option></select></label>
+              <button type="button" class="mini-button" id="comparePaperRuns">比较运行</button>
+              <div class="paper-export-actions">
+                <a id="paperExportJson" class="mini-button" href="#" download>JSON</a>
+                <a id="paperExportTrades" class="mini-button" href="#" download>成交 CSV</a>
+                <a id="paperExportEvents" class="mini-button" href="#" download>事件 CSV</a>
+              </div>
+            </div>
+            <div id="paperRunMetadata"></div>
+            <div id="paperRunComparison" class="paper-table-wrap"><div class="review-plan-state"><strong>等待运行对比</strong><span>选择两个不可变运行，比较规则或成本情景差异。</span></div></div>
+          </section>
+
+          <section class="paper-trading-grid">
+            <section class="panel">
+              <div class="panel-title"><span>净值 / 基准 / 回撤</span><small>含交易标记与估算退出成本</small></div>
+              <div id="paperEquityChart" class="paper-equity-chart" role="img" aria-label="模拟账户净值曲线"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><span>当前持仓</span><small>成本 / 浮盈亏 / 风控价</small></div>
+              <div id="paperPositionList" class="paper-table-wrap"></div>
+            </section>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title"><span>模拟成交</span><small>成交价 / 数量 / 摩擦成本 / 原因</small></div>
+            <div id="paperTradeList" class="paper-table-wrap"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title"><span>逐日事件流水</span><small>未成交 / T+1 / 规则降级 / 退出解释</small></div>
+            <div id="paperEventList" class="paper-table-wrap"></div>
+          </section>
+
+          <section class="panel paper-rule-panel">
+            <div class="panel-title"><span>模型边界</span><small>结果解读前请确认</small></div>
+            <ul id="paperTradingNotes" class="paper-trading-notes"></ul>
           </section>
         </section>
 
@@ -569,8 +673,12 @@
             </div>
             <div class="timeline-list" id="adviceTimeline" role="list" aria-live="polite" aria-atomic="false" aria-busy="false"></div>
           </section>
+        </section>
+
+        <section class="workspace-view" id="workspace-panel-data" data-view-panel="data" role="tabpanel" aria-labelledby="workspace-tab-data">
           <section class="panel local-data-panel">
             <div class="panel-title"><span>本地数据管理</span><small>用户数据 / 保留策略</small></div>
+            <p class="local-data-intro">导入、完整替换和保留策略清理会改变本地记录。请先导出备份，并在预览确认影响范围后再执行。</p>
             <div class="local-data-actions">
               <button type="button" id="exportLocalData">导出用户数据</button>
               <input type="file" id="localDataImportFile" accept="application/json,.json" aria-label="选择用户数据文件" />
@@ -675,6 +783,6 @@
       <span>研究辅助工具，不构成投资建议</span>
     </footer>
 
-    <script type="module" src="/static/app.js?v=20260729-market-export-1"></script>
+    <script type="module" src="/static/app.js?v=20260730-paper-trading-2"></script>
   </body>
 </html>

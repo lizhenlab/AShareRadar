@@ -250,7 +250,9 @@ test("primary navigation separates research, market, review, and monitoring work
   await expect(page.locator("#stockWorkbench")).toBeHidden();
   await expect(page.locator("#workspace-panel-replay")).toBeVisible();
   await expect(page.locator("#workspace-tab-replay")).toBeVisible();
+  await expect(page.locator("#workspace-tab-paper")).toBeVisible();
   await expect(page.locator("#workspace-tab-tools")).toBeVisible();
+  await expect(page.locator("#workspace-tab-data")).toBeVisible();
   await page.locator("#workspace-tab-tools").click();
   await expect(page.locator("#workspace-panel-tools")).toBeVisible();
 
@@ -264,6 +266,68 @@ test("primary navigation separates research, market, review, and monitoring work
   await expect(page.locator("#stockWorkbench")).toBeVisible();
   await expect(page.locator(".query-panel")).toBeVisible();
   await expect(page.locator("#workspace-panel-overview")).toBeVisible();
+});
+
+test("paper trading freezes a review plan and renders deterministic simulated fills", async ({ page }) => {
+  let strategyAdded = false;
+  let simulated = false;
+  const writes = [];
+  const runRequests = [];
+  await mockApi(page, {
+    api(url, request) {
+      if (url.pathname === "/api/reviews/summary") {
+        return { payload: { total_plan_count: 1, pending_count: 1, evaluated_count: 0, insufficient_count: 0 } };
+      }
+      if (url.pathname === "/api/reviews/due") return { payload: [] };
+      if (url.pathname === "/api/reviews" && !url.searchParams.has("symbol")) {
+        return { payload: url.searchParams.get("offset") ? [] : [{ plan: reviewPlan(), latest_evaluation: null }] };
+      }
+      if (url.pathname === "/api/paper-trading/strategies" && request.method() === "POST") {
+        writes.push(request.postDataJSON());
+        strategyAdded = true;
+        return { payload: paperStrategy(), status: 201 };
+      }
+      if (url.pathname === "/api/paper-trading/run" && request.method() === "POST") {
+        simulated = true;
+        runRequests.push(request.postDataJSON());
+        const dashboard = simulatedPaperDashboard();
+        return { payload: { run_id: 1, as_of: "2026-07-03 15:15:00", execution_count: 2, closed_count: 1, data_unavailable_count: 0, dashboard } };
+      }
+      if (url.pathname === "/api/paper-trading") {
+        return { payload: strategyAdded ? paperTradingDashboard({ strategies: [paperStrategy()] }) : paperTradingDashboard() };
+      }
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await selectPrimaryView(page, "review");
+  await page.locator("#workspace-tab-paper").click();
+  await expect(page.locator("#paperReviewPlan option[value='10']")).toHaveCount(1);
+  await page.locator("#paperReviewPlan").selectOption("10");
+  await page.locator("#paperAllocationPct").fill("25");
+  await page.locator("#paperStrategyForm button[type='submit']").click();
+  await expect.poll(() => writes).toEqual([{
+    plan_id: 10, allocation_pct: 25, priority: 0, entry_expiry_sessions: 5,
+  }]);
+  await expect(page.locator("#paperStrategyList")).toContainText("等待入场");
+
+  await page.locator("#paperRunAsOf").fill("2026-07-03");
+  await page.locator("#runPaperTrading").click();
+  await expect.poll(() => simulated).toBe(true);
+  await expect.poll(() => runRequests).toEqual([{
+    as_of: "2026-07-03T23:59:59+08:00",
+    cost_profile: "base",
+    benchmark_symbol: "000300.SH",
+  }]);
+  await expect(page.locator("#paperStrategyList")).toContainText("已平仓");
+  await expect(page.locator("#paperTradeList")).toContainText("目标价触达");
+  await expect(page.locator("#paperEquityChart .paper-benchmark-line")).toHaveCount(1);
+  await expect(page.locator("#paperEquityChart .paper-trade-marker")).toHaveCount(2);
+  await expect(page.locator("#paperEventList")).toContainText("buy_filled");
+  await expect(page.locator("#paperRunMetadata")).toContainText("paper-review-plan-v2");
+  await expect(page.locator("#paperExportJson")).toHaveAttribute("href", "/api/paper-trading/runs/1/export.json");
+  await expect(page.locator("#paperTradingFeedback")).toContainText("生成 2 笔成交");
 });
 
 test("full-market scan runs in background and renders a bounded responsive snapshot", async ({ page }, testInfo) => {
@@ -1916,7 +1980,9 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   const qaTab = page.locator("#workspace-tab-qa");
   const themeTab = page.locator("#workspace-tab-theme");
   const replayTab = page.locator("#workspace-tab-replay");
+  const paperTab = page.locator("#workspace-tab-paper");
   const toolsTab = page.locator("#workspace-tab-tools");
+  const dataTab = page.locator("#workspace-tab-data");
   await overviewTab.focus();
   await page.keyboard.press("ArrowRight");
   await expect(qaTab).toBeFocused();
@@ -1939,6 +2005,10 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   await selectPrimaryView(page, "review");
   await replayTab.focus();
   await page.keyboard.press("ArrowRight");
+  await expect(paperTab).toBeFocused();
+  await expect(paperTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#workspace-panel-paper")).not.toHaveAttribute("hidden", "");
+  await page.keyboard.press("ArrowRight");
   await expect(toolsTab).toBeFocused();
   await expect(toolsTab).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#workspace-panel-tools")).not.toHaveAttribute("hidden", "");
@@ -1951,7 +2021,8 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   await expect(replayTab).toBeFocused();
   await replayTab.focus();
   await page.keyboard.press("ArrowLeft");
-  await expect(toolsTab).toBeFocused();
+  await expect(dataTab).toBeFocused();
+  await expect(page.locator("#workspace-panel-data")).not.toHaveAttribute("hidden", "");
 
   const widths = await page.evaluate(() => ({
     body: document.body.scrollWidth,
@@ -2543,7 +2614,99 @@ function apiPayload(url) {
     );
   }
   if (pathname === "/api/advice/timeline" || pathname === "/api/plates") return [];
+  if (pathname === "/api/paper-trading") return paperTradingDashboard();
   return [];
+}
+
+function paperTradingDashboard(overrides = {}) {
+  return {
+    account: {
+      id: 1,
+      name: "本地模拟账户",
+      initial_cash: 1000000,
+      modelled_one_way_friction_pct: 0.05,
+      default_cost_profile: "base",
+      created_at: "2026-07-15T00:00:00.000000Z",
+      updated_at: "2026-07-15T00:00:00.000000Z",
+    },
+    performance: {
+      strategy_count: 0, pending_count: 0, open_count: 0, closed_count: 0,
+      skipped_count: 0, data_unavailable_count: 0, win_count: 0, win_rate_pct: null,
+      cash_balance: 1000000, market_value: 0, total_equity: 1000000,
+      realized_pnl: 0, unrealized_pnl: 0, total_return_pct: 0, max_drawdown_pct: 0,
+    },
+    strategies: [], positions: [], trades: [], events: [], equity_curve: [], latest_run: null,
+    selected_run_id: null, runs: [], cost_profiles: [],
+    notes: ["不连接券商，不发送真实委托"],
+    ...overrides,
+  };
+}
+
+function reviewPlan() {
+  return {
+    id: 10, advice_id: 20, symbol: "600519.SH", revision: 1,
+    snapshot_market_time: "2026-07-01 09:45:00", snapshot_price: 100,
+    target_price: 110, stop_price: 90, horizon_days: 20,
+    hypothesis: "趋势延续", trigger_condition: "次日开盘", invalidation_condition: "跌破止损",
+  };
+}
+
+function paperStrategy(overrides = {}) {
+  return {
+    id: 7, plan_id: 10, plan_revision: 1, advice_id: 20, symbol: "600519.SH",
+    activation_market_time: "2026-07-01 10:00:00", allocation_pct: 25,
+    priority: 0, entry_expiry_sessions: 5,
+    snapshot_market_time: "2026-07-01 09:45:00", snapshot_price: 100,
+    target_price: 110, stop_price: 90, horizon_days: 20, status: "pending",
+    ...overrides,
+  };
+}
+
+function simulatedPaperDashboard() {
+  const run = {
+    id: 1, as_of: "2026-07-03 15:15:00", rule_version: "paper-review-plan-v2",
+    modelled_one_way_friction_pct: 0, cost_profile_id: "base",
+    cost_profile_name: "基础成本", cost_profile_version: "2026.07",
+    benchmark_symbol: "000300.SH", benchmark_status: "available",
+    benchmark_message: null, strategy_count: 1, execution_count: 2,
+    closed_count: 1, data_unavailable_count: 0, input_fingerprint: "abc123",
+    strategy_snapshot_hash: "strategy123", market_data_hash: "market123",
+    data_start_date: "2026-07-01", data_end_date: "2026-07-03",
+    configuration: {}, rule_profiles: [], data_sources: ["test"],
+    message: "已重放 1 条策略，生成 2 笔成交，平仓 1 条，数据不可用 0 条",
+    created_at: "2026-07-03T08:00:00.000000Z",
+  };
+  const strategy = paperStrategy({
+    status: "closed", normalized_target_price: 110, normalized_stop_price: 90,
+    entry_date: "2026-07-02", entry_price: 100, quantity: 2400,
+    exit_date: "2026-07-03", exit_price: 110, exit_reason: "target_hit",
+    held_sessions: 2, realized_pnl: 23748, return_pct: 9.89,
+  });
+  return paperTradingDashboard({
+    performance: {
+      strategy_count: 1, pending_count: 0, open_count: 0, closed_count: 1,
+      skipped_count: 0, data_unavailable_count: 0, win_count: 1, win_rate_pct: 100,
+      cash_balance: 1023748, market_value: 0, total_equity: 1023748,
+      gross_equity: 1024000, realized_pnl: 23748, unrealized_pnl: 0,
+      gross_pnl: 24000, total_cost: 252, cost_drag_pct: 0.0252,
+      total_return_pct: 2.3748, gross_return_pct: 2.4,
+      benchmark_return_pct: 1, excess_return_pct: 1.3748, max_drawdown_pct: -0.05,
+    },
+    strategies: [strategy],
+    trades: [
+      { id: 1, run_id: 1, strategy_id: 7, symbol: "600519.SH", side: "buy", trade_date: "2026-07-02", price: 100, quantity: 2400, gross_amount: 240000, commission_amount: 60, stamp_duty_amount: 0, transfer_fee_amount: 2.4, slippage_amount: 48, friction_amount: 110.4, reason: "strategy_entry" },
+      { id: 2, run_id: 1, strategy_id: 7, symbol: "600519.SH", side: "sell", trade_date: "2026-07-03", price: 110, quantity: 2400, gross_amount: 264000, commission_amount: 66, stamp_duty_amount: 132, transfer_fee_amount: 2.64, slippage_amount: 52.8, friction_amount: 253.44, reason: "target_hit" },
+    ],
+    events: [
+      { id: 1, run_id: 1, sequence: 1, strategy_id: 7, symbol: "600519.SH", event_date: "2026-07-02", event_code: "buy_filled", category: "execution", severity: "info", message: "买入成交", details: {} },
+      { id: 2, run_id: 1, sequence: 2, strategy_id: 7, symbol: "600519.SH", event_date: "2026-07-03", event_code: "sell_filled", category: "execution", severity: "info", message: "卖出成交", details: {} },
+    ],
+    equity_curve: [
+      { as_of_date: "2026-07-02", total_equity: 999760, benchmark_equity: 1000000, return_pct: -0.024, drawdown_pct: -0.024 },
+      { as_of_date: "2026-07-03", total_equity: 1023748, benchmark_equity: 1010000, return_pct: 2.3748, drawdown_pct: 0 },
+    ],
+    latest_run: run, selected_run_id: 1, runs: [run],
+  });
 }
 
 function stockSearchPayload(keyword) {

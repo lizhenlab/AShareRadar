@@ -27,13 +27,17 @@ import {
   cancelAdviceReviewEdit,
   deleteAdviceReviewPlan,
   evaluateAdviceReviewPlan,
+  evaluateDueAdviceReviews,
+  loadAdviceReviewDashboard,
   loadAdviceReviews,
+  loadMoreAdviceReviews,
   retryAdviceReviewHistory,
   selectAdviceReviewSnapshot,
   setAdviceReviewEvaluationAsOf,
   submitAdviceReviewPlan,
   syncAdviceReviewSnapshots,
   toggleAdviceReviewHistory,
+  updateAdviceReviewDashboardFilters,
 } from "./js/advice-reviews.js";
 import { drawKlineChart } from "./js/chart.js";
 import { createChartInspector } from "./js/chart-inspector.js";
@@ -50,6 +54,17 @@ import { createDiscoveryController } from "./js/discovery.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
 import { createMarketScanController } from "./js/market-scan.js";
+import {
+  comparePaperTradingRuns,
+  createPaperStrategy,
+  deletePaperStrategy,
+  loadPaperTradingDashboard,
+  runPaperTradingSimulation,
+  selectPaperTradingRun,
+  selectPaperTradingPlan,
+  syncPaperTradingPlans,
+  updatePaperTradingAccount,
+} from "./js/paper-trading.js";
 import { createPrimaryNavigation } from "./js/primary-navigation.js";
 import {
   addStockNote,
@@ -88,8 +103,13 @@ import {
   watchlistUpdatesFromForm,
 } from "./js/watchlist.js";
 import {
+  compareWatchlistScanHistory,
+  exportWatchlistScanResult,
   initializeWatchlistScanControls,
+  loadWatchlistScanHistory,
+  loadWatchlistScanRecord,
   runWatchlistScan,
+  syncWatchlistScanConditions,
   syncWatchlistScanUniverse,
 } from "./js/watchlist-scan.js";
 import {
@@ -172,6 +192,16 @@ const state = {
   adviceReviewEvaluationSeqByPlan: {},
   adviceReviewHistoryEpoch: 0,
   adviceReviewHistorySymbol: "",
+  adviceReviewHasMore: false,
+  adviceReviewDashboardSeq: 0,
+  adviceReviewDashboardSummary: null,
+  adviceReviewDashboardDetails: [],
+  adviceReviewDueItems: [],
+  paperTradingSeq: 0,
+  paperTradingDashboard: null,
+  watchlistScanHistory: [],
+  watchlistScanResult: null,
+  watchlistScanComparison: null,
   adviceTimelineWatermark: null,
 };
 
@@ -261,6 +291,12 @@ function setPrimaryView(view, options = {}) {
     persistWorkspacePreferences();
   }
   if (previousView !== target && state.lastAnalysis) requestAnimationFrame(redrawResearchCharts);
+  if (target === "review" && previousView !== target) {
+    void loadAdviceReviewDashboard(state).then(() => syncPaperTradingPlans(state));
+    void loadPaperTradingDashboard(state);
+    void loadWatchlistScanHistory(state);
+    if (state.lastAnalysis) void loadAdviceReviewSnapshotHistory(currentLoadContext());
+  }
   return target;
 }
 
@@ -295,7 +331,8 @@ function setWorkspaceView(view, options = {}) {
     void refresh;
     void discoveryController.activate();
   }
-  if (target === "tools") void loadRuntimeCleanupPreview().catch(() => {});
+  if (target === "data") void loadRuntimeCleanupPreview().catch(() => {});
+  if (target === "paper" && previousView !== target) void loadPaperTradingDashboard(state);
   const analysis = state.lastAnalysis;
   if (!analysis) return;
   requestAnimationFrame(() => {
@@ -655,6 +692,7 @@ function resetWorkbenchState() {
   state.adviceReviewDetails = [];
   state.adviceReviewSnapshots = [];
   state.adviceReviewEditingPlanId = null;
+  state.adviceReviewHasMore = false;
   syncToolsStockContext(null);
   resetResearchActivityState();
   clearKlineCanvas();
@@ -818,7 +856,26 @@ function refreshStockPanels(request) {
     minute: loadMinuteAnalysis(context),
     adviceTimeline: loadAdviceTimeline(context),
     adviceReviews: loadAdviceReviews(state, context),
+    adviceReviewSnapshots: state.primaryView === "review" ? loadAdviceReviewSnapshotHistory(context) : Promise.resolve(false),
   };
+}
+
+async function loadAdviceReviewSnapshotHistory(request = currentLoadContext()) {
+  const requestedSymbol = request.symbol;
+  const requestedLoadSeq = request.loadSeq;
+  if (request.signal?.aborted || requestedSymbol !== state.symbol || requestedLoadSeq !== state.loadSeq) return false;
+  try {
+    const items = await fetchJson(`/api/advice/timeline?symbol=${encodeURIComponent(requestedSymbol)}&limit=200`, {
+      signal: request.signal,
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
+    if (requestedSymbol !== state.symbol || requestedLoadSeq !== state.loadSeq || !Array.isArray(items)) return false;
+    syncAdviceReviewSnapshots(state, items, state.lastAnalysis);
+    return true;
+  } catch (error) {
+    if (isAbortError(error)) return false;
+    return false;
+  }
 }
 
 async function refreshDataStatus(options = {}) {
@@ -2429,8 +2486,44 @@ $("reviewAdviceId").addEventListener("change", () => {
   selectAdviceReviewSnapshot(state);
 });
 
+for (const id of ["reviewDashboardStatus", "reviewDashboardSymbol", "reviewDashboardFrom", "reviewDashboardHorizon"]) {
+  $(id).addEventListener(id === "reviewDashboardSymbol" ? "input" : "change", () => {
+    updateAdviceReviewDashboardFilters(state);
+  });
+}
+
+$("evaluateDueReviews").addEventListener("click", async (event) => {
+  await runButtonTask(
+    event.currentTarget,
+    async () => {
+      const result = await evaluateDueAdviceReviews(state);
+      const options = currentWorkbenchMutationOptions();
+      if (options) await loadAdviceReviews(state, options);
+      return result;
+    },
+    { onError: (error) => setInlineFeedback("reviewDashboardFeedback", error) }
+  );
+});
+
+$("reviewDashboardQueue").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-review-open-symbol]");
+  if (!button) return;
+  setActiveSymbol(button.dataset.reviewOpenSymbol);
+  void loadAll({ reveal: true });
+});
+
 $("reviewPlanCancel").addEventListener("click", () => {
   cancelAdviceReviewEdit(state);
+});
+
+$("reviewPlanLoadMore").addEventListener("click", async (event) => {
+  const options = currentWorkbenchMutationOptions();
+  if (!options) return;
+  await runButtonTask(
+    event.currentTarget,
+    () => loadMoreAdviceReviews(state, options),
+    { isCurrent: options.isCurrent, onError: (error) => setInlineFeedback("reviewPlanFeedback", error) }
+  );
 });
 
 $("reviewPlanForm").addEventListener("submit", async (event) => {
@@ -2440,15 +2533,24 @@ $("reviewPlanForm").addEventListener("submit", async (event) => {
   const feedback = $("reviewPlanFeedback");
   if (feedback) feedback.hidden = true;
   try {
-    await runSubmitTask(event.currentTarget, state.adviceReviewEditingPlanId ? "更新中" : "建立中", () =>
-      submitAdviceReviewPlan(state, options)
-    );
+    await runSubmitTask(event.currentTarget, state.adviceReviewEditingPlanId ? "更新中" : "建立中", async () => {
+      const saved = await submitAdviceReviewPlan(state, options);
+      await loadAdviceReviewDashboard(state, options);
+      syncPaperTradingPlans(state);
+      return saved;
+    });
   } catch (error) {
     if (!isAbortError(error) && options.isCurrent()) setInlineFeedback("reviewPlanFeedback", error);
   }
 });
 
 $("reviewPlanList").addEventListener("click", async (event) => {
+  const paperButton = event.target.closest("button[data-paper-from-review]");
+  if (paperButton) {
+    setWorkspaceView("paper");
+    selectPaperTradingPlan(state, paperButton.dataset.paperFromReview);
+    return;
+  }
   const editButton = event.target.closest("button[data-review-edit]");
   if (editButton) {
     beginAdviceReviewEdit(state, editButton.dataset.reviewEdit);
@@ -2460,10 +2562,17 @@ $("reviewPlanList").addEventListener("click", async (event) => {
     if (!options) return;
     await runButtonTask(
       deleteButton,
-      () => deleteAdviceReviewPlan(state, deleteButton.dataset.reviewDelete, {
-        ...options,
-        confirm: (message) => window.confirm(message),
-      }),
+      async () => {
+        const removed = await deleteAdviceReviewPlan(state, deleteButton.dataset.reviewDelete, {
+          ...options,
+          confirm: (message) => window.confirm(message),
+        });
+        if (removed) {
+          await loadAdviceReviewDashboard(state, options);
+          syncPaperTradingPlans(state);
+        }
+        return removed;
+      },
       { isCurrent: options.isCurrent, onError: (error) => setInlineFeedback("reviewPlanFeedback", error) }
     );
     return;
@@ -2486,7 +2595,11 @@ $("reviewPlanList").addEventListener("click", async (event) => {
   if (!options) return;
   await runButtonTask(
     evaluateButton,
-    () => evaluateAdviceReviewPlan(state, evaluateButton.dataset.reviewEvaluate, options),
+    async () => {
+      const evaluated = await evaluateAdviceReviewPlan(state, evaluateButton.dataset.reviewEvaluate, options);
+      if (evaluated) await loadAdviceReviewDashboard(state, options);
+      return evaluated;
+    },
     { isCurrent: options.isCurrent, onError: (error) => setInlineFeedback("reviewPlanFeedback", error) }
   );
 });
@@ -2497,19 +2610,101 @@ $("reviewPlanList").addEventListener("change", (event) => {
   setAdviceReviewEvaluationAsOf(state, input.dataset.reviewAsOf, input.value);
 });
 
+$("savePaperAccount").addEventListener("click", async (event) => {
+  await runButtonTask(event.currentTarget, () => updatePaperTradingAccount(state), {
+    onError: (error) => setInlineFeedback("paperTradingFeedback", error),
+  });
+});
+
+$("runPaperTrading").addEventListener("click", async (event) => {
+  await runButtonTask(event.currentTarget, () => runPaperTradingSimulation(state), {
+    onError: (error) => setInlineFeedback("paperTradingFeedback", error),
+  });
+});
+
+$("paperStrategyForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await runSubmitTask(event.currentTarget, "加入中", () => createPaperStrategy(state));
+  } catch (error) {
+    if (!isAbortError(error)) setInlineFeedback("paperTradingFeedback", error);
+  }
+});
+
+$("paperStrategyList").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-paper-delete]");
+  if (!button) return;
+  await runButtonTask(
+    button,
+    () => deletePaperStrategy(state, button.dataset.paperDelete, { confirm: (message) => window.confirm(message) }),
+    { onError: (error) => setInlineFeedback("paperTradingFeedback", error) }
+  );
+});
+
+$("loadPaperRun").addEventListener("click", async (event) => {
+  await runButtonTask(
+    event.currentTarget,
+    () => selectPaperTradingRun(state, $("paperRunHistory").value),
+    { onError: (error) => setInlineFeedback("paperTradingFeedback", error) }
+  );
+});
+
+$("comparePaperRuns").addEventListener("click", async (event) => {
+  await runButtonTask(event.currentTarget, () => comparePaperTradingRuns(state), {
+    onError: (error) => setInlineFeedback("paperTradingFeedback", error),
+  });
+});
+
 $("watchlistScanForm").addEventListener("change", (event) => {
   if (event.target.matches?.('input[name="scanUniverse"]')) {
     syncWatchlistScanUniverse(event.currentTarget);
+  }
+  if (event.target.matches?.("input[data-scan-condition]")) {
+    syncWatchlistScanConditions(event.currentTarget, event.target);
   }
 });
 
 initializeWatchlistScanControls();
 
+$("watchlistScanHistory").addEventListener("change", (event) => {
+  const selected = Number(event.currentTarget.value);
+  $("loadWatchlistScanHistoryRecord").disabled = !selected;
+  $("compareWatchlistScanHistory").disabled = !selected || !state.watchlistScanResult;
+});
+
+$("loadWatchlistScanHistoryRecord").addEventListener("click", async (event) => {
+  await runButtonTask(
+    event.currentTarget,
+    () => loadWatchlistScanRecord(state, $("watchlistScanHistory").value),
+    { onError: (error) => setInlineFeedback("watchlistScanFeedback", error) }
+  );
+});
+
+$("compareWatchlistScanHistory").addEventListener("click", async (event) => {
+  await runButtonTask(
+    event.currentTarget,
+    () => compareWatchlistScanHistory(state, $("watchlistScanHistory").value),
+    { onError: (error) => setInlineFeedback("watchlistScanFeedback", error) }
+  );
+});
+
+$("exportWatchlistScanResult").addEventListener("click", () => {
+  try {
+    exportWatchlistScanResult(state);
+  } catch (error) {
+    setInlineFeedback("watchlistScanFeedback", error);
+  }
+});
+
 $("watchlistScanForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   clearInlineFeedback("watchlistScanFeedback");
   try {
-    await runSubmitTask(event.currentTarget, "扫描中", () => runWatchlistScan(state));
+    await runSubmitTask(event.currentTarget, "扫描中", async () => {
+      const completed = await runWatchlistScan(state);
+      if (completed) await loadWatchlistScanHistory(state);
+      return completed;
+    });
   } catch (error) {
     if (!isAbortError(error)) {
       setInlineFeedback("watchlistScanFeedback", error);

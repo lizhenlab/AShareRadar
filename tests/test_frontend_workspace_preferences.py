@@ -147,6 +147,7 @@ assert.deepEqual(migrated, {
 });
 
 assert.equal(sanitizeWorkspacePreferences({ workspaceView: "tools" }).primaryView, "review");
+assert.equal(sanitizeWorkspacePreferences({ workspaceView: "data" }).primaryView, "review");
 assert.equal(sanitizeWorkspacePreferences({ workspaceView: "qa" }).primaryView, "research");
 assert.equal(sanitizeWorkspacePreferences({ primaryView: "market", workspaceView: "overview" }).primaryView, "market");
 for (const invalid of ["", "MARKET", "market ", "admin", null, 1, {}, []]) {
@@ -176,7 +177,9 @@ def test_primary_navigation_static_contract_exposes_exactly_four_functional_area
     assert 'class="panel query-panel" data-primary-regions="research review"' in html
     assert 'id="workspace-tab-market-scan" data-view="market-scan" data-primary-regions="market"' in html
     assert 'id="workspace-tab-replay" data-view="replay" data-primary-regions="review"' in html
+    assert 'id="workspace-tab-paper" data-view="paper" data-primary-regions="review"' in html
     assert 'id="workspace-tab-tools" data-view="tools" data-primary-regions="review"' in html
+    assert 'id="workspace-tab-data" data-view="data" data-primary-regions="review"' in html
     assert "createPrimaryNavigation" in app
     assert "setPrimaryView" in app
 
@@ -192,7 +195,7 @@ import {
 } from "./static/js/workspace-preferences.js";
 
 const { element } = installAppDom({ canvasContext: null });
-const views = ["overview", "qa", "strategy", "finance", "theme", "replay", "tools"];
+const views = ["overview", "qa", "strategy", "finance", "theme", "replay", "paper", "tools", "data"];
 const tabs = views.map((view) => control(`workspace-tab-${view}`, "view", view));
 const panels = views.map((view) => control(`workspace-panel-${view}`, "viewPanel", view));
 const primaryViews = ["research", "market", "review", "monitor"];
@@ -274,10 +277,10 @@ assert.deepEqual(JSON.parse(values.get(WORKSPACE_PREFERENCES_STORAGE_KEY)).prefe
 
 __appTest.state.symbol = "600519.SH";
 __appTest.state.privateSessionToken = "never-store-state-wholesale";
-__appTest.setWorkspaceView("tools");
+__appTest.setWorkspaceView("data");
 await Promise.resolve();
 await Promise.resolve();
-assert.equal(cleanupPreviewCalls, 1, "entering the tools view did not load its cleanup preview");
+assert.equal(cleanupPreviewCalls, 1, "entering the data view did not load its cleanup preview");
 __appTest.selectDailyChartRange(240);
 __appTest.setDailyChartOverlay("ma5", true);
 __appTest.setDailyChartOverlay("ma20", false);
@@ -289,7 +292,7 @@ assert.deepEqual(payload, {
   version: WORKSPACE_PREFERENCES_VERSION,
   preferences: {
     primaryView: "review",
-    workspaceView: "tools",
+    workspaceView: "data",
     dailyChartRange: 240,
     dailyChartMa5: true,
     dailyChartMa20: false,

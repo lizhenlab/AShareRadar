@@ -22,6 +22,9 @@ const EVALUATION_STATUS_LABELS = Object.freeze({
 });
 
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const REVIEW_PAGE_SIZE = 20;
+const REVIEW_DASHBOARD_PAGE_SIZE = 100;
+const REVIEW_BATCH_TIMEOUT_MS = 120000;
 const SHANGHAI_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Shanghai",
   year: "numeric",
@@ -34,17 +37,23 @@ export async function loadAdviceReviews(state, options = {}) {
   const symbol = reviewOwnerSymbol(state, options);
   state.adviceReviewReadSeq = sequence;
   prepareReviewSymbolState(state, symbol);
-  resetReviewHistories(state);
-  renderReviewLoading();
+  const append = Boolean(options.append);
+  const offset = append ? (state.adviceReviewDetails || []).length : 0;
+  if (!append) {
+    resetReviewHistories(state);
+    renderReviewLoading();
+  }
   try {
+    const offsetQuery = offset > 0 ? `&offset=${offset}` : "";
     const details = await fetchJson(
-      `/api/reviews?symbol=${encodeURIComponent(symbol)}&limit=20`,
+      `/api/reviews?symbol=${encodeURIComponent(symbol)}&limit=${REVIEW_PAGE_SIZE}${offsetQuery}`,
       { signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }
     );
     if (!reviewReadIsCurrent(state, sequence, symbol, options)) return false;
     if (!Array.isArray(details)) throw new TypeError("复盘计划格式异常");
-    state.adviceReviewDetails = details;
-    renderAdviceReviewDetails(details, state);
+    state.adviceReviewDetails = append ? mergeReviewDetails(state.adviceReviewDetails, details) : details;
+    state.adviceReviewHasMore = details.length === REVIEW_PAGE_SIZE;
+    renderAdviceReviewDetails(state.adviceReviewDetails, state);
     renderSnapshotOptions(state);
     if (!state.adviceReviewEditingPlanId) applySelectedSnapshotDefaults(state, { preserveText: false });
     return true;
@@ -53,6 +62,77 @@ export async function loadAdviceReviews(state, options = {}) {
     renderReviewUnavailable(error);
     return false;
   }
+}
+
+export async function loadMoreAdviceReviews(state, options = {}) {
+  if (!state.adviceReviewHasMore) return false;
+  return loadAdviceReviews(state, { ...options, append: true });
+}
+
+export async function loadAdviceReviewDashboard(state, options = {}) {
+  const sequence = Number(state.adviceReviewDashboardSeq || 0) + 1;
+  state.adviceReviewDashboardSeq = sequence;
+  renderAdviceReviewDashboardLoading();
+  try {
+    const [summary, dueItems, details] = await Promise.all([
+      fetchJson("/api/reviews/summary", { signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }),
+      fetchJson("/api/reviews/due?limit=200", { signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }),
+      loadAllAdviceReviewDetails(options),
+    ]);
+    if (state.adviceReviewDashboardSeq !== sequence) return false;
+    if (!Array.isArray(dueItems) || !Array.isArray(details) || !summary || typeof summary !== "object") {
+      throw new TypeError("全局复盘数据格式异常");
+    }
+    state.adviceReviewDashboardSummary = summary;
+    state.adviceReviewDueItems = dueItems;
+    state.adviceReviewDashboardDetails = details;
+    renderAdviceReviewDashboard(state);
+    setDashboardFeedback("");
+    return true;
+  } catch (error) {
+    if (isAbortError(error) || state.adviceReviewDashboardSeq !== sequence) return false;
+    renderAdviceReviewDashboardUnavailable(error);
+    return false;
+  }
+}
+
+async function loadAllAdviceReviewDetails(options) {
+  const details = [];
+  let offset = 0;
+  do {
+    const offsetQuery = offset ? `&offset=${offset}` : "";
+    const page = await fetchJson(`/api/reviews?limit=${REVIEW_DASHBOARD_PAGE_SIZE}${offsetQuery}`, {
+      signal: options.signal,
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
+    if (!Array.isArray(page)) throw new TypeError("全局复盘计划格式异常");
+    details.push(...page);
+    if (page.length < REVIEW_DASHBOARD_PAGE_SIZE) break;
+    offset += page.length;
+  } while (offset <= 100000);
+  return details;
+}
+
+export async function evaluateDueAdviceReviews(state, options = {}) {
+  const result = await fetchJson("/api/reviews/evaluate-due?limit=100", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    timeoutMs: REVIEW_BATCH_TIMEOUT_MS,
+    signal: options.signal,
+  });
+  const attempted = Number(result?.attempted_count || 0);
+  const failed = Number(result?.failed_count || 0);
+  setDashboardFeedback(
+    attempted ? `已处理 ${attempted} 条到期计划，失败 ${failed} 条` : "当前没有到期计划",
+    failed ? "error" : "ok"
+  );
+  await loadAdviceReviewDashboard(state, options);
+  return result;
+}
+
+export function updateAdviceReviewDashboardFilters(state) {
+  renderAdviceReviewDashboard(state);
 }
 
 export function syncAdviceReviewSnapshots(state, items, analysis) {
@@ -250,6 +330,101 @@ export function renderAdviceReviewDetails(details, state = null) {
   target.innerHTML = details.length
     ? details.map((detail) => reviewDetailHtml(detail, state)).join("")
     : `<div class="review-plan-state"><strong>暂无复盘计划</strong><span>可从当前股票的保留建议快照建立计划。</span></div>`;
+  const loadMore = $("reviewPlanLoadMore");
+  if (loadMore) loadMore.hidden = !state?.adviceReviewHasMore;
+}
+
+function mergeReviewDetails(existing, incoming) {
+  const merged = new Map((Array.isArray(existing) ? existing : []).map((item) => [Number(item?.plan?.id), item]));
+  for (const item of incoming) merged.set(Number(item?.plan?.id), item);
+  return Array.from(merged.values());
+}
+
+function renderAdviceReviewDashboard(state) {
+  const summaryTarget = $("reviewDashboardSummary");
+  const queueTarget = $("reviewDashboardQueue");
+  if (!summaryTarget || !queueTarget) return;
+  const summary = state.adviceReviewDashboardSummary || {};
+  summaryTarget.innerHTML = [
+    ["计划总数", summary.total_plan_count],
+    ["待评估", summary.pending_count],
+    ["已评估", summary.evaluated_count],
+    ["数据不足", summary.insufficient_count],
+    ["有利比例", dashboardPercent(summary.favorable_rate_pct)],
+    ["平均收益", dashboardPercent(summary.average_return_pct)],
+    ["平均MFE", dashboardPercent(summary.average_mfe_pct)],
+    ["平均MAE", dashboardPercent(summary.average_mae_pct)],
+  ].map(([label, value]) => `<span><small>${escapeHtml(label)}</small><strong>${escapeHtml(value ?? "--")}</strong></span>`).join("");
+  const dueIds = new Set((state.adviceReviewDueItems || []).map((item) => Number(item?.plan?.id)));
+  const dueById = new Map((state.adviceReviewDueItems || []).map((item) => [Number(item?.plan?.id), item]));
+  const rows = filteredDashboardDetails(state, dueIds);
+  queueTarget.innerHTML = rows.length
+    ? rows.map((detail) => dashboardDetailHtml(detail, dueById.get(Number(detail?.plan?.id)))).join("")
+    : `<div class="review-plan-state"><strong>没有符合筛选条件的计划</strong><span>可调整状态、股票、日期或周期。</span></div>`;
+}
+
+function filteredDashboardDetails(state, dueIds) {
+  const filters = {
+    status: valueOf("reviewDashboardStatus") || "all",
+    symbol: valueOf("reviewDashboardSymbol").toUpperCase(),
+    from: valueOf("reviewDashboardFrom"),
+    horizon: valueOf("reviewDashboardHorizon"),
+  };
+  return (state.adviceReviewDashboardDetails || []).filter((detail) => dashboardDetailMatches(detail, dueIds, filters));
+}
+
+function dashboardDetailMatches(detail, dueIds, filters) {
+  const plan = detail?.plan || {};
+  if (!dashboardStatusMatches(detail, dueIds, filters.status)) return false;
+  if (filters.symbol && !String(plan.symbol || "").toUpperCase().includes(filters.symbol)) return false;
+  if (filters.from && String(plan.snapshot_market_time || "").slice(0, 10) < filters.from) return false;
+  return filters.horizon === "all" || String(plan.horizon_days) === filters.horizon;
+}
+
+function dashboardStatusMatches(detail, dueIds, status) {
+  if (status === "all") return true;
+  if (status === "due") return dueIds.has(Number(detail?.plan?.id));
+  return (detail?.latest_evaluation?.status || "pending") === status;
+}
+
+function dashboardDetailHtml(detail, due) {
+  const plan = detail?.plan || {};
+  const evaluation = detail?.latest_evaluation;
+  const status = evaluation?.status || "pending";
+  const conclusion = CONCLUSION_LABELS[evaluation?.conclusion] || "等待后续行情";
+  const dueText = due ? `到期 ${due.due_date}${due.overdue_trading_days ? ` · 逾期 ${due.overdue_trading_days} 个交易日` : ""}` : `周期 ${plan.horizon_days || "--"} 日`;
+  return `
+    <article class="review-dashboard-item" data-review-dashboard-plan="${escapeHtml(plan.id)}">
+      <span><strong>${escapeHtml(plan.symbol || "--")}</strong><small>${escapeHtml(plan.snapshot_market_time || "--")} · 版本 ${escapeHtml(plan.revision || 1)}</small></span>
+      <span><b>${escapeHtml(conclusion)}</b><small>${escapeHtml(dueText)}</small></span>
+      <button type="button" class="mini-button" data-review-open-symbol="${escapeHtml(plan.symbol || "")}">查看计划</button>
+    </article>`;
+}
+
+function dashboardPercent(value) {
+  return value === null || value === undefined || !Number.isFinite(Number(value)) ? "--" : `${formatNumber(value)}%`;
+}
+
+function renderAdviceReviewDashboardLoading() {
+  const summary = $("reviewDashboardSummary");
+  const queue = $("reviewDashboardQueue");
+  if (summary) summary.innerHTML = `<div class="review-plan-state"><strong>正在读取全局复盘统计</strong></div>`;
+  if (queue) queue.innerHTML = "";
+}
+
+function renderAdviceReviewDashboardUnavailable(error) {
+  const summary = $("reviewDashboardSummary");
+  const queue = $("reviewDashboardQueue");
+  if (summary) summary.innerHTML = `<div class="review-plan-state is-unavailable"><strong>全局复盘统计暂不可用</strong><span>${escapeHtml(error?.message || "请稍后重试")}</span></div>`;
+  if (queue) queue.innerHTML = "";
+}
+
+function setDashboardFeedback(message, tone = "") {
+  const target = $("reviewDashboardFeedback");
+  if (!target) return;
+  target.textContent = message;
+  target.dataset.tone = tone;
+  target.hidden = !message;
 }
 
 function reviewDetailHtml(detail, state) {
@@ -267,6 +442,7 @@ function reviewDetailHtml(detail, state) {
           <span>快照 ${escapeHtml(plan.snapshot_market_time || "--")} · 版本 ${escapeHtml(plan.revision || 1)}</span>
         </div>
         <div class="row-actions">
+          <button type="button" class="mini-button primary" data-paper-from-review="${escapeHtml(plan.id)}">加入模拟</button>
           <button type="button" class="mini-button" data-review-edit="${escapeHtml(plan.id)}">编辑</button>
           <button type="button" class="mini-button" data-review-history="${escapeHtml(plan.id)}" aria-expanded="${historyExpanded}" aria-controls="review-history-${escapeHtml(plan.id)}">${historyExpanded ? "收起历史" : "评估历史"}</button>
           <button type="button" class="icon-button" title="删除复盘计划" aria-label="删除复盘计划" data-review-delete="${escapeHtml(plan.id)}">×</button>
@@ -278,8 +454,10 @@ function reviewDetailHtml(detail, state) {
         <div><dt>止损</dt><dd>${escapeHtml(formatNumber(plan.stop_price))}</dd></div>
         <div><dt>周期</dt><dd>${escapeHtml(plan.horizon_days)}日</dd></div>
       </dl>
-      <p><b>触发</b>${escapeHtml(plan.trigger_condition || "--")}</p>
-      <p><b>失效</b>${escapeHtml(plan.invalidation_condition || "--")}</p>
+      <p><b>触发说明</b>${escapeHtml(plan.trigger_condition || "--")}</p>
+      <p><b>失效说明</b>${escapeHtml(plan.invalidation_condition || "--")}</p>
+      <p class="review-execution-basis"><b>自动评估口径</b>${escapeHtml(executableBasisLabel(plan))}</p>
+      ${evidenceRefsHtml(plan.evidence_refs)}
       ${evaluationHtml(evaluation)}
       <div class="review-evaluate-row">
         <label for="review-as-of-${escapeHtml(plan.id)}"><span>评估截至日</span><input id="review-as-of-${escapeHtml(plan.id)}" type="date" value="${escapeHtml(asOfValue)}" max="${escapeHtml(shanghaiDateText())}" data-review-as-of="${escapeHtml(plan.id)}" /></label>
@@ -295,7 +473,52 @@ function evaluationHtml(evaluation) {
   const returnText = evaluation.return_pct !== null && evaluation.return_pct !== undefined && Number.isFinite(Number(evaluation.return_pct))
     ? ` · 收益 ${formatNumber(evaluation.return_pct)}%`
     : "";
-  return `<p class="review-evaluation ${escapeHtml(evaluation.status || "pending")}"><b>最新评估</b>${escapeHtml(conclusion)}${escapeHtml(returnText)} · 截至 ${escapeHtml(evaluation.as_of || "--")}</p>`;
+  return `
+    <div class="review-evaluation ${escapeHtml(evaluation.status || "pending")}">
+      <p><b>最新评估</b>${escapeHtml(conclusion)}${escapeHtml(returnText)} · 截至 ${escapeHtml(evaluation.as_of || "--")}</p>
+      ${evaluationEvidenceHtml(evaluation)}
+    </div>`;
+}
+
+function executableBasisLabel(plan) {
+  const trigger = plan?.trigger_basis === "daily_high_gte_target_price"
+    ? "日最高价 ≥ 目标价"
+    : plan?.trigger_basis || "未知触发口径";
+  const invalidation = plan?.invalidation_basis === "daily_low_lte_stop_price"
+    ? "日最低价 ≤ 止损价"
+    : plan?.invalidation_basis || "未知失效口径";
+  return `${trigger}；${invalidation}`;
+}
+
+function evaluationEvidenceHtml(evaluation) {
+  const metric = (label, value, suffix = "") => `<span><small>${escapeHtml(label)}</small><strong>${escapeHtml(metricValue(value, suffix))}</strong></span>`;
+  return `
+    <div class="review-evaluation-evidence" aria-label="评估证据">
+      ${metric("目标触达", evaluation.target_hit ? evaluation.target_hit_date || "是" : "否")}
+      ${metric("止损触达", evaluation.stop_hit ? evaluation.stop_hit_date || "是" : "否")}
+      ${metric("最大有利波动", evaluation.max_favorable_excursion_pct, "%")}
+      ${metric("最大不利波动", evaluation.max_adverse_excursion_pct, "%")}
+      ${metric("有效后续交易日", evaluation.available_forward_days, "日")}
+      ${metric("可见K线", evaluation.visible_bar_count, "根")}
+    </div>
+    <details class="review-provenance">
+      <summary>数据与复权证据</summary>
+      <p>快照：${escapeHtml(evaluation.snapshot_adjustment_mode || "unknown")} · ${escapeHtml(evaluation.snapshot_data_version || "unknown")}</p>
+      <p>评估：${escapeHtml(evaluation.evaluation_adjustment_mode || "unknown")} · ${escapeHtml(evaluation.evaluation_data_version || "unknown")}</p>
+      <p>规则：${escapeHtml(evaluation.rule_version || "unknown")} · 覆盖 ${escapeHtml(evaluation.forward_start_date || "--")} 至 ${escapeHtml(evaluation.forward_end_date || "--")}</p>
+    </details>`;
+}
+
+function metricValue(value, suffix) {
+  if (value === null || value === undefined || value === "") return "--";
+  if (typeof value === "number" && Number.isFinite(value)) return `${formatNumber(value)}${suffix}`;
+  return `${value}${suffix}`;
+}
+
+function evidenceRefsHtml(items) {
+  const rows = Array.isArray(items) ? items.filter((item) => item && typeof item === "object").slice(0, 12) : [];
+  if (!rows.length) return "";
+  return `<details class="review-plan-evidence"><summary>计划证据 ${escapeHtml(rows.length)} 项</summary><div>${rows.map((item) => `<span><small>${escapeHtml(item.id || "证据")}</small><strong>${escapeHtml(metricValue(item.value, ""))}</strong><em>${escapeHtml(item.data_date || "--")} · ${escapeHtml(item.nature || "unknown")} · ${escapeHtml(item.rule_version || "unknown")}</em></span>`).join("")}</div></details>`;
 }
 
 function historyHtml(plan, history) {
@@ -379,7 +602,9 @@ function renderSnapshotOptions(state) {
 
 function snapshotOption(item, planned) {
   const snapshotTime = item.market_time || formatAuditTimestamp(item.created_at);
-  const label = `${snapshotTime} · ${item.action || "建议"}${planned ? " · 已建计划" : ""}`;
+  const recordedAt = formatAuditTimestamp(item.created_at);
+  const recordSuffix = recordedAt && recordedAt !== snapshotTime ? ` · 记录 ${recordedAt}` : ` · #${item.id}`;
+  const label = `${snapshotTime} · ${item.action || "建议"}${recordSuffix}${planned ? " · 已建计划" : ""}`;
   return `<option value="${escapeHtml(item.id)}"${planned ? " disabled" : ""}>${escapeHtml(label)}</option>`;
 }
 
@@ -394,8 +619,8 @@ function applySelectedSnapshotDefaults(state, { preserveText }) {
   setValue("reviewStop", support > 0 && support < entry ? support : roundedPrice(entry * 0.95));
   if (!preserveText || !valueOf("reviewHypothesis")) {
     setValue("reviewHypothesis", snapshot.summary || snapshot.reason || "当前建议在观察周期内得到价格验证");
-    setValue("reviewTrigger", `价格确认当前建议，快照价 ${formatNumber(entry)}`);
-    setValue("reviewInvalidation", "价格触及止损位或原结论依据失效");
+    setValue("reviewTrigger", `研究备注：关注价格对快照价 ${formatNumber(entry)} 的确认过程`);
+    setValue("reviewInvalidation", "研究备注：原结论依据失效时重新审视计划");
   }
   return true;
 }

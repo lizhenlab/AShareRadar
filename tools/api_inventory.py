@@ -77,6 +77,7 @@ def collect_endpoints() -> list[Endpoint]:
 
 def route_decorator_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]:
     endpoints: list[Endpoint] = []
+    prefix = module_router_prefix(tree)
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -85,8 +86,26 @@ def route_decorator_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]:
             if parsed is None:
                 continue
             method, path, response_model = parsed
+            if prefix:
+                path = f"{prefix}{path}"
             endpoints.append(Endpoint(method, path, node.name, response_model, rel, endpoint_inputs(node, path)))
     return endpoints
+
+
+def module_router_prefix(tree: ast.Module) -> str:
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "router" for target in node.targets):
+            continue
+        if not isinstance(node.value, ast.Call) or not isinstance(node.value.func, ast.Name):
+            continue
+        if node.value.func.id != "APIRouter":
+            continue
+        for keyword in node.value.keywords:
+            if keyword.arg == "prefix" and isinstance(keyword.value, ast.Constant):
+                return str(keyword.value.value)
+    return ""
 
 
 def parse_route_decorator(node: ast.expr) -> tuple[str, str, str] | None:

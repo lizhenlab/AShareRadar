@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 import sqlite3
 
@@ -8,8 +9,11 @@ import pytest
 
 from app.config import Settings
 from app.db.schema_migrations import AUDIT_TIMESTAMP_UTC_MIGRATION
+from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
 from app.models.local_data import USER_DATA_TABLE_ALLOWLIST, UserDataBundle
+from app.models.paper_trading import PaperStrategyCreate
 from app.services.cache import SQLiteCache
+from app.services.paper_trading import simulate_paper_portfolio
 from app.services.user_data_portability import export_user_data, import_user_data
 
 
@@ -234,6 +238,80 @@ def test_repeated_merge_is_idempotent_for_surrogate_rows(tmp_path: Path) -> None
         assert preview.tables[table].remapped == 0
         assert preview.tables[table].unchanged == bundle.row_counts[table]
         assert _table_count(target, table) == bundle.row_counts[table]
+
+
+def test_populated_paper_run_round_trips_with_all_relationships(tmp_path: Path) -> None:
+    source = tmp_path / "paper-source.sqlite3"
+    target = tmp_path / "paper-target.sqlite3"
+    source_cache = SQLiteCache(source)
+    target_cache = SQLiteCache(target)
+    advice_id = _insert_advice(source, "600519.SH", marker="paper")
+    plan_id = _insert_review_plan(source, advice_id, "600519.SH", marker="paper")
+    plan = source_cache.advice_review_plan(plan_id)
+    assert plan is not None
+    source_cache.create_paper_strategy(
+        plan,
+        PaperStrategyCreate(plan_id=plan.id, allocation_pct=10),
+        activation_market_time="2026-07-16 10:00:00",
+    )
+    strategy = source_cache.paper_strategies()[0].model_copy(
+        update={
+            "snapshot_adjustment_mode": "qfq",
+            "snapshot_anchor_date": "2026-07-16",
+            "snapshot_anchor_close": 100,
+            "snapshot_data_version": "portability-paper-v1",
+            "snapshot_contract_version": DAILY_KLINE_CONTRACT_VERSION,
+        }
+    )
+    draft = simulate_paper_portfolio(
+        source_cache.paper_trading_account(),
+        [strategy],
+        {
+            strategy.symbol: [
+                _paper_bar("2026-07-16", 100, 101, 99, 100),
+                _paper_bar("2026-07-17", 100, 105, 99, 104),
+                _paper_bar("2026-07-20", 104, 112, 103, 111),
+            ]
+        },
+        as_of=datetime(2026, 7, 20, 16),
+    )
+    source_dashboard = source_cache.save_paper_simulation(draft)
+    run_id = source_dashboard.selected_run_id
+    assert run_id is not None
+    bundle = export_user_data(source)
+
+    for table in (
+        "paper_trading_account",
+        "paper_strategy",
+        "paper_trading_run",
+        "paper_strategy_result",
+        "paper_trade",
+        "paper_equity_snapshot",
+        "paper_trading_event",
+    ):
+        assert bundle.row_counts[table] > 0
+
+    import_user_data(target, bundle, mode="merge", dry_run=False)
+    restored = target_cache.paper_trading_dashboard(run_id=run_id)
+    repeated = import_user_data(target, bundle, mode="merge", dry_run=True)
+
+    assert restored.selected_run_id == run_id
+    assert restored.runs[0].input_fingerprint == draft.input_fingerprint
+    assert [item.side for item in reversed(restored.trades)] == ["buy", "sell"]
+    assert restored.strategies[0].status == "closed"
+    assert restored.events
+    assert restored.equity_curve
+    for table in (
+        "paper_strategy",
+        "paper_trading_run",
+        "paper_strategy_result",
+        "paper_trade",
+        "paper_equity_snapshot",
+        "paper_trading_event",
+    ):
+        assert repeated.tables[table].unchanged == bundle.row_counts[table]
+        assert repeated.tables[table].inserted == 0
+        assert repeated.tables[table].remapped == 0
 
 
 def test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch(
@@ -689,6 +767,26 @@ def _insert_review_result(
             (plan_id, advice_id, symbol, marker),
         )
         return int(cursor.lastrowid)
+
+
+def _paper_bar(
+    day: str,
+    open_price: float,
+    high: float,
+    low: float,
+    close: float,
+) -> Kline:
+    return Kline(
+        date=day,
+        open=open_price,
+        high=high,
+        low=low,
+        close=close,
+        volume=1_000,
+        adjustment_mode="qfq",
+        data_version="portability-paper-v1",
+        contract_version=DAILY_KLINE_CONTRACT_VERSION,
+    )
 
 
 def _create_legacy_watchlist_database(path: Path) -> None:

@@ -600,6 +600,106 @@ def test_watchlist_scan_rejects_empty_invalid_oversized_and_future_custom_input(
     )
 
 
+def test_review_dashboard_loads_global_summary_due_queue_and_all_pages() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["reviewDashboardSummary", { innerHTML: "" }],
+          ["reviewDashboardQueue", { innerHTML: "" }],
+          ["reviewDashboardFeedback", { textContent: "", dataset: {}, hidden: true }],
+          ["reviewDashboardStatus", { value: "all" }],
+          ["reviewDashboardSymbol", { value: "" }],
+          ["reviewDashboardFrom", { value: "" }],
+          ["reviewDashboardHorizon", { value: "all" }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        const calls = [];
+        globalThis.fetch = async (url) => {
+          const target = String(url);
+          calls.push(target);
+          if (target === "/api/reviews/summary") return json({ total_plan_count: 1, pending_count: 1, evaluated_count: 0, insufficient_count: 0 });
+          if (target === "/api/reviews/due?limit=200") return json([{ plan: plan(), latest_evaluation: null, due_date: "2026-07-17", overdue_trading_days: 2 }]);
+          if (target === "/api/reviews?limit=100") return json([{ plan: plan(), latest_evaluation: null }]);
+          throw new Error(`unexpected dashboard request: ${target}`);
+        };
+        const { loadAdviceReviewDashboard, updateAdviceReviewDashboardFilters } = await import("./static/js/advice-reviews.js");
+        const state = {};
+
+        assert(await loadAdviceReviewDashboard(state) === true, "dashboard did not load");
+        assert(calls.length === 3, `dashboard made unexpected requests: ${calls}`);
+        assert(elements.get("reviewDashboardSummary").innerHTML.includes("计划总数"), "summary cards were not rendered");
+        assert(elements.get("reviewDashboardQueue").innerHTML.includes("逾期 2 个交易日"), "due evidence was not rendered");
+        elements.get("reviewDashboardStatus").value = "evaluated";
+        updateAdviceReviewDashboardFilters(state);
+        assert(elements.get("reviewDashboardQueue").innerHTML.includes("没有符合筛选条件"), "dashboard filter did not apply");
+
+        function plan() {
+          return { id: 7, symbol: "600519.SH", snapshot_market_time: "2026-07-16 15:00:00", horizon_days: 1, revision: 1 };
+        }
+        function json(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_watchlist_scan_history_load_compare_and_export_are_reachable() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["watchlistScanHistory", { innerHTML: "", value: "4", disabled: false }],
+          ["loadWatchlistScanHistoryRecord", { disabled: true }],
+          ["compareWatchlistScanHistory", { disabled: true }],
+          ["exportWatchlistScanResult", { disabled: true }],
+          ["watchlistScanResults", { innerHTML: "", setAttribute() {} }],
+          ["watchlistScanComparison", { innerHTML: "", hidden: true }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        globalThis.fetch = async (url) => {
+          const target = String(url);
+          if (target === "/api/watchlist/scans?limit=20") return json([{ id: 4, as_of: "2026-07-20 15:00:00", matched_count: 1, universe_count: 2 }]);
+          if (target === "/api/watchlist/scans/4") return json(record(4, "2026-07-20 15:00:00", ["600519.SH"]));
+          if (target === "/api/watchlist/scans/3") return json(record(3, "2026-07-17 15:00:00", ["000001.SZ"]));
+          throw new Error(`unexpected scan history request: ${target}`);
+        };
+        const {
+          compareWatchlistScanHistory,
+          exportWatchlistScanResult,
+          loadWatchlistScanHistory,
+          loadWatchlistScanRecord,
+        } = await import("./static/js/watchlist-scan.js");
+        const state = {};
+
+        assert(await loadWatchlistScanHistory(state) === true, "scan history did not load");
+        await loadWatchlistScanRecord(state, 4);
+        const comparison = await compareWatchlistScanHistory(state, 3);
+        let exported;
+        exportWatchlistScanResult(state, { save(content, name) { exported = { content, name }; } });
+
+        assert(comparison.newly_matched[0] === "600519.SH", "new match was not detected");
+        assert(comparison.no_longer_matched[0] === "000001.SZ", "lost match was not detected");
+        assert(elements.get("watchlistScanComparison").innerHTML.includes("扫描对比"), "comparison was not rendered");
+        assert(elements.get("exportWatchlistScanResult").disabled === false, "loaded record was not exportable");
+        assert(exported.name === "watchlist-scan-20260720-4.json" && JSON.parse(exported.content).id === 4, "export lost the selected record");
+
+        function record(id, asOf, matchedSymbols) {
+          const universe = ["600519.SH", "000001.SZ"];
+          return {
+            id, universe_kind: "symbols", created_at: asOf, universe, as_of: asOf,
+            rule_version: "watchlist-scan-v1", conditions: ["close_above_ma20"], missing: [],
+            success: universe.map((symbol) => ({
+              symbol, data_date: asOf.slice(0, 10), matched: matchedSymbols.includes(symbol),
+              condition_results: { close_above_ma20: matchedSymbols.includes(symbol) },
+              matched_conditions: matchedSymbols.includes(symbol) ? ["close_above_ma20"] : [],
+              metrics: { close: 100, ma20: 99 },
+            })),
+          };
+        }
+        function json(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
 def test_review_and_scan_controls_are_accessible_in_static_markup() -> None:
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 

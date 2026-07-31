@@ -1858,7 +1858,7 @@ def test_workspace_tabs_and_mark_filters_sync_accessibility_state() -> None:
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
       const { __appTest, element, jsonResponse } = await createAppHarness();
-      const views = ["overview", "qa", "strategy", "finance", "theme", "replay", "tools"];
+      const views = ["overview", "qa", "strategy", "finance", "theme", "replay", "paper", "tools", "data"];
       let focused;
       const tabs = views.map((view) => {
         const tab = element(`tab-${view}`);

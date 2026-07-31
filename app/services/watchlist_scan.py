@@ -95,7 +95,10 @@ async def _scan_universe(datahub: DataHub, payload: WatchlistScanRequest) -> lis
 
 
 def _unique_conditions(conditions: list[WatchlistScanCondition]) -> list[WatchlistScanCondition]:
-    return list(dict.fromkeys(conditions))
+    unique = list(dict.fromkeys(conditions))
+    if "close_above_ma20" in unique and "close_below_ma20" in unique:
+        raise ValueError("高于20日均线与低于20日均线不能同时选择")
+    return unique
 
 
 def _evaluate_scan_symbol(

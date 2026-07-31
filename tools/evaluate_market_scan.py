@@ -24,13 +24,21 @@ def main() -> int:
     parser.add_argument("--mode", choices=("official", "intraday"))
     parser.add_argument("--run-id", type=int, action="append", dest="run_ids")
     parser.add_argument("--minimum-sample-size", type=int, default=30)
+    parser.add_argument("--minimum-session-count", type=int, default=20)
     parser.add_argument("--complete-day-coverage", type=float, default=0.95)
+    parser.add_argument("--bootstrap-samples", type=int, default=1000)
+    parser.add_argument("--cost-profile", choices=("base", "conservative", "stress"), default="base")
+    parser.add_argument("--execution-notional", type=float, default=100_000)
     args = parser.parse_args()
     report = evaluate_market_scan_rankings(
         args.database,
         config=EvaluationConfig(
             minimum_sample_size=args.minimum_sample_size,
+            minimum_session_count=args.minimum_session_count,
             complete_day_coverage=args.complete_day_coverage,
+            bootstrap_samples=args.bootstrap_samples,
+            cost_profile=args.cost_profile,
+            execution_notional=args.execution_notional,
         ),
         mode=args.mode,
         run_ids=args.run_ids,

@@ -287,6 +287,8 @@
   .band-grid,
   .concept-strip,
   .theme-grid,
+  .replay-baseline,
+  .replay-regimes,
   .replay-stats,
   .replay-cases,
   .key-price-list,
@@ -314,9 +316,22 @@
   .alert-form,
   .note-form,
   .review-plan-form,
+  .review-dashboard-actions,
   .ai-question-bar,
   .minute-status-card {
     grid-template-columns: 1fr;
+  }
+
+  .review-dashboard-actions > button {
+    width: 100%;
+  }
+
+  .review-dashboard-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .review-dashboard-item {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .inline-edit-grid {
@@ -349,8 +364,21 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .review-evaluation-evidence,
+  .review-plan-evidence > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .watchlist-scan-form {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .watchlist-scan-history-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .watchlist-scan-history-controls button {
+    width: 100%;
   }
 
   .scan-condition-group,
@@ -619,5 +647,40 @@
   .advice-change-values i {
     transform: rotate(90deg);
     justify-self: start;
+  }
+}
+
+@media (max-width: 900px) {
+  .paper-account-actions,
+  .paper-strategy-form,
+  .paper-strategy-item,
+  .paper-run-actions,
+  .paper-run-metadata,
+  .paper-trading-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .paper-trading-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .paper-strategy-item > p {
+    grid-column: 1;
+  }
+
+  .paper-export-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 480px) {
+  .paper-trading-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .paper-equity-chart > div:last-child {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

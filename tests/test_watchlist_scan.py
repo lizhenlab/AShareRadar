@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from app.models.reviews import WatchlistScanRequest
+from app.services.cache import SQLiteCache
 from app.services.watchlist_scan import scan_watchlist_conditions
 from tests.factories import make_kline
 
@@ -69,3 +71,41 @@ def test_watchlist_scan_contract_rejects_scripts_and_large_universes() -> None:
             symbols=[f"{index:06d}.SZ" for index in range(51)],
             conditions=["close_above_ma20"],
         )
+
+
+def test_watchlist_scan_rejects_mutually_exclusive_ma20_conditions() -> None:
+    payload = WatchlistScanRequest(
+        universe="symbols",
+        symbols=["600519.SH"],
+        conditions=["close_above_ma20", "close_below_ma20"],
+    )
+
+    with pytest.raises(ValueError, match="不能同时选择"):
+        asyncio.run(scan_watchlist_conditions(_ScanHub({"600519.SH": _rising_rows()}), payload))
+
+
+def test_watchlist_scan_history_persists_full_reproducible_result(tmp_path: Path) -> None:
+    payload = WatchlistScanRequest(
+        universe="symbols",
+        symbols=["600519.SH"],
+        conditions=["close_above_ma20", "volume_surge_5d"],
+    )
+    result = asyncio.run(
+        scan_watchlist_conditions(
+            _ScanHub({"600519.SH": _rising_rows()}),
+            payload,
+            now=datetime(2026, 5, 1, 16),
+        )
+    )
+    cache = SQLiteCache(tmp_path / "cache.sqlite3")
+
+    saved = cache.save_watchlist_scan(payload, result)
+    history = cache.watchlist_scan_history(limit=20)
+    loaded = cache.watchlist_scan_record(saved.id)
+
+    assert saved.universe_kind == "symbols"
+    assert history[0].matched_count == 1
+    assert history[0].conditions == payload.conditions
+    assert loaded is not None
+    assert loaded.model_dump() == saved.model_dump()
+    assert loaded.success[0].metrics["volume_ratio_5d"] == 2.0

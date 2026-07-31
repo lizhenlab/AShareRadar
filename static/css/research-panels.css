@@ -643,6 +643,57 @@ canvas {
   margin-top: 10px;
 }
 
+.replay-baseline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.replay-baseline span,
+.replay-regimes span {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.replay-baseline small,
+.replay-baseline strong,
+.replay-regimes b,
+.replay-regimes small {
+  display: block;
+}
+
+.replay-baseline strong {
+  margin-top: 4px;
+  color: var(--text);
+}
+
+.replay-regimes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.replay-regimes small {
+  margin-top: 4px;
+}
+
+.replay-cases em {
+  color: var(--amber);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.replay-notes {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
 .replay-stats div {
   padding: 10px;
   border: 1px solid var(--line);
@@ -761,4 +812,302 @@ canvas {
 .event-actions em {
   color: var(--text);
   background: var(--blue-soft);
+}
+
+.paper-trading-disclaimer {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #f1d19a;
+  border-radius: var(--radius);
+  color: #74510c;
+  background: #fff8e8;
+  line-height: 1.6;
+}
+
+.paper-account-actions,
+.paper-strategy-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.paper-account-actions label,
+.paper-strategy-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.paper-account-actions input,
+.paper-account-actions select,
+.paper-strategy-form input,
+.paper-strategy-form select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: #fff;
+}
+
+.paper-account-actions button,
+.paper-strategy-form button {
+  min-height: 38px;
+  padding-right: 14px;
+  padding-left: 14px;
+  white-space: nowrap;
+}
+
+.paper-strategy-form {
+  grid-template-columns: minmax(240px, 2fr) repeat(3, minmax(110px, 1fr)) auto;
+}
+
+.paper-run-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr)) repeat(2, minmax(145px, 1fr)) auto minmax(220px, auto);
+  gap: 10px;
+  align-items: end;
+}
+
+.paper-run-actions label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.paper-run-actions select {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: #fff;
+}
+
+.paper-export-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.paper-export-actions a {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  text-decoration: none;
+}
+
+#paperRunMetadata,
+#paperRunComparison {
+  margin-top: 14px;
+}
+
+.paper-run-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.paper-run-metadata > div {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.paper-run-metadata dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.paper-run-metadata dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.paper-run-warnings {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: #8b5e08;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+#paperTradingFeedback {
+  margin: 10px 0 0;
+  color: var(--muted);
+}
+
+#paperTradingFeedback[data-tone="ok"] {
+  color: var(--green);
+}
+
+#paperTradingFeedback[data-tone="error"] {
+  color: var(--red);
+}
+
+.paper-trading-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.paper-trading-summary > span {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.paper-trading-summary small,
+.paper-trading-summary strong {
+  display: block;
+}
+
+.paper-trading-summary small,
+.paper-strategy-item span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.paper-trading-summary strong {
+  margin-top: 5px;
+}
+
+.paper-strategy-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.paper-strategy-item {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.2fr) minmax(140px, 1fr) minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.paper-strategy-item > div {
+  display: grid;
+  gap: 4px;
+}
+
+.paper-strategy-item > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--red);
+  font-size: 12px;
+}
+
+.paper-trading-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.paper-equity-chart {
+  min-height: 230px;
+}
+
+.paper-equity-chart svg {
+  width: 100%;
+  height: 185px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  overflow: visible;
+}
+
+.paper-equity-chart .paper-equity-line {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.paper-equity-chart .paper-benchmark-line {
+  fill: none;
+  stroke: #8b5cf6;
+  stroke-width: 1.2;
+  stroke-dasharray: 3 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.paper-equity-chart .paper-drawdown-line {
+  fill: none;
+  stroke: var(--red);
+  stroke-width: 1;
+  opacity: 0.65;
+  vector-effect: non-scaling-stroke;
+}
+
+.paper-trade-marker {
+  vector-effect: non-scaling-stroke;
+  stroke: #fff;
+  stroke-width: 0.7;
+}
+
+.paper-trade-marker.buy {
+  fill: var(--red);
+}
+
+.paper-trade-marker.sell {
+  fill: var(--green);
+}
+
+.paper-equity-chart > div:last-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.paper-equity-chart strong {
+  color: var(--text);
+}
+
+.paper-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.paper-data-table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+
+.paper-data-table th,
+.paper-data-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font-size: 12px;
+}
+
+.paper-data-table th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.paper-trading-notes {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.6;
 }

@@ -45,6 +45,25 @@ def test_review_event_rules_keep_price_move_priority_over_amplitude() -> None:
     assert events[0].level == "风险"
 
 
+def test_review_volume_attack_requires_a_real_five_day_volume_surge() -> None:
+    rows = [
+        make_kline(date=f"2026-05-{day:02d}", close=100, high=101, low=99, volume=1000)
+        for day in range(1, 6)
+    ]
+
+    confirmed = _review_events(
+        [*rows, make_kline(date="2026-05-06", close=105, high=106, low=104, volume=1600)]
+    )
+    unconfirmed = _review_events(
+        [*rows, make_kline(date="2026-05-06", close=105, high=106, low=104, volume=1200)]
+    )
+
+    assert confirmed[-1].title == "放量上攻日"
+    assert "1.60 倍" in confirmed[-1].description
+    assert unconfirmed[-1].title == "明显上涨日"
+    assert "未达到放量确认" in unconfirmed[-1].description
+
+
 def test_review_events_ignore_malformed_bars_and_keep_latest_limit() -> None:
     rows = [make_kline(date="2026-05-01", close=100, high=101, low=99, volume=1000)]
     rows.append(make_kline(date="2026-05-02", close=0, high=110, low=0, volume=1000))

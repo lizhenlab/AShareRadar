@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 106
+Total endpoints: 120
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -22,6 +22,17 @@ Total endpoints: 106
 | GET | `/api/analyze` | query `symbol: str = '600519'` (description=6位A股代码) | `analyze` | `AnalysisResult` | `app/api/routes/analysis.py` |
 | GET | `/api/data/status` | - | `data_status` | `DataStatus` | `app/api/routes/data.py` |
 | POST | `/api/data/trading-calendar/refresh` | - | `refresh_trading_calendar_api` | `TradeCalendarRefreshResponse` | `app/api/routes/data.py` |
+| GET | `/api/discovery/presets` | query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `list_discovery_presets` | `DiscoveryPresetPage` | `app/api/routes/discovery.py` |
+| POST | `/api/discovery/presets` | body `payload: DiscoveryPresetCreate` | `create_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| POST | `/api/discovery/presets/import` | body `payload: DiscoveryPresetArchive` | `import_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| DELETE | `/api/discovery/presets/{preset_id}` | path `preset_id: int` (ge=1)<br>query `expected_revision: int = ...` (ge=1) | `delete_discovery_preset` | `DiscoveryPresetDeleteResponse` | `app/api/routes/discovery.py` |
+| GET | `/api/discovery/presets/{preset_id}` | path `preset_id: int` (ge=1) | `get_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| PATCH | `/api/discovery/presets/{preset_id}` | body `payload: DiscoveryPresetRename`<br>path `preset_id: int` (ge=1) | `rename_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| PUT | `/api/discovery/presets/{preset_id}` | body `payload: DiscoveryPresetUpdate`<br>path `preset_id: int` (ge=1) | `update_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
+| POST | `/api/discovery/presets/{preset_id}/apply` | body `payload: DiscoveryPresetApplyRequest`<br>path `preset_id: int` (ge=1) | `apply_discovery_preset` | `DiscoveryLeaderboardPage` | `app/api/routes/discovery.py` |
+| GET | `/api/discovery/presets/{preset_id}/export` | path `preset_id: int` (ge=1) | `export_discovery_preset` | `DiscoveryPresetArchive` | `app/api/routes/discovery.py` |
+| POST | `/api/discovery/presets/{preset_id}/research-queue` | body `payload: DiscoveryResearchQueueRequest`<br>path `preset_id: int` (ge=1) | `enqueue_discovery_research` | `DiscoveryResearchQueueResponse` | `app/api/routes/discovery.py` |
+| GET | `/api/discovery/runs/{run_id}/rank-changes` | path `run_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200) | `discovery_rank_changes` | `DiscoveryRankChangePage` | `app/api/routes/discovery.py` |
 | GET | `/api/futu/status` | - | `futu_status` | `FutuStatusResponse` | `app/api/routes/data.py` |
 | GET | `/api/health` | - | `health` | `-` | `app/api/routes/health.py` |
 | GET | `/api/health/live` | - | `liveness` | `HealthProbe` | `app/api/routes/health.py` |
@@ -43,12 +54,24 @@ Total endpoints: 106
 | POST | `/api/market-scans/{run_id}/retry` | path `run_id: int` | `retry_market_scan` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/monitor/events` | query `limit: int = 30` (ge=1; le=200) | `monitor_events` | `list[MonitorEvent]` | `app/api/routes/monitoring.py` |
 | GET | `/api/order-book` | query `symbol: str = '600519'` (description=6位A股代码) | `order_book` | `OrderBook` | `app/api/routes/data.py` |
+| GET | `/api/paper-trading` | query `run_id: int \| None = None` (gt=0) | `paper_trading_dashboard` | `PaperTradingDashboard` | `app/api/routes/paper_trading.py` |
+| PATCH | `/api/paper-trading/account` | body `payload: PaperTradingAccountUpdate` | `patch_paper_trading_account` | `PaperTradingAccount` | `app/api/routes/paper_trading.py` |
+| POST | `/api/paper-trading/run` | body `payload: PaperSimulationRequest` | `run_paper_trading` | `PaperSimulationSummary` | `app/api/routes/paper_trading.py` |
+| GET | `/api/paper-trading/runs` | query `limit: int = 100` (ge=1; le=500) | `paper_trading_runs` | `list[PaperTradingRun]` | `app/api/routes/paper_trading.py` |
+| GET | `/api/paper-trading/runs/compare` | query `left_run_id: int = -` (gt=0)<br>query `right_run_id: int = -` (gt=0) | `compare_paper_trading_runs` | `PaperRunComparison` | `app/api/routes/paper_trading.py` |
+| GET | `/api/paper-trading/runs/{run_id}` | path `run_id: int` | `paper_trading_run_dashboard` | `PaperTradingDashboard` | `app/api/routes/paper_trading.py` |
+| GET | `/api/paper-trading/runs/{run_id}/export.csv` | path `run_id: int`<br>query `dataset: Literal['trades', 'events'] = 'trades'` | `export_paper_trading_run_csv` | `-` | `app/api/routes/paper_trading.py` |
+| GET | `/api/paper-trading/runs/{run_id}/export.json` | path `run_id: int` | `export_paper_trading_run_json` | `PaperRunExport` | `app/api/routes/paper_trading.py` |
+| POST | `/api/paper-trading/strategies` | body `payload: PaperStrategyCreate` | `post_paper_strategy` | `PaperStrategy` | `app/api/routes/paper_trading.py` |
+| DELETE | `/api/paper-trading/strategies/{strategy_id}` | path `strategy_id: int` | `delete_paper_strategy` | `MutationResult` | `app/api/routes/paper_trading.py` |
 | GET | `/api/plates` | query `limit: int = 20` (ge=1; le=100)<br>query `refresh: bool = False` (description=是否强制刷新板块排行) | `plates` | `list[PlateItem]` | `app/api/routes/data.py` |
 | GET | `/api/quote` | query `symbol: str = '600519'` (description=6位A股代码) | `quote` | `Quote` | `app/api/routes/quotes.py` |
 | GET | `/api/quotes` | query `symbols: str = '600519,000001,300750'` | `quotes` | `list[Quote]` | `app/api/routes/quotes.py` |
 | GET | `/api/review` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `period_days: int = 60` (ge=20; le=240) | `review` | `IndividualReview` | `app/api/routes/analysis.py` |
-| GET | `/api/reviews` | query `symbol: str \| None = None` (description=可选，A股代码)<br>query `limit: int = 20` (ge=1; le=100) | `review_details` | `list[AdviceReviewDetail]` | `app/api/routes/reviews.py` |
-| GET | `/api/reviews/plans` | query `symbol: str \| None = None` (description=可选，A股代码)<br>query `limit: int = 100` (ge=1; le=200) | `review_plans` | `list[AdviceReviewPlan]` | `app/api/routes/reviews.py` |
+| GET | `/api/reviews` | query `symbol: str \| None = None` (description=可选，A股代码)<br>query `limit: int = 20` (ge=1; le=100)<br>query `offset: int = 0` (ge=0; le=100000) | `review_details` | `list[AdviceReviewDetail]` | `app/api/routes/reviews.py` |
+| GET | `/api/reviews/due` | query `as_of: datetime \| None = None`<br>query `limit: int = 100` (ge=1; le=200) | `due_reviews` | `list[AdviceReviewDueItem]` | `app/api/routes/reviews.py` |
+| POST | `/api/reviews/evaluate-due` | body `payload: AdviceReviewEvaluationRequest`<br>query `limit: int = 20` (ge=1; le=100) | `evaluate_due_reviews` | `AdviceReviewBatchSummary` | `app/api/routes/reviews.py` |
+| GET | `/api/reviews/plans` | query `symbol: str \| None = None` (description=可选，A股代码)<br>query `limit: int = 100` (ge=1; le=200)<br>query `offset: int = 0` (ge=0; le=100000) | `review_plans` | `list[AdviceReviewPlan]` | `app/api/routes/reviews.py` |
 | POST | `/api/reviews/plans` | body `payload: AdviceReviewPlanInput` | `create_review_plan` | `AdviceReviewPlan` | `app/api/routes/reviews.py` |
 | DELETE | `/api/reviews/plans/{plan_id}` | path `plan_id: int` | `delete_review_plan` | `MutationResult` | `app/api/routes/reviews.py` |
 | GET | `/api/reviews/plans/{plan_id}` | path `plan_id: int` | `review_plan_detail` | `AdviceReviewDetail` | `app/api/routes/reviews.py` |
@@ -102,21 +125,12 @@ Total endpoints: 106
 | GET | `/api/tasks/status` | - | `task_status` | `SchedulerStatus` | `app/api/routes/monitoring.py` |
 | GET | `/api/watchlist` | - | `watchlist` | `list[WatchlistItem]` | `app/api/routes/watchlist.py` |
 | POST | `/api/watchlist` | body `payload: WatchlistInput` | `add_watchlist_item` | `WatchlistItem` | `app/api/routes/watchlist.py` |
-| POST | `/api/watchlist/scan` | body `payload: WatchlistScanRequest` | `scan_watchlist` | `WatchlistScanResponse` | `app/api/routes/watchlist_scan.py` |
+| POST | `/api/watchlist/scan` | body `payload: WatchlistScanRequest` | `scan_watchlist` | `WatchlistScanRecord` | `app/api/routes/watchlist_scan.py` |
+| GET | `/api/watchlist/scans` | query `limit: int = 20` (ge=1; le=100) | `watchlist_scan_history` | `list[WatchlistScanHistoryItem]` | `app/api/routes/watchlist_scan.py` |
+| GET | `/api/watchlist/scans/{scan_id}` | path `scan_id: int` | `watchlist_scan_record` | `WatchlistScanRecord` | `app/api/routes/watchlist_scan.py` |
 | DELETE | `/api/watchlist/{symbol}` | path `symbol: str` | `delete_watchlist_item` | `MutationResult` | `app/api/routes/watchlist.py` |
 | PATCH | `/api/watchlist/{symbol}` | path `symbol: str`<br>body `payload: WatchlistUpdate` | `update_watchlist_item` | `WatchlistItem` | `app/api/routes/watchlist.py` |
 | POST | `/api/watchlist/{symbol}/mark-viewed` | path `symbol: str`<br>body `payload: WatchlistMarkViewed` | `mark_watchlist_item_viewed` | `WatchlistItem` | `app/api/routes/watchlist.py` |
-| GET | `/presets` | query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `list_discovery_presets` | `DiscoveryPresetPage` | `app/api/routes/discovery.py` |
-| POST | `/presets` | body `payload: DiscoveryPresetCreate` | `create_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
-| POST | `/presets/import` | body `payload: DiscoveryPresetArchive` | `import_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
-| DELETE | `/presets/{preset_id}` | path `preset_id: int` (ge=1)<br>query `expected_revision: int = ...` (ge=1) | `delete_discovery_preset` | `DiscoveryPresetDeleteResponse` | `app/api/routes/discovery.py` |
-| GET | `/presets/{preset_id}` | path `preset_id: int` (ge=1) | `get_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
-| PATCH | `/presets/{preset_id}` | body `payload: DiscoveryPresetRename`<br>path `preset_id: int` (ge=1) | `rename_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
-| PUT | `/presets/{preset_id}` | body `payload: DiscoveryPresetUpdate`<br>path `preset_id: int` (ge=1) | `update_discovery_preset` | `DiscoveryPreset` | `app/api/routes/discovery.py` |
-| POST | `/presets/{preset_id}/apply` | body `payload: DiscoveryPresetApplyRequest`<br>path `preset_id: int` (ge=1) | `apply_discovery_preset` | `DiscoveryLeaderboardPage` | `app/api/routes/discovery.py` |
-| GET | `/presets/{preset_id}/export` | path `preset_id: int` (ge=1) | `export_discovery_preset` | `DiscoveryPresetArchive` | `app/api/routes/discovery.py` |
-| POST | `/presets/{preset_id}/research-queue` | body `payload: DiscoveryResearchQueueRequest`<br>path `preset_id: int` (ge=1) | `enqueue_discovery_research` | `DiscoveryResearchQueueResponse` | `app/api/routes/discovery.py` |
-| GET | `/runs/{run_id}/rank-changes` | path `run_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200) | `discovery_rank_changes` | `DiscoveryRankChangePage` | `app/api/routes/discovery.py` |
 
 ## Error Contract
 

@@ -170,6 +170,12 @@ def test_replay_analysis_detects_volume_breakout_case() -> None:
     assert replay.sample_count >= 1
     assert replay.cases[-1].pattern == "放量突破"
     assert replay.cases[-1].outcome == "有效"
+    assert replay.modelled_round_trip_friction_pct == MODELLED_ROUND_TRIP_FRICTION_PCT
+    assert replay.baseline_avg_forward_5d_return != 0
+    assert replay.excess_vs_baseline_pct is not None
+    assert replay.cases[-1].trend_regime in {"强势趋势", "弱势趋势", "震荡环境"}
+    assert sum(item.sample_count for item in replay.regime_stats) == replay.sample_count
+    assert all(item.evaluated_count <= item.sample_count for item in replay.regime_stats)
 
 
 def test_replay_pattern_ignores_malformed_lookback_bar() -> None:

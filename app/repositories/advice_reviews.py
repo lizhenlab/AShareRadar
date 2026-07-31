@@ -298,9 +298,16 @@ class AdviceReviewRepository(SQLiteRepository):
             row = _plan_row_by_advice(conn, advice_id)
         return _plan_from_row(row) if row else None
 
-    def plans(self, *, symbol: str | None = None, limit: int = 100) -> list[AdviceReviewPlan]:
+    def plans(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AdviceReviewPlan]:
         if limit <= 0:
             return []
+        offset = max(0, offset)
         clauses: list[str] = []
         params: list[object] = []
         if symbol is not None:
@@ -314,15 +321,22 @@ class AdviceReviewRepository(SQLiteRepository):
                 FROM advice_review_plan
                 {where_sql}
                 ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(updated_at) DESC, id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (*params, limit),
+                (*params, limit, offset),
             ).fetchall()
         return [_plan_from_row(row) for row in rows]
 
-    def details(self, *, symbol: str | None = None, limit: int = 100) -> list[AdviceReviewDetail]:
+    def details(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AdviceReviewDetail]:
         if limit <= 0:
             return []
+        offset = max(0, offset)
         clauses: list[str] = []
         params: list[object] = []
         if symbol is not None:
@@ -336,9 +350,9 @@ class AdviceReviewRepository(SQLiteRepository):
                 FROM advice_review_plan
                 {where_sql}
                 ORDER BY {SQLITE_AUDIT_EPOCH_FUNCTION}(updated_at) DESC, id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (*params, limit),
+                (*params, limit, offset),
             ).fetchall()
             plans = [_plan_from_row(row) for row in plan_rows]
             result_rows = _latest_result_rows(conn, plans)

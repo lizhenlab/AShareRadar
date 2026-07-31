@@ -6,6 +6,7 @@ from app.db.schema_migrations import ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION
 
 ADVICE_REVIEW_SCHEMA_VERSION = "20260716_advice_review_v1"
 ADVICE_REVIEW_PROVENANCE_SCHEMA_VERSION = "20260717_advice_review_price_provenance_v2"
+WATCHLIST_SCAN_HISTORY_SCHEMA_VERSION = "20260730_watchlist_scan_history_v1"
 
 ADVICE_REVIEW_PLAN_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS advice_review_plan (
@@ -102,21 +103,41 @@ CREATE TABLE IF NOT EXISTS advice_review_result (
 )
 """
 
+WATCHLIST_SCAN_HISTORY_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS watchlist_scan_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    universe_kind TEXT NOT NULL CHECK (universe_kind IN ('watchlist', 'symbols')),
+    as_of TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    conditions_json TEXT NOT NULL,
+    universe_count INTEGER NOT NULL CHECK (universe_count >= 0),
+    success_count INTEGER NOT NULL CHECK (success_count >= 0),
+    matched_count INTEGER NOT NULL CHECK (matched_count >= 0),
+    missing_count INTEGER NOT NULL CHECK (missing_count >= 0),
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+
 ADVICE_REVIEW_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_advice_review_plan_symbol_updated
     ON advice_review_plan(symbol, updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_advice_review_result_plan_evaluated
     ON advice_review_result(plan_id, plan_revision, evaluated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_advice_review_result_advice
-    ON advice_review_result(advice_id, evaluated_at DESC, id DESC)
+    ON advice_review_result(advice_id, evaluated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_watchlist_scan_history_created
+    ON watchlist_scan_history(created_at DESC, id DESC);
 """
 
 ADVICE_REVIEW_SCHEMA_SQL = f"""
 BEGIN IMMEDIATE;
 {ADVICE_REVIEW_PLAN_TABLE_SQL};
 {ADVICE_REVIEW_RESULT_TABLE_SQL};
+{WATCHLIST_SCAN_HISTORY_TABLE_SQL};
 {ADVICE_REVIEW_INDEX_SQL};
 INSERT OR IGNORE INTO schema_migration (name) VALUES ('{ADVICE_REVIEW_SCHEMA_VERSION}');
+INSERT OR IGNORE INTO schema_migration (name) VALUES ('{WATCHLIST_SCAN_HISTORY_SCHEMA_VERSION}');
 COMMIT;
 """
 
@@ -197,5 +218,7 @@ __all__ = [
     "ADVICE_REVIEW_RESULT_TABLE_SQL",
     "ADVICE_REVIEW_SCHEMA_SQL",
     "ADVICE_REVIEW_SCHEMA_VERSION",
+    "WATCHLIST_SCAN_HISTORY_SCHEMA_VERSION",
+    "WATCHLIST_SCAN_HISTORY_TABLE_SQL",
     "apply_advice_review_compat_schema",
 ]

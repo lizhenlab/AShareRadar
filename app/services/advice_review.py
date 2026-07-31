@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from app.models.reviews import (
     AdviceEvidenceRef,
     AdviceReviewBatchItem,
     AdviceReviewBatchSummary,
     AdviceReviewDetail,
+    AdviceReviewDueItem,
     AdviceReviewEvaluation,
     AdviceReviewPlan,
     AdviceReviewPlanInput,
@@ -64,8 +65,11 @@ def list_advice_review_plans(
     *,
     symbol: str | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[AdviceReviewPlan]:
-    return cache.advice_review_plans(symbol=symbol, limit=limit)
+    if offset <= 0:
+        return cache.advice_review_plans(symbol=symbol, limit=limit)
+    return cache.advice_review_plans(symbol=symbol, limit=limit, offset=offset)
 
 
 def list_advice_review_details(
@@ -73,8 +77,11 @@ def list_advice_review_details(
     *,
     symbol: str | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[AdviceReviewDetail]:
-    return cache.advice_review_details(symbol=symbol, limit=limit)
+    if offset <= 0:
+        return cache.advice_review_details(symbol=symbol, limit=limit)
+    return cache.advice_review_details(symbol=symbol, limit=limit, offset=offset)
 
 
 def build_advice_evidence_refs(snapshot: object) -> list[AdviceEvidenceRef]:
@@ -147,6 +154,26 @@ async def evaluate_due_advice_reviews(
         )
         await asyncio.sleep(0)
     return _due_review_summary(stable_as_of, due_details, items)
+
+
+async def list_due_advice_reviews(
+    datahub: DataHub,
+    *,
+    as_of: datetime | None = None,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> list[AdviceReviewDueItem]:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("到期复盘列表上限必须是正整数")
+    current = normalize_review_as_of(as_of, now=now, allow_future=True)
+    stable_as_of = _stable_review_as_of(current)
+    details = await run_cache_io(
+        datahub.cache.advice_review_evaluation_candidates,
+        as_of_date=stable_as_of.date().isoformat(),
+        limit=min(MAX_DUE_REVIEW_CANDIDATE_SCAN, max(limit * 10, limit)),
+    )
+    due = [detail for detail in details if _review_detail_is_due(detail, stable_as_of)]
+    return [_due_review_item(detail, stable_as_of) for detail in due[: min(limit, 200)]]
 
 
 async def _evaluate_due_review(
@@ -241,6 +268,33 @@ def _review_detail_is_due(detail: AdviceReviewDetail, as_of: datetime) -> bool:
     return observed >= plan.horizon_days
 
 
+def _due_review_item(detail: AdviceReviewDetail, as_of: datetime) -> AdviceReviewDueItem:
+    due_date = _review_due_date(detail.plan)
+    cutoff = completed_daily_bar_cutoff(as_of)
+    overdue = 0
+    current = due_date
+    while current < cutoff:
+        current += timedelta(days=1)
+        if is_trading_day(current):
+            overdue += 1
+    return AdviceReviewDueItem(
+        plan=detail.plan,
+        latest_evaluation=detail.latest_evaluation,
+        due_date=due_date.isoformat(),
+        overdue_trading_days=overdue,
+    )
+
+
+def _review_due_date(plan: AdviceReviewPlan) -> date:
+    current = _snapshot_datetime(plan.snapshot_market_time).date()
+    observed = 0
+    while observed < plan.horizon_days:
+        current += timedelta(days=1)
+        if is_trading_day(current):
+            observed += 1
+    return current
+
+
 def _short_review_error(
     exc: Exception,
     *,
@@ -285,6 +339,7 @@ __all__ = [
     "get_advice_review_detail",
     "list_advice_review_plans",
     "list_advice_review_details",
+    "list_due_advice_reviews",
     "normalize_review_as_of",
     "update_advice_review_plan",
 ]

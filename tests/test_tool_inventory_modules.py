@@ -81,6 +81,9 @@ def test_api_inventory_documents_business_api_scope() -> None:
     assert "GET | `/api/stock/workbench` | query `symbol: str = '600519'`" in rendered
     assert "POST | `/api/stock/ask` | body `payload: StockQuestionInput`" in rendered
     assert "POST | `/api/local-data/export` | - | `export_local_user_data`" in rendered
+    assert "GET | `/api/discovery/presets`" in rendered
+    assert "GET | `/api/paper-trading`" in rendered
+    assert "GET | `/api/paper-trading/runs/{run_id}/export.csv`" in rendered
     assert "response: Response" not in rendered
     assert "POST | `/api/reviews/plans/{plan_id}/evaluate` | path `plan_id: int`<br>body `payload: AdviceReviewEvaluationRequest \\| None`" in rendered
     assert "`503`: provider, runtime, scheduler, or SQLite failures" in rendered

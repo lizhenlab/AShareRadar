@@ -69,6 +69,7 @@ The current test suite is split by domain:
 - `tests/test_api_local_data_routes.py`: single-use preview claims, file/mode/database-state binding, expiry/replay rejection, verified pre-import backups, stable backup failures, and backed-up manual user-history cleanup.
 - `tests/test_api_monitoring_routes.py`
 - `tests/test_api_notes_routes.py`
+- `tests/test_api_paper_trading_routes.py`: paper-account, frozen-strategy, validation, deletion, no-store, and OpenAPI contracts.
 - `tests/test_api_review_routes.py`: review-plan deletion success/not-found contracts and OpenAPI response schema coverage.
 - `tests/test_api_security_modules.py`
 - `tests/test_api_stock_routes.py`
@@ -119,6 +120,7 @@ The current test suite is split by domain:
 - `tests/test_frontend_market_scan_reliability.py`: compact whole-run progress, aggregated failure examples, capability labels, and responsive leaderboard contracts.
 - `tests/test_frontend_notes_alerts_requests.py`: independent note/alert write ownership, local successful-write reconciliation, stale readback protection, explicit readback degradation, and row-scoped failure feedback.
 - `tests/test_frontend_notifications.py`: permission timing, first-poll baseline, keyset page draining, non-advancing-page safety, trigger de-duplication, burst summaries, and failed-delivery retry without skips.
+- `tests/test_frontend_paper_trading.py`: escaped strategy rendering, account/equity views, frozen-plan writes, refresh, and static workspace reachability.
 - `tests/test_frontend_research_activity.py`: three-source normalization/order, limits and filters, escaped output, and distinct loading/empty/partial-or-total-unavailable states.
 - `tests/test_frontend_research_panels.py`
 - `tests/test_frontend_review_scan.py`: escaped review rendering, snapshot-bound and rendered-symbol-owned plan requests, server-current-time handling for today, Shanghai end-of-day historical evaluation, lazy/retryable history ownership, current/custom scan controls, strict prices/symbols, whitelisted conditions, and result rendering.
@@ -142,7 +144,8 @@ The current test suite is split by domain:
 - `tests/test_market_scan_automation.py`: SH/SZ/BJ provider preflight, sanitized persisted diagnostics, bounded restart-safe cadence, structured retry eligibility, and pending-only automatic resume.
 - `tests/test_market_scan_architecture.py`: executor ownership, dependency direction, protocol boundaries, and split-module maintainability.
 - `tests/test_market_scan_execution.py`: full-universe batching, bounded concurrency, quote/K-line failure classification, and persistence behavior.
-- `tests/test_market_scan_evaluation.py`: read-only/no-look-ahead forward returns, market/quality/mode strata, sample floors, rule comparability, CLI output, and byte-for-byte database immutability.
+- `tests/test_market_scan_evaluation.py`: read-only/no-look-ahead forward returns, independent-session floors, session-block confidence intervals, Rank IC/deciles, board/market/quality/segment/liquidity/time strata, frozen-rank stability without future returns, T+1/cost/tradeability scenarios, shadow comparison, CLI output, and byte-for-byte database immutability.
+- `tests/test_market_scan_shadow_scoring.py`: deterministic input-order-independent Shadow v5 ranking, penalty-only confidence/special status, preregistered ablations, future-row exclusion, invalid/short inputs, specification replay, and normalization/ranking digest validation.
 - `tests/test_market_scan_export.py`: valid XLSX generation, complete filtered snapshots, audit metadata, text/formula safety, empty exports, and published-run enforcement.
 - `tests/test_market_scan_frontend.py`: split-module/version wiring, strict contracts, one-timer polling, bounded backoff, latest recovery, new-run pagination reset, online recovery, escaped rendering, and ARIA state.
 - `tests/test_market_scan_lifecycle.py`: lifecycle release, cancel/restart recovery, terminal SQLite retry, owned post-worker recovery, and foreign-leader protection.
@@ -160,6 +163,8 @@ The current test suite is split by domain:
 - `tests/test_minute_analysis_modules.py`
 - `tests/test_optional_kline_parsing_modules.py`
 - `tests/test_optional_provider_concurrency.py`
+- `tests/test_paper_trading.py`: deterministic no-lookahead fills, T+1 and blocked-exit lifecycles, board lots/price limits, versioned costs, benchmark/excess metrics, priority/expiry rules, and immutable run persistence.
+- `tests/test_paper_trading_schema.py`: populated v1 ledger migration, cost/provenance compatibility backfill, referential integrity, and idempotent v2 schema application.
 - `tests/test_provider_errors_modules.py`
 - `tests/test_provider_canary.py`: SH/SZ/BJ quote plus five-row daily-K contracts, three-market stock-pool validation, independent market/stock-pool and overall timeout boundaries, cancellation/cleanup, temporary SQLite CLI wiring, sanitization, and complete/partial/failure exit codes.
 - `tests/test_provider_failure_status_modules.py`

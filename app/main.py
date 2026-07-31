@@ -30,6 +30,7 @@ from app.api.routes import (
     market_scan,
     monitoring,
     notes,
+    paper_trading,
     quotes,
     reviews,
     stock,
@@ -206,6 +207,7 @@ def _register_routes(app: FastAPI, static_dir: Path) -> None:
     app.include_router(watchlist.router)
     app.include_router(watchlist_scan.router)
     app.include_router(reviews.router)
+    app.include_router(paper_trading.router)
     app.include_router(monitoring.router)
     app.include_router(data.router)
     app.include_router(local_data.router)

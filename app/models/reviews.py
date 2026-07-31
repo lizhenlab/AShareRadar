@@ -258,6 +258,11 @@ class AdviceReviewDetail(BaseModel):
     latest_evaluation: AdviceReviewEvaluation | None = None
 
 
+class AdviceReviewDueItem(AdviceReviewDetail):
+    due_date: str
+    overdue_trading_days: int = Field(default=0, ge=0)
+
+
 class ResearchQueueRefreshItem(BaseModel):
     symbol: str
     status: ResearchQueueRefreshStatus
@@ -346,6 +351,25 @@ class WatchlistScanResponse(BaseModel):
     as_of: str
     rule_version: Literal["watchlist-scan-v1"] = "watchlist-scan-v1"
     conditions: list[WatchlistScanCondition]
+
+
+class WatchlistScanRecord(WatchlistScanResponse):
+    id: int
+    universe_kind: WatchlistScanUniverse
+    created_at: str
+
+
+class WatchlistScanHistoryItem(BaseModel):
+    id: int
+    universe_kind: WatchlistScanUniverse
+    as_of: str
+    rule_version: str
+    conditions: list[WatchlistScanCondition]
+    universe_count: int = Field(ge=0)
+    success_count: int = Field(ge=0)
+    matched_count: int = Field(ge=0)
+    missing_count: int = Field(ge=0)
+    created_at: str
 
 
 def _required_text(value: str) -> str:
@@ -505,6 +529,7 @@ __all__ = [
     "AdviceEvidenceNature",
     "AdviceEvidenceRef",
     "AdviceReviewDetail",
+    "AdviceReviewDueItem",
     "AdviceReviewBatchItem",
     "AdviceReviewBatchSummary",
     "AdviceReviewEvaluation",
@@ -524,6 +549,8 @@ __all__ = [
     "WatchlistScanCondition",
     "WatchlistScanItem",
     "WatchlistScanMissing",
+    "WatchlistScanHistoryItem",
+    "WatchlistScanRecord",
     "WatchlistScanRequest",
     "WatchlistScanResponse",
     "WatchlistScanUniverse",
