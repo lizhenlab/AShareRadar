@@ -1,15 +1,15 @@
 # Direct runtime dependencies. Keep test and lint tooling in requirements-dev.txt.
-akshare==1.18.60
-baostock==0.9.1
-fastapi==0.136.1
-futu-api==10.5.6508
-httpx==0.27.0
-numpy==1.26.4
+akshare==1.18.82
+baostock==0.9.3
+fastapi==0.141.1
+futu-api==10.9.6908
+httpx==0.28.1
+numpy==2.5.1
 openpyxl==3.1.5
-openai==2.31.0
-pandas==2.2.2
+openai==2.53.0
+pandas==3.0.5
 pydantic==2.13.4
-requests==2.33.1
-starlette==1.3.1
+requests==2.34.2
+starlette==1.4.1
 tushare==1.4.29
-uvicorn==0.46.0
+uvicorn==0.52.1
