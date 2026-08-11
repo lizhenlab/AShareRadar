@@ -200,7 +200,46 @@ curl -sS 'http://127.0.0.1:8010/api/market-scans/1/results?page=1&page_size=100&
 curl -fL -o market-scan.xlsx 'http://127.0.0.1:8010/api/market-scans/1/export.xlsx?status=success&market=SH&market=BJ&min_score=80&sort=score&order=desc'
 curl -sS -X POST http://127.0.0.1:8010/api/market-scans/1/cancel
 curl -sS -X POST http://127.0.0.1:8010/api/market-scans/1/retry
+curl -sS -X POST http://127.0.0.1:8010/api/market-scans/1/refresh-top100
 ```
+
+The TOP100 refresh endpoint accepts only a published, current-date run whose scoring fingerprint still matches the active configuration. It creates a linked derived snapshot and never overwrites the source leaderboard. Use a new full-market scan when the source date or rule fingerprint is stale.
+
+### Strategy laboratory operations
+
+Use the browser editor for the ordinary flow. The API is also inspectable without a provider call:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8010/api/strategy-lab/parse \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"排除 ST 和上市不足 120 天，选择沪深 A 股中近 20 日趋势较强、成交额超过 1 亿、风险较低的股票，行业最多 3 只，持有 5 天。"}'
+curl -sS http://127.0.0.1:8010/api/strategy-lab/metrics
+curl -sS 'http://127.0.0.1:8010/api/strategy-lab/strategies?page=1&page_size=20'
+curl -sS 'http://127.0.0.1:8010/api/strategy-lab/executions/1/candidates?page=1&page_size=50&sort_by=utility_score&descending=true'
+curl -sS 'http://127.0.0.1:8010/api/strategy-lab/executions/compare?left_execution_id=1&right_execution_id=2'
+curl -sS 'http://127.0.0.1:8010/api/strategy-lab/executions/1/simulation-plan'
+```
+
+Saving or updating requires the complete structured `spec`, `confirmed: true`, and the expected revision for an update. Execution requires a saved `strategy_id`; `latest_scan` resolves one frozen published run, while `historical_replay` requires an exact persisted historical date/run and never contacts a provider. Equal, `risk_adjusted`, and `custom` weighting are executable contracts; custom weights must use canonical `000000.SH|SZ|BJ` symbols, stay under the stock/count caps, and sum to at most one. Buy and hold utility thresholds are separate deterministic admission gates. A valid response can be `no_trade`; do not weaken evidence, source provenance, price-limit, suspension, liquidity, or portfolio guards just to fill the requested stock count. Candidate pages are capped at 200 and the browser uses 50.
+
+Evidence refresh is intentionally cheap and synchronous:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8010/api/strategy-lab/strategies/1/evidence/refresh \
+  -H 'Content-Type: application/json' -d '{"revision":1,"mode":"official"}'
+```
+
+It reads `docs/research/FULL_MARKET_SELECTION_SHADOW_V5_2026.json`, records that artifact's schema, generation time, and digest, and combines it with the latest matching strategy execution. It does not launch the cross-date evaluator. To deliberately recompute the baseline, run the following offline and review the generated diff before replacing a retained report:
+
+```bash
+python tools/evaluate_market_scan_shadow.py \
+  --database data/ashare_radar.sqlite3 \
+  --output shadow-comparison.json
+```
+
+Keep production services single-worker while the existing runtime leader owns schedules. A strategy schedule is pinned to the revision present at creation, can be disabled with `PATCH /api/strategy-lab/schedules/{id}` and `{"enabled":false}`, and processes each published scan at most once. Failed schedule attempts are isolated and persisted in schedule-run state; alerts retain all strategy/data/rule/cost fingerprints. Archiving prevents new latest executions and automatically disables a still-enabled schedule before another claim; historical execution/evidence reads remain available. The manual `/api/strategy-lab/automation/evaluate` endpoint is an operational diagnostic, not an order trigger.
+
+Local user-data JSON export includes strategy roots and immutable versions. It intentionally excludes execution candidates, evidence snapshots, schedules, and alert runtime provenance because those records depend on frozen scan rows; use the verified full runtime backup/restore workflow for that complete lineage. A replace import that would violate an existing runtime reference fails and rolls back atomically.
 
 Replace `1` with the returned run ID. `queued`, `running`, and `cancelling` are active states. `success` means every seeded stock produced a clean ranked row from a current stock pool. `degraded` also covers a locally cached `stale-fallback` stock pool even when every per-stock score succeeds; run diagnostics and `stock_pool_source` retain that provenance. Per-result decisions use structured `quote_fallback_used`, `kline_fallback_used`, `metadata_degraded`, and `degradation_reasons` fields; Chinese display tags are derived and do not control retry or terminal status. `failed` means no usable ranking or a run-level prerequisite failed; `cancelled` and `interrupted` can be retried. Repeated starts return the existing active run rather than creating overlapping work. Runtime-leader startup or takeover changes orphaned active rows to `interrupted` before mutation.
 
@@ -210,7 +249,7 @@ Result and export queries accept repeated `market` values, repeated substring-ma
 
 Excel export accepts the exact same normalized filter and multi-sort parameters as the browser leaderboard, without pagination. Only `success` or `degraded` runs are exportable. The download contains `榜单`, `评分明细`, and `导出信息` sheets; it reads the persisted snapshot and does not contact providers or recompute ranks. Stock codes stay text and provider/user-derived cells are protected against formula injection. The API returns `Cache-Control: no-store`, an attachment filename, and the standard XLSX media type.
 
-Every run exposes `current_stage`, `stage_metrics`, `market_progress`, `elapsed_seconds`, effective `throughput_per_second`, and optional `eta_seconds`. The six stages are stock pool, bulk quotes, K-line acquisition, scoring, persistence, and publication. Wall duration and accumulated work duration can differ because concurrent K-line and scoring work overlaps. ETA is intentionally `null` until at least 20 rows and five seconds are observed; clients must display `估算中`, not invent precision. SH/SZ/BJ progress reports total/processed/success/missing/skipped and coverage separately. A terminal provider/coverage/span/distribution diagnosis should be acted on by restoring the source or retrying pending rows, never by lowering publication guards.
+Every run exposes `current_stage`, `stage_metrics`, `market_progress`, `elapsed_seconds`, effective `throughput_per_second`, and optional `eta_seconds`. The six stages are stock pool, bulk quotes, K-line acquisition, scoring, persistence, and publication. In v6, bulk quotes means the complete all-chunk capture phase: K-line acquisition cannot begin until its exact-count envelope is sealed. Wall duration and accumulated work duration can differ because concurrent K-line and scoring work overlaps after that boundary. ETA is intentionally `null` until at least 20 rows and five seconds are observed; clients must display `估算中`, not invent precision. SH/SZ/BJ progress reports total/processed/success/missing/skipped and coverage separately. The terminal UI separates **发布阻断**, **已通过门禁**, and **数据源告警**; operators should restore the source or start a valid retry instead of lowering publication guards.
 
 Run the provider-free, repeatable cache-path benchmark against the configured database:
 
@@ -223,6 +262,8 @@ python tools/benchmark_market_scan.py \
 
 The source database is checked for size/mtime mutation. The cold case uses an empty temporary cache of the same symbol cardinality; the warm case reads persisted K-lines. It compares the legacy connection-per-symbol path with production batch prefetch and reports historical complete-run median separately. The recorded 5,532-symbol evidence improved the cold local cache-read median from 3.043701 s to 0.078691 s (97.41%) and the warm median from 13.828884 s to 11.129911 s (19.52%). Ten historical complete scans had a 599.633 s median, so the safe local change contributes an estimated 0.45% end-to-end ceiling; provider refresh remains the measured limiting factor. No provider concurrency, date/coverage gate, incomplete-bar rule, or 30-minute deadline was changed.
 
+Production has two ordered phases. First, every quote chunk is fetched, frozen with its provider-response observation time, and sealed into one capture envelope; no K-line work overlaps this phase. Second, only the next batch's SQLite preservation-cache read may overlap the current batch's provider K-line work. K-line look-ahead depth is one, scoring and writes keep batch ownership, and the speculative task is drained on cancellation or failure. Tencent quote and daily-K calls also share one provider-scoped HTTP client and keep-alive pool until orderly DataHub shutdown. This removes repeated client/TLS setup but does not reduce the required provider responses or raise the provider admission limit. A 5,540-symbol read-only A/B rejected a proposed window-function cache query because it was 0.44%–1.99% slower and required temporary sorts; the indexed single-connection batch query remains the production path.
+
 Produce a read-only effectiveness research report with:
 
 ```bash
@@ -233,7 +274,47 @@ python tools/evaluate_market_scan.py \
 
 Optional repeated `--run-id`, `--mode`, `--minimum-sample`, and `--complete-coverage` flags narrow the study. The evaluator opens SQLite in URI read-only/query-only mode, starts from frozen published ranks, and uses only later complete persisted trading days. Every Top-N/horizon/stratum cohort is either `ok` or `insufficient_data`; missing later days are not backfilled from current providers. This report is research evidence only. Do not change production weights without a reviewed new `rule_version`.
 
-Retry creates a new run whose `retry_of_run_id` points to the frozen original. The repository returns one `MarketScanRetryPlan`, and both manager validation and atomic copy use that same plan; a concurrent change aborts retry rather than mixing decisions. A never-published `failed` run is fully recalculated because its partial cross-sectional snapshot is not reusable. A `degraded`, `cancelled`, or `interrupted` run may copy only clean successes; unresolved, fallback-derived, metadata-degraded, or stale-pool rows return to pending. When pending rows exist, retry validates a complete same-data-date stock pool and refreshes metadata only on those symbols. A fully processed clean interrupted run can be finalized without another provider read. `rule_version` is a stable hash over score, K-line/history, universe, metadata, and publication rules. Retry requires an exact contract match; after a contract change, create a new scan instead of mixing scores.
+Generate the separate 1/5/20-session上涨概率 Shadow artifact with:
+
+```bash
+python tools/evaluate_market_scan_probability.py \
+  --database data/ashare_radar.sqlite3 \
+  --output-dir data/market-scan-probability \
+  --report data/market-scan-probability-summary.json
+```
+
+The command opens SQLite through the same `mode=ro` plus `PRAGMA query_only=ON` evaluation path and has no database write path; only the ignored JSON artifact directory and optional machine-report path are written. Stop other database-writing services or evaluate a copied database when independently checking byte-for-byte invariance, because a concurrently running service may legitimately change the live file. It publishes one immutable content-addressed artifact per run so the API can validate and load only the requested history batch, while collectively retaining every run/symbol/target/horizon result. This includes `probability=null` and its limitations when the independent-date, split, 95% label-coverage, point-in-time evidence, per-bin, calibration, Top100 cost-aware outcome, temporal/major-strata or deterministic-replay gates fail.
+
+Probability research is never pooled across `(mode, scope, rule_version)`. For a given cohort and quote date, the read-only query orders published runs by `as_of` then `id` and keeps the final run; a conflicting second run that reaches the research builder is a contract violation and stops evaluation. Each cohort independently owns its equal-weight benchmark, labels, train/calibration/test folds, model, metrics and review gates. When the report contains several cohorts, use `cohorts[].cohort_contract` and its horizon evidence. The top-level horizon summary has `probability=null` and is only an index: do not infer a pooled base rate, benchmark, model, calibrated percentage or promotion decision from it.
+
+The grouped-date evaluator fits every complete non-overlapping test fold independently, drops a partial trailing test window, aggregates all fold-tagged OOS predictions, and records each fold's split/artifacts/base rate/digests. Brier Skill uses the corresponding calibration-period base rate; forecasts after the final test window use only the final complete fold. The 5-session equal-weight-market net-excess target is primary; 1 and 20 sessions and absolute net return remain separately auditable. Label v2 buys at the first tradeable-session open after the scan, counts that session as holding day 0, and sells at the H-th later tradeable-session close with T+1, capacity, locked-limit/suspension and round-trip cost rules; no missing or locked exit is shifted to a more convenient date. An unavailable or degraded effective-dated rule profile produces non-modelled evidence and is excluded from both the cohort benchmark and training. A verified profile may retain `daily_bar_model_limited=true` for ordinary OHLC-only intraday uncertainty under the registered open/close model; this flag is a limitation, not proof of exact fill order. Platt remains the display calibrator, the empirical-Bayes result remains a baseline, and Isotonic stays a sample-gated comparison candidate whose status/parameters/metrics are recorded without automatic selection.
+
+Artifacts use canonical finite JSON, exact schema/version contracts and a SHA-256 payload integrity seal. The seal detects alteration but is not a digital signature, signer identity or authenticity proof. Before reporting success, the CLI loads the complete artifact manifest, rejects missing/duplicate artifacts and records, regroups full feature/label inputs by cohort, and independently refits every target/horizon. Only exact reconstructed study fields and input/evidence digests yield `full_input_replay_verified=true` plus an `artifact_set_replay` breakdown; otherwise the command fails instead of publishing a credible flag. Stdout is one `market-scan-probability-evaluation-summary-v1` JSON object. `--report` atomically writes the identical object, refuses to overwrite/link to SQLite or an artifact, and is suitable for machines rather than a promotion authorization. `GET /api/market-scans/{run_id}/probability-research` and the ordinary results response load only verified artifacts and never recompute a model or write SQLite. `probability_horizon=1|5|20` selects the displayed/filter horizon; `min_upside_probability=0..1` returns `422` unless calibrated primary-target evidence exists for that run's cohort, and a null estimate is never treated as zero. These values are Shadow-only and do not affect production order. If database persistence is later desired, implement it as a separately invoked, reviewed importer into a dedicated versioned table; do not let this evaluator or the request path mutate the runtime database.
+
+Generate the official-only D+1/D+2/D+3 future-range evidence separately:
+
+```bash
+python tools/evaluate_market_scan_future_range.py \
+  --database data/ashare_radar.sqlite3 \
+  --output-dir data/research/market_scan_future_range \
+  --report data/research/market-scan-future-range-summary.json
+```
+
+Optional repeated `--run-id` narrows artifact targets, while repeated `--probability-artifact` may attach only previously persisted OOS `calibrated_shadow` context. `--minimum-sample-size`, `--minimum-session-count`, `--complete-run-coverage`, and `--bootstrap-samples` change research gates but cannot change the fixed `(1,2,3)` exchange-session offsets, HLC3 proxy contract, three-session moving-block length, production rank, or existing probability labels. The artifact also declares `validation_gap_sessions=3` as the minimum for any future train/test split; the current descriptive cohort has no fitted split and is not thinned by that setting. The command opens SQLite with `mode=ro`, `PRAGMA query_only=ON`, and one explicit transaction snapshot, then writes one immutable `market-scan-future-range-run-<id>-<digest>.json` per selected canonical published official run. Its summary records SHA-256 before and after: equality is the static-copy byte-invariance proof; a difference on a running service is reported as `database_concurrent_external_change_detected=true`, not misattributed to this query-only process. Stop writers or use a static database copy when byte equality itself is required.
+
+D is reconstructed only from digest-verified point-in-time scan evidence. Future dates come from the trusted exchange calendar; missing, suspended, zero-volume, not-yet-ingested, version-conflicting, or adjustment-rebased fixed dates remain unavailable and are never silently replaced by a later bar. HLC3 is a typical-price proxy, not VWAP. The D+1-open low/HLC3/high/close path and MFE/MAE are exploratory because a daily bar cannot reveal intraday order. The separate executable result marks D+1 same-day exit unavailable under T+1, uses D+2 as the existing H=1 close exit and D+3 as H=2, and records gross/net/cost/same-run benchmark/net-excess values only when the rule and fill model is valid. Future daily bars have no amount field, so capacity is only an explicit frozen signal-day amount proxy, not a future fill-capacity measurement. Evidence below the coverage or independent-date floor is persisted as `insufficient_data`; available descriptive mean/median/positive-rate observations may remain visible with that warning, but CI/pass/effectiveness fields stay blank and missing values are never replaced by zero.
+
+Inspect one generated artifact through the read-only server path:
+
+```bash
+curl -sS 'http://127.0.0.1:8010/api/market-scans/1/future-range-research?page=1&page_size=20&session_offset=2'
+curl -sS 'http://127.0.0.1:8010/api/market-scans/1/future-range-research?page=2&page_size=20&session_offset=2&include_research=false'
+curl -sS 'http://127.0.0.1:8010/api/market-scans/1/future-range-research?page=1&page_size=20&symbol=600519.SH'
+```
+
+The wrapper always contains `generation_status`, `artifact`, `research`, and `record_page`. Missing artifacts return `not_generated` with empty records; a verified underpowered artifact returns `insufficient_data`; non-published/non-official runs return `422`; a current-schema integrity failure returns `409`. The browser panel loads lazily only for the selected official batch. Ordinary XLSX export appends **未来区间验证** from the same verified artifact, including fixed-session status, exploratory range/path evidence, executable gross/net/net-excess evidence, versions/digests, and blank cells for unavailable values. Neither API nor export invokes providers, recomputes outcomes, writes SQLite, or promotes a model.
+
+Retry creates a new run whose `retry_of_run_id` points to the frozen original. The repository returns one `MarketScanRetryPlan`, and both manager validation and atomic creation use that same plan; a concurrent change aborts retry rather than mixing decisions. For `full-market-scan-v6`, every retry resets the full universe, acquires a new all-quote capture envelope, and recomputes every row regardless of whether the source was `failed`, `degraded`, `cancelled`, or `interrupted`. Clean-success copying and pending-only metadata refresh remain legacy pre-v6 compatibility paths only. `rule_version` is a stable hash over score, K-line/history, universe, metadata, snapshot, and publication rules. Retry requires an exact contract match; after a contract change, create a new scan instead of mixing scores.
 
 The completed `data_date` is the scan's frozen end-of-day boundary. A quote revision timestamped after run creation remains valid when its Shanghai market date still equals that `data_date`; a quote or K-line from another date is rejected. Retry that still needs market data is accepted only while the source run's date is the current completed trading date. Because providers expose only the current snapshot, an explicit historical `as_of` cannot create a new run; historical rankings are read only from already persisted snapshots. The `task_run` row is created and attached to its queued scan in one transaction. Scan terminal state, ranking/count validation, and the linked task terminal update also commit together. Terminal writes retry only SQLite `BUSY`/`LOCKED` errors, at most three attempts with bounded backoff. If all attempts fail, the owning process records the run; once its local worker is gone and it still holds unified leadership, a later status or scan operation converges the row to `interrupted`. Another instance cannot perform that local recovery, while a crash/takeover still uses the startup reconciliation path.
 
@@ -243,9 +324,9 @@ On trading days, a manual start or a retry that still needs market data is rejec
 
 Each formal scan may make thousands of daily-K refresh requests. A compatible cache is an overlap-verified incremental base or explicit fallback, but the scan requires a real provider response before treating a row as freshly verified. The executor has a fixed 30-minute whole-run wall-clock budget and rechecks the completed trading date throughout execution. Keep one Uvicorn worker, begin with the defaults, and change batch/concurrency only after observing provider latency and error rates. The default daily-K chain uses Tencent's current `newfqkline` endpoint for SH/SZ/BJ, then AKShare, optional token-backed Tushare, and BaoStock. Every accepted sequence must satisfy the shared `daily-kline.v1`/`qfq` contract.
 
-Before ranks are assigned, publication requires at least 95% success coverage over eligible (`success + missing`) rows for ALL, SH, SZ, and BJ independently. Deterministic `skipped` rows do not dilute that denominator, but at least 90% of each seeded market must remain eligible so a systemic problem cannot be hidden as mass skipping. It also rejects an unparseable quote timestamp, a global SH/SZ/BJ quote span above 15 minutes, or a same-stale-date cluster covering at least 5% of the universe (minimum three rows). A versioned distribution gate audits observed `raw_score` coverage, distinct-score ratio, maximum tie group, 0/100 saturation, and top-100 ties; a constant or severely collapsed score set fails instead of receiving ranks. Correct the provider/date/algorithm issue and retry; do not lower a gate merely to publish a biased list.
+Before ranks are assigned, publication requires at least 95% success coverage over eligible (`success + missing`) rows for ALL, SH, SZ, and BJ independently. Deterministic `skipped` rows do not dilute that denominator, but at least 90% of each seeded market must remain eligible so a systemic problem cannot be hidden as mass skipping. V6 also requires a sealed capture envelope whose count equals the seeded universe, a parseable `quote_observed_at` for every terminal row, capture duration no greater than 20 minutes, global observation-time span no greater than 20 minutes, and a quote event-time span no greater than 20 minutes inside each market. The event-time spread across SH/SZ/BJ is reported for diagnosis but does not block v6 publication because exchange/provider timestamps are not assumed to share one cross-market clock edge. An unparseable event timestamp or a same-stale-date cluster covering at least 5% of the universe (minimum three rows) still blocks. A versioned distribution gate audits observed `raw_score` coverage, distinct-score ratio, maximum tie group, 0/100 saturation, and top-100 ties; a constant or severely collapsed score set fails instead of receiving ranks. Correct the provider/date/algorithm issue and retry; do not lower a gate merely to publish a biased list.
 
-Quote work is one bounded batch at a time; K-line work is limited by a semaphore, per-symbol timeout, retries, and backoff. Per-symbol retries apply only to symbol-specific failures. A quote-batch failure or unavailable complete daily-K chain is raised to the shared batch recovery loop. Only affected rows remain `pending` during that run, and waits consume `ASHARE_RADAR_MARKET_SCAN_PROVIDER_WAIT_BUDGET_SECONDS`. If recovery is exhausted, the run becomes `failed` without bulk-inflating `missing_count`; an explicit retry fully recalculates the failed batch rather than mixing its partial snapshot. Set the wait budget to `0` to fail immediately after the configured batch attempts without sleeping.
+Quote capture fetches one bounded chunk at a time until every chunk is frozen and the envelope is sealed; only then is K-line work admitted through its semaphore, per-symbol timeout, retries, and backoff. Per-symbol retries apply only to symbol-specific K-line failures. A quote-capture failure or unavailable complete daily-K chain is raised to the shared recovery loop. Affected rows remain `pending` during the current run, and waits consume `ASHARE_RADAR_MARKET_SCAN_PROVIDER_WAIT_BUDGET_SECONDS`. A chain-wide cooldown-only signal is rechecked after at most 5 seconds instead of blocking one interactive scan for the full provider cooldown. If recovery is exhausted, the run becomes `failed` without bulk-inflating `missing_count`; the next v6 retry discards partial capture state and recomputes the full universe. Set the wait budget to `0` to fail immediately without sleeping.
 
 Quote snapshots/history and daily K-lines persist `fallback_used`, so cache cannot silently turn degraded data into clean success. Ordinary fresh-cache origin is neutral in the full-market quality score because event time and anomaly checks already govern freshness; fallback and stale states still reduce quality. Overlap-verified incremental refresh preserves provenance, corporate-action differences force a full refresh, and repository vintage checks prevent an older sequence from replacing a newer one.
 
@@ -268,7 +349,7 @@ Troubleshooting order:
 1. Check `/api/market-scans/latest` for `last_error`, counts, and the current message.
 2. Check `/api/data/status`, `/api/system/diagnostics`, recent task runs, and provider capability failures.
 3. Query results with `status=missing`, then `status=skipped`, to group concrete per-symbol reasons.
-4. Retry after correcting a same-data-date source/network issue. A new linked run retains only clean successful rows and resets non-success or explicitly degraded rows. If the completed trading date has advanced, start a new scan instead.
+4. Retry after correcting a same-data-date source/network issue. A new linked v6 run freezes a new all-market quote envelope and recomputes every row; do not expect clean rows from the prior capture to be retained. If the completed trading date has advanced, start a new scan instead.
 5. If a run remains active after an unclean process exit, let one process acquire the unified runtime-leader lock; startup or standby takeover reconciles it to `interrupted`. Do not edit status rows manually.
 
 ## 3. Diagnostics and Browser Notifications
@@ -432,7 +513,7 @@ npm run check:js
 $PYTHON tools/api_inventory.py --check
 $PYTHON tools/architecture_inventory.py --check
 $PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing
-npx --no-install playwright install chromium
+npx --no-install playwright install chromium firefox webkit
 npm run test:e2e
 ```
 

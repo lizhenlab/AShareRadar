@@ -108,7 +108,7 @@ async def _kline_map_for_quotes(datahub, quotes: list[Quote], *, limit: int, con
     rows = await asyncio.gather(*(datahub.kline(symbol, limit) for symbol in symbols), return_exceptions=True)
     result: dict[str, list[Kline]] = {}
     failed_symbols: list[str] = []
-    for quote, symbol, item in zip(quotes, symbols, rows):
+    for quote, symbol, item in zip(quotes, symbols, rows, strict=True):
         if isinstance(item, BaseException):
             if isinstance(item, asyncio.CancelledError):
                 raise item

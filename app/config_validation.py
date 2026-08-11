@@ -34,7 +34,7 @@ def _parse_llm_base_url(text: str) -> tuple[SplitResult, str]:
     try:
         parsed = urlsplit(text)
         host = parsed.hostname
-        parsed.port
+        _ = parsed.port
     except ValueError:
         raise ValueError("llm_base_url 必须是合法的绝对 HTTP(S) URL") from None
     if "@" in parsed.netloc or parsed.username is not None or parsed.password is not None:

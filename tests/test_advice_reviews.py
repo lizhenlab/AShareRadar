@@ -31,7 +31,7 @@ def _insert_advice(path: Path, *, market_time: str | None = "2026-05-10 10:00:00
                 '中性观察', '可控风险', 100, 0, 95, 110,
                 90, '优秀', '测试理由', '测试摘要', '2026-05-10 10:00:01',
                 '2026-05-10 10:00:01', 1, 'v1', 'rule', 'rule-v1', 'model-v1', ?, 'test',
-                'qfq', '2026-05-09', 100, 'snapshot-qfq-v1', 'daily-kline.v1'
+                'qfq', '2026-05-08', 100, 'snapshot-qfq-v1', 'daily-kline.v1'
             )
             """,
             (market_time,),
@@ -121,7 +121,7 @@ def test_review_evaluation_excludes_snapshot_day_and_marks_same_day_barriers_amb
     cache = SQLiteCache(path)
     plan = cache.create_advice_review_plan(_plan_input(_insert_advice(path)))
     rows = [
-        make_kline(date="2026-05-09", close=99, high=100, low=98),
+        make_kline(date="2026-05-08", close=99, high=100, low=98),
         make_kline(date="2026-05-10", close=111, high=112, low=94),
         make_kline(date="2026-05-11", close=102, high=111, low=94),
         make_kline(date="2026-05-12", close=103, high=104, low=100),
@@ -134,7 +134,7 @@ def test_review_evaluation_excludes_snapshot_day_and_marks_same_day_barriers_amb
         evaluated_at="2026-05-12 16:01:00",
     )
 
-    assert draft.visible_end_date == "2026-05-09"
+    assert draft.visible_end_date == "2026-05-08"
     assert draft.forward_start_date == "2026-05-11"
     assert draft.available_forward_days == 1
     assert draft.status == "evaluated"
@@ -186,7 +186,7 @@ def test_repository_preserves_new_pending_with_complete_snapshot_provenance(tmp_
     for evaluation in (saved, fetched, detail.latest_evaluation):
         assert (evaluation.status, evaluation.conclusion) == ("pending", "pending")
         assert evaluation.snapshot_adjustment_mode == "qfq"
-        assert evaluation.snapshot_anchor_date == "2026-05-09"
+        assert evaluation.snapshot_anchor_date == "2026-05-08"
         assert evaluation.snapshot_anchor_close == 100
         assert evaluation.snapshot_data_version == "snapshot-qfq-v1"
         assert evaluation.snapshot_contract_version == "daily-kline.v1"
@@ -202,7 +202,7 @@ def test_repository_redacts_unverifiable_legacy_evaluation_without_mutating_audi
     draft = evaluate_advice_forward_window(
         plan,
         [
-            make_kline(date="2026-05-09", close=100, high=101, low=99),
+            make_kline(date="2026-05-08", close=100, high=101, low=99),
             make_kline(date="2026-05-11", close=111, high=112, low=99),
         ],
         as_of=datetime(2026, 5, 11, 16),
@@ -227,8 +227,8 @@ def test_repository_redacts_unverifiable_legacy_evaluation_without_mutating_audi
                 normalized_target_price = 110,
                 normalized_stop_price = 95,
                 visible_bar_count = 1,
-                visible_start_date = '2026-05-09',
-                visible_end_date = '2026-05-09',
+                visible_start_date = '2026-05-08',
+                visible_end_date = '2026-05-08',
                 available_forward_days = 1,
                 forward_start_date = '2026-05-11',
                 forward_end_date = '2026-05-11',
@@ -282,7 +282,7 @@ def test_repository_redacts_unverifiable_legacy_evaluation_without_mutating_audi
             """,
             (saved.id,),
         ).fetchone()
-    assert raw == ("evaluated", "target_hit", 11.0, 1, "2026-05-11", "2026-05-09", "2026-05-11")
+    assert raw == ("evaluated", "target_hit", 11.0, 1, "2026-05-11", "2026-05-08", "2026-05-11")
 
 
 def test_review_evaluation_upsert_is_idempotent_for_one_revision_and_as_of(tmp_path: Path) -> None:
@@ -309,7 +309,7 @@ def test_review_evaluation_rebases_frozen_price_levels_to_current_qfq_vintage(tm
     cache = SQLiteCache(path)
     plan = cache.create_advice_review_plan(_plan_input(_insert_advice(path)))
     rows = [
-        make_kline(date="2026-05-09", close=50, high=51, low=49, data_version="rebased-qfq-v2"),
+        make_kline(date="2026-05-08", close=50, high=51, low=49, data_version="rebased-qfq-v2"),
         make_kline(date="2026-05-11", close=54, high=56, low=48, data_version="rebased-qfq-v2"),
     ]
 
@@ -329,12 +329,36 @@ def test_review_evaluation_rebases_frozen_price_levels_to_current_qfq_vintage(tm
     assert draft.evaluation_data_version == "rebased-qfq-v2"
 
 
+def test_review_evaluation_ignores_conflicting_bars_after_as_of(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite3"
+    cache = SQLiteCache(path)
+    plan = cache.create_advice_review_plan(_plan_input(_insert_advice(path)))
+    rows = [
+        make_kline(date="2026-05-08", close=100),
+        make_kline(date="2026-05-11", close=102, high=103, low=99),
+        make_kline(date="2026-05-12", close=103, high=104, low=101),
+        make_kline(date="2026-05-13", close=104, high=105, low=102),
+        make_kline(date="2026-05-13", close=110, high=111, low=109),
+    ]
+
+    draft = evaluate_advice_forward_window(
+        plan,
+        rows,
+        as_of=datetime(2026, 5, 12, 16),
+        evaluated_at="2026-05-12 16:01:00",
+    )
+
+    assert draft.status == "pending"
+    assert draft.available_forward_days == 2
+    assert draft.forward_end_date == "2026-05-12"
+
+
 def test_review_evaluation_marks_mature_partial_window_insufficient(tmp_path: Path) -> None:
     path = tmp_path / "cache.sqlite3"
     cache = SQLiteCache(path)
     plan = cache.create_advice_review_plan(_plan_input(_insert_advice(path)))
     rows = [
-        make_kline(date="2026-05-09", close=100),
+        make_kline(date="2026-05-08", close=100),
         make_kline(date="2026-05-11", close=102, high=103, low=99),
     ]
 

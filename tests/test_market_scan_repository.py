@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
+from app.models.market_scan import MARKET_SCAN_TOP100_REFRESH_SCOPE
 from app.repositories.market_scan import (
     MarketScanRepository,
     MarketScanResultWrite,
@@ -61,6 +62,17 @@ def test_results_are_ranked_stably_paginated_and_filtered(tmp_path: Path) -> Non
         _results(
             repo,
             run.id,
+            min_confidence=90,
+            max_risk=20,
+            min_tradability=70,
+            sort=("risk", "confidence", "symbol"),
+            order=("asc", "desc", "asc"),
+        )
+    ) == ["600001.SH", "000001.SZ"]
+    assert _symbols(
+        _results(
+            repo,
+            run.id,
             market=("SZ", "BJ"),
             industry=("银行", "高端装备"),
             min_score=70,
@@ -83,6 +95,20 @@ def test_results_are_ranked_stably_paginated_and_filtered(tmp_path: Path) -> Non
     assert _symbols(_results(repo, run.id, keyword="北交")) == ["920066.BJ"]
     assert _symbols(_results(repo, run.id, keyword="%", status=None)) == []
     assert _symbols(_results(repo, run.id, keyword="_", status=None)) == []
+    probability_scoped = _results(repo, run.id, symbols=("600002.SH", "920066.BJ"))
+    assert [(item.symbol, item.rank) for item in probability_scoped.items] == [
+        ("600002.SH", 3),
+        ("920066.BJ", 4),
+    ]  # A Shadow probability scope filters rows without reranking the persisted production ranks.
+    assert _symbols(_results(repo, run.id, symbols=())) == []
+
+
+def test_success_raw_scores_reads_only_the_complete_success_multiset(tmp_path: Path) -> None:
+    repo, _path = _repository(tmp_path)
+    run = _seed_running_run(repo, _sample_seeds())
+    repo.save_result_batch(run.id, _sample_results())
+
+    assert repo.success_raw_scores(run.id) == (80, 90, 80, 70)
 
 
 def test_retry_derives_new_run_and_keeps_original_snapshot_immutable(tmp_path: Path) -> None:
@@ -127,6 +153,48 @@ def test_retry_derives_new_run_and_keeps_original_snapshot_immutable(tmp_path: P
     assert original_items_before[0].rank == 1
 
 
+def test_top100_refresh_derives_only_source_leaders_and_preserves_full_snapshot(
+    tmp_path: Path,
+) -> None:
+    repo, _path = _repository(tmp_path)
+    run = _seed_running_run(repo, _sample_seeds()[:4])
+    repo.save_result_batch(
+        run.id,
+        [
+            _write("600001.SH", status="success", score=70, raw_score=70.1, quality=95),
+            _write("000001.SZ", status="success", score=90, raw_score=90.1, quality=95),
+            _write("600002.SH", status="success", score=80, raw_score=80.1, quality=95),
+            _write("920066.BJ", status="success", score=60, raw_score=60.1, quality=95),
+        ],
+    )
+    source = repo.finish_run(run.id, "success", message="源榜单已发布")
+    source_items = _results(repo, source.id, status=None).items
+
+    refreshed = repo.prepare_top100_refresh(
+        source.id,
+        rule_version=source.rule_version,
+        as_of="2026-07-17 16:35:00",
+        data_date=source.data_date,
+        quote_date=source.quote_date,
+        limit=3,
+    )
+    pending = repo.pending_items(refreshed.id)
+
+    assert refreshed.retry_of_run_id == source.id
+    assert refreshed.status == "queued"
+    assert refreshed.trigger == "retry"
+    assert refreshed.scope == MARKET_SCAN_TOP100_REFRESH_SCOPE
+    assert refreshed.stock_pool_source == f"top100-source-run:{source.id}"
+    assert refreshed.total_count == 3
+    assert refreshed.processed_count == refreshed.success_count == 0
+    assert {item.symbol for item in pending} == {"000001.SZ", "600002.SH", "600001.SH"}
+    assert all(item.status == "pending" and item.score is None and item.rank is None for item in pending)
+    assert repo.latest_run().id == refreshed.id
+    assert repo.latest_full_run().id == source.id
+    assert repo.run(source.id) == source
+    assert _results(repo, source.id, status=None).items == source_items
+
+
 def test_failed_retry_recomputes_every_result_instead_of_mixing_snapshots(
     tmp_path: Path,
 ) -> None:
@@ -142,13 +210,15 @@ def test_failed_retry_recomputes_every_result_instead_of_mixing_snapshots(
     repo.finish_run(run.id, "failed", message="发布可信度不足")
 
     plan = repo.retry_plan(run.id)
-    retried = repo.prepare_retry(run.id, plan)
+    retried = repo.prepare_retry(run.id, plan, as_of="2026-07-17 16:45:00")
     items = _results(repo, retried.id, status=None).items
 
     assert plan.preserved_success_count == 0
     assert plan.pending_count == 2
     assert retried.processed_count == 0
     assert retried.success_count == 0
+    assert retried.as_of == "2026-07-17 16:45:00"
+    assert repo.run(run.id).as_of == "2026-07-17 16:30:00"
     assert retried.message == "等待完整重算"
     assert [item.status for item in items] == ["pending", "pending"]
     assert all(item.score is None and item.quote_timestamp is None for item in items)
@@ -175,7 +245,50 @@ def test_cancelled_and_interrupted_retries_keep_clean_successes(
     assert retried.processed_count == 1
     assert retried.success_count == 1
     assert retried.message == "等待断点续跑"
+    assert retried.as_of == run.as_of
     assert [item.symbol for item in repo.pending_items(retried.id)] == ["000001.SZ"]
+
+
+@pytest.mark.parametrize("source_status", ("degraded", "interrupted"))
+def test_v6_retries_recompute_every_symbol_without_copying_snapshot_provenance(
+    tmp_path: Path,
+    source_status: str,
+) -> None:
+    repo, _path = _repository(tmp_path)
+    values = _run_values()
+    values["rule_version"] = "full-market-scan-v6:test"
+    run = repo.create_run(**values)
+    repo.start_run(run.id)
+    repo.seed_results(run.id, _sample_seeds()[:2], excluded_count=0)
+    writes = [_write("600001.SH", status="success", score=88, quality=95)]
+    if source_status == "degraded":
+        writes.append(_write("000001.SZ", status="missing", error="行情缺失"))
+    repo.save_result_batch(run.id, writes)
+    repo.finish_run(run.id, source_status, message="v6 等待完整重算")  # type: ignore[arg-type]
+
+    plan = repo.retry_plan(run.id)
+    retried = repo.prepare_retry(run.id, plan, as_of="2026-07-17 16:45:00")
+    items = _results(repo, retried.id, status=None).items
+
+    assert plan.preserved_success_count == 0
+    assert plan.pending_count == plan.result_count == retried.total_count == 2
+    assert retried.processed_count == retried.success_count == 0
+    assert retried.as_of == "2026-07-17 16:45:00"
+    assert repo.run(run.id).as_of == "2026-07-17 16:30:00"
+    assert retried.quote_capture_started_at is None
+    assert retried.quote_capture_finished_at is None
+    assert retried.quote_capture_duration_ms is None
+    assert retried.quote_capture_count == 0
+    assert retried.message == "等待完整重算"
+    assert all(item.status == "pending" for item in items)
+    assert all(
+        item.score is None
+        and item.quote_timestamp is None
+        and item.quote_observed_at is None
+        and item.quote_source is None
+        and item.kline_source is None
+        for item in items
+    )
 
 
 def test_retry_plan_guard_and_result_copy_commit_atomically(tmp_path: Path) -> None:
@@ -218,6 +331,68 @@ def test_retry_plan_guard_and_result_copy_commit_atomically(tmp_path: Path) -> N
     assert retried.retry_of_run_id == run.id
     assert retried.processed_count == plan.preserved_success_count
     assert len(repo.pending_items(retried.id)) == plan.pending_count
+
+
+def test_quote_capture_envelope_begin_and_seal_are_cross_process_atomic(
+    tmp_path: Path,
+) -> None:
+    repo, path = _repository(tmp_path)
+    peer = SQLiteCache(
+        settings=Settings(cache_path=path, scheduler_enabled=False)
+    ).market_scan_repo
+    run = _seed_running_run(repo, _sample_seeds()[:2])
+
+    def race(call):
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        outcomes: list[str] = []
+
+        def worker(repository):
+            barrier.wait(timeout=2)
+            try:
+                call(repository)
+            except (RuntimeError, ValueError) as exc:
+                outcome = f"error:{exc}"
+            else:
+                outcome = "ok"
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [
+            threading.Thread(target=worker, args=(repository,))
+            for repository in (repo, peer)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+        assert all(not thread.is_alive() for thread in threads)
+        return outcomes
+
+    begin_outcomes = race(
+        lambda repository: repository.begin_quote_capture(
+            run.id,
+            "2026-07-17T07:00:00Z",
+        )
+    )
+    seal_outcomes = race(
+        lambda repository: repository.seal_quote_capture(
+            run.id,
+            finished_at="2026-07-17T07:00:02Z",
+            duration_ms=2_000,
+            count=2,
+        )
+    )
+    current = repo.run(run.id)
+
+    assert begin_outcomes.count("ok") == 1
+    assert sum(outcome.startswith("error:") for outcome in begin_outcomes) == 1
+    assert seal_outcomes.count("ok") == 1
+    assert sum(outcome.startswith("error:") for outcome in seal_outcomes) == 1
+    assert current.quote_capture_started_at == "2026-07-17T07:00:00.000000Z"
+    assert current.quote_capture_finished_at == "2026-07-17T07:00:02.000000Z"
+    assert current.quote_capture_duration_ms == 2_000
+    assert current.quote_capture_count == 2
 
 
 def test_retry_pending_metadata_can_be_refreshed_without_mutating_clean_results(
@@ -700,7 +875,7 @@ def test_fallback_stock_pool_source_is_persisted_and_requires_degraded_status(
         repo.finish_run(run.id, "success", message="误报成功")
 
     final = repo.finish_run(run.id, "degraded", message="股票池缓存兜底")
-    retried = repo.prepare_retry(run.id)
+    retried = repo.prepare_retry(run.id, as_of="2026-07-17 16:45:00")
 
     assert final.stock_pool_source == "stale-fallback"
     assert retried.stock_pool_source == "stale-fallback"
@@ -881,10 +1056,27 @@ def _write(
         amount=amount,
         tags=("测试",) if status == "success" else (),
         metrics={"ma20": 9.5} if status == "success" else {},
+        score_details=(
+            {
+                "components": {
+                    "score_dimensions": {
+                        "scores": {
+                            "alpha_5d": float(score or 0),
+                            "confidence": float(quality or 0),
+                            "risk": float(100 - (score or 0)),
+                            "tradability": {100: 90.0, 200: 70.0, 300: 50.0}.get(amount, 40.0),
+                        }
+                    }
+                }
+            }
+            if status == "success"
+            else {}
+        ),
         reason=reason or ("测试评分依据" if status == "success" else None),
         error=error,
         data_date="2026-07-17" if status == "success" else None,
         quote_timestamp="2026-07-17 15:00:00" if status == "success" else None,
+        quote_observed_at="2026-07-17T07:00:00Z" if status == "success" else None,
         quote_source="test" if status == "success" else None,
         kline_source="test" if status == "success" else None,
         adjustment_mode="qfq" if status == "success" else None,
@@ -914,6 +1106,10 @@ def _results(
     max_amount: float | None = None,
     min_data_quality_score: int | None = None,
     max_data_quality_score: int | None = None,
+    min_confidence: float | None = None,
+    max_risk: float | None = None,
+    min_tradability: float | None = None,
+    symbols: tuple[str, ...] | None = None,
     keyword: str | None = None,
     sort: str | tuple[str, ...] = "rank",
     order: str | tuple[str, ...] = "asc",
@@ -939,7 +1135,11 @@ def _results(
         max_amount=max_amount,
         min_data_quality_score=min_data_quality_score,
         max_data_quality_score=max_data_quality_score,
+        min_confidence=min_confidence,
+        max_risk=max_risk,
+        min_tradability=min_tradability,
         keyword=keyword,
+        symbols=symbols,
         sort=sort,  # type: ignore[arg-type]
         order=order,  # type: ignore[arg-type]
     )

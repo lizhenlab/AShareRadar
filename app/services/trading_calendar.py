@@ -196,6 +196,30 @@ def previous_trade_date(value: date) -> date:
     return max(candidates)
 
 
+def next_trade_dates(value: date, count: int) -> tuple[date, ...]:
+    """Return the next fixed exchange sessions without silently skipping gaps."""
+    if isinstance(count, bool) or count <= 0:
+        raise ValueError("count 必须是正整数")
+    catalog = _trade_days()
+    candidates = catalog.candidates if isinstance(catalog, _TradeDays) and catalog.candidates else (catalog,)
+    eligible = [
+        item
+        for item in candidates
+        if (minimum := _coverage_bounds(item)[0]) is not None
+        and minimum <= value
+        and len([day for day in item if day > value]) >= count
+    ]
+    if not eligible:
+        _days, status = _calendar_resolution(value)
+        _require_coverage(status)
+        raise TradingCalendarCoverageError(
+            f"可信交易日历在 {value.isoformat()} 之后不足 {count} 个交易日；"
+            "请刷新运行时交易日历或更新 bundled baseline。"
+        )
+    selected = max(eligible, key=_future_candidate_rank)
+    return tuple(sorted(day for day in selected if day > value)[:count])
+
+
 def trading_day_gap(start: date, end: date) -> int:
     if start >= end:
         return 0
@@ -331,6 +355,13 @@ def _candidate_rank(days: _TradeDays) -> tuple[datetime, int, date, int]:
         days.max_date or date.min,
         -min_date.toordinal(),
     )
+
+
+def _future_candidate_rank(days: set[date]) -> tuple[datetime, int, date, int]:
+    if isinstance(days, _TradeDays):
+        return _candidate_rank(days)
+    minimum, maximum = _coverage_bounds(days)
+    return datetime.min, 0, maximum or date.min, -(minimum or date.max).toordinal()
 
 
 def _status_for_resolution(

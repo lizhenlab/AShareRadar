@@ -9,6 +9,7 @@ from app.utils.provider_errors import ProviderChainUnavailable, ProviderCoverage
 
 
 SYSTEMIC_UNAVAILABLE_RATIO = 0.25
+SYSTEMIC_COOLDOWN_RECHECK_CAP_SECONDS = 5.0
 MAX_ADAPTIVE_BACKOFF_SECONDS = 30.0
 _JITTER_SEQUENCE = (0.10, -0.05, 0.05, 0.0)
 
@@ -119,6 +120,8 @@ class MarketScanPressureController:
         self._pressure_streak += 1
         self._current_concurrency = max(1, self._current_concurrency // 2)
         delay = self._adaptive_delay(retry_after)
+        if systemic and not busy_count and not timeout_count:
+            delay = min(delay, SYSTEMIC_COOLDOWN_RECHECK_CAP_SECONDS)
         self._last_backoff_seconds = delay
         self._last_signal = _signal_name(
             busy=bool(busy_count),

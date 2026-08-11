@@ -65,6 +65,10 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         duration_ms=row["duration_ms"],
+        quote_capture_started_at=row["quote_capture_started_at"],
+        quote_capture_finished_at=row["quote_capture_finished_at"],
+        quote_capture_duration_ms=row["quote_capture_duration_ms"],
+        quote_capture_count=int(row["quote_capture_count"] or 0),
         current_stage=row["current_stage"],
         stage_started_at=row["stage_started_at"],
         stage_metrics=_stage_metrics(row["stage_metrics_json"]),
@@ -184,6 +188,7 @@ def result_from_row(row: sqlite3.Row) -> MarketScanResultItem:
         error=row["error"],
         data_date=row["data_date"],
         quote_timestamp=row["quote_timestamp"],
+        quote_observed_at=row["quote_observed_at"],
         quote_source=row["quote_source"],
         kline_source=row["kline_source"],
         adjustment_mode=row["adjustment_mode"],
@@ -227,7 +232,8 @@ def result_order_sql(
     parts: list[str] = []
     for field, sort_order in zip(sorts, orders, strict=True):
         direction = "ASC" if sort_order == "asc" else "DESC"
-        parts.extend((f"{field} IS NULL ASC", f"{field} {direction}"))
+        expression = _MARKET_SCAN_SORT_EXPRESSIONS[field]
+        parts.extend((f"{expression} IS NULL ASC", f"{expression} {direction}"))
     if len(sorts) == 1 and sorts[0] == "rank":
         parts.append("symbol ASC")
     else:
@@ -237,6 +243,24 @@ def result_order_sql(
 
 def rank_order_sql() -> str:
     return ", ".join(f"{column} {direction.upper()}" for column, direction in MARKET_SCAN_RANK_TIE_BREAK)
+
+
+_SCORE_DIMENSION_JSON_PREFIX = "$.score_details.components.score_dimensions.scores"
+_MARKET_SCAN_SORT_EXPRESSIONS: dict[MarketScanSort, str] = {
+    "rank": "rank",
+    "score": "score",
+    "raw_score": "raw_score",
+    "trend_score": "trend_score",
+    "change_pct": "change_pct",
+    "amount": "amount",
+    "turnover_rate": "turnover_rate",
+    "data_quality_score": "data_quality_score",
+    "symbol": "symbol",
+    "alpha_5d": f"json_extract(metrics_json, '{_SCORE_DIMENSION_JSON_PREFIX}.alpha_5d')",
+    "confidence": f"json_extract(metrics_json, '{_SCORE_DIMENSION_JSON_PREFIX}.confidence')",
+    "risk": f"json_extract(metrics_json, '{_SCORE_DIMENSION_JSON_PREFIX}.risk')",
+    "tradability": f"json_extract(metrics_json, '{_SCORE_DIMENSION_JSON_PREFIX}.tradability')",
+}
 
 
 def percentage(numerator: int, denominator: int) -> float:

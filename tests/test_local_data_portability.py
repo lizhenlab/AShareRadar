@@ -12,6 +12,12 @@ from app.db.schema_migrations import AUDIT_TIMESTAMP_UTC_MIGRATION
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
 from app.models.local_data import USER_DATA_TABLE_ALLOWLIST, UserDataBundle
 from app.models.paper_trading import PaperStrategyCreate
+from app.models.strategy_lab import (
+    StrategyHardFilter,
+    StrategySpecCreate,
+    StrategySpecInput,
+    StrategySpecUpdate,
+)
 from app.services.cache import SQLiteCache
 from app.services.paper_trading import simulate_paper_portfolio
 from app.services.user_data_portability import export_user_data, import_user_data
@@ -58,6 +64,65 @@ def test_merge_dry_run_reports_changes_without_writing_and_commit_is_source_wins
     assert result.conflict_strategy == "remap_surrogate_ids_source_wins_on_stable_keys"
     assert result.tables["watchlist"].remapped == 0
     assert _watchlist_note(target, "600519.SH") == "source"
+
+
+def test_strategy_specs_and_immutable_versions_port_across_id_collisions_idempotently(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    source_cache = SQLiteCache(source)
+    target_cache = SQLiteCache(target)
+    created = source_cache.strategy_lab_service.create(
+        StrategySpecCreate(spec=StrategySpecInput(name="可携带策略"), confirmed=True)
+    )
+    source_cache.strategy_lab_service.update(
+        created.strategy_id,
+        StrategySpecUpdate(
+            spec=created.spec.model_copy(
+                update={
+                    "hard_filters": [
+                        StrategyHardFilter(
+                            field="amount",
+                            operator="gte",
+                            value=100_000_000.0,
+                        )
+                    ]
+                }
+            ),
+            expected_revision=1,
+            confirmed=True,
+        ),
+    )
+    target_cache.strategy_lab_service.create(
+        StrategySpecCreate(spec=StrategySpecInput(name="目标已有策略"), confirmed=True)
+    )
+    bundle = export_user_data(source)
+
+    first = import_user_data(target, bundle, mode="merge", dry_run=False)
+    second = import_user_data(target, bundle, mode="merge", dry_run=False)
+
+    assert first.tables["strategy_spec"].remapped == 1
+    assert first.tables["strategy_spec_version"].remapped == 1
+    assert second.tables["strategy_spec"].inserted == 0
+    assert second.tables["strategy_spec_version"].inserted == 0
+    with sqlite3.connect(target) as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM strategy_spec_version WHERE revision = 1"
+            ).fetchall()
+        }
+        versions = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM strategy_spec_version AS version
+            JOIN strategy_spec AS strategy ON strategy.id = version.strategy_id
+            WHERE version.name = '可携带策略' AND strategy.current_revision = 2
+            """
+        ).fetchone()[0]
+    assert names == {"可携带策略", "目标已有策略"}
+    assert versions == 2
 
 
 def test_v1_bundle_without_metadata_keeps_aware_audit_timestamps_compatible(

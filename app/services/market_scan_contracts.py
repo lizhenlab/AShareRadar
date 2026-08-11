@@ -57,6 +57,8 @@ class MarketScanSettingsProtocol(Protocol):
 class MarketScanPublicationRepositoryProtocol(Protocol):
     def publication_summary(self, run_id: int) -> MarketScanPublicationSummary: ...
 
+    def success_raw_scores(self, run_id: int) -> tuple[object, ...]: ...
+
 
 @runtime_checkable
 class MarketScanCacheProtocol(Protocol):
@@ -88,9 +90,13 @@ class MarketScanCacheProtocol(Protocol):
 
     def latest_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...
 
+    def latest_full_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...
+
     def latest_published_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...
 
     def market_scan_degraded_result_count(self, run_id: int) -> int: ...
+
+    def market_scan_success_raw_scores(self, run_id: int) -> tuple[object, ...]: ...
 
     def market_scan_results(
         self,
@@ -115,7 +121,11 @@ class MarketScanCacheProtocol(Protocol):
         max_amount: float | None = None,
         min_data_quality_score: int | None,
         max_data_quality_score: int | None = None,
+        min_confidence: float | None = None,
+        max_risk: float | None = None,
+        min_tradability: float | None = None,
         keyword: str | None,
+        symbols: MarketScanFilterValues = None,
         sort: MarketScanSortValues,
         order: MarketScanSortOrderValues,
     ) -> MarketScanResultPage: ...
@@ -140,6 +150,19 @@ class MarketScanCacheProtocol(Protocol):
         self,
         run_id: int,
         expected_plan: MarketScanRetryPlan | None = None,
+        *,
+        as_of: str | None = None,
+    ) -> MarketScanRun: ...
+
+    def prepare_market_scan_top100_refresh(
+        self,
+        source_run_id: int,
+        *,
+        rule_version: str,
+        as_of: str,
+        data_date: str,
+        quote_date: str,
+        limit: int,
     ) -> MarketScanRun: ...
 
     def record_market_scan_stock_pool_source(self, run_id: int, source: str) -> MarketScanRun: ...
@@ -177,6 +200,17 @@ class MarketScanCacheProtocol(Protocol):
     ) -> int: ...
 
     def start_market_scan_run(self, run_id: int) -> MarketScanRun: ...
+
+    def begin_market_scan_quote_capture(self, run_id: int, started_at: str) -> MarketScanRun: ...
+
+    def seal_market_scan_quote_capture(
+        self,
+        run_id: int,
+        *,
+        finished_at: str,
+        duration_ms: int,
+        count: int,
+    ) -> MarketScanRun: ...
 
     def start_market_scan_task_run(self, run_id: int, task_name: str) -> int: ...
 

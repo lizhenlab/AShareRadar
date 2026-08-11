@@ -17,6 +17,7 @@ export {
 } from "./market-scan-contracts.js";
 export {
   createMarketScanView,
+  marketScanBoardLabel,
   marketScanResultRow,
   marketScanResultStatusLabel,
   marketScanRunStatusLabel,

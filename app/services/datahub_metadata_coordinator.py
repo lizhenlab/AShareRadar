@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import TypeVar
 
 from app.models.market import (
@@ -261,7 +262,7 @@ class MetadataCoordinator:
                 result = await self.runtime.timed_provider_call(
                     attempt.name,
                     kind,
-                    lambda: _required_metadata_call(call, attempt.provider, kind),
+                    partial(_required_metadata_call, call, attempt.provider, kind),
                     request_key=request_key,
                 )
                 rows = prepare(attempt, result.value)

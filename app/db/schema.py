@@ -5,6 +5,7 @@ import sqlite3
 from app.db.advice_review_schema import ADVICE_REVIEW_SCHEMA_SQL, apply_advice_review_compat_schema
 from app.db.discovery_schema import apply_discovery_schema
 from app.db.paper_trading_schema import apply_paper_trading_schema
+from app.db.strategy_lab_schema import apply_strategy_lab_schema
 from app.db.schema_definitions import SCHEMA_SQL
 from app.db.schema_migrations import (
     COMPAT_COLUMNS,
@@ -30,6 +31,7 @@ def initialize_schema(
         legacy_audit_timezone=legacy_audit_timezone,
     )
     apply_paper_trading_schema(conn)
+    apply_strategy_lab_schema(conn)
 
 
 __all__ = [

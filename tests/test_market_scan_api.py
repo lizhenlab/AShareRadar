@@ -11,6 +11,7 @@ from app.api.deps import get_market_scanner
 from app.api.errors import validation_exception_handler
 from app.api.routes import market_scan
 from app.models.market_scan import (
+    MARKET_SCAN_TOP100_REFRESH_SCOPE,
     MarketScanResultPage,
     MarketScanRun,
     MarketScanRunPage,
@@ -21,6 +22,9 @@ from app.services.market_scan_export import (
     MarketScanExportFilters,
     MarketScanWorkbookExport,
 )
+from app.services.market_scan_future_range_artifact import FutureRangeArtifactError
+from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
+from app.services.market_scan_probability_store import MarketScanProbabilityStore, ProbabilityFilterUnavailable
 from app.utils.errors import NotFoundError
 
 
@@ -68,6 +72,7 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     detail = client.get(f"/api/market-scans/{scanner.active.id}")
     cancelled = client.post(f"/api/market-scans/{scanner.active.id}/cancel")
     retried = client.post(f"/api/market-scans/{scanner.active.id}/retry")
+    refreshed = client.post(f"/api/market-scans/{scanner.previous.id}/refresh-top100")
 
     assert latest.status_code == 200
     assert latest.headers["cache-control"] == "no-store"
@@ -94,11 +99,15 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     assert retried.json()["accepted"] is True
     assert retried.json()["run"]["status"] == "queued"
     assert retried.json()["run"]["trigger"] == "retry"
+    assert refreshed.status_code == 202
+    assert refreshed.json()["run"]["scope"] == MARKET_SCAN_TOP100_REFRESH_SCOPE
+    assert refreshed.json()["run"]["retry_of_run_id"] == scanner.previous.id
     assert scanner.latest_calls == [(None, False), (None, True)]
     assert scanner.list_calls == [(2, 1, None, None, None)]
     assert scanner.detail_calls == [scanner.active.id]
     assert scanner.cancel_calls == [scanner.active.id]
     assert scanner.retry_calls == [scanner.active.id]
+    assert scanner.top100_refresh_calls == [scanner.previous.id]
 
 
 def test_latest_and_history_routes_forward_mode_status_and_date_filters() -> None:
@@ -161,6 +170,9 @@ def test_results_route_forwards_pagination_sorting_and_every_filter() -> None:
             "max_amount": 500_000_000,
             "min_data_quality_score": 77,
             "max_data_quality_score": 99,
+            "min_confidence": 80,
+            "max_risk": 35,
+            "min_tradability": 70,
             "keyword": "920066",
             "sort": ["amount", "score", "symbol"],
             "order": ["desc", "desc", "asc"],
@@ -194,7 +206,12 @@ def test_results_route_forwards_pagination_sorting_and_every_filter() -> None:
                 "max_amount": 500_000_000.0,
                 "min_data_quality_score": 77,
                 "max_data_quality_score": 99,
-                "keyword": "920066",
+                "min_confidence": 80.0,
+                "max_risk": 35.0,
+                    "min_tradability": 70.0,
+                    "probability_horizon": 5,
+                    "min_upside_probability": None,
+                    "keyword": "920066",
                 "sort": ("amount", "score", "symbol"),
                 "order": ("desc", "desc", "asc"),
             },
@@ -214,6 +231,137 @@ def test_results_route_maps_all_status_filter_to_unfiltered_query() -> None:
     assert response.status_code == 200
     assert scanner.result_calls[0][1]["status"] is None
     assert scanner.result_calls[0][1]["page_size"] == 100
+
+
+def test_results_route_forwards_probability_filter_and_validates_query_range() -> None:
+    scanner = _ScannerStub()
+    client = _client(scanner)
+
+    response = client.get(
+        f"/api/market-scans/{scanner.active.id}/results",
+        params={"probability_horizon": 20, "min_upside_probability": 0.61},
+    )
+
+    assert response.status_code == 200
+    assert scanner.result_calls[0][1]["probability_horizon"] == 20
+    assert scanner.result_calls[0][1]["min_upside_probability"] == pytest.approx(0.61)
+    assert client.get(
+        f"/api/market-scans/{scanner.active.id}/results",
+        params={"probability_horizon": 3},
+    ).status_code == 422
+    assert client.get(
+        f"/api/market-scans/{scanner.active.id}/results",
+        params={"min_upside_probability": 1.01},
+    ).status_code == 422
+    assert client.get(
+        f"/api/market-scans/{scanner.active.id}/results",
+        params={"sort": "upside_probability"},
+    ).status_code == 422
+
+
+def test_results_route_returns_422_when_probability_evidence_is_not_calibrated() -> None:
+    scanner = _ScannerStub()
+
+    def reject(_run_id: int, **_kwargs: object) -> MarketScanResultPage:
+        raise ProbabilityFilterUnavailable("当前批次证据不足")
+
+    scanner.results = reject  # type: ignore[method-assign]
+    response = _client(scanner).get(
+        f"/api/market-scans/{scanner.active.id}/results",
+        params={"min_upside_probability": 0.6},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "当前批次证据不足"
+
+
+def test_probability_research_route_is_read_only_and_run_bound() -> None:
+    scanner = _ScannerStub()
+    response = _client(scanner).get(f"/api/market-scans/{scanner.active.id}/probability-research")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["run_id"] == scanner.active.id
+    assert response.json()["default_horizon"] == 5
+
+
+def test_future_range_research_route_is_read_only_run_bound_and_paginated() -> None:
+    scanner = _ScannerStub()
+    response = _client(scanner).get(
+        f"/api/market-scans/{scanner.previous.id}/future-range-research",
+        params={
+            "page": 2,
+            "page_size": 20,
+            "session_offset": 2,
+            "symbol": "600519.SH",
+            "include_research": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["generation_status"] == "not_generated"
+    assert response.json()["research"] is None
+    assert scanner.future_range_calls == [
+        (scanner.previous.id, 2, 20, 2, "600519.SH", False)
+    ]
+    invalid = _client(scanner).get(
+        f"/api/market-scans/{scanner.previous.id}/future-range-research",
+        params={"page_size": 201, "session_offset": 5},
+    )
+    assert invalid.status_code == 422
+
+
+def test_future_range_research_route_maps_ineligible_and_corrupt_artifacts() -> None:
+    scanner = _ScannerStub()
+
+    def unavailable(_run_id: int, **_kwargs: object) -> dict[str, object]:
+        raise FutureRangeResearchUnavailable("未来区间研究仅支持盘后正式批次")
+
+    scanner.future_range_research = unavailable  # type: ignore[method-assign]
+    response = _client(scanner).get("/api/market-scans/7/future-range-research")
+    assert response.status_code == 422
+    assert response.json()["detail"] == "未来区间研究仅支持盘后正式批次"
+
+    def corrupted(_run_id: int, **_kwargs: object) -> dict[str, object]:
+        raise FutureRangeArtifactError("sensitive artifact path and digest mismatch")
+
+    scanner.future_range_research = corrupted  # type: ignore[method-assign]
+    response = _client(scanner).get("/api/market-scans/7/future-range-research")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "未来区间研究 artifact 完整性校验失败，已拒绝读取"
+    assert "sensitive" not in response.text
+
+
+def test_future_range_research_route_rejects_official_top100_refresh_scope() -> None:
+    scanner = _ScannerStub()
+
+    def top100(_run_id: int, **_kwargs: object) -> dict[str, object]:
+        raise FutureRangeResearchUnavailable("未来区间研究仅支持盘后正式全市场批次")
+
+    scanner.future_range_research = top100  # type: ignore[method-assign]
+    response = _client(scanner).get(
+        f"/api/market-scans/{scanner.previous.id}/future-range-research"
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "未来区间研究仅支持盘后正式全市场批次"
+
+
+def test_probability_store_returns_explicit_not_generated_contract_for_historical_run(tmp_path) -> None:
+    research, records = MarketScanProbabilityStore(tmp_path / "missing-artifacts").run_projection(77)
+
+    assert research["run_id"] == 77
+    assert research["status"] == "not_generated"
+    assert research["default_horizon"] == 5
+    assert research["primary_target"] == "net_excess_positive"
+    assert research["production_ranking_effect"] == "none"
+    assert records == {}
+    for horizon in ("1", "5", "20"):
+        for target in ("net_excess_positive", "absolute_net_positive"):
+            summary = research["horizons"][horizon][target]  # type: ignore[index]
+            assert summary["status"] == "not_generated"
+            assert summary["probability"] is None
 
 
 def test_export_route_returns_xlsx_attachment_and_forwards_current_filters() -> None:
@@ -259,6 +407,21 @@ def test_export_route_returns_xlsx_attachment_and_forwards_current_filters() -> 
     ]
 
 
+def test_export_route_fails_closed_when_future_range_artifact_is_corrupt() -> None:
+    scanner = _ScannerStub()
+
+    def corrupted(_run_id: int, *, filters: MarketScanExportFilters) -> MarketScanWorkbookExport:
+        del filters
+        raise FutureRangeArtifactError("sensitive artifact path")
+
+    scanner.export_results = corrupted  # type: ignore[method-assign]
+    response = _client(scanner).get(f"/api/market-scans/{scanner.previous.id}/export.xlsx")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "未来区间研究 artifact 完整性校验失败，已拒绝读取"
+    assert "sensitive" not in response.text
+
+
 def test_export_and_results_routes_share_the_same_filter_and_sort_contract() -> None:
     parameters = _client(_ScannerStub()).app.openapi()["paths"]
     results = {item["name"] for item in parameters["/api/market-scans/{run_id}/results"]["get"]["parameters"] if item["in"] == "query"}
@@ -297,6 +460,9 @@ def test_advanced_filter_contract_rejects_inverted_duplicate_or_misaligned_value
         ("get", "/api/market-scans/7/results?market=HK", None),
         ("get", "/api/market-scans/7/results?min_data_quality_score=-1", None),
         ("get", "/api/market-scans/7/results?min_data_quality_score=101", None),
+        ("get", "/api/market-scans/7/results?min_confidence=101", None),
+        ("get", "/api/market-scans/7/results?max_risk=-1", None),
+        ("get", "/api/market-scans/7/results?min_tradability=101", None),
         ("get", "/api/market-scans/7/results?sort=unknown", None),
         ("get", "/api/market-scans/7/results?order=sideways", None),
         ("get", "/api/market-scans/7/results?is_st=perhaps", None),
@@ -381,8 +547,10 @@ class _ScannerStub:
         self.detail_calls: list[int] = []
         self.result_calls: list[tuple[int, dict[str, object]]] = []
         self.export_calls: list[tuple[int, MarketScanExportFilters]] = []
+        self.future_range_calls: list[tuple[int, int, int, int | None, str | None, bool]] = []
         self.cancel_calls: list[int] = []
         self.retry_calls: list[int] = []
+        self.top100_refresh_calls: list[int] = []
 
     @property
     def calls(self) -> list[object]:
@@ -393,8 +561,10 @@ class _ScannerStub:
             *self.detail_calls,
             *self.result_calls,
             *self.export_calls,
+            *self.future_range_calls,
             *self.cancel_calls,
             *self.retry_calls,
+            *self.top100_refresh_calls,
         ]
 
     async def create_scan(
@@ -457,6 +627,43 @@ class _ScannerStub:
             page_count=0,
         )
 
+    def probability_research(self, run_id: int) -> dict[str, object]:
+        return {
+            "schema_version": "test-probability-v1",
+            "run_id": run_id,
+            "status": "insufficient_data",
+            "default_horizon": 5,
+            "primary_target": "net_excess_positive",
+            "horizons": {"1": {}, "5": {}, "20": {}},
+        }
+
+    def future_range_research(
+        self,
+        run_id: int,
+        *,
+        page: int,
+        page_size: int,
+        session_offset: int | None,
+        symbol: str | None,
+        include_research: bool,
+    ) -> dict[str, object]:
+        self.future_range_calls.append((run_id, page, page_size, session_offset, symbol, include_research))
+        return {
+            "schema_version": "market-scan-future-range-api-v1",
+            "generation_status": "not_generated",
+            "artifact": None,
+            "research": None,
+            "record_page": {
+                "page": page,
+                "page_size": page_size,
+                "total": 0,
+                "page_count": 0,
+                "session_offset": session_offset,
+                "symbol": symbol,
+                "items": [],
+            },
+        }
+
     def export_results(self, run_id: int, *, filters: MarketScanExportFilters) -> MarketScanWorkbookExport:
         self.export_calls.append((run_id, filters))
         return MarketScanWorkbookExport(content=b"xlsx-content", filename="market-scan.xlsx", row_count=0)
@@ -475,3 +682,18 @@ class _ScannerStub:
         self.retry_calls.append(run_id)
         retried = self.active.model_copy(update={"status": "queued", "trigger": "retry", "retry_count": 1})
         return MarketScanStartResponse(accepted=True, run=retried)
+
+    async def refresh_top100_scores(self, run_id: int) -> MarketScanStartResponse:
+        self.top100_refresh_calls.append(run_id)
+        refreshed = self.previous.model_copy(
+            update={
+                "id": self.active.id + 1,
+                "status": "queued",
+                "trigger": "retry",
+                "scope": MARKET_SCAN_TOP100_REFRESH_SCOPE,
+                "retry_of_run_id": run_id,
+                "finished_at": None,
+                "duration_ms": None,
+            }
+        )
+        return MarketScanStartResponse(accepted=True, run=refreshed)

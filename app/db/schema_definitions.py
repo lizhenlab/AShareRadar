@@ -185,6 +185,12 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     started_at TEXT,
     finished_at TEXT,
     duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    quote_capture_started_at TEXT,
+    quote_capture_finished_at TEXT,
+    quote_capture_duration_ms INTEGER
+        CHECK (quote_capture_duration_ms IS NULL OR quote_capture_duration_ms >= 0),
+    quote_capture_count INTEGER NOT NULL DEFAULT 0
+        CHECK (quote_capture_count >= 0),
     current_stage TEXT
         CHECK (current_stage IS NULL OR current_stage IN ('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication')),
     stage_started_at TEXT,
@@ -227,6 +233,7 @@ CREATE TABLE IF NOT EXISTS market_scan_result (
     error TEXT,
     data_date TEXT,
     quote_timestamp TEXT,
+    quote_observed_at TEXT,
     quote_source TEXT,
     kline_source TEXT,
     adjustment_mode TEXT,

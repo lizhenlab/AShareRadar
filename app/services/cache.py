@@ -91,6 +91,10 @@ from app.repositories.reliability import (
     ReliabilityScanStats,
     ReliabilityTaskStats,
 )
+from app.repositories.strategy_lab import StrategyLabRepository
+from app.repositories.strategy_execution import StrategyExecutionRepository
+from app.repositories.strategy_evidence import StrategyEvidenceRepository
+from app.repositories.strategy_automation import StrategyAutomationRepository
 from app.repositories.runtime import RuntimeEventRepository
 from app.repositories.watchlist import WatchlistRepository, WatchlistSymbolSelection
 from app.repositories.watchlist_scans import WatchlistScanRepository
@@ -98,6 +102,10 @@ from app.models.advice_change import build_conclusion_timeline
 from app.services.runtime_backup import destructive_local_data_lease
 from app.services.discovery import DiscoveryService
 from app.services.instance_guard import FileInstanceGuard
+from app.services.strategy_lab import StrategyLabService
+from app.services.strategy_execution import StrategyExecutionService
+from app.services.strategy_evidence import StrategyEvidenceService
+from app.services.strategy_automation import StrategyAutomationService
 from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
 from app.utils.clock import performance_now
 from app.utils.fallback_logging import report_persistence_failure
@@ -193,6 +201,25 @@ class SQLiteCache:
         self.cache_stats_repo = CacheStatsRepository(self.path, self._lock)
         self.discovery_repo = DiscoveryRepository(self.path, self._lock)
         self.discovery_service = DiscoveryService(self.discovery_repo)
+        self.strategy_lab_repo = StrategyLabRepository(self.path, self._lock)
+        self.strategy_lab_service = StrategyLabService(self.strategy_lab_repo)
+        self.strategy_execution_repo = StrategyExecutionRepository(self.path, self._lock)
+        self.strategy_execution_service = StrategyExecutionService(
+            self.strategy_execution_repo,
+            self.strategy_lab_service,
+        )
+        self.strategy_evidence_repo = StrategyEvidenceRepository(self.path, self._lock)
+        self.strategy_evidence_service = StrategyEvidenceService(
+            self.path,
+            self.strategy_evidence_repo,
+            self.strategy_lab_service,
+        )
+        self.strategy_automation_repo = StrategyAutomationRepository(self.path, self._lock)
+        self.strategy_automation_service = StrategyAutomationService(
+            self.strategy_automation_repo,
+            self.strategy_lab_service,
+            self.strategy_execution_service,
+        )
         self.market_data_repo = MarketDataRepository(self.path, self._lock)
         self.market_scan_repo = MarketScanRepository(self.path, self._lock)
         self.provider_status_repo = ProviderStatusRepository(self.path, self._lock)
@@ -351,6 +378,9 @@ class SQLiteCache:
     def latest_market_scan_run(self, *, mode=None):
         return self.market_scan_repo.latest_run(mode=mode)
 
+    def latest_full_market_scan_run(self, *, mode=None):
+        return self.market_scan_repo.latest_full_run(mode=mode)
+
     def latest_published_market_scan_run(self, *, mode=None):
         return self.market_scan_repo.latest_published_run(mode=mode)
 
@@ -377,6 +407,24 @@ class SQLiteCache:
 
     def start_market_scan_run(self, run_id: int):
         return self.market_scan_repo.start_run(run_id)
+
+    def begin_market_scan_quote_capture(self, run_id: int, started_at: str):
+        return self.market_scan_repo.begin_quote_capture(run_id, started_at)
+
+    def seal_market_scan_quote_capture(
+        self,
+        run_id: int,
+        *,
+        finished_at: str,
+        duration_ms: int,
+        count: int,
+    ):
+        return self.market_scan_repo.seal_quote_capture(
+            run_id,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            count=count,
+        )
 
     def seed_market_scan_results(
         self,
@@ -406,8 +454,11 @@ class SQLiteCache:
     def market_scan_retry_plan(self, run_id: int):
         return self.market_scan_repo.retry_plan(run_id)
 
-    def prepare_market_scan_retry(self, run_id: int, expected_plan=None):
-        return self.market_scan_repo.prepare_retry(run_id, expected_plan)
+    def prepare_market_scan_retry(self, run_id: int, expected_plan=None, *, as_of: str | None = None):
+        return self.market_scan_repo.prepare_retry(run_id, expected_plan, as_of=as_of)
+
+    def prepare_market_scan_top100_refresh(self, source_run_id: int, **kwargs):
+        return self.market_scan_repo.prepare_top100_refresh(source_run_id, **kwargs)
 
     def finish_market_scan_run(
         self,
@@ -428,6 +479,9 @@ class SQLiteCache:
 
     def market_scan_degraded_result_count(self, run_id: int) -> int:
         return self.market_scan_repo.degraded_result_count(run_id)
+
+    def market_scan_success_raw_scores(self, run_id: int) -> tuple[object, ...]:
+        return self.market_scan_repo.success_raw_scores(run_id)
 
     def reconcile_incomplete_market_scans(self) -> int:
         return self.market_scan_repo.reconcile_incomplete_runs()

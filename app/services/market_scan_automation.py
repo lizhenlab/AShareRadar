@@ -7,25 +7,19 @@ import math
 from typing import Literal
 
 from app.models.market_scan import (
-    MarketScanCoverageScope,
     MarketScanPublicationSummary,
     MarketScanRetryPlan,
     MarketScanRun,
 )
 from app.services.data_quality_time import latest_expected_daily_kline_date
 from app.services.market_scan_completion import (
-    MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
-    MARKET_SCAN_PUBLISH_MIN_COVERAGE,
-    MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
+    publication_blockers,
 )
 from app.utils.time import parse_text_time
 
 
 DEFAULT_MARKET_SCAN_AUTO_RETRY_DELAYS_SECONDS = (10 * 60.0, 30 * 60.0, 60 * 60.0)
 DEFAULT_MARKET_SCAN_AUTO_RETRY_MAX_ATTEMPTS = 3
-_PUBLISH_COVERAGE_SCOPES: tuple[MarketScanCoverageScope, ...] = ("ALL", "SH", "SZ", "BJ")
-
-
 @dataclass(frozen=True)
 class MarketScanAutomaticAction:
     kind: Literal["scheduled", "retry"]
@@ -73,46 +67,28 @@ def _failed_run_is_retryable(
     plan: MarketScanRetryPlan,
     summary: MarketScanPublicationSummary,
 ) -> bool:
+    if str(run.rule_version).startswith("full-market-scan-v5:"):
+        return False
     if not plan.needs_market_data:
         return False
     if _completed_with_only_deterministic_skips(run, summary):
         return False
     if run.total_count == 0 or run.processed_count < run.total_count:
         return True
-    if summary.systemic_stale_cluster is not None:
-        return True
-    if _coverage_below_publish_floor(summary):
-        return True
-    if summary.invalid_snapshot_timestamps:
-        return True
-    span = summary.snapshot_span_seconds
-    return span is not None and span > MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS
+    return bool(publication_blockers(summary))
 
 
 def _completed_with_only_deterministic_skips(
     run: MarketScanRun,
     summary: MarketScanPublicationSummary,
 ) -> bool:
-    span = summary.snapshot_span_seconds
     return (
         run.total_count > 0
         and run.processed_count == run.total_count
         and run.skipped_count > 0
         and run.missing_count == 0
         and run.success_count + run.skipped_count == run.total_count
-        and summary.systemic_stale_cluster is None
-        and not summary.invalid_snapshot_timestamps
-        and (span is None or span <= MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS)
-        and not _coverage_below_publish_floor(summary)
-    )
-
-
-def _coverage_below_publish_floor(summary: MarketScanPublicationSummary) -> bool:
-    return any(
-        (coverage := summary.coverage_for(scope)) is None
-        or coverage.coverage_ratio < MARKET_SCAN_PUBLISH_MIN_COVERAGE[scope]
-        or coverage.eligible_ratio < MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO[scope]
-        for scope in _PUBLISH_COVERAGE_SCOPES
+        and not publication_blockers(summary)
     )
 
 

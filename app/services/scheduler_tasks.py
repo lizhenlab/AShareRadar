@@ -200,6 +200,25 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
 
+    async def _run_strategy_schedules(self) -> str:
+        summary = await _offload(self.datahub.cache.strategy_automation_service.run_due)
+        message = (
+            f"版本化策略检查 {summary.checked_count} 条，执行 {summary.executed_count} 条，"
+            f"跳过 {summary.skipped_count} 条，生成提醒 {summary.event_count} 条，"
+            f"失败 {summary.failed_count} 条"
+        )
+        degraded = summary.failed_count > 0
+        await self._save_monitor_event(
+            "warning" if degraded else "info",
+            "strategy_lab",
+            message,
+        )
+        if summary.checked_count and summary.failed_count == summary.checked_count:
+            raise RuntimeError(message)
+        if degraded:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
+        return message
+
 
 def _research_maintenance_window_open(now: datetime | None = None) -> bool:
     current = market_local_naive(now) if now is not None else market_now_naive()

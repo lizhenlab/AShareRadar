@@ -53,6 +53,8 @@ _SURROGATE_PRIMARY_KEYS = {
     "paper_trade": "id",
     "paper_equity_snapshot": "id",
     "paper_trading_event": "id",
+    "strategy_spec": "id",
+    "strategy_spec_version": "id",
 }
 _SOURCE_WINS_KEYS = {
     "watchlist": ("symbol",),
@@ -71,6 +73,8 @@ _SOURCE_WINS_KEYS = {
     "paper_trade": ("run_id", "strategy_id", "side"),
     "paper_equity_snapshot": ("run_id", "as_of_date"),
     "paper_trading_event": ("run_id", "sequence"),
+    "strategy_spec": ("created_at",),
+    "strategy_spec_version": ("strategy_id", "revision"),
 }
 _CASE_INSENSITIVE_STABLE_COLUMNS = {
     "discovery_preset": frozenset({"name"}),
@@ -99,6 +103,7 @@ _RELATIONSHIPS = {
         ("run_id", "paper_trading_run"),
         ("strategy_id", "paper_strategy"),
     ),
+    "strategy_spec_version": (("strategy_id", "strategy_spec"),),
 }
 _USER_DATA_AUDIT_TIMESTAMP_COLUMNS = {
     "watchlist": frozenset({"created_at", "updated_at", "last_viewed_at"}),
@@ -120,6 +125,8 @@ _USER_DATA_AUDIT_TIMESTAMP_COLUMNS = {
     "paper_trade": frozenset({"created_at"}),
     "paper_equity_snapshot": frozenset({"created_at"}),
     "paper_trading_event": frozenset({"created_at"}),
+    "strategy_spec": frozenset({"created_at", "updated_at"}),
+    "strategy_spec_version": frozenset({"created_at"}),
 }
 _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
     "advice_history": {
@@ -860,7 +867,7 @@ def _stable_row_key(
 ) -> tuple[object, ...]:
     case_insensitive = _CASE_INSENSITIVE_STABLE_COLUMNS.get(table, frozenset())
     return tuple(
-        row[column].casefold()
+        cast(str, row[column]).casefold()
         if column in case_insensitive and isinstance(row[column], str)
         else row[column]
         for column in columns

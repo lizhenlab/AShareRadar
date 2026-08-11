@@ -11,6 +11,7 @@ import {
   validateDiscoveryRankChanges,
 } from "./market-scan-contracts.js";
 import { applyDiscoveryPresetFields, marketScanFilterElements } from "./market-scan-filters.js";
+import { marketScanPageSize } from "./layout-optimizations.js";
 import { marketScanResultRow } from "./market-scan-view.js";
 export {
   buildDiscoveryPresetDefinition,
@@ -19,7 +20,6 @@ export {
   rankChangeLabel,
 } from "./market-scan-contracts.js";
 
-const DISCOVERY_PAGE_SIZE = 100;
 const RANK_CHANGE_PAGE_SIZE = 200;
 const COMPLETED_RUN_STATUSES = new Set(["success", "degraded"]);
 export function createDiscoveryController(options = {}) {
@@ -233,7 +233,7 @@ export function createDiscoveryController(options = {}) {
     const operation = request(`/api/discovery/presets/${encodeURIComponent(preset.id)}/apply`, {
       ...options,
       method: "POST",
-      body: JSON.stringify({ run_id: run.id, page, page_size: DISCOVERY_PAGE_SIZE }),
+      body: JSON.stringify({ run_id: run.id, page, page_size: marketScanPageSize(elements) }),
     });
     const ranking = request(
       `/api/discovery/runs/${encodeURIComponent(run.id)}/rank-changes?page=1&page_size=${RANK_CHANGE_PAGE_SIZE}`,
@@ -385,7 +385,7 @@ export function createDiscoveryController(options = {}) {
         `/api/discovery/presets/${encodeURIComponent(applied.preset.id)}/apply`,
         requestOptions({
           method: "POST",
-          body: JSON.stringify({ run_id: applied.runId, page, page_size: DISCOVERY_PAGE_SIZE }),
+          body: JSON.stringify({ run_id: applied.runId, page, page_size: marketScanPageSize(elements) }),
         })
       ));
       if (payload.run_id !== applied.runId || payload.preset.revision !== applied.preset.revision) {

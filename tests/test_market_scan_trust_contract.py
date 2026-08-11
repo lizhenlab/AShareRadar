@@ -13,6 +13,7 @@ import pytest
 from app.config import Settings
 from app.models.market_scan import (
     MarketScanCoverage,
+    MarketScanMarketEventSpan,
     MarketScanPublicationSummary,
     MarketScanResultItem,
     MarketScanResultWrite,
@@ -92,7 +93,7 @@ def test_rule_version_is_an_opaque_stable_hash_not_a_partial_config_string(tmp_p
 
     assert first == second
     prefix, digest = first.split(":", 1)
-    assert prefix == "full-market-scan-v5"
+    assert prefix == "full-market-scan-v6"
     assert len(digest) == 64
     assert "kline_limit=" not in first
 
@@ -188,7 +189,6 @@ def test_persisted_score_details_replay_scores_and_sqlite_rank_exactly(tmp_path:
         ],
         excluded_count=0,
     )
-    changes = {"600001.SH": 5.2, "000001.SZ": 2.4, "920001.BJ": -1.0}
     writes = []
     for item in cache.pending_market_scan_items(run.id):
         quote = _quote().model_copy(
@@ -196,7 +196,7 @@ def test_persisted_score_details_replay_scores_and_sqlite_rank_exactly(tmp_path:
                 "code": item.code,
                 "market": item.market,
                 "name": item.name,
-                "change_pct": changes[item.symbol],
+                    "change_pct": 3.0,
             }
         )
         writes.append(
@@ -300,6 +300,58 @@ def test_publication_requires_global_and_sh_sz_bj_coverage() -> None:
     assert "1/5" in blockers[0]
 
 
+@pytest.mark.parametrize(
+    ("duration_ms", "blocked"),
+    ((1_200_000, False), (1_200_001, True)),
+)
+def test_v6_capture_duration_uses_an_exact_20_minute_boundary(
+    duration_ms: int,
+    blocked: bool,
+) -> None:
+    summary = replace(_strict_v6_publication_summary(), capture_duration_ms=duration_ms)
+
+    blockers = publication_blockers(summary)
+
+    assert any("采集耗时" in blocker for blocker in blockers) is blocked
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("unsealed", "missing-observed", "invalid-observed", "slow-observed-span"),
+)
+def test_v6_snapshot_contract_fails_closed_for_missing_or_invalid_capture_evidence(
+    mutation: str,
+) -> None:
+    summary = _strict_v6_publication_summary()
+    if mutation == "unsealed":
+        summary = replace(summary, capture_finished_at=None, capture_sealed=False)
+    elif mutation == "missing-observed":
+        summary = replace(summary, missing_observed_count=1)
+    elif mutation == "invalid-observed":
+        summary = replace(summary, invalid_observed_timestamps=("invalid-observed-at",))
+    else:
+        summary = replace(summary, observed_span_seconds=1_200.001)
+
+    assert publication_blockers(summary)
+
+
+def test_v5_legacy_summary_keeps_global_event_span_semantics_without_an_envelope() -> None:
+    summary = replace(
+        _strict_v6_publication_summary(),
+        snapshot_contract_version="v5-legacy",
+        capture_started_at=None,
+        capture_finished_at=None,
+        capture_duration_ms=None,
+        capture_count=0,
+        capture_sealed=False,
+        snapshot_span_seconds=1_201,
+    )
+
+    blockers = publication_blockers(summary)
+
+    assert any("全市场报价快照跨度" in blocker for blocker in blockers)
+
+
 def test_systemic_same_day_lag_blocks_publication_without_reclassifying_individual_rows(
     tmp_path: Path,
 ) -> None:
@@ -315,18 +367,21 @@ def test_systemic_same_day_lag_blocks_publication_without_reclassifying_individu
             status="missing",
             error="当日报价存在有效成交，但日K同日滞后",
             data_date=stale_date,
+            quote_observed_at="2026-07-17T07:00:00Z",
         ),
         MarketScanResultWrite(
             symbol="000002.SZ",
             status="skipped",
             reason="日K同日滞后，可能停牌",
             data_date=stale_date,
+            quote_observed_at="2026-07-17T07:00:00Z",
         ),
         MarketScanResultWrite(
             symbol="920002.BJ",
             status="skipped",
             reason="日K同日滞后，可能停牌",
             data_date=stale_date,
+            quote_observed_at="2026-07-17T07:00:00Z",
         ),
     ]
     cache.save_market_scan_result_batch(run.id, writes)
@@ -353,7 +408,7 @@ def test_quote_snapshot_span_blocks_when_one_market_exceeds_the_limit(tmp_path: 
         run.id,
         [
             _successful_write("600001.SH", quote_timestamp="2026-07-17 15:00:00"),
-            _successful_write("600002.SH", quote_timestamp="2026-07-17 15:16:00"),
+            _successful_write("600002.SH", quote_timestamp="2026-07-17 15:20:01"),
             _successful_write("000001.SZ", quote_timestamp="2026-07-17 15:08:00"),
             _successful_write("000002.SZ", quote_timestamp="2026-07-17 15:08:30"),
             _successful_write("920001.BJ", quote_timestamp="2026-07-17 15:09:00"),
@@ -365,12 +420,39 @@ def test_quote_snapshot_span_blocks_when_one_market_exceeds_the_limit(tmp_path: 
     summary = cache.market_scan_repo.publication_summary(run.id)
     status, message = completion_status(current, publication_summary=summary)
 
-    assert summary.snapshot_span_seconds == 16 * 60
+    assert summary.snapshot_span_seconds == 20 * 60 + 1
     assert status == "failed"
-    assert "快照跨度" in message
+    assert "SH 报价事件跨度" in message
 
 
-def test_quote_snapshot_span_blocks_cross_market_time_mixing(
+def test_quote_snapshot_span_allows_the_20_minute_boundary(tmp_path: Path) -> None:
+    cache = _cache(tmp_path)
+    run = _seed_running_run(cache)
+    cache.save_market_scan_result_batch(
+        run.id,
+        [
+            _successful_write("600001.SH", quote_timestamp="2026-07-17 15:00:00"),
+            _successful_write("600002.SH", quote_timestamp="2026-07-17 15:20:00"),
+            _successful_write("000001.SZ", quote_timestamp="2026-07-17 15:08:00"),
+            _successful_write("000002.SZ", quote_timestamp="2026-07-17 15:08:30"),
+            _successful_write("920001.BJ", quote_timestamp="2026-07-17 15:09:00"),
+            _successful_write("920002.BJ", quote_timestamp="2026-07-17 15:09:20"),
+        ],
+    )
+
+    summary = cache.market_scan_repo.publication_summary(run.id)
+    status, message = completion_status(
+        cache.market_scan_run(run.id),
+        publication_summary=summary,
+    )
+
+    assert summary.snapshot_span_seconds == 20 * 60
+    assert publication_blockers(summary) == ()
+    assert status == "success"
+    assert "完成" in message
+
+
+def test_quote_snapshot_span_allows_cross_market_event_time_offsets(
     tmp_path: Path,
 ) -> None:
     cache = _cache(tmp_path)
@@ -396,9 +478,14 @@ def test_quote_snapshot_span_blocks_cross_market_time_mixing(
     assert summary.snapshot_started_at == "2026-07-17 15:35:00"
     assert summary.snapshot_finished_at == "2026-07-17 16:15:59"
     assert summary.snapshot_span_seconds == 40 * 60 + 59
-    assert publication_blockers(summary)
-    assert status == "failed"
-    assert "快照跨度" in message
+    assert {item.market: item.span_seconds for item in summary.market_event_spans} == {
+        "SH": 45,
+        "SZ": 49,
+        "BJ": 50,
+    }
+    assert publication_blockers(summary) == ()
+    assert status == "success"
+    assert "完成" in message
 
 
 def test_snapshot_span_normalizes_equivalent_aware_and_naive_market_times(
@@ -470,6 +557,7 @@ def test_history_skips_are_diagnostic_and_do_not_reduce_publishable_coverage(
         ],
         excluded_count=0,
     )
+    _seal_quote_capture(cache, run.id, count=332)
     cache.save_market_scan_result_batch(
         run.id,
         [
@@ -481,6 +569,7 @@ def test_history_skips_are_diagnostic_and_do_not_reduce_publishable_coverage(
                     symbol=symbol,
                     status="skipped",
                     reason="历史数据不足 60 根，暂不参与排名",
+                    quote_observed_at="2026-07-17T07:00:00Z",
                 )
                 for symbol in bj_symbols[309:]
             ],
@@ -521,6 +610,7 @@ def test_excessive_market_skips_cannot_hide_coverage_failure(tmp_path: Path) -> 
                 symbol="920002.BJ",
                 status="skipped",
                 reason="历史数据不足 60 根，暂不参与排名",
+                quote_observed_at="2026-07-17T07:00:00Z",
             ),
         ],
     )
@@ -629,6 +719,37 @@ def _cache(tmp_path: Path) -> SQLiteCache:
     return SQLiteCache(settings=settings)
 
 
+def _strict_v6_publication_summary() -> MarketScanPublicationSummary:
+    return MarketScanPublicationSummary(
+        coverages=(
+            MarketScanCoverage("ALL", total_count=6, success_count=6),
+            MarketScanCoverage("SH", total_count=2, success_count=2),
+            MarketScanCoverage("SZ", total_count=2, success_count=2),
+            MarketScanCoverage("BJ", total_count=2, success_count=2),
+        ),
+        snapshot_contract_version="v6",
+        expected_capture_count=6,
+        capture_started_at="2026-07-17T07:00:00Z",
+        capture_finished_at="2026-07-17T07:20:00Z",
+        capture_duration_ms=1_200_000,
+        capture_count=6,
+        capture_sealed=True,
+        observed_started_at="2026-07-17T07:00:00Z",
+        observed_finished_at="2026-07-17T07:20:00Z",
+        observed_span_seconds=1_200,
+        observed_count=6,
+        market_event_spans=tuple(
+            MarketScanMarketEventSpan(
+                market=market,
+                started_at="2026-07-17 15:00:00",
+                finished_at="2026-07-17 15:00:00",
+                span_seconds=0,
+            )
+            for market in ("SH", "SZ", "BJ")
+        ),
+    )
+
+
 def _seed_running_run(cache: SQLiteCache, *, one_per_market: bool = False) -> MarketScanRun:
     run = cache.create_market_scan_run(
         trigger="manual",
@@ -652,7 +773,18 @@ def _seed_running_run(cache: SQLiteCache, *, one_per_market: bool = False) -> Ma
             )
         )
     cache.seed_market_scan_results(run.id, seeds, excluded_count=0)
+    _seal_quote_capture(cache, run.id, count=len(seeds))
     return cache.market_scan_run(run.id)
+
+
+def _seal_quote_capture(cache: SQLiteCache, run_id: int, *, count: int) -> None:
+    cache.begin_market_scan_quote_capture(run_id, "2026-07-17T06:59:59Z")
+    cache.seal_market_scan_quote_capture(
+        run_id,
+        finished_at="2026-07-17T07:00:01Z",
+        duration_ms=2_000,
+        count=count,
+    )
 
 
 def _successful_write(
@@ -676,6 +808,7 @@ def _successful_write(
         reason="测试评分",
         data_date=DATA_DATE.isoformat(),
         quote_timestamp=quote_timestamp,
+        quote_observed_at="2026-07-17T07:00:00Z",
         quote_source="test",
         kline_source="test",
         adjustment_mode="qfq",
@@ -713,6 +846,7 @@ def _quote():
             "code": "600001",
             "market": "SH",
             "name": "沪市样本",
+            "open": 10.1,
             "amount": 800_000_000,
         }
     )
@@ -823,6 +957,23 @@ def test_constant_raw_scores_fail_publication_with_auditable_metrics() -> None:
     assert error is not None and "raw_score 全部相同" in error
 
 
+def test_finalizer_uses_minimal_raw_score_fast_path_with_equivalent_distribution() -> None:
+    raw_scores = [100 - index * 0.1 for index in range(200)]
+    run = _distribution_run(len(raw_scores) + 3)
+    cache = _FastCompletionCache(raw_scores)
+
+    distribution = asyncio.run(MarketScanFinalizer(cache)._score_distribution(run))
+    expected = MarketScanScoreDistribution.from_raw_scores(
+        raw_scores,
+        expected_count=run.success_count,
+        policy=MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
+    )
+
+    assert distribution == expected
+    assert distribution is not None and distribution.expected_count == 203
+    assert cache.fast_path_calls == [run.id]
+
+
 def test_top_100_fully_saturated_at_100_fails_publication() -> None:
     raw_scores = [100.0] * 100 + [99.0 - index * 0.1 for index in range(200)]
     distribution = _score_distribution(raw_scores)
@@ -909,6 +1060,19 @@ class _CompletionCache:
     ) -> None:
         assert run_id == 1
         self.finished = (status, message, error)
+
+
+class _FastCompletionCache:
+    def __init__(self, raw_scores: list[float]) -> None:
+        self.raw_scores = raw_scores
+        self.fast_path_calls: list[int] = []
+
+    def market_scan_success_raw_scores(self, run_id: int) -> tuple[float, ...]:
+        self.fast_path_calls.append(run_id)
+        return tuple(self.raw_scores)
+
+    def market_scan_results(self, _run_id: int, **_kwargs: object) -> SimpleNamespace:
+        raise AssertionError("score distribution fast path must not hydrate full result rows")
 
 
 def _distribution_run(count: int) -> MarketScanRun:

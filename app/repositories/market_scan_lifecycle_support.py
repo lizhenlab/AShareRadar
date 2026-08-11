@@ -11,7 +11,7 @@ from app.repositories.market_scan_results import (
     sync_run_counts,
 )
 from app.utils.clock import monotonic_now
-from app.utils.time import parse_text_time
+from app.utils.time import datetime_to_text, parse_text_time
 
 
 ACTIVE_SCAN_STATUSES = ("queued", "running", "cancelling")
@@ -117,7 +117,7 @@ def _finish_active_run(
 
 
 def build_retry_plan(conn: sqlite3.Connection, run: sqlite3.Row) -> MarketScanRetryPlan:
-    force_recompute = str(run["status"]) == "failed" or str(run["stock_pool_source"] or "") == "stale-fallback"
+    force_recompute = force_recompute_retry(run)
     counts = conn.execute(
         """
         SELECT
@@ -145,6 +145,25 @@ def build_retry_plan(conn: sqlite3.Connection, run: sqlite3.Row) -> MarketScanRe
         needs_market_data=result_count == 0 or pending > 0,
         rule_version=str(run["rule_version"]),
     )
+
+
+def force_recompute_retry(run: sqlite3.Row) -> bool:
+    return (
+        str(run["rule_version"] or "").startswith("full-market-scan-v6:")
+        or str(run["status"]) == "failed"
+        or str(run["stock_pool_source"] or "") == "stale-fallback"
+    )
+
+
+def retry_as_of(run: sqlite3.Row, triggered_as_of: str | None) -> str:
+    if not force_recompute_retry(run):
+        return str(run["as_of"])
+    if not str(triggered_as_of or "").strip():
+        raise ValueError("完整重算必须记录本次重试触发时间")
+    normalized = datetime_to_text(parse_text_time(str(triggered_as_of)))
+    if normalized is None:  # pragma: no cover - parse_text_time already returns a datetime
+        raise ValueError("完整重算触发时间无效")
+    return normalized
 
 
 def _decoded_stage_metrics(value: object) -> dict[str, dict[str, int]]:

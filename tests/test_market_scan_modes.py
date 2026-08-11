@@ -11,6 +11,7 @@ from app.services.cache import SQLiteCache
 from app.services.market_scan_manager import market_scan_rule_version
 from app.services.market_scan_modes import market_scan_temporal_contract
 from app.services.market_scan_scoring import score_market_scan_item
+from app.services.market_scan_score_dimensions import verify_market_scan_point_in_time_evidence
 from tests.market_scan_test_support import (
     _MarketScanHub,
     _daily_rows,
@@ -75,6 +76,16 @@ def test_intraday_scoring_uses_today_quote_and_previous_completed_bar() -> None:
     assert result.status == "success"
     assert result.data_date == PREVIOUS_DATA_DATE.isoformat()
     assert result.quote_timestamp == "2026-07-17 12:08:00"
+    dimensions = result.score_details["components"]["score_dimensions"]
+    assert dimensions["volume_context"] == {
+        "mode": "intraday",
+        "volume_ratio_basis": "completed-daily-bars-5d-vs-20d",
+        "volume_data_date": PREVIOUS_DATA_DATE.isoformat(),
+        "price_volume_alignment": "intraday-time-aligned-volume-unavailable-neutralized",
+        "lifecycle_applied": False,
+    }
+    assert dimensions["raw_features"]["volume_lifecycle_delta"] == 0
+    assert verify_market_scan_point_in_time_evidence(dimensions["point_in_time_evidence"]) is True
 
 
 def test_intraday_manager_persists_explicit_mode_and_both_dates(tmp_path: Path) -> None:
@@ -110,9 +121,14 @@ def test_intraday_retry_preserves_mode_and_temporal_contract(tmp_path: Path) -> 
     )
     cache.finish_market_scan_run(original.id, "failed", message="测试失败")
 
-    retried = cache.prepare_market_scan_retry(original.id)
+    retried = cache.prepare_market_scan_retry(
+        original.id,
+        as_of="2026-07-17 12:15:00",
+    )
 
     assert retried.mode == "intraday"
+    assert retried.as_of == "2026-07-17 12:15:00"
+    assert cache.market_scan_run(original.id).as_of == "2026-07-17 12:08:00"
     assert retried.data_date == original.data_date
     assert retried.quote_date == original.quote_date
     assert retried.rule_version == original.rule_version

@@ -54,6 +54,7 @@ import { createDiscoveryController } from "./js/discovery.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
 import { createMarketScanController } from "./js/market-scan.js";
+import { createStrategyLabController } from "./js/strategy-lab.js";
 import {
   comparePaperTradingRuns,
   createPaperStrategy,
@@ -88,6 +89,7 @@ import { renderResearch } from "./js/research-panels.js";
 import { syncAiQuestionCapabilityFromAvailability } from "./js/research-qa-reports.js";
 import { ACTIVITY_FILTERS, mergeResearchActivity, renderResearchActivity } from "./js/research-activity.js";
 import { createStockSearchController } from "./js/stock-search.js";
+import { createStockSearchHistory } from "./js/stock-search-history.js";
 import { normalizeUiSymbol, validateUiSymbol } from "./js/symbols.js";
 import {
   addWatchlistItem,
@@ -288,6 +290,10 @@ function setPrimaryView(view, options = {}) {
       syncPrimary: false,
     });
   } else {
+    const surfaceActive = target === "market" && state.workspaceView === "market-scan";
+    marketScanController.setSurfaceActive(surfaceActive);
+    if (surfaceActive && !marketScanController.state.activated) void marketScanController.activate();
+    if (surfaceActive && !strategyLabController.state.activated) void strategyLabController.activate();
     persistWorkspacePreferences();
   }
   if (previousView !== target && state.lastAnalysis) requestAnimationFrame(redrawResearchCharts);
@@ -323,13 +329,16 @@ function setWorkspaceView(view, options = {}) {
     panel.hidden = !active;
   });
   document.body?.classList?.toggle("market-scan-view-active", state.primaryView === "market");
+  const surfaceActive = state.primaryView === "market" && target === "market-scan";
+  const surfaceChanged = marketScanController.setSurfaceActive(surfaceActive);
   persistWorkspacePreferences();
-  if (target === "market-scan" && previousView !== target) {
+  if (surfaceActive && previousView !== target) {
     let refresh = Promise.resolve(marketScanController.state.run);
     if (!marketScanController.state.activated) refresh = marketScanController.activate();
-    else if (options.refreshMarketScan !== false) refresh = marketScanController.loadLatest();
+    else if (!surfaceChanged && options.refreshMarketScan !== false) refresh = marketScanController.loadLatest();
     void refresh;
     void discoveryController.activate();
+    void strategyLabController.activate();
   }
   if (target === "data") void loadRuntimeCleanupPreview().catch(() => {});
   if (target === "paper" && previousView !== target) void loadPaperTradingDashboard(state);
@@ -637,6 +646,11 @@ function renderWorkbench(workbench) {
   state.coreStatus = { phase: "ready", text: "核心数据已加载", kind: "" };
   state.dataQualityStatus = workbenchDataQualityStatus(analysis, localWarnings);
   renderCompositeStatus();
+  const quote = plainObject(analysis.quote);
+  stockSearchHistory.record({
+    symbol: `${String(quote.code || "").trim()}.${String(quote.market || "").trim()}`,
+    name: quote.name,
+  });
 }
 
 function workbenchDataQualityStatus(analysis, localWarnings) {
@@ -2382,6 +2396,19 @@ const mainStockSearch = createStockSearchBinding({
   },
 });
 
+const stockSearchHistory = createStockSearchHistory({
+  onSelect(symbol) {
+    mainStockSearch.close();
+    clearSymbolError();
+    setWorkspaceView("overview");
+    setActiveSymbol(symbol);
+    void loadAll({ reveal: true }).then((loaded) => {
+      const workbench = $("stockWorkbench");
+      if (loaded && workbench && typeof workbench.focus === "function") workbench.focus();
+    });
+  },
+});
+
 const watchStockSearch = createStockSearchBinding({
   inputId: "watchSymbolInput",
   listId: "watchSymbolSuggestions",
@@ -2389,6 +2416,7 @@ const watchStockSearch = createStockSearchBinding({
 });
 
 const marketScanController = createMarketScanController({
+  surfaceActive: false,
   onOpen() {
     setWorkspaceView("market-scan", { refreshMarketScan: false });
     const panel = $("workspace-panel-market-scan");
@@ -2406,6 +2434,8 @@ const marketScanController = createMarketScanController({
     }
   },
 });
+
+const strategyLabController = createStrategyLabController();
 
 const discoveryController = createDiscoveryController({
   getRun: () => marketScanController.state.run,
@@ -2938,8 +2968,10 @@ $("exportLocalData").addEventListener("click", async () => {
 });
 
 $("localDataImportFile").addEventListener("change", async (event) => {
+  const file = event.currentTarget.files?.[0];
+  $("localDataImportFileName").textContent = file?.name || "尚未选择文件";
   try {
-    await readLocalDataFile(state, event.currentTarget.files?.[0]);
+    await readLocalDataFile(state, file);
   } catch (error) {
     setInlineFeedback("localDataFeedback", error);
   }
@@ -3174,6 +3206,7 @@ function handleWorkbenchOnline() {
 
 function destroyStockSearchBindings() {
   stockSearchBindings.forEach((binding) => binding.destroy());
+  stockSearchHistory.destroy();
 }
 
 function handleStockSearchPageHide(event) {
@@ -3182,6 +3215,7 @@ function handleStockSearchPageHide(event) {
     return;
   }
   stockSearchBindings.forEach((binding) => binding.close());
+  stockSearchHistory.close();
 }
 
 function handleVisibilityChange() {
@@ -3252,6 +3286,7 @@ export const __appTest = {
   DAILY_CHART_RANGES,
   MINUTE_CHART_INTERVALS,
   marketScanController,
+  strategyLabController,
   discoveryController,
 };
 

@@ -1,26 +1,15 @@
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { compactErrorMessage } from "./errors.js";
-import {
-  isActiveMarketScanRun,
-  isPublishedMarketScanRun,
-  isRetryableMarketScanRun,
-  marketScanContractError,
-  marketScanRunIdentityChanged,
-  marketScanRunStateChanged,
-  validateMarketScanRun,
-  validateResultPage,
-  validateStartResponse,
-} from "./market-scan-contracts.js";
+import { isActiveMarketScanRun, isPublishedMarketScanRun, isRetryableMarketScanRun, marketScanContractError, marketScanRunIdentityChanged, marketScanRunStateChanged, validateMarketScanRun, validateResultPage, validateStartResponse } from "./market-scan-contracts.js";
 import { createMarketScanPolling } from "./market-scan-polling.js";
 import { createMarketScanHistory } from "./market-scan-history.js";
-import {
-  exportTimeoutScope,
-  MARKET_SCAN_XLSX_MEDIA_TYPE,
-  marketScanExportError,
-  marketScanExportMediaType,
-} from "./market-scan-export-client.js";
+import { createMarketScanSurface } from "./market-scan-surface.js";
+import { exportTimeoutScope, MARKET_SCAN_XLSX_MEDIA_TYPE, marketScanExportError, marketScanExportMediaType } from "./market-scan-export-client.js";
+import { bindMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
+import { createMarketScanFutureRangeController } from "./market-scan-future-range-controller.js";
 import { inertMarketScanController } from "./market-scan-controller-inert.js";
 import { createMarketScanRowClickHandler } from "./market-scan-row-actions.js";
+import { createMarketScanTop100Refresh } from "./market-scan-top100-refresh.js";
 import { buildMarketScanExportUrl, buildMarketScanResultsUrl, createMarketScanView } from "./market-scan-view.js";
 export { buildMarketScanExportUrl, buildMarketScanResultsUrl, marketScanResultsUrl } from "./market-scan-view.js";
 
@@ -37,6 +26,7 @@ export function createMarketScanController(options = {}) {
   const { elements } = view;
   const state = {
     activated: false, actionBusy: false, exportBusy: false, visible: !root.hidden,
+    surfaceActive: options.surfaceActive !== false,
     run: null, publishedRun: null,
     browseMode: view.selectedMode(), selectedHistoryRunId: null, historyRuns: [],
     page: 1, pageCount: 0,
@@ -63,9 +53,24 @@ export function createMarketScanController(options = {}) {
     state,
     view,
   });
+  const surface = createMarketScanSurface({
+    abortHistory: history.abort,
+    abortResults: () => abortRequest("resultRequest", "resultRequestSeq"),
+    elements,
+    loadResults,
+    refresh: () => Promise.all([
+      isActiveMarketScanRun(state.run) ? pollRun() : state.publishedRun ? loadResults() : loadLatest(),
+      history.load(),
+    ]),
+    releaseResults,
+    state,
+  });
   const handleRowClick = createMarketScanRowClickHandler({ onSelectStock, view });
+  const top100Refresh = createMarketScanTop100Refresh({ applyRun, elements, mutate, polling, resultRun, state, view });
+  const futureRange = createMarketScanFutureRangeController({ root, request, getRun: resultRun });
   bindEvents();
   view.renderRun(null);
+  view.resetProbabilityResearch(null);
   view.renderExportBusy(false, null);
   syncBrowsingContext();
   function activate() {
@@ -75,14 +80,23 @@ export function createMarketScanController(options = {}) {
   }
   function deactivate() {
     state.activated = false;
+    futureRange.abort();
     clearControllerTimers();
     abortRequest("runRequest", "runRequestSeq");
     abortRequest("resultRequest", "resultRequestSeq");
     history.abort();
+    releaseResults();
+  }
+  function releaseResults() {
+    elements.rows.innerHTML = "";
+    elements.tableWrap.hidden = true;
+    elements.pagination.hidden = true;
+    state.renderedResultRunId = null;
   }
   function setVisible(visible) {
     state.visible = Boolean(visible);
     if (!state.visible) {
+      futureRange.abort();
       clearControllerTimers();
       abortRequest("runRequest", "runRequestSeq");
       abortRequest("resultRequest", "resultRequestSeq");
@@ -110,7 +124,7 @@ export function createMarketScanController(options = {}) {
       if (!isCurrentRequest("runRequestSeq", sequence)) return null;
       polling.resetFailures();
       const publishedChanged = applyPublishedRun(publishedRun);
-      if (publishedRun && (publishedChanged || state.renderedResultRunId !== publishedRun.id)) {
+      if (state.surfaceActive && publishedRun && (publishedChanged || state.renderedResultRunId !== publishedRun.id)) {
         const outcome = await loadResultsOnce();
         if (!outcome.ok) {
           if (!outcome.aborted && state.publishedRun?.id === publishedRun.id) {
@@ -230,6 +244,7 @@ export function createMarketScanController(options = {}) {
     abortRequest("runRequest", "runRequestSeq");
     const sequence = beginRequest("actionRequest", "actionRequestSeq");
     view.renderActionBusy(true, state.run, `${label}请求处理中。`);
+    top100Refresh.sync();
     let completionMessage = "";
     try {
       const payload = await request(url, {
@@ -255,6 +270,7 @@ export function createMarketScanController(options = {}) {
       if (isCurrentRequest("actionRequestSeq", sequence)) {
         state.actionBusy = false;
         view.renderActionBusy(false, state.run, completionMessage);
+        top100Refresh.sync();
       }
       finishRequest("actionRequest", "actionRequestSeq", sequence);
       if (!state.actionBusy) polling.scheduleDefault(state.run);
@@ -323,8 +339,9 @@ export function createMarketScanController(options = {}) {
       && run.mode === state.browseMode
     ) {
       applyPublishedRun(run);
-      void history.load();
+      if (state.surfaceActive) void history.load();
     }
+    if (!state.surfaceActive) { polling.scheduleDefault(state.run); return null; }
     const outcome = await loadResultsOnce();
     if (outcome.ok) { polling.scheduleDefault(state.run); return null; }
     if (outcome.aborted) return null;
@@ -339,6 +356,7 @@ export function createMarketScanController(options = {}) {
     return shouldRecover ? error : null;
   }
   async function loadResults(options = {}) {
+    if (!state.surfaceActive) return null;
     if (state.actionBusy && !options.allowDuringAction) return null;
     polling.clear();
     const runId = resultRun()?.id ?? null;
@@ -356,6 +374,7 @@ export function createMarketScanController(options = {}) {
     return null;
   }
   async function loadResultsOnce() {
+    if (!state.surfaceActive) return { ok: true, payload: null, skipped: true };
     const publishedRun = resultRun();
     if (!publishedRun) {
       state.renderedResultRunId = null;
@@ -449,6 +468,8 @@ export function createMarketScanController(options = {}) {
       state.browseMode,
       state.selectedHistoryRunId !== null,
     );
+    top100Refresh.sync();
+    futureRange.sync(resultRun());
   }
   async function recoverLatest(error) {
     if (!state.activated || !state.visible || state.actionBusy) return null;
@@ -470,6 +491,9 @@ export function createMarketScanController(options = {}) {
     elements.cancel.addEventListener("click", () => void cancel());
     elements.retry.addEventListener("click", () => void retry());
     elements.exportButton.addEventListener("click", () => void exportResults());
+    bindMarketScanProbabilityHorizon(elements, () => {
+      clearResetTimer(); state.page = 1; view.resetProbabilityResearch(resultRun()?.id); void loadResults();
+    });
     elements.filters.addEventListener("submit", (event) => {
       event.preventDefault();
       clearResetTimer();
@@ -491,11 +515,13 @@ export function createMarketScanController(options = {}) {
     elements.prev.addEventListener("click", () => {
       if (state.page <= 1) return;
       state.page -= 1;
+      view.focusResults();
       void loadResults();
     });
     elements.next.addEventListener("click", () => {
       if (state.pageCount && state.page >= state.pageCount) return;
       state.page += 1;
+      view.focusResults();
       void loadResults();
     });
     elements.globalOpen.addEventListener("click", () => onOpen());
@@ -524,7 +550,6 @@ export function createMarketScanController(options = {}) {
     void recovery;
     return true;
   }
-
   return {
     activate,
     cancel,
@@ -533,7 +558,10 @@ export function createMarketScanController(options = {}) {
     loadHistory: history.load,
     loadLatest,
     loadResults,
+    releaseResults,
     retry,
+    refreshTop100: top100Refresh.refresh,
+    setSurfaceActive: surface.setActive,
     setVisible,
     start,
     state,

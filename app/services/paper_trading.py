@@ -47,7 +47,7 @@ from app.services.research_replay import (
     completed_daily_bar_cutoff,
     normalized_advice_review_prices,
 )
-from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME
+from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
 from app.utils.market_data import valid_kline
 from app.utils.market_time import market_local_naive
 from app.utils.provider_errors import sanitize_provider_error
@@ -356,7 +356,7 @@ def simulate_paper_portfolio(
         recorder,
     )
     benchmark = _prepare_benchmark(benchmark_values, as_of, benchmark_error)
-    trades, equity = _simulate_trade_days(account, states, bars, profile, benchmark, recorder)
+    trades, equity, benchmark = _simulate_trade_days(account, states, bars, profile, benchmark, recorder)
     simulations = [_simulation_from_state(states[item.id]) for item in ordered]
     unavailable_count = sum(item.status == "data_unavailable" for item in simulations)
     closed_count = sum(item.status == "closed" for item in simulations)
@@ -476,6 +476,8 @@ def _simulation_configuration(profile: PaperCostProfile) -> dict[str, object]:
         "entry_fill": "first eligible complete daily bar open",
         "t1": "entry-day target/stop signal is latched; exit at next sellable session open",
         "same_bar": "stop wins when target and stop are both touched",
+        "benchmark_start": "first simulated trade-day open; previous close only when that open is unavailable",
+        "daily_bar_filter": "completed canonical trading dates only; conflicting duplicates are rejected",
         "daily_bar_limit": "order-book queue and intraday sequence are not reconstructed",
         "cost_profile_id": profile.profile_id,
         "cost_profile": profile.model_dump(mode="json"),
@@ -487,13 +489,15 @@ def _data_extent_and_sources(
     benchmark_rows: list[Kline],
     as_of: datetime,
 ) -> tuple[str | None, str | None, list[str]]:
+    cutoff = completed_daily_bar_cutoff(as_of)
     rows = [row for values in rows_by_symbol.values() for row in values]
-    dates = [row.date for row in rows if _valid_row_through(row, as_of.date())]
+    all_rows = [*rows, *benchmark_rows]
+    dates = [row.date for row in all_rows if _valid_row_through(row, cutoff)]
     sources = sorted(
         {
             str(row.source or row.data_version or "unknown")
-            for row in [*rows, *benchmark_rows]
-            if valid_kline(row)
+            for row in all_rows
+            if _valid_row_through(row, cutoff)
         }
     )
     return (min(dates) if dates else None, max(dates) if dates else None, sources)
@@ -501,7 +505,12 @@ def _data_extent_and_sources(
 
 def _valid_row_through(row: Kline, cutoff: date) -> bool:
     row_date = _date_or_none(row.date)
-    return valid_kline(row) and row_date is not None and row_date <= cutoff
+    return (
+        valid_kline(row)
+        and row_date is not None
+        and row_date <= cutoff
+        and is_trading_day(row_date)
+    )
 
 
 def _prepare_paper_states(
@@ -547,7 +556,21 @@ def _prepare_strategy(
     if data_error:
         _mark_strategy_unavailable(state, as_of.date(), "market_data_unavailable", data_error, recorder)
         return state, {}
-    prices = normalized_advice_review_prices(source, rows)
+    try:
+        prices = normalized_advice_review_prices(
+            source,
+            rows,
+            cutoff=completed_daily_bar_cutoff(as_of),
+        )
+    except ValueError:
+        _mark_strategy_unavailable(
+            state,
+            as_of.date(),
+            "conflicting_daily_bar",
+            "同一交易日存在冲突K线，未执行模拟撮合",
+            recorder,
+        )
+        return state, {}
     if prices is None:
         _mark_strategy_unavailable(
             state,
@@ -615,6 +638,7 @@ def _prepared_strategy_bars(
         if valid_kline(row)
         and (row_date := _date_or_none(row.date)) is not None
         and row_date <= cutoff
+        and is_trading_day(row_date)
     }
     ordered_rows = [by_date[key] for key in sorted(by_date)]
     previous_close_by_date: dict[str, float | None] = {}
@@ -664,7 +688,7 @@ def _simulate_trade_days(
     cost_profile: PaperCostProfile,
     benchmark: _BenchmarkSeries,
     recorder: _EventRecorder,
-) -> tuple[list[PaperTradeDraft], list[PaperEquityPointDraft]]:
+) -> tuple[list[PaperTradeDraft], list[PaperEquityPointDraft], _BenchmarkSeries]:
     trade_dates = sorted({trade_date for strategy_bars in bars.values() for trade_date in strategy_bars})
     cash = account.initial_cash
     peak_equity = account.initial_cash
@@ -695,7 +719,7 @@ def _simulate_trade_days(
             peak_equity,
         )
         equity.append(point)
-    return trades, equity
+    return trades, equity, benchmark
 
 
 def _process_open_positions(
@@ -1094,15 +1118,20 @@ def _skip_entry(state: _PaperState, row: Kline, reason: str, recorder: _EventRec
 @dataclass(frozen=True)
 class _BenchmarkSeries:
     closes: dict[str, float]
+    opens: dict[str, float]
     base_close: float | None
     available: bool
     message: str | None
 
     def starting_at(self, trade_date: str) -> _BenchmarkSeries:
-        eligible = [key for key in self.closes if key <= trade_date]
+        if not self.available:
+            return self
+        if trade_date in self.opens:
+            return _BenchmarkSeries(self.closes, self.opens, self.opens[trade_date], True, None)
+        eligible = [key for key in self.closes if key < trade_date]
         if not eligible:
-            return _BenchmarkSeries(self.closes, None, False, "基准在模拟起始日前没有可用日K")
-        return _BenchmarkSeries(self.closes, self.closes[max(eligible)], True, None)
+            return _BenchmarkSeries(self.closes, self.opens, None, False, "基准在模拟起始日前没有可用日K")
+        return _BenchmarkSeries(self.closes, self.opens, self.closes[max(eligible)], True, "基准起始日缺失，使用前收盘价")
 
     def values(self, trade_date: str, initial_cash: float) -> tuple[float | None, float | None]:
         if not self.available or self.base_close is None:
@@ -1117,20 +1146,37 @@ class _BenchmarkSeries:
 
 def _prepare_benchmark(rows: list[Kline], as_of: datetime, error: str | None) -> _BenchmarkSeries:
     if error:
-        return _BenchmarkSeries({}, None, False, error)
+        return _BenchmarkSeries({}, {}, None, False, error)
     cutoff = completed_daily_bar_cutoff(as_of)
-    closes = {
-        row.date: row.close
-        for row in rows
-        if valid_kline(row)
-        and row.volume >= 0
-        and (row_date := _date_or_none(row.date)) is not None
-        and row_date <= cutoff
-    }
-    if not closes:
-        return _BenchmarkSeries({}, None, False, "基准没有可用的完整日K")
-    first = min(closes)
-    return _BenchmarkSeries(dict(sorted(closes.items())), closes[first], True, None)
+    by_date: dict[str, Kline] = {}
+    for row in rows:
+        row_date = _date_or_none(row.date)
+        if row_date is None or row_date > cutoff or not is_trading_day(row_date) or not valid_kline(row):
+            continue
+        existing = by_date.get(row.date)
+        if existing is not None and _paper_bar_signature(existing) != _paper_bar_signature(row):
+            return _BenchmarkSeries({}, {}, None, False, f"基准同一交易日 {row.date} 存在冲突日K")
+        by_date[row.date] = row
+    if not by_date:
+        return _BenchmarkSeries({}, {}, None, False, "基准没有可用的完整日K")
+    ordered = dict(sorted(by_date.items()))
+    closes = {row_date: row.close for row_date, row in ordered.items()}
+    opens = {row_date: row.open for row_date, row in ordered.items()}
+    first = min(ordered)
+    return _BenchmarkSeries(closes, opens, opens[first], True, None)
+
+
+def _paper_bar_signature(row: Kline) -> tuple[float, float, float, float, float, str, str, str]:
+    return (
+        row.open,
+        row.close,
+        row.high,
+        row.low,
+        row.volume,
+        row.adjustment_mode,
+        row.data_version,
+        row.contract_version,
+    )
 
 
 def _paper_equity_point(
@@ -1340,6 +1386,7 @@ def _market_fingerprint_values(
             if valid_kline(item)
             and (row_date := _date_or_none(item.date)) is not None
             and row_date <= cutoff
+            and is_trading_day(row_date)
         ]
 
     return {

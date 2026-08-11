@@ -24,7 +24,10 @@ def test_deep_market_scan_retry_chain_keeps_only_retained_leaf_and_direct_parent
         cache.finish_market_scan_run(run.id, "failed", message="test")
         if len(chain) == 6:
             break
-        run = cache.prepare_market_scan_retry(run.id)
+        run = cache.prepare_market_scan_retry(
+            run.id,
+            as_of="2026-07-10 16:45:00",
+        )
         chain.append(run)
 
     preview = cache.preview_runtime_cleanup()

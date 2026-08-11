@@ -313,9 +313,28 @@ def test_trading_day_gap_and_previous_date_use_only_trusted_coverage(
     _use_paths(monkeypatch, tmp_path / "missing-runtime.json", bundle_path)
 
     assert trading_calendar.previous_trade_date(date(2026, 1, 4)) == date(2025, 12, 31)
+    assert trading_calendar.next_trade_dates(date(2025, 12, 31), 3) == (
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+    )
     assert trading_calendar.trading_day_gap(date(2025, 12, 31), date(2026, 1, 7)) == 3
     with pytest.raises(trading_calendar.TradingCalendarCoverageError):
         trading_calendar.trading_day_gap(date(2025, 12, 30), date(2026, 1, 7))
+
+
+def test_next_trade_dates_fails_closed_when_future_coverage_is_short(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_path = tmp_path / "bundle.json"
+    _write_calendar(bundle_path, ["2026-01-02", "2026-01-05"])
+    _use_paths(monkeypatch, tmp_path / "missing-runtime.json", bundle_path)
+
+    with pytest.raises(trading_calendar.TradingCalendarCoverageError, match="之后不足 3 个交易日"):
+        trading_calendar.next_trade_dates(date(2026, 1, 2), 3)
+    with pytest.raises(ValueError, match="count 必须是正整数"):
+        trading_calendar.next_trade_dates(date(2026, 1, 2), 0)
 
 
 @pytest.mark.parametrize(

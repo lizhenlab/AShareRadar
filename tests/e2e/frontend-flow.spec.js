@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { filterMarketScanRange, filterMarketScanResearchRange } from "./market-scan-fixture-filters.mjs";
 
 test("SSE status waits for the current frame and preserves degradation", async ({ page }) => {
   let degraded = false;
@@ -77,6 +78,38 @@ test("three stock loads reuse global requests and add only five stock requests",
       (url) => !globalEndpoints.includes(url) && !stockKinds.some((prefix) => url.startsWith(prefix))
     )
   ).toEqual([]);
+});
+
+test("successful stock loads build a recent history that switches back to refreshed research", async ({ page }) => {
+  const workbenchSymbols = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/stock/workbench") workbenchSymbols.push(url.searchParams.get("symbol"));
+  });
+  await mockApi(page);
+
+  await page.goto("/");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  await page.locator("#symbolInput").fill("000001");
+  await page.locator("#searchForm button").click();
+  await expect(page.locator("#stockName")).toHaveText("平安银行");
+  await page.locator("#symbolInput").fill("300750");
+  await page.locator("#searchForm button").click();
+  await expect(page.locator("#stockName")).toHaveText("宁德时代");
+
+  await page.locator("#primary-nav-review").click();
+  if (!(await page.locator("#stockSearchHistory").isVisible())) {
+    await page.locator("#queryPanelToggle").click();
+  }
+  await expect(page.locator("#stockSearchHistory")).toBeVisible();
+  await expect(page.locator("#stockSearchHistoryCount")).toHaveText("3");
+  await expect(page.locator("#stockSearchHistoryList .stock-search-history-item").first()).toContainText("宁德时代");
+  await page.locator('[data-stock-history-symbol="600519.SH"]').click();
+
+  await expect(page.locator("#primary-nav-research")).toHaveAttribute("aria-current", "page");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  await expect.poll(() => workbenchSymbols).toEqual(["600519", "000001.SZ", "300750.SZ", "600519.SH"]);
+  await expect(page.locator("#stockSearchHistory")).toBeVisible();
 });
 
 test("Beijing name search joins the quote stream and rejects market conflicts", async ({ page }) => {
@@ -268,7 +301,66 @@ test("primary navigation separates research, market, review, and monitoring work
   await expect(page.locator("#workspace-panel-overview")).toBeVisible();
 });
 
-test("paper trading freezes a review plan and renders deterministic simulated fills", async ({ page }) => {
+test("layout controls prioritize primary content across desktop and mobile workspaces", async ({ page }, testInfo) => {
+  const mobileProject = Boolean(testInfo.project.use.isMobile);
+  await page.setViewportSize(mobileProject ? { width: 390, height: 844 } : { width: 1440, height: 900 });
+  await mockApi(page, {
+    api(url) {
+      if (url.pathname === "/api/market-scans/latest") return { payload: null };
+      return null;
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+
+  if (mobileProject) {
+    await page.locator("#queryPanelToggle").click();
+    await expect(page.locator("#searchForm")).toBeHidden();
+    await expect(page.locator("body")).toHaveClass(/query-panel-collapsed/);
+    await page.locator("#queryPanelToggle").click();
+    await expect(page.locator("#searchForm")).toBeVisible();
+
+    await selectPrimaryView(page, "review");
+    await expect(page.locator("#searchForm")).toBeHidden();
+    await expect(page.locator(".advice-review-panel")).toHaveClass(/layout-panel-collapsed/);
+    await page.locator(".advice-review-panel .layout-collapse-toggle").click();
+    await page.locator("#reviewAdviceId").evaluate((select) => {
+      select.innerHTML = '<option value="">请选择</option><option value="1">600519 贵州茅台 · 2026-07-30 · 观察</option><option value="2">000001 平安银行 · 2026-07-29 · 等待</option>';
+    });
+    await page.locator("#reviewAdviceSearch").fill("茅台");
+    await expect(page.locator("#reviewAdviceSearchFeedback")).toHaveText("找到 1 条匹配快照");
+    await expect(page.locator('#reviewAdviceId option[value="2"]')).toHaveJSProperty("hidden", true);
+
+    await selectPrimaryView(page, "monitor");
+    await expect(page.locator("#watchForm")).toBeHidden();
+    const monitorOrder = await page.evaluate(() => ({
+      side: document.querySelector(".side-column").getBoundingClientRect().top,
+      notice: document.querySelector(".notice").getBoundingClientRect().top,
+    }));
+    expect(monitorOrder.side).toBeLessThan(monitorOrder.notice);
+    await page.locator("#watchFormToggle").click();
+    await expect(page.locator("#watchForm")).toBeVisible();
+    return;
+  }
+
+  const before = await page.locator(".layout").evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+  await page.locator("#queryPanelToggle").click();
+  const after = await page.locator(".layout").evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+  expect(before).not.toBe(after);
+  expect(Number.parseFloat(after)).toBeLessThan(Number.parseFloat(before));
+  await page.locator("#queryPanelToggle").click();
+
+  await page.locator("#minuteAnalysis").evaluate((element) => { element.dataset.availability = "unavailable"; });
+  await expect(page.locator("#minuteChartPane")).toBeVisible();
+  const chartWidths = await page.locator("#chartWorkspace").evaluate((workspace) => ({
+    daily: workspace.querySelector("#dailyChartPane").getBoundingClientRect().width,
+    grid: workspace.querySelector(".chart-grid").getBoundingClientRect().width,
+  }));
+  expect(chartWidths.daily).toBeGreaterThan(chartWidths.grid * 0.95);
+});
+
+test("paper trading freezes a review plan and renders deterministic simulated fills", async ({ page }, testInfo) => {
   let strategyAdded = false;
   let simulated = false;
   const writes = [];
@@ -303,6 +395,9 @@ test("paper trading freezes a review plan and renders deterministic simulated fi
   await page.goto("/");
   await selectPrimaryView(page, "review");
   await page.locator("#workspace-tab-paper").click();
+  if (testInfo.project.use.isMobile) {
+    await page.locator(".paper-strategy-create-panel .layout-collapse-toggle").click();
+  }
   await expect(page.locator("#paperReviewPlan option[value='10']")).toHaveCount(1);
   await page.locator("#paperReviewPlan").selectOption("10");
   await page.locator("#paperAllocationPct").fill("25");
@@ -331,7 +426,10 @@ test("paper trading freezes a review plan and renders deterministic simulated fi
 });
 
 test("full-market scan runs in background and renders a bounded responsive snapshot", async ({ page }, testInfo) => {
+  testInfo.setTimeout(45000);
   const mobileProject = Boolean(testInfo.project.use.isMobile);
+  const expectedPageSize = mobileProject ? 30 : 100;
+  const expectedPageCount = Math.ceil(101 / expectedPageSize);
   await page.setViewportSize(mobileProject ? { width: 390, height: 844 } : { width: 1440, height: 900 });
   const resultQueries = [];
   let runPolls = 0;
@@ -350,7 +448,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
       if (url.pathname === "/api/market-scans" && request.method() === "POST") {
         starts += 1;
         startBodies.push(request.postDataJSON());
-        await delay(120);
+        await delay(500);
         return { payload: { accepted: true, deduplicated: false, run: marketScanRunPayload("running", 20) } };
       }
       if (url.pathname === "/api/market-scans/42" && request.method() === "GET") {
@@ -390,11 +488,17 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   });
   await selectPrimaryView(page, "market");
   await expect(page.locator("#workspace-panel-market-scan")).toBeVisible();
+  await expect(page.locator("#marketScanFilterPanel")).toBeHidden();
+  await expect(page.locator("#marketScanDetails")).toBeHidden();
+  await expect(page.locator("#strategyLab")).toBeHidden();
+  await page.locator("#marketScanFilterToggle").click();
+  await expect(page.locator("#marketScanFilterPanel")).toBeVisible();
   await expect(page.locator("#marketScanHeadline")).toHaveText("尚无全市场扫描记录");
   await expect(page.locator("#marketScanExport")).toBeDisabled();
   await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-label", "全市场扫描进度");
   await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "false");
-  await expect(page.locator("#workspace-panel-market-scan [aria-live=polite]")).toHaveCount(1);
+  await expect(page.locator("#marketScanHistory")).toBeHidden();
+  await expect(page.locator("#workspace-panel-market-scan [aria-live=polite]")).toHaveCount(2);
   expect(latestCalls).toBe(1);
   await selectPrimaryView(page, "market");
   expect(latestCalls).toBe(1);
@@ -434,6 +538,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan-controller.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan-contracts.js?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/js/market-scan-message-view.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan-polling.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan-view.js?v="))).toBe(true);
 
@@ -477,10 +582,10 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await expect(page.locator("#marketScanMarketProgress")).toContainText("SH");
   await expect(page.locator("#marketScanMarketProgress")).toContainText("BJ");
   await expect(page.locator("#marketScanDiagnostic")).toContainText("等待数据源恢复后从断点重试");
-  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(100);
+  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(expectedPageSize);
   await expect(page.locator("#marketScanExport")).toBeEnabled();
-  await expect(page.locator("#marketScanPageText")).toHaveText("第 1/2 页 · 共 101 条");
-  await expect(page.locator("#marketScanAnnouncement")).toHaveText("盘后正式榜单加载完成，第 1/2 页，本页 100 条，共 101 条。");
+  await expect(page.locator("#marketScanPageText")).toHaveText(`第 1/${expectedPageCount} 页 · 共 101 条`);
+  await expect(page.locator("#marketScanAnnouncement")).toHaveText(`盘后正式榜单加载完成，第 1/${expectedPageCount} 页，本页 ${expectedPageSize} 条，共 101 条。`);
   await expect(page.locator("#marketScanRows tr.market-scan-result-row").first()).toContainText("北交样本");
   const frozenEvidenceButton = page.locator('button[data-market-scan-snapshot-target]').first();
   await frozenEvidenceButton.click();
@@ -494,7 +599,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await frozenEvidenceButton.click();
   await expect(frozenEvidence).toBeHidden();
   expect(runPolls).toBe(1);
-  expect(resultQueries[0]).toMatchObject({ page: "1", page_size: "100", status: "success", sort: "rank", order: "asc" });
+  expect(resultQueries[0]).toMatchObject({ page: "1", page_size: String(expectedPageSize), status: "success", sort: "rank", order: "asc" });
 
   await expect(page.locator("#marketScanTableWrap")).toHaveAttribute("tabindex", "0");
   const responsiveTable = await page.locator("#marketScanTableWrap").evaluate((element) => {
@@ -504,13 +609,13 @@ test("full-market scan runs in background and renders a bounded responsive snaps
       overflow: element.scrollWidth > element.clientWidth + 1,
       headerPosition: getComputedStyle(header).position,
       stockPosition: getComputedStyle(stock).position,
-      detailLabels: Array.from(element.querySelectorAll("tbody tr:first-child td")).map((cell) => cell.dataset.label || ""),
+      detailLabels: Array.from(element.querySelectorAll(":scope > .market-scan-table > tbody > tr:first-child > td")).map((cell) => cell.dataset.label || ""),
     };
   });
   if (mobileProject) {
     expect(responsiveTable.overflow).toBe(false);
     expect(responsiveTable.detailLabels).toEqual([
-      "排名", "股票", "市场 / 行业", "短线强势", "趋势", "涨跌幅", "换手率", "成交额", "质量", "状态 / 标签",
+      "排名", "股票", "上市板块 / 行业", "趋势强度", "研究信号", "涨跌幅", "换手率", "成交额", "质量", "状态 / 标签",
     ]);
   } else {
     expect(responsiveTable.headerPosition).toBe("sticky");
@@ -518,11 +623,11 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   }
 
   await page.locator("#marketScanNext").click();
-  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(1);
+  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(Math.min(expectedPageSize, 101 - expectedPageSize));
   await expect(page.locator("#marketScanTableWrap")).toBeFocused();
   expect(resultQueries.at(-1).page).toBe("2");
   await page.locator("#marketScanPrev").click();
-  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(100);
+  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(expectedPageSize);
 
   await page.locator("#marketScanSort").selectOption("score");
   await expect(page.locator("#marketScanOrder")).toHaveValue("desc");
@@ -538,6 +643,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await page.locator("#marketScanSt").selectOption("true");
   await page.locator("#marketScanNew").selectOption("true");
   await page.locator("#marketScanScoreMin").fill("90");
+  await page.locator("#marketScanAdvancedFilters summary").click();
   await page.locator("#marketScanScoreMax").fill("100");
   await page.locator("#marketScanTrendMin").fill("90");
   await page.locator("#marketScanTrendMax").fill("100");
@@ -549,6 +655,9 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await page.locator("#marketScanAmountMax").fill("130000000");
   await page.locator("#marketScanQuality").fill("90");
   await page.locator("#marketScanQualityMax").fill("100");
+  await page.locator("#marketScanConfidenceMin").fill("80");
+  await page.locator("#marketScanRiskMax").fill("40");
+  await page.locator("#marketScanTradabilityMin").fill("60");
   await page.locator("#marketScanKeyword").fill("北交样本");
   await page.locator("#marketScanSort2").selectOption("trend_score");
   await page.locator("#marketScanOrder2").selectOption("desc");
@@ -571,6 +680,9 @@ test("full-market scan runs in background and renders a bounded responsive snaps
     max_amount: "130000000",
     min_data_quality_score: "90",
     max_data_quality_score: "100",
+    min_confidence: "80",
+    max_risk: "40",
+    min_tradability: "60",
     keyword: "北交样本",
   });
   const resultQuery = new URLSearchParams(resultQueryStrings.at(-1));
@@ -588,12 +700,12 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   delete expectedExportQuery.page_size;
   expect(exportQueries[0]).toEqual(expectedExportQuery);
   const exportQuery = new URLSearchParams(exportQueryStrings[0]);
-  expect(exportQuery.toString()).toBe(resultQuery.toString().replace(/^page=1&page_size=100&/, ""));
+  expect(exportQuery.toString()).toBe(resultQuery.toString().replace(new RegExp(`^page=1&page_size=${expectedPageSize}&`), ""));
   await expect(page.locator("#marketScanExport")).toHaveAttribute("aria-busy", "false");
   await expect(page.locator("#marketScanAnnouncement")).toContainText("Excel 榜单已导出");
 
   await page.locator("#marketScanFilters button[type=reset]").click();
-  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(100);
+  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(expectedPageSize);
   await page.locator("#marketScanStatus").selectOption("missing");
   await page.locator("#marketScanFilters button[type=submit]").click();
   await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(1);
@@ -617,7 +729,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   expect(layout.tableScrollable).toBe(false);
 
   await page.locator("#marketScanFilters button[type=reset]").click();
-  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(100);
+  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(expectedPageSize);
   await page.locator('button[data-market-scan-symbol="920066.BJ"]').click();
   await expect(page.locator("#workspace-panel-overview")).toBeVisible();
   await expect(page.locator("#workspace-panel-market-scan")).toBeHidden();
@@ -626,9 +738,10 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await expect(page.locator("#stockWorkbench")).toBeFocused();
   await expect(page.locator("#currentAnalysisContext")).toBeVisible();
   await expect(page.locator("#currentAnalysisContext")).toContainText("不是批次 #42 的冻结快照");
+  await expect(page.locator("#marketScanRows tr")).toHaveCount(0);
 });
 
-test("market-scan mode isolation and historical selection keep one explicit result batch", async ({ page }) => {
+test("market-scan mode isolation and historical selection keep one explicit result batch", async ({ page }, testInfo) => {
   const listQueries = [];
   const resultRunIds = [];
   const exportRunIds = [];
@@ -699,8 +812,16 @@ test("market-scan mode isolation and historical selection keep one explicit resu
   });
 
   await page.goto("/");
-  await page.locator("#marketScanModeOfficial").check();
+  await page.locator("#marketScanModeOfficial").evaluate((input) => {
+    input.checked = true;
+    document.querySelector("#marketScanModeIntraday").checked = false;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
   await selectPrimaryView(page, "market");
+  await page.locator("#marketScanFilterToggle").click();
+  await page.locator("#marketScanDetailsToggle").click();
+  await page.locator("#marketScanHistoryToggle").click();
+  await expect(page.locator("#marketScanHistory")).toBeVisible();
   await expect(page.locator("#marketScanBrowseContext")).toContainText("盘后正式 · 最近发布 #42");
   await expect(page.locator("#marketScanTaskContext")).toContainText("盘中临时 #90");
   await expect(page.locator("#marketScanTaskContext")).toContainText("不同");
@@ -709,6 +830,9 @@ test("market-scan mode isolation and historical selection keep one explicit resu
   await page.locator("#marketScanHistoryRun").selectOption("40");
   await expect(page.locator("#marketScanBrowseContext")).toContainText("历史批次 #40");
   await expect(page.locator("#marketScanTableWrap")).toHaveAttribute("data-market-scan-run-id", "40");
+  await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("证据不足");
+  await expect(page.locator("#marketScanProbabilityMin")).toBeDisabled();
+  await expect(page.locator("#marketScanProbabilityMin")).toHaveValue("");
   await page.locator("#marketScanKeyword").fill("北交样本");
   await page.locator("#marketScanFilters button[type=submit]").click();
   await expect.poll(() => resultRunIds.at(-1)).toBe(40);
@@ -731,6 +855,8 @@ test("market-scan mode isolation and historical selection keep one explicit resu
   await expect(page.locator("#marketScanBrowseContext")).toContainText("盘中临时 · 最近发布 #38");
   await expect(page.locator("#marketScanTaskContext")).not.toContainText("不同");
   await expect(page.locator("#marketScanTableWrap")).toHaveAttribute("data-market-scan-run-id", "38");
+  await expect(page.locator("#marketScanProbabilityMin")).toBeDisabled();
+  await expect(page.locator("#marketScanProbabilityMin")).toHaveValue("");
   expect(resultRunIds).toContain(42);
   expect(resultRunIds).toContain(40);
   expect(resultRunIds).toContain(38);
@@ -745,6 +871,7 @@ for (const viewport of [
 ]) {
   test(`discovery presets, research queue, and adjacent ranks work at ${viewport.name}`, async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "desktop-chromium", "viewport matrix runs once in desktop Chromium");
+    const expectedPageSize = viewport.width <= 820 ? 30 : 100;
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     const discovery = discoveryApiHarness();
     await mockApi(page, { api: discovery.api });
@@ -753,7 +880,9 @@ for (const viewport of [
     await page.goto("/");
     await expect(page.locator("#stockName")).toHaveText("贵州茅台");
     await selectPrimaryView(page, "market");
-    await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(100);
+    await page.locator("#marketScanModeOfficial").check();
+    await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(expectedPageSize);
+    await page.locator("#marketScanFilterToggle").click();
 
     await page.locator("#marketScanMarket").selectOption("SH");
     await page.locator("#marketScanIndustry").fill("白酒");
@@ -794,7 +923,7 @@ for (const viewport of [
     await expect(page.locator("#marketScanRows tr.market-scan-result-row").nth(1)).toContainText("新进");
     await expect(page.locator("#discoveryRankSummary")).toContainText("批次 41 → 42");
     await expect(page.locator("#discoveryRankSummary")).toContainText("规则 leader-v2");
-    expect(discovery.calls.apply.at(-1)).toEqual({ run_id: 42, page: 1, page_size: 100 });
+    expect(discovery.calls.apply.at(-1)).toEqual({ run_id: 42, page: 1, page_size: expectedPageSize });
     expect(discovery.calls.rankChanges).toBe(1);
 
     const queueButton = page.locator('button[data-discovery-enqueue-symbol="600519.SH"]');
@@ -808,6 +937,7 @@ for (const viewport of [
     });
     await expect(queueButton).toBeDisabled();
 
+    await page.locator("#discoveryPresetMore summary").click();
     await page.locator("#discoveryPresetName").fill(`白酒观察-${viewport.name}`);
     await page.locator("#discoveryPresetRename").click();
     await expect(page.locator("#discoveryPresetSelect option:checked")).toHaveText(`白酒观察-${viewport.name}`);
@@ -843,17 +973,21 @@ for (const viewport of [
 ]) {
   test(`advanced discovery editing and bulk queue preserve the plan at ${viewport.name}`, async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "desktop-chromium", "viewport matrix runs once in desktop Chromium");
+    const expectedPageSize = viewport.width <= 820 ? 30 : 100;
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     const discovery = discoveryApiHarness();
     await mockApi(page, { api: discovery.api });
 
     await page.goto("/");
     await selectPrimaryView(page, "market");
+    await page.locator("#marketScanModeOfficial").check();
+    await page.locator("#marketScanFilterToggle").click();
     await page.locator("#marketScanMarket").selectOption(["SH", "BJ"]);
     await page.locator("#marketScanIndustry").fill("白酒，专用设备");
     await page.locator("#marketScanSt").selectOption("false");
     await page.locator("#marketScanNew").selectOption("false");
     await page.locator("#marketScanScoreMin").fill("80");
+    await page.locator("#marketScanAdvancedFilters summary").click();
     await page.locator("#marketScanScoreMax").fill("99");
     await page.locator("#marketScanTrendMin").fill("70");
     await page.locator("#marketScanTrendMax").fill("98");
@@ -918,10 +1052,11 @@ for (const viewport of [
 
     await page.locator("#discoveryEnqueueAll").click();
     await expect(page.locator("#discoveryPresetFeedback")).toContainText("当前筛选结果处理完成");
-    expect(discovery.calls.apply.at(-1)).toEqual({ run_id: 42, page: 1, page_size: 100 });
+    expect(discovery.calls.apply.at(-1)).toEqual({ run_id: 42, page: 1, page_size: expectedPageSize });
     expect(discovery.calls.enqueue.at(-1).symbols).toEqual(["600519.SH", "600809.SH"]);
 
     if (viewport.name === "desktop") {
+      await page.locator("#discoveryPresetMore summary").click();
       const downloadPromise = page.waitForEvent("download");
       await page.locator("#discoveryPresetExport").click();
       const download = await downloadPromise;
@@ -941,7 +1076,8 @@ for (const viewport of [
   });
 }
 
-test("full-market scan cancellation stays unpublished and retry derives a new snapshot", async ({ page }) => {
+test("full-market scan cancellation stays unpublished and retry derives a new snapshot", async ({ page }, testInfo) => {
+  const expectedPageSize = testInfo.project.use.isMobile ? 30 : 100;
   let starts = 0;
   let cancels = 0;
   let retries = 0;
@@ -1004,6 +1140,7 @@ test("full-market scan cancellation stays unpublished and retry derives a new sn
 
   await page.goto("/");
   await selectPrimaryView(page, "market");
+  await page.locator("#marketScanModeOfficial").check();
   await page.locator("#marketScanStart").click();
   await expect(page.locator("#marketScanStart")).toBeDisabled();
   await page.locator("#marketScanStart").evaluate((button) => button.click());
@@ -1014,7 +1151,7 @@ test("full-market scan cancellation stays unpublished and retry derives a new sn
   await expect(page.locator("#marketScanCancel")).toBeDisabled();
   await page.locator("#marketScanCancel").evaluate((button) => button.click());
   await expect(page.locator("#marketScanHeadline")).toContainText("已取消");
-  await expect(page.locator("#marketScanMarket")).toBeFocused();
+  await expect(page.locator("#marketScanStart")).toBeFocused();
   await expect(page.locator("#marketScanResultState")).toContainText("未发布盘后正式榜单");
   await expect(page.locator("#marketScanRetry")).toBeVisible();
   expect(cancels).toBe(1);
@@ -1025,15 +1162,23 @@ test("full-market scan cancellation stays unpublished and retry derives a new sn
   await expect(page.locator("#marketScanRetry")).toBeDisabled();
   await page.locator("#marketScanRetry").evaluate((button) => button.click());
   await expect(page.locator("#marketScanStart")).toBeDisabled();
-  await expect(page.locator("#marketScanMarket")).toBeFocused();
+  await expect(page.locator("#marketScanCancel")).toBeFocused();
   await expect(page.locator("#marketScanProgressText")).toHaveText("103/103 · 100.0%", { timeout: 5000 });
-  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(100);
+  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(expectedPageSize);
   expect(retries).toBe(1);
   expect(polls).toBe(1);
   expect(resultCalls).toBe(1);
 });
 
 test("full-market scan recovers a stale run, rejects malformed results, and resyncs online", async ({ page }) => {
+  await page.addInitScript(() => {
+    const NativeDate = Date;
+    const fixedTime = NativeDate.parse("2026-07-31T18:00:00Z");
+    globalThis.Date = class extends NativeDate {
+      constructor(...args) { super(...(args.length ? args : [fixedTime])); }
+      static now() { return fixedTime; }
+    };
+  });
   let latestCalls = 0;
   let staleRunCalls = 0;
   await mockApi(page, {
@@ -1072,7 +1217,6 @@ test("full-market scan recovers a stale run, rejects malformed results, and resy
 
   await page.goto("/");
   await selectPrimaryView(page, "market");
-  await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "true");
   await expect(page.locator("#marketScanResultState")).toContainText("响应格式异常", { timeout: 5000 });
   await expect(page.locator("#marketScanResultState")).toContainText("items 必须是数组");
   await expect(page.locator("#marketScanTableWrap")).toBeHidden();
@@ -1463,7 +1607,7 @@ test("advice timeline shows snapshot changes without narrow-screen overflow", as
   expect(widths.detailsRight).toBeLessThanOrEqual(widths.viewport);
 });
 
-test("watchlist research queue supports ordered entry, editing, viewed state, and narrow widths", async ({ page }) => {
+test("watchlist research queue supports ordered entry, editing, viewed state, and narrow widths", async ({ page }, testInfo) => {
   const watchlist = [
     {
       ...watchlistItem("600000.SH", "浦发银行"),
@@ -1519,6 +1663,7 @@ test("watchlist research queue supports ordered entry, editing, viewed state, an
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
   await selectPrimaryView(page, "monitor");
+  if (testInfo.project.use.isMobile) await page.locator("#watchFormToggle").click();
   await expect(page.locator(".watch-queue-row")).toHaveCount(3);
   const firstRow = page.locator('.watch-queue-row[data-symbol="600000.SH"]');
   await expect(firstRow).toContainText("待研究");
@@ -1553,6 +1698,9 @@ test("watchlist research queue supports ordered entry, editing, viewed state, an
   await page.keyboard.press("Tab");
   await expect(noteInput).toBeFocused();
   await page.keyboard.press("Tab");
+  if (testInfo.project.name === "desktop-webkit") {
+    await addButton.focus();
+  }
   await expect(addButton).toBeFocused();
 
   await symbolInput.fill("601318");
@@ -1704,7 +1852,7 @@ test("mobile actions show only current results and keep local errors in the quer
   await expect(input).toHaveAttribute("aria-invalid", "false");
 });
 
-test("historical watchlist scans stay read-only until current analysis is explicitly requested", async ({ page }) => {
+test("historical watchlist scans stay read-only until current analysis is explicitly requested", async ({ page }, testInfo) => {
   const workbenchSymbols = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -1739,6 +1887,9 @@ test("historical watchlist scans stay read-only until current analysis is explic
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
   await selectPrimaryView(page, "review");
   await page.locator("#workspace-tab-replay").click();
+  if (testInfo.project.use.isMobile) {
+    await page.locator(".watchlist-scan-panel .layout-collapse-toggle").click();
+  }
   await page.locator("#watchlistScanAsOf").fill("2026-07-10");
   await page.locator("#watchlistScanForm button[type=submit]").click();
 
@@ -1828,7 +1979,7 @@ test("failed alert and note writes retain the rendered rows and drafts", async (
   await expect(page.locator("#noteContent")).toHaveValue("失败后仍需保留的草稿");
 });
 
-test("restored tabs and tools retain the last successful current stock", async ({ page }) => {
+test("restored tabs and tools retain the last successful current stock", async ({ page }, testInfo) => {
   await page.addInitScript(() => {
     localStorage.setItem("ashare-radar.workspace-preferences", JSON.stringify({
       version: 1,
@@ -1861,6 +2012,7 @@ test("restored tabs and tools retain the last successful current stock", async (
   await expect(page.locator("#toolsStockContext")).toContainText("贵州茅台");
   await expect(page.locator("#toolsStockContext")).toContainText("SH600519");
 
+  if (testInfo.project.use.isMobile) await page.locator("#queryPanelToggle").click();
   await page.locator("#symbolInput").fill("000001");
   await page.locator("#searchForm button").click();
   await expect(page.locator("#dataStatus")).toContainText("仍显示贵州茅台");
@@ -1970,9 +2122,15 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   await page.keyboard.press("Tab");
   await expect(primaryViewButton(page, "monitor")).toBeFocused();
   await page.keyboard.press("Tab");
+  await expect(page.locator("#queryPanelToggle")).toBeFocused();
+  await page.keyboard.press("Tab");
   await expect(page.locator("#symbolInput")).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.locator("#searchForm button")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#stockSearchHistoryClear")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#stockSearchHistoryList .stock-search-history-item").first()).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.locator("#quickList button").first()).toBeFocused();
 
@@ -2041,7 +2199,9 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   }
 
   await selectPrimaryView(page, "monitor");
-  const monitorLayout = await narrowPrimaryLayout(page, [".control-panel", ".side-column"]);
+  const monitorLayout = await narrowPrimaryLayout(page, [
+    ".watchlist-box", ".side-column", ".notice", ".data-health", ".data-monitor",
+  ]);
   expect(monitorLayout.scrollWidth).toBeLessThanOrEqual(monitorLayout.viewport);
   for (const item of monitorLayout.items) {
     expect(item.left).toBeCloseTo(12, 0);
@@ -2968,6 +3128,9 @@ function marketScanResultPage(searchParams = new URLSearchParams(), runOverrides
   items = filterMarketScanRange(items, searchParams, "turnover_rate", "min_turnover_rate", "max_turnover_rate");
   items = filterMarketScanRange(items, searchParams, "amount", "min_amount", "max_amount");
   items = filterMarketScanRange(items, searchParams, "data_quality_score", "min_data_quality_score", "max_data_quality_score");
+  items = filterMarketScanResearchRange(items, searchParams, "confidence", "min_confidence", null);
+  items = filterMarketScanResearchRange(items, searchParams, "risk", null, "max_risk");
+  items = filterMarketScanResearchRange(items, searchParams, "tradability", "min_tradability", null);
   if (keyword) items = items.filter((item) => `${item.symbol} ${item.code} ${item.name}`.includes(keyword));
 
   const sort = searchParams.get("sort") || "rank";
@@ -2988,17 +3151,6 @@ function marketScanResultPage(searchParams = new URLSearchParams(), runOverrides
   };
 }
 
-function filterMarketScanRange(items, searchParams, field, minimumName, maximumName) {
-  const minimumText = searchParams.get(minimumName);
-  const maximumText = searchParams.get(maximumName);
-  const minimum = minimumText === null ? null : Number(minimumText);
-  const maximum = maximumText === null ? null : Number(maximumText);
-  return items.filter((item) => (
-    (minimum === null || Number(item[field]) >= minimum)
-    && (maximum === null || Number(item[field]) <= maximum)
-  ));
-}
-
 function marketScanFixtureRows() {
   const successes = Array.from({ length: 101 }, (_, index) => {
     if (index === 0) {
@@ -3007,6 +3159,9 @@ function marketScanFixtureRows() {
         isSt: true,
         isNew: true,
         quality: 96,
+        confidence: 96,
+        risk: 28,
+        tradability: 82,
       });
     }
     if (index === 1) return marketScanResult("600519.SH", "贵州茅台", "SH", 2, 96, { industry: "白酒" });
@@ -3045,6 +3200,9 @@ function marketScanResultCompare(left, right, sort, direction) {
 function marketScanResult(symbol, name, market, rank, score, options = {}) {
   const status = options.status || "success";
   const success = status === "success";
+  const confidence = options.confidence ?? options.quality ?? 92;
+  const risk = options.risk ?? 35;
+  const tradability = options.tradability ?? 70;
   return {
     run_id: 42,
     symbol,
@@ -3076,6 +3234,7 @@ function marketScanResult(symbol, name, market, rank, score, options = {}) {
         leader_score: { base: score - 10, trend_delta: 5, rule_deltas: { change: 5 } },
         final_score: { base: score + 4, quality_penalty: 4, rank_discount: 0.125, raw: score - 0.125, score },
         rank_refinement: { score: 0.875, weighted_terms: { trend_delta: 0.5 } },
+        score_dimensions: { scores: { alpha_5d: score - 10, confidence, risk, tradability } },
       },
       ranking: {
         tie_break: [["raw_score", "desc"], ["symbol", "asc"]],

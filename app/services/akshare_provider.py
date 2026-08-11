@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from contextlib import redirect_stderr
 from dataclasses import dataclass
+from datetime import datetime
 import importlib
 import io
 from typing import Any, cast
@@ -433,7 +434,14 @@ def _akshare_quote_event_time(row) -> str | None:
         default=None,
     )
     event_date = pick(row, "交易日期", "日期", "trade_date", "date", default=None)
-    return normalize_quote_event_time(value, event_date=event_date)
+    normalized = normalize_quote_event_time(value, event_date=event_date)
+    if normalized is None:
+        return None
+    try:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return normalized if parsed.year >= 2000 else None
 
 
 def _stock_concepts_from_em(ak, normalized: str, code: str, stamp: str, limit: int) -> list[StockConceptItem]:

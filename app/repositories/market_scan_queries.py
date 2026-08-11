@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
 import math
 import sqlite3
 from typing import Literal
 
 from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.market_scan import (
+    MARKET_SCAN_TOP100_REFRESH_SCOPE,
     MarketScanCoverage,
     MarketScanFilterValues,
     MarketScanMode,
@@ -24,15 +24,9 @@ from app.models.market_scan import (
 from app.repositories.market_scan_context import MarketScanRepositoryContext
 from app.repositories.market_scan_filtering import market_scan_result_filter_sql
 from app.repositories.market_scan_lifecycle import ACTIVE_SCAN_STATUSES
-from app.repositories.market_scan_mapping import (
-    append_exact_filter,
-    page_count,
-    result_from_row,
-    result_order_sql,
-    run_from_row,
-)
+from app.repositories.market_scan_mapping import append_exact_filter, page_count, result_from_row, result_order_sql, run_from_row
+from app.repositories.market_scan_publication_summary import publication_summary_from_evidence
 from app.repositories.market_scan_results import count_degraded_results, required_run_row
-from app.utils.market_time import normalize_market_datetime
 
 
 class MarketScanQueryMixin(MarketScanRepositoryContext):
@@ -61,6 +55,19 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         with self._read_snapshot() as conn:
             row = conn.execute(
                 f"SELECT * FROM market_scan_run {where} ORDER BY id DESC LIMIT 1",
+                parameters,
+            ).fetchone()
+        return run_from_row(row) if row is not None else None
+
+    def latest_full_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
+        clauses = ["scope != ?"]
+        parameters: list[object] = [MARKET_SCAN_TOP100_REFRESH_SCOPE]
+        if mode is not None:
+            clauses.append("mode = ?")
+            parameters.append(mode)
+        with self._read_snapshot() as conn:
+            row = conn.execute(
+                f"SELECT * FROM market_scan_run WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT 1",
                 parameters,
             ).fetchone()
         return run_from_row(row) if row is not None else None
@@ -146,13 +153,33 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
             required_run_row(conn, run_id)
             return count_degraded_results(conn, run_id)
 
+    def success_raw_scores(self, run_id: int) -> tuple[object, ...]:
+        """Return the complete success-score multiset without hydrating result rows."""
+        with self._read_snapshot() as conn:
+            rows = conn.execute(
+                """
+                SELECT raw_score
+                FROM market_scan_result
+                WHERE run_id = ? AND status = 'success'
+                ORDER BY symbol ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return tuple(row["raw_score"] for row in rows)
+
     def publication_summary(self, run_id: int) -> MarketScanPublicationSummary:
         with self._lock, self._connect() as conn:
             run = required_run_row(conn, run_id)
             coverage_rows = _publication_coverage_rows(conn, run_id)
             stale_rows = _publication_stale_rows(conn, run_id, data_date=run["data_date"])
             timestamp_rows = _publication_timestamp_rows(conn, run_id)
-        return _publication_summary_from_rows(run, coverage_rows, stale_rows, timestamp_rows)
+        total_count = int(run["total_count"] or 0)
+        return publication_summary_from_evidence(
+            run,
+            _coverage_summary(coverage_rows),
+            _systemic_stale_cluster(stale_rows, total_count=total_count),
+            timestamp_rows,
+        )
 
     def results_page(
         self,
@@ -171,8 +198,9 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         min_turnover_rate: float | None = None, max_turnover_rate: float | None = None,
         min_amount: float | None = None, max_amount: float | None = None,
         min_data_quality_score: int | None, max_data_quality_score: int | None = None,
-        keyword: str | None,
-        sort: MarketScanSortValues,
+        min_confidence: float | None = None, max_risk: float | None = None,
+        min_tradability: float | None = None, keyword: str | None,
+        symbols: MarketScanFilterValues = None, sort: MarketScanSortValues,
         order: MarketScanSortOrderValues,
     ) -> MarketScanResultPage:
         where, params = market_scan_result_filter_sql(
@@ -188,7 +216,8 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
             min_turnover_rate=min_turnover_rate, max_turnover_rate=max_turnover_rate,
             min_amount=min_amount, max_amount=max_amount,
             min_data_quality_score=min_data_quality_score, max_data_quality_score=max_data_quality_score,
-            keyword=keyword,
+            min_confidence=min_confidence, max_risk=max_risk, min_tradability=min_tradability,
+            keyword=keyword, symbols=symbols,
         )
         order_sql = result_order_sql(sort, order)
         offset = (page - 1) * page_size
@@ -280,36 +309,27 @@ def _publication_stale_rows(
     ).fetchall()
 
 
-def _publication_timestamp_rows(conn: sqlite3.Connection, run_id: int) -> list[tuple[str, str]]:
+def _publication_timestamp_rows(
+    conn: sqlite3.Connection,
+    run_id: int,
+) -> list[tuple[str, str | None, str | None]]:
     rows = conn.execute(
         """
-        SELECT market, quote_timestamp
+        SELECT market, quote_timestamp, quote_observed_at
         FROM market_scan_result
-        WHERE run_id = ? AND quote_timestamp IS NOT NULL
+        WHERE run_id = ? AND status != 'pending'
         ORDER BY market ASC, symbol ASC
         """,
         (run_id,),
     ).fetchall()
-    return [(str(row["market"]), str(row["quote_timestamp"])) for row in rows]
-
-
-def _publication_summary_from_rows(
-    run: sqlite3.Row,
-    coverage_rows: list[sqlite3.Row],
-    stale_rows: list[sqlite3.Row],
-    timestamp_rows: list[tuple[str, str]],
-) -> MarketScanPublicationSummary:
-    snapshot_started_at, snapshot_finished_at, snapshot_span_seconds, invalid_timestamps = _snapshot_span(
-        timestamp_rows
-    )
-    return MarketScanPublicationSummary(
-        coverages=_coverage_summary(coverage_rows),
-        systemic_stale_cluster=_systemic_stale_cluster(stale_rows, total_count=int(run["total_count"] or 0)),
-        snapshot_started_at=snapshot_started_at,
-        snapshot_finished_at=snapshot_finished_at,
-        snapshot_span_seconds=snapshot_span_seconds,
-        invalid_snapshot_timestamps=invalid_timestamps,
-    )
+    return [
+        (
+            str(row["market"]),
+            str(row["quote_timestamp"]) if row["quote_timestamp"] is not None else None,
+            str(row["quote_observed_at"]) if row["quote_observed_at"] is not None else None,
+        )
+        for row in rows
+    ]
 
 
 def _coverage_market(value: object) -> Literal["SH", "SZ", "BJ"] | None:
@@ -342,40 +362,6 @@ def _systemic_stale_cluster(
         markets=markets,
         total_count=total_count,
     )
-
-
-def _snapshot_span(
-    timestamp_rows: list[tuple[str, str]],
-) -> tuple[str | None, str | None, float | None, tuple[str, ...]]:
-    parsed_times: list[datetime] = []
-    invalid: list[str] = []
-    for _market, value in timestamp_rows:
-        snapshot_time = _parse_snapshot_time(value)
-        if snapshot_time is None:
-            invalid.append(value)
-        else:
-            parsed_times.append(snapshot_time)
-    if not parsed_times:
-        return None, None, None, tuple(dict.fromkeys(invalid))
-    started = min(parsed_times)
-    finished = max(parsed_times)
-    span = max(0.0, (finished - started).total_seconds())
-    return (
-        started.isoformat(sep=" "),
-        finished.isoformat(sep=" "),
-        span,
-        tuple(dict.fromkeys(invalid)),
-    )
-
-
-def _parse_snapshot_time(value: object) -> datetime | None:
-    normalized = normalize_market_datetime(value)
-    if normalized is None:
-        return None
-    try:
-        return datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
 
 
 __all__ = ["MarketScanQueryMixin"]

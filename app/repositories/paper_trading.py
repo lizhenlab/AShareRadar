@@ -890,7 +890,7 @@ def _risk_metrics(
             "risk_metric_message": "至少需要60个收益观察值和5笔已平仓策略",
         }
     values = [initial_cash, *[item.total_equity for item in equity]]
-    returns = [current / previous - 1 for previous, current in zip(values, values[1:]) if previous > 0]
+    returns = [current / previous - 1 for previous, current in zip(values, values[1:], strict=False) if previous > 0]
     if len(returns) < 2 or pstdev(returns) == 0:
         return {
             "sharpe_ratio": None,

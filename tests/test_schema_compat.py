@@ -176,6 +176,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
         self.assertTrue(
             {
                 "quote_fallback_used",
+                "quote_observed_at",
                 "kline_fallback_used",
                 "metadata_degraded",
                 "degradation_reasons_json",
@@ -187,9 +188,16 @@ class SchemaCompatibilityTests(unittest.TestCase):
         self.assertIn("mode", run_columns)
         self.assertIn("quote_date", run_columns)
         self.assertTrue(
-            {"current_stage", "stage_started_at", "stage_metrics_json", "market_progress_json"}.issubset(
-                run_columns
-            )
+            {
+                "current_stage",
+                "stage_started_at",
+                "stage_metrics_json",
+                "market_progress_json",
+                "quote_capture_started_at",
+                "quote_capture_finished_at",
+                "quote_capture_duration_ms",
+                "quote_capture_count",
+            }.issubset(run_columns)
         )
         run_indexes = self._index_names(conn, "market_scan_run")
         result_indexes = self._index_names(conn, "market_scan_result")

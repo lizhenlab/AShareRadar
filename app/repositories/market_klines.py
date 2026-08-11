@@ -8,7 +8,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from app.db.market_mappers import row_to_kline, row_to_minute_kline
 from app.models.market import (
@@ -493,7 +493,7 @@ def _uniform_daily_text(values: Iterable[object], field: str) -> str:
     value = str(_one_contract_value((str(item or "").strip() for item in values), field))
     if not value:
         raise ValueError(f"日K {field} 不能为空")
-    return value
+    return cast(KlineAdjustmentMode, value)
 
 
 def _validate_daily_revision_chain(
@@ -604,7 +604,7 @@ def _one_contract_value(values: Iterable[object], field: str):
 def _validated_adjustment_mode(value: object) -> KlineAdjustmentMode:
     if value not in {"qfq", "hfq", "none", "unknown"}:
         raise ValueError(f"不支持的日K复权方式：{value}")
-    return value
+    return cast(KlineAdjustmentMode, value)
 
 
 _DAILY_INSERT_SQL = _upsert_sql(_DAILY_SPEC)

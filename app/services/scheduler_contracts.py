@@ -236,6 +236,14 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         handler_name="_evaluate_due_reviews",
         initial_delay_seconds=28,
     ),
+    TaskDefinition(
+        name="run_strategy_schedules",
+        display_name="执行版本化选股策略",
+        settings_interval_attr="scheduler_kline_interval_seconds",
+        min_interval_seconds=300,
+        handler_name="_run_strategy_schedules",
+        initial_delay_seconds=32,
+    ),
 )
 _TASK_ORDER = tuple(definition.name for definition in _TASK_DEFINITIONS)
 

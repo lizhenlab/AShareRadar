@@ -191,6 +191,33 @@ def test_preflight_sanitizes_provider_errors(tmp_path: Path) -> None:
     assert "<redacted>" in quote_check.detail
 
 
+def test_preflight_rejects_fresh_fallback_cache_quotes_and_does_not_create_scan(
+    tmp_path: Path,
+) -> None:
+    hub = _MarketScanHub(tmp_path)
+    _configure_clean_full_market(hub)
+    hub.quotes_by_symbol = {
+        symbol: quote.model_copy(update={"from_cache": True, "fallback_used": True})
+        for symbol, quote in hub.quotes_by_symbol.items()
+    }
+    _enable_automation_settings(hub)
+    scanner = _scanner(hub)
+
+    async def scenario():
+        response = await scanner.scheduled_tick(SCAN_AS_OF)
+        await scanner.stop()
+        return response
+
+    response = asyncio.run(scenario())
+    task_runs = hub.cache.recent_task_runs(limit=5)
+
+    assert response is None
+    assert scanner.latest_run() is None
+    assert len(task_runs) == 1
+    assert task_runs[0].status == "failed"
+    assert "缓存报价" in (task_runs[0].message or "")
+
+
 def test_preflight_failure_persists_diagnostics_without_creating_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

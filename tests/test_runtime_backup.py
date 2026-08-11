@@ -717,7 +717,10 @@ def test_runtime_cleanup_preserves_market_scan_retry_and_task_lineage(tmp_path: 
         cache.start_market_scan_run(unrelated.id)
         cache.finish_market_scan_run(unrelated.id, "failed", message="test")
 
-    retry = cache.prepare_market_scan_retry(original.id)
+    retry = cache.prepare_market_scan_retry(
+        original.id,
+        as_of="2026-07-16 16:45:00",
+    )
     cache.start_market_scan_run(retry.id)
     cache.finish_market_scan_run(retry.id, "failed", message="test")
 
@@ -751,7 +754,10 @@ def test_runtime_cleanup_releases_expired_retry_and_task_lineage_in_one_pass(tmp
     cache.attach_market_scan_task_run(original.id, task_run_id)
     cache.start_market_scan_run(original.id)
     cache.finish_market_scan_run(original.id, "failed", message="test")
-    retry = cache.prepare_market_scan_retry(original.id)
+    retry = cache.prepare_market_scan_retry(
+        original.id,
+        as_of="2026-07-16 16:45:00",
+    )
     cache.start_market_scan_run(retry.id)
     cache.finish_market_scan_run(retry.id, "failed", message="test")
     latest = cache.create_market_scan_run(

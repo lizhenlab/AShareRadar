@@ -170,7 +170,7 @@ def resolve_trade_rule_profile(
 ) -> PaperTradeRuleProfile:
     template = _rule_template(symbol, trade_date)
     limit_pct, reasons = _effective_price_limit(template, trade_date, metadata)
-    limit_pct, status_reasons = _status_price_limit(limit_pct, metadata)
+    limit_pct, status_reasons = _status_price_limit(limit_pct, metadata, trade_date)
     reasons.extend(status_reasons)
     suffix = "-no-limit" if limit_pct is None else ""
     return PaperTradeRuleProfile(
@@ -222,8 +222,12 @@ def _effective_price_limit(
 def _status_price_limit(
     limit_pct: float | None,
     metadata: PaperInstrumentMetadata | None,
+    trade_date: date,
 ) -> tuple[float | None, list[str]]:
     if metadata is None or metadata.is_st is None or not metadata.status_effective_date:
+        return limit_pct, ["historical_st_status_unknown"]
+    status_effective_date = _date_or_none(metadata.status_effective_date)
+    if status_effective_date is None or status_effective_date > trade_date:
         return limit_pct, ["historical_st_status_unknown"]
     if metadata.is_st:
         return None, ["st_rule_requires_historical_exchange_parameter"]

@@ -34,6 +34,10 @@ MarketScanSort = Literal[
     "amount",
     "turnover_rate",
     "data_quality_score",
+    "alpha_5d",
+    "confidence",
+    "risk",
+    "tradability",
     "symbol",
 ]
 MarketScanSortOrder = Literal["asc", "desc"]
@@ -60,6 +64,12 @@ MARKET_SCAN_METADATA_DEGRADATION_REASONS: Final[frozenset[str]] = frozenset(
 MARKET_SCAN_DEGRADATION_REASONS: Final[frozenset[str]] = frozenset(
     {"quote_fallback", "kline_fallback", *MARKET_SCAN_METADATA_DEGRADATION_REASONS}
 )
+MARKET_SCAN_TOP100_REFRESH_SCOPE: Final[str] = "TOP100快速更新评分"
+MARKET_SCAN_TOP100_REFRESH_LIMIT: Final[int] = 100
+
+
+def is_market_scan_top100_refresh_scope(value: object) -> bool:
+    return str(value or "").strip() == MARKET_SCAN_TOP100_REFRESH_SCOPE
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,7 @@ class MarketScanResultWrite:
     error: str | None = None
     data_date: str | None = None
     quote_timestamp: str | None = None
+    quote_observed_at: str | None = None
     quote_source: str | None = None
     kline_source: str | None = None
     adjustment_mode: str | None = None
@@ -155,9 +166,32 @@ class MarketScanStaleCluster:
 
 
 @dataclass(frozen=True)
+class MarketScanMarketEventSpan:
+    market: Literal["SH", "SZ", "BJ"]
+    started_at: str | None = None
+    finished_at: str | None = None
+    span_seconds: float | None = None
+    invalid_timestamps: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class MarketScanPublicationSummary:
     coverages: tuple[MarketScanCoverage, ...]
     systemic_stale_cluster: MarketScanStaleCluster | None = None
+    snapshot_contract_version: Literal["v5-legacy", "v6"] = "v5-legacy"
+    expected_capture_count: int = 0
+    capture_started_at: str | None = None
+    capture_finished_at: str | None = None
+    capture_duration_ms: int | None = None
+    capture_count: int = 0
+    capture_sealed: bool = False
+    observed_started_at: str | None = None
+    observed_finished_at: str | None = None
+    observed_span_seconds: float | None = None
+    observed_count: int = 0
+    missing_observed_count: int = 0
+    invalid_observed_timestamps: tuple[str, ...] = ()
+    market_event_spans: tuple[MarketScanMarketEventSpan, ...] = ()
     snapshot_started_at: str | None = None
     snapshot_finished_at: str | None = None
     snapshot_span_seconds: float | None = None
@@ -383,6 +417,10 @@ class MarketScanRun(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     duration_ms: int | None = Field(default=None, ge=0)
+    quote_capture_started_at: str | None = None
+    quote_capture_finished_at: str | None = None
+    quote_capture_duration_ms: int | None = Field(default=None, ge=0)
+    quote_capture_count: int = Field(default=0, ge=0)
     current_stage: MarketScanStage | None = None
     stage_started_at: str | None = None
     stage_metrics: dict[MarketScanStage, MarketScanStageMetric] = Field(default_factory=dict)
@@ -437,6 +475,7 @@ class MarketScanResultItem(BaseModel):
     error: str | None = None
     data_date: str | None = None
     quote_timestamp: str | None = None
+    quote_observed_at: str | None = None
     quote_source: str | None = None
     kline_source: str | None = None
     adjustment_mode: str | None = None
@@ -444,6 +483,7 @@ class MarketScanResultItem(BaseModel):
     kline_fallback_used: bool = False
     metadata_degraded: bool = False
     degradation_reasons: list[str] = Field(default_factory=list)
+    upside_probabilities: dict[str, dict[str, dict[str, object]]] = Field(default_factory=dict)
     updated_at: str
 
 
@@ -454,6 +494,37 @@ class MarketScanResultPage(BaseModel):
     page: int = Field(ge=1)
     page_size: int = Field(ge=1)
     page_count: int = Field(ge=0)
+    probability_research: dict[str, object] | None = None
+
+
+class MarketScanFutureRangeArtifactSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    generated_at: str
+    integrity_digest: str
+
+
+class MarketScanFutureRangeRecordPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=200)
+    total: int = Field(ge=0)
+    page_count: int = Field(ge=0)
+    session_offset: Literal[1, 2, 3] | None = None
+    symbol: str | None = None
+    items: list[dict[str, object]] = Field(default_factory=list)
+
+
+class MarketScanFutureRangeResearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["market-scan-future-range-api-v1"]
+    generation_status: Literal["ready", "not_generated", "insufficient_data"]
+    artifact: MarketScanFutureRangeArtifactSummary | None = None
+    research: dict[str, object] | None = None
+    record_page: MarketScanFutureRangeRecordPage
 
 
 class MarketScanRunPage(BaseModel):
@@ -466,9 +537,14 @@ class MarketScanRunPage(BaseModel):
 
 __all__ = [
     "MARKET_SCAN_RANK_TIE_BREAK",
+    "MARKET_SCAN_TOP100_REFRESH_LIMIT",
+    "MARKET_SCAN_TOP100_REFRESH_SCOPE",
     "MarketScanCoverage",
     "MarketScanCoverageScope",
     "MarketScanFilterValues",
+    "MarketScanFutureRangeArtifactSummary",
+    "MarketScanFutureRangeRecordPage",
+    "MarketScanFutureRangeResearchResponse",
     "MarketScanMode",
     "MarketScanMarketProgress",
     "MarketScanPublicationSummary",
@@ -495,4 +571,5 @@ __all__ = [
     "MarketScanStaleCluster",
     "MarketScanSeed",
     "MarketScanTrigger",
+    "is_market_scan_top100_refresh_scope",
 ]

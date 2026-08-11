@@ -20,6 +20,12 @@ from app.services.market_scan_evaluation import (
     evaluate_market_scan_shadow_comparison,
     evaluate_market_scan_shadow_rankings,
 )
+from app.services.market_scan_probability_artifact import (
+    PROBABILITY_RESULT_CONTRACT_VERSION,
+    load_probability_artifact,
+    replay_probability_artifact_set,
+)
+from app.services.market_scan_probability_store import MarketScanProbabilityStore
 
 
 def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(tmp_path: Path) -> None:
@@ -92,6 +98,9 @@ def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(
     assert any(item["dimensions"] == {**contract, "scan_time": "after_close"} for item in cohorts)
     assert any(item["dimensions"] == {**contract, "regime": "strong"} for item in cohorts)
     assert any(item["dimensions"] == {**contract, "quality": "high"} for item in cohorts)
+    exposure = cast(list[dict[str, Any]], report["exposure_audit"])[0]
+    assert exposure["policy"] == "audit-only-no-naive-sector-quota"
+    assert exposure["taxonomy_quality"]["mixed_granularity"] is False
 
 
 def test_evaluation_reports_insufficient_samples_and_same_rule_rank_turnover(tmp_path: Path) -> None:
@@ -154,6 +163,10 @@ def test_evaluation_reports_insufficient_samples_and_same_rule_rank_turnover(tmp
     assert mismatch["status"] == "insufficient_data"
     monotonicity = cast(list[dict[str, Any]], report["monotonicity"])
     assert all(item["status"] == "insufficient_data" for item in monotonicity)
+    hysteresis = cast(list[dict[str, Any]], report["hysteresis"])
+    buffered = next(item for item in hysteresis if item["previous_run_id"] == first and item["current_run_id"] == second)
+    assert buffered["hold_rank_threshold"] > buffered["buy_rank_threshold"]
+    assert buffered["hysteresis_turnover_rate"] <= buffered["baseline_turnover_rate"]
 
     default_report = evaluate_market_scan_rankings(path, run_ids=[first])
     assert DEFAULT_TOP_SIZES == (20, 50, 100)
@@ -239,6 +252,141 @@ def test_evaluation_cli_emits_json_without_mutating_database(tmp_path: Path) -> 
     assert payload["source"]["read_only"] is True
     assert payload["source"]["published_run_count"] == 1
     assert path.read_bytes() == before
+
+
+def test_probability_cli_persists_null_shadow_records_without_mutating_database(tmp_path: Path) -> None:
+    path = tmp_path / "probability-cli.sqlite3"
+    output_dir = tmp_path / "probability-artifacts"
+    report_path = tmp_path / "probability-research-summary.json"
+    _initialize(path)
+    run_id = _seed_run(
+        path,
+        mode="official",
+        rule_version="production-v4",
+        quote_date="2026-01-05",
+        ranks=("600001.SH", "000002.SZ"),
+    )
+    _seed_forward_prices(
+        path,
+        dates=("2026-01-06", "2026-01-07", "2026-01-08"),
+        closes={"600001.SH": (101, 102, 103), "000002.SZ": (99, 100, 101)},
+    )
+    before = path.read_bytes()
+    with sqlite3.connect(path) as connection:
+        ranking_before = connection.execute(
+            "SELECT symbol, rank, score, raw_score FROM market_scan_result WHERE run_id = ? ORDER BY rank",
+            (run_id,),
+        ).fetchall()
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "tools/evaluate_market_scan_probability.py",
+            "--database",
+            str(path),
+            "--output-dir",
+            str(output_dir),
+            "--report",
+            str(report_path),
+            "--run-id",
+            str(run_id),
+            "--bootstrap-samples",
+            "100",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    summary = json.loads(completed.stdout)
+    artifact = load_probability_artifact(Path(summary["artifact"]))
+    records = cast(list[dict[str, Any]], artifact["payload"]["records"])  # type: ignore[index]
+
+    assert summary["status"] == "insufficient_data"
+    assert summary["record_count"] == 12
+    assert summary["database_read_only"] is True
+    assert summary["database_bytes_unchanged"] is True
+    assert summary["database_sha256_before"] == summary["database_sha256_after"]
+    assert summary["credible_probability_available"] is False
+    assert summary["calibrated_shadow_horizons"] == []
+    assert summary["production_rule"] == "full-market-score-v4"
+    assert summary["production_ranking_effect"] == "none"
+    assert summary["automatic_promotion"] is False
+    assert summary["full_input_replay_verified"] is True
+    assert summary["artifact_set_replay"]["run_ids"] == [run_id]
+    assert summary["artifact_set_replay"]["study_count"] == 6
+    assert set(summary["horizons"]) == {"1", "5", "20"}
+    assert json.loads(report_path.read_text(encoding="utf-8")) == summary
+    assert len(records) == 12
+    assert all(item["status"] == "insufficient_data" and item["probability"] is None for item in records)
+    set_replay = replay_probability_artifact_set(
+        [Path(item["artifact"]) for item in summary["artifacts"]]
+    )
+    assert set_replay["run_ids"] == [run_id]
+    assert set_replay["study_count"] == 6
+    restarted_research, restarted_records = MarketScanProbabilityStore(output_dir).run_projection(run_id)
+    assert restarted_research["record_contract_version"] == PROBABILITY_RESULT_CONTRACT_VERSION
+    restarted_result = cast(dict[str, Any], restarted_records["600001.SH"]["1"])[
+        "net_excess_positive"
+    ]
+    assert restarted_result["status"] == "insufficient_data"
+    assert restarted_result["probability"] is None
+    assert cast(dict[str, Any], restarted_result["calibration_summary"])["brier_score"] is None
+    assert path.read_bytes() == before
+    with sqlite3.connect(path) as connection:
+        ranking_after = connection.execute(
+            "SELECT symbol, rank, score, raw_score FROM market_scan_result WHERE run_id = ? ORDER BY rank",
+            (run_id,),
+        ).fetchall()
+    assert ranking_after == ranking_before
+
+
+def test_probability_research_freezes_verified_new_stock_no_limit_profile(tmp_path: Path) -> None:
+    path = tmp_path / "probability-new-stock.sqlite3"
+    _initialize(path)
+    run_id = _seed_run(
+        path,
+        mode="official",
+        rule_version="production-v4",
+        quote_date="2026-01-05",
+        ranks=("688001.SH",),
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE market_scan_result SET list_date = ?, is_new = 1 WHERE run_id = ?",
+            ("2026-01-05", run_id),
+        )
+        connection.commit()
+    _seed_forward_prices(
+        path,
+        dates=("2026-01-06", "2026-01-07", "2026-01-08"),
+        closes={"688001.SH": (101, 102, 103)},
+    )
+
+    report = evaluate_market_scan_rankings(
+        path,
+        config=EvaluationConfig(bootstrap_samples=100),
+        run_ids=[run_id],
+    )
+    research = cast(dict[str, Any], report["probability_research"])
+    evidence = cast(dict[str, Any], research["horizons"])["1"]["net_excess_positive"]
+    record = next(
+        item
+        for item in cast(list[dict[str, Any]], research["records"])
+        if item["run_id"] == run_id
+        and item["symbol"] == "688001.SH"
+        and item["horizon"] == 1
+        and item["target"] == "net_excess_positive"
+    )
+    features = dict(zip(evidence["feature_names"], record["feature_values"], strict=True))
+
+    assert features["is_st"] == 0
+    assert features["is_new"] == 1
+    assert features["price_limit_pct"] == 0
+    assert features["price_limit_profile_verified"] == 1
+    assert features["price_limit_profile_uncertain"] == 0
+    assert features["price_limit_absent"] == 1
+    assert features["new_stock_no_limit_phase"] == 1
 
 
 def test_one_cross_section_cannot_satisfy_independent_session_gate(tmp_path: Path) -> None:
@@ -482,11 +630,19 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
 
     assert shadow["source"]["ranking_source"] == "reconstructed-read-only-shadow-score"  # type: ignore[index]
     assert shadow["shadow"]["production_mutation"] is False  # type: ignore[index]
+    assert shadow["shadow"]["input_integrity"]["eligible_for_promotion_evidence"] is False  # type: ignore[index]
     evidence = shadow["shadow"]["run_evidence"]  # type: ignore[index]
     assert evidence[0]["scored_count"] == 3
     assert evidence[0]["ranking_digest"]
     assert comparison["status"] == "insufficient_data"
     assert comparison["promotion"]["automatic_promotion"] is False  # type: ignore[index]
+    assert comparison["promotion"]["point_in_time_input_integrity_verified"] is False  # type: ignore[index]
+    assert comparison["promotion"]["gate_version"] == "full-market-shadow-promotion-gate-v1"  # type: ignore[index]
+    assert comparison["promotion"]["eligible_candidates"] == []  # type: ignore[index]
+    gates = comparison["promotion"]["candidate_gates"]  # type: ignore[index]
+    assert set(gates) == {"v5_full", "v5_without_overextension"}
+    assert all("primary_contract" in gate["failed_criteria"] for gate in gates.values())
+    assert "候选评分历史输入缺少可验证的扫描时点快照" in comparison["promotion"]["blocking_reasons"]  # type: ignore[index]
     assert comparison["promotion"]["conclusion"] == "候选评分已实现并可持续积累影子证据，但暂不晋级生产。"  # type: ignore[index]
     completed = subprocess.run(
         [
@@ -511,9 +667,57 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
         text=True,
     )
     cli_payload = json.loads(completed.stdout)
-    assert cli_payload["schema_version"] == "market-scan-shadow-comparison-v1"
+    assert cli_payload["schema_version"] == "market-scan-shadow-comparison-v2"
     assert cli_payload["promotion"]["automatic_promotion"] is False
     assert path.read_bytes() == before
+
+
+def test_shadow_evaluation_excludes_one_invalid_symbol_without_losing_the_run(tmp_path: Path) -> None:
+    path = tmp_path / "shadow-isolation.sqlite3"
+    _initialize(path)
+    symbols = ("600001.SH", "600002.SH", "600003.SH")
+    run_id = _seed_run(
+        path,
+        mode="official",
+        rule_version="production-v4",
+        quote_date="2026-01-05",
+        ranks=symbols,
+    )
+    for index, symbol in enumerate(symbols):
+        _seed_shadow_history(path, symbol, end=date(2026, 1, 5), slope=(index + 1) * 0.001)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            "UPDATE market_scan_result SET price = 150 WHERE run_id = ? AND symbol = ?",
+            (run_id, symbols[0]),
+        )
+    _seed_forward_prices(
+        path,
+        dates=("2026-01-06",),
+        closes={symbol: (101,) for symbol in symbols},
+    )
+
+    report = evaluate_market_scan_shadow_rankings(
+        path,
+        variant="v5_3_skip5_residual_volume_lifecycle",
+        config=EvaluationConfig(
+            top_sizes=(2,),
+            horizons=(1,),
+            minimum_sample_size=1,
+            minimum_session_count=1,
+            bootstrap_samples=200,
+        ),
+        run_ids=[run_id],
+    )
+
+    quality = cast(dict[str, Any], report["evaluation_quality"])
+    assert quality["evaluated_run_count"] == 1
+    assert quality["rejected_run_count"] == 0
+    assert quality["expected_item_count"] == 3
+    assert quality["scored_item_count"] == 2
+    assert quality["excluded_item_count"] == 1
+    assert quality["exclusion_reason_counts"] == {"invalid_shadow_input": 1}
+    evidence = cast(list[dict[str, Any]], report["shadow"]["run_evidence"])
+    assert evidence[0]["scored_count"] == 2
 
 
 def _cohort(

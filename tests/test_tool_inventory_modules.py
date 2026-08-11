@@ -84,6 +84,9 @@ def test_api_inventory_documents_business_api_scope() -> None:
     assert "GET | `/api/discovery/presets`" in rendered
     assert "GET | `/api/paper-trading`" in rendered
     assert "GET | `/api/paper-trading/runs/{run_id}/export.csv`" in rendered
+    assert "GET | `/api/market-scans/{run_id}/future-range-research`" in rendered
+    assert "query `include_research: bool = True`" in rendered
+    assert "`generation_status`/`artifact`/`research`/`record_page` wrapper" in rendered
     assert "response: Response" not in rendered
     assert "POST | `/api/reviews/plans/{plan_id}/evaluate` | path `plan_id: int`<br>body `payload: AdviceReviewEvaluationRequest \\| None`" in rendered
     assert "`503`: provider, runtime, scheduler, or SQLite failures" in rendered
@@ -207,7 +210,7 @@ def test_ci_keeps_the_incremental_quality_gates() -> None:
         "--cov=app --cov=tools",
         "python -m pip install --require-hashes -r requirements-dev-lock.txt",
         "npm ci",
-        "npx --no-install playwright install --with-deps chromium",
+        "npx --no-install playwright install --with-deps chromium firefox webkit",
         "npm run test:e2e",
     ):
         assert gate in workflow

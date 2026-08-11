@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from app.models.reviews import AdviceReviewPlan
 from app.services.research_replay import (
     completed_daily_bar_cutoff,
@@ -117,4 +119,29 @@ def test_weekend_without_an_expected_bar_remains_pending() -> None:
     draft = _evaluate(plan, [], datetime(2026, 5, 10, 16))
 
     assert (draft.status, draft.conclusion) == ("pending", "pending")
+    assert draft.available_forward_days == 0
+
+
+def test_conflicting_duplicate_daily_bars_are_rejected_instead_of_using_input_order() -> None:
+    rows = [
+        make_kline(date="2026-05-08", close=100),
+        make_kline(date="2026-05-11", close=101, high=102, low=99),
+        make_kline(date="2026-05-11", close=111, high=112, low=99),
+    ]
+
+    with pytest.raises(ValueError, match="冲突日K"):
+        _evaluate(_plan(), rows, datetime(2026, 5, 11, 16))
+
+
+def test_non_trading_day_bar_cannot_enter_visible_or_forward_window() -> None:
+    plan = _plan(snapshot_market_time="2026-05-08 16:00:00")
+    rows = [
+        make_kline(date="2026-05-08", close=100),
+        make_kline(date="2026-05-10", close=111, high=112, low=99),
+    ]
+
+    draft = _evaluate(plan, rows, datetime(2026, 5, 10, 16))
+
+    assert (draft.status, draft.conclusion) == ("pending", "pending")
+    assert draft.visible_end_date == "2026-05-08"
     assert draft.available_forward_days == 0

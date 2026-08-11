@@ -29,6 +29,7 @@ def main() -> int:
     parser.add_argument("--bootstrap-samples", type=int, default=1000)
     parser.add_argument("--cost-profile", choices=("base", "conservative", "stress"), default="base")
     parser.add_argument("--execution-notional", type=float, default=100_000)
+    parser.add_argument("--hysteresis-buffer-ratio", type=float, default=0.20)
     args = parser.parse_args()
     report = evaluate_market_scan_rankings(
         args.database,
@@ -39,6 +40,7 @@ def main() -> int:
             bootstrap_samples=args.bootstrap_samples,
             cost_profile=args.cost_profile,
             execution_notional=args.execution_notional,
+            hysteresis_buffer_ratio=args.hysteresis_buffer_ratio,
         ),
         mode=args.mode,
         run_ids=args.run_ids,

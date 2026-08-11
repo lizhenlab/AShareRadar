@@ -15,6 +15,7 @@ from app.services.data_quality_time import (
 )
 from app.services.market_scan_completion import short_scan_error
 from app.services.market_scan_contracts import MarketScanDataHubProtocol
+from app.services.market_scan_quote_provenance import provider_response_quotes
 from app.services.market_scan_scoring import completed_market_scan_klines
 from app.services.market_scan_universe import (
     FULL_MARKET_MARKETS,
@@ -249,6 +250,12 @@ async def _check_representative_quotes(
     current: datetime,
 ) -> str:
     quotes, provider_errors = await datahub.partial_quotes_with_errors(symbols, use_cache=False)
+    quotes, cached_count = provider_response_quotes(quotes)
+    if cached_count:
+        provider_errors = (
+            *provider_errors,
+            f"代表股预检拒绝 {cached_count} 条缓存报价（必须由实时数据源返回）",
+        )
     by_symbol = _quotes_by_symbol(quotes)
     missing = sorted(set(symbols) - set(by_symbol))
     if missing:

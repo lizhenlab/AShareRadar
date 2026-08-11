@@ -19,6 +19,7 @@ from app.services.market_scan_scoring import (
     score_market_scan_item,
     stable_score_spec_hash,
 )
+from app.services.market_scan_score_dimensions import verify_market_scan_point_in_time_evidence
 from app.services.market_scan_universe import build_market_scan_universe
 from tests.factories import make_kline, make_quote, make_stock_info
 
@@ -69,7 +70,35 @@ def test_market_scan_score_is_deterministic_and_keeps_metadata_tags() -> None:
         "kline_fallback",
         "list_date_missing",
     )
-    assert "短线强势分" in (first.reason or "")
+    assert "趋势强度" in (first.reason or "")
+    assert "非上涨概率" in (first.reason or "")
+
+
+def test_market_scan_persists_separate_score_dimensions_and_verifiable_point_in_time_evidence() -> None:
+    result = score_market_scan_item(
+        _item(),
+        _quote(),
+        _rows(DATA_DATE, 80),
+        as_of=AS_OF,
+        completed_cutoff=DATA_DATE,
+        expected_data_date=DATA_DATE,
+        min_history_rows=60,
+        min_data_quality_score=0,
+    )
+
+    dimensions = result.score_details["components"]["score_dimensions"]
+    scores = dimensions["scores"]
+    evidence = dimensions["point_in_time_evidence"]
+
+    assert dimensions["semantics"]["alpha"] == "ordinal-research-score-not-return-probability"
+    assert all(0 <= scores[key] <= 100 for key in ("alpha_1d", "alpha_5d", "alpha_20d", "confidence", "risk", "tradability"))
+    assert set(scores["decision_utility"]) == {"conservative", "balanced", "aggressive"}
+    assert verify_market_scan_point_in_time_evidence(evidence) is True
+    assert len(evidence["payload"]["bar_contract_61"]) == 61
+
+    corrupted = deepcopy(evidence)
+    corrupted["payload"]["quote_price"] += 1
+    assert verify_market_scan_point_in_time_evidence(corrupted) is False
 
 
 def test_market_scan_score_is_neutral_to_short_cache_but_not_fallback() -> None:
@@ -149,6 +178,8 @@ def test_market_scan_v4_spec_serializes_penalty_only_quality_and_continuous_refi
     assert spec["ranking"]["refinement"]["max_rank_discount"] < spec["ranking"]["base_score_minimum_step"]
     assert spec["rounding"]["raw_score_decimals"] == 6
     assert spec["eligibility"]["single_price_session_excluded"] is True
+    assert spec["eligibility"]["valid_quote_fields_required"] is True
+    assert spec["eligibility"]["max_change_pct_gap"] == 0.3
     assert tuple(tuple(entry) for entry in spec["ranking"]["tie_break"]) == FULL_MARKET_SCORE_TIE_BREAK
     assert FULL_MARKET_SCORE_TIE_BREAK == (("raw_score", "desc"), ("symbol", "asc"))
 
@@ -429,6 +460,31 @@ def test_market_scan_score_rejects_missing_recent_kline_volume() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("quote_update", "message"),
+    [
+        ({"open": 10.9}, "OHLC"),
+        ({"turnover_rate": -0.1}, "OHLC"),
+        ({"change_pct": -5.0}, "涨跌幅"),
+    ],
+)
+def test_market_scan_score_rejects_malformed_or_internally_inconsistent_quotes(
+    quote_update: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(MarketScanDataMissing, match=message):
+        score_market_scan_item(
+            _item(),
+            _quote().model_copy(update=quote_update),
+            _rows(DATA_DATE, 80),
+            as_of=AS_OF,
+            completed_cutoff=DATA_DATE,
+            expected_data_date=DATA_DATE,
+            min_history_rows=60,
+            min_data_quality_score=0,
+        )
+
+
 def test_market_scan_score_rejects_quote_and_same_day_kline_close_mismatch() -> None:
     rows = _rows(DATA_DATE, 80)
     rows[-1] = rows[-1].model_copy(update={"close": 10.0, "high": 10.2})
@@ -516,6 +572,8 @@ def _as_v3_score_details(details: dict[str, object]) -> dict[str, object]:
     spec["eligibility"].pop("quote_kline_close_consistency")
     spec["eligibility"].pop("quote_timestamp_not_after_as_of")
     spec["eligibility"].pop("single_price_session_excluded")
+    spec["eligibility"].pop("valid_quote_fields_required")
+    spec["eligibility"].pop("max_change_pct_gap")
     spec["final_score"] = {
         "formula": "leader_score * leader_weight + data_quality_score * quality_weight",
         "weights": {"leader_score": 0.85, "data_quality_score": 0.15},
@@ -592,6 +650,7 @@ def _quote(
             "code": code,
             "market": market,
             "name": "贵州茅台",
+            "open": 10.1,
             "amount": 900_000_000,
             "change": 0.5,
             "fallback_used": fallback_used,

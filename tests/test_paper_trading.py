@@ -169,6 +169,66 @@ def test_entry_wait_expiry_is_configurable_and_does_not_create_a_fill() -> None:
     assert any(item.event_code == "entry_expired" for item in draft.events)
 
 
+def test_paper_simulation_rejects_conflicting_duplicate_daily_bars_per_strategy() -> None:
+    strategy = _strategy()
+    rows = [
+        _bar("2026-07-01", 100, 101, 99, 100),
+        _bar("2026-07-02", 100, 102, 99, 101),
+        _bar("2026-07-02", 100, 112, 99, 111),
+    ]
+
+    draft = simulate_paper_portfolio(
+        _account(),
+        [strategy],
+        {strategy.symbol: rows},
+        as_of=datetime(2026, 7, 2, 16),
+    )
+
+    assert draft.trades == []
+    assert draft.strategies[0].status == "data_unavailable"
+    assert any(item.event_code == "conflicting_daily_bar" for item in draft.events)
+
+
+def test_paper_simulation_never_executes_on_a_non_trading_day_bar() -> None:
+    strategy = _strategy()
+    rows = [
+        _bar("2026-07-01", 100, 101, 99, 100),
+        _bar("2026-07-04", 100, 102, 99, 101),
+        _bar("2026-07-06", 101, 103, 100, 102),
+    ]
+
+    draft = simulate_paper_portfolio(
+        _account(),
+        [strategy],
+        {strategy.symbol: rows},
+        as_of=datetime(2026, 7, 6, 16),
+    )
+
+    assert [item.trade_date for item in draft.trades] == ["2026-07-06"]
+    assert all(item.trade_date != "2026-07-04" for item in draft.trades)
+
+
+def test_paper_simulation_ignores_conflicting_daily_bars_after_as_of() -> None:
+    strategy = _strategy(target_price=150, stop_price=50)
+    rows = [
+        _bar("2026-07-01", 100, 101, 99, 100),
+        _bar("2026-07-06", 101, 103, 100, 102),
+        _bar("2026-07-07", 102, 104, 101, 103),
+        _bar("2026-07-07", 110, 112, 109, 111),
+    ]
+
+    draft = simulate_paper_portfolio(
+        _account(),
+        [strategy],
+        {strategy.symbol: rows},
+        as_of=datetime(2026, 7, 6, 16),
+    )
+
+    assert [item.trade_date for item in draft.trades] == ["2026-07-06"]
+    assert draft.strategies[0].status == "open"
+    assert draft.data_end_date == "2026-07-06"
+
+
 def test_locked_limit_up_blocks_buy_and_locked_limit_down_delays_sell() -> None:
     metadata = {"600519": _metadata("600519")}
     waiting = _strategy(
@@ -262,6 +322,22 @@ def test_board_profiles_and_star_quantity_do_not_use_universal_hundred_share_lot
 
     assert draft.trades[0].quantity >= 200
     assert draft.trades[0].quantity % 100 != 0
+
+
+def test_future_st_status_is_not_applied_to_an_earlier_trade_date() -> None:
+    metadata = _metadata("600519").model_copy(
+        update={"is_st": True, "status_effective_date": "2026-07-10"}
+    )
+
+    profile = resolve_trade_rule_profile(
+        "600519",
+        datetime(2026, 7, 8).date(),
+        metadata,
+    )
+
+    assert profile.price_limit_pct == 10
+    assert profile.quality == "degraded"
+    assert "historical_st_status_unknown" in profile.degradation_reasons
 
 
 def test_waiting_strategy_is_invalidated_and_priority_order_is_not_database_id_order() -> None:
@@ -400,6 +476,57 @@ def test_benchmark_and_excess_returns_are_persisted_and_reported(tmp_path: Path)
     assert dashboard.performance.excess_return_pct == latest.excess_return_pct
     assert dashboard.performance.cost_to_gross_profit_pct is not None
     assert dashboard.performance.cost_to_gross_profit_pct > 0
+
+
+def test_benchmark_return_starts_at_first_trade_day_open_not_its_close() -> None:
+    strategy = _strategy(target_price=150, stop_price=50)
+    strategy_rows = [
+        _bar("2026-07-01", 100, 101, 99, 100),
+        _bar("2026-07-02", 100, 102, 99, 101),
+    ]
+    benchmark_rows = [
+        _bar("2026-07-01", 100, 101, 99, 100),
+        _bar("2026-07-02", 110, 111, 99, 100),
+    ]
+
+    draft = simulate_paper_portfolio(
+        _account(),
+        [strategy],
+        {strategy.symbol: strategy_rows},
+        benchmark_symbol="000300.SH",
+        benchmark_rows=benchmark_rows,
+        as_of=datetime(2026, 7, 2, 16),
+    )
+
+    point = draft.equity_curve[0]
+    assert point.benchmark_return_pct == pytest.approx((100 / 110 - 1) * 100, abs=1e-4)
+    assert point.benchmark_equity == pytest.approx(_account().initial_cash * 100 / 110, abs=0.01)
+
+
+def test_conflicting_benchmark_bars_degrade_benchmark_without_changing_trades() -> None:
+    strategy = _strategy(target_price=150, stop_price=50)
+    strategy_rows = [
+        _bar("2026-07-01", 100, 101, 99, 100),
+        _bar("2026-07-02", 100, 102, 99, 101),
+    ]
+    benchmark_rows = [
+        _bar("2026-07-01", 100, 101, 99, 100),
+        _bar("2026-07-02", 100, 102, 99, 101),
+        _bar("2026-07-02", 100, 112, 99, 111),
+    ]
+
+    draft = simulate_paper_portfolio(
+        _account(),
+        [strategy],
+        {strategy.symbol: strategy_rows},
+        benchmark_symbol="000300.SH",
+        benchmark_rows=benchmark_rows,
+        as_of=datetime(2026, 7, 2, 16),
+    )
+
+    assert draft.trades
+    assert draft.benchmark_status == "unavailable"
+    assert "冲突日K" in (draft.benchmark_message or "")
 
 
 def test_paper_repository_freezes_plan_and_rejects_duplicate(tmp_path: Path) -> None:

@@ -645,7 +645,7 @@ def evaluate_advice_forward_window(
         raise ValueError("as_of 不能早于 advice snapshot 的 market_time")
     window = advice_review_window(rows, snapshot_time=snapshot_time, as_of=as_of)
     coverage = _advice_review_forward_coverage(window, plan.horizon_days)
-    prices = _advice_review_price_context(plan, rows)
+    prices = _advice_review_price_context(plan, rows, cutoff=window.as_of_cutoff)
     barrier = _advice_review_barrier_outcome(coverage.rows, prices)
     evaluation_rows = _terminal_review_rows(coverage.rows, barrier.terminal_index)
     status, conclusion = _advice_review_status_and_conclusion(
@@ -725,10 +725,10 @@ def advice_review_window(
 ) -> AdviceReviewWindow:
     if as_of < snapshot_time:
         raise ValueError("as_of 不能早于 advice snapshot 的 market_time")
-    dated_rows = _valid_unique_daily_rows(rows)
     snapshot_date = snapshot_time.date()
     visible_cutoff = completed_daily_bar_cutoff(snapshot_time)
     as_of_cutoff = completed_daily_bar_cutoff(as_of)
+    dated_rows = _valid_unique_daily_rows(rows, cutoff=as_of_cutoff)
     visible = [row for row_date, row in dated_rows if row_date <= visible_cutoff]
     forward = [row for row_date, row in dated_rows if snapshot_date < row_date <= as_of_cutoff]
     return AdviceReviewWindow(
@@ -780,13 +780,39 @@ def _expected_review_dates(
     return tuple(expected)
 
 
-def _valid_unique_daily_rows(rows: list[Kline]) -> list[tuple[date, Kline]]:
+def _valid_unique_daily_rows(
+    rows: list[Kline],
+    *,
+    cutoff: date | None = None,
+) -> list[tuple[date, Kline]]:
     by_date: dict[date, Kline] = {}
     for row in rows:
         row_date = _strict_daily_date(row.date)
-        if row_date is not None and valid_kline(row):
-            by_date[row_date] = row
+        if (
+            row_date is None
+            or (cutoff is not None and row_date > cutoff)
+            or not is_trading_day(row_date)
+            or not valid_kline(row)
+        ):
+            continue
+        existing = by_date.get(row_date)
+        if existing is not None and _review_bar_signature(existing) != _review_bar_signature(row):
+            raise ValueError(f"同一交易日 {row_date.isoformat()} 存在冲突日K，无法执行无未来函数复盘")
+        by_date[row_date] = row
     return sorted(by_date.items(), key=lambda item: item[0])
+
+
+def _review_bar_signature(row: Kline) -> tuple[float, float, float, float, float, str, str, str]:
+    return (
+        row.open,
+        row.close,
+        row.high,
+        row.low,
+        row.volume,
+        row.adjustment_mode,
+        row.data_version,
+        row.contract_version,
+    )
 
 
 def _strict_daily_date(value: object) -> date | None:
@@ -808,20 +834,24 @@ def _review_market_datetime(value: str) -> datetime:
 def normalized_advice_review_prices(
     plan: AdviceReviewPricePlan,
     rows: list[Kline],
+    *,
+    cutoff: date | None = None,
 ) -> AdviceReviewPriceContext | None:
     """Rebase frozen qfq price levels onto the current reproducible data vintage."""
 
-    return _advice_review_price_context(plan, rows)
+    return _advice_review_price_context(plan, rows, cutoff=cutoff)
 
 
 def _advice_review_price_context(
     plan: AdviceReviewPricePlan,
     rows: list[Kline],
+    *,
+    cutoff: date | None = None,
 ) -> AdviceReviewPriceContext | None:
     snapshot_anchor = _review_snapshot_anchor(plan)
     if snapshot_anchor is None:
         return None
-    dated_rows = _valid_unique_daily_rows(rows)
+    dated_rows = _valid_unique_daily_rows(rows, cutoff=cutoff)
     contract = _review_evaluation_contract(
         dated_rows,
         plan.snapshot_adjustment_mode,

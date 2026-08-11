@@ -176,7 +176,7 @@ class MarketScanResultWriterMixin(MarketScanRepositoryContext):
                 SET status = ?, rank = NULL, score = ?, raw_score = ?, trend_score = ?, leader_score = ?,
                     data_quality_score = ?, price = ?, change_pct = ?, turnover_rate = ?,
                     volume_ratio = ?, amount = ?, tags_json = ?, metrics_json = ?,
-                    reason = ?, error = ?, data_date = ?, quote_timestamp = ?,
+                    reason = ?, error = ?, data_date = ?, quote_timestamp = ?, quote_observed_at = ?,
                     quote_source = ?, kline_source = ?, adjustment_mode = ?,
                     quote_fallback_used = ?, kline_fallback_used = ?,
                     metadata_degraded = ?, degradation_reasons_json = ?, updated_at = ?
@@ -461,6 +461,7 @@ def _result_update_params(
         (result.error or "")[:800] or None,
         result.data_date,
         result.quote_timestamp,
+        result.quote_observed_at,
         result.quote_source,
         result.kline_source,
         result.adjustment_mode,

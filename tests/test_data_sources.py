@@ -653,7 +653,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             def __getitem__(self, key):
                 if isinstance(key, str):
                     return FakeSeries([row[key] for row in self.rows])
-                return FakeFrame([row for row, include in zip(self.rows, key) if include])
+                return FakeFrame([row for row, include in zip(self.rows, key, strict=True) if include])
 
             def iterrows(self):
                 return iter(enumerate(self.rows))
@@ -735,6 +735,18 @@ class DataSourceReliabilityTests(unittest.TestCase):
         class FakeFrame:
             def iterrows(self):
                 return iter(enumerate([{"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38}]))
+
+        with self.assertRaisesRegex(ProviderProtocolError, "缺少可解析的事件时间"):
+            _ordered_spot_quotes(FakeFrame(), ["600519"], "AKShare")
+
+    def test_akshare_spot_quotes_reject_epoch_placeholder_event_time(self) -> None:
+        class FakeFrame:
+            def iterrows(self):
+                return iter(
+                    enumerate(
+                        [{"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38, "更新时间": 1}]
+                    )
+                )
 
         with self.assertRaisesRegex(ProviderProtocolError, "缺少可解析的事件时间"):
             _ordered_spot_quotes(FakeFrame(), ["600519"], "AKShare")

@@ -1,3 +1,5 @@
+import { selectedMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
+
 const MARKET_SCAN_TO_DISCOVERY_SORT = Object.freeze({
   rank: "rank",
   symbol: "symbol",
@@ -13,9 +15,14 @@ const MARKET_SCAN_TO_DISCOVERY_SORT = Object.freeze({
 const DISCOVERY_TO_MARKET_SCAN_SORT = Object.freeze(Object.fromEntries(
   Object.entries(MARKET_SCAN_TO_DISCOVERY_SORT).map(([market, discovery]) => [discovery, market])
 ));
+const MARKET_SCAN_RESEARCH_SORTS = Object.freeze(new Set(["alpha_5d", "confidence", "risk", "tradability"]));
+const MARKET_SCAN_SORTS = Object.freeze(new Set([
+  ...Object.keys(MARKET_SCAN_TO_DISCOVERY_SORT),
+  ...MARKET_SCAN_RESEARCH_SORTS,
+]));
 
 const RANGE_FIELDS = Object.freeze([
-  ["score", "scoreMin", "scoreMax", "min_score", "max_score", 0, 100, "强势分"],
+  ["score", "scoreMin", "scoreMax", "min_score", "max_score", 0, 100, "趋势强度"],
   ["trend", "trendMin", "trendMax", "min_trend_score", "max_trend_score", 0, 100, "趋势分"],
   ["change", "changeMin", "changeMax", "min_change_pct", "max_change_pct", -1000, 1000, "涨跌幅"],
   ["turnover", "turnoverMin", "turnoverMax", "min_turnover_rate", "max_turnover_rate", 0, 10000, "换手率"],
@@ -50,6 +57,9 @@ export function marketScanFilterElements(root, requireElement) {
     amountMax: get("marketScanAmountMax"),
     quality: get("marketScanQuality"),
     qualityMax: get("marketScanQualityMax"),
+    confidenceMin: get("marketScanConfidenceMin"),
+    riskMax: get("marketScanRiskMax"),
+    tradabilityMin: get("marketScanTradabilityMin"),
     keyword: get("marketScanKeyword"),
     sort,
     sort2,
@@ -75,6 +85,13 @@ export function marketScanQueryParams(elements, initial = {}) {
     setOptional(params, minQuery, filters.ranges[field]?.min);
     setOptional(params, maxQuery, filters.ranges[field]?.max);
   }
+  setOptional(params, "min_confidence", filters.research.confidenceMin);
+  setOptional(params, "max_risk", filters.research.riskMax);
+  setOptional(params, "min_tradability", filters.research.tradabilityMin);
+  if (filters.research.probabilityMin !== null) {
+    params.set("probability_horizon", String(selectedMarketScanProbabilityHorizon(elements)));
+    params.set("min_upside_probability", String(Number((filters.research.probabilityMin / 100).toFixed(6))));
+  }
   setOptional(params, "keyword", filters.keyword);
   appendValues(params, "sort", filters.sort.map((item) => item.field));
   appendValues(params, "order", filters.sort.map((item) => item.order));
@@ -89,6 +106,12 @@ export function buildDiscoveryPresetDefinition(nameValue, elements) {
   if (filters.status !== "success") unsupported.push("状态");
   if (filters.keyword) unsupported.push("搜索关键词");
   if (unsupported.length) throw new Error(`筛选方案暂不支持保存${unsupported.join("、")}，请清除后再保存`);
+  if (Object.values(filters.research).some((value) => value !== null)) {
+    throw new Error("筛选方案暂不支持保存研究维度条件，请清除后再保存");
+  }
+  if (filters.sort.some((item) => !MARKET_SCAN_TO_DISCOVERY_SORT[item.field])) {
+    throw new Error("筛选方案暂不支持保存研究维度排序，请改用生产榜单字段");
+  }
   const criteria = {};
   if (filters.markets.length) criteria.market = filters.markets;
   if (filters.industries.length) criteria.industry = filters.industries;
@@ -127,6 +150,10 @@ export function applyDiscoveryPresetFields(preset, elements) {
   setElementValue(elements.industry, Array.isArray(criteria.industry) ? criteria.industry.join("，") : "");
   setElementValue(elements.isSt, typeof criteria.is_st === "boolean" ? String(criteria.is_st) : "");
   setElementValue(elements.isNew, typeof criteria.is_new === "boolean" ? String(criteria.is_new) : "");
+  setElementValue(elements.confidenceMin, "");
+  setElementValue(elements.riskMax, "");
+  setElementValue(elements.tradabilityMin, "");
+  setElementValue(elements.probabilityMin, "");
   for (const [field, minElement, maxElement] of RANGE_FIELDS) {
     setElementValue(elements[minElement], criteria[field]?.min ?? "");
     setElementValue(elements[maxElement], criteria[field]?.max ?? "");
@@ -153,7 +180,15 @@ export function readMarketScanFilters(elements) {
     .filter((item) => item.field);
   if (!sort.length) sort.push({ field: "rank", order: "asc" });
   if (new Set(sort.map((item) => item.field)).size !== sort.length) throw new Error("排序字段不能重复");
-  if (sort.some((item) => !MARKET_SCAN_TO_DISCOVERY_SORT[item.field])) throw new Error("排序字段无效");
+  if (sort.some((item) => !MARKET_SCAN_SORTS.has(item.field))) throw new Error("排序字段无效");
+  const research = {
+    confidenceMin: boundedOptionalNumber(elements.confidenceMin, 0, 100, "最低置信度"),
+    riskMax: boundedOptionalNumber(elements.riskMax, 0, 100, "最高风险分"),
+    tradabilityMin: boundedOptionalNumber(elements.tradabilityMin, 0, 100, "最低可交易性"),
+    probabilityMin: elements.probabilityMin?.disabled
+      ? null
+      : boundedOptionalNumber(elements.probabilityMin, 0, 100, "最低上涨概率"),
+  };
   return {
     status: elementValue(elements.status) || "success",
     markets: marketValues(elements.market),
@@ -161,6 +196,7 @@ export function readMarketScanFilters(elements) {
     isSt: booleanValue(elements.isSt),
     isNew: booleanValue(elements.isNew),
     ranges,
+    research,
     keyword: elementValue(elements.keyword),
     sort,
   };
@@ -199,6 +235,14 @@ function optionalNumber(element, label) {
   const number = Number(value);
   if (!Number.isFinite(number)) throw new Error(`${label}必须是有效数字`);
   return number;
+}
+
+function boundedOptionalNumber(element, minimum, maximum, label) {
+  const value = optionalNumber(element, label);
+  if (value !== null && (value < minimum || value > maximum)) {
+    throw new Error(`${label}超出允许范围`);
+  }
+  return value;
 }
 
 function marketValues(element) {

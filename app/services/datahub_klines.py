@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 import math
 from typing import TypeVar
 
@@ -603,7 +604,7 @@ class KlineCoordinator:
                 result = await self.runtime.timed_provider_call(
                     attempt.name,
                     kind,
-                    lambda: _run_provider_fetch(fetch, attempt.provider, kind),
+                    partial(_run_provider_fetch, fetch, attempt.provider, kind),
                     request_key=request_key,
                 )
                 rows = prepare(result.value, source)
@@ -961,7 +962,7 @@ def _require_compatible_revision_chain(rows: list[Kline]) -> None:
             raise ProviderProtocolError("日K序列 data_version 不一致或缺失")
         revisions.append((row_date, as_of, data_version))
     revisions.sort(key=lambda item: item[0])
-    if any(current[1] < previous[1] for previous, current in zip(revisions, revisions[1:])):
+    if any(current[1] < previous[1] for previous, current in zip(revisions, revisions[1:], strict=False)):
         raise ProviderProtocolError("日K序列 revision 链随行情日期倒退")
 
 

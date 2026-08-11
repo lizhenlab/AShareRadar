@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -25,6 +25,7 @@ from app.models.paper_trading import (
 from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.paper_trading_rules import assess_daily_tradeability, resolve_trade_rule_profile
 from app.services.market_scan_shadow_scoring import (
+    SHADOW_SCORE_MIN_HISTORY_ROWS,
     SHADOW_SCORE_VARIANTS,
     ShadowScoreBatch,
     ShadowScoreInput,
@@ -33,17 +34,42 @@ from app.services.market_scan_shadow_scoring import (
     score_shadow_market,
     stable_shadow_spec_hash,
 )
+from app.services.market_scan_score_dimensions import verify_market_scan_point_in_time_evidence
+from app.services.market_scan_probability_labels import (
+    PROBABILITY_DEFAULT_HORIZONS,
+    ProbabilityLabelConfig,
+    ProbabilityLabelOutcome,
+    build_probability_label_outcomes,
+    probability_label_contract,
+)
+from app.services.market_scan_probability_research import (
+    ProbabilityResearchRow,
+    build_probability_research,
+    probability_feature_vector,
+)
+from app.repositories.market_scan_mapping import decode_result_payload
 from app.utils.clock import utc_now
 
 
 EVALUATION_SCHEMA_VERSION = "market-scan-forward-evaluation-v2"
+SHADOW_RECONSTRUCTION_INTEGRITY = "unverified-overwrite-cache-reconstruction"
 DEFAULT_TOP_SIZES = (20, 50, 100)
 DEFAULT_HORIZONS = (1, 3, 5, 10, 20)
 DEFAULT_MINIMUM_SESSION_COUNT = 20
+DEFAULT_MINIMUM_PBO_SESSION_COUNT = 40
 DEFAULT_BOOTSTRAP_SAMPLES = 1_000
 DEFAULT_EXECUTION_NOTIONAL = 100_000.0
 DEFAULT_MAX_EXIT_DELAY_SESSIONS = 5
 DEFAULT_MAX_DAILY_PARTICIPATION_RATE = 0.01
+PROMOTION_GATE_VERSION = "full-market-shadow-promotion-gate-v1"
+PROMOTION_PRIMARY_HORIZON = 5
+PROMOTION_PRIMARY_TOP_N = 100
+PROMOTION_MINIMUM_MEAN_RANK_IC = 0.02
+PROMOTION_MINIMUM_NET_EXCESS_RETURN = 0.0
+PROMOTION_MINIMUM_ITEM_COVERAGE = 0.95
+PROMOTION_MAXIMUM_DRAWDOWN = -0.25
+PROMOTION_MAXIMUM_HYSTERESIS_TURNOVER = 0.80
+PROMOTION_MAXIMUM_EXPOSURE_SHARE_DIFFERENCE = 0.20
 EvaluationStatus = Literal["ok", "insufficient_data"]
 ExecutionStatus = Literal["modelled", "unfilled", "data_unavailable"]
 
@@ -60,6 +86,7 @@ class EvaluationConfig:
     execution_notional: float = DEFAULT_EXECUTION_NOTIONAL
     max_exit_delay_sessions: int = DEFAULT_MAX_EXIT_DELAY_SESSIONS
     max_daily_participation_rate: float = DEFAULT_MAX_DAILY_PARTICIPATION_RATE
+    hysteresis_buffer_ratio: float = 0.20
 
     def __post_init__(self) -> None:
         _require_positive_sequence(self.top_sizes, "top_sizes")
@@ -71,6 +98,8 @@ class EvaluationConfig:
         _require_positive(self.execution_notional, "execution_notional")
         _require_minimum(self.max_exit_delay_sessions, 0, "max_exit_delay_sessions")
         _require_unit_interval(self.max_daily_participation_rate, "max_daily_participation_rate")
+        if not 0 <= self.hysteresis_buffer_ratio <= 1:
+            raise ValueError("hysteresis_buffer_ratio 必须在 [0, 1] 范围内")
 
 
 def _require_positive_sequence(values: Sequence[int], label: str) -> None:
@@ -129,16 +158,32 @@ class _Observation:
     symbol: str
     market: str
     board: str
+    industry: str
     segment: str
     liquidity_bucket: str
     scan_time_bucket: str
     rank: int
     raw_score: float
+    amount: float
+    turnover_rate: float | None
     quality_bucket: str
     regime: str
     returns: dict[int, float]
     adverse: dict[int, float]
     execution: dict[int, _ExecutionOutcome]
+    probability_labels: dict[int, ProbabilityLabelOutcome]
+    factor_values: dict[str, float]
+    source_evidence_digest: str | None
+
+
+@dataclass(frozen=True)
+class _ExposureItem:
+    symbol: str
+    rank: int
+    board: str
+    industry: str
+    amount: float
+    turnover_rate: float | None
 
 
 @dataclass(frozen=True)
@@ -152,6 +197,11 @@ class _RunSnapshot:
     observations: tuple[_Observation, ...]
     rankings: tuple[tuple[str, int], ...]
     eligible_dates: tuple[str, ...]
+    expected_ranking_count: int = 0
+    exclusions: tuple[dict[str, object], ...] = ()
+    point_in_time_integrity_verified: bool = False
+    exposures: tuple[_ExposureItem, ...] = ()
+    regime: str = "unknown"
 
 
 def evaluate_market_scan_rankings(
@@ -165,12 +215,17 @@ def evaluate_market_scan_rankings(
     path = Path(database_path).resolve()
     with _readonly_connection(path) as conn:
         runs = _published_runs(conn, mode=mode, run_ids=run_ids)
-        snapshots = tuple(
-            snapshot
-            for run in runs
-            if (snapshot := _evaluate_run(conn, run, settings)) is not None
-        )
-    return _build_report(path, runs, snapshots, settings)
+        snapshots_list: list[_RunSnapshot] = []
+        run_failures: list[dict[str, object]] = []
+        for run in runs:
+            try:
+                snapshot = _evaluate_run(conn, run, settings)
+            except Exception as exc:
+                run_failures.append(_evaluation_failure(run, "production-evaluation", exc))
+                continue
+            if snapshot is not None:
+                snapshots_list.append(snapshot)
+    return _build_report(path, runs, tuple(snapshots_list), settings, run_failures=tuple(run_failures))
 
 
 def evaluate_market_scan_shadow_rankings(
@@ -187,11 +242,7 @@ def evaluate_market_scan_shadow_rankings(
     with _readonly_connection(path) as conn:
         production_runs = _published_runs(conn, mode=mode, run_ids=run_ids)
         runs = _deduplicate_shadow_sessions(production_runs)
-        evaluated = tuple(
-            value
-            for run in runs
-            if (value := _evaluate_shadow_run(conn, run, settings, variant)) is not None
-        )
+        evaluated, run_failures = _evaluate_shadow_runs(conn, runs, settings, variant)
     snapshots = tuple(item[0] for item in evaluated)
     batches = tuple(item[1] for item in evaluated)
     report = _build_report(
@@ -200,13 +251,56 @@ def evaluate_market_scan_shadow_rankings(
         snapshots,
         settings,
         ranking_source="reconstructed-read-only-shadow-score",
+        run_failures=tuple(run_failures),
     )
+    report["shadow"] = _shadow_report_metadata(variant, snapshots, batches)
+    return report
+
+
+def _evaluate_shadow_runs(
+    conn: sqlite3.Connection,
+    runs: Sequence[sqlite3.Row],
+    settings: EvaluationConfig,
+    variant: ShadowScoreVariant,
+) -> tuple[tuple[tuple[_RunSnapshot, ShadowScoreBatch], ...], list[dict[str, object]]]:
+    evaluated: list[tuple[_RunSnapshot, ShadowScoreBatch]] = []
+    failures: list[dict[str, object]] = []
+    for run in runs:
+        try:
+            value = _evaluate_shadow_run(conn, run, settings, variant)
+        except Exception as exc:
+            failures.append(_evaluation_failure(run, "shadow-evaluation", exc))
+            continue
+        if value is not None:
+            evaluated.append(value)
+    return tuple(evaluated), failures
+
+
+def _shadow_report_metadata(
+    variant: ShadowScoreVariant,
+    snapshots: Sequence[_RunSnapshot],
+    batches: Sequence[ShadowScoreBatch],
+) -> dict[str, object]:
     spec = market_scan_shadow_score_spec(variant=variant)
-    report["shadow"] = {
+    integrity_verified = bool(snapshots) and all(item.point_in_time_integrity_verified for item in snapshots)
+    return {
         "variant": variant,
         "spec": spec,
         "spec_hash": stable_shadow_spec_hash(spec),
         "production_mutation": False,
+        "input_integrity": {
+            "status": (
+                "verified-persisted-point-in-time-features"
+                if integrity_verified
+                else SHADOW_RECONSTRUCTION_INTEGRITY
+            ),
+            "eligible_for_promotion_evidence": integrity_verified,
+            "reason": (
+                "候选输入来自扫描事务内持久化且摘要校验通过的61日特征证据"
+                if integrity_verified
+                else "部分批次只能使用会被覆盖的 kline_daily 重建，不能证明当前历史K线就是扫描时点可见版本"
+            ),
+        },
         "run_evidence": [
             {
                 "run_id": snapshot.id,
@@ -219,10 +313,9 @@ def evaluate_market_scan_shadow_rankings(
         ],
         "reconstruction_limit": (
             "使用冻结扫描报价/元数据与当前只读数据库中 date<=data_date 的前复权日K；"
-            "不写回生产榜单，但较晚供应商修订的历史K线无法被识别为原始快照。"
+            "不写回生产榜单；当前缓存重建结果仅供探索，不能作为晋级证据。"
         ),
     }
-    return report
 
 
 def evaluate_market_scan_shadow_comparison(
@@ -257,29 +350,304 @@ def evaluate_market_scan_shadow_comparison(
         [_maximum_contract_session_count(production)]
         + [_maximum_contract_session_count(report) for report in candidates.values()]
     )
-    promotable = (
-        production["status"] == "ok"
-        and all(report["status"] == "ok" for report in candidates.values())
-        and observed_sessions >= settings.minimum_session_count
+    status, promotion = _shadow_promotion_assessment(
+        production,
+        candidates,
+        observed_sessions,
+        settings.minimum_session_count,
+        candidate_count=len(candidates),
     )
     return {
-        "schema_version": "market-scan-shadow-comparison-v1",
+        "schema_version": "market-scan-shadow-comparison-v2",
         "generated_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "status": "eligible_for_human_review" if promotable else "insufficient_data",
+        "status": status,
         "production": production,
         "candidates": candidates,
-        "promotion": {
+        "promotion": promotion,
+    }
+
+
+def _shadow_promotion_assessment(
+    production: dict[str, object],
+    candidates: Mapping[ShadowScoreVariant, dict[str, object]],
+    observed_sessions: int,
+    minimum_sessions: int,
+    *,
+    candidate_count: int,
+) -> tuple[str, dict[str, object]]:
+    candidate_gates = {
+        variant: _candidate_promotion_gate(report, minimum_sessions)
+        for variant, report in candidates.items()
+    }
+    integrity_verified = all(_shadow_input_integrity_verified(report) for report in candidates.values())
+    multiple_testing_ready = candidate_count <= 1 or observed_sessions >= DEFAULT_MINIMUM_PBO_SESSION_COUNT
+    eligible_candidates = [
+        variant
+        for variant, gate in candidate_gates.items()
+        if gate["passed"] is True
+    ]
+    promotable = (
+        production["status"] == "ok"
+        and bool(eligible_candidates)
+        and multiple_testing_ready
+    )
+    return (
+        "eligible_for_human_review" if promotable else "insufficient_data",
+        {
             "automatic_promotion": False,
             "eligible_for_human_review": promotable,
-            "required_independent_session_count": settings.minimum_session_count,
+            "required_independent_session_count": minimum_sessions,
             "observed_independent_session_count": observed_sessions,
+            "point_in_time_input_integrity_verified": integrity_verified,
+            "gate_version": PROMOTION_GATE_VERSION,
+            "eligible_candidates": eligible_candidates,
+            "candidate_gates": candidate_gates,
+            "multiple_testing_control": {
+                "candidate_count": candidate_count,
+                "method": "preregistered-ablation-plus-PBO-before-promotion",
+                "minimum_independent_session_count_for_pbo": DEFAULT_MINIMUM_PBO_SESSION_COUNT,
+                "ready": multiple_testing_ready,
+            },
+            "blocking_reasons": _shadow_promotion_blockers(
+                promotable,
+                observed_sessions,
+                minimum_sessions,
+                integrity_verified,
+                multiple_testing_ready,
+                bool(eligible_candidates),
+            ),
             "conclusion": (
-                "候选评分已实现并可持续积累影子证据，但暂不晋级生产。"
-                if not promotable
-                else "样本门槛已满足，仅可进入人工晋级评审；不得自动替换生产评分。"
+                "样本门槛已满足，仅可进入人工晋级评审；不得自动替换生产评分。"
+                if promotable
+                else "候选评分已实现并可持续积累影子证据，但暂不晋级生产。"
             ),
         },
+    )
+
+
+def _shadow_promotion_blockers(
+    promotable: bool,
+    observed_sessions: int,
+    minimum_sessions: int,
+    integrity_verified: bool,
+    multiple_testing_ready: bool,
+    has_eligible_candidate: bool,
+) -> list[str]:
+    if promotable:
+        return []
+    blockers: list[str] = []
+    if observed_sessions < minimum_sessions:
+        blockers.append("独立交易日样本不足")
+    if not integrity_verified:
+        blockers.append("候选评分历史输入缺少可验证的扫描时点快照")
+    if not multiple_testing_ready:
+        blockers.append("多候选比较尚未达到PBO/多重检验所需独立交易日门槛")
+    if not has_eligible_candidate:
+        blockers.append("没有候选同时通过预注册的IC、净超额、单调性、回撤、换手与暴露门槛")
+    return blockers
+
+
+def _candidate_promotion_gate(
+    report: dict[str, object],
+    minimum_sessions: int,
+) -> dict[str, object]:
+    contract = _primary_promotion_contract(report)
+    criteria = _base_promotion_criteria(report)
+    if contract is None:
+        criteria["primary_contract"] = _promotion_criterion(None, False, "full-market top100 5d")
+        return _promotion_gate_payload(criteria, None)
+    dimensions = cast(dict[str, str], contract["dimensions"])
+    criteria.update(_contract_promotion_criteria(report, contract, dimensions, minimum_sessions))
+    return _promotion_gate_payload(criteria, dimensions)
+
+
+def _base_promotion_criteria(report: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    integrity = _shadow_input_integrity_verified(report)
+    quality = report.get("evaluation_quality")
+    coverage = (
+        float(quality.get("item_coverage_ratio", 0.0))
+        if isinstance(quality, dict)
+        else 0.0
+    )
+    return {
+        "report_status": _promotion_criterion(report.get("status"), report.get("status") == "ok", "ok"),
+        "point_in_time_integrity": _promotion_criterion(integrity, integrity, True),
+        "item_coverage": _promotion_criterion(
+            coverage,
+            coverage >= PROMOTION_MINIMUM_ITEM_COVERAGE,
+            {"minimum": PROMOTION_MINIMUM_ITEM_COVERAGE},
+        ),
     }
+
+
+def _contract_promotion_criteria(
+    report: Mapping[str, object],
+    contract: Mapping[str, object],
+    dimensions: Mapping[str, str],
+    minimum_sessions: int,
+) -> dict[str, dict[str, object]]:
+    sessions = int(str(contract.get("independent_session_count", 0)))
+    rank_ic = _matching_metric(report.get("rank_ic"), dimensions, PROMOTION_PRIMARY_HORIZON)
+    monotonicity = _matching_metric(report.get("monotonicity"), dimensions, PROMOTION_PRIMARY_HORIZON)
+    execution_value = contract.get("execution")
+    execution: Mapping[str, object] = execution_value if isinstance(execution_value, dict) else {}
+    mean_ic = _optional_float(rank_ic.get("mean_rank_ic")) if rank_ic else None
+    net_excess = _optional_float(execution.get("average_net_excess_return"))
+    drawdown = _optional_float(contract.get("session_maximum_drawdown"))
+    turnover_values = _matching_hysteresis_turnover(report.get("hysteresis"), dimensions)
+    exposure_values = _matching_exposure_differences(report.get("exposure_audit"), dimensions)
+    return {
+        "independent_sessions": _promotion_criterion(
+            sessions, sessions >= minimum_sessions, {"minimum": minimum_sessions},
+        ),
+        "mean_rank_ic_5d": _promotion_criterion(
+            mean_ic,
+            mean_ic is not None and mean_ic >= PROMOTION_MINIMUM_MEAN_RANK_IC,
+            {"minimum": PROMOTION_MINIMUM_MEAN_RANK_IC},
+        ),
+        "top100_net_excess_5d": _promotion_criterion(
+            net_excess,
+            net_excess is not None and net_excess > PROMOTION_MINIMUM_NET_EXCESS_RETURN,
+            {"minimum_exclusive": PROMOTION_MINIMUM_NET_EXCESS_RETURN},
+        ),
+        "quantile_monotonicity_5d": _promotion_criterion(
+            monotonicity.get("monotonic") if monotonicity else None,
+            monotonicity is not None and monotonicity.get("monotonic") is True,
+            True,
+        ),
+        "maximum_drawdown_5d": _promotion_criterion(
+            drawdown, drawdown is not None and drawdown >= PROMOTION_MAXIMUM_DRAWDOWN,
+            {"minimum": PROMOTION_MAXIMUM_DRAWDOWN},
+        ),
+        "hysteresis_turnover_top100": _promotion_criterion(
+            fmean(turnover_values) if turnover_values else None,
+            bool(turnover_values) and max(turnover_values) <= PROMOTION_MAXIMUM_HYSTERESIS_TURNOVER,
+            {"maximum": PROMOTION_MAXIMUM_HYSTERESIS_TURNOVER},
+        ),
+        "board_industry_liquidity_exposure": _promotion_criterion(
+            max(exposure_values) if exposure_values else None,
+            bool(exposure_values) and max(exposure_values) <= PROMOTION_MAXIMUM_EXPOSURE_SHARE_DIFFERENCE,
+            {"maximum_absolute_share_difference": PROMOTION_MAXIMUM_EXPOSURE_SHARE_DIFFERENCE},
+        ),
+    }
+
+
+def _promotion_gate_payload(
+    criteria: Mapping[str, Mapping[str, object]],
+    contract: Mapping[str, str] | None,
+) -> dict[str, object]:
+    failed = [name for name, value in criteria.items() if value.get("passed") is not True]
+    return {
+        "gate_version": PROMOTION_GATE_VERSION,
+        "primary_contract": dict(contract) if contract else None,
+        "criteria": dict(criteria),
+        "failed_criteria": failed,
+        "passed": not failed,
+        "decision": "eligible-for-human-review-only" if not failed else "remain-shadow",
+    }
+
+
+def _promotion_criterion(observed: object, passed: bool, threshold: object) -> dict[str, object]:
+    return {"observed": observed, "threshold": threshold, "passed": bool(passed)}
+
+
+def _primary_promotion_contract(report: Mapping[str, object]) -> dict[str, object] | None:
+    cohorts = report.get("cohorts")
+    if not isinstance(cohorts, list):
+        return None
+    candidates: list[dict[str, object]] = []
+    for value in cohorts:
+        if not isinstance(value, dict):
+            continue
+        dimensions = value.get("dimensions")
+        if not isinstance(dimensions, dict) or len(dimensions) != 3:
+            continue
+        if value.get("top_n") != PROMOTION_PRIMARY_TOP_N:
+            continue
+        if value.get("horizon_trading_days") != PROMOTION_PRIMARY_HORIZON:
+            continue
+        if dimensions.get("scope") != "TOP100快速更新评分":
+            candidates.append(value)
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            int(str(item.get("independent_session_count", 0))),
+            cast(dict[str, object], item["dimensions"]).get("mode") == "official",
+        ),
+    )
+
+
+def _matching_metric(
+    value: object,
+    dimensions: Mapping[str, str],
+    horizon: int,
+) -> dict[str, object] | None:
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        if not isinstance(item, dict) or item.get("horizon_trading_days") != horizon:
+            continue
+        if all(item.get(name) == expected for name, expected in dimensions.items()):
+            return item
+    return None
+
+
+def _matching_hysteresis_turnover(
+    value: object,
+    dimensions: Mapping[str, str],
+) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    return [
+        parsed
+        for item in value
+        if isinstance(item, dict)
+        and item.get("top_n") == PROMOTION_PRIMARY_TOP_N
+        and all(item.get(name) == expected for name, expected in dimensions.items())
+        and (parsed := _optional_float(item.get("hysteresis_turnover_rate"))) is not None
+    ]
+
+
+def _matching_exposure_differences(
+    value: object,
+    dimensions: Mapping[str, str],
+) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    records = [
+        item
+        for item in value
+        if isinstance(item, dict)
+        and item.get("top_n") == PROMOTION_PRIMARY_TOP_N
+        and item.get("rule_version") == dimensions.get("rule_version")
+    ]
+    differences: list[float] = []
+    for record in records:
+        for dimension in ("board", "industry", "liquidity"):
+            groups = record.get(dimension)
+            if not isinstance(groups, list):
+                continue
+            differences.extend(
+                abs(parsed)
+                for group in groups
+                if isinstance(group, dict)
+                and (parsed := _optional_float(group.get("share_difference"))) is not None
+            )
+    return differences
+
+
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _maximum_contract_session_count(report: dict[str, object]) -> int:
@@ -294,6 +662,14 @@ def _maximum_contract_session_count(report: dict[str, object]) -> int:
     )
 
 
+def _shadow_input_integrity_verified(report: Mapping[str, object]) -> bool:
+    shadow = report.get("shadow")
+    if not isinstance(shadow, dict):
+        return False
+    integrity = shadow.get("input_integrity")
+    return isinstance(integrity, dict) and integrity.get("eligible_for_promotion_evidence") is True
+
+
 def _build_report(
     path: Path,
     runs: Sequence[sqlite3.Row],
@@ -301,7 +677,9 @@ def _build_report(
     settings: EvaluationConfig,
     *,
     ranking_source: str = "persisted_market_scan_result",
+    run_failures: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
+    generated_at = utc_now().isoformat(timespec="seconds").replace("+00:00", "Z")
     observations = tuple(item for snapshot in snapshots for item in snapshot.observations)
     cohorts = _cohort_metrics(observations, settings)
     monotonicity = _monotonicity_metrics(observations, settings)
@@ -312,7 +690,7 @@ def _build_report(
     status: EvaluationStatus = "ok" if any(item["status"] == "ok" for item in cohorts) else "insufficient_data"
     return {
         "schema_version": EVALUATION_SCHEMA_VERSION,
-        "generated_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "generated_at": generated_at,
         "status": status,
         "config": _report_config(settings),
         "source": _report_source(path, runs, snapshots, observations, eligible_runs, ranking_source),
@@ -321,8 +699,132 @@ def _build_report(
         "monotonicity": monotonicity,
         "deciles": deciles,
         "rank_ic": rank_ic,
+        "factor_diagnostics": _factor_diagnostics(observations, settings),
+        "calibration": _calibration_metrics(observations, settings),
         "stability": stability,
+        "hysteresis": _hysteresis_metrics(snapshots, settings),
+        "exposure_audit": _exposure_audit(snapshots, settings),
+        "regime_overlay": _regime_overlay(snapshots),
+        "evaluation_quality": _evaluation_quality(runs, snapshots, run_failures),
+        "probability_research": build_probability_research(
+            _probability_research_rows(snapshots),
+            generated_at=generated_at,
+            bootstrap_samples=settings.bootstrap_samples,
+            label_contract=probability_label_contract(_probability_label_settings(settings)),
+        ),
         "limitations": _report_limitations(),
+    }
+
+
+def _evaluation_failure(run: sqlite3.Row, stage: str, exc: Exception) -> dict[str, object]:
+    return {
+        "run_id": int(run["id"]),
+        "stage": stage,
+        "reason_code": type(exc).__name__,
+        "message": " ".join(str(exc).split())[:300] or "unknown evaluation error",
+    }
+
+
+def _evaluation_quality(
+    runs: Sequence[sqlite3.Row],
+    snapshots: Sequence[_RunSnapshot],
+    run_failures: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    exclusions = [item for snapshot in snapshots for item in snapshot.exclusions]
+    expected = sum(snapshot.expected_ranking_count for snapshot in snapshots)
+    scored = sum(len(snapshot.rankings) for snapshot in snapshots)
+    reason_counts = Counter(str(item.get("reason_code") or "unknown") for item in exclusions)
+    return {
+        "attempted_run_count": len(runs),
+        "evaluated_run_count": len(snapshots),
+        "rejected_run_count": len(run_failures),
+        "expected_item_count": expected,
+        "scored_item_count": scored,
+        "excluded_item_count": len(exclusions),
+        "item_coverage_ratio": scored / expected if expected > 0 else 0.0,
+        "exclusion_reason_counts": dict(sorted(reason_counts.items())),
+        "run_failures": list(run_failures),
+        "item_exclusions": exclusions[:100],
+        "truncated_item_exclusions": max(0, len(exclusions) - 100),
+    }
+
+
+def _probability_research_rows(
+    snapshots: Sequence[_RunSnapshot],
+) -> tuple[ProbabilityResearchRow, ...]:
+    rows: list[ProbabilityResearchRow] = []
+    for snapshot in snapshots:
+        market_strength, board_strength, industry_strength = _probability_strength_context(snapshot.observations)
+        mature = frozenset(
+            horizon
+            for horizon in PROBABILITY_DEFAULT_HORIZONS
+            if horizon < len(snapshot.eligible_dates)
+        )
+        rows.extend(
+            ProbabilityResearchRow(
+                run_id=item.run_id,
+                symbol=item.symbol,
+                session_date=item.quote_date,
+                features=probability_feature_vector(
+                    item.factor_values,
+                    market=item.market,
+                    board=item.board,
+                    liquidity=item.liquidity_bucket,
+                    regime=item.regime,
+                    industry=item.industry,
+                    segment=item.segment,
+                    market_strength=market_strength,
+                    board_relative_strength=board_strength.get(item.board, 0.0),
+                    industry_relative_strength=industry_strength.get(item.industry, 0.0),
+                ),
+                labels=item.probability_labels,
+                mature_horizons=mature,
+                dimensions=_probability_dimensions(item),
+                source_evidence_digest=item.source_evidence_digest,
+                mode=item.mode,
+                scope=item.scope,
+                rule_version=item.rule_version,
+            )
+            for item in snapshot.observations
+        )
+    return tuple(rows)
+
+
+def _probability_strength_context(
+    observations: Sequence[_Observation],
+) -> tuple[float, dict[str, float], dict[str, float]]:
+    market_strength = fmean(item.raw_score for item in observations) if observations else 50.0
+    return (
+        market_strength,
+        _relative_group_strength(observations, "board", market_strength),
+        _relative_group_strength(observations, "industry", market_strength),
+    )
+
+
+def _relative_group_strength(
+    observations: Sequence[_Observation], attribute: Literal["board", "industry"], market_strength: float,
+) -> dict[str, float]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for item in observations:
+        grouped[str(getattr(item, attribute))].append(item.raw_score)
+    return {
+        key: fmean(values) - market_strength
+        for key, values in sorted(grouped.items())
+        if values
+    }
+
+
+def _probability_dimensions(item: _Observation) -> dict[str, str]:
+    return {
+        "mode": item.mode,
+        "scope": item.scope,
+        "rule_version": item.rule_version,
+        "market": item.market,
+        "board": item.board,
+        "industry": item.industry,
+        "liquidity": item.liquidity_bucket,
+        "regime": item.regime,
+        "segment": item.segment,
     }
 
 
@@ -337,6 +839,7 @@ def _report_config(settings: EvaluationConfig) -> dict[str, object]:
         "execution_notional": settings.execution_notional,
         "max_exit_delay_sessions": settings.max_exit_delay_sessions,
         "max_daily_participation_rate": settings.max_daily_participation_rate,
+        "hysteresis_buffer_ratio": settings.hysteresis_buffer_ratio,
         "cost_profile": resolve_cost_profile(settings.cost_profile).model_dump(mode="json"),
     }
 
@@ -372,6 +875,9 @@ def _report_limitations() -> list[str]:
         "净收益是固定名义本金、下一完整交易日开盘入场、T+1后目标日或下一可卖日开盘退出的日K情景。",
         "日K无法复原盘口排队与盘中先后顺序，model_limited 与 unfilled 状态必须保留。",
         "市场环境由扫描快照当日全市场涨跌幅均值分层，不使用未来信息。",
+        "生产排名的板块、行业和流动性暴露只做审计；v5.4仅对质量可接受的具体行业组做收缩残差化。",
+        "迟滞换仓仅报告 buy/hold 阈值下的估算换手变化，不改写冻结排名。",
+        "多候选比较必须保留预注册消融并在足够独立交易日后执行PBO/多重检验。",
         "报告不会自动修改生产评分权重；规则调整必须创建新的 rule_version。",
     ]
 
@@ -456,7 +962,15 @@ def _evaluate_shadow_run(
     data_date = str(run["data_date"])
     quote_date = str(run["quote_date"] or run["data_date"])
     history = _shadow_history_bars(conn, int(run["id"]), data_date)
-    inputs = _shadow_score_inputs(result_rows, history, quote_date, data_date)
+    inputs, exclusions, evidence_count = _shadow_score_inputs(
+        result_rows,
+        history,
+        quote_date,
+        data_date,
+        variant,
+        mode=cast(Literal["official", "intraday"], str(run["mode"] or "official")),
+        run_id=int(run["id"]),
+    )
     if not inputs:
         return None
     batch = score_shadow_market(inputs, variant=variant)
@@ -471,6 +985,11 @@ def _evaluate_shadow_run(
         quote_date,
         data_date,
         config,
+        expected_ranking_count=len(result_rows),
+        exclusions=exclusions,
+        point_in_time_integrity_verified=(
+            evidence_count == len(result_rows) and not exclusions
+        ),
     )
     return snapshot, batch
 
@@ -478,10 +997,11 @@ def _evaluate_shadow_run(
 def _shadow_result_rows(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT symbol, market, rank, score, raw_score, price, change_pct, data_quality_score,
+        SELECT symbol, market, industry, rank, score, raw_score, price, change_pct, data_quality_score,
                amount, turnover_rate, volume_ratio, list_date, is_st, is_new,
-               quote_fallback_used, kline_fallback_used, metadata_degraded,
-               COALESCE(NULLIF(adjustment_mode, ''), 'qfq') AS adjustment_mode
+               quote_timestamp, quote_fallback_used, kline_fallback_used, metadata_degraded,
+               COALESCE(NULLIF(adjustment_mode, ''), 'qfq') AS adjustment_mode,
+               metrics_json
         FROM market_scan_result
         WHERE run_id = ? AND status = 'success' AND rank IS NOT NULL AND price > 0
         ORDER BY rank ASC, symbol ASC
@@ -495,15 +1015,174 @@ def _shadow_score_inputs(
     history: dict[str, tuple[Kline, ...]],
     quote_date: str,
     data_date: str,
-) -> list[ShadowScoreInput]:
+    variant: ShadowScoreVariant,
+    *,
+    mode: Literal["official", "intraday"],
+    run_id: int,
+) -> tuple[list[ShadowScoreInput], tuple[dict[str, object], ...], int]:
     inputs: list[ShadowScoreInput] = []
+    exclusions: list[dict[str, object]] = []
+    evidence_count = 0
     for row in result_rows:
         symbol = str(row["symbol"])
-        rows = history.get(symbol, ())
-        if len(rows) < 60:
+        evidence = _persisted_shadow_history(row, symbol, data_date)
+        evidence_rows = evidence[0] if evidence is not None else None
+        rows = evidence_rows or history.get(symbol, ())
+        if len(rows) < SHADOW_SCORE_MIN_HISTORY_ROWS:
+            exclusions.append(
+                _item_exclusion(run_id, symbol, "insufficient_history", f"仅有{len(rows)}根可用日K")
+            )
             continue
-        inputs.append(_shadow_score_input(row, rows, quote_date, data_date))
-    return inputs
+        candidate = _shadow_score_input(row, rows, quote_date, data_date, mode=mode)
+        try:
+            score_shadow_market((candidate,), variant=variant)
+        except (TypeError, ValueError) as exc:
+            exclusions.append(_item_exclusion(run_id, symbol, "invalid_shadow_input", str(exc)))
+            continue
+        inputs.append(candidate)
+        evidence_count += bool(
+            evidence is not None
+            and _point_in_time_payload_attests_shadow_input(
+                evidence[1], row, quote_date=quote_date, data_date=data_date, mode=mode,
+            )
+        )
+    return inputs, tuple(exclusions), evidence_count
+
+
+def _persisted_shadow_history(
+    row: sqlite3.Row,
+    symbol: str,
+    data_date: str,
+) -> tuple[tuple[Kline, ...], dict[str, object]] | None:
+    _metrics, details = decode_result_payload(row["metrics_json"])
+    payload = _verified_point_in_time_payload(details)
+    if payload is None:
+        return None
+    if payload.get("symbol") != symbol or payload.get("data_date") != data_date:
+        return None
+    quote_price = payload.get("quote_price")
+    if isinstance(quote_price, bool) or not isinstance(quote_price, int | float):
+        return None
+    try:
+        if not math.isclose(float(quote_price), float(row["price"]), rel_tol=0, abs_tol=1e-8):
+            return None
+    except (TypeError, ValueError):
+        return None
+    contracts = payload.get("bar_contract_61")
+    if not isinstance(contracts, list):
+        return None
+    rows: list[Kline] = []
+    try:
+        for item in contracts:
+            rows.append(_kline_from_evidence_contract(item))
+    except (TypeError, ValueError):
+        return None
+    return tuple(rows), payload
+
+
+def _point_in_time_payload_attests_shadow_input(
+    payload: Mapping[str, object],
+    row: sqlite3.Row,
+    *,
+    quote_date: str,
+    data_date: str,
+    mode: Literal["official", "intraday"],
+) -> bool:
+    text_fields = {
+        "symbol": row["symbol"],
+        "market": row["market"],
+        "quote_date": quote_date,
+        "data_date": data_date,
+        "mode": mode,
+        "quote_timestamp": row["quote_timestamp"],
+    }
+    if any(str(payload.get(name) or "") != str(expected or "") for name, expected in text_fields.items()):
+        return False
+    optional_text = {"industry": row["industry"], "list_date": row["list_date"]}
+    if any(
+        str(payload.get(name) or "").strip() != str(expected or "").strip()
+        for name, expected in optional_text.items()
+    ):
+        return False
+    numeric_fields = {
+        "quote_price": (row["price"], 1e-8),
+        "quote_change_pct": (row["change_pct"], 1e-8),
+        "quote_turnover_rate": (row["turnover_rate"], 1e-8),
+        "quote_amount": (row["amount"], 1e-4),
+        "reported_volume_ratio": (row["volume_ratio"], 1e-8),
+        "data_quality_score": (row["data_quality_score"], 0.0),
+    }
+    if any(
+        not _attested_number_matches(payload.get(name), expected, tolerance)
+        for name, (expected, tolerance) in numeric_fields.items()
+    ):
+        return False
+    boolean_fields = {
+        "is_st": row["is_st"],
+        "is_new": row["is_new"],
+        "quote_fallback_used": row["quote_fallback_used"],
+        "kline_fallback_used": row["kline_fallback_used"],
+        "metadata_degraded": row["metadata_degraded"],
+    }
+    return all(
+        isinstance(payload.get(name), bool) and payload[name] is bool(expected)
+        for name, expected in boolean_fields.items()
+    )
+
+
+def _attested_number_matches(value: object, expected: object, tolerance: float) -> bool:
+    if value is None or expected is None or isinstance(value, bool) or isinstance(expected, bool):
+        return value is None and expected is None
+    if not isinstance(value, (int, float, str)) or not isinstance(expected, (int, float, str)):
+        return False
+    try:
+        left, right = float(value), float(expected)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(left) and math.isfinite(right) and math.isclose(
+        left, right, rel_tol=0, abs_tol=tolerance,
+    )
+
+
+def _verified_point_in_time_payload(details: Mapping[str, object]) -> dict[str, object] | None:
+    components = details.get("components")
+    if not isinstance(components, dict):
+        return None
+    dimensions = components.get("score_dimensions")
+    if not isinstance(dimensions, dict):
+        return None
+    evidence = dimensions.get("point_in_time_evidence")
+    if not isinstance(evidence, dict) or not verify_market_scan_point_in_time_evidence(evidence):
+        return None
+    payload = evidence.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def _kline_from_evidence_contract(value: object) -> Kline:
+    if not isinstance(value, list) or len(value) != 9:
+        raise ValueError("invalid persisted bar contract")
+    return Kline(
+        date=str(value[0]),
+        open=float(value[1]),
+        close=float(value[2]),
+        high=float(value[3]),
+        low=float(value[4]),
+        volume=float(value[5]),
+        adjustment_mode=cast(KlineAdjustmentMode, str(value[6])),
+        data_version=str(value[7]),
+        contract_version=str(value[8]),
+        source="persisted-market-scan-point-in-time-evidence",
+        from_cache=True,
+    )
+
+
+def _item_exclusion(run_id: int, symbol: str, reason_code: str, message: str) -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "symbol": symbol,
+        "reason_code": reason_code,
+        "message": " ".join(message.split())[:240],
+    }
 
 
 def _shadow_score_input(
@@ -511,6 +1190,8 @@ def _shadow_score_input(
     rows: tuple[Kline, ...],
     quote_date: str,
     data_date: str,
+    *,
+    mode: Literal["official", "intraday"],
 ) -> ShadowScoreInput:
     return ShadowScoreInput(
         symbol=str(row["symbol"]), market=str(row["market"]), quote_date=quote_date,
@@ -522,6 +1203,8 @@ def _shadow_score_input(
         is_st=bool(row["is_st"]), is_new=bool(row["is_new"]),
         quote_fallback_used=bool(row["quote_fallback_used"]),
         kline_fallback_used=bool(row["kline_fallback_used"]), metadata_degraded=bool(row["metadata_degraded"]),
+        mode=mode,
+        industry=str(row["industry"]) if row["industry"] else None,
     )
 
 
@@ -534,6 +1217,10 @@ def _shadow_snapshot(
     quote_date: str,
     data_date: str,
     config: EvaluationConfig,
+    *,
+    expected_ranking_count: int,
+    exclusions: tuple[dict[str, object], ...],
+    point_in_time_integrity_verified: bool,
 ) -> _RunSnapshot:
     shadow_run = _shadow_run_proxy(run, batch.candidate_id, quote_date, data_date)
     rows_by_symbol = {str(row["symbol"]): row for row in result_rows}
@@ -550,6 +1237,14 @@ def _shadow_snapshot(
         observations=observations,
         rankings=tuple((item.symbol, item.rank) for item in batch.results),
         eligible_dates=eligible_dates,
+        expected_ranking_count=expected_ranking_count,
+        exclusions=exclusions,
+        point_in_time_integrity_verified=point_in_time_integrity_verified,
+        exposures=tuple(
+            _exposure_item(rows_by_symbol[item.symbol], rank=item.rank)
+            for item in batch.results
+        ),
+        regime=_market_regime(result_rows),
     )
 
 
@@ -626,9 +1321,10 @@ def _evaluate_run(
 ) -> _RunSnapshot | None:
     result_rows = conn.execute(
         """
-        SELECT symbol, market, rank, score, raw_score, price, change_pct, data_quality_score,
-               amount, turnover_rate, list_date, is_st, is_new,
-               COALESCE(NULLIF(adjustment_mode, ''), 'qfq') AS adjustment_mode
+        SELECT symbol, market, industry, rank, score, raw_score, price, change_pct, data_quality_score,
+               amount, turnover_rate, volume_ratio, list_date, is_st, is_new,
+               COALESCE(NULLIF(adjustment_mode, ''), 'qfq') AS adjustment_mode,
+               metrics_json
         FROM market_scan_result
         WHERE run_id = ? AND status = 'success' AND rank IS NOT NULL AND price > 0
         ORDER BY rank ASC, symbol ASC
@@ -671,6 +1367,9 @@ def _evaluate_run(
         observations=observations,
         rankings=tuple((str(row["symbol"]), int(row["rank"])) for row in result_rows),
         eligible_dates=eligible_dates,
+        expected_ranking_count=len(result_rows),
+        exposures=tuple(_exposure_item(row) for row in result_rows),
+        regime=regime,
     )
 
 
@@ -713,7 +1412,7 @@ def _eligible_trading_dates(
         for row_date in {str(row["date"]) for row in symbol_rows if str(row["date"]) > quote_date}:
             counts[row_date] += 1
     required = max(1, math.ceil(snapshot_count * config.complete_day_coverage))
-    limit = max(config.horizons) + config.max_exit_delay_sessions + 1
+    limit = max((*config.horizons, *PROBABILITY_DEFAULT_HORIZONS)) + config.max_exit_delay_sessions + 1
     return tuple(sorted(row_date for row_date, count in counts.items() if count >= required))[:limit]
 
 
@@ -727,13 +1426,15 @@ def _observation_from_rows(
 ) -> _Observation | None:
     entry = float(result["price"])
     returns, adverse = _forward_performance(bars, eligible_dates, entry, config.horizons)
-    if not returns:
-        return None
     quote_date = str(run["quote_date"] or run["data_date"])
     symbol = str(result["symbol"])
     market = str(result["market"])
     is_st = bool(result["is_st"])
     is_new = bool(result["is_new"])
+    amount = float(result["amount"] or 0)
+    execution, probability_labels = _observation_outcomes(
+        result, symbol, market, is_st, is_new, quote_date, amount, bars, eligible_dates, config,
+    )
     return _Observation(
         run_id=int(run["id"]),
         quote_date=quote_date,
@@ -743,28 +1444,54 @@ def _observation_from_rows(
         symbol=symbol,
         market=market,
         board=_board(symbol, market),
+        industry=_normalize_industry(result["industry"]),
         segment="st" if is_st else "new" if is_new else "regular",
         liquidity_bucket=_liquidity_bucket(result["amount"]),
         scan_time_bucket=_scan_time_bucket(run["as_of"], str(run["mode"] or "official")),
         rank=int(result["rank"]),
         raw_score=_result_raw_score(result),
+        amount=amount,
+        turnover_rate=float(result["turnover_rate"]) if result["turnover_rate"] is not None else None,
         quality_bucket=_quality_bucket(result["data_quality_score"]),
         regime=regime,
         returns=returns,
         adverse=adverse,
-        execution=_execution_outcomes(
+        execution=execution,
+        probability_labels=probability_labels,
+        factor_values=_probability_factor_values(
+            result,
             symbol=symbol,
             market=market,
-            list_date=result["list_date"],
+            quote_date=quote_date,
             is_st=is_st,
             is_new=is_new,
-            quote_date=quote_date,
-            amount=float(result["amount"] or 0),
-            bars=bars,
-            eligible_dates=eligible_dates,
-            config=config,
         ),
+        source_evidence_digest=_source_evidence_digest(result),
     )
+
+
+def _observation_outcomes(
+    result: sqlite3.Row,
+    symbol: str,
+    market: str,
+    is_st: bool,
+    is_new: bool,
+    quote_date: str,
+    amount: float,
+    bars: tuple[sqlite3.Row, ...],
+    eligible_dates: tuple[str, ...],
+    config: EvaluationConfig,
+) -> tuple[dict[int, _ExecutionOutcome], dict[int, ProbabilityLabelOutcome]]:
+    execution = _execution_outcomes(
+        symbol=symbol, market=market, list_date=result["list_date"], is_st=is_st,
+        is_new=is_new, quote_date=quote_date, amount=amount, bars=bars,
+        eligible_dates=eligible_dates, config=config,
+    )
+    labels = _probability_label_outcomes(
+        result=result, symbol=symbol, market=market, is_st=is_st, quote_date=quote_date,
+        amount=amount, bars=bars, eligible_dates=eligible_dates, config=config,
+    )
+    return execution, labels
 
 
 def _forward_performance(
@@ -786,6 +1513,49 @@ def _forward_performance(
             returns[index] = float(row["close"]) / entry - 1
             adverse[index] = min(lows) / entry - 1
     return returns, adverse
+
+
+def _probability_label_outcomes(
+    *,
+    result: sqlite3.Row,
+    symbol: str,
+    market: str,
+    is_st: bool,
+    quote_date: str,
+    amount: float,
+    bars: Sequence[sqlite3.Row],
+    eligible_dates: Sequence[str],
+    config: EvaluationConfig,
+) -> dict[int, ProbabilityLabelOutcome]:
+    settings = _probability_label_settings(config)
+    try:
+        rows = tuple(_to_kline(row) for row in bars)
+        return build_probability_label_outcomes(
+            symbol=symbol,
+            market=market,
+            list_date=str(result["list_date"]) if result["list_date"] else None,
+            is_st=is_st,
+            quote_date=quote_date,
+            amount=amount,
+            rows=rows,
+            eligible_dates=eligible_dates,
+            config=settings,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        reason = f"label_input_invalid:{type(exc).__name__}"
+        return {
+            horizon: ProbabilityLabelOutcome(horizon, "data_unavailable", reason)
+            for horizon in settings.horizons
+        }
+
+
+def _probability_label_settings(config: EvaluationConfig) -> ProbabilityLabelConfig:
+    return ProbabilityLabelConfig(
+        horizons=PROBABILITY_DEFAULT_HORIZONS,
+        cost_profile=config.cost_profile,
+        execution_notional=config.execution_notional,
+        max_daily_participation_rate=config.max_daily_participation_rate,
+    )
 
 
 def _result_raw_score(result: sqlite3.Row) -> float:
@@ -1168,6 +1938,17 @@ def _return_statistics(
     }
     daily_values = list(daily_returns.values())
     daily_excess_values = list(daily_excess.values())
+    execution = _execution_summary(selected, horizon)
+    daily_net = _execution_net_returns_by_run(selected, horizon)
+    daily_net_excess = {
+        run_id: value - benchmark_by_run[run_id]
+        for run_id, value in daily_net.items()
+        if run_id in benchmark_by_run
+    }
+    execution["average_net_excess_return"] = (
+        fmean(daily_net_excess.values()) if daily_net_excess else None
+    )
+    execution["net_excess_independent_session_count"] = len(daily_net_excess)
     seed = json.dumps({"dimensions": dimensions, "top_n": top_n, "horizon": horizon}, sort_keys=True)
     return {
         "average_return": fmean(returns),
@@ -1186,7 +1967,7 @@ def _return_statistics(
         ),
         "session_maximum_drawdown": _compounded_maximum_drawdown(daily_values),
         "maximum_adverse_excursion": min(adverse) if adverse else None,
-        "execution": _execution_summary(selected, horizon),
+        "execution": execution,
     }
 
 
@@ -1241,6 +2022,14 @@ def _execution_aggregates(
         delayed += outcome.exit_delay_sessions > 0
         model_limited += outcome.model_limited
     return by_run, cost_drag, delayed, model_limited
+
+
+def _execution_net_returns_by_run(
+    rows: Sequence[_Observation],
+    horizon: int,
+) -> dict[int, float]:
+    by_run, _cost_drag, _delayed, _model_limited = _execution_aggregates(rows, horizon)
+    return {run_id: fmean(values) for run_id, values in by_run.items() if values}
 
 
 def _returns_by_run(values: Iterable[tuple[_Observation, float]]) -> dict[int, list[float]]:
@@ -1478,6 +2267,284 @@ def _contract_rows(
     ]
 
 
+def _factor_values(result: sqlite3.Row) -> dict[str, float]:
+    values = _finite_row_values(
+        result,
+        (
+        "raw_score", "trend_score", "change_pct", "data_quality_score",
+        "amount", "turnover_rate", "volume_ratio",
+        ),
+    )
+    if "metrics_json" not in result.keys():
+        return values
+    _metrics, details = decode_result_payload(result["metrics_json"])
+    components = details.get("components")
+    if not isinstance(components, dict):
+        return values
+    values.update(_production_score_component_values(components))
+    refinement = components.get("rank_refinement")
+    if isinstance(refinement, dict) and isinstance(refinement.get("score"), int | float):
+        values["rank_refinement"] = float(refinement["score"])
+    dimensions = components.get("score_dimensions")
+    if not isinstance(dimensions, dict):
+        return values
+    scores = dimensions.get("scores")
+    if isinstance(scores, dict):
+        values.update(_finite_mapping_values(
+            scores,
+            ("alpha_1d", "alpha_5d", "alpha_20d", "confidence", "risk", "tradability"),
+        ))
+    raw_features = dimensions.get("raw_features")
+    if isinstance(raw_features, dict):
+        values.update(_finite_mapping_values(raw_features, tuple(raw_features), prefix="feature_"))
+    return values
+
+
+def _probability_factor_values(
+    result: sqlite3.Row,
+    *,
+    symbol: str,
+    market: str,
+    quote_date: str,
+    is_st: bool,
+    is_new: bool,
+) -> dict[str, float]:
+    """Add point-in-time status and effective price-limit facts to frozen factors."""
+    values = _factor_values(result)
+    values.update({"is_st": float(is_st), "is_new": float(is_new)})
+    metadata = _execution_metadata(symbol, market, result["list_date"], is_st, quote_date)
+    try:
+        profile = resolve_trade_rule_profile(symbol, date.fromisoformat(quote_date), metadata)
+    except (KeyError, TypeError, ValueError):
+        values["price_limit_profile_uncertain"] = 1.0
+        return values
+    verified = profile.quality == "ok"
+    values.update(
+        {
+            "price_limit_pct": float(profile.price_limit_pct or 0.0),
+            "price_limit_profile_verified": float(verified),
+            "price_limit_profile_uncertain": float(not verified),
+            "price_limit_absent": float(verified and profile.price_limit_pct is None),
+            "new_stock_no_limit_phase": float(
+                is_new and verified and profile.price_limit_pct is None
+            ),
+        }
+    )
+    return values
+
+
+def _production_score_component_values(components: Mapping[str, object]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    groups = (
+        ("leader_score", ("base", "trend_delta", "unclamped", "score"), "leader_"),
+        ("final_score", ("quality_penalty", "base", "rank_discount", "raw", "rounded", "score"), "final_"),
+    )
+    for group_name, names, prefix in groups:
+        group = components.get(group_name)
+        if isinstance(group, Mapping):
+            values.update(_finite_mapping_values(group, names, prefix=prefix))
+    refinement = components.get("rank_refinement")
+    if isinstance(refinement, Mapping):
+        normalized = refinement.get("normalized_inputs")
+        if isinstance(normalized, Mapping):
+            values.update(_finite_mapping_values(normalized, tuple(normalized), prefix="refinement_"))
+    return values
+
+
+def _source_evidence_digest(result: sqlite3.Row) -> str | None:
+    if "metrics_json" not in result.keys():
+        return None
+    _metrics, details = decode_result_payload(result["metrics_json"])
+    components = details.get("components")
+    dimensions = components.get("score_dimensions") if isinstance(components, dict) else None
+    evidence = dimensions.get("point_in_time_evidence") if isinstance(dimensions, dict) else None
+    if not isinstance(evidence, dict) or not verify_market_scan_point_in_time_evidence(evidence):
+        return None
+    digest = evidence.get("payload_digest") if isinstance(evidence, dict) else None
+    return digest if isinstance(digest, str) and len(digest) == 64 else None
+
+
+def _finite_row_values(row: sqlite3.Row, names: Sequence[str]) -> dict[str, float]:
+    available = set(row.keys())
+    return {
+        name: parsed
+        for name in names
+        if name in available
+        and row[name] is not None
+        and not isinstance(row[name], bool)
+        and math.isfinite(parsed := float(row[name]))
+    }
+
+
+def _finite_mapping_values(
+    values: Mapping[object, object],
+    names: Sequence[object],
+    *,
+    prefix: str = "",
+) -> dict[str, float]:
+    parsed: dict[str, float] = {}
+    for name in names:
+        value = values.get(name)
+        if isinstance(name, str) and isinstance(value, int | float) and not isinstance(value, bool):
+            number = float(value)
+            if math.isfinite(number):
+                parsed[f"{prefix}{name}"] = number
+    return parsed
+
+
+def _factor_diagnostics(
+    observations: tuple[_Observation, ...],
+    config: EvaluationConfig,
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for mode, scope, rule_version, rows in _contract_rows(observations):
+        factors = sorted({name for item in rows for name in item.factor_values})
+        for horizon in config.horizons:
+            for factor in factors:
+                records.append(
+                    _factor_diagnostic_record(
+                        mode, scope, rule_version, rows, factor, horizon, config,
+                    )
+                )
+    return records
+
+
+def _factor_diagnostic_record(
+    mode: str,
+    scope: str,
+    rule_version: str,
+    rows: Sequence[_Observation],
+    factor: str,
+    horizon: int,
+    config: EvaluationConfig,
+) -> dict[str, object]:
+    daily_ic, daily_partial_ic = _daily_factor_ics(rows, factor, horizon)
+    return {
+        "mode": mode,
+        "scope": scope,
+        "rule_version": rule_version,
+        "factor": factor,
+        "horizon_trading_days": horizon,
+        "status": "ok" if len(daily_ic) >= config.minimum_session_count else "insufficient_data",
+        "independent_session_count": len(daily_ic),
+        "mean_rank_ic": fmean(daily_ic) if daily_ic else None,
+        "mean_partial_rank_ic_controlling_raw_score": (
+            fmean(daily_partial_ic) if daily_partial_ic else None
+        ),
+        "partial_ic_session_count": len(daily_partial_ic),
+    }
+
+
+def _daily_factor_ics(
+    rows: Sequence[_Observation],
+    factor: str,
+    horizon: int,
+) -> tuple[list[float], list[float]]:
+    by_session: dict[str, list[_Observation]] = defaultdict(list)
+    for item in rows:
+        if horizon in item.returns and factor in item.factor_values:
+            by_session[item.quote_date].append(item)
+    daily_ic: list[float] = []
+    daily_partial_ic: list[float] = []
+    for session_rows in by_session.values():
+        factor_ic = _spearman(
+            [(item.factor_values[factor], item.returns[horizon]) for item in session_rows]
+        )
+        if factor_ic is not None:
+            daily_ic.append(factor_ic)
+        partial = None if factor == "raw_score" else _partial_rank_ic(session_rows, factor, horizon)
+        if partial is not None:
+            daily_partial_ic.append(partial)
+    return daily_ic, daily_partial_ic
+
+
+def _partial_rank_ic(
+    rows: Sequence[_Observation],
+    factor: str,
+    horizon: int,
+) -> float | None:
+    materialized = [
+        item
+        for item in rows
+        if factor in item.factor_values
+        and "raw_score" in item.factor_values
+        and horizon in item.returns
+    ]
+    if len(materialized) < 3:
+        return None
+    factor_return = _spearman(
+        [(item.factor_values[factor], item.returns[horizon]) for item in materialized]
+    )
+    factor_base = _spearman(
+        [(item.factor_values[factor], item.factor_values["raw_score"]) for item in materialized]
+    )
+    base_return = _spearman(
+        [(item.factor_values["raw_score"], item.returns[horizon]) for item in materialized]
+    )
+    if factor_return is None or factor_base is None or base_return is None:
+        return None
+    denominator = math.sqrt(max(0.0, (1 - factor_base**2) * (1 - base_return**2)))
+    return (factor_return - factor_base * base_return) / denominator if denominator > 1e-12 else None
+
+
+def _calibration_metrics(
+    observations: tuple[_Observation, ...],
+    config: EvaluationConfig,
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for mode, scope, rule_version, rows in _contract_rows(observations):
+        for horizon in config.horizons:
+            records.append(_calibration_record(mode, scope, rule_version, rows, horizon, config))
+    return records
+
+
+def _calibration_record(
+    mode: str,
+    scope: str,
+    rule_version: str,
+    rows: Sequence[_Observation],
+    horizon: int,
+    config: EvaluationConfig,
+) -> dict[str, object]:
+    horizon_rows = [item for item in rows if horizon in item.returns]
+    session_count = len({item.quote_date for item in horizon_rows})
+    return {
+        "mode": mode,
+        "scope": scope,
+        "rule_version": rule_version,
+        "horizon_trading_days": horizon,
+        "status": "diagnostic-only" if session_count >= config.minimum_session_count else "insufficient_data",
+        "independent_session_count": session_count,
+        "score_semantics": "ordinal-not-probability",
+        "probability_calibration_allowed": False,
+        "buckets": [
+            _calibration_bucket(horizon_rows, horizon, lower)
+            for lower in range(0, 100, 10)
+        ],
+    }
+
+
+def _calibration_bucket(
+    rows: Sequence[_Observation],
+    horizon: int,
+    lower: int,
+) -> dict[str, object]:
+    upper = lower + 10
+    selected = [
+        item
+        for item in rows
+        if lower <= item.raw_score <= upper and (upper == 100 or item.raw_score < upper)
+    ]
+    values = [item.returns[horizon] for item in selected]
+    return {
+        "score_range": [lower, upper],
+        "sample_size": len(values),
+        "independent_session_count": len({item.quote_date for item in selected}),
+        "average_return": fmean(values) if values else None,
+        "positive_return_rate": sum(value > 0 for value in values) / len(values) if values else None,
+    }
+
+
 def _stability_metrics(
     snapshots: tuple[_RunSnapshot, ...],
     config: EvaluationConfig,
@@ -1520,6 +2587,187 @@ def _stability_record(
         "turnover_rate": 1 - overlap if comparable and overlap is not None else None,
         "rank_stability": _spearman_rank_stability(previous_ranks, current_ranks, common) if comparable else None,
     }
+
+
+def _hysteresis_metrics(
+    snapshots: tuple[_RunSnapshot, ...],
+    config: EvaluationConfig,
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    by_contract: dict[tuple[str, str, str], list[_RunSnapshot]] = defaultdict(list)
+    for snapshot in snapshots:
+        by_contract[(snapshot.mode, snapshot.scope, snapshot.rule_version)].append(snapshot)
+    for contract, values in sorted(by_contract.items()):
+        ordered = sorted(values, key=lambda item: (item.quote_date, item.id))
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+            current_ranks = dict(current.rankings)
+            for top_n in config.top_sizes:
+                previous_members = {symbol for symbol, rank in previous.rankings if rank <= top_n}
+                baseline_members = [symbol for symbol, rank in current.rankings if rank <= top_n]
+                hold_rank = max(top_n, math.ceil(top_n * (1 + config.hysteresis_buffer_ratio)))
+                retained = [
+                    symbol
+                    for symbol in previous_members
+                    if current_ranks.get(symbol, hold_rank + 1) <= hold_rank
+                ]
+                hysteresis_members = retained + [
+                    symbol for symbol in baseline_members if symbol not in retained
+                ][: max(0, top_n - len(retained))]
+                baseline_overlap = len(previous_members & set(baseline_members))
+                hysteresis_overlap = len(previous_members & set(hysteresis_members))
+                denominator = min(top_n, len(previous_members), len(baseline_members))
+                baseline_turnover = 1 - baseline_overlap / denominator if denominator else None
+                hysteresis_turnover = 1 - hysteresis_overlap / denominator if denominator else None
+                records.append(
+                    {
+                        "mode": contract[0],
+                        "scope": contract[1],
+                        "rule_version": contract[2],
+                        "previous_run_id": previous.id,
+                        "current_run_id": current.id,
+                        "top_n": top_n,
+                        "buy_rank_threshold": top_n,
+                        "hold_rank_threshold": hold_rank,
+                        "buffer_ratio": config.hysteresis_buffer_ratio,
+                        "baseline_turnover_rate": baseline_turnover,
+                        "hysteresis_turnover_rate": hysteresis_turnover,
+                        "estimated_turnover_reduction": (
+                            baseline_turnover - hysteresis_turnover
+                            if baseline_turnover is not None and hysteresis_turnover is not None
+                            else None
+                        ),
+                        "status": "diagnostic-only-not-applied-to-production-ranking",
+                    }
+                )
+    return records
+
+
+def _exposure_audit(
+    snapshots: tuple[_RunSnapshot, ...],
+    config: EvaluationConfig,
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for snapshot in snapshots:
+        universe = snapshot.exposures
+        if not universe:
+            continue
+        for top_n in config.top_sizes:
+            selected = tuple(item for item in universe if item.rank <= top_n)
+            records.append(
+                {
+                    "run_id": snapshot.id,
+                    "rule_version": snapshot.rule_version,
+                    "quote_date": snapshot.quote_date,
+                    "top_n": top_n,
+                    "sample_count": len(selected),
+                    "universe_count": len(universe),
+                    "board": _group_exposure(selected, universe, "board"),
+                    "industry": _group_exposure(selected, universe, "industry"),
+                    "liquidity": _group_exposure(selected, universe, "liquidity"),
+                    "average_amount": _mean_optional(item.amount for item in selected),
+                    "universe_average_amount": _mean_optional(item.amount for item in universe),
+                    "average_turnover_rate": _mean_optional(item.turnover_rate for item in selected),
+                    "universe_average_turnover_rate": _mean_optional(item.turnover_rate for item in universe),
+                    "taxonomy_quality": _industry_taxonomy_quality(universe),
+                    "policy": "audit-only-no-naive-sector-quota",
+                }
+            )
+    return records
+
+
+def _regime_overlay(snapshots: Sequence[_RunSnapshot]) -> list[dict[str, object]]:
+    policy = {
+        "strong": (1.0, 45),
+        "neutral": (0.8, 50),
+        "weak": (0.5, 60),
+        "unknown": (0.5, 60),
+    }
+    return [
+        {
+            "run_id": snapshot.id,
+            "quote_date": snapshot.quote_date,
+            "regime": snapshot.regime,
+            "position_size_multiplier": policy.get(snapshot.regime, policy["unknown"])[0],
+            "minimum_balanced_utility": policy.get(snapshot.regime, policy["unknown"])[1],
+            "role": "admission-and-position-sizing-only-does-not-change-alpha-rank",
+        }
+        for snapshot in snapshots
+    ]
+
+
+def _group_exposure(
+    selected: Sequence[_ExposureItem],
+    universe: Sequence[_ExposureItem],
+    dimension: Literal["board", "industry", "liquidity"],
+) -> list[dict[str, object]]:
+    def label(item: _ExposureItem) -> str:
+        if dimension == "board":
+            return item.board
+        if dimension == "industry":
+            return item.industry
+        return _liquidity_bucket(item.amount)
+
+    selected_counts = Counter(label(item) for item in selected)
+    universe_counts = Counter(label(item) for item in universe)
+    records: list[dict[str, object]] = []
+    for value in sorted(universe_counts):
+        selected_share = selected_counts[value] / len(selected) if selected else 0.0
+        universe_share = universe_counts[value] / len(universe) if universe else 0.0
+        difference = selected_share - universe_share
+        records.append(
+            {
+                "value": value,
+                "selected_count": selected_counts[value],
+                "universe_count": universe_counts[value],
+                "selected_share": selected_share,
+                "universe_share": universe_share,
+                "share_difference": difference,
+                "representation_ratio": selected_share / universe_share if universe_share > 0 else None,
+                "alert": abs(difference) >= 0.05,
+            }
+        )
+    return records
+
+
+def _exposure_item(row: sqlite3.Row, *, rank: int | None = None) -> _ExposureItem:
+    symbol = str(row["symbol"])
+    return _ExposureItem(
+        symbol=symbol,
+        rank=rank if rank is not None else int(row["rank"]),
+        board=_board(symbol, str(row["market"])),
+        industry=_normalize_industry(row["industry"]),
+        amount=float(row["amount"] or 0),
+        turnover_rate=float(row["turnover_rate"]) if row["turnover_rate"] is not None else None,
+    )
+
+
+def _normalize_industry(value: object) -> str:
+    normalized = "".join(str(value or "").split()).strip("-/、，")
+    if not normalized:
+        return "UNKNOWN"
+    aliases = {
+        "信息传输、软件和信息技术服务业": "信息技术",
+        "软件和信息技术服务业": "信息技术",
+        "信息传输软件和信息技术服务业": "信息技术",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _industry_taxonomy_quality(rows: Sequence[_ExposureItem]) -> dict[str, object]:
+    industries = [item.industry for item in rows]
+    broad = {"制造业", "信息技术", "金融业", "建筑业", "采矿业", "房地产业", "UNKNOWN"}
+    broad_count = sum(value in broad for value in industries)
+    return {
+        "unknown_count": sum(value == "UNKNOWN" for value in industries),
+        "broad_category_count": broad_count,
+        "mixed_granularity": 0 < broad_count < len(industries),
+        "neutralization_ready": broad_count == 0 and all(value != "UNKNOWN" for value in industries),
+    }
+
+
+def _mean_optional(values: Iterable[float | None]) -> float | None:
+    materialized = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    return fmean(materialized) if materialized else None
 
 
 def _spearman_rank_stability(

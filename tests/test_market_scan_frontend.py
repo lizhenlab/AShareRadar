@@ -17,13 +17,45 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
 
     assert 'data-view="market-scan"' in html
     assert 'id="marketScanStart"' in html
+    assert 'id="marketScanRefreshTop100" aria-busy="false" disabled>更新 TOP100 评分</button>' in html
     assert 'id="marketScanExport" aria-busy="false" disabled>导出 Excel</button>' in html
     assert 'id="marketScanModeControl"' in html
     assert 'id="marketScanModeIntraday" name="marketScanMode" value="intraday"' in html
     assert 'id="marketScanModeOfficial" name="marketScanMode" value="official" checked' in html
     assert 'id="marketScanProgressBar"' in html
+    assert 'id="marketScanHistoryToggle" aria-controls="marketScanHistory" aria-expanded="false"' in html
+    assert 'id="marketScanHistory" aria-label="历史扫描批次" aria-busy="false" hidden' in html
+    assert 'id="marketScanProbabilityResearch"' in html
+    assert 'id="marketScanProbabilityHorizon5d" name="marketScanProbabilityHorizon" value="5" checked' in html
+    assert 'id="marketScanProbabilityMin"' in html and 'aria-describedby="marketScanProbabilityFilterHelp" disabled' in html
+    assert 'id="marketScanFutureRangeResearch" data-generation-status="not_generated" aria-busy="false"' in html
+    assert html.count('name="marketScanFutureRangeOffset"') == 3
+    assert html.count('name="marketScanFutureRangePath"') == 2
+    assert 'HLC3 典型价代理 · 非 VWAP' in html
+    assert 'id="marketScanFutureRangePagination" hidden' in html
+    assert '>研究信号</th>' in html
     assert 'id="marketScanFinishedAt"' in html
+    assert 'id="marketScanExecutedAt">评分执行时间：--</time>' in html
     assert 'id="marketScanRows"' in html
+    assert 'id="marketScanFilterToggle" aria-controls="marketScanFilterPanel"' in html
+    assert 'id="marketScanDetailsToggle" aria-controls="marketScanDetails"' in html
+    assert 'id="marketScanStrategyToggle" aria-controls="strategyLab"' in html
+    assert '<h3 id="marketScanTitle">全市场选股</h3>' in html
+    assert 'class="market-scan-mode-block"' in html
+    assert 'class="market-scan-action-buttons" aria-label="扫描操作"' in html
+    assert '<details class="strategy-lab-shell" id="strategyLab" hidden>' in html
+    assert '<details class="discovery-preset-more" id="discoveryPresetMore">' in html
+    assert html.count('class="market-scan-filter-section-heading"') == 1
+    assert '<details class="market-scan-advanced-filters" id="marketScanAdvancedFilters">' in html
+    assert 'class="market-scan-advanced-filter-grid"' in html
+    filters_markup = html.split('<form class="market-scan-filters" id="marketScanFilters">', 1)[1].split("</form>", 1)[0]
+    basic_markup, advanced_markup = filters_markup.split(
+        '<details class="market-scan-advanced-filters" id="marketScanAdvancedFilters">', 1
+    )
+    for element_id in ("marketScanKeyword", "marketScanMarket", "marketScanScoreMin", "marketScanQuality", "marketScanSort"):
+        assert f'id="{element_id}"' in basic_markup
+    for element_id in ("marketScanScoreMax", "marketScanTrendMin", "marketScanAmountMin", "marketScanSort2", "marketScanSort3"):
+        assert f'id="{element_id}"' in advanced_markup
     assert '<span>有效覆盖率</span><strong id="marketScanCoverage">--</strong>' in html
     assert '<span>榜单类型</span><strong id="marketScanModeSummary">--</strong>' in html
     assert '<span>行情日期</span><strong id="marketScanQuoteDate">--</strong>' in html
@@ -32,7 +64,8 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'id="marketScanProgressBar" max="100" value="0" aria-label="全市场扫描进度"' in html
     assert 'aria-valuetext="尚无扫描进度" aria-busy="false"' in html
     scan_panel = html.split('id="workspace-panel-market-scan"', 1)[1].split('</section>\n\n        <section class="workspace-view"', 1)[0]
-    assert scan_panel.count('aria-live="polite"') == 1
+    assert scan_panel.count('aria-live="polite"') == 2
+    assert 'id="strategyLabAnnouncement" role="status" aria-live="polite"' in scan_panel
     assert 'id="marketScanHeadline" role="status"' not in scan_panel
     assert 'id="marketScanResultState" role="status"' not in scan_panel
     assert 'id="marketScanTableWrap" role="region"' in html
@@ -41,12 +74,28 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'id="stockWorkbench" tabindex="-1" aria-labelledby="stockName"' in html
     assert 'id="currentAnalysisContext" role="status" hidden' in html
     assert 'id="marketScanStatus"' in html and 'value="all"' in html
+    ordered_ids = [
+        'id="marketScanFilterToggle"', 'id="strategyLab"', 'id="marketScanDetails"', 'id="marketScanFilterPanel"',
+        'id="marketScanAnnouncement"', 'id="marketScanTableWrap"', 'id="discoveryBulkControls"',
+    ]
+    assert [html.index(marker) for marker in ordered_ids] == sorted(html.index(marker) for marker in ordered_ids)
+    top_ids = ['id="marketScanHistoryToggle"', 'id="marketScanContext"', 'id="marketScanProgress"', 'id="marketScanHistory"']
+    assert [html.index(marker) for marker in top_ids] == sorted(html.index(marker) for marker in top_ids)
+    assert html.index('id="discoveryPresetControls"') < html.index('id="marketScanTableWrap"')
+    assert html.index('id="marketScanFutureRangeResearch"') < html.index('id="marketScanTableWrap"')
+    assert 'data-closed-label="筛选条件">筛选条件</button>' in html
     assert 'createMarketScanController' in app
     assert 'target === "market-scan"' in app
     assert '"market-scan"' in preferences
-    assert '@import url("/static/css/market-scan.css")' in styles
-    versions = re.findall(r'(?:href|src)="/static/(?:styles\.css|css/market-scan\.css|app\.js)\?v=([^"]+)"', html)
-    assert len(versions) == 3
+    assert "@import" not in styles
+    css_modules = re.findall(r'<link rel="stylesheet" href="/static/css/([^"]+)\?v=([^"]+)" />', html)
+    assert [name for name, _ in css_modules] == [
+        "base.css", "sidebar.css", "workspace-core.css", "research-panels.css", "market-scan.css",
+        "interactions.css", "side-footer.css", "responsive.css", "primary-navigation.css", "layout-optimizations.css",
+    ]
+    versions = [version for _, version in css_modules]
+    versions.extend(re.findall(r'(?:href|src)="/static/(?:styles\.css|app\.js)\?v=([^"]+)"', html))
+    assert len(versions) == 12
     import_map_match = re.search(r'<script type="importmap">\s*(\{.*?\})\s*</script>', html, re.DOTALL)
     assert import_map_match is not None
     imports = json.loads(import_map_match.group(1))["imports"]
@@ -55,17 +104,29 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/market-scan-controller.js",
         "/static/js/market-scan-controller-inert.js",
         "/static/js/market-scan-contracts.js",
-            "/static/js/market-scan-export-client.js",
-            "/static/js/market-scan-filters.js",
+        "/static/js/market-scan-export-client.js",
+        "/static/js/market-scan-filters.js",
+        "/static/js/market-scan-future-range-controller.js",
+        "/static/js/market-scan-future-range-view.js",
         "/static/js/market-scan-history.js",
         "/static/js/market-scan-history-view.js",
-            "/static/js/market-scan-polling.js",
-            "/static/js/market-scan-progress-view.js",
+        "/static/js/layout-optimizations.js",
+        "/static/js/market-scan-message-view.js",
+        "/static/js/market-scan-polling.js",
+        "/static/js/market-scan-probability-view.js",
+        "/static/js/market-scan-progress-view.js",
         "/static/js/market-scan-row-actions.js",
+        "/static/js/market-scan-run-context-view.js",
         "/static/js/market-scan-snapshot-view.js",
+        "/static/js/market-scan-surface.js",
+        "/static/js/market-scan-top100-refresh.js",
         "/static/js/market-scan-view.js",
         "/static/js/market-scan-view-export.js",
         "/static/js/discovery.js",
+        "/static/js/strategy-lab.js",
+        "/static/js/strategy-lab-contracts.js",
+        "/static/js/strategy-lab-controller.js",
+        "/static/js/strategy-lab-view.js",
     }
     assert set(imports) == module_paths
     module_versions = [imports[path].split("?v=", 1)[1] for path in module_paths]
@@ -81,24 +142,35 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
     view = (module_dir / "market-scan-view.js").read_text(encoding="utf-8")
     history = (module_dir / "market-scan-history.js").read_text(encoding="utf-8")
     history_view = (module_dir / "market-scan-history-view.js").read_text(encoding="utf-8")
+    message_view = (module_dir / "market-scan-message-view.js").read_text(encoding="utf-8")
     export_client = (module_dir / "market-scan-export-client.js").read_text(encoding="utf-8")
     row_actions = (module_dir / "market-scan-row-actions.js").read_text(encoding="utf-8")
     snapshot_view = (module_dir / "market-scan-snapshot-view.js").read_text(encoding="utf-8")
+    probability_view = (module_dir / "market-scan-probability-view.js").read_text(encoding="utf-8")
+    future_range_controller = (module_dir / "market-scan-future-range-controller.js").read_text(encoding="utf-8")
+    future_range_view = (module_dir / "market-scan-future-range-view.js").read_text(encoding="utf-8")
 
     modules = {
         "market-scan.js": facade,
         "market-scan-controller.js": controller,
         "market-scan-contracts.js": contracts,
         "market-scan-polling.js": polling,
+        "market-scan-probability-view.js": probability_view,
+        "market-scan-future-range-controller.js": future_range_controller,
+        "market-scan-future-range-view.js": future_range_view,
         "market-scan-view.js": view,
         "market-scan-history.js": history,
         "market-scan-history-view.js": history_view,
+        "market-scan-message-view.js": message_view,
         "market-scan-export-client.js": export_client,
         "market-scan-row-actions.js": row_actions,
+        "market-scan-run-context-view.js": (module_dir / "market-scan-run-context-view.js").read_text(encoding="utf-8"),
         "market-scan-snapshot-view.js": snapshot_view,
+        "market-scan-surface.js": (module_dir / "market-scan-surface.js").read_text(encoding="utf-8"),
+        "market-scan-top100-refresh.js": (module_dir / "market-scan-top100-refresh.js").read_text(encoding="utf-8"),
     }
     line_limits = {
-        "market-scan-controller.js": 550,
+        "market-scan-controller.js": 575,
         "market-scan-view.js": 675,
     }
     for filename, source in modules.items():
@@ -113,6 +185,8 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
     assert "validateMarketScanRun" in contracts and "fetchJson" not in contracts and "setTimeout" not in contracts
     assert "marketScanResultRow" in view and "escapeHtml" in view
     assert "marketScanSnapshotContent" in snapshot_view and "不请求当前行情" in snapshot_view
+    assert "renderMarketScanMessageSummary" in message_view and "发布阻断" not in view
+    assert "calibrated_shadow" in probability_view and "probability_horizon" not in probability_view
     assert "buildMarketScanExportUrl" in view and "marketScanQueryParams" in view
     assert "exportBusy" in controller and "exportFetcher" in controller
     assert "fetchJson" not in view and "setTimeout" not in view
@@ -216,6 +290,72 @@ assert.equal(reloaded.element("marketScanModeIntraday").disabled, false);
 assert.match(reloaded.element("marketScanBrowseContext").textContent, /当前浏览：盘中临时/);
 assert.match(reloaded.element("marketScanTaskContext").textContent, /盘后正式.*不同/);
 reloadController.deactivate();
+'''
+    )
+
+
+def test_market_scan_shows_execution_time_and_starts_top100_refresh() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+import { createMarketScanController } from "./static/js/market-scan.js";
+
+const { element } = installAppDom({ canvasContext: null });
+const source = scanRun(29, "success", "SH/SZ/BJ listed A-shares");
+const queued = {
+  ...scanRun(30, "queued", "TOP100快速更新评分"),
+  trigger: "retry", retry_of_run_id: 29, processed_count: 0, success_count: 0,
+  progress_pct: 0, coverage_pct: 0, started_at: null, finished_at: null, duration_ms: null,
+};
+const calls = [];
+const controller = createMarketScanController({
+  root: document,
+  now: new Date(2026, 7, 7, 16, 0),
+  surfaceActive: false,
+  pollIntervalMs: 60000,
+  async fetcher(url, init = {}) {
+    const target = String(url);
+    calls.push([target, init.method || "GET"]);
+    if (target === "/api/market-scans/latest") return source;
+    if (target.startsWith("/api/market-scans?")) {
+      return { items: [source], total: 1, page: 1, page_size: 100, page_count: 1 };
+    }
+    if (target === "/api/market-scans/29/refresh-top100") {
+      return { accepted: true, deduplicated: false, run: queued };
+    }
+    throw new Error(`unexpected request: ${target}`);
+  },
+});
+
+await controller.activate();
+assert.equal(element("marketScanExecutedAt").textContent, "评分完成时间：2026-08-07 15:03:04");
+assert.equal(element("marketScanExecutedAt").datetime, "2026-08-07 15:03:04");
+assert.equal(element("marketScanRefreshTop100").disabled, false);
+assert.match(element("marketScanRefreshTop100").title, /批次 #29.*前 100 名/);
+
+await controller.refreshTop100();
+assert.equal(calls.some(([url, method]) => url === "/api/market-scans/29/refresh-top100" && method === "POST"), true);
+assert.equal(controller.state.run.id, 30);
+assert.equal(element("marketScanRefreshTop100").disabled, true);
+assert.equal(element("marketScanRefreshTop100").textContent, "TOP100 更新中");
+assert.match(element("marketScanTaskContext").textContent, /TOP100 快更 #30/);
+assert.match(element("marketScanBrowseContext").textContent, /最近发布 #29/);
+controller.deactivate();
+
+function scanRun(id, status, scope) {
+  const terminal = status === "success";
+  return {
+    id, status, trigger: "manual", mode: "official", rule_version: "full-market-score-v5:test",
+    as_of: "2026-08-07 15:03:04", data_date: "2026-08-07", quote_date: "2026-08-07", scope,
+    total_count: 100, excluded_count: 0, processed_count: terminal ? 100 : 0,
+    success_count: terminal ? 100 : 0, missing_count: 0, skipped_count: 0, retry_count: 0,
+    progress_pct: terminal ? 100 : 0, coverage_pct: terminal ? 100 : 0,
+    created_at: "2026-08-07 15:00:00", updated_at: "2026-08-07 15:03:04",
+    started_at: "2026-08-07 15:00:01", finished_at: terminal ? "2026-08-07 15:03:04" : null,
+    duration_ms: terminal ? 183000 : null, message: terminal ? "扫描完成" : "等待执行",
+  };
+}
 '''
     )
 
@@ -365,6 +505,14 @@ assert.equal(parsed.searchParams.get("keyword"), "920066 科拜尔");
 assert.equal(parsed.searchParams.get("sort"), "score");
 assert.equal(parsed.searchParams.get("order"), "desc");
 
+const mobileUrl = new URL(buildMarketScanResultsUrl(17, 1, {
+  status: input("success"), market: input(""), industry: input(""),
+  isSt: input(""), isNew: input(""), quality: input(""), keyword: input(""),
+  sort: input("rank"), order: input("asc"),
+  rows: { ownerDocument: { defaultView: { matchMedia: () => ({ matches: true }) } } },
+}), "http://localhost");
+assert.equal(mobileUrl.searchParams.get("page_size"), "30");
+
 const exportUrl = new URL(buildMarketScanExportUrl(17, {
   status: input("all"), market: input("BJ"), industry: input("专用 设备"),
   isSt: input("false"), isNew: input("true"), quality: input("70"),
@@ -389,6 +537,9 @@ const advancedElements = {
   turnoverMin: input("1.2"), turnoverMax: input("30"),
   amountMin: input("1000000"), amountMax: input("500000000"),
   quality: input("75"), qualityMax: input("99"), keyword: input("龙头"),
+  confidenceMin: input("80"), riskMax: input("35"), tradabilityMin: input("70"),
+  probabilityMin: { value: "61.2", disabled: false },
+  probabilityHorizonInputs: [{ value: "1", checked: false }, { value: "5", checked: true }, { value: "20", checked: false }],
   sort: input("score"), order: input("desc"),
   sort2: input("amount"), order2: input("desc"),
   sort3: input("symbol"), order3: input("asc"),
@@ -403,9 +554,18 @@ for (const key of [
   "min_score", "max_score", "min_trend_score", "max_trend_score",
   "min_change_pct", "max_change_pct", "min_turnover_rate", "max_turnover_rate",
   "min_amount", "max_amount", "min_data_quality_score", "max_data_quality_score",
+  "min_confidence", "max_risk", "min_tradability",
+  "probability_horizon", "min_upside_probability",
 ]) {
   assert.equal(advancedExport.searchParams.get(key), advancedResults.searchParams.get(key), `${key} drifted`);
 }
+assert.equal(advancedResults.searchParams.get("probability_horizon"), "5");
+assert.equal(advancedResults.searchParams.get("min_upside_probability"), "0.612");
+const disabledProbability = new URL(buildMarketScanResultsUrl(17, 1, {
+  ...advancedElements, probabilityMin: { value: "99", disabled: true },
+}), "http://localhost");
+assert.equal(disabledProbability.searchParams.has("probability_horizon"), false);
+assert.equal(disabledProbability.searchParams.has("min_upside_probability"), false);
 assert.throws(
   () => buildMarketScanResultsUrl(17, 1, { ...advancedElements, scoreMin: input("96") }),
   /下限不能大于上限/,
@@ -471,6 +631,14 @@ const item = {
       leader_score: { base: 50, trend_delta: 12, rule_deltas: { amount: 8, "<script>": 1 } },
       final_score: { quality_penalty: 1.5, base: 93.5, rank_discount: 1.376544, raw: 92.123456, score: 93 },
       rank_refinement: { score: 0.6, weighted_terms: { ma_alignment: 0.24, return_20d_pct: 0.18 } },
+      score_dimensions: {
+        scores: { alpha_1d: 61, alpha_5d: 72, alpha_20d: 75, confidence: 90, risk: 22, tradability: 85 },
+        volume_context: {
+          price_volume_alignment: "intraday-time-aligned-volume-unavailable-neutralized",
+          volume_data_date: "2026-07-28",
+        },
+        point_in_time_evidence: { status: "verified-persisted-at-scan-time", payload_digest: "abcdef1234567890" },
+      },
     },
     ranking: { tie_break: [["raw_score", "desc"], ["symbol", "asc"]], tie_break_values: { raw_score: 92.123456, symbol: "600519.SH" } },
   },
@@ -483,6 +651,7 @@ assert.match(html, /只读持久化证据/);
 assert.match(html, /质量扣分/);
 assert.match(html, /raw_score 降序 → symbol 升序/);
 assert.match(html, /行情使用兜底源/);
+assert.match(html, /盘中缺少同一时刻量能证据，量能生命周期已置零/);
 assert.equal(html.includes("<script>"), false);
 assert.equal(html.includes("&lt;script&gt;"), true);
 assert.match(marketScanSnapshotContent({ run_id: 1, score_details: {} }), /不会用当前规则补算历史证据/);
@@ -507,6 +676,120 @@ const handler = createMarketScanRowClickHandler({
 handler({ target: { closest(selector) { return selector.includes("snapshot") ? null : currentButton; } } });
 assert.deepEqual(origin, { source: "market-scan", runId: 31, mode: "official", quoteDate: "2026-07-29", dataDate: "2026-07-29" });
 assert.match(messages[0], /当前可用数据，不是历史扫描快照/);
+'''
+    )
+
+
+def test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import {
+  marketScanProbabilityCell,
+  marketScanProbabilitySnapshot,
+  normalizeMarketScanProbabilityResearch,
+  normalizeMarketScanUpsideProbabilities,
+  renderMarketScanProbabilityResearch,
+  selectedMarketScanProbabilityHorizon,
+} from "./static/js/market-scan-probability-view.js";
+
+const artifact = {
+  schema_version: "market-scan-probability-artifact-v1",
+  run_id: 42,
+  horizons: {
+    "5": { net_excess_positive: {
+      status: "calibrated_shadow", horizon: 5, target: "net_excess_positive", base_rate: 0.514,
+      counts: { training_session_count: 120, calibration_session_count: 40, test_session_count: 60, observation_count: 180000 },
+      calibration_metrics: { calibrated: { brier_score: 0.1964, brier_skill_score: 0.127, ece: 0.034, auc: 0.681, bin_monotonic: true } },
+      versions: { model: "up-probability-v1", feature: "features-v1", label: "label-v1", cost_model: "cost-v1" },
+      training_cutoff: "2026-07-31",
+      limitations: ["Shadow only"],
+    } },
+    "20": { net_excess_positive: {
+      status: "calibrated_shadow", horizon: 20, target: "net_excess_positive", base_rate: 0.55,
+      counts: { training_session_count: 100, calibration_session_count: 30, test_session_count: 50, observation_count: 90000 },
+      model_version: "up-probability-v1", feature_version: "features-v1",
+      label_version: "label-v1", cost_model_version: "cost-v1", training_cutoff: "2026-07-11",
+      limitations: ["20d Shadow only"],
+    } },
+  },
+};
+const research = normalizeMarketScanProbabilityResearch(artifact, 42);
+const probabilities = normalizeMarketScanUpsideProbabilities({
+  "5": { net_excess_positive: {
+    status: "calibrated_shadow", probability: 0.612, base_rate: 0.514,
+    confidence_interval: { lower: 0.56, upper: 0.66, level: 0.95 },
+  } },
+}, research);
+const item = { symbol: "600519.SH", upside_probabilities: probabilities };
+assert.match(marketScanProbabilityCell(item, 5), /5日 61.2%/);
+assert.match(marketScanProbabilityCell(item, 5), /95% CI 56.0%–66.0%/);
+assert.match(marketScanProbabilityCell(item, 1), /证据不足/);
+assert.doesNotMatch(marketScanProbabilityCell(item, 1), /0\.0%|50\.0%/);
+const snapshot = marketScanProbabilitySnapshot(item, research);
+assert.match(snapshot, /上涨概率研究 · 冻结 Shadow 证据/);
+assert.match(snapshot, /up-probability-v1/);
+assert.match(snapshot, /2026-07-31/);
+assert.match(snapshot, /Shadow only/);
+assert.match(snapshot, /训练 120 日 · 校准 40 日 · 测试 60 日 · 180000 条/);
+assert.match(snapshot, /校准指标/);
+assert.match(snapshot, /Brier 0.1964 · BSS 0.127 · ECE 0.034 · AUC 0.681 · 分箱单调 是/);
+
+const element = () => ({ value: "", disabled: false, checked: false, dataset: {}, className: "", textContent: "", setAttribute() {} });
+const elements = {
+  probabilityResearch: element(), probabilityStatus: element(), probabilityTarget: element(),
+  probabilityBaseRate: element(), probabilityEvidence: element(), probabilityVersion: element(),
+  probabilityCutoff: element(), probabilityLimitations: element(), probabilityMin: element(),
+  probabilityFilterHelp: element(), probabilityHorizonInputs: [element(), element(), element()],
+};
+elements.probabilityHorizonInputs[0].value = "1";
+elements.probabilityHorizonInputs[1].value = "5";
+elements.probabilityHorizonInputs[1].checked = true;
+elements.probabilityHorizonInputs[2].value = "20";
+assert.equal(selectedMarketScanProbabilityHorizon(elements), 5);
+renderMarketScanProbabilityResearch(elements, research);
+assert.equal(elements.probabilityStatus.textContent, "样本外已校准 · Shadow");
+assert.equal(elements.probabilityTarget.textContent, "未来所选周期净超额收益为正");
+assert.equal(elements.probabilityBaseRate.textContent, "51.4%");
+assert.equal(elements.probabilityMin.disabled, false);
+elements.probabilityHorizonInputs[1].checked = false;
+elements.probabilityHorizonInputs[0].checked = true;
+renderMarketScanProbabilityResearch(elements, research);
+assert.equal(selectedMarketScanProbabilityHorizon(elements), 1);
+assert.equal(elements.probabilityStatus.textContent, "证据不足");
+assert.equal(elements.probabilityMin.disabled, true);
+elements.probabilityHorizonInputs[0].checked = false;
+elements.probabilityHorizonInputs[2].checked = true;
+renderMarketScanProbabilityResearch(elements, research);
+assert.equal(selectedMarketScanProbabilityHorizon(elements), 20);
+assert.equal(elements.probabilityBaseRate.textContent, "55.0%");
+assert.equal(elements.probabilityMin.disabled, false);
+
+const legacy = normalizeMarketScanProbabilityResearch(undefined, 42);
+const legacyProbabilities = normalizeMarketScanUpsideProbabilities(undefined, legacy);
+assert.equal(legacy.horizons["5"].status, "not_generated");
+assert.equal(legacyProbabilities["5"].probability, null);
+renderMarketScanProbabilityResearch(elements, legacy);
+assert.equal(elements.probabilityStatus.textContent, "证据不足");
+assert.equal(elements.probabilityBaseRate.textContent, "--");
+assert.match(elements.probabilityEvidence.textContent, /训练 -- 日/);
+assert.equal(elements.probabilityMin.disabled, true);
+assert.throws(
+  () => normalizeMarketScanUpsideProbabilities({ "5": { status: "insufficient_data", probability: 0.5 } }, research),
+  /证据不足时必须为空/,
+);
+assert.throws(
+  () => normalizeMarketScanUpsideProbabilities({ "5": { status: "calibrated_shadow", probability: 0.7, confidence_interval: { lower: 0.8, upper: 0.9 } } }, research),
+  /confidence_interval/,
+);
+assert.throws(
+  () => normalizeMarketScanUpsideProbabilities({ "5": { status: "calibrated_shadow", probability: 0.7, confidence_interval: { lower: 0.6, upper: 0.8, level: 0 } } }, research),
+  /confidence_interval/,
+);
+assert.throws(
+  () => normalizeMarketScanUpsideProbabilities({ "5": { status: "calibrated_shadow", probability: 0.7, confidence_interval: { lower: 0.6, upper: 0.8 } } }, legacy),
+  /不能超越批次研究证据状态/,
+);
 '''
     )
 
@@ -543,7 +826,72 @@ assert.match(elements.marketProgress.innerHTML, /SH/);
 assert.match(elements.marketProgress.innerHTML, /1 缺失 · 1 跳过/);
 assert.equal(etaText({ status: "running", eta_seconds: 65 }), "1 分 5 秒");
 assert.match(actionableDiagnostic({ status: "failed", last_error: "SH 发布覆盖不足" }), /检查股票池与数据源完整性/);
+assert.match(actionableDiagnostic({ status: "failed", last_error: "全市场报价采集耗时 1201 秒超过 1200 秒门槛" }), /避免混用不同时点行情/);
 assert.match(actionableDiagnostic({ status: "failed", last_error: "provider 超时" }), /等待数据源恢复/);
+'''
+    )
+
+
+def test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import {
+  marketScanHeadlineMessage,
+  marketScanMessagePresentation,
+  renderMarketScanMessageSummary,
+} from "./static/js/market-scan-message-view.js";
+
+const audit = "评分分布门禁 raw-score-distribution-v2：raw_score样本 5499/5499，distinct ratio 99.65%，最大并列组 2/5499（0.04%），0/100饱和 0/5499（0.00%），前100并列 0/100（0.00%），最大组 1";
+const legacyMessage = `盘后正式扫描未达到发布可信度：全市场报价快照跨度 1918 秒超过 1200 秒门槛；${audit}`;
+const message = `盘后正式扫描未达到发布可信度：发布阻断：全市场报价快照跨度 1918 秒超过 1200 秒门槛；已通过：${audit}`;
+const run = {
+  status: "failed",
+  message,
+  last_error: "批量行情缺失 1 只：tencent 未覆盖；akshare 最近失败，短暂冷却中；全市场报价快照跨度 1918 秒超过 1200 秒门槛；逐股结果含缺失 0、跳过 43",
+};
+const presentation = marketScanMessagePresentation(run);
+assert.equal(
+  marketScanHeadlineMessage(message),
+  "盘后正式扫描未达到发布可信度：发布阻断：全市场报价快照跨度 1918 秒超过 1200 秒门槛",
+);
+assert.equal(presentation.headline, marketScanHeadlineMessage(message));
+assert.equal(presentation.publicationBlockers, "全市场报价快照跨度 1918 秒超过 1200 秒门槛");
+assert.match(presentation.passedGates, /^评分分布 · raw-score-distribution-v2/);
+assert.match(presentation.sourceWarnings, /tencent 未覆盖/);
+assert.doesNotMatch(presentation.sourceWarnings, /快照跨度/);
+const legacyPresentation = marketScanMessagePresentation({ ...run, message: legacyMessage });
+assert.equal(
+  legacyPresentation.headline,
+  "盘后正式扫描未达到发布可信度：全市场报价快照跨度 1918 秒超过 1200 秒门槛",
+);
+assert.match(legacyPresentation.passedGates, /^评分分布 · raw-score-distribution-v2/);
+
+const nodes = new Map();
+const root = {
+  getElementById(id) {
+    if (!nodes.has(id)) nodes.set(id, { hidden: true, textContent: "", title: "" });
+    return nodes.get(id);
+  },
+};
+renderMarketScanMessageSummary(root, run);
+assert.equal(root.getElementById("marketScanGateSummary").hidden, false);
+assert.equal(root.getElementById("marketScanPublicationBlockers").hidden, false);
+assert.equal(root.getElementById("marketScanPassedGates").hidden, false);
+assert.equal(root.getElementById("marketScanSourceWarnings").hidden, false);
+assert.match(root.getElementById("marketScanPassedGatesText").textContent, /评分分布/);
+
+const failedDistribution = marketScanMessagePresentation({
+  status: "failed",
+  message: `盘后正式扫描未达到发布可信度：成功结果 raw_score 全部相同；${audit}`,
+  last_error: `成功结果 raw_score 全部相同；${audit}`,
+});
+assert.equal(failedDistribution.passedGates, "");
+
+const oldRun = { status: "failed", message: "全市场扫描失败", last_error: null };
+assert.equal(marketScanHeadlineMessage(oldRun.message), oldRun.message);
+renderMarketScanMessageSummary(root, oldRun);
+assert.equal(root.getElementById("marketScanGateSummary").hidden, true);
 '''
     )
 
@@ -1150,7 +1498,10 @@ const resultItem = {
   tags: [], metrics: {},
 };
 const resultPage = (item) => ({ run: terminal, total: 1, page: 1, page_size: 100, page_count: 1, items: [item] });
-assert.equal(validateResultPage(resultPage(resultItem), 70).items[0].symbol, "920066.BJ");
+const validatedLegacyPage = validateResultPage(resultPage(resultItem), 70);
+assert.equal(validatedLegacyPage.items[0].symbol, "920066.BJ");
+assert.equal(validatedLegacyPage.probability_research.horizons["5"].status, "not_generated");
+assert.equal(validatedLegacyPage.items[0].upside_probabilities["5"].probability, null);
 for (const invalid of [
   { ...resultItem, symbol: "920066.SH" },
   { ...resultItem, market: "SH" },
@@ -1667,7 +2018,7 @@ await latestRead;
 cancelResponse.resolve(cancelled);
 await cancelling;
 assert.equal(controller.state.run.status, "cancelled");
-assert.equal(document.activeElement, element("marketScanMarket"), "focused cancel was hidden without focus transfer");
+assert.equal(document.activeElement, element("marketScanStart"), "cancel completion did not restore a visible action");
 assert.equal(scheduled.size, 1, "stale cancel-era latest scheduled an extra poll");
 
 controller.state.run = degraded;
@@ -1683,7 +2034,7 @@ await resultRead;
 retryResponse.resolve({ accepted: true, deduplicated: false, run: retried });
 await retrying;
 assert.equal(controller.state.run.id, 4, "stale result replaced the retried run");
-assert.equal(document.activeElement, element("marketScanMarket"), "focused retry was hidden without focus transfer");
+assert.equal(document.activeElement, element("marketScanCancel"), "retry completion did not focus the active-run action");
 assert.equal(element("marketScanRetry").hidden, true);
 assert.equal(scheduled.size, 1, "stale result scheduled an extra poll");
 
@@ -1715,6 +2066,76 @@ function deferred() {
 }
 async function flushPromises() {
   for (let index = 0; index < 20; index += 1) await Promise.resolve();
+}
+'''
+    )
+
+
+def test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+import { createMarketScanController } from "./static/js/market-scan.js";
+
+const { element } = installAppDom({ canvasContext: null });
+const media = {
+  matches: false,
+  listeners: [],
+  addEventListener(type, listener) { if (type === "change") this.listeners.push(listener); },
+};
+element("marketScanRows").ownerDocument = { defaultView: { matchMedia: () => media } };
+const terminal = {
+  id: 90, status: "success", trigger: "manual", mode: "official", rule_version: "v1",
+  as_of: "2026-07-31 16:30:00", data_date: "2026-07-31", quote_date: "2026-07-31", scope: "SH/SZ/BJ",
+  total_count: 130, excluded_count: 0, processed_count: 130, success_count: 130,
+  missing_count: 0, skipped_count: 0, retry_count: 0, progress_pct: 100, coverage_pct: 100,
+  created_at: "2026-07-31 16:30:00", updated_at: "2026-07-31 16:31:00",
+  finished_at: "2026-07-31 16:31:00", message: "扫描完成",
+};
+const resultUrls = [];
+const controller = createMarketScanController({
+  root: document,
+  now: new Date(2026, 6, 31, 16, 30),
+  pollIntervalMs: 60000,
+  idlePollIntervalMs: 60000,
+  async fetcher(url) {
+    const value = String(url);
+    if (value === "/api/market-scans/latest") return terminal;
+    if (value.startsWith("/api/market-scans?")) return { items: [terminal], total: 1, page: 1, page_size: 100, page_count: 1 };
+    if (value.includes("/results?")) {
+      resultUrls.push(value);
+      const params = new URL(value, "http://localhost").searchParams;
+      const page = Number(params.get("page"));
+      const pageSize = Number(params.get("page_size"));
+      return { run: terminal, items: [], total: 130, page, page_size: pageSize, page_count: Math.ceil(130 / pageSize) };
+    }
+    throw new Error(`unexpected request: ${value}`);
+  },
+});
+
+await controller.activate();
+assert.match(resultUrls.at(-1), /page=1&page_size=100/);
+controller.state.page = 4;
+media.matches = true;
+media.listeners.forEach((listener) => listener({ matches: true }));
+await flushPromises();
+assert.equal(controller.state.page, 1);
+assert.match(resultUrls.at(-1), /page=1&page_size=30/);
+
+const renderedRequests = resultUrls.length;
+assert.equal(controller.setSurfaceActive(false), true);
+assert.equal(controller.state.activated, true, "leaving the surface stopped background task tracking");
+assert.equal(element("marketScanRows").innerHTML, "");
+await controller.loadLatest();
+assert.equal(resultUrls.length, renderedRequests, "hidden surface rehydrated result rows");
+assert.equal(controller.setSurfaceActive(true), true);
+await flushPromises();
+assert.equal(resultUrls.length, renderedRequests + 1, "returning to the surface did not restore results");
+controller.deactivate();
+
+async function flushPromises() {
+  for (let index = 0; index < 30; index += 1) await Promise.resolve();
 }
 '''
     )

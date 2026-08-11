@@ -38,7 +38,6 @@ StartAutomaticAction = Callable[
     Awaitable[MarketScanStartResponse],
 ]
 ValidateAutomaticRetry = Callable[[MarketScanRun, MarketScanRetryPlan, datetime], None]
-_ACTIVE_SCAN_STATUSES = frozenset({"queued", "running", "cancelling"})
 
 
 @dataclass(frozen=True)
@@ -101,9 +100,10 @@ class MarketScanAutomationCoordinator:
         data_date: str,
         validate_retry: ValidateAutomaticRetry,
     ) -> MarketScanAutomaticAction | None:
-        latest = await run_cache_io(self.cache.latest_market_scan_run)
-        if latest is not None and latest.status in _ACTIVE_SCAN_STATUSES:
+        active = await run_cache_io(self.cache.active_market_scan_run)
+        if active is not None:
             return None
+        latest = await run_cache_io(self.cache.latest_full_market_scan_run)
         if latest is None or latest.data_date != data_date:
             return MarketScanAutomaticAction("scheduled", data_date)
         if latest.status in {"success", "degraded", "cancelled"}:

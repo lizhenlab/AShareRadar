@@ -1,4 +1,8 @@
 import { validateUiSymbol } from "./symbols.js";
+import {
+  normalizeMarketScanProbabilityResearch,
+  normalizeMarketScanUpsideProbabilities,
+} from "./market-scan-probability-view.js";
 export {
   buildDiscoveryPresetDefinition,
   isDiscoveryPresetUiRepresentable,
@@ -18,6 +22,7 @@ const RUN_TRIGGERS = new Set(["manual", "scheduled", "retry"]);
 const MARKET_SCAN_MODES = new Set(["official", "intraday"]);
 const RESULT_STATUSES = new Set(["pending", "success", "missing", "skipped"]);
 const MARKET_SCAN_STAGES = new Set(["stock_pool", "bulk_quotes", "klines", "scoring", "persistence", "publication"]);
+export const MARKET_SCAN_TOP100_REFRESH_SCOPE = "TOP100快速更新评分";
 
 export function isActiveMarketScanRun(run) {
   return Boolean(run && ACTIVE_RUN_STATUSES.has(run.status));
@@ -31,6 +36,10 @@ export function isRetryableMarketScanRun(run) {
   return Boolean(run && RETRYABLE_RUN_STATUSES.has(run.status));
 }
 
+export function isMarketScanTop100RefreshRun(run) {
+  return Boolean(run && String(run.scope || "").trim() === MARKET_SCAN_TOP100_REFRESH_SCOPE);
+}
+
 export function defaultMarketScanMode(value = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "official";
@@ -42,6 +51,11 @@ export function defaultMarketScanMode(value = new Date()) {
 
 export function marketScanModeLabel(mode) {
   return mode === "intraday" ? "盘中临时" : "盘后正式";
+}
+
+export function marketScanRunModeLabel(run) {
+  const mode = marketScanModeLabel(run?.mode);
+  return isMarketScanTop100RefreshRun(run) ? `${mode} · TOP100 快更` : mode;
 }
 
 export function marketScanRunIdentityChanged(previousRun, nextRun) {
@@ -149,7 +163,12 @@ export function validateResultPage(value, expectedRunId) {
   if (page.page_count !== expectedPageCount) {
     throw marketScanContractError(`${context}.page_count 与 total/page_size 不一致`);
   }
-  page.items.forEach((item, index) => validateResultItem(item, expectedRunId, `${context}.items[${index}]`));
+  const probabilityResearch = normalizeMarketScanProbabilityResearch(page.probability_research, expectedRunId);
+  page.probability_research = probabilityResearch;
+  page.items.forEach((item, index) => {
+    validateResultItem(item, expectedRunId, `${context}.items[${index}]`);
+    item.upside_probabilities = normalizeMarketScanUpsideProbabilities(item.upside_probabilities, probabilityResearch);
+  });
   return page;
 }
 

@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 120
+Total endpoints: 148
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -50,6 +50,9 @@ Total endpoints: 120
 | GET | `/api/market-scans/{run_id}` | path `run_id: int` | `market_scan_run` | `MarketScanRun` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans/{run_id}/cancel` | path `run_id: int` | `cancel_market_scan` | `MarketScanRun` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/export.xlsx` | path `run_id: int` | `export_market_scan_results` | `-` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/{run_id}/future-range-research` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200)<br>query `session_offset: int \| None = None` (ge=1; le=3)<br>query `symbol: str \| None = None` (max_length=20)<br>query `include_research: bool = True` | `market_scan_future_range_research` | `MarketScanFutureRangeResearchResponse` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/{run_id}/probability-research` | path `run_id: int` | `market_scan_probability_research` | `dict[str, object]` | `app/api/routes/market_scan.py` |
+| POST | `/api/market-scans/{run_id}/refresh-top100` | path `run_id: int` | `refresh_market_scan_top100` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/results` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200) | `market_scan_results` | `MarketScanResultPage` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans/{run_id}/retry` | path `run_id: int` | `retry_market_scan` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/monitor/events` | query `limit: int = 30` (ge=1; le=200) | `monitor_events` | `list[MonitorEvent]` | `app/api/routes/monitoring.py` |
@@ -116,6 +119,31 @@ Total endpoints: 120
 | GET | `/api/stock/valuation` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_valuation` | `ValuationAnalysis` | `app/api/routes/stock.py` |
 | GET | `/api/stock/workbench` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_workbench` | `StockWorkbench` | `app/api/routes/stock.py` |
 | GET | `/api/stocks` | query `keyword: str \| None = None` (description=股票代码或名称关键字)<br>query `limit: int = 50` (ge=1; le=500)<br>query `refresh: bool = False` (description=是否强制刷新股票池) | `stocks` | `list[StockInfo]` | `app/api/routes/data.py` |
+| GET | `/api/strategy-lab/alert-events` | query `strategy_id: int \| None = None` (ge=1)<br>query `schedule_id: int \| None = None` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `strategy_alert_events` | `StrategyAlertEventPage` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/automation/evaluate` | - | `evaluate_strategy_automation` | `StrategyAutomationRunSummary` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/compile` | body `payload: StrategyCompileRequest` | `compile_strategy` | `StrategyCompileResponse` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/executions` | body `payload: StrategyExecutionRequest` | `execute_strategy` | `PortfolioDraft` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/executions/compare` | query `left_execution_id: int = -` (ge=1)<br>query `right_execution_id: int = -` (ge=1) | `compare_strategy_executions` | `StrategyExecutionComparison` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/executions/{execution_id}` | path `execution_id: int` (ge=1) | `get_strategy_execution` | `PortfolioDraft` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/executions/{execution_id}/candidates` | path `execution_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200)<br>query `status: PortfolioCandidateStatus \| None = None`<br>query `sort_by: PortfolioCandidateSort = 'utility_score'`<br>query `descending: bool = True` | `strategy_execution_candidates` | `PortfolioCandidatePage` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/executions/{execution_id}/simulation-plan` | path `execution_id: int` (ge=1) | `get_strategy_simulation_plan` | `StrategySimulationPlan \| None` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/executions/{execution_id}/simulation-plan` | path `execution_id: int` (ge=1) | `create_strategy_simulation_plan` | `StrategySimulationPlan` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/metrics` | - | `strategy_metric_registry` | `list[StrategyMetricDefinition]` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/parse` | body `payload: StrategyNaturalLanguageRequest` | `parse_strategy` | `StrategyNaturalLanguageResponse` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/schedules` | query `strategy_id: int \| None = None` (ge=1)<br>query `include_disabled: bool = False`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `list_strategy_schedules` | `StrategySchedulePage` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/schedules` | body `payload: StrategyScheduleCreate` | `create_strategy_schedule` | `StrategySchedule` | `app/api/routes/strategy_lab.py` |
+| PATCH | `/api/strategy-lab/schedules/{schedule_id}` | body `payload: StrategyScheduleUpdate`<br>path `schedule_id: int` (ge=1) | `update_strategy_schedule` | `StrategySchedule` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/strategies` | query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100)<br>query `include_archived: bool = False` | `list_strategies` | `StrategySpecPage` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/strategies` | body `payload: StrategySpecCreate` | `create_strategy` | `StrategySpec` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/strategies/{strategy_id}` | path `strategy_id: int` (ge=1)<br>query `revision: int \| None = None` (ge=1) | `get_strategy` | `StrategySpec` | `app/api/routes/strategy_lab.py` |
+| PUT | `/api/strategy-lab/strategies/{strategy_id}` | body `payload: StrategySpecUpdate`<br>path `strategy_id: int` (ge=1) | `update_strategy` | `StrategySpec` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/strategies/{strategy_id}/archive` | body `payload: StrategySpecArchiveRequest`<br>path `strategy_id: int` (ge=1) | `archive_strategy` | `StrategySpec` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/strategies/{strategy_id}/copy` | body `payload: StrategySpecCopyRequest`<br>path `strategy_id: int` (ge=1) | `copy_strategy` | `StrategySpec` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/strategies/{strategy_id}/diff` | path `strategy_id: int` (ge=1)<br>query `left_revision: int = -` (ge=1)<br>query `right_revision: int = -` (ge=1) | `strategy_version_diff` | `StrategyVersionDiff` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/strategies/{strategy_id}/evidence` | path `strategy_id: int` (ge=1)<br>query `revision: int \| None = None` (ge=1)<br>query `mode: str = 'official'` (pattern=^(official\|intraday)$) | `strategy_evidence_center` | `StrategyEvidenceCenter \| None` | `app/api/routes/strategy_lab.py` |
+| POST | `/api/strategy-lab/strategies/{strategy_id}/evidence/refresh` | body `payload: StrategyEvidenceRefreshRequest`<br>path `strategy_id: int` (ge=1) | `refresh_strategy_evidence_center` | `StrategyEvidenceCenter` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/strategies/{strategy_id}/executions` | path `strategy_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `strategy_execution_history` | `StrategyExecutionPage` | `app/api/routes/strategy_lab.py` |
+| GET | `/api/strategy-lab/strategies/{strategy_id}/versions` | path `strategy_id: int` (ge=1) | `strategy_versions` | `StrategyVersionPage` | `app/api/routes/strategy_lab.py` |
 | GET | `/api/stream/quotes` | query `symbols: str = '600519,000001,300750'` | `stream_quotes` | `-` | `app/api/routes/quotes.py` |
 | GET | `/api/strong-stocks` | query `symbols: str \| None = None` | `strong_stocks` | `StrongStockWatchResponse` | `app/api/routes/analysis.py` |
 | GET | `/api/system/diagnostics` | - | `system_diagnostics` | `SystemDiagnostics` | `app/api/routes/monitoring.py` |
@@ -146,3 +174,4 @@ Total endpoints: 120
 - All user-facing failures should pass through `app/api/errors.py` or explicit `HTTPException` with Chinese messages.
 - New endpoints should be added to the relevant route module and this file should be regenerated.
 - Prefer `GET /api/stock/workbench` for frontend workbench loading to avoid repeated provider calls.
+- `GET /api/market-scans/{run_id}/future-range-research` returns the stable `generation_status`/`artifact`/`research`/`record_page` wrapper; use `include_research=false` on follow-up record pages after aggregate evidence is loaded.

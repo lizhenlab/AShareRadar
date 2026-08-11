@@ -494,9 +494,10 @@ def test_build_local_tasks_uses_explicit_specs_min_intervals_and_offsets() -> No
         "evaluate_alerts",
         "refresh_research_queue",
         "evaluate_due_reviews",
+        "run_strategy_schedules",
     ]
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30, 300, 300]
-    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20, 24, 28]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30, 300, 300, 300]
+    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20, 24, 28, 32]
 
 
 def test_scheduler_loop_lets_market_scanner_use_its_shanghai_clock() -> None:
@@ -639,7 +640,7 @@ def test_build_local_tasks_clamps_invalid_interval_settings() -> None:
 
     tasks = _build_local_tasks(settings, now, _handlers())
 
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 45, 30, 300, 300]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 45, 30, 300, 300, 300]
 
 
 def test_run_once_and_status_use_task_spec_order() -> None:
@@ -1398,6 +1399,7 @@ def _handlers():
         "evaluate_alerts": _handler,
         "refresh_research_queue": _handler,
         "evaluate_due_reviews": _handler,
+        "run_strategy_schedules": _handler,
     }
 
 

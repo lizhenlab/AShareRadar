@@ -1,28 +1,18 @@
 import { escapeHtml } from "./dom.js";
 import { formatAuditTimestamp } from "./audit-time.js";
 import { changeClass, formatAmount, formatNumber } from "./format.js";
-import {
-  defaultMarketScanMode,
-  isActiveMarketScanRun,
-  isPublishedMarketScanRun,
-  isRetryableMarketScanRun,
-  marketScanModeLabel,
-  marketScanRunIdentityChanged,
-} from "./market-scan-contracts.js";
-import {
-  marketScanHistoryFilters,
-  renderMarketScanHistory,
-  renderMarketScanHistoryError,
-  renderMarketScanHistoryLoading,
-  selectedMarketScanHistoryRunId,
-} from "./market-scan-history-view.js";
+import { defaultMarketScanMode, isActiveMarketScanRun, isPublishedMarketScanRun, isRetryableMarketScanRun, marketScanModeLabel, marketScanRunModeLabel, marketScanRunIdentityChanged } from "./market-scan-contracts.js";
+import { marketScanHistoryFilters, renderMarketScanHistory, renderMarketScanHistoryError, renderMarketScanHistoryLoading, selectedMarketScanHistoryRunId } from "./market-scan-history-view.js";
+import { marketScanHeadlineMessage, renderMarketScanMessageSummary } from "./market-scan-message-view.js";
+import { renderMarketScanBrowsingContext, renderMarketScanTop100Refresh } from "./market-scan-run-context-view.js";
 import { saveMarketScanExport } from "./market-scan-view-export.js";
 import { marketScanFilterElements, marketScanQueryParams } from "./market-scan-filters.js";
 import { renderMarketScanObservability } from "./market-scan-progress-view.js";
-import { marketScanSnapshotRow, marketScanSnapshotTargetId, toggleMarketScanSnapshot } from "./market-scan-snapshot-view.js";
+import { marketScanResearchDimensionCell, marketScanSnapshotRow, marketScanSnapshotTargetId, toggleMarketScanSnapshot } from "./market-scan-snapshot-view.js";
+import { marketScanProbabilityCell, marketScanProbabilityElements, renderMarketScanProbabilityResearch, resetMarketScanProbabilityResearch, selectedMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
+import { marketScanPageSize } from "./layout-optimizations.js";
 export { marketScanExportFilename } from "./market-scan-view-export.js";
 
-const DEFAULT_PAGE_SIZE = 100;
 const PROGRESS_ANNOUNCEMENT_STEP = 10;
 
 const RUN_STATUS_LABELS = Object.freeze({
@@ -51,6 +41,7 @@ export function createMarketScanView(root, now = new Date()) {
     announce: (message, key) => announce(context, message, key),
     announceRunUpdate: (previousRun, run, message) => announceRunUpdate(context, previousRun, run, message),
     elements: context.elements,
+    focusResults: () => focusVisibleControl(context, [elements.tableWrap, elements.market, elements.start]),
     renderActionBusy: (busy, run, message) => renderActionBusy(context, busy, run, message),
     renderExportBusy: (busy, run) => renderExportBusy(context, busy, run),
     renderBrowsingContext: (taskRun, displayedRun, mode, historical) => (
@@ -66,6 +57,10 @@ export function createMarketScanView(root, now = new Date()) {
     renderResultsLoading: () => renderResultsLoading(context),
     renderResultState: (message, kind) => renderResultState(context, message, kind),
     renderRun: (run, message) => renderRun(context, run, message),
+    renderTop100Refresh: (busy, sourceRun, taskRun) => (
+      renderMarketScanTop100Refresh(elements, busy, sourceRun, taskRun)
+    ),
+    resetProbabilityResearch: (runId) => resetMarketScanProbabilityResearch(elements, runId),
     resetResultPresentation: (run) => resetResultPresentation(context, run),
     saveExport: (blob, disposition, run) => saveMarketScanExport(context, blob, disposition, run),
     historyFilters: () => marketScanHistoryFilters(elements),
@@ -79,7 +74,7 @@ export function createMarketScanView(root, now = new Date()) {
 export function buildMarketScanResultsUrl(runId, page, elements) {
   const params = marketScanQueryParams(elements, {
     page: String(positiveInteger(page, 1)),
-    page_size: String(DEFAULT_PAGE_SIZE),
+    page_size: String(marketScanPageSize(elements)),
   });
   return `/api/market-scans/${encodeURIComponent(runId)}/results?${params.toString()}`;
 }
@@ -100,16 +95,16 @@ export function marketScanResultRow(item, options = {}) {
   const run = options.run && typeof options.run === "object" ? options.run : {};
   return `<tr class="market-scan-result-row">
     <td data-label="排名">${escapeHtml(view.rank)}</td>
-    <td data-label="股票"><div class="market-scan-stock"><strong>${escapeHtml(view.name)}</strong><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span><div class="market-scan-stock-actions"><button type="button" class="mini-button" data-market-scan-snapshot-target="${escapeHtml(snapshotTarget)}" aria-controls="${escapeHtml(snapshotTarget)}" aria-expanded="false">查看扫描快照</button><button type="button" class="mini-button" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" data-market-scan-mode="${escapeHtml(run.mode || "")}" data-market-scan-quote-date="${escapeHtml(run.quote_date || "")}" data-market-scan-data-date="${escapeHtml(run.data_date || item.data_date || "")}" title="使用当前可用数据打开个股分析，不代表历史扫描快照">打开当前个股分析</button></div></div></td>
-    <td data-label="市场 / 行业"><span class="market-scan-meta">${escapeHtml(view.marketIndustry)}</span></td>
-    <td data-label="短线强势"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
-    <td data-label="趋势">${escapeHtml(scoreText(view.trendScore))}</td>
+    <td data-label="股票"><div class="market-scan-stock"><strong>${escapeHtml(view.name)}</strong><div class="market-scan-stock-meta-row"><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span><div class="market-scan-stock-actions"><button type="button" class="mini-button" data-market-scan-snapshot-target="${escapeHtml(snapshotTarget)}" aria-controls="${escapeHtml(snapshotTarget)}" aria-expanded="false" aria-label="查看扫描快照" title="查看该次扫描保存的证据快照">快照</button><button type="button" class="mini-button" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" data-market-scan-mode="${escapeHtml(run.mode || "")}" data-market-scan-quote-date="${escapeHtml(run.quote_date || "")}" data-market-scan-data-date="${escapeHtml(run.data_date || item.data_date || "")}" aria-label="打开当前个股分析" title="使用当前可用数据打开个股分析，不代表历史扫描快照">分析</button></div></div></div></td>
+    <td data-label="上市板块 / 行业"><div class="market-scan-market-industry"><strong class="market-scan-board">${escapeHtml(view.boardLabel)}</strong><span class="market-scan-meta">${escapeHtml(view.industry)}</span></div></td>
+    <td data-label="趋势强度" title="生产 v4 的序数趋势状态分，不代表上涨概率"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
+    <td data-label="研究信号"><div class="market-scan-research-signal">${marketScanProbabilityCell(item, options.probabilityHorizon)}${marketScanResearchDimensionCell(item)}</div></td>
     <td data-label="涨跌幅" class="${escapeHtml(changeClass(view.changePct))}">${escapeHtml(signedPercentage(view.changePct))}</td>
     <td data-label="换手率">${escapeHtml(percentage(view.turnoverRate))}</td>
     <td data-label="成交额">${escapeHtml(formatAmount(view.amount))}</td>
     <td data-label="质量">${escapeHtml(scoreText(view.qualityScore))}</td>
     <td data-label="状态 / 标签"><span class="market-scan-status ${escapeHtml(view.status)}">${escapeHtml(marketScanResultStatusLabel(view.status))}</span><div class="market-scan-tags">${escapeHtml(view.detail)}</div>${discovery}</td>
-  </tr>${marketScanSnapshotRow(item)}`;
+  </tr>${marketScanSnapshotRow(item, options.probabilityResearch)}`;
 }
 
 function discoveryResultActions(view, options) {
@@ -134,6 +129,7 @@ export function marketScanResultStatusLabel(status) {
 }
 
 function resetResultPresentation(context, run) {
+  resetMarketScanProbabilityResearch(context.elements, run?.id);
   if (!run) {
     renderResultState(context, "暂无扫描记录");
   } else if (isActiveMarketScanRun(run)) {
@@ -152,6 +148,7 @@ function resetResultPresentation(context, run) {
 }
 
 function renderRun(context, run, overrideMessage = "") {
+  renderMarketScanMessageSummary(context.root, run);
   if (!run) {
     renderEmptyRun(context);
     return;
@@ -173,6 +170,7 @@ function renderEmptyRun(context) {
     elements.issues,
     elements.coverage,
     elements.finishedAt,
+    elements.executedAt,
   ]
     .forEach((element) => setText(element, "--"));
   renderRuleVersion(elements.rule, null);
@@ -184,7 +182,7 @@ function renderPopulatedRun(context, run, overrideMessage) {
   const { elements } = context;
   const progress = clampPercentage(run.progress_pct);
   const statusLabel = marketScanRunStatusLabel(run.status);
-  const detail = overrideMessage || run.message || `${statusLabel} · 日K截止日 ${run.data_date || "--"}`;
+  const detail = marketScanHeadlineMessage(overrideMessage || run.message || `${statusLabel} · 日K截止日 ${run.data_date || "--"}`);
   const headline = modeAwareRunMessage(run, detail);
   renderHeadline(context, headline, run.status === "degraded" ? "degraded" : run.status === "failed" ? "error" : "");
   const progressText = `${integer(run.processed_count)}/${integer(run.total_count)} · ${formatNumber(progress, 1)}%`;
@@ -196,7 +194,7 @@ function renderPopulatedRun(context, run, overrideMessage) {
 }
 
 function renderRunSummary(elements, run) {
-  setText(elements.modeSummary, marketScanModeLabel(run.mode));
+  setText(elements.modeSummary, marketScanRunModeLabel(run));
   setText(elements.quoteDate, run.quote_date || "--");
   setText(elements.dataDate, run.data_date || "--");
   setText(
@@ -215,19 +213,9 @@ function renderBrowsingContext(context, taskRun, displayedRun, selectedMode, his
   if (displayedRun) renderRunSummary(elements, displayedRun);
   else if (taskRun?.mode === selectedMode) renderRunSummary(elements, taskRun);
   else clearRunSummary(elements);
-  const browseLabel = marketScanModeLabel(selectedMode);
-  const browseSource = displayedRun
-    ? `${historical ? "历史批次" : "最近发布"} #${displayedRun.id} · 行情日 ${displayedRun.quote_date || "--"}`
-    : "暂无已发布榜单";
-  setText(elements.browseContext, `当前浏览：${browseLabel} · ${browseSource}`);
-  let taskText = "后台任务：暂无扫描任务";
-  if (taskRun) {
-    taskText = `后台任务：${marketScanModeLabel(taskRun.mode)} #${taskRun.id} · ${marketScanRunStatusLabel(taskRun.status)}`;
-  }
-  const mismatch = Boolean(taskRun && isActiveMarketScanRun(taskRun) && taskRun.mode !== selectedMode);
-  if (mismatch) taskText += `；与当前浏览的${browseLabel}不同`;
-  setText(elements.taskContext, taskText);
-  elements.context.classList?.toggle("mismatch", mismatch);
+  renderMarketScanBrowsingContext(
+    elements, taskRun, displayedRun, selectedMode, historical, marketScanRunStatusLabel,
+  );
 }
 
 function clearRunSummary(elements) {
@@ -240,6 +228,7 @@ function clearRunSummary(elements) {
     elements.issues,
     elements.coverage,
     elements.finishedAt,
+    elements.executedAt,
   ].forEach((element) => setText(element, "--"));
   renderRuleVersion(elements.rule, null);
 }
@@ -264,6 +253,7 @@ function renderRuleVersion(element, value) {
 function renderResults(context, payload) {
   const { elements } = context;
   setResultsBusy(elements, false);
+  renderMarketScanProbabilityResearch(elements, payload.probability_research);
   if (!payload.items.length) {
     renderResultState(context, "当前筛选条件下没有结果");
     setResultRunIdentity(elements, payload.run.id);
@@ -271,7 +261,12 @@ function renderResults(context, payload) {
     announceResults(context, payload, 0);
     return;
   }
-  elements.rows.innerHTML = payload.items.map((item) => marketScanResultRow(item, { run: payload.run })).join("");
+  const probabilityOptions = {
+    probabilityHorizon: selectedMarketScanProbabilityHorizon(elements),
+    probabilityResearch: payload.probability_research,
+    run: payload.run,
+  };
+  elements.rows.innerHTML = payload.items.map((item) => marketScanResultRow(item, probabilityOptions)).join("");
   setResultRunIdentity(elements, payload.run.id);
   elements.tableWrap.hidden = false;
   elements.resultState.hidden = true;
@@ -307,6 +302,7 @@ function renderPagination(context, payload, hasRows) {
 
 function renderResultsLoading(context) {
   const { elements } = context;
+  setAttribute(elements.probabilityResearch, "aria-busy", "true");
   if (elements.tableWrap.hidden !== false || elements.pagination.hidden !== false) {
     renderResultState(context, "正在读取榜单...", "loading");
     return;
@@ -324,6 +320,7 @@ function renderResultsLoading(context) {
 
 function renderResultState(context, message, kind = "") {
   const { elements } = context;
+  setAttribute(elements.probabilityResearch, "aria-busy", kind === "loading" ? "true" : "false");
   if ([elements.tableWrap, elements.prev, elements.next].includes(context.root?.activeElement)) {
     focusVisibleControl(context, [elements.market, elements.start]);
   }
@@ -343,24 +340,21 @@ function renderHeadline({ elements }, message, kind = "") {
 }
 
 function renderActionBusy(context, busy, run, message = "") {
+  const restoreFocus = context.actionBusy && !busy;
   context.actionBusy = Boolean(busy);
   renderRunControls(context, run);
+  if (restoreFocus) focusVisibleControl(context, [context.elements.start, context.elements.cancel, context.elements.retry]);
   if (message) announce(context, message, `action-busy:${message}`);
 }
-
 function renderExportBusy({ elements }, busy, publishedRun) {
   elements.exportButton.disabled = Boolean(busy) || !isPublishedMarketScanRun(publishedRun);
   setAttribute(elements.exportButton, "aria-busy", busy ? "true" : "false");
   setText(elements.exportButton, busy ? "正在导出..." : "导出 Excel");
 }
-
 function renderRunControls(context, run) {
   const { elements } = context;
   const active = isActiveMarketScanRun(run);
-  if (
-    context.actionBusy
-    && [elements.start, elements.cancel, elements.retry].includes(context.root?.activeElement)
-  ) {
+  if (context.actionBusy) {
     focusVisibleControl(context, [elements.market, elements.tableWrap]);
   }
   elements.start.disabled = context.actionBusy || active;
@@ -495,9 +489,9 @@ function marketScanResultView(value) {
     symbol,
     name: item.name || item.code || "--",
     flags: marketScanResultFlags(item),
-    marketIndustry: [item.market, item.industry].filter(Boolean).join(" / ") || "--",
+    boardLabel: marketScanBoardLabel(item),
+    industry: item.industry || "行业待确认",
     score: item.score,
-    trendScore: item.trend_score,
     changePct: item.change_pct,
     turnoverRate: item.turnover_rate,
     amount: item.amount,
@@ -507,13 +501,30 @@ function marketScanResultView(value) {
   };
 }
 
+export function marketScanBoardLabel(value) {
+  const item = value && typeof value === "object" ? value : {};
+  const market = String(item.market || "").trim().toUpperCase();
+  const code = marketScanCode(item);
+  if (market === "BJ") return "北交所";
+  if (market === "SH" && /^(688|689)/.test(code)) return "科创板";
+  if (market === "SZ" && /^(300|301)/.test(code)) return "创业板";
+  if (market === "SH") return "上海A股（主板）";
+  if (market === "SZ") return "深圳A股（主板）";
+  return market || "板块待确认";
+}
+function marketScanCode(item) {
+  const code = String(item.code || "").trim();
+  return /^\d{6}$/.test(code) ? code : String(item.symbol || "").match(/\d{6}/)?.[0] || "";
+}
+
 function marketScanResultFlags(item) {
   return `${item.is_st ? " · ST" : ""}${item.is_new ? " · 新股" : ""}`;
 }
 
 function marketScanResultDetail(item) {
   const tags = Array.isArray(item.tags) ? item.tags.filter(Boolean).join(" · ") : "";
-  return [item.reason || item.error, tags].filter(Boolean).join(" · ") || "--";
+  const detail = [item.reason || item.error, tags].filter(Boolean).join(" · ") || "--";
+  return detail.replace(/短线强势(?:评分|分)/g, "趋势强度");
 }
 
 function marketScanElements(root) {
@@ -529,9 +540,11 @@ function marketScanElements(root) {
     modeInputs: [modeIntraday, modeOfficial],
     cancel: requiredElement(root, "marketScanCancel"),
     retry: requiredElement(root, "marketScanRetry"),
+    refreshTop100: requiredElement(root, "marketScanRefreshTop100"),
     exportButton: requiredElement(root, "marketScanExport"),
     context: requiredElement(root, "marketScanContext"),
     browseContext: requiredElement(root, "marketScanBrowseContext"),
+    executedAt: requiredElement(root, "marketScanExecutedAt"),
     taskContext: requiredElement(root, "marketScanTaskContext"),
     history: requiredElement(root, "marketScanHistory"),
     historyRun: requiredElement(root, "marketScanHistoryRun"),
@@ -556,6 +569,7 @@ function marketScanElements(root) {
     coverage: requiredElement(root, "marketScanCoverage"),
     finishedAt: requiredElement(root, "marketScanFinishedAt"),
     rule: requiredElement(root, "marketScanRule"),
+    ...marketScanProbabilityElements(root, requiredElement),
     ...marketScanFilterElements(root, requiredElement),
     announcement: requiredElement(root, "marketScanAnnouncement"),
     resultState: requiredElement(root, "marketScanResultState"),

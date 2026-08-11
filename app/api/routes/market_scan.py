@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, TypeAlias
+from collections.abc import Callable
+from typing import Literal, TypeAlias, TypeVar, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.deps import get_market_scanner
 from app.api.errors import run_api, run_sync_api_async
 from app.models.market_scan import (
+    MarketScanFutureRangeResearchResponse,
     MarketScanResultPage,
     MarketScanResultStatus,
     MarketScanMode,
@@ -20,6 +22,9 @@ from app.models.market_scan import (
     MarketScanStartResponse,
 )
 from app.services.market_scan_manager import MarketScanManager
+from app.services.market_scan_future_range_artifact import FutureRangeArtifactError
+from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
+from app.services.market_scan_probability_store import ProbabilityFilterUnavailable
 from app.services.market_scan_export import XLSX_MEDIA_TYPE, MarketScanExportFilters
 
 
@@ -27,6 +32,7 @@ router = APIRouter()
 MarketCode: TypeAlias = Literal["SH", "SZ", "BJ"]
 MarketScanStatusFilter: TypeAlias = MarketScanResultStatus | Literal["all"]
 MarketScanRunStatusFilter: TypeAlias = MarketScanRunStatus | Literal["published"]
+T = TypeVar("T")
 
 
 @router.post("/api/market-scans", response_model=MarketScanStartResponse, status_code=202)
@@ -114,24 +120,19 @@ def market_scan_filter_query(
     max_amount: float | None = Query(None, ge=0, le=1_000_000_000_000_000),
     min_data_quality_score: int | None = Query(None, ge=0, le=100),
     max_data_quality_score: int | None = Query(None, ge=0, le=100),
+    min_confidence: float | None = Query(None, ge=0, le=100),
+    max_risk: float | None = Query(None, ge=0, le=100),
+    min_tradability: float | None = Query(None, ge=0, le=100),
+    probability_horizon: int = Query(5),
+    min_upside_probability: float | None = Query(None, ge=0, le=1),
     keyword: str | None = Query(None, max_length=80),
     sort: list[MarketScanSort] | None = Query(None),
     order: list[MarketScanSortOrder] | None = Query(None),
 ) -> MarketScanExportFilters:
     _validate_filter_lists(market, industry, sort, order)
-    _validate_filter_ranges(
-        ("强势分", min_score, max_score),
-        ("趋势分", min_trend_score, max_trend_score),
-        ("涨跌幅", min_change_pct, max_change_pct),
-        ("换手率", min_turnover_rate, max_turnover_rate),
-        ("成交额", min_amount, max_amount),
-        ("数据质量", min_data_quality_score, max_data_quality_score),
-    )
-    sorts = tuple(sort or ("rank",))
-    orders: tuple[MarketScanSortOrder, ...] = tuple(
-        order or (_default_sort_order(field) for field in sorts)
-    )
-    return MarketScanExportFilters(
+    probability_horizon = _validated_probability_horizon(probability_horizon)
+    sorts, orders = _normalized_sort_query(sort, order)
+    filters = MarketScanExportFilters(
         status=None if status == "all" else status,
         market=tuple(market or ()),
         industry=tuple(_normalized_industries(industry)),
@@ -149,10 +150,31 @@ def market_scan_filter_query(
         max_amount=max_amount,
         min_data_quality_score=min_data_quality_score,
         max_data_quality_score=max_data_quality_score,
+        min_confidence=min_confidence,
+        max_risk=max_risk,
+        min_tradability=min_tradability,
+        probability_horizon=probability_horizon,
+        min_upside_probability=min_upside_probability,
         keyword=keyword,
         sort=sorts,
         order=orders,
-    ).normalized()
+    )
+    _validate_filter_values(filters)
+    return filters.normalized()
+
+
+def _validate_filter_values(filters: MarketScanExportFilters) -> None:
+    _validate_filter_ranges(
+        ("趋势强度", filters.min_score, filters.max_score),
+        ("趋势分", filters.min_trend_score, filters.max_trend_score),
+        ("涨跌幅", filters.min_change_pct, filters.max_change_pct),
+        ("换手率", filters.min_turnover_rate, filters.max_turnover_rate),
+        ("成交额", filters.min_amount, filters.max_amount),
+        ("数据质量", filters.min_data_quality_score, filters.max_data_quality_score),
+        ("置信度", filters.min_confidence, None),
+        ("风险分", None, filters.max_risk),
+        ("可交易性", filters.min_tradability, None),
+    )
 
 
 def _validate_filter_lists(
@@ -210,7 +232,22 @@ def _normalized_industries(values: list[str] | None) -> list[str]:
 
 
 def _default_sort_order(field: MarketScanSort) -> MarketScanSortOrder:
-    return "asc" if field in {"rank", "symbol"} else "desc"
+    return "asc" if field in {"rank", "symbol", "risk"} else "desc"
+
+
+def _validated_probability_horizon(value: int) -> Literal[1, 5, 20]:
+    if value not in (1, 5, 20):
+        raise HTTPException(status_code=422, detail="上涨概率周期仅支持 1、5、20 日")
+    return cast(Literal[1, 5, 20], value)
+
+
+def _normalized_sort_query(
+    sort: list[MarketScanSort] | None,
+    order: list[MarketScanSortOrder] | None,
+) -> tuple[tuple[MarketScanSort, ...], tuple[MarketScanSortOrder, ...]]:
+    sorts = tuple(sort or ("rank",))
+    orders = tuple(order or (_default_sort_order(field) for field in sorts))
+    return sorts, orders
 
 
 @router.get("/api/market-scans/{run_id}/results", response_model=MarketScanResultPage)
@@ -224,32 +261,102 @@ async def market_scan_results(
 ) -> MarketScanResultPage:
     response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(
-        lambda: scanner.results(
-            run_id,
-            page=page,
-            page_size=page_size,
-            status=filters.status,
-            market=filters.market,
-            industry=filters.industry,
-            is_st=filters.is_st,
-            is_new=filters.is_new,
-            min_score=filters.min_score,
-            max_score=filters.max_score,
-            min_trend_score=filters.min_trend_score,
-            max_trend_score=filters.max_trend_score,
-            min_change_pct=filters.min_change_pct,
-            max_change_pct=filters.max_change_pct,
-            min_turnover_rate=filters.min_turnover_rate,
-            max_turnover_rate=filters.max_turnover_rate,
-            min_amount=filters.min_amount,
-            max_amount=filters.max_amount,
-            min_data_quality_score=filters.min_data_quality_score,
-            max_data_quality_score=filters.max_data_quality_score,
-            keyword=filters.keyword,
-            sort=filters.sort,
-            order=filters.order,
+        lambda: _probability_filter_guard(
+            lambda: scanner.results(
+                run_id,
+                page=page,
+                page_size=page_size,
+                status=filters.status,
+                market=filters.market,
+                industry=filters.industry,
+                is_st=filters.is_st,
+                is_new=filters.is_new,
+                min_score=filters.min_score,
+                max_score=filters.max_score,
+                min_trend_score=filters.min_trend_score,
+                max_trend_score=filters.max_trend_score,
+                min_change_pct=filters.min_change_pct,
+                max_change_pct=filters.max_change_pct,
+                min_turnover_rate=filters.min_turnover_rate,
+                max_turnover_rate=filters.max_turnover_rate,
+                min_amount=filters.min_amount,
+                max_amount=filters.max_amount,
+                min_data_quality_score=filters.min_data_quality_score,
+                max_data_quality_score=filters.max_data_quality_score,
+                min_confidence=filters.min_confidence,
+                max_risk=filters.max_risk,
+                min_tradability=filters.min_tradability,
+                probability_horizon=filters.probability_horizon,
+                min_upside_probability=filters.min_upside_probability,
+                keyword=filters.keyword,
+                sort=filters.sort,
+                order=filters.order,
+            )
         )
     )
+
+
+def _probability_filter_guard(call: Callable[[], MarketScanResultPage]) -> MarketScanResultPage:
+    try:
+        return call()
+    except ProbabilityFilterUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/api/market-scans/{run_id}/probability-research", response_model=dict[str, object])
+async def market_scan_probability_research(
+    run_id: int,
+    response: Response,
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(lambda: scanner.probability_research(run_id))
+
+
+@router.get(
+    "/api/market-scans/{run_id}/future-range-research",
+    response_model=MarketScanFutureRangeResearchResponse,
+)
+async def market_scan_future_range_research(
+    run_id: int,
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=200),
+    session_offset: int | None = Query(None, ge=1, le=3),
+    symbol: str | None = Query(None, max_length=20),
+    include_research: bool = Query(True),
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(
+        lambda: _future_range_research_guard(
+            lambda: scanner.future_range_research(
+                run_id,
+                page=page,
+                page_size=page_size,
+                session_offset=cast(Literal[1, 2, 3], session_offset) if session_offset is not None else None,
+                symbol=symbol,
+                include_research=include_research,
+            )
+        )
+    )
+
+
+def _future_range_research_guard(call: Callable[[], dict[str, object]]) -> dict[str, object]:
+    try:
+        return _future_range_artifact_guard(call)
+    except FutureRangeResearchUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _future_range_artifact_guard(call: Callable[[], T]) -> T:
+    try:
+        return call()
+    except FutureRangeArtifactError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="未来区间研究 artifact 完整性校验失败，已拒绝读取",
+        ) from exc
 
 
 @router.get(
@@ -262,7 +369,11 @@ async def export_market_scan_results(
     filters: MarketScanExportFilters = Depends(market_scan_filter_query),
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> Response:
-    exported = await run_sync_api_async(lambda: scanner.export_results(run_id, filters=filters))
+    exported = await run_sync_api_async(
+        lambda: _future_range_artifact_guard(
+            lambda: scanner.export_results(run_id, filters=filters)
+        )
+    )
     return Response(
         content=exported.content,
         media_type=XLSX_MEDIA_TYPE,
@@ -288,6 +399,14 @@ async def retry_market_scan(
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketScanStartResponse:
     return await run_api(lambda: scanner.retry_scan(run_id))
+
+
+@router.post("/api/market-scans/{run_id}/refresh-top100", response_model=MarketScanStartResponse, status_code=202)
+async def refresh_market_scan_top100(
+    run_id: int,
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> MarketScanStartResponse:
+    return await run_api(lambda: scanner.refresh_top100_scores(run_id))
 
 
 __all__ = ["router"]

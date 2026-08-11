@@ -18,7 +18,7 @@ from app.services.market_scan_shadow_scoring import SHADOW_SCORE_VARIANTS  # noq
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="只读比较生产全市场榜单与 Shadow Score v5；不会写回生产数据库",
+        description="只读比较生产全市场榜单与 Shadow Score v5.3/v5.4；不会写回生产数据库",
     )
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--output", type=Path, help="JSON 输出路径；默认输出到 stdout")
@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--bootstrap-samples", type=int, default=1000)
     parser.add_argument("--cost-profile", choices=("base", "conservative", "stress"), default="base")
     parser.add_argument("--execution-notional", type=float, default=100_000)
+    parser.add_argument("--hysteresis-buffer-ratio", type=float, default=0.20)
     args = parser.parse_args()
     report = evaluate_market_scan_shadow_comparison(
         args.database,
@@ -41,6 +42,7 @@ def main() -> int:
             bootstrap_samples=args.bootstrap_samples,
             cost_profile=args.cost_profile,
             execution_notional=args.execution_notional,
+            hysteresis_buffer_ratio=args.hysteresis_buffer_ratio,
         ),
         mode=args.mode,
         run_ids=args.run_ids,

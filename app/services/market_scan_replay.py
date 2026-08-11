@@ -80,6 +80,8 @@ _CURRENT_CLOSE_CONSISTENCY = {
     "accept_when": "within-either-limit",
 }
 _CURRENT_SINGLE_PRICE_SESSION_EXCLUDED = True
+_CURRENT_VALID_QUOTE_FIELDS_REQUIRED = True
+_CURRENT_MAX_CHANGE_PCT_GAP = 0.3
 
 
 class MarketScanReplayError(ValueError):
@@ -334,12 +336,18 @@ def _require_current_data_contract(score_spec: Mapping[str, object]) -> None:
     eligibility = _require_shared_data_contract(score_spec)
     if set(eligibility) != {
         "min_data_quality_score",
+        "valid_quote_fields_required",
+        "max_change_pct_gap",
         "quote_timestamp_not_after_as_of",
         "single_price_session_excluded",
         "quote_kline_close_consistency",
     }:
         raise MarketScanReplayError("当前 eligibility 字段不完整或包含未知条目")
     _require_quality_floor(eligibility)
+    if eligibility.get("valid_quote_fields_required") is not _CURRENT_VALID_QUOTE_FIELDS_REQUIRED:
+        raise MarketScanReplayError("排名准入必须校验报价 OHLC 与成交字段")
+    if _number(eligibility.get("max_change_pct_gap"), "eligibility.max_change_pct_gap") != _CURRENT_MAX_CHANGE_PCT_GAP:
+        raise MarketScanReplayError("未知报价涨跌幅一致性阈值")
     if eligibility.get("quote_timestamp_not_after_as_of") is not True:
         raise MarketScanReplayError("报价时间必须不晚于批次截止时点")
     if eligibility.get("single_price_session_excluded") is not _CURRENT_SINGLE_PRICE_SESSION_EXCLUDED:
@@ -500,51 +508,47 @@ def _replay_leader_score(
 def _rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
     kind = _text(rule.get("kind"), "leader rule.kind")
     if kind == "high-low-threshold":
-        value = _input_number(rule, inputs)
-        high = _threshold_delta(value, rule.get("high_steps"), high=True)
-        return (
-            high
-            if high != 0
-            else _threshold_delta(
-                value,
-                rule.get("low_steps"),
-                high=False,
-            )
-        )
+        return _high_low_rule_delta(rule, inputs)
     if kind == "signed-volume-threshold":
-        value = _input_number(rule, inputs)
-        threshold = _number(rule.get("threshold"), "leader rule.threshold")
-        if value < threshold:
-            return 0
-        direction = inputs[_text(rule.get("direction_input"), "leader rule.direction_input")]
-        if direction > 0:
-            return _integer(rule.get("positive_delta"), "leader rule.positive_delta")
-        if direction < 0:
-            return _integer(rule.get("negative_delta"), "leader rule.negative_delta")
-        return 0
+        return _signed_volume_rule_delta(rule, inputs)
     if kind == "bounded-active-with-overheat":
-        value = _input_number(rule, inputs)
-        if value == 0:
-            return 0
-        active_min = _number(rule.get("active_min"), "leader rule.active_min")
-        active_max = _number(rule.get("active_max"), "leader rule.active_max")
-        if active_min <= value <= active_max:
-            return _integer(rule.get("active_delta"), "leader rule.active_delta")
-        overheated = _number(
-            rule.get("overheated_above"),
-            "leader rule.overheated_above",
-        )
-        if value > overheated:
-            return _integer(
-                rule.get("overheated_delta"),
-                "leader rule.overheated_delta",
-            )
-        return 0
+        return _bounded_active_rule_delta(rule, inputs)
     if kind == "high-threshold":
         value = _input_number(rule, inputs)
         delta = _threshold_delta(value, rule.get("high_steps"), high=True)
         return delta if delta != 0 else _integer(rule.get("default"), "leader rule.default")
     raise MarketScanReplayError(f"未知 leader rule 算法：{kind}")
+
+
+def _high_low_rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
+    value = _input_number(rule, inputs)
+    high = _threshold_delta(value, rule.get("high_steps"), high=True)
+    return high if high != 0 else _threshold_delta(value, rule.get("low_steps"), high=False)
+
+
+def _signed_volume_rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
+    value = _input_number(rule, inputs)
+    if value < _number(rule.get("threshold"), "leader rule.threshold"):
+        return 0
+    direction = inputs[_text(rule.get("direction_input"), "leader rule.direction_input")]
+    if direction > 0:
+        return _integer(rule.get("positive_delta"), "leader rule.positive_delta")
+    if direction < 0:
+        return _integer(rule.get("negative_delta"), "leader rule.negative_delta")
+    return 0
+
+
+def _bounded_active_rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
+    value = _input_number(rule, inputs)
+    if value == 0:
+        return 0
+    active_min = _number(rule.get("active_min"), "leader rule.active_min")
+    active_max = _number(rule.get("active_max"), "leader rule.active_max")
+    if active_min <= value <= active_max:
+        return _integer(rule.get("active_delta"), "leader rule.active_delta")
+    if value > _number(rule.get("overheated_above"), "leader rule.overheated_above"):
+        return _integer(rule.get("overheated_delta"), "leader rule.overheated_delta")
+    return 0
 
 
 def _threshold_delta(value: float, raw_steps: object, *, high: bool) -> int:

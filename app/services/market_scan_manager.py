@@ -4,11 +4,13 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime
 import math
+from pathlib import Path
 import sqlite3
 import threading
 from typing import Literal
 
 from app.models.market_scan import (
+    MARKET_SCAN_TOP100_REFRESH_LIMIT,
     MarketScanFilterValues,
     MarketScanMode,
     MarketScanResultPage,
@@ -21,6 +23,7 @@ from app.models.market_scan import (
     MarketScanSortValues,
     MarketScanStartResponse,
     MarketScanTrigger,
+    is_market_scan_top100_refresh_scope,
 )
 from app.repositories.market_scan import ACTIVE_SCAN_STATUSES, RETRYABLE_SCAN_STATUSES
 from app.services.advice_review import normalize_review_as_of
@@ -43,10 +46,21 @@ from app.services.market_scan_export import (
     MarketScanWorkbookExport,
     build_market_scan_workbook,
 )
+from app.services.market_scan_future_range_store import (
+    FutureRangeResearchUnavailable,
+    MarketScanFutureRangeStore,
+    not_generated_future_range_research,
+)
 from app.services.market_scan_lifecycle import MarketScanLifecycle, MarketScanStopSnapshot
 from app.services.market_scan_modes import (
     OFFICIAL_SCAN_WINDOW_MESSAGE,
     market_scan_temporal_contract,
+)
+from app.services.market_scan_probability_research import PROBABILITY_PRIMARY_TARGET
+from app.services.market_scan_probability_store import (
+    MarketScanProbabilityStore,
+    ProbabilityFilterUnavailable,
+    not_generated_probability_research,
 )
 from app.services.market_scan_automation import MarketScanAutomaticAction
 from app.services.market_scan_automation_runner import MarketScanAutomationCoordinator
@@ -64,6 +78,13 @@ HISTORICAL_SCAN_UNAVAILABLE_MESSAGE = "当前数据源只提供当前快照；�
 DAILY_BAR_WINDOW_MESSAGE = OFFICIAL_SCAN_WINDOW_MESSAGE
 TERMINAL_RECOVERY_MESSAGE = "本地扫描任务已退出，终态写入失败后自动中断；可从断点重试"
 TERMINAL_RECOVERY_ERROR = "本地后台扫描已退出，但原终态未能持久化"
+_MARKET_SCAN_RESULT_QUERY_FIELDS = (
+    "page", "page_size", "status", "market", "industry", "is_st", "is_new",
+    "min_score", "max_score", "min_trend_score", "max_trend_score",
+    "min_change_pct", "max_change_pct", "min_turnover_rate", "max_turnover_rate",
+    "min_amount", "max_amount", "min_data_quality_score", "max_data_quality_score",
+    "min_confidence", "max_risk", "min_tradability", "keyword", "symbols", "sort", "order",
+)
 
 
 class MarketScanManager:
@@ -79,6 +100,19 @@ class MarketScanManager:
         self.datahub = datahub
         self.cache = datahub.cache
         self.settings = datahub.settings
+        cache_path = getattr(self.cache, "path", None)
+        self._probability_store = (
+            MarketScanProbabilityStore(Path(cache_path).parent / "market-scan-probability")
+            if isinstance(cache_path, str | Path)
+            else None
+        )
+        self._future_range_store = (
+            MarketScanFutureRangeStore(
+                Path(cache_path).parent / "research" / "market_scan_future_range"
+            )
+            if isinstance(cache_path, str | Path)
+            else None
+        )
         self._now = now or _market_now
         sensitive_values = sensitive_setting_values(self.settings)
         self._sensitive_values = sensitive_values
@@ -234,6 +268,36 @@ class MarketScanManager:
     async def retry_scan(self, run_id: int) -> MarketScanStartResponse:
         return await self._retry_scan(run_id, current=self._current_time())
 
+    async def refresh_top100_scores(self, run_id: int) -> MarketScanStartResponse:
+        current = self._current_time()
+        async with self._lifecycle.lock:
+            self._lifecycle.require_open()
+            await self._lifecycle.require_instance_guard(MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE)
+            await run_cache_io(self._recover_terminal_persistence_failures, run_id)
+            source = await run_cache_io(self.cache.market_scan_run, run_id)
+            self._validate_top100_refresh_source(source, current=current)
+            active = await run_cache_io(self.cache.active_market_scan_run)
+            if active is not None:
+                return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
+            temporal = market_scan_temporal_contract(current, source.mode)
+            try:
+                run = await run_cache_io(
+                    self.cache.prepare_market_scan_top100_refresh,
+                    source.id,
+                    rule_version=source.rule_version,
+                    as_of=datetime_to_text(current),
+                    data_date=temporal.data_date.isoformat(),
+                    quote_date=temporal.quote_date.isoformat(),
+                    limit=MARKET_SCAN_TOP100_REFRESH_LIMIT,
+                )
+            except sqlite3.IntegrityError:
+                active = await run_cache_io(self.cache.active_market_scan_run)
+                if active is None:
+                    raise
+                return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
+            self._launch(run.id)
+            return MarketScanStartResponse(accepted=True, run=run)
+
     async def _retry_scan(
         self,
         run_id: int,
@@ -253,7 +317,12 @@ class MarketScanManager:
             if active is not None:
                 return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
             try:
-                run = await run_cache_io(self.cache.prepare_market_scan_retry, run_id, retry_plan)
+                run = await run_cache_io(
+                    self.cache.prepare_market_scan_retry,
+                    run_id,
+                    retry_plan,
+                    as_of=datetime_to_text(current),
+                )
             except (sqlite3.IntegrityError, ValueError):
                 active = await run_cache_io(self.cache.active_market_scan_run)
                 if active is None:
@@ -392,36 +461,77 @@ class MarketScanManager:
         max_amount: float | None = None,
         min_data_quality_score: int | None,
         max_data_quality_score: int | None = None,
+        min_confidence: float | None = None,
+        max_risk: float | None = None,
+        min_tradability: float | None = None,
         keyword: str | None,
         sort: MarketScanSortValues,
         order: MarketScanSortOrderValues,
+        probability_horizon: Literal[1, 5, 20] = 5,
+        min_upside_probability: float | None = None,
     ) -> MarketScanResultPage:
         self._recover_terminal_persistence_failures(run_id)
-        return self.cache.market_scan_results(
+        research = self._run_probability_research(run_id)
+        filter_probabilities = (
+            self._run_probability_projection(run_id)[1]
+            if min_upside_probability is not None
+            else {}
+        )
+        symbols = _probability_filter_symbols(
+            research,
+            filter_probabilities,
+            horizon=probability_horizon,
+            minimum=min_upside_probability,
+        )
+        query = _market_scan_result_query(locals())
+        page_result = self.cache.market_scan_results(run_id, **query)  # type: ignore[arg-type]
+        page_symbols = tuple(item.symbol for item in page_result.items)
+        _summary, probabilities = self._run_probability_projection(run_id, symbols=page_symbols)
+        return _attach_probability_projection(page_result, research, probabilities)
+
+    def probability_research(self, run_id: int) -> dict[str, object]:
+        self.run(run_id)
+        return self._run_probability_research(run_id)
+
+    def future_range_research(
+        self,
+        run_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        session_offset: Literal[1, 2, 3] | None = None,
+        symbol: str | None = None,
+        include_research: bool = True,
+    ) -> dict[str, object]:
+        # This endpoint is deliberately stricter than the lifecycle-oriented
+        # ``run`` facade: it must never perform terminal-state recovery writes.
+        run = self.cache.market_scan_run(run_id)
+        _require_future_range_eligible_run(run)
+        if self._future_range_store is None:
+            return not_generated_future_range_research(run_id)
+        return self._future_range_store.research_projection(
             run_id,
             page=page,
             page_size=page_size,
-            status=status,
-            market=market,
-            industry=industry,
-            is_st=is_st,
-            is_new=is_new,
-            min_score=min_score,
-            max_score=max_score,
-            min_trend_score=min_trend_score,
-            max_trend_score=max_trend_score,
-            min_change_pct=min_change_pct,
-            max_change_pct=max_change_pct,
-            min_turnover_rate=min_turnover_rate,
-            max_turnover_rate=max_turnover_rate,
-            min_amount=min_amount,
-            max_amount=max_amount,
-            min_data_quality_score=min_data_quality_score,
-            max_data_quality_score=max_data_quality_score,
-            keyword=keyword,
-            sort=sort,
-            order=order,
+            session_offset=session_offset,
+            symbol=symbol,
+            include_research=include_research,
         )
+
+    def _run_probability_research(self, run_id: int) -> dict[str, object]:
+        if self._probability_store is None:
+            return not_generated_probability_research(run_id)
+        return self._probability_store.research_projection(run_id)
+
+    def _run_probability_projection(
+        self,
+        run_id: int,
+        *,
+        symbols: tuple[str, ...] | None = None,
+    ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+        if self._probability_store is None:
+            return not_generated_probability_research(run_id), {}
+        return self._probability_store.run_projection(run_id, symbols=symbols)
 
     def export_results(
         self,
@@ -454,11 +564,31 @@ class MarketScanManager:
             max_amount=filters.max_amount,
             min_data_quality_score=filters.min_data_quality_score,
             max_data_quality_score=filters.max_data_quality_score,
+            min_confidence=filters.min_confidence,
+            max_risk=filters.max_risk,
+            min_tradability=filters.min_tradability,
             keyword=filters.keyword,
             sort=filters.sort,
             order=filters.order,
+            probability_horizon=filters.probability_horizon,
+            min_upside_probability=filters.min_upside_probability,
         )
-        return build_market_scan_workbook(page, filters, exported_at=self._current_time())
+        future_range_store = getattr(self, "_future_range_store", None)
+        future_range = (
+            future_range_store.export_projection(run_id)
+            if (
+                run.mode == "official"
+                and run.scope == FULL_MARKET_SCOPE
+                and future_range_store is not None
+            )
+            else not_generated_future_range_research(run_id)
+        )
+        return build_market_scan_workbook(
+            page,
+            filters,
+            exported_at=self._current_time(),
+            future_range_research=future_range,
+        )
 
     def _launch(self, run_id: int) -> None:
         self._lifecycle.launch(run_id, self._execute_run)
@@ -486,7 +616,7 @@ class MarketScanManager:
             publication_summary = await run_cache_io(
                 self.cache.market_scan_repo.publication_summary,
                 run_id,
-            )
+            ) if not is_market_scan_top100_refresh_scope(current.scope) else None
             persisted = await self._finalizer.finish_completed(
                 current,
                 degraded_count=degraded_count,
@@ -588,6 +718,28 @@ class MarketScanManager:
             raise ValueError("扫描规则/评分配置已变更，请新建扫描；旧批次将保留为历史快照")
         self._validate_retry_data_date(run, plan, current=current)
 
+    def _validate_top100_refresh_source(
+        self,
+        run: MarketScanRun,
+        *,
+        current: datetime,
+    ) -> None:
+        if run.status not in {"success", "degraded"}:
+            raise ValueError(f"扫描批次 {run.id} 尚未发布，不能快速更新 TOP100")
+        if run.success_count <= 0:
+            raise ValueError(f"扫描批次 {run.id} 没有有效排名，不能快速更新 TOP100")
+        effective_rule_version = market_scan_rule_version(self.settings, mode=run.mode)
+        if run.rule_version != effective_rule_version:
+            raise ValueError("评分规则已经变更，请先执行新的全市场扫描，再快速更新 TOP100")
+        temporal = market_scan_temporal_contract(current, run.mode)
+        expected_data_date = temporal.data_date.isoformat()
+        expected_quote_date = temporal.quote_date.isoformat()
+        if run.data_date != expected_data_date or run.quote_date != expected_quote_date:
+            raise ValueError(
+                f"源批次日K/行情日期 {run.data_date}/{run.quote_date} 已过期，"
+                f"当前应为 {expected_data_date}/{expected_quote_date}；请先执行新的全市场扫描"
+            )
+
     def _validate_retry_data_date(
         self,
         run: MarketScanRun,
@@ -609,6 +761,77 @@ class MarketScanManager:
 
     def _current_time(self, value: datetime | None = None) -> datetime:
         return normalize_review_as_of(value if value is not None else self._now(), allow_future=True)
+
+
+def _probability_filter_symbols(
+    research: dict[str, object],
+    probabilities: dict[str, dict[str, object]],
+    *,
+    horizon: Literal[1, 5, 20],
+    minimum: float | None,
+) -> tuple[str, ...] | None:
+    if minimum is None:
+        return None
+    if not math.isfinite(minimum) or not 0 <= minimum <= 1:
+        raise ValueError("最低上涨概率必须在 0 到 1 之间")
+    summary = _probability_summary(research, horizon)
+    if summary.get("status") != "calibrated_shadow":
+        raise ProbabilityFilterUnavailable("当前批次与周期尚无已校准 Shadow 概率，不能使用概率筛选")
+    return tuple(
+        symbol
+        for symbol, horizons in probabilities.items()
+        if _meets_probability_minimum(horizons, horizon, minimum)
+    )
+
+
+def _require_future_range_eligible_run(run: MarketScanRun) -> None:
+    if run.mode != "official":
+        raise FutureRangeResearchUnavailable("未来区间研究仅支持盘后正式批次")
+    if run.scope != FULL_MARKET_SCOPE:
+        raise FutureRangeResearchUnavailable("未来区间研究仅支持盘后正式全市场批次")
+    if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
+        raise FutureRangeResearchUnavailable("未来区间研究仅支持已发布批次")
+
+
+def _market_scan_result_query(values: dict[str, object]) -> dict[str, object]:
+    return {name: values[name] for name in _MARKET_SCAN_RESULT_QUERY_FIELDS}
+
+
+def _probability_summary(research: dict[str, object], horizon: int) -> dict[str, object]:
+    horizons = research.get("horizons")
+    targets = horizons.get(str(horizon)) if isinstance(horizons, dict) else None
+    summary = targets.get(PROBABILITY_PRIMARY_TARGET) if isinstance(targets, dict) else None
+    return summary if isinstance(summary, dict) else {}
+
+
+def _meets_probability_minimum(
+    horizons: dict[str, object],
+    horizon: int,
+    minimum: float,
+) -> bool:
+    targets = horizons.get(str(horizon))
+    record = targets.get(PROBABILITY_PRIMARY_TARGET) if isinstance(targets, dict) else None
+    probability = record.get("probability") if isinstance(record, dict) else None
+    return (
+        isinstance(record, dict)
+        and record.get("status") == "calibrated_shadow"
+        and isinstance(probability, int | float)
+        and not isinstance(probability, bool)
+        and math.isfinite(float(probability))
+        and float(probability) >= minimum
+    )
+
+
+def _attach_probability_projection(
+    page: MarketScanResultPage,
+    research: dict[str, object],
+    probabilities: dict[str, dict[str, object]],
+) -> MarketScanResultPage:
+    items = [
+        item.model_copy(update={"upside_probabilities": probabilities.get(item.symbol, {})})
+        for item in page.items
+    ]
+    return page.model_copy(update={"items": items, "probability_research": research})
 
 
 def _market_scan_shutdown_timeout(settings: object) -> float:
@@ -634,7 +857,7 @@ def market_scan_rule_version(
     mode: MarketScanMode = "official",
 ) -> str:
     contract = {
-        "schema_version": 5,
+        "schema_version": 6,
         "mode": {
             "id": mode,
             "quote_date": "current-trading-day" if mode == "intraday" else "completed-daily-bar-date",
@@ -660,12 +883,16 @@ def market_scan_rule_version(
             "excluded_denominator_statuses": ["skipped"],
             "minimum_coverage": MARKET_SCAN_PUBLISH_MIN_COVERAGE,
             "minimum_eligible_ratio": MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
-            "snapshot_span_scope": "all-markets",
+            "quote_capture_scope": "all-quote-chunks-before-klines",
+            "quote_capture_envelope": "required",
+            "quote_observed_at": "per-provider-response-batch",
+            "event_time_span_scope": "per-market",
+            "global_event_time_span": "diagnostic-only",
             "max_snapshot_span_seconds": MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
             "score_distribution": MARKET_SCAN_SCORE_DISTRIBUTION_POLICY.spec(),
         },
     }
-    return f"full-market-scan-v5:{stable_score_spec_hash(contract)}"
+    return f"full-market-scan-v6:{stable_score_spec_hash(contract)}"
 
 
 def _market_now() -> datetime:

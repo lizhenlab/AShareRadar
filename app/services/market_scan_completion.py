@@ -15,8 +15,10 @@ from app.models.market_scan import (
     MarketScanScoreDistribution,
     MarketScanScoreDistributionAssessment,
     MarketScanScoreDistributionPolicy,
+    is_market_scan_top100_refresh_scope,
 )
 from app.services.datahub_runtime import run_cache_io
+from app.services.market_scan_publication_snapshot import snapshot_publication_blockers
 from app.utils.provider_errors import sanitize_provider_error
 
 
@@ -50,7 +52,7 @@ MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO = {
     "BJ": 0.90,
 }
 MARKET_SCAN_PUBLICATION_SCOPES: tuple[MarketScanCoverageScope, ...] = ("ALL", "SH", "SZ", "BJ")
-MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS = 15 * 60
+MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS = 20 * 60
 _RETRYABLE_SQLITE_PRIMARY_CODES = {
     sqlite3.SQLITE_BUSY,
     sqlite3.SQLITE_LOCKED,
@@ -108,6 +110,14 @@ class MarketScanFinalizer:
         policy = MARKET_SCAN_SCORE_DISTRIBUTION_POLICY
         if run.success_count < policy.minimum_sample_count:
             return None
+        score_reader = getattr(self._cache, "market_scan_success_raw_scores", None)
+        if callable(score_reader):
+            raw_scores = await run_cache_io(score_reader, run.id)
+            return MarketScanScoreDistribution.from_raw_scores(
+                raw_scores,
+                expected_count=run.success_count,
+                policy=policy,
+            )
         results = getattr(self._cache, "market_scan_results", None)
         if not callable(results):
             return MarketScanScoreDistribution.from_raw_scores(
@@ -201,8 +211,14 @@ def assess_market_scan_score_distribution(
     return policy.assess(distribution)
 
 
-def _score_distribution_audit_suffix(distribution: MarketScanScoreDistribution | None) -> str:
-    return f"；{distribution.audit_text()}" if distribution is not None else ""
+def _score_distribution_audit_suffix(
+    distribution: MarketScanScoreDistribution | None,
+    assessment: MarketScanScoreDistributionAssessment,
+) -> str:
+    if distribution is None:
+        return ""
+    label = "已通过" if assessment.status == "pass" else "评分分布审计"
+    return f"；{label}：{distribution.audit_text()}"
 
 
 def completion_status(
@@ -225,9 +241,16 @@ def completion_status(
     if distribution_assessment.status == "failed":
         blockers.extend(distribution_assessment.reasons)
     if blockers:
-        return "failed", f"{scan_label}未达到发布可信度：" + "；".join(blockers) + _score_distribution_audit_suffix(score_distribution)
+        return "failed", (
+            f"{scan_label}未达到发布可信度：发布阻断："
+            + "；".join(blockers)
+            + _score_distribution_audit_suffix(score_distribution, distribution_assessment)
+        )
     if run.success_count == 0:
-        return "failed", f"{scan_label}没有生成有效排名；缺失 {run.missing_count}，跳过 {run.skipped_count}"
+        return "failed", (
+            f"{scan_label}没有生成有效排名；缺失 {run.missing_count}，跳过 {run.skipped_count}"
+            + _score_distribution_audit_suffix(score_distribution, distribution_assessment)
+        )
     stale_stock_pool = run.stock_pool_source == "stale-fallback"
     distribution_degraded = distribution_assessment.status == "degraded"
     if run.missing_count or run.skipped_count or run.processed_count < run.total_count or degraded_count or stale_stock_pool or distribution_degraded:
@@ -243,15 +266,17 @@ def completion_status(
         return "degraded", (
             f"{scan_label}降级完成：有效覆盖 {run.success_count}/{eligible_count}，"
             f"缺失 {run.missing_count}，跳过 {run.skipped_count}{degraded_suffix}"
-            f"{_score_distribution_audit_suffix(score_distribution)}"
+            f"{_score_distribution_audit_suffix(score_distribution, distribution_assessment)}"
         )
     return "success", (
         f"{scan_label}完成：成功 {run.success_count}/{run.total_count}"
-        f"{_score_distribution_audit_suffix(score_distribution)}"
+        f"{_score_distribution_audit_suffix(score_distribution, distribution_assessment)}"
     )
 
 
 def _scan_label(run: MarketScanRun) -> str:
+    if is_market_scan_top100_refresh_scope(run.scope):
+        return "TOP100 快速更新评分"
     return "盘中临时扫描" if run.mode == "intraday" else "盘后正式扫描"
 
 
@@ -284,34 +309,14 @@ def terminal_diagnostic(
 
 
 def publication_blockers(summary: MarketScanPublicationSummary) -> tuple[str, ...]:
-    blockers = list(_snapshot_publication_blockers(summary))
+    blockers = list(
+        snapshot_publication_blockers(
+            summary,
+            max_span_seconds=MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
+        )
+    )
     for scope in MARKET_SCAN_PUBLICATION_SCOPES:
         blockers.extend(_scope_publication_blockers(summary, scope))
-    return tuple(blockers)
-
-
-def _snapshot_publication_blockers(
-    summary: MarketScanPublicationSummary,
-) -> tuple[str, ...]:
-    blockers: list[str] = []
-    cluster = summary.systemic_stale_cluster
-    if cluster is not None:
-        markets = "/".join(cluster.markets) or "unknown"
-        blockers.append(
-            "系统性同日滞后："
-            f"{cluster.data_date} 有 {cluster.count}/{cluster.total_count} 只，涉及 {markets}"
-        )
-    if summary.invalid_snapshot_timestamps:
-        examples = "、".join(summary.invalid_snapshot_timestamps[:3])
-        blockers.append(
-            f"报价时间不可解析：{len(summary.invalid_snapshot_timestamps)} 个（{examples}）"
-        )
-    span = summary.snapshot_span_seconds
-    if span is not None and span > MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS:
-        blockers.append(
-            f"全市场报价快照跨度 {span:g} 秒超过 "
-            f"{MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS:g} 秒门槛"
-        )
     return tuple(blockers)
 
 

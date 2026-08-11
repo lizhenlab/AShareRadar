@@ -125,6 +125,15 @@ def test_mypy_scope_uses_explicit_existing_python_files() -> None:
     assert invalid == []
 
 
+def test_mypy_scope_covers_a_meaningful_share_of_application_modules() -> None:
+    configured_files = _mypy_config()["files"]
+    assert isinstance(configured_files, list)
+    app_files = {path.as_posix() for path in (ROOT / "app").rglob("*.py")}
+    typed_app_files = {path for path in configured_files if isinstance(path, str) and path.startswith("app/")}
+
+    assert len(typed_app_files) / len(app_files) >= 0.4
+
+
 def test_mypy_scope_does_not_hide_errors() -> None:
     config = _mypy_config()
 

@@ -150,11 +150,9 @@ def missing_quote_result(
             error="日K不是一致的前复权序列",
         )
     latest_date = datetime.fromisoformat(completed[-1].date).date()
-    provenance = {
-        "data_date": latest_date.isoformat(),
-        "kline_source": completed[-1].source,
-        "adjustment_mode": completed[-1].adjustment_mode,
-    }
+    data_date = latest_date.isoformat()
+    kline_source = completed[-1].source
+    adjustment_mode = completed[-1].adjustment_mode
     if latest_date < expected_data_date:
         return MarketScanResultWrite(
             symbol=item.symbol,
@@ -163,20 +161,26 @@ def missing_quote_result(
                 f"日K停留在 {latest_date.isoformat()}，早于应有交易日 "
                 f"{expected_data_date.isoformat()}，可能停牌"
             ),
-            **provenance,
+            data_date=data_date,
+            kline_source=kline_source,
+            adjustment_mode=adjustment_mode,
         )
     if completed[-1].volume <= 0:
         return MarketScanResultWrite(
             symbol=item.symbol,
             status="skipped",
             reason="当日日K成交量为 0 且报价不可用，可能停牌",
-            **provenance,
+            data_date=data_date,
+            kline_source=kline_source,
+            adjustment_mode=adjustment_mode,
         )
     return MarketScanResultWrite(
         symbol=item.symbol,
         status="missing",
-        error=quote_error or "报价不可用，无法计算短线强势分所需的换手率和成交额",
-        **provenance,
+        error=quote_error or "报价不可用，无法计算趋势强度所需的换手率和成交额",
+        data_date=data_date,
+        kline_source=kline_source,
+        adjustment_mode=adjustment_mode,
     )
 
 
@@ -254,6 +258,11 @@ def raise_batch_outcome_error(
         raise unexpected
 
 
+def raise_if_scan_cancelled(event: asyncio.Event) -> None:
+    if event.is_set():
+        raise asyncio.CancelledError
+
+
 __all__ = [
     "MARKET_SCAN_WALL_CLOCK_BUDGET_SECONDS",
     "MarketScanRuntimeGuard",
@@ -263,5 +272,6 @@ __all__ = [
     "minimum_market_counts",
     "missing_quote_result",
     "raise_batch_outcome_error",
+    "raise_if_scan_cancelled",
     "resolve_market_scan_stock_pool",
 ]

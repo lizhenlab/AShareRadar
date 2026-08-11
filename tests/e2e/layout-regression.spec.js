@@ -26,7 +26,7 @@ const VIEWPORTS = [
     layout: "stacked",
     scanScrollable: false,
     sideColumns: 1,
-    scanColumns: { summary: 2, presets: 2, filters: 2, table: 2 },
+    scanColumns: { summary: 2, presets: 2, filters: 2, table: 4 },
   },
   {
     name: "mobile 390x844",
@@ -65,7 +65,13 @@ test.describe("responsive layout regression", () => {
       await assertChartToolbarFits(page, viewport);
       await assertResearchLayout(page, viewport);
 
+      await selectPrimaryView(page, "review");
+      await assertReviewWorkspaceLayout(page, viewport);
+
       await selectPrimaryView(page, "market");
+      await page.locator("#marketScanModeOfficial").check();
+      await page.locator("#marketScanFilterToggle").click();
+      await page.locator("#marketScanDetailsToggle").click();
       await expect(page.locator("#workspace-panel-market-scan")).toBeVisible();
       await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(3);
       await settleLayout(page);
@@ -75,6 +81,7 @@ test.describe("responsive layout regression", () => {
       await assertMarketScanLayout(page, viewport);
 
       await selectPrimaryView(page, "monitor");
+      if (viewport.width <= 820) await page.locator("#watchFormToggle").click();
       await settleLayout(page);
       await assertNoDocumentOverflow(page);
       await assertMonitorLayout(page, viewport);
@@ -164,7 +171,7 @@ async function assertWorkspaceTabsAreReachable(page, viewport) {
     firstHeight: element.querySelector("button").getBoundingClientRect().height,
   }));
   expect(initial.overflowX).toBe("auto");
-  expect(initial.position).toBe(viewport.width <= 820 ? "static" : "sticky");
+  expect(initial.position).toBe("sticky");
   expect(initial.firstHeight).toBeGreaterThanOrEqual(viewport.width <= 820 ? 44 : 30);
   expectWithinViewport(initial.rect, viewport.width);
   if (viewport.width > 820) {
@@ -286,6 +293,42 @@ async function assertResearchLayout(page, viewport) {
   expect(layout.workspace.width).toBeCloseTo(layout.query.width, 0);
 }
 
+async function assertReviewWorkspaceLayout(page, viewport) {
+  await assertNoDocumentOverflow(page);
+  const replayTab = page.locator("#workspace-tab-replay");
+  const paperTab = page.locator("#workspace-tab-paper");
+  await expect(replayTab).toBeVisible();
+  await expect(paperTab).toBeVisible();
+  await expect(page.locator(".workspace-tabs button:visible")).toHaveCount(4);
+
+  const dashboard = await page.locator(".review-dashboard-actions").evaluate((actions) => ({
+    columns: window.__layoutGridColumnCount(actions),
+    rect: window.__layoutRect(actions),
+    button: window.__layoutRect(actions.querySelector("button")),
+  }));
+  expectWithinViewport(dashboard.rect, viewport.width);
+  expect(dashboard.columns).toBe(viewport.width >= 600 && viewport.width <= 1180 ? 2 : viewport.width < 600 ? 1 : 5);
+  expect(dashboard.button.height).toBeGreaterThanOrEqual(viewport.width <= 820 ? 44 : 36);
+
+  await paperTab.click();
+  await expect(page.locator("#workspace-panel-paper")).toBeVisible();
+  const paper = await page.locator(".paper-account-actions").evaluate((actions) => ({
+    columns: window.__layoutGridColumnCount(actions),
+    rect: window.__layoutRect(actions),
+    controls: Array.from(actions.querySelectorAll("input, select, button")).map((control) => ({
+      rect: window.__layoutRect(control),
+      scrollWidth: control.scrollWidth,
+      clientWidth: control.clientWidth,
+    })),
+  }));
+  expectWithinViewport(paper.rect, viewport.width);
+  expect(paper.columns).toBe(viewport.width >= 600 && viewport.width <= 1180 ? 2 : viewport.width < 600 ? 1 : 4);
+  for (const control of paper.controls) {
+    expectWithinViewport(control.rect, viewport.width);
+    expect(control.scrollWidth).toBeLessThanOrEqual(control.clientWidth + 1);
+  }
+}
+
 async function assertMarketPrimaryLayout(page, viewport) {
   const layout = await page.evaluate(() => {
     const rect = (selector) => window.__layoutRect(document.querySelector(selector));
@@ -307,6 +350,8 @@ async function assertMarketPrimaryLayout(page, viewport) {
   expect(layout.workbenchHidden).toBe(true);
   expect(layout.controlsHidden).toBe(true);
   expect(layout.sideHidden).toBe(true);
+  await expect(page.locator(".topbar-status")).toBeHidden();
+  await expect(page.locator("#sourceLine")).toBeHidden();
   expectWithinViewport(layout.workspace, layout.viewportWidth);
   expect(layout.display).toBe(viewport.layout === "split" ? "grid" : "flex");
 }
@@ -323,6 +368,7 @@ async function assertMonitorLayout(page, viewport) {
       viewportWidth: document.documentElement.clientWidth,
       controls: rect(".control-panel"),
       side: rect(".side-column"),
+      controlsDisplay: getComputedStyle(controls).display,
       queryHidden: document.querySelector(".query-panel").hidden,
       workspaceHidden: document.querySelector(".workspace").hidden,
       controlColumns: window.__layoutGridColumnCount(controls),
@@ -333,22 +379,24 @@ async function assertMonitorLayout(page, viewport) {
   expect(layout.primaryView).toBe("monitor");
   expect(layout.queryHidden).toBe(true);
   expect(layout.workspaceHidden).toBe(true);
-  expectWithinViewport(layout.controls, layout.viewportWidth);
+  await expect(page.locator(".topbar-status")).toBeHidden();
+  await expect(page.locator("#sourceLine")).toBeHidden();
   expectWithinViewport(layout.side, layout.viewportWidth);
-  expect(layout.controlColumns).toBe(viewport.layout === "split" ? 2 : 1);
   expect(layout.sideColumns).toBe(viewport.sideColumns);
 
   if (viewport.layout === "split") {
+    expectWithinViewport(layout.controls, layout.viewportWidth);
     expect(layout.display).toBe("grid");
+    expect(layout.controlColumns).toBe(2);
     expect(layout.controls.right).toBeLessThanOrEqual(layout.side.left - 17);
     expect(layout.controls.top).toBeCloseTo(layout.side.top, 0);
     return;
   }
 
   expect(layout.display).toBe("flex");
-  expect(layout.controls.bottom).toBeLessThanOrEqual(layout.side.top - 17);
-  expect(layout.side.left).toBeCloseTo(layout.controls.left, 0);
-  expect(layout.side.width).toBeCloseTo(layout.controls.width, 0);
+  expect(layout.controlsDisplay).toBe("contents");
+  expect(layout.controlColumns).toBe(0);
+  return;
 }
 
 async function assertMarketScanLayout(page, viewport) {
@@ -357,8 +405,21 @@ async function assertMarketScanLayout(page, viewport) {
     const tableWrap = panel.querySelector("#marketScanTableWrap");
     const table = panel.querySelector(".market-scan-table");
     const firstRow = panel.querySelector("#marketScanRows tr.market-scan-result-row");
+    const rankCell = firstRow.querySelector("td:first-child");
+    const stockActions = firstRow.querySelector(".market-scan-stock-actions");
+    const stockMetaRow = firstRow.querySelector(".market-scan-stock-meta-row");
+    const stockActionButtons = Array.from(stockActions.querySelectorAll("button"));
     const actions = panel.querySelector(".market-scan-actions");
     const start = panel.querySelector("#marketScanStart");
+    const strategyLab = panel.querySelector("#strategyLab");
+    const filterPanel = panel.querySelector("#marketScanFilterPanel");
+    const progress = panel.querySelector("#marketScanProgress");
+    const history = panel.querySelector("#marketScanHistory");
+    const presets = panel.querySelector("#discoveryPresetControls");
+    const filtersBeforeTable = Boolean(
+      filterPanel.compareDocumentPosition(tableWrap)
+        & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
     return {
       panel: window.__layoutRect(panel),
       heading: rect(".market-scan-heading"),
@@ -372,6 +433,14 @@ async function assertMarketScanLayout(page, viewport) {
       presetColumns: window.__layoutGridColumnCount(panel.querySelector("#discoveryPresetControls")),
       filterColumns: window.__layoutGridColumnCount(panel.querySelector("#marketScanFilters")),
       rowColumns: window.__layoutGridColumnCount(firstRow),
+      firstRowRect: window.__layoutRect(firstRow),
+      rankPosition: getComputedStyle(rankCell).position,
+      rankZIndex: Number.parseInt(getComputedStyle(rankCell).zIndex, 10) || 0,
+      rankRect: window.__layoutRect(rankCell),
+      stockActionsDisplay: getComputedStyle(stockActions).display,
+      stockActionColumns: window.__layoutGridColumnCount(stockActions),
+      stockActionRects: stockActionButtons.map((button) => window.__layoutRect(button)),
+      stockMetaRowRect: window.__layoutRect(stockMetaRow),
       tableDisplay: getComputedStyle(table).display,
       tableScrollable: tableWrap.scrollWidth > tableWrap.clientWidth + 1,
       tableClientWidth: tableWrap.clientWidth,
@@ -381,6 +450,14 @@ async function assertMarketScanLayout(page, viewport) {
       tableOverflowY: getComputedStyle(tableWrap).overflowY,
       actionRect: window.__layoutRect(actions),
       startRect: window.__layoutRect(start),
+      filtersBeforeTable,
+      strategyBeforeTable: Boolean(
+        strategyLab.compareDocumentPosition(tableWrap) & Node.DOCUMENT_POSITION_FOLLOWING
+      ),
+      strategyOpen: strategyLab.open,
+      progressBeforeTable: Boolean(progress.compareDocumentPosition(tableWrap) & Node.DOCUMENT_POSITION_FOLLOWING),
+      presetsBeforeTable: Boolean(presets.compareDocumentPosition(tableWrap) & Node.DOCUMENT_POSITION_FOLLOWING),
+      historyHidden: getComputedStyle(history).display === "none",
     };
   });
 
@@ -403,6 +480,16 @@ async function assertMarketScanLayout(page, viewport) {
   expect(metrics.startRect.width).toBeGreaterThan(0);
   expect(metrics.startRect.left).toBeGreaterThanOrEqual(metrics.actionRect.left - 1);
   expect(metrics.startRect.right).toBeLessThanOrEqual(metrics.actionRect.right + 1);
+  expect(metrics.filtersBeforeTable).toBe(true);
+  expect(metrics.strategyBeforeTable).toBe(true);
+  expect(metrics.strategyOpen).toBe(false);
+  expect(metrics.progressBeforeTable).toBe(true);
+  expect(metrics.presetsBeforeTable).toBe(true);
+  expect(metrics.historyHidden).toBe(true);
+  expect(metrics.stockActionRects).toHaveLength(2);
+  expect(metrics.stockActionRects[0].top).toBeCloseTo(metrics.stockActionRects[1].top, 0);
+  expect(metrics.stockActionRects[0].top).toBeGreaterThanOrEqual(metrics.stockMetaRowRect.top - 1);
+  expect(metrics.stockActionRects[0].bottom).toBeLessThanOrEqual(metrics.stockMetaRowRect.bottom + 1);
 
   if (viewport.width <= 820) {
     expect(metrics.tableDisplay).toBe("block");
@@ -413,9 +500,17 @@ async function assertMarketScanLayout(page, viewport) {
     expect(metrics.tableMaxHeight).toBeGreaterThan(0);
     expect(metrics.tableMaxHeight).toBeLessThanOrEqual(viewport.height * 0.72 + 1);
     expect(metrics.tableClientHeight).toBeLessThanOrEqual(metrics.tableMaxHeight + 1);
+    expect(metrics.rankPosition).toBe("absolute");
+    expect(metrics.rankZIndex).toBeGreaterThanOrEqual(1);
+    expect(metrics.rankRect.top).toBeGreaterThanOrEqual(metrics.firstRowRect.top);
+    expect(metrics.rankRect.right).toBeLessThanOrEqual(metrics.firstRowRect.right);
+    expect(metrics.stockActionColumns).toBe(2);
+    if (viewport.width >= 600) expect(metrics.firstRowRect.height).toBeLessThanOrEqual(300);
   } else {
     expect(metrics.tableDisplay).toBe("table");
     expect(metrics.tableScrollable).toBe(viewport.scanScrollable);
+    expect(metrics.stockActionsDisplay).toBe("flex");
+    expect(metrics.firstRowRect.height).toBeLessThanOrEqual(120);
   }
 }
 

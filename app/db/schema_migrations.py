@@ -112,9 +112,11 @@ AUDIT_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
         "updated_at",
         "started_at",
         "finished_at",
+        "quote_capture_started_at",
+        "quote_capture_finished_at",
         "cancel_requested_at",
     ),
-    "market_scan_result": ("updated_at",),
+    "market_scan_result": ("quote_observed_at", "updated_at"),
     "monitor_event": ("created_at", "last_seen_at"),
     "watchlist": ("created_at", "updated_at", "last_viewed_at"),
     "advice_history": ("created_at", "updated_at"),
@@ -187,6 +189,7 @@ COMPAT_COLUMNS = {
     "market_scan_result": {
         "metadata_source": "TEXT",
         "raw_score": "REAL CHECK (raw_score IS NULL OR raw_score BETWEEN 0 AND 100)",
+        "quote_observed_at": "TEXT",
         "quote_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (quote_fallback_used IN (0, 1))",
         "kline_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (kline_fallback_used IN (0, 1))",
         "metadata_degraded": "INTEGER NOT NULL DEFAULT 0 CHECK (metadata_degraded IN (0, 1))",
@@ -197,6 +200,12 @@ COMPAT_COLUMNS = {
         "stock_pool_source": "TEXT",
         "mode": "TEXT NOT NULL DEFAULT 'official' CHECK (mode IN ('official', 'intraday'))",
         "quote_date": "TEXT",
+        "quote_capture_started_at": "TEXT",
+        "quote_capture_finished_at": "TEXT",
+        "quote_capture_duration_ms": (
+            "INTEGER CHECK (quote_capture_duration_ms IS NULL OR quote_capture_duration_ms >= 0)"
+        ),
+        "quote_capture_count": "INTEGER NOT NULL DEFAULT 0 CHECK (quote_capture_count >= 0)",
         "current_stage": ("TEXT CHECK (current_stage IS NULL OR current_stage IN "
                           "('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication'))"),
         "stage_started_at": "TEXT",

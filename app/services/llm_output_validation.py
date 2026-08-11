@@ -189,6 +189,19 @@ def _validated_explanation(
     return explanation
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise LlmOutputValidationError(f"JSON字段重复：{key}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_json(token: str) -> Any:
+    raise LlmOutputValidationError(f"JSON包含非法数值：{token}")
+
+
 def _decode_structured_output(raw_answer: Any) -> dict[str, Any]:
     if isinstance(raw_answer, dict):
         return raw_answer
@@ -201,22 +214,11 @@ def _decode_structured_output(raw_answer: Any) -> dict[str, Any]:
     if fenced:
         text = fenced.group(1)
 
-    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise LlmOutputValidationError(f"JSON字段重复：{key}")
-            result[key] = value
-        return result
-
-    def reject_non_finite(token: str) -> Any:
-        raise LlmOutputValidationError(f"JSON包含非法数值：{token}")
-
     try:
         value = json.loads(
             text,
-            object_pairs_hook=reject_duplicate_keys,
-            parse_constant=reject_non_finite,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_non_finite_json,
         )
     except LlmOutputValidationError:
         raise
