@@ -7,8 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
-LOWER_LAYER_DIRS = ("db", "repositories", "models", "utils")
+LOWER_LAYER_DIRS = ("artifacts", "db", "repositories", "models", "utils")
 FORBIDDEN_LOWER_PREFIXES = ("app.api", "app.services", "app.workflows")
+MAX_CROSS_MODULE_PRIVATE_IMPORTS = 298
 
 
 def _python_modules() -> dict[str, Path]:
@@ -23,6 +24,35 @@ def _python_modules() -> dict[str, Path]:
 
 def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def _application_module_aliases(tree: ast.Module) -> dict[str, str]:
+    known_modules = set(_python_modules())
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name in known_modules and imported.asname is not None:
+                    aliases[imported.asname] = imported.name
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            for imported in node.names:
+                module = f"{node.module}.{imported.name}"
+                if module in known_modules:
+                    aliases[imported.asname or imported.name] = module
+    return aliases
+
+
+def _private_module_attribute_imports(path: Path, tree: ast.Module) -> list[str]:
+    aliases = _application_module_aliases(tree)
+    return [
+        f"{path.relative_to(ROOT)}:{node.lineno} imports {aliases[node.value.id]}.{node.attr}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in aliases
+        and node.attr.startswith("_")
+        and not node.attr.startswith("__")
+    ]
 
 
 def _imported_modules(path: Path, module: str, known_modules: set[str]) -> set[str]:
@@ -128,3 +158,24 @@ def test_direct_wall_clock_access_is_isolated_to_clock_adapter() -> None:
                 offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
 
     assert offenders == []
+
+
+def test_cross_module_private_imports_cannot_increase() -> None:
+    offenders: list[str] = []
+    for path in sorted(APP.rglob("*.py")):
+        tree = _tree(path)
+        offenders.extend(
+            f"{path.relative_to(ROOT)}:{node.lineno} imports {node.module}.{alias.name}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("app.")
+            for alias in node.names
+            if alias.name.startswith("_") and not alias.name.startswith("__")
+        )
+        offenders.extend(_private_module_attribute_imports(path, tree))
+
+    assert len(offenders) <= MAX_CROSS_MODULE_PRIVATE_IMPORTS, (
+        "cross-module private imports increased; publish a contract instead:\n"
+        + "\n".join(offenders[MAX_CROSS_MODULE_PRIVATE_IMPORTS:])
+    )

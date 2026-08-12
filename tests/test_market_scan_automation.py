@@ -228,13 +228,24 @@ def test_preflight_failure_persists_diagnostics_without_creating_scan(
     _enable_automation_settings(hub)
     scanner = _scanner(hub)
     task_runs_for_name = hub.cache.task_runs_for_name
+    latest_full_run = hub.cache.latest_full_market_scan_run
     named_lookups: list[tuple[str, int]] = []
+    latest_modes: list[str | None] = []
 
     def tracked_task_runs_for_name(task_name: str, limit: int = 20):
         named_lookups.append((task_name, limit))
         return task_runs_for_name(task_name, limit)
 
+    def tracked_latest_full_market_scan_run(*, mode=None):
+        latest_modes.append(mode)
+        return latest_full_run(mode=mode)
+
     monkeypatch.setattr(hub.cache, "task_runs_for_name", tracked_task_runs_for_name)
+    monkeypatch.setattr(
+        hub.cache,
+        "latest_full_market_scan_run",
+        tracked_latest_full_market_scan_run,
+    )
 
     async def scenario():
         response = await scanner.scheduled_tick(SCAN_AS_OF)
@@ -253,6 +264,7 @@ def test_preflight_failure_persists_diagnostics_without_creating_scan(
     assert scanner.latest_run() is None
     assert len(task_runs) == 1
     assert [limit for _task_name, limit in named_lookups] == [4, 4]
+    assert latest_modes == ["official", "official", "official"]
     assert all(task_name.startswith("full_market_scan_preflight|") for task_name, _limit in named_lookups)
     assert task_runs[0].status == "failed"
     assert task_runs[0].task_name.startswith("full_market_scan_preflight|")

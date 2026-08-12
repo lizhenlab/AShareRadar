@@ -9,13 +9,24 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-import hashlib
-import json
 import math
-import os
 from pathlib import Path
-import tempfile
 from typing import cast
+
+from app.artifacts.io import (
+    ArtifactCanonicalJsonError,
+    ArtifactContentConflictError,
+    ArtifactDuplicateKeyError,
+    ArtifactIOError,
+    ArtifactNonFiniteConstantError,
+    ArtifactPublishConflictError,
+    canonical_json_text,
+    content_addressed_filename,
+    decode_json_bytes,
+    exclusive_atomic_publish,
+    read_regular_file,
+    sha256_hex,
+)
 
 
 FUTURE_RANGE_ARTIFACT_SCHEMA_VERSION = "market-scan-future-range-artifact-v1"
@@ -23,6 +34,7 @@ FUTURE_RANGE_REPORT_CONTRACT_VERSION = "market-scan-future-range-report-v1"
 FUTURE_RANGE_ARTIFACT_DIGEST_ALGORITHM = "sha256"
 FUTURE_RANGE_ARTIFACT_DIGEST_SCOPE = "payload"
 FUTURE_RANGE_ARTIFACT_INTEGRITY_NOTICE = "integrity_digest_not_a_signature"
+FUTURE_RANGE_ARTIFACT_MAX_BYTES = 128 * 1024 * 1024
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "generated_at", "payload", "integrity"})
 _INTEGRITY_KEYS = frozenset({"algorithm", "scope", "integrity_digest", "notice"})
@@ -52,20 +64,14 @@ def canonical_future_range_artifact_json(value: object) -> str:
     """Return canonical, finite JSON suitable for hashing and persistence."""
     normalized = _json_value(value, "JSON")
     try:
-        return json.dumps(
-            normalized,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        return canonical_json_text(normalized)
+    except ArtifactCanonicalJsonError as exc:  # pragma: no cover - defensive
         raise FutureRangeArtifactError("未来区间 artifact 不是有限 JSON") from exc
 
 
 def future_range_payload_integrity_digest(payload: Mapping[str, object]) -> str:
     canonical = canonical_future_range_artifact_json(payload)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return sha256_hex(canonical)
 
 
 def build_future_range_artifact(
@@ -131,40 +137,26 @@ def write_future_range_artifact(
     database_path: str | Path,
 ) -> Path:
     """Atomically publish immutable content without replacing the database."""
-    target = Path(path).expanduser().resolve()
+    target = Path(path).expanduser().absolute()
     database = Path(database_path).expanduser().resolve()
     _reject_database_target(target, database)
     verified = verify_future_range_artifact(artifact)
     encoded = canonical_future_range_artifact_json(verified).encode("utf-8")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _reject_database_target(target, database)
-        if target.exists():
-            if target.read_bytes() == encoded:
-                return target
-            raise FutureRangeArtifactError("未来区间 artifact 已存在且内容不同，拒绝覆盖")
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb",
-                dir=target.parent,
-                prefix=f".{target.name}.",
-                delete=False,
-            ) as stream:
-                temporary = Path(stream.name)
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            _reject_database_target(target, database)
-            os.link(temporary, target)
-            _fsync_directory(target.parent)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        exclusive_atomic_publish(
+            target,
+            encoded,
+            max_bytes=FUTURE_RANGE_ARTIFACT_MAX_BYTES,
+            before_publish=lambda: _reject_database_target(target, database),
+        )
+    except ArtifactContentConflictError as exc:
+        raise FutureRangeArtifactError("未来区间 artifact 已存在且内容不同，拒绝覆盖") from exc
+    except ArtifactPublishConflictError as exc:
+        raise FutureRangeArtifactError("未来区间 artifact 并发发布冲突") from exc
+    except ArtifactIOError as exc:
+        raise FutureRangeArtifactError(f"未来区间 artifact 写入失败：{target}") from exc
     except FutureRangeArtifactError:
         raise
-    except FileExistsError as exc:
-        raise FutureRangeArtifactError("未来区间 artifact 并发发布冲突") from exc
     except OSError as exc:
         raise FutureRangeArtifactError(f"未来区间 artifact 写入失败：{target}") from exc
     return target
@@ -172,16 +164,20 @@ def write_future_range_artifact(
 
 def load_future_range_artifact(path: str | Path) -> dict[str, object]:
     """Read and strictly verify an artifact, including duplicate-key rejection."""
-    source = Path(path).expanduser().resolve()
+    source = Path(path).expanduser().absolute()
     try:
-        decoded = json.loads(
-            source.read_text(encoding="utf-8"),
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
+        decoded = decode_json_bytes(
+            read_regular_file(source, max_bytes=FUTURE_RANGE_ARTIFACT_MAX_BYTES)
         )
-    except FutureRangeArtifactError:
-        raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except ArtifactDuplicateKeyError as exc:
+        raise FutureRangeArtifactError(
+            f"未来区间 artifact 包含重复 JSON key：{exc.key}"
+        ) from exc
+    except ArtifactNonFiniteConstantError as exc:
+        raise FutureRangeArtifactError(
+            f"未来区间 artifact 包含非法常量：{exc.constant}"
+        ) from exc
+    except ArtifactIOError as exc:
         raise FutureRangeArtifactError(f"未来区间 artifact 读取失败：{source}") from exc
     if not isinstance(decoded, Mapping):
         raise FutureRangeArtifactError("未来区间 artifact 顶层必须是 JSON object")
@@ -198,7 +194,12 @@ def future_range_artifact_filename(run_id: int, artifact: Mapping[str, object]) 
     if run.get("run_id") != run_id:
         raise FutureRangeArtifactError("文件 run_id 与 payload.run_id 不一致")
     integrity = cast(Mapping[str, object], verified["integrity"])
-    return f"market-scan-future-range-run-{run_id}-{integrity['integrity_digest']}.json"
+    return content_addressed_filename(
+        "market-scan-future-range-run",
+        (run_id,),
+        cast(str, integrity["integrity_digest"]),
+        ".json",
+    )
 
 
 def _validate_payload(payload: Mapping[str, object], *, generated_at: str) -> dict[str, object]:
@@ -468,8 +469,10 @@ def _validate_aggregate_contracts(payload: Mapping[str, object]) -> None:
 
 
 def _target_bar_digest(bar: Mapping[str, object]) -> str:
-    encoded = json.dumps(bar, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    try:
+        return sha256_hex(canonical_json_text(bar))
+    except ArtifactCanonicalJsonError as exc:  # payload validation should already reject this
+        raise FutureRangeArtifactError("target bar 不是有限 JSON") from exc
 
 
 def _finite_number(value: object, label: str) -> float:
@@ -524,36 +527,15 @@ def _require_exact_keys(value: Mapping[str, object], keys: frozenset[str], label
         )
 
 
-def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    output: dict[str, object] = {}
-    for key, value in pairs:
-        if key in output:
-            raise FutureRangeArtifactError(f"未来区间 artifact 包含重复 JSON key：{key}")
-        output[key] = value
-    return output
-
-
-def _reject_nonfinite_json_constant(value: str) -> None:
-    raise FutureRangeArtifactError(f"未来区间 artifact 包含非法常量：{value}")
-
-
 def _reject_database_target(target: Path, database: Path) -> None:
     if target == database:
         raise FutureRangeArtifactError("artifact 路径不能覆盖 SQLite 数据库")
     if target.exists() and database.exists():
         try:
-            if os.path.samefile(target, database):
+            if target.samefile(database):
                 raise FutureRangeArtifactError("artifact 路径不能硬链接到 SQLite 数据库")
         except OSError as exc:
             raise FutureRangeArtifactError("无法验证 artifact 与 SQLite 的文件身份") from exc
-
-
-def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 __all__ = [

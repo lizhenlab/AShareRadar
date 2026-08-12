@@ -26,6 +26,7 @@ from tests.factories import make_kline, make_quote, make_stock_info
 
 AS_OF = datetime(2026, 7, 17, 16, 30)
 DATA_DATE = date(2026, 7, 17)
+PREOPEN_AS_OF = datetime(2026, 7, 20, 8, 0)
 
 
 def test_market_scan_score_is_deterministic_and_keeps_metadata_tags() -> None:
@@ -72,6 +73,90 @@ def test_market_scan_score_is_deterministic_and_keeps_metadata_tags() -> None:
     )
     assert "趋势强度" in (first.reason or "")
     assert "非上涨概率" in (first.reason or "")
+
+
+def test_preopen_score_matches_the_same_completed_official_snapshot() -> None:
+    item = _item()
+    quote = _quote()
+    rows = _rows(DATA_DATE, 80)
+
+    official = score_market_scan_item(
+        item,
+        quote,
+        rows,
+        as_of=AS_OF,
+        completed_cutoff=DATA_DATE,
+        expected_data_date=DATA_DATE,
+        expected_quote_date=DATA_DATE,
+        min_history_rows=60,
+        min_data_quality_score=0,
+        mode="official",
+    )
+    preopen = score_market_scan_item(
+        item,
+        quote,
+        rows,
+        as_of=PREOPEN_AS_OF,
+        completed_cutoff=DATA_DATE,
+        expected_data_date=DATA_DATE,
+        expected_quote_date=DATA_DATE,
+        min_history_rows=60,
+        min_data_quality_score=0,
+        mode="preopen",
+    )
+
+    assert preopen.score == official.score
+    assert preopen.raw_score == official.raw_score
+    assert preopen.data_date == DATA_DATE.isoformat()
+    assert preopen.quote_timestamp == quote.timestamp
+
+
+def test_preopen_score_keeps_quote_and_kline_date_gates_strict() -> None:
+    kwargs = {
+        "as_of": PREOPEN_AS_OF,
+        "completed_cutoff": DATA_DATE,
+        "expected_data_date": DATA_DATE,
+        "expected_quote_date": DATA_DATE,
+        "min_history_rows": 60,
+        "min_data_quality_score": 0,
+        "mode": "preopen",
+    }
+
+    with pytest.raises(MarketScanDataMissing, match="报价日期.*不一致"):
+        score_market_scan_item(
+            _item(),
+            _quote(timestamp="2026-07-16 15:00:00"),
+            _rows(DATA_DATE, 80),
+            **kwargs,
+        )
+
+    with pytest.raises(MarketScanDataMissing, match="早于应有交易日"):
+        score_market_scan_item(
+            _item(),
+            _quote(),
+            _rows(date(2026, 7, 16), 80),
+            **kwargs,
+        )
+
+
+def test_preopen_score_requires_quote_close_to_match_completed_daily_close() -> None:
+    quote = _quote().model_copy(
+        update={"price": 10.7, "change": 0.7, "change_pct": 7.0},
+    )
+
+    with pytest.raises(MarketScanDataMissing, match="盘前复盘报价收盘价与上一完成交易日日K"):
+        score_market_scan_item(
+            _item(),
+            quote,
+            _rows(DATA_DATE, 80),
+            as_of=PREOPEN_AS_OF,
+            completed_cutoff=DATA_DATE,
+            expected_data_date=DATA_DATE,
+            expected_quote_date=DATA_DATE,
+            min_history_rows=60,
+            min_data_quality_score=0,
+            mode="preopen",
+        )
 
 
 def test_market_scan_persists_separate_score_dimensions_and_verifiable_point_in_time_evidence() -> None:

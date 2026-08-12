@@ -7,15 +7,23 @@ signature.  This module never opens or writes the SQLite database.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import hashlib
-import json
 import math
-import os
 from pathlib import Path
 import re
-import tempfile
 from typing import cast
 
+from app.artifacts.io import (
+    ArtifactCanonicalJsonError,
+    ArtifactContentConflictError,
+    ArtifactDuplicateKeyError,
+    ArtifactIOError,
+    ArtifactNonFiniteConstantError,
+    canonical_json_text,
+    decode_json_bytes,
+    exclusive_atomic_publish,
+    read_regular_file,
+    sha256_hex,
+)
 from app.services.market_scan_probability import (
     ProbabilityConfig,
     ProbabilitySample,
@@ -35,6 +43,9 @@ PROBABILITY_ARTIFACT_TARGETS = frozenset(
     {"net_excess_positive", "absolute_net_positive", "net_return_positive"}
 )
 PROBABILITY_ARTIFACT_STATUSES = frozenset({"calibrated_shadow", "insufficient_data"})
+# Existing full-market v1 artifacts are about 192 MiB. Keep a bounded 256 MiB
+# compatibility envelope while still rejecting unexpectedly large local files.
+PROBABILITY_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "generated_at", "payload", "integrity"})
 _LEGACY_PAYLOAD_KEYS = frozenset({"studies", "records"})
@@ -88,9 +99,10 @@ _REQUIRED_RESULT_DETAIL_KEYS = frozenset(
 )
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _REPLAY_STUDY_FIELDS = (
-    "schema_version", "status", "probability", "horizon", "target_definition", "base_rate",
+    "schema_version", "status", "fit_status", "selection_qualified", "selection_qualification",
+    "probability", "horizon", "target_definition", "base_rate",
     "confidence_interval", "model_version", "feature_version", "label_version", "cost_model_version",
-    "generated_at", "input_digest", "contract", "limitations", "split", "counts", "training_cutoff",
+    "label_contract_digest", "label_contract_binding", "generated_at", "input_digest", "contract", "limitations", "split", "counts", "training_cutoff",
     "model", "calibrator", "isotonic_calibrator", "empirical_bayes_baseline", "calibration_metrics",
     "calibration_candidates", "folds", "model_digest", "calibrator_digest", "isotonic_calibrator_digest",
     "baseline_digest", "evidence_digest",
@@ -105,38 +117,26 @@ def canonical_probability_artifact_json(value: object) -> str:
     """Render finite JSON with stable key ordering and no insignificant spaces."""
     normalized = _json_value(value, "JSON")
     try:
-        return json.dumps(
-            normalized,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:  # defensive: _json_value already rejects these cases
+        return canonical_json_text(normalized)
+    except ArtifactCanonicalJsonError as exc:  # defensive: _json_value already rejects these cases
         raise ProbabilityArtifactError("上涨概率 artifact 不是有限 JSON") from exc
 
 
 def _canonical_validated_json(value: object) -> str:
     try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:
+        return canonical_json_text(value)
+    except ArtifactCanonicalJsonError as exc:
         raise ProbabilityArtifactError("上涨概率 artifact 不是有限 JSON") from exc
 
 
 def probability_payload_integrity_digest(payload: Mapping[str, object]) -> str:
     """Return the payload SHA-256 integrity digest, excluding caller-supplied generated_at."""
     canonical = canonical_probability_artifact_json(_digest_payload(payload))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return sha256_hex(canonical)
 
 
 def _validated_payload_integrity_digest(payload: Mapping[str, object]) -> str:
-    return hashlib.sha256(_canonical_validated_json(_digest_payload(payload)).encode("utf-8")).hexdigest()
+    return sha256_hex(_canonical_validated_json(_digest_payload(payload)))
 
 
 def _digest_payload(payload: Mapping[str, object]) -> object:
@@ -496,7 +496,8 @@ def _validate_study_digest_fields(study: Mapping[str, object]) -> None:
     metadata = _required_mapping(study["metadata"], "study.metadata")
     digests = _required_mapping(study["digests"], "study.digests")
     pairs = (
-        ("input_digest", "input"), ("model_digest", "model"),
+        ("input_digest", "input"), ("label_contract_digest", "label_contract"),
+        ("model_digest", "model"),
         ("calibrator_digest", "calibrator"), ("isotonic_calibrator_digest", "isotonic_calibrator"),
         ("baseline_digest", "baseline"), ("evidence_digest", "evidence"),
     )
@@ -558,6 +559,14 @@ def _probability_config_from_metadata(
     baseline = _required_mapping(contract.get("baseline"), "contract.baseline")
     split = _required_mapping(contract.get("split"), "contract.split")
     evaluation = _required_mapping(contract.get("evaluation"), "contract.evaluation")
+    raw_bound_label = cost.get("label_contract")
+    bound_label = dict(raw_bound_label) if isinstance(raw_bound_label, Mapping) else None
+    label_contract = (
+        None
+        if bound_label is None
+        or set(bound_label) == {"label_version", "cost_model_version"}
+        else bound_label
+    )
     model_target = _required_text(label.get("target"), "contract.label.target")
     expected_target = "net_excess_positive" if public_target == "net_excess_positive" else "net_return_positive"
     if model_target != expected_target or metadata.get("horizon") != horizon:
@@ -567,6 +576,7 @@ def _probability_config_from_metadata(
             horizon=horizon,
             target=cast(ProbabilityTarget, model_target),
             cost_model_version=_required_text(cost.get("version"), "contract.cost.version"),
+            label_contract=label_contract,
             minimum_train_sessions=_positive_integer(split.get("minimum_train_sessions"), "minimum_train_sessions"),
             minimum_calibration_sessions=_positive_integer(
                 split.get("minimum_calibration_sessions"), "minimum_calibration_sessions"
@@ -576,6 +586,9 @@ def _probability_config_from_metadata(
                 evaluation.get("minimum_label_coverage"), "minimum_label_coverage"
             ),
             minimum_bin_sessions=_positive_integer(evaluation.get("minimum_bin_sessions"), "minimum_bin_sessions"),
+            minimum_selection_folds=_positive_integer(
+                evaluation.get("minimum_selection_folds", 2), "minimum_selection_folds",
+            ),
             gap_sessions=_positive_integer(split.get("gap_sessions"), "gap_sessions"),
             calibration_bin_count=_positive_integer(evaluation.get("calibration_bin_count"), "calibration_bin_count"),
             minimum_isotonic_calibration_sessions=_positive_integer(
@@ -636,16 +649,24 @@ def write_probability_artifact(
     database_path: str | Path,
 ) -> Path:
     """Atomically write a verified artifact without ever replacing the database."""
-    target = Path(path).expanduser().resolve()
+    target = Path(path).expanduser().absolute()
     database = Path(database_path).expanduser().resolve()
     _reject_database_target(target, database)
     verified = verify_probability_artifact(artifact)
     encoded = _canonical_validated_json(verified).encode("utf-8")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if _existing_artifact_matches(target, encoded):
-            return target
-        _atomic_publish(target, encoded, database)
+        exclusive_atomic_publish(
+            target,
+            encoded,
+            max_bytes=PROBABILITY_ARTIFACT_MAX_BYTES,
+            before_publish=lambda: _reject_database_target(target, database),
+        )
+    except ArtifactContentConflictError as exc:
+        raise ProbabilityArtifactError(
+            f"上涨概率 artifact 已存在且内容不同，拒绝覆盖不可变证据：{target}"
+        ) from exc
+    except ArtifactIOError as exc:
+        raise ProbabilityArtifactError(f"上涨概率 artifact 写入失败：{target}") from exc
     except ProbabilityArtifactError:
         raise
     except OSError as exc:
@@ -655,17 +676,20 @@ def write_probability_artifact(
 
 def load_probability_artifact(path: str | Path) -> dict[str, object]:
     """Load and strictly verify an artifact; malformed input never degrades open."""
-    source = Path(path).expanduser().resolve()
+    source = Path(path).expanduser().absolute()
     try:
-        encoded = source.read_text(encoding="utf-8")
-        decoded = json.loads(
-            encoded,
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
+        decoded = decode_json_bytes(
+            read_regular_file(source, max_bytes=PROBABILITY_ARTIFACT_MAX_BYTES)
         )
-    except ProbabilityArtifactError:
-        raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except ArtifactDuplicateKeyError as exc:
+        raise ProbabilityArtifactError(
+            f"上涨概率 artifact JSON 包含重复 key：{exc.key}"
+        ) from exc
+    except ArtifactNonFiniteConstantError as exc:
+        raise ProbabilityArtifactError(
+            f"上涨概率 artifact JSON 包含非有限常量：{exc.constant}"
+        ) from exc
+    except ArtifactIOError as exc:
         raise ProbabilityArtifactError(f"上涨概率 artifact 读取失败：{source}") from exc
     if not isinstance(decoded, Mapping):
         raise ProbabilityArtifactError("上涨概率 artifact 顶层必须是 JSON object")
@@ -904,6 +928,7 @@ def _validate_study_replay_evidence(study: Mapping[str, object]) -> None:
         raise ProbabilityArtifactError("上涨概率 study input digest 与持久化 evidence 不一致")
     if "evidence" in digests and metadata.get("evidence_digest") != digests["evidence"]:
         raise ProbabilityArtifactError("上涨概率 study evidence digest 不一致")
+    _validate_label_contract_identity(metadata, digests)
     pairs = (
         ("model", "model", "model"),
         ("calibrator", "calibrator", "calibrator"),
@@ -913,6 +938,23 @@ def _validate_study_replay_evidence(study: Mapping[str, object]) -> None:
     for payload_name, digest_name, version_name in pairs:
         _validate_study_component(metadata, digests, versions, payload_name, digest_name, version_name)
     _validate_study_folds(metadata)
+
+
+def _validate_label_contract_identity(
+    metadata: Mapping[str, object], digests: Mapping[str, object],
+) -> None:
+    digest = metadata.get("label_contract_digest")
+    registry_digest = digests.get("label_contract")
+    if digest is None and registry_digest is None:
+        return  # Read-only compatibility for artifacts created before this binding.
+    expected = _required_sha256(digest, "study.metadata.label_contract_digest")
+    if registry_digest != expected:
+        raise ProbabilityArtifactError("上涨概率完整 label contract digest registry 不一致")
+    contract = _required_mapping(metadata.get("contract"), "study.metadata.contract")
+    cost = _required_mapping(contract.get("cost"), "study.metadata.contract.cost")
+    label_contract = _required_mapping(cost.get("label_contract"), "contract.cost.label_contract")
+    if _stable_json_digest(label_contract) != expected or cost.get("label_contract_digest") != expected:
+        raise ProbabilityArtifactError("上涨概率完整 label contract 未绑定到模型契约")
 
 
 def _validate_study_component(
@@ -1233,35 +1275,6 @@ def _validate_integrity(value: object) -> dict[str, object]:
     return integrity
 
 
-def _existing_artifact_matches(target: Path, encoded: bytes) -> bool:
-    if not target.exists():
-        return False
-    try:
-        if target.read_bytes() == encoded:
-            return True
-    except OSError as exc:
-        raise ProbabilityArtifactError(f"上涨概率 artifact 已存在但无法验证：{target}") from exc
-    raise ProbabilityArtifactError(f"上涨概率 artifact 已存在且内容不同，拒绝覆盖不可变证据：{target}")
-
-
-def _atomic_publish(target: Path, encoded: bytes, database: Path) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-        dir=target.parent,
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _reject_database_target(target, database)
-        os.link(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def _reject_database_target(target: Path, database: Path) -> None:
     if target == database:
         raise ProbabilityArtifactError("上涨概率 artifact 输出路径不能是 SQLite 数据库")
@@ -1328,7 +1341,7 @@ def _finite_number_list(value: object, path: str) -> list[float]:
 
 
 def _stable_json_digest(value: object) -> str:
-    return hashlib.sha256(_canonical_validated_json(value).encode("utf-8")).hexdigest()
+    return sha256_hex(_canonical_validated_json(value))
 
 
 def _sigmoid(value: float) -> float:
@@ -1394,16 +1407,3 @@ def _json_value(value: object, path: str) -> object:
             raise ProbabilityArtifactError(f"{path} 的 key 必须是字符串")
         return {cast(str, key): _json_value(item, f"{path}.{key}") for key, item in value.items()}
     raise ProbabilityArtifactError(f"{path} 包含非 JSON 类型：{type(value).__name__}")
-
-
-def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    value: dict[str, object] = {}
-    for key, item in pairs:
-        if key in value:
-            raise ProbabilityArtifactError(f"上涨概率 artifact JSON 包含重复 key：{key}")
-        value[key] = item
-    return value
-
-
-def _reject_nonfinite_json_constant(value: str) -> object:
-    raise ProbabilityArtifactError(f"上涨概率 artifact JSON 包含非有限常量：{value}")

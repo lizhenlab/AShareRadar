@@ -13,6 +13,7 @@ from app.models.market_scan import (
     MarketScanResultItem,
     MarketScanRun,
     MarketScanMarketProgress,
+    MarketScanPublicationDiagnostics,
     MarketScanStage,
     MarketScanStageMetric,
     MarketScanSort,
@@ -78,6 +79,7 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
         eta_seconds=_run_eta(total, processed, elapsed_seconds, throughput),
         message=row["message"],
         last_error=row["last_error"],
+        publication_diagnostics=_publication_diagnostics(row["publication_diagnostics_json"]),
         cancel_requested_at=row["cancel_requested_at"],
     )
 
@@ -145,6 +147,16 @@ def _market_progress(value: object) -> list[MarketScanMarketProgress]:
         except (TypeError, ValueError):
             continue
     return progress
+
+
+def _publication_diagnostics(value: object) -> MarketScanPublicationDiagnostics | None:
+    if value is None or not str(value).strip():
+        return None
+    parsed = _json_value(value, None)
+    try:
+        return MarketScanPublicationDiagnostics.model_validate(parsed)
+    except (TypeError, ValueError):
+        return None
 
 
 def _json_value(value: object, fallback: object) -> object:

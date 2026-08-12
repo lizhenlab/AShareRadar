@@ -10,6 +10,7 @@ import stat
 from threading import RLock
 from typing import Final, Literal, cast
 
+from app.artifacts.io import path_has_only_trusted_aliases
 from app.services.market_scan_future_range_artifact import (
     FUTURE_RANGE_ARTIFACT_SCHEMA_VERSION,
     FutureRangeArtifactError,
@@ -42,7 +43,7 @@ class MarketScanFutureRangeStore:
     """
 
     def __init__(self, directory: Path) -> None:
-        self.directory = directory.expanduser().resolve()
+        self.directory = directory.expanduser().absolute()
         self._lock = RLock()
         self._snapshot: _DirectorySnapshot | None = None
         self._file_cache: dict[Path, tuple[_FileFingerprint, dict[str, object]]] = {}
@@ -280,13 +281,17 @@ def _record_matches_symbol(record: Mapping[str, object], symbol: str) -> bool:
 
 def _directory_snapshot(directory: Path) -> _DirectorySnapshot:
     try:
-        directory_stat = directory.stat()
+        if not path_has_only_trusted_aliases(directory):
+            raise FutureRangeArtifactError(f"未来区间 artifact 路径不是普通目录：{directory}")
+        directory_stat = directory.lstat()
+    except FutureRangeArtifactError:
+        raise
     except FileNotFoundError:
         return None, ()
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise FutureRangeArtifactError(f"未来区间 artifact 目录无法读取：{directory}") from exc
     if not stat.S_ISDIR(directory_stat.st_mode):
-        return None, ()
+        raise FutureRangeArtifactError(f"未来区间 artifact 路径不是普通目录：{directory}")
     identity = (
         directory_stat.st_dev,
         directory_stat.st_ino,

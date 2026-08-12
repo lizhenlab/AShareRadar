@@ -98,7 +98,7 @@ export function marketScanResultRow(item, options = {}) {
     <td data-label="股票"><div class="market-scan-stock"><strong>${escapeHtml(view.name)}</strong><div class="market-scan-stock-meta-row"><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span><div class="market-scan-stock-actions"><button type="button" class="mini-button" data-market-scan-snapshot-target="${escapeHtml(snapshotTarget)}" aria-controls="${escapeHtml(snapshotTarget)}" aria-expanded="false" aria-label="查看扫描快照" title="查看该次扫描保存的证据快照">快照</button><button type="button" class="mini-button" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" data-market-scan-mode="${escapeHtml(run.mode || "")}" data-market-scan-quote-date="${escapeHtml(run.quote_date || "")}" data-market-scan-data-date="${escapeHtml(run.data_date || item.data_date || "")}" aria-label="打开当前个股分析" title="使用当前可用数据打开个股分析，不代表历史扫描快照">分析</button></div></div></div></td>
     <td data-label="上市板块 / 行业"><div class="market-scan-market-industry"><strong class="market-scan-board">${escapeHtml(view.boardLabel)}</strong><span class="market-scan-meta">${escapeHtml(view.industry)}</span></div></td>
     <td data-label="趋势强度" title="生产 v4 的序数趋势状态分，不代表上涨概率"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
-    <td data-label="研究信号"><div class="market-scan-research-signal">${marketScanProbabilityCell(item, options.probabilityHorizon)}${marketScanResearchDimensionCell(item)}</div></td>
+    <td data-label="研究信号"><div class="market-scan-research-signal">${marketScanProbabilityCell(item, options.probabilityHorizon, options.probabilityResearch)}${marketScanResearchDimensionCell(item)}</div></td>
     <td data-label="涨跌幅" class="${escapeHtml(changeClass(view.changePct))}">${escapeHtml(signedPercentage(view.changePct))}</td>
     <td data-label="换手率">${escapeHtml(percentage(view.turnoverRate))}</td>
     <td data-label="成交额">${escapeHtml(formatAmount(view.amount))}</td>
@@ -130,23 +130,18 @@ export function marketScanResultStatusLabel(status) {
 
 function resetResultPresentation(context, run) {
   resetMarketScanProbabilityResearch(context.elements, run?.id);
-  if (!run) {
-    renderResultState(context, "暂无扫描记录");
-  } else if (isActiveMarketScanRun(run)) {
-    const message = run.mode === "intraday"
-      ? "盘中临时扫描进行中，完成后将生成盘中临时榜单。"
-      : "盘后正式扫描进行中，完成后将发布盘后正式榜单。";
-    renderResultState(context, message, "loading");
-  } else if (isPublishedMarketScanRun(run)) {
-    renderResultState(context, `正在读取${marketScanModeLabel(run.mode)}榜单...`, "loading");
-  } else {
-    const message = run.mode === "intraday"
-      ? "该批次未生成盘中临时榜单，可重试问题项或新建扫描。"
-      : "该批次未发布盘后正式榜单，可重试问题项或新建扫描。";
-    renderResultState(context, message, "degraded");
+  if (!run) return renderResultState(context, "暂无扫描记录");
+  if (isActiveMarketScanRun(run)) return renderResultState(context, runResultMessage(run.mode, true), "loading");
+  if (isPublishedMarketScanRun(run)) {
+    return renderResultState(context, `正在读取${marketScanModeLabel(run.mode)}榜单...`, "loading");
   }
+  return renderResultState(context, runResultMessage(run.mode, false), "degraded");
 }
-
+function runResultMessage(mode, active) {
+  const label = marketScanModeLabel(mode);
+  if (active) return mode === "official" ? "盘后正式扫描进行中，完成后将发布盘后正式榜单。" : `${label}扫描进行中，完成后将生成${label}榜单。`;
+  return mode === "official" ? "该批次未发布盘后正式榜单，可重试问题项或新建扫描。" : `该批次未生成${label}榜单，可重试问题项或新建扫描。`;
+}
 function renderRun(context, run, overrideMessage = "") {
   renderMarketScanMessageSummary(context.root, run);
   if (!run) {
@@ -182,7 +177,10 @@ function renderPopulatedRun(context, run, overrideMessage) {
   const { elements } = context;
   const progress = clampPercentage(run.progress_pct);
   const statusLabel = marketScanRunStatusLabel(run.status);
-  const detail = marketScanHeadlineMessage(overrideMessage || run.message || `${statusLabel} · 日K截止日 ${run.data_date || "--"}`);
+  const detail = marketScanHeadlineMessage(
+    overrideMessage || run.message || `${statusLabel} · 日K截止日 ${run.data_date || "--"}`,
+    overrideMessage ? null : run.publication_diagnostics,
+  );
   const headline = modeAwareRunMessage(run, detail);
   renderHeadline(context, headline, run.status === "degraded" ? "degraded" : run.status === "failed" ? "error" : "");
   const progressText = `${integer(run.processed_count)}/${integer(run.total_count)} · ${formatNumber(progress, 1)}%`;
@@ -528,6 +526,7 @@ function marketScanResultDetail(item) {
 }
 
 function marketScanElements(root) {
+  const modePreopen = requiredElement(root, "marketScanModePreopen");
   const modeIntraday = requiredElement(root, "marketScanModeIntraday");
   const modeOfficial = requiredElement(root, "marketScanModeOfficial");
   return {
@@ -535,9 +534,8 @@ function marketScanElements(root) {
     headline: requiredElement(root, "marketScanHeadline"),
     start: requiredElement(root, "marketScanStart"),
     modeControl: requiredElement(root, "marketScanModeControl"),
-    modeIntraday,
-    modeOfficial,
-    modeInputs: [modeIntraday, modeOfficial],
+    modePreopen, modeIntraday, modeOfficial,
+    modeInputs: [modePreopen, modeIntraday, modeOfficial],
     cancel: requiredElement(root, "marketScanCancel"),
     retry: requiredElement(root, "marketScanRetry"),
     refreshTop100: requiredElement(root, "marketScanRefreshTop100"),
@@ -592,23 +590,26 @@ function initializeModeSelection(elements, now) {
 }
 
 function setModeSelection(elements, mode) {
+  elements.modePreopen.checked = mode === "preopen";
   elements.modeIntraday.checked = mode === "intraday";
   elements.modeOfficial.checked = mode === "official";
 }
 
 function selectedMarketScanMode(elements) {
+  if (elements.modePreopen.checked) return "preopen";
   return elements.modeIntraday.checked ? "intraday" : "official";
 }
 
 function modeAwareRunMessage(run, message) {
   const value = String(message || "").trim();
-  if (run?.mode !== "intraday") return value;
+  if (!run || run.mode === "official") return value;
+  const modeLabel = marketScanModeLabel(run.mode);
   const safe = value
-    .replaceAll("盘后正式", "盘中临时")
-    .replaceAll("正式榜单", "盘中临时榜单")
-    .replaceAll("稳定榜单", "盘中临时榜单")
-    .replaceAll("正式扫描", "盘中临时扫描");
-  return safe.includes("盘中临时") ? safe : `盘中临时 · ${safe}`;
+    .replaceAll("盘后正式", modeLabel)
+    .replaceAll("正式榜单", `${modeLabel}榜单`)
+    .replaceAll("稳定榜单", `${modeLabel}榜单`)
+    .replaceAll("正式扫描", `${modeLabel}扫描`);
+  return safe.includes(modeLabel) ? safe : `${modeLabel} · ${safe}`;
 }
 
 function requiredElement(root, id) {

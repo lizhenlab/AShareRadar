@@ -17,7 +17,8 @@ def test_global_market_scan_progress_is_wired_into_the_workspace() -> None:
     assert 'id="marketScanGlobalCancel"' in html
     assert '<fieldset class="market-scan-mode-control" id="marketScanModeControl">' in html
     assert '<legend>浏览和新建榜单模式</legend>' in html
-    assert html.count('name="marketScanMode"') == 2
+    assert html.count('name="marketScanMode"') == 3
+    assert 'id="marketScanModePreopen"' in html
     assert 'class="market-scan-kicker"' in html
     for board in ("上海A股", "科创板", "深圳A股", "创业板", "北交所"):
         assert f"<span>{board}</span>" in html
@@ -94,6 +95,11 @@ def test_market_scan_layout_freezes_desktop_headers_and_exposes_mobile_equivalen
     assert "scrollbar-gutter: stable" in mobile
     assert ".market-scan-mode-options span" in mobile
     assert re.search(
+        r"\.market-scan-mode-options\s+span\s*\{[^}]*min-height:\s*44px",
+        styles,
+        re.DOTALL,
+    )
+    assert re.search(
         r"\.market-scan-mode-options\s+input:focus-visible\s*\+\s*span\s*\{[^}]*outline:",
         styles,
         re.DOTALL,
@@ -101,6 +107,26 @@ def test_market_scan_layout_freezes_desktop_headers_and_exposes_mobile_equivalen
     compact = styles.split("@media (max-width: 480px)", 1)[1]
     assert ".market-scan-mode-control" in compact
     assert "grid-column: 1 / -1" in compact
+
+
+def test_future_range_research_styles_have_one_explicit_owner() -> None:
+    static_dir = ROOT / "static"
+    css_dir = static_dir / "css"
+    research_path = css_dir / "market-scan-research.css"
+    research_styles = research_path.read_text(encoding="utf-8")
+    owners = [
+        path.relative_to(static_dir).as_posix()
+        for path in sorted(static_dir.rglob("*.css"))
+        if ".market-scan-future-range" in path.read_text(encoding="utf-8")
+    ]
+
+    assert owners == ["css/market-scan-research.css"]
+    assert len(research_styles.splitlines()) >= 300
+    assert research_styles.startswith(
+        "/* Run-bound future-range research stays independent from the production leaderboard. */"
+    )
+    for breakpoint in ("960px", "820px", "480px"):
+        assert f"@media (max-width: {breakpoint})" in research_styles
 
 
 def test_layout_optimization_keeps_dense_scan_rows_readable_across_breakpoints() -> None:
@@ -126,7 +152,16 @@ def test_layout_optimization_keeps_dense_scan_rows_readable_across_breakpoints()
 
     tablet = styles.split("@media (min-width: 600px) and (max-width: 820px)", 1)[1]
     assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in tablet
-    assert "td:nth-child(8)" in tablet
+    assert re.search(
+        r"td:nth-child\(5\)\s*\{[^}]*grid-column:\s*2\s*/\s*-1",
+        tablet,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"td:nth-child\(8\),\s*\.market-scan-table[^{}]*td:nth-child\(9\)\s*\{[^}]*grid-column:\s*auto",
+        tablet,
+        re.DOTALL,
+    )
 
     assert ".query-panel .panel-title > span" in styles
     assert "white-space: nowrap" in styles

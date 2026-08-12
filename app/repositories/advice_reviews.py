@@ -285,7 +285,10 @@ class AdviceReviewRepository(SQLiteRepository):
             snapshot = _required_advice_snapshot(conn, payload.advice_id)
             _validate_snapshot_binding(snapshot, normalized_symbol, payload)
             cursor = _insert_plan(conn, _plan_insert_params(snapshot, payload, timestamp))
-            row = _plan_row(conn, int(cursor.lastrowid))
+            plan_id = cursor.lastrowid
+            if plan_id is None:
+                raise RuntimeError("研究计划创建失败")
+            row = _plan_row(conn, int(plan_id))
         return _required_plan_from_row(row, "研究计划创建失败")
 
     def plan(self, plan_id: int) -> AdviceReviewPlan | None:
@@ -570,7 +573,10 @@ def _insert_plan(conn: sqlite3.Connection, params: dict[str, object]) -> sqlite3
     try:
         return conn.execute(_PLAN_INSERT_SQL, params)
     except sqlite3.IntegrityError as exc:
-        advice_id = int(params["advice_id"])
+        advice_id_value = params["advice_id"]
+        if isinstance(advice_id_value, bool) or not isinstance(advice_id_value, int):
+            raise RuntimeError("研究计划 advice_id 契约无效") from exc
+        advice_id = advice_id_value
         if _plan_row_by_advice(conn, advice_id) is not None:
             raise ValueError("该 advice snapshot 已存在研究计划") from exc
         raise
@@ -976,6 +982,8 @@ def _evaluation_upsert_sql() -> str:
 
 
 def _positive_finite_float(value: object, message: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, str | bytes | bytearray | int | float):
+        raise ValueError(message)
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
@@ -999,12 +1007,16 @@ def _strict_iso_date(value: object) -> str:
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
+    if isinstance(value, bool) or not isinstance(value, str | bytes | bytearray | int | float):
+        return None
     parsed = float(value)
     return parsed if math.isfinite(parsed) else None
 
 
 def _optional_int(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
+        return None
+    if not isinstance(value, str | bytes | bytearray | int | float):
         return None
     try:
         parsed = int(value)
@@ -1014,6 +1026,8 @@ def _optional_int(value: object) -> int | None:
 
 
 def _evidence_refs_json(values: object) -> str:
+    if not isinstance(values, list | tuple):
+        raise ValueError("研究证据引用必须是列表")
     serialized = [item.model_dump(mode="json") if isinstance(item, AdviceEvidenceRef) else item for item in list(values)]
     return json.dumps(serialized, ensure_ascii=False, separators=(",", ":"))
 

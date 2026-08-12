@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 import app.services.market_scan_probability as probability_module
+import app.services.market_scan_probability_metrics as probability_metrics
 import app.services.market_scan_probability_research as probability_research_module
 import app.services.market_scan_probability_store as probability_store_module
 from app.services.market_scan_probability import (
@@ -25,6 +26,7 @@ from app.services.market_scan_probability import (
     fit_empirical_bayes_baseline,
     fit_shadow_probability,
     grouped_walk_forward_splits,
+    probability_selection_qualified,
     predict_shadow_probability,
     replay_shadow_probability,
     stable_probability_hash,
@@ -48,6 +50,59 @@ from app.services.market_scan_probability_research import (
     probability_feature_vector,
 )
 from app.services.market_scan_probability_store import MarketScanProbabilityStore
+
+
+def test_probability_metric_primitives_reject_invalid_inputs_without_silent_coercion() -> None:
+    with pytest.raises(ValueError, match="至少需要一个观测"):
+        probability_metrics.evaluate_probability_predictions([], [], [], base_rate=0.5)
+    with pytest.raises(ValueError, match="bin_count"):
+        probability_metrics.evaluate_probability_predictions([0.5], [1], ["2026-01-01"], base_rate=0.5, bin_count=1)
+    with pytest.raises(ValueError, match="长度必须一致"):
+        probability_metrics.evaluate_probability_predictions([0.5], [1], [], base_rate=0.5)
+    with pytest.raises(ValueError, match="参考概率"):
+        probability_metrics.metric_reference_probabilities([0.5, 0.6], 0.5, 1)
+    with pytest.raises(ValueError, match="不能为 None"):
+        probability_metrics.validated_metric_rows([0.5], [None], ["2026-01-01"])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="分箱参数"):
+        probability_metrics.fit_empirical_bayes_baseline([1.0], [1], bin_count=1)
+    with pytest.raises(ValueError, match="非空且长度一致"):
+        probability_metrics.validated_scores_and_labels([], [])
+    with pytest.raises(ValueError, match="不能为 None"):
+        probability_metrics.validated_scores_and_labels([1.0], [None])  # type: ignore[list-item]
+
+
+def test_probability_metric_scalar_boundaries_and_single_class_outputs() -> None:
+    report = probability_metrics.evaluate_probability_predictions(
+        [0.0, 0.0],
+        [False, False],
+        ["2026-01-01", "2026-01-02"],
+        base_rate=0.0,
+    )
+    assert report["brier_skill_score"] is None
+    assert report["auc"] is None
+    assert report["highest_bin_above_base_rate"] is False
+    assert probability_metrics.date_block_bootstrap_ci([("2026-01-01", 2.5)], "single", 10) == [2.5, 2.5]
+    assert probability_metrics.percentile([7.0], 0.5) == 7.0
+    assert probability_metrics.percentile([1.0, 2.0, 3.0], 0.5) == 2.0
+    assert probability_metrics.validated_target(None) is None
+    assert probability_metrics.validated_target(True) == 1
+
+    with pytest.raises(ValueError, match="0/1/None"):
+        probability_metrics.validated_target(2)
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        probability_metrics.require_probability(1.1, "probability")
+    with pytest.raises(ValueError, match="ISO 交易日"):
+        probability_metrics.validated_date("not-a-date")
+    with pytest.raises(ValueError, match="必须是数值"):
+        probability_metrics.finite_number(True, "value")
+    with pytest.raises(ValueError, match="有限数值"):
+        probability_metrics.finite_number(float("inf"), "value")
+    with pytest.raises(ValueError, match="必须是整数"):
+        probability_metrics.integer(True, "count")
+    with pytest.raises(ValueError, match="正整数"):
+        probability_metrics.date_block_bootstrap_ci(
+            [("2026-01-01", 1.0)], "invalid-block", 10, block_length_sessions=1.5,  # type: ignore[arg-type]
+        )
 
 
 def test_contract_versions_label_cost_model_and_keeps_targets_separate() -> None:
@@ -151,6 +206,69 @@ def test_calibrated_shadow_fit_is_deterministic_and_replayable() -> None:
     assert verify_shadow_probability_evidence(first) is True
     assert verify_shadow_probability_evidence(first, samples) is True
     assert replay_shadow_probability(first, samples) == first
+
+
+def test_selection_qualification_is_separate_from_fitted_calibrated_display_state() -> None:
+    config = ProbabilityConfig(
+        horizon=1,
+        label_contract=_complete_test_label_contract(),
+        minimum_train_sessions=12,
+        minimum_calibration_sessions=6,
+        minimum_test_sessions=6,
+        minimum_bin_sessions=1,
+        bootstrap_samples=100,
+    )
+    one_fold = fit_shadow_probability(
+        _signal_samples(26),
+        config=config,
+        generated_at="2026-08-11T08:00:00Z",
+    )
+    multiple_folds = fit_shadow_probability(
+        _signal_samples(42),
+        config=config,
+        generated_at="2026-08-11T08:00:00Z",
+    )
+
+    assert one_fold["status"] == "calibrated_shadow"
+    assert one_fold["fit_status"] == "fitted_oos"
+    assert one_fold["selection_qualified"] is False
+    assert one_fold["selection_qualification"]["gates"]["multiple_complete_oos_folds"] is False
+    assert probability_selection_qualified(one_fold) is False
+    assert probability_selection_qualified({"status": "calibrated_shadow"}) is False
+
+    assert multiple_folds["selection_qualified"] is True
+    assert multiple_folds["selection_qualification"]["gates"] == {
+        "complete_label_contract_bound": True,
+        "positive_oos_brier_skill": True,
+        "effective_probability_stratification": True,
+        "multiple_complete_oos_folds": True,
+        "stable_positive_skill_across_complete_oos_folds": True,
+    }
+    assert probability_selection_qualified(multiple_folds) is True
+
+
+def test_overlapping_horizon_uses_preregistered_circular_moving_block_ci() -> None:
+    config = ProbabilityConfig(
+        horizon=20,
+        minimum_train_sessions=20,
+        minimum_calibration_sessions=10,
+        minimum_test_sessions=20,
+        minimum_bin_sessions=1,
+        bootstrap_samples=100,
+    )
+    evidence = fit_shadow_probability(
+        _signal_samples(100),
+        config=config,
+        generated_at="2026-08-11T08:00:00Z",
+    )
+    metrics = evidence["calibration_metrics"]["calibrated"]
+    evaluation = evidence["contract"]["evaluation"]
+
+    assert metrics["bootstrap_method"] == "deterministic_circular_moving_session_block_95pct_v1"
+    assert metrics["bootstrap_block_length_sessions"] == 20
+    assert evaluation["bootstrap_block_length_sessions"] == 20
+    assert evaluation["bootstrap"] == metrics["bootstrap_method"]
+    assert verify_shadow_probability_evidence(evidence, _signal_samples(100)) is True
 
 
 def test_multifold_oos_evidence_replays_each_fold_and_final_fold_drives_future_prediction() -> None:
@@ -257,6 +375,56 @@ def test_non_default_label_cost_version_is_native_to_evidence_and_full_replay() 
     assert evidence["cost_model_version"] == config.cost_model_version
     assert evidence["contract"]["cost"]["version"] == config.cost_model_version
     assert verify_shadow_probability_evidence(evidence, samples) is True
+
+
+def test_complete_label_execution_contract_is_bound_to_model_identity() -> None:
+    first_label_contract = probability_label_contract(
+        ProbabilityLabelConfig(execution_notional=100_000.0, max_daily_participation_rate=0.01),
+    )
+    second_label_contract = probability_label_contract(
+        ProbabilityLabelConfig(execution_notional=200_000.0, max_daily_participation_rate=0.005),
+    )
+    base = dict(
+        horizon=1,
+        minimum_train_sessions=12,
+        minimum_calibration_sessions=6,
+        minimum_test_sessions=6,
+        minimum_bin_sessions=1,
+        bootstrap_samples=100,
+    )
+    first = fit_shadow_probability(
+        _signal_samples(42),
+        config=ProbabilityConfig(
+            **base,
+            cost_model_version=str(first_label_contract["cost_model_version"]),
+            label_contract=first_label_contract,
+        ),
+        generated_at="2026-08-11T08:00:00Z",
+    )
+    second = fit_shadow_probability(
+        _signal_samples(42),
+        config=ProbabilityConfig(
+            **base,
+            cost_model_version=str(second_label_contract["cost_model_version"]),
+            label_contract=second_label_contract,
+        ),
+        generated_at="2026-08-11T08:00:00Z",
+    )
+
+    assert first["cost_model_version"] == second["cost_model_version"]
+    assert first["label_contract_digest"] == stable_probability_hash(first_label_contract)
+    assert second["label_contract_digest"] == stable_probability_hash(second_label_contract)
+    assert first["label_contract_digest"] != second["label_contract_digest"]
+    assert first["contract"]["cost"]["label_contract"] == first_label_contract
+    assert first["contract"]["cost"]["label_contract_digest"] == first["label_contract_digest"]
+
+    tampered = deepcopy(first)
+    tampered["contract"]["cost"]["label_contract"]["execution_notional"] = 200_000.0
+    tampered["evidence_digest"] = stable_probability_hash(
+        {key: value for key, value in tampered.items() if key != "evidence_digest"},
+    )
+    with pytest.raises(ProbabilityReplayError, match="结构损坏|label_contract|契约"):
+        verify_shadow_probability_evidence(tampered)
 
 
 def test_isotonic_candidate_requires_registered_session_floor_and_never_replaces_platt() -> None:
@@ -521,6 +689,11 @@ def test_research_persists_every_run_symbol_target_horizon_as_null_when_insuffic
     studies = cast(list[dict[str, Any]], artifact["payload"]["studies"])  # type: ignore[index]
     persisted_records = cast(list[dict[str, Any]], artifact["payload"]["records"])  # type: ignore[index]
     assert {item["versions"]["cost_model"] for item in studies} == {label_contract["cost_model_version"]}
+    expected_label_contract_digest = stable_probability_hash(label_contract)
+    assert {item["digests"]["label_contract"] for item in studies} == {expected_label_contract_digest}
+    assert {
+        item["metadata"]["label_contract_digest"] for item in studies
+    } == {expected_label_contract_digest}
     feature_evidence = cast(list[dict[str, Any]], artifact["payload"]["feature_evidence"])  # type: ignore[index]
     assert len(feature_evidence) == len(rows)
     assert all("features" in item and "dimensions" in item for item in feature_evidence)
@@ -676,6 +849,29 @@ def test_probability_store_cache_hits_without_sharing_mutable_projection(
     assert second_summary["status"] == "insufficient_data"
     assert second_records["600519.SH"]["5"]["net_excess_positive"]["probability"] is None
     assert database.read_bytes() == b"persistent-database"
+
+
+def test_probability_store_rejects_symlink_root_and_keeps_missing_root_empty(tmp_path) -> None:
+    directory, _database, _target = _write_store_artifact(
+        tmp_path,
+        filename="market-scan-probability-root.json",
+        generated_at="2026-08-11T08:00:00Z",
+        status="insufficient_data",
+    )
+    alias = tmp_path / "probability-root-alias"
+    alias.symlink_to(directory, target_is_directory=True)
+
+    with pytest.raises(ProbabilityArtifactError, match="不是普通目录"):
+        MarketScanProbabilityStore(alias).research_projection(29)
+
+    loop = tmp_path / "probability-root-loop"
+    loop.symlink_to(loop, target_is_directory=True)
+    with pytest.raises(ProbabilityArtifactError, match="目录无法读取"):
+        MarketScanProbabilityStore(loop / "nested").research_projection(29)
+
+    assert MarketScanProbabilityStore(directory).research_projection(29)["status"] == "insufficient_data"
+    missing = MarketScanProbabilityStore(tmp_path / "missing-probability-root")
+    assert missing.research_projection(29)["status"] == "not_generated"
 
 
 def test_probability_store_invalidates_changed_file_and_fails_closed_on_corruption(
@@ -940,6 +1136,7 @@ def test_stability_major_strata_and_replay_are_explicit_promotion_gates() -> Non
     major = probability_research_module._major_strata_calibration_summary(stratified)
     evidence = {
         "status": "calibrated_shadow",
+        "selection_qualified": True,
         "counts": {"label_coverage": 1.0},
         "calibration_metrics": {
             "calibrated": {
@@ -970,6 +1167,7 @@ def test_stability_major_strata_and_replay_are_explicit_promotion_gates() -> Non
     assert major["market"]["passed"] is True
     assert major["board"]["passed"] is True
     assert gates["passed"] is True
+    assert gates["gates"]["selection_qualified"] is True
     assert gates["gates"]["deterministic_replay_verified"] is True
     assert failed_replay["passed"] is False
 
@@ -1055,6 +1253,22 @@ def _small_config() -> ProbabilityConfig:
         minimum_bin_sessions=1,
         bootstrap_samples=100,
     )
+
+
+def _complete_test_label_contract() -> dict[str, object]:
+    return {
+        "label_version": PROBABILITY_LABEL_VERSION,
+        "execution_model": "next-session-open,H-holding-session-close,T+1,no-delayed-exit",
+        "horizons": [1, 5, 20],
+        "target_definitions": [
+            "absolute_net_return_positive",
+            "equal_weight_market_net_excess_positive",
+        ],
+        "cost_model_version": PROBABILITY_COST_MODEL_VERSION,
+        "cost_profile_id": "test-base-v1",
+        "execution_notional": 100_000.0,
+        "max_daily_participation_rate": 0.01,
+    }
 
 
 def _write_store_artifact(

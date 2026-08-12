@@ -16,7 +16,7 @@ from app.models.market import (
     Quote,
 )
 from app.services.datahub import DataHub
-from app.services.datahub_status import _provider_error_text
+from app.services.datahub_status import provider_error_text
 from app.utils.provider_errors import sanitize_provider_error
 from app.utils.symbols import normalize_symbol, standard_symbol_list
 
@@ -186,7 +186,7 @@ async def _next_quote_stream_event(datahub: DataHub, symbol_list: list[str]) -> 
         return _sse_message(data)
     except Exception as exc:
         return _sse_message(
-            {"message": sanitize_provider_error(_provider_error_text(exc))},
+            {"message": sanitize_provider_error(provider_error_text(exc))},
             event="quote-error",
         )
 

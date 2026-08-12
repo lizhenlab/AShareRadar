@@ -200,6 +200,37 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
 
+    async def _maintain_market_scan_probability(self, *, now: datetime | None = None) -> str:
+        if not _research_maintenance_window_open(now):
+            message = "当前不在交易日盘后日K发布窗口，已跳过上涨概率标签维护"
+            await self._save_monitor_event("info", "market_scan_probability", message)
+            return message
+        from app.services.market_scan_probability_maintenance import (
+            MarketScanProbabilityMaintenanceService,
+        )
+
+        service = self._market_scan_probability_maintenance
+        if service is None:
+            service = MarketScanProbabilityMaintenanceService(self.datahub.cache)
+            self._market_scan_probability_maintenance = service
+        summary = await _offload(
+            service.run,
+            now=now,
+        )
+        message = summary.message()
+        if summary.failures:
+            message += "；" + "；".join(summary.failures)
+        await self._save_monitor_event(
+            "warning" if summary.degraded else "info",
+            "market_scan_probability",
+            message,
+        )
+        if summary.due_count and summary.failed_count == summary.due_count:
+            raise RuntimeError(message)
+        if summary.degraded:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
+        return message
+
     async def _run_strategy_schedules(self) -> str:
         summary = await _offload(self.datahub.cache.strategy_automation_service.run_due)
         message = (

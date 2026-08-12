@@ -24,7 +24,8 @@ MarketScanRunStatus = Literal[
 ]
 MarketScanResultStatus = Literal["pending", "success", "missing", "skipped"]
 MarketScanTrigger = Literal["manual", "scheduled", "retry"]
-MarketScanMode = Literal["official", "intraday"]
+MarketScanMode = Literal["official", "intraday", "preopen"]
+MarketScanDiagnosticSeverity = Literal["info", "warning", "error"]
 MarketScanSort = Literal[
     "rank",
     "score",
@@ -66,6 +67,14 @@ MARKET_SCAN_DEGRADATION_REASONS: Final[frozenset[str]] = frozenset(
 )
 MARKET_SCAN_TOP100_REFRESH_SCOPE: Final[str] = "TOP100快速更新评分"
 MARKET_SCAN_TOP100_REFRESH_LIMIT: Final[int] = 100
+MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION: Final[str] = (
+    "market-scan-publication-diagnostics-v1"
+)
+MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES: Final[tuple[str, ...]] = (
+    "info",
+    "warning",
+    "error",
+)
 
 
 def is_market_scan_top100_refresh_scope(value: object) -> bool:
@@ -390,6 +399,31 @@ class MarketScanMarketProgress(BaseModel):
     coverage_pct: float = Field(default=0, ge=0, le=100)
 
 
+class MarketScanPublicationDiagnostic(BaseModel):
+    """Stable machine-readable diagnostic with user-facing Chinese copy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$")
+    label: str = Field(min_length=1, max_length=80)
+    detail: str = Field(min_length=1, max_length=800)
+    severity: MarketScanDiagnosticSeverity
+
+
+class MarketScanPublicationDiagnostics(BaseModel):
+    """Typed publication evidence; absent on legacy or non-publication terminal runs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["market-scan-publication-diagnostics-v1"] = (
+        "market-scan-publication-diagnostics-v1"
+    )
+    headline: str = Field(min_length=1, max_length=800)
+    blockers: list[MarketScanPublicationDiagnostic] = Field(default_factory=list)
+    passed_gates: list[MarketScanPublicationDiagnostic] = Field(default_factory=list)
+    source_warnings: list[MarketScanPublicationDiagnostic] = Field(default_factory=list)
+
+
 class MarketScanRun(BaseModel):
     id: int
     task_run_id: int | None = None
@@ -430,6 +464,7 @@ class MarketScanRun(BaseModel):
     eta_seconds: float | None = Field(default=None, ge=0)
     message: str | None = None
     last_error: str | None = None
+    publication_diagnostics: MarketScanPublicationDiagnostics | None = None
     cancel_requested_at: str | None = None
 
     @model_validator(mode="after")
@@ -539,14 +574,19 @@ __all__ = [
     "MARKET_SCAN_RANK_TIE_BREAK",
     "MARKET_SCAN_TOP100_REFRESH_LIMIT",
     "MARKET_SCAN_TOP100_REFRESH_SCOPE",
+    "MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION",
+    "MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES",
     "MarketScanCoverage",
     "MarketScanCoverageScope",
+    "MarketScanDiagnosticSeverity",
     "MarketScanFilterValues",
     "MarketScanFutureRangeArtifactSummary",
     "MarketScanFutureRangeRecordPage",
     "MarketScanFutureRangeResearchResponse",
     "MarketScanMode",
     "MarketScanMarketProgress",
+    "MarketScanPublicationDiagnostic",
+    "MarketScanPublicationDiagnostics",
     "MarketScanPublicationSummary",
     "MarketScanScoreDistribution",
     "MarketScanScoreDistributionAssessment",

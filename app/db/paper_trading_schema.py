@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 
+from app.models.paper_trading_config import (
+    DEFAULT_PAPER_ACCOUNT_NAME,
+    DEFAULT_PAPER_INITIAL_CASH,
+    MODELLED_ONE_WAY_FRICTION_PCT,
+)
+from app.utils.audit_time import audit_now_text
+
 
 PAPER_TRADING_SCHEMA_VERSION = "20260730_paper_trading_v2"
 
@@ -209,6 +216,7 @@ _RUN_COMPAT_COLUMNS = {
 def apply_paper_trading_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(PAPER_TRADING_SCHEMA_SQL)
     _ensure_column(conn, "paper_trading_account", "default_cost_profile", "TEXT NOT NULL DEFAULT 'base'")
+    _ensure_default_account(conn)
     _ensure_column(conn, "paper_strategy", "priority", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "paper_strategy", "entry_expiry_sessions", "INTEGER NOT NULL DEFAULT 5")
     for name, declaration in _RUN_COMPAT_COLUMNS.items():
@@ -221,6 +229,25 @@ def apply_paper_trading_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
         (PAPER_TRADING_SCHEMA_VERSION,),
+    )
+
+
+def _ensure_default_account(conn: sqlite3.Connection) -> None:
+    timestamp = audit_now_text()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO paper_trading_account (
+            id, name, initial_cash, modelled_one_way_friction_pct,
+            default_cost_profile, created_at, updated_at
+        ) VALUES (1, ?, ?, ?, 'base', ?, ?)
+        """,
+        (
+            DEFAULT_PAPER_ACCOUNT_NAME,
+            DEFAULT_PAPER_INITIAL_CASH,
+            MODELLED_ONE_WAY_FRICTION_PCT,
+            timestamp,
+            timestamp,
+        ),
     )
 
 
@@ -302,7 +329,10 @@ def _legacy_run_id(conn: sqlite3.Connection, *, needed: bool) -> int | None:
         """,
         (created_at,),
     )
-    return int(cursor.lastrowid)
+    run_id = cursor.lastrowid
+    if run_id is None:
+        raise RuntimeError("旧模拟交易批次迁移失败")
+    return int(run_id)
 
 
 def _backfill_legacy_strategy_results(conn: sqlite3.Connection) -> None:

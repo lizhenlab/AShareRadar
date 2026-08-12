@@ -1,255 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { filterMarketScanRange, filterMarketScanResearchRange } from "./market-scan-fixture-filters.mjs";
-
-test("SSE status waits for the current frame and preserves degradation", async ({ page }) => {
-  let degraded = false;
-  await mockApi(page, {
-    workbench(symbol) {
-      return workbenchPayload(symbol, { degraded });
-    },
-  });
-
-  await page.goto("/");
-  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect(page.locator("#dataStatus")).not.toContainText("正常");
-  await emitQuoteFrame(page);
-  await expect(page.locator("#quoteList")).toContainText("浏览器行情帧");
-  await expect(page.locator("#dataStatus")).toHaveText("核心分析快照已加载；观察报价流已收到有效帧");
-  await expect(page.locator("#dataStatus")).not.toContainText("实时连接正常");
-
-  degraded = true;
-  await page.reload();
-  await expect(page.locator("#dataStatus")).toContainText("本地数据部分降级");
-  await emitQuoteFrame(page);
-  await expect(page.locator("#quoteList")).toContainText("浏览器行情帧");
-  await expect(page.locator("#dataStatus")).toContainText("本地数据部分降级");
-  await expect(page.locator("#dataStatus")).not.toContainText("实时连接正常");
-});
-
-test("three stock loads reuse global requests and add only five stock requests", async ({ page }) => {
-  const apiRequests = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.pathname.startsWith("/api/")) apiRequests.push(`${url.pathname}${url.search}`);
-  });
-  await mockApi(page);
-
-  await page.goto("/");
-  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect.poll(() => apiRequests.length).toBe(14);
-
-  const input = page.locator("#symbolInput");
-  await input.fill("000001");
-  await page.locator("#searchForm button").click();
-  await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await expect.poll(() => apiRequests.length).toBe(19);
-
-  await input.fill("300750");
-  await page.locator("#searchForm button").click();
-  await expect(page.locator("#stockName")).toHaveText("宁德时代");
-  await expect.poll(() => apiRequests.length).toBe(24);
-
-  const globalEndpoints = [
-    "/api/market",
-    "/api/strong-stocks",
-    "/api/data/status",
-    "/api/tasks/status",
-    "/api/tasks/runs?limit=8",
-    "/api/monitor/events?limit=8",
-    "/api/watchlist",
-    "/api/plates?limit=8",
-    "/api/system/diagnostics",
-  ];
-  for (const endpoint of globalEndpoints) {
-    expect(apiRequests.filter((url) => url === endpoint), endpoint).toHaveLength(1);
-  }
-  const stockKinds = [
-    "/api/stock/workbench?",
-    "/api/stock/minute-analysis?",
-    "/api/advice/timeline?",
-    "/api/reviews?",
-    "/api/stream/quotes?",
-  ];
-  for (const prefix of stockKinds) {
-    expect(apiRequests.filter((url) => url.startsWith(prefix)), prefix).toHaveLength(3);
-  }
-  expect(
-    apiRequests.filter(
-      (url) => !globalEndpoints.includes(url) && !stockKinds.some((prefix) => url.startsWith(prefix))
-    )
-  ).toEqual([]);
-});
-
-test("successful stock loads build a recent history that switches back to refreshed research", async ({ page }) => {
-  const workbenchSymbols = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.pathname === "/api/stock/workbench") workbenchSymbols.push(url.searchParams.get("symbol"));
-  });
-  await mockApi(page);
-
-  await page.goto("/");
-  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await page.locator("#symbolInput").fill("000001");
-  await page.locator("#searchForm button").click();
-  await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await page.locator("#symbolInput").fill("300750");
-  await page.locator("#searchForm button").click();
-  await expect(page.locator("#stockName")).toHaveText("宁德时代");
-
-  await page.locator("#primary-nav-review").click();
-  if (!(await page.locator("#stockSearchHistory").isVisible())) {
-    await page.locator("#queryPanelToggle").click();
-  }
-  await expect(page.locator("#stockSearchHistory")).toBeVisible();
-  await expect(page.locator("#stockSearchHistoryCount")).toHaveText("3");
-  await expect(page.locator("#stockSearchHistoryList .stock-search-history-item").first()).toContainText("宁德时代");
-  await page.locator('[data-stock-history-symbol="600519.SH"]').click();
-
-  await expect(page.locator("#primary-nav-research")).toHaveAttribute("aria-current", "page");
-  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect.poll(() => workbenchSymbols).toEqual(["600519", "000001.SZ", "300750.SZ", "600519.SH"]);
-  await expect(page.locator("#stockSearchHistory")).toBeVisible();
-});
-
-test("Beijing name search joins the quote stream and rejects market conflicts", async ({ page }) => {
-  const workbenchSymbols = [];
-  const streamSymbols = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.pathname === "/api/stock/workbench") workbenchSymbols.push(url.searchParams.get("symbol"));
-    if (url.pathname === "/api/stream/quotes") streamSymbols.push(url.searchParams.get("symbols"));
-  });
-  await mockApi(page);
-
-  await page.goto("/");
-  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  const input = page.locator("#symbolInput");
-  await input.fill("北交");
-  await expect(page.locator("#symbolSuggestions")).toContainText("北交样本");
-  await expect(page.locator("#symbolSuggestions")).toContainText("920066.BJ");
-  await page.locator("#symbolSuggestions button").click();
-  await expect(page.locator("#stockCode")).toHaveText("BJ920066");
-  await expect(page.locator("#stockName")).toHaveText("北交样本");
-  await expect.poll(() => workbenchSymbols).toEqual(["600519", "920066.BJ"]);
-  await expect.poll(() => streamSymbols.some((symbols) => symbols?.split(",").includes("920066.BJ"))).toBe(true);
-
-  await input.fill("920066.SH");
-  await page.locator("#searchForm button").click();
-  await expect(page.locator("#symbolError")).toBeVisible();
-  await expect(page.locator("#stockName")).toHaveText("北交样本");
-  expect(workbenchSymbols).toEqual(["600519", "920066.BJ"]);
-});
-
-test("stock search remains bound after a persisted pagehide lifecycle", async ({ page }) => {
-  const searchKeywords = [];
-  await mockApi(page, {
-    stocks(keyword) {
-      searchKeywords.push(keyword);
-      return stockSearchPayload(keyword);
-    },
-  });
-
-  await page.goto("/");
-  const input = page.locator("#symbolInput");
-  await input.fill("北交");
-  await expect(page.locator("#symbolSuggestions")).toContainText("北交样本");
-  await page.evaluate(() => {
-    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
-    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
-  });
-  await input.fill("平安");
-  await expect(page.locator("#symbolSuggestions")).toContainText("平安银行");
-  await expect.poll(() => searchKeywords).toEqual(["北交", "平安"]);
-});
-
-test("stock name suggestions select a canonical code without changing request baselines", async ({ page }) => {
-  const apiRequests = [];
-  const searchKeywords = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (!url.pathname.startsWith("/api/")) return;
-    apiRequests.push(`${url.pathname}${url.search}`);
-    if (url.pathname === "/api/stocks") searchKeywords.push(url.searchParams.get("keyword"));
-  });
-  await mockApi(page);
-
-  await page.goto("/");
-  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect.poll(() => apiRequests.length).toBe(14);
-
-  const input = page.locator("#symbolInput");
-  const suggestions = page.locator("#symbolSuggestions");
-  await input.fill("000001");
-  await page.waitForTimeout(350);
-  expect(searchKeywords).toEqual([]);
-  expect(apiRequests).toHaveLength(14);
-
-  await input.fill("平安");
-  await expect(suggestions).toBeVisible();
-  await expect(suggestions.getByRole("option")).toHaveCount(1);
-  await expect(suggestions).toContainText("平安银行");
-  await expect(suggestions).toContainText("000001.SZ");
-  await expect.poll(() => searchKeywords).toEqual(["平安"]);
-
-  await input.press("Escape");
-  await expect(suggestions).toBeHidden();
-  await expect(input).toHaveAttribute("aria-expanded", "false");
-
-  await input.fill("");
-  await input.fill("平安");
-  await expect(suggestions).toBeVisible();
-  expect(searchKeywords).toEqual(["平安"]);
-  await input.evaluate((element) => element.blur());
-  await input.focus();
-  await page.waitForTimeout(150);
-  await expect(suggestions).toBeVisible();
-  await input.press("ArrowDown");
-  await expect(input).toHaveAttribute("aria-activedescendant", "symbolSuggestions-option-0");
-  await expect(suggestions.getByRole("option")).toHaveAttribute("aria-selected", "true");
-  await input.press("Enter");
-
-  await expect(input).toHaveValue("000001");
-  await expect(suggestions).toBeHidden();
-  await expect(page.locator("#stockCode")).toHaveText("SZ000001");
-  await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await expect.poll(() => apiRequests.length).toBe(20);
-  expect(searchKeywords).toEqual(["平安"]);
-
-  const globalEndpoints = [
-    "/api/market",
-    "/api/strong-stocks",
-    "/api/data/status",
-    "/api/tasks/status",
-    "/api/tasks/runs?limit=8",
-    "/api/monitor/events?limit=8",
-    "/api/watchlist",
-    "/api/plates?limit=8",
-    "/api/system/diagnostics",
-  ];
-  for (const endpoint of globalEndpoints) {
-    expect(apiRequests.filter((url) => url === endpoint), endpoint).toHaveLength(1);
-  }
-  const stockKinds = [
-    "/api/stock/workbench?",
-    "/api/stock/minute-analysis?",
-    "/api/advice/timeline?",
-    "/api/reviews?",
-    "/api/stream/quotes?",
-  ];
-  for (const prefix of stockKinds) {
-    expect(apiRequests.filter((url) => url.startsWith(prefix)), prefix).toHaveLength(2);
-  }
-  expect(apiRequests.filter((url) => url.startsWith("/api/stocks?"))).toHaveLength(1);
-  expect(
-    apiRequests.filter(
-      (url) =>
-        !globalEndpoints.includes(url)
-        && !stockKinds.some((prefix) => url.startsWith(prefix))
-        && !url.startsWith("/api/stocks?")
-    )
-  ).toEqual([]);
-});
+import {
+  dailyKlines,
+  emitQuoteFrame,
+  minuteAnalysisPayload,
+  minuteKlines,
+  mockApi,
+  paperTradingDashboard,
+  workbenchPayload,
+} from "./frontend-flow-api-fixtures.mjs";
 
 test("primary navigation separates research, market, review, and monitoring workspaces", async ({ page }) => {
   await mockApi(page, {
@@ -535,6 +294,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   expect(new Set(versionedResources.map((url) => new URL(url).searchParams.get("v"))).size).toBe(1);
   expect(versionedResources.some((url) => url.includes("/static/app.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/css/market-scan.css?v="))).toBe(true);
+  expect(versionedResources.some((url) => url.includes("/static/css/market-scan-research.css?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan-controller.js?v="))).toBe(true);
   expect(versionedResources.some((url) => url.includes("/static/js/market-scan-contracts.js?v="))).toBe(true);
@@ -764,6 +524,12 @@ test("market-scan mode isolation and historical selection keep one explicit resu
     quote_date: "2026-07-15",
     data_date: "2026-07-14",
   });
+  const preopenLatest = marketScanRunPayload("success", 103, {
+    id: 36,
+    mode: "preopen",
+    quote_date: "2026-07-15",
+    data_date: "2026-07-14",
+  });
   await mockApi(page, {
     async api(url) {
       if (url.pathname === "/api/market-scans/latest") {
@@ -771,12 +537,15 @@ test("market-scan mode isolation and historical selection keep one explicit resu
         return { payload: activeIntraday };
       }
       if (url.pathname === "/api/market-scans/latest-published") {
-        return { payload: url.searchParams.get("mode") === "intraday" ? intradayLatest : officialLatest };
+        const mode = url.searchParams.get("mode");
+        return { payload: mode === "intraday" ? intradayLatest : mode === "preopen" ? preopenLatest : officialLatest };
       }
       if (url.pathname === "/api/market-scans") {
         listQueries.push(url.searchParams.toString());
-        const intraday = url.searchParams.get("mode") === "intraday";
-        const items = intraday ? [intradayLatest] : [officialLatest, officialHistory];
+        const mode = url.searchParams.get("mode");
+        const items = mode === "intraday"
+          ? [intradayLatest]
+          : mode === "preopen" ? [preopenLatest] : [officialLatest, officialHistory];
         return {
           payload: {
             items,
@@ -791,7 +560,9 @@ test("market-scan mode isolation and historical selection keep one explicit resu
       if (resultMatch) {
         const runId = Number(resultMatch[1]);
         resultRunIds.push(runId);
-        const run = runId === 40 ? officialHistory : runId === 38 ? intradayLatest : officialLatest;
+        const run = runId === 40
+          ? officialHistory
+          : runId === 38 ? intradayLatest : runId === 36 ? preopenLatest : officialLatest;
         return { payload: marketScanResultPage(url.searchParams, run) };
       }
       const exportMatch = url.pathname.match(/^\/api\/market-scans\/(\d+)\/export\.xlsx$/);
@@ -830,7 +601,7 @@ test("market-scan mode isolation and historical selection keep one explicit resu
   await page.locator("#marketScanHistoryRun").selectOption("40");
   await expect(page.locator("#marketScanBrowseContext")).toContainText("历史批次 #40");
   await expect(page.locator("#marketScanTableWrap")).toHaveAttribute("data-market-scan-run-id", "40");
-  await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("证据不足");
+  await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("尚未生成研究证据");
   await expect(page.locator("#marketScanProbabilityMin")).toBeDisabled();
   await expect(page.locator("#marketScanProbabilityMin")).toHaveValue("");
   await page.locator("#marketScanKeyword").fill("北交样本");
@@ -861,6 +632,14 @@ test("market-scan mode isolation and historical selection keep one explicit resu
   expect(resultRunIds).toContain(40);
   expect(resultRunIds).toContain(38);
   expect(latestCalls).toBeGreaterThanOrEqual(2);
+
+  await page.locator("#marketScanModePreopen").check();
+  await expect(page.locator("#marketScanBrowseContext")).toContainText("盘前复盘 · 最近发布 #36");
+  await expect(page.locator("#marketScanTaskContext")).toContainText("盘中临时 #90");
+  await expect(page.locator("#marketScanTaskContext")).toContainText("不同");
+  await expect(page.locator("#marketScanTableWrap")).toHaveAttribute("data-market-scan-run-id", "36");
+  await expect.poll(() => listQueries.some((query) => new URLSearchParams(query).get("mode") === "preopen")).toBe(true);
+  expect(resultRunIds).toContain(36);
 });
 
 for (const viewport of [
@@ -1790,18 +1569,6 @@ async function assertWatchlistFits(page) {
   }
 }
 
-async function emitQuoteFrame(page) {
-  await expect
-    .poll(async () => {
-      const response = await page.request.get("/__e2e/quote-streams");
-      return (await response.json()).clients;
-    })
-    .toBe(1);
-  const response = await page.request.post("/__e2e/quote-frame");
-  expect(response.ok()).toBeTruthy();
-  expect((await response.json()).sent).toBe(1);
-}
-
 test("mobile actions show only current results and keep local errors in the query panel", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.use.isMobile, "covered by the real mobile device project");
   const watchlist = [watchlistItem("600000.SH", "浦发银行")];
@@ -2650,158 +2417,6 @@ function discoveryRankChanges() {
   };
 }
 
-async function mockApi(page, options = {}) {
-  const watchlist = options.watchlist || [];
-  await page.route("**/api/**", async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (url.pathname === "/api/stream/quotes") {
-      await route.continue();
-      return;
-    }
-    const custom = options.api ? await options.api(url, request) : null;
-    if (custom?.response) {
-      await route.fulfill(custom.response);
-      return;
-    }
-    if (custom) {
-      await fulfillJson(route, custom.payload, custom.status);
-      return;
-    }
-    if (url.pathname === "/api/stocks" && request.method() === "GET") {
-      const keyword = url.searchParams.get("keyword") || "";
-      const payload = typeof options.stocks === "function"
-        ? await options.stocks(keyword)
-        : options.stocks || stockSearchPayload(keyword);
-      await fulfillJson(route, payload);
-      return;
-    }
-    if (url.pathname === "/api/stock/workbench") {
-      const symbol = url.searchParams.get("symbol") || "600519.SH";
-      const payload = options.workbench ? await options.workbench(symbol) : workbenchPayload(symbol);
-      await fulfillJson(route, payload);
-      return;
-    }
-    if (url.pathname === "/api/watchlist" && request.method() === "GET") {
-      await fulfillJson(route, watchlist);
-      return;
-    }
-    if (url.pathname === "/api/watchlist" && request.method() === "POST") {
-      const payload = request.postDataJSON();
-      const symbol = canonicalWatchlistSymbol(payload.symbol);
-      const item = {
-        symbol,
-        code: symbol.slice(0, 6),
-        market: symbol.endsWith(".SH") ? "SH" : "SZ",
-        name: `新增 ${symbol.slice(0, 6)}`,
-        note: payload.note ?? null,
-        group_name: payload.group_name || "默认",
-        pinned: Boolean(payload.pinned),
-        research_status: payload.research_status || "watching",
-        priority: payload.priority || "medium",
-        next_review_date: payload.next_review_date ?? null,
-        last_viewed_at: null,
-        unread_change_count: 0,
-        latest_price: 10,
-        latest_change_pct: 0,
-      };
-      const existing = watchlist.findIndex((row) => row.symbol === symbol);
-      if (existing >= 0) watchlist.splice(existing, 1, item);
-      else watchlist.push(item);
-      moveExcludedWatchlistItemsLast(watchlist);
-      await fulfillJson(route, item);
-      return;
-    }
-    if (url.pathname.endsWith("/mark-viewed") && request.method() === "POST") {
-      const symbol = decodeURIComponent(url.pathname.split("/").at(-2));
-      const item = watchlist.find((row) => row.symbol === symbol);
-      if (!item) {
-        await fulfillJson(route, { detail: "自选股不存在" }, 404);
-        return;
-      }
-      item.unread_change_count = 0;
-      item.last_viewed_at = "2026-07-15 12:00:00";
-      await fulfillJson(route, item);
-      return;
-    }
-    if (url.pathname.startsWith("/api/watchlist/") && request.method() === "PATCH") {
-      const symbol = decodeURIComponent(url.pathname.split("/").at(-1));
-      const item = watchlist.find((row) => row.symbol === symbol);
-      if (!item) {
-        await fulfillJson(route, { detail: "自选股不存在" }, 404);
-        return;
-      }
-      Object.assign(item, request.postDataJSON());
-      if (!item.group_name) item.group_name = "默认";
-      moveExcludedWatchlistItemsLast(watchlist);
-      await fulfillJson(route, item);
-      return;
-    }
-    if (url.pathname === "/api/advice/timeline") {
-      const symbol = url.searchParams.get("symbol") || "600519.SH";
-      const timeline = typeof options.timeline === "function" ? await options.timeline(symbol) : options.timeline || [];
-      await fulfillJson(route, timeline);
-      return;
-    }
-    if (url.pathname.startsWith("/api/watchlist/") && request.method() === "DELETE") {
-      const symbol = decodeURIComponent(url.pathname.split("/").at(-1));
-      const index = watchlist.findIndex((row) => row.symbol === symbol);
-      if (index >= 0) watchlist.splice(index, 1);
-      await fulfillJson(route, null, 204);
-      return;
-    }
-    const payload = apiPayload(url);
-    await fulfillJson(route, payload);
-  });
-}
-
-function apiPayload(url) {
-  const pathname = url.pathname;
-  if (pathname === "/api/market") return { indices: [] };
-  if (pathname === "/api/strong-stocks") return { items: [] };
-  if (pathname === "/api/discovery/presets") {
-    return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
-  }
-  if (pathname === "/api/data/status") {
-    return { providers: [], source_plan: {}, cache: {}, capabilities: [], capability_statuses: [] };
-  }
-  if (pathname === "/api/tasks/status") return { enabled: false, running: false, tasks: [] };
-  if (pathname === "/api/tasks/runs" || pathname === "/api/monitor/events") return [];
-  if (pathname === "/api/stock/minute-analysis") {
-    return minuteAnalysisPayload(
-      url.searchParams.get("interval") || "5m",
-      url.searchParams.get("symbol") || "600519.SH"
-    );
-  }
-  if (pathname === "/api/advice/timeline" || pathname === "/api/plates") return [];
-  if (pathname === "/api/paper-trading") return paperTradingDashboard();
-  return [];
-}
-
-function paperTradingDashboard(overrides = {}) {
-  return {
-    account: {
-      id: 1,
-      name: "本地模拟账户",
-      initial_cash: 1000000,
-      modelled_one_way_friction_pct: 0.05,
-      default_cost_profile: "base",
-      created_at: "2026-07-15T00:00:00.000000Z",
-      updated_at: "2026-07-15T00:00:00.000000Z",
-    },
-    performance: {
-      strategy_count: 0, pending_count: 0, open_count: 0, closed_count: 0,
-      skipped_count: 0, data_unavailable_count: 0, win_count: 0, win_rate_pct: null,
-      cash_balance: 1000000, market_value: 0, total_equity: 1000000,
-      realized_pnl: 0, unrealized_pnl: 0, total_return_pct: 0, max_drawdown_pct: 0,
-    },
-    strategies: [], positions: [], trades: [], events: [], equity_curve: [], latest_run: null,
-    selected_run_id: null, runs: [], cost_profiles: [],
-    notes: ["不连接券商，不发送真实委托"],
-    ...overrides,
-  };
-}
-
 function reviewPlan() {
   return {
     id: 10, advice_id: 20, symbol: "600519.SH", revision: 1,
@@ -2867,168 +2482,6 @@ function simulatedPaperDashboard() {
     ],
     latest_run: run, selected_run_id: 1, runs: [run],
   });
-}
-
-function stockSearchPayload(keyword) {
-  const query = String(keyword || "").trim().toLowerCase();
-  if (!query) return [];
-  return [
-    {
-      symbol: "600519.SH",
-      code: "600519",
-      market: "SH",
-      name: "贵州茅台",
-      industry: "白酒",
-      source: "E2E股票检索",
-      updated_at: "2026-07-15 10:00:00",
-    },
-    {
-      symbol: "000001.SZ",
-      code: "000001",
-      market: "SZ",
-      name: "平安银行",
-      industry: "股份制银行",
-      source: "E2E股票检索",
-      updated_at: "2026-07-15 10:00:00",
-    },
-    {
-      symbol: "300750.SZ",
-      code: "300750",
-      market: "SZ",
-      name: "宁德时代",
-      industry: "电池",
-      source: "E2E股票检索",
-      updated_at: "2026-07-15 10:00:00",
-    },
-    {
-      symbol: "920066.BJ",
-      code: "920066",
-      market: "BJ",
-      name: "北交样本",
-      industry: "专用设备",
-      source: "E2E股票检索",
-      updated_at: "2026-07-15 10:00:00",
-    },
-  ].filter((stock) => [stock.symbol, stock.code, stock.name].some((value) => value.toLowerCase().includes(query)));
-}
-
-function workbenchPayload(symbol, { degraded = false, chartMarks = false, withKlines = false } = {}) {
-  const stock = stockDetails(symbol);
-  return {
-    analysis: {
-      quote: {
-        code: stock.code,
-        market: stock.market,
-        name: stock.name,
-        price: 100,
-        change: 1,
-        change_pct: 1,
-        source: "E2E行情",
-        timestamp: "2026-07-14 10:00:00",
-      },
-      data_quality: { level: "优秀", score: 95 },
-      signal_snapshot: { label: "观察", summary: "E2E" },
-      action_advice: { action: "观察", confidence: 60 },
-      review: {},
-      klines: withKlines ? dailyKlines(240) : [],
-    },
-    insights: { overview: {} },
-    local_data_warnings: degraded ? [{ component: "notes", message: "本地笔记暂不可用" }] : [],
-    chart_marks: chartMarks
-      ? { marks: [{ category: "买点", price: 100, trade_date: "2026-07-14" }], categories: ["买点"] }
-      : { marks: [], categories: [] },
-  };
-}
-
-function dailyKlines(count) {
-  const start = Date.UTC(2025, 10, 17);
-  return Array.from({ length: count }, (_, index) => {
-    const date = new Date(start + index * 86400000).toISOString().slice(0, 10);
-    const open = 90 + index * 0.06 + Math.sin(index / 7) * 1.5;
-    const close = open + Math.sin(index / 3) * 0.7;
-    return {
-      date,
-      open,
-      close,
-      high: Math.max(open, close) + 0.8,
-      low: Math.min(open, close) - 0.8,
-      volume: 1000000 + index * 1000,
-    };
-  });
-}
-
-function minuteAnalysisPayload(interval, symbol = "600519.SH") {
-  const availability = interval === "30m" ? "unavailable" : interval === "60m" ? "degraded" : "ok";
-  const rows = minuteKlines(interval, 24);
-  return {
-    symbol,
-    updated_at: rows.at(-1).timestamp,
-    interval,
-    source: "E2E分钟行情",
-    sample_count: rows.length,
-    klines: rows,
-    availability,
-    availability_reason: {
-      ok: "分钟分析数据满足分析要求。",
-      degraded: "成交量字段降级，价格结构仍可参考。",
-      unavailable: "有效样本不足，仅保留审计行。",
-    }[availability],
-    reason_code: availability === "unavailable" ? "insufficient_samples" : availability === "degraded" ? "volume_unavailable" : "ok",
-    latest_price: availability === "unavailable" ? null : rows.at(-1).close,
-    intraday_change_pct: 0.8,
-    intraday_range_pct: 1.6,
-    volume_pulse: availability === "degraded" ? "待确认" : "温和放量",
-    trend_label: "盘中偏强",
-    momentum_label: "动能温和",
-    summary: `${interval} E2E分钟分析`,
-    supports: availability === "unavailable" ? [] : [{ label: "盘中支撑", price: 99, strength: 60, reason: "测试" }],
-    resistances: availability === "unavailable" ? [] : [{ label: "盘中压力", price: 103, strength: 55, reason: "测试" }],
-    t_plan: {
-      low_zone: availability === "unavailable" ? "不可用" : "99.00-100.00",
-      high_zone: availability === "unavailable" ? "不可用" : "102.00-103.00",
-      suitability: availability === "unavailable" ? "等待有效数据" : "仅底仓可做T",
-      style: availability === "unavailable" ? "不可用" : "区间型",
-      confidence: availability === "unavailable" ? 0 : 60,
-      summary: availability === "unavailable" ? "不形成执行区间" : "等待区间确认",
-      execution_steps: availability === "unavailable" ? [] : ["等待确认"],
-      stop_conditions: availability === "unavailable" ? [] : ["跌破支撑"],
-    },
-    warnings: availability === "degraded" ? ["成交量不可用"] : [],
-    missing_data: availability === "ok" ? [] : [availability === "degraded" ? "分钟成交量" : "有效分钟样本"],
-  };
-}
-
-function minuteKlines(interval, count) {
-  const step = Number.parseInt(interval, 10);
-  return Array.from({ length: count }, (_, index) => {
-    const minuteOfDay = 9 * 60 + 30 + index * step;
-    const hour = String(Math.floor(minuteOfDay / 60)).padStart(2, "0");
-    const minute = String(minuteOfDay % 60).padStart(2, "0");
-    const open = 100 + index * 0.08 + Math.sin(index / 3) * 0.4;
-    const close = open + Math.cos(index / 2) * 0.25;
-    return {
-      timestamp: `2026-07-15 ${hour}:${minute}:00`,
-      interval,
-      source: "E2E分钟行情",
-      from_cache: false,
-      fallback_used: false,
-      open,
-      close,
-      high: Math.max(open, close) + 0.3,
-      low: Math.min(open, close) - 0.3,
-      volume: 10000 + index * 100,
-      amount: 1000000 + index * 1000,
-    };
-  });
-}
-
-function stockDetails(symbol) {
-  const rows = {
-    "000001.SZ": { code: "000001", market: "SZ", name: "平安银行" },
-    "300750.SZ": { code: "300750", market: "SZ", name: "宁德时代" },
-    "920066.BJ": { code: "920066", market: "BJ", name: "北交样本" },
-  };
-  return rows[symbol] || { code: "600519", market: "SH", name: "贵州茅台" };
 }
 
 function marketScanRunPayload(status, processedCount, overrides = {}) {
@@ -3274,24 +2727,6 @@ function watchlistItem(symbol, name) {
     last_viewed_at: null,
     unread_change_count: 0,
   };
-}
-
-function canonicalWatchlistSymbol(value) {
-  const text = String(value || "").trim().toUpperCase();
-  if (/^\d{6}\.(SH|SZ)$/.test(text)) return text;
-  return `${text.slice(0, 6)}.${text.startsWith("6") ? "SH" : "SZ"}`;
-}
-
-function moveExcludedWatchlistItemsLast(items) {
-  items.sort((left, right) => Number(left.research_status === "excluded") - Number(right.research_status === "excluded"));
-}
-
-async function fulfillJson(route, payload, status = 200) {
-  await route.fulfill({
-    status,
-    contentType: "application/json; charset=utf-8",
-    body: status === 204 ? "" : JSON.stringify(payload),
-  });
 }
 
 function delay(milliseconds) {

@@ -148,6 +148,7 @@ TABLE_COUNT_NAMES = (
     "reliability_bucket",
     "market_scan_run",
     "market_scan_result",
+    "market_scan_probability_capture_outbox",
     "monitor_event",
     "watchlist",
     "advice_history",
@@ -333,6 +334,18 @@ def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str:
 
 def _candidate_protection_sql(spec: RuntimeCleanupSpec) -> str:
     predicates: list[str] = []
+    if spec.table == "market_scan_run":
+        # A pending PIT source capture still needs both the run metadata and all
+        # result rows.  The FK deliberately cascades only after capture reaches
+        # a durable terminal state.
+        predicates.append(
+            """NOT EXISTS (
+                SELECT 1
+                FROM market_scan_probability_capture_outbox AS capture_outbox
+                WHERE capture_outbox.run_id = candidate.retention_key
+                  AND capture_outbox.status IN ('pending', 'processing')
+            )"""
+        )
     if spec.protected_reference is not None:
         table, reference_column = spec.protected_reference
         if spec.protect_references_from_retained_only:

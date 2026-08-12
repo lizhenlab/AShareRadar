@@ -348,7 +348,7 @@ def _verify_v54_replayed_context(
     volume_context = _mapping(components.get("volume_context"), "volume_context")
     expected_alignment = (
         "same-completed-session"
-        if inputs.get("mode") == "official"
+        if inputs.get("mode") in {"official", "preopen"}
         else "intraday-time-aligned-volume-unavailable-neutralized"
     )
     if (
@@ -986,7 +986,7 @@ def _replayed_applied_volume_delta(
     if variant == "v5_4_skip5_multilevel_residual":
         return 0.0
     if variant == "v5_4_skip5_multilevel_residual_volume_lifecycle":
-        return lifecycle_delta if inputs.get("mode") == "official" else 0.0
+        return lifecycle_delta if inputs.get("mode") in {"official", "preopen"} else 0.0
     if variant == "v5_3_skip5_residual_volume_lifecycle":
         return lifecycle_delta
     return base_volume_delta
@@ -1143,7 +1143,7 @@ def _factor_inputs(
         "volume_data_date": item.data_date,
         "volume_price_alignment": (
             "same-completed-session"
-            if item.mode == "official"
+            if item.mode in {"official", "preopen"}
             else "intraday-time-aligned-volume-unavailable-neutralized"
         ),
         "data_quality_score": item.data_quality_score,
@@ -1533,7 +1533,11 @@ def _applied_volume_delta(factors: _RawFactors, variant: ShadowScoreVariant) -> 
     if variant == "v5_4_skip5_multilevel_residual":
         return 0.0
     if variant == "v5_4_skip5_multilevel_residual_volume_lifecycle":
-        return factors.volume_lifecycle_delta if factors.item.mode == "official" else 0.0
+        return (
+            factors.volume_lifecycle_delta
+            if factors.item.mode in {"official", "preopen"}
+            else 0.0
+        )
     if variant == "v5_3_skip5_residual_volume_lifecycle":
         return factors.volume_lifecycle_delta
     return factors.volume_confirmation_delta
@@ -1627,11 +1631,12 @@ def _snapshot_dates(item: ShadowScoreInput) -> tuple[date, date]:
 
 def _validate_v54_temporal_context(items: Sequence[ShadowScoreInput]) -> None:
     for item in items:
-        if item.mode not in {"official", "intraday"}:
+        if item.mode not in {"official", "intraday", "preopen"}:
             raise ValueError(f"{item.symbol} 的扫描模式无效")
         data_date, quote_date = _snapshot_dates(item)
-        if item.mode == "official" and quote_date != data_date:
-            raise ValueError(f"{item.symbol} 的盘后候选要求 quote_date 与 data_date 一致")
+        if item.mode in {"official", "preopen"} and quote_date != data_date:
+            label = "盘前" if item.mode == "preopen" else "盘后"
+            raise ValueError(f"{item.symbol} 的{label}候选要求 quote_date 与 data_date 一致")
         if item.mode == "intraday" and quote_date <= data_date:
             raise ValueError(f"{item.symbol} 的盘中候选要求 quote_date 晚于完整日K截止日")
 

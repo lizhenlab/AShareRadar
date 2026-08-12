@@ -9,7 +9,7 @@ from functools import partial
 import threading
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
-from app.services.datahub_status import _provider_error_text
+from app.services.datahub_status import provider_error_text
 from app.services.daemon_executor import DaemonThreadPoolExecutor
 from app.utils.clock import monotonic_now, performance_now
 from app.utils.provider_errors import (
@@ -569,7 +569,7 @@ class ProviderRuntime:
 
     def _sanitized_error_text(self, exc: Exception) -> str:
         return sanitize_provider_error(
-            _provider_error_text(exc),
+            provider_error_text(exc),
             sensitive_values=_settings_sensitive_values(self.settings),
         )
 

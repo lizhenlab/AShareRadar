@@ -22,6 +22,22 @@ from app.services.strategy_portfolio import strategy_board
 from tests.market_scan_test_support import SCAN_AS_OF, SCAN_DATA_DATE, _daily_rows, _quote_for
 
 
+def test_strategy_execution_rejects_preopen_review_cohort() -> None:
+    with pytest.raises(ValueError):
+        StrategyExecutionRequest(strategy_id=1, mode="preopen")  # type: ignore[arg-type]
+
+
+def test_strategy_repository_rejects_direct_preopen_access(tmp_path) -> None:
+    cache, _service, _strategy_id, _run_id = _environment(tmp_path)
+
+    with pytest.raises(ValueError, match="不接受盘前复盘"):
+        cache.strategy_execution_repo.frozen_scan(
+            run_id=None,
+            data_date=None,
+            mode="preopen",  # type: ignore[arg-type]
+        )
+
+
 def test_strategy_execution_uses_frozen_dimensions_preserves_rank_and_paginates(tmp_path) -> None:
     cache, service, strategy_id, run_id = _environment(tmp_path)
 

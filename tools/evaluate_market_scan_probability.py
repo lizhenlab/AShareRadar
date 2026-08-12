@@ -79,7 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", type=Path, required=True, help="只读 AShareRadar SQLite 数据库")
     parser.add_argument("--output-dir", type=Path, required=True, help="不可变 artifact 输出目录")
     parser.add_argument("--report", type=Path, help="可选的机器可读研究摘要 JSON 输出路径")
-    parser.add_argument("--mode", choices=("official", "intraday"))
+    parser.add_argument("--mode", choices=("official", "intraday", "preopen"))
     parser.add_argument("--run-id", type=int, action="append", dest="run_ids")
     parser.add_argument("--complete-day-coverage", type=float, default=0.95)
     parser.add_argument("--bootstrap-samples", type=int, default=1000)
@@ -120,7 +120,7 @@ def _artifact_path(output_dir: Path, run_id: int, artifact: dict[str, object]) -
     if not isinstance(integrity, dict) or not isinstance(integrity.get("integrity_digest"), str):
         raise RuntimeError("上涨概率 artifact 完整性摘要缺失")
     digest = integrity["integrity_digest"]
-    return output_dir.expanduser().resolve() / f"market-scan-probability-run-{run_id}-{digest}.json"
+    return output_dir.expanduser().absolute() / f"market-scan-probability-run-{run_id}-{digest}.json"
 
 
 def _summary(

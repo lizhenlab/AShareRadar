@@ -31,7 +31,7 @@ from app.services.datahub_runtime import (
     ProviderRuntime,
     run_cache_io,
 )
-from app.services.datahub_status import _provider_error_text
+from app.services.datahub_status import provider_error_text
 from app.utils.provider_errors import (
     is_provider_coverage_miss,
     sanitize_provider_error,
@@ -287,7 +287,7 @@ class MetadataCoordinator:
         errors: list[str],
         before_failure: Callable[[ProviderAttempt, Exception], Awaitable[None]] | None,
     ) -> None:
-        errors.append(f"{attempt.name}: {sanitize_provider_error(_provider_error_text(exc))}")
+        errors.append(f"{attempt.name}: {sanitize_provider_error(provider_error_text(exc))}")
         if is_provider_coverage_miss(exc) or isinstance(exc, ProviderCallBusyError):
             return
         if before_failure is not None:
@@ -299,7 +299,7 @@ class MetadataCoordinator:
             await _safe_log_metadata_event_async(
                 self.cache,
                 "fallback",
-                "AKShare板块排行不可用，继续尝试其他实时板块源：" f"{sanitize_provider_error(_provider_error_text(exc))}",
+                "AKShare板块排行不可用，继续尝试其他实时板块源：" f"{sanitize_provider_error(provider_error_text(exc))}",
             )
 
 

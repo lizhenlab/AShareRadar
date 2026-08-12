@@ -200,7 +200,7 @@ def _dimension_features(
 
 
 def _volume_context(mode: MarketScanMode, rows: Sequence[Kline]) -> dict[str, object]:
-    lifecycle_applied = mode == "official"
+    lifecycle_applied = mode in {"official", "preopen"}
     return {
         "mode": mode,
         "volume_ratio_basis": "completed-daily-bars-5d-vs-20d",
@@ -300,7 +300,7 @@ def _valid_evidence_envelope(value: Mapping[str, object]) -> bool:
 def _verify_current_evidence_payload(payload: Mapping[str, object]) -> bool:
     mode = payload.get("mode")
     context = payload.get("volume_context")
-    if mode not in {"official", "intraday"} or not isinstance(context, dict):
+    if mode not in {"official", "intraday", "preopen"} or not isinstance(context, dict):
         return False
     required = {
         "symbol",
@@ -340,6 +340,11 @@ def _valid_volume_context(
     if mode == "intraday" and (
         context.get("lifecycle_applied") is not False
         or context.get("price_volume_alignment") != "intraday-time-aligned-volume-unavailable-neutralized"
+    ):
+        return False
+    if mode in {"official", "preopen"} and (
+        context.get("lifecycle_applied") is not True
+        or context.get("price_volume_alignment") != "same-completed-session"
     ):
         return False
     return True

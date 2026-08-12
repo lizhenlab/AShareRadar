@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 
 from app.models.market_scan import (
     MARKET_SCAN_TOP100_REFRESH_SCOPE,
     MarketScanRetryPlan,
     MarketScanMode,
+    MarketScanPublicationDiagnostics,
     MarketScanRun,
     MarketScanRunStatus,
     MarketScanStage,
@@ -104,7 +106,11 @@ class MarketScanLifecycleMixin(MarketScanQuoteCaptureLifecycleMixin):
         scope: str,
     ) -> MarketScanRun:
         stamp = now_text()
-        message = "等待盘中临时扫描" if mode == "intraday" else "等待盘后正式扫描"
+        message = {
+            "intraday": "等待盘中临时扫描",
+            "preopen": "等待盘前复盘扫描",
+            "official": "等待盘后正式扫描",
+        }[mode]
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -367,7 +373,9 @@ class MarketScanLifecycleMixin(MarketScanQuoteCaptureLifecycleMixin):
         *,
         message: str,
         error: str | None = None,
+        publication_diagnostics: MarketScanPublicationDiagnostics | None = None,
         task_status: str | None = None,
+        validate_before_commit: Callable[[], None] | None = None,
     ) -> MarketScanRun:
         if status not in TERMINAL_SCAN_STATUSES:
             raise ValueError(f"不是终态：{status}")
@@ -381,8 +389,10 @@ class MarketScanLifecycleMixin(MarketScanQuoteCaptureLifecycleMixin):
                 stamp=stamp,
                 message=message,
                 error=error,
+                publication_diagnostics=publication_diagnostics,
                 task_status=task_status,
                 started_monotonic=self._run_started_monotonic.get(run_id),
+                validate_before_commit=validate_before_commit,
             )
         self._run_started_monotonic.pop(run_id, None)
         return run_from_row(updated)

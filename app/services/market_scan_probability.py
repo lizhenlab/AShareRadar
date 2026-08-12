@@ -15,18 +15,19 @@ from datetime import date
 import hashlib
 import json
 import math
-import random
 from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
+import app.services.market_scan_probability_metrics as probability_metrics
 
-PROBABILITY_SCHEMA_VERSION = "market-scan-shadow-probability-v2"
+
+PROBABILITY_SCHEMA_VERSION = "market-scan-shadow-probability-v3"
 PROBABILITY_MODEL_VERSION = "shadow-up-probability-logit-l2-v1"
 PROBABILITY_CALIBRATOR_VERSION = "shadow-up-probability-platt-v1"
 PROBABILITY_ISOTONIC_CALIBRATOR_VERSION = "shadow-up-probability-isotonic-pav-v1"
-PROBABILITY_BASELINE_VERSION = "shadow-up-probability-empirical-bayes-bins-v1"
+PROBABILITY_BASELINE_VERSION = probability_metrics.PROBABILITY_BASELINE_VERSION
 PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v2"
 PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v2"
 PROBABILITY_COST_MODEL_VERSION = "ashare-executable-round-trip-cost-v1"
@@ -38,6 +39,24 @@ _FORBIDDEN_FEATURE_NAMES = frozenset(
     {"symbol", "stock_code", "ticker", "rank", "final_rank", "ranking", "target", "outcome", "label"}
 )
 _FORBIDDEN_FEATURE_PREFIXES = ("future_", "forward_", "next_", "realized_", "observed_")
+
+# Compatibility aliases keep both the original public surface and historically
+# imported private helpers available while calculation ownership lives in the
+# dependency-free metrics module.
+evaluate_probability_predictions = probability_metrics.evaluate_probability_predictions
+fit_empirical_bayes_baseline = probability_metrics.fit_empirical_bayes_baseline
+_metric_reference_probabilities = probability_metrics.metric_reference_probabilities
+_brier_scores = probability_metrics.brier_scores
+_expected_calibration_error = probability_metrics.expected_calibration_error
+_validated_metric_rows = probability_metrics.validated_metric_rows
+_calibration_bins = probability_metrics.calibration_bins
+_bins_are_monotonic = probability_metrics.bins_are_monotonic
+_log_loss = probability_metrics.log_loss
+_auc = probability_metrics.auc
+_date_block_bootstrap_ci = probability_metrics.date_block_bootstrap_ci
+_validated_scores_and_labels = probability_metrics.validated_scores_and_labels
+_quantile_boundaries = probability_metrics.quantile_boundaries
+_percentile = probability_metrics.percentile
 
 
 class ProbabilityReplayError(ValueError):
@@ -62,11 +81,13 @@ class ProbabilityConfig:
     horizon: int = 5
     target: ProbabilityTarget = "net_excess_positive"
     cost_model_version: str = PROBABILITY_COST_MODEL_VERSION
+    label_contract: Mapping[str, object] | None = None
     minimum_train_sessions: int = 120
     minimum_calibration_sessions: int = 40
     minimum_test_sessions: int = 60
     minimum_label_coverage: float = 0.95
     minimum_bin_sessions: int = 20
+    minimum_selection_folds: int = 2
     gap_sessions: int | None = None
     calibration_bin_count: int = 5
     minimum_isotonic_calibration_sessions: int = 120
@@ -123,6 +144,7 @@ class _EvaluatedFold:
 
 def build_probability_contract(config: ProbabilityConfig) -> dict[str, object]:
     """Return the registered, versioned research contract for one horizon/target."""
+    bound_label_contract = _bound_label_contract(config)
     return {
         "schema_version": PROBABILITY_SCHEMA_VERSION,
         "feature_version": PROBABILITY_FEATURE_VERSION,
@@ -139,6 +161,11 @@ def build_probability_contract(config: ProbabilityConfig) -> dict[str, object]:
             "version": config.cost_model_version,
             "components": ["commission", "stamp_tax", "transfer_fee", "slippage"],
             "deduct_before_label": True,
+            "label_contract": bound_label_contract,
+            "label_contract_digest": stable_probability_hash(bound_label_contract),
+            "label_contract_binding": (
+                "complete" if config.label_contract is not None else "legacy_version_only"
+            ),
         },
         "model": {
             "version": PROBABILITY_MODEL_VERSION,
@@ -263,6 +290,21 @@ def predict_shadow_probability(
     return estimate
 
 
+def probability_selection_qualified(evidence: Mapping[str, object]) -> bool:
+    """Fail closed unless new evidence explicitly passed selection-use gates.
+
+    Legacy calibrated artifacts remain displayable, but lack this independently
+    verified qualification and therefore cannot silently become filter inputs.
+    """
+    qualification = evidence.get("selection_qualification")
+    return bool(
+        evidence.get("status") == "calibrated_shadow"
+        and evidence.get("selection_qualified") is True
+        and isinstance(qualification, Mapping)
+        and qualification.get("passed") is True
+    )
+
+
 def verify_shadow_probability_evidence(
     evidence: Mapping[str, object],
     samples: Sequence[ProbabilitySample] | None = None,
@@ -277,6 +319,7 @@ def verify_shadow_probability_evidence(
         _verify_calibrator_candidate_records(evidence, config)
         _verify_persisted_predictions(evidence)
         _verify_persisted_metrics(evidence, config)
+        _verify_selection_qualification(evidence, config)
         if samples is not None:
             rebuilt = fit_shadow_probability(samples, config=config, generated_at=str(evidence.get("generated_at") or ""))
             if rebuilt != dict(evidence):
@@ -295,120 +338,6 @@ def replay_shadow_probability(
     """Deterministically refit from full inputs and return the verified evidence."""
     verify_shadow_probability_evidence(evidence, samples)
     return dict(evidence)
-
-
-def evaluate_probability_predictions(
-    probabilities: Sequence[float],
-    outcomes: Sequence[int | bool],
-    session_dates: Sequence[str],
-    *,
-    base_rate: float,
-    bin_count: int = 5,
-    reference_probabilities: Sequence[float] | None = None,
-) -> dict[str, object]:
-    """Compute proper scoring, discrimination, calibration and monotonicity metrics."""
-    rows = _validated_metric_rows(probabilities, outcomes, session_dates)
-    if not rows:
-        raise ValueError("概率评估至少需要一个观测")
-    _require_probability(base_rate, "base_rate")
-    if bin_count < 2:
-        raise ValueError("bin_count 不能小于 2")
-    references, reference_definition = _metric_reference_probabilities(
-        reference_probabilities, base_rate, len(rows),
-    )
-    brier, reference = _brier_scores(rows, references)
-    bins = _calibration_bins(rows, bin_count)
-    return {
-        "observation_count": len(rows),
-        "independent_session_count": len({row[2] for row in rows}),
-        "base_rate": base_rate,
-        "reference_base_rate_mean": sum(references) / len(references),
-        "reference_brier_score": reference,
-        "reference_definition": reference_definition,
-        "actual_positive_rate": sum(row[1] for row in rows) / len(rows),
-        "brier_score": brier,
-        "brier_skill_score": None if reference <= 0 else 1.0 - brier / reference,
-        "log_loss": _log_loss(rows),
-        "ece": _expected_calibration_error(bins, len(rows)),
-        "auc": _auc(rows),
-        "calibration_bins": bins,
-        "bin_monotonic": _bins_are_monotonic(bins),
-        "highest_bin_above_base_rate": bool(
-            bins and _finite_number(bins[-1]["actual_rate"], "highest bin actual_rate") > base_rate
-        ),
-    }
-
-
-def _metric_reference_probabilities(
-    values: Sequence[float] | None, base_rate: float, observation_count: int,
-) -> tuple[list[float], str]:
-    if values is None:
-        return [base_rate] * observation_count, "constant_base_rate"
-    if len(values) != observation_count:
-        raise ValueError("参考概率与概率观测长度必须一致")
-    references = [_finite_number(value, "reference_probability") for value in values]
-    for value in references:
-        _require_probability(value, "reference_probability")
-    return references, "per_observation_calibration_base_rate"
-
-
-def _brier_scores(
-    rows: Sequence[tuple[float, int, str]], references: Sequence[float],
-) -> tuple[float, float]:
-    brier = sum((probability - outcome) ** 2 for probability, outcome, _date in rows) / len(rows)
-    reference = sum(
-        (reference_probability - outcome) ** 2
-        for reference_probability, (_probability, outcome, _date) in zip(references, rows, strict=True)
-    ) / len(rows)
-    return brier, reference
-
-
-def _expected_calibration_error(
-    bins: Sequence[Mapping[str, object]], observation_count: int,
-) -> float:
-    weighted_errors = (
-        _integer(item["count"], "calibration bin count")
-        * abs(
-            _finite_number(item["actual_rate"], "calibration actual_rate")
-            - _finite_number(item["mean_probability"], "calibration mean_probability")
-        )
-        for item in bins
-    )
-    return sum(weighted_errors) / observation_count
-
-
-def fit_empirical_bayes_baseline(
-    scores: Sequence[float],
-    outcomes: Sequence[int | bool],
-    *,
-    bin_count: int = 10,
-    prior_strength: float = 20.0,
-) -> dict[str, object]:
-    """Fit a deterministic empirical-Bayes binned probability baseline."""
-    values, labels = _validated_scores_and_labels(scores, outcomes)
-    if bin_count < 2 or prior_strength <= 0 or not math.isfinite(prior_strength):
-        raise ValueError("经验贝叶斯分箱参数无效")
-    base_rate = (sum(labels) + 1.0) / (len(labels) + 2.0)
-    boundaries = _quantile_boundaries(values, bin_count)
-    counts = [0] * (len(boundaries) + 1)
-    positives = [0] * len(counts)
-    for score, label in zip(values, labels, strict=True):
-        index = bisect_right(boundaries, score)
-        counts[index] += 1
-        positives[index] += label
-    probabilities = [
-        (positive + prior_strength * base_rate) / (count + prior_strength)
-        for count, positive in zip(counts, positives, strict=True)
-    ]
-    return {
-        "version": PROBABILITY_BASELINE_VERSION,
-        "boundaries": boundaries,
-        "probabilities": probabilities,
-        "counts": counts,
-        "positives": positives,
-        "base_rate": base_rate,
-        "prior_strength": prior_strength,
-    }
 
 
 def stable_probability_hash(value: object) -> str:
@@ -430,6 +359,7 @@ def _validate_config(config: ProbabilityConfig) -> None:
         config.minimum_calibration_sessions,
         config.minimum_test_sessions,
         config.minimum_bin_sessions,
+        config.minimum_selection_folds,
         config.minimum_isotonic_calibration_sessions,
         config.calibration_bin_count,
         config.empirical_bayes_bin_count,
@@ -446,6 +376,85 @@ def _validate_config(config: ProbabilityConfig) -> None:
         raise ValueError("上涨概率正则、先验及收敛参数必须为有限正数")
     if config.bootstrap_samples < 100:
         raise ValueError("bootstrap_samples 不能小于 100")
+    _bound_label_contract(config)
+
+
+def _bound_label_contract(config: ProbabilityConfig) -> dict[str, object]:
+    """Canonical label/execution assumptions bound into model identity."""
+    if config.label_contract is None:
+        return {
+            "label_version": PROBABILITY_LABEL_VERSION,
+            "cost_model_version": config.cost_model_version,
+        }
+    contract = _canonical_json_value(dict(config.label_contract))
+    if not isinstance(contract, dict) or not contract:
+        raise ValueError("上涨概率 label_contract 必须是非空有限 JSON object")
+    _validate_complete_label_contract(contract, config)
+    return contract
+
+
+def _validate_complete_label_contract(
+    contract: Mapping[str, object], config: ProbabilityConfig,
+) -> None:
+    label_version = contract.get("label_version")
+    cost_version = contract.get("cost_model_version")
+    if label_version != PROBABILITY_LABEL_VERSION:
+        raise ValueError("上涨概率 label_contract label_version 不一致")
+    if cost_version != config.cost_model_version:
+        raise ValueError("上涨概率 label_contract cost_model_version 不一致")
+    required = (
+        "execution_model",
+        "horizons",
+        "target_definitions",
+        "cost_profile_id",
+        "execution_notional",
+        "max_daily_participation_rate",
+    )
+    if any(contract.get(name) is None for name in required):
+        raise ValueError("上涨概率 label_contract 缺少完整执行或成本假设")
+    _validate_label_contract_semantics(contract, config)
+
+
+def _validate_label_contract_semantics(
+    contract: Mapping[str, object], config: ProbabilityConfig,
+) -> None:
+    if not isinstance(contract["execution_model"], str) or not contract["execution_model"].strip():
+        raise ValueError("上涨概率 label_contract execution_model 无效")
+    horizons = contract["horizons"]
+    if (
+        not isinstance(horizons, list)
+        or config.horizon not in horizons
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in horizons)
+        or len(horizons) != len(set(horizons))
+    ):
+        raise ValueError("上涨概率 label_contract horizons 无效")
+    targets = contract["target_definitions"]
+    if not isinstance(targets, list) or not targets or any(
+        not isinstance(value, str) or not value.strip() for value in targets
+    ):
+        raise ValueError("上涨概率 label_contract target_definitions 无效")
+    if not isinstance(contract["cost_profile_id"], str) or not contract["cost_profile_id"].strip():
+        raise ValueError("上涨概率 label_contract cost_profile_id 无效")
+    _validate_label_contract_capacity(contract)
+
+
+def _validate_label_contract_capacity(contract: Mapping[str, object]) -> None:
+    notional = contract["execution_notional"]
+    participation = contract["max_daily_participation_rate"]
+    if (
+        isinstance(notional, bool)
+        or not isinstance(notional, int | float)
+        or not math.isfinite(float(notional))
+        or float(notional) <= 0
+    ):
+        raise ValueError("上涨概率 label_contract execution_notional 无效")
+    if (
+        isinstance(participation, bool)
+        or not isinstance(participation, int | float)
+        or not math.isfinite(float(participation))
+        or not 0 < float(participation) <= 1
+    ):
+        raise ValueError("上涨概率 label_contract max_daily_participation_rate 无效")
 
 
 def _split_contract(config: ProbabilityConfig) -> dict[str, object]:
@@ -467,8 +476,17 @@ def _evaluation_contract(config: ProbabilityConfig) -> dict[str, object]:
         "minimum_bin_sessions": config.minimum_bin_sessions,
         "calibration_bin_count": config.calibration_bin_count,
         "minimum_isotonic_calibration_sessions": config.minimum_isotonic_calibration_sessions,
-        "bootstrap": "deterministic_session_block_95pct",
+        "bootstrap": "deterministic_circular_moving_session_block_95pct_v1",
+        "bootstrap_block_length_sessions": max(1, config.horizon),
         "bootstrap_samples": config.bootstrap_samples,
+        "minimum_selection_folds": config.minimum_selection_folds,
+        "selection_qualification": {
+            "requires_complete_label_contract_binding": True,
+            "requires_positive_oos_brier_skill": True,
+            "requires_effective_probability_stratification": True,
+            "requires_multiple_complete_oos_folds": True,
+            "requires_positive_skill_in_every_complete_oos_fold": True,
+        },
         "probability_when_insufficient": None,
         "production_ranking_effect": "none",
         "automatic_promotion": False,
@@ -804,10 +822,22 @@ def _prediction_metrics(
     residuals = [(day, outcome - probability) for day, outcome, probability in zip(dates, outcomes, probabilities, strict=True)]
     losses = [(day, (outcome - probability) ** 2) for day, outcome, probability in zip(dates, outcomes, probabilities, strict=True)]
     targets = list(zip(dates, [float(value) for value in outcomes], strict=True))
-    calibrated["calibration_offset_ci_95"] = _date_block_bootstrap_ci(residuals, seed + ":offset", config.bootstrap_samples)
-    calibrated["brier_score_ci_95"] = _date_block_bootstrap_ci(losses, seed + ":brier", config.bootstrap_samples)
-    calibrated["actual_positive_rate_ci_95"] = _date_block_bootstrap_ci(targets, seed + ":rate", config.bootstrap_samples)
+    block_length = max(1, config.horizon)
+    calibrated["calibration_offset_ci_95"] = _date_block_bootstrap_ci(
+        residuals, seed + ":offset", config.bootstrap_samples,
+        block_length_sessions=block_length,
+    )
+    calibrated["brier_score_ci_95"] = _date_block_bootstrap_ci(
+        losses, seed + ":brier", config.bootstrap_samples,
+        block_length_sessions=block_length,
+    )
+    calibrated["actual_positive_rate_ci_95"] = _date_block_bootstrap_ci(
+        targets, seed + ":rate", config.bootstrap_samples,
+        block_length_sessions=block_length,
+    )
     calibrated["bootstrap_samples"] = config.bootstrap_samples
+    calibrated["bootstrap_method"] = "deterministic_circular_moving_session_block_95pct_v1"
+    calibrated["bootstrap_block_length_sessions"] = block_length
     isotonic_metrics = _optional_candidate_metrics(
         predictions, outcomes, dates, base_rate, references, config,
     )
@@ -815,6 +845,49 @@ def _prediction_metrics(
         "calibrated": calibrated,
         "empirical_bayes_baseline": baseline_metrics,
         "isotonic_candidate": isotonic_metrics,
+        "fold_stability": _fold_selection_stability(predictions),
+    }
+
+
+def _fold_selection_stability(
+    predictions: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    grouped: dict[int, list[Mapping[str, object]]] = defaultdict(list)
+    for item in predictions:
+        grouped[_integer(item.get("fold_id"), "fold_id")].append(item)
+    folds: list[dict[str, object]] = []
+    for fold_id, rows in sorted(grouped.items()):
+        losses = [
+            (_integer(item["outcome"], "outcome") - _finite_number(item["probability"], "probability")) ** 2
+            for item in rows
+        ]
+        references = [
+            (_integer(item["outcome"], "outcome") - _finite_number(
+                item["reference_base_rate"], "reference_base_rate",
+            )) ** 2
+            for item in rows
+        ]
+        brier = sum(losses) / len(losses)
+        reference = sum(references) / len(references)
+        skill = None if reference <= 0 else 1.0 - brier / reference
+        folds.append(
+            {
+                "fold_id": fold_id,
+                "observation_count": len(rows),
+                "independent_session_count": len({str(item["session_date"]) for item in rows}),
+                "brier_score": brier,
+                "reference_brier_score": reference,
+                "brier_skill_score": skill,
+                "positive_brier_skill": skill is not None and skill > 0,
+            }
+        )
+    return {
+        "version": "complete-oos-fold-brier-stability-v1",
+        "fold_count": len(folds),
+        "all_folds_positive_brier_skill": bool(folds) and all(
+            item["positive_brier_skill"] is True for item in folds
+        ),
+        "folds": folds,
     }
 
 
@@ -850,6 +923,50 @@ def _metric_insufficiency_reasons(metrics: Mapping[str, object], config: Probabi
     return []
 
 
+def _selection_qualification(
+    metrics: Mapping[str, object], fold_count: int, config: ProbabilityConfig,
+) -> dict[str, object]:
+    calibrated = _object_mapping(metrics.get("calibrated"), "metrics.calibrated")
+    bins = cast(Sequence[Mapping[str, object]], calibrated.get("calibration_bins"))
+    brier_skill = calibrated.get("brier_skill_score")
+    positive_skill = (
+        not isinstance(brier_skill, bool)
+        and isinstance(brier_skill, int | float)
+        and math.isfinite(float(brier_skill))
+        and float(brier_skill) > 0
+    )
+    effective_stratification = bool(
+        len(bins) >= 2
+        and calibrated.get("bin_monotonic") is True
+        and calibrated.get("highest_bin_above_base_rate") is True
+        and all(
+            _integer(item["independent_session_count"], "independent_session_count")
+            >= config.minimum_bin_sessions
+            for item in bins
+        )
+    )
+    stability = _object_mapping(metrics.get("fold_stability"), "metrics.fold_stability")
+    stable_across_folds = bool(
+        fold_count >= config.minimum_selection_folds
+        and stability.get("fold_count") == fold_count
+        and stability.get("all_folds_positive_brier_skill") is True
+    )
+    gates = {
+        "complete_label_contract_bound": config.label_contract is not None,
+        "positive_oos_brier_skill": positive_skill,
+        "effective_probability_stratification": effective_stratification,
+        "multiple_complete_oos_folds": fold_count >= config.minimum_selection_folds,
+        "stable_positive_skill_across_complete_oos_folds": stable_across_folds,
+    }
+    return {
+        "version": "market-scan-probability-selection-gates-v1",
+        "passed": all(gates.values()),
+        "gates": gates,
+        "minimum_complete_oos_folds": config.minimum_selection_folds,
+        "evaluated_complete_oos_folds": fold_count,
+    }
+
+
 def _complete_evidence(
     prepared: _PreparedStudy,
     config: ProbabilityConfig,
@@ -866,10 +983,14 @@ def _complete_evidence(
     artifacts = final_fold.artifacts
     status: ProbabilityStatus = "insufficient_data" if reasons else "calibrated_shadow"
     calibrated = _object_mapping(metrics["calibrated"], "metrics.calibrated")
+    selection = _selection_qualification(metrics, len(folds), config)
     evidence = _base_evidence(prepared, config, generated_at, reasons)
     evidence.update(
         {
             "status": status,
+            "fit_status": "fitted_oos",
+            "selection_qualified": status == "calibrated_shadow" and selection["passed"] is True,
+            "selection_qualification": selection,
             "base_rate": artifacts.base_rate,
             "confidence_interval": calibrated.get("actual_positive_rate_ci_95"),
             "split": _split_payload(split),
@@ -912,6 +1033,9 @@ def _insufficient_evidence(
     evidence.update(
         {
             "status": "insufficient_data",
+            "fit_status": "not_fitted",
+            "selection_qualified": False,
+            "selection_qualification": None,
             "split": _split_payload(split) if split else None,
             "counts": _partition_counts(prepared, split),
             "training_cutoff": split.train_dates[-1] if split else None,
@@ -994,6 +1118,9 @@ def _base_evidence(
     return {
         "schema_version": PROBABILITY_SCHEMA_VERSION,
         "status": "insufficient_data",
+        "fit_status": "not_fitted",
+        "selection_qualified": False,
+        "selection_qualification": None,
         "probability": None,
         "horizon": config.horizon,
         "target_definition": _target_definition(config),
@@ -1003,6 +1130,10 @@ def _base_evidence(
         "feature_version": PROBABILITY_FEATURE_VERSION,
         "label_version": PROBABILITY_LABEL_VERSION,
         "cost_model_version": config.cost_model_version,
+        "label_contract_digest": stable_probability_hash(_bound_label_contract(config)),
+        "label_contract_binding": (
+            "complete" if config.label_contract is not None else "legacy_version_only"
+        ),
         "generated_at": generated_at,
         "input_digest": prepared.input_digest,
         "contract": build_probability_contract(config),
@@ -1160,6 +1291,9 @@ def _estimate_payload(
         "feature_version": evidence.get("feature_version"),
         "label_version": evidence.get("label_version"),
         "cost_model_version": evidence.get("cost_model_version"),
+        "label_contract_digest": evidence.get("label_contract_digest"),
+        "selection_qualified": evidence.get("selection_qualified") is True,
+        "selection_qualification": evidence.get("selection_qualification"),
         "training_cutoff": evidence.get("training_cutoff"),
         "model_digest": evidence.get("model_digest"),
         "calibrator_digest": evidence.get("calibrator_digest"),
@@ -1186,6 +1320,9 @@ def _null_estimate(evidence: Mapping[str, object], sample_id: str) -> dict[str, 
         "feature_version": evidence.get("feature_version"),
         "label_version": evidence.get("label_version"),
         "cost_model_version": evidence.get("cost_model_version"),
+        "label_contract_digest": evidence.get("label_contract_digest"),
+        "selection_qualified": False,
+        "selection_qualification": evidence.get("selection_qualification"),
         "training_cutoff": evidence.get("training_cutoff"),
         "limitations": evidence.get("limitations"),
         "generated_at": evidence.get("generated_at"),
@@ -1209,6 +1346,10 @@ def _verify_registered_evidence(evidence: Mapping[str, object], config: Probabil
         "feature_version": PROBABILITY_FEATURE_VERSION,
         "label_version": PROBABILITY_LABEL_VERSION,
         "cost_model_version": config.cost_model_version,
+        "label_contract_digest": stable_probability_hash(_bound_label_contract(config)),
+        "label_contract_binding": (
+            "complete" if config.label_contract is not None else "legacy_version_only"
+        ),
         "target_definition": _target_definition(config),
     }
     if any(evidence.get(name) != value for name, value in expected.items()):
@@ -1594,6 +1735,29 @@ def _verify_persisted_metrics(evidence: Mapping[str, object], config: Probabilit
         raise ProbabilityReplayError("上涨概率校准指标无法从测试观测重放")
 
 
+def _verify_selection_qualification(
+    evidence: Mapping[str, object], config: ProbabilityConfig,
+) -> None:
+    metrics = evidence.get("calibration_metrics")
+    folds = evidence.get("folds")
+    if metrics is None:
+        if (
+            evidence.get("fit_status") != "not_fitted"
+            or evidence.get("selection_qualified") is not False
+            or evidence.get("selection_qualification") is not None
+        ):
+            raise ProbabilityReplayError("上涨概率未拟合证据的选择资格无效")
+        return
+    if not isinstance(metrics, Mapping) or not isinstance(folds, list):
+        raise ProbabilityReplayError("上涨概率选择资格缺少指标或逐折证据")
+    expected = _selection_qualification(metrics, len(folds), config)
+    if evidence.get("fit_status") != "fitted_oos" or evidence.get("selection_qualification") != expected:
+        raise ProbabilityReplayError("上涨概率选择资格无法从样本外指标重放")
+    qualified = evidence.get("status") == "calibrated_shadow" and expected["passed"] is True
+    if evidence.get("selection_qualified") is not qualified:
+        raise ProbabilityReplayError("上涨概率 selection_qualified 与门禁不一致")
+
+
 def _config_from_evidence(evidence: Mapping[str, object]) -> ProbabilityConfig:
     contract = _object_mapping(evidence.get("contract"), "contract")
     label = _object_mapping(contract.get("label"), "contract.label")
@@ -1602,15 +1766,25 @@ def _config_from_evidence(evidence: Mapping[str, object]) -> ProbabilityConfig:
     baseline = _object_mapping(contract.get("baseline"), "contract.baseline")
     split = _object_mapping(contract.get("split"), "contract.split")
     evaluation = _object_mapping(contract.get("evaluation"), "contract.evaluation")
+    bound_label = _object_mapping(cost.get("label_contract"), "cost.label_contract")
+    label_contract = (
+        None
+        if set(bound_label) == {"label_version", "cost_model_version"}
+        else dict(bound_label)
+    )
     return ProbabilityConfig(
         horizon=_integer(evidence.get("horizon"), "horizon"),
         target=cast(ProbabilityTarget, label.get("target")),
         cost_model_version=_nonempty_text(cost.get("version"), "cost.version"),
+        label_contract=label_contract,
         minimum_train_sessions=_integer(split.get("minimum_train_sessions"), "minimum_train_sessions"),
         minimum_calibration_sessions=_integer(split.get("minimum_calibration_sessions"), "minimum_calibration_sessions"),
         minimum_test_sessions=_integer(split.get("minimum_test_sessions"), "minimum_test_sessions"),
         minimum_label_coverage=_finite_number(evaluation.get("minimum_label_coverage"), "minimum_label_coverage"),
         minimum_bin_sessions=_integer(evaluation.get("minimum_bin_sessions"), "minimum_bin_sessions"),
+        minimum_selection_folds=_integer(
+            evaluation.get("minimum_selection_folds"), "minimum_selection_folds",
+        ),
         minimum_isotonic_calibration_sessions=_integer(
             evaluation.get("minimum_isotonic_calibration_sessions"),
             "minimum_isotonic_calibration_sessions",
@@ -1624,135 +1798,6 @@ def _config_from_evidence(evidence: Mapping[str, object]) -> ProbabilityConfig:
         maximum_iterations=_integer(model.get("maximum_iterations"), "maximum_iterations"),
         convergence_tolerance=_finite_number(model.get("convergence_tolerance"), "convergence_tolerance"),
     )
-
-
-def _validated_metric_rows(
-    probabilities: Sequence[float], outcomes: Sequence[int | bool], session_dates: Sequence[str],
-) -> list[tuple[float, int, str]]:
-    if not (len(probabilities) == len(outcomes) == len(session_dates)):
-        raise ValueError("概率、结果和交易日长度必须一致")
-    rows: list[tuple[float, int, str]] = []
-    for probability, outcome, session_date in zip(probabilities, outcomes, session_dates, strict=True):
-        numeric = _finite_number(probability, "probability")
-        _require_probability(numeric, "probability")
-        label = _validated_target(outcome)
-        if label is None:
-            raise ValueError("概率评估结果不能为 None")
-        rows.append((numeric, label, _validated_date(session_date)))
-    return rows
-
-
-def _calibration_bins(rows: Sequence[tuple[float, int, str]], bin_count: int) -> list[dict[str, object]]:
-    grouped: list[list[tuple[float, int, str]]] = [[] for _index in range(bin_count)]
-    for row in rows:
-        index = min(bin_count - 1, int(row[0] * bin_count))
-        grouped[index].append(row)
-    bins: list[dict[str, object]] = []
-    for index, values in enumerate(grouped):
-        if not values:
-            continue
-        bins.append(
-            {
-                "lower": index / bin_count,
-                "upper": (index + 1) / bin_count,
-                "count": len(values),
-                "independent_session_count": len({item[2] for item in values}),
-                "mean_probability": sum(item[0] for item in values) / len(values),
-                "actual_rate": sum(item[1] for item in values) / len(values),
-            }
-        )
-    return bins
-
-
-def _bins_are_monotonic(bins: Sequence[Mapping[str, object]]) -> bool:
-    rates = [_finite_number(item["actual_rate"], "calibration actual_rate") for item in bins]
-    return all(right + 1e-12 >= left for left, right in zip(rates, rates[1:], strict=False))
-
-
-def _log_loss(rows: Sequence[tuple[float, int, str]]) -> float:
-    total = 0.0
-    for probability, outcome, _date in rows:
-        clipped = min(1.0 - 1e-15, max(1e-15, probability))
-        total -= outcome * math.log(clipped) + (1 - outcome) * math.log(1.0 - clipped)
-    return total / len(rows)
-
-
-def _auc(rows: Sequence[tuple[float, int, str]]) -> float | None:
-    positive_count = sum(outcome for _probability, outcome, _date in rows)
-    negative_count = len(rows) - positive_count
-    if not positive_count or not negative_count:
-        return None
-    ordered = sorted((probability, outcome) for probability, outcome, _date in rows)
-    wins = 0.0
-    negatives_seen = 0
-    index = 0
-    while index < len(ordered):
-        group_end = index + 1
-        while group_end < len(ordered) and ordered[group_end][0] == ordered[index][0]:
-            group_end += 1
-        group = ordered[index:group_end]
-        group_positives = sum(outcome for _probability, outcome in group)
-        group_negatives = len(group) - group_positives
-        wins += group_positives * negatives_seen + 0.5 * group_positives * group_negatives
-        negatives_seen += group_negatives
-        index = group_end
-    return wins / (positive_count * negative_count)
-
-
-def _date_block_bootstrap_ci(
-    rows: Sequence[tuple[str, float]], seed_text: str, bootstrap_samples: int,
-) -> list[float]:
-    grouped: dict[str, list[float]] = defaultdict(list)
-    for session_date, value in rows:
-        grouped[session_date].append(_finite_number(value, "bootstrap value"))
-    dates = sorted(grouped)
-    aggregates = {key: (sum(values), len(values)) for key, values in grouped.items()}
-    if len(dates) == 1:
-        mean = sum(grouped[dates[0]]) / len(grouped[dates[0]])
-        return [mean, mean]
-    generator = random.Random(int.from_bytes(hashlib.sha256(seed_text.encode()).digest()[:8], "big"))
-    estimates: list[float] = []
-    for _sample in range(bootstrap_samples):
-        selected = [dates[generator.randrange(len(dates))] for _index in dates]
-        total = sum(aggregates[selected_date][0] for selected_date in selected)
-        count = sum(aggregates[selected_date][1] for selected_date in selected)
-        estimates.append(total / count)
-    estimates.sort()
-    return [_percentile(estimates, 0.025), _percentile(estimates, 0.975)]
-
-
-def _validated_scores_and_labels(
-    scores: Sequence[float], outcomes: Sequence[int | bool],
-) -> tuple[list[float], list[int]]:
-    if not scores or len(scores) != len(outcomes):
-        raise ValueError("经验贝叶斯分箱分数和结果必须非空且长度一致")
-    values = [_finite_number(value, "score") for value in scores]
-    labels = [_validated_target(value) for value in outcomes]
-    if any(value is None for value in labels):
-        raise ValueError("经验贝叶斯结果不能为 None")
-    return values, cast(list[int], labels)
-
-
-def _quantile_boundaries(values: Sequence[float], bin_count: int) -> list[float]:
-    ordered = sorted(values)
-    candidates = [_percentile(ordered, index / bin_count) for index in range(1, bin_count)]
-    boundaries: list[float] = []
-    for value in candidates:
-        if not boundaries or value > boundaries[-1]:
-            boundaries.append(value)
-    return boundaries
-
-
-def _percentile(values: Sequence[float], probability: float) -> float:
-    if len(values) == 1:
-        return float(values[0])
-    position = (len(values) - 1) * probability
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return float(values[lower])
-    fraction = position - lower
-    return float(values[lower] * (1.0 - fraction) + values[upper] * fraction)
 
 
 def _required_label(item: ProbabilitySample) -> int:
@@ -1867,6 +1912,7 @@ __all__ = [
     "fit_empirical_bayes_baseline",
     "fit_shadow_probability",
     "grouped_walk_forward_splits",
+    "probability_selection_qualified",
     "predict_shadow_probability",
     "replay_shadow_probability",
     "stable_probability_hash",

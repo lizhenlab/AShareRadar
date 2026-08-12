@@ -63,7 +63,7 @@ from app.services.research import (
 )
 from app.services.research_breadth import MarketBreadthSnapshot
 from app.services.stock_insights import build_stock_insight_bundle
-from app.services.datahub_status import _provider_error_text
+from app.services.datahub_status import provider_error_text
 from app.services.workbench_context import WorkbenchContext
 from app.workflows.optional_data import optional_workflow_value, short_error
 from app.workflows.stock_analysis import analyze_individual_stock
@@ -273,17 +273,17 @@ async def _order_book_or_error(datahub: DataHub, symbol: str) -> tuple[OrderBook
         return await optional_workflow_value(
             datahub,
             lambda: _load_order_book(datahub, symbol),
-            lambda exc: (None, _provider_error_text(exc)),
+            lambda exc: (None, provider_error_text(exc)),
         )
     except Exception as exc:
-        return None, _provider_error_text(exc)
+        return None, provider_error_text(exc)
 
 
 async def _stock_concepts_or_error(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str | None]:
     return await optional_workflow_value(
         datahub,
         lambda: _load_stock_concepts(datahub, symbol),
-        lambda exc: ([], _provider_error_text(exc)),
+        lambda exc: ([], provider_error_text(exc)),
     )
 
 

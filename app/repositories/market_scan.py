@@ -12,11 +12,15 @@ from app.repositories.market_scan_lifecycle import (
     MarketScanLifecycleMixin,
 )
 from app.repositories.market_scan_queries import MarketScanQueryMixin
+from app.repositories.market_scan_probability_capture import (
+    MarketScanProbabilityCaptureOutboxMixin,
+)
 from app.repositories.market_scan_results import MarketScanResultWriterMixin
 
 
 class MarketScanRepository(
     MarketScanLifecycleMixin,
+    MarketScanProbabilityCaptureOutboxMixin,
     MarketScanResultWriterMixin,
     MarketScanQueryMixin,
     SQLiteRepository,

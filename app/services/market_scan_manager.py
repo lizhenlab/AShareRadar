@@ -4,10 +4,9 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime
 import math
-from pathlib import Path
 import sqlite3
-import threading
-from typing import Literal
+from typing import Literal, cast
+from uuid import uuid4
 
 from app.models.market_scan import (
     MARKET_SCAN_TOP100_REFRESH_LIMIT,
@@ -25,7 +24,7 @@ from app.models.market_scan import (
     MarketScanTrigger,
     is_market_scan_top100_refresh_scope,
 )
-from app.repositories.market_scan import ACTIVE_SCAN_STATUSES, RETRYABLE_SCAN_STATUSES
+from app.repositories.market_scan import RETRYABLE_SCAN_STATUSES
 from app.services.advice_review import normalize_review_as_of
 from app.services.datahub_runtime import run_cache_io
 from app.services.data_quality_time import latest_expected_daily_kline_date
@@ -36,9 +35,11 @@ from app.services.market_scan_completion import (
     MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
     MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
     MarketScanFinalizer,
+    MarketScanPublicationValidationError,
     sensitive_setting_values,
+    short_scan_error,
 )
-from app.services.market_scan_contracts import MarketScanDataHubProtocol
+from app.services.market_scan_contracts import MarketScanCacheProtocol, MarketScanDataHubProtocol
 from app.services.market_scan_execution import MarketScanExecutor
 from app.services.market_scan_export import (
     PUBLISHED_MARKET_SCAN_STATUSES,
@@ -46,25 +47,21 @@ from app.services.market_scan_export import (
     MarketScanWorkbookExport,
     build_market_scan_workbook,
 )
-from app.services.market_scan_future_range_store import (
-    FutureRangeResearchUnavailable,
-    MarketScanFutureRangeStore,
-    not_generated_future_range_research,
-)
+from app.services.market_scan_future_range_store import not_generated_future_range_research
 from app.services.market_scan_lifecycle import MarketScanLifecycle, MarketScanStopSnapshot
 from app.services.market_scan_modes import (
     OFFICIAL_SCAN_WINDOW_MESSAGE,
     market_scan_temporal_contract,
 )
-from app.services.market_scan_probability_research import PROBABILITY_PRIMARY_TARGET
-from app.services.market_scan_probability_store import (
-    MarketScanProbabilityStore,
-    ProbabilityFilterUnavailable,
-    not_generated_probability_research,
+from app.services.market_scan_probability_capture import (
+    process_market_scan_probability_capture_outbox,
 )
+from app.services.market_scan_query_service import MarketScanQueryService
+from app.services.market_scan_research_stores import MarketScanResearchStores
 from app.services.market_scan_automation import MarketScanAutomaticAction
 from app.services.market_scan_automation_runner import MarketScanAutomationCoordinator
 from app.services.market_scan_scoring import market_scan_score_spec, stable_score_spec_hash
+from app.services.market_scan_terminal_recovery import MarketScanTerminalRecovery
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
 from app.utils.clock import market_now
@@ -76,17 +73,7 @@ MARKET_SCAN_TASK_LABEL = "全市场A股扫描"
 MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE = "已有其他进程负责全市场扫描，本进程不能修改扫描任务"
 HISTORICAL_SCAN_UNAVAILABLE_MESSAGE = "当前数据源只提供当前快照；历史榜单只能读取已持久化快照，不能新建历史扫描"
 DAILY_BAR_WINDOW_MESSAGE = OFFICIAL_SCAN_WINDOW_MESSAGE
-TERMINAL_RECOVERY_MESSAGE = "本地扫描任务已退出，终态写入失败后自动中断；可从断点重试"
-TERMINAL_RECOVERY_ERROR = "本地后台扫描已退出，但原终态未能持久化"
-_MARKET_SCAN_RESULT_QUERY_FIELDS = (
-    "page", "page_size", "status", "market", "industry", "is_st", "is_new",
-    "min_score", "max_score", "min_trend_score", "max_trend_score",
-    "min_change_pct", "max_change_pct", "min_turnover_rate", "max_turnover_rate",
-    "min_amount", "max_amount", "min_data_quality_score", "max_data_quality_score",
-    "min_confidence", "max_risk", "min_tradability", "keyword", "symbols", "sort", "order",
-)
-
-
+PROBABILITY_SOURCE_CAPTURE_POLL_SECONDS = 30.0
 class MarketScanManager:
     """Public facade that coordinates scan lifecycle, execution and persistence."""
 
@@ -100,19 +87,14 @@ class MarketScanManager:
         self.datahub = datahub
         self.cache = datahub.cache
         self.settings = datahub.settings
-        cache_path = getattr(self.cache, "path", None)
-        self._probability_store = (
-            MarketScanProbabilityStore(Path(cache_path).parent / "market-scan-probability")
-            if isinstance(cache_path, str | Path)
-            else None
+        self._research_stores = MarketScanResearchStores.for_cache_path(
+            getattr(self.cache, "path", None)
         )
-        self._future_range_store = (
-            MarketScanFutureRangeStore(
-                Path(cache_path).parent / "research" / "market_scan_future_range"
-            )
-            if isinstance(cache_path, str | Path)
-            else None
-        )
+        self._probability_store = self._research_stores.probability
+        self._probability_source_research_store = self._research_stores.probability_source
+        self._future_range_store = self._research_stores.future_range
+        self._query_service = MarketScanQueryService(self.cache, self._research_stores)
+        self._query_service_stores = self._research_stores
         self._now = now or _market_now
         sensitive_values = sensitive_setting_values(self.settings)
         self._sensitive_values = sensitive_values
@@ -123,17 +105,21 @@ class MarketScanManager:
         )
         self._finalizer = MarketScanFinalizer(self.cache, sensitive_values=sensitive_values)
         self._lifecycle = MarketScanLifecycle(self.cache, instance_guard=instance_guard)
+        self._terminal_recovery = MarketScanTerminalRecovery(self.cache, self._lifecycle)
         self._automation = MarketScanAutomationCoordinator(
             datahub,
             sensitive_values=sensitive_values,
         )
         self._deferred_stop_task: asyncio.Task[None] | None = None
-        self._terminal_failure_lock = threading.Lock()
-        self._terminal_failure_run_ids: set[int] = set()
+        self._probability_capture_task: asyncio.Task[None] | None = None
+        self._probability_capture_lock = asyncio.Lock()
+        self._probability_capture_wakeup = asyncio.Event()
+        self._probability_capture_owner = f"market-scan-manager-{uuid4().hex}"
 
     async def start(self) -> int:
         reconciled = await self._lifecycle.start()
         await run_cache_io(self._recover_terminal_persistence_failures)
+        await self._activate_probability_capture_leader()
         return reconciled
 
     @property
@@ -164,6 +150,7 @@ class MarketScanManager:
         await run_cache_io(self._recover_terminal_persistence_failures)
         snapshot = await self._lifecycle.begin_stop(close=close)
         if snapshot is None:
+            await self._stop_probability_capture_worker()
             return
         pending: set[asyncio.Task[None]] = set()
         if snapshot.tasks:
@@ -192,10 +179,16 @@ class MarketScanManager:
                     await self._finish_interrupted(run_id)
         finally:
             try:
-                await self._lifecycle.finish_stop()
+                try:
+                    await self._drain_probability_capture_outbox()
+                finally:
+                    await self._stop_probability_capture_worker()
             finally:
-                if self._deferred_stop_task is current_task:
-                    self._deferred_stop_task = None
+                try:
+                    await self._lifecycle.finish_stop()
+                finally:
+                    if self._deferred_stop_task is current_task:
+                        self._deferred_stop_task = None
 
     async def create_scan(
         self,
@@ -242,10 +235,21 @@ class MarketScanManager:
                 if busy_is_noop:
                     return None
                 raise RuntimeError(MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE)
+            await self._activate_probability_capture_leader()
             await run_cache_io(self._recover_terminal_persistence_failures)
             active = await run_cache_io(self.cache.active_market_scan_run)
             if active is not None:
                 return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
+            fresh_current = self._current_time()
+            fresh_temporal = market_scan_temporal_contract(fresh_current, mode)
+            if as_of is None:
+                normalized_as_of = fresh_current
+                temporal = fresh_temporal
+            elif (
+                temporal.data_date != fresh_temporal.data_date
+                or temporal.quote_date != fresh_temporal.quote_date
+            ):
+                raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
             try:
                 run = await run_cache_io(
                     self.cache.create_market_scan_run,
@@ -269,12 +273,13 @@ class MarketScanManager:
         return await self._retry_scan(run_id, current=self._current_time())
 
     async def refresh_top100_scores(self, run_id: int) -> MarketScanStartResponse:
-        current = self._current_time()
         async with self._lifecycle.lock:
             self._lifecycle.require_open()
             await self._lifecycle.require_instance_guard(MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE)
+            await self._activate_probability_capture_leader()
             await run_cache_io(self._recover_terminal_persistence_failures, run_id)
             source = await run_cache_io(self.cache.market_scan_run, run_id)
+            current = self._current_time()
             self._validate_top100_refresh_source(source, current=current)
             active = await run_cache_io(self.cache.active_market_scan_run)
             if active is not None:
@@ -307,9 +312,11 @@ class MarketScanManager:
         async with self._lifecycle.lock:
             self._lifecycle.require_open()
             await self._lifecycle.require_instance_guard(MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE)
+            await self._activate_probability_capture_leader()
             await run_cache_io(self._recover_terminal_persistence_failures, run_id)
             candidate = await run_cache_io(self.cache.market_scan_run, run_id)
             retry_plan = await run_cache_io(self.cache.market_scan_retry_plan, run_id)
+            current = self._current_time()
             if retry_plan.needs_market_data:
                 market_scan_temporal_contract(current, candidate.mode)
             self._validate_retry_candidate(candidate, retry_plan, current=current)
@@ -335,6 +342,7 @@ class MarketScanManager:
         async with self._lifecycle.lock:
             self._lifecycle.require_open()
             await self._lifecycle.require_instance_guard(MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE)
+            await self._activate_probability_capture_leader()
             await run_cache_io(self._recover_terminal_persistence_failures, run_id)
             await run_cache_io(self.cache.request_market_scan_cancel, run_id)
             task = self._lifecycle.cancel_local(run_id)
@@ -376,6 +384,7 @@ class MarketScanManager:
             acquired, _reconciled = await self._lifecycle.ensure_instance_guard()
             if not acquired:
                 return False
+            await self._activate_probability_capture_leader()
             await run_cache_io(self._recover_terminal_persistence_failures)
             return True
 
@@ -406,19 +415,20 @@ class MarketScanManager:
         return response
 
     def run(self, run_id: int) -> MarketScanRun:
-        self._recover_terminal_persistence_failures(run_id)
-        return self.cache.market_scan_run(run_id)
+        return self._queries().run(run_id)
 
     def latest_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
-        self._recover_terminal_persistence_failures()
-        return self.cache.latest_market_scan_run(mode=mode)
+        return self._queries().latest_run(mode=mode)
 
     def latest_published_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
-        self._recover_terminal_persistence_failures()
-        return self.cache.latest_published_market_scan_run(mode=mode)
+        return self._queries().latest_published_run(mode=mode)
 
     def next_automatic_run_at(self) -> datetime | None:
         return self._automation.next_due_at
+
+    def recover_terminal_failures(self, run_id: int | None = None) -> int:
+        """Explicitly reconcile terminal writes that previously failed."""
+        return self._recover_terminal_persistence_failures(run_id)
 
     def runs(
         self,
@@ -429,8 +439,7 @@ class MarketScanManager:
         status: MarketScanRunStatus | Literal["published"] | None = None,
         data_date: str | None = None,
     ) -> MarketScanRunPage:
-        self._recover_terminal_persistence_failures()
-        return self.cache.market_scan_runs(
+        return self._queries().runs(
             page=page,
             page_size=page_size,
             mode=mode,
@@ -449,10 +458,8 @@ class MarketScanManager:
         industry: MarketScanFilterValues,
         is_st: bool | None,
         is_new: bool | None,
-        min_score: int | None = None,
-        max_score: int | None = None,
-        min_trend_score: int | None = None,
-        max_trend_score: int | None = None,
+        min_score: int | None = None, max_score: int | None = None,
+        min_trend_score: int | None = None, max_trend_score: int | None = None,
         min_change_pct: float | None = None,
         max_change_pct: float | None = None,
         min_turnover_rate: float | None = None,
@@ -470,28 +477,40 @@ class MarketScanManager:
         probability_horizon: Literal[1, 5, 20] = 5,
         min_upside_probability: float | None = None,
     ) -> MarketScanResultPage:
-        self._recover_terminal_persistence_failures(run_id)
-        research = self._run_probability_research(run_id)
-        filter_probabilities = (
-            self._run_probability_projection(run_id)[1]
-            if min_upside_probability is not None
-            else {}
+        return self._queries().results(
+            run_id,
+            page=page,
+            page_size=page_size,
+            status=status,
+            market=market,
+            industry=industry,
+            is_st=is_st,
+            is_new=is_new,
+            min_score=min_score,
+            max_score=max_score,
+            min_trend_score=min_trend_score,
+            max_trend_score=max_trend_score,
+            min_change_pct=min_change_pct,
+            max_change_pct=max_change_pct,
+            min_turnover_rate=min_turnover_rate,
+            max_turnover_rate=max_turnover_rate,
+            min_amount=min_amount,
+            max_amount=max_amount,
+            min_data_quality_score=min_data_quality_score,
+            max_data_quality_score=max_data_quality_score,
+            min_confidence=min_confidence,
+            max_risk=max_risk,
+            min_tradability=min_tradability,
+            keyword=keyword,
+            sort=sort,
+            order=order,
+            probability_horizon=probability_horizon,
+            min_upside_probability=min_upside_probability,
         )
-        symbols = _probability_filter_symbols(
-            research,
-            filter_probabilities,
-            horizon=probability_horizon,
-            minimum=min_upside_probability,
-        )
-        query = _market_scan_result_query(locals())
-        page_result = self.cache.market_scan_results(run_id, **query)  # type: ignore[arg-type]
-        page_symbols = tuple(item.symbol for item in page_result.items)
-        _summary, probabilities = self._run_probability_projection(run_id, symbols=page_symbols)
-        return _attach_probability_projection(page_result, research, probabilities)
 
     def probability_research(self, run_id: int) -> dict[str, object]:
         self.run(run_id)
-        return self._run_probability_research(run_id)
+        return self._queries().probability_research(run_id)
 
     def future_range_research(
         self,
@@ -503,13 +522,7 @@ class MarketScanManager:
         symbol: str | None = None,
         include_research: bool = True,
     ) -> dict[str, object]:
-        # This endpoint is deliberately stricter than the lifecycle-oriented
-        # ``run`` facade: it must never perform terminal-state recovery writes.
-        run = self.cache.market_scan_run(run_id)
-        _require_future_range_eligible_run(run)
-        if self._future_range_store is None:
-            return not_generated_future_range_research(run_id)
-        return self._future_range_store.research_projection(
+        return self._queries().future_range_research(
             run_id,
             page=page,
             page_size=page_size,
@@ -519,9 +532,7 @@ class MarketScanManager:
         )
 
     def _run_probability_research(self, run_id: int) -> dict[str, object]:
-        if self._probability_store is None:
-            return not_generated_probability_research(run_id)
-        return self._probability_store.research_projection(run_id)
+        return self._queries().probability_research(run_id)
 
     def _run_probability_projection(
         self,
@@ -529,9 +540,22 @@ class MarketScanManager:
         *,
         symbols: tuple[str, ...] | None = None,
     ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-        if self._probability_store is None:
-            return not_generated_probability_research(run_id), {}
-        return self._probability_store.run_projection(run_id, symbols=symbols)
+        return self._queries().probability_projection(run_id, symbols=symbols)
+
+    def _queries(self) -> MarketScanQueryService:
+        service = getattr(self, "_query_service", None)
+        stores = MarketScanResearchStores(
+            probability=getattr(self, "_probability_store", None),
+            probability_source=getattr(self, "_probability_source_research_store", None),
+            future_range=getattr(self, "_future_range_store", None),
+        )
+        if service is not None and getattr(self, "_query_service_stores", None) == stores:
+            return service
+        cache = cast(MarketScanCacheProtocol, getattr(self, "cache", None))
+        service = MarketScanQueryService(cache, stores)
+        self._query_service = service
+        self._query_service_stores = stores
+        return service
 
     def export_results(
         self,
@@ -609,6 +633,7 @@ class MarketScanManager:
                 message="正在执行发布门槛验证",
             )
             current = await run_cache_io(self.cache.market_scan_run, run_id)
+            self._validate_publication_window(current)
             degraded_count = await run_cache_io(
                 self.cache.market_scan_degraded_result_count,
                 run_id,
@@ -622,14 +647,84 @@ class MarketScanManager:
                 degraded_count=degraded_count,
                 warnings=warnings,
                 publication_summary=publication_summary,
+                validate_before_commit=lambda: self._validate_publication_window(current),
             )
-            self._track_terminal_persistence(run_id, persisted)
         except asyncio.CancelledError:
             finish = self._finish_interrupted if self._lifecycle.closed else self._finish_cancelled
             await asyncio.shield(finish(run_id))
             raise
         except Exception as exc:
             await self._finish_failed(run_id, exc)
+        else:
+            self._track_terminal_persistence(run_id, persisted)
+            if persisted:
+                self._probability_capture_wakeup.set()
+                await self._drain_probability_capture_outbox()
+
+    def _start_probability_capture_worker(self) -> None:
+        task = self._probability_capture_task
+        if task is not None and not task.done():
+            return
+        self._probability_capture_wakeup.set()
+        task = asyncio.create_task(
+            self._probability_capture_worker(),
+            name="market-scan-probability-source-capture",
+        )
+        self._probability_capture_task = task
+        task.add_done_callback(_consume_stop_exception)
+
+    async def _activate_probability_capture_leader(self) -> None:
+        if not self._lifecycle.owns_instance_guard():
+            return
+        await run_cache_io(self.cache.reconcile_probability_source_capture_outbox)
+        self._start_probability_capture_worker()
+
+    async def _stop_probability_capture_worker(self) -> None:
+        task = self._probability_capture_task
+        self._probability_capture_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _probability_capture_worker(self) -> None:
+        while True:
+            self._probability_capture_wakeup.clear()
+            try:
+                await self._drain_probability_capture_outbox()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                message = (
+                    "上涨概率PIT归档outbox处理失败："
+                    f"{short_scan_error(exc, sensitive_values=self._sensitive_values)}"
+                )
+                try:
+                    await run_cache_io(
+                        self.cache.save_monitor_event,
+                        "warning",
+                        "research",
+                        message[:800],
+                    )
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(
+                    self._probability_capture_wakeup.wait(),
+                    timeout=PROBABILITY_SOURCE_CAPTURE_POLL_SECONDS,
+                )
+            except TimeoutError:
+                continue
+
+    async def _drain_probability_capture_outbox(self) -> dict[str, int]:
+        if not self._lifecycle.owns_instance_guard():
+            return {"captured": 0, "skipped": 0, "failed": 0}
+        async with self._probability_capture_lock:
+            return await process_market_scan_probability_capture_outbox(
+                self.cache,
+                owner=self._probability_capture_owner,
+                sensitive_values=self._sensitive_values,
+            )
 
     async def _finish_cancelled(self, run_id: int) -> None:
         persisted = await self._finalizer.finish_cancelled(run_id)
@@ -650,53 +745,10 @@ class MarketScanManager:
         self._track_terminal_persistence(run_id, persisted)
 
     def _track_terminal_persistence(self, run_id: int, persisted: bool) -> None:
-        with self._terminal_failure_lock:
-            if persisted:
-                self._terminal_failure_run_ids.discard(run_id)
-            else:
-                self._terminal_failure_run_ids.add(run_id)
+        self._terminal_recovery.track(run_id, persisted)
 
     def _recover_terminal_persistence_failures(self, run_id: int | None = None) -> int:
-        if not self._owns_terminal_recovery_lease():
-            return 0
-        with self._terminal_failure_lock:
-            candidates = tuple(
-                candidate
-                for candidate in self._terminal_failure_run_ids
-                if run_id is None or candidate == run_id
-            )
-        local_active = set(self._lifecycle.active_run_ids)
-        recovered = 0
-        for candidate in candidates:
-            if candidate in local_active:
-                continue
-            try:
-                current = self.cache.market_scan_run(candidate)
-                if current.status in ACTIVE_SCAN_STATUSES:
-                    current = self.cache.finish_market_scan_run(
-                        candidate,
-                        "interrupted",
-                        message=TERMINAL_RECOVERY_MESSAGE,
-                        error=TERMINAL_RECOVERY_ERROR,
-                    )
-            except Exception:
-                continue
-            if current.status not in ACTIVE_SCAN_STATUSES:
-                self._track_terminal_persistence(candidate, True)
-                recovered += 1
-        return recovered
-
-    def _owns_terminal_recovery_lease(self) -> bool:
-        if self._lifecycle.closed or not bool(getattr(self._lifecycle, "_guard_acquired", False)):
-            return False
-        guard = getattr(self._lifecycle, "_instance_guard", None)
-        acquire = getattr(guard, "acquire", None)
-        if not callable(acquire):
-            return False
-        try:
-            return bool(acquire())
-        except Exception:
-            return False
+        return self._terminal_recovery.recover(run_id)
 
     def _validate_settings(self) -> None:
         if self.settings.market_scan_min_history_rows > self.settings.market_scan_kline_limit:
@@ -759,79 +811,21 @@ class MarketScanManager:
                 "请新建扫描，旧批次将保留为历史快照"
             )
 
+    def _validate_publication_window(self, run: MarketScanRun) -> None:
+        try:
+            temporal = market_scan_temporal_contract(self._current_time(), run.mode)
+        except ValueError as exc:
+            raise MarketScanPublicationValidationError(str(exc)) from exc
+        if (
+            run.data_date != temporal.data_date.isoformat()
+            or run.quote_date != temporal.quote_date.isoformat()
+        ):
+            raise MarketScanPublicationValidationError(
+                "扫描完成时日K/行情日期已变化，停止发布；请在当前有效窗口新建扫描"
+            )
+
     def _current_time(self, value: datetime | None = None) -> datetime:
         return normalize_review_as_of(value if value is not None else self._now(), allow_future=True)
-
-
-def _probability_filter_symbols(
-    research: dict[str, object],
-    probabilities: dict[str, dict[str, object]],
-    *,
-    horizon: Literal[1, 5, 20],
-    minimum: float | None,
-) -> tuple[str, ...] | None:
-    if minimum is None:
-        return None
-    if not math.isfinite(minimum) or not 0 <= minimum <= 1:
-        raise ValueError("最低上涨概率必须在 0 到 1 之间")
-    summary = _probability_summary(research, horizon)
-    if summary.get("status") != "calibrated_shadow":
-        raise ProbabilityFilterUnavailable("当前批次与周期尚无已校准 Shadow 概率，不能使用概率筛选")
-    return tuple(
-        symbol
-        for symbol, horizons in probabilities.items()
-        if _meets_probability_minimum(horizons, horizon, minimum)
-    )
-
-
-def _require_future_range_eligible_run(run: MarketScanRun) -> None:
-    if run.mode != "official":
-        raise FutureRangeResearchUnavailable("未来区间研究仅支持盘后正式批次")
-    if run.scope != FULL_MARKET_SCOPE:
-        raise FutureRangeResearchUnavailable("未来区间研究仅支持盘后正式全市场批次")
-    if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
-        raise FutureRangeResearchUnavailable("未来区间研究仅支持已发布批次")
-
-
-def _market_scan_result_query(values: dict[str, object]) -> dict[str, object]:
-    return {name: values[name] for name in _MARKET_SCAN_RESULT_QUERY_FIELDS}
-
-
-def _probability_summary(research: dict[str, object], horizon: int) -> dict[str, object]:
-    horizons = research.get("horizons")
-    targets = horizons.get(str(horizon)) if isinstance(horizons, dict) else None
-    summary = targets.get(PROBABILITY_PRIMARY_TARGET) if isinstance(targets, dict) else None
-    return summary if isinstance(summary, dict) else {}
-
-
-def _meets_probability_minimum(
-    horizons: dict[str, object],
-    horizon: int,
-    minimum: float,
-) -> bool:
-    targets = horizons.get(str(horizon))
-    record = targets.get(PROBABILITY_PRIMARY_TARGET) if isinstance(targets, dict) else None
-    probability = record.get("probability") if isinstance(record, dict) else None
-    return (
-        isinstance(record, dict)
-        and record.get("status") == "calibrated_shadow"
-        and isinstance(probability, int | float)
-        and not isinstance(probability, bool)
-        and math.isfinite(float(probability))
-        and float(probability) >= minimum
-    )
-
-
-def _attach_probability_projection(
-    page: MarketScanResultPage,
-    research: dict[str, object],
-    probabilities: dict[str, dict[str, object]],
-) -> MarketScanResultPage:
-    items = [
-        item.model_copy(update={"upside_probabilities": probabilities.get(item.symbol, {})})
-        for item in page.items
-    ]
-    return page.model_copy(update={"items": items, "probability_research": research})
 
 
 def _market_scan_shutdown_timeout(settings: object) -> float:
@@ -856,14 +850,30 @@ def market_scan_rule_version(
     *,
     mode: MarketScanMode = "official",
 ) -> str:
+    if mode == "intraday":
+        mode_contract = {
+            "id": mode,
+            "quote_date": "current-trading-day",
+            "daily_kline_cutoff": "previous-completed-trading-day",
+            "quote_kline_consistency": "previous-close",
+        }
+    elif mode == "preopen":
+        mode_contract = {
+            "id": mode,
+            "quote_date": "previous-completed-trading-day",
+            "daily_kline_cutoff": "same-previous-completed-trading-day",
+            "quote_kline_consistency": "same-day-close",
+        }
+    else:
+        mode_contract = {
+            "id": mode,
+            "quote_date": "completed-daily-bar-date",
+            "daily_kline_cutoff": "same-completed-trading-day",
+            "quote_kline_consistency": "same-day-close",
+        }
     contract = {
         "schema_version": 6,
-        "mode": {
-            "id": mode,
-            "quote_date": "current-trading-day" if mode == "intraday" else "completed-daily-bar-date",
-            "daily_kline_cutoff": "previous-completed-trading-day" if mode == "intraday" else "same-completed-trading-day",
-            "quote_kline_consistency": "previous-close" if mode == "intraday" else "same-day-close",
-        },
+        "mode": mode_contract,
         "score_spec": market_scan_score_spec(
             min_data_quality_score=int(getattr(settings, "market_scan_min_data_quality_score")),
         ),

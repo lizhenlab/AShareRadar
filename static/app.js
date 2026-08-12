@@ -90,6 +90,7 @@ import { syncAiQuestionCapabilityFromAvailability } from "./js/research-qa-repor
 import { ACTIVITY_FILTERS, mergeResearchActivity, renderResearchActivity } from "./js/research-activity.js";
 import { createStockSearchController } from "./js/stock-search.js";
 import { createStockSearchHistory } from "./js/stock-search-history.js";
+import { createStockSearchSurface } from "./js/stock-search-surface.js";
 import { normalizeUiSymbol, validateUiSymbol } from "./js/symbols.js";
 import {
   addWatchlistItem,
@@ -207,7 +208,6 @@ const state = {
   adviceTimelineWatermark: null,
 };
 
-const stockSearchBindings = [];
 let restoringWorkspacePreferences = false;
 let primaryNavigation = null;
 
@@ -578,7 +578,7 @@ function isStaleLoad(request) {
 function setActiveSymbol(symbol) {
   state.symbol = normalizeUiSymbol(symbol);
   renderCurrentAnalysisContext(null);
-  stockSearchBindings.forEach((binding) => binding.close());
+  stockSearchSurface.closeSuggestions();
   syncSymbolInputs(state.symbol);
 }
 
@@ -590,7 +590,11 @@ function renderCurrentAnalysisContext(origin) {
     target.textContent = "";
     return;
   }
-  const mode = origin.mode === "intraday" ? "盘中临时" : "盘后正式";
+  const mode = origin.mode === "intraday"
+    ? "盘中临时"
+    : origin.mode === "preopen"
+      ? "盘前复盘"
+      : "盘后正式";
   const run = origin.runId ? `批次 #${origin.runId}` : "所选扫描批次";
   const date = origin.quoteDate || origin.dataDate || "--";
   target.textContent = `当前个股分析使用此刻可用的最新数据，不是${run} 的冻结快照（${mode}，行情日 ${date}）。历史入榜证据请返回“全市场选股”查看。`;
@@ -2188,159 +2192,6 @@ function setElementAttribute(element, name, value) {
   if (name === "aria-activedescendant") element.ariaActiveDescendant = value;
 }
 
-function createStockSearchBinding({ inputId, listId, onSelect }) {
-  const input = $(inputId);
-  const list = $(listId);
-  let view = { phase: "idle", query: "", items: [], activeIndex: -1, message: "" };
-  const controller = createStockSearchController({
-    onState(nextView) {
-      view = nextView;
-      renderStockSearchView(input, list, nextView);
-    },
-    onSelect(symbol, item) {
-      if (input) input.value = item.code;
-      onSelect(symbol, item);
-    },
-  });
-  const events = bindStockSearchEvents(input, list, controller, () => view);
-
-  const binding = {
-    input(value) {
-      events.clearBlurTimer();
-      return controller.input(value);
-    },
-    close() {
-      events.clearBlurTimer();
-      return controller.close();
-    },
-    destroy() {
-      events.destroy();
-      return controller.destroy();
-    },
-    selectDefault() {
-      if (view.phase !== "ready" || !view.items.length) return null;
-      return controller.selectIndex(view.activeIndex >= 0 ? view.activeIndex : 0);
-    },
-    validationMessage(fallback) {
-      if (view.phase === "loading") return "正在搜索股票，请稍候。";
-      if (view.phase === "empty") return "未找到匹配股票，请检查名称或输入6位代码。";
-      if (view.phase === "unavailable") return "股票搜索暂不可用，请输入6位代码。";
-      return fallback;
-    },
-  };
-  stockSearchBindings.push(binding);
-  return binding;
-}
-
-function bindStockSearchEvents(input, list, controller, currentView) {
-  let blurTimer = null;
-  const clearBlurTimer = () => {
-    if (blurTimer !== null) clearTimeout(blurTimer);
-    blurTimer = null;
-  };
-  const handleKeydown = (event) => {
-    const view = currentView();
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      controller.move(event.key === "ArrowDown" ? 1 : -1);
-    } else if (event.key === "Enter" && view.phase === "ready" && view.items.length) {
-      event.preventDefault();
-      controller.selectIndex(view.activeIndex >= 0 ? view.activeIndex : 0);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      controller.close();
-    }
-  };
-  const handleBlur = () => {
-    clearBlurTimer();
-    blurTimer = setTimeout(() => {
-      blurTimer = null;
-      controller.close();
-    }, 120);
-  };
-  const handleClick = (event) => {
-    const option = event.target?.closest?.("button[data-stock-index]");
-    if (option) controller.selectIndex(Number(option.dataset.stockIndex));
-  };
-  const preventPointerFocus = (event) => event.preventDefault();
-  input.addEventListener("keydown", handleKeydown);
-  input.addEventListener("focus", clearBlurTimer);
-  input.addEventListener("blur", handleBlur);
-  list.addEventListener("pointerdown", preventPointerFocus);
-  list.addEventListener("click", handleClick);
-  return {
-    clearBlurTimer,
-    destroy() {
-      clearBlurTimer();
-      input.removeEventListener?.("keydown", handleKeydown);
-      input.removeEventListener?.("focus", clearBlurTimer);
-      input.removeEventListener?.("blur", handleBlur);
-      list.removeEventListener?.("pointerdown", preventPointerFocus);
-      list.removeEventListener?.("click", handleClick);
-    },
-  };
-}
-
-function renderStockSearchView(input, list, view) {
-  if (!input || !list) return;
-  const open = ["loading", "ready", "empty", "unavailable"].includes(view.phase);
-  list.hidden = !open;
-  setElementAttribute(input, "aria-expanded", String(open));
-  if (!open) {
-    list.innerHTML = "";
-    setElementAttribute(input, "aria-activedescendant", "");
-    return;
-  }
-  if (view.phase === "ready") {
-    list.innerHTML = view.items
-      .map((item, index) => stockSuggestionHtml(item, index, list.id, index === view.activeIndex))
-      .join("");
-    const activeId = view.activeIndex >= 0 ? `${list.id}-option-${view.activeIndex}` : "";
-    setElementAttribute(input, "aria-activedescendant", activeId);
-    return;
-  }
-  setElementAttribute(input, "aria-activedescendant", "");
-  const states = {
-    loading: ["正在搜索股票...", ""],
-    empty: ["未找到匹配股票", ""],
-    unavailable: ["股票搜索暂不可用，请输入6位代码。", "is-unavailable"],
-  };
-  const [message, className] = states[view.phase] || ["", ""];
-  list.innerHTML = `<div class="stock-suggestion-state ${className}" role="option" aria-disabled="true">${escapeHtml(message)}</div>`;
-}
-
-function stockSuggestionHtml(item, index, listId, active) {
-  const detail = [item.industry, item.source]
-    .filter((value) => typeof value === "string" && value.trim())
-    .join(" · ");
-  return `
-    <button type="button" class="stock-suggestion${active ? " is-active" : ""}" id="${escapeHtml(listId)}-option-${index}" role="option" aria-selected="${active ? "true" : "false"}" data-stock-index="${index}">
-      <strong>${escapeHtml(item.name)}</strong>
-      <span>${escapeHtml(item.code)}.${escapeHtml(item.market)}</span>
-      <small>${escapeHtml(detail || "行业信息暂缺")}</small>
-    </button>`;
-}
-
-function clearSymbolError() {
-  const input = $("symbolInput");
-  const error = $("symbolError");
-  setElementAttribute(input, "aria-invalid", "false");
-  if (!error) return;
-  error.textContent = "";
-  error.hidden = true;
-}
-
-function showSymbolError(error) {
-  const input = $("symbolInput");
-  const errorElement = $("symbolError");
-  setElementAttribute(input, "aria-invalid", "true");
-  if (errorElement) {
-    errorElement.textContent = compactErrorMessage(error.message);
-    errorElement.hidden = false;
-  }
-  if (input && typeof input.focus === "function") input.focus({ preventScroll: true });
-}
-
 function cancelPendingLoadForValidation() {
   const request = state.pendingLoad;
   if (!request) return;
@@ -2386,20 +2237,21 @@ function handleWorkspaceTabKeydown(event) {
   if (typeof target.focus === "function") target.focus();
 }
 
-const mainStockSearch = createStockSearchBinding({
-  inputId: "symbolInput",
-  listId: "symbolSuggestions",
-  onSelect(symbol) {
-    clearSymbolError();
+const stockSearchSurface = createStockSearchSurface({
+  root: document,
+  createSearchController: createStockSearchController,
+  createSearchHistory: createStockSearchHistory,
+  validateSymbol: validateUiSymbol,
+  escapeHtml,
+  compactErrorMessage,
+  setTimer: (callback, delay) => setTimeout(callback, delay),
+  clearTimer: (timer) => clearTimeout(timer),
+  onInvalidMain: cancelPendingLoadForValidation,
+  onMainSelect(symbol) {
     setActiveSymbol(symbol);
     void loadAll({ reveal: true });
   },
-});
-
-const stockSearchHistory = createStockSearchHistory({
-  onSelect(symbol) {
-    mainStockSearch.close();
-    clearSymbolError();
+  onHistorySelect(symbol) {
     setWorkspaceView("overview");
     setActiveSymbol(symbol);
     void loadAll({ reveal: true }).then((loaded) => {
@@ -2407,13 +2259,13 @@ const stockSearchHistory = createStockSearchHistory({
       if (loaded && workbench && typeof workbench.focus === "function") workbench.focus();
     });
   },
+  onQuickSelect(symbol) {
+    setActiveSymbol(symbol);
+    void loadAll({ reveal: true });
+  },
 });
-
-const watchStockSearch = createStockSearchBinding({
-  inputId: "watchSymbolInput",
-  listId: "watchSymbolSuggestions",
-  onSelect() {},
-});
+const stockSearchHistory = stockSearchSurface.history;
+const watchStockSearch = stockSearchSurface.watch;
 
 const marketScanController = createMarketScanController({
   surfaceActive: false,
@@ -2423,7 +2275,7 @@ const marketScanController = createMarketScanController({
     if (panel && typeof panel.focus === "function") requestAnimationFrame(() => panel.focus());
   },
   onSelectStock(symbol, origin) {
-    clearSymbolError();
+    stockSearchSurface.clearError();
     setActiveSymbol(symbol);
     renderCurrentAnalysisContext(origin);
     setWorkspaceView("overview");
@@ -2444,55 +2296,6 @@ const discoveryController = createDiscoveryController({
 
 primaryNavigation = createPrimaryNavigation({
   onSelect: (view) => setPrimaryView(view),
-});
-
-$("searchForm").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const input = $("symbolInput");
-  let symbol;
-  try {
-    symbol = validateUiSymbol(input.value);
-  } catch (error) {
-    if (mainStockSearch.selectDefault()) {
-      clearSymbolError();
-      return;
-    }
-    cancelPendingLoadForValidation();
-    showSymbolError(new Error(mainStockSearch.validationMessage(error.message)));
-    return;
-  }
-  clearSymbolError();
-  setActiveSymbol(symbol);
-  loadAll({ reveal: true });
-});
-
-$("symbolInput").addEventListener("input", (event) => {
-  try {
-    validateUiSymbol(event.currentTarget.value);
-    mainStockSearch.close();
-    clearSymbolError();
-  } catch (error) {
-    mainStockSearch.input(event.currentTarget.value);
-    // Keep the current validation message until the input becomes valid.
-  }
-});
-
-$("watchSymbolInput").addEventListener("input", (event) => {
-  try {
-    validateUiSymbol(event.currentTarget.value);
-    setElementAttribute(event.currentTarget, "aria-invalid", "false");
-    watchStockSearch.close();
-  } catch (error) {
-    watchStockSearch.input(event.currentTarget.value);
-  }
-});
-
-$("quickList").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-symbol]");
-  if (!button) return;
-  clearSymbolError();
-  setActiveSymbol(button.dataset.symbol);
-  loadAll({ reveal: true });
 });
 
 const workspaceTabs = document.querySelector(".workspace-tabs");
@@ -3205,17 +3008,11 @@ function handleWorkbenchOnline() {
 }
 
 function destroyStockSearchBindings() {
-  stockSearchBindings.forEach((binding) => binding.destroy());
-  stockSearchHistory.destroy();
+  stockSearchSurface.destroy();
 }
 
 function handleStockSearchPageHide(event) {
-  if (!event?.persisted) {
-    destroyStockSearchBindings();
-    return;
-  }
-  stockSearchBindings.forEach((binding) => binding.close());
-  stockSearchHistory.close();
+  stockSearchSurface.handlePageHide(event);
 }
 
 function handleVisibilityChange() {

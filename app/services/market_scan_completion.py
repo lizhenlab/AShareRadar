@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 import re
 import sqlite3
 import sys
 from urllib.parse import urlsplit, urlunsplit
 
 from app.models.market_scan import (
-    MarketScanCoverageScope,
+    MarketScanPublicationDiagnostics,
     MarketScanPublicationSummary,
     MarketScanRun,
     MarketScanRunStatus,
     MarketScanScoreDistribution,
-    MarketScanScoreDistributionAssessment,
-    MarketScanScoreDistributionPolicy,
-    is_market_scan_top100_refresh_scope,
 )
 from app.services.datahub_runtime import run_cache_io
-from app.services.market_scan_publication_snapshot import snapshot_publication_blockers
+from app.services.market_scan_publication_decision import (
+    MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
+    MARKET_SCAN_PUBLISH_MIN_COVERAGE,
+    MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
+    MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
+    assess_market_scan_score_distribution,
+    completion_diagnostics,
+    completion_status,
+    publication_blockers,
+)
 from app.utils.provider_errors import sanitize_provider_error
 
 
@@ -39,27 +45,10 @@ TERMINAL_WRITE_RETRY_BASE_SECONDS = 0.05
 TERMINAL_WRITE_RETRY_MAX_SECONDS = 0.2
 MARKET_SCAN_BULK_QUOTE_MIN_SYMBOLS = 10
 MARKET_SCAN_BULK_QUOTE_MIN_COVERAGE_RATIO = 0.8
-MARKET_SCAN_PUBLISH_MIN_COVERAGE = {
-    "ALL": 0.95,
-    "SH": 0.95,
-    "SZ": 0.95,
-    "BJ": 0.95,
-}
-MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO = {
-    "ALL": 0.90,
-    "SH": 0.90,
-    "SZ": 0.90,
-    "BJ": 0.90,
-}
-MARKET_SCAN_PUBLICATION_SCOPES: tuple[MarketScanCoverageScope, ...] = ("ALL", "SH", "SZ", "BJ")
-MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS = 20 * 60
 _RETRYABLE_SQLITE_PRIMARY_CODES = {
     sqlite3.SQLITE_BUSY,
     sqlite3.SQLITE_LOCKED,
 }
-
-
-MARKET_SCAN_SCORE_DISTRIBUTION_POLICY = MarketScanScoreDistributionPolicy()
 
 
 _RETRYABLE_SQLITE_MESSAGES = (
@@ -84,11 +73,19 @@ class MarketScanFinalizer:
         degraded_count: int,
         warnings: tuple[str, ...],
         publication_summary: MarketScanPublicationSummary | None = None,
+        validate_before_commit: Callable[[], None] | None = None,
     ) -> bool:
         score_distribution = await self._score_distribution(run)
         status, message = completion_status(
             run,
             degraded_count,
+            publication_summary=publication_summary,
+            score_distribution=score_distribution,
+        )
+        diagnostics = completion_diagnostics(
+            run,
+            message,
+            warnings=warnings,
             publication_summary=publication_summary,
             score_distribution=score_distribution,
         )
@@ -104,6 +101,8 @@ class MarketScanFinalizer:
                 publication_summary=publication_summary,
                 score_distribution=score_distribution,
             ),
+            publication_diagnostics=diagnostics,
+            validate_before_commit=validate_before_commit,
         )
 
     async def _score_distribution(self, run: MarketScanRun) -> MarketScanScoreDistribution | None:
@@ -178,16 +177,22 @@ class MarketScanFinalizer:
         *,
         message: str,
         error: str | None = None,
+        publication_diagnostics: MarketScanPublicationDiagnostics | None = None,
+        validate_before_commit: Callable[[], None] | None = None,
     ) -> bool:
         for attempt in range(1, TERMINAL_WRITE_MAX_ATTEMPTS + 1):
             try:
-                await run_cache_io(
-                    getattr(self._cache, "finish_market_scan_run"),
-                    run_id,
-                    status,
-                    message=message,
-                    error=error,
-                )
+                finish_run = getattr(self._cache, "finish_market_scan_run")
+                kwargs: dict[str, object] = {
+                    "message": message,
+                    "error": error,
+                    "publication_diagnostics": publication_diagnostics,
+                }
+                if validate_before_commit is not None:
+                    kwargs["validate_before_commit"] = validate_before_commit
+                await run_cache_io(finish_run, run_id, status, **kwargs)
+            except MarketScanPublicationValidationError:
+                raise
             except Exception as exc:
                 if attempt < TERMINAL_WRITE_MAX_ATTEMPTS and is_retryable_sqlite_error(exc):
                     await asyncio.sleep(terminal_write_retry_delay(attempt))
@@ -203,81 +208,8 @@ class MarketScanFinalizer:
         return False
 
 
-def assess_market_scan_score_distribution(
-    distribution: MarketScanScoreDistribution,
-    *,
-    policy: MarketScanScoreDistributionPolicy = MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
-) -> MarketScanScoreDistributionAssessment:
-    return policy.assess(distribution)
-
-
-def _score_distribution_audit_suffix(
-    distribution: MarketScanScoreDistribution | None,
-    assessment: MarketScanScoreDistributionAssessment,
-) -> str:
-    if distribution is None:
-        return ""
-    label = "已通过" if assessment.status == "pass" else "评分分布审计"
-    return f"；{label}：{distribution.audit_text()}"
-
-
-def completion_status(
-    run: MarketScanRun,
-    degraded_count: int = 0,
-    *,
-    publication_summary: MarketScanPublicationSummary | None = None,
-    score_distribution: MarketScanScoreDistribution | None = None,
-) -> tuple[MarketScanRunStatus, str]:
-    scan_label = _scan_label(run)
-    pending_count = max(0, run.total_count - run.processed_count)
-    if pending_count:
-        return "failed", f"{scan_label}尚有 {pending_count} 只待处理，不能发布"
-    distribution_assessment = (
-        assess_market_scan_score_distribution(score_distribution)
-        if score_distribution is not None
-        else MarketScanScoreDistributionAssessment("not-evaluated")
-    )
-    blockers = list(publication_blockers(publication_summary)) if publication_summary is not None else []
-    if distribution_assessment.status == "failed":
-        blockers.extend(distribution_assessment.reasons)
-    if blockers:
-        return "failed", (
-            f"{scan_label}未达到发布可信度：发布阻断："
-            + "；".join(blockers)
-            + _score_distribution_audit_suffix(score_distribution, distribution_assessment)
-        )
-    if run.success_count == 0:
-        return "failed", (
-            f"{scan_label}没有生成有效排名；缺失 {run.missing_count}，跳过 {run.skipped_count}"
-            + _score_distribution_audit_suffix(score_distribution, distribution_assessment)
-        )
-    stale_stock_pool = run.stock_pool_source == "stale-fallback"
-    distribution_degraded = distribution_assessment.status == "degraded"
-    if run.missing_count or run.skipped_count or run.processed_count < run.total_count or degraded_count or stale_stock_pool or distribution_degraded:
-        eligible_count = max(0, run.total_count - run.skipped_count)
-        degraded_details: list[str] = []
-        if degraded_count:
-            degraded_details.append(f"降级结果 {degraded_count}")
-        if stale_stock_pool:
-            degraded_details.append("股票池使用本地缓存")
-        if distribution_degraded:
-            degraded_details.append("评分分布退化：" + "、".join(distribution_assessment.reasons))
-        degraded_suffix = f"，{'，'.join(degraded_details)}" if degraded_details else ""
-        return "degraded", (
-            f"{scan_label}降级完成：有效覆盖 {run.success_count}/{eligible_count}，"
-            f"缺失 {run.missing_count}，跳过 {run.skipped_count}{degraded_suffix}"
-            f"{_score_distribution_audit_suffix(score_distribution, distribution_assessment)}"
-        )
-    return "success", (
-        f"{scan_label}完成：成功 {run.success_count}/{run.total_count}"
-        f"{_score_distribution_audit_suffix(score_distribution, distribution_assessment)}"
-    )
-
-
-def _scan_label(run: MarketScanRun) -> str:
-    if is_market_scan_top100_refresh_scope(run.scope):
-        return "TOP100 快速更新评分"
-    return "盘中临时扫描" if run.mode == "intraday" else "盘后正式扫描"
+class MarketScanPublicationValidationError(RuntimeError):
+    """A fresh temporal publication check rejected a success/degraded commit."""
 
 
 def terminal_diagnostic(
@@ -306,45 +238,6 @@ def terminal_diagnostic(
     if status == "failed" and not details:
         details.append("没有生成有效排名")
     return "；".join(dict.fromkeys(details))[:800] or None
-
-
-def publication_blockers(summary: MarketScanPublicationSummary) -> tuple[str, ...]:
-    blockers = list(
-        snapshot_publication_blockers(
-            summary,
-            max_span_seconds=MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
-        )
-    )
-    for scope in MARKET_SCAN_PUBLICATION_SCOPES:
-        blockers.extend(_scope_publication_blockers(summary, scope))
-    return tuple(blockers)
-
-
-def _scope_publication_blockers(
-    summary: MarketScanPublicationSummary,
-    scope: MarketScanCoverageScope,
-) -> tuple[str, ...]:
-    blockers: list[str] = []
-    coverage = summary.coverage_for(scope)
-    coverage_threshold = MARKET_SCAN_PUBLISH_MIN_COVERAGE[scope]
-    if coverage is None or coverage.coverage_ratio < coverage_threshold:
-        total = coverage.total_count if coverage is not None else 0
-        success = coverage.success_count if coverage is not None else 0
-        ratio = coverage.coverage_ratio if coverage is not None else 0.0
-        blockers.append(
-            f"{scope} 发布覆盖不足：{success}/{total}"
-            f"（{ratio:.2%}，门槛 {coverage_threshold:.2%}）"
-        )
-    eligible_threshold = MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO[scope]
-    if coverage is None or coverage.eligible_ratio < eligible_threshold:
-        eligible = coverage.total_count if coverage is not None else 0
-        population = coverage.population_count if coverage is not None else 0
-        ratio = coverage.eligible_ratio if coverage is not None else 0.0
-        blockers.append(
-            f"{scope} 有效样本占比不足：{eligible}/{population}"
-            f"（{ratio:.2%}，门槛 {eligible_threshold:.2%}）"
-        )
-    return tuple(blockers)
 
 
 def short_scan_error(exc: Exception, *, sensitive_values: Iterable[object] = ()) -> str:
@@ -445,8 +338,10 @@ def _strip_url_parameters(match: re.Match[str]) -> str:
 __all__ = [
     "MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS",
     "MARKET_SCAN_PUBLISH_MIN_COVERAGE",
+    "MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO",
     "MARKET_SCAN_SCORE_DISTRIBUTION_POLICY",
     "MarketScanFinalizer",
+    "MarketScanPublicationValidationError",
     "assess_market_scan_score_distribution",
     "bulk_quote_coverage_error",
     "completion_status",

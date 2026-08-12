@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import app.services.market_scan_future_range_store as future_range_store_module
 from app.models.market_scan import MARKET_SCAN_TOP100_REFRESH_SCOPE, MarketScanRun
 from app.services.market_scan_future_range_artifact import (
     FutureRangeArtifactError,
@@ -46,6 +47,32 @@ def test_missing_and_legacy_artifacts_use_explicit_null_projection(tmp_path: Pat
             "items": [],
         },
     }
+
+
+def test_future_range_store_rejects_symlink_root_and_keeps_missing_root_empty(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "future-range-real"
+    artifact = _artifact()
+    write_future_range_artifact(
+        directory / future_range_artifact_filename(29, artifact),
+        artifact,
+        database_path=tmp_path / "cache.sqlite3",
+    )
+    alias = tmp_path / "future-range-alias"
+    alias.symlink_to(directory, target_is_directory=True)
+
+    with pytest.raises(FutureRangeArtifactError, match="不是普通目录"):
+        MarketScanFutureRangeStore(alias).research_projection(29)
+
+    loop = tmp_path / "future-range-loop"
+    loop.symlink_to(loop, target_is_directory=True)
+    with pytest.raises(FutureRangeArtifactError, match="目录无法读取"):
+        MarketScanFutureRangeStore(loop / "nested").research_projection(29)
+
+    assert MarketScanFutureRangeStore(directory).research_projection(29)["generation_status"] == "ready"
+    missing = MarketScanFutureRangeStore(tmp_path / "missing-future-range")
+    assert missing.research_projection(29)["generation_status"] == "not_generated"
 
 
 def test_store_pages_filters_and_projects_only_requested_session_offset(tmp_path: Path) -> None:
@@ -106,6 +133,106 @@ def test_current_artifact_corruption_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(FutureRangeArtifactError, match="digest"):
         MarketScanFutureRangeStore(directory).research_projection(29)
+
+
+def test_store_validates_query_and_export_boundaries(tmp_path: Path) -> None:
+    directory = tmp_path / "future-range"
+    store = MarketScanFutureRangeStore(directory)
+    for kwargs, message in (
+        ({"run_id": False}, "run_id"),
+        ({"run_id": 1, "page": 0}, "page"),
+        ({"run_id": 1, "page_size": 201}, "page_size"),
+        ({"run_id": 1, "symbol": "bad\x00code"}, "symbol"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            store.research_projection(**kwargs)  # type: ignore[arg-type]
+    assert store.export_projection(29)["generation_status"] == "not_generated"
+
+    artifact = _artifact()
+    write_future_range_artifact(
+        directory / future_range_artifact_filename(29, artifact),
+        artifact,
+        database_path=tmp_path / "cache.sqlite3",
+    )
+    exported = store.export_projection(29)
+    assert exported["generation_status"] == "ready"
+    assert exported["record_page"]["total"] == 2  # type: ignore[index]
+
+
+def test_store_projection_helpers_fail_closed_on_malformed_cached_contracts() -> None:
+    artifact = _artifact()
+    for path, value, message in (
+        (("payload", "run", "run_id"), 30, "请求的 run_id"),
+        (("payload", "status"), "unknown", "研究状态"),
+        (("payload", "records"), {}, "records 无效"),
+    ):
+        changed = deepcopy(artifact)
+        _set_nested(changed, path, value)
+        with pytest.raises(FutureRangeArtifactError, match=message):
+            future_range_store_module._artifact_projection(changed, 29)
+
+    with pytest.raises(FutureRangeArtifactError, match="record_page contract"):
+        future_range_store_module._paged_projection(
+            {"record_page": None}, page=1, page_size=1,
+            session_offset=None, symbol=None, include_research=True,
+        )
+    with pytest.raises(FutureRangeArtifactError, match="records contract"):
+        future_range_store_module._paged_projection(
+            {"record_page": {"items": None}}, page=1, page_size=1,
+            session_offset=None, symbol=None, include_research=True,
+        )
+    with pytest.raises(FutureRangeArtifactError, match="record.offsets"):
+        future_range_store_module._record_offset_projection({"offsets": None}, 1)
+
+
+@pytest.mark.parametrize(
+    ("records", "message"),
+    [
+        ([None], "record 与 run_id"),
+        ([{"run_id": 29, "offsets": None}], "record.offsets"),
+        ([{"run_id": 29, "offsets": [{"session_offset": False}]}], "session_offset"),
+        (
+            [{"run_id": 29, "offsets": [{"session_offset": 1}, {"session_offset": 1}]}],
+            "session_offset",
+        ),
+    ],
+)
+def test_store_rejects_malformed_record_page_rows(records: list[object], message: str) -> None:
+    with pytest.raises(FutureRangeArtifactError, match=message):
+        future_range_store_module._validate_run_records(records, 29)
+
+
+def test_store_filesystem_helpers_reject_nonregular_and_mismatched_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    regular_file = tmp_path / "not-a-directory"
+    regular_file.write_text("x", encoding="utf-8")
+    with pytest.raises(FutureRangeArtifactError, match="不是普通目录"):
+        future_range_store_module._directory_snapshot(regular_file)
+    with pytest.raises(FutureRangeArtifactError, match="无法读取"):
+        future_range_store_module._file_fingerprint(tmp_path / "missing.json")
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(regular_file)
+    with pytest.raises(FutureRangeArtifactError, match="不是普通文件"):
+        future_range_store_module._file_fingerprint(linked)
+
+    directory = tmp_path / "artifacts"
+    artifact = _artifact()
+    path = directory / future_range_artifact_filename(29, artifact)
+    write_future_range_artifact(path, artifact, database_path=tmp_path / "cache.sqlite3")
+    fingerprint = future_range_store_module._file_fingerprint(path)
+    loaded = future_range_store_module._load_candidates((fingerprint,), {}, 29)
+    assert future_range_store_module._load_candidates((fingerprint,), loaded, 29) == loaded
+    assert future_range_store_module._record_matches_symbol({"symbol": "600519.SH"}, "600519.SH") is True
+
+    monkeypatch.setattr(
+        future_range_store_module,
+        "future_range_artifact_filename",
+        lambda _run_id, _artifact: "different.json",
+    )
+    with pytest.raises(FutureRangeArtifactError, match="文件名与内容摘要"):
+        future_range_store_module._load_candidates((fingerprint,), {}, 29)
 
 
 def test_manager_allows_only_published_official_runs() -> None:
@@ -269,3 +396,10 @@ def _not_mature_offset(session_offset: int, target_date: str) -> dict[str, objec
         "daily_bar_path_unknown": None,
         "interval_structure": None,
     }
+
+
+def _set_nested(root: object, path: tuple[str | int, ...], value: object) -> None:
+    current = root
+    for key in path[:-1]:
+        current = current[key]  # type: ignore[index]
+    current[path[-1]] = value  # type: ignore[index]

@@ -24,6 +24,9 @@ from app.models.market_scan import (
 from app.services.market_scan_manager import MarketScanManager
 from app.services.market_scan_future_range_artifact import FutureRangeArtifactError
 from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
+from app.services.market_scan_probability_artifact import ProbabilityArtifactError
+from app.services.market_scan_probability_outcomes import ProbabilityOutcomeError
+from app.services.market_scan_probability_source import ProbabilitySourceError
 from app.services.market_scan_probability_store import ProbabilityFilterUnavailable
 from app.services.market_scan_export import XLSX_MEDIA_TYPE, MarketScanExportFilters
 
@@ -310,7 +313,19 @@ async def market_scan_probability_research(
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(lambda: scanner.probability_research(run_id))
+    return await run_sync_api_async(
+        lambda: _probability_artifact_guard(lambda: scanner.probability_research(run_id))
+    )
+
+
+def _probability_artifact_guard(call: Callable[[], T]) -> T:
+    try:
+        return call()
+    except (ProbabilityArtifactError, ProbabilityOutcomeError, ProbabilitySourceError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="上涨概率研究 artifact 完整性校验失败，已拒绝读取",
+        ) from exc
 
 
 @router.get(

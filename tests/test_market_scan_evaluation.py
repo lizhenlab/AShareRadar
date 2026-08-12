@@ -7,11 +7,13 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from typing import Any, cast
 
 import pytest
 
 from app.db.schema import initialize_schema
+from app.services import market_scan_evaluation as evaluation
 from app.services.market_scan_evaluation import (
     DEFAULT_HORIZONS,
     DEFAULT_TOP_SIZES,
@@ -26,6 +28,88 @@ from app.services.market_scan_probability_artifact import (
     replay_probability_artifact_set,
 )
 from app.services.market_scan_probability_store import MarketScanProbabilityStore
+from app.services.market_scan_evaluation_exposure import (
+    ExposureItem,
+    board,
+    exposure_audit,
+    industry_taxonomy_quality,
+    liquidity_bucket,
+    market_regime,
+    mean_optional,
+    normalize_industry,
+    quality_bucket,
+    regime_overlay,
+    scan_time_bucket,
+)
+
+
+def test_exposure_helpers_cover_empty_invalid_and_market_boundary_contracts() -> None:
+    empty_snapshot = type(
+        "Snapshot",
+        (),
+        {"id": 1, "rule_version": "v1", "quote_date": "2026-01-01", "exposures": (), "regime": "unexpected"},
+    )()
+    config = type("Config", (), {"top_sizes": (20,)})()
+    assert exposure_audit([empty_snapshot], config) == []  # type: ignore[list-item,arg-type]
+    assert regime_overlay([empty_snapshot])[0]["position_size_multiplier"] == 0.5  # type: ignore[list-item]
+
+    assert normalize_industry(None) == "UNKNOWN"
+    assert normalize_industry(" 信息传输、软件和信息技术服务业 ") == "信息技术"
+    mixed = (
+        ExposureItem("600001.SH", 1, "SH_MAIN", "制造业", 1.0, None),
+        ExposureItem("600002.SH", 2, "SH_MAIN", "半导体", 2.0, 1.0),
+    )
+    assert industry_taxonomy_quality(mixed) == {
+        "unknown_count": 0,
+        "broad_category_count": 1,
+        "mixed_granularity": True,
+        "neutralization_ready": False,
+    }
+    assert industry_taxonomy_quality((mixed[1],))["neutralization_ready"] is True
+    assert mean_optional([None, float("nan")]) is None
+
+    row_type = type("Row", (dict,), {})
+    assert market_regime([row_type(change_pct=-2.0)]) == "weak"  # type: ignore[arg-type]
+    assert quality_bucket(None) == "unknown"
+    assert quality_bucket("70") == "low"
+    assert liquidity_bucket(object()) == "low"
+    assert liquidity_bucket(50_000_000) == "low"
+    assert liquidity_bucket(500_000_000) == "medium"
+    assert liquidity_bucket(2_000_000_000) == "high"
+    assert scan_time_bucket("invalid", "intraday") == "unknown"
+    assert scan_time_bucket("2026-01-01 10:00:00", "intraday") == "morning"
+    assert scan_time_bucket("2026-01-01 13:00:00", "intraday") == "afternoon"
+    assert scan_time_bucket("2026-01-01 10:00:00", "official") == "after_close"
+    assert scan_time_bucket("2026-01-01 08:00:00", "preopen") == "preopen"
+    assert board("920001.BJ", "BJ") == "BSE"
+    assert board("688001.SH", "SH") == "STAR"
+    assert board("300001.SZ", "SZ") == "CHINEXT"
+    assert board("600001.SH", "SH") == "SH_MAIN"
+
+
+def test_shadow_promotion_primary_contract_never_selects_preopen_research() -> None:
+    def cohort(mode: str, sessions: int) -> dict[str, object]:
+        return {
+            "dimensions": {
+                "mode": mode,
+                "scope": "SH/SZ/BJ listed A-shares",
+                "rule_version": "v1",
+            },
+            "top_n": 100,
+            "horizon_trading_days": 5,
+            "independent_session_count": sessions,
+        }
+
+    selected = evaluation._primary_promotion_contract(  # noqa: SLF001
+        {"cohorts": [cohort("official", 10), cohort("preopen", 11)]}
+    )
+
+    assert selected is not None
+    assert selected["dimensions"] == {
+        "mode": "official",
+        "scope": "SH/SZ/BJ listed A-shares",
+        "rule_version": "v1",
+    }
 
 
 def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(tmp_path: Path) -> None:
@@ -101,6 +185,30 @@ def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(
     exposure = cast(list[dict[str, Any]], report["exposure_audit"])[0]
     assert exposure["policy"] == "audit-only-no-naive-sector-quota"
     assert exposure["taxonomy_quality"]["mixed_granularity"] is False
+
+
+def test_probability_horizons_use_fixed_exchange_sessions_not_kline_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed = tuple(date(2026, 1, 6) + timedelta(days=offset) for offset in range(26))
+    monkeypatch.setattr(evaluation, "next_trade_dates", lambda value, count: fixed[:count])
+    misleading_bars = {
+        "600001.SH": (
+            cast(sqlite3.Row, {"date": "2026-01-07"}),
+            cast(sqlite3.Row, {"date": "2026-01-08"}),
+        ),
+    }
+
+    selected = evaluation._eligible_trading_dates(  # noqa: SLF001
+        misleading_bars,
+        snapshot_count=5_500,
+        quote_date="2026-01-05",
+        config=EvaluationConfig(complete_day_coverage=1.0),
+    )
+
+    assert selected[0] == "2026-01-06"
+    assert selected[1] == "2026-01-07"
+    assert len(selected) == 26
 
 
 def test_evaluation_reports_insufficient_samples_and_same_rule_rank_turnover(tmp_path: Path) -> None:
@@ -278,21 +386,22 @@ def test_probability_cli_persists_null_shadow_records_without_mutating_database(
             (run_id,),
         ).fetchall()
 
+    command = [
+        sys.executable,
+        "tools/evaluate_market_scan_probability.py",
+        "--database",
+        str(path),
+        "--output-dir",
+        str(output_dir),
+        "--report",
+        str(report_path),
+        "--run-id",
+        str(run_id),
+        "--bootstrap-samples",
+        "100",
+    ]
     completed = subprocess.run(
-        [
-            sys.executable,
-            "tools/evaluate_market_scan_probability.py",
-            "--database",
-            str(path),
-            "--output-dir",
-            str(output_dir),
-            "--report",
-            str(report_path),
-            "--run-id",
-            str(run_id),
-            "--bootstrap-samples",
-            "100",
-        ],
+        command,
         cwd=Path(__file__).resolve().parents[1],
         check=True,
         capture_output=True,
@@ -339,6 +448,41 @@ def test_probability_cli_persists_null_shadow_records_without_mutating_database(
             (run_id,),
         ).fetchall()
     assert ranking_after == ranking_before
+
+    outside = tmp_path / "probability-cli-outside"
+    outside.mkdir()
+    alias = tmp_path / "probability-cli-alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    output_index = command.index("--output-dir") + 1
+    report_index = command.index("--report") + 1
+    for index, hostile_output in enumerate((alias, alias / "not-created"), start=1):
+        hostile_command = list(command)
+        hostile_command[output_index] = str(hostile_output)
+        hostile_command[report_index] = str(tmp_path / f"hostile-report-{index}.json")
+        failed = subprocess.run(
+            hostile_command,
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert failed.returncode != 0
+    assert list(outside.iterdir()) == []
+    assert not (outside / "not-created").exists()
+
+    with tempfile.TemporaryDirectory(prefix="ashare-probability-cli-", dir="/tmp") as raw_output:
+        tmp_command = list(command)
+        tmp_command[output_index] = raw_output
+        tmp_command[report_index] = str(Path(raw_output) / "summary.json")
+        tmp_completed = subprocess.run(
+            tmp_command,
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        tmp_summary = json.loads(tmp_completed.stdout)
+        assert load_probability_artifact(Path(tmp_summary["artifact"]))["payload"]
 
 
 def test_probability_research_freezes_verified_new_stock_no_limit_profile(tmp_path: Path) -> None:
@@ -433,7 +577,7 @@ def test_rank_ic_deciles_and_clustered_metrics_use_sessions(tmp_path: Path) -> N
     path = tmp_path / "rank-diagnostics.sqlite3"
     _initialize(path)
     symbols = tuple(f"{600000 + index:06d}.SH" for index in range(10))
-    for quote_date, forward_date in (("2026-01-05", "2026-01-06"), ("2026-01-10", "2026-01-11")):
+    for quote_date, forward_date in (("2026-01-05", "2026-01-06"), ("2026-01-12", "2026-01-13")):
         _seed_run(
             path,
             mode="official",

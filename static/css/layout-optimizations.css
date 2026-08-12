@@ -589,6 +589,10 @@ body.query-panel-collapsed .query-panel .layout-toggle::before {
     grid-column: 3 / span 2;
   }
 
+  .market-scan-table tr.market-scan-result-row > td:nth-child(5) {
+    grid-column: 2 / -1;
+  }
+
   .market-scan-table tr.market-scan-result-row > td:nth-child(n + 4):nth-child(-n + 9) {
     display: flex;
     flex-direction: column;
@@ -597,7 +601,7 @@ body.query-panel-collapsed .query-panel .layout-toggle::before {
 
   .market-scan-table tr.market-scan-result-row > td:nth-child(8),
   .market-scan-table tr.market-scan-result-row > td:nth-child(9) {
-    grid-column: span 2;
+    grid-column: auto;
   }
 }
 

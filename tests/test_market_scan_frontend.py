@@ -4,9 +4,59 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from typing import get_args
+
+from app.models.market_scan import (
+    MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES,
+    MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION,
+    MarketScanDiagnosticSeverity,
+    MarketScanMode,
+    MarketScanPublicationDiagnostic,
+    MarketScanPublicationDiagnostics,
+    MarketScanRunStatus,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_python_and_javascript_market_scan_publication_contracts_stay_in_parity() -> None:
+    script = r'''
+import {
+  MARKET_SCAN_PUBLICATION_DIAGNOSTIC_FIELDS,
+  MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES,
+  MARKET_SCAN_PUBLICATION_DIAGNOSTICS_FIELDS,
+  MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION,
+  MARKET_SCAN_MODES,
+  MARKET_SCAN_RUN_STATUSES,
+} from "./static/js/market-scan-contracts.js";
+console.log(JSON.stringify({
+  diagnosticFields: MARKET_SCAN_PUBLICATION_DIAGNOSTIC_FIELDS,
+  diagnosticSeverities: MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES,
+  diagnosticsFields: MARKET_SCAN_PUBLICATION_DIAGNOSTICS_FIELDS,
+  diagnosticsSchemaVersion: MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION,
+  modes: MARKET_SCAN_MODES,
+  runStatuses: MARKET_SCAN_RUN_STATUSES,
+}));
+'''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    contract = json.loads(completed.stdout)
+
+    assert contract["runStatuses"] == list(get_args(MarketScanRunStatus))
+    assert contract["modes"] == list(get_args(MarketScanMode))
+    assert contract["diagnosticSeverities"] == list(
+        MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES
+    )
+    assert contract["diagnosticSeverities"] == list(get_args(MarketScanDiagnosticSeverity))
+    assert contract["diagnosticsSchemaVersion"] == MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION
+    assert contract["diagnosticFields"] == list(MarketScanPublicationDiagnostic.model_fields)
+    assert contract["diagnosticsFields"] == list(MarketScanPublicationDiagnostics.model_fields)
 
 
 def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
@@ -20,12 +70,14 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'id="marketScanRefreshTop100" aria-busy="false" disabled>更新 TOP100 评分</button>' in html
     assert 'id="marketScanExport" aria-busy="false" disabled>导出 Excel</button>' in html
     assert 'id="marketScanModeControl"' in html
+    assert 'id="marketScanModePreopen" name="marketScanMode" value="preopen"' in html
     assert 'id="marketScanModeIntraday" name="marketScanMode" value="intraday"' in html
     assert 'id="marketScanModeOfficial" name="marketScanMode" value="official" checked' in html
     assert 'id="marketScanProgressBar"' in html
     assert 'id="marketScanHistoryToggle" aria-controls="marketScanHistory" aria-expanded="false"' in html
     assert 'id="marketScanHistory" aria-label="历史扫描批次" aria-busy="false" hidden' in html
     assert 'id="marketScanProbabilityResearch"' in html
+    assert 'id="marketScanProbabilityEffectiveness"' in html
     assert 'id="marketScanProbabilityHorizon5d" name="marketScanProbabilityHorizon" value="5" checked' in html
     assert 'id="marketScanProbabilityMin"' in html and 'aria-describedby="marketScanProbabilityFilterHelp" disabled' in html
     assert 'id="marketScanFutureRangeResearch" data-generation-status="not_generated" aria-busy="false"' in html
@@ -91,11 +143,12 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     css_modules = re.findall(r'<link rel="stylesheet" href="/static/css/([^"]+)\?v=([^"]+)" />', html)
     assert [name for name, _ in css_modules] == [
         "base.css", "sidebar.css", "workspace-core.css", "research-panels.css", "market-scan.css",
+        "market-scan-research.css",
         "interactions.css", "side-footer.css", "responsive.css", "primary-navigation.css", "layout-optimizations.css",
     ]
     versions = [version for _, version in css_modules]
     versions.extend(re.findall(r'(?:href|src)="/static/(?:styles\.css|app\.js)\?v=([^"]+)"', html))
-    assert len(versions) == 12
+    assert len(versions) == 13
     import_map_match = re.search(r'<script type="importmap">\s*(\{.*?\})\s*</script>', html, re.DOTALL)
     assert import_map_match is not None
     imports = json.loads(import_map_match.group(1))["imports"]
@@ -192,7 +245,7 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
     assert "fetchJson" not in view and "setTimeout" not in view
 
 
-def test_market_scan_modes_default_request_contract_and_intraday_copy() -> None:
+def test_market_scan_modes_default_request_contract_and_mode_copy() -> None:
     _run_node_script(
         r'''
 import assert from "node:assert/strict";
@@ -200,6 +253,10 @@ import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
 import { createMarketScanController, validateMarketScanRun } from "./static/js/market-scan.js";
 import { defaultMarketScanMode } from "./static/js/market-scan-contracts.js";
 
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 0, 0)), "preopen");
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 8, 0)), "preopen");
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 9, 14, 59)), "preopen");
+assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 9, 15)), "official");
 assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 9, 29)), "official");
 assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 9, 30)), "intraday");
 assert.equal(defaultMarketScanMode(new Date(2026, 6, 27, 15, 14)), "intraday");
@@ -217,9 +274,40 @@ const intradayRun = {
   finished_at: null, message: "全市场扫描运行中",
 };
 assert.equal(validateMarketScanRun(intradayRun), intradayRun);
+assert.equal(validateMarketScanRun({ ...intradayRun, mode: "preopen" }).mode, "preopen");
 assert.throws(() => validateMarketScanRun({ ...intradayRun, mode: "preview" }), /mode/);
 assert.throws(() => validateMarketScanRun({ ...intradayRun, quote_date: "2026-7-27" }), /quote_date/);
 assert.throws(() => validateMarketScanRun({ ...intradayRun, quote_date: "2026-02-30" }), /quote_date/);
+const publicationDiagnostics = {
+  schema_version: "market-scan-publication-diagnostics-v1",
+  headline: "盘后正式扫描未达到发布可信度",
+  blockers: [{
+    code: "publication.snapshot.span_exceeded", label: "报价快照跨度超限",
+    detail: "全市场报价快照跨度 1918 秒超过 1200 秒门槛", severity: "error",
+  }],
+  passed_gates: [], source_warnings: [],
+};
+assert.equal(
+  validateMarketScanRun({ ...intradayRun, publication_diagnostics: publicationDiagnostics }).publication_diagnostics,
+  publicationDiagnostics,
+);
+assert.throws(
+  () => validateMarketScanRun({
+    ...intradayRun,
+    publication_diagnostics: { ...publicationDiagnostics, schema_version: "v2" },
+  }),
+  /schema_version/,
+);
+assert.throws(
+  () => validateMarketScanRun({
+    ...intradayRun,
+    publication_diagnostics: {
+      ...publicationDiagnostics,
+      blockers: [{ ...publicationDiagnostics.blockers[0], severity: "critical" }],
+    },
+  }),
+  /severity/,
+);
 
 let startInit = null;
 const controller = createMarketScanController({
@@ -245,6 +333,33 @@ assert.doesNotMatch(element("marketScanHeadline").textContent, /正式|稳定榜
 assert.doesNotMatch(element("marketScanResultState").textContent, /正式|稳定榜单/);
 assert.equal(element("marketScanModeIntraday").disabled, false);
 controller.deactivate();
+
+const morning = installAppDom({ canvasContext: null });
+let morningInit = null;
+const preopenRun = {
+  ...intradayRun, id: 94, mode: "preopen", as_of: "2026-07-27 08:00:00",
+  created_at: "2026-07-27 08:00:00", updated_at: "2026-07-27 08:01:00",
+};
+const morningController = createMarketScanController({
+  root: document,
+  now: new Date(2026, 6, 27, 8, 0),
+  async fetcher(url, init = {}) {
+    assert.equal(url, "/api/market-scans");
+    morningInit = init;
+    return { accepted: true, deduplicated: false, run: preopenRun };
+  },
+});
+assert.equal(morning.element("marketScanModePreopen").checked, true);
+assert.equal(morning.element("marketScanModeIntraday").checked, false);
+assert.equal(morning.element("marketScanModeOfficial").checked, false);
+await morningController.start();
+assert.deepEqual(JSON.parse(morningInit.body), { mode: "preopen" });
+assert.equal(morning.element("marketScanModeSummary").textContent, "盘前复盘");
+assert.match(morning.element("marketScanHeadline").textContent, /盘前复盘/);
+assert.match(morning.element("marketScanResultState").textContent, /盘前复盘/);
+assert.doesNotMatch(morning.element("marketScanHeadline").textContent, /盘后正式|盘中临时/);
+assert.doesNotMatch(morning.element("marketScanResultState").textContent, /盘后正式|盘中临时/);
+morningController.deactivate();
 
 const manual = installAppDom({ canvasContext: null });
 let manualInit = null;
@@ -371,6 +486,7 @@ const { element } = installAppDom({ canvasContext: null });
 const officialLatest = scanRun(31, "official", "2026-07-29");
 const officialHistory = scanRun(30, "official", "2026-07-28");
 const intradayLatest = scanRun(41, "intraday", "2026-07-29");
+const preopenLatest = scanRun(45, "preopen", "2026-07-29");
 const activeTask = { ...scanRun(50, "official", "2026-07-29"), status: "running", finished_at: null, total_count: 100, processed_count: 20, success_count: 20, progress_pct: 20, coverage_pct: 20 };
 const calls = [];
 const exportCalls = [];
@@ -386,9 +502,12 @@ const controller = createMarketScanController({
     if (target === "/api/market-scans/latest") return activeTask;
     if (target.startsWith("/api/market-scans/latest-published?mode=official")) return officialLatest;
     if (target.startsWith("/api/market-scans/latest-published?mode=intraday")) return intradayLatest;
+    if (target.startsWith("/api/market-scans/latest-published?mode=preopen")) return preopenLatest;
     if (target.startsWith("/api/market-scans?")) {
       const query = new URLSearchParams(target.split("?", 2)[1]);
-      const items = query.get("mode") === "intraday" ? [intradayLatest] : [officialLatest, officialHistory];
+      const items = query.get("mode") === "intraday"
+        ? [intradayLatest]
+        : query.get("mode") === "preopen" ? [preopenLatest] : [officialLatest, officialHistory];
       return { items, total: items.length, page: 1, page_size: 100, page_count: 1 };
     }
     const match = /^\/api\/market-scans\/(\d+)\/results\?/.exec(target);
@@ -436,6 +555,18 @@ assert.equal(controller.state.publishedRun.id, 41);
 assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "41");
 assert.match(element("marketScanBrowseContext").textContent, /盘中临时/);
 assert.match(element("marketScanTaskContext").textContent, /盘后正式.*不同/);
+
+element("marketScanModeIntraday").checked = false;
+element("marketScanModePreopen").checked = true;
+element("marketScanModePreopen").listeners.change();
+await flushPromises();
+assert.equal(controller.state.browseMode, "preopen");
+assert.equal(controller.state.selectedHistoryRunId, null);
+assert.equal(controller.state.publishedRun.id, 45);
+assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "45");
+assert.match(element("marketScanBrowseContext").textContent, /盘前复盘/);
+assert.match(element("marketScanTaskContext").textContent, /盘后正式.*不同/);
+assert.equal(calls.some((url) => url.includes("mode=preopen")), true);
 controller.deactivate();
 
 function scanRun(id, mode, dataDate) {
@@ -449,7 +580,7 @@ function scanRun(id, mode, dataDate) {
 }
 
 function resultPage(runId) {
-  const run = [officialLatest, officialHistory, intradayLatest].find((item) => item.id === runId);
+  const run = [officialLatest, officialHistory, intradayLatest, preopenLatest].find((item) => item.id === runId);
   return {
     run, total: 1, page: 1, page_size: 100, page_count: 1,
     items: [{ run_id: runId, rank: 1, symbol: "600519.SH", code: "600519", market: "SH", name: "贵州茅台", status: "success", is_st: false, is_new: false, score: 90, tags: [], metrics: {}, updated_at: `${run.data_date} 16:10:00` }],
@@ -699,6 +830,7 @@ const artifact = {
   horizons: {
     "5": { net_excess_positive: {
       status: "calibrated_shadow", horizon: 5, target: "net_excess_positive", base_rate: 0.514,
+      selection_qualified: true, selection_qualification: { passed: true },
       counts: { training_session_count: 120, calibration_session_count: 40, test_session_count: 60, observation_count: 180000 },
       calibration_metrics: { calibrated: { brier_score: 0.1964, brier_skill_score: 0.127, ece: 0.034, auc: 0.681, bin_monotonic: true } },
       versions: { model: "up-probability-v1", feature: "features-v1", label: "label-v1", cost_model: "cost-v1" },
@@ -707,6 +839,7 @@ const artifact = {
     } },
     "20": { net_excess_positive: {
       status: "calibrated_shadow", horizon: 20, target: "net_excess_positive", base_rate: 0.55,
+      selection_qualified: true, selection_qualification: { passed: true },
       counts: { training_session_count: 100, calibration_session_count: 30, test_session_count: 50, observation_count: 90000 },
       model_version: "up-probability-v1", feature_version: "features-v1",
       label_version: "label-v1", cost_model_version: "cost-v1", training_cutoff: "2026-07-11",
@@ -722,10 +855,11 @@ const probabilities = normalizeMarketScanUpsideProbabilities({
   } },
 }, research);
 const item = { symbol: "600519.SH", upside_probabilities: probabilities };
-assert.match(marketScanProbabilityCell(item, 5), /5日 61.2%/);
-assert.match(marketScanProbabilityCell(item, 5), /95% CI 56.0%–66.0%/);
-assert.match(marketScanProbabilityCell(item, 1), /证据不足/);
-assert.doesNotMatch(marketScanProbabilityCell(item, 1), /0\.0%|50\.0%/);
+assert.match(marketScanProbabilityCell(item, 5, research), /5日 61.2%/);
+assert.match(marketScanProbabilityCell(item, 5, research), /95% CI 56.0%–66.0%/);
+assert.match(marketScanProbabilityCell(item, 1, research), />—</);
+assert.doesNotMatch(marketScanProbabilityCell(item, 1, research), /证据不足|0\.0%|50\.0%/);
+assert.match(marketScanProbabilityCell(item, 20, research), /个股预测不可用/);
 const snapshot = marketScanProbabilitySnapshot(item, research);
 assert.match(snapshot, /上涨概率研究 · 冻结 Shadow 证据/);
 assert.match(snapshot, /up-probability-v1/);
@@ -738,7 +872,7 @@ assert.match(snapshot, /Brier 0.1964 · BSS 0.127 · ECE 0.034 · AUC 0.681 · �
 const element = () => ({ value: "", disabled: false, checked: false, dataset: {}, className: "", textContent: "", setAttribute() {} });
 const elements = {
   probabilityResearch: element(), probabilityStatus: element(), probabilityTarget: element(),
-  probabilityBaseRate: element(), probabilityEvidence: element(), probabilityVersion: element(),
+  probabilityBaseRate: element(), probabilityEvidence: element(), probabilityEffectiveness: element(), probabilityVersion: element(),
   probabilityCutoff: element(), probabilityLimitations: element(), probabilityMin: element(),
   probabilityFilterHelp: element(), probabilityHorizonInputs: [element(), element(), element()],
 };
@@ -748,15 +882,28 @@ elements.probabilityHorizonInputs[1].checked = true;
 elements.probabilityHorizonInputs[2].value = "20";
 assert.equal(selectedMarketScanProbabilityHorizon(elements), 5);
 renderMarketScanProbabilityResearch(elements, research);
-assert.equal(elements.probabilityStatus.textContent, "样本外已校准 · Shadow");
+assert.equal(elements.probabilityStatus.textContent, "样本外已校准");
 assert.equal(elements.probabilityTarget.textContent, "未来所选周期净超额收益为正");
 assert.equal(elements.probabilityBaseRate.textContent, "51.4%");
+assert.equal(elements.probabilityEffectiveness.textContent, "通过选股门禁");
 assert.equal(elements.probabilityMin.disabled, false);
+
+research.horizons["5"].selection_qualified = false;
+research.horizons["5"].selection_qualification = {
+  passed: false, gates: { positive_oos_brier_skill: false, multiple_complete_oos_folds: false },
+};
+renderMarketScanProbabilityResearch(elements, research);
+assert.equal(elements.probabilityStatus.textContent, "样本外已校准");
+assert.equal(elements.probabilityEffectiveness.textContent, "未通过：总体 Brier Skill、完整 OOS 折数");
+assert.equal(elements.probabilityMin.disabled, true);
+assert.match(elements.probabilityFilterHelp.textContent, /效力门禁未通过/);
+research.horizons["5"].selection_qualified = true;
+research.horizons["5"].selection_qualification = { passed: true };
 elements.probabilityHorizonInputs[1].checked = false;
 elements.probabilityHorizonInputs[0].checked = true;
 renderMarketScanProbabilityResearch(elements, research);
 assert.equal(selectedMarketScanProbabilityHorizon(elements), 1);
-assert.equal(elements.probabilityStatus.textContent, "证据不足");
+assert.equal(elements.probabilityStatus.textContent, "尚未生成研究证据");
 assert.equal(elements.probabilityMin.disabled, true);
 elements.probabilityHorizonInputs[0].checked = false;
 elements.probabilityHorizonInputs[2].checked = true;
@@ -769,11 +916,97 @@ const legacy = normalizeMarketScanProbabilityResearch(undefined, 42);
 const legacyProbabilities = normalizeMarketScanUpsideProbabilities(undefined, legacy);
 assert.equal(legacy.horizons["5"].status, "not_generated");
 assert.equal(legacyProbabilities["5"].probability, null);
+const legacySnapshot = marketScanProbabilitySnapshot({ upside_probabilities: legacyProbabilities }, legacy);
+assert.match(legacySnapshot, /上涨概率研究 · 尚未生成/);
+assert.match(legacySnapshot, /不展示概率或置信区间/);
+assert.doesNotMatch(legacySnapshot, /冻结 Shadow 证据/);
 renderMarketScanProbabilityResearch(elements, legacy);
-assert.equal(elements.probabilityStatus.textContent, "证据不足");
+assert.equal(elements.probabilityStatus.textContent, "尚未生成研究证据");
 assert.equal(elements.probabilityBaseRate.textContent, "--");
-assert.match(elements.probabilityEvidence.textContent, /训练 -- 日/);
+assert.equal(elements.probabilityEvidence.textContent, "--");
 assert.equal(elements.probabilityMin.disabled, true);
+const insufficient = normalizeMarketScanProbabilityResearch({
+  run_id: 43, horizons: { "5": { net_excess_positive: {
+    status: "insufficient_data", horizon: 5, target: "net_excess_positive", base_rate: null,
+    counts: { available_independent_session_count: 3, observation_count: 16470, label_coverage: 0.8897 },
+    contract: {
+      split: { minimum_train_sessions: 120, minimum_calibration_sessions: 40, minimum_test_sessions: 60, gap_sessions: 5 },
+      evaluation: { minimum_label_coverage: 0.95 },
+    },
+    limitations: ["minimum_independent_sessions", "minimum_label_coverage"],
+  } } },
+}, 43);
+elements.probabilityHorizonInputs[2].checked = false;
+elements.probabilityHorizonInputs[1].checked = true;
+renderMarketScanProbabilityResearch(elements, insufficient);
+assert.equal(elements.probabilityStatus.textContent, "研究已生成·样本不足");
+assert.equal(elements.probabilityEvidence.textContent, "独立日期 3/230 · 标签覆盖 89.0%/95.0% · 16470 条");
+assert.equal(elements.probabilityLimitations.textContent, "独立交易日不足；标签覆盖率不足");
+assert.match(marketScanProbabilityCell(item, 5, insufficient), />—</);
+assert.doesNotMatch(marketScanProbabilityCell(item, 5, insufficient), /证据不足|样本不足|61\.2%/);
+const archived = normalizeMarketScanProbabilityResearch({
+  run_id: 44, horizons: { "5": { net_excess_positive: {
+    status: "insufficient_data", horizon: 5, target: "net_excess_positive", base_rate: null,
+    counts: {
+      available_independent_session_count: 0, archived_independent_session_count: 1,
+      mature_label_session_count: 0, observation_count: 5499, label_coverage: 0,
+    },
+    contract: {
+      split: { minimum_train_sessions: 120, minimum_calibration_sessions: 40, minimum_test_sessions: 60, gap_sessions: 5 },
+      evaluation: { minimum_label_coverage: 0.95 },
+    },
+    limitations: ["live_point_in_time_source_archived", "waiting_fixed_horizon_labels"],
+  } } },
+}, 44);
+renderMarketScanProbabilityResearch(elements, archived);
+assert.equal(elements.probabilityEvidence.textContent, "已归档 1 日 · 成熟 / 可用 0 / 0 / 230 · 标签覆盖 0.0%/95.0% · 5499 条点时样本");
+assert.equal(elements.probabilityLimitations.textContent, "已归档真实点时样本；等待固定周期标签成熟");
+const archivedProbabilities = normalizeMarketScanUpsideProbabilities(undefined, archived);
+const archivedSnapshot = marketScanProbabilitySnapshot({ upside_probabilities: archivedProbabilities }, archived);
+assert.match(archivedSnapshot, /上涨概率研究 · 点时样本积累中/);
+assert.match(archivedSnapshot, /尚未形成成熟标签和样本外校准概率/);
+assert.match(archivedSnapshot, /已归档 1 日/);
+assert.doesNotMatch(archivedSnapshot, /冻结 Shadow 证据|61\.2%/);
+const sampled = normalizeMarketScanProbabilityResearch({
+  run_id: 45, horizons: { "5": { net_excess_positive: {
+    status: "insufficient_data", horizon: 5, target: "net_excess_positive",
+    probability: null, fit_status: "sampled_oos_assessment", pipeline_stage: "sampled_fit_assessed",
+    selection_qualified: false,
+    selection_qualification: {
+      passed: false,
+      gates: { full_market_benchmark_contract: false, full_market_top100_contract: false, deterministic_sample_replay: true },
+    },
+    counts: {
+      available_independent_session_count: 260, archived_independent_session_count: 260,
+      mature_label_session_count: 260, observation_count: 1430000, label_coverage: 0.98,
+    },
+    limitations: [
+      "individual_probability_projection_not_published",
+      "selection_filter_fail_closed",
+      "bounded_sample_benchmark_not_full_market_contract_selection_forbidden",
+    ],
+  } } },
+}, 45);
+renderMarketScanProbabilityResearch(elements, sampled);
+assert.equal(elements.probabilityEffectiveness.textContent, "有界样本评估完成 · 不具备选股资格");
+assert.equal(elements.probabilityMin.disabled, true);
+assert.match(elements.probabilityLimitations.textContent, /有界样本不满足全市场基准与 Top100 契约/);
+const sampledProbabilities = normalizeMarketScanUpsideProbabilities(undefined, sampled);
+const sampledSnapshot = marketScanProbabilitySnapshot(
+  { upside_probabilities: sampledProbabilities },
+  sampled,
+);
+assert.match(sampledSnapshot, /上涨概率研究 · 有界样本评估完成/);
+assert.match(sampledSnapshot, /逐股概率、置信区间和选股筛选继续保持为空或关闭/);
+assert.doesNotMatch(sampledSnapshot, /样本外已校准|冻结 Shadow 证据/);
+const insufficientProbabilities = normalizeMarketScanUpsideProbabilities(undefined, insufficient);
+const insufficientSnapshot = marketScanProbabilitySnapshot(
+  { upside_probabilities: insufficientProbabilities },
+  insufficient,
+);
+assert.match(insufficientSnapshot, /上涨概率研究 · 样本不足/);
+assert.match(insufficientSnapshot, /概率与置信区间保持为空/);
+assert.doesNotMatch(insufficientSnapshot, /冻结 Shadow 证据|61\.2%/);
 assert.throws(
   () => normalizeMarketScanUpsideProbabilities({ "5": { status: "insufficient_data", probability: 0.5 } }, research),
   /证据不足时必须为空/,
@@ -789,6 +1022,13 @@ assert.throws(
 assert.throws(
   () => normalizeMarketScanUpsideProbabilities({ "5": { status: "calibrated_shadow", probability: 0.7, confidence_interval: { lower: 0.6, upper: 0.8 } } }, legacy),
   /不能超越批次研究证据状态/,
+);
+assert.throws(
+  () => normalizeMarketScanProbabilityResearch({ run_id: 42, horizons: { "5": {
+    status: "calibrated_shadow", selection_qualified: true,
+    selection_qualification: { passed: false },
+  } } }, 42),
+  /选股效力资格与证据状态不一致/,
 );
 '''
     )
@@ -860,6 +1100,29 @@ assert.equal(presentation.publicationBlockers, "全市场报价快照跨度 1918
 assert.match(presentation.passedGates, /^评分分布 · raw-score-distribution-v2/);
 assert.match(presentation.sourceWarnings, /tencent 未覆盖/);
 assert.doesNotMatch(presentation.sourceWarnings, /快照跨度/);
+const structuredPresentation = marketScanMessagePresentation({
+  ...run,
+  publication_diagnostics: {
+    schema_version: "market-scan-publication-diagnostics-v1",
+    headline: "盘后正式扫描未达到发布可信度：发布阻断：结构化快照跨度超限",
+    blockers: [{
+      code: "publication.snapshot.span_exceeded", label: "报价快照跨度超限",
+      detail: "结构化快照跨度超限", severity: "error",
+    }],
+    passed_gates: [{
+      code: "score_distribution.pass", label: "评分分布",
+      detail: "raw-score-distribution-v2：raw_score样本 5499/5499", severity: "info",
+    }],
+    source_warnings: [{
+      code: "source.runtime_warning", label: "数据源告警",
+      detail: "结构化数据源告警", severity: "warning",
+    }],
+  },
+});
+assert.match(structuredPresentation.headline, /结构化快照/);
+assert.equal(structuredPresentation.publicationBlockers, "结构化快照跨度超限");
+assert.match(structuredPresentation.passedGates, /^评分分布 · raw-score-distribution-v2/);
+assert.equal(structuredPresentation.sourceWarnings, "结构化数据源告警");
 const legacyPresentation = marketScanMessagePresentation({ ...run, message: legacyMessage });
 assert.equal(
   legacyPresentation.headline,

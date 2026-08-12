@@ -11,6 +11,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,7 @@ import app.services.runtime_backup as runtime_backup_module
 from app.services.cache import SQLiteCache
 from app.config import Settings
 from app.repositories.market_scan import MarketScanResultWrite, MarketScanSeed
+from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.runtime_backup import (
     RuntimeBackupError,
     create_runtime_backup,
@@ -27,6 +29,67 @@ from app.services.runtime_backup import (
     runtime_backup_storage,
     verify_runtime_backup,
 )
+from tools import runtime_data
+
+
+class _RuntimeDataResult:
+    def __init__(self, operation: str) -> None:
+        self.operation = operation
+
+    def model_dump(self, *, mode: str) -> dict[str, str]:
+        assert mode == "json"
+        return {"operation": self.operation}
+
+
+@pytest.mark.parametrize(
+    ("argv", "function_name", "operation"),
+    [
+        (["verify", "backup"], "verify_runtime_backup", "verify"),
+        (["backup", "--destination", "backup"], "create_runtime_backup", "backup"),
+        (
+            ["restore", "backup", "--confirm-service-stopped", "--rollback-destination", "rollback"],
+            "restore_runtime_backup",
+            "restore",
+        ),
+    ],
+)
+def test_runtime_data_cli_dispatches_each_operation_in_process(
+    argv: list[str],
+    function_name: str,
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed: list[tuple[object, ...]] = []
+
+    def operation_call(*args: object, **kwargs: object) -> _RuntimeDataResult:
+        observed.append((*args, kwargs))
+        return _RuntimeDataResult(operation)
+
+    monkeypatch.setattr(runtime_data, function_name, operation_call)
+    monkeypatch.setattr(
+        runtime_data,
+        "Settings",
+        lambda: SimpleNamespace(cache_path=Path("runtime.sqlite3"), max_runtime_backups=7),
+    )
+
+    assert runtime_data.main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": operation}
+    assert len(observed) == 1
+
+
+def test_runtime_data_cli_maps_operation_failure_to_exit_one(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        runtime_data,
+        "verify_runtime_backup",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("broken backup")),
+    )
+
+    assert runtime_data.main(["verify", "backup"]) == 1
+    assert "runtime-data: broken backup" in capsys.readouterr().err
 
 
 def _create_runtime_backups_in_process(database_path: str, start_event, results, count: int) -> None:
@@ -684,6 +747,79 @@ def test_runtime_cleanup_keeps_configured_market_scan_snapshots_and_cascades_res
     assert removed["market_scan_run"] == 2
     assert counts["market_scan_run"] == 1
     assert counts["market_scan_result"] == 1
+
+
+def test_runtime_cleanup_protects_run_until_probability_source_capture_is_durable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.sqlite3"
+    settings = Settings(cache_path=path, max_market_scan_runs=1)
+    cache = SQLiteCache(path, settings=settings)
+    protected = cache.create_market_scan_run(
+        trigger="manual",
+        mode="official",
+        rule_version="full-market-score-v1",
+        as_of="2026-07-15 16:30:00",
+        data_date="2026-07-15",
+        scope=FULL_MARKET_SCOPE,
+    )
+    cache.start_market_scan_run(protected.id)
+    cache.seed_market_scan_results(
+        protected.id,
+        [MarketScanSeed("600519.SH", "600519", "SH", "贵州茅台")],
+        excluded_count=0,
+    )
+    cache.save_market_scan_result_batch(
+        protected.id,
+        [
+            MarketScanResultWrite(
+                symbol="600519.SH",
+                status="success",
+                score=80,
+                raw_score=80.0,
+                trend_score=80,
+                leader_score=80,
+                data_quality_score=100,
+                price=100.0,
+                data_date="2026-07-15",
+                quote_timestamp="2026-07-15 15:00:00",
+                quote_source="test",
+                kline_source="test",
+                adjustment_mode="qfq",
+                metrics={"test": 1},
+                reason="test",
+            )
+        ],
+    )
+    cache.finish_market_scan_run(protected.id, "success", message="待PIT归档")
+    for day in (16, 17):
+        run = cache.create_market_scan_run(
+            trigger="manual",
+            rule_version="test",
+            as_of=f"2026-07-{day} 16:30:00",
+            data_date=f"2026-07-{day}",
+            scope="test",
+        )
+        cache.start_market_scan_run(run.id)
+        cache.finish_market_scan_run(run.id, "failed", message="test")
+
+    first = cache.cleanup_runtime_rows()
+    assert first["market_scan_run"] == 1
+    assert cache.market_scan_run(protected.id).id == protected.id
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            UPDATE market_scan_probability_capture_outbox
+            SET status = 'succeeded', completed_at = updated_at
+            WHERE run_id = ?
+            """,
+            (protected.id,),
+        )
+
+    second = cache.cleanup_runtime_rows()
+    assert second["market_scan_run"] == 1
+    with pytest.raises(ValueError, match="不存在"):
+        cache.market_scan_run(protected.id)
 
 
 def test_runtime_cleanup_preserves_market_scan_retry_and_task_lineage(tmp_path: Path) -> None:

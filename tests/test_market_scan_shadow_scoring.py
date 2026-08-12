@@ -176,6 +176,7 @@ def test_shadow_v54_uses_replayable_multilevel_residuals_with_industry_quality_g
 
 def test_shadow_v54_neutralizes_volume_lifecycle_without_time_aligned_intraday_volume() -> None:
     official = _item(1, volume_ratio=2.5, industry="软件业")
+    preopen = _item(1, volume_ratio=2.5, mode="preopen", industry="软件业")
     intraday = _item(
         1,
         quote_date="2026-07-20",
@@ -190,14 +191,21 @@ def test_shadow_v54_neutralizes_volume_lifecycle_without_time_aligned_intraday_v
     intraday_result = score_shadow_market(
         (intraday,), variant="v5_4_skip5_multilevel_residual_volume_lifecycle"
     ).results[0]
+    preopen_result = score_shadow_market(
+        (preopen,), variant="v5_4_skip5_multilevel_residual_volume_lifecycle"
+    ).results[0]
 
     official_context = official_result.details["components"]["volume_context"]
     intraday_context = intraday_result.details["components"]["volume_context"]
+    preopen_context = preopen_result.details["components"]["volume_context"]
     assert official_context["alignment"] == "same-completed-session"
+    assert preopen_context["alignment"] == "same-completed-session"
+    assert preopen_context["applied_delta"] == official_context["applied_delta"]
     assert intraday_context["alignment"] == "intraday-time-aligned-volume-unavailable-neutralized"
     assert intraday_context["applied_delta"] == 0
     assert intraday_result.details["components"]["volume_confirmation_delta"] == 0
     assert replay_shadow_score_details(intraday_result.details) == intraday_result.raw_score
+    assert replay_shadow_score_details(preopen_result.details) == preopen_result.raw_score
 
 
 def test_shadow_v54_persists_explicit_risk_and_capacity_constraints() -> None:

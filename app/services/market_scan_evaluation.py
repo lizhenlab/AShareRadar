@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from functools import lru_cache
 import hashlib
 import json
@@ -16,6 +16,7 @@ from statistics import fmean, median, pstdev
 from typing import Literal, cast
 
 from app.models.market import Kline, KlineAdjustmentMode
+from app.models.market_scan import MarketScanMode
 from app.models.paper_trading import (
     CostProfileName,
     PaperCostProfile,
@@ -24,6 +25,21 @@ from app.models.paper_trading import (
 )
 from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.paper_trading_rules import assess_daily_tradeability, resolve_trade_rule_profile
+from app.services.market_scan_evaluation_exposure import (
+    ExposureItem as _ExposureItem,
+    board as _board,
+    exposure_audit as _exposure_audit,
+    exposure_item as _exposure_item,
+    group_exposure as _group_exposure,  # noqa: F401 - compatibility re-export
+    industry_taxonomy_quality as _industry_taxonomy_quality,  # noqa: F401 - compatibility re-export
+    liquidity_bucket as _liquidity_bucket,
+    market_regime as _market_regime,
+    mean_optional as _mean_optional,  # noqa: F401 - compatibility re-export
+    normalize_industry as _normalize_industry,
+    quality_bucket as _quality_bucket,
+    regime_overlay as _regime_overlay,
+    scan_time_bucket as _scan_time_bucket,
+)
 from app.services.market_scan_shadow_scoring import (
     SHADOW_SCORE_MIN_HISTORY_ROWS,
     SHADOW_SCORE_VARIANTS,
@@ -47,6 +63,7 @@ from app.services.market_scan_probability_research import (
     build_probability_research,
     probability_feature_vector,
 )
+from app.services.trading_calendar import next_trade_dates
 from app.repositories.market_scan_mapping import decode_result_payload
 from app.utils.clock import utc_now
 
@@ -177,16 +194,6 @@ class _Observation:
 
 
 @dataclass(frozen=True)
-class _ExposureItem:
-    symbol: str
-    rank: int
-    board: str
-    industry: str
-    amount: float
-    turnover_rate: float | None
-
-
-@dataclass(frozen=True)
 class _RunSnapshot:
     id: int
     mode: str
@@ -208,7 +215,7 @@ def evaluate_market_scan_rankings(
     database_path: Path,
     *,
     config: EvaluationConfig | None = None,
-    mode: Literal["official", "intraday"] | None = None,
+    mode: MarketScanMode | None = None,
     run_ids: Sequence[int] | None = None,
 ) -> dict[str, object]:
     settings = config or EvaluationConfig()
@@ -233,7 +240,7 @@ def evaluate_market_scan_shadow_rankings(
     *,
     variant: ShadowScoreVariant = "v5_full",
     config: EvaluationConfig | None = None,
-    mode: Literal["official", "intraday"] | None = None,
+    mode: MarketScanMode | None = None,
     run_ids: Sequence[int] | None = None,
 ) -> dict[str, object]:
     """Evaluate a candidate ranking reconstructed without changing production rows."""
@@ -322,7 +329,7 @@ def evaluate_market_scan_shadow_comparison(
     database_path: Path,
     *,
     config: EvaluationConfig | None = None,
-    mode: Literal["official", "intraday"] | None = None,
+    mode: MarketScanMode | None = None,
     run_ids: Sequence[int] | None = None,
     variants: Sequence[ShadowScoreVariant] = SHADOW_SCORE_VARIANTS,
 ) -> dict[str, object]:
@@ -566,7 +573,10 @@ def _primary_promotion_contract(report: Mapping[str, object]) -> dict[str, objec
             continue
         if value.get("horizon_trading_days") != PROMOTION_PRIMARY_HORIZON:
             continue
-        if dimensions.get("scope") != "TOP100快速更新评分":
+        if (
+            dimensions.get("mode") == "official"
+            and dimensions.get("scope") != "TOP100快速更新评分"
+        ):
             candidates.append(value)
     if not candidates:
         return None
@@ -968,7 +978,7 @@ def _evaluate_shadow_run(
         quote_date,
         data_date,
         variant,
-        mode=cast(Literal["official", "intraday"], str(run["mode"] or "official")),
+        mode=cast(MarketScanMode, str(run["mode"] or "official")),
         run_id=int(run["id"]),
     )
     if not inputs:
@@ -1017,7 +1027,7 @@ def _shadow_score_inputs(
     data_date: str,
     variant: ShadowScoreVariant,
     *,
-    mode: Literal["official", "intraday"],
+    mode: MarketScanMode,
     run_id: int,
 ) -> tuple[list[ShadowScoreInput], tuple[dict[str, object], ...], int]:
     inputs: list[ShadowScoreInput] = []
@@ -1086,7 +1096,7 @@ def _point_in_time_payload_attests_shadow_input(
     *,
     quote_date: str,
     data_date: str,
-    mode: Literal["official", "intraday"],
+    mode: MarketScanMode,
 ) -> bool:
     text_fields = {
         "symbol": row["symbol"],
@@ -1191,7 +1201,7 @@ def _shadow_score_input(
     quote_date: str,
     data_date: str,
     *,
-    mode: Literal["official", "intraday"],
+    mode: MarketScanMode,
 ) -> ShadowScoreInput:
     return ShadowScoreInput(
         symbol=str(row["symbol"]), market=str(row["market"]), quote_date=quote_date,
@@ -1407,13 +1417,16 @@ def _eligible_trading_dates(
     quote_date: str,
     config: EvaluationConfig,
 ) -> tuple[str, ...]:
-    counts: dict[str, int] = defaultdict(int)
-    for symbol_rows in bars.values():
-        for row_date in {str(row["date"]) for row in symbol_rows if str(row["date"]) > quote_date}:
-            counts[row_date] += 1
-    required = max(1, math.ceil(snapshot_count * config.complete_day_coverage))
+    # A horizon is an exchange-session contract, not a property of whichever
+    # dates happen to have broad K-line coverage in the local cache.  Inferring
+    # sessions from coverage could silently move D+1/H forward when an entire
+    # market day is missing.  Keep the legacy arguments for the evaluator API,
+    # but bind labels and forward paths to the trusted calendar; a missing
+    # per-symbol bar remains explicitly unavailable downstream.
+    del bars, snapshot_count
     limit = max((*config.horizons, *PROBABILITY_DEFAULT_HORIZONS)) + config.max_exit_delay_sessions + 1
-    return tuple(sorted(row_date for row_date, count in counts.items() if count >= required))[:limit]
+    signal_date = date.fromisoformat(quote_date)
+    return tuple(item.isoformat() for item in next_trade_dates(signal_date, limit))
 
 
 def _observation_from_rows(
@@ -1851,7 +1864,7 @@ def _contract_cohort_slices(
         "quality": ("unknown", "low", "medium", "high"),
         "segment": ("regular", "st", "new"),
         "liquidity": ("low", "medium", "high"),
-        "scan_time": ("morning", "afternoon", "after_close", "unknown"),
+        "scan_time": ("preopen", "morning", "afternoon", "after_close", "unknown"),
     }
     attributes = {
         "market": "market",
@@ -2642,134 +2655,6 @@ def _hysteresis_metrics(
     return records
 
 
-def _exposure_audit(
-    snapshots: tuple[_RunSnapshot, ...],
-    config: EvaluationConfig,
-) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    for snapshot in snapshots:
-        universe = snapshot.exposures
-        if not universe:
-            continue
-        for top_n in config.top_sizes:
-            selected = tuple(item for item in universe if item.rank <= top_n)
-            records.append(
-                {
-                    "run_id": snapshot.id,
-                    "rule_version": snapshot.rule_version,
-                    "quote_date": snapshot.quote_date,
-                    "top_n": top_n,
-                    "sample_count": len(selected),
-                    "universe_count": len(universe),
-                    "board": _group_exposure(selected, universe, "board"),
-                    "industry": _group_exposure(selected, universe, "industry"),
-                    "liquidity": _group_exposure(selected, universe, "liquidity"),
-                    "average_amount": _mean_optional(item.amount for item in selected),
-                    "universe_average_amount": _mean_optional(item.amount for item in universe),
-                    "average_turnover_rate": _mean_optional(item.turnover_rate for item in selected),
-                    "universe_average_turnover_rate": _mean_optional(item.turnover_rate for item in universe),
-                    "taxonomy_quality": _industry_taxonomy_quality(universe),
-                    "policy": "audit-only-no-naive-sector-quota",
-                }
-            )
-    return records
-
-
-def _regime_overlay(snapshots: Sequence[_RunSnapshot]) -> list[dict[str, object]]:
-    policy = {
-        "strong": (1.0, 45),
-        "neutral": (0.8, 50),
-        "weak": (0.5, 60),
-        "unknown": (0.5, 60),
-    }
-    return [
-        {
-            "run_id": snapshot.id,
-            "quote_date": snapshot.quote_date,
-            "regime": snapshot.regime,
-            "position_size_multiplier": policy.get(snapshot.regime, policy["unknown"])[0],
-            "minimum_balanced_utility": policy.get(snapshot.regime, policy["unknown"])[1],
-            "role": "admission-and-position-sizing-only-does-not-change-alpha-rank",
-        }
-        for snapshot in snapshots
-    ]
-
-
-def _group_exposure(
-    selected: Sequence[_ExposureItem],
-    universe: Sequence[_ExposureItem],
-    dimension: Literal["board", "industry", "liquidity"],
-) -> list[dict[str, object]]:
-    def label(item: _ExposureItem) -> str:
-        if dimension == "board":
-            return item.board
-        if dimension == "industry":
-            return item.industry
-        return _liquidity_bucket(item.amount)
-
-    selected_counts = Counter(label(item) for item in selected)
-    universe_counts = Counter(label(item) for item in universe)
-    records: list[dict[str, object]] = []
-    for value in sorted(universe_counts):
-        selected_share = selected_counts[value] / len(selected) if selected else 0.0
-        universe_share = universe_counts[value] / len(universe) if universe else 0.0
-        difference = selected_share - universe_share
-        records.append(
-            {
-                "value": value,
-                "selected_count": selected_counts[value],
-                "universe_count": universe_counts[value],
-                "selected_share": selected_share,
-                "universe_share": universe_share,
-                "share_difference": difference,
-                "representation_ratio": selected_share / universe_share if universe_share > 0 else None,
-                "alert": abs(difference) >= 0.05,
-            }
-        )
-    return records
-
-
-def _exposure_item(row: sqlite3.Row, *, rank: int | None = None) -> _ExposureItem:
-    symbol = str(row["symbol"])
-    return _ExposureItem(
-        symbol=symbol,
-        rank=rank if rank is not None else int(row["rank"]),
-        board=_board(symbol, str(row["market"])),
-        industry=_normalize_industry(row["industry"]),
-        amount=float(row["amount"] or 0),
-        turnover_rate=float(row["turnover_rate"]) if row["turnover_rate"] is not None else None,
-    )
-
-
-def _normalize_industry(value: object) -> str:
-    normalized = "".join(str(value or "").split()).strip("-/、，")
-    if not normalized:
-        return "UNKNOWN"
-    aliases = {
-        "信息传输、软件和信息技术服务业": "信息技术",
-        "软件和信息技术服务业": "信息技术",
-        "信息传输软件和信息技术服务业": "信息技术",
-    }
-    return aliases.get(normalized, normalized)
-
-
-def _industry_taxonomy_quality(rows: Sequence[_ExposureItem]) -> dict[str, object]:
-    industries = [item.industry for item in rows]
-    broad = {"制造业", "信息技术", "金融业", "建筑业", "采矿业", "房地产业", "UNKNOWN"}
-    broad_count = sum(value in broad for value in industries)
-    return {
-        "unknown_count": sum(value == "UNKNOWN" for value in industries),
-        "broad_category_count": broad_count,
-        "mixed_granularity": 0 < broad_count < len(industries),
-        "neutralization_ready": broad_count == 0 and all(value != "UNKNOWN" for value in industries),
-    }
-
-
-def _mean_optional(values: Iterable[float | None]) -> float | None:
-    materialized = [float(value) for value in values if value is not None and math.isfinite(float(value))]
-    return fmean(materialized) if materialized else None
-
-
 def _spearman_rank_stability(
     previous: dict[str, int],
     current: dict[str, int],
@@ -2805,63 +2690,6 @@ def _midranks(values: Sequence[float]) -> list[float]:
             ranks[ordered[position][0]] = midrank
         index = end
     return ranks
-
-
-def _market_regime(rows: Sequence[sqlite3.Row]) -> str:
-    changes = [float(row["change_pct"]) for row in rows if row["change_pct"] is not None]
-    average = fmean(changes) if changes else 0.0
-    if average >= 1:
-        return "strong"
-    if average <= -1:
-        return "weak"
-    return "neutral"
-
-
-def _quality_bucket(value: object) -> str:
-    if value is None:
-        return "unknown"
-    score = int(str(value))
-    if score >= 90:
-        return "high"
-    if score >= 80:
-        return "medium"
-    return "low"
-
-
-def _liquidity_bucket(value: object) -> str:
-    try:
-        amount = float(str(value))
-    except (TypeError, ValueError):
-        return "low"
-    if amount >= 1_000_000_000:
-        return "high"
-    if amount >= 100_000_000:
-        return "medium"
-    return "low"
-
-
-def _scan_time_bucket(value: object, mode: str) -> str:
-    text = str(value or "").replace("T", " ").replace("Z", "")
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return "unknown"
-    if mode == "official" or parsed.time() >= datetime.strptime("15:15", "%H:%M").time():
-        return "after_close"
-    if parsed.time() < datetime.strptime("11:30", "%H:%M").time():
-        return "morning"
-    return "afternoon"
-
-
-def _board(symbol: str, market: str) -> str:
-    code = symbol.split(".", 1)[0]
-    if market == "BJ":
-        return "BSE"
-    if market == "SH" and code.startswith(("688", "689")):
-        return "STAR"
-    if market == "SZ" and code.startswith(("300", "301")):
-        return "CHINEXT"
-    return f"{market}_MAIN"
 
 
 def _percentile(values: Sequence[float], probability: float) -> float:

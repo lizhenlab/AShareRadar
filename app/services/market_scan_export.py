@@ -37,7 +37,11 @@ _STATUS_LABELS: Final = {
     "missing": "数据缺失",
     "skipped": "已跳过",
 }
-_MODE_LABELS: Final = {"official": "盘后正式", "intraday": "盘中临时"}
+_MODE_LABELS: Final = {
+    "official": "盘后正式",
+    "intraday": "盘中临时",
+    "preopen": "盘前复盘",
+}
 _SORT_LABELS: Final = {
     "rank": "趋势强度排名",
     "score": "趋势强度",

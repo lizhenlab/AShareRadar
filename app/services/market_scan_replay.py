@@ -3,8 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import cmp_to_key
-import hashlib
-import json
 import math
 
 from app.services.market_scan_rank_refinement import (
@@ -15,6 +13,7 @@ from app.services.market_scan_rank_refinement import (
     MARKET_SCAN_RANK_REFINEMENT_WEIGHTS,
     market_scan_rank_refinement_spec,
 )
+from app.services.market_scan_score_contract import MarketScanReplayError, stable_score_spec_hash
 
 
 _LEGACY_SCORE_SPEC_SCHEMA_VERSION = 2
@@ -84,10 +83,6 @@ _CURRENT_VALID_QUOTE_FIELDS_REQUIRED = True
 _CURRENT_MAX_CHANGE_PCT_GAP = 0.3
 
 
-class MarketScanReplayError(ValueError):
-    pass
-
-
 @dataclass(frozen=True)
 class _LeaderReplayBreakdown:
     base: int
@@ -126,20 +121,6 @@ class MarketScanScoreReplay:
     final_score: int
     tie_break: tuple[tuple[str, str], ...]
     tie_break_values: dict[str, int | float | str]
-
-
-def stable_score_spec_hash(spec: object) -> str:
-    try:
-        canonical = json.dumps(
-            spec,
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("ascii")
-    except (TypeError, ValueError) as exc:
-        raise MarketScanReplayError("评分规范损坏：不是有限、可序列化的 JSON") from exc
-    return hashlib.sha256(canonical).hexdigest()
 
 
 def replay_score_details(details: Mapping[str, object]) -> MarketScanScoreReplay:

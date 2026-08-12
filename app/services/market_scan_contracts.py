@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from app.models.market import Kline, Quote, StockInfo
 from app.models.market_scan import (
     MarketScanFilterValues,
+    MarketScanPublicationDiagnostics,
     MarketScanPublicationSummary,
     MarketScanMode,
     MarketScanResultItem,
@@ -63,8 +65,40 @@ class MarketScanPublicationRepositoryProtocol(Protocol):
 @runtime_checkable
 class MarketScanCacheProtocol(Protocol):
     market_scan_repo: MarketScanPublicationRepositoryProtocol
+    path: Path
 
     def active_market_scan_run(self) -> MarketScanRun | None: ...
+
+    def reconcile_incomplete_market_scans(self) -> int: ...
+
+    def reconcile_probability_source_capture_outbox(self) -> int: ...
+
+    def claim_probability_source_capture(
+        self,
+        *,
+        owner: str,
+        lease_expires_at: str,
+    ) -> dict[str, object] | None: ...
+
+    def finish_probability_source_capture(
+        self,
+        run_id: int,
+        **kwargs: object,
+    ) -> None: ...
+
+    def retry_probability_source_capture(
+        self,
+        run_id: int,
+        **kwargs: object,
+    ) -> None: ...
+
+    def save_monitor_event(
+        self,
+        level: str,
+        category: str,
+        message: str,
+        symbol: str | None = None,
+    ) -> None: ...
 
     def create_market_scan_run(
         self,
@@ -85,7 +119,9 @@ class MarketScanCacheProtocol(Protocol):
         *,
         message: str,
         error: str | None = None,
+        publication_diagnostics: MarketScanPublicationDiagnostics | None = None,
         task_status: str | None = None,
+        validate_before_commit: Callable[[], None] | None = None,
     ) -> MarketScanRun: ...
 
     def latest_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...

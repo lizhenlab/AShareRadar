@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     trigger TEXT NOT NULL
         CHECK (trigger IN ('manual', 'scheduled', 'retry')),
     mode TEXT NOT NULL DEFAULT 'official'
-        CHECK (mode IN ('official', 'intraday')),
+        CHECK (mode IN ('official', 'intraday', 'preopen')),
     rule_version TEXT NOT NULL,
     as_of TEXT NOT NULL,
     data_date TEXT NOT NULL,
@@ -198,6 +198,7 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     market_progress_json TEXT NOT NULL DEFAULT '[]',
     message TEXT,
     last_error TEXT,
+    publication_diagnostics_json TEXT,
     cancel_requested_at TEXT,
     FOREIGN KEY (task_run_id) REFERENCES task_run(id) ON DELETE SET NULL,
     FOREIGN KEY (retry_of_run_id) REFERENCES market_scan_run(id) ON DELETE SET NULL
@@ -247,6 +248,27 @@ CREATE TABLE IF NOT EXISTS market_scan_result (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (run_id, symbol),
     FOREIGN KEY (run_id) REFERENCES market_scan_run(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS market_scan_probability_capture_outbox (
+    run_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'succeeded', 'skipped')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    last_attempt_at TEXT,
+    completed_at TEXT,
+    archive_digest TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES market_scan_run(id) ON DELETE CASCADE,
+    CHECK (
+        (status = 'processing' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+        OR (status <> 'processing' AND lease_owner IS NULL AND lease_expires_at IS NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS monitor_event (
@@ -437,6 +459,8 @@ CREATE INDEX IF NOT EXISTS idx_market_scan_result_rank
     ON market_scan_result(run_id, status, rank, symbol);
 CREATE INDEX IF NOT EXISTS idx_market_scan_result_filters
     ON market_scan_result(run_id, market, industry, is_st, status);
+CREATE INDEX IF NOT EXISTS idx_market_scan_probability_capture_due
+    ON market_scan_probability_capture_outbox(status, next_attempt_at, run_id);
 CREATE INDEX IF NOT EXISTS idx_monitor_event_created
     ON monitor_event(created_at);
 CREATE INDEX IF NOT EXISTS idx_watchlist_updated

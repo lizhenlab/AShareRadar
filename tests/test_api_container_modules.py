@@ -6,7 +6,9 @@ from app.api.container import build_container
 from app.config import Settings
 from app.services.cache import SQLiteCache
 from app.services.datahub import DataHub
+from app.services.domain_service_bundle import DomainServiceBundle
 from app.services.scheduler import LocalDataScheduler
+from app.repositories.paper_trading import PaperTradingRepository
 from tests.factories import make_quote
 
 
@@ -20,6 +22,8 @@ def test_container_reuses_datahub_workbench_context_cache(tmp_path) -> None:
     assert container.settings is settings
     assert container.datahub.settings is settings
     assert container.datahub.cache is cache
+    assert container.repositories is cache.repositories
+    assert container.domain_services is cache.domain_services
     assert cache.watchlist_repo.settings is settings
     assert cache.advice_repo.settings is settings
     assert cache.maintenance_repo.settings is settings
@@ -37,6 +41,30 @@ def test_explicit_cache_path_does_not_read_global_settings(monkeypatch, tmp_path
     assert cache.settings is None
     assert cache.watchlist_repo.settings is cache.advice_repo.settings
     assert cache.advice_repo.settings is cache.maintenance_repo.settings
+
+
+def test_cache_composes_bundles_without_domain_repository_reads(monkeypatch, tmp_path) -> None:
+    def fail_account(_repository):
+        raise AssertionError("缓存装配期间不应执行模拟账户领域读取")
+
+    monkeypatch.setattr(PaperTradingRepository, "account", fail_account)
+
+    cache = SQLiteCache(tmp_path / "composed.sqlite3")
+
+    assert cache.market_scan_repo is cache.repositories.market_scan
+    assert cache.discovery_service is cache.domain_services.discovery
+    assert cache.table_counts()["paper_trading_account"] == 1
+
+
+def test_cache_constructor_defers_domain_service_composition(monkeypatch, tmp_path) -> None:
+    def fail_build(*_args, **_kwargs):
+        raise AssertionError("SQLiteCache 构造器不应装配领域服务")
+
+    monkeypatch.setattr(DomainServiceBundle, "build", fail_build)
+
+    cache = SQLiteCache(tmp_path / "storage-only.sqlite3")
+
+    assert cache.bound_domain_services is None
 
 
 def test_build_container_binds_path_only_cache_repositories_to_settings(tmp_path) -> None:

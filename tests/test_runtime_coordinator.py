@@ -119,6 +119,12 @@ class _RuntimeCache:
     def reconcile_incomplete_market_scans(self) -> int:
         return 0
 
+    def reconcile_probability_source_capture_outbox(self) -> int:
+        return 0
+
+    def claim_probability_source_capture(self, **_kwargs):
+        return None
+
     def save_monitor_event(self, *args, **_kwargs) -> None:
         self.monitor_events.append((str(args[0]), str(args[1]), str(args[2])))
 

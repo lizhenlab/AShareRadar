@@ -48,6 +48,7 @@ from app.services.research_replay import (
     normalized_advice_review_prices,
 )
 from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
+from app.services.storage_contracts import PaperTradingStorage
 from app.utils.market_data import valid_kline
 from app.utils.market_time import market_local_naive
 from app.utils.provider_errors import sanitize_provider_error
@@ -148,21 +149,25 @@ class _PortfolioValuation:
     unrealized: float
 
 
-def get_paper_trading_dashboard(cache: object, *, run_id: int | None = None) -> PaperTradingDashboard:
+def get_paper_trading_dashboard(
+    cache: PaperTradingStorage,
+    *,
+    run_id: int | None = None,
+) -> PaperTradingDashboard:
     if run_id is None:
         return cache.paper_trading_dashboard()
     return cache.paper_trading_dashboard(run_id=run_id)
 
 
 def update_paper_trading_account(
-    cache: object,
+    cache: PaperTradingStorage,
     payload: PaperTradingAccountUpdate,
 ) -> PaperTradingAccount:
     return cache.update_paper_trading_account(payload)
 
 
 def create_paper_strategy(
-    cache: object,
+    cache: PaperTradingStorage,
     payload: PaperStrategyCreate,
     *,
     now: datetime | None = None,
@@ -178,7 +183,7 @@ def create_paper_strategy(
     )
 
 
-def delete_pending_paper_strategy(cache: object, strategy_id: int) -> None:
+def delete_pending_paper_strategy(cache: PaperTradingStorage, strategy_id: int) -> None:
     cache.delete_pending_paper_strategy(strategy_id)
 
 

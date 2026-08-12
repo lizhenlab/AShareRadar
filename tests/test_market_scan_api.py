@@ -12,6 +12,8 @@ from app.api.errors import validation_exception_handler
 from app.api.routes import market_scan
 from app.models.market_scan import (
     MARKET_SCAN_TOP100_REFRESH_SCOPE,
+    MarketScanPublicationDiagnostic,
+    MarketScanPublicationDiagnostics,
     MarketScanResultPage,
     MarketScanRun,
     MarketScanRunPage,
@@ -23,6 +25,9 @@ from app.services.market_scan_export import (
     MarketScanWorkbookExport,
 )
 from app.services.market_scan_future_range_artifact import FutureRangeArtifactError
+from app.services.market_scan_probability_artifact import ProbabilityArtifactError
+from app.services.market_scan_probability_outcomes import ProbabilityOutcomeError
+from app.services.market_scan_probability_source import ProbabilitySourceError
 from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
 from app.services.market_scan_probability_store import MarketScanProbabilityStore, ProbabilityFilterUnavailable
 from app.utils.errors import NotFoundError
@@ -52,18 +57,34 @@ def test_create_scan_returns_202_with_queued_run_and_deduplicates_active_request
     ]
 
 
-def test_create_scan_forwards_explicit_intraday_mode() -> None:
+@pytest.mark.parametrize("mode", ("intraday", "preopen"))
+def test_create_scan_forwards_explicit_non_official_mode(mode: str) -> None:
     scanner = _ScannerStub()
     client = _client(scanner)
 
-    response = client.post("/api/market-scans", json={"mode": "intraday"})
+    response = client.post("/api/market-scans", json={"mode": mode})
 
     assert response.status_code == 202
-    assert scanner.create_calls == [(None, "intraday")]
+    assert scanner.create_calls == [(None, mode)]
 
 
 def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     scanner = _ScannerStub()
+    scanner.previous = scanner.previous.model_copy(
+        update={
+            "publication_diagnostics": MarketScanPublicationDiagnostics(
+                headline="盘后正式扫描未达到发布可信度",
+                blockers=[
+                    MarketScanPublicationDiagnostic(
+                        code="publication.snapshot.span_exceeded",
+                        label="报价快照跨度超限",
+                        detail="全市场报价快照跨度 1918 秒超过 1200 秒门槛",
+                        severity="error",
+                    )
+                ],
+            )
+        }
+    )
     client = _client(scanner)
 
     latest = client.get("/api/market-scans/latest")
@@ -80,6 +101,9 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     assert published.status_code == 200
     assert published.headers["cache-control"] == "no-store"
     assert published.json()["id"] == scanner.previous.id
+    assert published.json()["publication_diagnostics"]["blockers"][0]["code"] == (
+        "publication.snapshot.span_exceeded"
+    )
     assert history.status_code == 200
     assert history.headers["cache-control"] == "no-store"
     assert history.json() == {
@@ -116,6 +140,7 @@ def test_latest_and_history_routes_forward_mode_status_and_date_filters() -> Non
 
     latest = client.get("/api/market-scans/latest", params={"mode": "intraday"})
     published = client.get("/api/market-scans/latest-published", params={"mode": "official"})
+    preopen = client.get("/api/market-scans/latest", params={"mode": "preopen"})
     history = client.get(
         "/api/market-scans",
         params={
@@ -129,8 +154,13 @@ def test_latest_and_history_routes_forward_mode_status_and_date_filters() -> Non
 
     assert latest.status_code == 200
     assert published.status_code == 200
+    assert preopen.status_code == 200
     assert history.status_code == 200
-    assert scanner.latest_calls == [("intraday", False), ("official", True)]
+    assert scanner.latest_calls == [
+        ("intraday", False),
+        ("official", True),
+        ("preopen", False),
+    ]
     assert scanner.list_calls == [(1, 50, "intraday", "published", "2026-07-16")]
 
 
@@ -283,6 +313,30 @@ def test_probability_research_route_is_read_only_and_run_bound() -> None:
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["run_id"] == scanner.active.id
     assert response.json()["default_horizon"] == 5
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProbabilityArtifactError("sensitive artifact path and digest mismatch"),
+        ProbabilityOutcomeError("sensitive outcome path and digest mismatch"),
+        ProbabilitySourceError("sensitive source path and digest mismatch"),
+    ],
+)
+def test_probability_research_route_maps_corrupt_artifact_to_integrity_conflict(
+    error: ValueError,
+) -> None:
+    scanner = _ScannerStub()
+
+    def corrupted(_run_id: int) -> dict[str, object]:
+        raise error
+
+    scanner.probability_research = corrupted  # type: ignore[method-assign]
+    response = _client(scanner).get("/api/market-scans/7/probability-research")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "上涨概率研究 artifact 完整性校验失败，已拒绝读取"
+    assert "sensitive" not in response.text
 
 
 def test_future_range_research_route_is_read_only_run_bound_and_paginated() -> None:

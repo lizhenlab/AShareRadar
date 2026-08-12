@@ -8,18 +8,29 @@ export {
   isDiscoveryPresetUiRepresentable,
 } from "./market-scan-filters.js";
 
+export const MARKET_SCAN_RUN_STATUSES = Object.freeze([
+  "queued", "running", "cancelling", "success", "degraded", "failed", "cancelled", "interrupted",
+]);
+export const MARKET_SCAN_MODES = Object.freeze(["official", "intraday", "preopen"]);
+export const MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION = "market-scan-publication-diagnostics-v1";
+export const MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES = Object.freeze(["info", "warning", "error"]);
+export const MARKET_SCAN_PUBLICATION_DIAGNOSTIC_FIELDS = Object.freeze(["code", "label", "detail", "severity"]);
+export const MARKET_SCAN_PUBLICATION_DIAGNOSTICS_FIELDS = Object.freeze([
+  "schema_version", "headline", "blockers", "passed_gates", "source_warnings",
+]);
+
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "cancelling"]);
 const PUBLISHED_RUN_STATUSES = new Set(["success", "degraded"]);
 const RETRYABLE_RUN_STATUSES = new Set(["degraded", "failed", "cancelled", "interrupted"]);
-const RUN_STATUSES = new Set([
-  ...ACTIVE_RUN_STATUSES,
-  ...PUBLISHED_RUN_STATUSES,
-  "failed",
-  "cancelled",
-  "interrupted",
-]);
+const RUN_STATUSES = new Set(MARKET_SCAN_RUN_STATUSES);
+const PUBLICATION_DIAGNOSTIC_SEVERITIES = new Set(MARKET_SCAN_PUBLICATION_DIAGNOSTIC_SEVERITIES);
 const RUN_TRIGGERS = new Set(["manual", "scheduled", "retry"]);
-const MARKET_SCAN_MODES = new Set(["official", "intraday"]);
+const MARKET_SCAN_MODE_LABELS = Object.freeze({
+  preopen: "盘前复盘",
+  intraday: "盘中临时",
+  official: "盘后正式",
+});
+const MARKET_SCAN_MODE_SET = new Set(MARKET_SCAN_MODES);
 const RESULT_STATUSES = new Set(["pending", "success", "missing", "skipped"]);
 const MARKET_SCAN_STAGES = new Set(["stock_pool", "bulk_quotes", "klines", "scoring", "persistence", "publication"]);
 export const MARKET_SCAN_TOP100_REFRESH_SCOPE = "TOP100快速更新评分";
@@ -45,12 +56,14 @@ export function defaultMarketScanMode(value = new Date()) {
   if (Number.isNaN(date.getTime())) return "official";
   const weekday = date.getDay() >= 1 && date.getDay() <= 5;
   const minutes = (date.getHours() * 60) + date.getMinutes();
+  const preopenWindow = minutes < (9 * 60) + 15;
   const intradayWindow = minutes >= (9 * 60) + 30 && minutes < (15 * 60) + 15;
+  if (weekday && preopenWindow) return "preopen";
   return weekday && intradayWindow ? "intraday" : "official";
 }
 
 export function marketScanModeLabel(mode) {
-  return mode === "intraday" ? "盘中临时" : "盘后正式";
+  return MARKET_SCAN_MODE_LABELS[mode] || "未知模式";
 }
 
 export function marketScanRunModeLabel(run) {
@@ -74,7 +87,7 @@ export function validateMarketScanRun(value, options = {}) {
   requireInteger(run.id, `${context}.id`, { min: 1 });
   requireEnum(run.status, RUN_STATUSES, `${context}.status`);
   requireEnum(run.trigger, RUN_TRIGGERS, `${context}.trigger`);
-  requireEnum(run.mode, MARKET_SCAN_MODES, `${context}.mode`);
+  requireEnum(run.mode, MARKET_SCAN_MODE_SET, `${context}.mode`);
   requireIsoDate(run.quote_date, `${context}.quote_date`);
   for (const field of ["rule_version", "as_of", "data_date", "scope", "created_at", "updated_at"]) {
     requireString(run[field], `${context}.${field}`);
@@ -108,6 +121,9 @@ export function validateMarketScanRun(value, options = {}) {
   if (run.market_progress !== undefined && !Array.isArray(run.market_progress)) {
     throw marketScanContractError(`${context}.market_progress 必须是数组`);
   }
+  if (run.publication_diagnostics !== undefined && run.publication_diagnostics !== null) {
+    validatePublicationDiagnostics(run.publication_diagnostics, `${context}.publication_diagnostics`);
+  }
   for (const field of [
     "stock_pool_source",
     "started_at",
@@ -122,6 +138,35 @@ export function validateMarketScanRun(value, options = {}) {
     throw marketScanContractError(`${context}.processed_count 不能大于 total_count`);
   }
   return run;
+}
+
+function validatePublicationDiagnostics(value, context) {
+  const diagnostics = requireObject(value, context);
+  if (diagnostics.schema_version !== MARKET_SCAN_PUBLICATION_DIAGNOSTICS_SCHEMA_VERSION) {
+    throw marketScanContractError(`${context}.schema_version 的值不受支持`);
+  }
+  requireString(diagnostics.headline, `${context}.headline`);
+  for (const field of ["blockers", "passed_gates", "source_warnings"]) {
+    if (!Array.isArray(diagnostics[field])) {
+      throw marketScanContractError(`${context}.${field} 必须是数组`);
+    }
+    diagnostics[field].forEach((item, index) => {
+      validatePublicationDiagnostic(item, `${context}.${field}[${index}]`);
+    });
+  }
+  return diagnostics;
+}
+
+function validatePublicationDiagnostic(value, context) {
+  const diagnostic = requireObject(value, context);
+  for (const field of ["code", "label", "detail"]) {
+    requireString(diagnostic[field], `${context}.${field}`);
+  }
+  if (!/^[a-z][a-z0-9_.-]*$/.test(diagnostic.code)) {
+    throw marketScanContractError(`${context}.code 格式不受支持`);
+  }
+  requireEnum(diagnostic.severity, PUBLICATION_DIAGNOSTIC_SEVERITIES, `${context}.severity`);
+  return diagnostic;
 }
 
 export function validateStartResponse(value, context = "扫描任务响应") {

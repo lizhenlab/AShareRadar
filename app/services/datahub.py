@@ -31,8 +31,8 @@ from app.services.datahub_metadata import MetadataCoordinator, StockPoolResoluti
 from app.services.datahub_klines import KlineCoordinator
 from app.services.datahub_orderbook import OrderBookCoordinator
 from app.services.datahub_status import (
-    _provider_error_text,
     _provider_source_key,
+    provider_error_text,
 )
 from app.services.datahub_source_plan import SourcePlanBuilder
 from app.services.datahub_quotes import QuoteCoordinator
@@ -49,7 +49,10 @@ from app.services.provider_registry import (
 from app.utils.clock import monotonic_now
 
 
-__all__ = ["DataHub", "_provider_error_text", "_provider_source_key"]
+_provider_error_text = provider_error_text
+
+
+__all__ = ["DataHub", "_provider_error_text", "_provider_source_key", "provider_error_text"]
 
 
 logger = logging.getLogger(__name__)

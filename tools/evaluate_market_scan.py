@@ -21,7 +21,7 @@ def main() -> int:
     )
     parser.add_argument("--database", type=Path, required=True, help="AShareRadar SQLite 数据库")
     parser.add_argument("--output", type=Path, help="JSON 报告输出路径；默认输出到 stdout")
-    parser.add_argument("--mode", choices=("official", "intraday"))
+    parser.add_argument("--mode", choices=("official", "intraday", "preopen"))
     parser.add_argument("--run-id", type=int, action="append", dest="run_ids")
     parser.add_argument("--minimum-sample-size", type=int, default=30)
     parser.add_argument("--minimum-session-count", type=int, default=20)

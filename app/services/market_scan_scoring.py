@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
 from app.models.market_scan import (
     MARKET_SCAN_RANK_TIE_BREAK,
@@ -31,14 +33,7 @@ from app.services.leader_scoring import (
     leader_tag_rules_spec,
     leader_tags,
 )
-from app.services.market_scan_replay import (
-    MarketScanReplayError,
-    MarketScanScoreReplay,
-    rank_score_details,
-    replay_score_details,
-    stable_score_spec_hash,
-    verify_score_details,
-)
+from app.services.market_scan_score_contract import MarketScanReplayError, stable_score_spec_hash
 from app.services.market_scan_rank_refinement import (
     MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION,
     MARKET_SCAN_RANK_REFINEMENT_MAX_DISCOUNT,
@@ -56,6 +51,10 @@ from app.services.trading_calendar import is_trading_day
 from app.utils.market_data import valid_kline, valid_quote
 from app.utils.market_time import market_local_naive
 from app.utils.symbols import standard_symbol
+
+
+if TYPE_CHECKING:
+    from app.services.market_scan_replay import MarketScanScoreReplay
 
 
 FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION = 4
@@ -83,6 +82,43 @@ class MarketScanDataMissing(ValueError):
 
 class MarketScanSkipped(ValueError):
     pass
+
+
+def replay_score_details(details: Mapping[str, object]) -> MarketScanScoreReplay:
+    from app.services.market_scan_replay import replay_score_details as replay
+
+    return replay(details)
+
+
+def verify_score_details(
+    details: Mapping[str, object],
+    *,
+    expected_leader_score: int | None,
+    expected_final_score: int | None,
+) -> MarketScanScoreReplay:
+    from app.services.market_scan_replay import verify_score_details as verify
+
+    return verify(
+        details,
+        expected_leader_score=expected_leader_score,
+        expected_final_score=expected_final_score,
+    )
+
+
+def rank_score_details(
+    rows: Iterable[tuple[str, Mapping[str, object]]],
+) -> dict[str, int]:
+    from app.services.market_scan_replay import rank_score_details as rank
+
+    return rank(rows)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "MarketScanScoreReplay":
+        from app.services.market_scan_replay import MarketScanScoreReplay
+
+        return MarketScanScoreReplay
+    raise AttributeError(name)
 
 
 @dataclass(frozen=True)
@@ -447,12 +483,19 @@ def _require_quote_kline_close_consistency(
     *,
     mode: MarketScanMode,
 ) -> None:
-    reference_price = quote.prev_close if mode == "intraday" else quote.price
+    if mode == "intraday":
+        reference_price = quote.prev_close
+        label = "报价昨收价与上一完整日K收盘价"
+    elif mode == "preopen":
+        reference_price = quote.price
+        label = "盘前复盘报价收盘价与上一完成交易日日K收盘价"
+    else:
+        reference_price = quote.price
+        label = "报价收盘价与同日日K收盘价"
     absolute_gap = abs(reference_price - latest.close)
     relative_limit = max(reference_price, latest.close) * FULL_MARKET_MAX_CLOSE_GAP_PCT / 100
     if absolute_gap > max(FULL_MARKET_MAX_CLOSE_GAP_ABSOLUTE, relative_limit):
         gap_pct = absolute_gap / latest.close * 100
-        label = "报价昨收价与上一完整日K收盘价" if mode == "intraday" else "报价收盘价与同日日K收盘价"
         raise MarketScanDataMissing(
             f"{label}偏差 {gap_pct:.2f}%，数据快照可能不同步"
         )

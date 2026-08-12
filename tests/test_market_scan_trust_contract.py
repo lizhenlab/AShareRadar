@@ -14,6 +14,7 @@ from app.config import Settings
 from app.models.market_scan import (
     MarketScanCoverage,
     MarketScanMarketEventSpan,
+    MarketScanPublicationDiagnostics,
     MarketScanPublicationSummary,
     MarketScanResultItem,
     MarketScanResultWrite,
@@ -955,6 +956,35 @@ def test_constant_raw_scores_fail_publication_with_auditable_metrics() -> None:
     assert "distinct ratio 0.50%" in message
     assert "最大并列组 200/200（100.00%）" in message
     assert error is not None and "raw_score 全部相同" in error
+    assert cache.publication_diagnostics is not None
+    assert cache.publication_diagnostics.blockers[0].code == "score_distribution.blocked"
+    assert cache.publication_diagnostics.passed_gates == []
+
+
+def test_finalizer_truncates_untrusted_snapshot_diagnostics_before_persistence() -> None:
+    invalid_timestamp = "invalid-" + "x" * 1_000
+    summary = replace(
+        _strict_v6_publication_summary(),
+        invalid_snapshot_timestamps=(invalid_timestamp,),
+    )
+    cache = _CompletionCache([])
+
+    persisted = asyncio.run(
+        MarketScanFinalizer(cache).finish_completed(
+            _distribution_run(6),
+            degraded_count=0,
+            warnings=(),
+            publication_summary=summary,
+        )
+    )
+
+    assert persisted is True
+    assert cache.finished is not None and cache.finished[0] == "failed"
+    assert cache.publication_diagnostics is not None
+    blocker = cache.publication_diagnostics.blockers[0]
+    assert blocker.code == "publication.snapshot.invalid_timestamp"
+    assert len(blocker.label) <= 80
+    assert len(blocker.detail) == 800
 
 
 def test_finalizer_uses_minimal_raw_score_fast_path_with_equivalent_distribution() -> None:
@@ -1043,6 +1073,7 @@ class _CompletionCache:
     def __init__(self, raw_scores: list[float]) -> None:
         self.raw_scores = raw_scores
         self.finished: tuple[str, str, str | None] | None = None
+        self.publication_diagnostics: MarketScanPublicationDiagnostics | None = None
 
     def market_scan_results(self, run_id: int, **kwargs: object) -> SimpleNamespace:
         assert run_id == 1
@@ -1057,9 +1088,11 @@ class _CompletionCache:
         *,
         message: str,
         error: str | None = None,
+        publication_diagnostics: MarketScanPublicationDiagnostics | None = None,
     ) -> None:
         assert run_id == 1
         self.finished = (status, message, error)
+        self.publication_diagnostics = publication_diagnostics
 
 
 class _FastCompletionCache:

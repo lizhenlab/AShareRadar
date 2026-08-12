@@ -4,8 +4,10 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from app.config import Settings, get_settings
+from app.repositories.bundle import RepositoryBundle
 from app.services.cache import SQLiteCache, resolve_cache_settings
 from app.services.datahub import DataHub
+from app.services.domain_service_bundle import DomainServiceBundle
 from app.services.local_data_import_guard import LocalDataImportPreviewRegistry
 from app.services.market_scan_manager import MarketScanManager
 from app.services.runtime_coordinator import RuntimeCoordinator, RuntimeLeadership
@@ -22,6 +24,8 @@ class AppContainer:
     datahub: DataHub
     scheduler: LocalDataScheduler
     workbench_contexts: WorkbenchContextCache
+    repositories: RepositoryBundle | None = None
+    domain_services: DomainServiceBundle | None = None
     market_scanner: MarketScanManager | None = None
     runtime_coordinator: RuntimeCoordinator | None = None
     local_data_import_previews: LocalDataImportPreviewRegistry = field(default_factory=LocalDataImportPreviewRegistry)
@@ -40,6 +44,17 @@ class AppContainer:
         datahub_contexts = getattr(self.datahub, "workbench_contexts", _MISSING)
         if datahub_contexts is not _MISSING and datahub_contexts is not self.workbench_contexts:
             raise ValueError("workbench_contexts 必须与 datahub.workbench_contexts 使用同一实例")
+        cache = getattr(self.datahub, "cache", None)
+        cache_repositories = getattr(cache, "repositories", None)
+        cache_services = getattr(cache, "domain_services", None)
+        if self.repositories is None:
+            self.repositories = cache_repositories
+        if self.domain_services is None:
+            self.domain_services = cache_services
+        if cache_repositories is not self.repositories:
+            raise ValueError("repositories 必须与 datahub.cache 使用同一实例")
+        if cache_services is not self.domain_services:
+            raise ValueError("domain_services 必须与 datahub.cache 使用同一实例")
 
 
 def build_container(
@@ -53,6 +68,7 @@ def build_container(
     effective_cache = _resolve_cache_injection(datahub, cache)
     resolved_settings = _resolve_settings(settings, datahub, effective_cache, scheduler)
     datahub = _build_datahub(datahub, cache, resolved_settings)
+    domain_services = _compose_domain_services(datahub.cache)
     leadership = RuntimeLeadership.for_cache_path(datahub.cache.path)
     market_scanner = MarketScanManager(datahub, instance_guard=leadership.service_guard())
     scheduler = _build_scheduler(
@@ -68,10 +84,19 @@ def build_container(
         datahub=datahub,
         scheduler=scheduler,
         workbench_contexts=datahub.workbench_contexts,
+        repositories=datahub.cache.repositories,
+        domain_services=domain_services,
         market_scanner=market_scanner,
         runtime_coordinator=runtime_coordinator,
         local_data_import_previews=LocalDataImportPreviewRegistry(),
     )
+
+
+def _compose_domain_services(cache: SQLiteCache) -> DomainServiceBundle:
+    services = cache.bound_domain_services
+    if services is None:
+        services = DomainServiceBundle.build(cache.path, cache.repositories)
+    return cache.bind_domain_services(services)
 
 
 def _resolve_datahub_injection(

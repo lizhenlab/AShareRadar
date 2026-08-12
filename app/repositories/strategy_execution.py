@@ -9,7 +9,6 @@ from pathlib import Path
 
 from app.models.market_scan import (
     MARKET_SCAN_TOP100_REFRESH_SCOPE,
-    MarketScanMode,
     MarketScanResultItem,
     MarketScanRun,
 )
@@ -22,6 +21,7 @@ from app.models.strategy_execution import (
     PortfolioDraftSummary,
     StrategyExecutionContext,
     StrategyExecutionPage,
+    StrategyExecutionMarketScanMode,
 )
 from app.repositories.base import SQLiteRepository
 from app.repositories.market_scan_mapping import result_from_row, run_from_row
@@ -43,7 +43,7 @@ class StrategyExecutionRepository(SQLiteRepository):
         *,
         run_id: int | None,
         data_date: str | None,
-        mode: MarketScanMode,
+        mode: StrategyExecutionMarketScanMode,
     ) -> FrozenMarketScan:
         with self._lock, self._read_snapshot() as conn:
             run_row = _published_run_row(
@@ -236,8 +236,10 @@ def _published_run_row(
     *,
     run_id: int | None,
     data_date: str | None,
-    mode: MarketScanMode,
+    mode: StrategyExecutionMarketScanMode,
 ) -> sqlite3.Row:
+    if mode not in {"official", "intraday"}:
+        raise ValueError("策略执行仅接受盘后正式或盘中临时扫描，不接受盘前复盘批次")
     if run_id is not None:
         row = conn.execute(
             "SELECT * FROM market_scan_run WHERE id = ?",

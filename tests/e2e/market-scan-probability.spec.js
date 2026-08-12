@@ -10,7 +10,8 @@ test("full-market Shadow probability stays auditable, gated, and rank preserving
   await expect(page.locator("#marketScanProbabilityHorizon5d")).toBeChecked();
   await expect(page.locator("#marketScanProbabilitySemantics")).toContainText("上涨概率是样本外校准估计，不参与生产评分或排名");
   await expect(page.locator("#marketScanProbabilityTarget")).toHaveText("未来所选周期净超额收益为正");
-  await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("样本外已校准 · Shadow");
+  await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("样本外已校准");
+  await expect(page.locator("#marketScanProbabilityEffectiveness")).toHaveText("通过选股门禁");
   await expect(page.locator("#marketScanProbabilityBaseRate")).toHaveText("51.4%");
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("5日 61.2%");
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("95% CI 56.0%–66.0%");
@@ -26,11 +27,11 @@ test("full-market Shadow probability stays auditable, gated, and rank preserving
   await expect(page.locator("#marketScanRows tr.market-scan-result-row > td").first()).toHaveText("7");
 
   await page.locator("#marketScanProbabilityHorizon1d").check({ force: true });
-  await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("证据不足");
+  await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("研究已生成·样本不足");
   await expect(page.locator("#marketScanProbabilityMin")).toBeDisabled();
   await expect(page.locator("#marketScanProbabilityMin")).toHaveValue("");
-  await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("1日 · 证据不足");
-  await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("不上屏概率数值");
+  await expect(page.locator("#marketScanRows .market-scan-probability").first()).toHaveText("—");
+  await expect(page.locator("#marketScanRows .market-scan-probability").first()).not.toContainText("样本不足");
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).not.toContainText(/0\.0%|50\.0%/);
   await expect.poll(() => resultQueries.at(-1)).not.toHaveProperty("min_upside_probability");
 
@@ -154,10 +155,14 @@ function probabilityResearch() {
       "1": { net_excess_positive: { ...common, status: "insufficient_data", horizon: 1, base_rate: 0.49, training_cutoff: "2026-07-15" } },
       "5": { net_excess_positive: {
         ...common, status: "calibrated_shadow", horizon: 5, base_rate: 0.514, training_cutoff: "2026-07-15",
+        selection_qualified: true, selection_qualification: { passed: true },
         counts: { training_session_count: 120, calibration_session_count: 40, test_session_count: 60, observation_count: 180000 },
         calibration_metrics: { calibrated: { brier_score: 0.1964, brier_skill_score: 0.127, ece: 0.034, auc: 0.681, bin_monotonic: true } },
       } },
-      "20": { net_excess_positive: { ...common, status: "calibrated_shadow", horizon: 20, base_rate: 0.55, training_cutoff: "2026-07-11" } },
+      "20": { net_excess_positive: {
+        ...common, status: "calibrated_shadow", horizon: 20, base_rate: 0.55, training_cutoff: "2026-07-11",
+        selection_qualified: true, selection_qualification: { passed: true },
+      } },
     },
   };
 }

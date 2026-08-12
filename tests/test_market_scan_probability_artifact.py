@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-import app.services.market_scan_probability_artifact as artifact_module
+import app.artifacts.io as artifact_io
+import app.services.market_scan_probability_artifact as probability_artifact_module
 from app.services.market_scan_probability import (
     PROBABILITY_BASELINE_VERSION,
     PROBABILITY_CALIBRATOR_VERSION,
@@ -318,6 +319,7 @@ def _replay_set_payload(
     run_id, symbol = int(sample.sample_id.split(":", 1)[0]), sample.sample_id.split(":", 2)[1]
     digests = {
         "input": evidence["input_digest"],
+        "label_contract": evidence["label_contract_digest"],
         "model": evidence["model_digest"],
         "calibrator": evidence["calibrator_digest"],
         "isotonic_calibrator": evidence["isotonic_calibrator_digest"],
@@ -514,6 +516,19 @@ def test_complete_artifact_set_refits_full_study_and_preserves_historical_digest
         assert record["details"]["digests"] == study["digests"]
 
 
+def test_artifact_rejects_resealed_label_contract_semantic_tampering() -> None:
+    _samples, artifacts = _replay_set_artifacts()
+    tampered = deepcopy(artifacts[0])
+    study = tampered["payload"]["studies"][0]  # type: ignore[index]
+    study["metadata"]["contract"]["cost"]["label_contract"]["cost_model_version"] = "tampered-v9"
+    tampered["integrity"]["integrity_digest"] = probability_payload_integrity_digest(
+        tampered["payload"],  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ProbabilityArtifactError, match="完整 label contract"):
+        verify_probability_artifact(tampered)
+
+
 def test_artifact_set_replays_each_cohort_with_its_own_model_and_input_digest() -> None:
     first_run_ids, second_run_ids = list(range(101, 109)), list(range(201, 209))
     manifest = [*first_run_ids, *second_run_ids]
@@ -673,7 +688,7 @@ def test_atomic_write_failure_preserves_previous_artifact_and_cleans_tempfile(tm
     def fail_publish(_source: Path, _target: Path) -> None:
         raise OSError("simulated publish failure")
 
-    monkeypatch.setattr(artifact_module.os, "link", fail_publish)
+    monkeypatch.setattr(artifact_io.os, "link", fail_publish)
     with pytest.raises(ProbabilityArtifactError, match="写入失败"):
         write_probability_artifact(
             failed_target,
@@ -746,6 +761,28 @@ def test_loader_fails_closed_on_corruption_unknown_schema_and_duplicate_json_key
     source.write_text('{"schema_version":"v1","schema_version":"v1"}', encoding="utf-8")
     with pytest.raises(ProbabilityArtifactError, match="重复 key"):
         load_probability_artifact(source)
+
+
+def test_loader_rejects_symlink_and_oversize_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    regular = tmp_path / "regular.json"
+    regular.write_text(canonical_probability_artifact_json(_artifact()), encoding="utf-8")
+    symlink = tmp_path / "artifact-link.json"
+    symlink.symlink_to(regular)
+    with pytest.raises(ProbabilityArtifactError, match="读取失败"):
+        load_probability_artifact(symlink)
+
+    oversize = tmp_path / "oversize.json"
+    oversize.write_bytes(b"12345")
+    monkeypatch.setattr(probability_artifact_module, "PROBABILITY_ARTIFACT_MAX_BYTES", 4)
+    with pytest.raises(ProbabilityArtifactError, match="读取失败"):
+        load_probability_artifact(oversize)
+
+
+def test_loader_budget_preserves_existing_full_market_artifact_contract() -> None:
+    assert probability_artifact_module.PROBABILITY_ARTIFACT_MAX_BYTES >= 256 * 1024 * 1024
 
 
 def test_loader_keeps_restart_compatibility_for_verified_legacy_artifacts(tmp_path: Path) -> None:

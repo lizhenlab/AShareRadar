@@ -1,6 +1,6 @@
 import { escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
-import { isMarketScanTop100RefreshRun } from "./market-scan-contracts.js";
+import { isMarketScanTop100RefreshRun, marketScanModeLabel } from "./market-scan-contracts.js";
 
 const GENERATION_STATUSES = new Set(["ready", "not_generated", "insufficient_data"]);
 const OFFSET_VALUES = Object.freeze([1, 2, 3]);
@@ -61,7 +61,11 @@ export function renderFutureRangeRun(elements, run) {
   setText(elements.evidenceStatus, "尚未生成");
   setText(elements.evidenceCount, "--");
   setText(elements.coverage, official && !top100Refresh ? `盘后正式批次 #${run.id}` : "仅盘后正式全市场批次");
-  if (run && !official) return renderUnavailable(elements, "盘中临时批次不可用，请切换到盘后正式榜单。", "盘中不可用");
+  if (run && !official) {
+    const mode = marketScanModeLabel(run.mode);
+    const summary = run.mode === "intraday" ? "盘中不可用" : `${mode}不可用`;
+    return renderUnavailable(elements, `${mode}批次不可用，请切换到盘后正式榜单。`, summary);
+  }
   if (top100Refresh) return renderUnavailable(elements, "TOP100 快速更新不是全市场快照，请切换到其来源盘后正式全市场榜单。", "非全市场批次");
   const message = run ? "展开后读取当前盘后正式批次的冻结研究证据。" : "暂无可验证的盘后正式批次。";
   setState(elements, message, run ? "" : "warn");

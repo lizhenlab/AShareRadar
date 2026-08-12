@@ -209,6 +209,38 @@ class MarketKlineRepositoryMixin:
                 )
         return grouped
 
+    def get_klines_by_dates_many(
+        self,
+        symbols: Iterable[str],
+        dates: Iterable[str],
+        adjustment_mode: KlineAdjustmentMode = DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+    ) -> dict[str, list[Kline]]:
+        """Load only the exact daily sessions required by a research label.
+
+        Unlike freshness-oriented cache reads, fixed-session outcome evidence is
+        historical and must neither slide to a nearby date nor materialize each
+        symbol's full retained window.
+        """
+        normalized_symbols = tuple(dict.fromkeys(standard_symbol(symbol) for symbol in symbols))
+        normalized_dates = _validated_kline_dates(dates)
+        if not normalized_symbols or not normalized_dates:
+            return {}
+        mode = _validated_adjustment_mode(adjustment_mode)
+        placeholders = ", ".join("?" for _value in normalized_dates)
+        sql = (
+            f"SELECT {_column_names(_DAILY_SPEC.columns)} FROM {_DAILY_SPEC.table} "
+            f"WHERE symbol = ? AND adjustment_mode = ? AND date IN ({placeholders}) "
+            "ORDER BY date ASC"
+        )
+        grouped: dict[str, list[Kline]] = {}
+        with self._lock, self._connect() as conn:
+            for symbol in normalized_symbols:
+                rows = conn.execute(sql, (symbol, mode, *normalized_dates)).fetchall()
+                grouped[symbol] = filter_valid_klines(
+                    row_to_kline(row) for row in rows if _valid_raw_kline_row(row)
+                )
+        return grouped
+
     def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None:
         valid_rows = filter_valid_minute_klines(rows)
         if not valid_rows:
@@ -561,6 +593,19 @@ def _required_fetched_at(value: object) -> datetime:
     if parsed is None:
         raise ValueError("日K fetched_at 无法解析")
     return parsed
+
+
+def _validated_kline_dates(values: Iterable[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in dict.fromkeys(values):
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+        except (TypeError, ValueError) as exc:
+            raise ValueError("日K精确查询日期必须是 YYYY-MM-DD") from exc
+        if parsed != value:
+            raise ValueError("日K精确查询日期必须是规范 YYYY-MM-DD")
+        normalized.append(value)
+    return tuple(sorted(normalized))
 
 
 def _daily_content_revision(rows: list[Kline]) -> str:

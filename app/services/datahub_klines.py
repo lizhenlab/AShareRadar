@@ -21,7 +21,7 @@ from app.models.market import (
 from app.services.datahub_cache import (
     _kline_cache_is_fresh,
     _minute_kline_cache_is_fresh,
-    _normalize_minute_interval,
+    normalize_minute_interval,
     _tag_klines,
     _tag_minute_klines,
 )
@@ -532,7 +532,7 @@ class KlineCoordinator:
             DEFAULT_MAX_MINUTE_KLINE_LIMIT,
         )
         normalized_symbol = _normalized_symbol_key(symbol)
-        normalized_interval = _normalize_minute_interval(interval)
+        normalized_interval = normalize_minute_interval(interval)
         current = self._now()
         if use_cache:
             cached = await run_cache_io(

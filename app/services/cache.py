@@ -15,7 +15,11 @@ from app.db.connection import SQLiteConnectionFactory
 from app.db.schema import initialize_schema
 from app.db.schema_migrations import audit_timestamp_migration_pending
 from app.models.market import DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE, KlineAdjustmentMode
-from app.models.market_scan import MarketScanResultWrite, MarketScanSeed
+from app.models.market_scan import (
+    MarketScanPublicationDiagnostics,
+    MarketScanResultWrite,
+    MarketScanSeed,
+)
 from app.models.paper_trading import (
     PaperRunComparison,
     PaperRunExport,
@@ -73,40 +77,24 @@ from app.models.market import (
     StockConceptItem,
     StockInfo,
 )
-from app.repositories.advice import AdviceHistoryRepository
-from app.repositories.advice_reviews import AdviceReviewRepository
-from app.repositories.alerts import AlertRepository
 from app.repositories.alerts import AlertStateDecision, AlertStateUpdateResult
-from app.repositories.cache_stats import CacheStatsRepository
-from app.repositories.discovery import DiscoveryRepository
-from app.repositories.market_data import MarketDataRepository
-from app.repositories.market_scan import MarketScanRepository
-from app.repositories.maintenance import RuntimeMaintenanceRepository
-from app.repositories.notes import StockNoteRepository
-from app.repositories.paper_trading import PaperTradingRepository
-from app.repositories.provider_status import ProviderStatusRepository
+from app.repositories.bundle import RepositoryBundle
 from app.repositories.reliability import (
     ReliabilityBucketStats,
-    ReliabilityRepository,
     ReliabilityScanStats,
     ReliabilityTaskStats,
 )
-from app.repositories.strategy_lab import StrategyLabRepository
-from app.repositories.strategy_execution import StrategyExecutionRepository
-from app.repositories.strategy_evidence import StrategyEvidenceRepository
-from app.repositories.strategy_automation import StrategyAutomationRepository
-from app.repositories.runtime import RuntimeEventRepository
-from app.repositories.watchlist import WatchlistRepository, WatchlistSymbolSelection
-from app.repositories.watchlist_scans import WatchlistScanRepository
+from app.repositories.watchlist import WatchlistSymbolSelection
 from app.models.advice_change import build_conclusion_timeline
 from app.services.runtime_backup import destructive_local_data_lease
+from app.services.domain_service_bundle import DomainServiceBundle
 from app.services.discovery import DiscoveryService
 from app.services.instance_guard import FileInstanceGuard
-from app.services.strategy_lab import StrategyLabService
-from app.services.strategy_execution import StrategyExecutionService
-from app.services.strategy_evidence import StrategyEvidenceService
-from app.services.strategy_automation import StrategyAutomationService
 from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
+from app.services.strategy_automation import StrategyAutomationService
+from app.services.strategy_evidence import StrategyEvidenceService
+from app.services.strategy_execution import StrategyExecutionService
+from app.services.strategy_lab import StrategyLabService
 from app.utils.clock import performance_now
 from app.utils.fallback_logging import report_persistence_failure
 
@@ -123,13 +111,16 @@ def resolve_cache_settings(
     owner: str = "cache",
 ) -> Settings:
     cache_settings = cache.settings if cache is not None else None
-    if settings is None:
-        settings = cache_settings if cache_settings is not None else get_settings()
-        if cache is not None and cache_settings is None and cache.path != settings.cache_path:
-            settings = settings.model_copy(update={"cache_path": cache.path})
+    resolved = settings
+    if resolved is None:
+        resolved = cache_settings if cache_settings is not None else get_settings()
+        if cache is not None and cache_settings is None and cache.path != resolved.cache_path:
+            resolved = resolved.model_copy(update={"cache_path": cache.path})
+    if resolved is None:
+        raise RuntimeError("缓存设置解析失败")
     if cache is not None:
-        cache.bind_settings(settings, owner=owner)
-    return settings
+        cache.bind_settings(resolved, owner=owner)
+    return resolved
 
 
 class _BorrowedTransactionConnection:
@@ -198,42 +189,76 @@ class SQLiteCache:
             repository_settings.legacy_audit_timezone,
             settings_supplied=settings_supplied,
         )
-        self.cache_stats_repo = CacheStatsRepository(self.path, self._lock)
-        self.discovery_repo = DiscoveryRepository(self.path, self._lock)
-        self.discovery_service = DiscoveryService(self.discovery_repo)
-        self.strategy_lab_repo = StrategyLabRepository(self.path, self._lock)
-        self.strategy_lab_service = StrategyLabService(self.strategy_lab_repo)
-        self.strategy_execution_repo = StrategyExecutionRepository(self.path, self._lock)
-        self.strategy_execution_service = StrategyExecutionService(
-            self.strategy_execution_repo,
-            self.strategy_lab_service,
-        )
-        self.strategy_evidence_repo = StrategyEvidenceRepository(self.path, self._lock)
-        self.strategy_evidence_service = StrategyEvidenceService(
+        self.repositories = RepositoryBundle.build(
             self.path,
-            self.strategy_evidence_repo,
-            self.strategy_lab_service,
+            self._lock,
+            settings=repository_settings,
         )
-        self.strategy_automation_repo = StrategyAutomationRepository(self.path, self._lock)
-        self.strategy_automation_service = StrategyAutomationService(
-            self.strategy_automation_repo,
-            self.strategy_lab_service,
-            self.strategy_execution_service,
-        )
-        self.market_data_repo = MarketDataRepository(self.path, self._lock)
-        self.market_scan_repo = MarketScanRepository(self.path, self._lock)
-        self.provider_status_repo = ProviderStatusRepository(self.path, self._lock)
-        self.reliability_repo = ReliabilityRepository(self.path, self._lock)
-        self.runtime_event_repo = RuntimeEventRepository(self.path, self._lock)
-        self.watchlist_repo = WatchlistRepository(self.path, self._lock, settings=repository_settings)
-        self.advice_repo = AdviceHistoryRepository(self.path, self._lock, settings=repository_settings)
-        self.advice_review_repo = AdviceReviewRepository(self.path, self._lock)
-        self.paper_trading_repo = PaperTradingRepository(self.path, self._lock)
-        self.paper_trading_repo.account()
-        self.watchlist_scan_repo = WatchlistScanRepository(self.path, self._lock)
-        self.alert_repo = AlertRepository(self.path, self._lock)
-        self.note_repo = StockNoteRepository(self.path, self._lock)
-        self.maintenance_repo = RuntimeMaintenanceRepository(self.path, self._lock, settings=repository_settings)
+        self._domain_services: DomainServiceBundle | None = None
+        self._bind_compatibility_attributes()
+
+    def _bind_compatibility_attributes(self) -> None:
+        repositories = self.repositories
+        self.cache_stats_repo = repositories.cache_stats
+        self.discovery_repo = repositories.discovery
+        self.strategy_lab_repo = repositories.strategy_lab
+        self.strategy_execution_repo = repositories.strategy_execution
+        self.strategy_evidence_repo = repositories.strategy_evidence
+        self.strategy_automation_repo = repositories.strategy_automation
+        self.market_data_repo = repositories.market_data
+        self.market_scan_repo = repositories.market_scan
+        self.provider_status_repo = repositories.provider_status
+        self.reliability_repo = repositories.reliability
+        self.runtime_event_repo = repositories.runtime_event
+        self.watchlist_repo = repositories.watchlist
+        self.advice_repo = repositories.advice
+        self.advice_review_repo = repositories.advice_review
+        self.paper_trading_repo = repositories.paper_trading
+        self.watchlist_scan_repo = repositories.watchlist_scan
+        self.alert_repo = repositories.alert
+        self.note_repo = repositories.note
+        self.maintenance_repo = repositories.maintenance
+
+    @property
+    def bound_domain_services(self) -> DomainServiceBundle | None:
+        """Return services already composed by the application root, if any."""
+
+        return self._domain_services
+
+    @property
+    def domain_services(self) -> DomainServiceBundle:
+        """Compatibility fallback for cache-only callers outside AppContainer."""
+
+        if self._domain_services is None:
+            self._domain_services = DomainServiceBundle.build(self.path, self.repositories)
+        return self._domain_services
+
+    def bind_domain_services(self, services: DomainServiceBundle) -> DomainServiceBundle:
+        current = self._domain_services
+        if current is not None and current is not services:
+            raise ValueError("cache.domain_services 已绑定到其他组合实例")
+        self._domain_services = services
+        return services
+
+    @property
+    def discovery_service(self) -> DiscoveryService:
+        return self.domain_services.discovery
+
+    @property
+    def strategy_lab_service(self) -> StrategyLabService:
+        return self.domain_services.strategy_lab
+
+    @property
+    def strategy_execution_service(self) -> StrategyExecutionService:
+        return self.domain_services.strategy_execution
+
+    @property
+    def strategy_evidence_service(self) -> StrategyEvidenceService:
+        return self.domain_services.strategy_evidence
+
+    @property
+    def strategy_automation_service(self) -> StrategyAutomationService:
+        return self.domain_services.strategy_automation
 
     @property
     def settings(self) -> Settings | None:
@@ -259,10 +284,9 @@ class SQLiteCache:
         if current is not None and current is not settings and current != settings:
             raise ValueError(f"{owner}.settings 与 Settings 配置不一致")
         self._settings = settings
-        for repository_name in ("watchlist_repo", "advice_repo", "maintenance_repo"):
-            repository = getattr(self, repository_name, None)
-            if repository is not None:
-                repository.settings = settings
+        repositories = getattr(self, "repositories", None)
+        if repositories is not None:
+            repositories.bind_settings(settings)
         return settings
 
     def _connect(self) -> AbstractContextManager:
@@ -345,6 +369,18 @@ class SQLiteCache:
             symbols,
             limit,
             max_age_seconds,
+            adjustment_mode=adjustment_mode,
+        )
+
+    def get_klines_by_dates_many(
+        self,
+        symbols: Iterable[str],
+        dates: Iterable[str],
+        adjustment_mode: KlineAdjustmentMode = DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+    ) -> dict[str, list[Kline]]:
+        return self.market_data_repo.get_klines_by_dates_many(
+            symbols,
+            dates,
             adjustment_mode=adjustment_mode,
         )
 
@@ -467,14 +503,18 @@ class SQLiteCache:
         *,
         message: str,
         error: str | None = None,
+        publication_diagnostics: MarketScanPublicationDiagnostics | None = None,
         task_status: str | None = None,
+        validate_before_commit=None,
     ):
         return self.market_scan_repo.finish_run(
             run_id,
             status,
             message=message,
             error=error,
+            publication_diagnostics=publication_diagnostics,
             task_status=task_status,
+            validate_before_commit=validate_before_commit,
         )
 
     def market_scan_degraded_result_count(self, run_id: int) -> int:
@@ -485,6 +525,18 @@ class SQLiteCache:
 
     def reconcile_incomplete_market_scans(self) -> int:
         return self.market_scan_repo.reconcile_incomplete_runs()
+
+    def reconcile_probability_source_capture_outbox(self) -> int:
+        return self.market_scan_repo.reconcile_probability_source_capture_outbox()
+
+    def claim_probability_source_capture(self, **kwargs):
+        return self.market_scan_repo.claim_probability_source_capture(**kwargs)
+
+    def finish_probability_source_capture(self, run_id: int, **kwargs) -> None:
+        self.market_scan_repo.finish_probability_source_capture(run_id, **kwargs)
+
+    def retry_probability_source_capture(self, run_id: int, **kwargs) -> None:
+        self.market_scan_repo.retry_probability_source_capture(run_id, **kwargs)
 
     def market_scan_results(self, run_id: int, **kwargs):
         return self.market_scan_repo.results_page(run_id, **kwargs)

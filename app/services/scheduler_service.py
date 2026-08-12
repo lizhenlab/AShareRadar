@@ -44,6 +44,7 @@ class LocalDataScheduler(
         self._manual_guard_users = 0
         self._shutdown_tasks: set[asyncio.Task] = set()
         self._guard_release_task: asyncio.Task[None] | None = None
+        self._market_scan_probability_maintenance = None
         self._quiescent_event = asyncio.Event()
         self._quiescent_event.set()
         self.tasks = _build_local_tasks(self.settings, market_now_naive(), self._task_handlers())

@@ -9,8 +9,11 @@ import unittest
 from unittest.mock import patch
 
 from app.db.schema import initialize_schema
+from app.db.schema_definitions import SCHEMA_SQL
 from app.db.schema_migrations import (
     AUDIT_TIMESTAMP_UTC_MIGRATION,
+    MARKET_SCAN_PREOPEN_MODE_MIGRATION,
+    MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION,
     QUOTE_HISTORY_CONTRACT_MIGRATION,
     QUOTE_HISTORY_UNIQUE_INDEX,
     SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,
@@ -19,6 +22,151 @@ from app.db.schema_migrations import (
 
 
 class SchemaCompatibilityTests(unittest.TestCase):
+    def test_probability_capture_outbox_migration_backfills_retained_published_run(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        self.addCleanup(conn.close)
+        initialize_schema(conn)
+        conn.execute("DROP TABLE market_scan_probability_capture_outbox")
+        conn.execute(
+            "DELETE FROM schema_migration WHERE name = ?",
+            (MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION,),
+        )
+        run_id = conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                status, trigger, mode, rule_version, as_of, data_date, quote_date,
+                scope, success_count, created_at, updated_at, finished_at
+            ) VALUES (
+                'success', 'manual', 'official', 'legacy-probability-source',
+                '2026-08-11 16:30:00', '2026-08-11', '2026-08-11',
+                '沪市 + 深市 + 北交所当前上市A股', 1,
+                '2026-08-11T08:30:00Z', '2026-08-11T08:31:00Z',
+                '2026-08-11T08:31:00Z'
+            )
+            """
+        ).lastrowid
+
+        initialize_schema(conn)
+        initialize_schema(conn)
+
+        row = conn.execute(
+            """
+            SELECT status, attempt_count, next_attempt_at
+            FROM market_scan_probability_capture_outbox WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        self.assertEqual(tuple(row), ("pending", 0, "2026-08-11T08:31:00Z"))
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_legacy_market_scan_mode_constraint_migrates_to_preopen_without_data_loss(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        self.addCleanup(conn.close)
+        legacy_schema = SCHEMA_SQL.replace(
+            "mode IN ('official', 'intraday', 'preopen')",
+            "mode IN ('official', 'intraday')",
+        )
+        conn.executescript(legacy_schema)
+        parent_id = conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                status, trigger, mode, rule_version, as_of, data_date, quote_date,
+                scope, created_at, updated_at
+            ) VALUES (
+                'success', 'manual', 'official', 'legacy-parent',
+                '2026-08-11 16:30:00', '2026-08-11', '2026-08-11', 'SH/SZ/BJ',
+                '2026-08-11T08:30:00.000000Z', '2026-08-11T08:31:00.000000Z'
+            )
+            """
+        ).lastrowid
+        child_id = conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                retry_of_run_id, status, trigger, mode, rule_version, as_of,
+                data_date, quote_date, scope, created_at, updated_at
+            ) VALUES (
+                ?, 'failed', 'retry', 'official', 'legacy-child',
+                '2026-08-11 17:00:00', '2026-08-11', '2026-08-11', 'SH/SZ/BJ',
+                '2026-08-11T09:00:00.000000Z', '2026-08-11T09:01:00.000000Z'
+            )
+            """,
+            (parent_id,),
+        ).lastrowid
+        for run_id, symbol in ((parent_id, "600000.SH"), (child_id, "000001.SZ")):
+            conn.execute(
+                """
+                INSERT INTO market_scan_result (
+                    run_id, symbol, code, market, name, status, updated_at
+                ) VALUES (?, ?, ?, ?, '迁移样本', 'success', ?)
+                """,
+                (
+                    run_id,
+                    symbol,
+                    symbol.split(".")[0],
+                    symbol.split(".")[1],
+                    "2026-08-11T09:01:00.000000Z",
+                ),
+            )
+
+        initialize_schema(conn)
+        initialize_schema(conn)
+
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM market_scan_run").fetchone()[0],
+            2,
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM market_scan_result").fetchone()[0],
+            2,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT retry_of_run_id FROM market_scan_run WHERE id = ?",
+                (child_id,),
+            ).fetchone()[0],
+            parent_id,
+        )
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.assertIn("uq_market_scan_single_active", self._index_names(conn, "market_scan_run"))
+        self.assertIn("idx_market_scan_result_rank", self._index_names(conn, "market_scan_result"))
+        conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                status, trigger, mode, rule_version, as_of, data_date, quote_date,
+                scope, created_at, updated_at
+            ) VALUES (
+                'queued', 'manual', 'preopen', 'preopen-v1',
+                '2026-08-12 08:00:00', '2026-08-11', '2026-08-11', 'SH/SZ/BJ',
+                '2026-08-12T00:00:00.000000Z', '2026-08-12T00:00:00.000000Z'
+            )
+            """
+        )
+        conn.execute("DELETE FROM market_scan_run WHERE id = ?", (parent_id,))
+        self.assertIsNone(
+            conn.execute(
+                "SELECT retry_of_run_id FROM market_scan_run WHERE id = ?",
+                (child_id,),
+            ).fetchone()[0]
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM market_scan_result WHERE run_id = ?",
+                (parent_id,),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
+                (MARKET_SCAN_PREOPEN_MODE_MIGRATION,),
+            ).fetchone()[0],
+            1,
+        )
+
     def test_legacy_audit_timestamps_migrate_to_utc_without_changing_market_time(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -193,6 +341,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
                 "stage_started_at",
                 "stage_metrics_json",
                 "market_progress_json",
+                "publication_diagnostics_json",
                 "quote_capture_started_at",
                 "quote_capture_finished_at",
                 "quote_capture_duration_ms",
@@ -240,6 +389,34 @@ class SchemaCompatibilityTests(unittest.TestCase):
         conn.execute("DELETE FROM market_scan_run WHERE id = ?", (run_id,))
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM market_scan_result").fetchone()[0], 0)
 
+    def test_initialize_schema_adds_nullable_publication_diagnostics_to_legacy_runs(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        initialize_schema(conn)
+        conn.execute("ALTER TABLE market_scan_run DROP COLUMN publication_diagnostics_json")
+        conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                status, trigger, rule_version, as_of, data_date, scope,
+                created_at, updated_at, message
+            ) VALUES (
+                'failed', 'manual', 'legacy-v1', '2026-07-17 16:30:00',
+                '2026-07-17', 'test', '2026-07-17T08:30:00.000000Z',
+                '2026-07-17T08:31:00.000000Z', '旧批次'
+            )
+            """
+        )
+
+        initialize_schema(conn)
+        initialize_schema(conn)
+
+        self.assertIn("publication_diagnostics_json", self._column_names(conn, "market_scan_run"))
+        self.assertIsNone(
+            conn.execute(
+                "SELECT publication_diagnostics_json FROM market_scan_run WHERE rule_version = 'legacy-v1'"
+            ).fetchone()[0]
+        )
     def test_legacy_market_scan_tags_are_backfilled_once_into_structured_provenance(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

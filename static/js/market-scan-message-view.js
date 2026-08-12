@@ -4,12 +4,16 @@ const PUBLICATION_BLOCKER_RE = /全市场报价快照跨度|发布覆盖不足|�
 const DISTRIBUTION_ISSUE_RE = /评分分布退化|raw_score\s*可审计样本(?:不足|仅覆盖)|raw_score\s*全部相同|distinct raw score ratio\s*仅|最大并列组占比(?:达到|\s*\d)|0\/100\s*饱和率|前100名\s*raw_score\s*全部饱和/;
 const SOURCE_WARNING_RE = /数据源|provider|调用未结束|冷却|备用源|批量行情|实时报价|akshare|tencent|腾讯行情|东方财富|BaoStock|扫描压力控制/i;
 
-export function marketScanHeadlineMessage(message) {
+export function marketScanHeadlineMessage(message, publicationDiagnostics = null) {
+  const structured = structuredDiagnostics(publicationDiagnostics);
+  if (structured) return text(structured.headline) || text(message);
   const original = text(message);
   return splitDistributionAudit(original).main || original;
 }
 
 export function marketScanMessagePresentation(run) {
+  const structured = structuredMessagePresentation(run);
+  if (structured) return structured;
   const message = text(run?.message);
   const lastError = text(run?.last_error);
   const messageParts = splitDistributionAudit(message);
@@ -23,6 +27,39 @@ export function marketScanMessagePresentation(run) {
       : "",
     sourceWarnings: sourceWarningText(lastError || message),
   };
+}
+
+function structuredMessagePresentation(run) {
+  const diagnostics = structuredDiagnostics(run?.publication_diagnostics);
+  if (!diagnostics) return null;
+  return {
+    headline: text(diagnostics.headline) || text(run?.message),
+    publicationBlockers: diagnosticDetails(diagnostics.blockers, 240),
+    passedGates: passedGateDetails(diagnostics.passed_gates),
+    sourceWarnings: diagnosticDetails(diagnostics.source_warnings, 280),
+  };
+}
+
+function structuredDiagnostics(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (!Array.isArray(value.blockers) || !Array.isArray(value.passed_gates) || !Array.isArray(value.source_warnings)) {
+    return null;
+  }
+  return value;
+}
+
+function diagnosticDetails(items, limit) {
+  return compact(items.map((item) => text(item?.detail)).filter(Boolean).join("；"), limit);
+}
+
+function passedGateDetails(items) {
+  const details = items.map((item) => {
+    const label = text(item?.label);
+    const detail = text(item?.detail);
+    if (!label) return detail;
+    return detail ? `${label} · ${detail}` : label;
+  }).filter(Boolean);
+  return compact(details.join("；"), 360);
 }
 
 export function renderMarketScanMessageSummary(root, run) {

@@ -441,6 +441,7 @@ async function assertMarketScanLayout(page, viewport) {
       stockActionColumns: window.__layoutGridColumnCount(stockActions),
       stockActionRects: stockActionButtons.map((button) => window.__layoutRect(button)),
       stockMetaRowRect: window.__layoutRect(stockMetaRow),
+      cellRects: Array.from(firstRow.cells, (cell) => window.__layoutRect(cell)),
       tableDisplay: getComputedStyle(table).display,
       tableScrollable: tableWrap.scrollWidth > tableWrap.clientWidth + 1,
       tableClientWidth: tableWrap.clientWidth,
@@ -505,7 +506,13 @@ async function assertMarketScanLayout(page, viewport) {
     expect(metrics.rankRect.top).toBeGreaterThanOrEqual(metrics.firstRowRect.top);
     expect(metrics.rankRect.right).toBeLessThanOrEqual(metrics.firstRowRect.right);
     expect(metrics.stockActionColumns).toBe(2);
-    if (viewport.width >= 600) expect(metrics.firstRowRect.height).toBeLessThanOrEqual(300);
+    if (viewport.width >= 600) {
+      expect(metrics.firstRowRect.height).toBeLessThanOrEqual(300);
+      expect(metrics.cellRects[3].top).toBeCloseTo(metrics.cellRects[4].top, 0);
+      for (const rect of metrics.cellRects.slice(5, 9)) {
+        expect(rect.top).toBeCloseTo(metrics.cellRects[5].top, 0);
+      }
+    }
   } else {
     expect(metrics.tableDisplay).toBe("table");
     expect(metrics.tableScrollable).toBe(viewport.scanScrollable);

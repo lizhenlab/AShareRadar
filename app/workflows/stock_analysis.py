@@ -13,7 +13,7 @@ from app.models.research import (
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.datahub import DataHub
-from app.services.datahub_cache import _normalize_minute_interval
+from app.services.datahub_cache import normalize_minute_interval
 from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
 from app.services.market_sampling import PeerQuoteSampleResult, peer_quote_sample as _peer_quote_sample
 from app.services.minute_analysis import build_minute_analysis_report, build_unavailable_minute_analysis_report
@@ -194,7 +194,7 @@ async def stock_minute_analysis(
 ) -> MinuteAnalysisReport:
     normalized = normalize_symbol(symbol)
     standard = f"{normalized[0]}.{normalized[1].upper()}"
-    normalized_interval = _normalize_minute_interval(interval)
+    normalized_interval = normalize_minute_interval(interval)
     await confirmed_stock_profile(datahub, standard)
     try:
         rows = await datahub.minute_kline(standard, interval=normalized_interval, limit=limit)

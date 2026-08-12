@@ -8,13 +8,18 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.models.market_scan import MARKET_SCAN_TOP100_REFRESH_SCOPE
+from app.models.market_scan import (
+    MARKET_SCAN_TOP100_REFRESH_SCOPE,
+    MarketScanPublicationDiagnostic,
+    MarketScanPublicationDiagnostics,
+)
 from app.repositories.market_scan import (
     MarketScanRepository,
     MarketScanResultWrite,
     MarketScanSeed,
 )
 from app.services.cache import SQLiteCache
+from app.services.market_scan_universe import FULL_MARKET_SCOPE
 
 
 def test_results_are_ranked_stably_paginated_and_filtered(tmp_path: Path) -> None:
@@ -109,6 +114,87 @@ def test_success_raw_scores_reads_only_the_complete_success_multiset(tmp_path: P
     repo.save_result_batch(run.id, _sample_results())
 
     assert repo.success_raw_scores(run.id) == (80, 90, 80, 70)
+
+
+def test_run_queries_keep_preopen_official_and_intraday_cohorts_isolated(
+    tmp_path: Path,
+) -> None:
+    repo, _path = _repository(tmp_path)
+    runs = {}
+    for index, mode in enumerate(("official", "intraday", "preopen"), start=1):
+        run = _seed_running_run(
+            repo,
+            _sample_seeds()[:1],
+            as_of=f"2026-07-17 0{index}:00:00",
+            mode=mode,
+        )
+        repo.save_result_batch(
+            run.id,
+            _sample_results()[:1],
+        )
+        runs[mode] = repo.finish_run(run.id, "success", message=f"{mode} complete")
+
+    preopen_page = repo.list_runs(page=1, page_size=20, mode="preopen")
+
+    assert [item.id for item in preopen_page.items] == [runs["preopen"].id]
+    assert repo.latest_run(mode="preopen").id == runs["preopen"].id  # type: ignore[union-attr]
+    assert repo.latest_published_run(mode="official").id == runs["official"].id  # type: ignore[union-attr]
+    assert repo.latest_full_run(mode="intraday").id == runs["intraday"].id  # type: ignore[union-attr]
+
+
+def test_publication_diagnostics_round_trip_and_legacy_terminal_rows_remain_nullable(
+    tmp_path: Path,
+) -> None:
+    repo, path = _repository(tmp_path)
+    run = _seed_running_run(repo, _sample_seeds())
+    repo.save_result_batch(run.id, _sample_results())
+    diagnostics = MarketScanPublicationDiagnostics(
+        headline="盘后正式扫描未达到发布可信度：发布阻断：SH 发布覆盖不足",
+        blockers=[
+            MarketScanPublicationDiagnostic(
+                code="publication.coverage.insufficient",
+                label="SH 发布覆盖不足",
+                detail="SH 发布覆盖不足：1/2（50.00%，门槛 95.00%）",
+                severity="error",
+            )
+        ],
+        passed_gates=[
+            MarketScanPublicationDiagnostic(
+                code="score_distribution.pass",
+                label="评分分布",
+                detail="raw-score-distribution-v2：raw_score样本 100/100",
+                severity="info",
+            )
+        ],
+    )
+
+    final = repo.finish_run(
+        run.id,
+        "degraded",
+        message="结构化诊断持久化",
+        publication_diagnostics=diagnostics,
+    )
+    legacy = repo.create_run(
+        trigger="manual",
+        rule_version="test-rule-v1",
+        as_of="2026-07-17 16:40:00",
+        data_date="2026-07-17",
+        scope="test",
+    )
+    repo.start_run(legacy.id)
+    repo.finish_run(legacy.id, "failed", message="旧式终态")
+
+    assert final.publication_diagnostics == diagnostics
+    assert repo.run(run.id).publication_diagnostics == diagnostics
+    listed = {item.id: item for item in repo.list_runs(page=1, page_size=10).items}
+    assert listed[run.id].publication_diagnostics == diagnostics
+    assert repo.run(legacy.id).publication_diagnostics is None
+    with sqlite3.connect(path) as conn:
+        stored = conn.execute(
+            "SELECT publication_diagnostics_json FROM market_scan_run WHERE id = ?",
+            (run.id,),
+        ).fetchone()[0]
+    assert '"schema_version":"market-scan-publication-diagnostics-v1"' in stored
 
 
 def test_retry_derives_new_run_and_keeps_original_snapshot_immutable(tmp_path: Path) -> None:
@@ -584,6 +670,87 @@ def test_historical_snapshots_are_isolated_and_terminal_finish_is_idempotent(tmp
     assert repo.latest_run().id == second.id  # type: ignore[union-attr]
     assert [item.id for item in history.items] == [second.id, first.id]
     assert history.total == 2
+
+
+def test_published_full_run_and_capture_outbox_commit_atomically(tmp_path: Path) -> None:
+    repo, path = _repository(tmp_path)
+    values = _run_values()
+    values["scope"] = FULL_MARKET_SCOPE
+    run = repo.create_run(
+        **values,
+        mode="official",
+    )
+    repo.start_run(run.id)
+    repo.seed_results(run.id, [_sample_seeds()[0]], excluded_count=0)
+    repo.save_result_batch(
+        run.id,
+        [_write("600001.SH", status="success", score=91, quality=96)],
+    )
+
+    def reject_publication() -> None:
+        raise RuntimeError("publication fence rejected")
+
+    with pytest.raises(RuntimeError, match="publication fence rejected"):
+        repo.finish_run(
+            run.id,
+            "success",
+            message="不应提交",
+            validate_before_commit=reject_publication,
+        )
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT status FROM market_scan_run WHERE id = ?", (run.id,)
+        ).fetchone()[0] == "running"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM market_scan_probability_capture_outbox"
+        ).fetchone()[0] == 0
+
+    final = repo.finish_run(run.id, "success", message="正式发布")
+    repeated = repo.finish_run(run.id, "failed", message="幂等重复终态")
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, attempt_count
+            FROM market_scan_probability_capture_outbox
+            WHERE run_id = ?
+            """,
+            (run.id,),
+        ).fetchone()
+
+    assert final.status == repeated.status == "success"
+    assert row == ("pending", 0)
+
+
+@pytest.mark.parametrize(
+    ("mode", "scope"),
+    (
+        ("intraday", FULL_MARKET_SCOPE),
+        ("preopen", FULL_MARKET_SCOPE),
+        ("official", MARKET_SCAN_TOP100_REFRESH_SCOPE),
+    ),
+)
+def test_non_official_or_top100_publication_does_not_enqueue_probability_capture(
+    tmp_path: Path,
+    mode: str,
+    scope: str,
+) -> None:
+    repo, path = _repository(tmp_path)
+    values = _run_values()
+    values["scope"] = scope
+    run = repo.create_run(**values, mode=mode)  # type: ignore[arg-type]
+    repo.start_run(run.id)
+    repo.seed_results(run.id, [_sample_seeds()[0]], excluded_count=0)
+    repo.save_result_batch(
+        run.id,
+        [_write("600001.SH", status="success", score=91, quality=96)],
+    )
+    repo.finish_run(run.id, "success", message="published")
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM market_scan_probability_capture_outbox"
+        ).fetchone()[0] == 0
 
 
 def test_latest_published_run_excludes_unpublished_and_uses_stable_recency_order(

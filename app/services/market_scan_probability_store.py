@@ -10,6 +10,7 @@ import stat
 from threading import RLock
 from typing import cast
 
+from app.artifacts.io import path_has_only_trusted_aliases
 from app.services.market_scan_probability_artifact import (
     PROBABILITY_RESULT_CONTRACT_VERSION,
     ProbabilityArtifactError,
@@ -36,7 +37,7 @@ class MarketScanProbabilityStore:
     """Locate, verify and project the newest artifact for one persisted run."""
 
     def __init__(self, directory: Path) -> None:
-        self.directory = directory.expanduser().resolve()
+        self.directory = directory.expanduser().absolute()
         self._lock = RLock()
         self._snapshot: _DirectorySnapshot | None = None
         self._file_cache: dict[Path, tuple[_FileFingerprint, dict[str, object]]] = {}
@@ -121,13 +122,17 @@ class MarketScanProbabilityStore:
 
 def _directory_snapshot(directory: Path) -> _DirectorySnapshot:
     try:
-        directory_stat = directory.stat()
+        if not path_has_only_trusted_aliases(directory):
+            raise ProbabilityArtifactError(f"上涨概率 artifact 路径不是普通目录：{directory}")
+        directory_stat = directory.lstat()
+    except ProbabilityArtifactError:
+        raise
     except FileNotFoundError:
         return None, ()
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise ProbabilityArtifactError(f"上涨概率 artifact 目录无法读取：{directory}") from exc
     if not stat.S_ISDIR(directory_stat.st_mode):
-        return None, ()
+        raise ProbabilityArtifactError(f"上涨概率 artifact 路径不是普通目录：{directory}")
     identity = (
         directory_stat.st_dev,
         directory_stat.st_ino,
@@ -143,7 +148,12 @@ def _directory_snapshot(directory: Path) -> _DirectorySnapshot:
 
 
 def _file_fingerprint(path: Path) -> _FileFingerprint:
-    facts = path.stat()
+    try:
+        facts = path.lstat()
+    except OSError as exc:
+        raise ProbabilityArtifactError(f"上涨概率 artifact 无法读取：{path}") from exc
+    if not stat.S_ISREG(facts.st_mode):
+        raise ProbabilityArtifactError(f"上涨概率 artifact 不是普通文件：{path}")
     return (
         path,
         facts.st_dev,

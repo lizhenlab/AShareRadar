@@ -20,7 +20,11 @@ from app.services.market_scan_scoring import (
     MarketScanSkipped,
     completed_market_scan_klines,
 )
-from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME
+from app.services.trading_calendar import (
+    CALL_AUCTION_START_TIME,
+    DAILY_KLINE_PUBLISH_TIME,
+    is_trading_day,
+)
 from app.utils.clock import market_now, monotonic_now
 from app.utils.provider_errors import ProviderChainUnavailable
 
@@ -72,6 +76,11 @@ class MarketScanRuntimeGuard:
             or current.time() >= DAILY_KLINE_PUBLISH_TIME
         ):
             raise RuntimeError("盘中临时扫描已越过当日行情窗口，停止发布")
+        if self.mode == "preopen" and (
+            not is_trading_day(current.date())
+            or current.time() >= CALL_AUCTION_START_TIME
+        ):
+            raise RuntimeError("盘前复盘扫描已越过交易日 09:15 门禁，停止发布")
         current_data_date = latest_expected_daily_kline_date(current)
         if current_data_date != self.data_date:
             raise RuntimeError(

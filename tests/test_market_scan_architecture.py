@@ -22,3 +22,16 @@ def test_market_scan_support_modules_keep_domain_boundary_and_bounded_size() -> 
             if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("app.repositories")
         ]
         assert repository_imports == [], f"{path.name} must not depend on repository DTOs"
+
+
+def test_production_scoring_does_not_eagerly_import_replay_engine() -> None:
+    path = Path(__file__).resolve().parents[1] / "app/services/market_scan_scoring.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    eager_imports = {
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert "app.services.market_scan_replay" not in eager_imports

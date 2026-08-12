@@ -5,6 +5,7 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MINIMUM_TYPED_APP_FILE_COUNT = 191
 
 # This is a review-visible floor, not a target. New files may be added freely;
 # removing any protected file requires an explicit contract change.
@@ -18,15 +19,19 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/api/routes/quotes.py",
         "app/api/security.py",
         "app/api/static_assets.py",
+        "app/artifacts/io.py",
         "app/config.py",
         "app/config_settings.py",
         "app/config_shell.py",
         "app/config_validation.py",
         "app/main.py",
         "app/models/market_scan.py",
+        "app/models/paper_trading_config.py",
         "app/models/reliability.py",
         "app/models/system.py",
+        "app/repositories/advice_reviews.py",
         "app/repositories/base.py",
+        "app/repositories/bundle.py",
         "app/repositories/maintenance.py",
         "app/repositories/market_klines.py",
         "app/repositories/market_quotes.py",
@@ -36,9 +41,12 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/repositories/market_scan_mapping.py",
         "app/repositories/market_scan_queries.py",
         "app/repositories/market_scan_results.py",
+        "app/repositories/paper_trading_metrics.py",
         "app/repositories/provider_status.py",
         "app/repositories/reliability.py",
         "app/repositories/update_fields.py",
+        "app/services/advice_review.py",
+        "app/services/cache.py",
         "app/services/daemon_executor.py",
         "app/services/datahub_metadata.py",
         "app/services/datahub_metadata_coordinator.py",
@@ -48,19 +56,30 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/services/datahub_quotes.py",
         "app/services/datahub_source_plan.py",
         "app/services/datahub_status_service.py",
+        "app/services/domain_service_bundle.py",
         "app/services/market_scan_completion.py",
+        "app/services/market_scan_evaluation_exposure.py",
         "app/services/market_scan_execution.py",
         "app/services/market_scan_lifecycle.py",
         "app/services/market_scan_manager.py",
+        "app/services/market_scan_probability_history.py",
+        "app/services/market_scan_probability_metrics.py",
+        "app/services/market_scan_publication_decision.py",
+        "app/services/market_scan_query_service.py",
+        "app/services/market_scan_research_stores.py",
+        "app/services/market_scan_score_contract.py",
+        "app/services/market_scan_terminal_recovery.py",
         "app/services/market_scan_scoring.py",
         "app/services/market_scan_universe.py",
         "app/services/optional_providers.py",
+        "app/services/paper_trading.py",
         "app/services/provider_errors.py",
         "app/services/provider_failure_status.py",
         "app/services/provider_registry.py",
         "app/services/provider_stock_mappers.py",
         "app/services/provider_utils.py",
         "app/services/providers.py",
+        "app/services/research_artifact_catalog.py",
         "app/services/runtime_backup.py",
         "app/services/runtime_coordinator.py",
         "app/services/scheduler.py",
@@ -73,6 +92,7 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/services/scheduler_service.py",
         "app/services/scheduler_tasks.py",
         "app/services/stock_overview.py",
+        "app/services/storage_contracts.py",
         "app/services/system_diagnostics.py",
         "app/services/task_run_lifecycle.py",
         "app/utils/audit_time.py",
@@ -82,6 +102,8 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/utils/stock_pool.py",
         "app/utils/text.py",
         "app/utils/time.py",
+        "app/workflows/active_research_queue.py",
+        "app/workflows/individual.py",
         "tools/api_inventory.py",
         "tools/architecture_inventory.py",
     }
@@ -131,7 +153,8 @@ def test_mypy_scope_covers_a_meaningful_share_of_application_modules() -> None:
     app_files = {path.as_posix() for path in (ROOT / "app").rglob("*.py")}
     typed_app_files = {path for path in configured_files if isinstance(path, str) and path.startswith("app/")}
 
-    assert len(typed_app_files) / len(app_files) >= 0.4
+    assert len(typed_app_files) >= MINIMUM_TYPED_APP_FILE_COUNT
+    assert len(typed_app_files) / len(app_files) >= 0.5
 
 
 def test_mypy_scope_does_not_hide_errors() -> None:

@@ -117,6 +117,7 @@ def build_probability_research(
     generated_at: str,
     bootstrap_samples: int = 1_000,
     label_contract: Mapping[str, object] | None = None,
+    include_records: bool = True,
 ) -> dict[str, object]:
     """Fit isolated contract cohorts and emit replayable per-row records."""
     values = tuple(rows)
@@ -129,6 +130,7 @@ def build_probability_research(
             generated_at=generated_at,
             bootstrap_samples=bootstrap_samples,
             label_contract=contract,
+            include_records=include_records,
         )
         cohort = _cohort_payload(cohort_contract, cohort_rows, horizons)
         records.extend(_attach_cohort_evidence(cohort_records, cohort))
@@ -152,6 +154,7 @@ def _build_cohort_research(
     generated_at: str,
     bootstrap_samples: int,
     label_contract: Mapping[str, object],
+    include_records: bool,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     benchmarks = _market_benchmarks(rows)
     horizons: dict[str, object] = {}
@@ -175,7 +178,8 @@ def _build_cohort_research(
                 horizon,
                 label_contract,
             )
-            records.extend(_probability_records(rows, benchmarks, horizon, target, evidence))
+            if include_records:
+                records.extend(_probability_records(rows, benchmarks, horizon, target, evidence))
         horizons[str(horizon)] = target_evidence
     return horizons, records
 
@@ -639,7 +643,7 @@ def _artifact_versions(evidence: Mapping[str, object]) -> dict[str, object]:
 
 def _artifact_digests(evidence: Mapping[str, object]) -> dict[str, object]:
     fitted = evidence.get("model") is not None
-    return {
+    digests = {
         "input": evidence["input_digest"],
         "model": evidence.get("model_digest") if fitted else None,
         "calibrator": evidence.get("calibrator_digest") if fitted else None,
@@ -647,6 +651,9 @@ def _artifact_digests(evidence: Mapping[str, object]) -> dict[str, object]:
         "baseline": evidence.get("baseline_digest") if fitted else None,
         "evidence": evidence.get("evidence_digest"),
     }
+    if evidence.get("label_contract_digest") is not None:
+        digests["label_contract"] = evidence["label_contract_digest"]
+    return digests
 
 
 def _fit_target(
@@ -667,6 +674,7 @@ def _fit_target(
         horizon=horizon,
         target="net_excess_positive" if target == PROBABILITY_PRIMARY_TARGET else "net_return_positive",
         cost_model_version=_label_cost_model_version(label_contract),
+        label_contract=dict(label_contract),
         bootstrap_samples=bootstrap_samples,
     )
     return fit_shadow_probability(samples, config=config, generated_at=generated_at)
@@ -869,6 +877,10 @@ def _record_common_evidence(
 ) -> dict[str, object]:
     return {
         "study_evidence_digest": evidence.get("evidence_digest"),
+        "label_contract_digest": evidence.get("label_contract_digest"),
+        "label_contract_binding": evidence.get("label_contract_binding"),
+        "selection_qualified": evidence.get("selection_qualified") is True,
+        "selection_qualification": evidence.get("selection_qualification"),
         "limitations": limitations,
         "generated_at": evidence.get("generated_at"),
         "automatic_promotion": False,
@@ -913,12 +925,18 @@ def _evidence_summary(
     stability = _temporal_stability_metrics(evidence)
     major_strata = _major_strata_calibration_summary(stratified)
     replay_verified = _deterministic_replay_verified(evidence, rows, horizon, target)
-    if evidence.get("cost_model_version") != label_contract.get("cost_model_version"):
-        raise ValueError("probability study and label cost model versions differ")
+    expected_label_digest = stable_probability_hash(label_contract)
+    if (
+        evidence.get("cost_model_version") != label_contract.get("cost_model_version")
+        or evidence.get("label_contract_digest") != expected_label_digest
+    ):
+        raise ValueError("probability study and complete label contract differ")
     summary.pop("predictions", None)
     summary["target"] = target
     summary["label_version"] = label_contract.get("label_version") or evidence.get("label_version")
     summary["cost_model_version"] = evidence.get("cost_model_version")
+    summary["label_contract_digest"] = expected_label_digest
+    summary["label_contract_binding"] = evidence.get("label_contract_binding")
     summary["feature_names"] = sorted(rows[0].features) if rows else []
     summary["benchmark_definition"] = PROBABILITY_BENCHMARK_VERSION
     summary["automatic_promotion"] = False
@@ -965,6 +983,7 @@ def _promotion_gates(
     counts: Mapping[str, object] = raw_counts if isinstance(raw_counts, Mapping) else {}
     gates = {
         "calibrated_shadow": evidence.get("status") == "calibrated_shadow",
+        "selection_qualified": evidence.get("selection_qualified") is True,
         "label_coverage_at_least_95pct": _mapping_float(counts, "label_coverage") >= 0.95,
         "point_in_time_evidence_at_least_95pct": _mapping_float(point_in_time, "coverage") >= 0.95,
         "brier_skill_positive": _mapping_float(calibrated, "brier_skill_score") > 0,

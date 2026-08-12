@@ -11,6 +11,9 @@ from app.utils.time import datetime_to_text
 
 
 if TYPE_CHECKING:
+    from app.services.market_scan_probability_maintenance import (
+        MarketScanProbabilityMaintenanceService,
+    )
     from app.config import Settings
     from app.services.datahub import DataHub
     from app.services.market_scan_manager import MarketScanManager
@@ -148,6 +151,7 @@ if TYPE_CHECKING:
         _manual_guard_users: int
         _shutdown_tasks: set[asyncio.Task]
         _guard_release_task: asyncio.Task[None] | None
+        _market_scan_probability_maintenance: MarketScanProbabilityMaintenanceService | None
         _quiescent_event: asyncio.Event
 
         async def _loop(self) -> None: ...
@@ -243,6 +247,14 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         min_interval_seconds=300,
         handler_name="_run_strategy_schedules",
         initial_delay_seconds=32,
+    ),
+    TaskDefinition(
+        name="maintain_market_scan_probability",
+        display_name="维护全市场上涨概率标签",
+        settings_interval_attr="scheduler_kline_interval_seconds",
+        min_interval_seconds=300,
+        handler_name="_maintain_market_scan_probability",
+        initial_delay_seconds=36,
     ),
 )
 _TASK_ORDER = tuple(definition.name for definition in _TASK_DEFINITIONS)

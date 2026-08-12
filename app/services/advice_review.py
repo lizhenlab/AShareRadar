@@ -19,6 +19,7 @@ from app.models.reviews import (
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.services.research_replay import completed_daily_bar_cutoff, evaluate_advice_forward_window
+from app.services.storage_contracts import AdviceReviewStorage
 from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
 from app.utils.audit_time import audit_datetime_to_text
 from app.utils.clock import market_now_naive
@@ -33,12 +34,15 @@ REVIEW_KLINE_BUFFER_DAYS = 40
 MAX_DUE_REVIEW_CANDIDATE_SCAN = 500
 
 
-def create_advice_review_plan(cache: object, payload: AdviceReviewPlanInput) -> AdviceReviewPlan:
+def create_advice_review_plan(
+    cache: AdviceReviewStorage,
+    payload: AdviceReviewPlanInput,
+) -> AdviceReviewPlan:
     return cache.create_advice_review_plan(payload)
 
 
 def update_advice_review_plan(
-    cache: object,
+    cache: AdviceReviewStorage,
     plan_id: int,
     payload: AdviceReviewPlanUpdate,
 ) -> AdviceReviewPlan:
@@ -48,12 +52,12 @@ def update_advice_review_plan(
     return plan
 
 
-def delete_advice_review_plan(cache: object, plan_id: int) -> None:
+def delete_advice_review_plan(cache: AdviceReviewStorage, plan_id: int) -> None:
     if not cache.delete_advice_review_plan(plan_id):
         raise NotFoundError("研究计划不存在")
 
 
-def get_advice_review_detail(cache: object, plan_id: int) -> AdviceReviewDetail:
+def get_advice_review_detail(cache: AdviceReviewStorage, plan_id: int) -> AdviceReviewDetail:
     detail = cache.advice_review_detail(plan_id)
     if detail is None:
         raise NotFoundError("研究计划不存在")
@@ -61,7 +65,7 @@ def get_advice_review_detail(cache: object, plan_id: int) -> AdviceReviewDetail:
 
 
 def list_advice_review_plans(
-    cache: object,
+    cache: AdviceReviewStorage,
     *,
     symbol: str | None = None,
     limit: int = 100,
@@ -73,7 +77,7 @@ def list_advice_review_plans(
 
 
 def list_advice_review_details(
-    cache: object,
+    cache: AdviceReviewStorage,
     *,
     symbol: str | None = None,
     limit: int = 100,
@@ -88,7 +92,7 @@ def build_advice_evidence_refs(snapshot: object) -> list[AdviceEvidenceRef]:
     return structured_advice_evidence_refs(snapshot)
 
 
-def get_advice_review_summary(cache: object) -> AdviceReviewSummary:
+def get_advice_review_summary(cache: AdviceReviewStorage) -> AdviceReviewSummary:
     return cache.advice_review_summary()
 
 

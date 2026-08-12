@@ -632,6 +632,8 @@ def test_system_diagnostics_renders_over_budget_usage_and_row_boundaries() -> No
           storage: {
             db_size_mb: 20, budget_bytes: 16 * 1024 * 1024, usage_pct: 125,
             sqlite_size_bytes: 16 * 1024 * 1024, backup_size_bytes: 4 * 1024 * 1024,
+            research_artifact_size_bytes: 6 * 1024 * 1024, total_managed_size_bytes: 26 * 1024 * 1024,
+            total_managed_usage_pct: 162.5,
             managed_backup_count: 2, cache_rows: 30, runtime_rows: 4, user_rows: 7,
             quote_rows: 11, kline_rows: 12, market_scan_rows: 3,
           },
@@ -641,6 +643,7 @@ def test_system_diagnostics_renders_over_budget_usage_and_row_boundaries() -> No
 
         assert(storage.innerHTML.includes("125%") && storage.innerHTML.includes("7</b>用户数据"), "storage diagnostics hid over-budget or user rows");
         assert(storage.innerHTML.includes("备份 4.00 MB（2 份）") && storage.innerHTML.includes("11</b>行情") && storage.innerHTML.includes("3</b>全市场扫描"), "storage diagnostics hid category details");
+        assert(storage.innerHTML.includes("研究证据 6.00 MB") && storage.innerHTML.includes("总受管 26.00 MB（预算 162.50%）"), "storage diagnostics hid research artifact usage");
         assert(messages.innerHTML.includes("超过容量预算") && messages.innerHTML.includes("先备份"), "diagnostic guidance was not rendered");
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''

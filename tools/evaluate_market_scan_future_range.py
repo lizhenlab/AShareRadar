@@ -85,7 +85,7 @@ def _persist_reports(
         artifact = build_future_range_artifact(report, generated_at=generated_at)
         filename = future_range_artifact_filename(run_id, artifact)
         target = write_future_range_artifact(
-            output_dir.expanduser().resolve() / filename,
+            output_dir.expanduser().absolute() / filename,
             artifact,
             database_path=database,
         )

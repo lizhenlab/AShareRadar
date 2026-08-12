@@ -6,10 +6,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.market_scan import MarketScanMode
-
-
 StrategyExecutionKind = Literal["latest_scan", "historical_replay"]
+StrategyExecutionMarketScanMode = Literal["official", "intraday"]
 StrategyExecutionStatus = Literal["ready", "no_trade", "blocked"]
 PortfolioCandidateStatus = Literal[
     "selected",
@@ -39,7 +37,10 @@ class StrategyExecutionRequest(_StrictModel):
     kind: StrategyExecutionKind = "latest_scan"
     run_id: int | None = Field(default=None, ge=1)
     data_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    mode: MarketScanMode = "official"
+    # Strategy execution remains isolated from the read-only pre-open review
+    # cohort.  Supporting pre-open signals here requires a separate strategy
+    # evidence contract and database migration, not an implicit enum expansion.
+    mode: StrategyExecutionMarketScanMode = "official"
     notional_cash_cny: float = Field(
         default=1_000_000.0,
         ge=10_000,
@@ -186,5 +187,6 @@ __all__ = [
     "StrategyExecutionPage",
     "StrategyExecutionCandidateChange",
     "StrategyExecutionComparison",
+    "StrategyExecutionMarketScanMode",
     "StrategyExecutionRequest",
 ]

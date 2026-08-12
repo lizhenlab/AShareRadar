@@ -51,6 +51,7 @@ def test_index_loads_css_modules_in_parallel_and_in_order() -> None:
         "workspace-core.css",
         "research-panels.css",
         "market-scan.css",
+        "market-scan-research.css",
         "interactions.css",
         "side-footer.css",
         "responsive.css",
@@ -114,7 +115,9 @@ def test_frontend_entrypoints_have_reviewable_growth_budgets() -> None:
     budgets = {
         STATIC_DIR / "app.js": 3300,
         STATIC_DIR / "css" / "interactions.css": 1850,
-        ROOT / "tests" / "e2e" / "frontend-flow.spec.js": 3300,
+        ROOT / "tests" / "e2e" / "frontend-flow.spec.js": 2800,
+        ROOT / "tests" / "e2e" / "frontend-flow-api-fixtures.mjs": 400,
+        ROOT / "tests" / "e2e" / "stock-search-flow.spec.js": 280,
     }
 
     oversized = {

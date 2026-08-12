@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 
 from app.models.market_scan import (
     MarketScanRetryPlan,
@@ -103,7 +104,12 @@ class MarketScanAutomationCoordinator:
         active = await run_cache_io(self.cache.active_market_scan_run)
         if active is not None:
             return None
-        latest = await run_cache_io(self.cache.latest_full_market_scan_run)
+        # The automatic workflow is an after-close official publication loop.
+        # Pre-open review and intraday scans have independent cohorts and must
+        # never suppress or become retry parents for the scheduled official run.
+        latest = await run_cache_io(
+            partial(self.cache.latest_full_market_scan_run, mode="official")
+        )
         if latest is None or latest.data_date != data_date:
             return MarketScanAutomaticAction("scheduled", data_date)
         if latest.status in {"success", "degraded", "cancelled"}:

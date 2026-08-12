@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="/static/css/workspace-core.css?v=20260811-future-range-1" />
     <link rel="stylesheet" href="/static/css/research-panels.css?v=20260811-future-range-1" />
     <link rel="stylesheet" href="/static/css/market-scan.css?v=20260811-future-range-1" />
+    <link rel="stylesheet" href="/static/css/market-scan-research.css?v=20260811-future-range-1" />
     <link rel="stylesheet" href="/static/css/interactions.css?v=20260811-future-range-1" />
     <link rel="stylesheet" href="/static/css/side-footer.css?v=20260811-future-range-1" />
     <link rel="stylesheet" href="/static/css/responsive.css?v=20260811-future-range-1" />
@@ -251,6 +252,7 @@
                   <fieldset class="market-scan-mode-control" id="marketScanModeControl">
                     <legend>浏览和新建榜单模式</legend>
                     <div class="market-scan-mode-options">
+                      <label><input type="radio" id="marketScanModePreopen" name="marketScanMode" value="preopen" /><span>盘前复盘</span></label>
                       <label><input type="radio" id="marketScanModeIntraday" name="marketScanMode" value="intraday" /><span>盘中临时</span></label>
                       <label><input type="radio" id="marketScanModeOfficial" name="marketScanMode" value="official" checked /><span>盘后正式</span></label>
                     </div>
@@ -347,14 +349,15 @@
                 </fieldset>
               </div>
               <div class="market-scan-probability-summary">
-                <div><span>证据状态</span><strong id="marketScanProbabilityStatus" class="insufficient">证据不足</strong></div>
+                <div><span>证据状态</span><strong id="marketScanProbabilityStatus" class="insufficient">尚未生成研究证据</strong></div>
                 <div><span>目标</span><strong id="marketScanProbabilityTarget">未来所选周期净超额收益为正</strong></div>
                 <div><span>基础胜率</span><strong id="marketScanProbabilityBaseRate">--</strong></div>
                 <div><span>独立日期 / 观察</span><strong id="marketScanProbabilityEvidence">--</strong></div>
+                <div><span>预测效力</span><strong id="marketScanProbabilityEffectiveness" class="insufficient">--</strong></div>
                 <div><span>模型与证据版本</span><strong id="marketScanProbabilityVersion">--</strong></div>
                 <div><span>训练截止</span><strong id="marketScanProbabilityCutoff">--</strong></div>
               </div>
-              <p class="market-scan-probability-limitations" id="marketScanProbabilityLimitations">尚无可验证的上涨概率证据。</p>
+              <p class="market-scan-probability-limitations" id="marketScanProbabilityLimitations">当前批次尚未生成上涨概率研究。</p>
             </section>
 
             <details class="market-scan-future-range" id="marketScanFutureRangeResearch" data-generation-status="not_generated" aria-busy="false">
@@ -608,7 +611,7 @@
                   <label><span>最低置信度</span><input id="marketScanConfidenceMin" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="最低置信度；序数研究分" /></label>
                   <label><span>最高风险分</span><input id="marketScanRiskMax" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="最高风险分；分数越高风险越大" /></label>
                   <label><span>最低可交易性</span><input id="marketScanTradabilityMin" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="最低可交易性；序数研究分" /></label>
-                  <label><span>最低上涨概率 (%)</span><input id="marketScanProbabilityMin" type="number" min="0" max="100" step="0.1" placeholder="证据不足" aria-describedby="marketScanProbabilityFilterHelp" disabled /><small id="marketScanProbabilityFilterHelp">只有样本外已校准的 Shadow 概率才可筛选。当前已禁用。</small></label>
+                  <label><span>最低上涨概率 (%)</span><input id="marketScanProbabilityMin" type="number" min="0" max="100" step="0.1" placeholder="概率不可用" aria-describedby="marketScanProbabilityFilterHelp" disabled /><small id="marketScanProbabilityFilterHelp">当前批次尚未生成 Shadow 研究，概率筛选不可用。</small></label>
                   <fieldset class="market-scan-range"><legend>趋势分</legend><input id="marketScanTrendMin" type="number" min="0" max="100" step="1" placeholder="最小" aria-label="趋势分最小值" /><span>—</span><input id="marketScanTrendMax" type="number" min="0" max="100" step="1" placeholder="最大" aria-label="趋势分最大值" /></fieldset>
                   <fieldset class="market-scan-range"><legend>涨跌幅 (%)</legend><input id="marketScanChangeMin" type="number" min="-1000" max="1000" step="0.01" placeholder="最小" aria-label="涨跌幅最小值" /><span>—</span><input id="marketScanChangeMax" type="number" min="-1000" max="1000" step="0.01" placeholder="最大" aria-label="涨跌幅最大值" /></fieldset>
                   <fieldset class="market-scan-range"><legend>换手率 (%)</legend><input id="marketScanTurnoverMin" type="number" min="0" max="10000" step="0.01" placeholder="最小" aria-label="换手率最小值" /><span>—</span><input id="marketScanTurnoverMax" type="number" min="0" max="10000" step="0.01" placeholder="最大" aria-label="换手率最大值" /></fieldset>
