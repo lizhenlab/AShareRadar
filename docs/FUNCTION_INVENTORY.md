@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 404 | 1015 | 6046 | 1393 | 135278 |
-| `tests/` | 230 | 199 | 3549 | 882 | 116740 |
+| `tests/` | 230 | 199 | 3551 | 882 | 116824 |
 | `tools/` | 15 | 7 | 152 | 6 | 3314 |
 
 ## Python Function Health
@@ -12753,20 +12753,21 @@ Lines: 252
 
 #### `tests/test_frontend_api_format_workbench.py`
 
-Lines: 693
+Lines: 717
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `test_fetch_json_normalizes_structured_fastapi_detail` | 10 | `def test_fetch_json_normalizes_structured_fastapi_detail() -> None` |
 | function | `test_fetch_json_normalizes_network_and_non_json_errors` | 56 | `def test_fetch_json_normalizes_network_and_non_json_errors() -> None` |
-| function | `test_fetch_json_accepts_empty_success_and_message_error_payloads` | 114 | `def test_fetch_json_accepts_empty_success_and_message_error_payloads() -> None` |
-| function | `test_fetch_json_keeps_abort_silent_capable_and_surfaces_timeout` | 170 | `def test_fetch_json_keeps_abort_silent_capable_and_surfaces_timeout() -> None` |
-| function | `test_change_class_returns_neutral_for_zero_and_invalid_numbers` | 201 | `def test_change_class_returns_neutral_for_zero_and_invalid_numbers() -> None` |
-| function | `test_number_formatters_hide_non_finite_values_and_clamp_digits` | 227 | `def test_number_formatters_hide_non_finite_values_and_clamp_digits() -> None` |
-| function | `test_workbench_renderers_tolerate_missing_quote_ma_and_arrays` | 271 | `def test_workbench_renderers_tolerate_missing_quote_ma_and_arrays() -> None` |
-| function | `test_minute_workbench_uses_availability_contract_and_escapes_status_content` | 487 | `def test_minute_workbench_uses_availability_contract_and_escapes_status_content() -> None` |
-| function | `test_workbench_distinguishes_proxy_orderbook_and_financial_data_semantics` | 625 | `def test_workbench_distinguishes_proxy_orderbook_and_financial_data_semantics() -> None` |
-| function | `_run_node_script` | 692 | `def _run_node_script(script: str) -> None` |
+| function | `test_fetch_json_preserves_retry_after_for_recoverable_http_errors` | 114 | `def test_fetch_json_preserves_retry_after_for_recoverable_http_errors() -> None` |
+| function | `test_fetch_json_accepts_empty_success_and_message_error_payloads` | 138 | `def test_fetch_json_accepts_empty_success_and_message_error_payloads() -> None` |
+| function | `test_fetch_json_keeps_abort_silent_capable_and_surfaces_timeout` | 194 | `def test_fetch_json_keeps_abort_silent_capable_and_surfaces_timeout() -> None` |
+| function | `test_change_class_returns_neutral_for_zero_and_invalid_numbers` | 225 | `def test_change_class_returns_neutral_for_zero_and_invalid_numbers() -> None` |
+| function | `test_number_formatters_hide_non_finite_values_and_clamp_digits` | 251 | `def test_number_formatters_hide_non_finite_values_and_clamp_digits() -> None` |
+| function | `test_workbench_renderers_tolerate_missing_quote_ma_and_arrays` | 295 | `def test_workbench_renderers_tolerate_missing_quote_ma_and_arrays() -> None` |
+| function | `test_minute_workbench_uses_availability_contract_and_escapes_status_content` | 511 | `def test_minute_workbench_uses_availability_contract_and_escapes_status_content() -> None` |
+| function | `test_workbench_distinguishes_proxy_orderbook_and_financial_data_semantics` | 649 | `def test_workbench_distinguishes_proxy_orderbook_and_financial_data_semantics() -> None` |
+| function | `_run_node_script` | 716 | `def _run_node_script(script: str) -> None` |
 
 #### `tests/test_frontend_app_flow.py`
 
@@ -14085,49 +14086,50 @@ Lines: 101
 
 #### `tests/test_market_scan_frontend.py`
 
-Lines: 4930
+Lines: 4970
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `test_python_and_javascript_market_scan_publication_contracts_stay_in_parity` | 23 | `def test_python_and_javascript_market_scan_publication_contracts_stay_in_parity() -> None` |
 | function | `test_market_scan_frontend_contract_is_wired_into_workspace` | 62 | `def test_market_scan_frontend_contract_is_wired_into_workspace() -> None` |
-| function | `test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed` | 206 | `def test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed() -> None` |
-| function | `test_market_scan_modules_have_explicit_reviewable_boundaries` | 230 | `def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None` |
-| function | `test_market_scan_modes_default_request_contract_and_mode_copy` | 304 | `def test_market_scan_modes_default_request_contract_and_mode_copy() -> None` |
-| function | `test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator` | 490 | `def test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator() -> None` |
-| function | `test_market_scan_shows_execution_time_and_starts_top100_refresh` | 550 | `def test_market_scan_shows_execution_time_and_starts_top100_refresh() -> None` |
-| function | `test_market_scan_history_selection_binds_results_export_filters_and_mode` | 622 | `def test_market_scan_history_selection_binds_results_export_filters_and_mode() -> None` |
-| function | `test_market_scan_query_and_rows_are_bounded_encoded_and_escaped` | 756 | `def test_market_scan_query_and_rows_are_bounded_encoded_and_escaped() -> None` |
-| function | `test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action` | 899 | `def test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action() -> None` |
-| function | `test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable` | 983 | `def test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable() -> None` |
-| function | `test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures` | 1339 | `def test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures() -> None` |
-| function | `test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics` | 1413 | `def test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics() -> None` |
-| function | `test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning` | 1451 | `def test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning() -> None` |
-| function | `test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state` | 1538 | `def test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state() -> None` |
-| function | `test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run` | 1669 | `def test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run() -> None` |
-| function | `test_market_scan_controller_discovers_external_run_and_retains_published_snapshot` | 2012 | `def test_market_scan_controller_discovers_external_run_and_retains_published_snapshot() -> None` |
-| function | `test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation` | 2145 | `def test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation() -> None` |
-| function | `test_market_scan_controller_rejects_malformed_success_payloads` | 2290 | `def test_market_scan_controller_rejects_malformed_success_payloads() -> None` |
-| function | `test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online` | 2457 | `def test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online() -> None` |
-| function | `test_market_scan_controller_uses_one_bounded_exponential_backoff_timer` | 2589 | `def test_market_scan_controller_uses_one_bounded_exponential_backoff_timer() -> None` |
-| function | `test_market_scan_controller_cancels_deferred_reset_when_deactivated` | 2697 | `def test_market_scan_controller_cancels_deferred_reset_when_deactivated() -> None` |
-| function | `test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading` | 2751 | `def test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading() -> None` |
-| function | `test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions` | 2840 | `def test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions() -> None` |
-| function | `test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent` | 3006 | `def test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent() -> None` |
-| function | `test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced` | 3096 | `def test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced() -> None` |
-| function | `test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run` | 3315 | `def test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run() -> None` |
-| function | `test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries` | 3380 | `def test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries() -> None` |
-| function | `test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh` | 3770 | `def test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh() -> None` |
-| function | `test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results` | 3874 | `def test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results() -> None` |
-| function | `test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling` | 3982 | `def test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling() -> None` |
-| function | `test_market_scan_probability_horizon_switches_are_local_serial_and_retryable` | 4088 | `def test_market_scan_probability_horizon_switches_are_local_serial_and_retryable() -> None` |
-| function | `test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache` | 4374 | `def test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache() -> None` |
-| function | `test_market_scan_probability_horizon_drops_queued_filtered_query` | 4425 | `def test_market_scan_probability_horizon_drops_queued_filtered_query() -> None` |
-| function | `test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe` | 4522 | `def test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe() -> None` |
-| function | `test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection` | 4584 | `def test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection() -> None` |
-| function | `test_market_scan_poll_run_failure_releases_owner_before_latest_recovery` | 4693 | `def test_market_scan_poll_run_failure_releases_owner_before_latest_recovery() -> None` |
-| function | `test_market_scan_filter_waits_for_active_run_owner_without_abort` | 4804 | `def test_market_scan_filter_waits_for_active_run_owner_without_abort() -> None` |
-| function | `_run_node_script` | 4922 | `def _run_node_script(script: str) -> None` |
+| function | `test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed` | 208 | `def test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed() -> None` |
+| function | `test_market_scan_modules_have_explicit_reviewable_boundaries` | 232 | `def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None` |
+| function | `test_market_scan_busy_retry_uses_server_delay_without_counting_failure` | 306 | `def test_market_scan_busy_retry_uses_server_delay_without_counting_failure() -> None` |
+| function | `test_market_scan_modes_default_request_contract_and_mode_copy` | 341 | `def test_market_scan_modes_default_request_contract_and_mode_copy() -> None` |
+| function | `test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator` | 527 | `def test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator() -> None` |
+| function | `test_market_scan_shows_execution_time_and_starts_top100_refresh` | 587 | `def test_market_scan_shows_execution_time_and_starts_top100_refresh() -> None` |
+| function | `test_market_scan_history_selection_binds_results_export_filters_and_mode` | 659 | `def test_market_scan_history_selection_binds_results_export_filters_and_mode() -> None` |
+| function | `test_market_scan_query_and_rows_are_bounded_encoded_and_escaped` | 793 | `def test_market_scan_query_and_rows_are_bounded_encoded_and_escaped() -> None` |
+| function | `test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action` | 936 | `def test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action() -> None` |
+| function | `test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable` | 1020 | `def test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable() -> None` |
+| function | `test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures` | 1376 | `def test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures() -> None` |
+| function | `test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics` | 1450 | `def test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics() -> None` |
+| function | `test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning` | 1488 | `def test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning() -> None` |
+| function | `test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state` | 1575 | `def test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state() -> None` |
+| function | `test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run` | 1706 | `def test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run() -> None` |
+| function | `test_market_scan_controller_discovers_external_run_and_retains_published_snapshot` | 2049 | `def test_market_scan_controller_discovers_external_run_and_retains_published_snapshot() -> None` |
+| function | `test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation` | 2182 | `def test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation() -> None` |
+| function | `test_market_scan_controller_rejects_malformed_success_payloads` | 2327 | `def test_market_scan_controller_rejects_malformed_success_payloads() -> None` |
+| function | `test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online` | 2494 | `def test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online() -> None` |
+| function | `test_market_scan_controller_uses_one_bounded_exponential_backoff_timer` | 2626 | `def test_market_scan_controller_uses_one_bounded_exponential_backoff_timer() -> None` |
+| function | `test_market_scan_controller_cancels_deferred_reset_when_deactivated` | 2734 | `def test_market_scan_controller_cancels_deferred_reset_when_deactivated() -> None` |
+| function | `test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading` | 2788 | `def test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading() -> None` |
+| function | `test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions` | 2877 | `def test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions() -> None` |
+| function | `test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent` | 3043 | `def test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent() -> None` |
+| function | `test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced` | 3133 | `def test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced() -> None` |
+| function | `test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run` | 3352 | `def test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run() -> None` |
+| function | `test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries` | 3417 | `def test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries() -> None` |
+| function | `test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh` | 3807 | `def test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh() -> None` |
+| function | `test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results` | 3911 | `def test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results() -> None` |
+| function | `test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling` | 4019 | `def test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling() -> None` |
+| function | `test_market_scan_probability_horizon_switches_are_local_serial_and_retryable` | 4125 | `def test_market_scan_probability_horizon_switches_are_local_serial_and_retryable() -> None` |
+| function | `test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache` | 4414 | `def test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache() -> None` |
+| function | `test_market_scan_probability_horizon_drops_queued_filtered_query` | 4465 | `def test_market_scan_probability_horizon_drops_queued_filtered_query() -> None` |
+| function | `test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe` | 4562 | `def test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe() -> None` |
+| function | `test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection` | 4624 | `def test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection() -> None` |
+| function | `test_market_scan_poll_run_failure_releases_owner_before_latest_recovery` | 4733 | `def test_market_scan_poll_run_failure_releases_owner_before_latest_recovery() -> None` |
+| function | `test_market_scan_filter_waits_for_active_run_owner_without_abort` | 4844 | `def test_market_scan_filter_waits_for_active_run_owner_without_abort() -> None` |
+| function | `_run_node_script` | 4962 | `def _run_node_script(script: str) -> None` |
 
 #### `tests/test_market_scan_future_range.py`
 
@@ -14804,7 +14806,7 @@ Lines: 1728
 
 #### `tests/test_market_scan_repository.py`
 
-Lines: 2234
+Lines: 2254
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -14844,34 +14846,34 @@ Lines: 2234
 | function | `test_distribution_degraded_publication_is_not_enqueued_and_legacy_pending_is_skipped` | 1282 | `def test_distribution_degraded_publication_is_not_enqueued_and_legacy_pending_is_skipped(tmp_path: Path) -> None` |
 | function | `test_non_official_or_top100_publication_does_not_enqueue_probability_capture` | 1338 | `def test_non_official_or_top100_publication_does_not_enqueue_probability_capture(tmp_path: Path, mode: str, scope: str) -> None` |
 | function | `test_latest_published_run_excludes_unpublished_and_uses_stable_recency_order` | 1361 | `def test_latest_published_run_excludes_unpublished_and_uses_stable_recency_order(tmp_path: Path) -> None` |
-| function | `test_polling_identity_is_stable_non_authorizing_and_never_hashes_results` | 1465 | `def test_polling_identity_is_stable_non_authorizing_and_never_hashes_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_polling_identity_tracks_each_slot_and_database_schema_without_authority` | 1525 | `def test_polling_identity_tracks_each_slot_and_database_schema_without_authority(tmp_path: Path) -> None` |
-| function | `test_result_only_tamper_does_not_turn_polling_identity_into_authority` | 1547 | `def test_result_only_tamper_does_not_turn_polling_identity_into_authority(tmp_path: Path) -> None` |
-| function | `test_polling_identity_header_changes_detect_tamper_without_authorizing_it` | 1572 | `def test_polling_identity_header_changes_detect_tamper_without_authorizing_it(tmp_path: Path) -> None` |
-| function | `test_polling_identity_selection_matches_trusted_selectors_across_modes` | 1600 | `def test_polling_identity_selection_matches_trusted_selectors_across_modes(tmp_path: Path) -> None` |
-| function | `test_polling_identity_ignores_active_progress_but_tracks_status_transition` | 1650 | `def test_polling_identity_ignores_active_progress_but_tracks_status_transition(tmp_path: Path) -> None` |
-| function | `test_polling_identity_rejects_database_file_change_during_read` | 1681 | `def test_polling_identity_rejects_database_file_change_during_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_latest_full_and_published_ignore_newer_partial_legacy_run` | 1701 | `def test_latest_full_and_published_ignore_newer_partial_legacy_run(tmp_path: Path) -> None` |
-| function | `test_run_queries_filter_mode_status_and_data_date_without_changing_legacy_defaults` | 1725 | `def test_run_queries_filter_mode_status_and_data_date_without_changing_legacy_defaults(tmp_path: Path) -> None` |
-| function | `test_reconcile_orphaned_run_and_terminal_finish_are_idempotent` | 1764 | `def test_reconcile_orphaned_run_and_terminal_finish_are_idempotent(tmp_path: Path) -> None` |
-| function | `test_sqlite_allows_only_one_active_scan_across_repository_instances` | 1784 | `def test_sqlite_allows_only_one_active_scan_across_repository_instances(tmp_path: Path) -> None` |
-| function | `test_result_batch_rejects_unknown_duplicate_and_invalid_payloads` | 1799 | `def test_result_batch_rejects_unknown_duplicate_and_invalid_payloads(tmp_path: Path) -> None` |
-| function | `test_terminal_success_and_degraded_states_require_complete_consistent_results` | 1855 | `def test_terminal_success_and_degraded_states_require_complete_consistent_results(tmp_path: Path) -> None` |
-| function | `test_all_successful_fallback_results_must_finish_as_degraded` | 1877 | `def test_all_successful_fallback_results_must_finish_as_degraded(tmp_path: Path) -> None` |
-| function | `test_display_tags_do_not_control_degradation_or_retry` | 1905 | `def test_display_tags_do_not_control_degradation_or_retry(tmp_path: Path) -> None` |
-| function | `test_fallback_stock_pool_source_is_persisted_and_requires_degraded_status` | 1922 | `def test_fallback_stock_pool_source_is_persisted_and_requires_degraded_status(tmp_path: Path) -> None` |
-| function | `test_task_run_creation_and_scan_attachment_roll_back_together` | 1945 | `def test_task_run_creation_and_scan_attachment_roll_back_together(tmp_path: Path) -> None` |
-| function | `test_scan_and_linked_task_terminal_state_commit_atomically` | 1972 | `def test_scan_and_linked_task_terminal_state_commit_atomically(tmp_path: Path) -> None` |
-| function | `test_reconcile_repairs_terminal_scan_with_stale_running_task` | 2014 | `def test_reconcile_repairs_terminal_scan_with_stale_running_task(tmp_path: Path) -> None` |
-| function | `_repository` | 2039 | `def _repository(tmp_path: Path) -> tuple[MarketScanRepository, Path]` |
-| function | `_seed_running_run` | 2046 | `def _seed_running_run(repo: MarketScanRepository, seeds: list[MarketScanSeed], *, as_of: str='2026-07-17 16:30:00', mode: str='official')` |
-| function | `_run_values` | 2059 | `def _run_values(*, as_of: str='2026-07-17 16:30:00') -> dict[str, str]` |
-| function | `_sample_seeds` | 2069 | `def _sample_seeds() -> list[MarketScanSeed]` |
-| function | `_sample_results` | 2080 | `def _sample_results() -> list[MarketScanResultWrite]` |
-| function | `_write` | 2091 | `def _write(symbol: str, *, status: str, score: int \| None=None, raw_score: float \| None=None, trend: int \| None=None, change: float \| None=None, amount: float \| None=None, quality: int \| None=None, data_date: str='2026-07-17', reason: str \| None=None, error: str \| None=None, score_rule: str='full-market-score-v4', score_hash: str \| None='a' * 64) -> MarketScanResultWrite` |
-| function | `_results` | 2159 | `def _results(repo: MarketScanRepository, run_id: int, *, page: int=1, page_size: int=100, status: str \| None='success', market: str \| tuple[str, ...] \| None=None, industry: str \| tuple[str, ...] \| None=None, is_st: bool \| None=None, is_new: bool \| None=None, min_score: int \| None=None, max_score: int \| None=None, min_trend_score: int \| None=None, max_trend_score: int \| None=None, min_change_pct: float \| None=None, max_change_pct: float \| None=None, min_turnover_rate: float \| None=None, max_turnover_rate: float \| None=None, min_amount: float \| None=None, max_amount: float \| None=None, min_data_quality_score: int \| None=None, max_data_quality_score: int \| None=None, min_confidence: float \| None=None, max_risk: float \| None=None, min_tradability: float \| None=None, symbols: tuple[str, ...] \| None=None, keyword: str \| None=None, sort: str \| tuple[str, ...]='rank', order: str \| tuple[str, ...]='asc')` |
-| function | `_symbols` | 2221 | `def _symbols(page) -> list[str]` |
-| function | `_reseal_published_runs` | 2225 | `def _reseal_published_runs(conn: sqlite3.Connection, *run_ids: int) -> None` |
+| function | `test_polling_identity_is_stable_non_authorizing_and_never_hashes_results` | 1485 | `def test_polling_identity_is_stable_non_authorizing_and_never_hashes_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_polling_identity_tracks_each_slot_and_database_schema_without_authority` | 1545 | `def test_polling_identity_tracks_each_slot_and_database_schema_without_authority(tmp_path: Path) -> None` |
+| function | `test_result_only_tamper_does_not_turn_polling_identity_into_authority` | 1567 | `def test_result_only_tamper_does_not_turn_polling_identity_into_authority(tmp_path: Path) -> None` |
+| function | `test_polling_identity_header_changes_detect_tamper_without_authorizing_it` | 1592 | `def test_polling_identity_header_changes_detect_tamper_without_authorizing_it(tmp_path: Path) -> None` |
+| function | `test_polling_identity_selection_matches_trusted_selectors_across_modes` | 1620 | `def test_polling_identity_selection_matches_trusted_selectors_across_modes(tmp_path: Path) -> None` |
+| function | `test_polling_identity_ignores_active_progress_but_tracks_status_transition` | 1670 | `def test_polling_identity_ignores_active_progress_but_tracks_status_transition(tmp_path: Path) -> None` |
+| function | `test_polling_identity_rejects_database_file_change_during_read` | 1701 | `def test_polling_identity_rejects_database_file_change_during_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_latest_full_and_published_ignore_newer_partial_legacy_run` | 1721 | `def test_latest_full_and_published_ignore_newer_partial_legacy_run(tmp_path: Path) -> None` |
+| function | `test_run_queries_filter_mode_status_and_data_date_without_changing_legacy_defaults` | 1745 | `def test_run_queries_filter_mode_status_and_data_date_without_changing_legacy_defaults(tmp_path: Path) -> None` |
+| function | `test_reconcile_orphaned_run_and_terminal_finish_are_idempotent` | 1784 | `def test_reconcile_orphaned_run_and_terminal_finish_are_idempotent(tmp_path: Path) -> None` |
+| function | `test_sqlite_allows_only_one_active_scan_across_repository_instances` | 1804 | `def test_sqlite_allows_only_one_active_scan_across_repository_instances(tmp_path: Path) -> None` |
+| function | `test_result_batch_rejects_unknown_duplicate_and_invalid_payloads` | 1819 | `def test_result_batch_rejects_unknown_duplicate_and_invalid_payloads(tmp_path: Path) -> None` |
+| function | `test_terminal_success_and_degraded_states_require_complete_consistent_results` | 1875 | `def test_terminal_success_and_degraded_states_require_complete_consistent_results(tmp_path: Path) -> None` |
+| function | `test_all_successful_fallback_results_must_finish_as_degraded` | 1897 | `def test_all_successful_fallback_results_must_finish_as_degraded(tmp_path: Path) -> None` |
+| function | `test_display_tags_do_not_control_degradation_or_retry` | 1925 | `def test_display_tags_do_not_control_degradation_or_retry(tmp_path: Path) -> None` |
+| function | `test_fallback_stock_pool_source_is_persisted_and_requires_degraded_status` | 1942 | `def test_fallback_stock_pool_source_is_persisted_and_requires_degraded_status(tmp_path: Path) -> None` |
+| function | `test_task_run_creation_and_scan_attachment_roll_back_together` | 1965 | `def test_task_run_creation_and_scan_attachment_roll_back_together(tmp_path: Path) -> None` |
+| function | `test_scan_and_linked_task_terminal_state_commit_atomically` | 1992 | `def test_scan_and_linked_task_terminal_state_commit_atomically(tmp_path: Path) -> None` |
+| function | `test_reconcile_repairs_terminal_scan_with_stale_running_task` | 2034 | `def test_reconcile_repairs_terminal_scan_with_stale_running_task(tmp_path: Path) -> None` |
+| function | `_repository` | 2059 | `def _repository(tmp_path: Path) -> tuple[MarketScanRepository, Path]` |
+| function | `_seed_running_run` | 2066 | `def _seed_running_run(repo: MarketScanRepository, seeds: list[MarketScanSeed], *, as_of: str='2026-07-17 16:30:00', mode: str='official')` |
+| function | `_run_values` | 2079 | `def _run_values(*, as_of: str='2026-07-17 16:30:00') -> dict[str, str]` |
+| function | `_sample_seeds` | 2089 | `def _sample_seeds() -> list[MarketScanSeed]` |
+| function | `_sample_results` | 2100 | `def _sample_results() -> list[MarketScanResultWrite]` |
+| function | `_write` | 2111 | `def _write(symbol: str, *, status: str, score: int \| None=None, raw_score: float \| None=None, trend: int \| None=None, change: float \| None=None, amount: float \| None=None, quality: int \| None=None, data_date: str='2026-07-17', reason: str \| None=None, error: str \| None=None, score_rule: str='full-market-score-v4', score_hash: str \| None='a' * 64) -> MarketScanResultWrite` |
+| function | `_results` | 2179 | `def _results(repo: MarketScanRepository, run_id: int, *, page: int=1, page_size: int=100, status: str \| None='success', market: str \| tuple[str, ...] \| None=None, industry: str \| tuple[str, ...] \| None=None, is_st: bool \| None=None, is_new: bool \| None=None, min_score: int \| None=None, max_score: int \| None=None, min_trend_score: int \| None=None, max_trend_score: int \| None=None, min_change_pct: float \| None=None, max_change_pct: float \| None=None, min_turnover_rate: float \| None=None, max_turnover_rate: float \| None=None, min_amount: float \| None=None, max_amount: float \| None=None, min_data_quality_score: int \| None=None, max_data_quality_score: int \| None=None, min_confidence: float \| None=None, max_risk: float \| None=None, min_tradability: float \| None=None, symbols: tuple[str, ...] \| None=None, keyword: str \| None=None, sort: str \| tuple[str, ...]='rank', order: str \| tuple[str, ...]='asc')` |
+| function | `_symbols` | 2241 | `def _symbols(page) -> list[str]` |
+| function | `_reseal_published_runs` | 2245 | `def _reseal_published_runs(conn: sqlite3.Connection, *run_ids: int) -> None` |
 
 #### `tests/test_market_scan_repository_structure.py`
 
