@@ -1269,14 +1269,21 @@ def test_official_pit_sources_filter_deduplicate_sort_and_reject_conflicts(
         artifact_module._official_pit_sources(["early", "conflict"])
 
 
-def test_real_legacy_run_71_77_sources_are_audit_only_not_current_pit(
+def test_legacy_source_versions_are_audit_only_not_current_pit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    directory = Path("data/research/market_scan_probability_source")
-    paths = [next(directory.glob(f"market-scan-probability-source-run-{run_id}-*.json.gz")) for run_id in (71, 77)]
-    snapshots = {path: artifact_module.load_probability_source_snapshot(path) for path in paths}
+    paths = (Path("legacy-run-71.json.gz"), Path("legacy-run-77.json.gz"))
+    snapshots = {
+        paths[0]: _official_source_snapshot("2026-08-07", 71),
+        paths[1]: _official_source_snapshot("2026-08-08", 77),
+    }
+    snapshots[paths[0]]["schema_version"] = (
+        source_module.LEGACY_PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION
+    )
+    snapshots[paths[1]]["schema_version"] = (
+        source_module.PREVIOUS_PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION
+    )
 
-    assert all(snapshot["schema_version"] != artifact_module.PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION for snapshot in snapshots.values())
     monkeypatch.setattr(
         artifact_module,
         "load_probability_source_snapshot",

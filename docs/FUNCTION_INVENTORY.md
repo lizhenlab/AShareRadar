@@ -8,8 +8,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 404 | 1015 | 6046 | 1393 | 135278 |
-| `tests/` | 230 | 199 | 3551 | 882 | 116824 |
+| `app/` | 404 | 1015 | 6047 | 1393 | 135310 |
+| `tests/` | 230 | 199 | 3552 | 882 | 116854 |
 | `tools/` | 15 | 7 | 152 | 6 | 3314 |
 
 ## Python Function Health
@@ -18,7 +18,7 @@ Branch points count `if`, loops, `try/except`, boolean operators, ternaries, `ma
 
 | Area | Longest function | Branchiest function |
 | --- | --- | --- |
-| `app/` | 60 lines: `app/services/strategy_portfolio.py:_candidate_allocation_decision` | 12 branches: `app/repositories/advice_reviews.py:_validate_evaluation_binding` |
+| `app/` | 60 lines: `app/services/strategy_portfolio.py:_candidate_allocation_decision` | 13 branches: `app/artifacts/io.py:_validate_json_tree` |
 | `tests/` | 388 lines: `tests/test_market_scan_frontend.py:test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries` | 37 branches: `tests/test_market_scan_release_boundary_coverage.py:test_public_probability_replay_rejects_resealed_boundary_counterexamples` |
 | `tools/` | 57 lines: `tools/provider_canary.py:_run_contract_probes` | 12 branches: `tools/provider_canary.py:_stock_pool_result` |
 
@@ -431,60 +431,61 @@ Lines: 14
 
 #### `app/artifacts/io.py`
 
-Lines: 570
+Lines: 602
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `ArtifactIOError` | 26 | `class ArtifactIOError(Exception)` |
-| class | `ArtifactCanonicalJsonError` | 30 | `class ArtifactCanonicalJsonError(ArtifactIOError)` |
-| class | `ArtifactJsonDecodeError` | 34 | `class ArtifactJsonDecodeError(ArtifactIOError)` |
-| class | `ArtifactDuplicateKeyError` | 38 | `class ArtifactDuplicateKeyError(ArtifactJsonDecodeError)` |
-| method | `ArtifactDuplicateKeyError.__init__` | 41 | `def __init__(self, key: str) -> None` |
-| class | `ArtifactNonFiniteConstantError` | 46 | `class ArtifactNonFiniteConstantError(ArtifactJsonDecodeError)` |
-| method | `ArtifactNonFiniteConstantError.__init__` | 49 | `def __init__(self, constant: str) -> None` |
-| class | `ArtifactPathError` | 54 | `class ArtifactPathError(ArtifactIOError)` |
-| method | `ArtifactPathError.__init__` | 57 | `def __init__(self, path: Path) -> None` |
-| class | `ArtifactNotFoundError` | 62 | `class ArtifactNotFoundError(ArtifactPathError)` |
-| class | `ArtifactNotRegularError` | 66 | `class ArtifactNotRegularError(ArtifactPathError)` |
-| class | `ArtifactNotDirectoryError` | 70 | `class ArtifactNotDirectoryError(ArtifactPathError)` |
-| class | `ArtifactReadError` | 74 | `class ArtifactReadError(ArtifactPathError)` |
-| class | `ArtifactTooLargeError` | 78 | `class ArtifactTooLargeError(ArtifactPathError)` |
-| method | `ArtifactTooLargeError.__init__` | 81 | `def __init__(self, path: Path, *, max_bytes: int) -> None` |
-| class | `ArtifactChangedError` | 86 | `class ArtifactChangedError(ArtifactPathError)` |
-| method | `ArtifactChangedError.__init__` | 89 | `def __init__(self, path: Path, *, stage: str) -> None` |
-| class | `ArtifactContentConflictError` | 94 | `class ArtifactContentConflictError(ArtifactPathError)` |
-| class | `ArtifactPublishConflictError` | 98 | `class ArtifactPublishConflictError(ArtifactPathError)` |
-| function | `canonical_json_text` | 102 | `def canonical_json_text(value: object) -> str` |
-| function | `canonical_json_bytes` | 119 | `def canonical_json_bytes(value: object) -> bytes` |
-| function | `sha256_hex` | 124 | `def sha256_hex(value: str \| bytes) -> str` |
-| function | `decode_json_bytes` | 130 | `def decode_json_bytes(encoded: bytes) -> object` |
-| function | `read_regular_file` | 144 | `def read_regular_file(path: str \| Path, *, max_bytes: int) -> bytes` |
-| function | `exclusive_atomic_publish` | 165 | `def exclusive_atomic_publish(path: str \| Path, encoded: bytes, *, max_bytes: int, before_publish: Callable[[], None] \| None=None) -> bool` |
-| function | `content_addressed_filename` | 206 | `def content_addressed_filename(prefix: str, identifiers: Sequence[str \| int], digest: str, suffix: str) -> str` |
-| function | `path_has_only_trusted_aliases` | 225 | `def path_has_only_trusted_aliases(path: Path) -> bool` |
-| function | `_reject_path_alias` | 232 | `def _reject_path_alias(path: Path, error_type: type[ArtifactPathError]) -> None` |
-| function | `_trusted_system_alias_path` | 244 | `def _trusted_system_alias_path(path: Path) -> Path` |
-| function | `_validate_json_tree` | 262 | `def _validate_json_tree(value: object) -> None` |
-| function | `_unique_object` | 280 | `def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]` |
-| function | `_reject_nonfinite_constant` | 289 | `def _reject_nonfinite_constant(value: str) -> object` |
-| function | `_open_regular_file` | 293 | `def _open_regular_file(path: Path, *, max_bytes: int) -> tuple[int, os.stat_result]` |
-| function | `_validate_regular_stat` | 308 | `def _validate_regular_stat(path: Path, facts: os.stat_result, *, max_bytes: int) -> None` |
-| function | `_read_open_file` | 315 | `def _read_open_file(path: Path, descriptor: int, opened: os.stat_result, *, max_bytes: int) -> bytes` |
-| function | `_stat_identity` | 333 | `def _stat_identity(facts: os.stat_result) -> tuple[int, int, int, int, int, int]` |
-| function | `_existing_bytes` | 344 | `def _existing_bytes(path: Path, *, max_bytes: int) -> bytes \| None` |
-| function | `_open_stable_directory` | 351 | `def _open_stable_directory(path: Path) -> tuple[int, os.stat_result]` |
-| function | `_validate_directory_stat` | 374 | `def _validate_directory_stat(path: Path, facts: os.stat_result) -> None` |
-| function | `_validate_directory_identity` | 379 | `def _validate_directory_identity(path: Path, opened: os.stat_result, *, stage: str) -> None` |
-| function | `_directory_descriptor_publish_supported` | 388 | `def _directory_descriptor_publish_supported() -> bool` |
-| function | `_publish_at_directory_descriptor` | 392 | `def _publish_at_directory_descriptor(target: Path, encoded: bytes, *, max_bytes: int, directory_descriptor: int, directory_facts: os.stat_result, before_publish: Callable[[], None] \| None) -> bool` |
-| function | `_existing_bytes_at` | 426 | `def _existing_bytes_at(path: Path, directory_descriptor: int, *, max_bytes: int) -> bytes \| None` |
-| function | `_write_temporary_at` | 457 | `def _write_temporary_at(target: Path, encoded: bytes, directory_descriptor: int) -> str` |
-| function | `_link_exclusively_at` | 483 | `def _link_exclusively_at(temporary_name: str, target: Path, directory_descriptor: int) -> None` |
-| function | `_unlink_at` | 498 | `def _unlink_at(name: str, directory_descriptor: int) -> None` |
-| function | `_publish_with_guarded_paths` | 505 | `def _publish_with_guarded_paths(target: Path, encoded: bytes, *, max_bytes: int, directory_descriptor: int, directory_facts: os.stat_result, before_publish: Callable[[], None] \| None) -> bool` |
-| function | `_write_temporary` | 540 | `def _write_temporary(target: Path, encoded: bytes) -> Path` |
-| function | `_link_exclusively` | 558 | `def _link_exclusively(temporary: Path, target: Path) -> None` |
-| function | `_fsync_directory` | 565 | `def _fsync_directory(directory: Path) -> None` |
+| class | `ArtifactIOError` | 27 | `class ArtifactIOError(Exception)` |
+| class | `ArtifactCanonicalJsonError` | 31 | `class ArtifactCanonicalJsonError(ArtifactIOError)` |
+| class | `ArtifactJsonDecodeError` | 35 | `class ArtifactJsonDecodeError(ArtifactIOError)` |
+| class | `ArtifactDuplicateKeyError` | 39 | `class ArtifactDuplicateKeyError(ArtifactJsonDecodeError)` |
+| method | `ArtifactDuplicateKeyError.__init__` | 42 | `def __init__(self, key: str) -> None` |
+| class | `ArtifactNonFiniteConstantError` | 47 | `class ArtifactNonFiniteConstantError(ArtifactJsonDecodeError)` |
+| method | `ArtifactNonFiniteConstantError.__init__` | 50 | `def __init__(self, constant: str) -> None` |
+| class | `ArtifactPathError` | 55 | `class ArtifactPathError(ArtifactIOError)` |
+| method | `ArtifactPathError.__init__` | 58 | `def __init__(self, path: Path) -> None` |
+| class | `ArtifactNotFoundError` | 63 | `class ArtifactNotFoundError(ArtifactPathError)` |
+| class | `ArtifactNotRegularError` | 67 | `class ArtifactNotRegularError(ArtifactPathError)` |
+| class | `ArtifactNotDirectoryError` | 71 | `class ArtifactNotDirectoryError(ArtifactPathError)` |
+| class | `ArtifactReadError` | 75 | `class ArtifactReadError(ArtifactPathError)` |
+| class | `ArtifactTooLargeError` | 79 | `class ArtifactTooLargeError(ArtifactPathError)` |
+| method | `ArtifactTooLargeError.__init__` | 82 | `def __init__(self, path: Path, *, max_bytes: int) -> None` |
+| class | `ArtifactChangedError` | 87 | `class ArtifactChangedError(ArtifactPathError)` |
+| method | `ArtifactChangedError.__init__` | 90 | `def __init__(self, path: Path, *, stage: str) -> None` |
+| class | `ArtifactContentConflictError` | 95 | `class ArtifactContentConflictError(ArtifactPathError)` |
+| class | `ArtifactPublishConflictError` | 99 | `class ArtifactPublishConflictError(ArtifactPathError)` |
+| function | `canonical_json_text` | 103 | `def canonical_json_text(value: object) -> str` |
+| function | `canonical_json_bytes` | 120 | `def canonical_json_bytes(value: object) -> bytes` |
+| function | `sha256_hex` | 125 | `def sha256_hex(value: str \| bytes) -> str` |
+| function | `decode_json_bytes` | 131 | `def decode_json_bytes(encoded: bytes) -> object` |
+| function | `read_regular_file` | 147 | `def read_regular_file(path: str \| Path, *, max_bytes: int) -> bytes` |
+| function | `exclusive_atomic_publish` | 168 | `def exclusive_atomic_publish(path: str \| Path, encoded: bytes, *, max_bytes: int, before_publish: Callable[[], None] \| None=None) -> bool` |
+| function | `content_addressed_filename` | 209 | `def content_addressed_filename(prefix: str, identifiers: Sequence[str \| int], digest: str, suffix: str) -> str` |
+| function | `path_has_only_trusted_aliases` | 228 | `def path_has_only_trusted_aliases(path: Path) -> bool` |
+| function | `_reject_path_alias` | 235 | `def _reject_path_alias(path: Path, error_type: type[ArtifactPathError]) -> None` |
+| function | `_trusted_system_alias_path` | 247 | `def _trusted_system_alias_path(path: Path) -> Path` |
+| function | `_validate_json_tree` | 265 | `def _validate_json_tree(value: object) -> None` |
+| function | `_validate_json_text_nesting` | 288 | `def _validate_json_text_nesting(text: str) -> None` |
+| function | `_unique_object` | 312 | `def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]` |
+| function | `_reject_nonfinite_constant` | 321 | `def _reject_nonfinite_constant(value: str) -> object` |
+| function | `_open_regular_file` | 325 | `def _open_regular_file(path: Path, *, max_bytes: int) -> tuple[int, os.stat_result]` |
+| function | `_validate_regular_stat` | 340 | `def _validate_regular_stat(path: Path, facts: os.stat_result, *, max_bytes: int) -> None` |
+| function | `_read_open_file` | 347 | `def _read_open_file(path: Path, descriptor: int, opened: os.stat_result, *, max_bytes: int) -> bytes` |
+| function | `_stat_identity` | 365 | `def _stat_identity(facts: os.stat_result) -> tuple[int, int, int, int, int, int]` |
+| function | `_existing_bytes` | 376 | `def _existing_bytes(path: Path, *, max_bytes: int) -> bytes \| None` |
+| function | `_open_stable_directory` | 383 | `def _open_stable_directory(path: Path) -> tuple[int, os.stat_result]` |
+| function | `_validate_directory_stat` | 406 | `def _validate_directory_stat(path: Path, facts: os.stat_result) -> None` |
+| function | `_validate_directory_identity` | 411 | `def _validate_directory_identity(path: Path, opened: os.stat_result, *, stage: str) -> None` |
+| function | `_directory_descriptor_publish_supported` | 420 | `def _directory_descriptor_publish_supported() -> bool` |
+| function | `_publish_at_directory_descriptor` | 424 | `def _publish_at_directory_descriptor(target: Path, encoded: bytes, *, max_bytes: int, directory_descriptor: int, directory_facts: os.stat_result, before_publish: Callable[[], None] \| None) -> bool` |
+| function | `_existing_bytes_at` | 458 | `def _existing_bytes_at(path: Path, directory_descriptor: int, *, max_bytes: int) -> bytes \| None` |
+| function | `_write_temporary_at` | 489 | `def _write_temporary_at(target: Path, encoded: bytes, directory_descriptor: int) -> str` |
+| function | `_link_exclusively_at` | 515 | `def _link_exclusively_at(temporary_name: str, target: Path, directory_descriptor: int) -> None` |
+| function | `_unlink_at` | 530 | `def _unlink_at(name: str, directory_descriptor: int) -> None` |
+| function | `_publish_with_guarded_paths` | 537 | `def _publish_with_guarded_paths(target: Path, encoded: bytes, *, max_bytes: int, directory_descriptor: int, directory_facts: os.stat_result, before_publish: Callable[[], None] \| None) -> bool` |
+| function | `_write_temporary` | 572 | `def _write_temporary(target: Path, encoded: bytes) -> Path` |
+| function | `_link_exclusively` | 590 | `def _link_exclusively(temporary: Path, target: Path) -> None` |
+| function | `_fsync_directory` | 597 | `def _fsync_directory(directory: Path) -> None` |
 
 #### `app/config.py`
 
@@ -13289,7 +13290,7 @@ Lines: 28
 
 #### `tests/test_individual_probability.py`
 
-Lines: 2555
+Lines: 2562
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -13354,52 +13355,52 @@ Lines: 2555
 | function | `test_assessment_write_load_is_content_addressed_and_idempotent` | 1204 | `def test_assessment_write_load_is_content_addressed_and_idempotent(tmp_path: Path) -> None` |
 | function | `test_assessment_io_failures_are_wrapped_as_domain_errors` | 1215 | `def test_assessment_io_failures_are_wrapped_as_domain_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
 | function | `test_official_pit_sources_filter_deduplicate_sort_and_reject_conflicts` | 1238 | `def test_official_pit_sources_filter_deduplicate_sort_and_reject_conflicts(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_real_legacy_run_71_77_sources_are_audit_only_not_current_pit` | 1272 | `def test_real_legacy_run_71_77_sources_are_audit_only_not_current_pit(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_official_pit_source_rejects_invalid_identity` | 1288 | `def test_official_pit_source_rejects_invalid_identity(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_official_pit_source_must_exist_by_assessment_generated_at` | 1307 | `def test_official_pit_source_must_exist_by_assessment_generated_at(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_run87_weekend_source_roundtrips_current_assessment_store` | 1339 | `def test_run87_weekend_source_roundtrips_current_assessment_store(tmp_path: Path) -> None` |
-| function | `test_current_official_source_requires_1515_maturity` | 1432 | `def test_current_official_source_requires_1515_maturity(monkeypatch: pytest.MonkeyPatch, as_of: str, captured_at: str) -> None` |
-| function | `test_current_official_source_rejects_low_success_coverage` | 1452 | `def test_current_official_source_rejects_low_success_coverage(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_current_official_source_rejects_unregistered_production_contract` | 1472 | `def test_current_official_source_rejects_unregistered_production_contract(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_current_official_sources_require_one_cross_date_contract` | 1489 | `def test_current_official_sources_require_one_cross_date_contract(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_current_official_sources_reject_same_run_across_dates` | 1508 | `def test_current_official_sources_reject_same_run_across_dates(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_current_official_source_date_is_bound_in_shanghai_timezone` | 1524 | `def test_current_official_source_date_is_bound_in_shanghai_timezone(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_previous_source_rollover_keeps_frozen_same_day_contract` | 1542 | `def test_previous_source_rollover_keeps_frozen_same_day_contract(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_current_assessment_rejects_embedded_source_captured_after_generated_at` | 1580 | `def test_current_assessment_rejects_embedded_source_captured_after_generated_at(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_v4_metrics_bind_selection_summary_while_v2_keeps_legacy_shape` | 1615 | `def test_v4_metrics_bind_selection_summary_while_v2_keeps_legacy_shape() -> None` |
-| function | `test_v4_source_identity_exactly_binds_full_market_coverage` | 1649 | `def test_v4_source_identity_exactly_binds_full_market_coverage() -> None` |
-| function | `test_individual_source_identity_reads_previous_v2_v4_but_rejects_v4_as_v3` | 1696 | `def test_individual_source_identity_reads_previous_v2_v4_but_rejects_v4_as_v3() -> None` |
-| function | `test_official_intake_rejects_quality_run_coverage_divergence` | 1743 | `def test_official_intake_rejects_quality_run_coverage_divergence() -> None` |
-| function | `test_history_series_rejects_empty_and_cross_symbol_date_mismatch` | 1754 | `def test_history_series_rejects_empty_and_cross_symbol_date_mismatch() -> None` |
-| function | `test_history_and_label_boundaries_fail_closed` | 1769 | `def test_history_and_label_boundaries_fail_closed(tmp_path: Path) -> None` |
-| function | `test_current_source_intake_rejects_resealed_contract_and_count_attacks` | 1799 | `def test_current_source_intake_rejects_resealed_contract_and_count_attacks() -> None` |
-| function | `test_v4_embedded_source_is_exactly_round_trip_bound_and_rejects_tampering` | 1838 | `def test_v4_embedded_source_is_exactly_round_trip_bound_and_rejects_tampering() -> None` |
-| function | `test_v4_and_legacy_v2_source_shapes_cannot_be_reinterpreted` | 1870 | `def test_v4_and_legacy_v2_source_shapes_cannot_be_reinterpreted() -> None` |
-| function | `test_source_timestamps_and_generated_time_fail_closed_on_ambiguous_values` | 1906 | `def test_source_timestamps_and_generated_time_fail_closed_on_ambiguous_values(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_official_timing_rejects_calendar_outage_and_non_session` | 1929 | `def test_official_timing_rejects_calendar_outage_and_non_session(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_horizon_set_rejects_source_count_and_authorization_bypasses` | 1968 | `def test_horizon_set_rejects_source_count_and_authorization_bypasses() -> None` |
-| function | `test_compact_metrics_and_validation_reject_malformed_selection_evidence` | 2039 | `def test_compact_metrics_and_validation_reject_malformed_selection_evidence() -> None` |
-| function | `test_database_fail_closed_paths_cover_read_sidecar_and_toctou_errors` | 2111 | `def test_database_fail_closed_paths_cover_read_sidecar_and_toctou_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_low_level_artifact_validators_reject_non_regular_and_non_json_shapes` | 2156 | `def test_low_level_artifact_validators_reject_non_regular_and_non_json_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_invalid_history_date_and_unaffordable_lot_are_not_labelled` | 2187 | `def test_invalid_history_date_and_unaffordable_lot_are_not_labelled() -> None` |
-| function | `test_cli_main_builds_writes_and_summarizes_all_horizons` | 2201 | `def test_cli_main_builds_writes_and_summarizes_all_horizons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None` |
-| function | `test_cli_projection_rejects_non_mapping` | 2275 | `def test_cli_projection_rejects_non_mapping() -> None` |
-| function | `_write_synthetic_history_database` | 2280 | `def _write_synthetic_history_database(path: Path) -> None` |
-| function | `_official_source_snapshot` | 2310 | `def _official_source_snapshot(data_date: str, run_id: int, *, mode: str='official') -> dict[str, object]` |
-| class | `_RowsConnection` | 2383 | `class _RowsConnection` |
-| method | `_RowsConnection.__init__` | 2384 | `def __init__(self, rows: list[dict[str, object]]) -> None` |
-| method | `_RowsConnection.execute` | 2387 | `def execute(self, _sql: str) -> list[dict[str, object]]` |
-| function | `_history_row` | 2391 | `def _history_row(symbol: str, data_date: str) -> dict[str, object]` |
-| function | `_cli_horizon` | 2406 | `def _cli_horizon(display_day: int, *, metrics: bool) -> dict[str, object]` |
-| function | `_synthetic_history_bars` | 2427 | `def _synthetic_history_bars() -> list[artifact_module._HistoryBar]` |
-| function | `_empty_horizon` | 2445 | `def _empty_horizon(display_day: int, holding_sessions: int, counts: IndividualProbabilityCounts) -> IndividualUpsideHorizon` |
-| function | `_calibrated_counts` | 2459 | `def _calibrated_counts(display_day: int) -> IndividualProbabilityCounts` |
-| function | `_calibrated_metrics` | 2471 | `def _calibrated_metrics() -> IndividualProbabilityMetrics` |
-| function | `_calibrated_horizon` | 2489 | `def _calibrated_horizon(display_day: int) -> IndividualUpsideHorizon` |
-| function | `_calibrated_report_evidence` | 2506 | `def _calibrated_report_evidence() -> IndividualProbabilityEvidence` |
-| function | `_reseal` | 2519 | `def _reseal(artifact: dict) -> None` |
-| function | `_set_nested_value` | 2524 | `def _set_nested_value(container: object, path: tuple[str, ...], value: object) -> None` |
-| function | `_delete_nested_value` | 2541 | `def _delete_nested_value(container: object, path: tuple[str, ...]) -> None` |
+| function | `test_legacy_source_versions_are_audit_only_not_current_pit` | 1272 | `def test_legacy_source_versions_are_audit_only_not_current_pit(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_official_pit_source_rejects_invalid_identity` | 1295 | `def test_official_pit_source_rejects_invalid_identity(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_official_pit_source_must_exist_by_assessment_generated_at` | 1314 | `def test_official_pit_source_must_exist_by_assessment_generated_at(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_run87_weekend_source_roundtrips_current_assessment_store` | 1346 | `def test_run87_weekend_source_roundtrips_current_assessment_store(tmp_path: Path) -> None` |
+| function | `test_current_official_source_requires_1515_maturity` | 1439 | `def test_current_official_source_requires_1515_maturity(monkeypatch: pytest.MonkeyPatch, as_of: str, captured_at: str) -> None` |
+| function | `test_current_official_source_rejects_low_success_coverage` | 1459 | `def test_current_official_source_rejects_low_success_coverage(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_current_official_source_rejects_unregistered_production_contract` | 1479 | `def test_current_official_source_rejects_unregistered_production_contract(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_current_official_sources_require_one_cross_date_contract` | 1496 | `def test_current_official_sources_require_one_cross_date_contract(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_current_official_sources_reject_same_run_across_dates` | 1515 | `def test_current_official_sources_reject_same_run_across_dates(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_current_official_source_date_is_bound_in_shanghai_timezone` | 1531 | `def test_current_official_source_date_is_bound_in_shanghai_timezone(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_previous_source_rollover_keeps_frozen_same_day_contract` | 1549 | `def test_previous_source_rollover_keeps_frozen_same_day_contract(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_current_assessment_rejects_embedded_source_captured_after_generated_at` | 1587 | `def test_current_assessment_rejects_embedded_source_captured_after_generated_at(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_v4_metrics_bind_selection_summary_while_v2_keeps_legacy_shape` | 1622 | `def test_v4_metrics_bind_selection_summary_while_v2_keeps_legacy_shape() -> None` |
+| function | `test_v4_source_identity_exactly_binds_full_market_coverage` | 1656 | `def test_v4_source_identity_exactly_binds_full_market_coverage() -> None` |
+| function | `test_individual_source_identity_reads_previous_v2_v4_but_rejects_v4_as_v3` | 1703 | `def test_individual_source_identity_reads_previous_v2_v4_but_rejects_v4_as_v3() -> None` |
+| function | `test_official_intake_rejects_quality_run_coverage_divergence` | 1750 | `def test_official_intake_rejects_quality_run_coverage_divergence() -> None` |
+| function | `test_history_series_rejects_empty_and_cross_symbol_date_mismatch` | 1761 | `def test_history_series_rejects_empty_and_cross_symbol_date_mismatch() -> None` |
+| function | `test_history_and_label_boundaries_fail_closed` | 1776 | `def test_history_and_label_boundaries_fail_closed(tmp_path: Path) -> None` |
+| function | `test_current_source_intake_rejects_resealed_contract_and_count_attacks` | 1806 | `def test_current_source_intake_rejects_resealed_contract_and_count_attacks() -> None` |
+| function | `test_v4_embedded_source_is_exactly_round_trip_bound_and_rejects_tampering` | 1845 | `def test_v4_embedded_source_is_exactly_round_trip_bound_and_rejects_tampering() -> None` |
+| function | `test_v4_and_legacy_v2_source_shapes_cannot_be_reinterpreted` | 1877 | `def test_v4_and_legacy_v2_source_shapes_cannot_be_reinterpreted() -> None` |
+| function | `test_source_timestamps_and_generated_time_fail_closed_on_ambiguous_values` | 1913 | `def test_source_timestamps_and_generated_time_fail_closed_on_ambiguous_values(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_official_timing_rejects_calendar_outage_and_non_session` | 1936 | `def test_official_timing_rejects_calendar_outage_and_non_session(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_horizon_set_rejects_source_count_and_authorization_bypasses` | 1975 | `def test_horizon_set_rejects_source_count_and_authorization_bypasses() -> None` |
+| function | `test_compact_metrics_and_validation_reject_malformed_selection_evidence` | 2046 | `def test_compact_metrics_and_validation_reject_malformed_selection_evidence() -> None` |
+| function | `test_database_fail_closed_paths_cover_read_sidecar_and_toctou_errors` | 2118 | `def test_database_fail_closed_paths_cover_read_sidecar_and_toctou_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_low_level_artifact_validators_reject_non_regular_and_non_json_shapes` | 2163 | `def test_low_level_artifact_validators_reject_non_regular_and_non_json_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_invalid_history_date_and_unaffordable_lot_are_not_labelled` | 2194 | `def test_invalid_history_date_and_unaffordable_lot_are_not_labelled() -> None` |
+| function | `test_cli_main_builds_writes_and_summarizes_all_horizons` | 2208 | `def test_cli_main_builds_writes_and_summarizes_all_horizons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None` |
+| function | `test_cli_projection_rejects_non_mapping` | 2282 | `def test_cli_projection_rejects_non_mapping() -> None` |
+| function | `_write_synthetic_history_database` | 2287 | `def _write_synthetic_history_database(path: Path) -> None` |
+| function | `_official_source_snapshot` | 2317 | `def _official_source_snapshot(data_date: str, run_id: int, *, mode: str='official') -> dict[str, object]` |
+| class | `_RowsConnection` | 2390 | `class _RowsConnection` |
+| method | `_RowsConnection.__init__` | 2391 | `def __init__(self, rows: list[dict[str, object]]) -> None` |
+| method | `_RowsConnection.execute` | 2394 | `def execute(self, _sql: str) -> list[dict[str, object]]` |
+| function | `_history_row` | 2398 | `def _history_row(symbol: str, data_date: str) -> dict[str, object]` |
+| function | `_cli_horizon` | 2413 | `def _cli_horizon(display_day: int, *, metrics: bool) -> dict[str, object]` |
+| function | `_synthetic_history_bars` | 2434 | `def _synthetic_history_bars() -> list[artifact_module._HistoryBar]` |
+| function | `_empty_horizon` | 2452 | `def _empty_horizon(display_day: int, holding_sessions: int, counts: IndividualProbabilityCounts) -> IndividualUpsideHorizon` |
+| function | `_calibrated_counts` | 2466 | `def _calibrated_counts(display_day: int) -> IndividualProbabilityCounts` |
+| function | `_calibrated_metrics` | 2478 | `def _calibrated_metrics() -> IndividualProbabilityMetrics` |
+| function | `_calibrated_horizon` | 2496 | `def _calibrated_horizon(display_day: int) -> IndividualUpsideHorizon` |
+| function | `_calibrated_report_evidence` | 2513 | `def _calibrated_report_evidence() -> IndividualProbabilityEvidence` |
+| function | `_reseal` | 2526 | `def _reseal(artifact: dict) -> None` |
+| function | `_set_nested_value` | 2531 | `def _set_nested_value(container: object, path: tuple[str, ...], value: object) -> None` |
+| function | `_delete_nested_value` | 2548 | `def _delete_nested_value(container: object, path: tuple[str, ...]) -> None` |
 
 #### `tests/test_individual_probability_store_failures.py`
 
@@ -15130,47 +15131,48 @@ Lines: 1208
 
 #### `tests/test_market_scan_snapshot_integrity.py`
 
-Lines: 1197
+Lines: 1220
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `_capture_verified_connection` | 68 | `def _capture_verified_connection(monkeypatch: pytest.MonkeyPatch) -> list[sqlite3.Connection]` |
-| function | `test_frozen_full_market_snapshot_reconstructs_the_complete_contract` | 90 | `def test_frozen_full_market_snapshot_reconstructs_the_complete_contract(tmp_path) -> None` |
-| function | `test_sealed_published_snapshot_rejects_every_direct_sql_mutation` | 108 | `def test_sealed_published_snapshot_rejects_every_direct_sql_mutation(tmp_path) -> None` |
-| function | `test_repository_rejects_each_resealed_or_incomplete_snapshot_counterexample` | 156 | `def test_repository_rejects_each_resealed_or_incomplete_snapshot_counterexample(tmp_path, mutation: str) -> None` |
-| function | `test_strategy_service_revalidates_untrusted_repository_before_build_or_save` | 208 | `def test_strategy_service_revalidates_untrusted_repository_before_build_or_save(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_public_run_header_reads_fail_closed_after_result_tamper` | 233 | `def test_public_run_header_reads_fail_closed_after_result_tamper(tmp_path, read_kind: str) -> None` |
-| function | `test_probability_facing_queries_verify_one_full_snapshot_per_request` | 263 | `def test_probability_facing_queries_verify_one_full_snapshot_per_request(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_verified_query_rejects_drop_tamper_recreate_receipt_bypass` | 309 | `def test_verified_query_rejects_drop_tamper_recreate_receipt_bypass(tmp_path) -> None` |
-| function | `test_verified_read_session_is_request_local_and_closes_on_error` | 324 | `def test_verified_read_session_is_request_local_and_closes_on_error(tmp_path) -> None` |
-| function | `test_verified_read_public_issuer_does_not_accept_caller_owned_connections` | 358 | `def test_verified_read_public_issuer_does_not_accept_caller_owned_connections(tmp_path) -> None` |
-| function | `test_verified_read_rejects_same_connection_dml_after_verification` | 371 | `def test_verified_read_rejects_same_connection_dml_after_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_verified_read_rejects_same_connection_schema_change_after_verification` | 396 | `def test_verified_read_rejects_same_connection_schema_change_after_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_verified_read_rejects_restarted_transaction_after_verification` | 416 | `def test_verified_read_rejects_restarted_transaction_after_verification(tmp_path, transaction_end: str, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_verified_read_closed_internal_connection_does_not_mask_domain_error` | 433 | `def test_verified_read_closed_internal_connection_does_not_mask_domain_error(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_verified_read_linearizes_outbox_state_until_the_next_request` | 454 | `def test_verified_read_linearizes_outbox_state_until_the_next_request(tmp_path) -> None` |
-| function | `test_5382_row_results_request_stays_under_api_timeout_with_one_full_hash` | 499 | `def test_5382_row_results_request_stays_under_api_timeout_with_one_full_hash(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_legacy_backfill_results_use_one_full_verification` | 563 | `def test_legacy_backfill_results_use_one_full_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_scheduler_no_action_hint_never_replaces_periodic_or_api_seal_verification` | 601 | `def test_scheduler_no_action_hint_never_replaces_periodic_or_api_seal_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_streamed_snapshot_digest_is_byte_exact_with_materialized_v2_contract` | 664 | `def test_streamed_snapshot_digest_is_byte_exact_with_materialized_v2_contract(tmp_path) -> None` |
-| function | `test_streamed_snapshot_digest_preserves_empty_result_array_bytes` | 687 | `def test_streamed_snapshot_digest_preserves_empty_result_array_bytes(tmp_path) -> None` |
-| function | `test_streamed_snapshot_digest_preserves_float_bytes_and_symbol_order` | 713 | `def test_streamed_snapshot_digest_preserves_float_bytes_and_symbol_order(tmp_path) -> None` |
-| function | `test_snapshot_verifier_never_fetches_all_result_rows` | 737 | `def test_snapshot_verifier_never_fetches_all_result_rows(tmp_path) -> None` |
-| function | `test_streamed_snapshot_digest_keeps_strict_json_fail_closed` | 775 | `def test_streamed_snapshot_digest_keeps_strict_json_fail_closed(tmp_path, invalid_json: str) -> None` |
-| function | `_materialized_v2_snapshot_digest` | 791 | `def _materialized_v2_snapshot_digest(conn: sqlite3.Connection, run_id: int) -> str` |
-| function | `test_legacy_backfill_seal_is_audit_only_and_cannot_authorize_strategy_source` | 821 | `def test_legacy_backfill_seal_is_audit_only_and_cannot_authorize_strategy_source(tmp_path) -> None` |
-| function | `test_executable_shadow_revalidates_before_portfolio_build` | 851 | `def test_executable_shadow_revalidates_before_portfolio_build(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_published_snapshot_is_append_only_at_the_database_boundary` | 880 | `def test_published_snapshot_is_append_only_at_the_database_boundary(tmp_path, mutation: str) -> None` |
-| function | `test_publication_seal_rejects_impossible_audit_time_order` | 907 | `def test_publication_seal_rejects_impossible_audit_time_order(tmp_path, mutation: str) -> None` |
-| function | `test_public_run_model_rejects_impossible_audit_time_order` | 956 | `def test_public_run_model_rejects_impossible_audit_time_order(tmp_path, field: str, value: str) -> None` |
-| function | `test_public_result_page_rejects_result_updated_after_run` | 970 | `def test_public_result_page_rejects_result_updated_after_run(tmp_path) -> None` |
-| function | `_query_results` | 992 | `def _query_results(service: MarketScanQueryService, run_id: int) -> MarketScanResultPage` |
-| function | `_empty_research_stores` | 999 | `def _empty_research_stores() -> MarketScanResearchStores` |
-| function | `_result_query` | 1007 | `def _result_query() -> dict[str, object]` |
-| function | `_large_missing_publication` | 1023 | `def _large_missing_publication(tmp_path, *, result_count: int, seal_origin: str='publication') -> tuple[SQLiteCache, int]` |
-| function | `_large_current_action_publication` | 1094 | `def _large_current_action_publication(tmp_path, *, result_count: int) -> tuple[SQLiteCache, int]` |
-| function | `_representative_market_counts` | 1189 | `def _representative_market_counts(result_count: int) -> dict[str, int]` |
-| function | `_market_codes` | 1195 | `def _market_codes(market: str, count: int) -> list[str]` |
+| function | `_capture_verified_connection` | 69 | `def _capture_verified_connection(monkeypatch: pytest.MonkeyPatch) -> list[sqlite3.Connection]` |
+| function | `_paused_active_coverage` | 92 | `def _paused_active_coverage() -> Iterator[None]` |
+| function | `test_frozen_full_market_snapshot_reconstructs_the_complete_contract` | 104 | `def test_frozen_full_market_snapshot_reconstructs_the_complete_contract(tmp_path) -> None` |
+| function | `test_sealed_published_snapshot_rejects_every_direct_sql_mutation` | 122 | `def test_sealed_published_snapshot_rejects_every_direct_sql_mutation(tmp_path) -> None` |
+| function | `test_repository_rejects_each_resealed_or_incomplete_snapshot_counterexample` | 170 | `def test_repository_rejects_each_resealed_or_incomplete_snapshot_counterexample(tmp_path, mutation: str) -> None` |
+| function | `test_strategy_service_revalidates_untrusted_repository_before_build_or_save` | 222 | `def test_strategy_service_revalidates_untrusted_repository_before_build_or_save(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_public_run_header_reads_fail_closed_after_result_tamper` | 247 | `def test_public_run_header_reads_fail_closed_after_result_tamper(tmp_path, read_kind: str) -> None` |
+| function | `test_probability_facing_queries_verify_one_full_snapshot_per_request` | 277 | `def test_probability_facing_queries_verify_one_full_snapshot_per_request(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_verified_query_rejects_drop_tamper_recreate_receipt_bypass` | 323 | `def test_verified_query_rejects_drop_tamper_recreate_receipt_bypass(tmp_path) -> None` |
+| function | `test_verified_read_session_is_request_local_and_closes_on_error` | 338 | `def test_verified_read_session_is_request_local_and_closes_on_error(tmp_path) -> None` |
+| function | `test_verified_read_public_issuer_does_not_accept_caller_owned_connections` | 372 | `def test_verified_read_public_issuer_does_not_accept_caller_owned_connections(tmp_path) -> None` |
+| function | `test_verified_read_rejects_same_connection_dml_after_verification` | 385 | `def test_verified_read_rejects_same_connection_dml_after_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_verified_read_rejects_same_connection_schema_change_after_verification` | 410 | `def test_verified_read_rejects_same_connection_schema_change_after_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_verified_read_rejects_restarted_transaction_after_verification` | 430 | `def test_verified_read_rejects_restarted_transaction_after_verification(tmp_path, transaction_end: str, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_verified_read_closed_internal_connection_does_not_mask_domain_error` | 447 | `def test_verified_read_closed_internal_connection_does_not_mask_domain_error(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_verified_read_linearizes_outbox_state_until_the_next_request` | 468 | `def test_verified_read_linearizes_outbox_state_until_the_next_request(tmp_path) -> None` |
+| function | `test_5382_row_results_request_stays_under_api_timeout_with_one_full_hash` | 513 | `def test_5382_row_results_request_stays_under_api_timeout_with_one_full_hash(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_legacy_backfill_results_use_one_full_verification` | 586 | `def test_legacy_backfill_results_use_one_full_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_scheduler_no_action_hint_never_replaces_periodic_or_api_seal_verification` | 624 | `def test_scheduler_no_action_hint_never_replaces_periodic_or_api_seal_verification(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_streamed_snapshot_digest_is_byte_exact_with_materialized_v2_contract` | 687 | `def test_streamed_snapshot_digest_is_byte_exact_with_materialized_v2_contract(tmp_path) -> None` |
+| function | `test_streamed_snapshot_digest_preserves_empty_result_array_bytes` | 710 | `def test_streamed_snapshot_digest_preserves_empty_result_array_bytes(tmp_path) -> None` |
+| function | `test_streamed_snapshot_digest_preserves_float_bytes_and_symbol_order` | 736 | `def test_streamed_snapshot_digest_preserves_float_bytes_and_symbol_order(tmp_path) -> None` |
+| function | `test_snapshot_verifier_never_fetches_all_result_rows` | 760 | `def test_snapshot_verifier_never_fetches_all_result_rows(tmp_path) -> None` |
+| function | `test_streamed_snapshot_digest_keeps_strict_json_fail_closed` | 798 | `def test_streamed_snapshot_digest_keeps_strict_json_fail_closed(tmp_path, invalid_json: str) -> None` |
+| function | `_materialized_v2_snapshot_digest` | 814 | `def _materialized_v2_snapshot_digest(conn: sqlite3.Connection, run_id: int) -> str` |
+| function | `test_legacy_backfill_seal_is_audit_only_and_cannot_authorize_strategy_source` | 844 | `def test_legacy_backfill_seal_is_audit_only_and_cannot_authorize_strategy_source(tmp_path) -> None` |
+| function | `test_executable_shadow_revalidates_before_portfolio_build` | 874 | `def test_executable_shadow_revalidates_before_portfolio_build(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_published_snapshot_is_append_only_at_the_database_boundary` | 903 | `def test_published_snapshot_is_append_only_at_the_database_boundary(tmp_path, mutation: str) -> None` |
+| function | `test_publication_seal_rejects_impossible_audit_time_order` | 930 | `def test_publication_seal_rejects_impossible_audit_time_order(tmp_path, mutation: str) -> None` |
+| function | `test_public_run_model_rejects_impossible_audit_time_order` | 979 | `def test_public_run_model_rejects_impossible_audit_time_order(tmp_path, field: str, value: str) -> None` |
+| function | `test_public_result_page_rejects_result_updated_after_run` | 993 | `def test_public_result_page_rejects_result_updated_after_run(tmp_path) -> None` |
+| function | `_query_results` | 1015 | `def _query_results(service: MarketScanQueryService, run_id: int) -> MarketScanResultPage` |
+| function | `_empty_research_stores` | 1022 | `def _empty_research_stores() -> MarketScanResearchStores` |
+| function | `_result_query` | 1030 | `def _result_query() -> dict[str, object]` |
+| function | `_large_missing_publication` | 1046 | `def _large_missing_publication(tmp_path, *, result_count: int, seal_origin: str='publication') -> tuple[SQLiteCache, int]` |
+| function | `_large_current_action_publication` | 1117 | `def _large_current_action_publication(tmp_path, *, result_count: int) -> tuple[SQLiteCache, int]` |
+| function | `_representative_market_counts` | 1212 | `def _representative_market_counts(result_count: int) -> dict[str, int]` |
+| function | `_market_codes` | 1218 | `def _market_codes(market: str, count: int) -> list[str]` |
 
 #### `tests/test_market_scan_terminal_recovery.py`
 

@@ -17,6 +17,7 @@ import tempfile
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _READ_CHUNK_BYTES = 1024 * 1024
+_MAX_JSON_NESTING_DEPTH = 256
 _DARWIN_SYSTEM_ALIASES = {
     "tmp": Path("/private/tmp"),
     "var": Path("/private/var"),
@@ -130,12 +131,14 @@ def sha256_hex(value: str | bytes) -> str:
 def decode_json_bytes(encoded: bytes) -> object:
     """Decode UTF-8 JSON while rejecting duplicate keys and non-finite constants."""
     try:
+        text = encoded.decode("utf-8")
+        _validate_json_text_nesting(text)
         return json.loads(
-            encoded.decode("utf-8"),
+            text,
             object_pairs_hook=_unique_object,
             parse_constant=_reject_nonfinite_constant,
         )
-    except (ArtifactDuplicateKeyError, ArtifactNonFiniteConstantError):
+    except ArtifactJsonDecodeError:
         raise
     except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ArtifactJsonDecodeError from exc
@@ -260,21 +263,50 @@ def _trusted_system_alias_path(path: Path) -> Path:
 
 
 def _validate_json_tree(value: object) -> None:
-    if isinstance(value, dict):
-        if any(not isinstance(key, str) for key in value):
-            raise ArtifactCanonicalJsonError
-        for item in value.values():
-            _validate_json_tree(item)
-        return
-    if isinstance(value, list):
-        for item in value:
-            _validate_json_tree(item)
-        return
-    if value is None or isinstance(value, str | bool | int):
-        return
-    if isinstance(value, float) and math.isfinite(value):
-        return
-    raise ArtifactCanonicalJsonError
+    pending = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, dict):
+            if depth >= _MAX_JSON_NESTING_DEPTH or any(
+                not isinstance(key, str) for key in item
+            ):
+                raise ArtifactCanonicalJsonError
+            pending.extend((child, depth + 1) for child in item.values())
+            continue
+        if isinstance(item, list):
+            if depth >= _MAX_JSON_NESTING_DEPTH:
+                raise ArtifactCanonicalJsonError
+            pending.extend((child, depth + 1) for child in item)
+            continue
+        if item is None or isinstance(item, str | bool | int):
+            continue
+        if isinstance(item, float) and math.isfinite(item):
+            continue
+        raise ArtifactCanonicalJsonError
+
+
+def _validate_json_text_nesting(text: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+            continue
+        if character in "[{":
+            depth += 1
+            if depth > _MAX_JSON_NESTING_DEPTH:
+                raise ArtifactJsonDecodeError("JSON nesting exceeds the supported limit")
+        elif character in "]}":
+            depth -= 1
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
