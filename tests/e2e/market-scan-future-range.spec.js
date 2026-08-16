@@ -1,4 +1,9 @@
 import { expect, test } from "@playwright/test";
+import { marketScanPollingIdentityPayload, workbenchPayload } from "./frontend-flow-api-fixtures.mjs";
+
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime("2026-08-11T15:30:00Z");
+});
 
 test("future-range research stays independent, auditable, paged, and mobile safe", async ({ page }, testInfo) => {
   const queries = [];
@@ -79,6 +84,9 @@ async function routeFutureRangeFixture(page, queries, status) {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === "/api/stream/quotes") return route.abort();
+    if (url.pathname === "/api/market-scans/polling-identity") {
+      return fulfillJson(route, marketScanPollingIdentityPayload(scanRun(), scanRun()));
+    }
     if (url.pathname === "/api/market-scans/latest") return fulfillJson(route, scanRun());
     if (url.pathname === "/api/market-scans/latest-published") return fulfillJson(route, scanRun());
     if (url.pathname === "/api/market-scans" && request.method() === "GET") {
@@ -171,10 +179,11 @@ function resultPage() {
 function scanRun() {
   return {
     id: 29, status: "success", trigger: "manual", mode: "official", rule_version: "full-market-score-v4",
-    as_of: "2026-07-31 16:00:00", data_date: "2026-07-31", quote_date: "2026-07-31", scope: "SH/SZ/BJ listed A-shares",
+    as_of: "2026-07-31 16:00:00", data_date: "2026-07-31", quote_date: "2026-07-31", scope: "沪市 + 深市 + 北交所当前上市A股",
     total_count: 1, excluded_count: 0, processed_count: 1, success_count: 1, missing_count: 0, skipped_count: 0, retry_count: 0,
     progress_pct: 100, coverage_pct: 100, created_at: "2026-07-31 16:00:00", updated_at: "2026-07-31 16:01:00",
     started_at: "2026-07-31 16:00:01", finished_at: "2026-07-31 16:01:00", duration_ms: 59000,
+    snapshot_digest: "a".repeat(64), snapshot_seal_origin: "publication", snapshot_sealed_at: "2026-07-31 16:01:00",
     message: "扫描完成", stock_pool_source: "fixture", task_run_id: null, retry_of_run_id: null,
   };
 }
@@ -185,7 +194,7 @@ function scanItem() {
     metadata_source: "fixture", is_st: false, is_new: false, status: "success", rank: 1, score: 92, raw_score: 91.5,
     trend_score: 88, leader_score: 80, data_quality_score: 96, price: 1500, change_pct: 1.2, turnover_rate: 0.8,
     volume_ratio: 1.1, amount: 2000000000, tags: ["趋势向上"], metrics: {}, score_details: {}, reason: "冻结生产排名 1", error: null,
-    data_date: "2026-07-31", quote_timestamp: "2026-07-31 15:00:00", quote_source: "fixture", kline_source: "fixture",
+    data_date: "2026-07-31", quote_timestamp: "2026-07-31 15:00:00", quote_observed_at: "2026-07-31T07:00:00Z", quote_source: "fixture", kline_source: "fixture",
     adjustment_mode: "qfq", quote_fallback_used: false, kline_fallback_used: false, metadata_degraded: false,
     degradation_reasons: [], updated_at: "2026-07-31 16:00:00", upside_probabilities: {},
   };
@@ -197,7 +206,7 @@ function fallbackPayload(url) {
   if (url.pathname === "/api/strong-stocks") return { items: [] };
   if (url.pathname === "/api/data/status") return { providers: [], source_plan: {}, cache: {}, capabilities: [], capability_statuses: [] };
   if (url.pathname === "/api/tasks/status") return { enabled: false, running: false, tasks: [] };
-  if (url.pathname === "/api/stock/workbench") return { analysis: { quote: { code: "600519", market: "SH", name: "贵州茅台", price: 1, change: 0, change_pct: 0, source: "fixture", timestamp: "2026-07-31 10:00:00" }, data_quality: { level: "优秀", score: 95 }, signal_snapshot: {}, action_advice: {}, review: {}, klines: [] }, insights: { overview: {} }, local_data_warnings: [], chart_marks: { marks: [], categories: [] } };
+  if (url.pathname === "/api/stock/workbench") return workbenchPayload("600519.SH");
   if (["/api/tasks/runs", "/api/monitor/events", "/api/watchlist", "/api/advice/timeline", "/api/plates"].includes(url.pathname)) return [];
   return [];
 }

@@ -4,6 +4,12 @@ from collections.abc import Callable
 import json
 import sqlite3
 
+from app.db.market_scan_action_source import (
+    MarketScanActionSourceError,
+    market_scan_diagnostics_authorize_action,
+    require_market_scan_action_source,
+)
+from app.db.market_scan_integrity import verify_market_scan_snapshot
 from app.models.market_scan import (
     MarketScanPublicationDiagnostics,
     MarketScanRetryPlan,
@@ -14,6 +20,10 @@ from app.repositories.market_scan_results import (
     count_degraded_results,
     required_run_row,
     sync_run_counts,
+)
+from app.repositories.market_scan_terminal_publication import (
+    persist_terminal_run,
+    validated_publication_diagnostics,
 )
 from app.utils.clock import monotonic_now
 from app.utils.time import datetime_to_text, parse_text_time
@@ -39,6 +49,8 @@ def finish_run_row(
     validate_before_commit: Callable[[], None] | None,
 ) -> sqlite3.Row:
     if row["status"] in TERMINAL_SCAN_STATUSES:
+        if str(row["status"]) in {"success", "degraded"}:
+            verify_market_scan_snapshot(conn, int(row["id"]))
         _finish_existing_terminal(conn, row, stamp=stamp, message=message, task_status=task_status)
         enqueue_probability_source_capture(conn, row, stamp=stamp)
         return row
@@ -92,6 +104,12 @@ def _finish_active_run(
     sync_run_counts(conn, run_id, stamp=stamp)
     synced = required_run_row(conn, run_id)
     validate_terminal_status(conn, synced, status)
+    publication_diagnostics = validated_publication_diagnostics(
+        conn,
+        synced,
+        status=status,
+        diagnostics=publication_diagnostics,
+    )
     _prepare_published_results(
         conn,
         run_id,
@@ -110,16 +128,7 @@ def _finish_active_run(
         publication_diagnostics=publication_diagnostics,
         run_id=run_id,
     )
-    conn.execute(
-        """
-        UPDATE market_scan_run
-        SET status = ?, updated_at = ?, finished_at = ?, duration_ms = ?,
-            current_stage = NULL, stage_started_at = NULL, stage_metrics_json = ?,
-            message = ?, last_error = ?, publication_diagnostics_json = ?
-        WHERE id = ?
-        """,
-        values,
-    )
+    persist_terminal_run(conn, run_id, status=status, stamp=stamp, values=values)
     updated = required_run_row(conn, run_id)
     finish_linked_task_run(
         conn,
@@ -147,7 +156,14 @@ def enqueue_probability_source_capture(
         or str(row["mode"]) != "official"
         or str(row["scope"]) != PROBABILITY_SOURCE_CAPTURE_FULL_MARKET_SCOPE
         or int(row["success_count"] or 0) <= 0
+        or not _publication_passed_score_distribution(
+            row["publication_diagnostics_json"]
+        )
     ):
+        return False
+    try:
+        require_market_scan_action_source(conn, int(row["id"]))
+    except MarketScanActionSourceError:
         return False
     cursor = conn.execute(
         """
@@ -159,6 +175,16 @@ def enqueue_probability_source_capture(
         (row["id"], stamp, stamp, stamp),
     )
     return cursor.rowcount == 1
+
+
+def _publication_passed_score_distribution(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        diagnostics = MarketScanPublicationDiagnostics.model_validate_json(value)
+    except (TypeError, ValueError):
+        return False
+    return market_scan_diagnostics_authorize_action(diagnostics)
 
 
 def _terminal_update_values(
@@ -364,6 +390,53 @@ def _task_status_for_scan(scan_status: str) -> str:
     return "cancelled" if scan_status in {"cancelled", "interrupted"} else scan_status
 
 
+def reconcile_incomplete_run_rows(conn: sqlite3.Connection, *, stamp: str) -> int:
+    terminal_rows = conn.execute(
+        """
+        SELECT * FROM market_scan_run
+        WHERE status IN ('success', 'degraded', 'failed', 'cancelled', 'interrupted')
+          AND task_run_id IS NOT NULL
+        """
+    ).fetchall()
+    for row in terminal_rows:
+        finish_linked_task_run(
+            conn,
+            row,
+            scan_status=str(row["status"]),
+            task_status=None,
+            stamp=str(row["finished_at"] or stamp),
+            message=str(row["message"] or "全市场扫描已结束"),
+            duration_ms=row["duration_ms"],
+        )
+    placeholders = ", ".join("?" for _status in ACTIVE_SCAN_STATUSES)
+    rows = conn.execute(
+        f"SELECT * FROM market_scan_run WHERE status IN ({placeholders})",
+        ACTIVE_SCAN_STATUSES,
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """
+            UPDATE market_scan_run
+            SET status = 'interrupted', updated_at = ?, finished_at = ?, duration_ms = ?,
+                message = '应用重启中断扫描，可从断点重试',
+                last_error = '应用重启时终止遗留扫描任务'
+            WHERE id = ?
+            """,
+            (stamp, stamp, _duration_ms(row["started_at"], stamp), row["id"]),
+        )
+        interrupted = required_run_row(conn, int(row["id"]))
+        finish_linked_task_run(
+            conn,
+            interrupted,
+            scan_status="interrupted",
+            task_status="cancelled",
+            stamp=stamp,
+            message="应用重启时终止遗留全市场扫描记录",
+            duration_ms=interrupted["duration_ms"],
+        )
+    return len(rows)
+
+
 def _required_lastrowid(cursor: sqlite3.Cursor, *, operation: str) -> int:
     if cursor.lastrowid is None:
         raise RuntimeError(f"{operation}未返回记录 ID")
@@ -393,5 +466,6 @@ __all__ = [
     "build_retry_plan",
     "finish_linked_task_run",
     "finish_run_row",
+    "reconcile_incomplete_run_rows",
     "validate_terminal_status",
 ]

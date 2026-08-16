@@ -60,8 +60,10 @@ class RiskPressureContext:
     data_quality_score: int
     abnormal_level: str
     order_pressure: str
+    order_pressure_available: bool
     price: float
     ma20: float
+    ma20_available: bool
 
 
 @dataclass(frozen=True)
@@ -87,9 +89,14 @@ def _build_factor(
     *,
     data_nature: str | None = None,
     methodology: str | None = None,
+    participates_in_current_score: bool = True,
 ) -> StandardFactor:
     clean_score = _clamp(score)
-    calibration = _factor_calibration(spec, analysis, clean_score)
+    calibration = (
+        _factor_calibration(spec, analysis, clean_score)
+        if participates_in_current_score
+        else _unavailable_factor_calibration(spec.name, "当前因子所需观测字段不可用")
+    )
     return StandardFactor(
         id=spec.id,
         name=spec.name,
@@ -98,14 +105,19 @@ def _build_factor(
         score=clean_score,
         level=_score_level(clean_score),
         direction=_factor_direction(clean_score),
-        percentile=_factor_percentile(analysis.klines, spec.evaluator, clean_score),
+        percentile=(
+            _factor_percentile(analysis.klines, spec.evaluator, clean_score)
+            if participates_in_current_score
+            else None
+        ),
         weight=_adjusted_factor_weight(spec.id, spec.weight, weight_adjustments or {}),
+        participates_in_current_score=participates_in_current_score,
         evidence=evidence[:4],
         missing_data=_dedupe(missing_data)[:6],
         calibration=calibration,
         calibration_buckets=(
             _calibration_buckets(analysis.klines, spec, clean_score)
-            if spec.historically_replayable
+            if spec.historically_replayable and participates_in_current_score
             else []
         ),
         data_nature=data_nature,
@@ -134,14 +146,39 @@ def _factor_calibration(
     )
 
 
+def _unavailable_factor_calibration(name: str, reason: str) -> FactorCalibration:
+    return FactorCalibration(
+        sample_count=0,
+        win_rate=0,
+        avg_forward_5d_return=0,
+        avg_forward_10d_return=0,
+        max_adverse_return=0,
+        stability_score=0,
+        expected_level="待补数据",
+        confidence_level="数据不可用",
+        participates_in_historical_aggregate=False,
+        availability="execution_evidence_unavailable",
+        unavailable_reason=reason,
+        note=f"「{name}」{reason}，不参与当前综合评分或历史证据聚合。",
+    )
+
+
 def _weighted_factor_score(factors: list[StandardFactor]) -> int:
-    total_weight = sum(item.weight for item in factors) or 1
-    return _clamp(round(sum(item.score * item.weight for item in factors) / total_weight))
+    participating = [item for item in factors if item.participates_in_current_score]
+    total_weight = sum(item.weight for item in participating)
+    if total_weight <= 0:
+        return 50
+    return _clamp(round(sum(item.score * item.weight for item in participating) / total_weight))
 
 
 def _factor_participates_in_historical_aggregate(factor: StandardFactor) -> bool:
     calibration = factor.calibration
-    return bool(calibration and getattr(calibration, "participates_in_historical_aggregate", True))
+    return bool(
+        factor.participates_in_current_score
+        and calibration
+        and calibration.availability == "available"
+        and getattr(calibration, "participates_in_historical_aggregate", True)
+    )
 
 
 def _historical_aggregate_factors(factors: list[StandardFactor]) -> list[StandardFactor]:
@@ -163,6 +200,8 @@ def _factor_calibration_quality(factors: list[StandardFactor]) -> int:
 
 
 def _volume_confirmation_score(analysis: AnalysisResult, feature: FeatureSnapshot) -> int:
+    if getattr(feature, "volume_ratio_available", False) is not True:
+        return 50
     context = VolumeConfirmationContext(ratio=feature.volume_ratio, change_pct=analysis.quote.change_pct)
     adjustment = _volume_confirmation_adjustment(context)
     return _clamp(VOLUME_CONFIRMATION_BASE_SCORE + adjustment)
@@ -201,8 +240,10 @@ def _risk_pressure_score(analysis: AnalysisResult, insights: StockInsightBundle,
         data_quality_score=feature.data_quality_score,
         abnormal_level=insights.abnormal_events.level,
         order_pressure=feature.order_pressure,
+        order_pressure_available=feature.order_pressure_data_nature != "unavailable",
         price=feature.price,
         ma20=feature.ma20,
+        ma20_available=feature.ma20_available,
     )
     score = RISK_PRESSURE_BASE_SCORE + sum(_risk_pressure_adjustments(context))
     return _clamp(score)
@@ -234,21 +275,37 @@ def _chip_position_score_current(feature: FeatureSnapshot, chip: ChipAnalysis | 
 RISK_PRESSURE_RULES = (
     RiskPressureRule("risk_level", _risk_level_adjustment, lambda context: context.risk_level in {"高风险", "中等风险", "低风险"}),
     RiskPressureRule("abnormal_risk", lambda context: -14, lambda context: context.abnormal_level == "风险"),
-    RiskPressureRule("sell_pressure", lambda context: -8, lambda context: "卖压" in context.order_pressure),
-    RiskPressureRule("below_ma20", lambda context: -8, lambda context: context.price < context.ma20),
+    RiskPressureRule(
+        "sell_pressure",
+        lambda context: -8,
+        lambda context: context.order_pressure_available and "卖压" in context.order_pressure,
+    ),
+    RiskPressureRule(
+        "below_ma20",
+        lambda context: -8,
+        lambda context: context.ma20_available and context.price < context.ma20,
+    ),
 )
 
 
 def _has_chip_model(chip: ChipAnalysis | None) -> bool:
-    return bool(chip and chip.center_price > 0)
+    return bool(chip and chip.distribution_available is True and chip.center_price > 0)
 
 
 def _chip_fallback_score(feature: FeatureSnapshot) -> int:
-    context = ChipFallbackContext(price=feature.price, support=feature.support, resistance=feature.resistance)
+    context = _chip_fallback_context(feature)
     for rule in CHIP_FALLBACK_RULES:
         if rule.matches(context):
             return rule.score
     return 52
+
+
+def _chip_fallback_context(feature: FeatureSnapshot) -> ChipFallbackContext:
+    return ChipFallbackContext(
+        price=feature.price,
+        support=feature.support if feature.support_available else 0,
+        resistance=feature.resistance if feature.resistance_available else 0,
+    )
 
 
 def _near_resistance_without_chip(context: ChipFallbackContext) -> bool:
@@ -285,14 +342,22 @@ CHIP_DISTANCE_RULES = (
 
 
 def _chip_position_value(feature: FeatureSnapshot, chip: ChipAnalysis | None) -> str:
-    if not chip:
-        return f"现价 {feature.price:.2f} / 支撑 {feature.support:.2f} / 压力 {feature.resistance:.2f}"
+    if not _has_chip_model(chip):
+        levels = _available_structural_level_texts(feature)
+        if not levels:
+            return "筹码与结构价位不可用"
+        return f"筹码不可用，仅观察已验证结构价位：{' / '.join(levels)}"
+    assert chip is not None
     return f"现价较成本中枢 {pct_change(feature.price, chip.center_price):.2f}% / 集中度 {chip.concentration}"
 
 
 def _chip_position_evidence(feature: FeatureSnapshot, chip: ChipAnalysis | None) -> list[str]:
-    if not chip:
-        return [f"支撑位 {feature.support:.2f}，压力位 {feature.resistance:.2f}。"]
+    if not _has_chip_model(chip):
+        levels = _available_structural_level_texts(feature)
+        if not levels:
+            return ["缺少可验证的筹码分布与结构价位，不形成筹码位置证据。"]
+        return [f"筹码分布不可用；仅用已验证的{' / '.join(levels)}作结构观察。"]
+    assert chip is not None
     evidence = [chip.summary]
     if chip.support_bands:
         band = chip.support_bands[0]
@@ -301,6 +366,15 @@ def _chip_position_evidence(feature: FeatureSnapshot, chip: ChipAnalysis | None)
         band = chip.pressure_bands[0]
         evidence.append(f"最近压力筹码区 {band.low:.2f}-{band.high:.2f}，占比 {band.share:.1f}%。")
     return evidence
+
+
+def _available_structural_level_texts(feature: FeatureSnapshot) -> list[str]:
+    levels: list[str] = []
+    if feature.support_available:
+        levels.append(f"支撑 {feature.support:.2f}")
+    if feature.resistance_available:
+        levels.append(f"压力 {feature.resistance:.2f}")
+    return levels
 
 
 def _factor_direction(score: int) -> str:

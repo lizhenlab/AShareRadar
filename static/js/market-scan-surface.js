@@ -1,7 +1,10 @@
 import { observeMarketScanPageSize } from "./layout-optimizations.js";
 
 export function createMarketScanSurface(options) {
-  const { abortHistory, abortResults, elements, loadResults, refresh, releaseResults, state } = options;
+  const {
+    abortHistory, elements, loadResults, refreshOwned, releaseResults,
+    scheduleTracking, state, transitionReads,
+  } = options;
   observeMarketScanPageSize(elements, handlePageSizeChange);
 
   function setActive(active) {
@@ -9,11 +12,20 @@ export function createMarketScanSurface(options) {
     if (state.surfaceActive === next) return false;
     state.surfaceActive = next;
     if (!next) {
-      abortResults();
       abortHistory();
       releaseResults();
+      void transitionReads(() => {
+        if (!state.surfaceActive && state.activated && state.visible && !state.actionBusy) {
+          scheduleTracking();
+        }
+      }, { preserveCache: true });
     } else if (state.activated && state.visible && !state.actionBusy) {
-      void refresh();
+      void transitionReads(() => {
+        if (state.activated && state.visible && state.surfaceActive && !state.actionBusy) {
+          return refreshOwned();
+        }
+        return null;
+      });
     }
     return true;
   }
@@ -21,7 +33,6 @@ export function createMarketScanSurface(options) {
   function handlePageSizeChange() {
     state.page = 1;
     state.pageCount = 0;
-    abortResults();
     if (state.activated && state.visible && state.surfaceActive && !state.actionBusy) void loadResults();
   }
 

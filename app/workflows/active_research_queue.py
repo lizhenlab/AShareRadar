@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from typing import Any, Protocol
 
@@ -17,7 +17,13 @@ from app.models.reviews import ResearchQueueRefreshItem, ResearchQueueRefreshSum
 from app.models.rule_versions import RULE_VERSION
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
-from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
+from app.services.data_quality_time import quote_event_time_error
+from app.services.research_factor_execution_contract import factor_calibration_evidence_issue
+from app.services.trading_calendar import (
+    DAILY_KLINE_PUBLISH_TIME,
+    MARKET_CLOSE_TIME,
+    is_trading_day,
+)
 from app.utils.audit_time import audit_datetime_to_text
 from app.utils.clock import market_now_naive
 from app.utils.market_data import valid_kline
@@ -30,6 +36,7 @@ from app.workflows.stock_analysis import analyze_individual_stock
 ACTIVE_RESEARCH_REFRESH_LIMIT = 20
 MAX_ACTIVE_RESEARCH_REFRESH_LIMIT = 100
 MIN_ACTIVE_RESEARCH_QUALITY_SCORE = 50
+MIN_ACTIVE_RESEARCH_KLINE_COUNT = 60
 INVALID_RESEARCH_CONTRACT_VERSIONS = frozenset({"", "unknown", "legacy"})
 ACTIVE_RESEARCH_CURSOR_ATTR = "_active_research_queue_cursor"
 
@@ -86,16 +93,13 @@ async def refresh_active_research_queue(
         active_count=len(active_symbols),
         attempted_count=len(selected_symbols),
     )
-    items: list[ResearchQueueRefreshItem] = []
-    for symbol in selected_symbols:
-        item = await _refresh_active_research_symbol(
-            datahub,
-            symbol,
-            data_date=data_date,
-            analyzer=analyzer,
-        )
-        items.append(item)
-        await asyncio.sleep(0)
+    items = await _refresh_active_research_symbols(
+        datahub,
+        selected_symbols,
+        data_date=data_date,
+        now=current,
+        analyzer=analyzer,
+    )
     return ResearchQueueRefreshSummary(
         started_at=started_at,
         data_date=data_date,
@@ -107,6 +111,29 @@ async def refresh_active_research_queue(
         failed_count=sum(item.status == "failed" for item in items),
         items=items,
     )
+
+
+async def _refresh_active_research_symbols(
+    datahub: DataHub,
+    symbols: list[str],
+    *,
+    data_date: str,
+    now: datetime,
+    analyzer: ActiveResearchAnalyzer,
+) -> list[ResearchQueueRefreshItem]:
+    items: list[ResearchQueueRefreshItem] = []
+    for symbol in symbols:
+        items.append(
+            await _refresh_active_research_symbol(
+                datahub,
+                symbol,
+                data_date=data_date,
+                now=now,
+                analyzer=analyzer,
+            )
+        )
+        await asyncio.sleep(0)
+    return items
 
 
 def _active_research_refresh_window(
@@ -122,12 +149,18 @@ async def _refresh_active_research_symbol(
     symbol: str,
     *,
     data_date: str,
+    now: datetime,
     analyzer: ActiveResearchAnalyzer = analyze_individual_stock,
 ) -> ResearchQueueRefreshItem:
     try:
         normalized = standard_symbol(symbol)
         analysis = await analyzer(datahub, normalized, persist_history=False)
-        rejection = _active_research_snapshot_rejection(analysis, normalized, data_date)
+        rejection = _active_research_snapshot_rejection(
+            analysis,
+            normalized,
+            data_date,
+            now=now,
+        )
         if rejection is not None:
             return ResearchQueueRefreshItem(
                 symbol=normalized,
@@ -175,25 +208,78 @@ def _active_research_snapshot_rejection(
     analysis: AnalysisResult,
     expected_symbol: str,
     data_date: str,
+    *,
+    now: datetime,
 ) -> str | None:
+    if analysis.research_mode != "official":
+        return "non_official_research_mode"
     if _analysis_data_date(analysis) != data_date:
         return "stale_data_date"
+    if _active_research_quote_is_invalid(analysis, now):
+        return "low_data_quality"
+    if _active_research_quality_is_invalid(analysis, data_date):
+        return "low_data_quality"
+    anchor = _latest_research_kline(analysis.klines, data_date)
+    if anchor is None:
+        return "stale_data_date"
+    formal_rows = analysis.klines[-MIN_ACTIVE_RESEARCH_KLINE_COUNT:]
+    if _active_research_formal_rows_are_invalid(formal_rows):
+        return "invalid_rule_contract"
+    if _active_research_contract_is_invalid(analysis, anchor, expected_symbol):
+        return "invalid_rule_contract"
+    return None
+
+
+def _active_research_quote_is_invalid(
+    analysis: AnalysisResult,
+    now: datetime,
+) -> bool:
+    if quote_event_time_error(analysis.quote.timestamp, now=now) is not None:
+        return True
+    quote_time = normalize_market_datetime(analysis.quote.timestamp)
+    return quote_time is None or datetime.fromisoformat(quote_time).time() > MARKET_CLOSE_TIME
+
+
+def _active_research_quality_is_invalid(
+    analysis: AnalysisResult,
+    data_date: str,
+) -> bool:
     quality = analysis.data_quality
     kline_quality = quality.kline_quality
-    if (
+    return (
         quality.score < MIN_ACTIVE_RESEARCH_QUALITY_SCORE
+        or quality.kline_count < MIN_ACTIVE_RESEARCH_KLINE_COUNT
+        or len(analysis.klines) < MIN_ACTIVE_RESEARCH_KLINE_COUNT
+        or not analysis.support_available
+        or not analysis.resistance_available
+        or not analysis.ma20_available
         or kline_quality is None
         or kline_quality.last_date != data_date
         or kline_quality.days_behind_expected != 0
         or kline_quality.fallback_used
         or analysis.quote.fallback_used
-    ):
-        return "low_data_quality"
-    anchor = _latest_research_kline(analysis.klines, data_date)
-    if anchor is None:
-        return "stale_data_date"
+    )
+
+
+def _active_research_formal_rows_are_invalid(rows: list[Kline]) -> bool:
+    return (
+        len(rows) != MIN_ACTIVE_RESEARCH_KLINE_COUNT
+        or factor_calibration_evidence_issue(rows) is not None
+        or len({row.data_version for row in rows}) != 1
+        or any(
+            row.contract_version != DAILY_KLINE_CONTRACT_VERSION or row.fallback_used
+            for row in rows
+        )
+    )
+
+
+def _active_research_contract_is_invalid(
+    analysis: AnalysisResult,
+    anchor: Kline,
+    expected_symbol: str,
+) -> bool:
     observed_symbol = standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}")
-    if (
+    return (
         observed_symbol != expected_symbol
         or anchor.adjustment_mode != "qfq"
         or anchor.data_version in INVALID_RESEARCH_CONTRACT_VERSIONS
@@ -202,9 +288,7 @@ def _active_research_snapshot_rejection(
         or RULE_VERSION in INVALID_RESEARCH_CONTRACT_VERSIONS
         or SNAPSHOT_CONTRACT_VERSION in INVALID_RESEARCH_CONTRACT_VERSIONS
         or not str(analysis.action_advice.action or "").strip()
-    ):
-        return "invalid_rule_contract"
-    return None
+    )
 
 
 def _analysis_data_date(analysis: AnalysisResult) -> str | None:
@@ -214,13 +298,15 @@ def _analysis_data_date(analysis: AnalysisResult) -> str | None:
 
 def _latest_research_kline(rows: list[Kline], data_date: str) -> Kline | None:
     candidates = [row for row in rows if row.date == data_date and valid_kline(row)]
-    return candidates[-1] if candidates else None
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
 
 
 def _active_research_candidate_order(
     cache: object,
     active_symbols: list[str],
-    latest_by_symbol: dict[str, object],
+    latest_by_symbol: Mapping[str, object],
     *,
     data_date: str,
 ) -> list[str]:

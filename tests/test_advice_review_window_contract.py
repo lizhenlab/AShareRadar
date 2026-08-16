@@ -50,12 +50,18 @@ def _evaluate(plan: AdviceReviewPlan, rows, as_of: datetime):
     )
 
 
+def _review_kline(**values):
+    return make_kline(replay_eligible=True, **values).model_copy(
+        update={"data_version": "evaluation-qfq-v1"}
+    )
+
+
 def test_missing_trading_day_cannot_be_replaced_by_a_later_barrier() -> None:
     rows = [
-        make_kline(date="2026-05-08", close=100),
-        make_kline(date="2026-05-11", close=101, high=102, low=99),
-        make_kline(date="2026-05-13", close=111, high=112, low=100),
-        make_kline(date="2026-05-14", close=103, high=104, low=100),
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-11", close=101, high=102, low=99),
+        _review_kline(date="2026-05-13", close=111, high=112, low=100),
+        _review_kline(date="2026-05-14", close=103, high=104, low=100),
     ]
 
     draft = _evaluate(_plan(), rows, datetime(2026, 5, 14, 16))
@@ -68,8 +74,8 @@ def test_missing_trading_day_cannot_be_replaced_by_a_later_barrier() -> None:
 
 def test_barrier_after_a_missing_first_day_is_not_treated_as_certain() -> None:
     rows = [
-        make_kline(date="2026-05-08", close=100),
-        make_kline(date="2026-05-12", close=111, high=112, low=100),
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-12", close=111, high=112, low=100),
     ]
 
     draft = _evaluate(_plan(), rows, datetime(2026, 5, 12, 16))
@@ -82,8 +88,8 @@ def test_barrier_after_a_missing_first_day_is_not_treated_as_certain() -> None:
 def test_daily_bar_becomes_visible_only_at_publish_boundary() -> None:
     at_publish = datetime(2026, 5, 11, 15, 15)
     rows = [
-        make_kline(date="2026-05-08", close=100),
-        make_kline(date="2026-05-11", close=111, high=112, low=100),
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-11", close=111, high=112, low=100),
     ]
 
     after = _evaluate(_plan(), rows, at_publish)
@@ -102,8 +108,8 @@ def test_daily_bar_becomes_visible_only_at_publish_boundary() -> None:
 
 def test_cross_contract_evaluation_is_rejected_without_an_explicit_converter() -> None:
     rows = [
-        make_kline(date="2026-05-08", close=100).model_copy(update={"contract_version": "daily-kline.v2"}),
-        make_kline(date="2026-05-11", close=111, high=112, low=100).model_copy(update={"contract_version": "daily-kline.v2"}),
+        _review_kline(date="2026-05-08", close=100).model_copy(update={"contract_version": "daily-kline.v2"}),
+        _review_kline(date="2026-05-11", close=111, high=112, low=100).model_copy(update={"contract_version": "daily-kline.v2"}),
     ]
 
     draft = _evaluate(_plan(), rows, datetime(2026, 5, 11, 16))
@@ -124,20 +130,50 @@ def test_weekend_without_an_expected_bar_remains_pending() -> None:
 
 def test_conflicting_duplicate_daily_bars_are_rejected_instead_of_using_input_order() -> None:
     rows = [
-        make_kline(date="2026-05-08", close=100),
-        make_kline(date="2026-05-11", close=101, high=102, low=99),
-        make_kline(date="2026-05-11", close=111, high=112, low=99),
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-11", close=101, high=102, low=99),
+        _review_kline(date="2026-05-11", close=111, high=112, low=99),
     ]
 
     with pytest.raises(ValueError, match="冲突日K"):
         _evaluate(_plan(), rows, datetime(2026, 5, 11, 16))
 
 
+def test_conflicting_duplicate_execution_evidence_is_rejected() -> None:
+    row = _review_kline(date="2026-05-11", close=101, high=102, low=99)
+    rows = [
+        _review_kline(date="2026-05-08", close=100),
+        row,
+        row.model_copy(update={"open_execution_status": "locked_limit_up"}),
+    ]
+
+    with pytest.raises(ValueError, match="冲突日K"):
+        _evaluate(_plan(), rows, datetime(2026, 5, 11, 16))
+
+
+def test_source_digest_binds_each_session_execution_evidence() -> None:
+    rows = [
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-11", close=101, high=102, low=99),
+    ]
+
+    original = _evaluate(_plan(horizon_days=1), rows, datetime(2026, 5, 11, 16))
+    changed = _evaluate(
+        _plan(horizon_days=1),
+        [rows[0], rows[1].model_copy(update={"open_execution_status": "locked_limit_up"})],
+        datetime(2026, 5, 11, 16),
+    )
+
+    assert original.source_session_count == original.expected_session_count == 2
+    assert changed.source_session_count == changed.expected_session_count == 2
+    assert original.source_window_digest != changed.source_window_digest
+
+
 def test_non_trading_day_bar_cannot_enter_visible_or_forward_window() -> None:
     plan = _plan(snapshot_market_time="2026-05-08 16:00:00")
     rows = [
-        make_kline(date="2026-05-08", close=100),
-        make_kline(date="2026-05-10", close=111, high=112, low=99),
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-10", close=111, high=112, low=99),
     ]
 
     draft = _evaluate(plan, rows, datetime(2026, 5, 10, 16))
@@ -145,3 +181,38 @@ def test_non_trading_day_bar_cannot_enter_visible_or_forward_window() -> None:
     assert (draft.status, draft.conclusion) == ("pending", "pending")
     assert draft.visible_end_date == "2026-05-08"
     assert draft.available_forward_days == 0
+
+
+def test_non_pit_forward_bar_is_typed_insufficient() -> None:
+    rows = [
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-11", close=111, high=112, low=100).model_copy(
+            update={"point_in_time": False}
+        ),
+    ]
+
+    draft = _evaluate(_plan(horizon_days=1), rows, datetime(2026, 5, 11, 16))
+
+    assert (draft.status, draft.conclusion) == ("insufficient", "insufficient_data")
+    assert draft.available_forward_days == 0
+    assert draft.target_hit is False
+
+
+def test_suspended_session_counts_as_coverage_but_cannot_trigger_a_price_touch() -> None:
+    rows = [
+        _review_kline(date="2026-05-08", close=100),
+        _review_kline(date="2026-05-11", close=111, high=112, low=100).model_copy(
+            update={
+                "session_status": "suspended",
+                "open_execution_status": "unavailable",
+                "volume": 0,
+            }
+        ),
+    ]
+
+    draft = _evaluate(_plan(horizon_days=1), rows, datetime(2026, 5, 11, 16))
+
+    assert draft.available_forward_days == 1
+    assert draft.target_hit is False
+    assert (draft.status, draft.conclusion) == ("insufficient", "insufficient_data")
+    assert draft.return_pct is None

@@ -109,6 +109,18 @@ class MarketScanFinalizer:
         policy = MARKET_SCAN_SCORE_DISTRIBUTION_POLICY
         if run.success_count < policy.minimum_sample_count:
             return None
+        observation_reader = getattr(
+            self._cache,
+            "market_scan_success_score_observations",
+            None,
+        )
+        if callable(observation_reader):
+            observations = await run_cache_io(observation_reader, run.id)
+            return MarketScanScoreDistribution.from_score_observations(
+                observations,
+                expected_count=run.success_count,
+                policy=policy,
+            )
         score_reader = getattr(self._cache, "market_scan_success_raw_scores", None)
         if callable(score_reader):
             raw_scores = await run_cache_io(score_reader, run.id)

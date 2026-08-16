@@ -1,23 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+import gc
+from pathlib import Path
+from threading import Event, Thread
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from app.api.deps import get_market_scanner
-from app.api.errors import validation_exception_handler
+from app.api.deps import get_market_scan_heavy_read_admission, get_market_scanner
+from app.api.errors import MARKET_SCAN_BUSY_DETAIL, MARKET_SCAN_INTEGRITY_DETAIL, validation_exception_handler
+from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission, run_admitted_market_scan_read
 from app.api.routes import market_scan
+from app.config import Settings
+from app.db.market_scan_integrity import MarketScanSnapshotSealError
+from app.main import create_app
 from app.models.market_scan import (
     MARKET_SCAN_TOP100_REFRESH_SCOPE,
     MarketScanPublicationDiagnostic,
     MarketScanPublicationDiagnostics,
+    MarketScanResultItem,
     MarketScanResultPage,
     MarketScanRun,
     MarketScanRunPage,
     MarketScanStartResponse,
+)
+from app.models.market_scan_snapshot import MarketScanSnapshotIntegrityError
+from app.models.market_scan_polling import (
+    MarketScanPollingIdentity,
+    MarketScanPollingRunToken,
 )
 from app.services.market_scan_export import (
     XLSX_MEDIA_TYPE,
@@ -44,10 +59,12 @@ def test_create_scan_returns_202_with_queued_run_and_deduplicates_active_request
     duplicate = client.post("/api/market-scans")
 
     assert first.status_code == 202
+    assert first.headers["cache-control"] == "no-store"
     assert first.json()["accepted"] is True
     assert first.json()["deduplicated"] is False
     assert first.json()["run"]["status"] == "queued"
     assert duplicate.status_code == 202
+    assert duplicate.headers["cache-control"] == "no-store"
     assert duplicate.json()["accepted"] is False
     assert duplicate.json()["deduplicated"] is True
     assert duplicate.json()["run"]["id"] == first.json()["run"]["id"]
@@ -55,6 +72,61 @@ def test_create_scan_returns_202_with_queued_run_and_deduplicates_active_request
         (datetime.fromisoformat("2026-07-17T16:30:00+08:00"), "official"),
         (None, "official"),
     ]
+
+
+def test_public_run_and_result_models_reject_cross_field_corruption() -> None:
+    active_payload = _run().model_dump()
+    active_payload["processed_count"] = 1
+    with pytest.raises(ValidationError, match="计数不守恒"):
+        MarketScanRun.model_validate(active_payload)
+
+    published_payload = _run(status="success").model_dump()
+    published_payload.update({"current_stage": "scoring", "stage_started_at": "2026-07-17 16:30:30"})
+    with pytest.raises(ValidationError, match="运行中阶段"):
+        MarketScanRun.model_validate(published_payload)
+
+    run = _run(status="success")
+    valid = _valid_result_item(run.id)
+    malformed = valid.model_copy(update={"status": "missing", "error": "行情缺失"})
+    with pytest.raises(ValidationError, match="非 success.*rank"):
+        MarketScanResultPage(
+            run=run,
+            items=[malformed],
+            total=1,
+            page=1,
+            page_size=100,
+            page_count=1,
+        )
+    missing_provenance = valid.model_copy(update={"quote_observed_at": None})
+    with pytest.raises(ValidationError, match="quote_observed_at"):
+        MarketScanResultPage(
+            run=run,
+            items=[missing_provenance],
+            total=1,
+            page=1,
+            page_size=100,
+            page_count=1,
+        )
+
+
+def test_public_pages_require_exact_current_page_item_count_and_allow_empty_overflow() -> None:
+    with pytest.raises(ValidationError, match="当前分页"):
+        MarketScanRunPage(
+            items=[_run()],
+            total=2,
+            page=1,
+            page_size=2,
+            page_count=1,
+        )
+
+    overflow = MarketScanRunPage(
+        items=[],
+        total=1,
+        page=2,
+        page_size=10,
+        page_count=1,
+    )
+    assert overflow.items == []
 
 
 @pytest.mark.parametrize("mode", ("intraday", "preopen"))
@@ -117,13 +189,16 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     assert detail.headers["cache-control"] == "no-store"
     assert detail.json()["id"] == scanner.active.id
     assert cancelled.status_code == 200
+    assert cancelled.headers["cache-control"] == "no-store"
     assert cancelled.json()["status"] == "cancelled"
     assert cancelled.json()["cancel_requested_at"] is not None
     assert retried.status_code == 202
+    assert retried.headers["cache-control"] == "no-store"
     assert retried.json()["accepted"] is True
     assert retried.json()["run"]["status"] == "queued"
     assert retried.json()["run"]["trigger"] == "retry"
     assert refreshed.status_code == 202
+    assert refreshed.headers["cache-control"] == "no-store"
     assert refreshed.json()["run"]["scope"] == MARKET_SCAN_TOP100_REFRESH_SCOPE
     assert refreshed.json()["run"]["retry_of_run_id"] == scanner.previous.id
     assert scanner.latest_calls == [(None, False), (None, True)]
@@ -162,6 +237,201 @@ def test_latest_and_history_routes_forward_mode_status_and_date_filters() -> Non
         ("preopen", False),
     ]
     assert scanner.list_calls == [(1, 50, "intraday", "published", "2026-07-16")]
+
+
+def test_polling_identity_route_is_explicit_non_authorizing_and_no_store() -> None:
+    scanner = _ScannerStub()
+    client = _client(scanner)
+
+    response = client.get(
+        "/api/market-scans/polling-identity",
+        params={"mode": "intraday"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "schema_version": "market-scan-polling-identity-v1",
+        "authorization": "change_detection_only",
+        "request_mode": "intraday",
+        "latest": {"run_id": scanner.active.id, "token": "a" * 64},
+        "latest_published": {"run_id": scanner.previous.id, "token": "b" * 64},
+        "fingerprint": "c" * 64,
+    }
+    assert scanner.polling_identity_calls == ["intraday"]
+    assert client.get(
+        "/api/market-scans/polling-identity",
+        params={"mode": "invalid"},
+    ).status_code == 422
+
+
+def test_polling_identity_contract_rejects_impossible_slot_ordering() -> None:
+    def token(run_id: int | None, digest: str) -> MarketScanPollingRunToken:
+        return MarketScanPollingRunToken(run_id=run_id, token=digest)
+
+    common = {
+        "request_mode": "official",
+        "fingerprint": "f" * 64,
+    }
+
+    with pytest.raises(ValidationError, match="不能脱离"):
+        MarketScanPollingIdentity(
+            **common,
+            latest=token(None, "a" * 64),
+            latest_published=token(1, "b" * 64),
+        )
+    with pytest.raises(ValidationError, match="不能晚于"):
+        MarketScanPollingIdentity(
+            **common,
+            latest=token(1, "a" * 64),
+            latest_published=token(2, "b" * 64),
+        )
+    with pytest.raises(ValidationError, match="必须一致"):
+        MarketScanPollingIdentity(
+            **common,
+            latest=token(None, "a" * 64),
+            latest_published=token(None, "b" * 64),
+        )
+
+
+def test_four_snapshot_read_routes_share_one_nonblocking_admission_slot(tmp_path: Path) -> None:
+    scanner = _ScannerStub()
+    admission = MarketScanHeavyReadAdmission()
+    started, release = Event(), Event()
+    original_latest = scanner.latest_run
+
+    def blocked_latest(*, mode: str | None = None) -> MarketScanRun:
+        started.set()
+        assert release.wait(timeout=10)
+        return original_latest(mode=mode)
+
+    scanner.latest_run = blocked_latest  # type: ignore[method-assign]
+    client = _production_handler_client(scanner, admission, tmp_path)
+    responses: list[object] = []
+    first = Thread(target=lambda: responses.append(client.get("/api/market-scans/latest")))
+    first.start()
+    assert started.wait(timeout=5)
+    assert admission.active_count == 1
+
+    busy = [
+        client.get("/api/market-scans/latest-published", params={"mode": "official"}),
+        client.get(f"/api/market-scans/{scanner.active.id}"),
+        client.get(f"/api/market-scans/{scanner.active.id}/results"),
+    ]
+    identity = client.get("/api/market-scans/polling-identity", params={"mode": "official"})
+
+    assert [response.status_code for response in busy] == [503, 503, 503]
+    assert all(response.headers["cache-control"] == "no-store" for response in busy)
+    assert all(response.headers["retry-after"] == "2" for response in busy)
+    assert all(response.json() == {"detail": MARKET_SCAN_BUSY_DETAIL} for response in busy)
+    assert scanner.latest_calls == []
+    assert scanner.detail_calls == []
+    assert scanner.result_calls == []
+    assert identity.status_code == 200
+    assert scanner.polling_identity_calls == ["official"]
+
+    release.set()
+    first.join(timeout=5)
+    assert not first.is_alive()
+    assert responses[0].status_code == 200
+    assert admission.active_count == 0
+    assert client.get("/api/market-scans/latest-published").status_code == 200
+    assert scanner.latest_calls == [(None, False), (None, True)]
+
+
+def test_cancelled_heavy_read_keeps_slot_until_worker_finishes_and_consumes_late_error() -> None:
+    started, release = Event(), Event()
+    admission = MarketScanHeavyReadAdmission()
+
+    def delayed_failure() -> None:
+        started.set()
+        assert release.wait(timeout=2)
+        raise RuntimeError("late verifier failure")
+
+    async def scenario() -> tuple[list[dict[str, object]], int]:
+        loop = asyncio.get_running_loop()
+        unhandled: list[dict[str, object]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+        try:
+            task = asyncio.create_task(run_admitted_market_scan_read(admission, delayed_failure))
+            assert await asyncio.to_thread(started.wait, 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert admission.active_count == 1
+            del task
+            gc.collect()
+            assert admission.worker_count == 1
+            with pytest.raises(HTTPException) as busy:
+                await run_admitted_market_scan_read(admission, lambda: None)
+            assert busy.value.status_code == 503
+            close_task = asyncio.create_task(admission.aclose())
+            await asyncio.sleep(0)
+            assert not close_task.done()
+            close_task.cancel()
+            await asyncio.sleep(0)
+            assert not close_task.done()
+            release.set()
+            for _ in range(100):
+                if admission.active_count == 0:
+                    break
+                await asyncio.sleep(0.01)
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+            await asyncio.sleep(0)
+            return unhandled, admission.active_count + admission.worker_count
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    unhandled, active_count = asyncio.run(scenario())
+
+    assert unhandled == []
+    assert active_count == 0
+    with pytest.raises(HTTPException) as closed:
+        asyncio.run(run_admitted_market_scan_read(admission, lambda: 7))
+    assert closed.value.status_code == 503
+
+
+def test_admission_never_reuses_a_prior_success_when_next_snapshot_read_fails() -> None:
+    scanner = _ScannerStub()
+    admission = MarketScanHeavyReadAdmission()
+    original_latest = scanner.latest_run
+    calls = 0
+
+    def mutable_latest(*, mode: str | None = None) -> MarketScanRun:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise MarketScanSnapshotSealError("tampered after prior response")
+        return original_latest(mode=mode)
+
+    scanner.latest_run = mutable_latest  # type: ignore[method-assign]
+    client = _client(scanner, admission=admission)
+
+    assert client.get("/api/market-scans/latest").status_code == 200
+    rejected = client.get("/api/market-scans/latest")
+
+    assert rejected.status_code == 409
+    assert rejected.headers["cache-control"] == "no-store"
+    assert rejected.json() == {"detail": MARKET_SCAN_INTEGRITY_DETAIL}
+    assert calls == 2
+
+
+def test_admission_releases_lease_when_worker_task_creation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    admission = MarketScanHeavyReadAdmission()
+
+    def rejected_create_task(coroutine: object) -> None:
+        coroutine.close()  # type: ignore[attr-defined]
+        raise RuntimeError("event loop rejected worker")
+
+    monkeypatch.setattr("app.api.market_scan_read_admission.asyncio.create_task", rejected_create_task)
+
+    with pytest.raises(RuntimeError, match="event loop rejected worker"):
+        asyncio.run(run_admitted_market_scan_read(admission, lambda: 7))
+
+    assert admission.active_count == 0
+    assert admission.worker_count == 0
 
 
 def test_history_route_rejects_invalid_mode_status_and_date() -> None:
@@ -335,8 +605,58 @@ def test_probability_research_route_maps_corrupt_artifact_to_integrity_conflict(
     response = _client(scanner).get("/api/market-scans/7/probability-research")
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "上涨概率研究 artifact 完整性校验失败，已拒绝读取"
+    assert response.json()["detail"] == "研究 artifact 完整性校验失败，已拒绝读取"
     assert "sensitive" not in response.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProbabilityArtifactError("sensitive probability artifact path"),
+        MarketScanSnapshotIntegrityError("sensitive database snapshot identity"),
+    ],
+)
+def test_results_route_maps_artifact_or_snapshot_corruption_to_generic_conflict(
+    error: ValueError,
+) -> None:
+    scanner = _ScannerStub()
+
+    def corrupted(_run_id: int, **_kwargs: object) -> MarketScanResultPage:
+        raise error
+
+    scanner.results = corrupted  # type: ignore[method-assign]
+    response = _client(scanner).get(f"/api/market-scans/{scanner.previous.id}/results")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "研究 artifact 完整性校验失败，已拒绝读取"
+    assert "sensitive" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("method_name", "path"),
+    [
+        ("latest_run", "/api/market-scans/latest"),
+        ("run", "/api/market-scans/6"),
+        ("results", "/api/market-scans/6/results"),
+    ],
+)
+def test_public_scan_reads_redact_snapshot_seal_failures(
+    method_name: str,
+    path: str,
+) -> None:
+    scanner = _ScannerStub()
+
+    def corrupted(*_args: object, **_kwargs: object) -> object:
+        raise MarketScanSnapshotSealError("摘要 abc123 与 /private/market.db 不一致")
+
+    setattr(scanner, method_name, corrupted)
+    response = _client(scanner).get(path)
+
+    assert response.status_code == 409
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["detail"] == MARKET_SCAN_INTEGRITY_DETAIL
+    assert "abc123" not in response.text
+    assert "private" not in response.text
 
 
 def test_future_range_research_route_is_read_only_run_bound_and_paginated() -> None:
@@ -383,7 +703,7 @@ def test_future_range_research_route_maps_ineligible_and_corrupt_artifacts() -> 
     scanner.future_range_research = corrupted  # type: ignore[method-assign]
     response = _client(scanner).get("/api/market-scans/7/future-range-research")
     assert response.status_code == 409
-    assert response.json()["detail"] == "未来区间研究 artifact 完整性校验失败，已拒绝读取"
+    assert response.json()["detail"] == "研究 artifact 完整性校验失败，已拒绝读取"
     assert "sensitive" not in response.text
 
 
@@ -472,8 +792,25 @@ def test_export_route_fails_closed_when_future_range_artifact_is_corrupt() -> No
     response = _client(scanner).get(f"/api/market-scans/{scanner.previous.id}/export.xlsx")
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "未来区间研究 artifact 完整性校验失败，已拒绝读取"
+    assert response.json()["detail"] == "研究 artifact 完整性校验失败，已拒绝读取"
     assert "sensitive" not in response.text
+
+
+def test_export_route_preserves_probability_filter_unavailable_as_422() -> None:
+    scanner = _ScannerStub()
+
+    def unavailable(_run_id: int, *, filters: MarketScanExportFilters) -> MarketScanWorkbookExport:
+        del filters
+        raise ProbabilityFilterUnavailable("当前批次证据不足")
+
+    scanner.export_results = unavailable  # type: ignore[method-assign]
+    response = _client(scanner).get(
+        f"/api/market-scans/{scanner.previous.id}/export.xlsx",
+        params={"min_upside_probability": 0.6},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "当前批次证据不足"
 
 
 def test_export_and_results_routes_share_the_same_filter_and_sort_contract() -> None:
@@ -556,12 +893,39 @@ def test_missing_scan_detail_is_mapped_to_404() -> None:
     assert response.json() == {"detail": "全市场扫描批次不存在：999"}
 
 
-def _client(scanner: _ScannerStub) -> TestClient:
+def _client(
+    scanner: _ScannerStub,
+    *,
+    admission: MarketScanHeavyReadAdmission | None = None,
+) -> TestClient:
     app = FastAPI()
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.include_router(market_scan.router)
     app.dependency_overrides[get_market_scanner] = lambda: scanner
+    shared_admission = admission or MarketScanHeavyReadAdmission()
+    app.dependency_overrides[get_market_scan_heavy_read_admission] = lambda: shared_admission
     return TestClient(app)
+
+
+def _production_handler_client(
+    scanner: _ScannerStub,
+    admission: MarketScanHeavyReadAdmission,
+    tmp_path: Path,
+) -> TestClient:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    application = create_app(
+        settings=Settings(
+            cache_path=tmp_path / "unused.sqlite3",
+            cors_allow_origins=("http://testserver",),
+            scheduler_enabled=False,
+        ),
+        static_dir=static_dir,
+    )
+    application.dependency_overrides[get_market_scanner] = lambda: scanner
+    application.dependency_overrides[get_market_scan_heavy_read_admission] = lambda: admission
+    return TestClient(application)
 
 
 def _run(run_id: int = 7, *, status: str = "queued") -> MarketScanRun:
@@ -582,12 +946,40 @@ def _run(run_id: int = 7, *, status: str = "queued") -> MarketScanRun:
         skipped_count=1 if terminal else 0,
         retry_count=0,
         progress_pct=100.0 if terminal else 0.0,
-        coverage_pct=80.0 if terminal else 0.0,
+        coverage_pct=88.89 if terminal else 0.0,
         created_at="2026-07-17 16:30:00",
-        updated_at="2026-07-17 16:30:00",
+        updated_at="2026-07-17 16:31:00" if terminal else "2026-07-17 16:30:00",
         finished_at="2026-07-17 16:31:00" if terminal else None,
         duration_ms=60_000 if terminal else None,
+        snapshot_digest="a" * 64 if status in {"success", "degraded"} else None,
+        snapshot_seal_origin="publication" if status in {"success", "degraded"} else None,
+        snapshot_sealed_at="2026-07-17 16:31:00" if status in {"success", "degraded"} else None,
         message="等待全市场扫描" if not terminal else "扫描结束",
+    )
+
+
+def _valid_result_item(run_id: int) -> MarketScanResultItem:
+    return MarketScanResultItem(
+        run_id=run_id,
+        rank=1,
+        symbol="600519.SH",
+        code="600519",
+        market="SH",
+        name="贵州茅台",
+        status="success",
+        score=90,
+        raw_score=90.1,
+        trend_score=88,
+        leader_score=87,
+        data_quality_score=95,
+        price=1500,
+        data_date="2026-07-17",
+        quote_timestamp="2026-07-17 15:00:00",
+        quote_observed_at="2026-07-17T07:00:00Z",
+        quote_source="fixture",
+        kline_source="fixture",
+        adjustment_mode="qfq",
+        updated_at="2026-07-17 16:31:00",
     )
 
 
@@ -605,6 +997,7 @@ class _ScannerStub:
         self.cancel_calls: list[int] = []
         self.retry_calls: list[int] = []
         self.top100_refresh_calls: list[int] = []
+        self.polling_identity_calls: list[str] = []
 
     @property
     def calls(self) -> list[object]:
@@ -646,6 +1039,18 @@ class _ScannerStub:
         self.latest_calls.append((mode, True))
         return self.previous
 
+    def polling_identity(self, *, mode: str) -> MarketScanPollingIdentity:
+        self.polling_identity_calls.append(mode)
+        return MarketScanPollingIdentity(
+            request_mode=mode,  # type: ignore[arg-type]
+            latest=MarketScanPollingRunToken(run_id=self.active.id, token="a" * 64),
+            latest_published=MarketScanPollingRunToken(
+                run_id=self.previous.id,
+                token="b" * 64,
+            ),
+            fingerprint="c" * 64,
+        )
+
     def runs(
         self,
         *,
@@ -657,11 +1062,11 @@ class _ScannerStub:
     ) -> MarketScanRunPage:
         self.list_calls.append((page, page_size, mode, status, data_date))
         return MarketScanRunPage(
-            items=[self.active],
+            items=[self.active] if page_size == 1 else [self.active, self.previous],
             total=2,
             page=page,
             page_size=page_size,
-            page_count=2,
+            page_count=(2 + page_size - 1) // page_size,
         )
 
     def run(self, run_id: int) -> MarketScanRun:
@@ -748,6 +1153,15 @@ class _ScannerStub:
                 "retry_of_run_id": run_id,
                 "finished_at": None,
                 "duration_ms": None,
+                "processed_count": 0,
+                "success_count": 0,
+                "missing_count": 0,
+                "skipped_count": 0,
+                "progress_pct": 0,
+                "coverage_pct": 0,
+                "snapshot_digest": None,
+                "snapshot_seal_origin": None,
+                "snapshot_sealed_at": None,
             }
         )
         return MarketScanStartResponse(accepted=True, run=refreshed)

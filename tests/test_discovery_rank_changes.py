@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 
 from app.db.schema import initialize_schema
+from app.db.market_scan_integrity import seal_market_scan_snapshot
+from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE
 from app.repositories.discovery import DiscoveryRepository
 from app.services.discovery import DiscoveryService
 
@@ -66,8 +68,11 @@ def test_skipped_result_is_unavailable_instead_of_false_exit(tmp_path) -> None:
         [("600001.SH", 1)],
         data_date="2026-07-28",
         as_of="2026-07-28 15:00:00",
+        seal=False,
     )
     with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER trg_market_scan_published_result_no_update")
+        conn.execute("DROP TRIGGER trg_market_scan_published_run_immutable")
         conn.execute(
             """
             UPDATE market_scan_result
@@ -77,6 +82,7 @@ def test_skipped_result_is_unavailable_instead_of_false_exit(tmp_path) -> None:
             """,
             (current_id,),
         )
+        seal_market_scan_snapshot(conn, current_id, sealed_at="2026-07-28T01:00:00.000000Z")
 
     result = service.rank_changes(current_id, page=1, page_size=50)
 
@@ -244,7 +250,7 @@ def test_different_scope_is_not_a_previous_period(tmp_path) -> None:
         [("600001.SH", 2)],
         data_date="2026-07-28",
         as_of="2026-07-28 15:00:00",
-        scope="ALL",
+        scope=MARKET_SCAN_FULL_MARKET_SCOPE,
     )
 
     result = service.rank_changes(current_id, page=1, page_size=50)
@@ -299,8 +305,9 @@ def _seed_run(
     *,
     data_date: str,
     as_of: str,
-    scope: str = "ALL",
+    scope: str = MARKET_SCAN_FULL_MARKET_SCOPE,
     mode: str = "official",
+    seal: bool = True,
 ) -> int:
     timestamp = "2026-07-28T01:00:00.000000Z"
     with sqlite3.connect(path) as conn:
@@ -325,4 +332,6 @@ def _seed_run(
                 """,
                 (run_id, symbol, code, market, f"样本{code}", rank, timestamp),
             )
+        if seal:
+            seal_market_scan_snapshot(conn, int(run_id), sealed_at=timestamp)
     return int(run_id)

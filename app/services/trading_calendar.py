@@ -205,17 +205,12 @@ def next_trade_dates(value: date, count: int) -> tuple[date, ...]:
     eligible = [
         item
         for item in candidates
-        if (minimum := _coverage_bounds(item)[0]) is not None
-        and minimum <= value
-        and len([day for day in item if day > value]) >= count
+        if (minimum := _coverage_bounds(item)[0]) is not None and minimum <= value and len([day for day in item if day > value]) >= count
     ]
     if not eligible:
         _days, status = _calendar_resolution(value)
         _require_coverage(status)
-        raise TradingCalendarCoverageError(
-            f"可信交易日历在 {value.isoformat()} 之后不足 {count} 个交易日；"
-            "请刷新运行时交易日历或更新 bundled baseline。"
-        )
+        raise TradingCalendarCoverageError(f"可信交易日历在 {value.isoformat()} 之后不足 {count} 个交易日；" "请刷新运行时交易日历或更新 bundled baseline。")
     selected = max(eligible, key=_future_candidate_rank)
     return tuple(sorted(day for day in selected if day > value)[:count])
 
@@ -226,6 +221,31 @@ def trading_day_gap(start: date, end: date) -> int:
     days, status = _calendar_resolution(end, range_start=start)
     _require_coverage(status, range_start=start)
     return sum(start < item <= end for item in days)
+
+
+def trading_session_count(start: date, end: date) -> int:
+    """Count trusted exchange sessions in an inclusive covered date range."""
+
+    days, _status = trading_date_range(start, end)
+    return len(days)
+
+
+def trading_dates_between(start: date, end: date) -> tuple[date, ...]:
+    """Return every trusted exchange session in an inclusive date range."""
+    days, _status = trading_date_range(start, end)
+    return days
+
+
+def trading_date_range(
+    start: date,
+    end: date,
+) -> tuple[tuple[date, ...], TradeCalendarStatus]:
+    """Return trusted inclusive sessions and the exact selected source status."""
+    if start > end:
+        raise ValueError("start 不能晚于 end")
+    days, status = _calendar_resolution(end, range_start=start)
+    _require_coverage(status, range_start=start)
+    return tuple(sorted(item for item in days if start <= item <= end)), status
 
 
 def calendar_status(value: date | None = None) -> TradeCalendarStatus:
@@ -338,11 +358,7 @@ def _select_candidate(
 ) -> _TradeDays | None:
     required_start = range_start or value
     covered = [
-        item
-        for item in candidates
-        if item.min_date is not None
-        and item.max_date is not None
-        and item.min_date <= required_start <= value <= item.max_date
+        item for item in candidates if item.min_date is not None and item.max_date is not None and item.min_date <= required_start <= value <= item.max_date
     ]
     return max(covered, key=_candidate_rank) if covered else None
 
@@ -421,9 +437,7 @@ def _require_coverage(status: TradeCalendarStatus, *, range_start: date | None =
         return
     target = status.target_date.isoformat()
     scope = f"{range_start.isoformat()} 至 {target}" if range_start is not None else target
-    raise TradingCalendarCoverageError(
-        f"可信交易日历未覆盖 {scope}，无法推导交易日期；请刷新运行时交易日历或更新 bundled baseline。"
-    )
+    raise TradingCalendarCoverageError(f"可信交易日历未覆盖 {scope}，无法推导交易日期；请刷新运行时交易日历或更新 bundled baseline。")
 
 
 def _should_auto_refresh(catalog: set[date], selected: set[date] | None, value: date) -> bool:

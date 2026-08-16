@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Protocol
 
+from app.models.strategy_automation import StrategyAutomationRunSummary
 from app.services.instance_guard import FileInstanceGuard
 from app.utils.time import datetime_to_text
 
@@ -34,6 +35,10 @@ class SchedulerInstanceGuard(Protocol):
     def acquire(self) -> bool: ...
 
     def release(self) -> None: ...
+
+
+class StrategyAutomationRunner(Protocol):
+    def run_due(self) -> StrategyAutomationRunSummary: ...
 
 
 class NoopSchedulerInstanceGuard:
@@ -152,6 +157,7 @@ if TYPE_CHECKING:
         _shutdown_tasks: set[asyncio.Task]
         _guard_release_task: asyncio.Task[None] | None
         _market_scan_probability_maintenance: MarketScanProbabilityMaintenanceService | None
+        _strategy_automation_service: StrategyAutomationRunner | None
         _quiescent_event: asyncio.Event
 
         async def _loop(self) -> None: ...

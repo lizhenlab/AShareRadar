@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
 
@@ -14,13 +14,16 @@ from app.models.market_scan import (
     is_market_scan_top100_refresh_scope,
 )
 from app.services.datahub_runtime import run_cache_io
+from app.services.data_quality_time import parse_quote_time
 from app.services.market_scan_contracts import MarketScanCacheProtocol, MarketScanSettingsProtocol
 from app.services.market_scan_pressure import MarketScanPressureController
 from app.services.market_scan_recovery import ProviderWaitBudget
+from app.services.market_scan_modes import market_scan_temporal_contract
 from app.services.market_scan_validation import MarketScanRuntimeGuard, raise_if_scan_cancelled
-from app.utils.audit_time import audit_datetime_to_text
+from app.utils.audit_time import audit_datetime_to_text, parse_audit_time
 from app.utils.clock import market_now_naive, monotonic_now
 from app.utils.market_time import market_local_naive
+from app.utils.time import datetime_to_text
 from app.utils.provider_errors import ProviderChainUnavailable
 
 
@@ -75,6 +78,7 @@ class MarketScanQuoteCaptureEnvelope:
     duration_ms: int
     count: int
     batches: tuple[MarketScanFrozenQuoteBatch, ...]
+    decision_as_of: str | None = None
 
 
 class MarketScanQuoteCapture:
@@ -172,14 +176,52 @@ async def capture_market_scan_quote_batches(
             warnings.append(quote_error)
         capture.observe(batch, quote_map, quote_error)
     envelope = capture.seal()
+    decision_as_of = _quote_capture_decision_as_of(run, envelope)
+    envelope = replace(envelope, decision_as_of=datetime_to_text(decision_as_of))
+    assert envelope.decision_as_of is not None
     await run_cache_io(
         cache.seal_market_scan_quote_capture,
         run.id,
         finished_at=envelope.finished_at,
+        decision_as_of=envelope.decision_as_of,
         duration_ms=envelope.duration_ms,
         count=envelope.count,
     )
     return envelope, tuple(dict.fromkeys(warnings))
+
+
+def _quote_capture_decision_as_of(
+    run: MarketScanRun,
+    envelope: MarketScanQuoteCaptureEnvelope,
+) -> datetime:
+    try:
+        decision = market_local_naive(datetime.fromisoformat(run.as_of.replace("Z", "+00:00")))
+        available_at = market_local_naive(parse_audit_time(envelope.finished_at))
+    except ValueError as exc:
+        raise ValueError("报价采集时点合同无法解析") from exc
+    for batch in envelope.batches:
+        observed_at = market_local_naive(batch.evaluation_as_of)
+        if observed_at > available_at:
+            raise ValueError("报价接收时间晚于报价采集可用时间")
+        decision = max(decision, observed_at)
+        for quote in batch.quote_map.values():
+            event_at = parse_quote_time(quote.timestamp)
+            if event_at is None:
+                continue
+            if event_at > observed_at:
+                raise ValueError("报价事件时间晚于报价接收时间")
+            decision = max(decision, event_at)
+    if decision > available_at:
+        raise ValueError("扫描决策时点晚于报价采集可用时间")
+    temporal = market_scan_temporal_contract(decision, run.mode)
+    if (
+        decision.date()
+        != market_local_naive(datetime.fromisoformat(run.as_of.replace("Z", "+00:00"))).date()
+        or temporal.data_date.isoformat() != run.data_date
+        or temporal.quote_date.isoformat() != run.quote_date
+    ):
+        raise ValueError("报价采集跨越扫描模式或交易日边界")
+    return decision
 
 
 async def _capture_one_quote_batch(

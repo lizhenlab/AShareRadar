@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -31,6 +32,15 @@ from app.models.local_data import (
 from app.services.instance_guard import FileInstanceGuard
 from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
 from app.services.user_data_portability import available_user_tables
+from app.db.market_scan_integrity import (
+    MarketScanSnapshotSealError,
+    verify_market_scan_snapshot,
+)
+from app.db.market_scan_artifact_lease import (
+    MarketScanArtifactLeaseError,
+    market_scan_artifact_retention_lease,
+    require_restored_market_scan_artifact_bindings,
+)
 from app.utils.audit_time import audit_now_text
 from app.utils.clock import monotonic_now, utc_now
 
@@ -281,11 +291,7 @@ def create_runtime_backup(
     source = _require_database(source_path)
     destination_parent = _backup_destination_parent(source, destination)
     destination_parent.mkdir(parents=True, exist_ok=True)
-    managed_limit = (
-        _runtime_backup_limit(max_backups)
-        if destination_parent == _managed_backup_directory(source)
-        else None
-    )
+    managed_limit = _runtime_backup_limit(max_backups) if destination_parent == _managed_backup_directory(source) else None
     with _runtime_backup_operation_lease(
         _database_operation_lock_path(source),
         _backup_directory_operation_lock_path(destination_parent),
@@ -373,11 +379,13 @@ def restore_runtime_backup(
             _backup_directory_operation_lock_path(rollback_parent),
         ):
             _remove_stale_managed_backup_temporaries(target)
-            with _verified_restore_source(backup_root, target) as verified:
-                with _restore_guard(target):
-                    rollback = _create_rollback_backup(target, rollback_destination)
-                    _replace_from_verified_backup(verified.database_path, target, verified.manifest, rollback)
-                    database_replaced = True
+            with market_scan_artifact_retention_lease(target, allow_missing=True):
+                with _verified_restore_source(backup_root, target) as verified:
+                    with _restore_guard(target):
+                        require_restored_market_scan_artifact_bindings(target)
+                        rollback = _create_rollback_backup(target, rollback_destination)
+                        _replace_from_verified_backup(verified.database_path, target, verified.manifest, rollback)
+                        database_replaced = True
             protected_paths = [verified.backup_path]
             if rollback is not None:
                 protected_paths.append(Path(rollback.backup_path))
@@ -393,6 +401,8 @@ def restore_runtime_backup(
                 rollback_backup_path=str(rollback.backup_path) if rollback else None,
                 integrity_check="ok",
             )
+    except MarketScanArtifactLeaseError as exc:
+        raise RuntimeBackupError(str(exc)) from exc
     except RuntimeBackupLeaseReleaseError as exc:
         if not database_replaced:
             raise
@@ -400,9 +410,7 @@ def restore_runtime_backup(
             "Runtime database replacement completed but an operation lease failed to release",
             exc_info=(type(exc), exc, exc.__traceback__),
         )
-        raise RuntimeBackupError(
-            "数据库恢复已完成，但运行时操作锁释放失败；请重启服务并核验数据库状态"
-        ) from exc
+        raise RuntimeBackupError("数据库恢复已完成，但运行时操作锁释放失败；请重启服务并核验数据库状态") from exc
 
 
 @contextmanager
@@ -513,9 +521,7 @@ def _restore_guard(target: Path) -> Iterator[None]:
                 ),
             )
             if body_error is None:
-                raise RuntimeBackupLeaseReleaseError(
-                    "数据库恢复步骤已结束，但释放服务状态锁失败，请重启服务后核验数据库状态"
-                ) from first_release_error
+                raise RuntimeBackupLeaseReleaseError("数据库恢复步骤已结束，但释放服务状态锁失败，请重启服务后核验数据库状态") from first_release_error
 
 
 def _require_quiescent_database(path: Path) -> None:
@@ -592,7 +598,102 @@ def _integrity_check(conn: sqlite3.Connection) -> str:
     messages = [str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()]
     if messages != ["ok"]:
         raise RuntimeBackupError("SQLite integrity_check 失败：" + "；".join(messages[:10]))
+    foreign_key_violations = conn.execute("PRAGMA foreign_key_check").fetchmany(10)
+    if foreign_key_violations:
+        details = "；".join(f"{row[0]}:{row[1]}->{row[2]}" for row in foreign_key_violations)
+        raise RuntimeBackupError("SQLite foreign_key_check 失败：" + details)
+    _require_market_scan_snapshot_integrity(conn)
     return "ok"
+
+
+def _require_market_scan_snapshot_integrity(conn: sqlite3.Connection) -> None:
+    table_names = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'").fetchall()}
+    scan_tables = {"market_scan_run", "market_scan_result"}
+    present_scan_tables = scan_tables & table_names
+    if not present_scan_tables:
+        return
+    if present_scan_tables != scan_tables:
+        missing = ", ".join(sorted(scan_tables - present_scan_tables))
+        raise RuntimeBackupError(f"全市场扫描表结构不完整，缺少：{missing}")
+    _require_market_scan_rule_contract_integrity(conn, table_names)
+    run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(market_scan_run)").fetchall()}
+    if "snapshot_digest" not in run_columns:
+        return
+    try:
+        published = conn.execute(
+            """
+            SELECT id FROM market_scan_run
+            WHERE status IN ('success', 'degraded')
+            ORDER BY id
+            """
+        ).fetchall()
+        for row in published:
+            verify_market_scan_snapshot(conn, int(row[0]))
+    except sqlite3.OperationalError as exc:
+        raise RuntimeBackupError("全市场扫描快照表结构不完整，无法验证备份") from exc
+    except MarketScanSnapshotSealError as exc:
+        raise RuntimeBackupError(f"全市场已发布快照摘要校验失败：{exc}") from exc
+
+
+def _require_market_scan_rule_contract_integrity(
+    conn: sqlite3.Connection,
+    table_names: set[str],
+) -> None:
+    if "market_scan_rule_contract" not in table_names:
+        return  # Legacy backups remain readable; schema init creates the empty registry.
+    expected_triggers = {
+        "trg_market_scan_rule_contract_immutable_update",
+        "trg_market_scan_rule_contract_immutable_delete",
+    }
+    triggers = {
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT name FROM sqlite_schema
+            WHERE type = 'trigger' AND tbl_name = 'market_scan_rule_contract'
+            """
+        ).fetchall()
+    }
+    if not expected_triggers.issubset(triggers):
+        raise RuntimeBackupError("扫描规则合同注册表缺少不可变写保护")
+    rows = conn.execute(
+        """
+        SELECT rule_version, contract_json, production_score_rule_version,
+               production_score_spec_hash
+        FROM market_scan_rule_contract
+        ORDER BY rule_version
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            contract = json.loads(str(row[1]))
+            canonical = json.dumps(
+                contract,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            score_spec = contract["score_spec"]
+            score_rule = score_spec["rule_version"]
+            score_canonical = json.dumps(
+                score_spec,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeBackupError("扫描规则合同注册表包含无效 JSON") from exc
+        rule_version = f"full-market-scan-v6:{hashlib.sha256(canonical.encode('ascii')).hexdigest()}"
+        score_hash = hashlib.sha256(score_canonical.encode("ascii")).hexdigest()
+        if (
+            canonical != row[1]
+            or rule_version != row[0]
+            or score_rule != row[2]
+            or score_hash != row[3]
+        ):
+            raise RuntimeBackupError("扫描规则合同注册表摘要或评分绑定不一致")
 
 
 def _table_row_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -855,10 +956,7 @@ def _remove_stale_managed_backup_temporaries(source: Path) -> tuple[Path, ...]:
 
 
 def _managed_backup_temporary_pattern(source: Path) -> re.Pattern[str]:
-    return re.compile(
-        rf"\.{re.escape(source.stem)}\.{BACKUP_TEMPORARY_MARKER}-"
-        rf"[0-9a-f]{{{BACKUP_TEMPORARY_TOKEN_HEX_LENGTH}}}\Z"
-    )
+    return re.compile(rf"\.{re.escape(source.stem)}\.{BACKUP_TEMPORARY_MARKER}-" rf"[0-9a-f]{{{BACKUP_TEMPORARY_TOKEN_HEX_LENGTH}}}\Z")
 
 
 def _is_stale_managed_backup_temporary(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.models.analysis import (
@@ -13,7 +14,7 @@ from app.models.research import (
 from app.models.market import (
     StockConceptItem,
 )
-from app.services.indicators import average_true_range, daily_return_volatility, recent_volume_ratio
+from app.services.indicators import average_true_range, daily_return_volatility, recent_volume_ratio_if_available
 from app.services.leader_scoring import (
     FEATURE_LEADER_PROFILE,
     FEATURE_TAG_RULES,
@@ -22,7 +23,7 @@ from app.services.leader_scoring import (
     leader_tags,
 )
 from app.services.scoring import clamp_score, score_level
-from app.utils.market_data import finite_float
+from app.utils.market_data import filter_valid_klines, finite_float
 
 HOT_CONCEPT_LIMIT = 2
 LEADERSHIP_TAG_LIMIT = 8
@@ -46,10 +47,15 @@ LEADERSHIP_MISSING_RULES = (
 @dataclass(frozen=True)
 class FeatureMetrics:
     volume_ratio: float
+    volume_ratio_available: bool
+    volume_positive_session_count: int
     atr14: float
     atr_pct: float
+    atr14_available: bool
     volatility_pct: float
+    volatility_available: bool
     valuation_score: int
+    valuation_score_available: bool
     financial_score: int | None
     fund_flow_score: int
     leader_score: int
@@ -66,6 +72,11 @@ def build_feature_snapshot(analysis: AnalysisResult, insights: StockInsightBundl
     trend_score = _score_or_zero(analysis.trend_score)
     signal_confidence = _score_or_zero(analysis.signal_snapshot.confidence)
     data_quality_score = _score_or_zero(analysis.data_quality.score)
+    valid_kline_count = len(filter_valid_klines(analysis.klines))
+    support = _non_negative_or_zero(analysis.support)
+    resistance = _non_negative_or_zero(analysis.resistance)
+    ma20 = _non_negative_or_zero(analysis.ma20)
+    structural_levels_available = valid_kline_count >= 20
     return FeatureSnapshot(
         symbol=f"{quote.code}.{quote.market}",
         updated_at=quote.timestamp,
@@ -78,18 +89,27 @@ def build_feature_snapshot(analysis: AnalysisResult, insights: StockInsightBundl
         data_quality_level=_safe_quality_level(analysis.data_quality.score, analysis.data_quality.level),
         leader_score=metrics.leader_score,
         leader_level=score_level(metrics.leader_score),
-        support=_non_negative_or_zero(analysis.support),
-        resistance=_non_negative_or_zero(analysis.resistance),
+        support=support,
+        resistance=resistance,
         ma5=_non_negative_or_zero(analysis.ma5),
         ma10=_non_negative_or_zero(analysis.ma10),
-        ma20=_non_negative_or_zero(analysis.ma20),
+        ma20=ma20,
         volume_ratio=metrics.volume_ratio,
+        volume_ratio_available=metrics.volume_ratio_available,
+        volume_positive_session_count=metrics.volume_positive_session_count,
+        support_available=structural_levels_available and support > 0,
+        resistance_available=structural_levels_available and resistance > 0,
+        ma20_available=valid_kline_count >= 20 and ma20 > 0,
         atr14=round(metrics.atr14, 2),
         atr_pct=round(metrics.atr_pct, 2),
         volatility_pct=round(metrics.volatility_pct, 2),
+        atr14_available=metrics.atr14_available,
+        volatility_available=metrics.volatility_available,
         turnover_rate=_optional_non_negative(quote.turnover_rate),
         amount=_optional_non_negative(quote.amount),
         valuation_score=metrics.valuation_score,
+        valuation_score_available=metrics.valuation_score_available,
+        valuation_data_nature="derived" if metrics.valuation_score_available else "unavailable",
         financial_score=metrics.financial_score,
         fund_flow_score=metrics.fund_flow_score,
         fund_flow_data_nature=_data_nature(getattr(insights.fund_flow, "data_nature", None)),
@@ -104,19 +124,30 @@ def build_feature_snapshot(analysis: AnalysisResult, insights: StockInsightBundl
 
 def _feature_metrics(analysis: AnalysisResult, insights: StockInsightBundle) -> FeatureMetrics:
     quote = analysis.quote
-    volume_ratio = _non_negative_or_zero(recent_volume_ratio(analysis.klines))
+    valid_rows = filter_valid_klines(analysis.klines)
+    observed_volume_ratio = recent_volume_ratio_if_available(valid_rows)
+    volume_ratio_available = observed_volume_ratio is not None
+    volume_ratio = _non_negative_or_zero(observed_volume_ratio)
+    volume_positive_session_count = sum(1 for item in valid_rows[-20:] if item.volume > 0)
     atr14 = _non_negative_or_zero(average_true_range(analysis.klines, 14))
+    atr14_available = len(valid_rows) >= 15
     price = _positive_or_zero(quote.price)
-    atr_pct = _non_negative_or_zero(atr14 / price * 100 if price > 0 else 0)
+    atr_pct = _non_negative_or_zero(atr14 / price * 100 if atr14_available and price > 0 else 0)
     volatility_pct = _non_negative_or_zero(daily_return_volatility(analysis.klines, 20))
+    volatility_available = len(valid_rows) >= 21
     leader_inputs = _feature_leader_inputs(analysis, insights, volume_ratio)
     leader_score_value = _leader_score(leader_inputs)
     return FeatureMetrics(
         volume_ratio=volume_ratio,
+        volume_ratio_available=volume_ratio_available,
+        volume_positive_session_count=volume_positive_session_count,
         atr14=atr14,
         atr_pct=atr_pct,
+        atr14_available=atr14_available,
         volatility_pct=volatility_pct,
+        volatility_available=volatility_available,
         valuation_score=_score_or_zero(insights.valuation.score),
+        valuation_score_available=insights.valuation.score_available,
         financial_score=_financial_health_score(insights.financial_health),
         fund_flow_score=_score_or_zero(insights.fund_flow.overall_score),
         leader_score=leader_score_value,
@@ -194,6 +225,8 @@ def _feature_notes(analysis: AnalysisResult, insights: StockInsightBundle) -> li
     ]
     if _financial_health_score(insights.financial_health) is None:
         notes.append("正式财报最小集不完整，财务体检分按不可用处理，未计为 0 分。")
+    if recent_volume_ratio_if_available(analysis.klines) is None:
+        notes.append("近20个交易日正成交量窗口不完整，量比兼容值不参与因子评分。")
     if insights.lhb.missing_data:
         notes.append("龙虎榜席位、公告和逐笔资金仍是后续精确化重点。")
     return notes
@@ -229,12 +262,28 @@ def _leadership_evidence(feature: FeatureSnapshot, concepts: list[StockConceptIt
     return [
         f"趋势评分 {feature.trend_score}，涨跌幅 {feature.change_pct:.2f}%。",
         _liquidity_evidence(feature),
-        f"量价热度评分 {feature.fund_flow_score}（{_data_nature_label(feature.fund_flow_data_nature)}），订单压力：{feature.order_pressure}。",
+        _fund_flow_evidence(feature),
         *(item for item in optional_evidence if item),
     ]
 
 
+def _fund_flow_evidence(feature: FeatureSnapshot) -> str:
+    if feature.fund_flow_data_nature == "unavailable":
+        return "量价热度证据不可用，不据此调整龙头强度。"
+    pressure_text = (
+        feature.order_pressure
+        if feature.order_pressure_data_nature != "unavailable"
+        else "盘口证据不可用"
+    )
+    return (
+        f"量价热度评分 {feature.fund_flow_score}"
+        f"（{_data_nature_label(feature.fund_flow_data_nature)}），订单压力：{pressure_text}。"
+    )
+
+
 def _liquidity_evidence(feature: FeatureSnapshot) -> str:
+    if not feature.volume_ratio_available:
+        return "成交量窗口不完整，量能比不可用。"
     if feature.amount:
         return f"成交额 {feature.amount / 100000000:.1f} 亿，量能比 {feature.volume_ratio:.2f}。"
     return f"量能比 {feature.volume_ratio:.2f}。"
@@ -357,6 +406,10 @@ def _safe_report_feature(feature: FeatureSnapshot) -> FeatureSnapshot:
             "turnover_rate": _optional_non_negative(feature.turnover_rate),
             "amount": _optional_non_negative(feature.amount),
             "valuation_score": _score_or_zero(feature.valuation_score),
+            "valuation_score_available": bool(feature.valuation_score_available),
+            "valuation_data_nature": (
+                "derived" if feature.valuation_score_available else "unavailable"
+            ),
             "financial_score": _optional_score(feature.financial_score),
             "fund_flow_score": _score_or_zero(feature.fund_flow_score),
             "fund_flow_data_nature": _data_nature(feature.fund_flow_data_nature),
@@ -372,8 +425,7 @@ def _safe_report_feature(feature: FeatureSnapshot) -> FeatureSnapshot:
 def _clean_tags(tags: list[str] | object) -> list[str]:
     if not tags:
         return []
-    try:
-        values = list(tags)
-    except TypeError:
+    if isinstance(tags, str | bytes) or not isinstance(tags, Iterable):
         return []
+    values = list(tags)
     return [text for item in values if (text := _non_empty_text(item))]

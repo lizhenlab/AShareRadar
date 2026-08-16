@@ -10,13 +10,18 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+import inspect
 from pathlib import Path
 import stat
 from threading import RLock
 from typing import Protocol, TypeVar, cast
 
 from app.artifacts.io import path_has_only_trusted_aliases
-from app.models.market import Kline
+from app.models.market import (
+    DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
+    Kline,
+    KlineAdjustmentMode,
+)
 from app.services.market_scan_probability import stable_probability_hash
 from app.services.market_scan_probability_fit_assessment import (
     PROBABILITY_FIT_ASSESSMENT_RELATIVE_PATH,
@@ -28,6 +33,7 @@ from app.services.market_scan_probability_fit_assessment import (
 )
 from app.services.market_scan_probability_outcomes import (
     ProbabilityOutcomeError,
+    ProbabilityOutcomeSemanticDriftError,
     build_probability_outcome_artifact,
     load_probability_outcome_artifact,
     probability_outcome_required_dates,
@@ -54,13 +60,14 @@ _DirectorySnapshot = tuple[tuple[int, int, int, int] | None, tuple[_FileFingerpr
 class ProbabilityMaintenanceCache(Protocol):
     """Minimal local cache boundary required by maintenance."""
 
-    path: str | Path
+    @property
+    def path(self) -> Path: ...
 
     def get_klines_by_dates_many(
         self,
         symbols: Iterable[str],
         dates: Iterable[str],
-        adjustment_mode: str = "qfq",
+        adjustment_mode: KlineAdjustmentMode = DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,
     ) -> dict[str, list[Kline]]: ...
 
 
@@ -115,7 +122,18 @@ class _OutcomeManifest:
     state_digest: str
 
 
-_Manifest = TypeVar("_Manifest", _SourceManifest, _OutcomeManifest)
+@dataclass(frozen=True)
+class _OutcomeSemanticDriftManifest:
+    path: Path
+    run_id: int
+    as_of_date: str
+    generated_at: str
+    digest: str
+    source_digest: str
+
+
+_OutcomeCatalogEntry = _OutcomeManifest | _OutcomeSemanticDriftManifest
+_Manifest = TypeVar("_Manifest", _SourceManifest, _OutcomeCatalogEntry)
 
 
 class MarketScanProbabilityMaintenanceService:
@@ -141,7 +159,8 @@ class MarketScanProbabilityMaintenanceService:
         self._source_snapshot: _DirectorySnapshot | None = None
         self._outcome_snapshot: _DirectorySnapshot | None = None
         self._source_cache: dict[_FileFingerprint, _SourceManifest] = {}
-        self._outcome_cache: dict[_FileFingerprint, _OutcomeManifest] = {}
+        self._outcome_cache: dict[_FileFingerprint, _OutcomeCatalogEntry] = {}
+        self._semantic_drift_by_run: dict[int, _OutcomeSemanticDriftManifest] = {}
         self._attempt_ledger: dict[str, dict[str, str]] = {}
         self._assessed_corpus_digests: dict[tuple[str, str, str], str] = {}
         self._fit_state_loaded = False
@@ -168,6 +187,13 @@ class MarketScanProbabilityMaintenanceService:
         counts = {"due": 0, "published": 0, "unchanged": 0, "skipped": 0}
         failures: list[str] = []
         for source in sources:
+            if _terminal_semantic_drift(
+                source,
+                latest.get(source.run_id),
+                self._semantic_drift_by_run.get(source.run_id),
+            ):
+                counts["skipped"] += 1
+                continue
             try:
                 _maintain_source(
                     self,
@@ -230,7 +256,12 @@ class MarketScanProbabilityMaintenanceService:
             [outcome.path for _source, outcome in complete],
             generated_at=max(outcome.generated_at for _source, outcome in complete),
         )
-        publish_probability_fit_assessment(self.fit_directory, assessment)
+        _publish_with_optional_database(
+            publish_probability_fit_assessment,
+            self.fit_directory,
+            assessment,
+            database_path=self.cache.path,
+        )
         self._assessed_corpus_digests[cohort] = corpus_digest
         return 1
 
@@ -266,10 +297,15 @@ class MarketScanProbabilityMaintenanceService:
             "market-scan-probability-outcomes-run-*.json.gz",
             self._outcome_snapshot,
             self._outcome_cache,
-            _outcome_manifest,
+            _outcome_catalog_entry,
         )
         self._outcome_snapshot, self._outcome_cache = snapshot, cache
-        return tuple(cache.values())
+        valid = tuple(item for item in cache.values() if isinstance(item, _OutcomeManifest))
+        drifted = tuple(
+            item for item in cache.values() if isinstance(item, _OutcomeSemanticDriftManifest)
+        )
+        self._semantic_drift_by_run = _latest_semantic_drifts(drifted)
+        return valid
 
 
 def _ready_fit_cohorts(
@@ -352,8 +388,25 @@ def _maintain_source(
     if latest is not None and candidate_state == latest.state_digest:
         counts["unchanged"] += 1
         return
-    publish_built_probability_outcome_artifact(service.outcome_directory, candidate)
+    _publish_with_optional_database(
+        publish_built_probability_outcome_artifact,
+        service.outcome_directory,
+        candidate,
+        database_path=service.cache.path,
+    )
     counts["published"] += 1
+
+
+def _publish_with_optional_database(
+    publisher: Callable[..., object],
+    directory: Path,
+    artifact: Mapping[str, object],
+    *,
+    database_path: Path,
+) -> object:
+    if "database_path" in inspect.signature(publisher).parameters:
+        return publisher(directory, artifact, database_path=database_path)
+    return publisher(directory, artifact)
 
 
 def _due_reason(
@@ -476,6 +529,62 @@ def _latest_outcomes(manifests: Sequence[_OutcomeManifest]) -> dict[int, _Outcom
     return newest
 
 
+def _latest_semantic_drifts(
+    manifests: Sequence[_OutcomeSemanticDriftManifest],
+) -> dict[int, _OutcomeSemanticDriftManifest]:
+    newest: dict[int, _OutcomeSemanticDriftManifest] = {}
+    for item in manifests:
+        previous = newest.get(item.run_id)
+        if previous is None or _outcome_order(item) > _outcome_order(previous):
+            newest[item.run_id] = item
+        elif _outcome_order(item) == _outcome_order(previous) and item.digest != previous.digest:
+            raise ProbabilityOutcomeError(
+                f"run {item.run_id} 存在冲突 legacy semantic drift outcomes"
+            )
+    return newest
+
+
+def _terminal_semantic_drift(
+    source: _SourceManifest,
+    valid: _OutcomeManifest | None,
+    drifted: _OutcomeSemanticDriftManifest | None,
+) -> bool:
+    return bool(
+        drifted is not None
+        and drifted.source_digest == source.digest
+        and (valid is None or _outcome_order(drifted) >= _outcome_order(valid))
+    )
+
+
+def _outcome_order(
+    item: _OutcomeManifest | _OutcomeSemanticDriftManifest,
+) -> tuple[str, float]:
+    return item.as_of_date, _timestamp(item.generated_at)
+
+
+def _outcome_catalog_entry(path: Path) -> _OutcomeCatalogEntry:
+    try:
+        return _outcome_manifest(path)
+    except ProbabilityOutcomeSemanticDriftError as exc:
+        identity = (
+            exc.run_id,
+            exc.as_of_date,
+            exc.generated_at,
+            exc.integrity_digest,
+            exc.source_digest,
+        )
+        if any(value is None for value in identity):
+            raise ProbabilityOutcomeError("legacy outcome semantic drift 缺少机械封存身份") from exc
+        return _OutcomeSemanticDriftManifest(
+            path=path,
+            run_id=cast(int, exc.run_id),
+            as_of_date=cast(str, exc.as_of_date),
+            generated_at=cast(str, exc.generated_at),
+            digest=cast(str, exc.integrity_digest),
+            source_digest=cast(str, exc.source_digest),
+        )
+
+
 def _outcome_manifest(path: Path) -> _OutcomeManifest:
     artifact = load_probability_outcome_artifact(path)
     payload = _mapping(artifact["payload"], "outcome.payload")
@@ -542,10 +651,9 @@ def _stable_manifest_refresh(
         snapshot = _directory_snapshot(directory, pattern)
         if snapshot == previous:
             return snapshot, candidate
-        refreshed = {
-            fingerprint: candidate.get(fingerprint) or loader(fingerprint[0])
-            for fingerprint in snapshot[1]
-        }
+        refreshed: dict[_FileFingerprint, _Manifest] = {}
+        for fingerprint in snapshot[1]:
+            refreshed[fingerprint] = candidate.get(fingerprint) or loader(fingerprint[0])
         if _directory_snapshot(directory, pattern) == snapshot:
             return snapshot, refreshed
         candidate.update(refreshed)

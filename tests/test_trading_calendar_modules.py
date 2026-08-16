@@ -165,11 +165,7 @@ def test_nonempty_expired_runtime_with_auto_fetch_attempts_refresh(
     _use_paths(monkeypatch, runtime_path, bundle_path)
     monkeypatch.setenv("ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH", "1")
     monkeypatch.setattr(trading_calendar, "_market_now", lambda: datetime(2026, 1, 5, 12, 0, 0))
-    fetch = Mock(
-        return_value=trading_calendar.TradeDateFetchResult(
-            {date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)}
-        )
-    )
+    fetch = Mock(return_value=trading_calendar.TradeDateFetchResult({date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)}))
     monkeypatch.setattr(trading_calendar, "_fetch_akshare_trade_dates_result", fetch)
 
     assert not trading_calendar.is_trading_day(date(2026, 1, 5))
@@ -191,11 +187,7 @@ def test_auto_fetch_refreshes_stale_runtime_even_when_bundle_covers_current_date
     _use_paths(monkeypatch, runtime_path, bundle_path)
     monkeypatch.setenv("ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH", "1")
     monkeypatch.setattr(trading_calendar, "_market_now", lambda: datetime(2026, 1, 5, 12, 0, 0))
-    fetch = Mock(
-        return_value=trading_calendar.TradeDateFetchResult(
-            {date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)}
-        )
-    )
+    fetch = Mock(return_value=trading_calendar.TradeDateFetchResult({date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)}))
     monkeypatch.setattr(trading_calendar, "_fetch_akshare_trade_dates_result", fetch)
 
     initial = trading_calendar.calendar_status(date(2026, 1, 5))
@@ -227,9 +219,7 @@ def test_implicit_auto_fetch_is_nonblocking_singleflight_and_applies_after_compl
         fetch_calls.append(1)
         fetch_started.set()
         release_fetch.wait(1)
-        return trading_calendar.TradeDateFetchResult(
-            {date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)}
-        )
+        return trading_calendar.TradeDateFetchResult({date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)})
 
     monkeypatch.setattr(trading_calendar, "_fetch_akshare_trade_dates_blocking", slow_fetch)
 
@@ -321,6 +311,18 @@ def test_trading_day_gap_and_previous_date_use_only_trusted_coverage(
     assert trading_calendar.trading_day_gap(date(2025, 12, 31), date(2026, 1, 7)) == 3
     with pytest.raises(trading_calendar.TradingCalendarCoverageError):
         trading_calendar.trading_day_gap(date(2025, 12, 30), date(2026, 1, 7))
+
+
+def test_inclusive_session_count_accepts_catalog_left_boundary_and_reports_real_overflow() -> None:
+    assert trading_calendar.trading_session_count(date(1990, 12, 19), date(1990, 12, 19)) == 1
+    assert trading_calendar.trading_session_count(date(1990, 12, 19), date(1990, 12, 20)) == 2
+    assert trading_calendar.is_trading_day(date(2026, 8, 12))
+
+    with pytest.raises(
+        trading_calendar.TradingCalendarCoverageError,
+        match="1990-12-18 至 1990-12-19",
+    ):
+        trading_calendar.trading_session_count(date(1990, 12, 18), date(1990, 12, 19))
 
 
 def test_next_trade_dates_fails_closed_when_future_coverage_is_short(

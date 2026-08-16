@@ -47,6 +47,7 @@ from app.models.user_data import (
 )
 from app.models.workbench import (
     StockWorkbench,
+    WorkbenchResearchCohort,
     WorkbenchDataWarning,
 )
 from app.services import chart_marks as chart_marks_service
@@ -60,7 +61,7 @@ from app.services.stock_insights import rule_definitions
 from app.services.workbench_context import WorkbenchContext, WorkbenchContextCache
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.clock import performance_now
-from app.utils.symbols import standard_symbol
+from app.utils.symbols import standard_a_share_stock_symbol
 from app.workflows import active_research_queue as _active_research_queue
 from app.workflows.market_overview import market_overview, strong_stock_watch
 from app.workflows.stock_analysis import analyze_individual_stock, review_individual_stock, stock_minute_analysis
@@ -138,11 +139,10 @@ async def stock_insight_bundle(datahub: DataHub, symbol: str) -> StockInsightBun
 async def stock_workbench(datahub: DataHub, symbol: str) -> StockWorkbench:
     started = performance_now()
     try:
+        normalized = _workbench_symbol(symbol)
         context = await stock_workbench_context(datahub, symbol)
-        normalized = _workbench_symbol(context.insights.overview.symbol)
-        advice_warning = await _ensure_advice_snapshot(datahub, context)
         local_state = await _workbench_local_state(datahub, normalized, context)
-        warnings = [item for item in [advice_warning, *local_state.warnings] if item is not None]
+        warnings = list(local_state.warnings)
         result = _stock_workbench_response(context, normalized, local_state, warnings)
     except asyncio.CancelledError:
         raise
@@ -214,22 +214,6 @@ def _elapsed_ms(started: float) -> int:
     return max(0, round((performance_now() - started) * 1000))
 
 
-async def _ensure_advice_snapshot(datahub: DataHub, context: WorkbenchContext) -> WorkbenchDataWarning | None:
-    if context.advice_snapshot_saved:
-        return None
-    try:
-        await run_cache_io(datahub.cache.save_advice_snapshot, context.analysis)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        message = "分析建议快照暂未保存，本次分析结果仍可正常查看。"
-        await _log_local_state_failure(datahub, message, exc)
-        return WorkbenchDataWarning(component="advice_snapshot", message=message)
-    else:
-        context.advice_snapshot_saved = True
-        return None
-
-
 async def _workbench_local_state(datahub: DataHub, normalized: str, context: WorkbenchContext) -> StockWorkbenchLocalState:
     normalized = _workbench_symbol(normalized)
     chart_marks, chart_warning = await _safe_chart_marks(datahub, normalized, context)
@@ -246,7 +230,7 @@ async def _workbench_local_state(datahub: DataHub, normalized: str, context: Wor
 
 
 def _workbench_symbol(symbol: str) -> str:
-    return standard_symbol(symbol)
+    return standard_a_share_stock_symbol(symbol)
 
 
 async def _safe_chart_marks(
@@ -326,9 +310,19 @@ def _stock_workbench_response(
     local_state: StockWorkbenchLocalState,
     warnings: list[WorkbenchDataWarning],
 ) -> StockWorkbench:
+    cohort = WorkbenchResearchCohort(
+        requested_symbol=context.requested_symbol,
+        observed_symbol=context.observed_symbol,
+        decision_time=context.context_generated_at,
+        quote_event_time=context.quote_event_time,
+        signal_date=context.signal_date,
+        daily_bar_cutoff=context.daily_bar_cutoff,
+    )
     return StockWorkbench(
         symbol=normalized,
-        generated_at=now_text(),
+        generated_at=context.context_generated_at,
+        context_generated_at=context.context_generated_at,
+        research_cohort=cohort,
         analysis=context.analysis,
         insights=context.insights,
         feature_snapshot=context.feature_snapshot,

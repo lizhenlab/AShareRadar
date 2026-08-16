@@ -13,6 +13,31 @@ def recent_volume_ratio(klines: list[Kline], recent_window: int = 5, base_window
     return positive_volume_ratio(values, recent_window, base_window, min_count=recent_window + 1, precision=2)
 
 
+def recent_volume_ratio_if_available(
+    klines: list[Kline],
+    recent_window: int = 5,
+    base_window: int = 20,
+) -> float | None:
+    """Return a ratio only when the whole declared volume window is observed."""
+
+    if recent_window <= 0 or base_window < recent_window:
+        return None
+    rows = filter_valid_klines(klines)
+    if len(rows) < base_window:
+        return None
+    values = [finite_float(item.volume) for item in rows[-base_window:]]
+    if any(value is None or value <= 0 for value in values):
+        return None
+    observed = [value for value in values if value is not None]
+    return positive_volume_ratio(
+        observed,
+        recent_window,
+        base_window,
+        min_count=base_window,
+        precision=2,
+    )
+
+
 def positive_volume_ratio(
     values: list[float],
     recent_window: int = 5,
@@ -57,4 +82,9 @@ def _positive_average_ratio(recent: list[float], base: list[float], precision: i
     return round(ratio, precision) if precision is not None else ratio
 
 
-__all__ = ["average_volume", "positive_volume_ratio", "recent_volume_ratio"]
+__all__ = [
+    "average_volume",
+    "positive_volume_ratio",
+    "recent_volume_ratio",
+    "recent_volume_ratio_if_available",
+]

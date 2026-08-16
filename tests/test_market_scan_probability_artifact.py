@@ -22,6 +22,8 @@ from app.services.market_scan_probability import (
     fit_shadow_probability,
 )
 from app.services.market_scan_probability_artifact import (
+    LEGACY_PROBABILITY_RESULT_CONTRACT_VERSION,
+    LEGACY_SCORE_BOUND_PROBABILITY_RESULT_CONTRACT_VERSION,
     PROBABILITY_ARTIFACT_SET_REPLAY_SCHEMA_VERSION,
     PROBABILITY_ARTIFACT_INTEGRITY_NOTICE,
     PROBABILITY_ARTIFACT_SCHEMA_VERSION,
@@ -30,6 +32,7 @@ from app.services.market_scan_probability_artifact import (
     build_probability_artifact,
     canonical_probability_artifact_json,
     load_probability_artifact,
+    probability_artifact_integrity_digest,
     probability_payload_integrity_digest,
     replay_probability_artifact,
     replay_probability_artifact_set,
@@ -190,7 +193,10 @@ def _record(
         "horizon": 5,
         "status": status,
         "probability": probability,
-        "confidence_interval": [probability - 0.1, probability + 0.1] if probability is not None else None,
+        "calibration_bias_interval": [-0.1, 0.1] if probability is not None else None,
+        "calibration_adjusted_probability_interval": (
+            [probability - 0.1, probability + 0.1] if probability is not None else None
+        ),
         "details": {
             "record_contract_version": PROBABILITY_RESULT_CONTRACT_VERSION,
             "sample_id": "29:600519.SH:5:net_excess_positive",
@@ -213,7 +219,9 @@ def _record(
             "exit_date": "2026-08-10" if calibrated else None,
             "raw_probability": probability,
             "empirical_bayes_probability": 0.6 if calibrated else None,
-            "confidence_interval_definition": "test_session_block_bootstrap_calibration_offset_95pct" if calibrated else None,
+            "calibration_adjusted_probability_interval_definition": (
+                "test_session_block_bootstrap_calibration_offset_95pct" if calibrated else None
+            ),
             "versions": _versions(),
             "digests": digests,
             "base_rate": 0.53 if calibrated else None,
@@ -263,7 +271,7 @@ def _replay_set_artifacts(
     cohort_contract: dict[str, object] | None = None,
     feature_scale: float = 1.0,
 ) -> tuple[list[ProbabilitySample], list[dict[str, object]]]:
-    run_ids = list(range(run_start, run_start + 8))
+    run_ids = list(range(run_start, run_start + 10))
     manifest = artifact_set_run_ids or run_ids
     samples = [
         ProbabilitySample(
@@ -284,7 +292,7 @@ def _replay_set_artifacts(
         minimum_test_sessions=2,
         minimum_label_coverage=1.0,
         minimum_bin_sessions=1,
-        gap_sessions=1,
+        gap_sessions=2,
         calibration_bin_count=2,
         minimum_isotonic_calibration_sessions=2,
         empirical_bayes_bin_count=2,
@@ -364,7 +372,7 @@ def _replay_set_payload(
         "exit_date": sample.session_date,
         "raw_probability": None,
         "empirical_bayes_probability": None,
-        "confidence_interval_definition": None,
+        "calibration_adjusted_probability_interval_definition": None,
         "versions": versions,
         "digests": digests,
         "base_rate": evidence["base_rate"],
@@ -407,7 +415,8 @@ def _replay_set_payload(
             "horizon": 1,
             "status": "insufficient_data",
             "probability": None,
-            "confidence_interval": None,
+            "calibration_bias_interval": None,
+            "calibration_adjusted_probability_interval": None,
             "details": details,
         }],
     }
@@ -429,7 +438,7 @@ def _replay_set_calibration_summary(evidence: dict[str, object]) -> dict[str, ob
     }
 
 
-def test_artifact_digest_is_canonical_and_excludes_generated_at() -> None:
+def test_artifact_digest_is_canonical_and_binds_generated_at() -> None:
     first = _artifact(generated_at="2026-08-11T10:00:00+08:00")
     second = _artifact(generated_at="2026-08-11T11:00:00+08:00")
     first_integrity = first["integrity"]
@@ -439,12 +448,39 @@ def test_artifact_digest_is_canonical_and_excludes_generated_at() -> None:
     assert isinstance(second_integrity, dict)
     assert first["schema_version"] == PROBABILITY_ARTIFACT_SCHEMA_VERSION
     assert first_integrity["notice"] == PROBABILITY_ARTIFACT_INTEGRITY_NOTICE
-    assert first_integrity["integrity_digest"] == second_integrity["integrity_digest"]
-    assert first_integrity["integrity_digest"] == probability_payload_integrity_digest(_payload())
+    assert first_integrity["integrity_digest"] != second_integrity["integrity_digest"]
+    assert first_integrity["integrity_digest"] == probability_artifact_integrity_digest(
+        str(first["generated_at"]), first["payload"],  # type: ignore[arg-type]
+    )
     encoded = canonical_probability_artifact_json(first)
     assert ": " not in encoded
     assert ", " not in encoded
     assert encoded == canonical_probability_artifact_json(json.loads(encoded))
+
+
+def test_artifact_rejects_naive_future_and_pre_maturity_generation_times() -> None:
+    naive = "2026-08-11T10:00:00"
+    with pytest.raises(ProbabilityArtifactError, match="必须包含时区"):
+        build_probability_artifact(_payload(generated_at=naive), generated_at=naive)
+
+    future = "2099-08-11T10:00:00+08:00"
+    with pytest.raises(ProbabilityArtifactError, match="不能晚于当前时间"):
+        build_probability_artifact(_payload(generated_at=future), generated_at=future)
+
+    immature = "2026-08-05T10:00:00+08:00"
+    with pytest.raises(ProbabilityArtifactError, match="早于绑定行情或标签成熟日期"):
+        build_probability_artifact(
+            _payload(status="calibrated_shadow", generated_at=immature),
+            generated_at=immature,
+        )
+
+
+def test_artifact_generated_at_tamper_breaks_content_address() -> None:
+    artifact = _artifact(generated_at="2026-08-11T10:00:00+08:00")
+    artifact["generated_at"] = "2026-08-11T11:00:00+08:00"
+
+    with pytest.raises(ProbabilityArtifactError, match="integrity digest 不一致"):
+        verify_probability_artifact(artifact)
 
 
 def test_self_contained_result_replays_offline_and_persists_every_contract_field() -> None:
@@ -504,7 +540,7 @@ def test_complete_artifact_set_refits_full_study_and_preserves_historical_digest
     replay = replay_probability_artifact_set(artifacts)
 
     assert replay["schema_version"] == PROBABILITY_ARTIFACT_SET_REPLAY_SCHEMA_VERSION
-    assert replay["run_ids"] == list(range(101, 109))
+    assert replay["run_ids"] == list(range(101, 111))
     assert replay["study_count"] == 1
     assert replay["studies"][0]["sample_count"] == len(samples)  # type: ignore[index]
     assert replay["studies"][0]["status"] == "calibrated_shadow"  # type: ignore[index]
@@ -521,8 +557,8 @@ def test_artifact_rejects_resealed_label_contract_semantic_tampering() -> None:
     tampered = deepcopy(artifacts[0])
     study = tampered["payload"]["studies"][0]  # type: ignore[index]
     study["metadata"]["contract"]["cost"]["label_contract"]["cost_model_version"] = "tampered-v9"
-    tampered["integrity"]["integrity_digest"] = probability_payload_integrity_digest(
-        tampered["payload"],  # type: ignore[arg-type]
+    tampered["integrity"]["integrity_digest"] = probability_artifact_integrity_digest(
+        str(tampered["generated_at"]), tampered["payload"],  # type: ignore[arg-type]
     )
 
     with pytest.raises(ProbabilityArtifactError, match="完整 label contract"):
@@ -530,7 +566,7 @@ def test_artifact_rejects_resealed_label_contract_semantic_tampering() -> None:
 
 
 def test_artifact_set_replays_each_cohort_with_its_own_model_and_input_digest() -> None:
-    first_run_ids, second_run_ids = list(range(101, 109)), list(range(201, 209))
+    first_run_ids, second_run_ids = list(range(101, 111)), list(range(201, 211))
     manifest = [*first_run_ids, *second_run_ids]
     first_cohort = {"mode": "official", "scope": "A", "rule_version": "v1"}
     second_cohort = {"mode": "intraday", "scope": "B", "rule_version": "v2"}
@@ -708,7 +744,6 @@ def test_atomic_write_failure_preserves_previous_artifact_and_cleans_tempfile(tm
         ("calibrated_shadow", None, [0.4, 0.6]),
         ("calibrated_shadow", 1.01, [0.4, 0.6]),
         ("calibrated_shadow", 0.5, [0.7, 0.6]),
-        ("calibrated_shadow", 0.8, [0.4, 0.6]),
         ("calibrated_shadow", 0.5, [0.4, float("nan")]),
     ],
 )
@@ -720,10 +755,32 @@ def test_builder_rejects_status_probability_and_ci_inconsistency(
     payload = _payload(status=status)
     record = payload["records"][0]  # type: ignore[index]
     record["probability"] = probability  # type: ignore[index]
-    record["confidence_interval"] = interval  # type: ignore[index]
+    record["calibration_adjusted_probability_interval"] = interval  # type: ignore[index]
 
     with pytest.raises(ProbabilityArtifactError):
         build_probability_artifact(payload, generated_at="2026-08-11T10:00:00+08:00")
+
+
+def test_builder_accepts_signed_calibration_bias_interval_not_covering_probability() -> None:
+    payload = _payload(status="calibrated_shadow")
+    study = payload["studies"][0]  # type: ignore[index]
+    record = payload["records"][0]  # type: ignore[index]
+    probability = float(record["probability"])  # type: ignore[arg-type]
+    offset = [0.05, 0.10]
+    study["metadata"]["calibration_metrics"]["calibrated"]["calibration_offset_ci_95"] = offset  # type: ignore[index]
+    record["details"]["calibration_offset_ci_95"] = offset  # type: ignore[index]
+    record["details"]["calibration_summary"]["calibration_offset_ci_95"] = offset  # type: ignore[index]
+    record["calibration_bias_interval"] = offset  # type: ignore[index]
+    record["calibration_adjusted_probability_interval"] = [  # type: ignore[index]
+        probability + offset[0], probability + offset[1]
+    ]
+
+    artifact = build_probability_artifact(
+        payload, generated_at="2026-08-11T10:00:00+08:00",
+    )
+
+    persisted = artifact["payload"]["records"][0]  # type: ignore[index]
+    assert persisted["calibration_adjusted_probability_interval"][0] > persisted["probability"]  # type: ignore[index,operator]
 
 
 def test_builder_rejects_duplicates_or_record_study_mismatch() -> None:
@@ -740,7 +797,8 @@ def test_builder_rejects_duplicates_or_record_study_mismatch() -> None:
     mismatch = _payload()
     mismatch["records"][0]["status"] = "calibrated_shadow"  # type: ignore[index]
     mismatch["records"][0]["probability"] = 0.6  # type: ignore[index]
-    mismatch["records"][0]["confidence_interval"] = [0.5, 0.7]  # type: ignore[index]
+    mismatch["records"][0]["calibration_bias_interval"] = [-0.1, 0.1]  # type: ignore[index]
+    mismatch["records"][0]["calibration_adjusted_probability_interval"] = [0.5, 0.7]  # type: ignore[index]
     with pytest.raises(ProbabilityArtifactError, match="状态不一致"):
         build_probability_artifact(mismatch, generated_at="2026-08-11T10:00:00+08:00")
 
@@ -787,6 +845,7 @@ def test_loader_budget_preserves_existing_full_market_artifact_contract() -> Non
 
 def test_loader_keeps_restart_compatibility_for_verified_legacy_artifacts(tmp_path: Path) -> None:
     legacy = deepcopy(_artifact())
+    _convert_records_to_legacy_intervals(legacy)
     legacy["payload"].pop("record_contract_version")  # type: ignore[union-attr]
     legacy["payload"].pop("feature_evidence")  # type: ignore[union-attr]
     _reseal(legacy)
@@ -797,6 +856,57 @@ def test_loader_keeps_restart_compatibility_for_verified_legacy_artifacts(tmp_pa
 
     assert loaded["payload"].get("record_contract_version") is None  # type: ignore[union-attr]
     with pytest.raises(ProbabilityArtifactError, match="schema"):
+        verify_probability_artifact(legacy)
+
+
+@pytest.mark.parametrize(
+    "legacy_contract",
+    (
+        LEGACY_PROBABILITY_RESULT_CONTRACT_VERSION,
+        LEGACY_SCORE_BOUND_PROBABILITY_RESULT_CONTRACT_VERSION,
+    ),
+)
+def test_loader_replays_legacy_self_contained_results_but_rejects_new_writes(
+    tmp_path: Path, legacy_contract: str,
+) -> None:
+    legacy = deepcopy(_artifact(status="calibrated_shadow"))
+    _convert_records_to_legacy_intervals(legacy)
+    payload = legacy["payload"]
+    payload["record_contract_version"] = legacy_contract  # type: ignore[index]
+    for record in payload["records"]:  # type: ignore[index,union-attr]
+        record["details"]["record_contract_version"] = legacy_contract
+    _reseal(legacy)
+    source = tmp_path / f"legacy-{legacy_contract}.json"
+    source.write_text(canonical_probability_artifact_json(legacy), encoding="utf-8")
+
+    loaded = load_probability_artifact(source)
+
+    assert replay_probability_artifact(loaded)["29:600519.SH:5:net_excess_positive"] == pytest.approx(
+        0.7310585786300049
+    )
+    with pytest.raises(ProbabilityArtifactError, match="只读兼容回放"):
+        verify_probability_artifact(legacy)
+    with pytest.raises(ProbabilityArtifactError, match="只读兼容回放"):
+        write_probability_artifact(
+            tmp_path / "legacy-v2-copy.json",
+            legacy,
+            database_path=tmp_path / "database.sqlite3",
+        )
+
+
+def test_loader_accepts_old_unsealed_time_scope_only_for_legacy_reads(tmp_path: Path) -> None:
+    legacy = deepcopy(_artifact())
+    legacy["integrity"]["scope"] = "payload"  # type: ignore[index]
+    legacy["integrity"]["integrity_digest"] = probability_payload_integrity_digest(  # type: ignore[index]
+        legacy["payload"],  # type: ignore[arg-type]
+    )
+    source = tmp_path / "legacy-unsealed-time.json"
+    source.write_text(canonical_probability_artifact_json(legacy), encoding="utf-8")
+
+    loaded = load_probability_artifact(source)
+
+    assert loaded["integrity"]["scope"] == "payload"  # type: ignore[index]
+    with pytest.raises(ProbabilityArtifactError, match="scope 不受支持"):
         verify_probability_artifact(legacy)
 
 
@@ -823,4 +933,17 @@ def test_builder_rejects_bad_versions_digests_targets_and_non_json_values() -> N
 
 
 def _reseal(artifact: dict[str, object]) -> None:
-    artifact["integrity"]["integrity_digest"] = probability_payload_integrity_digest(artifact["payload"])  # type: ignore[index,arg-type]
+    artifact["integrity"]["integrity_digest"] = probability_artifact_integrity_digest(  # type: ignore[index]
+        str(artifact["generated_at"]), artifact["payload"],  # type: ignore[arg-type]
+    )
+
+
+def _convert_records_to_legacy_intervals(artifact: dict[str, object]) -> None:
+    payload = artifact["payload"]
+    for record in payload["records"]:  # type: ignore[index,union-attr]
+        adjusted = record.pop("calibration_adjusted_probability_interval")
+        record.pop("calibration_bias_interval")
+        record["confidence_interval"] = adjusted
+        details = record["details"]
+        definition = details.pop("calibration_adjusted_probability_interval_definition")
+        details["confidence_interval_definition"] = definition

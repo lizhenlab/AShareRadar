@@ -311,6 +311,10 @@ def _run(
         coverage_pct=100,
         created_at="2026-08-03 16:00:00",
         updated_at="2026-08-03 16:10:00",
+        finished_at="2026-08-03 16:10:00" if status in {"success", "degraded"} else None,
+        snapshot_digest="a" * 64 if status in {"success", "degraded"} else None,
+        snapshot_seal_origin="publication" if status in {"success", "degraded"} else None,
+        snapshot_sealed_at="2026-08-03 16:10:00" if status in {"success", "degraded"} else None,
     )
 
 

@@ -199,10 +199,44 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     message TEXT,
     last_error TEXT,
     publication_diagnostics_json TEXT,
+    snapshot_digest TEXT CHECK (
+        snapshot_digest IS NULL OR (
+            length(snapshot_digest) = 64
+            AND snapshot_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    snapshot_seal_origin TEXT CHECK (
+        snapshot_seal_origin IS NULL
+        OR snapshot_seal_origin IN ('publication', 'legacy_backfill')
+    ),
+    snapshot_sealed_at TEXT,
     cancel_requested_at TEXT,
     FOREIGN KEY (task_run_id) REFERENCES task_run(id) ON DELETE SET NULL,
     FOREIGN KEY (retry_of_run_id) REFERENCES market_scan_run(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS market_scan_rule_contract (
+    rule_version TEXT PRIMARY KEY,
+    contract_json TEXT NOT NULL,
+    production_score_rule_version TEXT NOT NULL,
+    production_score_spec_hash TEXT NOT NULL CHECK (
+        length(production_score_spec_hash) = 64
+        AND production_score_spec_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_market_scan_rule_contract_immutable_update
+BEFORE UPDATE ON market_scan_rule_contract
+BEGIN
+    SELECT RAISE(ABORT, 'market_scan_rule_contract is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_market_scan_rule_contract_immutable_delete
+BEFORE DELETE ON market_scan_rule_contract
+BEGIN
+    SELECT RAISE(ABORT, 'market_scan_rule_contract is immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS market_scan_result (
     run_id INTEGER NOT NULL,
@@ -260,7 +294,12 @@ CREATE TABLE IF NOT EXISTS market_scan_probability_capture_outbox (
     lease_expires_at TEXT,
     last_attempt_at TEXT,
     completed_at TEXT,
-    archive_digest TEXT,
+    archive_digest TEXT CHECK (
+        archive_digest IS NULL OR (
+            length(archive_digest) = 64
+            AND archive_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
     last_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -268,6 +307,11 @@ CREATE TABLE IF NOT EXISTS market_scan_probability_capture_outbox (
     CHECK (
         (status = 'processing' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
         OR (status <> 'processing' AND lease_owner IS NULL AND lease_expires_at IS NULL)
+    ),
+    CHECK (
+        (status = 'succeeded' AND completed_at IS NOT NULL AND archive_digest IS NOT NULL)
+        OR (status = 'skipped' AND completed_at IS NOT NULL AND archive_digest IS NULL)
+        OR (status IN ('pending', 'processing') AND completed_at IS NULL AND archive_digest IS NULL)
     )
 );
 

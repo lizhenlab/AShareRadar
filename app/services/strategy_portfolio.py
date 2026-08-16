@@ -18,12 +18,15 @@ from app.models.strategy_execution import (
     StrategyExecutionRequest,
 )
 from app.models.strategy_lab import StrategyCompiledExpression, StrategySpec
-from app.services.market_scan_score_dimensions import verify_market_scan_point_in_time_evidence
+from app.services.market_scan_score_dimensions import (
+    verify_market_scan_point_in_time_evidence_context,
+)
 from app.services.paper_trading_rules import resolve_trade_rule_profile
 from app.services.strategy_compiler import compile_strategy_spec
 
 
 _MISSING = object()
+STRATEGY_EXECUTION_FRESHNESS_POLICY_VERSION = "strategy-execution-freshness-v2"
 _BOARD_LABELS = {
     "sh_main": "上海A股（主板）",
     "star": "科创板",
@@ -65,19 +68,41 @@ class PortfolioComputation:
     result_digest: str
 
 
+@dataclass(frozen=True)
+class _ConstraintSelectionStats:
+    replacement_attempt_count: int = 0
+    pool_exhausted: bool = False
+
+
+@dataclass(frozen=True)
+class _AllocationDecision:
+    status: str
+    weight: float
+    quantity: int
+    gross_amount: float
+    round_trip_cost: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class _AllocationFailure:
+    status: str
+    reason: str
+    change: str | None = None
+
+
 def build_portfolio_draft(
     strategy: StrategySpec,
     run: MarketScanRun,
     items: list[MarketScanResultItem],
     request: StrategyExecutionRequest,
+    *,
+    freshness_contract: dict[str, object] | None = None,
 ) -> PortfolioComputation:
     compiled = compile_strategy_spec(strategy.spec)
     if not compiled.execution_plan.executable:
         raise ValueError("策略编译计划不可执行：" + "；".join(compiled.execution_plan.blocked_reasons))
-    working = [
-        _evaluate_candidate(strategy, run, item, compiled.execution_plan.expressions)
-        for item in items
-    ]
+    working = [_evaluate_candidate(strategy, run, item, compiled.execution_plan.expressions) for item in items]
     _apply_execution_freshness(strategy, run, working)
     _apply_rebalance_hysteresis(strategy, request, working)
     eligible = [item for item in working if item.utility is not None and not item.failures]
@@ -86,18 +111,24 @@ def build_portfolio_draft(
         item.utility_rank = index
     _rank_sensitivity(strategy, eligible)
     _mark_pareto_front(eligible)
-    _apply_portfolio_constraints(strategy, run, eligible, request.notional_cash_cny)
+    selection_stats = _apply_portfolio_constraints(
+        strategy,
+        run,
+        eligible,
+        request.notional_cash_cny,
+    )
     _finalize_unselected_reasons(strategy, eligible)
 
     candidates = [_to_candidate(item) for item in working]
     candidates.sort(key=lambda item: (item.utility_rank is None, item.utility_rank or 10**9, item.original_rank or 10**9, item.symbol))
-    summary = _portfolio_summary(strategy, candidates, request)
+    summary = _portfolio_summary(strategy, candidates, request, selection_stats)
     cost_fingerprint = _cost_rule_fingerprint(strategy)
     execution_fingerprint = _execution_fingerprint(
         strategy,
         run,
         request,
         cost_rule_fingerprint=cost_fingerprint,
+        freshness_contract=freshness_contract,
     )
     result_digest = _stable_digest(
         {
@@ -144,7 +175,14 @@ def _evaluate_candidate(
 
     dimensions, evidence = _dimensions_and_evidence(item)
     candidate.scores = dimensions
-    candidate.evidence_verified = bool(evidence) and verify_market_scan_point_in_time_evidence(evidence)
+    candidate.evidence_verified = bool(evidence) and verify_market_scan_point_in_time_evidence_context(
+        evidence,
+        item=item,
+        expected_data_date=run.data_date,
+        expected_quote_date=run.quote_date,
+        expected_as_of=run.as_of,
+        expected_mode=run.mode,
+    )
     candidate.freshness = _evidence_freshness(run, item, evidence, candidate.evidence_verified)
     _apply_evidence_policy(strategy, item, candidate)
 
@@ -174,10 +212,7 @@ def _dimensions_and_evidence(item: MarketScanResultItem) -> tuple[dict[str, floa
     values = {
         name: float(value)
         for name in ("alpha_1d", "alpha_5d", "alpha_20d", "confidence", "risk", "tradability")
-        if (value := scores.get(name)) is not None
-        and isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and isfinite(float(value))
+        if (value := scores.get(name)) is not None and isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(float(value))
     }
     return values, _dict(dimensions.get("point_in_time_evidence"))
 
@@ -246,16 +281,10 @@ def _apply_rebalance_hysteresis(
         threshold = policy.hold_utility_threshold if held else policy.buy_utility_threshold
         if candidate.utility + 1e-9 < threshold:
             action = "继续持有" if held else "新买入"
-            candidate.failures.append(
-                f"多目标效用 {candidate.utility:.4f} 未达到{action}阈值 {threshold:.4f}"
-            )
-            candidate.changes.append(
-                f"多目标效用至少提高 {threshold - candidate.utility:.4f} 或调整{action}阈值"
-            )
+            candidate.failures.append(f"多目标效用 {candidate.utility:.4f} 未达到{action}阈值 {threshold:.4f}")
+            candidate.changes.append(f"多目标效用至少提高 {threshold - candidate.utility:.4f} 或调整{action}阈值")
         elif held:
-            candidate.reasons.append(
-                f"当前持仓适用持有阈值 {policy.hold_utility_threshold:.4f}，保留买卖迟滞"
-            )
+            candidate.reasons.append(f"当前持仓适用持有阈值 {policy.hold_utility_threshold:.4f}，保留买卖迟滞")
 
 
 def _evidence_freshness(
@@ -362,10 +391,7 @@ def _rank_sensitivity(strategy: StrategySpec, candidates: list[_WorkingCandidate
     """Record rank shifts from a local +/-10% one-weight-at-a-time perturbation."""
     if not candidates:
         return
-    base_weights = {
-        name: float(value)
-        for name, value in strategy.spec.objectives.model_dump().items()
-    }
+    base_weights = {name: float(value) for name, value in strategy.spec.objectives.model_dump().items()}
     for name in base_weights:
         for direction, multiplier in (("+10%", 1.1), ("-10%", 0.9)):
             weights = dict(base_weights)
@@ -385,10 +411,7 @@ def _rank_sensitivity(strategy: StrategySpec, candidates: list[_WorkingCandidate
 
 
 def _utility_from_weights(scores: dict[str, float], weights: dict[str, float]) -> float:
-    return sum(
-        weight * (100 - scores[name] if name == "risk" else scores[name])
-        for name, weight in weights.items()
-    )
+    return sum(weight * (100 - scores[name] if name == "risk" else scores[name]) for name, weight in weights.items())
 
 
 def _mark_pareto_front(candidates: list[_WorkingCandidate]) -> None:
@@ -415,44 +438,132 @@ def _apply_portfolio_constraints(
     run: MarketScanRun,
     candidates: list[_WorkingCandidate],
     notional: float,
-) -> None:
-    constraints = strategy.spec.portfolio_constraints
-    target_weights = _target_weights(strategy, candidates)
-    selected_count = 0
-    industry_counts: dict[str, int] = {}
-    industry_weights: dict[str, float] = {}
-    board_weights: dict[str, float] = {}
-    for candidate in candidates:
-        requested_weight = target_weights.get(candidate.item.symbol, 0.0)
-        if not _has_requested_weight(candidate, requested_weight, constraints.weighting_method):
-            continue
-        if selected_count >= constraints.stock_count:
-            candidate.reasons.append(
-                f"组合已达到 {constraints.stock_count} 只股票上限"
-            )
-            candidate.changes.append("提高组合股票数量上限或等待更高排名股票退出")
-            continue
-        industry = candidate.item.industry or "未知行业"
-        if industry_counts.get(industry, 0) >= constraints.max_industry_positions:
-            candidate.reasons.append(f"行业 {industry} 已达到 {constraints.max_industry_positions} 只上限")
-            candidate.changes.append("提高行业持仓上限或等待同业更高排名股票退出")
-            continue
-        actual_weight = _allocate_candidate(
+) -> _ConstraintSelectionStats:
+    if strategy.spec.portfolio_constraints.weighting_method == "custom":
+        return _apply_custom_weight_constraints(strategy, run, candidates, notional)
+    return _apply_refilling_constraints(strategy, run, candidates, notional)
+
+
+def _apply_refilling_constraints(
+    strategy: StrategySpec,
+    run: MarketScanRun,
+    candidates: list[_WorkingCandidate],
+    notional: float,
+) -> _ConstraintSelectionStats:
+    target_count = strategy.spec.portfolio_constraints.stock_count
+    cursor = min(target_count, len(candidates))
+    pool = list(candidates[:cursor])
+    replacement_attempts = 0
+    final_decisions: dict[str, _AllocationDecision] = {}
+    maximum_iterations = len(candidates) + 1
+    for _iteration in range(maximum_iterations):
+        decisions, failures = _evaluate_weighted_pool(strategy, run, pool, _target_weights(strategy, pool), notional)
+        pool, replacement_attempts = _retain_allocation_survivors(
+            pool,
+            decisions,
+            failures,
+            replacement_attempts,
+        )
+        pool, cursor = _refill_candidate_pool(
+            pool,
+            candidates,
+            cursor=cursor,
+            target_count=target_count,
+        )
+        final_decisions = decisions
+        if _refill_converged(failures, pool, cursor, candidates, target_count):
+            break
+    else:
+        raise RuntimeError("组合约束补位未在有限迭代内收敛")
+    if set(final_decisions) != {item.item.symbol for item in pool}:
+        final_decisions, failures = _evaluate_weighted_pool(
             strategy,
             run,
-            candidate,
-            requested_weight=requested_weight,
-            notional=notional,
-            industry=industry,
-            industry_weight=industry_weights.get(industry, 0.0),
-            board_weight=board_weights.get(candidate.board, 0.0),
+            pool,
+            _target_weights(strategy, pool),
+            notional,
         )
-        if actual_weight is None:
-            continue
-        selected_count += 1
-        industry_counts[industry] = industry_counts.get(industry, 0) + 1
-        industry_weights[industry] = industry_weights.get(industry, 0.0) + actual_weight
-        board_weights[candidate.board] = board_weights.get(candidate.board, 0.0) + actual_weight
+        pool, replacement_attempts = _retain_allocation_survivors(
+            pool,
+            final_decisions,
+            failures,
+            replacement_attempts,
+        )
+    _apply_allocation_decisions(pool, final_decisions)
+    return _ConstraintSelectionStats(
+        replacement_attempt_count=replacement_attempts,
+        pool_exhausted=len(pool) < target_count and cursor >= len(candidates),
+    )
+
+
+def _retain_allocation_survivors(
+    pool: list[_WorkingCandidate],
+    decisions: dict[str, _AllocationDecision],
+    failures: dict[str, _AllocationFailure],
+    replacement_attempts: int,
+) -> tuple[list[_WorkingCandidate], int]:
+    for candidate in pool:
+        failure = failures.get(candidate.item.symbol)
+        if failure is not None:
+            _record_allocation_failure(candidate, failure)
+            replacement_attempts += 1
+    return (
+        [candidate for candidate in pool if candidate.item.symbol in decisions],
+        replacement_attempts,
+    )
+
+
+def _refill_candidate_pool(
+    pool: list[_WorkingCandidate],
+    candidates: list[_WorkingCandidate],
+    *,
+    cursor: int,
+    target_count: int,
+) -> tuple[list[_WorkingCandidate], int]:
+    while len(pool) < target_count and cursor < len(candidates):
+        pool.append(candidates[cursor])
+        cursor += 1
+    return pool, cursor
+
+
+def _refill_converged(
+    failures: dict[str, _AllocationFailure],
+    pool: list[_WorkingCandidate],
+    cursor: int,
+    candidates: list[_WorkingCandidate],
+    target_count: int,
+) -> bool:
+    return not failures and (len(pool) == target_count or cursor >= len(candidates))
+
+
+def _apply_custom_weight_constraints(
+    strategy: StrategySpec,
+    run: MarketScanRun,
+    candidates: list[_WorkingCandidate],
+    notional: float,
+) -> _ConstraintSelectionStats:
+    weights = _target_weights(strategy, candidates)
+    pool = [candidate for candidate in candidates if weights.get(candidate.item.symbol, 0) > 0]
+    for candidate in candidates:
+        if candidate not in pool:
+            _has_requested_weight(candidate, 0.0, "custom")
+    decisions, failures = _evaluate_weighted_pool(
+        strategy,
+        run,
+        pool,
+        weights,
+        notional,
+    )
+    for candidate in pool:
+        failure = failures.get(candidate.item.symbol)
+        if failure is not None:
+            _record_allocation_failure(candidate, failure)
+    selected = [candidate for candidate in pool if candidate.item.symbol in decisions]
+    _apply_allocation_decisions(selected, decisions)
+    return _ConstraintSelectionStats(
+        replacement_attempt_count=len(failures),
+        pool_exhausted=len(selected) < min(len(pool), strategy.spec.portfolio_constraints.stock_count),
+    )
 
 
 def _has_requested_weight(
@@ -468,7 +579,58 @@ def _has_requested_weight(
     return False
 
 
-def _allocate_candidate(
+def _evaluate_weighted_pool(
+    strategy: StrategySpec,
+    run: MarketScanRun,
+    pool: list[_WorkingCandidate],
+    target_weights: dict[str, float],
+    notional: float,
+) -> tuple[dict[str, _AllocationDecision], dict[str, _AllocationFailure]]:
+    constraints = strategy.spec.portfolio_constraints
+    decisions: dict[str, _AllocationDecision] = {}
+    failures: dict[str, _AllocationFailure] = {}
+    industry_counts: dict[str, int] = {}
+    industry_weights: dict[str, float] = {}
+    board_weights: dict[str, float] = {}
+    for candidate in pool:
+        if len(decisions) >= constraints.stock_count:
+            failures[candidate.item.symbol] = _AllocationFailure(
+                status="rejected",
+                reason=f"组合已达到 {constraints.stock_count} 只股票上限",
+                change="提高组合股票数量上限或等待更高排名股票退出",
+            )
+            continue
+        industry = candidate.item.industry or "未知行业"
+        if industry_counts.get(industry, 0) >= constraints.max_industry_positions:
+            failures[candidate.item.symbol] = _AllocationFailure(
+                status="rejected",
+                reason=f"行业 {industry} 已达到 {constraints.max_industry_positions} 只上限",
+                change="提高行业持仓上限或等待同业更高排名股票退出",
+            )
+            continue
+        decision, failure = _candidate_allocation_decision(
+            strategy,
+            run,
+            candidate,
+            requested_weight=target_weights.get(candidate.item.symbol, 0.0),
+            notional=notional,
+            industry=industry,
+            industry_weight=industry_weights.get(industry, 0.0),
+            board_weight=board_weights.get(candidate.board, 0.0),
+        )
+        if decision is None:
+            if failure is None:
+                raise RuntimeError("组合约束评估缺少失败原因")
+            failures[candidate.item.symbol] = failure
+            continue
+        decisions[candidate.item.symbol] = decision
+        industry_counts[industry] = industry_counts.get(industry, 0) + 1
+        industry_weights[industry] = industry_weights.get(industry, 0.0) + decision.weight
+        board_weights[candidate.board] = board_weights.get(candidate.board, 0.0) + decision.weight
+    return decisions, failures
+
+
+def _candidate_allocation_decision(
     strategy: StrategySpec,
     run: MarketScanRun,
     candidate: _WorkingCandidate,
@@ -478,7 +640,7 @@ def _allocate_candidate(
     industry: str,
     industry_weight: float,
     board_weight: float,
-) -> float | None:
+) -> tuple[_AllocationDecision | None, _AllocationFailure | None]:
     constraints = strategy.spec.portfolio_constraints
     capacity_weight = _capacity_weight(
         candidate.item,
@@ -487,57 +649,71 @@ def _allocate_candidate(
     )
     target_weight = min(requested_weight, constraints.max_stock_weight, capacity_weight)
     if target_weight * notional < constraints.min_position_amount_cny:
-        candidate.status = "unfilled"
-        candidate.reasons.append("流动性容量不足以达到最小名义持仓金额")
-        candidate.changes.append("提高允许的日成交额容量比例或降低最小持仓金额")
-        return None
+        return None, _AllocationFailure(
+            status="unfilled",
+            reason="流动性容量不足以达到最小名义持仓金额",
+            change="提高允许的日成交额容量比例或降低最小持仓金额",
+        )
     if industry_weight + target_weight > constraints.max_industry_weight + 1e-9:
-        candidate.reasons.append(f"行业 {industry} 权重将超过 {constraints.max_industry_weight:.1%}")
-        return None
+        return None, _AllocationFailure(
+            status="rejected",
+            reason=f"行业 {industry} 权重将超过 {constraints.max_industry_weight:.1%}",
+        )
     if board_weight + target_weight > constraints.max_board_weight + 1e-9:
-        candidate.reasons.append(f"{_BOARD_LABELS[candidate.board]}权重将超过 {constraints.max_board_weight:.1%}")
-        return None
+        return None, _AllocationFailure(
+            status="rejected",
+            reason=f"{_BOARD_LABELS[candidate.board]}权重将超过 {constraints.max_board_weight:.1%}",
+        )
     if _locked_limit_up(candidate.item, run):
-        candidate.status = "unfilled"
-        candidate.reasons.append("冻结日K显示一字涨停，日线模型按无法买入处理")
-        return None
+        return None, _AllocationFailure(
+            status="unfilled",
+            reason="冻结日K显示一字涨停，日线模型按无法买入处理",
+        )
     quantity = _target_quantity(candidate.item, run, target_weight * notional)
     if quantity <= 0:
-        candidate.status = "unfilled"
-        candidate.reasons.append("目标金额不足以满足该板块最小买入数量")
-        candidate.changes.append("提高名义本金或降低目标股票数量")
-        return None
-    return _record_candidate_allocation(
-        strategy,
-        candidate,
-        requested_weight=requested_weight,
-        notional=notional,
-        quantity=quantity,
-    )
-
-
-def _record_candidate_allocation(
-    strategy: StrategySpec,
-    candidate: _WorkingCandidate,
-    *,
-    requested_weight: float,
-    notional: float,
-    quantity: int,
-) -> float:
+        return None, _AllocationFailure(
+            status="unfilled",
+            reason="目标金额不足以满足该板块最小买入数量",
+            change="提高名义本金或降低目标股票数量",
+        )
     gross = quantity * float(candidate.item.price or 0)
     actual_weight = min(1.0, gross / notional)
-    candidate.weight = round(actual_weight, 8)
-    candidate.quantity = quantity
-    candidate.gross_amount = round(gross, 2)
-    candidate.round_trip_cost = round(_round_trip_cost(strategy, gross), 2)
     adjusted = actual_weight + 1e-6 < requested_weight
-    candidate.status = "constraint_adjusted" if adjusted else "selected"
-    candidate.reasons.append(
-        "流动性容量或最小交易单位使目标权重低于基础权重"
-        if adjusted
-        else "进入受约束研究组合草案"
+    return (
+        _AllocationDecision(
+            status="constraint_adjusted" if adjusted else "selected",
+            weight=actual_weight,
+            quantity=quantity,
+            gross_amount=gross,
+            round_trip_cost=_round_trip_cost(strategy, gross),
+            reason=("流动性容量或最小交易单位使目标权重低于基础权重" if adjusted else "进入受约束研究组合草案"),
+        ),
+        None,
     )
-    return actual_weight
+
+
+def _record_allocation_failure(
+    candidate: _WorkingCandidate,
+    failure: _AllocationFailure,
+) -> None:
+    candidate.status = failure.status
+    candidate.reasons.append(failure.reason)
+    if failure.change:
+        candidate.changes.append(failure.change)
+
+
+def _apply_allocation_decisions(
+    candidates: list[_WorkingCandidate],
+    decisions: dict[str, _AllocationDecision],
+) -> None:
+    for candidate in candidates:
+        decision = decisions[candidate.item.symbol]
+        candidate.status = decision.status
+        candidate.weight = round(decision.weight, 8)
+        candidate.quantity = decision.quantity
+        candidate.gross_amount = round(decision.gross_amount, 2)
+        candidate.round_trip_cost = round(decision.round_trip_cost, 2)
+        candidate.reasons.append(decision.reason)
 
 
 def _target_weights(
@@ -551,10 +727,7 @@ def _target_weights(
     if not pool:
         return {}
     if constraints.weighting_method == "risk_adjusted":
-        raw = {
-            item.item.symbol: 1.0 / max(5.0, float(item.scores["risk"]))
-            for item in pool
-        }
+        raw = {item.item.symbol: 1.0 / max(5.0, float(item.scores["risk"])) for item in pool}
     else:
         raw = {item.item.symbol: 1.0 for item in pool}
     return _normalize_capped_weights(raw, cap=constraints.max_stock_weight)
@@ -566,10 +739,7 @@ def _normalize_capped_weights(raw: dict[str, float], *, cap: float) -> dict[str,
     weights: dict[str, float] = {}
     while active and remaining > 1e-12:
         total = sum(active.values())
-        proposed = {
-            symbol: remaining * value / total
-            for symbol, value in active.items()
-        }
+        proposed = {symbol: remaining * value / total for symbol, value in active.items()}
         capped = [symbol for symbol, value in proposed.items() if value > cap + 1e-12]
         if not capped:
             weights.update(proposed)
@@ -586,14 +756,10 @@ def _finalize_unselected_reasons(strategy: StrategySpec, eligible: list[_Working
     cutoff = min((float(item.utility or 0) for item in selected), default=None)
     for candidate in eligible:
         if candidate.status != "rejected":
-            candidate.reasons.append(
-                f"生产原始排名 {candidate.item.rank or '--'}，多目标效用排名 {candidate.utility_rank or '--'}"
-            )
+            candidate.reasons.append(f"生产原始排名 {candidate.item.rank or '--'}，多目标效用排名 {candidate.utility_rank or '--'}")
             continue
         if not candidate.reasons:
-            candidate.reasons.append(
-                f"多目标效用排名超出 {strategy.spec.portfolio_constraints.stock_count} 只组合容量"
-            )
+            candidate.reasons.append(f"多目标效用排名超出 {strategy.spec.portfolio_constraints.stock_count} 只组合容量")
         if cutoff is not None and candidate.utility is not None and candidate.utility < cutoff:
             candidate.changes.append(f"多目标效用至少提高 {cutoff - candidate.utility:.4f}")
 
@@ -620,9 +786,7 @@ def _target_quantity(item: MarketScanResultItem, run: MarketScanRun, allocation:
     maximum = floor(allocation / price)
     if maximum < profile.min_buy_quantity:
         return 0
-    return profile.min_buy_quantity + floor(
-        (maximum - profile.min_buy_quantity) / profile.buy_quantity_step
-    ) * profile.buy_quantity_step
+    return profile.min_buy_quantity + floor((maximum - profile.min_buy_quantity) / profile.buy_quantity_step) * profile.buy_quantity_step
 
 
 def _locked_limit_up(item: MarketScanResultItem, run: MarketScanRun) -> bool:
@@ -697,10 +861,7 @@ def _to_candidate(value: _WorkingCandidate) -> PortfolioCandidate:
         reasons=value.reasons,
         minimum_changes=list(dict.fromkeys(value.changes)),
         rank_sensitivity=value.rank_sensitivity,
-        rank_change_reason=(
-            f"生产原始排名 {value.item.rank or '--'} 保持不变；"
-            f"策略多目标效用排名 {value.utility_rank or '--'}"
-        ),
+        rank_change_reason=(f"生产原始排名 {value.item.rank or '--'} 保持不变；" f"策略多目标效用排名 {value.utility_rank or '--'}"),
     )
 
 
@@ -708,6 +869,7 @@ def _portfolio_summary(
     strategy: StrategySpec,
     candidates: list[PortfolioCandidate],
     request: StrategyExecutionRequest,
+    selection_stats: _ConstraintSelectionStats,
 ) -> PortfolioDraftSummary:
     selected = _selected_candidates(candidates)
     no_trade_reasons = _no_trade_reasons(strategy, selected)
@@ -716,6 +878,12 @@ def _portfolio_summary(
     gross = _sum_candidate_field(selected, "estimated_gross_amount_cny")
     costs = _sum_candidate_field(selected, "estimated_round_trip_cost_cny")
     no_trade = not selected
+    underinvested_reason = _underinvested_reason(
+        strategy,
+        selected_count=len(selected),
+        invested=invested,
+        pool_exhausted=selection_stats.pool_exhausted,
+    )
     return PortfolioDraftSummary(
         status="no_trade" if no_trade else "ready",
         no_trade=no_trade,
@@ -731,22 +899,39 @@ def _portfolio_summary(
         estimated_round_trip_cost_cny=round(costs, 2),
         residual_cash_cny=round(max(0.0, request.notional_cash_cny - gross - costs), 2),
         evidence_verified_count=_verified_candidate_count(candidates),
+        replacement_attempt_count=selection_stats.replacement_attempt_count,
+        pool_exhausted=selection_stats.pool_exhausted,
+        underinvested_reason=underinvested_reason,
         notes=[
-            "组合草案不修改 full-market-score-v4 的生产原始排名。",
+            "组合草案不修改来源批次的生产原始排名。",
             f"组合权重方式为 {strategy.spec.portfolio_constraints.weighting_method}；买入/持有迟滞已参与确定性准入。",
             "Alpha、置信度、风险和可交易性是序数研究分，不是收益概率。",
             "日K模型无法证明真实盘口排队与成交，结果仅用于研究和模拟。",
             "策略是否有效仍受独立扫描日期、成本、暴露和PBO晋级门槛约束。",
+            "约束淘汰后会按多目标效用顺序确定性补位，并对最终集合重新计算权重和成本。",
         ],
     )
 
 
+def _underinvested_reason(
+    strategy: StrategySpec,
+    *,
+    selected_count: int,
+    invested: float,
+    pool_exhausted: bool,
+) -> str | None:
+    target_count = strategy.spec.portfolio_constraints.stock_count
+    if selected_count == 0:
+        return "没有候选通过全部准入与组合约束"
+    if pool_exhausted and selected_count < target_count:
+        return f"候选池在约束后耗尽，仅入选 {selected_count}/{target_count} 只"
+    if invested < 0.999999:
+        return "容量、整手或权重上限导致目标资金未完全配置"
+    return None
+
+
 def _selected_candidates(candidates: list[PortfolioCandidate]) -> list[PortfolioCandidate]:
-    return [
-        item
-        for item in candidates
-        if item.status in {"selected", "constraint_adjusted"}
-    ]
+    return [item for item in candidates if item.status in {"selected", "constraint_adjusted"}]
 
 
 def _no_trade_reasons(
@@ -756,9 +941,7 @@ def _no_trade_reasons(
     reasons: list[str] = []
     if not selected:
         reasons.append("没有候选同时通过硬过滤、时点证据、流动性和组合约束")
-    if strategy.spec.evidence_policy.require_verified_point_in_time_evidence and not any(
-        item.evidence_verified for item in selected
-    ):
+    if strategy.spec.evidence_policy.require_verified_point_in_time_evidence and not any(item.evidence_verified for item in selected):
         reasons.append("没有入选候选具备可验证的冻结时点证据")
     return reasons
 
@@ -768,10 +951,7 @@ def _estimated_turnover(
     current_weights: dict[str, float],
 ) -> float:
     target = {item.symbol: item.target_weight for item in selected}
-    return sum(
-        abs(target.get(symbol, 0.0) - current_weights.get(symbol, 0.0))
-        for symbol in set(target) | set(current_weights)
-    )
+    return sum(abs(target.get(symbol, 0.0) - current_weights.get(symbol, 0.0)) for symbol in set(target) | set(current_weights))
 
 
 def _sum_candidate_field(candidates: list[PortfolioCandidate], field_name: str) -> float:
@@ -779,10 +959,7 @@ def _sum_candidate_field(candidates: list[PortfolioCandidate], field_name: str) 
 
 
 def _eligible_candidate_count(candidates: list[PortfolioCandidate]) -> int:
-    return sum(
-        item.utility_score is not None and not item.hard_filter_failures
-        for item in candidates
-    )
+    return sum(item.utility_score is not None and not item.hard_filter_failures for item in candidates)
 
 
 def _candidate_status_count(candidates: list[PortfolioCandidate], status: str) -> int:
@@ -808,17 +985,30 @@ def _execution_fingerprint(
     request: StrategyExecutionRequest,
     *,
     cost_rule_fingerprint: str,
+    freshness_contract: dict[str, object] | None,
 ) -> str:
+    resolved_freshness = freshness_contract or {
+        "version": STRATEGY_EXECUTION_FRESHNESS_POLICY_VERSION,
+        "reference_kind": "frozen_run_decision_time",
+        "reference_date": run.data_date,
+        "age_exchange_sessions": 0,
+        "maximum_age_exchange_sessions": (
+            strategy.spec.evidence_policy.maximum_market_data_age_days
+        ),
+    }
     return _stable_digest(
         {
             "strategy_id": strategy.strategy_id,
             "strategy_version": strategy.strategy_version,
             "strategy_fingerprint": strategy.fingerprint,
             "market_scan_run_id": run.id,
+            "source_snapshot_digest": run.snapshot_digest,
+            "source_snapshot_seal_origin": run.snapshot_seal_origin,
             "rule_version": run.rule_version,
             "data_as_of": run.as_of,
             "data_date": run.data_date,
             "cost_rule_fingerprint": cost_rule_fingerprint,
+            "freshness_contract": resolved_freshness,
             "execution_request": {
                 "kind": request.kind,
                 "mode": request.mode,

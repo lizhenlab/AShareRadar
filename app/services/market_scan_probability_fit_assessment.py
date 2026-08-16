@@ -17,9 +17,14 @@ from app.artifacts.io import (
     canonical_json_text,
     content_addressed_filename,
     decode_json_bytes,
-    exclusive_atomic_publish,
     read_regular_file,
     sha256_hex,
+)
+from app.db.market_scan_artifact_lease import (
+    MarketScanArtifactLeaseError,
+    publish_market_scan_artifact,
+    require_project_managed_artifact_database,
+    verified_market_scan_artifact_publication,
 )
 from app.services.market_scan_probability import stable_probability_hash
 from app.services.market_scan_probability_outcomes import probability_research_rows_from_outcome_artifacts
@@ -38,26 +43,60 @@ _DIGEST = re.compile(r"[0-9a-f]{64}")
 _HORIZONS = (1, 5, 20)
 _TARGETS = ("net_excess_positive", "absolute_net_positive")
 _PAYLOAD_KEYS = {
-    "contract_version", "cohort", "through_run_id", "training_cutoff", "input_pair_digest",
-    "corpus_chain_digest", "members", "sampling", "sampled_row_count", "research_digest",
+    "contract_version",
+    "cohort",
+    "through_run_id",
+    "training_cutoff",
+    "input_pair_digest",
+    "corpus_chain_digest",
+    "members",
+    "sampling",
+    "sampled_row_count",
+    "research_digest",
     "compact_research_digest",
-    "fit_status", "fit_replay_verified", "fit_selection_qualified",
-    "fit_selection_qualification", "horizons", "records_included", "projection_status",
-    "production_ranking_effect", "limitations",
+    "fit_status",
+    "fit_replay_verified",
+    "fit_selection_qualified",
+    "fit_selection_qualification",
+    "horizons",
+    "records_included",
+    "projection_status",
+    "production_ranking_effect",
+    "limitations",
 }
 _MEMBER_KEYS = {
-    "run_id", "session_date", "source_filename", "outcome_filename", "source_content_digest",
-    "outcome_content_digest", "sampled_symbol_digest", "sampled_row_count",
+    "run_id",
+    "session_date",
+    "source_filename",
+    "outcome_filename",
+    "source_content_digest",
+    "outcome_content_digest",
+    "sampled_symbol_digest",
+    "sampled_row_count",
 }
 _SAMPLING_KEYS = {
-    "method", "maximum_rows_per_session", "maximum_total_rows", "maximum_rolling_sessions",
-    "total_canonical_session_count", "excluded_older_session_count", "window_start_session",
+    "method",
+    "maximum_rows_per_session",
+    "maximum_total_rows",
+    "maximum_rolling_sessions",
+    "total_canonical_session_count",
+    "excluded_older_session_count",
+    "window_start_session",
     "window_end_session",
 }
 _HORIZON_EVIDENCE_KEYS = {
-    "status", "fit_status", "selection_qualified", "selection_qualification", "counts",
-    "training_cutoff", "evidence_digest", "input_digest", "deterministic_replay_verified",
-    "promotion_gates", "limitations", "compact_evidence_digest",
+    "status",
+    "fit_status",
+    "selection_qualified",
+    "selection_qualification",
+    "counts",
+    "training_cutoff",
+    "evidence_digest",
+    "input_digest",
+    "deterministic_replay_verified",
+    "promotion_gates",
+    "limitations",
+    "compact_evidence_digest",
 }
 
 
@@ -129,19 +168,33 @@ def probability_fit_corpus_ready(outcome_manifests: Sequence[object]) -> bool:
 def publish_probability_fit_assessment(
     directory: str | Path,
     assessment: Mapping[str, object],
+    *,
+    database_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Publish compact fit evidence without per-stock records."""
     verified = verify_probability_fit_assessment(assessment)
     payload = _mapping(verified["payload"], "payload")
     integrity = _mapping(verified["integrity"], "integrity")
-    target = Path(directory).expanduser().absolute() / content_addressed_filename(
-        "market-scan-probability-fit-through-run",
-        (int(cast(int, payload["through_run_id"])),),
-        str(integrity["integrity_digest"]),
-        ".json.gz",
-    )
+    target = probability_fit_assessment_path(directory, verified)
+    try:
+        require_project_managed_artifact_database(target, database_path, "research/market_scan_probability_fit")
+    except MarketScanArtifactLeaseError as exc:
+        raise ValueError("上涨概率 fit assessment 受管发布绑定无效") from exc
     encoded = gzip.compress(canonical_json_text(verified).encode(), compresslevel=9, mtime=0)
-    exclusive_atomic_publish(target, encoded, max_bytes=PROBABILITY_FIT_MAX_COMPRESSED_BYTES)
+    run_ids = tuple(sorted(_assessment_run_ids(payload)))
+    if database_path is None:
+        publish_market_scan_artifact(target, encoded, max_bytes=PROBABILITY_FIT_MAX_COMPRESSED_BYTES)
+    else:
+        try:
+            with verified_market_scan_artifact_publication(
+                database_path,
+                target,
+                run_ids,
+                managed_directory="research/market_scan_probability_fit",
+            ):
+                publish_market_scan_artifact(target, encoded, max_bytes=PROBABILITY_FIT_MAX_COMPRESSED_BYTES)
+        except MarketScanArtifactLeaseError as exc:
+            raise ValueError("上涨概率 fit assessment 来源批次已失效") from exc
     return {
         "path": str(target),
         "digest": integrity["integrity_digest"],
@@ -149,6 +202,38 @@ def publish_probability_fit_assessment(
         "fit_status": payload["fit_status"],
         "fit_replay_verified": payload["fit_replay_verified"],
     }
+
+
+def probability_fit_assessment_path(
+    directory: str | Path,
+    assessment: Mapping[str, object],
+) -> Path:
+    verified = verify_probability_fit_assessment(assessment)
+    payload = _mapping(verified["payload"], "payload")
+    integrity = _mapping(verified["integrity"], "integrity")
+    return Path(directory).expanduser().absolute() / content_addressed_filename(
+        "market-scan-probability-fit-through-run",
+        (int(cast(int, payload["through_run_id"])),),
+        str(integrity["integrity_digest"]),
+        ".json.gz",
+    )
+
+
+def _assessment_run_ids(value: object) -> set[int]:
+    found: set[int] = set()
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            for key, item in current.items():
+                if str(key).endswith("run_id") and isinstance(item, int) and not isinstance(item, bool) and item > 0:
+                    found.add(item)
+                pending.append(item)
+        elif isinstance(current, list | tuple):
+            pending.extend(current)
+    if not found:
+        raise ValueError("上涨概率 fit assessment 缺少来源 run manifest")
+    return found
 
 
 def verify_probability_fit_assessment(assessment: Mapping[str, object]) -> dict[str, object]:
@@ -183,7 +268,8 @@ def _verify_fit_payload(payload: Mapping[str, object]) -> None:
 
 
 def _verify_member_digests(
-    payload: Mapping[str, object], members: Sequence[Mapping[str, object]],
+    payload: Mapping[str, object],
+    members: Sequence[Mapping[str, object]],
 ) -> None:
     _positive_int(payload["through_run_id"], "through_run_id")
     _iso_date(payload["training_cutoff"], "training_cutoff")
@@ -222,7 +308,8 @@ def _verify_member(member: Mapping[str, object]) -> None:
     for name in ("source_content_digest", "outcome_content_digest", "sampled_symbol_digest"):
         _digest(member[name], f"members[].{name}")
     for name, digest_name in (
-        ("source_filename", "source_content_digest"), ("outcome_filename", "outcome_content_digest"),
+        ("source_filename", "source_content_digest"),
+        ("outcome_filename", "outcome_content_digest"),
     ):
         filename = member[name]
         if not isinstance(filename, str) or str(member[digest_name]) not in filename:
@@ -248,9 +335,7 @@ def _verify_sampling(payload: Mapping[str, object], members: Sequence[Mapping[st
         raise ValueError("上涨概率 fit assessment sampling 计数不一致")
     if sampled > PROBABILITY_FIT_MAX_ROWS:
         raise ValueError("上涨概率 fit assessment 超过内存预算")
-    if sampling["window_start_session"] != members[0]["session_date"] or sampling[
-        "window_end_session"
-    ] != members[-1]["session_date"]:
+    if sampling["window_start_session"] != members[0]["session_date"] or sampling["window_end_session"] != members[-1]["session_date"]:
         raise ValueError("上涨概率 fit assessment sampling window 不一致")
 
 
@@ -265,9 +350,7 @@ def _verify_horizons(value: object) -> tuple[bool, bool]:
             item = _mapping(targets[target], f"horizons.{horizon}.{target}")
             _verify_horizon_evidence(item)
             evidence.append(item)
-    return any(item["fit_status"] == "fitted_oos" for item in evidence), all(
-        item["deterministic_replay_verified"] is True for item in evidence
-    )
+    return any(item["fit_status"] == "fitted_oos" for item in evidence), all(item["deterministic_replay_verified"] is True for item in evidence)
 
 
 def _verify_horizon_evidence(evidence: Mapping[str, object]) -> None:
@@ -283,9 +366,7 @@ def _verify_horizon_evidence(evidence: Mapping[str, object]) -> None:
         raise ValueError("上涨概率 fit assessment horizon fit_status 无效")
     if evidence["deterministic_replay_verified"] is not True:
         raise ValueError("上涨概率 fit assessment horizon 未通过确定性回放")
-    if evidence["selection_qualified"] is not False or evidence[
-        "selection_qualification"
-    ] != _fit_selection_contract(True):
+    if evidence["selection_qualified"] is not False or evidence["selection_qualification"] != _fit_selection_contract(True):
         raise ValueError("上涨概率有界 fit assessment horizon 不得取得选股资格")
     _mapping(evidence["counts"], "horizon evidence.counts")
     _mapping(evidence["promotion_gates"], "horizon evidence.promotion_gates")
@@ -334,11 +415,7 @@ def _verify_cohort(value: object) -> None:
 
 def _verify_integrity_contract(integrity: Mapping[str, object]) -> None:
     _require_exact_keys(integrity, {"algorithm", "scope", "integrity_digest", "notice"}, "integrity")
-    if (
-        integrity["algorithm"] != "sha256"
-        or integrity["scope"] != "payload"
-        or integrity["notice"] != "integrity_digest_not_a_signature"
-    ):
+    if integrity["algorithm"] != "sha256" or integrity["scope"] != "payload" or integrity["notice"] != "integrity_digest_not_a_signature":
         raise ValueError("上涨概率 fit assessment integrity contract 无效")
     _digest(integrity["integrity_digest"], "integrity.integrity_digest")
 
@@ -446,9 +523,7 @@ def _assessment_payload(
         "cohort": deepcopy(cohorts[0]["cohort_contract"]),
         "through_run_id": members[-1]["run_id"],
         "training_cutoff": members[-1]["session_date"],
-        "input_pair_digest": stable_probability_hash(
-            [(member["source_content_digest"], member["outcome_content_digest"]) for member in members]
-        ),
+        "input_pair_digest": stable_probability_hash([(member["source_content_digest"], member["outcome_content_digest"]) for member in members]),
         "corpus_chain_digest": stable_probability_hash(list(members)),
         "members": [dict(value) for value in members],
         "sampling": _sampling_contract(rows, members, total_session_count),
@@ -468,18 +543,12 @@ def _assessment_payload(
             "bounded_sample_benchmark_not_full_market_contract_selection_forbidden",
         ],
     }
-    payload["compact_research_digest"] = stable_probability_hash(
-        _compact_research_identity(payload)
-    )
+    payload["compact_research_digest"] = stable_probability_hash(_compact_research_identity(payload))
     return payload
 
 
 def _fit_replay_state(horizons: Mapping[str, object]) -> tuple[bool, bool]:
-    evidence = (
-        _mapping(_mapping(horizons[str(horizon)], "horizon")[target], "evidence")
-        for horizon in _HORIZONS
-        for target in _TARGETS
-    )
+    evidence = (_mapping(_mapping(horizons[str(horizon)], "horizon")[target], "evidence") for horizon in _HORIZONS for target in _TARGETS)
     values = tuple(evidence)
     replay = all(value.get("deterministic_replay_verified") is True for value in values)
     fitted = any(value.get("fit_status") == "fitted_oos" for value in values)
@@ -517,23 +586,14 @@ def _fit_selection_contract(replay: bool) -> dict[str, object]:
 
 def _compact_horizons(horizons: Mapping[str, object]) -> dict[str, object]:
     return {
-        str(horizon): {
-            target: _compact_horizon_evidence(
-                _mapping(_mapping(horizons[str(horizon)], "horizon")[target], "evidence")
-            )
-            for target in _TARGETS
-        }
+        str(horizon): {target: _compact_horizon_evidence(_mapping(_mapping(horizons[str(horizon)], "horizon")[target], "evidence")) for target in _TARGETS}
         for horizon in _HORIZONS
     }
 
 
 def _compact_horizon_evidence(evidence: Mapping[str, object]) -> dict[str, object]:
     replay = evidence.get("deterministic_replay_verified") is True
-    compact: dict[str, object] = {
-        name: deepcopy(evidence.get(name))
-        for name in _HORIZON_EVIDENCE_KEYS
-        if name != "compact_evidence_digest"
-    }
+    compact: dict[str, object] = {name: deepcopy(evidence.get(name)) for name in _HORIZON_EVIDENCE_KEYS if name != "compact_evidence_digest"}
     compact["selection_qualified"] = False
     compact["selection_qualification"] = _fit_selection_contract(replay)
     compact["compact_evidence_digest"] = stable_probability_hash(compact)
@@ -544,9 +604,18 @@ def _compact_research_identity(payload: Mapping[str, object]) -> dict[str, objec
     return {
         name: deepcopy(payload[name])
         for name in (
-            "cohort", "through_run_id", "training_cutoff", "input_pair_digest",
-            "corpus_chain_digest", "members", "sampling", "sampled_row_count",
-            "research_digest", "fit_status", "fit_replay_verified", "horizons",
+            "cohort",
+            "through_run_id",
+            "training_cutoff",
+            "input_pair_digest",
+            "corpus_chain_digest",
+            "members",
+            "sampling",
+            "sampled_row_count",
+            "research_digest",
+            "fit_status",
+            "fit_replay_verified",
+            "horizons",
         )
     }
 

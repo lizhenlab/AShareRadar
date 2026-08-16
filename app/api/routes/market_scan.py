@@ -6,8 +6,9 @@ from typing import Literal, TypeAlias, TypeVar, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from app.api.deps import get_market_scanner
-from app.api.errors import run_api, run_sync_api_async
+from app.api.deps import get_market_scan_heavy_read_admission, get_market_scanner
+from app.api.errors import artifact_integrity_guard, run_api, run_sync_api_async
+from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission, run_admitted_market_scan_read
 from app.models.market_scan import (
     MarketScanFutureRangeResearchResponse,
     MarketScanResultPage,
@@ -21,14 +22,21 @@ from app.models.market_scan import (
     MarketScanStartRequest,
     MarketScanStartResponse,
 )
+from app.models.market_scan_delta import MarketScanDeltaResponse
+from app.models.market_scan_polling import MarketScanPollingIdentity
+from app.models.market_scan_screening import (
+    MarketBreadthV1,
+    MarketScanScreenEvaluateRequest,
+    MarketScanScreenEvaluationV1,
+)
 from app.services.market_scan_manager import MarketScanManager
-from app.services.market_scan_future_range_artifact import FutureRangeArtifactError
 from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
-from app.services.market_scan_probability_artifact import ProbabilityArtifactError
-from app.services.market_scan_probability_outcomes import ProbabilityOutcomeError
-from app.services.market_scan_probability_source import ProbabilitySourceError
-from app.services.market_scan_probability_store import ProbabilityFilterUnavailable
+from app.services.market_scan_probability_store import (
+    ProbabilityFilterUnavailable,
+    ProbabilityResearchUnavailable,
+)
 from app.services.market_scan_export import XLSX_MEDIA_TYPE, MarketScanExportFilters
+from app.services.market_scan_screening import MarketScanScreeningUnavailable
 
 
 router = APIRouter()
@@ -40,9 +48,11 @@ T = TypeVar("T")
 
 @router.post("/api/market-scans", response_model=MarketScanStartResponse, status_code=202)
 async def create_market_scan(
+    response: Response,
     payload: MarketScanStartRequest | None = None,
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketScanStartResponse:
+    response.headers["Cache-Control"] = "no-store"
     request = payload or MarketScanStartRequest()
     return await run_api(
         lambda: scanner.create_scan(
@@ -58,9 +68,10 @@ async def latest_market_scan(
     response: Response,
     mode: MarketScanMode | None = Query(None),
     scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
 ) -> MarketScanRun | None:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(lambda: scanner.latest_run(mode=mode))
+    return await run_admitted_market_scan_read(admission, lambda: scanner.latest_run(mode=mode))
 
 
 @router.get("/api/market-scans/latest-published", response_model=MarketScanRun | None)
@@ -68,9 +79,24 @@ async def latest_published_market_scan(
     response: Response,
     mode: MarketScanMode | None = Query(None),
     scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
 ) -> MarketScanRun | None:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(lambda: scanner.latest_published_run(mode=mode))
+    return await run_admitted_market_scan_read(admission, lambda: scanner.latest_published_run(mode=mode))
+
+
+@router.get(
+    "/api/market-scans/polling-identity",
+    response_model=MarketScanPollingIdentity,
+)
+async def market_scan_polling_identity(
+    response: Response,
+    mode: MarketScanMode = Query("official"),
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> MarketScanPollingIdentity:
+    """Return opaque non-authorizing tokens for browser change detection."""
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(lambda: scanner.polling_identity(mode=mode))
 
 
 @router.get("/api/market-scans", response_model=MarketScanRunPage)
@@ -100,9 +126,10 @@ async def market_scan_run(
     run_id: int,
     response: Response,
     scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
 ) -> MarketScanRun:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(lambda: scanner.run(run_id))
+    return await run_admitted_market_scan_read(admission, lambda: scanner.run(run_id))
 
 
 def market_scan_filter_query(
@@ -261,9 +288,11 @@ async def market_scan_results(
     page_size: int = Query(100, ge=1, le=200),
     filters: MarketScanExportFilters = Depends(market_scan_filter_query),
     scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
 ) -> MarketScanResultPage:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(
+    return await run_admitted_market_scan_read(
+        admission,
         lambda: _probability_filter_guard(
             lambda: scanner.results(
                 run_id,
@@ -299,9 +328,54 @@ async def market_scan_results(
     )
 
 
-def _probability_filter_guard(call: Callable[[], MarketScanResultPage]) -> MarketScanResultPage:
+@router.get("/api/market-scans/{run_id}/breadth", response_model=MarketBreadthV1)
+async def market_scan_breadth(
+    run_id: int,
+    response: Response,
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> MarketBreadthV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(
+        lambda: _screening_guard(lambda: scanner.breadth(run_id))
+    )
+
+
+@router.post(
+    "/api/market-scans/{run_id}/screen/evaluate",
+    response_model=MarketScanScreenEvaluationV1,
+)
+async def evaluate_market_scan_screen(
+    run_id: int,
+    payload: MarketScanScreenEvaluateRequest,
+    response: Response,
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> MarketScanScreenEvaluationV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(
+        lambda: _screening_guard(lambda: scanner.evaluate_screen(run_id, payload))
+    )
+
+
+@router.get("/api/market-scans/{run_id}/delta", response_model=MarketScanDeltaResponse)
+async def market_scan_delta(
+    run_id: int,
+    response: Response,
+    scanner: MarketScanManager = Depends(get_market_scanner),
+) -> MarketScanDeltaResponse:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(lambda: scanner.delta(run_id))
+
+
+def _screening_guard(call: Callable[[], T]) -> T:
     try:
         return call()
+    except MarketScanScreeningUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _probability_filter_guard(call: Callable[[], T]) -> T:
+    try:
+        return artifact_integrity_guard(call)
     except ProbabilityFilterUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -314,18 +388,19 @@ async def market_scan_probability_research(
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(
-        lambda: _probability_artifact_guard(lambda: scanner.probability_research(run_id))
+        lambda: _probability_research_guard(lambda: scanner.probability_research(run_id))
     )
 
 
-def _probability_artifact_guard(call: Callable[[], T]) -> T:
+def _probability_research_guard(call: Callable[[], T]) -> T:
     try:
-        return call()
-    except (ProbabilityArtifactError, ProbabilityOutcomeError, ProbabilitySourceError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="上涨概率研究 artifact 完整性校验失败，已拒绝读取",
-        ) from exc
+        return _probability_artifact_guard(call)
+    except ProbabilityResearchUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _probability_artifact_guard(call: Callable[[], T]) -> T:
+    return artifact_integrity_guard(call)
 
 
 @router.get(
@@ -365,13 +440,7 @@ def _future_range_research_guard(call: Callable[[], dict[str, object]]) -> dict[
 
 
 def _future_range_artifact_guard(call: Callable[[], T]) -> T:
-    try:
-        return call()
-    except FutureRangeArtifactError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="未来区间研究 artifact 完整性校验失败，已拒绝读取",
-        ) from exc
+    return artifact_integrity_guard(call)
 
 
 @router.get(
@@ -385,8 +454,12 @@ async def export_market_scan_results(
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> Response:
     exported = await run_sync_api_async(
-        lambda: _future_range_artifact_guard(
-            lambda: scanner.export_results(run_id, filters=filters)
+        lambda: _probability_filter_guard(
+            lambda: _probability_research_guard(
+                lambda: _future_range_artifact_guard(
+                    lambda: scanner.export_results(run_id, filters=filters)
+                )
+            )
         )
     )
     return Response(
@@ -403,24 +476,30 @@ async def export_market_scan_results(
 @router.post("/api/market-scans/{run_id}/cancel", response_model=MarketScanRun)
 async def cancel_market_scan(
     run_id: int,
+    response: Response,
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketScanRun:
+    response.headers["Cache-Control"] = "no-store"
     return await run_api(lambda: scanner.cancel_scan(run_id))
 
 
 @router.post("/api/market-scans/{run_id}/retry", response_model=MarketScanStartResponse, status_code=202)
 async def retry_market_scan(
     run_id: int,
+    response: Response,
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketScanStartResponse:
+    response.headers["Cache-Control"] = "no-store"
     return await run_api(lambda: scanner.retry_scan(run_id))
 
 
 @router.post("/api/market-scans/{run_id}/refresh-top100", response_model=MarketScanStartResponse, status_code=202)
 async def refresh_market_scan_top100(
     run_id: int,
+    response: Response,
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketScanStartResponse:
+    response.headers["Cache-Control"] = "no-store"
     return await run_api(lambda: scanner.refresh_top100_scores(run_id))
 
 

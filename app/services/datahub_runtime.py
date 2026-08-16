@@ -83,10 +83,10 @@ async def run_provider_io(call: Callable[P, T], /, *args: P.args, **kwargs: P.kw
 
 
 @dataclass(frozen=True)
-class ProviderAttempt:
+class ProviderAttempt(Generic[T]):
     index: int
     name: str
-    provider: object
+    provider: T
 
 
 @dataclass(frozen=True)
@@ -337,10 +337,10 @@ class ProviderRuntime:
     def attempts(
         self,
         priority_rows: Iterable[tuple[int, str]],
-        providers: Mapping[str, object],
+        providers: Mapping[str, T],
         kind: str,
         errors: list[str],
-    ) -> Iterator[ProviderAttempt]:
+    ) -> Iterator[ProviderAttempt[T]]:
         for index, name in priority_rows:
             if self.is_cooling(name, kind):
                 errors.append(f"{name}: 最近失败，短暂冷却中")

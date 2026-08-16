@@ -2,16 +2,23 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
 
 import pytest
 
+import app.repositories.advice_reviews as advice_review_repository_module
+import app.services.user_data_portability as portability_module
 from app.config import Settings
+from app.db.advice_review_schema import _backfill_current_plan_revisions
+from app.db.paper_trading_schema import paper_run_output_digest
 from app.db.schema_migrations import AUDIT_TIMESTAMP_UTC_MIGRATION
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
 from app.models.local_data import USER_DATA_TABLE_ALLOWLIST, UserDataBundle
 from app.models.paper_trading import PaperStrategyCreate
+from app.models.reviews import AdviceReviewPlanUpdate
 from app.models.strategy_lab import (
     StrategyHardFilter,
     StrategySpecCreate,
@@ -20,7 +27,12 @@ from app.models.strategy_lab import (
 )
 from app.services.cache import SQLiteCache
 from app.services.paper_trading import simulate_paper_portfolio
-from app.services.user_data_portability import export_user_data, import_user_data
+from app.services.research_replay import evaluate_advice_forward_window
+from app.services.user_data_portability import (
+    export_user_data,
+    import_user_data,
+    user_data_state_digest,
+)
 
 
 def test_export_contains_only_exact_user_data_allowlist(tmp_path: Path) -> None:
@@ -316,7 +328,12 @@ def test_populated_paper_run_round_trips_with_all_relationships(tmp_path: Path) 
     assert plan is not None
     source_cache.create_paper_strategy(
         plan,
-        PaperStrategyCreate(plan_id=plan.id, allocation_pct=10),
+        PaperStrategyCreate(
+            plan_id=plan.id,
+            expected_plan_revision=plan.revision,
+            expected_plan_payload_digest=plan.plan_payload_digest,
+            allocation_pct=10,
+        ),
         activation_market_time="2026-07-16 10:00:00",
     )
     strategy = source_cache.paper_strategies()[0].model_copy(
@@ -377,6 +394,220 @@ def test_populated_paper_run_round_trips_with_all_relationships(tmp_path: Path) 
         assert repeated.tables[table].unchanged == bundle.row_counts[table]
         assert repeated.tables[table].inserted == 0
         assert repeated.tables[table].remapped == 0
+
+
+def test_paper_output_digest_round_trips_and_rejects_tampered_bundle_atomically(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "paper-digest-source.sqlite3"
+    target = tmp_path / "paper-digest-target.sqlite3"
+    source_cache = SQLiteCache(source)
+    SQLiteCache(target)
+    _save_portable_paper_run(source_cache, source, marker="digest")
+    bundle = export_user_data(source)
+    run_row = bundle.tables["paper_trading_run"].rows[0]
+    source_digest = str(run_row["output_digest"])
+    assert len(source_digest) == 64
+
+    import_user_data(target, bundle, mode="merge", dry_run=False)
+
+    with sqlite3.connect(target) as conn:
+        imported = conn.execute(
+            "SELECT id, output_digest FROM paper_trading_run"
+        ).fetchone()
+        assert imported is not None
+        assert imported[1] == source_digest
+        assert imported[1] == paper_run_output_digest(conn, int(imported[0]))
+
+    tampered = bundle.model_dump(mode="json")
+    tampered["tables"]["paper_strategy_result"]["rows"][0]["last_price"] = 999.0
+    before = user_data_state_digest(target)
+    with pytest.raises(ValueError, match="输出摘要"):
+        import_user_data(
+            target,
+            UserDataBundle.model_validate(tampered),
+            mode="merge",
+            dry_run=False,
+        )
+    assert user_data_state_digest(target) == before
+
+
+def test_legacy_paper_bundle_without_output_digest_is_rehashed_on_import(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy-paper-source.sqlite3"
+    target = tmp_path / "legacy-paper-target.sqlite3"
+    source_cache = SQLiteCache(source)
+    SQLiteCache(target)
+    _save_portable_paper_run(source_cache, source, marker="legacy-digest")
+    payload = export_user_data(source).model_dump(mode="json")
+    _remove_bundle_columns(payload, "paper_trading_run", {"output_digest"})
+
+    import_user_data(
+        target,
+        UserDataBundle.model_validate(payload),
+        mode="merge",
+        dry_run=False,
+    )
+
+    with sqlite3.connect(target) as conn:
+        run_id, digest = conn.execute(
+            "SELECT id, output_digest FROM paper_trading_run"
+        ).fetchone()
+        assert len(str(digest)) == 64
+        assert digest == paper_run_output_digest(conn, int(run_id))
+
+
+def test_nonempty_paper_run_requires_complete_output_ledger_before_writing(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "partial-paper-source.sqlite3"
+    target = tmp_path / "partial-paper-target.sqlite3"
+    source_cache = SQLiteCache(source)
+    SQLiteCache(target)
+    _save_portable_paper_run(source_cache, source, marker="partial-digest")
+    payload = export_user_data(source).model_dump(mode="json")
+    payload["tables"].pop("paper_trading_event")
+    payload["row_counts"].pop("paper_trading_event")
+
+    with pytest.raises(ValueError, match="完整输出账本"):
+        import_user_data(
+            target,
+            UserDataBundle.model_validate(payload),
+            mode="merge",
+            dry_run=False,
+        )
+
+    assert _table_count(target, "advice_history") == 0
+    assert _table_count(target, "paper_trading_run") == 0
+
+
+def test_paper_output_digest_is_recomputed_after_plan_digest_remap(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "paper-remap-source.sqlite3"
+    target = tmp_path / "paper-remap-target.sqlite3"
+    source_cache = SQLiteCache(source)
+    target_cache = SQLiteCache(target)
+    _save_portable_paper_run(source_cache, source, marker="source")
+    _save_portable_paper_run(
+        target_cache,
+        target,
+        marker="target",
+        symbol="000001.SZ",
+    )
+    source_bundle = export_user_data(source)
+    source_digest = str(source_bundle.tables["paper_trading_run"].rows[0]["output_digest"])
+
+    result = import_user_data(target, source_bundle, mode="merge", dry_run=False)
+
+    assert result.tables["advice_history"].remapped == 1
+    assert result.tables["advice_review_plan"].remapped == 1
+    assert result.tables["paper_strategy"].remapped == 1
+    assert result.tables["paper_trading_run"].remapped == 1
+    with sqlite3.connect(target) as conn:
+        rows = conn.execute(
+            """
+            SELECT run.id, run.output_digest
+            FROM paper_trading_run AS run
+            JOIN paper_strategy_result AS result ON result.run_id = run.id
+            JOIN paper_strategy AS strategy ON strategy.id = result.strategy_id
+            WHERE strategy.symbol = '600519.SH'
+            """
+        ).fetchall()
+        assert len(rows) == 1
+        run_id, imported_digest = int(rows[0][0]), str(rows[0][1])
+        assert imported_digest == paper_run_output_digest(conn, run_id)
+    assert imported_digest != source_digest
+
+
+def test_strategy_only_merge_cannot_rewrite_a_strategy_bound_to_an_immutable_run(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "strategy-only-source.sqlite3"
+    target = tmp_path / "strategy-only-target.sqlite3"
+    source_cache = SQLiteCache(source)
+    target_cache = SQLiteCache(target)
+    target_run_id = _save_portable_paper_run(
+        target_cache,
+        target,
+        marker="shared-plan",
+    )
+    source_advice = _insert_advice(source, "600519.SH", marker="shared-plan")
+    source_plan_id = _insert_review_plan(
+        source,
+        source_advice,
+        "600519.SH",
+        marker="shared-plan",
+    )
+    source_plan = source_cache.advice_review_plan(source_plan_id)
+    assert source_plan is not None
+    source_cache.create_paper_strategy(
+        source_plan,
+        PaperStrategyCreate(
+            plan_id=source_plan.id,
+            expected_plan_revision=source_plan.revision,
+            expected_plan_payload_digest=source_plan.plan_payload_digest,
+            allocation_pct=25,
+        ),
+        activation_market_time="2026-07-16 10:00:00",
+    )
+    source_bundle = export_user_data(source)
+    assert source_bundle.row_counts["paper_trading_run"] == 0
+    before_state = user_data_state_digest(target)
+    with sqlite3.connect(target) as conn:
+        before = conn.execute(
+            """
+            SELECT strategy.allocation_pct, run.output_digest
+            FROM paper_strategy AS strategy
+            JOIN paper_strategy_result AS result ON result.strategy_id = strategy.id
+            JOIN paper_trading_run AS run ON run.id = result.run_id
+            WHERE run.id = ?
+            """,
+            (target_run_id,),
+        ).fetchone()
+
+    with pytest.raises(ValueError, match="不可变运行"):
+        import_user_data(target, source_bundle, mode="merge", dry_run=False)
+
+    assert user_data_state_digest(target) == before_state
+    with sqlite3.connect(target) as conn:
+        after = conn.execute(
+            """
+            SELECT strategy.allocation_pct, run.output_digest
+            FROM paper_strategy AS strategy
+            JOIN paper_strategy_result AS result ON result.strategy_id = strategy.id
+            JOIN paper_trading_run AS run ON run.id = result.run_id
+            WHERE run.id = ?
+            """,
+            (target_run_id,),
+        ).fetchone()
+        assert after[1] == paper_run_output_digest(conn, target_run_id)
+    assert after == before
+    assert target_cache.paper_trading_dashboard(run_id=target_run_id).selected_run_id == (
+        target_run_id
+    )
+
+
+def test_account_only_merge_cannot_change_initial_cash_after_paper_history_exists(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "paper-account-history-target.sqlite3"
+    target_cache = SQLiteCache(target)
+    _save_portable_paper_run(target_cache, target, marker="account-history")
+    payload = export_user_data(target).model_dump(mode="json")
+    account = payload["tables"]["paper_trading_account"]
+    account["rows"][0]["initial_cash"] = 2_000_000
+    payload["tables"] = {"paper_trading_account": account}
+    payload["row_counts"] = {"paper_trading_account": 1}
+    bundle = UserDataBundle.model_validate(payload)
+    before = user_data_state_digest(target)
+
+    with pytest.raises(ValueError, match="模拟账户"):
+        import_user_data(target, bundle, mode="merge", dry_run=False)
+
+    assert user_data_state_digest(target) == before
+    assert target_cache.paper_trading_account().initial_cash == 1_000_000
 
 
 def test_import_normalizes_legacy_audit_fields_after_schema_migration_and_orders_by_epoch(
@@ -551,7 +782,7 @@ def test_merge_rejects_child_rows_without_bundled_surrogate_parent(
     assert _joined_alert_markers(target) == {("target", "target")}
 
 
-def test_v1_bundle_without_later_price_provenance_columns_is_upgraded(
+def test_v1_bundle_without_frozen_price_provenance_is_rejected_atomically(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.sqlite3"
@@ -608,45 +839,18 @@ def test_v1_bundle_without_later_price_provenance_columns_is_upgraded(
         },
     )
 
-    import_user_data(
-        target,
-        UserDataBundle.model_validate(payload),
-        mode="merge",
-        dry_run=False,
-    )
+    with pytest.raises(ValueError, match="不可变版本账本"):
+        import_user_data(
+            target,
+            UserDataBundle.model_validate(payload),
+            mode="merge",
+            dry_run=False,
+        )
 
     with sqlite3.connect(target) as conn:
-        advice = conn.execute("SELECT kline_adjustment_mode, kline_anchor_close FROM advice_history").fetchone()
-        plan = conn.execute(
-            """
-            SELECT snapshot_adjustment_mode, snapshot_anchor_close,
-                   trigger_basis, invalidation_basis
-            FROM advice_review_plan
-            """
-        ).fetchone()
-        result = conn.execute(
-            """
-            SELECT snapshot_adjustment_mode, evaluation_adjustment_mode,
-                   price_scale_factor, normalized_entry_price,
-                   trigger_basis, invalidation_basis
-            FROM advice_review_result
-            """
-        ).fetchone()
-    assert advice == ("unknown", None)
-    assert plan == (
-        "unknown",
-        None,
-        "daily_high_gte_target_price",
-        "daily_low_lte_stop_price",
-    )
-    assert result == (
-        "unknown",
-        "unknown",
-        None,
-        None,
-        "daily_high_gte_target_price",
-        "daily_low_lte_stop_price",
-    )
+        assert conn.execute("SELECT COUNT(*) FROM advice_history").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM advice_review_plan").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM advice_review_result").fetchone()[0] == 0
 
 
 def test_foreign_key_failure_rolls_back_every_table(tmp_path: Path) -> None:
@@ -668,6 +872,320 @@ def test_foreign_key_failure_rolls_back_every_table(tmp_path: Path) -> None:
     assert _watchlist_symbols(target) == []
     with sqlite3.connect(target) as conn:
         assert conn.execute("SELECT COUNT(*) FROM advice_review_plan").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("missing_kind", ["table", "historical_revision"])
+def test_import_rejects_plan_without_complete_revision_ledger_before_writing(
+    tmp_path: Path,
+    missing_kind: str,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    source_cache = SQLiteCache(source)
+    SQLiteCache(target)
+    plan_id = _insert_review_plan(
+        source,
+        _insert_advice(source, "600519.SH", marker="source"),
+        "600519.SH",
+        marker="source-v1",
+    )
+    plan = source_cache.advice_review_plan(plan_id)
+    assert plan is not None
+    source_cache.update_advice_review_plan(
+        plan.id,
+        AdviceReviewPlanUpdate(expected_revision=1, hypothesis="source-v2"),
+    )
+    payload = export_user_data(source).model_dump(mode="json")
+    if missing_kind == "table":
+        payload["tables"].pop("advice_review_plan_revision")
+        payload["row_counts"].pop("advice_review_plan_revision")
+        message = "不可变版本账本"
+    else:
+        ledger_rows = payload["tables"]["advice_review_plan_revision"]["rows"]
+        payload["tables"]["advice_review_plan_revision"]["rows"] = [
+            row for row in ledger_rows if row["revision"] != 1
+        ]
+        payload["row_counts"]["advice_review_plan_revision"] = 1
+        message = "完整、连续"
+
+    with pytest.raises(ValueError, match=message):
+        import_user_data(
+            target,
+            UserDataBundle.model_validate(payload),
+            mode="merge",
+            dry_run=False,
+        )
+
+    assert _table_count(target, "advice_history") == 0
+    assert _table_count(target, "advice_review_plan") == 0
+    assert _table_count(target, "advice_review_plan_revision") == 0
+
+
+def test_merge_rejects_stale_plan_revision_and_rolls_back_every_table(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    source_cache = SQLiteCache(source)
+    SQLiteCache(target)
+    _insert_watchlist(source, "600519.SH", note="stale-source")
+    plan_id = _insert_review_plan(
+        source,
+        _insert_advice(source, "600519.SH", marker="source"),
+        "600519.SH",
+        marker="source-v1",
+    )
+    stale_bundle = export_user_data(source)
+    source_cache.update_advice_review_plan(
+        plan_id,
+        AdviceReviewPlanUpdate(expected_revision=1, hypothesis="source-v2"),
+    )
+    import_user_data(target, export_user_data(source), mode="merge", dry_run=False)
+    before = user_data_state_digest(target)
+
+    with pytest.raises(ValueError, match="不能用旧修订回退"):
+        import_user_data(target, stale_bundle, mode="merge", dry_run=False)
+
+    assert user_data_state_digest(target) == before
+    with sqlite3.connect(target) as conn:
+        plan = conn.execute(
+            "SELECT revision, hypothesis FROM advice_review_plan"
+        ).fetchone()
+    assert plan == (2, "source-v2")
+    assert _watchlist_note(target, "600519.SH") == "stale-source"
+
+
+def test_collision_remap_rewrites_canonical_plan_result_and_paper_bindings(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    target = tmp_path / "target.sqlite3"
+    source_cache = SQLiteCache(source)
+    target_cache = SQLiteCache(target)
+    source_advice = _insert_advice(source, "600519.SH", marker="source")
+    target_advice = _insert_advice(target, "000001.SZ", marker="target")
+    source_plan_id = _insert_review_plan(
+        source,
+        source_advice,
+        "600519.SH",
+        marker="source",
+    )
+    target_plan_id = _insert_review_plan(
+        target,
+        target_advice,
+        "000001.SZ",
+        marker="target",
+    )
+    source_plan = source_cache.advice_review_plan(source_plan_id)
+    target_plan = target_cache.advice_review_plan(target_plan_id)
+    assert source_plan is not None and target_plan is not None
+    bars = [
+        _paper_bar("2026-07-16", 100, 102, 99, 101),
+        _paper_bar("2026-07-17", 101, 104, 100, 103),
+        _paper_bar("2026-07-20", 103, 106, 102, 105),
+        _paper_bar("2026-07-21", 105, 108, 104, 107),
+        _paper_bar("2026-07-22", 107, 109, 106, 108),
+    ]
+    source_evaluation = None
+    for cache, plan in ((source_cache, source_plan), (target_cache, target_plan)):
+        evaluation = evaluate_advice_forward_window(
+            plan,
+            bars,
+            as_of=datetime(2026, 7, 22, 16),
+            evaluated_at="2026-07-22T08:01:00.000000Z",
+        )
+        saved_evaluation = cache.save_advice_review_evaluation(evaluation)
+        if cache is source_cache:
+            source_evaluation = saved_evaluation
+        cache.create_paper_strategy(
+            plan,
+            PaperStrategyCreate(
+                plan_id=plan.id,
+                expected_plan_revision=plan.revision,
+                expected_plan_payload_digest=plan.plan_payload_digest,
+                allocation_pct=10,
+            ),
+            activation_market_time="2026-07-16 10:00:00",
+        )
+
+    result = import_user_data(
+        target,
+        export_user_data(source),
+        mode="merge",
+        dry_run=False,
+    )
+
+    assert result.tables["advice_history"].remapped == 1
+    assert result.tables["advice_review_plan"].remapped == 1
+    assert result.tables["advice_review_result"].remapped == 1
+    assert result.tables["paper_strategy"].remapped == 1
+    with sqlite3.connect(target) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT plan.id AS plan_id, plan.advice_id, plan.plan_payload_digest,
+                   ledger.payload_json, ledger.payload_digest,
+                   result.plan_id AS result_plan_id,
+                   result.advice_id AS result_advice_id,
+                   result.plan_payload_digest AS result_plan_digest,
+                   strategy.plan_id AS strategy_plan_id,
+                   strategy.advice_id AS strategy_advice_id,
+                   strategy.plan_payload_digest AS strategy_plan_digest
+            FROM advice_history AS advice
+            JOIN advice_review_plan AS plan ON plan.advice_id = advice.id
+            JOIN advice_review_plan_revision AS ledger
+              ON ledger.plan_id = plan.id AND ledger.revision = plan.revision
+            JOIN advice_review_result AS result
+              ON result.plan_id = plan.id AND result.plan_revision = plan.revision
+            JOIN paper_strategy AS strategy
+              ON strategy.plan_id = plan.id AND strategy.plan_revision = plan.revision
+            WHERE advice.summary = 'source'
+            """
+        ).fetchone()
+        assert row is not None
+        result_row = conn.execute(
+            "SELECT * FROM advice_review_result WHERE plan_id = ?",
+            (row["plan_id"],),
+        ).fetchone()
+    assert result_row is not None
+    payload = json.loads(str(row["payload_json"]))
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    assert row["plan_id"] != source_plan_id
+    assert row["advice_id"] != source_advice
+    assert payload["advice_id"] == row["advice_id"]
+    assert digest == row["payload_digest"] == row["plan_payload_digest"]
+    assert (row["result_plan_id"], row["result_advice_id"], row["result_plan_digest"]) == (
+        row["plan_id"],
+        row["advice_id"],
+        digest,
+    )
+    assert (
+        row["strategy_plan_id"],
+        row["strategy_advice_id"],
+        row["strategy_plan_digest"],
+    ) == (row["plan_id"], row["advice_id"], digest)
+    imported_detail = target_cache.advice_review_detail(int(row["plan_id"]))
+    assert imported_detail is not None and imported_detail.latest_evaluation is not None
+    assert source_evaluation is not None
+    result_digest_fields = {"plan_payload_digest", "input_digest", "result_digest"}
+    result_value_fields = {
+        "status",
+        "conclusion",
+        "return_pct",
+        "max_favorable_excursion_pct",
+        "max_adverse_excursion_pct",
+        "target_hit",
+        "target_hit_date",
+        "stop_hit",
+        "stop_hit_date",
+    }
+    input_payload = {
+        field: result_row[field]
+        for field in advice_review_repository_module._RESULT_INSERT_FIELDS
+        if field not in result_digest_fields | result_value_fields
+    }
+    assert result_row["input_digest"] == advice_review_repository_module._payload_digest(
+        input_payload
+    )
+    assert result_row["input_digest"] != source_evaluation.input_digest
+    assert result_row["evidence_contract_version"] == "advice-review-evidence.v2"
+    imported_strategy = next(
+        item for item in target_cache.paper_strategies() if item.symbol == "600519.SH"
+    )
+    assert imported_strategy.plan_payload_digest == digest
+
+
+@pytest.mark.parametrize("table", ["advice_review_result", "paper_strategy"])
+def test_import_rejects_result_or_paper_row_bound_to_different_plan_payload(
+    tmp_path: Path,
+    table: str,
+) -> None:
+    source = tmp_path / f"source-{table}.sqlite3"
+    target = tmp_path / f"target-{table}.sqlite3"
+    source_cache = SQLiteCache(source)
+    SQLiteCache(target)
+    advice_id = _insert_advice(source, "600519.SH", marker="source")
+    plan_id = _insert_review_plan(source, advice_id, "600519.SH", marker="source")
+    _insert_review_result(source, plan_id, advice_id, "600519.SH", marker="source")
+    plan = source_cache.advice_review_plan(plan_id)
+    assert plan is not None
+    source_cache.create_paper_strategy(
+        plan,
+        PaperStrategyCreate(
+            plan_id=plan.id,
+            expected_plan_revision=plan.revision,
+            expected_plan_payload_digest=plan.plan_payload_digest,
+            allocation_pct=10,
+        ),
+        activation_market_time="2026-07-16 10:00:00",
+    )
+    payload = export_user_data(source).model_dump(mode="json")
+    payload["tables"][table]["rows"][0]["target_price"] = 111.0
+
+    with pytest.raises(ValueError, match=table):
+        import_user_data(
+            target,
+            UserDataBundle.model_validate(payload),
+            mode="merge",
+            dry_run=False,
+        )
+
+    assert _table_count(target, "advice_history") == 0
+    assert _table_count(target, "advice_review_plan") == 0
+    assert _table_count(target, "advice_review_result") == 0
+    assert _table_count(target, "paper_strategy") == 0
+
+
+def test_v1_review_evidence_digest_imports_as_fail_closed_audit_history(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "review-v1-source.sqlite3"
+    target = tmp_path / "review-v1-target.sqlite3"
+    source_cache = SQLiteCache(source)
+    target_cache = SQLiteCache(target)
+    advice_id = _insert_advice(source, "600519.SH", marker="review-v1")
+    plan_id = _insert_review_plan(source, advice_id, "600519.SH", marker="review-v1")
+    plan = source_cache.advice_review_plan(plan_id)
+    assert plan is not None
+    source_cache.save_advice_review_evaluation(
+        evaluate_advice_forward_window(
+            plan,
+            [
+                _paper_bar("2026-07-16", 100, 102, 99, 101),
+                _paper_bar("2026-07-17", 101, 104, 100, 103),
+            ],
+            as_of=datetime(2026, 7, 17, 16),
+            evaluated_at="2026-07-17T08:01:00.000000Z",
+        )
+    )
+    payload = export_user_data(source).model_dump(mode="json")
+    row = payload["tables"]["advice_review_result"]["rows"][0]
+    row["evidence_contract_version"] = "advice-review-evidence.v1"
+    row["input_digest"] = portability_module._review_result_input_digest(row)
+
+    import_user_data(
+        target,
+        UserDataBundle.model_validate(payload),
+        mode="merge",
+        dry_run=False,
+    )
+
+    with sqlite3.connect(target) as conn:
+        stored = conn.execute(
+            """
+            SELECT evidence_contract_version, input_digest
+            FROM advice_review_result
+            """
+        ).fetchone()
+    assert stored == ("advice-review-evidence.v1", row["input_digest"])
+    detail = target_cache.advice_review_detail(plan_id)
+    assert detail is not None and detail.latest_evaluation is not None
+    assert detail.latest_evaluation.status == "insufficient"
+    assert detail.latest_evaluation.conclusion == "insufficient_data"
 
 
 def _insert_watchlist(path: Path, symbol: str, *, note: str) -> None:
@@ -780,6 +1298,18 @@ def _insert_advice(path: Path, symbol: str, *, marker: str) -> int:
                 "2026-07-16 09:59:00",
             ),
         )
+        conn.execute(
+            """
+            UPDATE advice_history
+            SET kline_adjustment_mode = 'qfq',
+                kline_anchor_date = '2026-07-16',
+                kline_anchor_close = 100,
+                kline_data_version = 'portability-qfq-v1',
+                kline_contract_version = ?
+            WHERE id = ?
+            """,
+            (DAILY_KLINE_CONTRACT_VERSION, cursor.lastrowid),
+        )
         return int(cursor.lastrowid)
 
 
@@ -791,20 +1321,27 @@ def _insert_review_plan(
     marker: str,
 ) -> int:
     with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             """
             INSERT INTO advice_review_plan (
                 advice_id, symbol, snapshot_market_time, snapshot_price,
+                snapshot_adjustment_mode, snapshot_anchor_date, snapshot_anchor_close,
+                snapshot_data_version, snapshot_contract_version,
                 hypothesis, trigger_condition, invalidation_condition,
                 target_price, stop_price, horizon_days, evidence_refs_json,
-                revision, created_at, updated_at
-            ) VALUES (?, ?, '2026-07-16 09:59:00', 100, ?, ?, ?, 110, 95, 5,
-                      '[]', 1, '2026-07-16T02:00:00.000000Z',
+                revision, plan_payload_digest, created_at, updated_at
+            ) VALUES (?, ?, '2026-07-16 09:59:00', 100,
+                      'qfq', '2026-07-15', 100, 'portability-qfq-v1', ?,
+                      ?, ?, ?, 110, 95, 5,
+                      '[]', 1, ?, '2026-07-16T02:00:00.000000Z',
                       '2026-07-16T02:00:00.000000Z')
             """,
-            (advice_id, symbol, marker, marker, marker),
+            (advice_id, symbol, DAILY_KLINE_CONTRACT_VERSION, marker, marker, marker, "b" * 64),
         )
-        return int(cursor.lastrowid)
+        plan_id = int(cursor.lastrowid)
+        _backfill_current_plan_revisions(conn)
+        return plan_id
 
 
 def _insert_review_result(
@@ -821,15 +1358,18 @@ def _insert_review_result(
             INSERT INTO advice_review_result (
                 plan_id, plan_revision, advice_id, symbol, snapshot_market_time,
                 as_of, evaluated_at, status, conclusion, rule_version,
+                snapshot_adjustment_mode, snapshot_anchor_date, snapshot_anchor_close,
+                snapshot_data_version, snapshot_contract_version,
                 entry_price, target_price, stop_price, horizon_days,
                 visible_bar_count, available_forward_days, target_hit, stop_hit
             ) VALUES (
                 ?, 1, ?, ?, '2026-07-16 09:59:00', '2026-07-17',
                 '2026-07-17T08:00:00.000000Z', 'evaluated', 'horizon_gain', ?,
+                'qfq', '2026-07-15', 100, 'portability-qfq-v1', ?,
                 100, 110, 95, 5, 1, 1, 0, 0
             )
             """,
-            (plan_id, advice_id, symbol, marker),
+            (plan_id, advice_id, symbol, marker, DAILY_KLINE_CONTRACT_VERSION),
         )
         return int(cursor.lastrowid)
 
@@ -849,9 +1389,54 @@ def _paper_bar(
         close=close,
         volume=1_000,
         adjustment_mode="qfq",
+        as_of=f"{day} 15:15:00",
         data_version="portability-paper-v1",
         contract_version=DAILY_KLINE_CONTRACT_VERSION,
+        point_in_time=True,
+        session_status="trading",
+        open_execution_status="tradable",
+        corporate_action_status="none",
+        execution_metadata_version="factor-execution-evidence.v1",
     )
+
+
+def _save_portable_paper_run(
+    cache: SQLiteCache,
+    path: Path,
+    *,
+    marker: str,
+    symbol: str = "600519.SH",
+) -> int:
+    advice_id = _insert_advice(path, symbol, marker=marker)
+    plan_id = _insert_review_plan(path, advice_id, symbol, marker=marker)
+    plan = cache.advice_review_plan(plan_id)
+    assert plan is not None
+    cache.create_paper_strategy(
+        plan,
+        PaperStrategyCreate(
+            plan_id=plan.id,
+            expected_plan_revision=plan.revision,
+            expected_plan_payload_digest=plan.plan_payload_digest,
+            allocation_pct=10,
+        ),
+        activation_market_time="2026-07-16 10:00:00",
+    )
+    strategy = next(item for item in cache.paper_strategies() if item.plan_id == plan_id)
+    draft = simulate_paper_portfolio(
+        cache.paper_trading_account(),
+        [strategy],
+        {
+            symbol: [
+                _paper_bar("2026-07-16", 100, 101, 99, 100),
+                _paper_bar("2026-07-17", 100, 105, 99, 104),
+                _paper_bar("2026-07-20", 104, 112, 103, 111),
+            ]
+        },
+        as_of=datetime(2026, 7, 20, 16),
+    )
+    dashboard = cache.save_paper_simulation(draft)
+    assert dashboard.selected_run_id is not None
+    return dashboard.selected_run_id
 
 
 def _create_legacy_watchlist_database(path: Path) -> None:

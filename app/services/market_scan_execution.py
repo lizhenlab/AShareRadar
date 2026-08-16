@@ -17,14 +17,16 @@ from app.models.market import Kline, Quote
 from app.services.datahub_runtime import run_cache_io
 from app.services.market_scan_completion import bulk_quote_coverage_error, quote_batch_error, short_scan_error
 from app.services.market_scan_batch_evaluation import evaluate_market_scan_batch
-from app.services.market_scan_contracts import (
-    MarketScanDataHubProtocol,
-    MarketScanKlinePrefetchProtocol,
-)
+from app.services.market_scan_contracts import MarketScanDataHubProtocol, MarketScanKlinePrefetchProtocol
 from app.services.market_scan_pressure import MarketScanPressureController, MarketScanPressureSnapshot
 from app.services.market_scan_prefetch import MarketScanKlinePrefetchPipeline
 from app.services.market_scan_quote_capture import MarketScanFrozenQuoteBatch, capture_market_scan_quote_batches
-from app.services.market_scan_quote_provenance import normalized_quote_batch
+from app.services.market_scan_quote_provenance import (
+    normalized_quote_batch,
+    requested_quote_response,
+    require_available_quote_chain,
+    require_quote_batch_coverage,
+)
 from app.services.market_scan_recovery import ProviderWaitBudget, wait_for_provider_recovery
 from app.services.market_scan_stock_evaluation import MarketScanStockEvaluator
 from app.services.market_scan_universe import FULL_MARKET_MARKETS, MarketScanUniverse, build_market_scan_universe
@@ -36,6 +38,7 @@ from app.services.market_scan_validation import (
     resolve_market_scan_stock_pool,
 )
 from app.utils.clock import monotonic_now
+from app.utils.market_time import market_local_naive
 from app.utils.provider_errors import ProviderChainUnavailable
 
 
@@ -196,10 +199,8 @@ class MarketScanExecutor:
         provider_wait_budget = ProviderWaitBudget(
             remaining_seconds=self.settings.market_scan_provider_wait_budget_seconds,
         )
-        as_of = datetime.fromisoformat(run.as_of)
         expected_data_date = date.fromisoformat(run.data_date)
         expected_quote_date = date.fromisoformat(run.quote_date)
-        cutoff = expected_data_date
         batches = [pending[index : index + batch_size] for index in range(0, len(pending), batch_size)]
         quote_capture, quote_warnings = await capture_market_scan_quote_batches(
             run,
@@ -217,6 +218,14 @@ class MarketScanExecutor:
             monotonic=self._monotonic,
         )
         warnings.extend(quote_warnings)
+        if quote_capture.decision_as_of is None:
+            raise RuntimeError("报价采集信封缺少统一决策时点")
+        try:
+            as_of = market_local_naive(
+                datetime.fromisoformat(quote_capture.decision_as_of.replace("Z", "+00:00"))
+            )
+        except ValueError as exc:
+            raise RuntimeError("报价采集信封决策时点无法解析") from exc
         kline_batches = [list(batch.items) for batch in quote_capture.batches]
         prefetch = self._prefetch_kline_cache if self._kline_prefetch is not None else None
         async with MarketScanKlinePrefetchPipeline(kline_batches, prefetch) as pipeline:
@@ -229,7 +238,7 @@ class MarketScanExecutor:
                     frozen_batch,
                     cancel_event=cancel_event,
                     as_of=as_of,
-                    cutoff=cutoff,
+                    cutoff=expected_data_date,
                     expected_data_date=expected_data_date,
                     expected_quote_date=expected_quote_date,
                     provider_wait_budget=provider_wait_budget,
@@ -265,7 +274,7 @@ class MarketScanExecutor:
             retry_pairs = await self._scan_and_persist_batch(
                 run,
                 remaining,
-                quote_map=dict(batch.quote_map), quote_error=batch.quote_error,
+            quote_map=dict(batch.quote_map), quote_error=batch.quote_error,
                 quote_observed_at=batch.quote_observed_at,
                 semaphore=semaphore, cancel_event=cancel_event,
                 as_of=evaluation_as_of, cutoff=cutoff,
@@ -309,6 +318,7 @@ class MarketScanExecutor:
             items,
             quote_map=quote_map,
             quote_error=quote_error,
+            quote_observed_at=quote_observed_at,
             semaphore=semaphore,
             cancel_event=cancel_event,
             as_of=as_of,
@@ -372,8 +382,47 @@ class MarketScanExecutor:
         require_provider_response: bool = False,
     ) -> tuple[dict[str, Quote], str | None]:
         symbols = [item.symbol for item in items]
+        available, provider_errors = await self._fetch_quote_batch_response(
+            symbols,
+            use_cache=use_cache,
+        )
+        quotes, provider_errors, cached_count = normalized_quote_batch(
+            available,
+            provider_errors,
+            require_provider_response=require_provider_response,
+        )
+        quotes, provider_errors = requested_quote_response(
+            symbols,
+            quotes,
+            provider_errors,
+        )
+        requested_count = len(set(symbols))
+        missing_count = requested_count - len(quotes)
+        require_available_quote_chain(
+            missing_count,
+            self._pressure.provider_chain_state("quote"),
+        )
+        require_quote_batch_coverage(
+            bulk_quote_coverage_error(len(quotes), requested_count),
+            cached_count=cached_count,
+            require_provider_response=require_provider_response,
+            retry_after_seconds=self.settings.market_scan_retry_backoff_seconds,
+        )
+        error = quote_batch_error(
+            missing_count,
+            provider_errors,
+            sensitive_values=self._sensitive_values,
+        )
+        return quotes, error
+
+    async def _fetch_quote_batch_response(
+        self,
+        symbols: list[str],
+        *,
+        use_cache: bool,
+    ) -> tuple[list[Quote], tuple[str, ...]]:
         try:
-            available, provider_errors = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self.datahub.partial_quotes_with_errors(symbols, use_cache=use_cache),
                 timeout=self.settings.market_scan_quote_batch_timeout_seconds,
             )
@@ -385,37 +434,7 @@ class MarketScanExecutor:
         except Exception as exc:
             message = short_scan_error(exc, sensitive_values=self._sensitive_values)
             raise self._pressure.unavailable_error(exc, message) from exc
-        quotes, provider_errors, cached_count = normalized_quote_batch(
-            available,
-            provider_errors,
-            require_provider_response=require_provider_response,
-        )
-        requested_count = len(set(symbols))
-        missing_count = len(set(symbols) - quotes.keys())
-        chain_state = self._pressure.provider_chain_state("quote")
-        chain_status = getattr(chain_state, "status", None)
-        if missing_count and chain_status in {
-            "temporary_unavailable",
-            "permanent_unavailable",
-        }:
-            raise ProviderChainUnavailable(
-                "实时报价数据源当前不可用或仍有调用未结束",
-                retry_after_seconds=getattr(chain_state, "retry_after_seconds", None),
-            )
-        coverage_error = bulk_quote_coverage_error(len(quotes), requested_count)
-        if coverage_error:
-            if require_provider_response and cached_count:
-                coverage_error += f"；其中 {cached_count} 条缓存报价未计入实时快照"
-            raise ProviderChainUnavailable(
-                coverage_error,
-                retry_after_seconds=self.settings.market_scan_retry_backoff_seconds,
-            )
-        error = quote_batch_error(
-            missing_count,
-            provider_errors,
-            sensitive_values=self._sensitive_values,
-        )
-        return quotes, error
+
 
     async def _stage(
         self,

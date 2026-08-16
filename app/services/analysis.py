@@ -18,6 +18,7 @@ from app.models.market import (
     Quote,
     StockInfo,
 )
+from app.models.market_scan import MarketScanMode
 from app.services.analysis_signal_advice import action_advice, beginner_summary
 from app.services.analysis_signal_points import buy_points, risk_level, sell_points, strength_tags, t_plan
 from app.services.analysis_signal_quality import gate_signal_items
@@ -44,6 +45,9 @@ class TrendMetrics:
     ma5: float
     ma10: float
     ma20: float
+    support_available: bool
+    resistance_available: bool
+    ma20_available: bool
 
 
 @dataclass(frozen=True)
@@ -75,9 +79,11 @@ def build_analysis(
     quote_history: list[dict[str, float | str | None]] | None = None,
     peer_quotes: list[Quote] | None = None,
     peer_sample: PeerSampleInfo | None = None,
+    *,
+    mode: MarketScanMode = "official",
 ) -> AnalysisResult:
     valid_klines = filter_valid_klines(klines)
-    metrics = _trend_metrics(quote, valid_klines)
+    metrics = _trend_metrics(quote, valid_klines, mode=mode)
     quality = data_quality or build_data_quality(quote, klines)
     signals = _analysis_signals(quote, metrics, quality, stock_profile, industry_context)
     return _analysis_result(
@@ -92,15 +98,22 @@ def build_analysis(
         quote_history=quote_history,
         peer_quotes=peer_quotes,
         peer_sample=peer_sample,
+        mode=mode,
     )
 
 
-def _trend_metrics(quote: Quote, klines: list[Kline]) -> TrendMetrics:
-    score, label, contributions = trend_score_snapshot(quote, klines)
+def _trend_metrics(
+    quote: Quote,
+    klines: list[Kline],
+    *,
+    mode: MarketScanMode,
+) -> TrendMetrics:
+    score, label, contributions = trend_score_snapshot(quote, klines, mode=mode)
     ma5 = moving_average(klines, 5)
     ma10 = moving_average(klines, 10)
     ma20 = moving_average(klines, 20)
     support, resistance = support_resistance(klines, current_price=quote.price)
+    structural_history_available = len(klines) >= 20
     return TrendMetrics(
         score=score,
         label=label,
@@ -110,6 +123,9 @@ def _trend_metrics(quote: Quote, klines: list[Kline]) -> TrendMetrics:
         ma5=ma5,
         ma10=ma10,
         ma20=ma20,
+        support_available=structural_history_available and support > 0,
+        resistance_available=structural_history_available and resistance > 0,
+        ma20_available=structural_history_available and ma20 > 0,
     )
 
 
@@ -120,7 +136,9 @@ def _analysis_signals(
     stock_profile: StockInfo | None,
     industry_context: PlateItem | None,
 ) -> AnalysisSignals:
-    risk_level_value = risk_level(quote, metrics.score, metrics.support, quality)
+    support = metrics.support if metrics.support_available else 0.0
+    resistance = metrics.resistance if metrics.resistance_available else 0.0
+    risk_level_value = risk_level(quote, metrics.score, support, quality)
     action_advice_item = _analysis_action_advice(quote, metrics, quality, risk_level_value)
     point_sets = _analysis_signal_points(quote, metrics, quality)
     return AnalysisSignals(
@@ -132,8 +150,8 @@ def _analysis_signals(
             metrics.score,
             metrics.label,
             risk_level_value,
-            metrics.support,
-            metrics.resistance,
+            support,
+            resistance,
             stock_profile,
             industry_context,
             action_advice_item,
@@ -155,25 +173,38 @@ def _analysis_action_advice(
         quote,
         metrics.score,
         risk_level_value,
-        metrics.support,
-        metrics.resistance,
+        metrics.support if metrics.support_available else 0.0,
+        metrics.resistance if metrics.resistance_available else 0.0,
         quality,
     )
 
 
 def _analysis_signal_points(quote: Quote, metrics: TrendMetrics, quality: DataQuality) -> AnalysisSignalPoints:
+    support = metrics.support if metrics.support_available else 0.0
+    resistance = metrics.resistance if metrics.resistance_available else 0.0
+    ma20 = metrics.ma20 if metrics.ma20_available else 0.0
+    structure_available = metrics.support_available and metrics.resistance_available
+    t_items = t_plan(quote, support, resistance) if structure_available else [_unavailable_t_plan_item()]
     return AnalysisSignalPoints(
         buy=gate_signal_items(
-            buy_points(quote, metrics.score, metrics.ma5, metrics.ma10, metrics.support, metrics.resistance),
+            buy_points(quote, metrics.score, metrics.ma5, metrics.ma10, support, resistance),
             quality,
             BUY_SIGNAL_KIND,
         ),
         sell=gate_signal_items(
-            sell_points(quote, metrics.score, metrics.ma5, metrics.ma20, metrics.support, metrics.resistance),
+            sell_points(quote, metrics.score, metrics.ma5, ma20, support, resistance),
             quality,
             SELL_SIGNAL_KIND,
         ),
-        t=gate_signal_items(t_plan(quote, metrics.support, metrics.resistance), quality, T_SIGNAL_KIND),
+        t=gate_signal_items(t_items, quality, T_SIGNAL_KIND) if structure_available else t_items,
+    )
+
+
+def _unavailable_t_plan_item() -> SignalItem:
+    return SignalItem(
+        title="做T区间待确认",
+        level="观察",
+        reason="有效日K不足20根，支撑与压力区间不可用，不给出结构动作价位。",
     )
 
 
@@ -190,9 +221,11 @@ def _analysis_result(
     quote_history: list[dict[str, float | str | None]] | None,
     peer_quotes: list[Quote] | None,
     peer_sample: PeerSampleInfo | None,
+    mode: MarketScanMode,
 ) -> AnalysisResult:
     return AnalysisResult(
         quote=quote,
+        research_mode=mode,
         stock_profile=stock_profile,
         industry_context=industry_context,
         action_advice=signals.action_advice,
@@ -203,9 +236,12 @@ def _analysis_result(
         trend_label=metrics.label,
         support=metrics.support,
         resistance=metrics.resistance,
+        support_available=metrics.support_available,
+        resistance_available=metrics.resistance_available,
         ma5=metrics.ma5,
         ma10=metrics.ma10,
         ma20=metrics.ma20,
+        ma20_available=metrics.ma20_available,
         risk_level=signals.risk_level,
         beginner_summary=signals.beginner_summary,
         buy_points=signals.buy_points,

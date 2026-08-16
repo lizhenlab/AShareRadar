@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api_async
@@ -100,10 +100,12 @@ async def delete_watchlist_item(symbol: str, datahub: DataHub = Depends(get_data
 
 @router.get("/api/advice/history", response_model=list[AdviceHistoryItem])
 async def advice_history(
+    response: Response,
     symbol: str = Query("600519", description="6位A股代码"),
     limit: int = Query(30, ge=1, le=200),
     datahub: DataHub = Depends(get_datahub),
 ) -> list[AdviceHistoryItem]:
+    response.headers["Cache-Control"] = "no-store"
     def load() -> list[AdviceHistoryItem]:
         normalize_symbol(symbol)
         return datahub.cache.advice_history(symbol, limit=limit)
@@ -113,10 +115,12 @@ async def advice_history(
 
 @router.get("/api/advice/timeline", response_model=list[AdviceTimelineItem])
 async def advice_timeline(
+    response: Response,
     symbol: str = Query("600519", description="6位A股代码"),
     limit: int = Query(30, ge=1, le=200),
     datahub: DataHub = Depends(get_datahub),
 ) -> list[AdviceTimelineItem]:
+    response.headers["Cache-Control"] = "no-store"
     def load() -> list[AdviceTimelineItem]:
         normalize_symbol(symbol)
         return datahub.cache.advice_timeline(symbol, limit=limit)

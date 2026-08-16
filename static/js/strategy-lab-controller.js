@@ -35,6 +35,7 @@ import {
   setStrategyLabBusy,
   strategyLabElements,
 } from "./strategy-lab-view.js";
+import { createStrategyTemplateCatalog } from "./strategy-template-catalog.js";
 
 const API = "/api/strategy-lab";
 
@@ -49,14 +50,33 @@ export function createStrategyLabController(options = {}) {
     execution: null, candidatePage: null, candidatePageNumber: 1, candidateSort: "utility_score",
     compileExecutable: false,
   };
+  const templateCatalog = createStrategyTemplateCatalog({
+    root,
+    fetcher: request,
+    onLoadDraft: (template) => runTask("正在载入策略模板草案", () => applyTemplateDraft(template)),
+  });
   bindEvents();
   syncActions();
 
   async function activate() {
     if (state.activated) return state.strategies;
     state.activated = true;
-    await loadStrategies();
+    await Promise.all([loadStrategies(), templateCatalog.load()]);
     return state.strategies;
+  }
+
+  async function applyTemplateDraft(template) {
+    state.spec = structuredClone(template.strategy_spec);
+    state.strategy = null;
+    state.parsed = null;
+    state.compileExecutable = false;
+    clearExecution();
+    syncStrategyEditor(root, state.spec);
+    elements.strategyParseOutput.dataset.state = "ready";
+    elements.strategyParseOutput.textContent = `已从“${template.name}”载入结构化研究草案；尚未保存或扫描。`;
+    const compiled = await compileEditor(true, structuredClone(state.spec));
+    syncActions();
+    return compiled;
   }
 
   async function loadStrategies(selectedId = state.strategy?.strategy_id) {
@@ -81,6 +101,7 @@ export function createStrategyLabController(options = {}) {
       state.parsed = validateParsedStrategy(payload);
       state.spec = state.parsed.draft;
       state.strategy = null;
+      templateCatalog.clearSource("模板来源已清除：当前草案来自自然语言解析。");
       clearExecution();
       syncStrategyEditor(root, state.spec);
       renderParsedStrategy(elements, state.parsed);
@@ -92,10 +113,10 @@ export function createStrategyLabController(options = {}) {
     });
   }
 
-  async function compileEditor(force = false) {
+  async function compileEditor(force = false, suppliedSpec = null) {
     if (!state.spec || (state.busy && !force)) return null;
     try {
-      const spec = strategySpecFromEditor(root, state.spec);
+      const spec = suppliedSpec || strategySpecFromEditor(root, state.spec);
       const compiled = await request(`${API}/compile`, jsonInit({ spec, dry_run: true }));
       state.spec = compiled.normalized_spec;
       state.compileExecutable = compiled.execution_plan?.executable === true;
@@ -128,6 +149,7 @@ export function createStrategyLabController(options = {}) {
       const strategy = validateStrategy(await request(url, jsonInit(body, updating ? "PUT" : "POST")));
       state.strategy = strategy;
       state.spec = strategy.spec;
+      templateCatalog.clearSource("模板来源已清除：策略已保存为独立版本。");
       state.compileExecutable = true;
       clearExecution();
       await fetchStrategies(strategy.strategy_id);
@@ -146,6 +168,7 @@ export function createStrategyLabController(options = {}) {
       state.strategy = strategy;
       state.spec = strategy.spec;
       state.parsed = null;
+      templateCatalog.clearSource("模板来源已清除：当前为已保存策略版本。");
       clearExecution();
       syncStrategyEditor(root, strategy.spec);
       await compileEditor(true);
@@ -164,6 +187,7 @@ export function createStrategyLabController(options = {}) {
       const copied = validateStrategy(payload);
       state.strategy = copied;
       state.spec = copied.spec;
+      templateCatalog.clearSource("模板来源已清除：当前为独立复制的策略版本。");
       state.compileExecutable = true;
       clearExecution();
       syncStrategyEditor(root, copied.spec);
@@ -319,6 +343,7 @@ export function createStrategyLabController(options = {}) {
     elements.strategyArchive.disabled = state.busy || !hasStrategy;
     elements.strategyCreateSimulation.disabled = state.busy || !hasCurrentExecution;
     elements.strategyParse.disabled = state.busy;
+    templateCatalog.setBusy(state.busy);
   }
 
   function bindEvents() {
@@ -341,7 +366,10 @@ export function createStrategyLabController(options = {}) {
     elements.strategyCandidateRows.addEventListener("click", openCandidateEvidence);
     elements.strategyCandidateDialogClose.addEventListener("click", () => elements.strategyCandidateDialog.close());
     root.querySelectorAll("[data-strategy-sort]").forEach((button) => button.addEventListener("click", selectSort));
-    root.querySelectorAll("#strategyEditor input, #strategyEditor select, #strategyEditor textarea").forEach((input) => input.addEventListener("change", () => compileEditor(false)));
+    root.querySelectorAll("#strategyEditor input, #strategyEditor select, #strategyEditor textarea").forEach((input) => input.addEventListener("change", () => {
+      templateCatalog.markCustom();
+      void compileEditor(false);
+    }));
     elements.strategyWeightingMethod.addEventListener("change", () => syncCustomWeightsVisibility(root));
     elements.strategyProfile.addEventListener("change", () => syncCustomObjectivesVisibility(root));
   }
@@ -385,7 +413,7 @@ export function createStrategyLabController(options = {}) {
     resetStrategyExecutionView(elements);
   }
 
-  return { activate, state, loadStrategies, parseNaturalLanguage, execute, loadEvidence };
+  return { activate, state, loadStrategies, parseNaturalLanguage, execute, loadEvidence, templateCatalog };
 }
 
 function jsonInit(body, method = "POST", timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {

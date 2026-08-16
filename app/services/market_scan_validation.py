@@ -8,7 +8,12 @@ import math
 from typing import Literal
 
 from app.models.market import Kline, Quote, StockInfo
-from app.models.market_scan import MarketScanMode, MarketScanResultItem, MarketScanResultWrite
+from app.models.market_scan import (
+    MARKET_SCAN_MIN_HISTORY_ROWS,
+    MarketScanMode,
+    MarketScanResultItem,
+    MarketScanResultWrite,
+)
 from app.services.data_quality_time import latest_expected_daily_kline_date
 from app.services.market_scan_completion import short_scan_error
 from app.services.market_scan_contracts import (
@@ -20,6 +25,7 @@ from app.services.market_scan_scoring import (
     MarketScanSkipped,
     completed_market_scan_klines,
 )
+from app.services.market_scan_skip_contract import MARKET_SCAN_SKIP_EVIDENCE_KEY
 from app.services.trading_calendar import (
     CALL_AUCTION_START_TIME,
     DAILY_KLINE_PUBLISH_TIME,
@@ -146,11 +152,16 @@ def missing_quote_result(
     min_history_rows: int,
 ) -> MarketScanResultWrite:
     completed = completed_market_scan_klines(rows, cutoff)
-    if len(completed) < min_history_rows:
+    required_history_rows = max(MARKET_SCAN_MIN_HISTORY_ROWS, min_history_rows)
+    if len(completed) < required_history_rows:
+        message = (
+            f"完整前复权日K不足：需要 {required_history_rows} 根，"
+            f"当前 {len(completed)} 根"
+        )
         return MarketScanResultWrite(
             symbol=item.symbol,
-            status="skipped",
-            reason=f"完整前复权日K不足：需要 {min_history_rows} 根，当前 {len(completed)} 根",
+            status="missing",
+            error=message,
         )
     if {row.adjustment_mode for row in completed} != {"qfq"}:
         return MarketScanResultWrite(
@@ -165,8 +176,8 @@ def missing_quote_result(
     if latest_date < expected_data_date:
         return MarketScanResultWrite(
             symbol=item.symbol,
-            status="skipped",
-            reason=(
+            status="missing",
+            error=(
                 f"日K停留在 {latest_date.isoformat()}，早于应有交易日 "
                 f"{expected_data_date.isoformat()}，可能停牌"
             ),
@@ -177,8 +188,8 @@ def missing_quote_result(
     if completed[-1].volume <= 0:
         return MarketScanResultWrite(
             symbol=item.symbol,
-            status="skipped",
-            reason="当日日K成交量为 0 且报价不可用，可能停牌",
+            status="missing",
+            error="当日日K成交量为 0 且报价不可用，可能停牌",
             data_date=data_date,
             kline_source=kline_source,
             adjustment_mode=adjustment_mode,
@@ -202,6 +213,8 @@ def failed_market_scan_result(
     cutoff: date,
     reason: str | None = None,
     error: str | None = None,
+    score_details: dict[str, object] | None = None,
+    quote_observed_at: str | None = None,
 ) -> MarketScanResultWrite:
     completed = completed_market_scan_klines(rows, cutoff)
     latest = completed[-1] if completed else None
@@ -210,8 +223,10 @@ def failed_market_scan_result(
         status=status,
         reason=reason,
         error=error,
+        score_details=score_details or {},
         data_date=latest.date if latest is not None else None,
         quote_timestamp=quote.timestamp if quote is not None else None,
+        quote_observed_at=quote_observed_at if quote is not None else None,
         quote_source=quote.source if quote is not None else None,
         kline_source=latest.source if latest is not None else None,
         adjustment_mode=latest.adjustment_mode if latest is not None else None,
@@ -226,8 +241,14 @@ def failed_scan_result_for_exception(
     cutoff: date,
     exc: Exception,
     sensitive_values: tuple[object, ...],
+    quote_observed_at: str | None = None,
 ) -> MarketScanResultWrite:
     if isinstance(exc, MarketScanSkipped):
+        score_details = (
+            {MARKET_SCAN_SKIP_EVIDENCE_KEY: exc.evidence}
+            if exc.evidence is not None
+            else {}
+        )
         return failed_market_scan_result(
             item.symbol,
             "skipped",
@@ -235,6 +256,8 @@ def failed_scan_result_for_exception(
             rows,
             cutoff=cutoff,
             reason=str(exc),
+            score_details=score_details,
+            quote_observed_at=quote_observed_at,
         )
     error = str(exc)
     if not isinstance(exc, MarketScanDataMissing):
@@ -246,6 +269,7 @@ def failed_scan_result_for_exception(
         rows,
         cutoff=cutoff,
         error=error,
+        quote_observed_at=quote_observed_at,
     )
 
 

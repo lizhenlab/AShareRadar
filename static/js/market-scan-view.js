@@ -9,7 +9,7 @@ import { saveMarketScanExport } from "./market-scan-view-export.js";
 import { marketScanFilterElements, marketScanQueryParams } from "./market-scan-filters.js";
 import { renderMarketScanObservability } from "./market-scan-progress-view.js";
 import { marketScanResearchDimensionCell, marketScanSnapshotRow, marketScanSnapshotTargetId, toggleMarketScanSnapshot } from "./market-scan-snapshot-view.js";
-import { marketScanProbabilityCell, marketScanProbabilityElements, renderMarketScanProbabilityResearch, resetMarketScanProbabilityResearch, selectedMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
+import { marketScanProbabilityCell, marketScanProbabilityElements, renderMarketScanProbabilityResearch, renderMarketScanReadWaiting, resetMarketScanProbabilityResearch, selectedMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
 import { marketScanPageSize } from "./layout-optimizations.js";
 export { marketScanExportFilename } from "./market-scan-view-export.js";
 
@@ -53,14 +53,17 @@ export function createMarketScanView(root, now = new Date()) {
     ),
     renderHistoryError: (message) => renderMarketScanHistoryError(elements, message),
     renderHistoryLoading: () => renderMarketScanHistoryLoading(elements),
+    renderProbabilityHorizon: (payload) => renderResults(context, payload, { announce: false }),
+    renderProbabilityResearch: (payload) => renderMarketScanProbabilityResearch(elements, payload.probability_research),
     renderResults: (payload) => renderResults(context, payload),
     renderResultsLoading: () => renderResultsLoading(context),
+    renderResultsWaiting: (message) => renderMarketScanReadWaiting(elements, message),
     renderResultState: (message, kind) => renderResultState(context, message, kind),
     renderRun: (run, message) => renderRun(context, run, message),
     renderTop100Refresh: (busy, sourceRun, taskRun) => (
       renderMarketScanTop100Refresh(elements, busy, sourceRun, taskRun)
     ),
-    resetProbabilityResearch: (runId) => resetMarketScanProbabilityResearch(elements, runId),
+    resetProbabilityResearch: (runId, options) => resetMarketScanProbabilityResearch(elements, runId, options),
     resetResultPresentation: (run) => resetResultPresentation(context, run),
     saveExport: (blob, disposition, run) => saveMarketScanExport(context, blob, disposition, run),
     historyFilters: () => marketScanHistoryFilters(elements),
@@ -70,24 +73,22 @@ export function createMarketScanView(root, now = new Date()) {
     toggleSnapshot: (button) => toggleMarketScanSnapshot(root, button),
   };
 }
-
-export function buildMarketScanResultsUrl(runId, page, elements) {
+export function buildMarketScanResultsUrl(runId, page, elements, options = {}) {
   const params = marketScanQueryParams(elements, {
     page: String(positiveInteger(page, 1)),
     page_size: String(marketScanPageSize(elements)),
   });
+  if (options.includeProbability === false) ["probability_horizon", "min_upside_probability"].forEach((key) => params.delete(key));
+  else if (!params.has("min_upside_probability")) params.delete("probability_horizon");
   return `/api/market-scans/${encodeURIComponent(runId)}/results?${params.toString()}`;
 }
-
 export function buildMarketScanExportUrl(runId, elements) {
   const params = marketScanQueryParams(elements);
   return `/api/market-scans/${encodeURIComponent(runId)}/export.xlsx?${params.toString()}`;
 }
-
 export function marketScanResultsUrl(runId, page, elements) {
   return buildMarketScanResultsUrl(runId, page, elements);
 }
-
 export function marketScanResultRow(item, options = {}) {
   const view = marketScanResultView(item);
   const discovery = discoveryResultActions(view, options);
@@ -129,7 +130,8 @@ export function marketScanResultStatusLabel(status) {
 }
 
 function resetResultPresentation(context, run) {
-  resetMarketScanProbabilityResearch(context.elements, run?.id);
+  const terminalUnpublished = Boolean(run && !isActiveMarketScanRun(run) && !isPublishedMarketScanRun(run));
+  resetMarketScanProbabilityResearch(context.elements, run?.id, { terminalUnpublished });
   if (!run) return renderResultState(context, "暂无扫描记录");
   if (isActiveMarketScanRun(run)) return renderResultState(context, runResultMessage(run.mode, true), "loading");
   if (isPublishedMarketScanRun(run)) {
@@ -248,7 +250,7 @@ function renderRuleVersion(element, value) {
   setAttribute(element, "aria-label", `规则版本 ${fullVersion}`);
 }
 
-function renderResults(context, payload) {
+function renderResults(context, payload, options = {}) {
   const { elements } = context;
   setResultsBusy(elements, false);
   renderMarketScanProbabilityResearch(elements, payload.probability_research);
@@ -256,7 +258,7 @@ function renderResults(context, payload) {
     renderResultState(context, "当前筛选条件下没有结果");
     setResultRunIdentity(elements, payload.run.id);
     renderPagination(context, payload, false);
-    announceResults(context, payload, 0);
+    if (options.announce !== false) announceResults(context, payload, 0);
     return;
   }
   const probabilityOptions = {
@@ -269,7 +271,7 @@ function renderResults(context, payload) {
   elements.tableWrap.hidden = false;
   elements.resultState.hidden = true;
   renderPagination(context, payload, true);
-  announceResults(context, payload, payload.items.length);
+  if (options.announce !== false) announceResults(context, payload, payload.items.length);
 }
 
 function announceResults(context, payload, visibleCount) {

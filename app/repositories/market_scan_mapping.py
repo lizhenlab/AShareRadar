@@ -39,6 +39,7 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
     status = str(row["status"])
     elapsed_seconds = _run_elapsed_seconds(row, status)
     throughput = _run_throughput(processed, elapsed_seconds)
+    publication_diagnostics, market_progress = _run_publication_projections(row)
     return MarketScanRun(
         id=row["id"],
         task_run_id=row["task_run_id"],
@@ -73,15 +74,29 @@ def run_from_row(row: sqlite3.Row) -> MarketScanRun:
         current_stage=row["current_stage"],
         stage_started_at=row["stage_started_at"],
         stage_metrics=_stage_metrics(row["stage_metrics_json"]),
-        market_progress=_market_progress(row["market_progress_json"]),
+        market_progress=market_progress,
         elapsed_seconds=elapsed_seconds,
         throughput_per_second=throughput,
         eta_seconds=_run_eta(total, processed, elapsed_seconds, throughput),
         message=row["message"],
         last_error=row["last_error"],
-        publication_diagnostics=_publication_diagnostics(row["publication_diagnostics_json"]),
+        publication_diagnostics=publication_diagnostics,
+        snapshot_digest=row["snapshot_digest"],
+        snapshot_seal_origin=row["snapshot_seal_origin"],
+        snapshot_sealed_at=row["snapshot_sealed_at"],
         cancel_requested_at=row["cancel_requested_at"],
     )
+
+
+def _run_publication_projections(
+    row: sqlite3.Row,
+) -> tuple[MarketScanPublicationDiagnostics | None, list[MarketScanMarketProgress]]:
+    diagnostics = _publication_diagnostics(row["publication_diagnostics_json"])
+    progress = _market_progress(
+        row["market_progress_json"],
+        allow_legacy_coverage=not _has_canonical_replay_receipt(diagnostics),
+    )
+    return diagnostics, progress
 
 
 def _text_or(value: object, fallback: str) -> str:
@@ -136,17 +151,72 @@ def _stage_metrics(value: object) -> dict[MarketScanStage, MarketScanStageMetric
     return metrics
 
 
-def _market_progress(value: object) -> list[MarketScanMarketProgress]:
-    parsed = _json_value(value, [])
+def _market_progress(
+    value: object,
+    *,
+    allow_legacy_coverage: bool,
+) -> list[MarketScanMarketProgress]:
+    parsed = _strict_json_value(value, "market_progress_json")
     if not isinstance(parsed, list):
-        return []
-    progress: list[MarketScanMarketProgress] = []
-    for item in parsed:
-        try:
-            progress.append(MarketScanMarketProgress.model_validate(item))
-        except (TypeError, ValueError):
-            continue
-    return progress
+        raise ValueError("market_progress_json 必须是数组")
+    try:
+        return [
+            _market_progress_item(
+                item,
+                allow_legacy_coverage=allow_legacy_coverage,
+            )
+            for item in parsed
+        ]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("market_progress_json 包含无效分市场覆盖证据") from exc
+
+
+def _market_progress_item(
+    value: object,
+    *,
+    allow_legacy_coverage: bool,
+) -> MarketScanMarketProgress:
+    try:
+        return MarketScanMarketProgress.model_validate(value)
+    except (TypeError, ValueError):
+        if not allow_legacy_coverage or not isinstance(value, dict):
+            raise
+    counts = tuple(
+        value.get(field)
+        for field in ("total_count", "success_count", "skipped_count")
+    )
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in counts):
+        raise ValueError("旧版分市场覆盖计数无效")
+    total, success, skipped = cast(tuple[int, int, int], counts)
+    coverage = value.get("coverage_pct")
+    if (
+        isinstance(coverage, bool)
+        or not isinstance(coverage, int | float)
+        or not math.isfinite(float(coverage))
+        or abs(float(coverage) - percentage(success, total)) > 0.011
+    ):
+        raise ValueError("分市场 coverage_pct 不是受支持的旧版公式")
+    normalized = dict(value)
+    normalized["coverage_pct"] = percentage(success, max(0, total - skipped))
+    return MarketScanMarketProgress.model_validate(normalized)
+
+
+def _has_canonical_replay_receipt(
+    diagnostics: MarketScanPublicationDiagnostics | None,
+) -> bool:
+    return diagnostics is not None and any(
+        item.code == "publication.canonical_replay.v1"
+        for item in diagnostics.passed_gates
+    )
+
+
+def _strict_json_value(value: object, path: str) -> object:
+    if not isinstance(value, str):
+        raise ValueError(f"{path} 必须是 JSON 文本")
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path} 不是有效 JSON") from exc
 
 
 def _publication_diagnostics(value: object) -> MarketScanPublicationDiagnostics | None:

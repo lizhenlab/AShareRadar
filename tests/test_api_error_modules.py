@@ -11,13 +11,24 @@ from pydantic import BaseModel, ValidationError
 
 from app.api.errors import (
     INTERNAL_VALIDATION_DETAIL,
+    MARKET_SCAN_INTEGRITY_DETAIL,
+    NO_STORE_INTERNAL_DETAIL,
+    WORKBENCH_INTEGRITY_DETAIL,
     VALIDATION_MESSAGE_RULES,
     _validation_message,
     internal_validation_exception_handler,
+    no_store_internal_exception,
+    sensitive_individual_exception_handler,
+    response_validation_exception_handler,
     run_api,
     run_sync_api,
     validation_exception_handler,
+    sensitive_individual_http_exception_handler,
 )
+from app.db.market_scan_integrity import MarketScanSnapshotSealError
+from fastapi.exceptions import ResponseValidationError
+from app.services.workbench_context import WorkbenchContextIntegrityError
+from app.repositories.advice_reviews import AdviceReviewRevisionConflictError
 
 
 @pytest.mark.parametrize(
@@ -114,6 +125,79 @@ def test_api_errors_redact_provider_credentials_before_returning_details() -> No
     assert "api_key=<redacted>" in exc_info.value.detail
 
 
+def test_snapshot_seal_error_is_generic_but_plain_value_error_keeps_bad_request_semantics() -> None:
+    with pytest.raises(HTTPException) as seal_info:
+        run_sync_api(
+            lambda: (_ for _ in ()).throw(
+                MarketScanSnapshotSealError("摘要 abc123 与 /private/market.db 不一致")
+            )
+        )
+    with pytest.raises(HTTPException) as value_info:
+        run_sync_api(lambda: (_ for _ in ()).throw(ValueError("普通业务输入无效")))
+
+    assert seal_info.value.status_code == 409
+    assert seal_info.value.detail == MARKET_SCAN_INTEGRITY_DETAIL
+    assert seal_info.value.headers == {"Cache-Control": "no-store"}
+    assert "abc123" not in seal_info.value.detail
+    assert value_info.value.status_code == 400
+    assert value_info.value.detail == "普通业务输入无效"
+
+
+def test_workbench_context_integrity_error_is_generic_conflict() -> None:
+    async def load() -> object:
+        raise WorkbenchContextIntegrityError("内部错绑：600519.SH -> 000001.SZ")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(run_api(load))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == WORKBENCH_INTEGRITY_DETAIL
+    assert "600519" not in exc_info.value.detail
+
+
+def test_advice_review_revision_conflict_is_generic_conflict() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        run_sync_api(
+            lambda: (_ for _ in ()).throw(
+                AdviceReviewRevisionConflictError("期望修订 1，当前 99 /private/ledger.db")
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "复盘计划已更新，请刷新后重试"
+    assert "99" not in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/reviews",
+        "/api/advice/timeline",
+        "/api/paper-trading/run",
+        "/api/market-scans/7/results",
+        "/api/discovery/presets/7/apply",
+        "/api/strategy-lab/executions",
+    ],
+)
+def test_sensitive_review_validation_errors_are_no_store(path: str) -> None:
+    exc = SimpleNamespace(errors=lambda: [{"loc": ("body", "value"), "type": "missing"}])
+    request = SimpleNamespace(url=SimpleNamespace(path=path))
+
+    response = asyncio.run(validation_exception_handler(request, exc))
+
+    assert response.status_code == 422
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_no_store_internal_exception_is_generic_and_non_cacheable() -> None:
+    exc = no_store_internal_exception(TimeoutError("primary timeout /private/secret.json"))
+
+    assert exc.status_code == 503
+    assert exc.detail == NO_STORE_INTERNAL_DETAIL
+    assert exc.headers == {"Cache-Control": "no-store"}
+    assert "secret" not in str(exc.detail)
+
+
 class _InternalRow(BaseModel):
     amount: int
 
@@ -159,3 +243,65 @@ def test_internal_validation_handler_never_returns_model_details() -> None:
     assert response.status_code == 503
     assert json.loads(response.body) == {"detail": INTERNAL_VALIDATION_DETAIL}
     assert b"dirty-private-value" not in response.body
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/analyze", "/api/market-scans/latest", "/api/discovery/presets", "/api/strategy-lab/executions/1"],
+)
+def test_sensitive_response_validation_is_generic_and_no_store(path: str) -> None:
+    request = SimpleNamespace(url=SimpleNamespace(path=path))
+    exc = ResponseValidationError(
+        [{"type": "missing", "loc": ("response", "quote"), "msg": "secret response"}],
+        body={"private": "/private/response-secret.json"},
+    )
+
+    response = asyncio.run(response_validation_exception_handler(request, exc))
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert json.loads(response.body) == {"detail": NO_STORE_INTERNAL_DETAIL}
+    assert b"private" not in response.body
+
+
+def test_generic_exception_handler_preserves_non_sensitive_error_behavior() -> None:
+    error = RuntimeError("ordinary route failure")
+    request = SimpleNamespace(url=SimpleNamespace(path="/api/health/live"))
+
+    response = asyncio.run(sensitive_individual_exception_handler(request, error))
+
+    assert response.status_code == 500
+    assert response.body == b"Internal Server Error"
+    assert response.headers["content-type"].startswith("text/plain")
+
+
+def test_non_sensitive_http_exception_preserves_fastapi_default_semantics() -> None:
+    request = SimpleNamespace(url=SimpleNamespace(path="/api/plates"))
+    error = HTTPException(
+        status_code=418,
+        detail={"message": "safe teapot"},
+        headers={"X-Test-Reason": "teapot"},
+    )
+
+    response = asyncio.run(sensitive_individual_http_exception_handler(request, error))
+
+    assert response.status_code == 418
+    assert json.loads(response.body) == {"detail": {"message": "safe teapot"}}
+    assert response.headers["x-test-reason"] == "teapot"
+    assert "cache-control" not in response.headers
+
+
+def test_sensitive_arbitrary_service_unavailable_cannot_impersonate_market_scan_busy() -> None:
+    request = SimpleNamespace(url=SimpleNamespace(path="/api/market-scans/latest"))
+    error = HTTPException(
+        status_code=503,
+        detail="unsafe caller-controlled busy response",
+        headers={"Retry-After": "999"},
+    )
+
+    response = asyncio.run(sensitive_individual_http_exception_handler(request, error))
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert "retry-after" not in response.headers
+    assert json.loads(response.body) == {"detail": NO_STORE_INTERNAL_DETAIL}

@@ -8,6 +8,9 @@ import pytest
 
 from app.services.market_scan_shadow_scoring import (
     SHADOW_SCORE_CANDIDATE_VERSION,
+    SHADOW_SCORE_V55_ALGORITHM_VERSION,
+    SHADOW_SCORE_V55_CANDIDATE_VERSION,
+    SHADOW_SCORE_V55_SCHEMA_VERSION,
     ShadowScoreInput,
     ShadowScoreReplayError,
     replay_shadow_score_details,
@@ -204,8 +207,35 @@ def test_shadow_v54_neutralizes_volume_lifecycle_without_time_aligned_intraday_v
     assert intraday_context["alignment"] == "intraday-time-aligned-volume-unavailable-neutralized"
     assert intraday_context["applied_delta"] == 0
     assert intraday_result.details["components"]["volume_confirmation_delta"] == 0
+    intraday_inputs = intraday_result.details["inputs"]
+    closes = [
+        row.close
+        for row in intraday.rows
+        if is_trading_day(date.fromisoformat(row.date))
+    ]
+    assert intraday_inputs["price_window_contract"] == "market-scan-feature-windows-v1"
+    assert intraday_inputs["return20_pct"] == pytest.approx(
+        (intraday.price / closes[-20] - 1) * 100,
+        abs=1e-8,
+    )
+    assert intraday_inputs["return60_pct"] == pytest.approx(
+        (intraday.price / closes[-60] - 1) * 100,
+        abs=1e-8,
+    )
     assert replay_shadow_score_details(intraday_result.details) == intraday_result.raw_score
     assert replay_shadow_score_details(preopen_result.details) == preopen_result.raw_score
+
+
+def test_all_shadow_variants_neutralize_intraday_volume_without_aligned_volume() -> None:
+    official = _item(1)
+    intraday = _item(1, quote_date="2026-07-20", mode="intraday")
+
+    official_result = score_shadow_market((official,), variant="v5_full").results[0]
+    intraday_result = score_shadow_market((intraday,), variant="v5_full").results[0]
+
+    assert official_result.details["components"]["volume_confirmation_delta"] != 0
+    assert intraday_result.details["components"]["volume_confirmation_delta"] == 0
+    assert replay_shadow_score_details(intraday_result.details) == intraday_result.raw_score
 
 
 def test_shadow_v54_persists_explicit_risk_and_capacity_constraints() -> None:
@@ -229,6 +259,123 @@ def test_shadow_v54_persists_explicit_risk_and_capacity_constraints() -> None:
     assert {"special_treatment", "new_stock", "capacity_above_one_percent_of_amount", "turnover_extreme"}.issubset(
         components["explicit_constraints"]["flags"]
     )
+
+
+def test_shadow_v55_is_preregistered_bounded_replayable_and_permutation_stable() -> None:
+    items = tuple(
+        _item(index, slope=(index - 4) / 5_000, industry="软件业")
+        for index in range(8)
+    )
+
+    first = score_shadow_market(items, variant="v5_5_bounded_nonlinear_stability")
+    second = score_shadow_market(tuple(reversed(items)), variant="v5_5_bounded_nonlinear_stability")
+    direct_v54 = score_shadow_market(items, variant="v5_4_skip5_multilevel_residual")
+
+    assert first.candidate_id.startswith(f"{SHADOW_SCORE_V55_CANDIDATE_VERSION}:")
+    assert first.spec["schema_version"] == SHADOW_SCORE_V55_SCHEMA_VERSION
+    assert first.spec["algorithm"] == SHADOW_SCORE_V55_ALGORITHM_VERSION
+    assert first.spec["final_score"]["training_claim"] == "none-deterministic-preregistered-shadow-challenger"
+    assert first.spec["final_score"]["volume_policy"] == "not-used-direct-v5.4-base"
+    assert "industry_breadth_not_available_in_v55" in first.spec["inputs"]["challenger_limitations"]
+    assert [(item.symbol, item.rank, item.raw_score) for item in first.results] == [
+        (item.symbol, item.rank, item.raw_score) for item in second.results
+    ]
+    assert first.normalization == second.normalization
+    assert first.normalization == direct_v54.normalization
+    direct_by_symbol = {item.symbol: item for item in direct_v54.results}
+    for item in first.results:
+        components = item.details["components"]
+        evidence = components["challenger_evidence"]
+        direct_components = direct_by_symbol[item.symbol].details["components"]
+        assert components["normalized_alpha"] == direct_components["normalized_alpha"]
+        assert components["penalties"] == direct_components["penalties"]
+        assert components["total_penalty"] == direct_components["total_penalty"]
+        expected = round(
+            max(
+                0,
+                min(
+                    100,
+                    components["normalized_alpha"]
+                    + components["bounded_nonlinear_delta"]
+                    - components["total_penalty"],
+                ),
+            ),
+            6,
+        )
+        assert item.raw_score == expected
+        assert -6 <= components["bounded_nonlinear_delta"] <= 6
+        assert components["volume_confirmation_delta"] == 0
+        assert len(evidence["input_digest"]) == 64
+        assert evidence["training_claim"] == "none-deterministic-paper-inspired-interaction"
+        if evidence["cross_sectional_residual_strength"] < 0:
+            assert evidence["positive_residual_gate_applied"] is False
+            assert "conservative-downside-penalty" in evidence["negative_residual_policy"]
+        assert replay_shadow_score_details(item.details) == item.raw_score
+
+
+def test_shadow_v55_gates_positive_residual_strength_for_crowding_and_capacity() -> None:
+    weak = _item(1, slope=-0.002, industry="软件业")
+    implementable = _item(
+        2,
+        slope=0.003,
+        amount=90_000_000,
+        turnover_rate=4,
+        industry="软件业",
+    )
+    crowded = _item(
+        3,
+        slope=0.003,
+        amount=5_000_000,
+        turnover_rate=35,
+        industry="软件业",
+    )
+
+    batch = score_shadow_market(
+        (weak, implementable, crowded),
+        variant="v5_5_bounded_nonlinear_stability",
+    )
+    evidence = {
+        item.symbol: item.details["components"]["challenger_evidence"]
+        for item in batch.results
+    }
+
+    assert evidence[implementable.symbol]["cross_sectional_residual_strength"] > 0
+    assert evidence[crowded.symbol]["cross_sectional_residual_strength"] > 0
+    assert evidence[crowded.symbol]["crowding"]["risk"] > evidence[implementable.symbol]["crowding"]["risk"]
+    assert evidence[crowded.symbol]["capacity"]["risk"] > evidence[implementable.symbol]["capacity"]["risk"]
+    assert evidence[crowded.symbol]["implementability_gate"] < evidence[implementable.symbol]["implementability_gate"]
+    assert evidence[crowded.symbol]["bounded_nonlinear_delta"] < evidence[implementable.symbol]["bounded_nonlinear_delta"]
+
+
+def test_shadow_v55_replay_fails_closed_for_interaction_or_digest_corruption() -> None:
+    batch = score_shadow_market(
+        tuple(_item(index, slope=index / 5_000, industry="软件业") for index in range(3)),
+        variant="v5_5_bounded_nonlinear_stability",
+    )
+    corrupted_delta = deepcopy(batch.results[0].details)
+    cast(dict[str, Any], corrupted_delta["components"])["bounded_nonlinear_delta"] = 5.5
+    with pytest.raises(ShadowScoreReplayError, match="交互增量无法重放"):
+        replay_shadow_score_details(corrupted_delta)
+
+    corrupted_digest = deepcopy(batch.results[0].details)
+    challenger = cast(
+        dict[str, Any],
+        cast(dict[str, Any], corrupted_digest["components"])["challenger_evidence"],
+    )
+    challenger["input_digest"] = "tampered"
+    with pytest.raises(ShadowScoreReplayError, match="交互证据无法从冻结输入重放"):
+        replay_shadow_score_details(corrupted_digest)
+
+
+def test_shadow_v55_does_not_change_legacy_v54_component_contract() -> None:
+    legacy = score_shadow_market(
+        (_item(1, industry="软件业"),),
+        variant="v5_4_skip5_multilevel_residual",
+    ).results[0]
+
+    assert "bounded_nonlinear_delta" not in legacy.details["components"]
+    assert "challenger_evidence" not in legacy.details["components"]
+    assert replay_shadow_score_details(legacy.details) == legacy.raw_score
 
 
 def test_shadow_score_ignores_rows_after_data_date() -> None:

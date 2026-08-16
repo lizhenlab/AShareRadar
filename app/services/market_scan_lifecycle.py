@@ -35,6 +35,7 @@ class MarketScanLifecycle:
         self.lock = asyncio.Lock()
         self._guard_acquired = False
         self._ownership_reconciled = False
+        self._instance_guard_epoch = 0
         self._started = False
         self._stopping = False
         self._closed = False
@@ -63,6 +64,14 @@ class MarketScanLifecycle:
             return bool(self._instance_guard.acquire())
         except Exception:
             return False
+
+    @property
+    def instance_guard_epoch(self) -> int:
+        return self._instance_guard_epoch
+
+    @property
+    def has_instance_guard(self) -> bool:
+        return self._guard_acquired
 
     async def wait_until_quiescent(self) -> None:
         if self.is_quiescent:
@@ -144,6 +153,7 @@ class MarketScanLifecycle:
         self._guard_acquired = acquired
         if not acquired:
             return False, 0
+        self._instance_guard_epoch += 1
         try:
             return True, await self._reconcile_ownership()
         except BaseException:

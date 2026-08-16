@@ -6,12 +6,17 @@ from pathlib import Path
 
 import pytest
 
+import app.services.market_scan_modes as market_scan_modes_module
 from app.models.market_scan import MarketScanResultItem, MarketScanStartRequest
 from app.services.cache import SQLiteCache
 from app.services.market_scan_manager import MarketScanManager, market_scan_rule_version
-from app.services.market_scan_modes import market_scan_temporal_contract
-from app.services.market_scan_scoring import score_market_scan_item
+from app.services.market_scan_modes import (
+    current_official_source_temporal_contract_matches,
+    market_scan_temporal_contract,
+)
+from app.services.market_scan_scoring import completed_market_scan_klines, score_market_scan_item
 from app.services.market_scan_score_dimensions import verify_market_scan_point_in_time_evidence
+from app.services.trading_calendar import TradingCalendarCoverageError
 from tests.market_scan_test_support import (
     _MarketScanHub,
     _configure_clean_full_market,
@@ -25,6 +30,73 @@ from tests.market_scan_test_support import (
 INTRADAY_AS_OF = datetime(2026, 7, 17, 12, 8)
 PREOPEN_AS_OF = datetime(2026, 7, 17, 8, 0)
 PREVIOUS_DATA_DATE = date(2026, 7, 16)
+
+
+@pytest.mark.parametrize(
+    ("source_date", "as_of", "expected"),
+    (
+        (date(2026, 8, 14), "2026-08-14T15:14:59+08:00", False),
+        (date(2026, 8, 14), "2026-08-14T15:15:00+08:00", True),
+        (date(2026, 8, 14), "2026-08-15T00:38:35+08:00", True),
+        (date(2026, 8, 14), "2026-08-16T23:59:59+08:00", True),
+        (date(2026, 8, 13), "2026-08-15T00:38:35+08:00", False),
+        (date(2026, 8, 15), "2026-08-15T00:38:35+08:00", False),
+        (date(2026, 8, 17), "2026-08-15T00:38:35+08:00", False),
+        (date(2026, 8, 14), "2026-08-17T15:15:00+08:00", False),
+        (date(2026, 8, 17), "2026-08-17T15:15:00+08:00", True),
+        (date(2026, 9, 30), "2026-10-05T12:00:00+08:00", True),
+    ),
+)
+def test_current_official_source_temporal_contract_tracks_latest_completed_session(
+    source_date: date,
+    as_of: str,
+    expected: bool,
+) -> None:
+    parsed = datetime.fromisoformat(as_of)
+
+    assert current_official_source_temporal_contract_matches(
+        source_date,
+        as_of=parsed,
+        captured_at=datetime.fromisoformat("2026-10-09T16:00:00+08:00"),
+    ) is expected
+
+
+def test_current_official_source_temporal_contract_rejects_naive_reverse_and_uncovered_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_date = date(2026, 8, 14)
+    aware_as_of = datetime.fromisoformat("2026-08-15T00:38:35+08:00")
+    aware_captured = datetime.fromisoformat("2026-08-15T00:49:29+08:00")
+
+    assert not current_official_source_temporal_contract_matches(
+        source_date,
+        as_of=aware_as_of.replace(tzinfo=None),
+        captured_at=aware_captured,
+    )
+    assert not current_official_source_temporal_contract_matches(
+        source_date,
+        as_of=aware_as_of,
+        captured_at=aware_captured.replace(tzinfo=None),
+    )
+    assert not current_official_source_temporal_contract_matches(
+        source_date,
+        as_of=aware_as_of,
+        captured_at=aware_as_of.replace(second=34),
+    )
+
+    def unavailable(_value: datetime) -> date:
+        raise TradingCalendarCoverageError("calendar unavailable")
+
+    monkeypatch.setattr(
+        market_scan_modes_module,
+        "latest_expected_daily_kline_date",
+        unavailable,
+    )
+    assert not current_official_source_temporal_contract_matches(
+        source_date,
+        as_of=aware_as_of,
+        captured_at=aware_captured,
+    )
 
 
 def test_scan_temporal_contract_separates_intraday_and_official_boundaries() -> None:
@@ -129,12 +201,32 @@ def test_intraday_scoring_uses_today_quote_and_previous_completed_bar() -> None:
     dimensions = result.score_details["components"]["score_dimensions"]
     assert dimensions["volume_context"] == {
         "mode": "intraday",
+        "feature_window_contract": "market-scan-feature-windows-v1",
+        "snapshot_bar_position": "previous-completed-session",
         "volume_ratio_basis": "completed-daily-bars-5d-vs-20d",
         "volume_data_date": PREVIOUS_DATA_DATE.isoformat(),
         "price_volume_alignment": "intraday-time-aligned-volume-unavailable-neutralized",
         "lifecycle_applied": False,
     }
-    assert dimensions["raw_features"]["volume_lifecycle_delta"] == 0
+    features = dimensions["raw_features"]
+    closes = [
+        row.close
+        for row in completed_market_scan_klines(rows, PREVIOUS_DATA_DATE)
+    ]
+    assert features["return_1d_pct"] == pytest.approx((quote.price / closes[-1] - 1) * 100, abs=1e-4)
+    assert features["return_5d_pct"] == pytest.approx((quote.price / closes[-5] - 1) * 100, abs=1e-4)
+    assert features["return_20d_pct"] == pytest.approx((quote.price / closes[-20] - 1) * 100, abs=1e-4)
+    assert features["return_60d_pct"] == pytest.approx((quote.price / closes[-60] - 1) * 100, abs=1e-4)
+    assert features["volume_lifecycle_delta"] == 0
+    score_inputs = result.score_details["inputs"]
+    assert score_inputs["continuous_trend_return_5d_pct"] == pytest.approx(
+        features["return_5d_pct"],
+        abs=1e-4,
+    )
+    assert score_inputs["continuous_trend_return_20d_pct"] == pytest.approx(
+        features["return_20d_pct"],
+        abs=1e-4,
+    )
     assert verify_market_scan_point_in_time_evidence(dimensions["point_in_time_evidence"]) is True
 
 

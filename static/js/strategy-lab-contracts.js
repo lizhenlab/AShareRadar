@@ -1,4 +1,10 @@
 const BOARD_ORDER = ["sh_main", "star", "sz_main", "chinext", "beijing"];
+const BASELINE_PRODUCTION_SCORE_RULE_VERSION = "full-market-score-v4";
+const BASELINE_PRODUCTION_SCORE_SPEC_HASH = "30c5abb10b676fc71b5fa6c621cce809a6c2d054113fa578d77eccf28fb5955a";
+const PRODUCTION_SCORE_RULE_VERSIONS = new Set([
+  "full-market-score-v4",
+  "full-market-score-v5",
+]);
 const PROFILE_OBJECTIVES = {
   conservative: { alpha_1d: .03, alpha_5d: .12, alpha_20d: .25, confidence: .20, risk: .25, tradability: .15 },
   balanced: { alpha_1d: .05, alpha_5d: .20, alpha_20d: .35, confidence: .15, risk: .15, tradability: .10 },
@@ -52,10 +58,73 @@ export function validateEvidence(value) {
   if (value === null) return null;
   const evidence = objectValue(value, "证据中心");
   fingerprint(evidence.strategy_fingerprint, "strategy_fingerprint");
+  const boundary = objectValue(evidence.research_boundary, "research_boundary");
+  if (
+    boundary.status !== "shadow_only"
+    || boundary.baseline_kind !== "offline_evaluation_baseline"
+    || boundary.baseline_production_score_rule_version !== BASELINE_PRODUCTION_SCORE_RULE_VERSION
+    || boundary.baseline_production_score_spec_hash !== BASELINE_PRODUCTION_SCORE_SPEC_HASH
+    || !["not_available", "compatible", "incompatible"].includes(boundary.execution_contract_compatibility)
+    || boundary.production_ranking_mutated !== false
+    || boundary.statement !== "影子研究，不改变生产排名"
+  ) {
+    throw new Error("证据中心研究边界无效，已拒绝把 Shadow 结果展示为生产评分");
+  }
+  const execution = objectValue(evidence.execution, "execution");
+  validateEvidenceExecutionContract(execution, boundary.execution_contract_compatibility);
   if (!Array.isArray(evidence.coverage) || !Array.isArray(evidence.top_n)) {
     throw new Error("证据中心缺少覆盖率或 Top N 统计");
   }
+  if (!Array.isArray(evidence.shadow_candidates)) throw new Error("证据中心缺少 Shadow 候选列表");
+  evidence.shadow_candidates.forEach((candidate) => {
+    objectValue(candidate, "Shadow 候选");
+    evidenceAvailability(candidate.evidence_status, "candidate.evidence_status");
+    evidenceAvailability(objectValue(candidate.coverage, "candidate.coverage").status, "coverage.status");
+    evidenceAvailability(objectValue(candidate.rank_delta_vs_production, "candidate.rank_delta_vs_production").status, "rank_delta.status");
+    evidenceAvailability(objectValue(candidate.constraints, "candidate.constraints").status, "constraints.status");
+    evidenceAvailability(objectValue(candidate.exposure, "candidate.exposure").status, "exposure.status");
+    evidenceAvailability(objectValue(candidate.promotion_gate, "candidate.promotion_gate").status, "promotion_gate.status");
+    if (!Array.isArray(candidate.top_n)) throw new Error("Shadow 候选缺少 Top N 证据");
+    candidate.top_n.forEach((item) => evidenceAvailability(objectValue(item, "candidate.top_n[]").status, "top_n.status"));
+  });
+  const promotion = objectValue(evidence.promotion, "promotion");
+  if (promotion.pbo_status !== "not_computed" || promotion.deflated_sharpe_status !== "not_computed") {
+    throw new Error("证据中心不得暗示未执行的 PBO / DSR 已计算");
+  }
+  if (promotion.pbo_ready !== false) throw new Error("兼容字段 pbo_ready 必须保持 false");
   return evidence;
+}
+
+function validateEvidenceExecutionContract(execution, compatibility) {
+  const ruleVersion = execution.production_score_rule_version;
+  const specHash = execution.production_score_spec_hash;
+  const hasRuleVersion = ruleVersion !== null && ruleVersion !== undefined;
+  const hasSpecHash = specHash !== null && specHash !== undefined;
+  if (hasRuleVersion !== hasSpecHash) {
+    throw new Error("证据中心执行评分合同不完整");
+  }
+  if (!hasRuleVersion) {
+    const expected = execution.execution_id === null || execution.execution_id === undefined
+      ? "not_available"
+      : "incompatible";
+    if (compatibility !== expected) throw new Error("证据中心执行评分合同兼容性不一致");
+    return;
+  }
+  if (!PRODUCTION_SCORE_RULE_VERSIONS.has(ruleVersion)) {
+    throw new Error("证据中心执行评分规则版本无效");
+  }
+  fingerprint(specHash, "production_score_spec_hash");
+  const expected = ruleVersion === BASELINE_PRODUCTION_SCORE_RULE_VERSION
+    && specHash === BASELINE_PRODUCTION_SCORE_SPEC_HASH
+    ? "compatible"
+    : "incompatible";
+  if (compatibility !== expected) throw new Error("证据中心执行评分合同兼容性不一致");
+}
+
+function evidenceAvailability(value, label) {
+  if (!["available", "insufficient_data", "unavailable"].includes(value)) {
+    throw new Error(`${label} 不是可识别的证据状态`);
+  }
 }
 
 export function validateHistory(value) {

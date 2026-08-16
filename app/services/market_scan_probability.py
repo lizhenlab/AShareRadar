@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import math
@@ -21,24 +21,69 @@ import numpy as np
 from numpy.typing import NDArray
 
 import app.services.market_scan_probability_metrics as probability_metrics
+from app.services.joint_execution_probability import (
+    joint_execution_probability_action_qualified,
+    verify_joint_execution_probability_evidence,
+)
+from app.utils.clock import utc_now
 
 
-PROBABILITY_SCHEMA_VERSION = "market-scan-shadow-probability-v3"
-PROBABILITY_MODEL_VERSION = "shadow-up-probability-logit-l2-v1"
-PROBABILITY_CALIBRATOR_VERSION = "shadow-up-probability-platt-v1"
+PROBABILITY_SCHEMA_VERSION = "market-scan-shadow-probability-v4"
+PROBABILITY_MODEL_VERSION = "shadow-up-probability-logit-l2-v2-convergence-required"
+PROBABILITY_CALIBRATOR_VERSION = "shadow-up-probability-platt-v2-convergence-required"
 PROBABILITY_ISOTONIC_CALIBRATOR_VERSION = "shadow-up-probability-isotonic-pav-v1"
 PROBABILITY_BASELINE_VERSION = probability_metrics.PROBABILITY_BASELINE_VERSION
-PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v2"
-PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v2"
+PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v3-liquidity-medium"
+PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v3-explicit-target-offset"
 PROBABILITY_COST_MODEL_VERSION = "ashare-executable-round-trip-cost-v1"
-PROBABILITY_SPLIT_VERSION = "grouped-date-multifold-train-gap-calibration-gap-test-v2"
+PROBABILITY_SPLIT_VERSION = "grouped-date-multifold-target-offset-purge-v3"
+PROBABILITY_FILTER_QUALIFICATION_VERSION = "market-scan-probability-filter-qualification-v1"
+PROBABILITY_FILTER_AUTHORIZATION_VERSION = (
+    "market-scan-probability-filter-authorization-v3-raw-drift-joint-execution"
+)
+PROBABILITY_FILTER_AUTHORIZATION_SCHEMA_VERSION = (
+    "market-scan-probability-filter-authorization-artifact-v1"
+)
+PROBABILITY_FILTER_AUTHORIZATION_INTEGRITY_NOTICE = (
+    "content_address_only_not_signature_load_from_trusted_research_store"
+)
+PROBABILITY_DEPLOYMENT_ARTIFACT_SCHEMA_VERSION = (
+    "market-scan-probability-deployment-estimator-artifact-v1"
+)
+PROBABILITY_DEPLOYMENT_CONTRACT_VERSION = (
+    "market-scan-probability-deployment-refit-v1"
+)
+PROBABILITY_DEPLOYMENT_MAXIMUM_AGE_HOURS = 36
+SUPERSEDED_PROBABILITY_SCHEMA_VERSIONS = ("market-scan-shadow-probability-v3",)
+SUPERSEDED_PROBABILITY_FEATURE_VERSIONS = ("full-market-point-in-time-features-v2",)
+SUPERSEDED_PROBABILITY_LABEL_VERSIONS = ("market-scan-upside-label-v2",)
+SUPERSEDED_PROBABILITY_SPLIT_VERSIONS = (
+    "grouped-date-multifold-train-gap-calibration-gap-test-v2",
+)
+LEGACY_PROBABILITY_FEATURE_VERSION = SUPERSEDED_PROBABILITY_FEATURE_VERSIONS[0]
 ProbabilityStatus = Literal["insufficient_data", "calibrated_shadow"]
 ProbabilityTarget = Literal["net_excess_positive", "net_return_positive"]
-_SUPPORTED_HORIZONS = frozenset({1, 5, 20})
+# The generic grouped-date estimator is also reused by the isolated individual-
+# stock D+2/D+3/D+4 research namespace.  Full-market routes and artifacts keep
+# their separately validated public 1/5/20 contract.
+_SUPPORTED_HORIZONS = frozenset({1, 2, 3, 5, 20})
 _FORBIDDEN_FEATURE_NAMES = frozenset(
     {"symbol", "stock_code", "ticker", "rank", "final_rank", "ranking", "target", "outcome", "label"}
 )
 _FORBIDDEN_FEATURE_PREFIXES = ("future_", "forward_", "next_", "realized_", "observed_")
+_EVIDENCE_DIGEST_FIELDS = frozenset(
+    {
+        "schema_version", "status", "fit_status", "selection_qualified", "selection_qualification",
+        "probability", "horizon", "target_definition", "base_rate",
+        "actual_positive_rate_interval",
+        "model_version", "feature_version", "label_version", "cost_model_version",
+        "label_contract_digest", "label_contract_binding", "generated_at", "input_digest",
+        "contract", "limitations", "split", "counts", "training_cutoff", "model", "calibrator",
+        "isotonic_calibrator", "empirical_bayes_baseline", "calibration_metrics",
+        "calibration_candidates", "folds", "predictions", "model_digest", "calibrator_digest",
+        "isotonic_calibrator_digest", "baseline_digest",
+    }
+)
 
 # Compatibility aliases keep both the original public surface and historically
 # imported private helpers available while calculation ownership lives in the
@@ -61,6 +106,89 @@ _percentile = probability_metrics.percentile
 
 class ProbabilityReplayError(ValueError):
     """Raised when persisted probability evidence is invalid or cannot replay."""
+
+
+class _ProbabilityModelConvergenceError(ValueError):
+    """Internal fail-closed signal for an optimizer that did not converge."""
+
+
+_VERIFIED_AUTHORIZATION_SEAL = object()
+_VERIFIED_DEPLOYMENT_SEAL = object()
+
+
+class VerifiedProbabilityFilterAuthorization(Mapping[str, object]):
+    """Opaque result of strict raw-evidence authorization verification.
+
+    Callers cannot authorize filtering by passing an ordinary JSON mapping.  A
+    mapping first has to pass the exact-schema, content-address and statistical
+    replay checks in :func:`verify_probability_filter_authorization_artifact`.
+    """
+
+    __slots__ = ("_encoded_payload", "generated_at", "integrity_digest")
+
+    def __init__(
+        self,
+        *,
+        encoded_payload: str,
+        generated_at: str = "",
+        integrity_digest: str,
+        _seal: object | None = None,
+    ) -> None:
+        if _seal is not _VERIFIED_AUTHORIZATION_SEAL:
+            raise TypeError("authorization token 只能由 strict verifier 创建")
+        self._encoded_payload = encoded_payload
+        self.generated_at = generated_at
+        self.integrity_digest = integrity_digest
+
+    @property
+    def payload(self) -> Mapping[str, object]:
+        decoded = json.loads(self._encoded_payload)
+        if not isinstance(decoded, dict):  # pragma: no cover - verifier invariant
+            raise TypeError("verified authorization payload is not an object")
+        return cast(Mapping[str, object], decoded)
+
+    def __getitem__(self, key: str) -> object:
+        return self.payload[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.payload)
+
+    def __len__(self) -> int:
+        return len(self.payload)
+
+
+class VerifiedProbabilityDeploymentEstimator(Mapping[str, object]):
+    """Opaque, replay-verified deployment refit accepted by new-row prediction."""
+
+    __slots__ = ("_encoded_payload", "integrity_digest")
+
+    def __init__(
+        self,
+        *,
+        encoded_payload: str,
+        integrity_digest: str,
+        _seal: object | None = None,
+    ) -> None:
+        if _seal is not _VERIFIED_DEPLOYMENT_SEAL:
+            raise TypeError("deployment estimator 只能由 strict verifier 创建")
+        self._encoded_payload = encoded_payload
+        self.integrity_digest = integrity_digest
+
+    @property
+    def payload(self) -> Mapping[str, object]:
+        decoded = json.loads(self._encoded_payload)
+        if not isinstance(decoded, dict):  # pragma: no cover - verifier invariant
+            raise TypeError("verified deployment payload is not an object")
+        return cast(Mapping[str, object], decoded)
+
+    def __getitem__(self, key: str) -> object:
+        return self.payload[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.payload)
+
+    def __len__(self) -> int:
+        return len(self.payload)
 
 
 @dataclass(frozen=True)
@@ -103,7 +231,17 @@ class ProbabilityConfig:
 
     @property
     def effective_gap_sessions(self) -> int:
-        return self.horizon if self.gap_sessions is None else self.gap_sessions
+        return self.target_session_offset if self.gap_sessions is None else self.gap_sessions
+
+    @property
+    def target_session_offset(self) -> int:
+        """Signal-date offset of the close used by the H-session label.
+
+        Entry occurs at D+1 open and a holding horizon of H exits at D+H+1
+        close.  Purging only H signal dates therefore leaks the first date of
+        the following partition into the preceding partition's final label.
+        """
+        return self.horizon + 1
 
 
 @dataclass(frozen=True)
@@ -142,58 +280,91 @@ class _EvaluatedFold:
     predictions: tuple[dict[str, object], ...]
 
 
+def _probability_label_contract(config: ProbabilityConfig) -> dict[str, object]:
+    return {
+        "version": PROBABILITY_LABEL_VERSION,
+        "target": config.target,
+        "target_definition": _target_definition(config),
+        "entry": "next_tradable_session_open_after_scan",
+        "holding_sessions": config.horizon,
+        "entry_session_offset": 1,
+        "target_session_offset": config.target_session_offset,
+        "exit": f"signal_plus_{config.target_session_offset}_trading_session_close",
+        "unfilled_policy": "explicitly_non_executable_never_assume_fill",
+        "point_in_time_required": True,
+    }
+
+
+def _probability_cost_contract(
+    config: ProbabilityConfig, bound_label_contract: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "version": config.cost_model_version,
+        "components": ["commission", "stamp_tax", "transfer_fee", "slippage"],
+        "deduct_before_label": True,
+        "label_contract": dict(bound_label_contract),
+        "label_contract_digest": stable_probability_hash(bound_label_contract),
+        "label_contract_binding": (
+            "complete" if config.label_contract is not None else "legacy_version_only"
+        ),
+    }
+
+
+def _probability_model_contract(config: ProbabilityConfig) -> dict[str, object]:
+    return {
+        "version": PROBABILITY_MODEL_VERSION,
+        "algorithm": "standardized_l2_logistic_regression_newton",
+        "l2_strength": config.l2_strength,
+        "maximum_iterations": config.maximum_iterations,
+        "convergence_tolerance": config.convergence_tolerance,
+    }
+
+
+def _probability_calibrator_contract(config: ProbabilityConfig) -> dict[str, object]:
+    return {
+        "version": PROBABILITY_CALIBRATOR_VERSION,
+        "algorithm": "independent_platt_sigmoid",
+        "primary": True,
+        "candidate_registry": [
+            {
+                "id": "platt",
+                "version": PROBABILITY_CALIBRATOR_VERSION,
+                "algorithm": "independent_platt_sigmoid",
+                "minimum_calibration_sessions": config.minimum_calibration_sessions,
+            },
+            {
+                "id": "isotonic",
+                "version": PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
+                "algorithm": "weighted_pool_adjacent_violators",
+                "minimum_calibration_sessions": config.minimum_isotonic_calibration_sessions,
+                "selection_policy": "comparison_only_never_automatic",
+            },
+        ],
+    }
+
+
+def _probability_compatibility_contract() -> dict[str, object]:
+    return {
+        "legacy_artifact_policy": "replayable_read_only_never_filter_qualified",
+        "qualification_policy": "exact_current_contract_versions_only",
+        "superseded_schema_versions": list(SUPERSEDED_PROBABILITY_SCHEMA_VERSIONS),
+        "superseded_feature_versions": list(SUPERSEDED_PROBABILITY_FEATURE_VERSIONS),
+        "superseded_label_versions": list(SUPERSEDED_PROBABILITY_LABEL_VERSIONS),
+        "superseded_split_versions": list(SUPERSEDED_PROBABILITY_SPLIT_VERSIONS),
+        "supersession_reason": "target_exit_is_H_plus_1_sessions_from_signal_and_v2_purged_only_H",
+    }
+
+
 def build_probability_contract(config: ProbabilityConfig) -> dict[str, object]:
     """Return the registered, versioned research contract for one horizon/target."""
     bound_label_contract = _bound_label_contract(config)
     return {
         "schema_version": PROBABILITY_SCHEMA_VERSION,
         "feature_version": PROBABILITY_FEATURE_VERSION,
-        "label": {
-            "version": PROBABILITY_LABEL_VERSION,
-            "target": config.target,
-            "target_definition": _target_definition(config),
-            "entry": "next_tradable_session_open_after_scan",
-            "exit": f"effective_trading_session_{config.horizon}_close",
-            "unfilled_policy": "explicitly_non_executable_never_assume_fill",
-            "point_in_time_required": True,
-        },
-        "cost": {
-            "version": config.cost_model_version,
-            "components": ["commission", "stamp_tax", "transfer_fee", "slippage"],
-            "deduct_before_label": True,
-            "label_contract": bound_label_contract,
-            "label_contract_digest": stable_probability_hash(bound_label_contract),
-            "label_contract_binding": (
-                "complete" if config.label_contract is not None else "legacy_version_only"
-            ),
-        },
-        "model": {
-            "version": PROBABILITY_MODEL_VERSION,
-            "algorithm": "standardized_l2_logistic_regression_newton",
-            "l2_strength": config.l2_strength,
-            "maximum_iterations": config.maximum_iterations,
-            "convergence_tolerance": config.convergence_tolerance,
-        },
-        "calibrator": {
-            "version": PROBABILITY_CALIBRATOR_VERSION,
-            "algorithm": "independent_platt_sigmoid",
-            "primary": True,
-            "candidate_registry": [
-                {
-                    "id": "platt",
-                    "version": PROBABILITY_CALIBRATOR_VERSION,
-                    "algorithm": "independent_platt_sigmoid",
-                    "minimum_calibration_sessions": config.minimum_calibration_sessions,
-                },
-                {
-                    "id": "isotonic",
-                    "version": PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
-                    "algorithm": "weighted_pool_adjacent_violators",
-                    "minimum_calibration_sessions": config.minimum_isotonic_calibration_sessions,
-                    "selection_policy": "comparison_only_never_automatic",
-                },
-            ],
-        },
+        "label": _probability_label_contract(config),
+        "cost": _probability_cost_contract(config, bound_label_contract),
+        "model": _probability_model_contract(config),
+        "calibrator": _probability_calibrator_contract(config),
         "baseline": {
             "version": PROBABILITY_BASELINE_VERSION,
             "bin_count": config.empirical_bayes_bin_count,
@@ -201,6 +372,7 @@ def build_probability_contract(config: ProbabilityConfig) -> dict[str, object]:
         },
         "split": _split_contract(config),
         "evaluation": _evaluation_contract(config),
+        "compatibility": _probability_compatibility_contract(),
     }
 
 
@@ -248,7 +420,16 @@ def fit_shadow_probability(
         if diversity_reasons:
             tagged = [f"fold_{fold_id}_{reason}" for reason in diversity_reasons]
             return _insufficient_evidence(prepared, config, generated_at, tagged, split=split)
-        artifacts = _fit_artifacts(partitions, prepared.feature_names, config)
+        try:
+            artifacts = _fit_artifacts(partitions, prepared.feature_names, config)
+        except _ProbabilityModelConvergenceError as exc:
+            return _insufficient_evidence(
+                prepared,
+                config,
+                generated_at,
+                [f"fold_{fold_id}_{exc}"],
+                split=split,
+            )
         fold_predictions = tuple(
             _test_predictions(
                 partitions["test"], artifacts, prepared.feature_names, fold_id=fold_id,
@@ -275,19 +456,100 @@ def predict_shadow_probability(
     features: Mapping[str, float],
     *,
     sample_id: str = "research-current",
+    deployment: VerifiedProbabilityDeploymentEstimator | object | None = None,
+    as_of: str | None = None,
 ) -> dict[str, object]:
-    """Apply a calibrated artifact; insufficient studies return a null probability."""
+    """Predict only from a fresh, separately refitted deployment estimator.
+
+    The model embedded in research evidence is the final OOS evaluation fold. It
+    is intentionally not a deployment model and must never be extrapolated to a
+    new row. Persisted OOS rows are projected directly from ``predictions`` by
+    the research/artifact layer instead of calling this function.
+    """
     verify_shadow_probability_evidence(evidence)
-    if evidence.get("status") != "calibrated_shadow":
-        return _null_estimate(evidence, sample_id)
-    model = _object_mapping(evidence.get("model"), "model")
-    calibrator = _object_mapping(evidence.get("calibrator"), "calibrator")
-    baseline = _object_mapping(evidence.get("empirical_bayes_baseline"), "empirical_bayes_baseline")
+    _validate_prediction_features_only(evidence, features)
+    if isinstance(deployment, VerifiedProbabilityDeploymentEstimator):
+        return _deployment_estimate(evidence, deployment, features, sample_id, as_of)
+    estimate = _null_estimate(evidence, sample_id)
+    estimate["deployment_status"] = "deployment_model_not_fitted"
+    estimate["limitations"] = list(dict.fromkeys([
+        *cast(Sequence[str], evidence.get("limitations") or ()),
+        "oos_evaluation_fold_forbidden_for_new_prediction",
+        "deployment_model_and_fresh_calibrator_not_available",
+    ]))
+    return estimate
+
+
+def _deployment_estimate(
+    evidence: Mapping[str, object],
+    deployment: VerifiedProbabilityDeploymentEstimator,
+    features: Mapping[str, float],
+    sample_id: str,
+    as_of: str | None,
+) -> dict[str, object]:
+    if not _joint_execution_estimand_supported(evidence):
+        estimate = _null_estimate(evidence, sample_id)
+        estimate["deployment_status"] = "joint_execution_estimand_not_supported"
+        estimate["limitations"] = ["all_decisions_joint_label_corpus_not_available"]
+        return estimate
+    payload = deployment.payload
+    if not _deployment_binding_matches(payload, evidence):
+        raise ProbabilityReplayError("deployment estimator 与研究证据绑定冲突")
+    if not _deployment_is_fresh(payload, as_of):
+        estimate = _null_estimate(evidence, sample_id)
+        estimate["deployment_status"] = "deployment_estimator_stale"
+        estimate["limitations"] = ["deployment_estimator_stale_or_future_skew"]
+        return estimate
+    model = _object_mapping(payload.get("model"), "deployment.model")
+    calibrator = _object_mapping(payload.get("calibrator"), "deployment.calibrator")
+    baseline = _object_mapping(payload.get("empirical_bayes_baseline"), "deployment.baseline")
     raw = _model_probability(model, features)
     probability = _platt_probability(calibrator, raw)
-    estimate = _estimate_payload(evidence, sample_id, probability, raw, _baseline_probability(baseline, raw))
-    estimate["prediction_digest"] = stable_probability_hash(estimate)
+    estimate = _deployment_estimate_payload(
+        evidence, payload, sample_id, probability, raw, _baseline_probability(baseline, raw),
+    )
+    estimate["deployment_artifact_digest"] = deployment.integrity_digest
     return estimate
+
+
+def _deployment_estimate_payload(
+    evidence: Mapping[str, object],
+    deployment: Mapping[str, object],
+    sample_id: str,
+    probability: float,
+    raw: float,
+    baseline: float,
+) -> dict[str, object]:
+    offset = _number_sequence(
+        deployment.get("calibration_offset_ci_95"),
+        "deployment.calibration_offset_ci_95",
+    )
+    adjusted = [_clamp_probability(probability + value) for value in offset]
+    return {
+        **_estimate_payload(evidence, sample_id, probability, raw, baseline),
+        "calibration_bias_interval": offset,
+        "calibration_adjusted_probability_interval": adjusted,
+        "deployment_status": "fresh_verified_deployment_estimator",
+        "training_cutoff": deployment.get("training_cutoff"),
+        "calibration_cutoff": deployment.get("calibration_cutoff"),
+        "deployment_generated_at": deployment.get("generated_at"),
+        "model_digest": deployment.get("model_digest"),
+        "calibrator_digest": deployment.get("calibrator_digest"),
+        "input_digest": deployment.get("corpus_digest"),
+    }
+
+
+def _validate_prediction_features_only(
+    evidence: Mapping[str, object], features: Mapping[str, float],
+) -> None:
+    model = evidence.get("model")
+    if not isinstance(model, Mapping):
+        return
+    names = model.get("feature_names")
+    if not isinstance(names, list) or sorted(features) != names:
+        raise ProbabilityReplayError("上涨概率新样本 feature schema 与研究模型不一致")
+    for name in names:
+        _finite_number(features[str(name)], f"features.{name}")
 
 
 def probability_selection_qualified(evidence: Mapping[str, object]) -> bool:
@@ -298,11 +560,71 @@ def probability_selection_qualified(evidence: Mapping[str, object]) -> bool:
     """
     qualification = evidence.get("selection_qualification")
     return bool(
-        evidence.get("status") == "calibrated_shadow"
+        _has_current_probability_contract(evidence)
+        and evidence.get("status") == "calibrated_shadow"
         and evidence.get("selection_qualified") is True
         and isinstance(qualification, Mapping)
         and qualification.get("passed") is True
     )
+
+
+def build_probability_filter_qualification(
+    evidence: Mapping[str, object],
+    authorization: VerifiedProbabilityFilterAuthorization | object | None = None,
+) -> dict[str, object]:
+    """Build the only contract that may authorize probability-based filtering.
+
+    Core selection evidence is deliberately insufficient.  A separately
+    persisted authorization must bind the exact evidence digest and must carry
+    promotion, multiple-testing, calibration, drift, and executable-portfolio
+    evidence.  Missing or malformed sections fail closed rather than raising.
+    """
+    external = authorization.payload if isinstance(
+        authorization, VerifiedProbabilityFilterAuthorization,
+    ) else {}
+    proper_score = _proper_score_filter_gate(evidence)
+    binding = _filter_authorization_binding(evidence, external)
+    gates = {
+        "current_contract_not_superseded": _has_current_probability_contract(evidence),
+        "selection_qualified": probability_selection_qualified(evidence),
+        "positive_brier_improvement_ci_95": proper_score["positive_brier_improvement_ci_95"],
+        "positive_log_loss_improvement_ci_95": proper_score["positive_log_loss_improvement_ci_95"],
+        "ece_at_most_5pct": proper_score["ece_at_most_5pct"],
+        "authorization_bound_to_evidence_digest": binding,
+        "promotion_gates_passed": _verified_promotion_gates(evidence, external),
+        "multiple_testing_fdr_passed": _verified_multiple_testing(external),
+        "calibration_validation_passed": _verified_calibration_validation(evidence, external),
+        "temporal_drift_validation_passed": _verified_drift_validation(external),
+        "execution_validation_passed": _verified_execution_validation(external, evidence),
+    }
+    return {
+        "version": PROBABILITY_FILTER_QUALIFICATION_VERSION,
+        "passed": all(value is True for value in gates.values()),
+        "gates": gates,
+        "evidence_digest": evidence.get("evidence_digest"),
+        "authorization_digest": (
+            authorization.integrity_digest
+            if isinstance(authorization, VerifiedProbabilityFilterAuthorization)
+            else None
+        ),
+        "proper_score_evidence": proper_score,
+        "required_external_sections": [
+            "promotion_gates",
+            "multiple_testing",
+            "calibration",
+            "drift",
+            "execution",
+        ],
+        "automatic_promotion": False,
+    }
+
+
+def probability_filter_qualified(
+    evidence: Mapping[str, object],
+    authorization: VerifiedProbabilityFilterAuthorization | object | None = None,
+) -> bool:
+    """Return whether exact, fully bound evidence may be used as a filter."""
+    return build_probability_filter_qualification(evidence, authorization)["passed"] is True
 
 
 def verify_shadow_probability_evidence(
@@ -347,9 +669,1176 @@ def stable_probability_hash(value: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _has_current_probability_contract(evidence: Mapping[str, object]) -> bool:
+    contract = evidence.get("contract")
+    split = contract.get("split") if isinstance(contract, Mapping) else None
+    label = contract.get("label") if isinstance(contract, Mapping) else None
+    return bool(
+        evidence.get("schema_version") == PROBABILITY_SCHEMA_VERSION
+        and evidence.get("model_version") == PROBABILITY_MODEL_VERSION
+        and evidence.get("feature_version") == PROBABILITY_FEATURE_VERSION
+        and evidence.get("label_version") == PROBABILITY_LABEL_VERSION
+        and isinstance(split, Mapping)
+        and split.get("version") == PROBABILITY_SPLIT_VERSION
+        and isinstance(label, Mapping)
+        and label.get("target_session_offset") == _safe_positive_integer(evidence.get("horizon")) + 1
+    )
+
+
+def _proper_score_filter_gate(evidence: Mapping[str, object]) -> dict[str, object]:
+    metrics = evidence.get("calibration_metrics")
+    calibrated = metrics.get("calibrated") if isinstance(metrics, Mapping) else None
+    values: Mapping[str, object] = calibrated if isinstance(calibrated, Mapping) else {}
+    brier_ci = _safe_interval(values.get("brier_improvement_vs_reference_ci_95"))
+    log_loss_ci = _safe_interval(values.get("log_loss_improvement_vs_reference_ci_95"))
+    ece = _safe_finite_number(values.get("ece"))
+    return {
+        "metrics_digest": _safe_probability_hash(metrics) if isinstance(metrics, Mapping) else None,
+        "brier_improvement_vs_reference_ci_95": brier_ci,
+        "log_loss_improvement_vs_reference_ci_95": log_loss_ci,
+        "ece": ece,
+        "positive_brier_improvement_ci_95": brier_ci is not None and brier_ci[0] > 0,
+        "positive_log_loss_improvement_ci_95": log_loss_ci is not None and log_loss_ci[0] > 0,
+        "ece_at_most_5pct": ece is not None and ece <= 0.05,
+    }
+
+
+def _filter_authorization_binding(
+    evidence: Mapping[str, object], authorization: Mapping[str, object],
+) -> bool:
+    """Recheck the exact evidence identity even for an opaque verified object."""
+
+    binding = authorization.get("evidence_binding")
+    if not isinstance(binding, Mapping):
+        return False
+    evidence_digest = evidence.get("evidence_digest")
+    metrics = evidence.get("calibration_metrics")
+    return bool(
+        authorization.get("version") == PROBABILITY_FILTER_AUTHORIZATION_VERSION
+        and isinstance(evidence_digest, str)
+        and binding.get("evidence_digest") == evidence_digest
+        and isinstance(metrics, Mapping)
+        and binding.get("metrics_digest") == _safe_probability_hash(metrics)
+        and binding.get("input_digest") == evidence.get("input_digest")
+        and binding.get("horizon") == evidence.get("horizon")
+        and binding.get("target_definition") == evidence.get("target_definition")
+    )
+
+
+def seal_probability_filter_authorization_artifact(
+    payload: Mapping[str, object], *, generated_at: str,
+) -> dict[str, object]:
+    """Seal a candidate authorization; sealing alone never authorizes filtering."""
+
+    normalized = _canonical_json_value(dict(payload))
+    if not isinstance(normalized, dict):
+        raise ValueError("概率筛选 authorization payload 必须是 object")
+    _validated_aware_timestamp(generated_at, "authorization.generated_at")
+    identity = {"generated_at": generated_at, "payload": normalized}
+    return {
+        "schema_version": PROBABILITY_FILTER_AUTHORIZATION_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "payload": normalized,
+        "integrity": {
+            "algorithm": "sha256",
+            "scope": "generated_at+payload",
+            "notice": PROBABILITY_FILTER_AUTHORIZATION_INTEGRITY_NOTICE,
+            "integrity_digest": stable_probability_hash(identity),
+        },
+    }
+
+
+def verify_probability_filter_authorization_artifact(
+    artifact: Mapping[str, object], evidence: Mapping[str, object],
+) -> VerifiedProbabilityFilterAuthorization:
+    """Strictly replay raw authorization evidence and return an opaque token."""
+
+    try:
+        _require_exact_mapping_keys(
+            artifact,
+            {"schema_version", "generated_at", "payload", "integrity"},
+            "authorization",
+        )
+        if artifact.get("schema_version") != PROBABILITY_FILTER_AUTHORIZATION_SCHEMA_VERSION:
+            raise ValueError("authorization schema_version 不受支持")
+        generated_at = str(artifact.get("generated_at") or "")
+        authorization_time = _validated_aware_timestamp(
+            generated_at, "authorization.generated_at",
+        )
+        evidence_time = _validated_aware_timestamp(
+            str(evidence.get("generated_at") or ""), "evidence.generated_at",
+        )
+        if authorization_time < evidence_time:
+            raise ValueError("authorization 生成时间早于绑定 OOS evidence")
+        payload = _strict_mapping(artifact.get("payload"), "authorization.payload")
+        integrity = _strict_mapping(artifact.get("integrity"), "authorization.integrity")
+        _require_exact_mapping_keys(
+            integrity, {"algorithm", "scope", "notice", "integrity_digest"}, "authorization.integrity",
+        )
+        digest = str(integrity.get("integrity_digest") or "")
+        if (
+            integrity.get("algorithm") != "sha256"
+            or integrity.get("scope") != "generated_at+payload"
+            or integrity.get("notice") != PROBABILITY_FILTER_AUTHORIZATION_INTEGRITY_NOTICE
+            or digest != stable_probability_hash({"generated_at": generated_at, "payload": payload})
+        ):
+            raise ValueError("authorization content address 不一致")
+        _verify_filter_authorization_payload(payload, evidence)
+    except ProbabilityReplayError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProbabilityReplayError("概率筛选 authorization 原始证据无效") from exc
+    encoded_payload = json.dumps(
+        _canonical_json_value(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return VerifiedProbabilityFilterAuthorization(
+        encoded_payload=encoded_payload,
+        generated_at=generated_at,
+        integrity_digest=digest,
+        _seal=_VERIFIED_AUTHORIZATION_SEAL,
+    )
+
+
+def fit_probability_deployment_estimator(
+    samples: Sequence[ProbabilitySample],
+    *,
+    evidence: Mapping[str, object],
+    authorization: VerifiedProbabilityFilterAuthorization | object,
+    generated_at: str,
+) -> dict[str, object]:
+    """Refit a standalone estimator only after strict OOS/filter authorization."""
+
+    if not isinstance(authorization, VerifiedProbabilityFilterAuthorization):
+        raise ProbabilityReplayError("deployment refit 需要 strict verified authorization")
+    verify_shadow_probability_evidence(evidence, samples)
+    if not probability_filter_qualified(evidence, authorization):
+        raise ProbabilityReplayError("deployment refit 的 OOS/filter gates 未通过")
+    generated = _validated_aware_timestamp(generated_at, "deployment.generated_at")
+    evidence_generated = _validated_aware_timestamp(
+        str(evidence.get("generated_at") or ""), "evidence.generated_at",
+    )
+    authorization_generated = _validated_aware_timestamp(
+        authorization.generated_at, "authorization.generated_at",
+    )
+    if generated < max(evidence_generated, authorization_generated):
+        raise ProbabilityReplayError("deployment generated_at 早于研究或授权证据")
+    config = _config_from_evidence(evidence)
+    prepared = _prepare_study(samples, config)
+    split = _deployment_refit_split(prepared.eligible, config)
+    generated_market_date = generated.astimezone(timezone(timedelta(hours=8))).date()
+    if date.fromisoformat(split.calibration_dates[-1]) > generated_market_date:
+        raise ProbabilityReplayError("deployment calibration 尚未成熟")
+    partitions = _partition_samples(prepared.eligible, split)
+    reasons = _class_diversity_reasons(partitions)
+    if reasons:
+        raise ProbabilityReplayError(f"deployment refit 数据不足：{','.join(reasons)}")
+    artifacts = _fit_artifacts(partitions, prepared.feature_names, config)
+    calibration_predictions = _deployment_calibration_predictions(
+        partitions["calibration"], artifacts, prepared.feature_names,
+    )
+    offset = _deployment_calibration_offset_ci(
+        calibration_predictions, config, prepared.input_digest,
+    )
+    payload = _deployment_payload(
+        evidence=evidence,
+        authorization=authorization,
+        prepared=prepared,
+        config=config,
+        split=split,
+        artifacts=artifacts,
+        calibration_predictions=calibration_predictions,
+        calibration_offset_ci_95=offset,
+        generated_at=generated_at,
+    )
+    return seal_probability_deployment_artifact(payload, generated_at=generated_at)
+
+
+def seal_probability_deployment_artifact(
+    payload: Mapping[str, object], *, generated_at: str,
+) -> dict[str, object]:
+    normalized = _canonical_json_value(dict(payload))
+    if not isinstance(normalized, dict):
+        raise ValueError("deployment payload 必须是 object")
+    _validated_aware_timestamp(generated_at, "deployment.generated_at")
+    return {
+        "schema_version": PROBABILITY_DEPLOYMENT_ARTIFACT_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "payload": normalized,
+        "integrity": {
+            "algorithm": "sha256",
+            "scope": "generated_at+payload",
+            "integrity_digest": stable_probability_hash(
+                {"generated_at": generated_at, "payload": normalized},
+            ),
+            "notice": "content_address_only_not_signature_strict_replay_required",
+        },
+    }
+
+
+def verify_probability_deployment_artifact(
+    artifact: Mapping[str, object],
+    *,
+    evidence: Mapping[str, object],
+    authorization: VerifiedProbabilityFilterAuthorization | object,
+    samples: Sequence[ProbabilitySample],
+    as_of: str | None = None,
+) -> VerifiedProbabilityDeploymentEstimator:
+    """Full-refit replay and freshness verification for one deployment artifact."""
+
+    if not isinstance(authorization, VerifiedProbabilityFilterAuthorization):
+        raise ProbabilityReplayError("deployment verifier 缺少 strict authorization")
+    try:
+        generated_at, payload, digest = _verified_deployment_envelope(artifact)
+        rebuilt = fit_probability_deployment_estimator(
+            samples,
+            evidence=evidence,
+            authorization=authorization,
+            generated_at=generated_at,
+        )
+        if artifact != rebuilt:
+            raise ValueError("deployment artifact 无法由完整 corpus 确定性重放")
+        if not _deployment_is_fresh(payload, as_of):
+            raise ValueError("deployment artifact 已过期或存在未来时间偏差")
+    except ProbabilityReplayError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProbabilityReplayError("deployment estimator artifact 无效") from exc
+    encoded = json.dumps(
+        _canonical_json_value(payload), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    )
+    return VerifiedProbabilityDeploymentEstimator(
+        encoded_payload=encoded,
+        integrity_digest=digest,
+        _seal=_VERIFIED_DEPLOYMENT_SEAL,
+    )
+
+
+def _verified_deployment_envelope(
+    artifact: Mapping[str, object],
+) -> tuple[str, Mapping[str, object], str]:
+    _require_exact_mapping_keys(
+        artifact, {"schema_version", "generated_at", "payload", "integrity"}, "deployment",
+    )
+    if artifact.get("schema_version") != PROBABILITY_DEPLOYMENT_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("deployment schema_version 不受支持")
+    generated_at = str(artifact.get("generated_at") or "")
+    _validated_aware_timestamp(generated_at, "deployment.generated_at")
+    payload = _strict_mapping(artifact.get("payload"), "deployment.payload")
+    integrity = _strict_mapping(artifact.get("integrity"), "deployment.integrity")
+    _require_exact_mapping_keys(
+        integrity, {"algorithm", "scope", "integrity_digest", "notice"}, "deployment.integrity",
+    )
+    digest = str(integrity.get("integrity_digest") or "")
+    expected = stable_probability_hash({"generated_at": generated_at, "payload": payload})
+    if (
+        integrity.get("algorithm") != "sha256"
+        or integrity.get("scope") != "generated_at+payload"
+        or integrity.get("notice") != "content_address_only_not_signature_strict_replay_required"
+        or digest != expected
+    ):
+        raise ValueError("deployment content address 不一致")
+    return generated_at, payload, digest
+
+
+def _verify_filter_authorization_payload(
+    payload: Mapping[str, object], evidence: Mapping[str, object],
+) -> None:
+    _require_exact_mapping_keys(
+        payload,
+        {
+            "version", "evidence_binding", "oos_predictions", "candidate_registry",
+            "selected_candidate_id", "multiple_testing", "calibration_validation",
+            "drift_validation", "execution_validation",
+        },
+        "authorization.payload",
+    )
+    if payload.get("version") != PROBABILITY_FILTER_AUTHORIZATION_VERSION:
+        raise ValueError("authorization version 不受支持")
+    binding = _strict_mapping(payload.get("evidence_binding"), "evidence_binding")
+    _require_exact_mapping_keys(
+        binding,
+        {"evidence_digest", "metrics_digest", "input_digest", "horizon", "target_definition"},
+        "evidence_binding",
+    )
+    if not _filter_authorization_binding(evidence, payload):
+        raise ValueError("authorization 未绑定 exact evidence")
+    predictions = payload.get("oos_predictions")
+    if not isinstance(predictions, list) or not predictions or not _predictions_bind_evidence(
+        predictions, evidence,
+    ):
+        raise ValueError("authorization OOS predictions 未绑定完整 evidence")
+    _verify_authorization_calibration(evidence, payload)
+    _verify_authorization_candidates(evidence, payload)
+    if (
+        not _verified_promotion_gates(evidence, payload)
+        or not _verified_multiple_testing(payload)
+        or not _verified_calibration_validation(evidence, payload)
+        or not _verified_drift_validation(payload)
+        or not _verified_execution_validation(payload, evidence)
+    ):
+        raise ValueError("authorization drift/execution 原始门禁未通过")
+
+
+def _predictions_bind_evidence(
+    predictions: list[object], evidence: Mapping[str, object],
+) -> bool:
+    persisted = evidence.get("predictions")
+    if isinstance(persisted, list):
+        if predictions != persisted:
+            return False
+        try:
+            return verify_shadow_probability_evidence(evidence)
+        except ProbabilityReplayError:
+            return False
+    if not _EVIDENCE_DIGEST_FIELDS - {"predictions"} <= evidence.keys():
+        return False
+    unsigned = {
+        name: predictions if name == "predictions" else evidence[name]
+        for name in _EVIDENCE_DIGEST_FIELDS
+    }
+    return stable_probability_hash(unsigned) == evidence.get("evidence_digest")
+
+
+def _verify_authorization_calibration(
+    evidence: Mapping[str, object], payload: Mapping[str, object],
+) -> None:
+    section = _strict_mapping(payload.get("calibration_validation"), "calibration_validation")
+    _require_exact_mapping_keys(
+        section,
+        {
+            "independent_session_count", "brier_improvement_ci_95",
+            "log_loss_improvement_ci_95", "ece",
+        },
+        "calibration_validation",
+    )
+    predictions = cast(list[Mapping[str, object]], payload["oos_predictions"])
+    config = _config_from_evidence(evidence)
+    inputs = _prediction_metric_inputs(predictions)
+    series = _prediction_bootstrap_series(inputs)
+    seed = str(evidence.get("input_digest") or "")
+    expected_brier = _date_block_bootstrap_ci(
+        series["brier_improvement_vs_reference"], seed + ":brier-improvement",
+        config.bootstrap_samples, block_length_sessions=config.target_session_offset,
+    )
+    expected_log = _date_block_bootstrap_ci(
+        series["log_loss_improvement_vs_reference"], seed + ":log-loss-improvement",
+        config.bootstrap_samples, block_length_sessions=config.target_session_offset,
+    )
+    probabilities, _baseline, outcomes, dates, references = inputs
+    metrics = evaluate_probability_predictions(
+        probabilities, outcomes, dates, base_rate=sum(references) / len(references),
+        bin_count=config.calibration_bin_count, reference_probabilities=references,
+    )
+    expected_sessions = len(set(dates))
+    if (
+        section.get("independent_session_count") != expected_sessions
+        or expected_sessions < 60
+        or not _same_interval(section.get("brier_improvement_ci_95"), expected_brier)
+        or not _same_interval(section.get("log_loss_improvement_ci_95"), expected_log)
+        or not _same_number(section.get("ece"), metrics.get("ece"))
+    ):
+        raise ValueError("authorization proper-score/calibration replay 不一致")
+
+
+def _verify_authorization_candidates(
+    evidence: Mapping[str, object], payload: Mapping[str, object],
+) -> None:
+    registry = _authorization_candidate_registry(payload.get("candidate_registry"))
+    selected = str(payload.get("selected_candidate_id") or "")
+    selected_statistics = _selected_candidate_session_statistics(
+        cast(list[Mapping[str, object]], payload["oos_predictions"]),
+    )
+    raw_p_values = _candidate_p_values(
+        registry,
+        selected=selected,
+        selected_evidence_digest=str(evidence.get("evidence_digest") or ""),
+        selected_statistics=selected_statistics,
+    )
+    _verify_bh_authorization(payload.get("multiple_testing"), raw_p_values, selected)
+
+
+def _authorization_candidate_registry(value: object) -> list[object]:
+    if not isinstance(value, list) or len(value) < 6:
+        raise ValueError("authorization candidate family 少于 6")
+    return value
+
+
+def _candidate_p_values(
+    registry: Sequence[object],
+    *,
+    selected: str,
+    selected_evidence_digest: str,
+    selected_statistics: list[tuple[str, float]],
+) -> dict[str, float]:
+    raw_p_values: dict[str, float] = {}
+    for index, raw in enumerate(registry):
+        candidate_id, digest, statistics, raw_p = _validated_authorization_candidate(raw, index)
+        if candidate_id in raw_p_values:
+            raise ValueError("authorization candidate identity 无效")
+        if candidate_id == selected and (
+            digest != selected_evidence_digest or statistics != selected_statistics
+        ):
+            raise ValueError("authorization selected candidate 未绑定 OOS evidence")
+        raw_p_values[candidate_id] = raw_p
+    if selected not in raw_p_values:
+        raise ValueError("authorization selected candidate 不在注册 family")
+    return raw_p_values
+
+
+def _validated_authorization_candidate(
+    raw: object, index: int,
+) -> tuple[str, str, list[tuple[str, float]], float]:
+    path = f"candidate_registry[{index}]"
+    candidate = _strict_mapping(raw, path)
+    _require_exact_mapping_keys(
+        candidate, {"candidate_id", "evidence_digest", "session_statistics", "raw_p_value"},
+        path,
+    )
+    candidate_id = str(candidate.get("candidate_id") or "")
+    digest = str(candidate.get("evidence_digest") or "")
+    if not candidate_id or len(digest) != 64:
+        raise ValueError("authorization candidate identity 无效")
+    statistics = _validated_candidate_statistics(candidate.get("session_statistics"))
+    raw_p = _one_sided_sign_test_p_value([value for _day, value in statistics])
+    if not _same_number(candidate.get("raw_p_value"), raw_p):
+        raise ValueError("authorization raw p-value 无法由会话统计重算")
+    return candidate_id, digest, statistics, raw_p
+
+
+def _verify_bh_authorization(
+    value: object, raw_p_values: Mapping[str, float], selected: str,
+) -> None:
+    section = _strict_mapping(value, "multiple_testing")
+    _require_exact_mapping_keys(
+        section, {"method", "alpha", "family_size", "adjusted_p_value"}, "multiple_testing",
+    )
+    alpha = _safe_finite_number(section.get("alpha"))
+    adjusted = _benjamini_hochberg_adjusted(raw_p_values)[selected]
+    if (
+        section.get("method") != "benjamini_hochberg_fdr"
+        or alpha is None or not 0 < alpha <= 0.10
+        or section.get("family_size") != len(raw_p_values)
+        or not _same_number(section.get("adjusted_p_value"), adjusted)
+        or adjusted > alpha
+    ):
+        raise ValueError("authorization BH-FDR 重算未通过")
+
+
+def _selected_candidate_session_statistics(
+    predictions: Sequence[Mapping[str, object]],
+) -> list[tuple[str, float]]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for raw in predictions:
+        row = _strict_mapping(raw, "prediction")
+        outcome = _integer(row.get("outcome"), "prediction.outcome")
+        probability = _finite_number(row.get("probability"), "prediction.probability")
+        reference = _finite_number(row.get("reference_base_rate"), "prediction.reference_base_rate")
+        grouped[str(row.get("session_date") or "")].append(
+            (outcome - reference) ** 2 - (outcome - probability) ** 2
+        )
+    return [(day, sum(values) / len(values)) for day, values in sorted(grouped.items())]
+
+
+def _deployment_refit_split(
+    samples: Sequence[ProbabilitySample], config: ProbabilityConfig,
+) -> GroupedWalkForwardSplit:
+    dates = tuple(sorted({item.session_date for item in samples}))
+    gap = config.effective_gap_sessions
+    calibration_start = len(dates) - config.minimum_calibration_sessions
+    train_end = calibration_start - gap
+    if train_end < config.minimum_train_sessions or calibration_start >= len(dates):
+        raise ProbabilityReplayError("deployment refit 缺少独立后置 calibration block")
+    split = GroupedWalkForwardSplit(
+        train_dates=dates[:train_end],
+        train_gap_dates=dates[train_end:calibration_start],
+        calibration_dates=dates[calibration_start:],
+        calibration_gap_dates=(),
+        test_dates=(),
+    )
+    if split.train_dates[-1] >= split.calibration_dates[0]:
+        raise ProbabilityReplayError("deployment calibration 与 training overlap")
+    return split
+
+
+def _deployment_calibration_predictions(
+    samples: Sequence[ProbabilitySample],
+    artifacts: _FittedArtifacts,
+    feature_names: tuple[str, ...],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "sample_id": item.sample_id,
+            "session_date": item.session_date,
+            "outcome": _required_label(item),
+            "raw_probability": (raw := _model_probability(artifacts.model, item.features)),
+            "probability": _platt_probability(artifacts.calibrator, raw),
+            "baseline_probability": _baseline_probability(artifacts.baseline, raw),
+            "feature_vector_digest": stable_probability_hash(
+                {name: float(item.features[name]) for name in feature_names},
+            ),
+        }
+        for item in samples
+    ]
+
+
+def _deployment_calibration_offset_ci(
+    predictions: Sequence[Mapping[str, object]],
+    config: ProbabilityConfig,
+    seed: str,
+) -> list[float]:
+    series = [
+        (
+            str(item["session_date"]),
+            _integer(item["outcome"], "outcome")
+            - _finite_number(item["probability"], "probability"),
+        )
+        for item in predictions
+    ]
+    return _date_block_bootstrap_ci(
+        series,
+        seed + ":deployment-calibration-offset",
+        config.bootstrap_samples,
+        block_length_sessions=config.target_session_offset,
+    )
+
+
+def _deployment_payload(
+    *,
+    evidence: Mapping[str, object],
+    authorization: VerifiedProbabilityFilterAuthorization,
+    prepared: _PreparedStudy,
+    config: ProbabilityConfig,
+    split: GroupedWalkForwardSplit,
+    artifacts: _FittedArtifacts,
+    calibration_predictions: Sequence[Mapping[str, object]],
+    calibration_offset_ci_95: Sequence[float],
+    generated_at: str,
+) -> dict[str, object]:
+    model_digest = stable_probability_hash(artifacts.model)
+    final_fold = cast(Sequence[Mapping[str, object]], evidence["folds"])[-1]
+    payload = {
+        "contract_version": PROBABILITY_DEPLOYMENT_CONTRACT_VERSION,
+        "generated_at": generated_at,
+        "evidence_digest": evidence["evidence_digest"],
+        "oos_predictions_digest": stable_probability_hash(evidence["predictions"]),
+        "authorization_digest": authorization.integrity_digest,
+        "authorization_generated_at": authorization.generated_at,
+        **_deployment_joint_bindings(authorization),
+        "corpus_digest": prepared.input_digest,
+        "config_digest": stable_probability_hash(build_probability_contract(config)),
+        "feature_version": PROBABILITY_FEATURE_VERSION,
+        "feature_names": list(prepared.feature_names),
+        "label_version": PROBABILITY_LABEL_VERSION,
+        "label_contract_digest": evidence["label_contract_digest"],
+        "split_version": PROBABILITY_SPLIT_VERSION,
+        "purge_sessions": config.effective_gap_sessions,
+        "training_dates": list(split.train_dates),
+        "purge_dates": list(split.train_gap_dates),
+        "calibration_dates": list(split.calibration_dates),
+        "training_cutoff": split.train_dates[-1],
+        "calibration_start": split.calibration_dates[0],
+        "calibration_cutoff": split.calibration_dates[-1],
+        "model": artifacts.model,
+        "model_digest": model_digest,
+        "calibrator": artifacts.calibrator,
+        "calibrator_digest": stable_probability_hash(artifacts.calibrator),
+        "empirical_bayes_baseline": artifacts.baseline,
+        "baseline_digest": stable_probability_hash(artifacts.baseline),
+        "calibration_predictions": list(calibration_predictions),
+        "calibration_predictions_digest": stable_probability_hash(calibration_predictions),
+        "calibration_offset_ci_95": list(calibration_offset_ci_95),
+        "freshness": {
+            "maximum_age_hours": PROBABILITY_DEPLOYMENT_MAXIMUM_AGE_HOURS,
+            "policy": "generated_at_and_latest_mature_calibration_cutoff",
+        },
+        "oos_final_fold_model_digest": final_fold["model_digest"],
+        "oos_final_fold_reuse_forbidden": True,
+    }
+    if model_digest == final_fold["model_digest"]:
+        raise ProbabilityReplayError("deployment estimator 不得复用 final OOS fold 参数")
+    return payload
+
+
+def _deployment_joint_bindings(
+    authorization: Mapping[str, object],
+) -> dict[str, str]:
+    execution = _strict_mapping(
+        authorization.get("execution_validation"), "execution_validation",
+    )
+    bindings = {
+        name: str(execution.get(name) or "")
+        for name in (
+            "joint_execution_evidence_digest",
+            "joint_execution_assessment_digest",
+            "joint_execution_estimand_digest",
+        )
+    }
+    if any(len(value) != 64 for value in bindings.values()):
+        raise ProbabilityReplayError("deployment 缺少成熟 joint execution 评估绑定")
+    return bindings
+
+
+def _deployment_binding_matches(
+    payload: Mapping[str, object], evidence: Mapping[str, object],
+) -> bool:
+    return bool(
+        payload.get("contract_version") == PROBABILITY_DEPLOYMENT_CONTRACT_VERSION
+        and payload.get("evidence_digest") == evidence.get("evidence_digest")
+        and payload.get("feature_version") == evidence.get("feature_version")
+        and payload.get("label_version") == evidence.get("label_version")
+        and payload.get("label_contract_digest") == evidence.get("label_contract_digest")
+        and payload.get("split_version") == PROBABILITY_SPLIT_VERSION
+        and payload.get("oos_final_fold_reuse_forbidden") is True
+    )
+
+
+def _deployment_is_fresh(payload: Mapping[str, object], as_of: str | None) -> bool:
+    try:
+        generated = _validated_aware_timestamp(
+            str(payload.get("generated_at") or ""), "deployment.generated_at",
+        ).astimezone(timezone.utc)
+        reference = (
+            _validated_aware_timestamp(as_of, "deployment.as_of").astimezone(timezone.utc)
+            if as_of is not None else utc_now()
+        )
+        calibration_cutoff = date.fromisoformat(str(payload.get("calibration_cutoff") or ""))
+    except (TypeError, ValueError):
+        return False
+    age = reference - generated
+    reference_market_date = reference.astimezone(timezone(timedelta(hours=8))).date()
+    return bool(
+        timedelta(0) <= age <= timedelta(hours=PROBABILITY_DEPLOYMENT_MAXIMUM_AGE_HOURS)
+        and calibration_cutoff <= reference_market_date
+        and (reference_market_date - calibration_cutoff).days <= 4
+    )
+
+
+def _validated_candidate_statistics(value: object) -> list[tuple[str, float]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("candidate session_statistics 必须非空")
+    output: list[tuple[str, float]] = []
+    for index, raw in enumerate(value):
+        row = _strict_mapping(raw, f"session_statistics[{index}]")
+        _require_exact_mapping_keys(
+            row, {"session_date", "proper_score_improvement"}, f"session_statistics[{index}]",
+        )
+        day = _validated_date(str(row.get("session_date") or ""))
+        output.append((day, _finite_number(row.get("proper_score_improvement"), "proper_score_improvement")))
+    if output != sorted(output) or len({day for day, _value in output}) != len(output):
+        raise ValueError("candidate session statistics 必须按唯一日期排序")
+    return output
+
+
+def _one_sided_sign_test_p_value(values: Sequence[float]) -> float:
+    nonzero = [value for value in values if not math.isclose(value, 0.0, rel_tol=0, abs_tol=1e-15)]
+    if not nonzero:
+        return 1.0
+    positives = sum(value > 0 for value in nonzero)
+    denominator = 2 ** len(nonzero)
+    return min(1.0, sum(math.comb(len(nonzero), count) for count in range(positives, len(nonzero) + 1)) / denominator)
+
+
+def _benjamini_hochberg_adjusted(values: Mapping[str, float]) -> dict[str, float]:
+    ordered = sorted(values.items(), key=lambda item: (item[1], item[0]))
+    adjusted: dict[str, float] = {}
+    running = 1.0
+    family_size = len(ordered)
+    for rank in range(family_size, 0, -1):
+        candidate_id, raw = ordered[rank - 1]
+        running = min(running, raw * family_size / rank)
+        adjusted[candidate_id] = min(1.0, running)
+    return adjusted
+
+
+def _verified_promotion_gates(
+    evidence: Mapping[str, object], authorization: Mapping[str, object],
+) -> bool:
+    return bool(
+        authorization
+        and evidence.get("status") == "calibrated_shadow"
+        and probability_selection_qualified(evidence)
+        and _filter_authorization_binding(evidence, authorization)
+    )
+
+
+def _verified_multiple_testing(authorization: Mapping[str, object]) -> bool:
+    section = authorization.get("multiple_testing")
+    if not isinstance(section, Mapping):
+        return False
+    alpha = _safe_finite_number(section.get("alpha"))
+    adjusted = _safe_finite_number(section.get("adjusted_p_value"))
+    return bool(
+        section.get("method") == "benjamini_hochberg_fdr"
+        and alpha is not None and 0 < alpha <= 0.10
+        and adjusted is not None and 0 <= adjusted <= alpha
+        and section.get("family_size") == len(cast(list[object], authorization.get("candidate_registry") or []))
+    )
+
+
+def _verified_calibration_validation(
+    evidence: Mapping[str, object], authorization: Mapping[str, object],
+) -> bool:
+    section = authorization.get("calibration_validation")
+    proper = _proper_score_filter_gate(evidence)
+    return bool(
+        isinstance(section, Mapping)
+        and _safe_positive_integer(section.get("independent_session_count")) >= 60
+        and proper["positive_brier_improvement_ci_95"] is True
+        and proper["positive_log_loss_improvement_ci_95"] is True
+        and proper["ece_at_most_5pct"] is True
+        and _same_interval(section.get("brier_improvement_ci_95"), proper["brier_improvement_vs_reference_ci_95"])
+        and _same_interval(section.get("log_loss_improvement_ci_95"), proper["log_loss_improvement_vs_reference_ci_95"])
+        and _same_number(section.get("ece"), proper["ece"])
+    )
+
+
+def _verified_drift_validation(authorization: Mapping[str, object]) -> bool:
+    section = authorization.get("drift_validation")
+    if not isinstance(section, Mapping):
+        return False
+    required = {
+        "independent_session_count", "reference_series", "current_series",
+        "reference_digest", "current_digest", "statistics", "thresholds",
+    }
+    if set(section) != required:
+        return False
+    try:
+        reference = _validated_drift_series(section.get("reference_series"), "reference")
+        current = _validated_drift_series(section.get("current_series"), "current")
+        if current != _oos_current_drift_series(authorization.get("oos_predictions")):
+            return False
+        statistics = _strict_mapping(section.get("statistics"), "drift.statistics")
+        thresholds = _strict_mapping(section.get("thresholds"), "drift.thresholds")
+        return _drift_replay_passes(section, reference, current, statistics, thresholds)
+    except (TypeError, ValueError):
+        return False
+
+
+def _validated_drift_series(
+    value: object, path: str,
+) -> list[tuple[str, float, float, float]]:
+    if not isinstance(value, list) or len(value) < 30:
+        raise ValueError(f"drift {path} series 少于 30 会话")
+    rows: list[tuple[str, float, float, float]] = []
+    for index, raw in enumerate(value):
+        row = _strict_mapping(raw, f"drift.{path}[{index}]")
+        _require_exact_mapping_keys(
+            row, {"session_date", "feature_statistic", "probability", "performance"},
+            f"drift.{path}[{index}]",
+        )
+        probability = _finite_number(row.get("probability"), "drift.probability")
+        _require_probability(probability, "drift.probability")
+        rows.append((
+            _validated_date(str(row.get("session_date") or "")),
+            _finite_number(row.get("feature_statistic"), "drift.feature_statistic"),
+            probability,
+            _finite_number(row.get("performance"), "drift.performance"),
+        ))
+    if rows != sorted(rows) or len({row[0] for row in rows}) != len(rows):
+        raise ValueError("drift series 日期必须严格递增唯一")
+    return rows
+
+
+def _oos_current_drift_series(value: object) -> list[tuple[str, float, float, float]]:
+    if not isinstance(value, list):
+        raise ValueError("drift 缺少绑定 OOS predictions")
+    grouped: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    for raw in value:
+        row = _strict_mapping(raw, "oos_predictions[]")
+        performance = (
+            row.get("net_excess_return")
+            if row.get("net_excess_return") is not None
+            else row.get("net_return")
+        )
+        net = _finite_number(performance, "prediction.performance")
+        grouped[_validated_date(str(row.get("session_date") or ""))].append((
+            _finite_number(row.get("raw_probability"), "prediction.raw_probability"),
+            _finite_number(row.get("probability"), "prediction.probability"),
+            net,
+        ))
+    output = [
+        (
+            day,
+            sum(row[0] for row in rows) / len(rows),
+            sum(row[1] for row in rows) / len(rows),
+            sum(row[2] for row in rows) / len(rows),
+        )
+        for day, rows in sorted(grouped.items())
+    ]
+    if len(output) < 30:
+        raise ValueError("drift OOS current series 少于 30 会话")
+    return output[-30:]
+
+
+def _drift_replay_passes(
+    section: Mapping[str, object],
+    reference: Sequence[tuple[str, float, float, float]],
+    current: Sequence[tuple[str, float, float, float]],
+    statistics: Mapping[str, object],
+    thresholds: Mapping[str, object],
+) -> bool:
+    statistic_names = {"feature_mean_shift", "probability_mean_shift", "performance_mean_shift"}
+    threshold_names = {"maximum_feature_mean_shift", "maximum_probability_mean_shift", "maximum_performance_mean_shift"}
+    if set(statistics) != statistic_names or set(thresholds) != threshold_names:
+        return False
+    replayed = _drift_statistics(reference, current)
+    limits = {
+        name: _safe_finite_number(thresholds.get(name))
+        for name in threshold_names
+    }
+    return bool(
+        reference[-1][0] < current[0][0]
+        and section.get("independent_session_count") == len(reference) + len(current)
+        and section.get("reference_digest") == stable_probability_hash(section["reference_series"])
+        and section.get("current_digest") == stable_probability_hash(section["current_series"])
+        and all(_same_number(statistics.get(name), value) for name, value in replayed.items())
+        and all(value is not None and value >= 0 for value in limits.values())
+        and replayed["feature_mean_shift"] <= cast(float, limits["maximum_feature_mean_shift"])
+        and replayed["probability_mean_shift"] <= cast(float, limits["maximum_probability_mean_shift"])
+        and replayed["performance_mean_shift"] <= cast(float, limits["maximum_performance_mean_shift"])
+    )
+
+
+def _drift_statistics(
+    reference: Sequence[tuple[str, float, float, float]],
+    current: Sequence[tuple[str, float, float, float]],
+) -> dict[str, float]:
+    def mean(rows: Sequence[tuple[str, float, float, float]], index: Literal[1, 2, 3]) -> float:
+        total = 0.0
+        for row in rows:
+            total += row[index]
+        return total / len(rows)
+
+    def shift(index: Literal[1, 2, 3]) -> float:
+        return abs(mean(reference, index) - mean(current, index))
+
+    return {
+        "feature_mean_shift": shift(1),
+        "probability_mean_shift": shift(2),
+        "performance_mean_shift": shift(3),
+    }
+
+
+def _verified_execution_validation(
+    authorization: Mapping[str, object], evidence: Mapping[str, object],
+) -> bool:
+    if not _joint_execution_estimand_supported(evidence):
+        return False
+    section = authorization.get("execution_validation")
+    if not isinstance(section, Mapping):
+        return False
+    required = {
+        "observation_count", "independent_session_count", "prediction_digest",
+        "joint_execution_evidence", "joint_execution_evidence_digest",
+        "joint_execution_assessment_digest", "joint_execution_estimand_digest",
+        "session_economics", "session_economics_digest", "mean_net_excess_return",
+        "maximum_drawdown", "mean_top100_turnover", "capacity_coverage", "thresholds",
+    }
+    if set(section) != required:
+        return False
+    try:
+        predictions = _execution_predictions(authorization.get("oos_predictions"))
+        reports = _verified_joint_execution_corpus(
+            section.get("joint_execution_evidence"), predictions,
+        )
+        economics = _execution_session_economics(predictions, reports)
+        metrics = _execution_metrics(economics)
+        return _execution_replay_passes(section, predictions, reports, economics, metrics)
+    except (TypeError, ValueError):
+        return False
+
+
+def _joint_execution_estimand_supported(evidence: Mapping[str, object]) -> bool:
+    """Fail closed until OOS evidence carries observed all-decision joint labels.
+
+    Current v4 research predicts a conditional up/down label only after a row is
+    deemed executable.  Joint-execution v2 reports bind matured market evidence
+    but do not contain the observed entry-fill, exit-executable, and net-positive
+    components needed to assess the all-decisions estimand.  A future probability
+    evidence contract must add those observed components before this gate can be
+    intentionally versioned open.
+    """
+    contract = evidence.get("contract")
+    label = contract.get("label") if isinstance(contract, Mapping) else None
+    return bool(
+        isinstance(label, Mapping)
+        and label.get("version") == "market-scan-joint-execution-label-v1"
+        and label.get("target") == "joint_execution_action_positive"
+        and label.get("target_population")
+        == "all_fixed_full_market_decisions_including_unfilled_and_unexecutable"
+        and label.get("observed_components")
+        == ["entry_fill", "exit_executable", "net_positive"]
+        and label.get("selection_probability") == "joint_execution_action_probability"
+        and evidence.get("schema_version") == "market-scan-joint-execution-probability-v1"
+    )
+
+
+def _execution_predictions(value: object) -> list[Mapping[str, object]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("execution 缺少 OOS predictions")
+    return [_strict_mapping(item, "execution.prediction") for item in value]
+
+
+def _verified_joint_execution_corpus(
+    value: object, predictions: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    if not isinstance(value, list) or len(value) != len(predictions):
+        raise ValueError("joint execution corpus 未与 OOS predictions 全覆盖绑定")
+    reports = [
+        verify_joint_execution_probability_evidence(
+            _strict_mapping(item, f"joint_execution_evidence[{index}]"),
+        )
+        for index, item in enumerate(value)
+    ]
+    if len({report.sample_id for report in reports}) != len(reports):
+        raise ValueError("joint execution corpus sample_id 重复")
+    for prediction, report in zip(predictions, reports, strict=True):
+        sample_id = str(prediction.get("sample_id") or "")
+        symbol = _probability_sample_symbol(sample_id)
+        if (
+            report.sample_id != sample_id
+            or report.symbol != symbol
+            or report.signal_session != str(prediction.get("session_date") or "")
+            or not joint_execution_probability_action_qualified(report)
+        ):
+            raise ValueError("joint execution corpus 与 OOS prediction identity 冲突")
+    return [report.model_dump(mode="json") for report in reports]
+
+
+def _probability_sample_symbol(sample_id: str) -> str:
+    parts = sample_id.split(":")
+    if len(parts) != 4 or not parts[0].isdigit() or not parts[2].isdigit():
+        raise ValueError("prediction sample_id 不是 production 格式")
+    symbol, horizon, target = parts[1], int(parts[2]), parts[3]
+    valid_symbol = (
+        len(symbol) == 9 and symbol[:6].isdigit()
+        and symbol[6:] in {".SH", ".SZ", ".BJ"}
+    )
+    if not valid_symbol or horizon not in {1, 5, 20} or target not in {
+        "net_excess_positive", "net_return_positive",
+    }:
+        raise ValueError("prediction sample_id identity 无效")
+    return symbol
+
+
+def _execution_session_economics(
+    predictions: Sequence[Mapping[str, object]],
+    reports: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    report_by_id = {str(report["sample_id"]): report for report in reports}
+    grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for prediction in predictions:
+        grouped[str(prediction["session_date"])].append(prediction)
+    previous_symbols: set[str] | None = None
+    output: list[dict[str, object]] = []
+    for session_date, candidates in sorted(grouped.items()):
+        selected = sorted(
+            candidates,
+            key=lambda row: (-_finite_number(row["probability"], "probability"), str(row["sample_id"])),
+        )[:100]
+        symbols = {_probability_sample_symbol(str(row["sample_id"])) for row in selected}
+        output.append(_execution_session_row(
+            session_date, selected, report_by_id, symbols, previous_symbols,
+        ))
+        previous_symbols = symbols
+    return output
+
+
+def _execution_session_row(
+    session_date: str,
+    selected: Sequence[Mapping[str, object]],
+    report_by_id: Mapping[str, Mapping[str, object]],
+    symbols: set[str],
+    previous_symbols: set[str] | None,
+) -> dict[str, object]:
+    net_returns = [_finite_number(row.get("net_return"), "net_return") for row in selected]
+    excess_returns = [
+        _finite_number(row.get("net_excess_return"), "net_excess_return")
+        for row in selected
+    ]
+    selected_reports = [report_by_id[str(row["sample_id"])] for row in selected]
+    capacity_count = sum(_joint_report_within_capacity(report) for report in selected_reports)
+    turnover = 0.0 if previous_symbols is None else (
+        1.0 - len(symbols & previous_symbols) / max(1, len(symbols), len(previous_symbols))
+    )
+    return {
+        "session_date": session_date,
+        "decision_count": len(selected),
+        "portfolio_net_return": sum(net_returns) / len(net_returns),
+        "benchmark_return": sum(
+            net - excess for net, excess in zip(net_returns, excess_returns, strict=True)
+        ) / len(selected),
+        "net_excess_return": sum(excess_returns) / len(excess_returns),
+        "top100_turnover": turnover,
+        "capacity_eligible_count": capacity_count,
+        "joint_evidence_digest": stable_probability_hash(
+            [report["canonical_digest"] for report in selected_reports],
+        ),
+    }
+
+
+def _joint_report_within_capacity(report: Mapping[str, object]) -> bool:
+    evidence = _strict_mapping(report.get("evidence"), "joint.evidence")
+    participation = _strict_mapping(evidence.get("participation"), "joint.participation")
+    maximum = _finite_number(
+        participation.get("maximum_participation_rate"), "maximum_participation_rate",
+    )
+    rates = [
+        _safe_finite_number(participation.get(name))
+        for name in ("entry_participation_rate", "exit_participation_rate")
+    ]
+    return bool(all(rate is not None and rate <= maximum for rate in rates))
+
+
+def _execution_metrics(economics: Sequence[Mapping[str, object]]) -> dict[str, float]:
+    net_excess = [
+        _finite_number(row["net_excess_return"], "net_excess_return")
+        for row in economics
+    ]
+    decision_count = sum(_integer(row["decision_count"], "decision_count") for row in economics)
+    capacity_count = sum(
+        _integer(row["capacity_eligible_count"], "capacity_eligible_count")
+        for row in economics
+    )
+    return {
+        "mean_net_excess_return": sum(net_excess) / len(net_excess),
+        "maximum_drawdown": _execution_maximum_drawdown(economics),
+        "mean_top100_turnover": sum(
+            _finite_number(row["top100_turnover"], "top100_turnover") for row in economics
+        ) / len(economics),
+        "capacity_coverage": capacity_count / decision_count,
+    }
+
+
+def _execution_maximum_drawdown(economics: Sequence[Mapping[str, object]]) -> float:
+    wealth = peak = 1.0
+    drawdown = 0.0
+    for row in economics:
+        wealth *= 1.0 + _finite_number(row["portfolio_net_return"], "portfolio_net_return")
+        peak = max(peak, wealth)
+        drawdown = min(drawdown, wealth / peak - 1.0)
+    return drawdown
+
+
+def _execution_replay_passes(
+    section: Mapping[str, object],
+    predictions: Sequence[Mapping[str, object]],
+    reports: Sequence[Mapping[str, object]],
+    economics: Sequence[Mapping[str, object]],
+    metrics: Mapping[str, float],
+) -> bool:
+    thresholds = section.get("thresholds")
+    if not isinstance(thresholds, Mapping) or set(thresholds) != {
+        "minimum_mean_net_excess_return", "minimum_maximum_drawdown",
+        "maximum_mean_top100_turnover", "minimum_capacity_coverage",
+    }:
+        return False
+    report_assessments = [
+        {
+            "sample_id": report["sample_id"],
+            "assessment_digest": _strict_mapping(
+                _strict_mapping(report["evidence"], "joint.evidence")["calibration"],
+                "joint.calibration",
+            )["out_of_sample_assessment_digest"],
+        }
+        for report in reports
+    ]
+    estimands = {stable_probability_hash(report["estimand"]) for report in reports}
+    limits = {name: _safe_finite_number(thresholds.get(name)) for name in thresholds}
+    return bool(
+        section.get("observation_count") == len(predictions) == len(reports)
+        and section.get("independent_session_count") == len(economics) >= 60
+        and section.get("prediction_digest") == stable_probability_hash(predictions)
+        and section.get("joint_execution_evidence_digest") == stable_probability_hash(reports)
+        and section.get("joint_execution_assessment_digest") == stable_probability_hash(report_assessments)
+        and len(estimands) == 1
+        and section.get("joint_execution_estimand_digest") == next(iter(estimands))
+        and section.get("session_economics") == list(economics)
+        and section.get("session_economics_digest") == stable_probability_hash(economics)
+        and all(_same_number(section.get(name), value) for name, value in metrics.items())
+        and all(value is not None for value in limits.values())
+        and metrics["mean_net_excess_return"] > cast(float, limits["minimum_mean_net_excess_return"])
+        and metrics["maximum_drawdown"] >= cast(float, limits["minimum_maximum_drawdown"])
+        and metrics["mean_top100_turnover"] <= cast(float, limits["maximum_mean_top100_turnover"])
+        and metrics["capacity_coverage"] >= cast(float, limits["minimum_capacity_coverage"])
+    )
+
+
+def _strict_mapping(value: object, path: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{path} 必须是 object")
+    return cast(Mapping[str, object], value)
+
+
+def _require_exact_mapping_keys(
+    value: Mapping[str, object], expected: set[str], path: str,
+) -> None:
+    if set(value) != expected:
+        raise ValueError(f"{path} 字段不符合 exact schema")
+
+
+def _same_number(left: object, right: object) -> bool:
+    left_value, right_value = _safe_finite_number(left), _safe_finite_number(right)
+    return bool(
+        left_value is not None and right_value is not None
+        and math.isclose(left_value, right_value, rel_tol=0, abs_tol=1e-12)
+    )
+
+
+def _same_interval(left: object, right: object) -> bool:
+    left_value, right_value = _safe_interval(left), _safe_interval(right)
+    return bool(
+        left_value is not None and right_value is not None
+        and all(_same_number(a, b) for a, b in zip(left_value, right_value, strict=True))
+    )
+
+
+def _validated_aware_timestamp(value: str, path: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{path} 无效") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{path} 必须包含时区")
+    if parsed.astimezone(timezone.utc) > utc_now() + timedelta(minutes=5):
+        raise ValueError(f"{path} 不能晚于当前时间")
+    return parsed
+
+
+def _safe_interval(value: object) -> list[float] | None:
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    lower, upper = (_safe_finite_number(item) for item in value)
+    if lower is None or upper is None or lower > upper:
+        return None
+    return [lower, upper]
+
+
+def _safe_finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(float(value)):
+        return None
+    return float(value)
+
+
+def _safe_probability_hash(value: object) -> str | None:
+    try:
+        return stable_probability_hash(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_positive_integer(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else -1
+
+
 def _validate_config(config: ProbabilityConfig) -> None:
     if config.horizon not in _SUPPORTED_HORIZONS:
-        raise ValueError("上涨概率 horizon 仅支持 1、5、20")
+        raise ValueError("上涨概率 estimator horizon 仅支持 1、2、3、5、20")
     if config.target not in ("net_excess_positive", "net_return_positive"):
         raise ValueError("上涨概率 target 不受支持")
     if not config.cost_model_version.strip():
@@ -367,8 +1856,8 @@ def _validate_config(config: ProbabilityConfig) -> None:
     )
     if any(value <= 0 for value in positive_ints):
         raise ValueError("上涨概率会话、分箱和迭代门槛必须为正整数")
-    if config.effective_gap_sessions < config.horizon:
-        raise ValueError("gap_sessions 不能小于预测 horizon")
+    if config.effective_gap_sessions < config.target_session_offset:
+        raise ValueError("gap_sessions 不能小于标签 target_session_offset（horizon + 1）")
     if not 0 < config.minimum_label_coverage <= 1:
         raise ValueError("minimum_label_coverage 必须在 (0, 1] 范围内")
     positive_floats = (config.empirical_bayes_prior_strength, config.l2_strength, config.convergence_tolerance)
@@ -405,6 +1894,8 @@ def _validate_complete_label_contract(
     required = (
         "execution_model",
         "horizons",
+        "entry_session_offset",
+        "target_session_offsets",
         "target_definitions",
         "cost_profile_id",
         "execution_notional",
@@ -418,8 +1909,23 @@ def _validate_complete_label_contract(
 def _validate_label_contract_semantics(
     contract: Mapping[str, object], config: ProbabilityConfig,
 ) -> None:
-    if not isinstance(contract["execution_model"], str) or not contract["execution_model"].strip():
-        raise ValueError("上涨概率 label_contract execution_model 无效")
+    _validate_label_contract_text(contract, "execution_model")
+    horizons = _validated_label_contract_horizons(contract, config)
+    _validate_label_contract_offsets(contract, horizons)
+    _validate_label_contract_targets(contract)
+    _validate_label_contract_text(contract, "cost_profile_id")
+    _validate_label_contract_capacity(contract)
+
+
+def _validate_label_contract_text(contract: Mapping[str, object], name: str) -> None:
+    value = contract[name]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"上涨概率 label_contract {name} 无效")
+
+
+def _validated_label_contract_horizons(
+    contract: Mapping[str, object], config: ProbabilityConfig,
+) -> list[int]:
     horizons = contract["horizons"]
     if (
         not isinstance(horizons, list)
@@ -428,14 +1934,26 @@ def _validate_label_contract_semantics(
         or len(horizons) != len(set(horizons))
     ):
         raise ValueError("上涨概率 label_contract horizons 无效")
+    return cast(list[int], horizons)
+
+
+def _validate_label_contract_offsets(
+    contract: Mapping[str, object], horizons: Sequence[int],
+) -> None:
+    if contract["entry_session_offset"] != 1:
+        raise ValueError("上涨概率 label_contract entry_session_offset 必须为 1")
+    offsets = contract["target_session_offsets"]
+    expected_offsets = {str(value): value + 1 for value in horizons}
+    if not isinstance(offsets, Mapping) or dict(offsets) != expected_offsets:
+        raise ValueError("上涨概率 label_contract target_session_offsets 必须等于 horizon + 1")
+
+
+def _validate_label_contract_targets(contract: Mapping[str, object]) -> None:
     targets = contract["target_definitions"]
     if not isinstance(targets, list) or not targets or any(
         not isinstance(value, str) or not value.strip() for value in targets
     ):
         raise ValueError("上涨概率 label_contract target_definitions 无效")
-    if not isinstance(contract["cost_profile_id"], str) or not contract["cost_profile_id"].strip():
-        raise ValueError("上涨概率 label_contract cost_profile_id 无效")
-    _validate_label_contract_capacity(contract)
 
 
 def _validate_label_contract_capacity(contract: Mapping[str, object]) -> None:
@@ -466,6 +1984,11 @@ def _split_contract(config: ProbabilityConfig) -> dict[str, object]:
         "minimum_calibration_sessions": config.minimum_calibration_sessions,
         "minimum_test_sessions": config.minimum_test_sessions,
         "gap_sessions": config.effective_gap_sessions,
+        "target_session_offset": config.target_session_offset,
+        "minimum_safe_gap_sessions": config.target_session_offset,
+        "purge_rule": "all_prior_partition_labels_mature_strictly_before_next_partition_signal",
+        "minimum_fit_independent_sessions": _minimum_fit_session_count(config),
+        "minimum_selection_independent_sessions": _minimum_selection_session_count(config),
         "walk_forward": "expanding_train_rolling_calibration_and_test",
     }
 
@@ -476,8 +1999,8 @@ def _evaluation_contract(config: ProbabilityConfig) -> dict[str, object]:
         "minimum_bin_sessions": config.minimum_bin_sessions,
         "calibration_bin_count": config.calibration_bin_count,
         "minimum_isotonic_calibration_sessions": config.minimum_isotonic_calibration_sessions,
-        "bootstrap": "deterministic_circular_moving_session_block_95pct_v1",
-        "bootstrap_block_length_sessions": max(1, config.horizon),
+        "bootstrap": "deterministic_circular_moving_target_offset_block_95pct_v2",
+        "bootstrap_block_length_sessions": config.target_session_offset,
         "bootstrap_samples": config.bootstrap_samples,
         "minimum_selection_folds": config.minimum_selection_folds,
         "selection_qualification": {
@@ -486,6 +2009,17 @@ def _evaluation_contract(config: ProbabilityConfig) -> dict[str, object]:
             "requires_effective_probability_stratification": True,
             "requires_multiple_complete_oos_folds": True,
             "requires_positive_skill_in_every_complete_oos_fold": True,
+        },
+        "filter_qualification": {
+            "version": PROBABILITY_FILTER_QUALIFICATION_VERSION,
+            "requires_exact_evidence_digest_binding": True,
+            "requires_positive_brier_improvement_ci_95": True,
+            "requires_positive_log_loss_improvement_ci_95": True,
+            "requires_multiple_testing_fdr_evidence": True,
+            "requires_calibration_validation": True,
+            "requires_temporal_drift_validation": True,
+            "requires_execution_validation": True,
+            "missing_evidence_policy": "fail_closed",
         },
         "probability_when_insufficient": None,
         "production_ranking_effect": "none",
@@ -499,6 +2033,21 @@ def _target_definition(config: ProbabilityConfig) -> str:
         if config.target == "net_excess_positive"
         else f"future_{config.horizon}d_net_return_gt_0_after_costs"
     )
+
+
+def _minimum_fit_session_count(config: ProbabilityConfig) -> int:
+    return (
+        config.minimum_train_sessions
+        + config.minimum_calibration_sessions
+        + config.minimum_test_sessions
+        + 2 * config.effective_gap_sessions
+    )
+
+
+def _minimum_selection_session_count(config: ProbabilityConfig) -> int:
+    return _minimum_fit_session_count(config) + (
+        config.minimum_selection_folds - 1
+    ) * config.minimum_test_sessions
 
 
 def _split_at_endpoint(
@@ -522,7 +2071,7 @@ def _prepare_study(samples: Sequence[ProbabilitySample], config: ProbabilityConf
     values = tuple(samples)
     feature_names = _validate_samples(values)
     eligible = tuple(item for item in values if item.executable and item.target is not None)
-    covered = sum(item.target is not None for item in values)
+    covered = sum(item.executable and item.target is not None for item in values)
     coverage = covered / len(values) if values else 0.0
     splits = grouped_walk_forward_splits([item.session_date for item in eligible], config)
     return _PreparedStudy(
@@ -554,6 +2103,8 @@ def _validate_samples(samples: tuple[ProbabilitySample, ...]) -> tuple[str, ...]
         for name in names:
             _finite_number(item.features[name], f"features.{name}")
         _validated_target(item.target)
+        if not item.executable and item.target is not None:
+            raise ValueError("上涨概率不可执行样本的 target 必须为 None")
         _validate_optional_return(item.net_return, "net_return")
         _validate_optional_return(item.net_excess_return, "net_excess_return")
     return expected or ()
@@ -673,7 +2224,9 @@ def _fit_logistic_model(
     scales = np.where(scales > 1e-12, scales, 1.0)
     standardized = (matrix - means) / scales
     design = np.column_stack((np.ones(len(samples), dtype=np.float64), standardized))
-    weights, iterations = _newton_logistic(design, labels, config.l2_strength, config)
+    weights, iterations = _newton_logistic(
+        design, labels, config.l2_strength, config, component="model",
+    )
     return {
         "version": PROBABILITY_MODEL_VERSION,
         "feature_names": list(feature_names),
@@ -683,11 +2236,17 @@ def _fit_logistic_model(
         "coefficients": weights[1:].tolist(),
         "l2_strength": config.l2_strength,
         "iterations": iterations,
+        "converged": True,
     }
 
 
 def _newton_logistic(
-    design: NDArray[np.float64], labels: NDArray[np.float64], l2_strength: float, config: ProbabilityConfig,
+    design: NDArray[np.float64],
+    labels: NDArray[np.float64],
+    l2_strength: float,
+    config: ProbabilityConfig,
+    *,
+    component: str,
 ) -> tuple[NDArray[np.float64], int]:
     base_rate = (float(labels.sum()) + 0.5) / (len(labels) + 1.0)
     weights = np.zeros(design.shape[1], dtype=np.float64)
@@ -702,11 +2261,11 @@ def _newton_logistic(
         try:
             step = np.linalg.solve(hessian, gradient)
         except np.linalg.LinAlgError as exc:
-            raise ValueError("上涨概率逻辑回归矩阵不可解") from exc
+            raise _ProbabilityModelConvergenceError(f"{component}_singular_hessian") from exc
         weights -= step
         if float(np.max(np.abs(step))) <= config.convergence_tolerance:
             return weights, iteration
-    return weights, config.maximum_iterations
+    raise _ProbabilityModelConvergenceError(f"{component}_nonconvergence")
 
 
 def _fit_platt_calibrator(
@@ -715,12 +2274,15 @@ def _fit_platt_calibrator(
     logits = np.asarray([_logit(value) for value in raw_probabilities], dtype=np.float64)
     design = np.column_stack((np.ones(len(logits), dtype=np.float64), logits))
     targets = np.asarray(labels, dtype=np.float64)
-    weights, iterations = _newton_logistic(design, targets, 1e-6, config)
+    weights, iterations = _newton_logistic(
+        design, targets, 1e-6, config, component="calibrator",
+    )
     return {
         "version": PROBABILITY_CALIBRATOR_VERSION,
         "intercept": float(weights[0]),
         "slope": float(weights[1]),
         "iterations": iterations,
+        "converged": True,
         "fit_partition": "calibration_only",
     }
 
@@ -791,9 +2353,15 @@ def _test_predictions(
     return predictions
 
 
-def _prediction_metrics(
-    predictions: Sequence[Mapping[str, object]], config: ProbabilityConfig, seed: str,
-) -> dict[str, object]:
+_PredictionMetricInputs = tuple[
+    list[float], list[float], list[int], list[str], list[float],
+]
+_DatedMetricSeries = dict[str, list[tuple[str, float]]]
+
+
+def _prediction_metric_inputs(
+    predictions: Sequence[Mapping[str, object]],
+) -> _PredictionMetricInputs:
     probabilities = [_finite_number(item["probability"], "probability") for item in predictions]
     baseline = [_finite_number(item["baseline_probability"], "baseline_probability") for item in predictions]
     outcomes = [_integer(item["outcome"], "outcome") for item in predictions]
@@ -802,6 +2370,13 @@ def _prediction_metrics(
         _finite_number(item["reference_base_rate"], "reference_base_rate")
         for item in predictions
     ]
+    return probabilities, baseline, outcomes, dates, references
+
+
+def _core_prediction_metrics(
+    inputs: _PredictionMetricInputs, config: ProbabilityConfig,
+) -> tuple[dict[str, object], dict[str, object], float]:
+    probabilities, baseline, outcomes, dates, references = inputs
     base_rate = sum(references) / len(references)
     calibrated = evaluate_probability_predictions(
         probabilities,
@@ -819,25 +2394,88 @@ def _prediction_metrics(
         bin_count=config.calibration_bin_count,
         reference_probabilities=references,
     )
-    residuals = [(day, outcome - probability) for day, outcome, probability in zip(dates, outcomes, probabilities, strict=True)]
-    losses = [(day, (outcome - probability) ** 2) for day, outcome, probability in zip(dates, outcomes, probabilities, strict=True)]
-    targets = list(zip(dates, [float(value) for value in outcomes], strict=True))
-    block_length = max(1, config.horizon)
-    calibrated["calibration_offset_ci_95"] = _date_block_bootstrap_ci(
-        residuals, seed + ":offset", config.bootstrap_samples,
-        block_length_sessions=block_length,
+    return calibrated, baseline_metrics, base_rate
+
+
+def _prediction_bootstrap_series(inputs: _PredictionMetricInputs) -> _DatedMetricSeries:
+    probabilities, _baseline, outcomes, dates, references = inputs
+    return {
+        "calibration_offset": [
+            (day, outcome - probability)
+            for day, outcome, probability in zip(dates, outcomes, probabilities, strict=True)
+        ],
+        "brier_score": [
+            (day, (outcome - probability) ** 2)
+            for day, outcome, probability in zip(dates, outcomes, probabilities, strict=True)
+        ],
+        "actual_positive_rate": list(
+            zip(dates, [float(value) for value in outcomes], strict=True)
+        ),
+        "brier_improvement_vs_reference": [
+            (day, (outcome - reference) ** 2 - (outcome - probability) ** 2)
+            for day, outcome, probability, reference in zip(
+                dates, outcomes, probabilities, references, strict=True,
+            )
+        ],
+        "log_loss_improvement_vs_reference": [
+            (
+                day,
+                _binary_log_loss(outcome, reference) - _binary_log_loss(outcome, probability),
+            )
+            for day, outcome, probability, reference in zip(
+                dates, outcomes, probabilities, references, strict=True,
+            )
+        ],
+    }
+
+
+def _attach_prediction_bootstrap_metrics(
+    calibrated: dict[str, object],
+    series: _DatedMetricSeries,
+    config: ProbabilityConfig,
+    seed: str,
+) -> None:
+    block_length = config.target_session_offset
+    bootstrap_specs = (
+        ("calibration_offset_ci_95", "calibration_offset", ":offset"),
+        ("brier_score_ci_95", "brier_score", ":brier"),
+        ("actual_positive_rate_ci_95", "actual_positive_rate", ":rate"),
+        (
+            "brier_improvement_vs_reference_ci_95",
+            "brier_improvement_vs_reference",
+            ":brier-improvement",
+        ),
+        (
+            "log_loss_improvement_vs_reference_ci_95",
+            "log_loss_improvement_vs_reference",
+            ":log-loss-improvement",
+        ),
     )
-    calibrated["brier_score_ci_95"] = _date_block_bootstrap_ci(
-        losses, seed + ":brier", config.bootstrap_samples,
-        block_length_sessions=block_length,
-    )
-    calibrated["actual_positive_rate_ci_95"] = _date_block_bootstrap_ci(
-        targets, seed + ":rate", config.bootstrap_samples,
-        block_length_sessions=block_length,
-    )
+    for output_name, series_name, seed_suffix in bootstrap_specs:
+        calibrated[output_name] = _date_block_bootstrap_ci(
+            series[series_name], seed + seed_suffix, config.bootstrap_samples,
+            block_length_sessions=block_length,
+        )
+    for metric_name in (
+        "brier_improvement_vs_reference", "log_loss_improvement_vs_reference",
+    ):
+        calibrated[metric_name] = sum(value for _day, value in series[metric_name]) / len(
+            series[metric_name]
+        )
     calibrated["bootstrap_samples"] = config.bootstrap_samples
-    calibrated["bootstrap_method"] = "deterministic_circular_moving_session_block_95pct_v1"
+    calibrated["bootstrap_method"] = "deterministic_circular_moving_target_offset_block_95pct_v2"
     calibrated["bootstrap_block_length_sessions"] = block_length
+
+
+def _prediction_metrics(
+    predictions: Sequence[Mapping[str, object]], config: ProbabilityConfig, seed: str,
+) -> dict[str, object]:
+    inputs = _prediction_metric_inputs(predictions)
+    calibrated, baseline_metrics, base_rate = _core_prediction_metrics(inputs, config)
+    _attach_prediction_bootstrap_metrics(
+        calibrated, _prediction_bootstrap_series(inputs), config, seed,
+    )
+    _probabilities, _baseline, outcomes, dates, references = inputs
     isotonic_metrics = _optional_candidate_metrics(
         predictions, outcomes, dates, base_rate, references, config,
     )
@@ -847,6 +2485,11 @@ def _prediction_metrics(
         "isotonic_candidate": isotonic_metrics,
         "fold_stability": _fold_selection_stability(predictions),
     }
+
+
+def _binary_log_loss(outcome: int, probability: float) -> float:
+    clipped = min(1.0 - 1e-15, max(1e-15, probability))
+    return -(outcome * math.log(clipped) + (1 - outcome) * math.log(1.0 - clipped))
 
 
 def _fold_selection_stability(
@@ -992,7 +2635,7 @@ def _complete_evidence(
             "selection_qualified": status == "calibrated_shadow" and selection["passed"] is True,
             "selection_qualification": selection,
             "base_rate": artifacts.base_rate,
-            "confidence_interval": calibrated.get("actual_positive_rate_ci_95"),
+            "actual_positive_rate_interval": calibrated.get("actual_positive_rate_ci_95"),
             "split": _split_payload(split),
             "counts": _partition_counts(
                 prepared, split, evaluated_folds=folds, predictions=predictions,
@@ -1125,7 +2768,7 @@ def _base_evidence(
         "horizon": config.horizon,
         "target_definition": _target_definition(config),
         "base_rate": None,
-        "confidence_interval": None,
+        "actual_positive_rate_interval": None,
         "model_version": PROBABILITY_MODEL_VERSION,
         "feature_version": PROBABILITY_FEATURE_VERSION,
         "label_version": PROBABILITY_LABEL_VERSION,
@@ -1280,8 +2923,8 @@ def _estimate_payload(
         "probability": probability,
         "raw_probability": raw,
         "empirical_bayes_probability": baseline,
-        "confidence_interval": interval,
-        "confidence_interval_definition": "test_session_block_bootstrap_calibration_offset_95pct",
+        "calibration_bias_interval": offset,
+        "calibration_adjusted_probability_interval": interval,
         "horizon": evidence.get("horizon"),
         "target_definition": evidence.get("target_definition"),
         "base_rate": evidence.get("base_rate"),
@@ -1300,7 +2943,7 @@ def _estimate_payload(
         "input_digest": evidence.get("input_digest"),
         "limitations": [
             "shadow_only_no_production_ranking_effect",
-            "confidence_interval_is_calibration_uncertainty_not_individual_outcome_certainty",
+            "calibration_adjusted_interval_is_not_individual_outcome_certainty",
         ],
         "generated_at": evidence.get("generated_at"),
     }
@@ -1311,7 +2954,10 @@ def _null_estimate(evidence: Mapping[str, object], sample_id: str) -> dict[str, 
         "status": "insufficient_data",
         "sample_id": sample_id,
         "probability": None,
-        "confidence_interval": None,
+        "raw_probability": None,
+        "empirical_bayes_probability": None,
+        "calibration_bias_interval": None,
+        "calibration_adjusted_probability_interval": None,
         "horizon": evidence.get("horizon"),
         "target_definition": evidence.get("target_definition"),
         "base_rate": evidence.get("base_rate"),
@@ -1391,6 +3037,17 @@ def _verify_artifact_versions(evidence: Mapping[str, object]) -> None:
         payload = evidence.get(name)
         if payload is not None and _object_mapping(payload, name).get("version") != version:
             raise ProbabilityReplayError(f"上涨概率 {name} 版本不受支持")
+    for name in ("model", "calibrator"):
+        payload = evidence.get(name)
+        if payload is not None:
+            _verify_optimizer_status(_object_mapping(payload, name), name)
+
+
+def _verify_optimizer_status(payload: Mapping[str, object], name: str) -> None:
+    if payload.get("converged") is not True:
+        raise ProbabilityReplayError(f"上涨概率 {name} 未证明优化器收敛")
+    if _integer(payload.get("iterations"), f"{name}.iterations") <= 0:
+        raise ProbabilityReplayError(f"上涨概率 {name} iterations 无效")
 
 
 def _verify_fold_artifacts(
@@ -1505,6 +3162,8 @@ def _verify_fold_artifact_digests(fold: Mapping[str, object]) -> None:
             raise ProbabilityReplayError(f"上涨概率逐折 {digest_name} 不一致")
         if mapping.get("version") != version:
             raise ProbabilityReplayError(f"上涨概率逐折 {payload_name} 版本不受支持")
+        if payload_name in {"model", "calibrator"}:
+            _verify_optimizer_status(mapping, f"fold.{payload_name}")
 
 
 def _split_from_payload(value: object) -> GroupedWalkForwardSplit:
@@ -1898,7 +3557,12 @@ __all__ = [
     "PROBABILITY_BASELINE_VERSION",
     "PROBABILITY_CALIBRATOR_VERSION",
     "PROBABILITY_COST_MODEL_VERSION",
+    "PROBABILITY_DEPLOYMENT_ARTIFACT_SCHEMA_VERSION",
+    "PROBABILITY_DEPLOYMENT_CONTRACT_VERSION",
     "PROBABILITY_FEATURE_VERSION",
+    "PROBABILITY_FILTER_AUTHORIZATION_VERSION",
+    "PROBABILITY_FILTER_AUTHORIZATION_SCHEMA_VERSION",
+    "PROBABILITY_FILTER_QUALIFICATION_VERSION",
     "PROBABILITY_ISOTONIC_CALIBRATOR_VERSION",
     "PROBABILITY_LABEL_VERSION",
     "PROBABILITY_MODEL_VERSION",
@@ -1907,14 +3571,23 @@ __all__ = [
     "ProbabilityConfig",
     "ProbabilityReplayError",
     "ProbabilitySample",
+    "VerifiedProbabilityFilterAuthorization",
+    "VerifiedProbabilityDeploymentEstimator",
     "build_probability_contract",
+    "build_probability_filter_qualification",
     "evaluate_probability_predictions",
     "fit_empirical_bayes_baseline",
+    "fit_probability_deployment_estimator",
     "fit_shadow_probability",
     "grouped_walk_forward_splits",
     "probability_selection_qualified",
+    "probability_filter_qualified",
     "predict_shadow_probability",
     "replay_shadow_probability",
+    "seal_probability_filter_authorization_artifact",
+    "seal_probability_deployment_artifact",
     "stable_probability_hash",
     "verify_shadow_probability_evidence",
+    "verify_probability_filter_authorization_artifact",
+    "verify_probability_deployment_artifact",
 ]

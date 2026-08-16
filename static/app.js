@@ -41,6 +41,7 @@ import {
 } from "./js/advice-reviews.js";
 import { drawKlineChart } from "./js/chart.js";
 import { createChartInspector } from "./js/chart-inspector.js";
+import { createAppLifecycleController } from "./js/app-lifecycle.js";
 import {
   cancelDataStatusRefresh,
   cancelMonitoringRefresh,
@@ -51,6 +52,8 @@ import {
 } from "./js/diagnostics.js";
 import { $, escapeHtml, setMetricTone } from "./js/dom.js";
 import { createDiscoveryController } from "./js/discovery.js";
+import { createIndividualProbabilityController } from "./js/individual-probability-controller.js";
+import { createMarketScanExecutableShadowController } from "./js/market-scan-executable-shadow-controller.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
 import { createMarketScanController } from "./js/market-scan.js";
@@ -92,6 +95,7 @@ import { createStockSearchController } from "./js/stock-search.js";
 import { createStockSearchHistory } from "./js/stock-search-history.js";
 import { createStockSearchSurface } from "./js/stock-search-surface.js";
 import { normalizeUiSymbol, validateUiSymbol } from "./js/symbols.js";
+import { validateStockWorkbenchResponse } from "./js/workbench-contracts.js";
 import {
   addWatchlistItem,
   appendWatchlistMessage,
@@ -232,6 +236,7 @@ const WORKBENCH_PANEL_IDS = [
   "qualityPanel",
   "signalEvidence",
   "alphaEvidence",
+  "individualProbabilityCards",
   "factorList",
   "fundFlowPanel",
   "orderPressurePanel",
@@ -466,7 +471,7 @@ async function loadAll(options = {}) {
     const workbench = await workbenchLoad;
     if (!workbench || isStaleLoad(request)) return false;
     if (!renderCurrentWorkbench(workbench, request)) return false;
-    const stockPanels = refreshStockPanels(request);
+    const stockPanels = refreshStockPanels(request, workbench);
     await globalLoads.watchlist;
     if (options.waitForAdviceTimeline) await stockPanels.adviceTimeline;
     if (isStaleLoad(request)) return false;
@@ -534,6 +539,7 @@ function refreshGlobalPanels(options = {}) {
 
 function beginLoadRequest(options = {}) {
   cancelMinuteRequest();
+  individualProbabilityController.cancel();
   if (state.loadRequest) state.loadRequest.abort();
   const loadRequest = createRequestScope();
   state.loadRequest = loadRequest;
@@ -562,6 +568,7 @@ function beginLoadRequest(options = {}) {
 
 function invalidateActiveLoad() {
   cancelMinuteRequest();
+  individualProbabilityController.cancel();
   if (state.loadRequest) {
     state.loadRequest.abort();
     state.loadRequest = null;
@@ -622,11 +629,12 @@ function syncToolsStockContext(analysis = state.lastAnalysis) {
   if (context) context.dataset.symbol = code && market ? `${code}.${market}` : "";
 }
 
-function loadWorkbench(symbol, signal) {
-  return fetchJson(`/api/stock/workbench?symbol=${encodeURIComponent(symbol)}`, {
+async function loadWorkbench(symbol, signal) {
+  const payload = await fetchJson(`/api/stock/workbench?symbol=${encodeURIComponent(symbol)}`, {
     signal,
     timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   });
+  return validateStockWorkbenchResponse(payload, symbol);
 }
 
 function renderWorkbench(workbench) {
@@ -643,7 +651,11 @@ function renderWorkbench(workbench) {
   syncToolsStockContext(analysis);
   state.lastAnalysis = analysis;
   state.lastInsights = workbench.insights;
-  drawKline(analysis.klines, analysis.ma5, analysis.ma20);
+  drawKline(
+    analysis.klines,
+    analysis.ma5,
+    analysis.ma20_available === true ? analysis.ma20 : null,
+  );
   const localWarnings = asLocalDataWarnings(workbench.local_data_warnings);
   $("sourceLine").textContent = sourceLineText(analysis, localWarnings);
   document.body.classList.remove("is-stale");
@@ -655,6 +667,10 @@ function renderWorkbench(workbench) {
     symbol: `${String(quote.code || "").trim()}.${String(quote.market || "").trim()}`,
     name: quote.name,
   });
+}
+
+function availableAnalysisMa20(analysis) {
+  return analysis && analysis.ma20_available === true ? analysis.ma20 : null;
 }
 
 function workbenchDataQualityStatus(analysis, localWarnings) {
@@ -868,14 +884,29 @@ function syncWorkbenchChartMarks(chartMarks) {
   renderMarkFilters();
 }
 
-function refreshStockPanels(request) {
-  const context = loadContextFromRequest(request);
+function refreshStockPanels(request, workbench = null) {
+  const context = {
+    ...loadContextFromRequest(request),
+    signalDate: workbenchSignalDate(workbench),
+  };
   return {
+    individualProbability: individualProbabilityController.load({
+      ...context,
+      isCurrent: () => !isStaleContext(context),
+    }),
     minute: loadMinuteAnalysis(context),
     adviceTimeline: loadAdviceTimeline(context),
     adviceReviews: loadAdviceReviews(state, context),
     adviceReviewSnapshots: state.primaryView === "review" ? loadAdviceReviewSnapshotHistory(context) : Promise.resolve(false),
   };
+}
+
+function workbenchSignalDate(workbench) {
+  const cohortDate = workbench && workbench.research_cohort && workbench.research_cohort.signal_date;
+  if (typeof cohortDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(cohortDate)) return cohortDate;
+  const quoteTime = workbench && workbench.analysis && workbench.analysis.quote && workbench.analysis.quote.timestamp;
+  const quoteDate = typeof quoteTime === "string" ? quoteTime.slice(0, 10) : "";
+  return /^\d{4}-\d{2}-\d{2}$/.test(quoteDate) ? quoteDate : "";
 }
 
 async function loadAdviceReviewSnapshotHistory(request = currentLoadContext()) {
@@ -1267,7 +1298,7 @@ async function loadChartMarks(request = currentLoadContext()) {
     renderMarkFilters();
     clearChartMarksFeedback();
     if (state.lastAnalysis) {
-      drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, state.lastAnalysis.ma20);
+      drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, availableAnalysisMa20(state.lastAnalysis));
     }
     clearAuxiliaryFailure("chart-marks");
   } catch (error) {
@@ -1864,7 +1895,7 @@ function drawEmptyMinuteKline() {
 
 function redrawResearchCharts() {
   if (state.lastAnalysis) {
-    drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, state.lastAnalysis.ma20);
+    drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, availableAnalysisMa20(state.lastAnalysis));
   }
   drawMinuteKline();
 }
@@ -2029,7 +2060,7 @@ function selectDailyChartRange(value) {
   state.dailyChartRange = range;
   syncChartControls();
   persistWorkspacePreferences();
-  if (state.lastAnalysis) drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, state.lastAnalysis.ma20);
+  if (state.lastAnalysis) drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, availableAnalysisMa20(state.lastAnalysis));
   return true;
 }
 
@@ -2039,7 +2070,7 @@ function setDailyChartOverlay(name, enabled) {
   else return false;
   syncChartControls();
   persistWorkspacePreferences();
-  if (state.lastAnalysis) drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, state.lastAnalysis.ma20);
+  if (state.lastAnalysis) drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, availableAnalysisMa20(state.lastAnalysis));
   return true;
 }
 
@@ -2196,6 +2227,7 @@ function cancelPendingLoadForValidation() {
   const request = state.pendingLoad;
   if (!request) return;
   cancelMinuteRequest();
+  individualProbabilityController.cancel();
   if (state.loadRequest) state.loadRequest.abort();
   state.loadRequest = null;
   state.pendingLoad = null;
@@ -2288,6 +2320,10 @@ const marketScanController = createMarketScanController({
 });
 
 const strategyLabController = createStrategyLabController();
+const marketScanExecutableShadowController = createMarketScanExecutableShadowController({
+  getCurrentRun: () => marketScanController.state.publishedRun || marketScanController.state.run,
+});
+const individualProbabilityController = createIndividualProbabilityController();
 
 const discoveryController = createDiscoveryController({
   getRun: () => marketScanController.state.run,
@@ -2958,7 +2994,7 @@ $("markFilters").addEventListener("click", (event) => {
   }
   renderMarkFilters();
   if (state.lastAnalysis) {
-    drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, state.lastAnalysis.ma20);
+    drawKline(state.lastAnalysis.klines, state.lastAnalysis.ma5, availableAnalysisMa20(state.lastAnalysis));
   }
 });
 
@@ -2977,70 +3013,18 @@ window.addEventListener("resize", () => {
   }, 200);
 });
 
-function workbenchNeedsOnlineRecovery() {
-  const phase = state.coreStatus?.phase || "idle";
-  const failures = state.auxiliaryStatus?.failures || {};
-  return Boolean(
-    state.pendingLoad
-    || state.failedLoadSymbol
-    || phase === "loading"
-    || phase === "error"
-    || state.visibilityRefreshSources.size
-    || Object.keys(failures).length
-  );
-}
+const appLifecycleController = createAppLifecycleController({
+  state, documentTarget: document, windowTarget: window, marketScanController, refreshGlobalPanels, loadAll,
+  invalidateActiveLoad, setActiveSymbol, stopStream, reconcileStreamSubscription, cancelMonitoringRefresh,
+  cancelDataStatusRefresh, cancelIndividualProbability: () => individualProbabilityController.cancel(),
+  onPageHide: stockSearchSurface.handlePageHide,
+});
 
-function handleWorkbenchOnline() {
-  if (document.hidden || state.onlineRecoveryPromise || !workbenchNeedsOnlineRecovery()) return false;
-  const recoverCore = Boolean(state.pendingLoad || state.failedLoadSymbol)
-    || ["loading", "error"].includes(state.coreStatus?.phase)
-    || Object.keys(state.auxiliaryStatus?.failures || {}).length > 0;
-  if (state.pendingLoad) invalidateActiveLoad();
-  if (state.failedLoadSymbol) setActiveSymbol(state.failedLoadSymbol);
-  const task = recoverCore
-    ? loadAll({ forceGlobal: true, waitForGlobal: true })
-    : Promise.allSettled(Object.values(refreshGlobalPanels({ force: true })));
-  const recovery = Promise.resolve(task).finally(() => {
-    if (state.onlineRecoveryPromise === recovery) state.onlineRecoveryPromise = null;
-  });
-  state.onlineRecoveryPromise = recovery;
-  return true;
-}
-
-function destroyStockSearchBindings() {
-  stockSearchSurface.destroy();
-}
-
-function handleStockSearchPageHide(event) {
-  stockSearchSurface.handlePageHide(event);
-}
-
-function handleVisibilityChange() {
-  if (document.hidden) {
-    marketScanController.setVisible(false);
-    if (state.monitorTimer) {
-      clearInterval(state.monitorTimer);
-      state.monitorTimer = null;
-    }
-    if (state.monitorRequest) {
-      state.visibilityRefreshSources.add("monitoring");
-      cancelMonitoringRefresh(state);
-    }
-    if (state.dataStatusRequest) {
-      state.visibilityRefreshSources.add("data-status");
-      cancelDataStatusRefresh(state);
-    }
-    stopStream();
-    return;
-  }
-  marketScanController.setVisible(true);
-  refreshGlobalPanels({ force: true });
-  if (state.lastAnalysis) reconcileStreamSubscription();
-}
-
-document.addEventListener("visibilitychange", handleVisibilityChange);
-window.addEventListener("online", handleWorkbenchOnline);
-window.addEventListener("pagehide", handleStockSearchPageHide);
+function workbenchNeedsOnlineRecovery() { return appLifecycleController.needsOnlineRecovery(); }
+function handleWorkbenchOnline() { return appLifecycleController.handleOnline(); }
+function destroyStockSearchBindings() { stockSearchSurface.destroy(); }
+function handleStockSearchPageHide(event) { appLifecycleController.handlePageHide(event); }
+function handleVisibilityChange() { appLifecycleController.handleVisibilityChange(); }
 
 initializeChartInspectors();
 initializeAlertNotifications(state);
@@ -3078,12 +3062,15 @@ export const __appTest = {
   canonicalStreamSymbol,
   quoteRowsFromStreamEvent,
   compositeStatus,
+  availableAnalysisMa20,
   GLOBAL_ENDPOINTS,
   GLOBAL_REFRESH_TTL_MS,
   DAILY_CHART_RANGES,
   MINUTE_CHART_INTERVALS,
   marketScanController,
   strategyLabController,
+  marketScanExecutableShadowController,
+  individualProbabilityController,
   discoveryController,
 };
 

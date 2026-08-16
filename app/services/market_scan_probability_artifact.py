@@ -7,6 +7,7 @@ signature.  This module never opens or writes the SQLite database.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timedelta, timezone
 import math
 from pathlib import Path
 import re
@@ -20,9 +21,14 @@ from app.artifacts.io import (
     ArtifactNonFiniteConstantError,
     canonical_json_text,
     decode_json_bytes,
-    exclusive_atomic_publish,
     read_regular_file,
     sha256_hex,
+)
+from app.db.market_scan_artifact_lease import (
+    MarketScanArtifactLeaseError,
+    publish_market_scan_artifact,
+    require_project_managed_artifact_database,
+    verified_market_scan_artifact_publication,
 )
 from app.services.market_scan_probability import (
     ProbabilityConfig,
@@ -30,36 +36,61 @@ from app.services.market_scan_probability import (
     ProbabilityTarget,
     fit_shadow_probability,
 )
+from app.utils.clock import utc_now
 
 
 PROBABILITY_ARTIFACT_SCHEMA_VERSION = "market-scan-probability-artifact-v1"
 PROBABILITY_ARTIFACT_DIGEST_ALGORITHM = "sha256"
-PROBABILITY_ARTIFACT_DIGEST_SCOPE = "payload"
+PROBABILITY_ARTIFACT_DIGEST_SCOPE = "generated_at+payload"
 PROBABILITY_ARTIFACT_INTEGRITY_NOTICE = "integrity_digest_not_a_signature"
-PROBABILITY_RESULT_CONTRACT_VERSION = "market-scan-probability-result-v2-self-contained"
+LEGACY_PROBABILITY_RESULT_CONTRACT_VERSION = "market-scan-probability-result-v2-self-contained"
+LEGACY_SCORE_BOUND_PROBABILITY_RESULT_CONTRACT_VERSION = "market-scan-probability-result-v3-score-bound"
+PROBABILITY_RESULT_CONTRACT_VERSION = "market-scan-probability-result-v4-explicit-intervals"
 PROBABILITY_ARTIFACT_SET_REPLAY_SCHEMA_VERSION = "market-scan-probability-artifact-set-replay-v1"
 PROBABILITY_ARTIFACT_HORIZONS = frozenset({1, 5, 20})
-PROBABILITY_ARTIFACT_TARGETS = frozenset(
-    {"net_excess_positive", "absolute_net_positive", "net_return_positive"}
-)
+PROBABILITY_ARTIFACT_TARGETS = frozenset({"net_excess_positive", "absolute_net_positive", "net_return_positive"})
 PROBABILITY_ARTIFACT_STATUSES = frozenset({"calibrated_shadow", "insufficient_data"})
 # Existing full-market v1 artifacts are about 192 MiB. Keep a bounded 256 MiB
 # compatibility envelope while still rejecting unexpectedly large local files.
 PROBABILITY_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
+PROBABILITY_MANAGED_DIRECTORY = Path("market-scan-probability")
+
+_SELF_CONTAINED_RESULT_CONTRACTS = frozenset(
+    {
+        LEGACY_PROBABILITY_RESULT_CONTRACT_VERSION,
+        LEGACY_SCORE_BOUND_PROBABILITY_RESULT_CONTRACT_VERSION,
+        PROBABILITY_RESULT_CONTRACT_VERSION,
+    }
+)
+_READ_ONLY_RESULT_CONTRACTS = frozenset(
+    {
+        LEGACY_PROBABILITY_RESULT_CONTRACT_VERSION,
+        LEGACY_SCORE_BOUND_PROBABILITY_RESULT_CONTRACT_VERSION,
+    }
+)
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "generated_at", "payload", "integrity"})
 _LEGACY_PAYLOAD_KEYS = frozenset({"studies", "records"})
 _PAYLOAD_KEYS = frozenset({"record_contract_version", "feature_evidence", "studies", "records"})
-_STUDY_KEYS = frozenset(
-    {"run_id", "target", "horizon", "status", "versions", "digests", "limitations", "metadata"}
-)
-_RECORD_KEYS = frozenset(
-    {"run_id", "symbol", "target", "horizon", "status", "probability", "confidence_interval", "details"}
+_STUDY_KEYS = frozenset({"run_id", "target", "horizon", "status", "versions", "digests", "limitations", "metadata"})
+_LEGACY_RECORD_KEYS = frozenset({"run_id", "symbol", "target", "horizon", "status", "probability", "confidence_interval", "details"})
+_CURRENT_RECORD_KEYS = frozenset(
+    {
+        "run_id",
+        "symbol",
+        "target",
+        "horizon",
+        "status",
+        "probability",
+        "calibration_bias_interval",
+        "calibration_adjusted_probability_interval",
+        "details",
+    }
 )
 _INTEGRITY_KEYS = frozenset({"algorithm", "scope", "integrity_digest", "notice"})
 _REQUIRED_VERSION_KEYS = frozenset({"model", "calibrator", "feature", "label", "cost_model"})
 _REQUIRED_DIGEST_KEYS = frozenset({"input", "model", "calibrator"})
-_REQUIRED_RESULT_DETAIL_KEYS = frozenset(
+_CURRENT_REQUIRED_RESULT_DETAIL_KEYS = frozenset(
     {
         "record_contract_version",
         "sample_id",
@@ -82,7 +113,7 @@ _REQUIRED_RESULT_DETAIL_KEYS = frozenset(
         "exit_date",
         "raw_probability",
         "empirical_bayes_probability",
-        "confidence_interval_definition",
+        "calibration_adjusted_probability_interval_definition",
         "versions",
         "digests",
         "base_rate",
@@ -97,15 +128,46 @@ _REQUIRED_RESULT_DETAIL_KEYS = frozenset(
         "automatic_promotion",
     }
 )
+_LEGACY_REQUIRED_RESULT_DETAIL_KEYS = frozenset(
+    (_CURRENT_REQUIRED_RESULT_DETAIL_KEYS - {"calibration_adjusted_probability_interval_definition"}) | {"confidence_interval_definition"}
+)
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _REPLAY_STUDY_FIELDS = (
-    "schema_version", "status", "fit_status", "selection_qualified", "selection_qualification",
-    "probability", "horizon", "target_definition", "base_rate",
-    "confidence_interval", "model_version", "feature_version", "label_version", "cost_model_version",
-    "label_contract_digest", "label_contract_binding", "generated_at", "input_digest", "contract", "limitations", "split", "counts", "training_cutoff",
-    "model", "calibrator", "isotonic_calibrator", "empirical_bayes_baseline", "calibration_metrics",
-    "calibration_candidates", "folds", "model_digest", "calibrator_digest", "isotonic_calibrator_digest",
-    "baseline_digest", "evidence_digest",
+    "schema_version",
+    "status",
+    "fit_status",
+    "selection_qualified",
+    "selection_qualification",
+    "probability",
+    "horizon",
+    "target_definition",
+    "base_rate",
+    "actual_positive_rate_interval",
+    "model_version",
+    "feature_version",
+    "label_version",
+    "cost_model_version",
+    "label_contract_digest",
+    "label_contract_binding",
+    "generated_at",
+    "input_digest",
+    "contract",
+    "limitations",
+    "split",
+    "counts",
+    "training_cutoff",
+    "model",
+    "calibrator",
+    "isotonic_calibrator",
+    "empirical_bayes_baseline",
+    "calibration_metrics",
+    "calibration_candidates",
+    "folds",
+    "model_digest",
+    "calibrator_digest",
+    "isotonic_calibrator_digest",
+    "baseline_digest",
+    "evidence_digest",
 )
 
 
@@ -130,17 +192,36 @@ def _canonical_validated_json(value: object) -> str:
 
 
 def probability_payload_integrity_digest(payload: Mapping[str, object]) -> str:
-    """Return the payload SHA-256 integrity digest, excluding caller-supplied generated_at."""
+    """Return a component/payload SHA-256 digest.
+
+    Top-level artifact integrity additionally binds ``generated_at`` via
+    :func:`_artifact_integrity_digest`; this helper remains for component hashes.
+    """
     canonical = canonical_probability_artifact_json(_digest_payload(payload))
     return sha256_hex(canonical)
+
+
+def probability_artifact_integrity_digest(
+    generated_at: str,
+    payload: Mapping[str, object],
+) -> str:
+    """Return the current top-level content address including generation time."""
+
+    _validated_artifact_timestamp(generated_at, "generated_at")
+    return _artifact_integrity_digest(generated_at, payload)
 
 
 def _validated_payload_integrity_digest(payload: Mapping[str, object]) -> str:
     return sha256_hex(_canonical_validated_json(_digest_payload(payload)))
 
 
+def _artifact_integrity_digest(generated_at: str, payload: Mapping[str, object]) -> str:
+    identity = {"generated_at": generated_at, "payload": _digest_payload(payload)}
+    return sha256_hex(_canonical_validated_json(identity))
+
+
 def _digest_payload(payload: Mapping[str, object]) -> object:
-    if payload.get("record_contract_version") == PROBABILITY_RESULT_CONTRACT_VERSION:
+    if payload.get("record_contract_version") in _SELF_CONTAINED_RESULT_CONTRACTS:
         return _integrity_payload(payload)
     return payload
 
@@ -160,14 +241,19 @@ def build_probability_artifact(
 ) -> dict[str, object]:
     """Build and verify one schema-v1 artifact from a complete research payload."""
     normalized_payload = _validate_payload(payload, allow_legacy=False)
+    _validated_artifact_timestamp(generated_at, "generated_at")
+    canonical_generated_at = generated_at
     artifact: dict[str, object] = {
         "schema_version": PROBABILITY_ARTIFACT_SCHEMA_VERSION,
-        "generated_at": _required_text(generated_at, "generated_at"),
+        "generated_at": canonical_generated_at,
         "payload": normalized_payload,
         "integrity": {
             "algorithm": PROBABILITY_ARTIFACT_DIGEST_ALGORITHM,
             "scope": PROBABILITY_ARTIFACT_DIGEST_SCOPE,
-            "integrity_digest": _validated_payload_integrity_digest(normalized_payload),
+            "integrity_digest": _artifact_integrity_digest(
+                canonical_generated_at,
+                normalized_payload,
+            ),
             "notice": PROBABILITY_ARTIFACT_INTEGRITY_NOTICE,
         },
     }
@@ -182,8 +268,11 @@ def verify_probability_artifact(artifact: Mapping[str, object]) -> dict[str, obj
 
 def replay_probability_artifact(artifact: Mapping[str, object]) -> dict[str, float | None]:
     """Verify and deterministically replay every self-contained persisted result."""
-    verified = verify_probability_artifact(artifact)
+    _validate_json_tree(artifact, "artifact")
+    verified = _verify_normalized_artifact(dict(artifact), allow_legacy=True)
     payload = cast(Mapping[str, object], verified["payload"])
+    if payload.get("record_contract_version") not in _SELF_CONTAINED_RESULT_CONTRACTS:
+        raise ProbabilityArtifactError("上涨概率回放仅支持 self-contained records")
     studies = {_study_key(item): item for item in cast(Sequence[Mapping[str, object]], payload["studies"])}
     features = _feature_evidence_by_key(payload["feature_evidence"])
     return {
@@ -241,14 +330,15 @@ def _verified_artifact_set(
     artifacts: list[dict[str, object]] = []
     for source in sources:
         if isinstance(source, Mapping):
-            artifact = verify_probability_artifact(source)
+            _validate_json_tree(source, "artifact")
+            artifact = _verify_normalized_artifact(dict(source), allow_legacy=True)
         elif isinstance(source, str | Path):
             artifact = load_probability_artifact(source)
         else:
             raise ProbabilityArtifactError("上涨概率 artifact set source 类型无效")
         payload = _required_mapping(artifact["payload"], "artifact.payload")
-        if payload.get("record_contract_version") != PROBABILITY_RESULT_CONTRACT_VERSION:
-            raise ProbabilityArtifactError("上涨概率 artifact set 仅支持 v2 self-contained records")
+        if payload.get("record_contract_version") not in _SELF_CONTAINED_RESULT_CONTRACTS:
+            raise ProbabilityArtifactError("上涨概率 artifact set 仅支持 self-contained records")
         artifacts.append(artifact)
     return artifacts
 
@@ -292,9 +382,7 @@ def _single_artifact_run_id(payload: Mapping[str, object]) -> int:
 
 def _artifact_run_manifest(payload: Mapping[str, object]) -> tuple[int, ...]:
     manifests = {
-        _required_run_id_list(
-            _required_mapping(study["metadata"], "study.metadata").get("artifact_set_run_ids")
-        )
+        _required_run_id_list(_required_mapping(study["metadata"], "study.metadata").get("artifact_set_run_ids"))
         for study in cast(Sequence[Mapping[str, object]], payload["studies"])
     }
     if len(manifests) != 1:
@@ -342,7 +430,9 @@ def _validate_run_record_matrix(
 
 
 def _validate_run_study_records(
-    study: Mapping[str, object], records: Sequence[Mapping[str, object]], run_id: int,
+    study: Mapping[str, object],
+    records: Sequence[Mapping[str, object]],
+    run_id: int,
 ) -> None:
     key = str(study["target"]), cast(int, study["horizon"])
     selected = [item for item in records if (str(item["target"]), cast(int, item["horizon"])) == key]
@@ -361,7 +451,11 @@ def _artifact_set_study_groups(
     study_keys: Sequence[tuple[str, int]],
 ) -> list[tuple[dict[str, object], tuple[int, ...], str, int, Mapping[str, object]]]:
     output: list[tuple[dict[str, object], tuple[int, ...], str, int, Mapping[str, object]]] = []
-    for cohort, cohort_run_ids in _artifact_set_cohorts(by_run, run_ids, study_keys):
+    for cohort, _score_contract, cohort_run_ids in _artifact_set_cohorts(
+        by_run,
+        run_ids,
+        study_keys,
+    ):
         for target, horizon in study_keys:
             key = target, horizon
             studies = [_artifact_study_for_key(by_run[run_id], key) for run_id in cohort_run_ids]
@@ -374,28 +468,32 @@ def _artifact_set_cohorts(
     by_run: Mapping[int, Mapping[str, object]],
     run_ids: Sequence[int],
     study_keys: Sequence[tuple[str, int]],
-) -> list[tuple[dict[str, object], tuple[int, ...]]]:
-    grouped: dict[str, tuple[dict[str, object], list[int]]] = {}
+) -> list[tuple[dict[str, object], dict[str, object], tuple[int, ...]]]:
+    grouped: dict[str, tuple[dict[str, object], dict[str, object], list[int]]] = {}
     for run_id in run_ids:
         cohort = _artifact_run_cohort(by_run[run_id], study_keys)
-        token = _canonical_validated_json(cohort)
+        score_contract = _artifact_run_score_contract(by_run[run_id], study_keys)
+        token = _canonical_validated_json({"cohort_contract": cohort, "production_score_contract": score_contract})
         if token not in grouped:
-            grouped[token] = cohort, []
-        grouped[token][1].append(run_id)
-    output: list[tuple[dict[str, object], tuple[int, ...]]] = []
-    for cohort, values in grouped.values():
+            grouped[token] = cohort, score_contract, []
+        grouped[token][2].append(run_id)
+    output: list[tuple[dict[str, object], dict[str, object], tuple[int, ...]]] = []
+    for cohort, score_contract, values in grouped.values():
         ordered = tuple(sorted(values, key=lambda run_id: _artifact_run_order(by_run[run_id], run_id)))
-        _validate_artifact_cohort_identity(by_run, cohort, ordered, study_keys)
-        output.append((cohort, ordered))
+        _validate_artifact_cohort_identity(
+            by_run,
+            cohort,
+            score_contract,
+            ordered,
+            study_keys,
+        )
+        output.append((cohort, score_contract, ordered))
     return output
 
 
 def _artifact_run_order(artifact: Mapping[str, object], run_id: int) -> tuple[str, int]:
     payload = _required_mapping(artifact["payload"], "artifact.payload")
-    dates = {
-        _required_text(item["quote_date"], "feature.quote_date")
-        for item in cast(Sequence[Mapping[str, object]], payload["feature_evidence"])
-    }
+    dates = {_required_text(item["quote_date"], "feature.quote_date") for item in cast(Sequence[Mapping[str, object]], payload["feature_evidence"])}
     if len(dates) != 1:
         raise ProbabilityArtifactError(f"上涨概率 run {run_id} quote_date 不唯一")
     return next(iter(dates)), run_id
@@ -404,6 +502,7 @@ def _artifact_run_order(artifact: Mapping[str, object], run_id: int) -> tuple[st
 def _validate_artifact_cohort_identity(
     by_run: Mapping[int, Mapping[str, object]],
     cohort: Mapping[str, object],
+    score_contract: Mapping[str, object],
     run_ids: Sequence[int],
     study_keys: Sequence[tuple[str, int]],
 ) -> None:
@@ -423,6 +522,8 @@ def _validate_artifact_cohort_identity(
         "session_dates": sessions,
         "horizon_evidence_digests": evidence_digests,
     }
+    if score_contract and all(score_contract.values()):
+        identity["production_score_contract"] = dict(score_contract)
     expected = _stable_json_digest(identity)
     for run_id in run_ids:
         for key in study_keys:
@@ -433,16 +534,39 @@ def _validate_artifact_cohort_identity(
 
 
 def _artifact_run_cohort(
-    artifact: Mapping[str, object], study_keys: Sequence[tuple[str, int]],
+    artifact: Mapping[str, object],
+    study_keys: Sequence[tuple[str, int]],
 ) -> dict[str, object]:
-    cohorts = {
-        _canonical_validated_json(cohort): cohort
-        for key in study_keys
-        for cohort in (_study_cohort_contract(_artifact_study_for_key(artifact, key)),)
-    }
+    cohorts = {_canonical_validated_json(cohort): cohort for key in study_keys for cohort in (_study_cohort_contract(_artifact_study_for_key(artifact, key)),)}
     if len(cohorts) != 1:
         raise ProbabilityArtifactError("上涨概率同一 run 的 study cohort contract 不一致")
     return next(iter(cohorts.values()))
+
+
+def _artifact_run_score_contract(
+    artifact: Mapping[str, object],
+    study_keys: Sequence[tuple[str, int]],
+) -> dict[str, object]:
+    contracts = {
+        _canonical_validated_json(contract): contract
+        for key in study_keys
+        for contract in (_study_production_score_contract(_artifact_study_for_key(artifact, key)),)
+    }
+    if len(contracts) != 1:
+        raise ProbabilityArtifactError("上涨概率同一 run 的生产评分合同不一致")
+    return next(iter(contracts.values()))
+
+
+def _study_production_score_contract(study: Mapping[str, object]) -> dict[str, object]:
+    metadata = _required_mapping(study["metadata"], "study.metadata")
+    value = metadata.get("production_score_contract")
+    if value is None:
+        return {
+            "production_score_rule_version": None,
+            "production_score_spec_hash": None,
+        }
+    contract = _required_mapping(value, "study.metadata.production_score_contract")
+    return dict(contract)
 
 
 def _study_cohort_contract(study: Mapping[str, object]) -> dict[str, object]:
@@ -461,24 +585,22 @@ def _study_cohort_contract(study: Mapping[str, object]) -> dict[str, object]:
 
 
 def _consistent_study_metadata(
-    studies: Sequence[Mapping[str, object]], key: tuple[str, int],
+    studies: Sequence[Mapping[str, object]],
+    key: tuple[str, int],
 ) -> Mapping[str, object]:
     reference = studies[0]
     metadata = _shared_study_metadata(reference)
     _validate_study_digest_fields(reference)
     for study in studies[1:]:
         _validate_study_digest_fields(study)
-        if (
-            study["versions"] != reference["versions"]
-            or study["digests"] != reference["digests"]
-            or _shared_study_metadata(study) != metadata
-        ):
+        if study["versions"] != reference["versions"] or study["digests"] != reference["digests"] or _shared_study_metadata(study) != metadata:
             raise ProbabilityArtifactError(f"上涨概率 cohort 内 study evidence 冲突：{key}")
     return metadata
 
 
 def _artifact_study_for_key(
-    artifact: Mapping[str, object], key: tuple[str, int],
+    artifact: Mapping[str, object],
+    key: tuple[str, int],
 ) -> Mapping[str, object]:
     payload = _required_mapping(artifact["payload"], "artifact.payload")
     studies = cast(Sequence[Mapping[str, object]], payload["studies"])
@@ -496,10 +618,13 @@ def _validate_study_digest_fields(study: Mapping[str, object]) -> None:
     metadata = _required_mapping(study["metadata"], "study.metadata")
     digests = _required_mapping(study["digests"], "study.digests")
     pairs = (
-        ("input_digest", "input"), ("label_contract_digest", "label_contract"),
+        ("input_digest", "input"),
+        ("label_contract_digest", "label_contract"),
         ("model_digest", "model"),
-        ("calibrator_digest", "calibrator"), ("isotonic_calibrator_digest", "isotonic_calibrator"),
-        ("baseline_digest", "baseline"), ("evidence_digest", "evidence"),
+        ("calibrator_digest", "calibrator"),
+        ("isotonic_calibrator_digest", "isotonic_calibrator"),
+        ("baseline_digest", "baseline"),
+        ("evidence_digest", "evidence"),
     )
     if any(metadata.get(metadata_name) != digests.get(digest_name) for metadata_name, digest_name in pairs):
         raise ProbabilityArtifactError("上涨概率 study metadata 与 digest registry 不一致")
@@ -529,7 +654,8 @@ def _artifact_set_samples(
 
 
 def _probability_sample_from_record(
-    details: Mapping[str, object], features: Mapping[str, object],
+    details: Mapping[str, object],
+    features: Mapping[str, object],
 ) -> ProbabilitySample:
     target = details["model_target"]
     return ProbabilitySample(
@@ -539,9 +665,7 @@ def _probability_sample_from_record(
         target=cast(int | None, target),
         executable=cast(bool, details["executable"]),
         net_return=_optional_finite_number(details["net_return"], "record.details.net_return"),
-        net_excess_return=_optional_finite_number(
-            details["net_excess_return"], "record.details.net_excess_return"
-        ),
+        net_excess_return=_optional_finite_number(details["net_excess_return"], "record.details.net_excess_return"),
     )
 
 
@@ -550,7 +674,9 @@ def _optional_finite_number(value: object, path: str) -> float | None:
 
 
 def _probability_config_from_metadata(
-    metadata: Mapping[str, object], public_target: str, horizon: int,
+    metadata: Mapping[str, object],
+    public_target: str,
+    horizon: int,
 ) -> ProbabilityConfig:
     contract = _required_mapping(metadata.get("contract"), "study.metadata.contract")
     label = _required_mapping(contract.get("label"), "contract.label")
@@ -561,12 +687,7 @@ def _probability_config_from_metadata(
     evaluation = _required_mapping(contract.get("evaluation"), "contract.evaluation")
     raw_bound_label = cost.get("label_contract")
     bound_label = dict(raw_bound_label) if isinstance(raw_bound_label, Mapping) else None
-    label_contract = (
-        None
-        if bound_label is None
-        or set(bound_label) == {"label_version", "cost_model_version"}
-        else bound_label
-    )
+    label_contract = None if bound_label is None or set(bound_label) == {"label_version", "cost_model_version"} else bound_label
     model_target = _required_text(label.get("target"), "contract.label.target")
     expected_target = "net_excess_positive" if public_target == "net_excess_positive" else "net_return_positive"
     if model_target != expected_target or metadata.get("horizon") != horizon:
@@ -578,16 +699,13 @@ def _probability_config_from_metadata(
             cost_model_version=_required_text(cost.get("version"), "contract.cost.version"),
             label_contract=label_contract,
             minimum_train_sessions=_positive_integer(split.get("minimum_train_sessions"), "minimum_train_sessions"),
-            minimum_calibration_sessions=_positive_integer(
-                split.get("minimum_calibration_sessions"), "minimum_calibration_sessions"
-            ),
+            minimum_calibration_sessions=_positive_integer(split.get("minimum_calibration_sessions"), "minimum_calibration_sessions"),
             minimum_test_sessions=_positive_integer(split.get("minimum_test_sessions"), "minimum_test_sessions"),
-            minimum_label_coverage=_required_finite_number(
-                evaluation.get("minimum_label_coverage"), "minimum_label_coverage"
-            ),
+            minimum_label_coverage=_required_finite_number(evaluation.get("minimum_label_coverage"), "minimum_label_coverage"),
             minimum_bin_sessions=_positive_integer(evaluation.get("minimum_bin_sessions"), "minimum_bin_sessions"),
             minimum_selection_folds=_positive_integer(
-                evaluation.get("minimum_selection_folds", 2), "minimum_selection_folds",
+                evaluation.get("minimum_selection_folds", 2),
+                "minimum_selection_folds",
             ),
             gap_sessions=_positive_integer(split.get("gap_sessions"), "gap_sessions"),
             calibration_bin_count=_positive_integer(evaluation.get("calibration_bin_count"), "calibration_bin_count"),
@@ -595,28 +713,25 @@ def _probability_config_from_metadata(
                 evaluation.get("minimum_isotonic_calibration_sessions"), "minimum_isotonic_calibration_sessions"
             ),
             empirical_bayes_bin_count=_positive_integer(baseline.get("bin_count"), "empirical_bayes_bin_count"),
-            empirical_bayes_prior_strength=_required_finite_number(
-                baseline.get("prior_strength"), "empirical_bayes_prior_strength"
-            ),
+            empirical_bayes_prior_strength=_required_finite_number(baseline.get("prior_strength"), "empirical_bayes_prior_strength"),
             l2_strength=_required_finite_number(model.get("l2_strength"), "l2_strength"),
             bootstrap_samples=_positive_integer(evaluation.get("bootstrap_samples"), "bootstrap_samples"),
             maximum_iterations=_positive_integer(model.get("maximum_iterations"), "maximum_iterations"),
-            convergence_tolerance=_required_finite_number(
-                model.get("convergence_tolerance"), "convergence_tolerance"
-            ),
+            convergence_tolerance=_required_finite_number(model.get("convergence_tolerance"), "convergence_tolerance"),
         )
     except ValueError as exc:
         raise ProbabilityArtifactError("上涨概率 artifact set config 无效") from exc
 
 
 def _validate_rebuilt_study(
-    metadata: Mapping[str, object], rebuilt: Mapping[str, object], target: str, horizon: int,
+    metadata: Mapping[str, object],
+    rebuilt: Mapping[str, object],
+    target: str,
+    horizon: int,
 ) -> None:
     for name in _REPLAY_STUDY_FIELDS:
         if name not in metadata or metadata[name] != rebuilt.get(name):
-            raise ProbabilityArtifactError(
-                f"上涨概率 artifact set {target}/{horizon} {name} 无法从完整输入确定性重放"
-            )
+            raise ProbabilityArtifactError(f"上涨概率 artifact set {target}/{horizon} {name} 无法从完整输入确定性重放")
 
 
 def _verify_normalized_artifact(
@@ -627,10 +742,14 @@ def _verify_normalized_artifact(
     _require_exact_keys(normalized, _TOP_LEVEL_KEYS, "artifact")
     if normalized["schema_version"] != PROBABILITY_ARTIFACT_SCHEMA_VERSION:
         raise ProbabilityArtifactError("上涨概率 artifact schema_version 不受支持")
-    _required_text(normalized["generated_at"], "generated_at")
+    generated_at = _validated_artifact_timestamp(normalized["generated_at"], "generated_at")
     payload = _required_mapping(normalized["payload"], "payload")
-    integrity = _validate_integrity(normalized["integrity"])
-    actual_digest = _validated_payload_integrity_digest(payload)
+    integrity = _validate_integrity(normalized["integrity"], allow_legacy=allow_legacy)
+    actual_digest = (
+        _artifact_integrity_digest(generated_at, payload)
+        if integrity["scope"] == PROBABILITY_ARTIFACT_DIGEST_SCOPE
+        else _validated_payload_integrity_digest(payload)
+    )
     if integrity["integrity_digest"] != actual_digest:
         raise ProbabilityArtifactError("上涨概率 artifact integrity digest 不一致")
     normalized["payload"] = _validate_normalized_payload(payload, allow_legacy=allow_legacy)
@@ -638,6 +757,8 @@ def _verify_normalized_artifact(
         cast(Mapping[str, object], normalized["payload"]),
         cast(str, normalized["generated_at"]),
     )
+    if integrity["scope"] == PROBABILITY_ARTIFACT_DIGEST_SCOPE:
+        _validate_result_maturity_time(cast(Mapping[str, object], normalized["payload"]), generated_at)
     normalized["integrity"] = integrity
     return normalized
 
@@ -652,43 +773,65 @@ def write_probability_artifact(
     target = Path(path).expanduser().absolute()
     database = Path(database_path).expanduser().resolve()
     _reject_database_target(target, database)
+    try:
+        require_project_managed_artifact_database(target, database, PROBABILITY_MANAGED_DIRECTORY)
+    except MarketScanArtifactLeaseError as exc:
+        raise ProbabilityArtifactError(str(exc)) from exc
     verified = verify_probability_artifact(artifact)
     encoded = _canonical_validated_json(verified).encode("utf-8")
+    payload = cast(Mapping[str, object], verified["payload"])
     try:
-        exclusive_atomic_publish(
+        with verified_market_scan_artifact_publication(
+            database,
             target,
-            encoded,
-            max_bytes=PROBABILITY_ARTIFACT_MAX_BYTES,
-            before_publish=lambda: _reject_database_target(target, database),
-        )
+            _publication_run_manifest(payload),
+            managed_directory=PROBABILITY_MANAGED_DIRECTORY,
+        ):
+            publish_market_scan_artifact(
+                target,
+                encoded,
+                max_bytes=PROBABILITY_ARTIFACT_MAX_BYTES,
+                before_publish=lambda: _reject_database_target(target, database),
+            )
     except ArtifactContentConflictError as exc:
-        raise ProbabilityArtifactError(
-            f"上涨概率 artifact 已存在且内容不同，拒绝覆盖不可变证据：{target}"
-        ) from exc
+        raise ProbabilityArtifactError(f"上涨概率 artifact 已存在且内容不同，拒绝覆盖不可变证据：{target}") from exc
     except ArtifactIOError as exc:
         raise ProbabilityArtifactError(f"上涨概率 artifact 写入失败：{target}") from exc
     except ProbabilityArtifactError:
         raise
+    except MarketScanArtifactLeaseError as exc:
+        raise ProbabilityArtifactError("上涨概率 artifact 来源批次已失效") from exc
     except OSError as exc:
         raise ProbabilityArtifactError(f"上涨概率 artifact 写入失败：{target}") from exc
     return target
+
+
+def probability_artifact_run_manifest(
+    artifact: Mapping[str, object],
+) -> tuple[int, ...]:
+    """Return every run semantically referenced by one verified artifact."""
+
+    verified = verify_probability_artifact(artifact)
+    return _publication_run_manifest(cast(Mapping[str, object], verified["payload"]))
+
+
+def _publication_run_manifest(payload: Mapping[str, object]) -> tuple[int, ...]:
+    studies = cast(Sequence[Mapping[str, object]], payload["studies"])
+    encoded = [_required_mapping(study["metadata"], "study.metadata").get("artifact_set_run_ids") for study in studies]
+    if all(value is None for value in encoded):
+        return (_single_artifact_run_id(payload),)
+    return _artifact_run_manifest(payload)
 
 
 def load_probability_artifact(path: str | Path) -> dict[str, object]:
     """Load and strictly verify an artifact; malformed input never degrades open."""
     source = Path(path).expanduser().absolute()
     try:
-        decoded = decode_json_bytes(
-            read_regular_file(source, max_bytes=PROBABILITY_ARTIFACT_MAX_BYTES)
-        )
+        decoded = decode_json_bytes(read_regular_file(source, max_bytes=PROBABILITY_ARTIFACT_MAX_BYTES))
     except ArtifactDuplicateKeyError as exc:
-        raise ProbabilityArtifactError(
-            f"上涨概率 artifact JSON 包含重复 key：{exc.key}"
-        ) from exc
+        raise ProbabilityArtifactError(f"上涨概率 artifact JSON 包含重复 key：{exc.key}") from exc
     except ArtifactNonFiniteConstantError as exc:
-        raise ProbabilityArtifactError(
-            f"上涨概率 artifact JSON 包含非有限常量：{exc.constant}"
-        ) from exc
+        raise ProbabilityArtifactError(f"上涨概率 artifact JSON 包含非有限常量：{exc.constant}") from exc
     except ArtifactIOError as exc:
         raise ProbabilityArtifactError(f"上涨概率 artifact 读取失败：{source}") from exc
     if not isinstance(decoded, Mapping):
@@ -712,14 +855,21 @@ def _validate_normalized_payload(
         _require_exact_keys(normalized, _LEGACY_PAYLOAD_KEYS, "payload")
     else:
         _require_exact_keys(normalized, _PAYLOAD_KEYS, "payload")
-        if contract != PROBABILITY_RESULT_CONTRACT_VERSION:
+        if contract not in _SELF_CONTAINED_RESULT_CONTRACTS:
             raise ProbabilityArtifactError("上涨概率 result record contract 不受支持")
+        if contract in _READ_ONLY_RESULT_CONTRACTS and not allow_legacy:
+            raise ProbabilityArtifactError("上涨概率 result record contract 仅允许只读兼容回放")
     studies, study_statuses = _validated_studies(normalized["studies"])
-    records = _validated_records(normalized["records"])
+    records = _validated_records(normalized["records"], contract=cast(str | None, contract))
     _validate_record_studies(records, study_statuses)
-    if contract == PROBABILITY_RESULT_CONTRACT_VERSION:
+    if contract in _SELF_CONTAINED_RESULT_CONTRACTS:
         feature_evidence = _validated_feature_evidence(normalized["feature_evidence"])
-        _validate_self_contained_results(records, studies, feature_evidence)
+        _validate_self_contained_results(
+            records,
+            studies,
+            feature_evidence,
+            record_contract_version=cast(str, contract),
+        )
         normalized["feature_evidence"] = feature_evidence
     normalized["studies"] = studies
     normalized["records"] = records
@@ -740,12 +890,16 @@ def _validated_studies(value: object) -> tuple[list[dict[str, object]], dict[tup
     return studies, statuses
 
 
-def _validated_records(value: object) -> list[dict[str, object]]:
+def _validated_records(
+    value: object,
+    *,
+    contract: str | None,
+) -> list[dict[str, object]]:
     rows = _required_list(value, "payload.records")
     records: list[dict[str, object]] = []
     identities: set[tuple[int, str, int, str]] = set()
     for index, raw in enumerate(rows):
-        record = _validate_record(raw, f"payload.records[{index}]")
+        record = _validate_record(raw, f"payload.records[{index}]", contract=contract)
         key = (*_study_key(record), cast(str, record["symbol"]))
         if key in identities:
             raise ProbabilityArtifactError(f"上涨概率 artifact 存在重复 record：{key}")
@@ -767,15 +921,22 @@ def _validate_study(value: object, path: str) -> dict[str, object]:
     return study
 
 
-def _validate_record(value: object, path: str) -> dict[str, object]:
+def _validate_record(
+    value: object,
+    path: str,
+    *,
+    contract: str | None,
+) -> dict[str, object]:
     record = _required_mapping(value, path)
-    _require_exact_keys(record, _RECORD_KEYS, path)
+    current = contract == PROBABILITY_RESULT_CONTRACT_VERSION
+    _require_exact_keys(record, _CURRENT_RECORD_KEYS if current else _LEGACY_RECORD_KEYS, path)
     _validate_identity(record, path)
     record["symbol"] = _required_text(record["symbol"], f"{path}.symbol")
     status = _required_status(record["status"], f"{path}.status")
     probability = record["probability"]
-    interval = record["confidence_interval"]
-    _validate_probability_state(status, probability, interval, path)
+    bias = record["calibration_bias_interval"] if current else None
+    adjusted = record["calibration_adjusted_probability_interval"] if current else record["confidence_interval"]
+    _validate_probability_state(status, probability, bias, adjusted, path, current=current)
     record["status"] = status
     record["details"] = _required_mapping(record["details"], f"{path}.details")
     return record
@@ -829,21 +990,39 @@ def _validate_limitations(value: object, path: str) -> list[object]:
     return cast(list[object], normalized)
 
 
-def _validate_probability_state(status: str, probability: object, interval: object, path: str) -> None:
+def _validate_probability_state(
+    status: str,
+    probability: object,
+    bias: object,
+    adjusted: object,
+    path: str,
+    *,
+    current: bool,
+) -> None:
     if status == "insufficient_data":
-        if probability is not None or interval is not None:
-            raise ProbabilityArtifactError(f"{path} 数据不足时 probability 和 CI 必须为 null")
+        if probability is not None or bias is not None or adjusted is not None:
+            raise ProbabilityArtifactError(f"{path} 数据不足时 probability 与校准区间必须为 null")
         return
-    estimate = _required_probability(probability, f"{path}.probability")
-    bounds = _required_list(interval, f"{path}.confidence_interval")
+    _required_probability(probability, f"{path}.probability")
+    if current:
+        bias_bounds = _required_list(bias, f"{path}.calibration_bias_interval")
+        if len(bias_bounds) != 2:
+            raise ProbabilityArtifactError(f"{path}.calibration_bias_interval 必须为 [lower, upper]")
+        lower_bias = _required_finite_number(bias_bounds[0], f"{path}.calibration_bias_interval[0]")
+        upper_bias = _required_finite_number(bias_bounds[1], f"{path}.calibration_bias_interval[1]")
+        if not -1 <= lower_bias <= upper_bias <= 1:
+            raise ProbabilityArtifactError(f"{path}.calibration_bias_interval 必须为有序 [-1,1] 区间")
+    bounds = _required_list(adjusted, f"{path}.calibration_adjusted_probability_interval")
     if len(bounds) != 2:
-        raise ProbabilityArtifactError(f"{path}.confidence_interval 必须为 [lower, upper]")
-    lower = _required_probability(bounds[0], f"{path}.confidence_interval[0]")
-    upper = _required_probability(bounds[1], f"{path}.confidence_interval[1]")
+        raise ProbabilityArtifactError(f"{path}.calibration_adjusted_probability_interval 必须为 [lower, upper]")
+    lower = _required_probability(bounds[0], f"{path}.calibration_adjusted_probability_interval[0]")
+    upper = _required_probability(bounds[1], f"{path}.calibration_adjusted_probability_interval[1]")
     if lower > upper:
-        raise ProbabilityArtifactError(f"{path}.confidence_interval 上下界颠倒")
-    if not lower <= estimate <= upper:
-        raise ProbabilityArtifactError(f"{path}.confidence_interval 必须覆盖 probability")
+        raise ProbabilityArtifactError(f"{path}.calibration_adjusted_probability_interval 上下界颠倒")
+    # This is a calibration-adjusted probability interval p + signed bias CI.
+    # A statistically significant positive/negative bias interval legitimately
+    # does not cover the unadjusted point probability; replay below verifies the
+    # exact relationship to calibration_offset_ci_95.
 
 
 def _validate_record_studies(
@@ -862,6 +1041,8 @@ def _validate_self_contained_results(
     records: Sequence[Mapping[str, object]],
     studies: Sequence[Mapping[str, object]],
     feature_evidence: Sequence[Mapping[str, object]],
+    *,
+    record_contract_version: str,
 ) -> None:
     study_by_key = {_study_key(study): study for study in studies}
     features_by_key = _feature_evidence_by_key(feature_evidence)
@@ -873,7 +1054,12 @@ def _validate_self_contained_results(
         feature_row = features_by_key.get(str(details.get("feature_evidence_key") or ""))
         if feature_row is None:
             raise ProbabilityArtifactError("上涨概率 record 引用的 feature evidence 不存在")
-        _validate_result_details(record, study, feature_row)
+        _validate_result_details(
+            record,
+            study,
+            feature_row,
+            record_contract_version=record_contract_version,
+        )
         _replayed_record_probability(record, study, feature_row)
 
 
@@ -883,8 +1069,14 @@ def _validated_feature_evidence(value: object) -> list[dict[str, object]]:
     identities: set[str] = set()
     required = frozenset(
         {
-            "run_id", "symbol", "quote_date", "features", "feature_names",
-            "feature_vector_digest", "dimensions", "source_evidence_digest",
+            "run_id",
+            "symbol",
+            "quote_date",
+            "features",
+            "feature_names",
+            "feature_vector_digest",
+            "dimensions",
+            "source_evidence_digest",
         }
     )
     for raw in rows:
@@ -922,6 +1114,8 @@ def _feature_evidence_by_key(value: object) -> dict[str, Mapping[str, object]]:
 
 def _validate_study_replay_evidence(study: Mapping[str, object]) -> None:
     metadata = _required_mapping(study["metadata"], "study.metadata")
+    if metadata.get("filter_qualified") is True:
+        raise ProbabilityArtifactError("上涨概率 core artifact 不能在缺少独立绑定 authorization 时声明 filter_qualified")
     digests = _required_mapping(study["digests"], "study.digests")
     versions = _required_mapping(study["versions"], "study.versions")
     if metadata.get("input_digest") != digests["input"]:
@@ -941,7 +1135,8 @@ def _validate_study_replay_evidence(study: Mapping[str, object]) -> None:
 
 
 def _validate_label_contract_identity(
-    metadata: Mapping[str, object], digests: Mapping[str, object],
+    metadata: Mapping[str, object],
+    digests: Mapping[str, object],
 ) -> None:
     digest = metadata.get("label_contract_digest")
     registry_digest = digests.get("label_contract")
@@ -1014,14 +1209,19 @@ def _validate_fold_components(fold: Mapping[str, object]) -> None:
 
 
 def _validate_final_fold_matches_study(
-    metadata: Mapping[str, object], fold: Mapping[str, object],
+    metadata: Mapping[str, object],
+    fold: Mapping[str, object],
 ) -> None:
     pairs = (
-        ("split", "split"), ("training_cutoff", "training_cutoff"), ("base_rate", "base_rate"),
-        ("model", "model"), ("calibrator", "calibrator"),
+        ("split", "split"),
+        ("training_cutoff", "training_cutoff"),
+        ("base_rate", "base_rate"),
+        ("model", "model"),
+        ("calibrator", "calibrator"),
         ("isotonic_calibrator", "isotonic_calibrator"),
         ("empirical_bayes_baseline", "empirical_bayes_baseline"),
-        ("model_digest", "model_digest"), ("calibrator_digest", "calibrator_digest"),
+        ("model_digest", "model_digest"),
+        ("calibrator_digest", "calibrator_digest"),
         ("isotonic_calibrator_digest", "isotonic_calibrator_digest"),
         ("baseline_digest", "baseline_digest"),
     )
@@ -1033,12 +1233,19 @@ def _validate_result_details(
     record: Mapping[str, object],
     study: Mapping[str, object],
     feature_row: Mapping[str, object],
+    *,
+    record_contract_version: str,
 ) -> None:
     details = _required_mapping(record["details"], "record.details")
-    missing = sorted(_REQUIRED_RESULT_DETAIL_KEYS - details.keys())
+    current = record_contract_version == PROBABILITY_RESULT_CONTRACT_VERSION
+    required = _CURRENT_REQUIRED_RESULT_DETAIL_KEYS if current else _LEGACY_REQUIRED_RESULT_DETAIL_KEYS
+    missing = sorted(required - details.keys())
     if missing:
         raise ProbabilityArtifactError(f"上涨概率 self-contained record 缺少字段：{missing}")
-    if details["record_contract_version"] != PROBABILITY_RESULT_CONTRACT_VERSION:
+    forbidden_interval_name = "confidence_interval_definition" if current else "calibration_adjusted_probability_interval_definition"
+    if forbidden_interval_name in details:
+        raise ProbabilityArtifactError("上涨概率 record 区间语义字段与 contract 版本冲突")
+    if details["record_contract_version"] != record_contract_version:
         raise ProbabilityArtifactError("上涨概率 record_contract_version 不一致")
     expected_sample_id = f'{record["run_id"]}:{record["symbol"]}:{record["horizon"]}:{record["target"]}'
     if details["sample_id"] != expected_sample_id:
@@ -1073,12 +1280,7 @@ def _validate_result_execution(details: Mapping[str, object]) -> None:
     model_target = details["model_target"]
     if model_target is not None and (isinstance(model_target, bool) or model_target not in (0, 1)):
         raise ProbabilityArtifactError("上涨概率 record model_target 必须是 0、1 或 null")
-    if executable and (
-        not mature
-        or model_target is None
-        or details["label_status"] != "modelled"
-        or details["source_evidence_digest"] is None
-    ):
+    if executable and (not mature or model_target is None or details["label_status"] != "modelled" or details["source_evidence_digest"] is None):
         raise ProbabilityArtifactError("上涨概率 executable record 缺少成熟标签或时点证据")
     if not executable and model_target is not None:
         raise ProbabilityArtifactError("上涨概率不可执行 record 的 model_target 必须为 null")
@@ -1111,10 +1313,7 @@ def _validate_result_fold(record: Mapping[str, object], study: Mapping[str, obje
 
 def _fold_test_dates(fold: Mapping[str, object]) -> list[str]:
     split = _required_mapping(fold["split"], "fold.split")
-    return [
-        _required_text(value, "fold.split.test_dates[]")
-        for value in _required_list(split["test_dates"], "fold.split.test_dates")
-    ]
+    return [_required_text(value, "fold.split.test_dates[]") for value in _required_list(split["test_dates"], "fold.split.test_dates")]
 
 
 def _expected_result_digests(study: Mapping[str, object], fold_id: object) -> dict[str, object]:
@@ -1151,10 +1350,22 @@ def _study_calibration_summary(metadata: Mapping[str, object]) -> dict[str, obje
     calibrated = metrics.get("calibrated") if isinstance(metrics, Mapping) else None
     values: Mapping[str, object] = calibrated if isinstance(calibrated, Mapping) else {}
     names = (
-        "observation_count", "independent_session_count", "brier_score", "brier_skill_score",
-        "reference_base_rate_mean", "reference_brier_score", "reference_definition",
-        "log_loss", "ece", "auc", "bin_monotonic", "highest_bin_above_base_rate",
-        "brier_score_ci_95", "actual_positive_rate_ci_95", "calibration_offset_ci_95", "bootstrap_samples",
+        "observation_count",
+        "independent_session_count",
+        "brier_score",
+        "brier_skill_score",
+        "reference_base_rate_mean",
+        "reference_brier_score",
+        "reference_definition",
+        "log_loss",
+        "ece",
+        "auc",
+        "bin_monotonic",
+        "highest_bin_above_base_rate",
+        "brier_score_ci_95",
+        "actual_positive_rate_ci_95",
+        "calibration_offset_ci_95",
+        "bootstrap_samples",
     )
     bins = values.get("calibration_bins")
     rows = [item for item in bins if isinstance(item, Mapping)] if isinstance(bins, list) else []
@@ -1183,9 +1394,7 @@ def _replayed_record_probability(
     probability = _replay_calibrated_probability(calibrator, raw)
     _require_close(details["raw_probability"], raw, "record raw_probability")
     _require_close(record["probability"], probability, "record probability")
-    baseline = _required_mapping(
-        predictor.get("empirical_bayes_baseline"), "record predictor.empirical_bayes_baseline"
-    )
+    baseline = _required_mapping(predictor.get("empirical_bayes_baseline"), "record predictor.empirical_bayes_baseline")
     _require_close(
         details["empirical_bayes_probability"],
         _replay_baseline_probability(baseline, raw),
@@ -1243,35 +1452,81 @@ def _validate_replayed_interval(
     probability: float,
 ) -> None:
     offsets = _finite_number_list(details["calibration_offset_ci_95"], "calibration_offset_ci_95")
-    interval = _required_list(record["confidence_interval"], "record.confidence_interval")
+    current = "calibration_adjusted_probability_interval" in record
+    interval = _required_list(
+        record["calibration_adjusted_probability_interval" if current else "confidence_interval"],
+        "record.calibration_adjusted_probability_interval",
+    )
     if len(offsets) != 2 or len(interval) != 2:
-        raise ProbabilityArtifactError("上涨概率回放 CI 必须具有两个边界")
+        raise ProbabilityArtifactError("上涨概率回放校准区间必须具有两个边界")
+    if current and record.get("calibration_bias_interval") != offsets:
+        raise ProbabilityArtifactError("上涨概率 signed calibration bias 无法从 record 重放")
     expected = [max(0.0, min(1.0, probability + value)) for value in offsets]
     for persisted, replayed in zip(interval, expected, strict=True):
-        _require_close(persisted, replayed, "record confidence_interval")
+        _require_close(persisted, replayed, "record calibration adjusted interval")
 
 
 def _validate_result_generated_at(payload: Mapping[str, object], generated_at: str) -> None:
-    if payload.get("record_contract_version") != PROBABILITY_RESULT_CONTRACT_VERSION:
+    if payload.get("record_contract_version") not in _SELF_CONTAINED_RESULT_CONTRACTS:
         return
     records = cast(Sequence[Mapping[str, object]], payload["records"])
     if any(cast(Mapping[str, object], record["details"])["generated_at"] != generated_at for record in records):
         raise ProbabilityArtifactError("上涨概率 record generated_at 与 artifact 不一致")
 
 
-def _validate_integrity(value: object) -> dict[str, object]:
+def _validated_artifact_timestamp(value: object, path: str) -> str:
+    text = _required_text(value, path)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ProbabilityArtifactError(f"{path} 无效") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProbabilityArtifactError(f"{path} 必须包含时区")
+    if parsed.astimezone(timezone.utc) > utc_now() + timedelta(minutes=5):
+        raise ProbabilityArtifactError(f"{path} 不能晚于当前时间")
+    return text
+
+
+def _validate_result_maturity_time(payload: Mapping[str, object], generated_at: str) -> None:
+    if payload.get("record_contract_version") not in _SELF_CONTAINED_RESULT_CONTRACTS:
+        return
+    generated = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    market_date = generated.astimezone(timezone(timedelta(hours=8))).date()
+    records = cast(Sequence[Mapping[str, object]], payload["records"])
+    for record in records:
+        details = cast(Mapping[str, object], record["details"])
+        maturity_dates = [_optional_artifact_date(details.get(name), f"record.details.{name}") for name in ("quote_date", "entry_date", "exit_date")]
+        latest = max((value for value in maturity_dates if value is not None), default=None)
+        if latest is not None and latest > market_date:
+            raise ProbabilityArtifactError("上涨概率 artifact 生成时间早于绑定行情或标签成熟日期")
+
+
+def _optional_artifact_date(value: object, path: str) -> date | None:
+    if value is None:
+        return None
+    text = _required_text(value, path)
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise ProbabilityArtifactError(f"{path} 日期无效") from exc
+    if parsed.isoformat() != text:
+        raise ProbabilityArtifactError(f"{path} 日期无效")
+    return parsed
+
+
+def _validate_integrity(value: object, *, allow_legacy: bool) -> dict[str, object]:
     integrity = _required_mapping(value, "integrity")
     _require_exact_keys(integrity, _INTEGRITY_KEYS, "integrity")
     expected = {
         "algorithm": PROBABILITY_ARTIFACT_DIGEST_ALGORITHM,
-        "scope": PROBABILITY_ARTIFACT_DIGEST_SCOPE,
         "notice": PROBABILITY_ARTIFACT_INTEGRITY_NOTICE,
     }
     if any(integrity[name] != expected_value for name, expected_value in expected.items()):
         raise ProbabilityArtifactError("上涨概率 artifact integrity contract 不受支持")
-    integrity["integrity_digest"] = _required_sha256(
-        integrity["integrity_digest"], "integrity.integrity_digest"
-    )
+    scope = integrity["scope"]
+    if scope != PROBABILITY_ARTIFACT_DIGEST_SCOPE and not (allow_legacy and scope == "payload"):
+        raise ProbabilityArtifactError("上涨概率 artifact integrity scope 不受支持")
+    integrity["integrity_digest"] = _required_sha256(integrity["integrity_digest"], "integrity.integrity_digest")
     return integrity
 
 

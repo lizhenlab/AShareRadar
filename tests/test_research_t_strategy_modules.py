@@ -70,8 +70,47 @@ def test_t_strategy_uses_price_buffer_when_resistance_is_missing() -> None:
     assert report.high_zone == "102.00 附近"
 
 
+def test_unavailable_t_strategy_inputs_never_generate_actions_or_price_zones() -> None:
+    first = build_t_strategy_assistant_report(
+        _analysis(90),
+        _feature(
+            support=95,
+            resistance=107,
+            atr14=2,
+            atr_pct=2,
+            support_available=False,
+            resistance_available=False,
+            atr14_available=False,
+        ),
+        _regime(1.0),
+        _validation("条件较好"),
+    )
+    perturbed = build_t_strategy_assistant_report(
+        _analysis(90),
+        _feature(
+            support=1,
+            resistance=999,
+            atr14=88,
+            atr_pct=88,
+            support_available=False,
+            resistance_available=False,
+            atr14_available=False,
+        ),
+        _regime(1.0),
+        _validation("条件较好"),
+    )
+
+    assert first == perturbed
+    assert first.suitability == "等待更大区间"
+    assert first.low_zone == first.high_zone == "待确认"
+    assert all("低吸只看" not in item and "高抛只看" not in item for item in first.execution_steps)
+
+
 def _analysis(data_quality_score: int):
-    return SimpleNamespace(data_quality=SimpleNamespace(score=data_quality_score))
+    return SimpleNamespace(
+        quote=SimpleNamespace(code="600519", market="SH", timestamp="2026-05-13 10:00:00"),
+        data_quality=SimpleNamespace(score=data_quality_score),
+    )
 
 
 def _feature(
@@ -83,6 +122,9 @@ def _feature(
     atr_pct: float = 2,
     trend_score: int = 70,
     ma5: float = 99,
+    support_available: bool = True,
+    resistance_available: bool = True,
+    atr14_available: bool = True,
 ):
     return SimpleNamespace(
         price=price,
@@ -92,6 +134,9 @@ def _feature(
         atr_pct=atr_pct,
         trend_score=trend_score,
         ma5=ma5,
+        support_available=support_available,
+        resistance_available=resistance_available,
+        atr14_available=atr14_available,
     )
 
 

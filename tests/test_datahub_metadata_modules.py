@@ -14,6 +14,7 @@ import pytest
 from app.config import Settings
 from app.models.schemas import PlateItem, StockConceptItem, StockInfo
 from app.services.cache import SQLiteCache
+from app.services.datahub import DataHub
 from app.services.datahub_metadata import (
     MetadataCoordinator,
     StockPoolRequest,
@@ -24,6 +25,7 @@ from app.services.datahub_metadata import (
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.local_metadata_provider import LocalIndividualStockProvider
 from app.utils.clock import market_now_naive
+from app.workflows.workbench_pipeline import _stock_concepts_or_error
 from tests.factories import make_plate_item, make_stock_info
 
 
@@ -652,9 +654,16 @@ def test_metadata_coordinator_offloads_cache_and_runtime_io_from_event_loop_thre
             symbol: str,
             max_age_seconds: int,
             limit: int = 8,
+            *,
+            excluded_source: str | None = None,
         ) -> list[StockConceptItem]:
             self._track("get_stock_concepts")
-            return super().get_stock_concepts(symbol, max_age_seconds, limit=limit)
+            return super().get_stock_concepts(
+                symbol,
+                max_age_seconds,
+                limit=limit,
+                excluded_source=excluded_source,
+            )
 
         def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
             self._track("save_stock_concepts")
@@ -1023,6 +1032,421 @@ def test_stock_pool_refresh_still_uses_stale_keyword_fallback_after_provider_fai
     assert [item.symbol for item in rows] == ["600706.SH"]
     assert calls == 1
     assert message == "股票池数据源失败，使用本地缓存股票池"
+
+
+def test_interactive_concepts_return_only_fresh_provider_cache_without_starting_provider() -> None:
+    class ProviderMustNotRun:
+        source_name = "不应调用的概念源"
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            raise AssertionError("interactive concept read must remain cache-only")
+
+    async def run_check(path: Path) -> tuple[list[StockConceptItem], bool]:
+        settings = Settings(stock_concept_cache_seconds=3600)
+        cache = SQLiteCache(path)
+        cache.save_stock_concepts(
+            "600519.SH",
+            [
+                _concept(symbol="600519.SH", rank=1, name="白酒", source="可信概念缓存").model_copy(
+                    update={"updated_at": market_now_naive().strftime("%Y-%m-%d %H:%M:%S")}
+                )
+            ],
+        )
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": ProviderMustNotRun()},
+            runtime=runtime,
+            priority=lambda kind: [(1, "external")],
+        )
+        try:
+            result = await coordinator.cached_stock_concepts_result("600519", limit=5)
+            return result.rows, runtime.provider_call_in_flight("external", "concept")
+        finally:
+            await runtime.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        rows, provider_in_flight = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [(item.symbol, item.name, item.source) for item in rows] == [("600519.SH", "白酒", "可信概念缓存")]
+    assert provider_in_flight is False
+
+
+def test_interactive_concepts_filter_static_rows_before_limit() -> None:
+    async def run_check(path: Path) -> list[StockConceptItem]:
+        settings = Settings(stock_concept_cache_seconds=3600)
+        cache = SQLiteCache(path)
+        updated_at = market_now_naive().strftime("%Y-%m-%d %H:%M:%S")
+        cache.save_stock_concepts(
+            "600519.SH",
+            [
+                _concept(symbol="600519.SH", rank=1, name="静态高涨幅", source="本地个股基础数据").model_copy(
+                    update={"change_pct": 99.0, "updated_at": updated_at}
+                ),
+                _concept(symbol="600519.SH", rank=2, name="外部缓存", source="历史provider缓存").model_copy(
+                    update={"change_pct": 1.0, "updated_at": updated_at}
+                ),
+            ],
+        )
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE stock_concept SET source = ? WHERE symbol = ? AND name = ?",
+                (" 本地个股基础数据 ", "600519.SH", "静态高涨幅"),
+            )
+            raw_source = conn.execute(
+                "SELECT source FROM stock_concept WHERE symbol = ? AND name = ?",
+                ("600519.SH", "静态高涨幅"),
+            ).fetchone()
+            old_filter_winner = conn.execute(
+                """
+                SELECT name
+                FROM stock_concept
+                WHERE symbol = ? AND source <> ?
+                ORDER BY change_pct DESC, rank ASC, name ASC
+                LIMIT 1
+                """,
+                ("600519.SH", "本地个股基础数据"),
+            ).fetchone()
+        assert raw_source == (" 本地个股基础数据 ",)
+        assert old_filter_winner == ("静态高涨幅",)
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={},
+            runtime=runtime,
+            priority=lambda kind: [],
+        )
+        try:
+            return (await coordinator.cached_stock_concepts_result("600519.SH", limit=1)).rows
+        finally:
+            await runtime.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert [(item.name, item.source) for item in rows] == [("外部缓存", "历史provider缓存")]
+
+
+@pytest.mark.parametrize("cache_state", ["missing", "stale", "static-only"])
+def test_interactive_concepts_fail_closed_without_starting_provider(cache_state: str) -> None:
+    class CountingProvider:
+        source_name = "不应调用的概念源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            self.calls += 1
+            return [_concept(symbol=symbol, rank=1, name="在线概念", source=self.source_name)]
+
+    async def run_check(path: Path) -> tuple[int, bool, str]:
+        settings = Settings(stock_concept_cache_seconds=60)
+        cache = SQLiteCache(path)
+        if cache_state != "missing":
+            updated_at = (
+                market_now_naive() - timedelta(hours=1)
+                if cache_state == "stale"
+                else market_now_naive()
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            source = "缓存概念" if cache_state == "stale" else "本地个股基础数据"
+            cache.save_stock_concepts(
+                "600519.SH",
+                [_concept(symbol="600519.SH", rank=1, name="白酒", source=source).model_copy(update={"updated_at": updated_at})],
+            )
+        provider = CountingProvider()
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": provider},
+            runtime=runtime,
+            priority=lambda kind: [(1, "external")],
+        )
+        try:
+            with pytest.raises(RuntimeError, match=r"概念归属新鲜非静态缓存不可用：600519\.SH") as captured:
+                await coordinator.cached_stock_concepts_result("600519.SH", limit=5)
+            return provider.calls, runtime.provider_call_in_flight("external", "concept"), str(captured.value)
+        finally:
+            await runtime.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        provider_calls, provider_in_flight, message = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert provider_calls == 0
+    assert provider_in_flight is False
+    assert "交互式研究不发起在线概念扫描" in message
+
+
+def test_explicit_concept_refresh_still_calls_provider_and_warms_interactive_cache() -> None:
+    class LiveConceptProvider:
+        source_name = "受控刷新概念源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            self.calls += 1
+            return [
+                _concept(symbol=symbol, rank=1, name="刷新概念", source=self.source_name).model_copy(
+                    update={"updated_at": market_now_naive().strftime("%Y-%m-%d %H:%M:%S")}
+                )
+            ]
+
+    async def run_check(path: Path) -> tuple[int, list[str], list[str]]:
+        settings = Settings(stock_concept_cache_seconds=3600)
+        cache = SQLiteCache(path)
+        provider = LiveConceptProvider()
+        runtime = ProviderRuntime(cache, settings)
+        coordinator = MetadataCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"external": provider},
+            runtime=runtime,
+            priority=lambda kind: [(1, "external")],
+        )
+        try:
+            with pytest.raises(RuntimeError, match="新鲜非静态缓存不可用"):
+                await coordinator.cached_stock_concepts_result("600519.SH", limit=5)
+            refreshed = await coordinator.stock_concepts_result("600519.SH", limit=5, refresh=True)
+            cached = await coordinator.cached_stock_concepts_result("600519.SH", limit=5)
+            return provider.calls, [item.name for item in refreshed.rows], [item.name for item in cached.rows]
+        finally:
+            await runtime.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        calls, refreshed_names, cached_names = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert calls == 1
+    assert refreshed_names == ["刷新概念"]
+    assert cached_names == refreshed_names
+
+
+def test_workbench_cache_miss_returns_without_concept_provider_or_orphan() -> None:
+    class CountingProvider:
+        source_name = "不应调用的在线概念源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            self.calls += 1
+            return [_concept(symbol=symbol, rank=1, name="在线概念", source=self.source_name)]
+
+    async def run_check(path: Path) -> tuple[list[StockConceptItem], str | None, int, bool]:
+        settings = Settings(cache_path=str(path), stock_concept_cache_seconds=60)
+        hub = DataHub(cache=SQLiteCache(path, settings=settings), settings=settings)
+        provider = CountingProvider()
+        hub.providers["akshare"] = provider  # type: ignore[assignment]
+        try:
+            concepts, error = await _stock_concepts_or_error(hub, "600519.SH")
+            in_flight = hub._provider_runtime.provider_call_in_flight("akshare", "concept")
+            return concepts, error, provider.calls, in_flight
+        finally:
+            await hub.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        concepts, error, provider_calls, provider_in_flight = asyncio.run(
+            run_check(Path(tmpdir) / "cache.sqlite3")
+        )
+
+    assert concepts == []
+    assert error == "概念归属新鲜非静态缓存不可用：600519.SH；交互式研究不发起在线概念扫描"
+    assert provider_calls == 0
+    assert provider_in_flight is False
+
+
+def test_workbench_concept_cache_read_error_has_no_provider_or_side_effects() -> None:
+    class ReadFailingCache(SQLiteCache):
+        concept_writes = 0
+        event_writes = 0
+
+        def get_stock_concepts(
+            self,
+            symbol: str,
+            max_age_seconds: int,
+            limit: int = 8,
+            *,
+            excluded_source: str | None = None,
+        ) -> list[StockConceptItem]:
+            raise sqlite3.DatabaseError("concept cache read failed")
+
+        def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
+            self.concept_writes += 1
+            super().save_stock_concepts(symbol, rows)
+
+        def log_event(self, category: str, message: str) -> None:
+            self.event_writes += 1
+            super().log_event(category, message)
+
+    class CountingProvider:
+        source_name = "不应调用的在线概念源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            self.calls += 1
+            return []
+
+    async def run_check(path: Path) -> tuple[str | None, int, bool, int, int]:
+        settings = Settings(cache_path=str(path), stock_concept_cache_seconds=60)
+        cache = ReadFailingCache(settings=settings)
+        hub = DataHub(cache=cache, settings=settings)
+        provider = CountingProvider()
+        hub.providers["akshare"] = provider  # type: ignore[assignment]
+        try:
+            _concepts, error = await _stock_concepts_or_error(hub, "600519.SH")
+            return (
+                error,
+                provider.calls,
+                hub._provider_runtime.provider_call_in_flight("akshare", "concept"),
+                cache.concept_writes,
+                cache.event_writes,
+            )
+        finally:
+            await hub.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        error, provider_calls, provider_in_flight, concept_writes, event_writes = asyncio.run(
+            run_check(Path(tmpdir) / "cache.sqlite3")
+        )
+
+    assert error == "concept cache read failed"
+    assert (provider_calls, provider_in_flight, concept_writes, event_writes) == (0, False, 0, 0)
+
+
+def test_one_hundred_workbench_cache_misses_do_not_start_provider_or_write() -> None:
+    class ObservedCache(SQLiteCache):
+        concept_writes = 0
+        event_writes = 0
+
+        def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
+            self.concept_writes += 1
+            super().save_stock_concepts(symbol, rows)
+
+        def log_event(self, category: str, message: str) -> None:
+            self.event_writes += 1
+            super().log_event(category, message)
+
+    class CountingProvider:
+        source_name = "不应调用的在线概念源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            self.calls += 1
+            return []
+
+    async def run_check(path: Path) -> tuple[int, int, bool, int, int]:
+        settings = Settings(cache_path=str(path), stock_concept_cache_seconds=60)
+        cache = ObservedCache(settings=settings)
+        hub = DataHub(cache=cache, settings=settings)
+        provider = CountingProvider()
+        hub.providers["akshare"] = provider  # type: ignore[assignment]
+        try:
+            results = await asyncio.gather(*(_stock_concepts_or_error(hub, "600519.SH") for _ in range(100)))
+            unavailable_count = sum(
+                concepts == [] and error is not None and "新鲜非静态缓存不可用" in error
+                for concepts, error in results
+            )
+            return (
+                unavailable_count,
+                provider.calls,
+                hub._provider_runtime.provider_call_in_flight("akshare", "concept"),
+                cache.concept_writes,
+                cache.event_writes,
+            )
+        finally:
+            await hub.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        unavailable_count, provider_calls, provider_in_flight, concept_writes, event_writes = asyncio.run(
+            run_check(Path(tmpdir) / "cache.sqlite3")
+        )
+
+    assert unavailable_count == 100
+    assert (provider_calls, provider_in_flight, concept_writes, event_writes) == (0, False, 0, 0)
+
+
+def test_cancelled_workbench_cache_reads_do_not_start_provider_or_runtime_worker() -> None:
+    class BlockingCache(SQLiteCache):
+        def __init__(self, *, settings: Settings) -> None:
+            super().__init__(settings=settings)
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.concept_writes = 0
+            self.event_writes = 0
+
+        def get_stock_concepts(
+            self,
+            symbol: str,
+            max_age_seconds: int,
+            limit: int = 8,
+            *,
+            excluded_source: str | None = None,
+        ) -> list[StockConceptItem]:
+            self.entered.set()
+            self.release.wait(timeout=1)
+            return super().get_stock_concepts(
+                symbol,
+                max_age_seconds,
+                limit=limit,
+                excluded_source=excluded_source,
+            )
+
+        def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
+            self.concept_writes += 1
+            super().save_stock_concepts(symbol, rows)
+
+        def log_event(self, category: str, message: str) -> None:
+            self.event_writes += 1
+            super().log_event(category, message)
+
+    class CountingProvider:
+        source_name = "不应调用的在线概念源"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
+            self.calls += 1
+            return []
+
+    async def run_check(path: Path) -> tuple[int, bool, int, int, int]:
+        settings = Settings(cache_path=str(path), stock_concept_cache_seconds=60)
+        cache = BlockingCache(settings=settings)
+        hub = DataHub(cache=cache, settings=settings)
+        provider = CountingProvider()
+        hub.providers["akshare"] = provider  # type: ignore[assignment]
+        tasks = [asyncio.create_task(_stock_concepts_or_error(hub, "600519.SH")) for _ in range(100)]
+        try:
+            while not cache.entered.is_set():
+                await asyncio.sleep(0.001)
+            for task in tasks:
+                task.cancel()
+            cache.release.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return (
+                sum(isinstance(result, asyncio.CancelledError) for result in results),
+                hub._provider_runtime.provider_call_in_flight("akshare", "concept"),
+                provider.calls,
+                cache.concept_writes,
+                cache.event_writes,
+            )
+        finally:
+            cache.release.set()
+            await hub.aclose()
+
+    with TemporaryDirectory() as tmpdir:
+        cancelled, provider_in_flight, provider_calls, concept_writes, event_writes = asyncio.run(
+            run_check(Path(tmpdir) / "cache.sqlite3")
+        )
+
+    assert cancelled == 100
+    assert (provider_calls, provider_in_flight, concept_writes, event_writes) == (0, False, 0, 0)
 
 
 def test_stock_concepts_returns_provider_rows_when_cache_write_fails() -> None:

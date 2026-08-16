@@ -45,6 +45,8 @@ class PaperCostOverrides(PaperTradingInput):
 
 class PaperStrategyCreate(PaperTradingInput):
     plan_id: int = Field(gt=0)
+    expected_plan_revision: int = Field(gt=0)
+    expected_plan_payload_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     allocation_pct: FiniteFloat = Field(default=10, ge=1, le=100)
     priority: int = Field(default=0, ge=-1000, le=1000)
     entry_expiry_sessions: int = Field(default=5, ge=1, le=60)
@@ -121,6 +123,7 @@ class PaperStrategy(BaseModel):
     id: int
     plan_id: int
     plan_revision: int
+    plan_payload_digest: str = Field(pattern=r"^(?:[0-9a-f]{64}|legacy-unverified)$")
     advice_id: int
     symbol: str
     activation_market_time: str
@@ -299,6 +302,7 @@ class PaperTradingRun(BaseModel):
     closed_count: int
     data_unavailable_count: int
     input_fingerprint: str = ""
+    output_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     strategy_snapshot_hash: str = ""
     market_data_hash: str = ""
     data_start_date: str | None = None

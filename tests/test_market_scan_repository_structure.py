@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
+
+import pytest
 
 from app.models.market_scan import (
     MarketScanResultWrite as ModelResultWrite,
     MarketScanRetryPlan as ModelRetryPlan,
     MarketScanSeed as ModelSeed,
 )
-from app.repositories import market_scan
+from app.repositories import market_scan, market_scan_verified_read
 from app.repositories.market_scan import (
     MarketScanRepository,
     MarketScanResultWrite,
@@ -75,3 +78,21 @@ def test_market_scan_repository_modules_remain_reviewable() -> None:
         path.name: len(path.read_text(encoding="utf-8").splitlines()) for path in SCAN_MODULES if len(path.read_text(encoding="utf-8").splitlines()) > 500
     }
     assert oversized == {}
+
+
+def test_verified_read_module_exposes_no_raw_receipt_capability_factory() -> None:
+    assert market_scan_verified_read.__all__ == [
+        "MARKET_SCAN_VERIFIED_RESULT_READ_ARGUMENTS",
+        "VerifiedMarketScanRead",
+        "verified_market_scan_read",
+    ]
+    parameters = inspect.signature(
+        market_scan_verified_read.verified_market_scan_read
+    ).parameters
+    assert tuple(parameters) == ("path", "run_id")
+    assert not hasattr(
+        market_scan_verified_read,
+        "verified_market_scan_result_page",
+    )
+    with pytest.raises(TypeError, match="Protocols cannot be instantiated"):
+        market_scan_verified_read.VerifiedMarketScanRead()

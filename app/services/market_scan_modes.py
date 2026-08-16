@@ -9,6 +9,7 @@ from app.services.trading_calendar import (
     CALL_AUCTION_START_TIME,
     DAILY_KLINE_PUBLISH_TIME,
     MORNING_SESSION_START_TIME,
+    TradingCalendarCoverageError,
     is_trading_day,
 )
 from app.utils.market_time import market_local_naive
@@ -61,10 +62,33 @@ def market_scan_temporal_contract(
     return MarketScanTemporalContract(mode=mode, data_date=data_date, quote_date=data_date)
 
 
+def current_official_source_temporal_contract_matches(
+    source_date: date,
+    *,
+    as_of: datetime,
+    captured_at: datetime,
+) -> bool:
+    """Bind a current probability source to the official session at its decision time."""
+    if (
+        as_of.tzinfo is None
+        or as_of.utcoffset() is None
+        or captured_at.tzinfo is None
+        or captured_at.utcoffset() is None
+        or captured_at < as_of
+    ):
+        return False
+    try:
+        temporal = market_scan_temporal_contract(as_of, "official")
+    except (TradingCalendarCoverageError, ValueError):
+        return False
+    return temporal.data_date == source_date and temporal.quote_date == source_date
+
+
 __all__ = [
     "INTRADAY_SCAN_WINDOW_MESSAGE",
     "MarketScanTemporalContract",
     "OFFICIAL_SCAN_WINDOW_MESSAGE",
     "PREOPEN_SCAN_WINDOW_MESSAGE",
+    "current_official_source_temporal_contract_matches",
     "market_scan_temporal_contract",
 ]

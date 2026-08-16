@@ -174,6 +174,26 @@ class MetadataCoordinator:
     ) -> list[StockConceptItem]:
         return (await self.stock_concepts_result(symbol, limit=limit, refresh=refresh)).rows
 
+    async def cached_stock_concepts_result(
+        self,
+        symbol: str,
+        limit: int = 8,
+    ) -> StockConceptResult:
+        """Return fresh non-static cache rows as optional, non-authorizing research context."""
+        ensure_positive_limit(limit)
+        normalized = standard_symbol(symbol)
+        cached = await run_cache_io(
+            self.cache.get_stock_concepts,
+            normalized,
+            self.settings.stock_concept_cache_seconds,
+            limit=limit,
+            excluded_source=STATIC_LOCAL_METADATA_SOURCE,
+        )
+        cached = _without_static_local_metadata(cached)
+        if not cached:
+            raise RuntimeError(f"概念归属新鲜非静态缓存不可用：{normalized}；交互式研究不发起在线概念扫描")
+        return StockConceptResult(rows=cached)
+
     async def stock_concepts_result(
         self,
         symbol: str,

@@ -8,7 +8,7 @@ from app.config import Settings
 from app.services.cache import SQLiteCache
 
 
-def test_deep_market_scan_retry_chain_keeps_only_retained_leaf_and_direct_parent(tmp_path: Path) -> None:
+def test_deep_market_scan_retry_chain_keeps_complete_retained_lineage(tmp_path: Path) -> None:
     path = tmp_path / "runtime.sqlite3"
     cache = SQLiteCache(path, settings=Settings(cache_path=path, max_market_scan_runs=1))
     run = cache.create_market_scan_run(
@@ -33,14 +33,14 @@ def test_deep_market_scan_retry_chain_keeps_only_retained_leaf_and_direct_parent
     preview = cache.preview_runtime_cleanup()
     removed = cache.cleanup_runtime_rows()
 
-    assert preview["market_scan_run"] == removed["market_scan_run"] == 4
-    assert cache.table_counts()["market_scan_run"] == 2
+    assert preview["market_scan_run"] == removed["market_scan_run"] == 0
+    assert cache.table_counts()["market_scan_run"] == len(chain)
     retained_leaf = cache.market_scan_run(chain[-1].id)
     assert retained_leaf.retry_of_run_id == chain[-2].id
     assert cache.market_scan_run(chain[-2].id).id == chain[-2].id
     with sqlite3.connect(path) as conn:
         remaining = [int(row[0]) for row in conn.execute("SELECT id FROM market_scan_run ORDER BY id")]
-    assert remaining == [chain[-2].id, chain[-1].id]
+    assert remaining == [item.id for item in chain]
     assert cache.cleanup_runtime_rows()["market_scan_run"] == 0
 
 

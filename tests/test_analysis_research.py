@@ -314,7 +314,7 @@ class MinuteAnalysisTests(unittest.TestCase):
         self.assertEqual(score, reconstructed)
         self.assertTrue(any(item.impact > 0 for item in contributions))
 
-    def test_build_analysis_filters_invalid_klines_from_result_but_scores_raw_quality(self) -> None:
+    def test_build_analysis_filters_invalid_klines_from_result_and_quality(self) -> None:
         klines = [_kline(close=100 + index, high=101 + index, low=99 + index, volume=1000) for index in range(30)]
         klines.append(_kline(close=140, high=141, low=139, volume=1000).model_copy(update={"high": math.inf}))
         quote = _quote(price=130, prev_close=128, high=131, low=127, change_pct=1.56)
@@ -322,8 +322,55 @@ class MinuteAnalysisTests(unittest.TestCase):
         analysis = build_analysis(quote, klines)
 
         self.assertEqual(len(analysis.klines), 30)
-        self.assertEqual(analysis.data_quality.kline_count, 31)
+        self.assertEqual(analysis.data_quality.kline_count, 30)
+        self.assertIn("K线字段无效", analysis.data_quality.anomalies)
+        self.assertLess(analysis.data_quality.score, 80)
         self.assertTrue(all(math.isfinite(item.high) for item in analysis.klines))
+
+    def test_short_history_never_emits_structural_action_prices(self) -> None:
+        klines = [
+            _kline(
+                date=(date(2026, 4, 1) + timedelta(days=index)).isoformat(),
+                close=100 + index,
+                high=101 + index,
+                low=99 + index,
+                volume=1000,
+            )
+            for index in range(19)
+        ]
+        quote = _quote(price=119, prev_close=118, high=120, low=117, change_pct=0.85)
+
+        analysis = build_analysis(quote, klines)
+
+        assert analysis.support_available is False
+        assert analysis.resistance_available is False
+        assert analysis.ma20_available is False
+        assert analysis.action_advice.action in {"轻仓观察", "控制风险"}
+        assert [item.title for item in analysis.t_plan] == ["做T区间待确认"]
+        assert all("低吸" not in item.reason and "高抛" not in item.reason for item in analysis.t_plan)
+        assert "支撑 0.00" not in analysis.beginner_summary
+        assert "压力 0.00" not in analysis.beginner_summary
+
+    def test_data_quality_counts_only_valid_kline_rows(self) -> None:
+        valid_rows = [
+            _kline(
+                date=(date(2026, 4, 1) + timedelta(days=index)).isoformat(),
+                close=100 + index,
+                high=101 + index,
+                low=99 + index,
+            )
+            for index in range(19)
+        ]
+        invalid_rows = [
+            _kline(date=f"2026-01-{(index % 28) + 1:02d}").model_copy(update={"high": math.inf})
+            for index in range(41)
+        ]
+
+        quality = build_data_quality(_quote(), [*invalid_rows, *valid_rows])
+
+        assert quality.kline_count == 19
+        assert "K线字段无效" in quality.anomalies
+        assert quality.score < 80
 
     def test_build_analysis_copies_optional_history_and_peer_inputs(self) -> None:
         quote = _quote(price=130, prev_close=128, high=131, low=127, change_pct=1.56)
@@ -479,7 +526,7 @@ class MinuteAnalysisTests(unittest.TestCase):
         risk_reward = build_risk_reward_report(analysis, feature, factor_lab, regime, validation, timeframe)
         alpha = build_alpha_evidence_report(analysis, bundle, feature, factor_lab, regime, timeframe, risk_reward)
         diagnosis = build_stock_diagnosis(analysis, bundle, feature, alpha, factor_lab, regime, validation, risk_reward, timeframe)
-        evidence_chain = build_evidence_chain_report(diagnosis, alpha, validation, risk_reward)
+        evidence_chain = build_evidence_chain_report(analysis, diagnosis, alpha, validation, risk_reward)
         t_strategy = build_t_strategy_assistant_report(analysis, feature, regime, validation)
         theme_context = build_theme_context_report(
             analysis,
@@ -497,12 +544,15 @@ class MinuteAnalysisTests(unittest.TestCase):
             ],
         )
         qa_report = build_stock_qa_report(analysis, diagnosis, regime, risk_reward, t_strategy, theme_context)
-        event_digest = build_event_digest_report(bundle)
+        event_digest = build_event_digest_report(analysis, bundle)
         peer_comparison = build_peer_comparison_report(analysis, bundle, feature)
         risk_radar = build_risk_radar_report(analysis, bundle, feature, regime, risk_reward, timeframe)
         replay = build_replay_analysis(analysis)
 
         self.assertEqual(feature.symbol, "600519.SH")
+        for report in (evidence_chain, qa_report, event_digest, peer_comparison, t_strategy, risk_radar):
+            self.assertEqual(report.symbol, "600519.SH")
+            self.assertEqual(report.updated_at, analysis.quote.timestamp)
         self.assertGreaterEqual(feature.leader_score, 0)
         self.assertGreaterEqual(len(factor_lab.factors), 6)
         self.assertGreaterEqual(factor_lab.total_score, 0)
@@ -526,7 +576,18 @@ class MinuteAnalysisTests(unittest.TestCase):
             self.assertLessEqual(factor.calibration.stability_score, 100)
             self.assertIn(
                 factor.calibration.expected_level,
-                {"较强", "偏正", "观察", "偏弱", "风险", "待确认", "待补数据", "待补历史快照", "样本不足"},
+                {
+                    "较强",
+                    "偏正",
+                    "观察",
+                    "偏弱",
+                    "风险",
+                    "待确认",
+                    "待补数据",
+                    "待补历史快照",
+                    "待补执行证据",
+                    "样本不足",
+                },
             )
             for bucket in factor.calibration_buckets:
                 self.assertGreater(bucket.sample_count, 0)

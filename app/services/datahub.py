@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Iterable, Mapping
 import logging
 import math
+from typing import TypeVar
 
 from app.config import Settings
 from app.models.analysis import (
@@ -56,6 +57,7 @@ __all__ = ["DataHub", "_provider_error_text", "_provider_source_key", "provider_
 
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -275,6 +277,9 @@ class DataHub:
     async def stock_concepts_result(self, symbol: str, limit: int = 8, refresh: bool = False):
         return await self._metadata_coordinator.stock_concepts_result(symbol, limit=limit, refresh=refresh)
 
+    async def cached_stock_concepts_result(self, symbol: str, limit: int = 8):
+        return await self._metadata_coordinator.cached_stock_concepts_result(symbol, limit=limit)
+
     async def order_book(self, symbol: str) -> OrderBook:
         return await self._order_book_coordinator.order_book(symbol)
 
@@ -435,8 +440,8 @@ async def _close_provider(provider: object) -> bool:
     return result is not False
 
 
-def _unique_by_identity(values: Iterable[object]) -> list[object]:
-    unique: list[object] = []
+def _unique_by_identity(values: Iterable[T]) -> list[T]:
+    unique: list[T] = []
     for value in values:
         if not any(existing is value for existing in unique):
             unique.append(value)

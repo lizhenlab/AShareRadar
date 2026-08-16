@@ -19,12 +19,18 @@ from app.models.discovery import (
     DiscoveryResearchQueueRequest,
     DiscoveryResearchQueueResponse,
 )
+from app.models.market_scan_screen_alert import (
+    MarketScanScreenAlertRequest,
+    MarketScanScreenAlertResponse,
+)
 from app.repositories.discovery import (
     DiscoveryPresetNameExistsError,
     DiscoveryPresetRevisionError,
     DiscoveryRepository,
 )
 from app.repositories.discovery_sql import canonical_json
+from app.repositories.market_scan_screen_alert import MarketScanScreenAlertPresetRevisionError
+from app.services.market_scan_screen_alert import MarketScanScreenAlertService
 from app.utils.audit_time import audit_now_text
 
 
@@ -40,8 +46,13 @@ _COMPLETED_RUN_STATUSES = frozenset({"success", "degraded"})
 
 
 class DiscoveryService:
-    def __init__(self, repository: DiscoveryRepository) -> None:
+    def __init__(
+        self,
+        repository: DiscoveryRepository,
+        screen_alerts: MarketScanScreenAlertService | None = None,
+    ) -> None:
         self.repository = repository
+        self._screen_alerts = screen_alerts
 
     def create_preset(self, payload: DiscoveryPresetCreate) -> DiscoveryPreset:
         try:
@@ -107,6 +118,7 @@ class DiscoveryService:
             page=page,
             page_size=page_size,
         )
+        _require_stable_run(run, self.repository.run_reference(run_id))
         return DiscoveryLeaderboardPage(
             preset=preset,
             run_id=run.id,
@@ -124,6 +136,7 @@ class DiscoveryService:
             name=preset.name,
             criteria=preset.criteria,
             sort=preset.sort,
+            column_view=preset.column_view,
         )
         return DiscoveryPresetArchive(
             format=DISCOVERY_PRESET_FORMAT,
@@ -135,10 +148,12 @@ class DiscoveryService:
         )
 
     def import_preset(self, archive: DiscoveryPresetArchive) -> DiscoveryPreset:
-        if archive.schema_version != DISCOVERY_PRESET_SCHEMA_VERSION:
+        if archive.schema_version not in {1, DISCOVERY_PRESET_SCHEMA_VERSION}:
             raise DiscoveryImportError(
-                f"不支持的筛选方案版本：{archive.schema_version}，当前支持 {DISCOVERY_PRESET_SCHEMA_VERSION}"
+                f"不支持的筛选方案版本：{archive.schema_version}，当前支持 1 和 {DISCOVERY_PRESET_SCHEMA_VERSION}"
             )
+        if archive.schema_version == 1:
+            _require_legacy_archive_compatible(archive.preset)
         expected = _archive_checksum(archive.schema_version, archive.preset)
         if not hmac.compare_digest(archive.checksum, expected):
             raise DiscoveryImportError("筛选方案校验和不匹配，文件可能已损坏或被篡改")
@@ -147,6 +162,7 @@ class DiscoveryService:
                 name=archive.preset.name,
                 criteria=archive.preset.criteria,
                 sort=archive.preset.sort,
+                column_view=archive.preset.column_view,
             )
         )
 
@@ -169,6 +185,22 @@ class DiscoveryService:
             added_count=added_count,
             existing_count=len(items) - added_count,
         )
+
+    def record_screen_alert(
+        self,
+        preset_id: int,
+        request: MarketScanScreenAlertRequest,
+    ) -> MarketScanScreenAlertResponse:
+        if self._screen_alerts is None:
+            raise RuntimeError("筛选变化提醒服务尚未绑定")
+        try:
+            return self._screen_alerts.record(
+                preset_id=preset_id,
+                current_run_id=request.current_run_id,
+                expected_preset_revision=request.expected_preset_revision,
+            )
+        except MarketScanScreenAlertPresetRevisionError as exc:
+            raise DiscoveryConflictError(str(exc)) from exc
 
     def rank_changes(self, run_id: int, *, page: int, page_size: int) -> DiscoveryRankChangePage:
         current = self.repository.run_reference(run_id)
@@ -200,6 +232,8 @@ class DiscoveryService:
             page=page,
             page_size=page_size,
         )
+        _require_stable_run(current, self.repository.run_reference(current.id))
+        _require_stable_run(previous, self.repository.run_reference(previous.id))
         return DiscoveryRankChangePage(
             current_run_id=current.id,
             previous_run_id=previous.id,
@@ -216,14 +250,36 @@ class DiscoveryService:
 
 
 def _archive_checksum(schema_version: int, preset: DiscoveryPresetPortable) -> str:
+    preset_payload = preset.model_dump(mode="json")
+    if schema_version == 1:
+        preset_payload.pop("column_view", None)
+        criteria = preset_payload.get("criteria")
+        if isinstance(criteria, dict):
+            for field in ("confidence", "risk", "tradability", "keyword"):
+                criteria.pop(field, None)
     checksum_payload = canonical_json(
         {
             "format": DISCOVERY_PRESET_FORMAT,
             "schema_version": schema_version,
-            "preset": preset.model_dump(mode="json"),
+            "preset": preset_payload,
         }
     )
     return hashlib.sha256(checksum_payload.encode("utf-8")).hexdigest()
+
+
+def _require_stable_run(expected: object, observed: object) -> None:
+    if expected != observed:
+        raise DiscoveryConflictError("全市场扫描批次在筛选读取期间发生变化，请重试")
+
+
+def _require_legacy_archive_compatible(preset: DiscoveryPresetPortable) -> None:
+    criteria = preset.criteria
+    if (
+        preset.column_view != "overview"
+        or criteria.keyword is not None
+        or any(getattr(criteria, field) is not None for field in ("confidence", "risk", "tradability"))
+    ):
+        raise DiscoveryImportError("旧版筛选方案不能携带未被 v1 校验和覆盖的 v2 字段")
 
 
 def _empty_rank_change_page(

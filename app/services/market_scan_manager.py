@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
 import sqlite3
 from typing import Literal, cast
@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.models.market_scan import (
     MARKET_SCAN_TOP100_REFRESH_LIMIT,
+    MarketScanAutomaticState,
     MarketScanFilterValues,
     MarketScanMode,
     MarketScanResultPage,
@@ -23,6 +24,14 @@ from app.models.market_scan import (
     MarketScanStartResponse,
     MarketScanTrigger,
     is_market_scan_top100_refresh_scope,
+)
+from app.models.market_scan_delta import MarketScanDeltaResponse
+from app.models.market_scan_polling import MarketScanPollingIdentity
+from app.models.market_scan_snapshot import validate_market_scan_run_binding
+from app.models.market_scan_screening import (
+    MarketBreadthV1,
+    MarketScanScreenEvaluateRequest,
+    MarketScanScreenEvaluationV1,
 )
 from app.repositories.market_scan import RETRYABLE_SCAN_STATUSES
 from app.services.advice_review import normalize_review_as_of
@@ -50,17 +59,25 @@ from app.services.market_scan_export import (
 from app.services.market_scan_future_range_store import not_generated_future_range_research
 from app.services.market_scan_lifecycle import MarketScanLifecycle, MarketScanStopSnapshot
 from app.services.market_scan_modes import (
+    MarketScanTemporalContract,
     OFFICIAL_SCAN_WINDOW_MESSAGE,
     market_scan_temporal_contract,
 )
 from app.services.market_scan_probability_capture import (
+    audit_market_scan_probability_source_archives,
     process_market_scan_probability_capture_outbox,
 )
 from app.services.market_scan_query_service import MarketScanQueryService
+from app.services.market_scan_probability_store import ProbabilityResearchUnavailable
+from app.services.market_scan_delta import MarketScanDeltaRepositoryProtocol, MarketScanDeltaService
 from app.services.market_scan_research_stores import MarketScanResearchStores
 from app.services.market_scan_automation import MarketScanAutomaticAction
 from app.services.market_scan_automation_runner import MarketScanAutomationCoordinator
-from app.services.market_scan_scoring import market_scan_score_spec, stable_score_spec_hash
+from app.services.market_scan_scoring import (
+    MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS,
+    market_scan_score_spec,
+    stable_score_spec_hash,
+)
 from app.services.market_scan_terminal_recovery import MarketScanTerminalRecovery
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
@@ -74,6 +91,25 @@ MARKET_SCAN_INSTANCE_GUARD_BUSY_MESSAGE = "已有其他进程负责全市场扫�
 HISTORICAL_SCAN_UNAVAILABLE_MESSAGE = "当前数据源只提供当前快照；历史榜单只能读取已持久化快照，不能新建历史扫描"
 DAILY_BAR_WINDOW_MESSAGE = OFFICIAL_SCAN_WINDOW_MESSAGE
 PROBABILITY_SOURCE_CAPTURE_POLL_SECONDS = 30.0
+AUTOMATIC_NO_ACTION_AUDIT_INTERVAL = timedelta(minutes=5)
+
+
+def _automatic_state_is_terminal_for_date(
+    state: MarketScanAutomaticState | None,
+    *,
+    data_date: str,
+) -> bool:
+    return (
+        state is not None
+        and state.data_date == data_date
+        and state.status in {"success", "degraded", "cancelled"}
+    )
+
+
+def _automatic_audit_is_deferred(checked_at: datetime, *, current: datetime) -> bool:
+    return checked_at <= current < checked_at + AUTOMATIC_NO_ACTION_AUDIT_INTERVAL
+
+
 class MarketScanManager:
     """Public facade that coordinates scan lifecycle, execution and persistence."""
 
@@ -95,6 +131,12 @@ class MarketScanManager:
         self._future_range_store = self._research_stores.future_range
         self._query_service = MarketScanQueryService(self.cache, self._research_stores)
         self._query_service_stores = self._research_stores
+        delta_repositories = getattr(self.cache, "repositories", None)
+        delta_repository = cast(
+            MarketScanDeltaRepositoryProtocol,
+            getattr(delta_repositories, "market_scan_delta", None),
+        )
+        self._delta_service = MarketScanDeltaService(delta_repository)
         self._now = now or _market_now
         sensitive_values = sensitive_setting_values(self.settings)
         self._sensitive_values = sensitive_values
@@ -110,17 +152,30 @@ class MarketScanManager:
             datahub,
             sensitive_values=sensitive_values,
         )
+        self._automatic_tick_lock = asyncio.Lock()
+        self._settled_automatic_state: MarketScanAutomaticState | None = None
+        self._settled_automatic_checked_at: datetime | None = None
+        self._settled_automatic_guard_epoch: int | None = None
         self._deferred_stop_task: asyncio.Task[None] | None = None
         self._probability_capture_task: asyncio.Task[None] | None = None
         self._probability_capture_lock = asyncio.Lock()
         self._probability_capture_wakeup = asyncio.Event()
         self._probability_capture_owner = f"market-scan-manager-{uuid4().hex}"
+        self._probability_archives_audited = False
 
     async def start(self) -> int:
         reconciled = await self._lifecycle.start()
         await run_cache_io(self._recover_terminal_persistence_failures)
+        await self.refresh_probability_research_cache()
         await self._activate_probability_capture_leader()
         return reconciled
+
+    async def refresh_probability_research_cache(self) -> int:
+        """Verify and atomically publish the compact source/outcome/fit index."""
+        probability_source = self._probability_source_research_store
+        if probability_source is None:
+            return 0
+        return await run_cache_io(probability_source.preload)
 
     @property
     def is_quiescent(self) -> bool:
@@ -218,15 +273,11 @@ class MarketScanManager:
         current: datetime,
         busy_is_noop: bool,
     ) -> MarketScanStartResponse | None:
-        normalized_as_of = normalize_review_as_of(as_of, now=current)
-        temporal = market_scan_temporal_contract(normalized_as_of, mode)
-        if as_of is not None:
-            current_temporal = market_scan_temporal_contract(current, mode)
-            if (
-                temporal.data_date != current_temporal.data_date
-                or temporal.quote_date != current_temporal.quote_date
-            ):
-                raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
+        normalized_as_of, temporal = _requested_scan_temporal(
+            as_of,
+            current=current,
+            mode=mode,
+        )
         self._validate_settings()
         async with self._lifecycle.lock:
             self._lifecycle.require_open()
@@ -241,25 +292,26 @@ class MarketScanManager:
             if active is not None:
                 return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
             fresh_current = self._current_time()
-            fresh_temporal = market_scan_temporal_contract(fresh_current, mode)
-            if as_of is None:
-                normalized_as_of = fresh_current
-                temporal = fresh_temporal
-            elif (
-                temporal.data_date != fresh_temporal.data_date
-                or temporal.quote_date != fresh_temporal.quote_date
-            ):
-                raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
+            normalized_as_of, temporal = _fresh_scan_temporal(
+                as_of,
+                normalized_as_of=normalized_as_of,
+                temporal=temporal,
+                fresh_current=fresh_current,
+                mode=mode,
+            )
+            run_as_of = _required_datetime_text(normalized_as_of)
+            rule_contract = market_scan_rule_contract(self.settings, mode=mode)
             try:
                 run = await run_cache_io(
                     self.cache.create_market_scan_run,
                     trigger=trigger,
                     mode=mode,
-                    rule_version=market_scan_rule_version(self.settings, mode=mode),
-                    as_of=datetime_to_text(normalized_as_of),
+                    rule_version=f"full-market-scan-v6:{stable_score_spec_hash(rule_contract)}",
+                    as_of=run_as_of,
                     data_date=temporal.data_date.isoformat(),
                     quote_date=temporal.quote_date.isoformat(),
                     scope=FULL_MARKET_SCOPE,
+                    rule_contract=rule_contract,
                 )
             except sqlite3.IntegrityError:
                 active = await run_cache_io(self.cache.active_market_scan_run)
@@ -285,15 +337,18 @@ class MarketScanManager:
             if active is not None:
                 return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
             temporal = market_scan_temporal_contract(current, source.mode)
+            run_as_of = _required_datetime_text(current)
+            rule_contract = market_scan_rule_contract(self.settings, mode=source.mode)
             try:
                 run = await run_cache_io(
                     self.cache.prepare_market_scan_top100_refresh,
                     source.id,
                     rule_version=source.rule_version,
-                    as_of=datetime_to_text(current),
+                    as_of=run_as_of,
                     data_date=temporal.data_date.isoformat(),
                     quote_date=temporal.quote_date.isoformat(),
                     limit=MARKET_SCAN_TOP100_REFRESH_LIMIT,
+                    rule_contract=rule_contract,
                 )
             except sqlite3.IntegrityError:
                 active = await run_cache_io(self.cache.active_market_scan_run)
@@ -315,6 +370,13 @@ class MarketScanManager:
             await self._activate_probability_capture_leader()
             await run_cache_io(self._recover_terminal_persistence_failures, run_id)
             candidate = await run_cache_io(self.cache.market_scan_run, run_id)
+            if candidate.rule_version != market_scan_rule_version(
+                self.settings,
+                mode=candidate.mode,
+            ):
+                raise ValueError(
+                    "扫描规则/评分配置已变更，请新建扫描；旧批次将保留为历史快照"
+                )
             retry_plan = await run_cache_io(self.cache.market_scan_retry_plan, run_id)
             current = self._current_time()
             if retry_plan.needs_market_data:
@@ -324,11 +386,16 @@ class MarketScanManager:
             if active is not None:
                 return MarketScanStartResponse(accepted=False, deduplicated=True, run=active)
             try:
+                rule_contract = market_scan_rule_contract(
+                    self.settings,
+                    mode=candidate.mode,
+                )
                 run = await run_cache_io(
                     self.cache.prepare_market_scan_retry,
                     run_id,
                     retry_plan,
                     as_of=datetime_to_text(current),
+                    rule_contract=rule_contract,
                 )
             except (sqlite3.IntegrityError, ValueError):
                 active = await run_cache_io(self.cache.active_market_scan_run)
@@ -369,15 +436,106 @@ class MarketScanManager:
             publish_time,
         ):
             return None
-        if not await self._claim_automatic_ownership():
-            return None
         data_date = latest_expected_daily_kline_date(current).isoformat()
-        return await self._automation.run(
-            current=current,
+        async with self._automatic_tick_lock:
+            state = await run_cache_io(
+                self.cache.latest_full_market_scan_automatic_state
+            )
+            if self._is_settled_automatic_state(
+                state,
+                data_date=data_date,
+                current=current,
+            ):
+                return None
+            if not await self._claim_automatic_ownership():
+                return None
+            return await self._run_automatic_tick_decision(
+                state,
+                current=current,
+                data_date=data_date,
+            )
+
+    async def _run_automatic_tick_decision(
+        self,
+        state: MarketScanAutomaticState | None,
+        *,
+        current: datetime,
+        data_date: str,
+    ) -> MarketScanStartResponse | None:
+        try:
+            response = await self._automation.run(
+                current=current,
+                data_date=data_date,
+                start_action=self._start_automatic_action,
+                validate_retry=self._validate_automatic_retry,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._remember_terminal_automatic_state(
+                state,
+                data_date=data_date,
+                current=current,
+            )
+            raise
+        if response is not None:
+            self._clear_settled_automatic_state()
+            return response
+        self._remember_terminal_automatic_state(
+            state,
             data_date=data_date,
-            start_action=self._start_automatic_action,
-            validate_retry=self._validate_automatic_retry,
+            current=current,
         )
+        return None
+
+    def _remember_terminal_automatic_state(
+        self,
+        state: MarketScanAutomaticState | None,
+        *,
+        data_date: str,
+        current: datetime,
+    ) -> None:
+        if state is not None and _automatic_state_is_terminal_for_date(
+            state,
+            data_date=data_date,
+        ):
+            self._remember_settled_automatic_state(state, current=current)
+
+    def _is_settled_automatic_state(
+        self,
+        state: MarketScanAutomaticState | None,
+        *,
+        data_date: str,
+        current: datetime,
+    ) -> bool:
+        return (
+            state is not None
+            and state == self._settled_automatic_state
+            and _automatic_state_is_terminal_for_date(state, data_date=data_date)
+            and self._lifecycle.has_instance_guard
+            and self._settled_automatic_guard_epoch
+            == self._lifecycle.instance_guard_epoch
+            and self._settled_automatic_checked_at is not None
+            and _automatic_audit_is_deferred(
+                self._settled_automatic_checked_at,
+                current=current,
+            )
+        )
+
+    def _remember_settled_automatic_state(
+        self,
+        state: MarketScanAutomaticState,
+        *,
+        current: datetime,
+    ) -> None:
+        self._settled_automatic_state = state
+        self._settled_automatic_checked_at = current
+        self._settled_automatic_guard_epoch = self._lifecycle.instance_guard_epoch
+
+    def _clear_settled_automatic_state(self) -> None:
+        self._settled_automatic_state = None
+        self._settled_automatic_checked_at = None
+        self._settled_automatic_guard_epoch = None
 
     async def _claim_automatic_ownership(self) -> bool:
         async with self._lifecycle.lock:
@@ -419,6 +577,9 @@ class MarketScanManager:
 
     def latest_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
         return self._queries().latest_run(mode=mode)
+
+    def polling_identity(self, *, mode: MarketScanMode) -> MarketScanPollingIdentity:
+        return self._queries().polling_identity(mode=mode)
 
     def latest_published_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
         return self._queries().latest_published_run(mode=mode)
@@ -509,8 +670,20 @@ class MarketScanManager:
         )
 
     def probability_research(self, run_id: int) -> dict[str, object]:
-        self.run(run_id)
         return self._queries().probability_research(run_id)
+
+    def breadth(self, run_id: int) -> MarketBreadthV1:
+        return self._queries().breadth(run_id)
+
+    def evaluate_screen(
+        self,
+        run_id: int,
+        request: MarketScanScreenEvaluateRequest,
+    ) -> MarketScanScreenEvaluationV1:
+        return self._queries().evaluate_screen(run_id, request)
+
+    def delta(self, run_id: int) -> MarketScanDeltaResponse:
+        return self._delta_service.compare(run_id)
 
     def future_range_research(
         self,
@@ -566,7 +739,9 @@ class MarketScanManager:
         filters = filters.normalized()
         run = self.run(run_id)
         if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
-            raise ValueError("只有已发布的全市场榜单可以导出 Excel")
+            raise ProbabilityResearchUnavailable("只有已发布的全市场榜单可以导出 Excel")
+        if run.mode != "official" or run.scope != FULL_MARKET_SCOPE or run.quote_date != run.data_date:
+            raise ProbabilityResearchUnavailable("只有盘后正式全市场榜单可以导出概率研究 Excel")
         page = self.results(
             run_id,
             page=1,
@@ -597,14 +772,13 @@ class MarketScanManager:
             probability_horizon=filters.probability_horizon,
             min_upside_probability=filters.min_upside_probability,
         )
-        future_range_store = getattr(self, "_future_range_store", None)
+        validate_market_scan_run_binding(run, page.run)
         future_range = (
-            future_range_store.export_projection(run_id)
-            if (
-                run.mode == "official"
-                and run.scope == FULL_MARKET_SCOPE
-                and future_range_store is not None
+            self._queries().future_range_export_projection(
+                run_id,
+                expected_run=page.run,
             )
+            if getattr(self, "_future_range_store", None) is not None
             else not_generated_future_range_research(run_id)
         )
         return build_market_scan_workbook(
@@ -615,6 +789,7 @@ class MarketScanManager:
         )
 
     def _launch(self, run_id: int) -> None:
+        self._clear_settled_automatic_state()
         self._lifecycle.launch(run_id, self._execute_run)
 
     async def _execute_run(self, run_id: int, cancel_event: asyncio.Event) -> None:
@@ -677,6 +852,9 @@ class MarketScanManager:
         if not self._lifecycle.owns_instance_guard():
             return
         await run_cache_io(self.cache.reconcile_probability_source_capture_outbox)
+        if not self._probability_archives_audited:
+            await run_cache_io(audit_market_scan_probability_source_archives, self.cache)
+            self._probability_archives_audited = True
         self._start_probability_capture_worker()
 
     async def _stop_probability_capture_worker(self) -> None:
@@ -720,11 +898,14 @@ class MarketScanManager:
         if not self._lifecycle.owns_instance_guard():
             return {"captured": 0, "skipped": 0, "failed": 0}
         async with self._probability_capture_lock:
-            return await process_market_scan_probability_capture_outbox(
+            summary = await process_market_scan_probability_capture_outbox(
                 self.cache,
                 owner=self._probability_capture_owner,
                 sensitive_values=self._sensitive_values,
             )
+            if summary["captured"]:
+                await self.refresh_probability_research_cache()
+            return summary
 
     async def _finish_cancelled(self, run_id: int) -> None:
         persisted = await self._finalizer.finish_cancelled(run_id)
@@ -828,6 +1009,43 @@ class MarketScanManager:
         return normalize_review_as_of(value if value is not None else self._now(), allow_future=True)
 
 
+def _requested_scan_temporal(
+    as_of: datetime | None,
+    *,
+    current: datetime,
+    mode: MarketScanMode,
+) -> tuple[datetime, MarketScanTemporalContract]:
+    normalized = normalize_review_as_of(as_of, now=current)
+    temporal = market_scan_temporal_contract(normalized, mode)
+    current_temporal = market_scan_temporal_contract(current, mode)
+    if as_of is not None and _temporal_dates_differ(temporal, current_temporal):
+        raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
+    return normalized, temporal
+
+
+def _fresh_scan_temporal(
+    requested: datetime | None,
+    *,
+    normalized_as_of: datetime,
+    temporal: MarketScanTemporalContract,
+    fresh_current: datetime,
+    mode: MarketScanMode,
+) -> tuple[datetime, MarketScanTemporalContract]:
+    fresh_temporal = market_scan_temporal_contract(fresh_current, mode)
+    if requested is None:
+        return fresh_current, fresh_temporal
+    if _temporal_dates_differ(temporal, fresh_temporal):
+        raise ValueError(HISTORICAL_SCAN_UNAVAILABLE_MESSAGE)
+    return normalized_as_of, temporal
+
+
+def _temporal_dates_differ(
+    left: MarketScanTemporalContract,
+    right: MarketScanTemporalContract,
+) -> bool:
+    return left.data_date != right.data_date or left.quote_date != right.quote_date
+
+
 def _market_scan_shutdown_timeout(settings: object) -> float:
     try:
         timeout = float(getattr(settings, "scheduler_shutdown_timeout_seconds", 5.0))
@@ -845,11 +1063,11 @@ def _consume_stop_exception(task: asyncio.Task[None]) -> None:
         pass
 
 
-def market_scan_rule_version(
+def market_scan_rule_contract(
     settings: object,
     *,
     mode: MarketScanMode = "official",
-) -> str:
+) -> dict[str, object]:
     if mode == "intraday":
         mode_contract = {
             "id": mode,
@@ -877,6 +1095,7 @@ def market_scan_rule_version(
         "score_spec": market_scan_score_spec(
             min_data_quality_score=int(getattr(settings, "market_scan_min_data_quality_score")),
         ),
+        "production_score_semantics": MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS,
         "history": {
             "adjustment_mode": "qfq",
             "kline_limit": int(getattr(settings, "market_scan_kline_limit")),
@@ -902,11 +1121,26 @@ def market_scan_rule_version(
             "score_distribution": MARKET_SCAN_SCORE_DISTRIBUTION_POLICY.spec(),
         },
     }
+    return contract
+
+
+def market_scan_rule_version(
+    settings: object,
+    *,
+    mode: MarketScanMode = "official",
+) -> str:
+    contract = market_scan_rule_contract(settings, mode=mode)
     return f"full-market-scan-v6:{stable_score_spec_hash(contract)}"
 
 
 def _market_now() -> datetime:
     return market_now()
+
+
+def _required_datetime_text(value: datetime) -> str:
+    serialized = datetime_to_text(value)
+    assert serialized is not None
+    return serialized
 
 
 __all__ = [
@@ -915,5 +1149,6 @@ __all__ = [
     "MARKET_SCAN_TASK_LABEL",
     "MARKET_SCAN_TASK_NAME",
     "MarketScanManager",
+    "market_scan_rule_contract",
     "market_scan_rule_version",
 ]

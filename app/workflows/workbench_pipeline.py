@@ -64,7 +64,10 @@ from app.services.research import (
 from app.services.research_breadth import MarketBreadthSnapshot
 from app.services.stock_insights import build_stock_insight_bundle
 from app.services.datahub_status import provider_error_text
-from app.services.workbench_context import WorkbenchContext
+from app.services.workbench_context import WorkbenchContext, workbench_cache_cohort_key
+from app.utils.audit_time import audit_now_text
+from app.utils.market_time import normalize_market_datetime
+from app.utils.symbols import standard_symbol
 from app.workflows.optional_data import optional_workflow_value, short_error
 from app.workflows.stock_analysis import analyze_individual_stock
 
@@ -72,6 +75,7 @@ from app.workflows.stock_analysis import analyze_individual_stock
 @dataclass(frozen=True)
 class WorkbenchInputs:
     analysis: AnalysisResult
+    context_generated_at: str
     breadth_quotes: list[Quote]
     breadth_warnings: tuple[str, ...]
     order_book: OrderBook | None
@@ -113,11 +117,19 @@ class WorkbenchSupportPanels:
 
 
 async def build_workbench_context(datahub: DataHub, symbol: str) -> WorkbenchContext:
+    cache_cohort_key = workbench_cache_cohort_key()
     inputs = await _collect_workbench_inputs(datahub, symbol)
     core = _build_research_core(inputs)
     evidence = _build_evidence_chain(inputs.analysis, core)
     support_panels = _build_support_panels(inputs.analysis, core, evidence)
-    return _workbench_context_from_parts(inputs, core, evidence, support_panels)
+    return _workbench_context_from_parts(
+        symbol,
+        inputs,
+        core,
+        evidence,
+        support_panels,
+        cache_cohort_key=cache_cohort_key,
+    )
 
 
 async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchInputs:
@@ -129,15 +141,137 @@ async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchI
     )
     order_book, order_book_error = order_book_result
     concepts, concept_error = concept_result
+    context_generated_at = audit_now_text()
+    breadth_quotes, breadth_warnings = _time_aligned_breadth(
+        analysis,
+        list(breadth_sample.quotes),
+        breadth_sample.warnings,
+        decision_cutoff=context_generated_at,
+    )
+    order_book, order_book_error = _bound_order_book(
+        analysis,
+        order_book,
+        order_book_error,
+        decision_cutoff=context_generated_at,
+    )
+    concepts, concept_error = _bound_concepts(
+        analysis,
+        concepts,
+        concept_error,
+        decision_cutoff=context_generated_at,
+    )
     return WorkbenchInputs(
         analysis=analysis,
-        breadth_quotes=list(breadth_sample.quotes),
-        breadth_warnings=breadth_sample.warnings,
+        context_generated_at=context_generated_at,
+        breadth_quotes=breadth_quotes,
+        breadth_warnings=breadth_warnings,
         order_book=order_book,
         order_book_error=order_book_error,
         concepts=concepts,
         concept_error=concept_error,
     )
+
+
+def _time_aligned_breadth(
+    analysis: AnalysisResult,
+    rows: list[Quote],
+    warnings: tuple[str, ...],
+    *,
+    decision_cutoff: str | None = None,
+) -> tuple[list[Quote], tuple[str, ...]]:
+    signal_date = _quote_date(analysis.quote)
+    cutoff = _component_cutoff(analysis, decision_cutoff)
+    aligned = [
+        row
+        for row in rows
+        if not row.fallback_used
+        and _quote_date(row) == signal_date
+        and _event_at_or_before(row.timestamp, cutoff)
+    ]
+    if len(aligned) == len(rows):
+        return aligned, warnings
+    warning = "市场宽度含不同交易日或降级行情，已从本次环境评分剔除。"
+    return aligned, tuple(dict.fromkeys((*warnings, warning)))
+
+
+def _bound_order_book(
+    analysis: AnalysisResult,
+    order_book: OrderBook | None,
+    error: str | None,
+    *,
+    decision_cutoff: str | None = None,
+) -> tuple[OrderBook | None, str | None]:
+    if order_book is None:
+        return None, error
+    expected = standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}")
+    updated = normalize_market_datetime(order_book.updated_at)
+    if (
+        _same_symbol(order_book.symbol, expected)
+        and updated is not None
+        and updated[:10] == _quote_date(analysis.quote)
+        and updated <= _component_cutoff(analysis, decision_cutoff)
+    ):
+        return order_book, error
+    return None, "盘口股票身份或交易日与当前个股研究不一致，已按不可用处理。"
+
+
+def _bound_concepts(
+    analysis: AnalysisResult,
+    rows: list[StockConceptItem],
+    error: str | None,
+    *,
+    decision_cutoff: str | None = None,
+) -> tuple[list[StockConceptItem], str | None]:
+    expected = standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}")
+    signal_date = _quote_date(analysis.quote)
+    cutoff = _component_cutoff(analysis, decision_cutoff)
+    aligned = [
+        row
+        for row in rows
+        if not row.fallback_used
+        and _same_symbol(row.symbol, expected)
+        and (updated := normalize_market_datetime(row.updated_at)) is not None
+        and updated[:10] == signal_date
+        and updated <= cutoff
+    ]
+    if len(aligned) == len(rows):
+        return aligned, error
+    return aligned, "概念证据含不同股票或交易日，已从本次主题评分剔除。"
+
+
+def _quote_date(quote: Quote) -> str:
+    value = normalize_market_datetime(quote.timestamp)
+    if value is None:
+        raise ValueError("个股工作台行情时间无效")
+    return value[:10]
+
+
+def _decision_cutoff(value: str | None) -> str:
+    cutoff = normalize_market_datetime(value or audit_now_text())
+    if cutoff is None:
+        raise ValueError("个股工作台决策截止时间无效")
+    return cutoff
+
+
+def _component_cutoff(analysis: AnalysisResult, decision_cutoff: str | None) -> str:
+    """Bind optional inputs to the primary quote, never a later same-day state."""
+
+    quote_cutoff = normalize_market_datetime(analysis.quote.timestamp)
+    if quote_cutoff is None:
+        raise ValueError("个股工作台行情截止时间无效")
+    return min(quote_cutoff, _decision_cutoff(decision_cutoff))
+
+
+def _event_at_or_before(value: object, cutoff: str) -> bool:
+    observed = normalize_market_datetime(value)
+    return observed is not None and observed <= cutoff
+
+
+def _same_symbol(value: object, expected: str) -> bool:
+    try:
+        return standard_symbol(str(value)) == expected
+    except (TypeError, ValueError):
+        return False
 
 
 async def _market_breadth_sample_or_empty(datahub: DataHub) -> MarketBreadthQuoteResult:
@@ -213,7 +347,13 @@ def _build_evidence_chain(analysis: AnalysisResult, core: WorkbenchResearchCore)
     return WorkbenchEvidence(
         alpha_evidence=alpha_evidence,
         diagnosis=diagnosis,
-        evidence_chain=build_evidence_chain_report(diagnosis, alpha_evidence, core.signal_validation, core.risk_reward),
+        evidence_chain=build_evidence_chain_report(
+            analysis,
+            diagnosis,
+            alpha_evidence,
+            core.signal_validation,
+            core.risk_reward,
+        ),
     )
 
 
@@ -225,7 +365,7 @@ def _build_support_panels(
     t_strategy = build_t_strategy_assistant_report(analysis, core.feature_snapshot, core.market_regime, core.signal_validation)
     return WorkbenchSupportPanels(
         qa_report=build_stock_qa_report(analysis, evidence.diagnosis, core.market_regime, core.risk_reward, t_strategy, core.theme_context),
-        event_digest=build_event_digest_report(core.insights),
+        event_digest=build_event_digest_report(analysis, core.insights),
         peer_comparison=build_peer_comparison_report(analysis, core.insights, core.feature_snapshot),
         t_strategy=t_strategy,
         risk_radar=build_risk_radar_report(analysis, core.insights, core.feature_snapshot, core.market_regime, core.risk_reward, core.timeframe_alignment),
@@ -234,11 +374,23 @@ def _build_support_panels(
 
 
 def _workbench_context_from_parts(
+    requested_symbol: str,
     inputs: WorkbenchInputs,
     core: WorkbenchResearchCore,
     evidence: WorkbenchEvidence,
     support_panels: WorkbenchSupportPanels,
+    *,
+    cache_cohort_key: str,
 ) -> WorkbenchContext:
+    requested = standard_symbol(requested_symbol)
+    observed = standard_symbol(f"{inputs.analysis.quote.code}.{inputs.analysis.quote.market}")
+    quote_event_time = normalize_market_datetime(inputs.analysis.quote.timestamp)
+    if quote_event_time is None:
+        raise ValueError("个股工作台 quote event time 无效")
+    daily_bar_cutoff = inputs.analysis.klines[-1].date if inputs.analysis.klines else ""
+    if not daily_bar_cutoff:
+        raise ValueError("个股工作台缺少已完成日K截止日")
+    context_generated_at = inputs.context_generated_at
     return WorkbenchContext(
         analysis=inputs.analysis,
         insights=core.insights,
@@ -261,6 +413,13 @@ def _workbench_context_from_parts(
         theme_context=core.theme_context,
         replay=support_panels.replay,
         order_book_error=inputs.order_book_error,
+        requested_symbol=requested,
+        observed_symbol=observed,
+        context_generated_at=context_generated_at,
+        signal_date=quote_event_time[:10],
+        daily_bar_cutoff=daily_bar_cutoff,
+        quote_event_time=inputs.analysis.quote.timestamp,
+        cache_cohort_key=cache_cohort_key,
     )
 
 
@@ -292,10 +451,7 @@ async def _load_order_book(datahub: DataHub, symbol: str) -> tuple[OrderBook | N
 
 
 async def _load_stock_concepts(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str | None]:
-    result_loader = getattr(datahub, "stock_concepts_result", None)
-    if not callable(result_loader):
-        return await datahub.stock_concepts(symbol, limit=8), None
-    result = await result_loader(symbol, limit=8)
+    result = await datahub.cached_stock_concepts_result(symbol, limit=8)
     if result.used_fallback_cache:
         return [], "概念数据源不可用，过期缓存不参与主题与龙头强度评分。"
     return result.rows, None

@@ -22,6 +22,8 @@ import sqlite3
 from statistics import fmean, median
 from typing import Final, Literal, cast
 
+from app.db.market_scan_action_source import require_market_scan_action_source
+from app.db.market_scan_integrity import MarketScanSnapshotSealError
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
 from app.models.paper_trading import CostProfileName
 from app.repositories.market_scan_mapping import decode_result_payload
@@ -39,6 +41,7 @@ from app.services.market_scan_score_dimensions import (
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.trading_calendar import TradingCalendarCoverageError, next_trade_dates
 from app.utils.clock import utc_now
+from app.utils.market_time import market_datetime_epoch
 
 
 FUTURE_RANGE_EVALUATION_SCHEMA_VERSION: Final[str] = "market-scan-future-range-evaluation-v1"
@@ -105,6 +108,7 @@ class _Run:
     quote_date: str
     data_date: str
     as_of: str
+    snapshot_digest: str = ""
 
     @property
     def cohort(self) -> tuple[str, str, str]:
@@ -125,6 +129,7 @@ class _EvidenceBar:
     adjustment_mode: str
     data_version: str
     contract_version: str
+    as_of: str
 
     @property
     def hlc3(self) -> float:
@@ -234,7 +239,8 @@ def _readonly_connection(path: Path) -> Iterator[sqlite3.Connection]:
 def _canonical_official_runs(conn: sqlite3.Connection) -> list[_Run]:
     rows = conn.execute(
         """
-        SELECT id, mode, scope, rule_version, quote_date, data_date, as_of
+        SELECT id, mode, scope, rule_version, quote_date, data_date, as_of,
+               snapshot_digest
         FROM market_scan_run
         WHERE status IN ('success', 'degraded') AND mode = 'official' AND scope = ?
         ORDER BY data_date ASC, as_of ASC, id ASC
@@ -258,6 +264,7 @@ def _run_from_row(row: sqlite3.Row) -> _Run:
         quote_date=quote_date,
         data_date=str(row["data_date"]),
         as_of=str(row["as_of"]),
+        snapshot_digest=str(row["snapshot_digest"] or ""),
     )
 
 
@@ -286,6 +293,10 @@ def _evaluate_run(
     probability: Mapping[tuple[int, str], dict[str, object]],
     config: FutureRangeConfig,
 ) -> dict[str, object]:
+    try:
+        require_market_scan_action_source(conn, run.run_id)
+    except MarketScanSnapshotSealError as exc:
+        return _snapshot_integrity_failure(run, exc)
     rows = _result_rows(conn, run.run_id)
     target_dates, calendar_error = _fixed_target_dates(run.data_date)
     targets = _target_rows(conn, run.run_id, (run.data_date, *target_dates))
@@ -322,6 +333,27 @@ def _evaluate_run(
         "exclusions": exclusions,
         "target_dates": target_dates,
         "calendar_error": calendar_error,
+    }
+
+
+def _snapshot_integrity_failure(
+    run: _Run,
+    error: MarketScanSnapshotSealError,
+) -> dict[str, object]:
+    return {
+        "run": run,
+        "expected_result_count": 0,
+        "records": [],
+        "exclusions": [
+            {
+                "run_id": run.run_id,
+                "symbol": "*",
+                "reason": "market_scan_snapshot_integrity_failed",
+                "detail": " ".join(str(error).split())[:240],
+            }
+        ],
+        "target_dates": (),
+        "calendar_error": "market_scan_snapshot_integrity_failed",
     }
 
 
@@ -414,7 +446,7 @@ def _validated_signal_evidence(
     bars = _evidence_bars(contracts)
     if bars is None:
         return _invalid_evidence("point_in_time_bar_contract_invalid")
-    if not _valid_evidence_bar_series(bars, run.data_date):
+    if not _valid_evidence_bar_series(bars, run.data_date, run.as_of):
         return _invalid_evidence("point_in_time_bar_version_or_qfq_conflict")
     digest = evidence.get("payload_digest")
     if not isinstance(digest, str) or len(digest) != 64:
@@ -453,8 +485,8 @@ def _evidence_identity_matches(payload: Mapping[str, object], row: sqlite3.Row, 
 
 
 def _bar_from_contract(value: object) -> _EvidenceBar:
-    if not isinstance(value, list) or len(value) != 9:
-        raise ValueError("bar_contract 必须包含9个字段")
+    if not isinstance(value, list) or len(value) != 10:
+        raise ValueError("bar_contract 必须包含10个字段")
     return _EvidenceBar(
         date=str(value[0]),
         open=_positive_float(value[1]),
@@ -465,23 +497,78 @@ def _bar_from_contract(value: object) -> _EvidenceBar:
         adjustment_mode=str(value[6]),
         data_version=str(value[7]),
         contract_version=str(value[8]),
+        as_of=str(value[9]),
     )
 
 
-def _valid_evidence_bar_series(bars: Sequence[_EvidenceBar], data_date: str) -> bool:
+def _valid_evidence_bar_series(
+    bars: Sequence[_EvidenceBar],
+    data_date: str,
+    run_as_of: str,
+) -> bool:
+    if not bars:
+        return False
+    return (
+        _valid_evidence_bar_identity(bars, data_date)
+        and _valid_evidence_bar_contracts(bars)
+        and _valid_evidence_bar_times(bars, run_as_of)
+    )
+
+
+def _valid_evidence_bar_identity(
+    bars: Sequence[_EvidenceBar],
+    data_date: str,
+) -> bool:
     dates = [bar.date for bar in bars]
     versions = {bar.data_version for bar in bars}
     return (
-        bool(bars)
-        and dates == sorted(dates)
+        dates == sorted(dates)
         and len(dates) == len(set(dates))
         and bars[-1].date == data_date
-        and all(_valid_ohlc(bar) for bar in bars)
-        and all(bar.adjustment_mode == "qfq" for bar in bars)
-        and all(bar.contract_version == DAILY_KLINE_CONTRACT_VERSION for bar in bars)
         and len(versions) == 1
         and all(version.strip() for version in versions)
     )
+
+
+def _valid_evidence_bar_contracts(bars: Sequence[_EvidenceBar]) -> bool:
+    return (
+        all(_valid_ohlc(bar) for bar in bars)
+        and all(bar.adjustment_mode == "qfq" for bar in bars)
+        and all(bar.contract_version == DAILY_KLINE_CONTRACT_VERSION for bar in bars)
+    )
+
+
+def _valid_evidence_bar_times(
+    bars: Sequence[_EvidenceBar],
+    run_as_of: str,
+) -> bool:
+    decision_epoch = market_datetime_epoch(run_as_of)
+    optional_snapshot_epochs = [_evidence_timestamp_epoch(bar.as_of) for bar in bars]
+    optional_row_start_epochs = [
+        market_datetime_epoch(f"{bar.date} 00:00:00") for bar in bars
+    ]
+    if (
+        decision_epoch is None
+        or any(epoch is None for epoch in optional_snapshot_epochs)
+        or any(epoch is None for epoch in optional_row_start_epochs)
+    ):
+        return False
+    snapshot_epochs = cast(list[float], optional_snapshot_epochs)
+    row_start_epochs = cast(list[float], optional_row_start_epochs)
+    return (
+        all(
+            row_start <= snapshot <= decision_epoch
+            for snapshot, row_start in zip(snapshot_epochs, row_start_epochs, strict=True)
+        )
+        and snapshot_epochs == sorted(snapshot_epochs)
+    )
+
+
+def _evidence_timestamp_epoch(value: object) -> float | None:
+    text = str(value or "").strip()
+    if len(text) == 10:
+        text = f"{text} 00:00:00"
+    return market_datetime_epoch(text)
 
 
 def _invalid_evidence(reason: str) -> _EvidenceResult:
@@ -725,6 +812,7 @@ def _verified_target_bar(
             adjustment_mode=str(row["adjustment_mode"]),
             data_version=str(row["data_version"]),
             contract_version=str(row["contract_version"]),
+            as_of=str(row["as_of"]),
         )
     except (TypeError, ValueError):
         return None, "target_bar_nonfinite_or_nonpositive"
@@ -947,6 +1035,7 @@ def _run_payload(run: _Run) -> dict[str, object]:
         "run_id": run.run_id, "mode": run.mode, "scope": run.scope,
         "rule_version": run.rule_version, "quote_date": run.quote_date,
         "data_date": run.data_date, "as_of": run.as_of,
+        "snapshot_digest": run.snapshot_digest,
     }
 
 

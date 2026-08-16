@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import JsonValue
 
+from app.db.paper_trading_schema import paper_run_output_digest
 from app.models.local_data import (
     AuditTimestampMetadata,
     CORE_USER_DATA_TABLES,
@@ -34,6 +35,7 @@ from app.utils.audit_time import audit_now_text, normalize_audit_time_text
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 CONFLICT_STRATEGY = "remap_surrogate_ids_source_wins_on_stable_keys"
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _UTC_FIXED_AUDIT_TIMESTAMP = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z"
 )
@@ -59,7 +61,14 @@ _SURROGATE_PRIMARY_KEYS = {
 _SOURCE_WINS_KEYS = {
     "watchlist": ("symbol",),
     "advice_review_plan": ("advice_id",),
-    "advice_review_result": ("plan_id", "plan_revision", "as_of", "rule_version"),
+    "advice_review_plan_revision": ("plan_id", "revision"),
+    "advice_review_result": (
+        "plan_id",
+        "plan_revision",
+        "as_of",
+        "rule_version",
+        "attempt",
+    ),
     "discovery_preset": ("name",),
     "discovery_research_queue_source": (
         "symbol",
@@ -79,9 +88,116 @@ _SOURCE_WINS_KEYS = {
 _CASE_INSENSITIVE_STABLE_COLUMNS = {
     "discovery_preset": frozenset({"name"}),
 }
+_IMMUTABLE_LEDGER_TABLES = frozenset(
+    {"advice_review_plan_revision", "advice_review_result"}
+)
+_REVIEW_RESULT_INPUT_FIELDS = (
+    "plan_id",
+    "plan_revision",
+    "advice_id",
+    "symbol",
+    "snapshot_market_time",
+    "as_of",
+    "evaluated_at",
+    "rule_version",
+    "trigger_basis",
+    "invalidation_basis",
+    "snapshot_adjustment_mode",
+    "snapshot_anchor_date",
+    "snapshot_anchor_close",
+    "snapshot_data_version",
+    "snapshot_contract_version",
+    "evaluation_adjustment_mode",
+    "evaluation_data_version",
+    "evaluation_contract_version",
+    "anchor_evaluation_close",
+    "price_scale_factor",
+    "normalized_entry_price",
+    "normalized_target_price",
+    "normalized_stop_price",
+    "entry_price",
+    "target_price",
+    "stop_price",
+    "horizon_days",
+    "visible_bar_count",
+    "visible_start_date",
+    "visible_end_date",
+    "available_forward_days",
+    "forward_start_date",
+    "forward_end_date",
+    "evidence_contract_version",
+    "source_window_digest",
+    "source_session_count",
+    "expected_session_count",
+    "observation_basis",
+    "attempt",
+)
+_REVIEW_RESULT_V1_INPUT_FIELDS = tuple(
+    field
+    for field in _REVIEW_RESULT_INPUT_FIELDS
+    if field not in {"evaluated_at", "attempt"}
+)
+_REVIEW_EVIDENCE_DIGEST_VERSIONS = frozenset(
+    {"advice-review-evidence.v1", "advice-review-evidence.v2"}
+)
+_REVIEW_RESULT_OUTCOME_FIELDS = (
+    "status",
+    "conclusion",
+    "return_pct",
+    "max_favorable_excursion_pct",
+    "max_adverse_excursion_pct",
+    "target_hit",
+    "target_hit_date",
+    "stop_hit",
+    "stop_hit_date",
+)
+_REVIEW_RESULT_REAL_FIELDS = frozenset(
+    {
+        "snapshot_anchor_close",
+        "anchor_evaluation_close",
+        "price_scale_factor",
+        "normalized_entry_price",
+        "normalized_target_price",
+        "normalized_stop_price",
+        "entry_price",
+        "target_price",
+        "stop_price",
+        "return_pct",
+        "max_favorable_excursion_pct",
+        "max_adverse_excursion_pct",
+    }
+)
+_REVIEW_PLAN_PAYLOAD_KEYS = frozenset(
+    {
+        "advice_id",
+        "evidence_refs",
+        "horizon_days",
+        "hypothesis",
+        "invalidation_basis",
+        "invalidation_condition",
+        "snapshot",
+        "stop_price",
+        "symbol",
+        "target_price",
+        "trigger_basis",
+        "trigger_condition",
+    }
+)
+_REVIEW_PLAN_SNAPSHOT_KEYS = frozenset(
+    {
+        "adjustment_mode",
+        "anchor_close",
+        "anchor_date",
+        "contract_version",
+        "data_version",
+        "market_time",
+        "price",
+    }
+)
 _RELATIONSHIPS = {
     "alert_event": (("rule_id", "alert_rule"),),
     "advice_review_plan": (("advice_id", "advice_history"),),
+    "advice_review_plan_revision": (("plan_id", "advice_review_plan"),),
     "advice_review_result": (
         ("plan_id", "advice_review_plan"),
         ("advice_id", "advice_history"),
@@ -114,6 +230,7 @@ _USER_DATA_AUDIT_TIMESTAMP_COLUMNS = {
     "alert_event": frozenset({"created_at"}),
     "stock_note": frozenset({"created_at", "updated_at"}),
     "advice_review_plan": frozenset({"created_at", "updated_at"}),
+    "advice_review_plan_revision": frozenset({"created_at"}),
     "advice_review_result": frozenset({"evaluated_at"}),
     "watchlist_scan_history": frozenset({"created_at"}),
     "discovery_preset": frozenset({"created_at", "updated_at"}),
@@ -144,6 +261,8 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
         "snapshot_contract_version": "unknown",
         "trigger_basis": "daily_high_gte_target_price",
         "invalidation_basis": "daily_low_lte_stop_price",
+        "plan_payload_digest": "legacy-unverified",
+        "deleted_at": None,
     },
     "advice_review_result": {
         "snapshot_adjustment_mode": "unknown",
@@ -161,6 +280,15 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
         "normalized_stop_price": None,
         "trigger_basis": "daily_high_gte_target_price",
         "invalidation_basis": "daily_low_lte_stop_price",
+        "attempt": 1,
+        "plan_payload_digest": "legacy-unverified",
+        "input_digest": "legacy-unverified",
+        "result_digest": "legacy-unverified",
+        "evidence_contract_version": "legacy-unverified",
+        "source_window_digest": "legacy-unverified",
+        "source_session_count": 0,
+        "expected_session_count": 0,
+        "observation_basis": "gross_close_and_barrier_observation",
     },
     "paper_trading_account": {
         "default_cost_profile": "base",
@@ -168,6 +296,7 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
     "paper_strategy": {
         "priority": 0,
         "entry_expiry_sessions": 5,
+        "plan_payload_digest": "legacy-unverified",
     },
     "paper_trading_run": {
         "cost_profile_id": "legacy",
@@ -177,6 +306,7 @@ _V1_COMPAT_COLUMN_DEFAULTS: dict[str, dict[str, JsonValue]] = {
         "benchmark_status": "unavailable",
         "benchmark_message": None,
         "input_fingerprint": "",
+        "output_digest": "legacy-unverified",
         "strategy_snapshot_hash": "",
         "market_data_hash": "",
         "data_start_date": None,
@@ -283,7 +413,12 @@ def import_user_data(
                 legacy_audit_timezone=legacy_audit_timezone,
             )
             _validate_in_bundle_relationships(normalized_tables)
+            _validate_bundled_paper_run_output_digests(
+                normalized_tables,
+                allow_legacy_unverified=_bundle_missing_paper_output_digest(bundle),
+            )
             prepared = _prepare_bundle(conn, normalized_tables, table_names, mode)
+            _reject_paper_history_rewrites(conn, prepared)
             previews = {name: prepared[name].preview for name in table_names}
             result = LocalDataImportResult(
                 bundle_version=bundle.version,
@@ -312,6 +447,47 @@ def import_user_data(
             conn.rollback()
             raise
     return result
+
+
+def _reject_paper_history_rewrites(
+    conn: sqlite3.Connection,
+    prepared: dict[str, _PreparedTable],
+) -> None:
+    account = prepared.get("paper_trading_account")
+    changes_initial_cash = account is not None and any(
+        row.operation == "update" and _changes_paper_initial_cash(conn, row.values)
+        for row in account.rows
+    )
+    if changes_initial_cash:
+        has_paper_history = conn.execute(
+            "SELECT 1 FROM paper_strategy UNION ALL SELECT 1 FROM paper_trading_run LIMIT 1"
+        ).fetchone()
+        if has_paper_history is not None:
+            raise ValueError("已有模拟策略或运行时不能通过导入修改模拟账户")
+    strategies = prepared.get("paper_strategy")
+    if strategies is None:
+        return
+    for row in strategies.rows:
+        if row.operation != "update":
+            continue
+        strategy_id = _integer_value(row.values["id"])
+        has_result = conn.execute(
+            "SELECT 1 FROM paper_strategy_result WHERE strategy_id = ? LIMIT 1",
+            (strategy_id,),
+        ).fetchone()
+        if has_result is not None:
+            raise ValueError("已进入不可变运行的模拟策略不能通过导入改写")
+
+
+def _changes_paper_initial_cash(
+    conn: sqlite3.Connection,
+    values: dict[str, object],
+) -> bool:
+    current = conn.execute(
+        "SELECT initial_cash FROM paper_trading_account WHERE id = ?",
+        (_integer_value(values["id"]),),
+    ).fetchone()
+    return current is not None and float(current["initial_cash"]) != _float_value(values["initial_cash"])
 
 
 def available_user_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -590,6 +766,101 @@ def _validate_in_bundle_relationships(tables: dict[str, LocalDataTableBundle]) -
     _validate_review_bundle_relationships(tables)
 
 
+def _validate_bundled_paper_run_output_digests(
+    tables: dict[str, LocalDataTableBundle],
+    *,
+    allow_legacy_unverified: bool,
+) -> None:
+    runs = tables.get("paper_trading_run")
+    if runs is None:
+        return
+    for row in runs.rows:
+        digest = row["output_digest"]
+        if not isinstance(digest, str):
+            raise ValueError("paper_trading_run.output_digest 类型无效")
+        if digest == "legacy-unverified":
+            if allow_legacy_unverified:
+                continue
+            raise ValueError("paper_trading_run 缺少可验证输出摘要")
+        if _SHA256.fullmatch(digest) is None:
+            raise ValueError("paper_trading_run.output_digest 不是有效 SHA-256")
+    # Complete paper bundles can be verified without trusting the target
+    # database or any surrogate identifier. Partial bundles are still checked
+    # after materialization against the target's canonical ledger projection.
+    required = {
+        "paper_strategy",
+        "paper_strategy_result",
+        "paper_trade",
+        "paper_equity_snapshot",
+        "paper_trading_event",
+    }
+    if not runs.rows:
+        return
+    if not required.issubset(tables):
+        raise ValueError("paper_trading_run 必须与完整输出账本一同导入")
+    _validate_complete_bundled_paper_output_digests(tables, runs)
+
+
+def _bundle_missing_paper_output_digest(bundle: UserDataBundle) -> bool:
+    runs = bundle.tables.get("paper_trading_run")
+    return runs is not None and "output_digest" not in runs.columns
+
+
+def _validate_complete_bundled_paper_output_digests(
+    tables: dict[str, LocalDataTableBundle],
+    runs: LocalDataTableBundle,
+) -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        for name in (
+            "paper_strategy",
+            "paper_trading_run",
+            "paper_strategy_result",
+            "paper_trade",
+            "paper_equity_snapshot",
+            "paper_trading_event",
+        ):
+            _create_bundle_verification_table(connection, name, tables[name])
+            _insert_bundle_verification_rows(connection, name, tables[name])
+        for row in runs.rows:
+            digest = str(row["output_digest"])
+            if digest == "legacy-unverified":
+                continue
+            if paper_run_output_digest(connection, _integer_value(row["id"])) != digest:
+                raise ValueError("paper_trading_run 输出摘要与携带账本不一致")
+    finally:
+        connection.close()
+
+
+def _create_bundle_verification_table(
+    conn: sqlite3.Connection,
+    table: str,
+    bundle: LocalDataTableBundle,
+) -> None:
+    declarations = bundle.column_types or {}
+    columns = ", ".join(
+        f"{_quote_identifier(column)} {declarations.get(column) or 'BLOB'}"
+        for column in bundle.columns
+    )
+    conn.execute(f"CREATE TABLE {_quote_identifier(table)} ({columns})")
+
+
+def _insert_bundle_verification_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    bundle: LocalDataTableBundle,
+) -> None:
+    if not bundle.rows:
+        return
+    columns = ", ".join(_quote_identifier(column) for column in bundle.columns)
+    placeholders = ", ".join("?" for _ in bundle.columns)
+    conn.executemany(
+        f"INSERT INTO {_quote_identifier(table)} ({columns}) VALUES ({placeholders})",
+        (tuple(row[column] for column in bundle.columns) for row in bundle.rows),
+    )
+
+
 def _validate_child_bundle_relationships(
     tables: dict[str, LocalDataTableBundle],
     child_table: str,
@@ -613,12 +884,393 @@ def _validate_child_bundle_relationships(
 
 def _validate_review_bundle_relationships(tables: dict[str, LocalDataTableBundle]) -> None:
     plans = tables.get("advice_review_plan")
+    revisions = tables.get("advice_review_plan_revision")
     results = tables.get("advice_review_result")
-    if plans is None or results is None:
+    paper_strategies = tables.get("paper_strategy")
+    if plans is None:
         return
+    if plans.rows and revisions is None:
+        raise ValueError("advice_review_plan 必须与不可变版本账本一同导入")
     plan_advice = {row["id"]: row["advice_id"] for row in plans.rows}
-    if any(plan_advice.get(row["plan_id"]) != row["advice_id"] for row in results.rows):
+    if results is not None and any(
+        plan_advice.get(row["plan_id"]) != row["advice_id"] for row in results.rows
+    ):
         raise ValueError("advice_review_result 包含不一致的计划/建议外键约束")
+    if revisions is not None:
+        _validate_review_revision_bundle(plans, revisions, results, paper_strategies)
+
+
+def _validate_review_revision_bundle(
+    plans: LocalDataTableBundle,
+    revisions: LocalDataTableBundle,
+    results: LocalDataTableBundle | None,
+    paper_strategies: LocalDataTableBundle | None,
+) -> None:
+    plans_by_id = {row["id"]: row for row in plans.rows}
+    revision_payloads: dict[tuple[object, object], dict[str, object]] = {}
+    revision_digests: dict[tuple[object, object], str] = {}
+    revisions_by_plan: dict[object, set[int]] = {}
+    for row in revisions.rows:
+        payload, revision_digest = _validated_revision_payload(row)
+        plan = plans_by_id.get(row["plan_id"])
+        if plan is None or payload.get("advice_id") != plan["advice_id"]:
+            raise ValueError("advice_review_plan_revision 与计划/advice snapshot 绑定不一致")
+        revision = int(row["revision"])
+        identity = (row["plan_id"], revision)
+        revision_payloads[identity] = payload
+        revision_digests[identity] = revision_digest
+        revisions_by_plan.setdefault(row["plan_id"], set()).add(revision)
+    for row in plans.rows:
+        current_revision = int(row["revision"])
+        identity = (row["id"], current_revision)
+        current_digest = revision_digests.get(identity)
+        expected_revisions = set(range(1, current_revision + 1))
+        if revisions_by_plan.get(row["id"], set()) != expected_revisions:
+            raise ValueError("advice_review_plan 缺少完整、连续的不可变版本账本")
+        if (
+            current_digest is None
+            or row["plan_payload_digest"] != current_digest
+            or revision_payloads[identity] != _review_plan_payload(row)
+        ):
+            raise ValueError("advice_review_plan 当前投影未绑定不可变版本账本")
+    if results is not None:
+        _validate_bundled_review_results(results, revision_payloads, revision_digests)
+    if paper_strategies is not None:
+        _validate_bundled_paper_strategies(
+            paper_strategies,
+            revision_payloads,
+            revision_digests,
+        )
+
+
+def _validate_bundled_review_results(
+    results: LocalDataTableBundle,
+    revision_payloads: dict[tuple[object, object], dict[str, object]],
+    revision_digests: dict[tuple[object, object], str],
+) -> None:
+    for row in results.rows:
+        identity = (row["plan_id"], row["plan_revision"])
+        result_digest = revision_digests.get(identity)
+        if result_digest is None:
+            raise ValueError("advice_review_result 引用了不存在的计划版本")
+        if row["plan_payload_digest"] not in {result_digest, "legacy-unverified"}:
+            raise ValueError("advice_review_result 计划摘要与版本账本不一致")
+        _validate_result_plan_binding(row, revision_payloads[identity])
+        _validate_review_result_digests(row)
+
+
+def _validate_bundled_paper_strategies(
+    strategies: LocalDataTableBundle,
+    revision_payloads: dict[tuple[object, object], dict[str, object]],
+    revision_digests: dict[tuple[object, object], str],
+) -> None:
+    for row in strategies.rows:
+        identity = (row["plan_id"], row["plan_revision"])
+        strategy_digest = revision_digests.get(identity)
+        if strategy_digest is None:
+            raise ValueError("paper_strategy 引用了不存在的计划版本")
+        if row["plan_payload_digest"] not in {strategy_digest, "legacy-unverified"}:
+            raise ValueError("paper_strategy 计划摘要与版本账本不一致")
+        _validate_paper_strategy_plan_binding(row, revision_payloads[identity])
+
+
+def _validated_revision_payload(
+    row: dict[str, JsonValue],
+) -> tuple[dict[str, object], str]:
+    payload_json = row["payload_json"]
+    digest = row["payload_digest"]
+    if not isinstance(payload_json, str) or not isinstance(digest, str):
+        raise ValueError("advice_review_plan_revision 载荷类型无效")
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise ValueError("advice_review_plan_revision 载荷不是有效 JSON") from None
+    if not isinstance(payload, dict):
+        raise ValueError("advice_review_plan_revision 载荷必须是 JSON 对象")
+    _validate_revision_payload_contract(payload)
+    canonical = _canonical_json(payload)
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if payload_json != canonical or _SHA256.fullmatch(digest) is None or digest != expected:
+        raise ValueError("advice_review_plan_revision 载荷或摘要不规范")
+    return payload, digest
+
+
+def _validate_revision_payload_contract(payload: dict[str, object]) -> None:
+    snapshot = payload.get("snapshot")
+    if set(payload) != _REVIEW_PLAN_PAYLOAD_KEYS or not isinstance(snapshot, dict):
+        raise ValueError("advice_review_plan_revision 载荷字段不完整")
+    _validate_revision_snapshot_contract(snapshot)
+    _validate_revision_identity_contract(payload)
+    _validate_revision_text_contract(payload, snapshot)
+    _validate_revision_price_contract(payload, snapshot)
+
+
+def _validate_revision_snapshot_contract(snapshot: dict[str, object]) -> None:
+    if set(snapshot) != _REVIEW_PLAN_SNAPSHOT_KEYS:
+        raise ValueError("advice_review_plan_revision 快照字段不完整")
+
+
+def _validate_revision_identity_contract(payload: dict[str, object]) -> None:
+    advice_id = payload["advice_id"]
+    horizon_days = payload["horizon_days"]
+    evidence_refs = payload["evidence_refs"]
+    if (
+        isinstance(advice_id, bool)
+        or not isinstance(advice_id, int)
+        or advice_id <= 0
+        or isinstance(horizon_days, bool)
+        or not isinstance(horizon_days, int)
+        or not 1 <= horizon_days <= 60
+        or not isinstance(evidence_refs, list)
+    ):
+        raise ValueError("advice_review_plan_revision 载荷类型无效")
+
+
+def _validate_revision_text_contract(
+    payload: dict[str, object],
+    snapshot: dict[str, object],
+) -> None:
+    text_fields = (
+        "hypothesis",
+        "invalidation_basis",
+        "invalidation_condition",
+        "symbol",
+        "trigger_basis",
+        "trigger_condition",
+    )
+    snapshot_text_fields = (
+        "adjustment_mode",
+        "contract_version",
+        "data_version",
+        "market_time",
+    )
+    if any(not _is_nonblank_text(payload[field]) for field in text_fields):
+        raise ValueError("advice_review_plan_revision 文本载荷无效")
+    if any(not _is_nonblank_text(snapshot[field]) for field in snapshot_text_fields):
+        raise ValueError("advice_review_plan_revision 快照文本无效")
+    anchor_date = snapshot["anchor_date"]
+    if anchor_date is not None and not isinstance(anchor_date, str):
+        raise ValueError("advice_review_plan_revision anchor_date 无效")
+
+
+def _validate_revision_price_contract(
+    payload: dict[str, object],
+    snapshot: dict[str, object],
+) -> None:
+    anchor_close = snapshot["anchor_close"]
+    if anchor_close is not None:
+        _float_value(anchor_close)
+    entry_price = _float_value(snapshot["price"])
+    target_price = _float_value(payload["target_price"])
+    stop_price = _float_value(payload["stop_price"])
+    if not target_price > entry_price > stop_price > 0:
+        raise ValueError("advice_review_plan_revision 价格关系无效")
+
+
+def _is_nonblank_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _review_plan_payload(row: dict[str, JsonValue] | dict[str, object] | sqlite3.Row) -> dict[str, object]:
+    try:
+        evidence_refs = json.loads(str(row["evidence_refs_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise ValueError("advice_review_plan 证据引用不是有效 JSON") from None
+    if not isinstance(evidence_refs, list):
+        raise ValueError("advice_review_plan 证据引用必须是列表")
+    return {
+        "advice_id": _integer_value(row["advice_id"]),
+        "evidence_refs": evidence_refs,
+        "horizon_days": _integer_value(row["horizon_days"]),
+        "hypothesis": str(row["hypothesis"]),
+        "invalidation_basis": str(row["invalidation_basis"]),
+        "invalidation_condition": str(row["invalidation_condition"]),
+        "snapshot": {
+            "adjustment_mode": str(row["snapshot_adjustment_mode"]),
+            "anchor_close": _optional_float_value(row["snapshot_anchor_close"]),
+            "anchor_date": row["snapshot_anchor_date"],
+            "contract_version": str(row["snapshot_contract_version"]),
+            "data_version": str(row["snapshot_data_version"]),
+            "market_time": str(row["snapshot_market_time"]),
+            "price": _float_value(row["snapshot_price"]),
+        },
+        "stop_price": _float_value(row["stop_price"]),
+        "symbol": str(row["symbol"]),
+        "target_price": _float_value(row["target_price"]),
+        "trigger_basis": str(row["trigger_basis"]),
+        "trigger_condition": str(row["trigger_condition"]),
+    }
+
+
+def _validate_result_plan_binding(
+    row: dict[str, JsonValue] | dict[str, object],
+    payload: dict[str, object],
+) -> None:
+    snapshot = _revision_snapshot(payload)
+    expected = (
+        payload["advice_id"],
+        payload["symbol"],
+        snapshot["market_time"],
+        snapshot["price"],
+        snapshot["adjustment_mode"],
+        snapshot["anchor_date"],
+        snapshot["anchor_close"],
+        snapshot["data_version"],
+        snapshot["contract_version"],
+        payload["trigger_basis"],
+        payload["invalidation_basis"],
+        payload["target_price"],
+        payload["stop_price"],
+        payload["horizon_days"],
+    )
+    observed = (
+        row["advice_id"],
+        row["symbol"],
+        row["snapshot_market_time"],
+        row["entry_price"],
+        row["snapshot_adjustment_mode"],
+        row["snapshot_anchor_date"],
+        row["snapshot_anchor_close"],
+        row["snapshot_data_version"],
+        row["snapshot_contract_version"],
+        row["trigger_basis"],
+        row["invalidation_basis"],
+        row["target_price"],
+        row["stop_price"],
+        row["horizon_days"],
+    )
+    if observed != expected:
+        raise ValueError("advice_review_result 与不可变计划版本绑定不一致")
+
+
+def _validate_paper_strategy_plan_binding(
+    row: dict[str, JsonValue] | dict[str, object],
+    payload: dict[str, object],
+) -> None:
+    snapshot = _revision_snapshot(payload)
+    expected = (
+        payload["advice_id"],
+        payload["symbol"],
+        snapshot["market_time"],
+        snapshot["price"],
+        snapshot["adjustment_mode"],
+        snapshot["anchor_date"],
+        snapshot["anchor_close"],
+        snapshot["data_version"],
+        snapshot["contract_version"],
+        payload["target_price"],
+        payload["stop_price"],
+        payload["horizon_days"],
+    )
+    observed = (
+        row["advice_id"],
+        row["symbol"],
+        row["snapshot_market_time"],
+        row["snapshot_price"],
+        row["snapshot_adjustment_mode"],
+        row["snapshot_anchor_date"],
+        row["snapshot_anchor_close"],
+        row["snapshot_data_version"],
+        row["snapshot_contract_version"],
+        row["target_price"],
+        row["stop_price"],
+        row["horizon_days"],
+    )
+    if observed != expected:
+        raise ValueError("paper_strategy 与不可变计划版本绑定不一致")
+
+
+def _revision_snapshot(payload: dict[str, object]) -> dict[str, object]:
+    snapshot = payload.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise ValueError("advice_review_plan_revision 快照载荷无效")
+    return snapshot
+
+
+def _validate_review_result_digests(
+    row: dict[str, JsonValue] | dict[str, object],
+) -> None:
+    input_digest = row["input_digest"]
+    result_digest = row["result_digest"]
+    if input_digest == result_digest == "legacy-unverified":
+        return
+    evidence_version = row["evidence_contract_version"]
+    if (
+        evidence_version not in _REVIEW_EVIDENCE_DIGEST_VERSIONS
+        or not isinstance(input_digest, str)
+        or not isinstance(result_digest, str)
+        or _SHA256.fullmatch(input_digest) is None
+        or _SHA256.fullmatch(result_digest) is None
+        or input_digest != _review_result_input_digest(row)
+        or result_digest != _review_result_outcome_digest(row)
+    ):
+        raise ValueError("advice_review_result 输入或结果摘要不一致")
+
+
+def _review_result_input_digest(
+    row: dict[str, JsonValue] | dict[str, object],
+) -> str:
+    fields = (
+        _REVIEW_RESULT_V1_INPUT_FIELDS
+        if row["evidence_contract_version"] == "advice-review-evidence.v1"
+        else _REVIEW_RESULT_INPUT_FIELDS
+    )
+    return _payload_digest(
+        {
+            field: _review_result_digest_value(field, row[field])
+            for field in fields
+        }
+    )
+
+
+def _review_result_outcome_digest(
+    row: dict[str, JsonValue] | dict[str, object],
+) -> str:
+    return _payload_digest(
+        {
+            field: _review_result_digest_value(field, row[field])
+            for field in _REVIEW_RESULT_OUTCOME_FIELDS
+        }
+    )
+
+
+def _review_result_digest_value(field: str, value: object) -> object:
+    if field not in _REVIEW_RESULT_REAL_FIELDS or value is None:
+        return value
+    return _float_value(value)
+
+
+def _payload_digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _optional_float_value(value: object) -> float | None:
+    return None if value is None else _float_value(value)
+
+
+def _integer_value(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("复盘计划整数载荷无效")
+    return value
+
+
+def _float_value(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("复盘计划数值载荷无效")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("复盘计划数值载荷无效")
+    return parsed
 
 
 def _prepare_bundle(
@@ -658,7 +1310,85 @@ def _remap_foreign_keys(
         if parent_map is None or row[column] not in parent_map:
             raise ValueError(f"{table}.{column} 无法映射到导入数据中的父记录")
         row[column] = parent_map[row[column]]
+    _rewrite_review_plan_digest_after_remap(table, source_row, row, tables, id_maps)
     return row
+
+
+def _rewrite_review_plan_digest_after_remap(
+    table: str,
+    source_row: dict[str, JsonValue],
+    row: dict[str, object],
+    tables: dict[str, LocalDataTableBundle],
+    id_maps: dict[str, dict[object, object]],
+) -> None:
+    identity = _review_plan_revision_identity(table, source_row)
+    if identity is None:
+        return
+    source_plan_id, revision = identity
+    payload_json, digest = _remapped_revision_payload(
+        tables,
+        id_maps,
+        source_plan_id=source_plan_id,
+        revision=revision,
+    )
+    if table == "advice_review_plan_revision":
+        row["payload_json"] = payload_json
+        row["payload_digest"] = digest
+    elif table == "advice_review_plan":
+        row["plan_payload_digest"] = digest
+    else:
+        row["plan_payload_digest"] = digest
+        if table == "advice_review_result" and row.get("input_digest") != "legacy-unverified":
+            row["input_digest"] = _review_result_input_digest(row)
+            row["result_digest"] = _review_result_outcome_digest(row)
+
+
+def _review_plan_revision_identity(
+    table: str,
+    row: dict[str, JsonValue],
+) -> tuple[object, object] | None:
+    if table == "advice_review_plan":
+        return row.get("id"), row.get("revision")
+    if table in {
+        "advice_review_plan_revision",
+        "advice_review_result",
+        "paper_strategy",
+    }:
+        revision_key = "revision" if table == "advice_review_plan_revision" else "plan_revision"
+        return row.get("plan_id"), row.get(revision_key)
+    return None
+
+
+def _remapped_revision_payload(
+    tables: dict[str, LocalDataTableBundle],
+    id_maps: dict[str, dict[object, object]],
+    *,
+    source_plan_id: object,
+    revision: object,
+) -> tuple[str, str]:
+    revisions = tables.get("advice_review_plan_revision")
+    if revisions is None:
+        raise ValueError("复盘计划缺少不可变版本账本")
+    matched = next(
+        (
+            item
+            for item in revisions.rows
+            if item["plan_id"] == source_plan_id and item["revision"] == revision
+        ),
+        None,
+    )
+    if matched is None:
+        raise ValueError("复盘记录引用了不存在的计划版本")
+    payload = json.loads(str(matched["payload_json"]))
+    if not isinstance(payload, dict):
+        raise ValueError("复盘计划版本载荷无效")
+    advice_map = id_maps.get("advice_history")
+    source_advice_id = payload.get("advice_id")
+    if advice_map is None or source_advice_id not in advice_map:
+        raise ValueError("复盘计划版本无法映射 advice snapshot")
+    payload["advice_id"] = advice_map[source_advice_id]
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return payload_json, hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
 
 def _prepare_replace_table(
@@ -716,6 +1446,8 @@ def _prepare_stable_merge_table(
             operation = "insert"
         elif current == row:
             operation = "unchanged"
+        elif table in _IMMUTABLE_LEDGER_TABLES:
+            raise ValueError(f"{table} 不可变账本与目标数据库冲突")
         else:
             operation = "update"
         prepared_rows.append(_PreparedRow(operation=operation, values=row))
@@ -787,9 +1519,16 @@ def _append_surrogate_merge_row(
     stable_key = _optional_row_key(state.table, source_row, state.stable_columns)
     stable_match = state.existing_by_stable.get(stable_key) if stable_key is not None else None
     if stable_match is not None:
+        if state.table == "advice_review_plan" and _row_revision(source_row) < _row_revision(stable_match):
+            raise ValueError("advice_review_plan 不能用旧修订回退目标数据库")
         target_id = stable_match[state.primary_key]
         row = {**source_row, state.primary_key: target_id}
-        operation: _RowOperation = "unchanged" if stable_match == row else "update"
+        if stable_match == row:
+            operation: _RowOperation = "unchanged"
+        elif state.table in _IMMUTABLE_LEDGER_TABLES:
+            raise ValueError(f"{state.table} 不可变账本与目标数据库冲突")
+        else:
+            operation = "update"
     elif state.existing_by_id.get(source_id) == source_row:
         target_id, row, operation = source_id, source_row, "unchanged"
     else:
@@ -803,6 +1542,13 @@ def _append_surrogate_merge_row(
     if stable_key is not None:
         state.existing_by_stable[stable_key] = row
     state.prepared_rows.append(_PreparedRow(operation=operation, values=row))
+
+
+def _row_revision(row: dict[str, object]) -> int:
+    value = row.get("revision")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("advice_review_plan revision 必须是整数")
+    return value
 
 
 def _available_surrogate_id(state: _SurrogateMergeState, source_id: object) -> object:
@@ -890,6 +1636,90 @@ def _apply_prepared_bundle(
                 _insert_row(conn, name, table.bundle, row.values)
             elif row.operation == "update":
                 _update_row(conn, name, table.bundle, row.values)
+    _refresh_imported_paper_run_output_digests(conn, prepared)
+
+
+def _refresh_imported_paper_run_output_digests(
+    conn: sqlite3.Connection,
+    prepared: dict[str, _PreparedTable],
+) -> None:
+    run_ids = _affected_paper_run_ids(conn, prepared, include_all_imported_runs=False)
+    for run_id in sorted(run_ids):
+        digest = paper_run_output_digest(conn, run_id)
+        cursor = conn.execute(
+            "UPDATE paper_trading_run SET output_digest = ? WHERE id = ?",
+            (digest, run_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("paper_trading_run 导入后无法写入输出摘要")
+
+
+def _affected_paper_run_ids(
+    conn: sqlite3.Connection,
+    prepared: dict[str, _PreparedTable],
+    *,
+    include_all_imported_runs: bool,
+) -> set[int]:
+    runs = prepared.get("paper_trading_run")
+    run_ids = (
+        {
+            _integer_value(row.values["id"])
+            for row in runs.rows
+            if include_all_imported_runs or row.operation != "unchanged"
+        }
+        if runs is not None
+        else set()
+    )
+    _add_changed_paper_child_run_ids(run_ids, prepared)
+    _add_changed_strategy_run_ids(conn, run_ids, prepared)
+    return run_ids
+
+
+def _add_changed_paper_child_run_ids(
+    run_ids: set[int],
+    prepared: dict[str, _PreparedTable],
+) -> None:
+    for table in (
+        "paper_strategy_result",
+        "paper_trade",
+        "paper_equity_snapshot",
+        "paper_trading_event",
+    ):
+        child = prepared.get(table)
+        if child is not None:
+            run_ids.update(
+                _integer_value(row.values["run_id"])
+                for row in child.rows
+                if row.operation != "unchanged"
+            )
+
+
+def _add_changed_strategy_run_ids(
+    conn: sqlite3.Connection,
+    run_ids: set[int],
+    prepared: dict[str, _PreparedTable],
+) -> None:
+    strategies = prepared.get("paper_strategy")
+    if strategies is None:
+        return
+    strategy_ids = [
+        _integer_value(row.values["id"])
+        for row in strategies.rows
+        if row.operation != "unchanged"
+    ]
+    for offset in range(0, len(strategy_ids), 400):
+        chunk = strategy_ids[offset : offset + 400]
+        if not chunk:
+            continue
+        placeholders = ", ".join("?" for _ in chunk)
+        run_ids.update(
+            int(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT run_id FROM paper_strategy_result "
+                f"WHERE strategy_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+        )
 
 
 def _insert_row(
@@ -940,7 +1770,24 @@ def _validate_imported_relationships(
         child = prepared.get(child_table)
         if child is not None:
             _validate_imported_child_rows(child_table, child, relationships, parent_rows)
-    _validate_imported_review_rows(prepared.get("advice_review_result"), parent_rows)
+    _validate_imported_review_rows(conn, prepared, parent_rows)
+    _validate_imported_paper_run_output_digests(conn, prepared)
+
+
+def _validate_imported_paper_run_output_digests(
+    conn: sqlite3.Connection,
+    prepared: dict[str, _PreparedTable],
+) -> None:
+    run_ids = _affected_paper_run_ids(conn, prepared, include_all_imported_runs=True)
+    for run_id in sorted(run_ids):
+        stored = conn.execute(
+            "SELECT output_digest FROM paper_trading_run WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if stored is None:
+            raise ValueError("paper_trading_run 导入后不存在")
+        if str(stored["output_digest"]) != paper_run_output_digest(conn, run_id):
+            raise ValueError("paper_trading_run 导入后输出摘要不一致")
 
 
 def _imported_parent_rows(
@@ -981,16 +1828,124 @@ def _row_symbol(row) -> object | None:
 
 
 def _validate_imported_review_rows(
-    results: _PreparedTable | None,
+    conn: sqlite3.Connection,
+    prepared: dict[str, _PreparedTable],
     parent_rows: dict[str, dict[object, sqlite3.Row]],
 ) -> None:
-    if results is None:
+    _validate_imported_review_plan_rows(conn, prepared)
+    results = prepared.get("advice_review_result")
+    strategies = prepared.get("paper_strategy")
+    if results is None and strategies is None:
         return
-    plans = parent_rows["advice_review_plan"]
+    plans = parent_rows.get("advice_review_plan")
+    if plans is None:
+        raise ValueError("复盘子记录导入后缺少计划父记录")
+    if results is not None:
+        _validate_imported_review_results(conn, results, plans)
+    if strategies is not None:
+        _validate_imported_paper_strategies(conn, strategies, plans)
+
+
+def _validate_imported_review_results(
+    conn: sqlite3.Connection,
+    results: _PreparedTable,
+    plans: dict[object, sqlite3.Row],
+) -> None:
     for prepared_row in results.rows:
         row = prepared_row.values
         if plans[row["plan_id"]]["advice_id"] != row["advice_id"]:
             raise ValueError("advice_review_result 导入后计划与建议关联不一致")
+        revision = _imported_review_revision(
+            conn,
+            plan_id=row["plan_id"],
+            revision=row["plan_revision"],
+            missing_message="advice_review_result 导入后引用了不存在的计划版本",
+        )
+        if row["plan_payload_digest"] != str(revision["payload_digest"]):
+            raise ValueError("advice_review_result 导入后计划摘要不一致")
+        payload = _loaded_revision_payload(revision)
+        _validate_result_plan_binding(row, payload)
+        _validate_review_result_digests(row)
+
+
+def _validate_imported_paper_strategies(
+    conn: sqlite3.Connection,
+    strategies: _PreparedTable,
+    plans: dict[object, sqlite3.Row],
+) -> None:
+    for prepared_row in strategies.rows:
+        row = prepared_row.values
+        if plans[row["plan_id"]]["advice_id"] != row["advice_id"]:
+            raise ValueError("paper_strategy 导入后计划与建议关联不一致")
+        revision = _imported_review_revision(
+            conn,
+            plan_id=row["plan_id"],
+            revision=row["plan_revision"],
+            missing_message="paper_strategy 导入后引用了不存在的计划版本",
+        )
+        if row["plan_payload_digest"] != str(revision["payload_digest"]):
+            raise ValueError("paper_strategy 导入后计划摘要不一致")
+        _validate_paper_strategy_plan_binding(row, _loaded_revision_payload(revision))
+
+
+def _validate_imported_review_plan_rows(
+    conn: sqlite3.Connection,
+    prepared: dict[str, _PreparedTable],
+) -> None:
+    plans = prepared.get("advice_review_plan")
+    if plans is None:
+        return
+    for prepared_row in plans.rows:
+        plan_id = prepared_row.values["id"]
+        projection = conn.execute(
+            "SELECT * FROM advice_review_plan WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+        if projection is None:
+            raise ValueError("advice_review_plan 导入后投影不存在")
+        revision = _imported_review_revision(
+            conn,
+            plan_id=plan_id,
+            revision=projection["revision"],
+            missing_message="advice_review_plan 导入后缺少当前不可变版本",
+        )
+        payload = _loaded_revision_payload(revision)
+        if (
+            str(projection["plan_payload_digest"]) != str(revision["payload_digest"])
+            or payload != _review_plan_payload(projection)
+        ):
+            raise ValueError("advice_review_plan 导入后投影与不可变版本不一致")
+
+
+def _imported_review_revision(
+    conn: sqlite3.Connection,
+    *,
+    plan_id: object,
+    revision: object,
+    missing_message: str,
+) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT payload_json, payload_digest FROM advice_review_plan_revision
+        WHERE plan_id = ? AND revision = ?
+        """,
+        (plan_id, revision),
+    ).fetchone()
+    if row is None:
+        raise ValueError(missing_message)
+    return row
+
+
+def _loaded_revision_payload(row: sqlite3.Row) -> dict[str, object]:
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise ValueError("advice_review_plan_revision 导入后载荷损坏") from None
+    if not isinstance(payload, dict):
+        raise ValueError("advice_review_plan_revision 导入后载荷不是对象")
+    if _payload_digest(payload) != str(row["payload_digest"]):
+        raise ValueError("advice_review_plan_revision 导入后摘要不一致")
+    return payload
 
 
 def _table_contract(

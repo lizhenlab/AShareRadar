@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from app.models.market import Kline, Quote, StockInfo
 from app.models.market_scan import (
     MarketScanFilterValues,
+    MarketScanAutomaticState,
     MarketScanPublicationDiagnostics,
     MarketScanPublicationSummary,
+    MarketScanProductionScoreContract,
     MarketScanMode,
     MarketScanResultItem,
     MarketScanResultPage,
@@ -18,11 +21,18 @@ from app.models.market_scan import (
     MarketScanRun,
     MarketScanRunPage,
     MarketScanRunStatus,
+    MarketScanScoreDistributionObservation,
     MarketScanSeed,
     MarketScanSortOrderValues,
     MarketScanSortValues,
     MarketScanStage,
     MarketScanTrigger,
+)
+from app.models.market_scan_probability_capture import ProbabilitySourceCaptureState
+from app.models.market_scan_polling import MarketScanPollingIdentity
+from app.repositories.market_scan_screening import (
+    MarketScanBreadthRow,
+    MarketScanScreeningRow,
 )
 from app.services.datahub_metadata import StockPoolResolution
 from app.services.datahub_runtime import ProviderChainState
@@ -61,17 +71,69 @@ class MarketScanPublicationRepositoryProtocol(Protocol):
 
     def success_raw_scores(self, run_id: int) -> tuple[object, ...]: ...
 
+    def success_score_observations(
+        self,
+        run_id: int,
+    ) -> tuple[MarketScanScoreDistributionObservation, ...]: ...
+
+    def success_score_contract(
+        self,
+        run_id: int,
+    ) -> MarketScanProductionScoreContract | None: ...
+
+    def market_scan_action_source_digest(self, run_id: int) -> str | None: ...
+
+
+class MarketScanVerifiedReadProtocol(Protocol):
+    """One request-local, linearized read of a market-scan publication."""
+
+    @property
+    def run(self) -> MarketScanRun: ...
+
+    @property
+    def snapshot_digest(self) -> str | None: ...
+
+    @property
+    def action_source_digest(self) -> str | None: ...
+
+    @property
+    def probability_source_capture_state(
+        self,
+    ) -> Mapping[str, object] | None: ...
+
+    @property
+    def success_score_contract(
+        self,
+    ) -> MarketScanProductionScoreContract | None: ...
+
+    def results_page(self, **query: object) -> MarketScanResultPage: ...
+
 
 @runtime_checkable
 class MarketScanCacheProtocol(Protocol):
-    market_scan_repo: MarketScanPublicationRepositoryProtocol
-    path: Path
+    @property
+    def market_scan_repo(self) -> MarketScanPublicationRepositoryProtocol: ...
+
+    @property
+    def path(self) -> Path: ...
 
     def active_market_scan_run(self) -> MarketScanRun | None: ...
 
     def reconcile_incomplete_market_scans(self) -> int: ...
 
     def reconcile_probability_source_capture_outbox(self) -> int: ...
+
+    def probability_source_capture_status(
+        self,
+        run_id: int,
+    ) -> ProbabilitySourceCaptureState | None: ...
+
+    def market_scan_action_source_digest(self, run_id: int) -> str | None: ...
+
+    def verified_market_scan_read(
+        self,
+        run_id: int,
+    ) -> AbstractContextManager[MarketScanVerifiedReadProtocol]: ...
 
     def claim_probability_source_capture(
         self,
@@ -110,6 +172,7 @@ class MarketScanCacheProtocol(Protocol):
         data_date: str,
         quote_date: str,
         scope: str,
+        rule_contract: Mapping[str, object] | None = None,
     ) -> MarketScanRun: ...
 
     def finish_market_scan_run(
@@ -128,11 +191,25 @@ class MarketScanCacheProtocol(Protocol):
 
     def latest_full_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...
 
+    def latest_full_market_scan_automatic_state(self) -> MarketScanAutomaticState | None: ...
+
+    def market_scan_polling_identity(self, *, mode: MarketScanMode) -> MarketScanPollingIdentity: ...
+
     def latest_published_market_scan_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None: ...
 
     def market_scan_degraded_result_count(self, run_id: int) -> int: ...
 
     def market_scan_success_raw_scores(self, run_id: int) -> tuple[object, ...]: ...
+
+    def market_scan_success_score_observations(
+        self,
+        run_id: int,
+    ) -> tuple[MarketScanScoreDistributionObservation, ...]: ...
+
+    def market_scan_success_score_contract(
+        self,
+        run_id: int,
+    ) -> MarketScanProductionScoreContract | None: ...
 
     def market_scan_results(
         self,
@@ -166,6 +243,22 @@ class MarketScanCacheProtocol(Protocol):
         order: MarketScanSortOrderValues,
     ) -> MarketScanResultPage: ...
 
+    def market_scan_screening_breadth_snapshot(
+        self,
+        run_id: int,
+    ) -> tuple[MarketScanRun, list[MarketScanBreadthRow]]: ...
+
+    def market_scan_screening_evaluation_snapshot(
+        self,
+        run_id: int,
+    ) -> tuple[MarketScanRun, list[MarketScanScreeningRow]]: ...
+
+    def market_scan_screening_result_items(
+        self,
+        run_id: int,
+        symbols: Sequence[str],
+    ) -> list[MarketScanResultItem]: ...
+
     def market_scan_retry_plan(self, run_id: int) -> MarketScanRetryPlan: ...
 
     def market_scan_run(self, run_id: int) -> MarketScanRun: ...
@@ -188,6 +281,7 @@ class MarketScanCacheProtocol(Protocol):
         expected_plan: MarketScanRetryPlan | None = None,
         *,
         as_of: str | None = None,
+        rule_contract: Mapping[str, object] | None = None,
     ) -> MarketScanRun: ...
 
     def prepare_market_scan_top100_refresh(
@@ -199,6 +293,7 @@ class MarketScanCacheProtocol(Protocol):
         data_date: str,
         quote_date: str,
         limit: int,
+        rule_contract: Mapping[str, object] | None = None,
     ) -> MarketScanRun: ...
 
     def record_market_scan_stock_pool_source(self, run_id: int, source: str) -> MarketScanRun: ...
@@ -244,6 +339,7 @@ class MarketScanCacheProtocol(Protocol):
         run_id: int,
         *,
         finished_at: str,
+        decision_as_of: str,
         duration_ms: int,
         count: int,
     ) -> MarketScanRun: ...

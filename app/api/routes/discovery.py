@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Path, Query, Response
 
-from app.api.deps import get_datahub
+from app.api.deps import get_domain_services
 from app.api.errors import run_sync_api_async
 from app.models.discovery import (
     DiscoveryLeaderboardPage,
@@ -18,30 +18,40 @@ from app.models.discovery import (
     DiscoveryResearchQueueRequest,
     DiscoveryResearchQueueResponse,
 )
-from app.services.datahub import DataHub
+from app.models.market_scan_screen_alert import (
+    MarketScanScreenAlertRequest,
+    MarketScanScreenAlertResponse,
+)
 from app.services.discovery import DiscoveryService
+from app.services.domain_service_bundle import DomainServiceBundle
 
 
 router = APIRouter(prefix="/api/discovery", tags=["discovery"])
 
 
-def get_discovery_service(datahub: DataHub = Depends(get_datahub)) -> DiscoveryService:
-    return datahub.cache.discovery_service
+def get_discovery_service(
+    services: DomainServiceBundle = Depends(get_domain_services),
+) -> DiscoveryService:
+    return services.discovery
 
 
 @router.post("/presets", response_model=DiscoveryPreset, status_code=201)
 async def create_discovery_preset(
     payload: DiscoveryPresetCreate,
+    response: Response,
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryPreset:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: service.create_preset(payload))
 
 
 @router.post("/presets/import", response_model=DiscoveryPreset, status_code=201)
 async def import_discovery_preset(
     payload: DiscoveryPresetArchive,
+    response: Response,
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryPreset:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: service.import_preset(payload))
 
 
@@ -69,30 +79,34 @@ async def get_discovery_preset(
 @router.patch("/presets/{preset_id}", response_model=DiscoveryPreset)
 async def rename_discovery_preset(
     payload: DiscoveryPresetRename,
+    response: Response,
     preset_id: int = Path(ge=1),
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryPreset:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: service.rename_preset(preset_id, payload))
 
 
 @router.put("/presets/{preset_id}", response_model=DiscoveryPreset)
 async def update_discovery_preset(
     payload: DiscoveryPresetUpdate,
+    response: Response,
     preset_id: int = Path(ge=1),
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryPreset:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: service.update_preset(preset_id, payload))
 
 
 @router.delete("/presets/{preset_id}", response_model=DiscoveryPresetDeleteResponse)
 async def delete_discovery_preset(
+    response: Response,
     preset_id: int = Path(ge=1),
     expected_revision: int = Query(..., ge=1),
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryPresetDeleteResponse:
-    return await run_sync_api_async(
-        lambda: service.delete_preset(preset_id, expected_revision=expected_revision)
-    )
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(lambda: service.delete_preset(preset_id, expected_revision=expected_revision))
 
 
 @router.get("/presets/{preset_id}/export", response_model=DiscoveryPresetArchive)
@@ -108,9 +122,11 @@ async def export_discovery_preset(
 @router.post("/presets/{preset_id}/apply", response_model=DiscoveryLeaderboardPage)
 async def apply_discovery_preset(
     payload: DiscoveryPresetApplyRequest,
+    response: Response,
     preset_id: int = Path(ge=1),
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryLeaderboardPage:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(
         lambda: service.apply_preset(
             preset_id,
@@ -127,10 +143,26 @@ async def apply_discovery_preset(
 )
 async def enqueue_discovery_research(
     payload: DiscoveryResearchQueueRequest,
+    response: Response,
     preset_id: int = Path(ge=1),
     service: DiscoveryService = Depends(get_discovery_service),
 ) -> DiscoveryResearchQueueResponse:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: service.enqueue_research(preset_id, payload))
+
+
+@router.post(
+    "/presets/{preset_id}/screen-alerts",
+    response_model=MarketScanScreenAlertResponse,
+)
+async def record_discovery_screen_alert(
+    payload: MarketScanScreenAlertRequest,
+    response: Response,
+    preset_id: int = Path(ge=1),
+    service: DiscoveryService = Depends(get_discovery_service),
+) -> MarketScanScreenAlertResponse:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(lambda: service.record_screen_alert(preset_id, payload))
 
 
 @router.get("/runs/{run_id}/rank-changes", response_model=DiscoveryRankChangePage)

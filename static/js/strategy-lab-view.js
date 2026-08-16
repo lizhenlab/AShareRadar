@@ -3,6 +3,7 @@ import { escapeHtml } from "./dom.js";
 const STATUS_LABELS = {
   selected: "已入选", rejected: "未入选", constraint_adjusted: "约束后调整", unfilled: "无法成交",
   ready: "草案就绪", no_trade: "不交易", blocked: "已阻断",
+  available: "证据可用", unavailable: "证据不可用", shadow_only: "仅影子研究",
   insufficient_data: "样本不足", eligible_for_manual_review: "仅可人工评审",
 };
 
@@ -106,16 +107,31 @@ export function renderEvidence(elements, evidence) {
   const promotion = evidence.promotion;
   const top = evidence.top_n[0] || {};
   const coverage = evidence.coverage[0] || {};
+  const boundary = evidence.research_boundary;
+  const executionRule = evidence.execution.production_score_rule_version || "不可用";
+  const compatibility = {
+    compatible: "与离线基线兼容",
+    incompatible: "与离线基线不兼容",
+    not_available: "执行合同不可用",
+  }[boundary.execution_contract_compatibility] || "执行合同无效";
+  const shadowCandidates = (evidence.shadow_candidates || []).map(renderShadowCandidate).join("");
   elements.strategyEvidenceContent.innerHTML = `
+    <div class="strategy-shadow-boundary" data-status="${escapeHtml(boundary.status)}">
+      <strong>${escapeHtml(boundary.statement)}</strong>
+      <span>离线基线 ${escapeHtml(boundary.baseline_production_score_rule_version)} · 来源批次 ${escapeHtml(executionRule)} · ${escapeHtml(compatibility)} · 生产排名写入：${boundary.production_ranking_mutated ? "是" : "否"}</span>
+    </div>
     <div class="strategy-evidence-metrics">
       ${metric("证据状态", STATUS_LABELS[evidence.status] || evidence.status)}
       ${metric("独立交易日", `${promotion.observed_independent_session_count} / ${promotion.required_independent_session_count}`)}
       ${metric("全市场时点覆盖", percent(coverage.coverage_ratio))}
       ${metric("Rank IC", number(topValue(evidence.rank_evidence, "rank_ic")))}
       ${metric("ICIR", number(topValue(evidence.rank_evidence, "icir")))}
-      ${metric("PBO / 多重检验", promotion.pbo_ready ? "已就绪" : "未就绪")}
+      ${metric("配对块检验 / BH-FDR", promotion.multiple_testing_ready ? "已就绪" : "未就绪")}
+      ${metric("多候选检验方法", promotion.multiple_testing_method || "--")}
+      ${metric("PBO / DSR", `${promotion.pbo_status === "not_computed" ? "未计算" : "--"} / ${promotion.deflated_sharpe_status === "not_computed" ? "未计算" : "--"}`)}
       ${metric("自定义执行摘要", evidence.execution.evidence_digest_verified ? "校验通过" : "未校验")}
       ${metric("离线基线生成", evidence.baseline_generated_at || "未知")}
+      ${metric("Artifact 投影", evidence.baseline_projection_schema_version || "旧版完整报告")}
       ${metric("Top N 毛收益", percent(top.gross_return))}
       ${metric("Top N 净收益", percent(top.net_return))}
       ${metric("最大回撤 / MAE", `${percent(top.maximum_drawdown)} / ${percent(top.maximum_adverse_excursion)}`)}
@@ -124,9 +140,70 @@ export function renderEvidence(elements, evidence) {
     <p><strong>结论：</strong>${escapeHtml(promotion.conclusion)}</p>
     <p><strong>指纹：</strong><code>${escapeHtml(evidence.strategy_fingerprint)}</code></p>
     <p><strong>离线报告摘要：</strong><code>${escapeHtml(evidence.baseline_report_digest || "未知")}</code></p>
+    <section class="strategy-shadow-research" aria-label="Shadow 候选评分研究">
+      <h5>Shadow 候选评分（只读离线 artifact）</h5>
+      ${shadowCandidates || "<p>离线 artifact 没有候选评分记录。</p>"}
+    </section>
     ${messageList("数据来源", evidence.data_sources, "ready")}
     ${messageList("新鲜度", evidence.freshness_notes, "warn")}
     ${messageList("限制", evidence.limitations, "warn")}`;
+}
+
+function renderShadowCandidate(candidate) {
+  const coverage = candidate.coverage || {};
+  const delta = candidate.rank_delta_vs_production || {};
+  const constraints = candidate.constraints || {};
+  const exposure = candidate.exposure || {};
+  const gate = candidate.promotion_gate || {};
+  const topRows = (candidate.top_n || []).map((item) => `
+    <tr data-evidence-status="${escapeHtml(item.status)}">
+      <th scope="row">Top${escapeHtml(item.top_n)}</th>
+      <td>${escapeHtml(availabilityLabel(item.status))}</td>
+      <td>${escapeHtml(optionalCount(item.independent_session_count))}</td>
+      <td>${escapeHtml(percent(item.gross_return))}</td>
+      <td>${escapeHtml(percent(item.net_return))}</td>
+      <td>${escapeHtml(percent(item.cost_drag))}</td>
+      <td>${escapeHtml(percent(item.turnover_rate))}</td>
+    </tr>`).join("");
+  const unavailable = [
+    ...(coverage.reasons || []),
+    ...(candidate.top_n || []).flatMap((item) => item.insufficient_reasons || []),
+    ...(delta.reasons || []),
+    ...(constraints.reasons || []),
+    ...(exposure.reasons || []),
+    ...(gate.reasons || []),
+  ];
+  const failed = [
+    ...(gate.failed_criteria || []),
+    ...(constraints.failed_constraints || []),
+  ];
+  return `
+    <details class="strategy-shadow-candidate" data-candidate-id="${escapeHtml(candidate.candidate_id)}">
+      <summary>
+        <span><strong>${escapeHtml(candidate.candidate_id)}</strong><small>${escapeHtml(availabilityLabel(candidate.evidence_status))} · 独立日 ${escapeHtml(optionalCount(candidate.independent_session_count))}</small></span>
+        <span>${candidate.point_in_time_integrity_verified ? "PIT 已验证" : "PIT 未验证"}</span>
+      </summary>
+      <p><strong>Candidate spec hash：</strong><code>${escapeHtml(candidate.spec_hash || "不可用")}</code></p>
+      <div class="strategy-evidence-metrics strategy-shadow-metrics">
+        ${metric("覆盖状态", availabilityLabel(coverage.status))}
+        ${metric("评分批次 / 行", `${optionalCount(coverage.scored_run_count)} / ${optionalCount(coverage.scored_item_count)}`)}
+        ${metric("评分行覆盖率", percent(coverage.item_coverage_ratio))}
+        ${metric("v4-v5.x rank delta", availabilityLabel(delta.status))}
+        ${metric("平均绝对名次差", number(delta.mean_absolute_rank_delta))}
+        ${metric("Top20 / 50 / 100 重合", `${percent(delta.top20_overlap_ratio)} / ${percent(delta.top50_overlap_ratio)} / ${percent(delta.top100_overlap_ratio)}`)}
+        ${metric("约束证据", auditLabel(constraints))}
+        ${metric("Top100 迟滞换手", percent(constraints.hysteresis_turnover_rate))}
+        ${metric("暴露审计", auditLabel(exposure))}
+        ${metric("最大暴露偏差 / 门槛", `${percent(exposure.maximum_absolute_share_difference)} / ${percent(exposure.threshold)}`)}
+        ${metric("逐候选晋级门禁", auditLabel(gate))}
+        ${metric("门禁决策", gate.decision || "不可用")}
+      </div>
+      <div class="strategy-shadow-topn-wrap" role="region" aria-label="${escapeHtml(candidate.candidate_id)} Top N 五日证据" tabindex="0">
+        <table><thead><tr><th>组合</th><th>证据状态</th><th>独立日</th><th>5日毛收益</th><th>5日净收益</th><th>成本拖累</th><th>换手率</th></tr></thead><tbody>${topRows}</tbody></table>
+      </div>
+      ${messageList("晋级失败项", [...new Set(failed)], "error")}
+      ${messageList("不可用 / 样本不足说明", [...new Set(unavailable)], "warn")}
+    </details>`;
 }
 
 export function renderHistory(elements, executions, versions) {
@@ -262,18 +339,43 @@ function topValue(values, key) {
 }
 
 function money(value) {
+  if (missing(value)) return "--";
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? `¥${numberValue.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}` : "--";
 }
 
 function percent(value) {
+  if (missing(value)) return "--";
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? `${(numberValue * 100).toFixed(2)}%` : "--";
 }
 
 function number(value) {
+  if (missing(value)) return "--";
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue.toFixed(2) : "--";
+}
+
+function optionalCount(value) {
+  if (missing(value)) return "--";
+  const numberValue = Number(value);
+  return Number.isSafeInteger(numberValue) && numberValue >= 0 ? String(numberValue) : "--";
+}
+
+function availabilityLabel(status) {
+  return STATUS_LABELS[status] || "证据不可用";
+}
+
+function auditLabel(value) {
+  if (!value || value.status === "unavailable") return "证据不可用";
+  if (value.status === "insufficient_data") return "样本不足";
+  if (value.passed === true) return "通过";
+  if (value.passed === false) return "未通过";
+  return "证据可用";
+}
+
+function missing(value) {
+  return value === null || value === undefined || value === "";
 }
 
 function required(root, id) {

@@ -11,6 +11,7 @@ from app.models.market import (
 from app.models.analysis import (
     SignalContribution,
 )
+from app.models.market_scan import MarketScanMode
 from app.services.indicator_math import moving_average
 from app.services.indicator_volume import recent_volume_ratio
 from app.utils.market_data import filter_valid_klines
@@ -28,6 +29,8 @@ class TrendContext:
     recent_high: float
     recent_low: float
     volume_ratio: float
+    volume_confirmation_enabled: bool = True
+    volume_price_alignment: str = "same-completed-session"
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,14 @@ RELATIVE_NEUTRAL_BAND_PCT = 0.10
 RELATIVE_FULL_EFFECT_PCT = 2.00
 
 
-def build_trend_context(quote: Quote, klines: list[Kline]) -> TrendContext:
+def build_trend_context(
+    quote: Quote,
+    klines: list[Kline],
+    *,
+    mode: MarketScanMode = "official",
+) -> TrendContext:
+    if mode not in {"official", "intraday", "preopen"}:
+        raise ValueError(f"未知趋势评分模式：{mode!r}")
     valid_klines = filter_valid_klines(klines)
     recent_rows = valid_klines[-20:]
     ma5 = moving_average(valid_klines, 5)
@@ -73,6 +83,16 @@ def build_trend_context(quote: Quote, klines: list[Kline]) -> TrendContext:
         recent_high=max((item.high for item in recent_rows), default=0),
         recent_low=min((item.low for item in recent_rows), default=0),
         volume_ratio=recent_volume_ratio(valid_klines),
+        volume_confirmation_enabled=mode == "official",
+        volume_price_alignment=(
+            "intraday-time-aligned-volume-unavailable-neutralized"
+            if mode == "intraday"
+            else (
+                "preopen-time-aligned-volume-unavailable-neutralized"
+                if mode == "preopen"
+                else "same-completed-session"
+            )
+        ),
     )
 
 
@@ -248,6 +268,14 @@ def turnover_contribution(context: TrendContext) -> SignalContribution:
 
 
 def volume_confirmation_contribution(context: TrendContext) -> SignalContribution:
+    if not context.volume_confirmation_enabled:
+        phase = "盘前" if context.volume_price_alignment.startswith("preopen") else "盘中"
+        return contribution(
+            "量能",
+            "量价确认",
+            0,
+            f"{phase}缺少同进度成交量；历史完整日K量比仅作背景，量价确认保持中性。",
+        )
     impact, reason = volume_signal(context.quote.change_pct, context.volume_ratio)
     return contribution("量能", "量价确认", impact, reason)
 

@@ -24,12 +24,15 @@ export function renderAnalysis(data, { state, drawKline } = {}) {
   $("trendScore").textContent = `${analysis.trend_score ?? "--"}`;
   $("trendLabel").textContent = analysis.trend_label || "--";
   $("actionAdvice").textContent = actionAdvice.action
-    ? `${actionAdvice.action} · 建议强度 ${actionAdvice.confidence ?? "--"}/100`
+    ? `${actionAdvice.action} · 证据强度 ${actionAdvice.confidence ?? "--"}/100`
     : "--";
-  $("support").textContent = formatNumber(analysis.support);
-  $("resistance").textContent = formatNumber(analysis.resistance);
+  const supportAvailable = analysis.support_available === true;
+  const resistanceAvailable = analysis.resistance_available === true;
+  const ma20Available = analysis.ma20_available === true;
+  $("support").textContent = supportAvailable ? formatNumber(analysis.support) : "--";
+  $("resistance").textContent = resistanceAvailable ? formatNumber(analysis.resistance) : "--";
   $("ma5").textContent = formatNumber(analysis.ma5);
-  $("ma20").textContent = formatNumber(analysis.ma20);
+  $("ma20").textContent = ma20Available ? formatNumber(analysis.ma20) : "--";
   $("dataQuality").textContent = analysis.data_quality ? `${quality.level || "--"} ${quality.score ?? "--"}分` : "--";
   $("summary").textContent = analysis.beginner_summary || "";
   setMetricTone("trendScore", toneByScore(analysis.trend_score, 68, 45));
@@ -38,7 +41,7 @@ export function renderAnalysis(data, { state, drawKline } = {}) {
   setMetricTone("support", "");
   setMetricTone("resistance", "");
   setMetricTone("ma5", maTone(quote.price, analysis.ma5, "warn"));
-  setMetricTone("ma20", maTone(quote.price, analysis.ma20, "risk"));
+  setMetricTone("ma20", ma20Available ? maTone(quote.price, analysis.ma20, "risk") : "");
   setMetricTone("dataQuality", analysis.data_quality ? toneByScore(quality.score, 85, 70) : "warn");
   renderQuality(analysis.data_quality ? quality : null);
   renderSignalEvidence(analysis.signal_snapshot);
@@ -46,7 +49,9 @@ export function renderAnalysis(data, { state, drawKline } = {}) {
   renderSignals("sellSignals", analysis.sell_points);
   renderSignals("tSignals", analysis.t_plan);
   renderReview(analysis.review);
-  if (typeof drawKline === "function") drawKline(asArray(analysis.klines), analysis.ma5, analysis.ma20);
+  if (typeof drawKline === "function") {
+    drawKline(asArray(analysis.klines), analysis.ma5, ma20Available ? analysis.ma20 : null);
+  }
 }
 
 export function renderInsights(data, state) {
@@ -114,17 +119,20 @@ function renderInsightOverview(overview) {
 function renderFactors(items) {
   $("factorList").innerHTML = renderList(
     items,
-    (item) => `
+    (item) => {
+      const available = item.score_available !== false && item.participates_in_total_score !== false;
+      return `
         <div class="factor-item">
           <div class="factor-head">
             <strong>${escapeHtml(item.name)}</strong>
-            <span>${escapeHtml(item.score)} · ${escapeHtml(item.level)}</span>
+            <span>${available ? `${escapeHtml(item.score)} · ${escapeHtml(item.level)}` : "不可用 · --"}</span>
           </div>
-          <div class="score-bar"><i style="width:${Math.max(0, Math.min(100, Number(item.score) || 0))}%"></i></div>
-          <p>${escapeHtml(item.summary)}</p>
-          ${renderEscapedItems(item.evidence, "small")}
+          ${available ? `<div class="score-bar"><i style="width:${Math.max(0, Math.min(100, Number(item.score) || 0))}%"></i></div>` : ""}
+          <p>${escapeHtml(available ? item.summary : item.unavailable_reason || "当前证据不可用，未纳入全景评分。")}</p>
+          ${available ? renderEscapedItems(item.evidence, "small") : ""}
           ${asArray(item.missing_data).length ? `<em>待补充：${escapedJoin(item.missing_data, "、")}</em>` : ""}
-        </div>`
+        </div>`;
+    }
   );
 }
 
@@ -132,21 +140,22 @@ function renderFundFlow(flow) {
   const windows = asArray(flow.windows);
   const notes = asArray(flow.notes);
   const nature = dataNatureLabel(flow.data_nature);
-  const score = flow.data_nature === "unavailable" || !flow.data_nature ? "不可用" : `${flow.overall_score ?? "--"} · ${flow.level || "--"}`;
+  const unavailable = flow.data_nature === "unavailable" || !flow.data_nature;
+  const score = unavailable ? "不可用" : `${flow.overall_score ?? "--"} · ${flow.level || "--"}`;
   $("fundFlowPanel").innerHTML = `
     <div class="flow-head">
       <strong>量价热度 ${escapeHtml(score)}</strong>
       <span>${escapeHtml(nature)} · ${escapeHtml(flow.source)}</span>
     </div>
-    <p>${escapeHtml(flow.price_volume_relation)}</p>
+    <p>${escapeHtml(unavailable ? "量价证据不可用，未生成方向结论。" : flow.price_volume_relation)}</p>
     <div class="flow-windows">
       ${renderList(
         windows,
         (item) => `
           <div>
             <span>${escapeHtml(item.label)}</span>
-            <strong>${escapeHtml(flow.data_nature === "unavailable" || !flow.data_nature ? "--" : item.score)}</strong>
-            <small>${escapeHtml(item.summary)}</small>
+            <strong>${escapeHtml(unavailable ? "--" : item.score)}</strong>
+            <small>${escapeHtml(unavailable ? "量价证据不可用" : item.summary)}</small>
           </div>`
       )}
     </div>
@@ -156,15 +165,16 @@ function renderFundFlow(flow) {
 
 function renderOrderPressure(order) {
   const notes = asArray(order.notes);
+  const unavailable = order.data_nature === "unavailable" || !order.data_nature;
   $("orderPressurePanel").innerHTML = `
     <div class="flow-head">
       <strong>订单压力 · ${escapeHtml(dataNatureLabel(order.data_nature))}</strong>
-      <span>${escapeHtml(order.pressure_level)} · ${escapeHtml(order.source)}</span>
+      <span>${escapeHtml(unavailable ? "订单压力不可用" : order.pressure_level)} · ${escapeHtml(order.source)}</span>
     </div>
-    <p>${escapeHtml(order.summary)}</p>
+    <p>${escapeHtml(unavailable ? "盘口证据不可用，未生成方向结论。" : order.summary)}</p>
     <div class="mini-metrics">
-      <span>买卖比：${order.bid_ask_ratio === null || order.bid_ask_ratio === undefined ? "--" : escapeHtml(order.bid_ask_ratio)}</span>
-      <span>价差：${order.spread_pct === null || order.spread_pct === undefined ? "--" : `${formatNumber(order.spread_pct, 4)}%`}</span>
+      <span>买卖比：${unavailable || order.bid_ask_ratio === null || order.bid_ask_ratio === undefined ? "--" : escapeHtml(order.bid_ask_ratio)}</span>
+      <span>价差：${unavailable || order.spread_pct === null || order.spread_pct === undefined ? "--" : `${formatNumber(order.spread_pct, 4)}%`}</span>
     </div>
     ${renderEscapedItems(notes, "small")}
   `;
@@ -215,7 +225,7 @@ function renderValuation(valuation) {
   const watchPoints = asArray(valuation.watch_points);
   $("valuationPanel").innerHTML = `
     <div class="finance-head">
-      <strong>估值 ${escapeHtml(valuation.score)} · ${escapeHtml(valuation.level)}</strong>
+      <strong>${valuation.score_available === true ? `估值 ${escapeHtml(valuation.score)} · ${escapeHtml(valuation.level)}` : "估值证据不可用"}</strong>
       <span>${escapeHtml(valuation.market_cap_text || valuation.source)}</span>
     </div>
     <p>${escapeHtml(valuation.summary)}</p>

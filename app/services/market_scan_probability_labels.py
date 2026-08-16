@@ -13,8 +13,12 @@ from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.paper_trading_rules import assess_daily_tradeability, resolve_trade_rule_profile
 
 
-PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v2"
-PROBABILITY_EXECUTION_MODEL = "next-session-open,H-holding-session-close,T+1,no-delayed-exit"
+PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v3-explicit-target-offset"
+PROBABILITY_EXECUTION_MODEL = (
+    "signal-D,next-session-open,holding-H-session-close,target-offset-H+1,T+1,no-delayed-exit"
+)
+LEGACY_PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v2"
+LEGACY_PROBABILITY_EXECUTION_MODEL = "next-session-open,H-holding-session-close,T+1,no-delayed-exit"
 PROBABILITY_DEFAULT_HORIZONS = (1, 5, 20)
 ProbabilityLabelStatus = Literal["modelled", "unfilled", "data_unavailable"]
 
@@ -92,12 +96,22 @@ def build_probability_label_outcomes(
     }
 
 
-def probability_label_contract(config: ProbabilityLabelConfig | None = None) -> dict[str, object]:
+def probability_label_contract(
+    config: ProbabilityLabelConfig | None = None,
+    *,
+    label_version: str = PROBABILITY_LABEL_VERSION,
+) -> dict[str, object]:
     settings = config or ProbabilityLabelConfig()
     cost = resolve_cost_profile(settings.cost_profile)
-    return {
-        "label_version": PROBABILITY_LABEL_VERSION,
-        "execution_model": PROBABILITY_EXECUTION_MODEL,
+    if label_version not in {PROBABILITY_LABEL_VERSION, LEGACY_PROBABILITY_LABEL_VERSION}:
+        raise ValueError("unsupported probability label contract version")
+    contract: dict[str, object] = {
+        "label_version": label_version,
+        "execution_model": (
+            PROBABILITY_EXECUTION_MODEL
+            if label_version == PROBABILITY_LABEL_VERSION
+            else LEGACY_PROBABILITY_EXECUTION_MODEL
+        ),
         "horizons": list(settings.horizons),
         "target_definitions": ["absolute_net_return_positive", "equal_weight_market_net_excess_positive"],
         "cost_model_version": cost.version,
@@ -105,6 +119,16 @@ def probability_label_contract(config: ProbabilityLabelConfig | None = None) -> 
         "execution_notional": settings.execution_notional,
         "max_daily_participation_rate": settings.max_daily_participation_rate,
     }
+    if label_version == PROBABILITY_LABEL_VERSION:
+        contract.update(
+            {
+                "entry_session_offset": 1,
+                "target_session_offsets": {
+                    str(horizon): horizon + 1 for horizon in settings.horizons
+                },
+            }
+        )
+    return contract
 
 
 def _validated_bars(rows: Sequence[Kline]) -> dict[str, Kline]:

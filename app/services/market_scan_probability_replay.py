@@ -734,6 +734,8 @@ def _horizon_quality(
     records: Sequence[Mapping[str, object]],
     horizon: int,
     maximum_date: str | None,
+    *,
+    minimum_required_sessions: int | None = None,
 ) -> dict[str, object]:
     outcomes = [_outcome_for(record, horizon) for record in records]
     modelled = [item for item in outcomes if item["status"] == "modelled"]
@@ -743,7 +745,7 @@ def _horizon_quality(
         if outcome["status"] == "modelled"
     }
     mature = [item for item in outcomes if maximum_date is not None and str(item["target_session_date"]) <= maximum_date]
-    required = _minimum_registered_sessions(horizon)
+    required = minimum_required_sessions or _minimum_registered_sessions(horizon)
     return {
         "requested_record_count": len(records),
         "mature_record_count": len(mature),
@@ -778,7 +780,9 @@ def _validate_report(
     _validate_source(source, parsed_config)
     records = _records(report)
     _validate_records(records, names, config)
-    _validate_quality(_mapping(report["quality"], "quality"), records, parsed_config, source)
+    quality = _mapping(report["quality"], "quality")
+    legacy_split = _uses_superseded_probability_split(quality)
+    _validate_quality(quality, records, parsed_config, source)
     _validate_cost_contract(_mapping(report["cost_contract"], "cost_contract"), config)
     if report["metadata_contract"] != _metadata_contract():
         raise HistoricalReplayError("historical replay metadata contract 冲突")
@@ -787,7 +791,7 @@ def _validate_report(
     _validate_probability_fit(
         report,
         _mapping(report["probability_fit"], "probability_fit"),
-        replay=replay_probability_fit,
+        replay=replay_probability_fit and not legacy_split,
     )
     if report["status"] != _report_status(_mapping(report["quality"], "quality")):
         raise HistoricalReplayError("historical replay status 与质量摘要冲突")
@@ -951,13 +955,20 @@ def _validate_quality(
     }
     if set(quality) != required:
         raise HistoricalReplayError("historical replay quality 字段无效")
+    split_defaults = _validated_registered_split_defaults(quality)
     _validate_quality_identity(quality, records, config, source)
     horizons = _mapping(quality.get("horizons"), "quality.horizons")
     if set(horizons) != {str(horizon) for horizon in HISTORICAL_REPLAY_HORIZONS}:
         raise HistoricalReplayError("historical replay quality horizons 冲突")
     for horizon in HISTORICAL_REPLAY_HORIZONS:
         value = _mapping(horizons.get(str(horizon)), f"quality.horizons.{horizon}")
-        expected = _horizon_quality(records, horizon, cast(str | None, source.get("maximum_qfq_date")))
+        registered = _mapping(split_defaults[str(horizon)], f"split_defaults.{horizon}")
+        expected = _horizon_quality(
+            records,
+            horizon,
+            cast(str | None, source.get("maximum_qfq_date")),
+            minimum_required_sessions=int(cast(int, registered["minimum_required_independent_session_count"])),
+        )
         if value != expected:
             raise HistoricalReplayError("historical replay horizon quality 无法由records重放")
 
@@ -979,12 +990,25 @@ def _validate_quality_identity(
         "sampling_strategy": source["sampling_strategy"], "source_row_count": source["source_row_count"],
         "record_count": len(records),
         "record_independent_session_count": len({str(item["signal_date"]) for item in records}),
-        "registered_probability_split_defaults": _registered_split_defaults(),
         "minimum_history_bars": config.minimum_history_bars,
     }
     if any(quality.get(key) != value for key, value in expected.items()):
         raise HistoricalReplayError("historical replay quality identity 无法重放")
     _validate_quality_exclusions(quality, records, len(dates), int(cast(int, source["source_symbol_count"])))
+
+
+def _validated_registered_split_defaults(quality: Mapping[str, object]) -> Mapping[str, object]:
+    value = _mapping(
+        quality.get("registered_probability_split_defaults"),
+        "quality.registered_probability_split_defaults",
+    )
+    if value != _registered_split_defaults() and value != _superseded_registered_split_defaults():
+        raise HistoricalReplayError("historical replay probability split defaults 不受支持")
+    return value
+
+
+def _uses_superseded_probability_split(quality: Mapping[str, object]) -> bool:
+    return quality.get("registered_probability_split_defaults") == _superseded_registered_split_defaults()
 
 
 def _validate_quality_exclusions(
@@ -1344,8 +1368,21 @@ def _registered_split_defaults() -> dict[str, object]:
             "minimum_train_sessions": 120,
             "minimum_calibration_sessions": 40,
             "minimum_test_sessions": 60,
-            "gap_sessions": horizon,
+            "gap_sessions": horizon + 1,
             "minimum_required_independent_session_count": _minimum_registered_sessions(horizon),
+        }
+        for horizon in HISTORICAL_REPLAY_HORIZONS
+    }
+
+
+def _superseded_registered_split_defaults() -> dict[str, object]:
+    return {
+        str(horizon): {
+            "minimum_train_sessions": 120,
+            "minimum_calibration_sessions": 40,
+            "minimum_test_sessions": 60,
+            "gap_sessions": horizon,
+            "minimum_required_independent_session_count": 220 + 2 * horizon,
         }
         for horizon in HISTORICAL_REPLAY_HORIZONS
     }

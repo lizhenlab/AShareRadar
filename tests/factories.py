@@ -80,7 +80,10 @@ def make_kline(
     data_version: str = "test-daily-kline-qfq-v1",
     from_cache: bool = False,
     fallback_used: bool = False,
+    replay_eligible: bool = False,
 ) -> Kline:
+    effective_as_of = f"{date} 15:15:00" if replay_eligible else as_of
+    effective_data_version = f"pit-{date}" if replay_eligible else data_version
     return Kline(
         date=date,
         open=close - 0.5,
@@ -89,9 +92,14 @@ def make_kline(
         low=low if low is not None else close - 1,
         volume=volume,
         adjustment_mode=adjustment_mode,
-        as_of=as_of,
-        data_version=data_version,
+        as_of=effective_as_of,
+        data_version=effective_data_version,
         source=source,
         from_cache=from_cache,
         fallback_used=fallback_used,
+        session_status="trading" if replay_eligible else "unknown",
+        open_execution_status="tradable" if replay_eligible else "unknown",
+        corporate_action_status="none" if replay_eligible else "unknown",
+        point_in_time=replay_eligible,
+        execution_metadata_version="factor-execution-evidence.v1" if replay_eligible else None,
     )

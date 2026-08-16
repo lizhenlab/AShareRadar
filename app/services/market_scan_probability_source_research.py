@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import stat
-from threading import RLock
+from threading import Lock, RLock
 from typing import cast
 
 from app.artifacts.io import path_has_only_trusted_aliases
@@ -26,11 +26,14 @@ from app.services.market_scan_probability_research import (
     PROBABILITY_PRIMARY_TARGET,
 )
 from app.services.market_scan_probability_source import (
+    PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION,
+    PROBABILITY_SOURCE_PAYLOAD_CONTRACT_VERSION,
     ProbabilitySourceError,
     load_probability_source_snapshot,
 )
 from app.services.market_scan_probability_outcomes import (
     ProbabilityOutcomeError,
+    ProbabilityOutcomeSemanticDriftError,
     load_probability_outcome_artifact,
 )
 from app.services.market_scan_probability_fit_assessment import (
@@ -80,62 +83,137 @@ class MarketScanProbabilitySourceResearchStore:
             else self.directory.parent / "market_scan_probability_fit"
         )
         self._lock = RLock()
+        self._refresh_lock = Lock()
         self._snapshot: tuple[_DirectorySnapshot, _DirectorySnapshot, _DirectorySnapshot, str] | None = None
         self._research_by_run: dict[int, dict[str, object]] = {}
         self._summary_by_fingerprint: dict[_FileFingerprint, _SourceSummary] = {}
         self._outcome_by_fingerprint: dict[_FileFingerprint, _OutcomeSummary] = {}
         self._fit_by_fingerprint: dict[_FileFingerprint, _FitSummary] = {}
+        self._excluded_outcome_run_ids: frozenset[int] = frozenset()
 
     def research_projection(self, run_id: int) -> dict[str, object]:
+        self._refresh_if_changed(blocking=False)
         with self._lock:
-            self._refresh_if_changed()
             return deepcopy(
                 self._research_by_run.get(run_id, not_generated_probability_research(run_id))
             )
 
-    def _refresh_if_changed(self) -> None:
-        candidate_cache = dict(self._summary_by_fingerprint)
-        candidate_outcomes = dict(self._outcome_by_fingerprint)
-        candidate_fits = dict(self._fit_by_fingerprint)
-        for _attempt in range(_STABLE_SNAPSHOT_READ_ATTEMPTS):
-            source_snapshot = _directory_snapshot(
-                self.directory, "market-scan-probability-source-run-*.json.gz"
-            )
-            outcome_snapshot = _directory_snapshot(
-                self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz"
-            )
-            fit_snapshot = _directory_snapshot(
-                self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz"
-            )
-            effective_as_of = latest_expected_daily_kline_date().isoformat()
-            snapshot = source_snapshot, outcome_snapshot, fit_snapshot, effective_as_of
-            if self._snapshot == snapshot:
+    def preload(self) -> int:
+        """Verify archives and atomically publish the compact in-memory run index."""
+        self._refresh_if_changed(blocking=True)
+        with self._lock:
+            return len(self._research_by_run)
+
+    def _refresh_if_changed(self, *, blocking: bool) -> None:
+        observed = self._observed_snapshot()
+        with self._lock:
+            if self._snapshot == observed:
                 return
-            summaries = _snapshot_summaries(source_snapshot, candidate_cache)
-            outcomes = _snapshot_outcomes(outcome_snapshot, candidate_outcomes)
-            fits = _snapshot_fits(fit_snapshot, candidate_fits)
-            candidate_cache.update(summaries)
-            candidate_outcomes.update(outcomes)
-            candidate_fits.update(fits)
-            if (
-                _directory_snapshot(self.directory, "market-scan-probability-source-run-*.json.gz"),
-                _directory_snapshot(self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz"),
-                _directory_snapshot(self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz"),
-                latest_expected_daily_kline_date().isoformat(),
-            ) != snapshot:
-                continue
-            self._research_by_run = _research_index(
-                tuple(summaries.values()),
-                tuple(outcomes.values()),
-                tuple(fits.values()),
-                effective_as_of=effective_as_of,
-            )
+        acquired = self._refresh_lock.acquire(blocking=blocking)
+        if not acquired:
+            # Non-blocking warm reads return the previous complete projection
+            # while the sole refresher verifies/decompresses the next snapshot.
+            return
+        try:
+            with self._lock:
+                candidate_cache, candidate_outcomes, candidate_fits = self._candidate_caches()
+            for _attempt in range(_STABLE_SNAPSHOT_READ_ATTEMPTS):
+                source_snapshot = _directory_snapshot(
+                    self.directory, "market-scan-probability-source-run-*.json.gz"
+                )
+                outcome_snapshot = _directory_snapshot(
+                    self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz"
+                )
+                fit_snapshot = _directory_snapshot(
+                    self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz"
+                )
+                effective_as_of = latest_expected_daily_kline_date().isoformat()
+                snapshot = source_snapshot, outcome_snapshot, fit_snapshot, effective_as_of
+                with self._lock:
+                    if self._snapshot == snapshot:
+                        return
+                # Deep verification/decompression deliberately happens outside the
+                # projection-state lock. Readers only ever see the previous complete
+                # index or the new complete index, never a partially refreshed cache.
+                summaries = _snapshot_summaries(source_snapshot, candidate_cache)
+                outcomes, excluded_outcome_run_ids = _snapshot_outcomes(
+                    outcome_snapshot,
+                    candidate_outcomes,
+                )
+                fits = _snapshot_fits(fit_snapshot, candidate_fits)
+                candidate_cache.update(summaries)
+                candidate_outcomes.update(outcomes)
+                candidate_fits.update(fits)
+                if (
+                    _directory_snapshot(self.directory, "market-scan-probability-source-run-*.json.gz"),
+                    _directory_snapshot(self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz"),
+                    _directory_snapshot(self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz"),
+                    latest_expected_daily_kline_date().isoformat(),
+                ) != snapshot:
+                    continue
+                self._commit_refresh(
+                    snapshot,
+                    summaries,
+                    outcomes,
+                    fits,
+                    excluded_outcome_run_ids,
+                    effective_as_of,
+                )
+                return
+            raise ProbabilitySourceError("上涨概率 source archive 目录在多次读取期间持续变化，请重试")
+        finally:
+            self._refresh_lock.release()
+
+    def _commit_refresh(
+        self,
+        snapshot: tuple[_DirectorySnapshot, _DirectorySnapshot, _DirectorySnapshot, str],
+        summaries: dict[_FileFingerprint, _SourceSummary],
+        outcomes: dict[_FileFingerprint, _OutcomeSummary],
+        fits: dict[_FileFingerprint, _FitSummary],
+        excluded_run_ids: frozenset[int],
+        effective_as_of: str,
+    ) -> None:
+        index = _research_index(
+            tuple(summaries.values()),
+            tuple(outcomes.values()),
+            tuple(fits.values()),
+            effective_as_of=effective_as_of,
+            excluded_outcome_run_ids=excluded_run_ids,
+        )
+        with self._lock:
+            self._research_by_run = index
             self._summary_by_fingerprint = summaries
             self._outcome_by_fingerprint = outcomes
             self._fit_by_fingerprint = fits
+            self._excluded_outcome_run_ids = excluded_run_ids
             self._snapshot = snapshot
-            return
-        raise ProbabilitySourceError("上涨概率 source archive 目录在多次读取期间持续变化，请重试")
+
+    def _candidate_caches(
+        self,
+    ) -> tuple[
+        dict[_FileFingerprint, _SourceSummary],
+        dict[_FileFingerprint, _OutcomeSummary],
+        dict[_FileFingerprint, _FitSummary],
+    ]:
+        return (
+            dict(self._summary_by_fingerprint),
+            dict(self._outcome_by_fingerprint),
+            dict(self._fit_by_fingerprint),
+        )
+
+    def _observed_snapshot(
+        self,
+    ) -> tuple[_DirectorySnapshot, _DirectorySnapshot, _DirectorySnapshot, str]:
+        return (
+            _directory_snapshot(self.directory, "market-scan-probability-source-run-*.json.gz"),
+            _directory_snapshot(
+                self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz",
+            ),
+            _directory_snapshot(
+                self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz",
+            ),
+            latest_expected_daily_kline_date().isoformat(),
+        )
 
 
 def _snapshot_summaries(
@@ -158,8 +236,20 @@ def _fingerprint_summary(
 def _snapshot_outcomes(
     snapshot: _DirectorySnapshot,
     cache: Mapping[_FileFingerprint, _OutcomeSummary],
-) -> dict[_FileFingerprint, _OutcomeSummary]:
-    return {fingerprint: _fingerprint_outcome(fingerprint, cache) for fingerprint in snapshot[1]}
+) -> tuple[dict[_FileFingerprint, _OutcomeSummary], frozenset[int]]:
+    outcomes: dict[_FileFingerprint, _OutcomeSummary] = {}
+    excluded_run_ids: set[int] = set()
+    for fingerprint in snapshot[1]:
+        try:
+            outcomes[fingerprint] = _fingerprint_outcome(fingerprint, cache)
+        except ProbabilityOutcomeSemanticDriftError as exc:
+            # Intact legacy evidence remains on disk for audit, but cannot enter
+            # the current replay/probability projection.
+            if exc.run_id is None:
+                raise ProbabilitySourceError("legacy outcome semantic drift 缺少 run 绑定") from exc
+            excluded_run_ids.add(exc.run_id)
+            continue
+    return outcomes, frozenset(excluded_run_ids)
 
 
 def _fingerprint_outcome(
@@ -171,6 +261,8 @@ def _fingerprint_outcome(
         return cached
     try:
         return _compact_outcome_summary(load_probability_outcome_artifact(fingerprint[0]))
+    except ProbabilityOutcomeSemanticDriftError:
+        raise
     except ProbabilityOutcomeError as exc:
         raise ProbabilitySourceError("上涨概率 outcome archive 校验失败") from exc
 
@@ -202,6 +294,7 @@ def _research_index(
     fits: Sequence[_FitSummary] = (),
     *,
     effective_as_of: str | None = None,
+    excluded_outcome_run_ids: frozenset[int] = frozenset(),
 ) -> dict[int, dict[str, object]]:
     newest_by_run = _newest_capture_by_run(summaries)
     canonical = _canonical_sources(tuple(newest_by_run.values()))
@@ -212,7 +305,11 @@ def _research_index(
         outcomes,
         effective_as_of=effective_as_of or latest_expected_daily_kline_date().isoformat(),
     )
-    fit_by_run = _newest_fit_by_run(fits)
+    fit_by_run = _trusted_fits_by_run(
+        _newest_fit_by_run(fits),
+        tuple(canonical.values()),
+        excluded_outcome_run_ids,
+    )
     return {
         run_id: _source_research(
             summary,
@@ -225,6 +322,7 @@ def _research_index(
                 canonical_sources=tuple(canonical.values()),
                 outcomes=selected_outcomes,
             ),
+            excluded_outcome_semantic_drift=run_id in excluded_outcome_run_ids,
         )
         for run_id, summary in canonical.items()
     }
@@ -255,6 +353,31 @@ def _fit_for_source(
     return fit
 
 
+def _trusted_fits_by_run(
+    fits: Mapping[int, _FitSummary],
+    sources: Sequence[_SourceSummary],
+    excluded_run_ids: frozenset[int],
+) -> dict[int, _FitSummary]:
+    if not excluded_run_ids:
+        return dict(fits)
+    source_by_run = {_run_id(source): source for source in sources}
+    trusted: dict[int, _FitSummary] = {}
+    for run_id, fit in fits.items():
+        through = source_by_run.get(run_id)
+        if through is None:
+            trusted[run_id] = fit
+            continue
+        dependent_ids = {
+            _run_id(source)
+            for source in sources
+            if _source_contract_key(source) == _source_contract_key(through)
+            and _source_progress_order(source) <= _source_progress_order(through)
+        }
+        if dependent_ids.isdisjoint(excluded_run_ids):
+            trusted[run_id] = fit
+    return trusted
+
+
 def _fit_input_pair_digest(
     through: _SourceSummary,
     sources: Sequence[_SourceSummary],
@@ -264,7 +387,7 @@ def _fit_input_pair_digest(
         (
             source
             for source in sources
-            if _cohort_key(source) == _cohort_key(through)
+            if _source_contract_key(source) == _source_contract_key(through)
             and _source_progress_order(source) <= _source_progress_order(through)
         ),
         key=_source_progress_order,
@@ -301,9 +424,9 @@ def _newest_capture_by_run(
 def _canonical_sources(
     summaries: Sequence[_SourceSummary],
 ) -> dict[int, _SourceSummary]:
-    grouped: dict[tuple[str, str, str, str], list[_SourceSummary]] = {}
+    grouped: dict[tuple[str, str, str, str, str, str], list[_SourceSummary]] = {}
     for summary in summaries:
-        key = (*_cohort_key(summary), str(summary["quote_date"]))
+        key = (*_source_contract_key(summary), str(summary["quote_date"]))
         grouped.setdefault(key, []).append(summary)
     canonical = [max(values, key=_source_canonical_order) for values in grouped.values()]
     return {_run_id(summary): summary for summary in canonical}
@@ -315,6 +438,7 @@ def _source_research(
     corpus: Mapping[str, object],
     progress: Mapping[str, object],
     fit: Mapping[str, object] | None,
+    excluded_outcome_semantic_drift: bool = False,
 ) -> dict[str, object]:
     progress_horizons = _mapping(progress["horizons"], "progress.horizons")
     horizons = {
@@ -355,6 +479,49 @@ def _source_research(
         "integrity_notice": "source_corpus_integrity_digest_not_probability_model_evidence",
         "production_ranking_effect": "none",
         "automatic_promotion": False,
+        "outcome_evidence_status": (
+            "legacy_semantic_drift_excluded"
+            if excluded_outcome_semantic_drift
+            else "current_replay_only"
+        ),
+        "run_binding": _source_run_binding(summary),
+    }
+
+
+def _source_run_binding(summary: Mapping[str, object]) -> dict[str, object]:
+    cohort = _mapping(summary["cohort"], "source.cohort")
+    score_contract = _mapping(summary.get("score_contract") or {}, "source.score_contract")
+    rule_version = str(cohort["rule_version"])
+    suffix = rule_version.rsplit(":", 1)[-1]
+    scan_hash = suffix if len(suffix) == 64 and all(value in "0123456789abcdef" for value in suffix) else None
+    production_hash = score_contract.get("production_score_spec_hash")
+    production_rule = score_contract.get("production_score_rule_version")
+    verified = bool(
+        summary.get("artifact_schema_version") == PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION
+        and summary.get("payload_contract_version") == PROBABILITY_SOURCE_PAYLOAD_CONTRACT_VERSION
+        and scan_hash is not None
+        and isinstance(production_rule, str)
+        and production_rule
+        and isinstance(production_hash, str)
+        and len(production_hash) == 64
+        and all(value in "0123456789abcdef" for value in production_hash)
+    )
+    return {
+        "schema_version": "market-scan-probability-run-binding-v1",
+        "binding_status": "verified" if verified else "legacy_unbound",
+        "legacy": not verified,
+        "run_id": summary["run_id"],
+        "mode": cohort["mode"],
+        "scope": cohort["scope"],
+        "rule_version": rule_version,
+        "quote_date": summary["quote_date"],
+        "data_date": summary["quote_date"],
+        "scan_rule_hash": scan_hash,
+        "production_score_rule_version": production_rule,
+        "production_score_spec_hash": production_hash,
+        "cohort_contract": dict(cohort),
+        "record_contract_version": "market-scan-probability-source-corpus-v1",
+        "source_integrity_digest": summary["integrity_digest"],
     }
 
 
@@ -399,6 +566,8 @@ def _source_horizon_summary(
         "maintenance_status": _maintenance_status(stage, progress),
         "limitations": limitations,
         "automatic_promotion": False,
+        "filter_qualified": False,
+        "filter_qualification_evaluation": None,
     }
 
 
@@ -571,7 +740,10 @@ def _compact_source_summary(artifact: Mapping[str, object]) -> _SourceSummary:
     cohort = _mapping(payload["cohort"], "payload.cohort")
     quality = _mapping(payload["quality"], "payload.quality")
     integrity = _mapping(artifact["integrity"], "integrity")
+    score_semantics = _mapping(payload["score_semantics"], "payload.score_semantics")
     return {
+        "artifact_schema_version": str(artifact["schema_version"]),
+        "payload_contract_version": str(payload["contract_version"]),
         "captured_at": str(artifact["captured_at"]),
         "run_id": int(cast(int, run["run_id"])),
         "quote_date": str(run["quote_date"]),
@@ -580,6 +752,10 @@ def _compact_source_summary(artifact: Mapping[str, object]) -> _SourceSummary:
             "mode": str(cohort["mode"]),
             "scope": str(cohort["scope"]),
             "rule_version": str(cohort["rule_version"]),
+        },
+        "score_contract": {
+            "production_score_rule_version": score_semantics.get("production_rule_version"),
+            "production_score_spec_hash": score_semantics.get("production_score_spec_hash"),
         },
         "record_count": int(cast(int, quality["record_count"])),
         "integrity_digest": str(integrity["integrity_digest"]),
@@ -654,9 +830,9 @@ def _outcome_progress_by_run(
     effective_as_of: str,
 ) -> dict[int, dict[str, object]]:
     selected = _newest_outcome_by_run(outcomes)
-    grouped: dict[tuple[str, str, str], list[_SourceSummary]] = {}
+    grouped: dict[tuple[str, str, str, str, str], list[_SourceSummary]] = {}
     for source in sources:
-        grouped.setdefault(_cohort_key(source), []).append(source)
+        grouped.setdefault(_source_contract_key(source), []).append(source)
     progress: dict[int, dict[str, object]] = {}
     for cohort_sources in grouped.values():
         progress.update(
@@ -843,9 +1019,9 @@ def _outcome_order(summary: Mapping[str, object]) -> tuple[str, float]:
 
 
 def _cumulative_source_corpora(summaries: Sequence[_SourceSummary]) -> dict[int, dict[str, object]]:
-    grouped: dict[tuple[str, str, str], list[_SourceSummary]] = {}
+    grouped: dict[tuple[str, str, str, str, str], list[_SourceSummary]] = {}
     for summary in summaries:
-        grouped.setdefault(_cohort_key(summary), []).append(summary)
+        grouped.setdefault(_source_contract_key(summary), []).append(summary)
     corpora: dict[int, dict[str, object]] = {}
     for cohort in grouped.values():
         corpora.update(_cohort_source_corpora(cohort))
@@ -927,6 +1103,17 @@ def _source_capture_order(summary: Mapping[str, object]) -> tuple[float, str, in
 def _cohort_key(summary: Mapping[str, object]) -> tuple[str, str, str]:
     cohort = _mapping(summary["cohort"], "summary.cohort")
     return (str(cohort["mode"]), str(cohort["scope"]), str(cohort["rule_version"]))
+
+
+def _source_contract_key(
+    summary: Mapping[str, object],
+) -> tuple[str, str, str, str, str]:
+    score = _mapping(summary.get("score_contract") or {}, "summary.score_contract")
+    return (
+        *_cohort_key(summary),
+        str(score.get("production_score_rule_version") or "legacy_unbound"),
+        str(score.get("production_score_spec_hash") or "legacy_unbound"),
+    )
 
 
 def _run_id(summary: Mapping[str, object]) -> int:

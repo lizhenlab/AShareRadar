@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Path, Query, Response
 
-from app.api.deps import get_datahub
-from app.api.errors import run_sync_api_async
+from app.api.deps import get_domain_services
+from app.api.errors import artifact_integrity_guard, run_sync_api_async
+from app.models.market_strategy_templates import MarketStrategyTemplateCatalog
+from app.models.market_scan_executable_shadow import ExecutableCandidateShadowReport
 from app.models.strategy_lab import (
     StrategyCompileRequest,
     StrategyCompileResponse,
@@ -43,7 +45,8 @@ from app.models.strategy_automation import (
     StrategyScheduleUpdate,
     StrategySimulationPlan,
 )
-from app.services.datahub import DataHub
+from app.services.domain_service_bundle import DomainServiceBundle
+from app.services.market_scan_executable_shadow import MarketScanExecutableShadowService
 from app.services.strategy_execution import StrategyExecutionService
 from app.services.strategy_evidence import StrategyEvidenceService
 from app.services.strategy_automation import StrategyAutomationService
@@ -53,26 +56,34 @@ from app.services.strategy_lab import StrategyLabService
 router = APIRouter(prefix="/api/strategy-lab", tags=["strategy-lab"])
 
 
-def get_strategy_lab_service(datahub: DataHub = Depends(get_datahub)) -> StrategyLabService:
-    return datahub.cache.strategy_lab_service
+def get_strategy_lab_service(
+    services: DomainServiceBundle = Depends(get_domain_services),
+) -> StrategyLabService:
+    return services.strategy_lab
 
 
 def get_strategy_execution_service(
-    datahub: DataHub = Depends(get_datahub),
+    services: DomainServiceBundle = Depends(get_domain_services),
 ) -> StrategyExecutionService:
-    return datahub.cache.strategy_execution_service
+    return services.strategy_execution
+
+
+def get_market_scan_executable_shadow_service(
+    services: DomainServiceBundle = Depends(get_domain_services),
+) -> MarketScanExecutableShadowService:
+    return services.market_scan_executable_shadow
 
 
 def get_strategy_evidence_service(
-    datahub: DataHub = Depends(get_datahub),
+    services: DomainServiceBundle = Depends(get_domain_services),
 ) -> StrategyEvidenceService:
-    return datahub.cache.strategy_evidence_service
+    return services.strategy_evidence
 
 
 def get_strategy_automation_service(
-    datahub: DataHub = Depends(get_datahub),
+    services: DomainServiceBundle = Depends(get_domain_services),
 ) -> StrategyAutomationService:
-    return datahub.cache.strategy_automation_service
+    return services.strategy_automation
 
 
 @router.get("/metrics", response_model=list[StrategyMetricDefinition])
@@ -82,6 +93,40 @@ async def strategy_metric_registry(
 ) -> list[StrategyMetricDefinition]:
     response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(service.metrics)
+
+
+@router.get("/templates", response_model=MarketStrategyTemplateCatalog)
+async def strategy_template_catalog(
+    response: Response,
+    service: StrategyLabService = Depends(get_strategy_lab_service),
+) -> MarketStrategyTemplateCatalog:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(service.templates)
+
+
+@router.get(
+    "/executable-candidate-shadow",
+    response_model=ExecutableCandidateShadowReport,
+)
+async def executable_candidate_shadow(
+    response: Response,
+    run_id: int = Query(ge=1),
+    notional_cash_cny: float = Query(
+        1_000_000.0,
+        ge=10_000,
+        le=1_000_000_000,
+        allow_inf_nan=False,
+    ),
+    service: MarketScanExecutableShadowService = Depends(
+        get_market_scan_executable_shadow_service
+    ),
+) -> ExecutableCandidateShadowReport:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(
+        lambda: artifact_integrity_guard(
+            lambda: service.project(run_id, notional_cash_cny=notional_cash_cny)
+        )
+    )
 
 
 @router.post("/compile", response_model=StrategyCompileResponse)
@@ -194,10 +239,14 @@ async def strategy_version_diff(
 
 @router.post("/executions", response_model=PortfolioDraft, status_code=201)
 async def execute_strategy(
+    response: Response,
     payload: StrategyExecutionRequest,
     service: StrategyExecutionService = Depends(get_strategy_execution_service),
 ) -> PortfolioDraft:
-    return await run_sync_api_async(lambda: service.execute(payload))
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(
+        lambda: artifact_integrity_guard(lambda: service.execute(payload))
+    )
 
 
 @router.get("/executions/compare", response_model=StrategyExecutionComparison)
@@ -208,9 +257,7 @@ async def compare_strategy_executions(
     service: StrategyExecutionService = Depends(get_strategy_execution_service),
 ) -> StrategyExecutionComparison:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(
-        lambda: service.compare(left_execution_id, right_execution_id)
-    )
+    return await run_sync_api_async(lambda: service.compare(left_execution_id, right_execution_id))
 
 
 @router.get("/executions/{execution_id}", response_model=PortfolioDraft)
@@ -278,7 +325,9 @@ async def strategy_evidence_center(
 ) -> StrategyEvidenceCenter | None:
     response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(
-        lambda: service.latest(strategy_id, revision=revision, mode=mode)
+        lambda: artifact_integrity_guard(
+            lambda: service.latest(strategy_id, revision=revision, mode=mode)
+        )
     )
 
 
@@ -293,10 +342,12 @@ async def refresh_strategy_evidence_center(
     service: StrategyEvidenceService = Depends(get_strategy_evidence_service),
 ) -> StrategyEvidenceCenter:
     return await run_sync_api_async(
-        lambda: service.refresh(
-            strategy_id,
-            revision=payload.revision,
-            mode=payload.mode,
+        lambda: artifact_integrity_guard(
+            lambda: service.refresh(
+                strategy_id,
+                revision=payload.revision,
+                mode=payload.mode,
+            )
         )
     )
 
@@ -335,9 +386,7 @@ async def update_strategy_schedule(
     schedule_id: int = Path(ge=1),
     service: StrategyAutomationService = Depends(get_strategy_automation_service),
 ) -> StrategySchedule:
-    return await run_sync_api_async(
-        lambda: service.set_enabled(schedule_id, enabled=payload.enabled)
-    )
+    return await run_sync_api_async(lambda: service.set_enabled(schedule_id, enabled=payload.enabled))
 
 
 @router.post("/automation/evaluate", response_model=StrategyAutomationRunSummary)
@@ -376,7 +425,11 @@ async def create_strategy_simulation_plan(
     execution_id: int = Path(ge=1),
     service: StrategyAutomationService = Depends(get_strategy_automation_service),
 ) -> StrategySimulationPlan:
-    return await run_sync_api_async(lambda: service.create_simulation_plan(execution_id))
+    return await run_sync_api_async(
+        lambda: artifact_integrity_guard(
+            lambda: service.create_simulation_plan(execution_id)
+        )
+    )
 
 
 @router.get(
@@ -389,7 +442,9 @@ async def get_strategy_simulation_plan(
     service: StrategyAutomationService = Depends(get_strategy_automation_service),
 ) -> StrategySimulationPlan | None:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(lambda: service.simulation_plan(execution_id))
+    return await run_sync_api_async(
+        lambda: artifact_integrity_guard(lambda: service.simulation_plan(execution_id))
+    )
 
 
 __all__ = [

@@ -127,6 +127,17 @@ def _trend_pullback_validation(
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
     condition_met = feature.trend_score >= 55 and feature.price >= feature.ma5
+    volume_confirmation = (
+        f"同时量能不低于20日均量 {VOLUME_CONFIRMATION_RATIO:.1f} 倍；"
+        f"当前量能 {feature.volume_ratio:.2f} 倍。"
+        if feature.volume_ratio_available
+        else "量能窗口不完整，当前不用量能占位值作确认。"
+    )
+    invalidation_condition = (
+        f"收盘跌破20日线 {feature.ma20:.2f} 或有效跌破支撑 {feature.support:.2f}。"
+        if feature.ma20_available and feature.support_available
+        else "20日线或支撑位证据不完整，失效线待确认。"
+    )
     return SignalValidationItem(
         name="趋势回踩验证",
         category="买点",
@@ -139,11 +150,8 @@ def _trend_pullback_validation(
         ),
         confidence=_validation_confidence(feature.signal_confidence, factor, market_regime, timeframe),
         trigger_condition=f"价格不低于5日线 {feature.ma5:.2f}，趋势评分至少 55 分。",
-        confirmation_condition=(
-            f"收盘不跌回5日线，同时量能不低于20日均量 {VOLUME_CONFIRMATION_RATIO:.1f} 倍；"
-            f"当前量能 {feature.volume_ratio:.2f} 倍。"
-        ),
-        invalidation_condition=f"收盘跌破20日线 {feature.ma20:.2f} 或有效跌破支撑 {feature.support:.2f}。",
+        confirmation_condition=f"收盘不跌回5日线，{volume_confirmation}",
+        invalidation_condition=invalidation_condition,
         historical_reference=_factor_reference(factor),
         action_hint="只作为回踩确认信号，不在下跌途中提前判定止跌。",
     )
@@ -155,22 +163,34 @@ def _breakout_validation(
     factor: StandardFactor | None,
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
-    condition_met = feature.price >= feature.resistance * 0.985 and feature.volume_ratio >= VOLUME_CONFIRMATION_RATIO
+    evidence_available = feature.resistance_available and feature.volume_ratio_available
+    condition_met = (
+        evidence_available
+        and feature.price >= feature.resistance * 0.985
+        and feature.volume_ratio >= VOLUME_CONFIRMATION_RATIO
+    )
+    trigger_condition = (
+        f"价格接近或突破压力位 {feature.resistance:.2f}，"
+        f"且放量不低于20日均量 {VOLUME_CONFIRMATION_RATIO:.1f} 倍。"
+        if evidence_available
+        else "压力位或量能窗口不完整，突破条件待确认。"
+    )
     return SignalValidationItem(
         name="压力突破验证",
         category="买点",
-        status=_price_validation_status(
-            condition_met,
-            (feature.price, feature.resistance),
-            market_regime,
-            factor,
-            timeframe,
+        status=(
+            _price_validation_status(
+                condition_met,
+                (feature.price, feature.resistance),
+                market_regime,
+                factor,
+                timeframe,
+            )
+            if evidence_available
+            else STATUS_WAITING
         ),
         confidence=_validation_confidence(feature.signal_confidence, factor, market_regime, timeframe),
-        trigger_condition=(
-            f"价格接近或突破压力位 {feature.resistance:.2f}，"
-            f"且放量不低于20日均量 {VOLUME_CONFIRMATION_RATIO:.1f} 倍。"
-        ),
+        trigger_condition=trigger_condition,
         confirmation_condition="突破后回踩不跌回压力位下方，量价热度评分（衍生）维持在60分附近或继续改善。",
         invalidation_condition="突破后快速缩量回落，或次日跌回压力位下方。",
         historical_reference=_factor_reference(factor),
@@ -184,25 +204,42 @@ def _support_defense_validation(
     factor: StandardFactor | None,
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
-    condition_met = feature.price > feature.support * 1.01 and feature.price >= feature.ma20 * 0.985
+    evidence_available = feature.support_available and feature.ma20_available
+    condition_met = (
+        evidence_available
+        and feature.price > feature.support * 1.01
+        and feature.price >= feature.ma20 * 0.985
+    )
+    trigger_condition = (
+        f"价格守在支撑 {feature.support:.2f} 上方 1% 以外，"
+        f"且不明显跌破20日线 {feature.ma20:.2f}。"
+        if evidence_available
+        else "支撑位或20日线证据不完整，防守条件待确认。"
+    )
+    invalidation_condition = (
+        f"有效跌破支撑 {feature.support:.2f} 或20日线 {feature.ma20:.2f} 后不能快速修复。"
+        if evidence_available
+        else "支撑位或20日线证据不完整，失效线待确认。"
+    )
     return SignalValidationItem(
         name="支撑防守验证",
         category="风控",
-        status=_price_validation_status(
-            condition_met,
-            (feature.price, feature.support, feature.ma20),
-            market_regime,
-            factor,
-            timeframe,
-            reverse=True,
+        status=(
+            _price_validation_status(
+                condition_met,
+                (feature.price, feature.support, feature.ma20),
+                market_regime,
+                factor,
+                timeframe,
+                reverse=True,
+            )
+            if evidence_available
+            else STATUS_WAITING
         ),
         confidence=_validation_confidence(feature.data_quality_score, factor, market_regime, timeframe),
-        trigger_condition=(
-            f"价格守在支撑 {feature.support:.2f} 上方 1% 以外，"
-            f"且不明显跌破20日线 {feature.ma20:.2f}。"
-        ),
+        trigger_condition=trigger_condition,
         confirmation_condition="支撑附近缩量止跌，且次日能重新站回短期均线。",
-        invalidation_condition=f"有效跌破支撑 {feature.support:.2f} 或20日线 {feature.ma20:.2f} 后不能快速修复。",
+        invalidation_condition=invalidation_condition,
         historical_reference=_factor_reference(factor),
         action_hint="这是风险线，不是越跌越买的理由。",
     )
@@ -214,16 +251,27 @@ def _t_range_validation(
     factor: StandardFactor | None,
     timeframe: TimeframeAlignmentReport | None,
 ) -> SignalValidationItem:
-    condition_met = feature.price > feature.support and feature.price < feature.resistance
+    evidence_available = feature.support_available and feature.resistance_available
+    condition_met = evidence_available and feature.price > feature.support and feature.price < feature.resistance
+    trigger_condition = (
+        f"价格严格高于支撑 {feature.support:.2f} 且低于压力 {feature.resistance:.2f}，"
+        "不把边界触及当作区间内。"
+        if evidence_available
+        else "支撑位或压力位证据不完整，做T区间待确认。"
+    )
     return SignalValidationItem(
         name="做T区间验证",
         category="做T",
-        status=_price_validation_status(
-            condition_met,
-            (feature.price, feature.support, feature.resistance),
-            market_regime,
-            factor,
-            timeframe,
+        status=(
+            _price_validation_status(
+                condition_met,
+                (feature.price, feature.support, feature.resistance),
+                market_regime,
+                factor,
+                timeframe,
+            )
+            if evidence_available
+            else STATUS_WAITING
         ),
         confidence=_validation_confidence(
             min(feature.signal_confidence, feature.data_quality_score),
@@ -231,10 +279,7 @@ def _t_range_validation(
             market_regime,
             timeframe,
         ),
-        trigger_condition=(
-            f"价格严格高于支撑 {feature.support:.2f} 且低于压力 {feature.resistance:.2f}，"
-            "不把边界触及当作区间内。"
-        ),
+        trigger_condition=trigger_condition,
         confirmation_condition=(
             "只用已有可卖底仓，低吸后必须能在区间上沿或分时转弱处高抛，"
             "不能把做T确认等同于新增仓位。"

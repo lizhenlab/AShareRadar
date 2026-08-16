@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 import sqlite3
 from typing import Literal
 
 from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
+from app.db.market_scan_integrity import verify_market_scan_snapshot
 from app.models.market_scan import (
-    MARKET_SCAN_TOP100_REFRESH_SCOPE,
-    MarketScanCoverage,
+    MARKET_SCAN_FULL_MARKET_SCOPE,
+    MarketScanAutomaticState,
     MarketScanFilterValues,
     MarketScanMode,
     MarketScanPublicationSummary,
+    MarketScanProductionScoreContract,
     MarketScanResultItem,
     MarketScanResultPage,
     MarketScanResultStatus,
@@ -19,21 +22,43 @@ from app.models.market_scan import (
     MarketScanRunStatus,
     MarketScanSortOrderValues,
     MarketScanSortValues,
-    MarketScanStaleCluster,
+    MarketScanScoreDistributionObservation,
 )
+from app.models.market_scan_polling import MarketScanPollingIdentity
 from app.repositories.market_scan_context import MarketScanRepositoryContext
-from app.repositories.market_scan_filtering import market_scan_result_filter_sql
+from app.repositories.market_scan_automatic_state import market_scan_automatic_state_from_row
 from app.repositories.market_scan_lifecycle import ACTIVE_SCAN_STATUSES
-from app.repositories.market_scan_mapping import append_exact_filter, page_count, result_from_row, result_order_sql, run_from_row
-from app.repositories.market_scan_publication_summary import publication_summary_from_evidence
+from app.repositories.market_scan_mapping import (
+    append_exact_filter,
+    page_count,
+    result_from_row,
+    run_from_row,
+)
+from app.repositories.market_scan_polling_identity import read_market_scan_polling_identity
 from app.repositories.market_scan_results import count_degraded_results, required_run_row
-
+from app.repositories.market_scan_score_diagnostics import (
+    read_production_score_contract,
+    read_publication_summary,
+    read_success_score_observations,
+)
+from app.repositories.market_scan_verified_read import (
+    MARKET_SCAN_VERIFIED_RESULT_READ_ARGUMENTS,
+    VerifiedMarketScanRead,
+    verified_market_scan_read,
+)
 
 class MarketScanQueryMixin(MarketScanRepositoryContext):
     def run(self, run_id: int) -> MarketScanRun:
         with self._read_snapshot() as conn:
             row = required_run_row(conn, run_id)
+            _verify_published_row(conn, row)
         return run_from_row(row)
+
+    @contextmanager
+    def verified_read(self, run_id: int) -> Iterator[VerifiedMarketScanRead]:
+        """Open one non-reusable request snapshot with exactly one full verification."""
+        with verified_market_scan_read(self._path, run_id) as session:
+            yield session
 
     def active_run(self) -> MarketScanRun | None:
         placeholders = ", ".join("?" for _status in ACTIVE_SCAN_STATUSES)
@@ -57,11 +82,21 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
                 f"SELECT * FROM market_scan_run {where} ORDER BY id DESC LIMIT 1",
                 parameters,
             ).fetchone()
+            if row is not None:
+                _verify_published_row(conn, row)
         return run_from_row(row) if row is not None else None
 
+    def polling_identity(self, *, mode: MarketScanMode) -> MarketScanPollingIdentity:
+        """Return change tokens only; this result has no publication authority."""
+        return read_market_scan_polling_identity(
+            database_path=self._path,
+            read_snapshot=self._read_snapshot,
+            mode=mode,
+        )
+
     def latest_full_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
-        clauses = ["scope != ?"]
-        parameters: list[object] = [MARKET_SCAN_TOP100_REFRESH_SCOPE]
+        clauses = ["scope = ?"]
+        parameters: list[object] = [MARKET_SCAN_FULL_MARKET_SCOPE]
         if mode is not None:
             clauses.append("mode = ?")
             parameters.append(mode)
@@ -70,11 +105,40 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
                 f"SELECT * FROM market_scan_run WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT 1",
                 parameters,
             ).fetchone()
+            if row is not None:
+                _verify_published_row(conn, row)
         return run_from_row(row) if row is not None else None
 
+    def latest_full_automatic_state(self) -> MarketScanAutomaticState | None:
+        """Read a lightweight identity; this does not authorize use of a publication."""
+        with self._read_snapshot() as conn:
+            schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+            row = conn.execute(
+                """
+                SELECT id, status, trigger, data_date, scope, mode, rule_version,
+                       updated_at, snapshot_digest, snapshot_seal_origin,
+                       snapshot_sealed_at, finished_at
+                FROM market_scan_run
+                WHERE scope = ? AND mode = 'official'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (MARKET_SCAN_FULL_MARKET_SCOPE,),
+            ).fetchone()
+        if row is None:
+            return None
+        return market_scan_automatic_state_from_row(
+            row,
+            database_path=self._path,
+            schema_version=schema_version,
+        )
+
     def latest_published_run(self, *, mode: MarketScanMode | None = None) -> MarketScanRun | None:
-        clauses = ["status IN ('success', 'degraded')"]
-        parameters: list[object] = []
+        clauses = [
+            "status IN ('success', 'degraded')",
+            "scope = ?",
+        ]
+        parameters: list[object] = [MARKET_SCAN_FULL_MARKET_SCOPE]
         if mode is not None:
             clauses.append("mode = ?")
             parameters.append(mode)
@@ -90,6 +154,8 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
                 """,
                 parameters,
             ).fetchone()
+            if row is not None:
+                _verify_published_row(conn, row)
         return run_from_row(row) if row is not None else None
 
     def list_runs(
@@ -127,6 +193,8 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
                 """,
                 (*parameters, page_size, offset),
             ).fetchall()
+            for row in rows:
+                _verify_published_row(conn, row)
         return MarketScanRunPage(
             items=[run_from_row(row) for row in rows],
             total=total,
@@ -167,19 +235,33 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
             ).fetchall()
         return tuple(row["raw_score"] for row in rows)
 
-    def publication_summary(self, run_id: int) -> MarketScanPublicationSummary:
-        with self._lock, self._connect() as conn:
+    def success_score_observations(
+        self,
+        run_id: int,
+    ) -> tuple[MarketScanScoreDistributionObservation, ...]:
+        """Return auditable base/integer/final layers without hydrating result models."""
+        with self._read_snapshot() as conn:
+            return read_success_score_observations(conn, run_id)
+
+    def success_score_contract(
+        self,
+        run_id: int,
+    ) -> MarketScanProductionScoreContract | None:
+        """Return one fully covered, internally consistent production score contract."""
+        with self._read_snapshot() as conn:
             run = required_run_row(conn, run_id)
-            coverage_rows = _publication_coverage_rows(conn, run_id)
-            stale_rows = _publication_stale_rows(conn, run_id, data_date=run["data_date"])
-            timestamp_rows = _publication_timestamp_rows(conn, run_id)
-        total_count = int(run["total_count"] or 0)
-        return publication_summary_from_evidence(
-            run,
-            _coverage_summary(coverage_rows),
-            _systemic_stale_cluster(stale_rows, total_count=total_count),
-            timestamp_rows,
-        )
+            return read_production_score_contract(
+                conn,
+                run_id,
+                expected_count=int(run["success_count"] or 0),
+            )
+
+    def publication_summary(self, run_id: int) -> MarketScanPublicationSummary:
+        with self._read_snapshot() as conn:
+            run = required_run_row(conn, run_id)
+            if str(run["status"]) in {"success", "degraded"}:
+                verify_market_scan_snapshot(conn, run_id)
+            return read_publication_summary(conn, run)
 
     def results_page(
         self,
@@ -203,165 +285,19 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         symbols: MarketScanFilterValues = None, sort: MarketScanSortValues,
         order: MarketScanSortOrderValues,
     ) -> MarketScanResultPage:
-        where, params = market_scan_result_filter_sql(
-            run_id,
-            status=status,
-            market=market,
-            industry=industry,
-            is_st=is_st,
-            is_new=is_new,
-            min_score=min_score, max_score=max_score,
-            min_trend_score=min_trend_score, max_trend_score=max_trend_score,
-            min_change_pct=min_change_pct, max_change_pct=max_change_pct,
-            min_turnover_rate=min_turnover_rate, max_turnover_rate=max_turnover_rate,
-            min_amount=min_amount, max_amount=max_amount,
-            min_data_quality_score=min_data_quality_score, max_data_quality_score=max_data_quality_score,
-            min_confidence=min_confidence, max_risk=max_risk, min_tradability=min_tradability,
-            keyword=keyword, symbols=symbols,
-        )
-        order_sql = result_order_sql(sort, order)
-        offset = (page - 1) * page_size
-        with self._read_snapshot() as conn:
-            run_row = required_run_row(conn, run_id)
-            total = int(conn.execute(f"SELECT COUNT(*) FROM market_scan_result WHERE {where}", params).fetchone()[0])
-            rows = conn.execute(
-                f"""
-                SELECT * FROM market_scan_result
-                WHERE {where}
-                ORDER BY {order_sql}
-                LIMIT ? OFFSET ?
-                """,
-                (*params, page_size, offset),
-            ).fetchall()
-        return MarketScanResultPage(
-            run=run_from_row(run_row),
-            items=[result_from_row(row) for row in rows],
-            total=total,
-            page=page,
-            page_size=page_size,
-            page_count=page_count(total, page_size),
-        )
+        values = locals()
+        with self.verified_read(run_id) as verified:
+            return verified.results_page(
+                **{
+                    name: values[name]
+                    for name in MARKET_SCAN_VERIFIED_RESULT_READ_ARGUMENTS
+                }
+            )
 
 
-def _coverage_summary(rows: list[sqlite3.Row]) -> tuple[MarketScanCoverage, ...]:
-    by_market: dict[Literal["SH", "SZ", "BJ"], MarketScanCoverage] = {}
-    for row in rows:
-        market = _coverage_market(row["market"])
-        if market is None:
-            continue
-        by_market[market] = MarketScanCoverage(
-            market,
-            total_count=int(row["total_count"] or 0),
-            success_count=int(row["success_count"] or 0),
-            missing_count=int(row["missing_count"] or 0),
-            skipped_count=int(row["skipped_count"] or 0),
-        )
-    markets = (
-        by_market.get("SH", MarketScanCoverage("SH", total_count=0, success_count=0)),
-        by_market.get("SZ", MarketScanCoverage("SZ", total_count=0, success_count=0)),
-        by_market.get("BJ", MarketScanCoverage("BJ", total_count=0, success_count=0)),
-    )
-    overall = MarketScanCoverage(
-        "ALL",
-        total_count=sum(item.total_count for item in markets),
-        success_count=sum(item.success_count for item in markets),
-        missing_count=sum(item.missing_count for item in markets),
-        skipped_count=sum(item.skipped_count for item in markets),
-    )
-    return (overall, *markets)
-
-
-def _publication_coverage_rows(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
-    return conn.execute(
-        """
-        SELECT market,
-               SUM(CASE WHEN status IN ('success', 'missing') THEN 1 ELSE 0 END) AS total_count,
-               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-               SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END) AS missing_count,
-               SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count
-        FROM market_scan_result
-        WHERE run_id = ?
-        GROUP BY market
-        """,
-        (run_id,),
-    ).fetchall()
-
-
-def _publication_stale_rows(
-    conn: sqlite3.Connection,
-    run_id: int,
-    *,
-    data_date: object,
-) -> list[sqlite3.Row]:
-    return conn.execute(
-        """
-        SELECT data_date, COUNT(*) AS stale_count,
-               GROUP_CONCAT(DISTINCT market) AS markets
-        FROM market_scan_result
-        WHERE run_id = ?
-          AND status IN ('missing', 'skipped')
-          AND data_date IS NOT NULL
-          AND data_date < ?
-        GROUP BY data_date
-        ORDER BY stale_count DESC, data_date DESC
-        """,
-        (run_id, data_date),
-    ).fetchall()
-
-
-def _publication_timestamp_rows(
-    conn: sqlite3.Connection,
-    run_id: int,
-) -> list[tuple[str, str | None, str | None]]:
-    rows = conn.execute(
-        """
-        SELECT market, quote_timestamp, quote_observed_at
-        FROM market_scan_result
-        WHERE run_id = ? AND status != 'pending'
-        ORDER BY market ASC, symbol ASC
-        """,
-        (run_id,),
-    ).fetchall()
-    return [
-        (
-            str(row["market"]),
-            str(row["quote_timestamp"]) if row["quote_timestamp"] is not None else None,
-            str(row["quote_observed_at"]) if row["quote_observed_at"] is not None else None,
-        )
-        for row in rows
-    ]
-
-
-def _coverage_market(value: object) -> Literal["SH", "SZ", "BJ"] | None:
-    market = str(value)
-    if market == "SH":
-        return "SH"
-    if market == "SZ":
-        return "SZ"
-    if market == "BJ":
-        return "BJ"
-    return None
-
-
-def _systemic_stale_cluster(
-    rows: list[sqlite3.Row],
-    *,
-    total_count: int,
-) -> MarketScanStaleCluster | None:
-    if not rows or total_count <= 0:
-        return None
-    row = rows[0]
-    count = int(row["stale_count"] or 0)
-    minimum_count = max(3, math.ceil(total_count * 0.05))
-    if count < minimum_count:
-        return None
-    markets = tuple(sorted(part for part in str(row["markets"] or "").split(",") if part))
-    return MarketScanStaleCluster(
-        data_date=str(row["data_date"]),
-        count=count,
-        markets=markets,
-        total_count=total_count,
-    )
+def _verify_published_row(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+    if str(row["status"]) in {"success", "degraded"}:
+        verify_market_scan_snapshot(conn, int(row["id"]))
 
 
 __all__ = ["MarketScanQueryMixin"]

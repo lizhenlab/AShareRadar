@@ -6,6 +6,10 @@ from pathlib import Path
 import threading
 
 from app.config import Settings
+from app.models.market_scan import (
+    MarketScanPublicationDiagnostic,
+    MarketScanPublicationDiagnostics,
+)
 from app.models.schemas import Kline, Quote, StockInfo
 from app.services.cache import SQLiteCache
 from app.services.datahub_metadata import StockPoolResolution
@@ -15,6 +19,34 @@ from tests.factories import make_kline, make_quote, make_stock_info
 
 SCAN_AS_OF = datetime(2026, 7, 17, 16, 30)
 SCAN_DATA_DATE = date(2026, 7, 17)
+
+
+def action_pass_publication_diagnostics() -> MarketScanPublicationDiagnostics:
+    return MarketScanPublicationDiagnostics(
+        headline="测试批次已通过动作源评分分布门禁",
+        passed_gates=[
+            MarketScanPublicationDiagnostic(
+                code="score_distribution.pass",
+                label="评分分布",
+                detail="测试评分分布通过",
+                severity="info",
+            )
+        ],
+    )
+
+
+def distribution_degraded_publication_diagnostics() -> MarketScanPublicationDiagnostics:
+    return MarketScanPublicationDiagnostics(
+        headline="评分分布退化，仅允许审计展示",
+        source_warnings=[
+            MarketScanPublicationDiagnostic(
+                code="score_distribution.degraded",
+                label="评分分布",
+                detail="基础分档过少且头部并列，未通过动作源门禁",
+                severity="warning",
+            )
+        ],
+    )
 
 
 class _MarketScanHub:

@@ -62,7 +62,11 @@ export function marketScanSnapshotContent(value, probabilityResearch) {
   const components = objectValue(details.components);
   const leader = objectValue(components.leader_score);
   const finalScore = objectValue(components.final_score);
-  const refinement = objectValue(components.rank_refinement);
+  const continuousTrend = objectValue(components.continuous_trend);
+  const refinement = Object.keys(continuousTrend).length
+    ? continuousTrend
+    : objectValue(components.rank_refinement);
+  const isContinuousTrend = Object.keys(continuousTrend).length > 0;
   const dimensions = objectValue(components.score_dimensions);
   const ranking = objectValue(details.ranking);
   const ruleDeltas = objectValue(leader.rule_deltas);
@@ -79,9 +83,11 @@ export function marketScanSnapshotContent(value, probabilityResearch) {
       ${snapshotMetric("基础趋势分", item.trend_score)}
       ${snapshotMetric("龙头分", item.leader_score)}
       ${snapshotMetric("质量扣分", finalScore.quality_penalty, 4)}
-      ${snapshotMetric("精排扣分", finalScore.rank_discount, 6)}
+      ${isContinuousTrend
+        ? snapshotMetric("连续趋势调整", finalScore.continuous_trend_adjustment, 6)
+        : snapshotMetric("精排扣分", finalScore.rank_discount, 6)}
     </div>
-    ${hasDetails ? scoreBreakdown(leader, finalScore, refinement, ruleDeltas, weightedTerms) : missingScoreDetails()}
+    ${hasDetails ? scoreBreakdown(leader, finalScore, refinement, ruleDeltas, weightedTerms, isContinuousTrend) : missingScoreDetails()}
     ${scoreDimensions(dimensions)}
     ${marketScanProbabilitySnapshot(item, probabilityResearch)}
     <div class="market-scan-snapshot-columns">
@@ -129,7 +135,12 @@ function volumeContextText(context) {
   return `<p class="market-scan-snapshot-rule"><strong>量能口径：</strong>${escapeHtml(label)} · 日K截止 ${escapeHtml(context.volume_data_date || "--")}</p>`;
 }
 
-function scoreBreakdown(leader, finalScore, refinement, ruleDeltas, weightedTerms) {
+function scoreBreakdown(leader, finalScore, refinement, ruleDeltas, weightedTerms, isContinuousTrend) {
+  const adjustment = isContinuousTrend
+    ? definition("连续趋势调整", finalScore.continuous_trend_adjustment, 6, true)
+    : definition("精排扣分", finalScore.rank_discount, 6, true, -1);
+  const componentTitle = isContinuousTrend ? "连续中期趋势" : "排名细化值";
+  const componentLabel = isContinuousTrend ? "连续趋势综合值" : "精排综合值";
   return `<div class="market-scan-score-breakdown">
     <section><h4>评分组成</h4><dl>
       ${definition("龙头基础分", leader.base)}
@@ -137,12 +148,12 @@ function scoreBreakdown(leader, finalScore, refinement, ruleDeltas, weightedTerm
       ${termDefinitions(ruleDeltas, true)}
       ${definition("质量扣分", finalScore.quality_penalty, 4, true, -1)}
       ${definition("扣分前基础分", finalScore.base, 4)}
-      ${definition("精排扣分", finalScore.rank_discount, 6, true, -1)}
+      ${adjustment}
       ${definition("原始排名分", finalScore.raw, 6)}
       ${definition("趋势强度取整分", finalScore.score)}
     </dl></section>
-    <section><h4>排名细化值</h4><dl>
-      ${definition("精排综合值", refinement.score, 6)}
+    <section><h4>${componentTitle}</h4><dl>
+      ${definition(componentLabel, refinement.score, 6)}
       ${termDefinitions(weightedTerms, false)}
     </dl></section>
   </div>`;

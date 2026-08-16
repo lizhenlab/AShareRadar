@@ -11,6 +11,11 @@ from app.db.schema_definitions import (
     QUOTE_HISTORY_COLUMN_DEFINITIONS,
     SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL,
 )
+from app.db.market_scan_integrity import (
+    backfill_market_scan_snapshot_digests,
+    create_market_scan_immutability_triggers,
+    drop_market_scan_immutability_triggers,
+)
 from app.utils.audit_time import normalize_audit_time_text
 
 
@@ -30,6 +35,7 @@ MARKET_SCAN_PREOPEN_MODE_MIGRATION = "20260812_market_scan_preopen_mode_v2"
 MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION = (
     "20260812_market_scan_probability_capture_outbox_v1"
 )
+MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION = "20260813_market_scan_snapshot_digest_v3"
 AUDIT_TIMESTAMP_UTC_MIGRATION = "20260724_audit_timestamps_utc_v2"
 ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION = "20260724_advice_review_audit_timestamps_utc_v2"
 SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION = "20260724_schema_migration_applied_at_utc_v2"
@@ -146,6 +152,7 @@ AUDIT_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
     "plate_rank": ("updated_at",),
     "stock_concept": ("updated_at",),
     "advice_review_plan": ("created_at", "updated_at"),
+    "advice_review_plan_revision": ("created_at",),
     "advice_review_result": ("evaluated_at",),
 }
 
@@ -226,6 +233,15 @@ COMPAT_COLUMNS = {
         "stage_metrics_json": "TEXT NOT NULL DEFAULT '{}'",
         "market_progress_json": "TEXT NOT NULL DEFAULT '[]'",
         "publication_diagnostics_json": "TEXT",
+        "snapshot_digest": (
+            "TEXT CHECK (snapshot_digest IS NULL OR (length(snapshot_digest) = 64 "
+            "AND snapshot_digest NOT GLOB '*[^0-9a-f]*'))"
+        ),
+        "snapshot_seal_origin": (
+            "TEXT CHECK (snapshot_seal_origin IS NULL OR "
+            "snapshot_seal_origin IN ('publication', 'legacy_backfill'))"
+        ),
+        "snapshot_sealed_at": "TEXT",
     },
     "stock_concept": {
         "match_reason": "TEXT NOT NULL DEFAULT '概念成分匹配'",
@@ -293,6 +309,30 @@ def _apply_compat_migrations(
     _apply_audit_timestamp_utc_migration(
         conn,
         legacy_audit_timezone=legacy_audit_timezone,
+    )
+    _apply_market_scan_snapshot_digest_migration(conn)
+
+
+def _apply_market_scan_snapshot_digest_migration(conn: sqlite3.Connection) -> None:
+    if not table_has_columns(
+        conn,
+        "market_scan_run",
+        "snapshot_digest",
+        "snapshot_seal_origin",
+        "snapshot_sealed_at",
+    ):
+        return
+    existing = conn.execute(
+        "SELECT 1 FROM schema_migration WHERE name = ?",
+        (MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION,),
+    ).fetchone()
+    if existing is not None:
+        create_market_scan_immutability_triggers(conn)
+        return
+    backfill_market_scan_snapshot_digests(conn)
+    conn.execute(
+        "INSERT INTO schema_migration (name) VALUES (?)",
+        (MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION,),
     )
 
 
@@ -483,6 +523,16 @@ def _apply_market_scan_probability_capture_outbox_migration(
 ) -> None:
     if not table_exists(conn, "market_scan_run"):
         return
+    _create_market_scan_probability_capture_outbox(conn)
+    claimed = conn.execute(
+        "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
+        (MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION,),
+    )
+    if claimed.rowcount:
+        _backfill_market_scan_probability_capture_outbox(conn)
+
+
+def _create_market_scan_probability_capture_outbox(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS market_scan_probability_capture_outbox (
@@ -495,7 +545,12 @@ def _apply_market_scan_probability_capture_outbox_migration(
             lease_expires_at TEXT,
             last_attempt_at TEXT,
             completed_at TEXT,
-            archive_digest TEXT,
+            archive_digest TEXT CHECK (
+                archive_digest IS NULL OR (
+                    length(archive_digest) = 64
+                    AND archive_digest NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
             last_error TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -503,6 +558,11 @@ def _apply_market_scan_probability_capture_outbox_migration(
             CHECK (
                 (status = 'processing' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
                 OR (status <> 'processing' AND lease_owner IS NULL AND lease_expires_at IS NULL)
+            ),
+            CHECK (
+                (status = 'succeeded' AND completed_at IS NOT NULL AND archive_digest IS NOT NULL)
+                OR (status = 'skipped' AND completed_at IS NOT NULL AND archive_digest IS NULL)
+                OR (status IN ('pending', 'processing') AND completed_at IS NULL AND archive_digest IS NULL)
             )
         )
         """
@@ -513,12 +573,9 @@ def _apply_market_scan_probability_capture_outbox_migration(
         ON market_scan_probability_capture_outbox(status, next_attempt_at, run_id)
         """
     )
-    claimed = conn.execute(
-        "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
-        (MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION,),
-    )
-    if claimed.rowcount == 0:
-        return
+
+
+def _backfill_market_scan_probability_capture_outbox(conn: sqlite3.Connection) -> None:
     # Backfill retained, published source candidates so upgrading an existing
     # runtime resumes capture instead of starting the corpus at upgrade time.
     conn.execute(
@@ -547,6 +604,7 @@ def _market_scan_mode_accepts_preopen(conn: sqlite3.Connection) -> bool:
 
 
 def _rebuild_market_scan_tables_for_preopen(conn: sqlite3.Connection) -> None:
+    drop_market_scan_immutability_triggers(conn)
     run_sql = _table_sql(conn, "market_scan_run")
     result_sql = _table_sql(conn, "market_scan_result")
     dependent_sql = _market_scan_dependent_schema(conn)
@@ -1087,6 +1145,7 @@ __all__ = [
     "JOURNAL_MODE_RETRY_COUNT",
     "KLINE_DAILY_CONTRACT_MIGRATION",
     "MIGRATION_BUSY_TIMEOUT_MS",
+    "MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION",
     "QUOTE_HISTORY_CONTRACT_MIGRATION",
     "QUOTE_HISTORY_UNIQUE_INDEX",
     "SCHEMA_MIGRATION_SQL",

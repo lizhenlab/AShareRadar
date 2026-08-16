@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 
 from app.models.market import Kline
@@ -92,6 +94,8 @@ def test_probability_label_contract_is_versioned_and_rejects_conflicting_bars() 
     assert contract["label_version"] == PROBABILITY_LABEL_VERSION
     assert contract["execution_model"] == PROBABILITY_EXECUTION_MODEL
     assert contract["horizons"] == [1, 5, 20]
+    assert contract["entry_session_offset"] == 1
+    assert contract["target_session_offsets"] == {"1": 2, "5": 6, "20": 21}
     assert contract["cost_model_version"]
     assert set(contract["target_definitions"]) == {
         "absolute_net_return_positive",
@@ -105,6 +109,31 @@ def test_probability_label_contract_is_versioned_and_rejects_conflicting_bars() 
     )
     with pytest.raises(ValueError, match="conflicting probability label bar"):
         _labels(duplicate, horizons=(1,))
+
+
+def test_probability_labels_use_exact_H_plus_1_signal_date_exit_offsets() -> None:
+    start = date(2026, 1, 5)
+    rows = _rows(
+        *(
+            (
+                (start + timedelta(days=offset)).isoformat(),
+                100 + offset * 0.1,
+                100.05 + offset * 0.1,
+                100.2 + offset * 0.1,
+                99.9 + offset * 0.1,
+                1_000,
+            )
+            for offset in range(22)
+        )
+    )
+
+    outcomes = _labels(rows, horizons=(1, 5, 20))
+
+    assert outcomes[1].entry_date == "2026-01-06"
+    assert outcomes[1].exit_date == "2026-01-07"
+    assert outcomes[5].exit_date == "2026-01-11"
+    assert outcomes[20].exit_date == "2026-01-26"
+    assert all(outcomes[horizon].status == "modelled" for horizon in (1, 5, 20))
 
 
 def test_probability_label_fails_closed_when_effective_rule_profile_is_unverified() -> None:

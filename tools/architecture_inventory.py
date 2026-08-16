@@ -165,7 +165,8 @@ def render_source_modules(source: SourceInventory) -> list[str]:
 
 def render_module(path: Path) -> list[str]:
     symbols = module_symbols(path)
-    if not symbols:
+    exports = module_exports(path)
+    if not symbols and not exports:
         return []
     rel = path.relative_to(ROOT)
     line_count = len(path.read_text(encoding="utf-8").splitlines())
@@ -174,9 +175,11 @@ def render_module(path: Path) -> list[str]:
         "",
         f"Lines: {line_count}",
         "",
-        "| Kind | Name | Line | Signature |",
-        "| --- | --- | ---: | --- |",
     ]
+    if not symbols:
+        sections.extend([f"Explicit re-export facade (`__all__`): {', '.join(f'`{name}`' for name in exports)}", ""])
+        return sections
+    sections.extend(["| Kind | Name | Line | Signature |", "| --- | --- | ---: | --- |"])
     for symbol in symbols:
         sections.append(f"| {symbol.kind} | `{symbol.name}` | {symbol.line} | `{escape_table(symbol.signature)}` |")
     sections.append("")
@@ -294,6 +297,21 @@ def module_symbols(path: Path) -> list[Symbol]:
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             symbols.append(Symbol("async function" if isinstance(node, ast.AsyncFunctionDef) else "function", node.name, node.lineno, function_signature(node)))
     return symbols
+
+
+def module_exports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, SyntaxError):
+            return []
+        if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+            return list(value)
+        return []
+    return []
 
 
 def class_signature(node: ast.ClassDef) -> str:

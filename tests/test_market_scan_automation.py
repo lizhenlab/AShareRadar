@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 
 import pytest
 
 from app.models.market_scan import (
+    MARKET_SCAN_FULL_MARKET_SCOPE,
     MarketScanCoverage,
     MarketScanPublicationSummary,
-    MarketScanResultWrite,
     MarketScanRetryPlan,
     MarketScanRun,
+    MarketScanAutomaticState,
     MarketScanSeed,
 )
 from app.models.system import TaskRun
@@ -20,6 +21,7 @@ from app.services.market_scan_automation import (
     MarketScanAutomaticAction,
     automatic_retry_decision,
 )
+from app.services.market_scan_manager import market_scan_rule_contract
 from app.services.market_scan_preflight import (
     run_market_scan_preflight,
 )
@@ -535,6 +537,139 @@ def test_scheduled_retry_resumes_pending_rows_once_after_restart_derived_delay(
     assert runs.total == 2
 
 
+def test_settled_publication_only_revalidates_after_header_change_or_audit_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = _MarketScanHub(tmp_path)
+    _configure_clean_full_market(hub)
+    _enable_automation_settings(hub)
+    scanner = _scanner(hub)
+    verified = _market_scan_run(
+        status="success",
+        processed_count=100,
+        success_count=100,
+    )
+    state = _automatic_state(verified)
+    lookups: list[int] = []
+
+    def automatic_state():
+        return state
+
+    def latest_full_market_scan_run(*, mode=None):
+        assert mode == "official"
+        lookups.append(verified.id)
+        return verified
+
+    monkeypatch.setattr(
+        hub.cache,
+        "latest_full_market_scan_automatic_state",
+        automatic_state,
+    )
+    monkeypatch.setattr(
+        hub.cache,
+        "latest_full_market_scan_run",
+        latest_full_market_scan_run,
+    )
+
+    async def scenario():
+        nonlocal state
+        await scanner.start()
+        start = datetime(2026, 7, 17, 16, 30)
+        for second in range(100):
+            hub.cache.save_monitor_event("info", "test", f"unrelated-{second}")
+            assert await scanner.scheduled_tick(start + timedelta(seconds=second)) is None
+        state = state.__class__(**{**state.__dict__, "updated_at": "2026-07-17 16:31:40"})
+        assert await scanner.scheduled_tick(datetime(2026, 7, 17, 16, 31, 40)) is None
+        assert await scanner.scheduled_tick(datetime(2026, 7, 17, 16, 36, 40)) is None
+        await scanner.stop()
+
+    asyncio.run(scenario())
+
+    assert lookups == [verified.id, verified.id, verified.id]
+
+
+def test_settled_publication_cache_is_not_an_action_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = _MarketScanHub(tmp_path)
+    _configure_clean_full_market(hub)
+    _enable_automation_settings(hub)
+    scanner = _scanner(hub)
+    verified = _market_scan_run(
+        status="success",
+        processed_count=100,
+        success_count=100,
+    )
+    state = _automatic_state(verified)
+    lookups = 0
+
+    def latest_full_market_scan_run(*, mode=None):
+        nonlocal lookups
+        assert mode == "official"
+        lookups += 1
+        if lookups == 1:
+            return verified
+        raise ValueError("snapshot digest mismatch")
+
+    monkeypatch.setattr(
+        hub.cache,
+        "latest_full_market_scan_automatic_state",
+        lambda: state,
+    )
+    monkeypatch.setattr(
+        hub.cache,
+        "latest_full_market_scan_run",
+        latest_full_market_scan_run,
+    )
+
+    async def scenario():
+        await scanner.start()
+        assert await scanner.scheduled_tick(datetime(2026, 7, 17, 16, 30)) is None
+        for second in range(1, 60):
+            assert await scanner.scheduled_tick(
+                datetime(2026, 7, 17, 16, 30, second)
+            ) is None
+        with pytest.raises(ValueError, match="digest mismatch"):
+            await scanner.scheduled_tick(datetime(2026, 7, 17, 16, 35))
+        assert scanner.latest_run() is None
+        await scanner.stop()
+
+    asyncio.run(scenario())
+
+    assert lookups == 2
+
+
+def test_automatic_state_identity_ignores_unrelated_database_writes(
+    tmp_path: Path,
+) -> None:
+    hub = _MarketScanHub(tmp_path)
+    first = hub.cache.latest_full_market_scan_automatic_state()
+
+    hub.cache.save_monitor_event("info", "test", "unrelated database write")
+
+    second = hub.cache.latest_full_market_scan_automatic_state()
+    assert first is None
+    assert second is None
+
+    run = hub.cache.create_market_scan_run(
+        trigger="scheduled",
+        rule_version=_rule_version(hub),
+        rule_contract=market_scan_rule_contract(hub.settings),
+        as_of="2026-07-17 16:30:00",
+        data_date="2026-07-17",
+        scope=MARKET_SCAN_FULL_MARKET_SCOPE,
+    )
+    before_write = hub.cache.latest_full_market_scan_automatic_state()
+    hub.cache.save_monitor_event("info", "test", "another unrelated database write")
+    after_write = hub.cache.latest_full_market_scan_automatic_state()
+
+    assert before_write == after_write
+    assert after_write is not None
+    assert after_write.run_id == run.id
+
+
 def _enable_automation_settings(hub: _MarketScanHub) -> None:
     hub.settings = hub.settings.model_copy(
         update={
@@ -547,6 +682,24 @@ def _enable_automation_settings(hub: _MarketScanHub) -> None:
             "market_scan_auto_retry_delays_seconds": (600, 1800, 3600),
             "market_scan_auto_retry_max_attempts": 3,
         }
+    )
+
+
+def _automatic_state(run: MarketScanRun) -> MarketScanAutomaticState:
+    return MarketScanAutomaticState(
+        run_id=run.id,
+        status=run.status,
+        trigger=run.trigger,
+        data_date=run.data_date,
+        scope=run.scope,
+        mode=run.mode,
+        rule_version=run.rule_version,
+        updated_at=run.updated_at,
+        snapshot_digest=run.snapshot_digest,
+        snapshot_seal_origin=run.snapshot_seal_origin,
+        snapshot_sealed_at=run.snapshot_sealed_at,
+        finished_at=run.finished_at,
+        database_identity="test:database:identity",
     )
 
 
@@ -583,6 +736,15 @@ def _market_scan_run(**updates) -> MarketScanRun:
         "finished_at": "2026-07-17 16:30:00",
     }
     values.update(updates)
+    if "progress_pct" not in updates:
+        values["progress_pct"] = round(values["processed_count"] / values["total_count"] * 100, 2)
+    if "coverage_pct" not in updates:
+        denominator = values["total_count"] - values["skipped_count"]
+        values["coverage_pct"] = round(values["success_count"] / denominator * 100, 2) if denominator else 0
+    if values["status"] in {"success", "degraded"}:
+        values.setdefault("snapshot_digest", "a" * 64)
+        values.setdefault("snapshot_seal_origin", "publication")
+        values.setdefault("snapshot_sealed_at", values["finished_at"])
     return MarketScanRun(**values)
 
 
@@ -618,9 +780,10 @@ def _seed_incomplete_scheduled_run(hub: _MarketScanHub) -> MarketScanRun:
     run = hub.cache.create_market_scan_run(
         trigger="scheduled",
         rule_version=_rule_version(hub),
+        rule_contract=market_scan_rule_contract(hub.settings),
         as_of="2026-07-17 16:30:00",
         data_date="2026-07-17",
-        scope="test",
+        scope=MARKET_SCAN_FULL_MARKET_SCOPE,
     )
     hub.cache.start_market_scan_run(run.id)
     seeds = [
@@ -635,31 +798,6 @@ def _seed_incomplete_scheduled_run(hub: _MarketScanHub) -> MarketScanRun:
         for row in hub.rows
     ]
     hub.cache.seed_market_scan_results(run.id, seeds, excluded_count=0)
-    hub.cache.save_market_scan_result_batch(
-        run.id,
-        [
-            MarketScanResultWrite(
-                symbol="600001.SH",
-                status="success",
-                score=60,
-                trend_score=60,
-                leader_score=60,
-                data_quality_score=90,
-                price=10,
-                change_pct=1,
-                turnover_rate=2,
-                volume_ratio=1,
-                amount=1_000_000,
-                metrics={"ma20": 9.5},
-                data_date="2026-07-17",
-                quote_timestamp="2026-07-17 15:00:00",
-                quote_source="test",
-                kline_source="test",
-                adjustment_mode="qfq",
-                reason="test score",
-            )
-        ],
-    )
     hub.cache.finish_market_scan_run(run.id, "failed", message="structured test failure")
     with sqlite3.connect(hub.cache.path) as conn:
         conn.execute(

@@ -16,11 +16,16 @@ from app.models.reviews import (
     AdviceReviewSummary,
     structured_advice_evidence_refs,
 )
+from app.repositories.advice_reviews import AdviceReviewRevisionConflictError
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.services.research_replay import completed_daily_bar_cutoff, evaluate_advice_forward_window
 from app.services.storage_contracts import AdviceReviewStorage
-from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
+from app.services.trading_calendar import (
+    DAILY_KLINE_PUBLISH_TIME,
+    is_trading_day,
+    latest_expected_daily_kline_date,
+)
 from app.utils.audit_time import audit_datetime_to_text
 from app.utils.clock import market_now_naive
 from app.utils.errors import NotFoundError
@@ -52,8 +57,13 @@ def update_advice_review_plan(
     return plan
 
 
-def delete_advice_review_plan(cache: AdviceReviewStorage, plan_id: int) -> None:
-    if not cache.delete_advice_review_plan(plan_id):
+def delete_advice_review_plan(
+    cache: AdviceReviewStorage,
+    plan_id: int,
+    *,
+    expected_revision: int,
+) -> None:
+    if not cache.delete_advice_review_plan(plan_id, expected_revision=expected_revision):
         raise NotFoundError("研究计划不存在")
 
 
@@ -100,14 +110,17 @@ async def evaluate_advice_review_plan(
     datahub: DataHub,
     plan_id: int,
     *,
+    expected_revision: int,
     as_of: datetime | None = None,
     now: datetime | None = None,
 ) -> AdviceReviewEvaluation:
+    evaluated_at_value = normalize_review_as_of(now)
+    as_of_value = normalize_review_as_of(as_of, now=evaluated_at_value)
     plan = await run_cache_io(datahub.cache.advice_review_plan, plan_id)
     if plan is None:
         raise NotFoundError("研究计划不存在")
-    evaluated_at_value = normalize_review_as_of(now, allow_future=True)
-    as_of_value = normalize_review_as_of(as_of, now=evaluated_at_value)
+    if plan.revision != expected_revision:
+        raise AdviceReviewRevisionConflictError("研究计划已更新，请基于最新 revision 重新评估")
     snapshot_time = _snapshot_datetime(plan.snapshot_market_time)
     if as_of_value < snapshot_time:
         raise ValueError("as_of 不能早于 advice snapshot 的 market_time")
@@ -135,8 +148,9 @@ async def evaluate_due_advice_reviews(
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("到期复盘批量上限必须是正整数")
     limit = min(limit, 100)
-    current = normalize_review_as_of(as_of, now=now, allow_future=True)
-    stable_as_of = _stable_review_as_of(current)
+    evaluated_at_value = normalize_review_as_of(now)
+    requested_as_of = normalize_review_as_of(as_of, now=evaluated_at_value)
+    stable_as_of = _stable_review_as_of(requested_as_of)
     details = await run_cache_io(
         datahub.cache.advice_review_evaluation_candidates,
         as_of_date=stable_as_of.date().isoformat(),
@@ -152,7 +166,7 @@ async def evaluate_due_advice_reviews(
                 datahub,
                 detail,
                 as_of=stable_as_of,
-                evaluated_at=current,
+                evaluated_at=evaluated_at_value,
                 sensitive_values=sensitive_values,
             )
         )
@@ -169,7 +183,7 @@ async def list_due_advice_reviews(
 ) -> list[AdviceReviewDueItem]:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("到期复盘列表上限必须是正整数")
-    current = normalize_review_as_of(as_of, now=now, allow_future=True)
+    current = normalize_review_as_of(as_of, now=now)
     stable_as_of = _stable_review_as_of(current)
     details = await run_cache_io(
         datahub.cache.advice_review_evaluation_candidates,
@@ -193,6 +207,7 @@ async def _evaluate_due_review(
         evaluation = await evaluate_advice_review_plan(
             datahub,
             plan.id,
+            expected_revision=plan.revision,
             as_of=as_of,
             now=evaluated_at,
         )
@@ -208,7 +223,7 @@ async def _evaluate_due_review(
     return AdviceReviewBatchItem(
         plan_id=plan.id,
         symbol=plan.symbol,
-        status="evaluated",
+        status=evaluation.status,
         evaluation_id=evaluation.id,
         conclusion=evaluation.conclusion,
     )
@@ -224,6 +239,8 @@ def _due_review_summary(
         candidate_count=len(candidates),
         attempted_count=len(items),
         evaluated_count=sum(item.status == "evaluated" for item in items),
+        insufficient_count=sum(item.status == "insufficient" for item in items),
+        pending_count=sum(item.status == "pending" for item in items),
         failed_count=sum(item.status == "failed" for item in items),
         items=items,
     )
@@ -250,7 +267,7 @@ def _snapshot_datetime(value: str) -> datetime:
 
 
 def _stable_review_as_of(value: datetime) -> datetime:
-    cutoff = completed_daily_bar_cutoff(value)
+    cutoff = latest_expected_daily_kline_date(value)
     return datetime.combine(cutoff, DAILY_KLINE_PUBLISH_TIME)
 
 

@@ -3,10 +3,15 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypeVar
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.deps import get_datahub
-from app.api.errors import run_api
+from app.api.errors import (
+    no_store_http_exception,
+    no_store_internal_exception,
+    run_api,
+    run_sync_api_async,
+)
 from app.models.analysis import (
     AbnormalEventSummary,
     FactorScore,
@@ -23,6 +28,7 @@ from app.models.analysis import (
     StrategyCard,
     ValuationAnalysis,
 )
+from app.models.individual_probability import IndividualUpsideProbabilityReport
 from app.models.research import (
     AlphaEvidenceReport,
     ChipAnalysis,
@@ -46,6 +52,13 @@ from app.models.workbench import (
     StockWorkbench,
 )
 from app.services.datahub import DataHub
+from app.services.individual_probability import (
+    individual_probability_store_for_cache_path,
+    project_individual_upside_probability,
+)
+from app.services.individual_probability_artifact import IndividualProbabilityArtifactError
+from app.services.datahub_runtime import run_cache_io
+from app.utils.symbols import standard_a_share_stock_symbol
 from app.workflows.individual import (
     stock_abnormal_events,
     stock_alpha_evidence,
@@ -88,10 +101,24 @@ StockHandler = Callable[[DataHub, str], Awaitable[T]]
 
 def _register_stock_get(path: str, response_model: Any, handler: StockHandler[Any]) -> None:
     async def endpoint(
+        response: Response,
         symbol: str = Query("600519", description="6位A股代码"),
         datahub: DataHub = Depends(get_datahub),
     ) -> Any:
-        return await run_api(lambda: handler(datahub, symbol))
+        no_store = path == "/api/stock/workbench"
+        if no_store:
+            response.headers["Cache-Control"] = "no-store"
+        try:
+            normalized = await run_sync_api_async(lambda: standard_a_share_stock_symbol(symbol))
+            return await run_api(lambda: handler(datahub, normalized))
+        except HTTPException as exc:
+            if no_store:
+                raise no_store_http_exception(exc) from exc
+            raise
+        except Exception as exc:
+            if no_store:
+                raise no_store_internal_exception(exc) from exc
+            raise
 
     endpoint.__name__ = f"{handler.__name__}_endpoint"
     router.add_api_route(path, endpoint, methods=["GET"], response_model=response_model)
@@ -140,7 +167,8 @@ async def minute_analysis(
     limit: int = Query(120, ge=20, le=500),
     datahub: DataHub = Depends(get_datahub),
 ) -> MinuteAnalysisReport:
-    return await run_api(lambda: stock_minute_analysis(datahub, symbol, interval=interval, limit=limit))
+    normalized = await run_sync_api_async(lambda: standard_a_share_stock_symbol(symbol))
+    return await run_api(lambda: stock_minute_analysis(datahub, normalized, interval=interval, limit=limit))
 
 
 @router.post("/api/stock/ask", response_model=StockQuestionAnswer)
@@ -148,9 +176,57 @@ async def ask_stock(
     payload: StockQuestionInput,
     datahub: DataHub = Depends(get_datahub),
 ) -> StockQuestionAnswer:
-    return await run_api(lambda: stock_question_answer(datahub, payload))
+    normalized = await run_sync_api_async(lambda: standard_a_share_stock_symbol(payload.symbol))
+    return await run_api(
+        lambda: stock_question_answer(datahub, payload.model_copy(update={"symbol": normalized}))
+    )
 
 
 @router.get("/api/rules", response_model=list[RuleDefinition])
 async def rules() -> list[RuleDefinition]:
     return stock_rule_definitions()
+
+
+@router.get(
+    "/api/stock/upside-probability",
+    response_model=IndividualUpsideProbabilityReport,
+)
+async def upside_probability(
+    response: Response,
+    symbol: str = Query("600519", description="6位A股代码"),
+    datahub: DataHub = Depends(get_datahub),
+) -> IndividualUpsideProbabilityReport:
+    """Return compact artifact projection without request-time model fitting."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        normalized = await run_sync_api_async(lambda: _individual_probability_symbol(symbol))
+        store = individual_probability_store_for_cache_path(datahub.cache.path)
+        assessment = await run_cache_io(store.latest)
+    except IndividualProbabilityArtifactError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="个股上涨概率证据损坏，拒绝回退旧版本",
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    except HTTPException as exc:
+        raise no_store_http_exception(exc) from exc
+    except Exception as exc:
+        raise no_store_internal_exception(exc) from exc
+    try:
+        return await run_sync_api_async(
+            lambda: project_individual_upside_probability(normalized, assessment)
+        )
+    except HTTPException as exc:
+        raise no_store_http_exception(exc) from exc
+    except Exception as exc:
+        raise no_store_internal_exception(exc) from exc
+
+
+def _individual_probability_symbol(value: str) -> str:
+    try:
+        return standard_a_share_stock_symbol(value)
+    except ValueError as exc:
+        text = str(value or "").strip().upper()
+        if len(text) == 9 and text[:6].isdigit() and text[6:] in {".SH", ".SZ", ".BJ"} and text[:6] != "000000":
+            raise ValueError("股票代码与 A 股交易所不一致") from exc
+        raise

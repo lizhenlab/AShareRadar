@@ -44,9 +44,14 @@ def beginner_summary(
         industry = f" 所属行业为「{stock_profile.industry}」。"
     if industry_context:
         industry += f" 行业背景参考「{industry_context.name}」当前涨跌幅 {industry_context.change_pct:.2f}%。"
+    level_text = (
+        f"新手可记住两个价位：支撑 {support:.2f}，压力 {resistance:.2f}；"
+        if support > 0 and resistance > 0
+        else "有效日K不足，支撑与压力价位仍待确认；"
+    )
     return (
         f"{quote.name} 当前属于「{label}」，趋势分 {score}/100，风险级别为「{risk_level}」。"
-        f"{industry} 新手可记住两个价位：支撑 {support:.2f}，压力 {resistance:.2f}；"
+        f"{industry} {level_text}"
         f"当前建议「{action_advice.action}」，理由是{action_advice.reason}"
     )
 
@@ -72,6 +77,7 @@ def action_advice(
         (
             _low_quality_blocks_advice,
             _low_quality_observation_advice,
+            _missing_structure_observation_advice,
             _strong_trend_advice,
             _risk_control_advice,
             _hold_observation_advice,
@@ -122,6 +128,16 @@ def _strong_trend_advice(context: AdviceContext) -> ActionAdvice | None:
         action="回踩关注",
         confidence=min(90, context.score),
         reason="趋势结构较强，但仍建议等回踩或突破确认后分批处理。",
+    )
+
+
+def _missing_structure_observation_advice(context: AdviceContext) -> ActionAdvice | None:
+    if context.support > 0 and context.resistance > 0:
+        return None
+    return ActionAdvice(
+        action="轻仓观察",
+        confidence=min(55, max(35, context.score)),
+        reason="有效日K不足，关键结构价位尚不可用；先补齐证据，不据占位价位行动。",
     )
 
 

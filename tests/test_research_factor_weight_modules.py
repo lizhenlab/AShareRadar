@@ -117,6 +117,26 @@ def test_adjusted_factor_weight_clamps_final_weight() -> None:
     assert _adjusted_factor_weight("trend_momentum", 0.9, {}) == 0.9
 
 
+@pytest.mark.parametrize("placeholder", [0.0, 2.0, 99.0])
+def test_unavailable_volume_ratio_never_changes_factor_profile(
+    placeholder: float,
+) -> None:
+    analysis, feature = _factor_weight_inputs(
+        turnover_rate=4.2,
+        volume_ratio=placeholder,
+        data_quality_score=90,
+    )
+    feature = feature.model_copy(update={"volume_ratio_available": False})
+
+    context = _factor_weight_context(analysis, feature)
+    profile, adjustments, notes = _factor_weight_policy(analysis, feature)
+
+    assert context.volume_ratio == 0
+    assert profile == "常规个股"
+    assert adjustments == {}
+    assert notes == ["使用默认单股分析权重。"]
+
+
 def _factor_weight_inputs(
     *,
     amount: float = 1_300_000_000,

@@ -17,6 +17,7 @@ from app.models.market import (
 )
 from app.services.research_qa_utils import clean_text, dedupe, first_clean_items
 from app.utils.market_data import finite_float
+from app.utils.symbols import standard_symbol
 
 _DEFAULT_EVIDENCE_FALLBACK = "关键证据待确认。"
 
@@ -37,7 +38,12 @@ def build_stock_qa_report(
         _t_strategy_item(analysis, t_strategy),
         _theme_context_item(theme_context),
     ])
-    return StockQaReport(summary="围绕单只股票的常见问题，回答均引用当前分析结果。", items=items)
+    return StockQaReport(
+        symbol=standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}"),
+        updated_at=analysis.quote.timestamp,
+        summary="围绕单只股票的常见问题，回答均引用当前分析结果。",
+        items=items,
+    )
 
 
 def _direct_buy_item(
@@ -192,10 +198,15 @@ def _theme_context_item(theme_context: ThemeContextReport | None) -> StockQaItem
 
 
 def _scenario_triggers(risk_reward: RiskRewardReport) -> list[str]:
-    return [getattr(item, "trigger", None) for item in _first_items(getattr(risk_reward, "scenarios", None), 2)]
+    return first_clean_items(
+        [getattr(item, "trigger", None) for item in _first_items(getattr(risk_reward, "scenarios", None), 2)],
+        2,
+    )
 
 
 def _support_level_text(analysis: AnalysisResult) -> str:
+    if getattr(analysis, "support_available", False) is not True:
+        return "待确认"
     support = _positive_number_or_none(getattr(analysis, "support", None))
     resistance = _positive_number_or_none(getattr(analysis, "resistance", None))
     price = _positive_number_or_none(getattr(getattr(analysis, "quote", None), "price", None))
@@ -205,6 +216,8 @@ def _support_level_text(analysis: AnalysisResult) -> str:
 
 
 def _resistance_level_text(analysis: AnalysisResult) -> str:
+    if getattr(analysis, "resistance_available", False) is not True:
+        return "待确认"
     resistance = _positive_number_or_none(getattr(analysis, "resistance", None))
     support = _positive_number_or_none(getattr(analysis, "support", None))
     price = _positive_number_or_none(getattr(getattr(analysis, "quote", None), "price", None))
@@ -214,7 +227,10 @@ def _resistance_level_text(analysis: AnalysisResult) -> str:
 
 
 def _t_plan_reasons(analysis: AnalysisResult) -> list[str]:
-    return [getattr(item, "reason", None) for item in _first_items(getattr(analysis, "t_plan", None), 3)]
+    return first_clean_items(
+        [getattr(item, "reason", None) for item in _first_items(getattr(analysis, "t_plan", None), 3)],
+        3,
+    )
 
 
 def _concept_evidence(concepts: object) -> list[str]:
@@ -243,7 +259,7 @@ def _first_items(items: object, limit: int) -> list[object]:
 
 
 def _normalize_items(items: object) -> list[StockQaItem]:
-    return [_normalize_item(item) for item in _first_items(items, 20)]
+    return [_normalize_item(item) for item in _first_items(items, 20) if isinstance(item, StockQaItem)]
 
 
 def _normalize_item(item: StockQaItem) -> StockQaItem:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from app.market_scan_screening import screen_spec_from_market_scan_filters
 from app.models.market_scan import MarketScanFilterValues, MarketScanResultStatus
-from app.repositories.market_scan_mapping import escaped_like
+from app.models.market_scan_screening import ScreenSpecV2
+from app.repositories.market_scan_screening_sql import screen_spec_filter_sql, screen_spec_order_sql
 
 
 def market_scan_result_filter_sql(
@@ -30,99 +32,40 @@ def market_scan_result_filter_sql(
     keyword: str | None,
     symbols: MarketScanFilterValues = None,
 ) -> tuple[str, list[object]]:
-    clauses = ["run_id = ?"]
-    parameters: list[object] = [run_id]
-    _append_exact(clauses, parameters, "status", status)
-    _append_in(clauses, parameters, "market", market)
-    _append_like_any(clauses, parameters, "industry", industry)
-    _append_exact(clauses, parameters, "is_st", int(is_st) if is_st is not None else None)
-    _append_exact(clauses, parameters, "is_new", int(is_new) if is_new is not None else None)
-    for column, minimum, maximum in (
-        ("score", min_score, max_score),
-        ("trend_score", min_trend_score, max_trend_score),
-        ("change_pct", min_change_pct, max_change_pct),
-        ("turnover_rate", min_turnover_rate, max_turnover_rate),
-        ("amount", min_amount, max_amount),
-        ("data_quality_score", min_data_quality_score, max_data_quality_score),
-        (_score_dimension_sql("confidence"), min_confidence, None),
-        (_score_dimension_sql("risk"), None, max_risk),
-        (_score_dimension_sql("tradability"), min_tradability, None),
-    ):
-        _append_range(clauses, parameters, column, minimum, maximum)
-    _append_keyword(clauses, parameters, keyword)
+    spec = screen_spec_from_market_scan_filters(
+        status=status, market=market, industry=industry, is_st=is_st, is_new=is_new,
+        min_score=min_score, max_score=max_score,
+        min_trend_score=min_trend_score, max_trend_score=max_trend_score,
+        min_change_pct=min_change_pct, max_change_pct=max_change_pct,
+        min_turnover_rate=min_turnover_rate, max_turnover_rate=max_turnover_rate,
+        min_amount=min_amount, max_amount=max_amount,
+        min_data_quality_score=min_data_quality_score,
+        max_data_quality_score=max_data_quality_score,
+        min_confidence=min_confidence, max_risk=max_risk,
+        min_tradability=min_tradability, keyword=keyword,
+        sort="rank", order="asc",
+    )
+    where, parameters, _order = market_scan_result_screen_sql(run_id, spec, symbols=symbols)
+    return where, parameters
+
+
+def market_scan_result_screen_sql(
+    run_id: int,
+    spec: ScreenSpecV2,
+    *,
+    symbols: MarketScanFilterValues = None,
+) -> tuple[str, list[object], str]:
+    filter_sql, filter_parameters = screen_spec_filter_sql(spec)
+    clauses = ["run_id = ?", filter_sql]
+    parameters: list[object] = [run_id, *filter_parameters]
     _append_symbol_scope(clauses, parameters, symbols)
-    return " AND ".join(clauses), parameters
-
-
-def _score_dimension_sql(name: str) -> str:
-    return f"json_extract(metrics_json, '$.score_details.components.score_dimensions.scores.{name}')"
+    return " AND ".join(clauses), parameters, screen_spec_order_sql(spec)
 
 
 def normalized_filter_values(value: MarketScanFilterValues, *, maximum: int) -> tuple[str, ...]:
     candidates = [value] if isinstance(value, str) else list(value or ())
     normalized = tuple(dict.fromkeys(" ".join(str(item).split()).strip() for item in candidates))
     return tuple(item for item in normalized if item)[:maximum]
-
-
-def _append_exact(
-    clauses: list[str],
-    parameters: list[object],
-    column: str,
-    value: object | None,
-) -> None:
-    if value is not None:
-        clauses.append(f"{column} = ?")
-        parameters.append(value)
-
-
-def _append_in(
-    clauses: list[str],
-    parameters: list[object],
-    column: str,
-    values: MarketScanFilterValues,
-) -> None:
-    normalized = normalized_filter_values(values, maximum=20)
-    if not normalized:
-        return
-    clauses.append(f"{column} IN ({','.join('?' for _value in normalized)})")
-    parameters.extend(normalized)
-
-
-def _append_like_any(
-    clauses: list[str],
-    parameters: list[object],
-    column: str,
-    values: MarketScanFilterValues,
-) -> None:
-    normalized = normalized_filter_values(values, maximum=20)
-    if not normalized:
-        return
-    clauses.append("(" + " OR ".join(f"{column} LIKE ? ESCAPE '\\'" for _value in normalized) + ")")
-    parameters.extend(f"%{escaped_like(value)}%" for value in normalized)
-
-
-def _append_range(
-    clauses: list[str],
-    parameters: list[object],
-    column: str,
-    minimum: int | float | None,
-    maximum: int | float | None,
-) -> None:
-    if minimum is not None:
-        clauses.append(f"{column} >= ?")
-        parameters.append(minimum)
-    if maximum is not None:
-        clauses.append(f"{column} <= ?")
-        parameters.append(maximum)
-
-
-def _append_keyword(clauses: list[str], parameters: list[object], keyword: str | None) -> None:
-    normalized = " ".join((keyword or "").split()).strip()
-    if not normalized:
-        return
-    like = f"%{escaped_like(normalized)}%"
-    clauses.append("(symbol LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')")
-    parameters.extend((like, like, like))
 
 
 def _append_symbol_scope(
@@ -140,4 +83,8 @@ def _append_symbol_scope(
     parameters.extend(normalized)
 
 
-__all__ = ["market_scan_result_filter_sql", "normalized_filter_values"]
+__all__ = [
+    "market_scan_result_filter_sql",
+    "market_scan_result_screen_sql",
+    "normalized_filter_values",
+]

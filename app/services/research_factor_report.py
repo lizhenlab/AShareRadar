@@ -31,17 +31,20 @@ class FactorLabMetrics:
     scoring_factor_count: int = 0
     calibration_factor_count: int = 0
     uncalibrated_factor_names: tuple[str, ...] = ()
+    unavailable_factor_names: tuple[str, ...] = ()
 
 
 def build_factor_lab_metrics(factors: list[StandardFactor], feature: FeatureSnapshot) -> FactorLabMetrics:
+    scoring_factors = [item for item in factors if item.participates_in_current_score]
     total_score = _weighted_factor_score(factors)
     historical_factors = _historical_aggregate_factors(factors)
     evidence_factor_score = _weighted_factor_score(historical_factors)
     calibration_sample_count = _effective_calibration_sample_count(historical_factors)
     calibration_factor_count = len(historical_factors)
     uncalibrated_factor_names = tuple(
-        item.name for item in factors if not _factor_participates_in_historical_calibration(item)
+        item.name for item in scoring_factors if not _factor_participates_in_historical_calibration(item)
     )
+    unavailable_factor_names = tuple(item.name for item in factors if not item.participates_in_current_score)
     support_count = factor_support_count(historical_factors)
     risk_count = factor_risk_count(historical_factors)
     calibration_quality = _factor_calibration_quality(historical_factors)
@@ -61,9 +64,10 @@ def build_factor_lab_metrics(factors: list[StandardFactor], feature: FeatureSnap
         calibration_sample_count=calibration_sample_count,
         positives=top_positive_factors(historical_factors),
         negatives=top_negative_factors(historical_factors),
-        scoring_factor_count=len(factors),
+        scoring_factor_count=len(scoring_factors),
         calibration_factor_count=calibration_factor_count,
         uncalibrated_factor_names=uncalibrated_factor_names,
+        unavailable_factor_names=unavailable_factor_names,
     )
 
 
@@ -121,6 +125,7 @@ def factor_lab_notes(
     scoring_factor_count: int | None = None,
     calibration_factor_count: int | None = None,
     uncalibrated_factor_names: tuple[str, ...] = (),
+    unavailable_factor_names: tuple[str, ...] = (),
 ) -> list[str]:
     participation_notes: list[str] = []
     if scoring_factor_count is not None and calibration_factor_count is not None:
@@ -133,6 +138,10 @@ def factor_lab_notes(
         else:
             participation_notes.append(
                 f"当前 {scoring_factor_count} 个因子参与评分，均参与历史校准。"
+            )
+        if unavailable_factor_names:
+            participation_notes.append(
+                f"当前证据不可用且已从评分剔除：{'、'.join(unavailable_factor_names)}。"
             )
     calibration_scope = (
         f"{calibration_factor_count} 个参与历史校准因子"
@@ -185,6 +194,7 @@ def assemble_factor_lab_report(
             scoring_factor_count=metrics.scoring_factor_count,
             calibration_factor_count=metrics.calibration_factor_count,
             uncalibrated_factor_names=metrics.uncalibrated_factor_names,
+            unavailable_factor_names=metrics.unavailable_factor_names,
         ),
     )
 

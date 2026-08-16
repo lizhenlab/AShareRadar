@@ -16,6 +16,7 @@ from statistics import fmean, median, pstdev
 from typing import Literal, cast
 
 from app.models.market import Kline, KlineAdjustmentMode
+from app.db.market_scan_integrity import verify_market_scan_snapshot
 from app.models.market_scan import MarketScanMode
 from app.models.paper_trading import (
     CostProfileName,
@@ -30,15 +31,21 @@ from app.services.market_scan_evaluation_exposure import (
     board as _board,
     exposure_audit as _exposure_audit,
     exposure_item as _exposure_item,
-    group_exposure as _group_exposure,  # noqa: F401 - compatibility re-export
-    industry_taxonomy_quality as _industry_taxonomy_quality,  # noqa: F401 - compatibility re-export
     liquidity_bucket as _liquidity_bucket,
     market_regime as _market_regime,
-    mean_optional as _mean_optional,  # noqa: F401 - compatibility re-export
     normalize_industry as _normalize_industry,
     quality_bucket as _quality_bucket,
     regime_overlay as _regime_overlay,
     scan_time_bucket as _scan_time_bucket,
+)
+from app.services.market_scan_evaluation_metrics import (
+    calibration_bucket as _calibration_bucket,  # noqa: F401 - compatibility re-export
+    calibration_metrics as _calibration_metrics,
+    calibration_record as _calibration_record,  # noqa: F401 - compatibility re-export
+)
+from app.services.market_scan_evaluation_statistics import (
+    benjamini_hochberg,
+    moving_block_bootstrap_p_value,
 )
 from app.services.market_scan_shadow_scoring import (
     SHADOW_SCORE_MIN_HISTORY_ROWS,
@@ -68,17 +75,23 @@ from app.repositories.market_scan_mapping import decode_result_payload
 from app.utils.clock import utc_now
 
 
+_CALIBRATION_COMPATIBILITY_EXPORTS = (
+    _calibration_bucket,
+    _calibration_record,
+)
+
+
 EVALUATION_SCHEMA_VERSION = "market-scan-forward-evaluation-v2"
 SHADOW_RECONSTRUCTION_INTEGRITY = "unverified-overwrite-cache-reconstruction"
 DEFAULT_TOP_SIZES = (20, 50, 100)
 DEFAULT_HORIZONS = (1, 3, 5, 10, 20)
 DEFAULT_MINIMUM_SESSION_COUNT = 20
-DEFAULT_MINIMUM_PBO_SESSION_COUNT = 40
+DEFAULT_MINIMUM_MULTIPLE_TEST_SESSION_COUNT = 40
 DEFAULT_BOOTSTRAP_SAMPLES = 1_000
 DEFAULT_EXECUTION_NOTIONAL = 100_000.0
 DEFAULT_MAX_EXIT_DELAY_SESSIONS = 5
 DEFAULT_MAX_DAILY_PARTICIPATION_RATE = 0.01
-PROMOTION_GATE_VERSION = "full-market-shadow-promotion-gate-v1"
+PROMOTION_GATE_VERSION = "full-market-shadow-promotion-gate-v2"
 PROMOTION_PRIMARY_HORIZON = 5
 PROMOTION_PRIMARY_TOP_N = 100
 PROMOTION_MINIMUM_MEAN_RANK_IC = 0.02
@@ -87,6 +100,8 @@ PROMOTION_MINIMUM_ITEM_COVERAGE = 0.95
 PROMOTION_MAXIMUM_DRAWDOWN = -0.25
 PROMOTION_MAXIMUM_HYSTERESIS_TURNOVER = 0.80
 PROMOTION_MAXIMUM_EXPOSURE_SHARE_DIFFERENCE = 0.20
+PROMOTION_MINIMUM_STRESS_CAPACITY_COVERAGE = 0.80
+MULTIPLE_TESTING_ALPHA = 0.05
 EvaluationStatus = Literal["ok", "insufficient_data"]
 ExecutionStatus = Literal["modelled", "unfilled", "data_unavailable"]
 
@@ -150,6 +165,8 @@ class _ExecutionOutcome:
     exit_date: str | None = None
     exit_delay_sessions: int = 0
     model_limited: bool = False
+    buy_amount: float | None = None
+    sell_amount: float | None = None
 
 
 @dataclass(frozen=True)
@@ -209,6 +226,36 @@ class _RunSnapshot:
     point_in_time_integrity_verified: bool = False
     exposures: tuple[_ExposureItem, ...] = ()
     regime: str = "unknown"
+    reference_rankings: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass
+class _RankDeltaAccumulator:
+    deltas: list[float]
+    overlap_values: dict[int, list[float]]
+    candidate_count: int = 0
+    reference_count: int = 0
+    common_count: int = 0
+    missing_candidate: int = 0
+    missing_reference: int = 0
+
+
+@dataclass(frozen=True)
+class _PromotionAssessment:
+    multiple_testing: dict[str, object]
+    candidate_gates: dict[ShadowScoreVariant, dict[str, object]]
+    integrity_verified: bool
+    multiple_testing_ready: bool
+    eligible_candidates: list[ShadowScoreVariant]
+    promotable: bool
+
+
+@dataclass(frozen=True)
+class _RobustnessComponents:
+    regime_slices: list[dict[str, object]]
+    cost_scenarios: list[dict[str, object]]
+    capacity_scenarios: list[dict[str, object]]
+    stability: dict[str, object]
 
 
 def evaluate_market_scan_rankings(
@@ -261,6 +308,9 @@ def evaluate_market_scan_shadow_rankings(
         run_failures=tuple(run_failures),
     )
     report["shadow"] = _shadow_report_metadata(variant, snapshots, batches)
+    rank_delta = _rank_delta_summary(snapshots)
+    report["rank_delta_vs_production"] = rank_delta
+    report["production_comparison"] = {"rank_delta": rank_delta}
     return report
 
 
@@ -325,6 +375,98 @@ def _shadow_report_metadata(
     }
 
 
+def _rank_delta_summary(snapshots: Sequence[_RunSnapshot]) -> dict[str, object]:
+    aggregate = _rank_delta_aggregate(snapshots)
+    absolute = [abs(value) for value in aggregate.deltas]
+    overlaps = {
+        top_n: fmean(values) if values else None
+        for top_n, values in aggregate.overlap_values.items()
+    }
+    return _rank_delta_payload(
+        snapshots,
+        aggregate,
+        absolute,
+        overlaps,
+        _rank_delta_unavailable_reasons(snapshots, aggregate),
+    )
+
+
+def _rank_delta_aggregate(snapshots: Sequence[_RunSnapshot]) -> _RankDeltaAccumulator:
+    aggregate = _RankDeltaAccumulator([], {20: [], 50: [], 100: []})
+    for snapshot in snapshots:
+        candidate = dict(snapshot.rankings)
+        reference = dict(snapshot.reference_rankings)
+        aggregate.candidate_count += len(candidate)
+        aggregate.reference_count += len(reference)
+        common = candidate.keys() & reference.keys()
+        aggregate.common_count += len(common)
+        aggregate.deltas.extend(float(candidate[symbol] - reference[symbol]) for symbol in common)
+        aggregate.missing_candidate += len(reference.keys() - candidate.keys())
+        aggregate.missing_reference += len(candidate.keys() - reference.keys())
+        _append_rank_overlaps(aggregate.overlap_values, candidate, reference)
+    return aggregate
+
+
+def _append_rank_overlaps(
+    overlap_values: dict[int, list[float]],
+    candidate: Mapping[str, int],
+    reference: Mapping[str, int],
+) -> None:
+    for top_n, values in overlap_values.items():
+        candidate_top = {symbol for symbol, rank in candidate.items() if rank <= top_n}
+        reference_top = {symbol for symbol, rank in reference.items() if rank <= top_n}
+        denominator = min(top_n, len(candidate_top), len(reference_top))
+        if denominator:
+            values.append(len(candidate_top & reference_top) / denominator)
+
+
+def _rank_delta_unavailable_reasons(
+    snapshots: Sequence[_RunSnapshot],
+    aggregate: _RankDeltaAccumulator,
+) -> list[str]:
+    unavailable_reasons: list[str] = []
+    if not snapshots:
+        unavailable_reasons.append("no_evaluated_shadow_sessions")
+    if not aggregate.reference_count:
+        unavailable_reasons.append("production_reference_rankings_unavailable")
+    if not aggregate.deltas:
+        unavailable_reasons.append("no_common_ranked_symbols")
+    return unavailable_reasons
+
+
+def _rank_delta_payload(
+    snapshots: Sequence[_RunSnapshot],
+    aggregate: _RankDeltaAccumulator,
+    absolute: Sequence[float],
+    overlaps: Mapping[int, float | None],
+    unavailable_reasons: list[str],
+) -> dict[str, object]:
+    deltas = aggregate.deltas
+    return {
+        "status": "ok" if deltas else "unavailable",
+        "compared_run_count": len(snapshots),
+        "compared_item_count": aggregate.common_count,
+        "candidate_ranking_count": aggregate.candidate_count,
+        "production_ranking_count": aggregate.reference_count,
+        "common_symbol_count": aggregate.common_count,
+        "missing_from_candidate_count": aggregate.missing_candidate,
+        "missing_from_production_count": aggregate.missing_reference,
+        "mean_rank_delta": fmean(deltas) if deltas else None,
+        "median_rank_delta": median(deltas) if deltas else None,
+        "mean_absolute_rank_delta": fmean(absolute) if absolute else None,
+        "maximum_absolute_rank_delta": max(absolute) if absolute else None,
+        "mean_absolute": fmean(absolute) if absolute else None,
+        "max_absolute": max(absolute) if absolute else None,
+        "top20_overlap": overlaps[20],
+        "top50_overlap": overlaps[50],
+        "top100_overlap": overlaps[100],
+        "top20_overlap_ratio": overlaps[20],
+        "top50_overlap_ratio": overlaps[50],
+        "top100_overlap_ratio": overlaps[100],
+        "unavailable_reasons": unavailable_reasons,
+    }
+
+
 def evaluate_market_scan_shadow_comparison(
     database_path: Path,
     *,
@@ -382,12 +524,47 @@ def _shadow_promotion_assessment(
     *,
     candidate_count: int,
 ) -> tuple[str, dict[str, object]]:
+    if candidate_count != len(candidates):
+        raise ValueError("candidate_count 与候选集合不一致")
+    assessment = _promotion_assessment_context(
+        production,
+        candidates,
+        minimum_sessions,
+    )
+    return (
+        "eligible_for_human_review" if assessment.promotable else "insufficient_data",
+        _promotion_assessment_payload(
+            assessment,
+            observed_sessions=observed_sessions,
+            minimum_sessions=minimum_sessions,
+        ),
+    )
+
+
+def _promotion_assessment_context(
+    production: Mapping[str, object],
+    candidates: Mapping[ShadowScoreVariant, dict[str, object]],
+    minimum_sessions: int,
+) -> _PromotionAssessment:
+    multiple_testing = _candidate_multiple_testing_control(
+        production,
+        candidates,
+        minimum_sessions=max(
+            minimum_sessions,
+            DEFAULT_MINIMUM_MULTIPLE_TEST_SESSION_COUNT,
+        ),
+    )
+    candidate_tests = cast(dict[str, dict[str, object]], multiple_testing["candidate_results"])
     candidate_gates = {
-        variant: _candidate_promotion_gate(report, minimum_sessions)
+        variant: _candidate_promotion_gate(
+            report,
+            minimum_sessions,
+            multiple_testing_result=candidate_tests.get(variant),
+        )
         for variant, report in candidates.items()
     }
     integrity_verified = all(_shadow_input_integrity_verified(report) for report in candidates.values())
-    multiple_testing_ready = candidate_count <= 1 or observed_sessions >= DEFAULT_MINIMUM_PBO_SESSION_COUNT
+    multiple_testing_ready = multiple_testing["status"] == "ok"
     eligible_candidates = [
         variant
         for variant, gate in candidate_gates.items()
@@ -398,38 +575,207 @@ def _shadow_promotion_assessment(
         and bool(eligible_candidates)
         and multiple_testing_ready
     )
+    return _PromotionAssessment(
+        multiple_testing=multiple_testing,
+        candidate_gates=candidate_gates,
+        integrity_verified=integrity_verified,
+        multiple_testing_ready=multiple_testing_ready,
+        eligible_candidates=eligible_candidates,
+        promotable=promotable,
+    )
+
+
+def _promotion_assessment_payload(
+    assessment: _PromotionAssessment,
+    *,
+    observed_sessions: int,
+    minimum_sessions: int,
+) -> dict[str, object]:
+    return {
+        "automatic_promotion": False,
+        "eligible_for_human_review": assessment.promotable,
+        "required_independent_session_count": minimum_sessions,
+        "observed_independent_session_count": observed_sessions,
+        "point_in_time_input_integrity_verified": assessment.integrity_verified,
+        "gate_version": PROMOTION_GATE_VERSION,
+        "eligible_candidates": assessment.eligible_candidates,
+        "candidate_gates": assessment.candidate_gates,
+        "multiple_testing_control": assessment.multiple_testing,
+        "blocking_reasons": _shadow_promotion_blockers(
+            assessment.promotable,
+            observed_sessions,
+            minimum_sessions,
+            assessment.integrity_verified,
+            assessment.multiple_testing_ready,
+            bool(assessment.eligible_candidates),
+        ),
+        "conclusion": (
+            "样本门槛已满足，仅可进入人工晋级评审；不得自动替换生产评分。"
+            if assessment.promotable
+            else "候选评分已实现并可持续积累影子证据，但暂不晋级生产。"
+        ),
+    }
+
+
+def _candidate_multiple_testing_control(
+    production: Mapping[str, object],
+    candidates: Mapping[ShadowScoreVariant, dict[str, object]],
+    *,
+    minimum_sessions: int,
+) -> dict[str, object]:
+    production_values = _promotion_session_values(production, "net_excess_return")
+    variants = list(candidates)
+    evaluated = [
+        _candidate_test_record(
+            variant,
+            candidates[variant],
+            production_values,
+            minimum_sessions,
+        )
+        for variant in variants
+    ]
+    candidate_records = {
+        variant: record
+        for variant, (record, _raw_p_value) in zip(variants, evaluated, strict=True)
+    }
+    raw_p_values = [raw_p_value for _record, raw_p_value in evaluated]
+    _apply_candidate_multiple_test_adjustments(variants, candidate_records, raw_p_values)
+    available_count = sum(value is not None for value in raw_p_values)
+    status = "ok" if variants and available_count == len(variants) else "insufficient_data"
+    return _candidate_multiple_testing_payload(
+        candidate_records,
+        candidate_count=len(variants),
+        available_count=available_count,
+        minimum_sessions=minimum_sessions,
+        status=status,
+    )
+
+
+def _candidate_test_record(
+    variant: ShadowScoreVariant,
+    report: Mapping[str, object],
+    production_values: Mapping[str, float],
+    minimum_sessions: int,
+) -> tuple[dict[str, object], float | None]:
+    candidate_values = _promotion_session_values(report, "net_excess_return")
+    shared_sessions = sorted(production_values.keys() & candidate_values.keys())
+    deltas = [
+        candidate_values[session] - production_values[session]
+        for session in shared_sessions
+    ]
+    raw_p_value = moving_block_bootstrap_p_value(
+        deltas,
+        samples=_candidate_bootstrap_samples(report),
+        block_length=PROMOTION_PRIMARY_HORIZON,
+        seed_text=f"candidate-vs-production:{variant}:top100:5d-net-excess",
+        minimum_count=minimum_sessions,
+    )
     return (
-        "eligible_for_human_review" if promotable else "insufficient_data",
         {
-            "automatic_promotion": False,
-            "eligible_for_human_review": promotable,
-            "required_independent_session_count": minimum_sessions,
-            "observed_independent_session_count": observed_sessions,
-            "point_in_time_input_integrity_verified": integrity_verified,
-            "gate_version": PROMOTION_GATE_VERSION,
-            "eligible_candidates": eligible_candidates,
-            "candidate_gates": candidate_gates,
-            "multiple_testing_control": {
-                "candidate_count": candidate_count,
-                "method": "preregistered-ablation-plus-PBO-before-promotion",
-                "minimum_independent_session_count_for_pbo": DEFAULT_MINIMUM_PBO_SESSION_COUNT,
-                "ready": multiple_testing_ready,
-            },
-            "blocking_reasons": _shadow_promotion_blockers(
-                promotable,
-                observed_sessions,
-                minimum_sessions,
-                integrity_verified,
-                multiple_testing_ready,
-                bool(eligible_candidates),
-            ),
-            "conclusion": (
-                "样本门槛已满足，仅可进入人工晋级评审；不得自动替换生产评分。"
-                if promotable
-                else "候选评分已实现并可持续积累影子证据，但暂不晋级生产。"
+            "status": "ok" if raw_p_value is not None else "insufficient_data",
+            "null_hypothesis": "candidate mean paired 5d top100 net-excess improvement <= 0",
+            "alternative": "greater",
+            "paired_independent_session_count": len(shared_sessions),
+            "minimum_paired_independent_session_count": minimum_sessions,
+            "mean_paired_net_excess_delta": fmean(deltas) if deltas else None,
+            "raw_p_value_one_sided": raw_p_value,
+            "adjusted_p_value": None,
+            "rejected_at_alpha": None,
+            "insufficient_reasons": _candidate_test_reasons(
+                len(shared_sessions), minimum_sessions, raw_p_value,
             ),
         },
+        raw_p_value,
     )
+
+
+def _candidate_bootstrap_samples(report: Mapping[str, object]) -> int:
+    config = report.get("config")
+    if not isinstance(config, dict):
+        return DEFAULT_BOOTSTRAP_SAMPLES
+    return int(str(config.get("bootstrap_samples", DEFAULT_BOOTSTRAP_SAMPLES)))
+
+
+def _candidate_test_reasons(
+    session_count: int,
+    minimum_sessions: int,
+    raw_p_value: float | None,
+) -> list[str]:
+    if session_count < minimum_sessions:
+        return ["minimum_paired_independent_session_count"]
+    if raw_p_value is None:
+        return ["session_level_test_unavailable"]
+    return []
+
+
+def _apply_candidate_multiple_test_adjustments(
+    variants: Sequence[ShadowScoreVariant],
+    candidate_records: Mapping[ShadowScoreVariant, dict[str, object]],
+    raw_p_values: Sequence[float | None],
+) -> None:
+    adjusted, rejected = benjamini_hochberg(raw_p_values, alpha=MULTIPLE_TESTING_ALPHA)
+    for variant, adjusted_value, rejected_value in zip(
+        variants, adjusted, rejected, strict=True,
+    ):
+        candidate_records[variant]["adjusted_p_value"] = adjusted_value
+        candidate_records[variant]["rejected_at_alpha"] = rejected_value
+
+
+def _candidate_multiple_testing_payload(
+    candidate_records: Mapping[ShadowScoreVariant, dict[str, object]],
+    *,
+    candidate_count: int,
+    available_count: int,
+    minimum_sessions: int,
+    status: str,
+) -> dict[str, object]:
+    return {
+        "status": status,
+        "ready": status == "ok",
+        "method": "benjamini-hochberg-fdr",
+        "alpha": MULTIPLE_TESTING_ALPHA,
+        "family": "preregistered-shadow-candidate-paired-5d-top100-net-excess-vs-production",
+        "candidate_count": candidate_count,
+        "tested_hypothesis_count": available_count,
+        "minimum_paired_independent_session_count": minimum_sessions,
+        "session_resampling": {
+            "method": "deterministic-circular-moving-block-bootstrap-under-null",
+            "block_length_sessions": PROMOTION_PRIMARY_HORIZON,
+            "reason": "5日远期标签重叠，不能把相邻扫描日当作完全独立观测",
+        },
+        "candidate_results": candidate_records,
+        "pbo": {
+            "status": "not_computed",
+            "value": None,
+            "reason": "当前报告未执行组合切分与选择路径枚举，不得把样本数门槛称为PBO结果",
+        },
+        "deflated_sharpe_ratio": {
+            "status": "not_computed",
+            "value": None,
+            "reason": "当前晋级主统计量是配对净超额差异，不伪造DSR",
+        },
+    }
+
+
+def _promotion_session_values(
+    report: Mapping[str, object],
+    metric: str,
+) -> dict[str, float]:
+    evidence = report.get("promotion_evidence")
+    if not isinstance(evidence, dict):
+        return {}
+    sessions = evidence.get("sessions")
+    if not isinstance(sessions, list):
+        return {}
+    values: dict[str, float] = {}
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        quote_date = item.get("quote_date")
+        parsed = _optional_float(item.get(metric))
+        if isinstance(quote_date, str) and parsed is not None:
+            values[quote_date] = parsed
+    return values
 
 
 def _shadow_promotion_blockers(
@@ -448,7 +794,7 @@ def _shadow_promotion_blockers(
     if not integrity_verified:
         blockers.append("候选评分历史输入缺少可验证的扫描时点快照")
     if not multiple_testing_ready:
-        blockers.append("多候选比较尚未达到PBO/多重检验所需独立交易日门槛")
+        blockers.append("候选相对生产评分的配对交易日证据不足，BH-FDR未形成可用拒绝结论")
     if not has_eligible_candidate:
         blockers.append("没有候选同时通过预注册的IC、净超额、单调性、回撤、换手与暴露门槛")
     return blockers
@@ -457,14 +803,18 @@ def _shadow_promotion_blockers(
 def _candidate_promotion_gate(
     report: dict[str, object],
     minimum_sessions: int,
+    *,
+    multiple_testing_result: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     contract = _primary_promotion_contract(report)
     criteria = _base_promotion_criteria(report)
     if contract is None:
         criteria["primary_contract"] = _promotion_criterion(None, False, "full-market top100 5d")
+        criteria.update(_research_promotion_criteria(report, multiple_testing_result))
         return _promotion_gate_payload(criteria, None)
     dimensions = cast(dict[str, str], contract["dimensions"])
     criteria.update(_contract_promotion_criteria(report, contract, dimensions, minimum_sessions))
+    criteria.update(_research_promotion_criteria(report, multiple_testing_result))
     return _promotion_gate_payload(criteria, dimensions)
 
 
@@ -485,6 +835,81 @@ def _base_promotion_criteria(report: Mapping[str, object]) -> dict[str, dict[str
             {"minimum": PROMOTION_MINIMUM_ITEM_COVERAGE},
         ),
     }
+
+
+def _research_promotion_criteria(
+    report: Mapping[str, object],
+    multiple_testing_result: Mapping[str, object] | None,
+) -> dict[str, dict[str, object]]:
+    test = multiple_testing_result or {}
+    adjusted_p_value = _optional_float(test.get("adjusted_p_value"))
+    paired_delta = _optional_float(test.get("mean_paired_net_excess_delta"))
+    fdr_passed = (
+        test.get("status") == "ok"
+        and test.get("rejected_at_alpha") is True
+        and adjusted_p_value is not None
+        and paired_delta is not None
+        and paired_delta > 0
+    )
+    robustness_value = report.get("robustness")
+    robustness = robustness_value if isinstance(robustness_value, dict) else {}
+    cost_scenarios = robustness.get("cost_scenarios")
+    stress_cost = _named_scenario(cost_scenarios, "profile", "stress")
+    stress_net_excess = _optional_float(stress_cost.get("mean_net_excess_return"))
+    capacity_scenarios = robustness.get("capacity_scenarios")
+    stress_capacity = _named_scenario(capacity_scenarios, "scenario", "stress")
+    stress_coverage = _optional_float(stress_capacity.get("capacity_coverage_ratio"))
+    return {
+        "bh_fdr_primary_net_excess_improvement": _promotion_criterion(
+            {
+                "adjusted_p_value": adjusted_p_value,
+                "mean_paired_net_excess_delta": paired_delta,
+                "rejected": test.get("rejected_at_alpha"),
+                "status": test.get("status", "insufficient_data"),
+            },
+            fdr_passed,
+            {
+                "alpha": MULTIPLE_TESTING_ALPHA,
+                "alternative": "paired candidate-production mean delta > 0",
+            },
+        ),
+        "regime_cost_capacity_robustness": _promotion_criterion(
+            robustness.get("status"),
+            robustness.get("promotion_ready") is True,
+            "ok",
+        ),
+        "stress_cost_net_excess_5d": _promotion_criterion(
+            stress_net_excess,
+            stress_cost.get("status") == "ok"
+            and stress_net_excess is not None
+            and stress_net_excess > PROMOTION_MINIMUM_NET_EXCESS_RETURN,
+            {"minimum_exclusive": PROMOTION_MINIMUM_NET_EXCESS_RETURN},
+        ),
+        "stress_capacity_coverage_top100": _promotion_criterion(
+            stress_coverage,
+            stress_capacity.get("status") == "ok"
+            and stress_coverage is not None
+            and stress_coverage >= PROMOTION_MINIMUM_STRESS_CAPACITY_COVERAGE,
+            {"minimum": PROMOTION_MINIMUM_STRESS_CAPACITY_COVERAGE},
+        ),
+    }
+
+
+def _named_scenario(
+    value: object,
+    field: str,
+    expected: str,
+) -> Mapping[str, object]:
+    if not isinstance(value, list):
+        return {}
+    return next(
+        (
+            item
+            for item in value
+            if isinstance(item, dict) and item.get(field) == expected
+        ),
+        {},
+    )
 
 
 def _contract_promotion_criteria(
@@ -715,6 +1140,8 @@ def _build_report(
         "hysteresis": _hysteresis_metrics(snapshots, settings),
         "exposure_audit": _exposure_audit(snapshots, settings),
         "regime_overlay": _regime_overlay(snapshots),
+        "promotion_evidence": _primary_session_evidence(observations, settings),
+        "robustness": _robustness_summary(observations, snapshots, settings),
         "evaluation_quality": _evaluation_quality(runs, snapshots, run_failures),
         "probability_research": build_probability_research(
             _probability_research_rows(snapshots),
@@ -838,6 +1265,402 @@ def _probability_dimensions(item: _Observation) -> dict[str, str]:
     }
 
 
+def _primary_observation_contract(
+    observations: Sequence[_Observation],
+) -> tuple[dict[str, str], tuple[_Observation, ...]] | None:
+    grouped: dict[tuple[str, str, str], list[_Observation]] = defaultdict(list)
+    for item in observations:
+        if item.mode == "official" and item.scope != "TOP100快速更新评分":
+            grouped[(item.mode, item.scope, item.rule_version)].append(item)
+    if not grouped:
+        return None
+    key, values = max(
+        grouped.items(),
+        key=lambda item: (
+            len({row.quote_date for row in item[1]}),
+            len(item[1]),
+            item[0],
+        ),
+    )
+    return {"mode": key[0], "scope": key[1], "rule_version": key[2]}, tuple(values)
+
+
+def _primary_session_evidence(
+    observations: Sequence[_Observation],
+    config: EvaluationConfig,
+) -> dict[str, object]:
+    selected = _primary_observation_contract(observations)
+    if selected is None:
+        return {
+            "status": "insufficient_data",
+            "dimensions": None,
+            "top_n": PROMOTION_PRIMARY_TOP_N,
+            "horizon_trading_days": PROMOTION_PRIMARY_HORIZON,
+            "sessions": [],
+            "insufficient_reasons": ["official_full_market_contract_unavailable"],
+        }
+    dimensions, rows = selected
+    sessions = _session_research_records(
+        rows,
+        top_n=PROMOTION_PRIMARY_TOP_N,
+        horizon=PROMOTION_PRIMARY_HORIZON,
+    )
+    complete = [
+        item
+        for item in sessions
+        if item["rank_ic"] is not None and item["net_excess_return"] is not None
+    ]
+    reasons: list[str] = []
+    if PROMOTION_PRIMARY_HORIZON not in config.horizons:
+        reasons.append("primary_horizon_not_requested")
+    if len(complete) < config.minimum_session_count:
+        reasons.append("minimum_session_count")
+    return {
+        "status": "ok" if not reasons else "insufficient_data",
+        "dimensions": dimensions,
+        "top_n": PROMOTION_PRIMARY_TOP_N,
+        "horizon_trading_days": PROMOTION_PRIMARY_HORIZON,
+        "independent_session_count": len(complete),
+        "sessions": sessions,
+        "insufficient_reasons": reasons,
+        "semantics": (
+            "one-record-per-scan-session; rank IC uses the session cross-section; "
+            "net excess uses next-complete-session-open,T+1,next-sellable-open"
+        ),
+    }
+
+
+def _session_research_records(
+    rows: Sequence[_Observation],
+    *,
+    top_n: int,
+    horizon: int,
+    cost_profile: CostProfileName | None = None,
+) -> list[dict[str, object]]:
+    grouped: dict[str, list[_Observation]] = defaultdict(list)
+    for item in rows:
+        grouped[item.quote_date].append(item)
+    return [
+        _session_research_record(
+            quote_date,
+            session_rows,
+            top_n=top_n,
+            horizon=horizon,
+            cost_profile=cost_profile,
+        )
+        for quote_date, session_rows in sorted(grouped.items())
+    ]
+
+
+def _session_research_record(
+    quote_date: str,
+    session_rows: Sequence[_Observation],
+    *,
+    top_n: int,
+    horizon: int,
+    cost_profile: CostProfileName | None,
+) -> dict[str, object]:
+    forward_rows = [item for item in session_rows if horizon in item.returns]
+    benchmark = fmean(item.returns[horizon] for item in forward_rows) if forward_rows else None
+    rank_ic = _spearman(
+        [(item.raw_score, item.returns[horizon]) for item in forward_rows]
+    )
+    modelled = _session_modelled_returns(
+        session_rows,
+        top_n=top_n,
+        horizon=horizon,
+        cost_profile=cost_profile,
+    )
+    net_return = fmean(modelled) if modelled else None
+    return {
+        "quote_date": quote_date,
+        "rank_ic": rank_ic,
+        "net_return": net_return,
+        "net_excess_return": (
+            net_return - benchmark
+            if net_return is not None and benchmark is not None
+            else None
+        ),
+        "modelled_top_n_count": len(modelled),
+        "cross_section_count": len(forward_rows),
+    }
+
+
+def _session_modelled_returns(
+    session_rows: Sequence[_Observation],
+    *,
+    top_n: int,
+    horizon: int,
+    cost_profile: CostProfileName | None,
+) -> list[float]:
+    modelled: list[float] = []
+    for item in session_rows:
+        if item.rank > top_n:
+            continue
+        outcome = item.execution.get(horizon)
+        if outcome is None or outcome.status != "modelled":
+            continue
+        value = _execution_scenario_value(outcome, cost_profile)
+        if value is not None:
+            modelled.append(value)
+    return modelled
+
+
+def _execution_scenario_value(
+    outcome: _ExecutionOutcome,
+    cost_profile: CostProfileName | None,
+) -> float | None:
+    if cost_profile is None:
+        return outcome.net_return
+    return _scenario_net_return(outcome, cost_profile)
+
+
+def _scenario_net_return(
+    outcome: _ExecutionOutcome,
+    cost_profile: CostProfileName,
+) -> float | None:
+    if outcome.buy_amount is None or outcome.sell_amount is None:
+        return None
+    profile = resolve_cost_profile(cost_profile)
+    buy_cost = trade_costs(profile, side="buy", gross_amount=outcome.buy_amount).total
+    sell_cost = trade_costs(profile, side="sell", gross_amount=outcome.sell_amount).total
+    return (
+        outcome.sell_amount - sell_cost - outcome.buy_amount - buy_cost
+    ) / (outcome.buy_amount + buy_cost)
+
+
+def _robustness_summary(
+    observations: Sequence[_Observation],
+    snapshots: Sequence[_RunSnapshot],
+    config: EvaluationConfig,
+) -> dict[str, object]:
+    selected = _primary_observation_contract(observations)
+    if selected is None:
+        return _missing_robustness_summary()
+    dimensions, rows = selected
+    components = _build_robustness_components(rows, snapshots, dimensions, config)
+    reasons = _robustness_reasons(components)
+    return _robustness_payload(dimensions, components, reasons)
+
+
+def _missing_robustness_summary() -> dict[str, object]:
+    return {
+        "status": "insufficient_data",
+        "promotion_ready": False,
+        "insufficient_reasons": ["official_full_market_contract_unavailable"],
+        "regime_slices": [],
+        "cost_scenarios": [],
+        "capacity_scenarios": [],
+        "stability": {"status": "insufficient_data"},
+    }
+
+
+def _build_robustness_components(
+    rows: Sequence[_Observation],
+    snapshots: Sequence[_RunSnapshot],
+    dimensions: Mapping[str, str],
+    config: EvaluationConfig,
+) -> _RobustnessComponents:
+    profiles = cast(tuple[CostProfileName, ...], ("base", "conservative", "stress"))
+    return _RobustnessComponents(
+        regime_slices=[
+            _regime_robustness_slice(rows, regime, config)
+            for regime in ("strong", "neutral", "weak")
+        ],
+        cost_scenarios=[
+            _cost_robustness_scenario(rows, profile, config)
+            for profile in profiles
+        ],
+        capacity_scenarios=_capacity_robustness_scenarios(rows, config),
+        stability=_primary_stability_summary(snapshots, dimensions, config),
+    )
+
+
+def _robustness_reasons(components: _RobustnessComponents) -> list[str]:
+    observed_regimes = [
+        item for item in components.regime_slices if item["observation_count"]
+    ]
+    reasons: list[str] = []
+    if not observed_regimes or not all(item["status"] == "ok" for item in observed_regimes):
+        reasons.append("regime_session_coverage_insufficient")
+    if not all(item["status"] == "ok" for item in components.cost_scenarios):
+        reasons.append("cost_scenario_evidence_insufficient")
+    if not all(item["status"] == "ok" for item in components.capacity_scenarios):
+        reasons.append("capacity_scenario_evidence_insufficient")
+    if components.stability["status"] != "ok":
+        reasons.append("ranking_stability_sessions_insufficient")
+    return reasons
+
+
+def _robustness_payload(
+    dimensions: Mapping[str, str],
+    components: _RobustnessComponents,
+    reasons: list[str],
+) -> dict[str, object]:
+    return {
+        "status": "ok" if not reasons else "insufficient_data",
+        "promotion_ready": not reasons,
+        "dimensions": dict(dimensions),
+        "regime_slices": components.regime_slices,
+        "cost_scenarios": components.cost_scenarios,
+        "capacity_scenarios": components.capacity_scenarios,
+        "stability": components.stability,
+        "insufficient_reasons": reasons,
+        "constraints": {
+            "point_in_time": True,
+            "fixed_session": True,
+            "entry": "next-complete-session-open",
+            "exit": "T+1-next-sellable-open",
+            "capacity_semantics": "scan-day-amount-screen-only; no order-book queue reconstruction",
+        },
+    }
+
+
+def _regime_robustness_slice(
+    rows: Sequence[_Observation],
+    regime: str,
+    config: EvaluationConfig,
+) -> dict[str, object]:
+    selected = [item for item in rows if item.regime == regime]
+    sessions = _session_research_records(
+        selected,
+        top_n=PROMOTION_PRIMARY_TOP_N,
+        horizon=PROMOTION_PRIMARY_HORIZON,
+    )
+    rank_ics = [
+        parsed
+        for item in sessions
+        if (parsed := _optional_float(item.get("rank_ic"))) is not None
+    ]
+    net_excess = [
+        parsed
+        for item in sessions
+        if (parsed := _optional_float(item.get("net_excess_return"))) is not None
+    ]
+    independent = len({item.quote_date for item in selected})
+    return {
+        "regime": regime,
+        "status": "ok" if independent >= config.minimum_session_count else "insufficient_data",
+        "observation_count": len(selected),
+        "independent_session_count": independent,
+        "mean_rank_ic": fmean(rank_ics) if rank_ics else None,
+        "mean_net_excess_return": fmean(net_excess) if net_excess else None,
+        "positive_net_excess_session_rate": (
+            sum(value > 0 for value in net_excess) / len(net_excess)
+            if net_excess
+            else None
+        ),
+    }
+
+
+def _cost_robustness_scenario(
+    rows: Sequence[_Observation],
+    profile: CostProfileName,
+    config: EvaluationConfig,
+) -> dict[str, object]:
+    sessions = _session_research_records(
+        rows,
+        top_n=PROMOTION_PRIMARY_TOP_N,
+        horizon=PROMOTION_PRIMARY_HORIZON,
+        cost_profile=profile,
+    )
+    values = [
+        parsed
+        for item in sessions
+        if (parsed := _optional_float(item.get("net_excess_return"))) is not None
+    ]
+    return {
+        "profile": profile,
+        "profile_contract": resolve_cost_profile(profile).model_dump(mode="json"),
+        "status": "ok" if len(values) >= config.minimum_session_count else "insufficient_data",
+        "independent_session_count": len(values),
+        "mean_net_excess_return": fmean(values) if values else None,
+        "positive_session_rate": (
+            sum(value > 0 for value in values) / len(values) if values else None
+        ),
+    }
+
+
+def _capacity_robustness_scenarios(
+    rows: Sequence[_Observation],
+    config: EvaluationConfig,
+) -> list[dict[str, object]]:
+    selected = [item for item in rows if item.rank <= PROMOTION_PRIMARY_TOP_N]
+    definitions = (
+        ("base", config.execution_notional, config.max_daily_participation_rate),
+        (
+            "conservative",
+            config.execution_notional * 5,
+            config.max_daily_participation_rate / 2,
+        ),
+        (
+            "stress",
+            config.execution_notional * 10,
+            config.max_daily_participation_rate / 4,
+        ),
+    )
+    session_count = len({item.quote_date for item in selected})
+    records: list[dict[str, object]] = []
+    for name, notional, participation in definitions:
+        eligible = [
+            item
+            for item in selected
+            if item.amount > 0 and notional / item.amount <= participation
+        ]
+        records.append(
+            {
+                "scenario": name,
+                "execution_notional": notional,
+                "maximum_daily_participation_rate": participation,
+                "status": (
+                    "ok" if selected and session_count >= config.minimum_session_count
+                    else "insufficient_data"
+                ),
+                "independent_session_count": session_count,
+                "selected_observation_count": len(selected),
+                "capacity_eligible_count": len(eligible),
+                "capacity_coverage_ratio": len(eligible) / len(selected) if selected else None,
+            }
+        )
+    return records
+
+
+def _primary_stability_summary(
+    snapshots: Sequence[_RunSnapshot],
+    dimensions: Mapping[str, str],
+    config: EvaluationConfig,
+) -> dict[str, object]:
+    selected = tuple(
+        item
+        for item in snapshots
+        if item.mode == dimensions["mode"]
+        and item.scope == dimensions["scope"]
+        and item.rule_version == dimensions["rule_version"]
+    )
+    records = [
+        item
+        for item in _stability_metrics(selected, config)
+        if item["top_n"] == PROMOTION_PRIMARY_TOP_N
+    ]
+    turnovers = [
+        parsed
+        for item in records
+        if (parsed := _optional_float(item.get("turnover_rate"))) is not None
+    ]
+    rank_stability = [
+        parsed
+        for item in records
+        if (parsed := _optional_float(item.get("rank_stability"))) is not None
+    ]
+    return {
+        "status": "ok" if len(records) >= config.minimum_session_count - 1 else "insufficient_data",
+        "transition_count": len(records),
+        "mean_turnover_rate": fmean(turnovers) if turnovers else None,
+        "maximum_turnover_rate": max(turnovers) if turnovers else None,
+        "mean_spearman_rank_stability": fmean(rank_stability) if rank_stability else None,
+    }
+
+
 def _report_config(settings: EvaluationConfig) -> dict[str, object]:
     return {
         "top_sizes": list(settings.top_sizes),
@@ -887,7 +1710,7 @@ def _report_limitations() -> list[str]:
         "市场环境由扫描快照当日全市场涨跌幅均值分层，不使用未来信息。",
         "生产排名的板块、行业和流动性暴露只做审计；v5.4仅对质量可接受的具体行业组做收缩残差化。",
         "迟滞换仓仅报告 buy/hold 阈值下的估算换手变化，不改写冻结排名。",
-        "多候选比较必须保留预注册消融并在足够独立交易日后执行PBO/多重检验。",
+        "多候选比较使用独立交易日的配对净超额差异并实际执行BH-FDR；PBO与DSR未计算时明确标记不可用。",
         "报告不会自动修改生产评分权重；规则调整必须创建新的 rule_version。",
     ]
 
@@ -966,6 +1789,7 @@ def _evaluate_shadow_run(
     config: EvaluationConfig,
     variant: ShadowScoreVariant,
 ) -> tuple[_RunSnapshot, ShadowScoreBatch] | None:
+    verify_market_scan_snapshot(conn, int(run["id"]))
     result_rows = _shadow_result_rows(conn, int(run["id"]))
     if not result_rows:
         return None
@@ -1255,6 +2079,10 @@ def _shadow_snapshot(
             for item in batch.results
         ),
         regime=_market_regime(result_rows),
+        reference_rankings=tuple(
+            (str(row["symbol"]), int(row["rank"]))
+            for row in result_rows
+        ),
     )
 
 
@@ -1329,6 +2157,7 @@ def _evaluate_run(
     run: sqlite3.Row,
     config: EvaluationConfig,
 ) -> _RunSnapshot | None:
+    verify_market_scan_snapshot(conn, int(run["id"]))
     result_rows = conn.execute(
         """
         SELECT symbol, market, industry, rank, score, raw_score, price, change_pct, data_quality_score,
@@ -1757,6 +2586,8 @@ def _modelled_execution(
         gross_return=gross_return, net_return=net_return, cost_drag=gross_return - net_return,
         entry_date=entry.entry_date, exit_date=exit_date, exit_delay_sessions=delay,
         model_limited=entry.entry_model_limited or exit_model_limited,
+        buy_amount=entry.buy_amount,
+        sell_amount=sell_amount,
     )
 
 
@@ -2295,9 +3126,12 @@ def _factor_values(result: sqlite3.Row) -> dict[str, float]:
     if not isinstance(components, dict):
         return values
     values.update(_production_score_component_values(components))
-    refinement = components.get("rank_refinement")
-    if isinstance(refinement, dict) and isinstance(refinement.get("score"), int | float):
-        values["rank_refinement"] = float(refinement["score"])
+    continuous_trend = _continuous_trend_component(components)
+    continuous_score = continuous_trend.get("score") if continuous_trend is not None else None
+    if isinstance(continuous_score, int | float):
+        # Keep the historical factor name as a stable model-feature alias while
+        # sourcing the material v5 continuous-trend component when present.
+        values["rank_refinement"] = float(continuous_score)
     dimensions = components.get("score_dimensions")
     if not isinstance(dimensions, dict):
         return values
@@ -2350,18 +3184,35 @@ def _production_score_component_values(components: Mapping[str, object]) -> dict
     values: dict[str, float] = {}
     groups = (
         ("leader_score", ("base", "trend_delta", "unclamped", "score"), "leader_"),
-        ("final_score", ("quality_penalty", "base", "rank_discount", "raw", "rounded", "score"), "final_"),
+        (
+            "final_score",
+            (
+                "quality_penalty", "base", "continuous_trend_adjustment",
+                "rank_discount", "raw", "rounded", "score",
+            ),
+            "final_",
+        ),
     )
     for group_name, names, prefix in groups:
         group = components.get(group_name)
         if isinstance(group, Mapping):
             values.update(_finite_mapping_values(group, names, prefix=prefix))
-    refinement = components.get("rank_refinement")
-    if isinstance(refinement, Mapping):
-        normalized = refinement.get("normalized_inputs")
+    continuous_trend = _continuous_trend_component(components)
+    if continuous_trend is not None:
+        normalized = continuous_trend.get("normalized_inputs")
         if isinstance(normalized, Mapping):
             values.update(_finite_mapping_values(normalized, tuple(normalized), prefix="refinement_"))
     return values
+
+
+def _continuous_trend_component(
+    components: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    current = components.get("continuous_trend")
+    if isinstance(current, Mapping):
+        return current
+    legacy = components.get("rank_refinement")
+    return legacy if isinstance(legacy, Mapping) else None
 
 
 def _source_evidence_digest(result: sqlite3.Row) -> str | None:
@@ -2419,7 +3270,7 @@ def _factor_diagnostics(
                         mode, scope, rule_version, rows, factor, horizon, config,
                     )
                 )
-    return records
+    return _apply_factor_fdr(records)
 
 
 def _factor_diagnostic_record(
@@ -2432,6 +3283,14 @@ def _factor_diagnostic_record(
     config: EvaluationConfig,
 ) -> dict[str, object]:
     daily_ic, daily_partial_ic = _daily_factor_ics(rows, factor, horizon)
+    inference_minimum = max(config.minimum_session_count, DEFAULT_MINIMUM_SESSION_COUNT)
+    raw_p_value = moving_block_bootstrap_p_value(
+        daily_ic,
+        samples=config.bootstrap_samples,
+        block_length=max(1, horizon),
+        seed_text=f"factor:{mode}:{scope}:{rule_version}:{factor}:{horizon}",
+        minimum_count=inference_minimum,
+    )
     return {
         "mode": mode,
         "scope": scope,
@@ -2445,7 +3304,50 @@ def _factor_diagnostic_record(
             fmean(daily_partial_ic) if daily_partial_ic else None
         ),
         "partial_ic_session_count": len(daily_partial_ic),
+        "hypothesis": "H0: mean session rank IC <= 0",
+        "raw_p_value_one_sided": raw_p_value,
+        "multiple_testing": {
+            "method": "benjamini-hochberg-fdr",
+            "family": "same-contract-and-horizon-factor-diagnostics",
+            "alpha": MULTIPLE_TESTING_ALPHA,
+            "status": "pending_family_adjustment" if raw_p_value is not None else "insufficient_data",
+            "adjusted_p_value": None,
+            "rejected": None,
+            "minimum_independent_session_count": inference_minimum,
+        },
     }
+
+
+def _apply_factor_fdr(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    families: dict[tuple[str, str, str, int], list[dict[str, object]]] = defaultdict(list)
+    for record in records:
+        families[
+            (
+                str(record["mode"]),
+                str(record["scope"]),
+                str(record["rule_version"]),
+                int(str(record["horizon_trading_days"])),
+            )
+        ].append(record)
+    for family_records in families.values():
+        raw = [_optional_float(record.get("raw_p_value_one_sided")) for record in family_records]
+        adjusted, rejected = benjamini_hochberg(raw, alpha=MULTIPLE_TESTING_ALPHA)
+        available = sum(value is not None for value in raw)
+        family_status = "ok" if available == len(raw) else "insufficient_data"
+        for record, adjusted_value, rejected_value in zip(
+            family_records, adjusted, rejected, strict=True,
+        ):
+            control = cast(dict[str, object], record["multiple_testing"])
+            control.update(
+                {
+                    "status": family_status if adjusted_value is not None else "insufficient_data",
+                    "family_size": len(raw),
+                    "tested_hypothesis_count": available,
+                    "adjusted_p_value": adjusted_value,
+                    "rejected": rejected_value,
+                }
+            )
+    return records
 
 
 def _daily_factor_ics(
@@ -2498,64 +3400,6 @@ def _partial_rank_ic(
         return None
     denominator = math.sqrt(max(0.0, (1 - factor_base**2) * (1 - base_return**2)))
     return (factor_return - factor_base * base_return) / denominator if denominator > 1e-12 else None
-
-
-def _calibration_metrics(
-    observations: tuple[_Observation, ...],
-    config: EvaluationConfig,
-) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    for mode, scope, rule_version, rows in _contract_rows(observations):
-        for horizon in config.horizons:
-            records.append(_calibration_record(mode, scope, rule_version, rows, horizon, config))
-    return records
-
-
-def _calibration_record(
-    mode: str,
-    scope: str,
-    rule_version: str,
-    rows: Sequence[_Observation],
-    horizon: int,
-    config: EvaluationConfig,
-) -> dict[str, object]:
-    horizon_rows = [item for item in rows if horizon in item.returns]
-    session_count = len({item.quote_date for item in horizon_rows})
-    return {
-        "mode": mode,
-        "scope": scope,
-        "rule_version": rule_version,
-        "horizon_trading_days": horizon,
-        "status": "diagnostic-only" if session_count >= config.minimum_session_count else "insufficient_data",
-        "independent_session_count": session_count,
-        "score_semantics": "ordinal-not-probability",
-        "probability_calibration_allowed": False,
-        "buckets": [
-            _calibration_bucket(horizon_rows, horizon, lower)
-            for lower in range(0, 100, 10)
-        ],
-    }
-
-
-def _calibration_bucket(
-    rows: Sequence[_Observation],
-    horizon: int,
-    lower: int,
-) -> dict[str, object]:
-    upper = lower + 10
-    selected = [
-        item
-        for item in rows
-        if lower <= item.raw_score <= upper and (upper == 100 or item.raw_score < upper)
-    ]
-    values = [item.returns[horizon] for item in selected]
-    return {
-        "score_range": [lower, upper],
-        "sample_size": len(values),
-        "independent_session_count": len({item.quote_date for item in selected}),
-        "average_return": fmean(values) if values else None,
-        "positive_return_rate": sum(value > 0 for value in values) / len(values) if values else None,
-    }
 
 
 def _stability_metrics(

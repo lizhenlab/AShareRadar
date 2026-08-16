@@ -25,7 +25,7 @@ test("SSE status waits for the current frame and preserves degradation", async (
   await expect(page.locator("#dataStatus")).toContainText("本地数据部分降级");
   await expect(page.locator("#dataStatus")).not.toContainText("实时连接正常");
 });
-test("three stock loads reuse global requests and add only five stock requests", async ({ page }) => {
+test("three stock loads reuse global requests and add only six stock requests", async ({ page }) => {
   const apiRequests = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -35,18 +35,18 @@ test("three stock loads reuse global requests and add only five stock requests",
 
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect.poll(() => apiRequests.length).toBe(14);
+  await expect.poll(() => apiRequests.length).toBe(15);
 
   const input = page.locator("#symbolInput");
   await input.fill("000001");
   await page.locator("#searchForm button").click();
   await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await expect.poll(() => apiRequests.length).toBe(19);
+  await expect.poll(() => apiRequests.length).toBe(21);
 
   await input.fill("300750");
   await page.locator("#searchForm button").click();
   await expect(page.locator("#stockName")).toHaveText("宁德时代");
-  await expect.poll(() => apiRequests.length).toBe(24);
+  await expect.poll(() => apiRequests.length).toBe(27);
 
   const globalEndpoints = [
     "/api/market",
@@ -67,6 +67,7 @@ test("three stock loads reuse global requests and add only five stock requests",
     "/api/stock/minute-analysis?",
     "/api/advice/timeline?",
     "/api/reviews?",
+    "/api/stock/upside-probability?",
     "/api/stream/quotes?",
   ];
   for (const prefix of stockKinds) {
@@ -175,14 +176,14 @@ test("stock name suggestions select a canonical code without changing request ba
 
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect.poll(() => apiRequests.length).toBe(14);
+  await expect.poll(() => apiRequests.length).toBe(15);
 
   const input = page.locator("#symbolInput");
   const suggestions = page.locator("#symbolSuggestions");
   await input.fill("000001");
   await page.waitForTimeout(350);
   expect(searchKeywords).toEqual([]);
-  expect(apiRequests).toHaveLength(14);
+  expect(apiRequests).toHaveLength(15);
 
   await input.fill("平安");
   await expect(suggestions).toBeVisible();
@@ -212,7 +213,7 @@ test("stock name suggestions select a canonical code without changing request ba
   await expect(suggestions).toBeHidden();
   await expect(page.locator("#stockCode")).toHaveText("SZ000001");
   await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await expect.poll(() => apiRequests.length).toBe(20);
+  await expect.poll(() => apiRequests.length).toBe(22);
   expect(searchKeywords).toEqual(["平安"]);
 
   const globalEndpoints = [
@@ -234,6 +235,7 @@ test("stock name suggestions select a canonical code without changing request ba
     "/api/stock/minute-analysis?",
     "/api/advice/timeline?",
     "/api/reviews?",
+    "/api/stock/upside-probability?",
     "/api/stream/quotes?",
   ];
   for (const prefix of stockKinds) {

@@ -8,6 +8,9 @@ from pydantic import BaseModel, FiniteFloat
 
 
 KlineAdjustmentMode = Literal["qfq", "hfq", "none", "unknown"]
+KlineSessionStatus = Literal["trading", "suspended", "unknown"]
+KlineOpenExecutionStatus = Literal["tradable", "locked_limit_up", "locked_limit_down", "unavailable", "unknown"]
+KlineCorporateActionStatus = Literal["none", "effective_event", "unknown"]
 DAILY_KLINE_CONTRACT_VERSION = "daily-kline.v1"
 DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE: KlineAdjustmentMode = "qfq"
 UNKNOWN_KLINE_DATA_VERSION = "unknown"
@@ -51,6 +54,12 @@ class Kline(BaseModel):
     fetched_at: str | None = None
     from_cache: bool = False
     fallback_used: bool = False
+    session_status: KlineSessionStatus = "unknown"
+    open_execution_status: KlineOpenExecutionStatus = "unknown"
+    corporate_action_status: KlineCorporateActionStatus = "unknown"
+    adjustment_factor: FiniteFloat | None = None
+    point_in_time: bool = False
+    execution_metadata_version: str | None = None
 
 
 class MinuteKline(BaseModel):

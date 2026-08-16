@@ -1,5 +1,7 @@
 # Full-Market Selection Baseline (2026-07-29)
 
+> Current trust boundary (2026-08-13): this file is a historical product baseline, not an authorization contract. Current published graphs use `market-scan-snapshot-digest-v2`; a migration `legacy_backfill` can be audited but cannot authorize Discovery, delta/alerts, strategy, probability/future research, degraded retry-copy, or TOP100 refresh. The shared action gate additionally requires the exact full-market scope and internally consistent diagnostics v1 with no blockers, exactly one info `score_distribution.pass`, and no score-distribution conflict. Read-only browse/audit remains visible. Current point-in-time evidence is v4 with quote-event/observed/decision and per-bar `as_of` ordering. Managed research writers and scan retention share a cross-process database lease; database-only restore refuses populated side artifacts. Use README, REQUIREMENTS, DESIGN, and OPERATIONS for the live contract.
+
 This document records the implementation baseline before the full-market selection workspace is expanded. It separates verified behavior, reproducible product gaps, and hypotheses that require measured evidence.
 
 ## Verified implementation baseline

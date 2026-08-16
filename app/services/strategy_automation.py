@@ -6,6 +6,7 @@ from datetime import date
 import hashlib
 import json
 
+from app.db.market_scan_integrity import MarketScanSnapshotSealError
 from app.models.strategy_automation import (
     StrategyAlertEventPage,
     StrategyAutomationRunSummary,
@@ -17,6 +18,7 @@ from app.models.strategy_automation import (
 )
 from app.models.strategy_execution import PortfolioCandidate, PortfolioDraft, StrategyExecutionRequest
 from app.repositories.strategy_automation import StrategyAutomationRepository
+from app.repositories.strategy_automation import StrategyAutomationIntegrityError
 from app.services.strategy_execution import StrategyExecutionService
 from app.services.strategy_lab import StrategyLabService
 from app.utils.audit_time import audit_now_text
@@ -167,6 +169,8 @@ class StrategyAutomationService:
             if schedule.last_execution_id is not None
             else None
         )
+        if previous is not None:
+            self._require_action_source(previous)
         current = self.executions.execute(
             StrategyExecutionRequest(
                 strategy_id=schedule.strategy_id,
@@ -180,8 +184,18 @@ class StrategyAutomationService:
             raise RuntimeError("定时执行期间最新扫描批次发生变化，请重试")
         return self._emit_events(schedule, previous, current), current.context.execution_id
 
+    def _require_action_source(self, draft: PortfolioDraft) -> None:
+        _require_publication_action_source(draft)
+        try:
+            self.executions.require_action_source(draft.context.execution_id)
+        except MarketScanSnapshotSealError as exc:
+            raise StrategyAutomationIntegrityError(
+                "策略自动化动作来源未通过全市场发布门禁"
+            ) from exc
+
     def create_simulation_plan(self, execution_id: int) -> StrategySimulationPlan:
         draft = self.executions.draft(execution_id)
+        self._require_action_source(draft)
         strategy = self.strategies.get(
             draft.context.strategy_id,
             revision=draft.context.strategy_version,
@@ -232,7 +246,7 @@ class StrategyAutomationService:
     def simulation_plan(self, execution_id: int) -> StrategySimulationPlan | None:
         # Require the execution to exist even when no plan has been generated,
         # so a bad identifier is a typed 404 rather than an ambiguous null.
-        self.executions.draft(execution_id)
+        self._require_action_source(self.executions.draft(execution_id))
         return self.repository.simulation_plan(execution_id)
 
     def _emit_events(
@@ -352,6 +366,13 @@ def _selected_by_symbol(draft: PortfolioDraft | None) -> dict[str, PortfolioCand
     if draft is None:
         return {}
     return {item.symbol: item for item in draft.selected}
+
+
+def _require_publication_action_source(draft: PortfolioDraft) -> None:
+    if draft.context.source_snapshot_seal_origin != "publication":
+        raise StrategyAutomationIntegrityError(
+            "策略自动化动作要求原发布时快照封印"
+        )
 
 
 def _stable_digest(value: object) -> str:

@@ -76,7 +76,7 @@ def _factor_weight_context(analysis: AnalysisResult, feature: FeatureSnapshot) -
         amount=feature.amount or 0,
         market_cap=analysis.quote.market_cap or 0,
         turnover=feature.turnover_rate,
-        volume_ratio=feature.volume_ratio,
+        volume_ratio=feature.volume_ratio if feature.volume_ratio_available else 0.0,
         data_quality_score=feature.data_quality_score,
     )
 

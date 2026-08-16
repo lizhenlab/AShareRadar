@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
+from typing import cast
 
+import pytest
+from starlette.requests import Request
+
+from app.api.deps import get_domain_services, get_market_scan_heavy_read_admission
 from app.api.container import build_container
 from app.config import Settings
 from app.services.cache import SQLiteCache
@@ -24,9 +29,35 @@ def test_container_reuses_datahub_workbench_context_cache(tmp_path) -> None:
     assert container.datahub.cache is cache
     assert container.repositories is cache.repositories
     assert container.domain_services is cache.domain_services
+    assert container.scheduler.strategy_automation_service is container.domain_services.strategy_automation
     assert cache.watchlist_repo.settings is settings
     assert cache.advice_repo.settings is settings
     assert cache.maintenance_repo.settings is settings
+
+
+def test_domain_services_dependency_uses_container_owned_bundle(tmp_path) -> None:
+    settings = Settings(cache_path=tmp_path / "domain-services.sqlite3", scheduler_enabled=False)
+    container = build_container(settings=settings)
+    request = cast(
+        Request,
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container))),
+    )
+
+    assert get_domain_services(request) is container.domain_services
+    assert get_market_scan_heavy_read_admission(request) is container.market_scan_heavy_read_admission
+
+
+def test_domain_services_dependency_fails_fast_when_uninitialized(tmp_path) -> None:
+    settings = Settings(cache_path=tmp_path / "missing-services.sqlite3", scheduler_enabled=False)
+    container = build_container(settings=settings)
+    container.domain_services = None
+    request = cast(
+        Request,
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container))),
+    )
+
+    with pytest.raises(RuntimeError, match="领域服务尚未初始化"):
+        get_domain_services(request)
 
 
 def test_explicit_cache_path_does_not_read_global_settings(monkeypatch, tmp_path) -> None:
@@ -53,6 +84,8 @@ def test_cache_composes_bundles_without_domain_repository_reads(monkeypatch, tmp
 
     assert cache.market_scan_repo is cache.repositories.market_scan
     assert cache.discovery_service is cache.domain_services.discovery
+    assert cache.market_scan_screen_alert_service is cache.domain_services.market_scan_screen_alert
+    assert cache.discovery_service._screen_alerts is cache.market_scan_screen_alert_service
     assert cache.table_counts()["paper_trading_account"] == 1
 
 
@@ -64,6 +97,29 @@ def test_cache_constructor_defers_domain_service_composition(monkeypatch, tmp_pa
 
     cache = SQLiteCache(tmp_path / "storage-only.sqlite3")
 
+    assert cache.bound_domain_services is None
+
+
+def test_direct_scheduler_does_not_recover_bound_strategy_service_from_cache(tmp_path) -> None:
+    settings = Settings(cache_path=tmp_path / "bound-scheduler.sqlite3", scheduler_enabled=False)
+    cache = SQLiteCache(settings=settings)
+    services = cache.domain_services
+    datahub = DataHub(cache=cache, settings=settings)
+
+    scheduler = LocalDataScheduler(datahub)
+
+    assert services.strategy_automation is cache.bound_domain_services.strategy_automation
+    assert scheduler.strategy_automation_service is None
+
+
+def test_direct_scheduler_does_not_trigger_domain_service_composition(tmp_path) -> None:
+    settings = Settings(cache_path=tmp_path / "unbound-scheduler.sqlite3", scheduler_enabled=False)
+    cache = SQLiteCache(settings=settings)
+    datahub = DataHub(cache=cache, settings=settings)
+
+    scheduler = LocalDataScheduler(datahub)
+
+    assert scheduler.strategy_automation_service is None
     assert cache.bound_domain_services is None
 
 
@@ -226,3 +282,4 @@ def test_build_container_infers_datahub_from_injected_scheduler(tmp_path) -> Non
     assert container.settings is settings
     assert container.datahub is datahub
     assert container.scheduler is scheduler
+    assert scheduler.strategy_automation_service is container.domain_services.strategy_automation

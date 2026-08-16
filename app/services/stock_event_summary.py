@@ -13,9 +13,6 @@ from app.services.stock_event_sources import (
     external_event_placeholders,
     external_source_capabilities,
 )
-from app.utils.audit_time import audit_now_text as now_text
-
-
 def build_event_summary(
     analysis: AnalysisResult,
     *,
@@ -29,7 +26,7 @@ def build_event_summary(
     capabilities = external_source_capabilities(lhb)
     return StockEventSummary(
         symbol=f"{quote.code}.{quote.market}",
-        updated_at=now_text(),
+        updated_at=quote.timestamp,
         events=events[-8:],
         notes=[
             "事件列表仅包含已有数据形成的历史复盘、行业背景、行情异动和质量提醒。",

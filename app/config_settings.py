@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from app.config_shell import load_shell_env as _load_shell_env
 from app.config_validation import normalized_llm_base_url as _normalized_llm_base_url
 from app.config_validation import normalized_timezone_name as _normalized_timezone_name
+from app.models.market_scan import MARKET_SCAN_MIN_HISTORY_ROWS
 
 
 LLM_SHELL_ENV_PATH = Path.home() / ".zshrc"
@@ -396,11 +397,21 @@ class Settings(BaseModel):
         le=32,
     )
     market_scan_kline_limit: int = Field(
-        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_KLINE_LIMIT", 260, minimum=60),
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_MARKET_SCAN_KLINE_LIMIT",
+            260,
+            minimum=MARKET_SCAN_MIN_HISTORY_ROWS,
+        ),
+        ge=MARKET_SCAN_MIN_HISTORY_ROWS,
         le=1000,
     )
     market_scan_min_history_rows: int = Field(
-        default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_MIN_HISTORY_ROWS", 60, minimum=60),
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_MARKET_SCAN_MIN_HISTORY_ROWS",
+            MARKET_SCAN_MIN_HISTORY_ROWS,
+            minimum=MARKET_SCAN_MIN_HISTORY_ROWS,
+        ),
+        ge=MARKET_SCAN_MIN_HISTORY_ROWS,
         le=260,
     )
     market_scan_min_data_quality_score: int = Field(

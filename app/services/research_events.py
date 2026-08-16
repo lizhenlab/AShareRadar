@@ -4,12 +4,14 @@ from dataclasses import dataclass
 
 from app.models.analysis import (
     AbnormalEventItem,
+    AnalysisResult,
     StockEventItem,
     StockInsightBundle,
 )
 from app.models.research import (
     EventDigestReport,
 )
+from app.utils.symbols import standard_symbol
 
 
 MAX_EVENT_ITEMS = 4
@@ -36,10 +38,12 @@ class EventDigestBuckets:
             self.watch.append(text)
 
 
-def build_event_digest_report(insights: StockInsightBundle) -> EventDigestReport:
+def build_event_digest_report(analysis: AnalysisResult, insights: StockInsightBundle) -> EventDigestReport:
     buckets = _event_buckets(insights)
     impact = _impact_label(buckets)
     return EventDigestReport(
+        symbol=standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}"),
+        updated_at=analysis.quote.timestamp,
         impact_label=impact,
         summary=f"{impact}。事件层仅统计已有数据形成的异动、行业背景和复盘记录；未接入的外部源不计作事件证据。",
         positive_events=_dedupe(buckets.positive)[:MAX_EVENT_ITEMS],

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+import pytest
 
 from app.api.errors import validation_exception_handler
 from app.api.routes import strategy_lab
 from app.db.schema import initialize_schema
 from app.repositories.strategy_lab import StrategyLabRepository
+from app.repositories.strategy_automation import StrategyAutomationIntegrityError
+from app.repositories.strategy_evidence import StrategyEvidenceIntegrityError
+from app.repositories.strategy_execution import StrategyExecutionIntegrityError
+from app.models.strategy_execution import StrategyExecutionRequest
 from app.services.strategy_lab import StrategyLabService
 
 
@@ -132,8 +138,97 @@ def test_every_strategy_lab_route_has_strict_response_model_and_main_registratio
     assert all(route.response_model is not None for route in strategy_lab.router.routes)
     paths = {route.path for route in create_app().routes}
     assert "/api/strategy-lab/parse" in paths
+    assert "/api/strategy-lab/templates" in paths
+    assert "/api/strategy-lab/executable-candidate-shadow" in paths
     assert "/api/strategy-lab/strategies" in paths
     assert "/api/strategy-lab/strategies/{strategy_id}/diff" in paths
+
+
+def test_strategy_template_catalog_route_is_read_only_and_not_cached(tmp_path) -> None:
+    response = _client(tmp_path).get("/api/strategy-lab/templates")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()
+    assert payload["schema_version"] == "full-market-strategy-template-catalog-v1"
+    assert payload["production_effect"] == "none"
+    assert payload["official_session_count"] == 2
+    assert len(payload["catalog_digest"]) == 64
+    assert len(payload["templates"]) == 14
+
+
+def test_strategy_execution_success_sets_no_store_before_service_call() -> None:
+    sentinel = object()
+
+    class ExecutionService:
+        def execute(self, _payload: StrategyExecutionRequest) -> object:
+            return sentinel
+
+    response = Response()
+    result = asyncio.run(
+        strategy_lab.execute_strategy(
+            response,
+            StrategyExecutionRequest(strategy_id=1),
+            ExecutionService(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert result is sentinel
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_strategy_execution_integrity_error_is_generic_conflict() -> None:
+    class ExecutionService:
+        def execute(self, _payload: StrategyExecutionRequest) -> None:
+            raise StrategyExecutionIntegrityError("候选摘要损坏 /private/ledger.sqlite3")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            strategy_lab.execute_strategy(
+                Response(),
+                StrategyExecutionRequest(strategy_id=1),
+                ExecutionService(),  # type: ignore[arg-type]
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "策略执行账本完整性校验失败，已拒绝读取"
+    assert "private" not in str(exc_info.value.detail)
+
+
+def test_strategy_evidence_and_simulation_integrity_errors_are_generic_conflicts() -> None:
+    class CorruptEvidenceService:
+        def latest(self, *_args: object, **_kwargs: object) -> None:
+            raise StrategyEvidenceIntegrityError("sensitive evidence row and digest")
+
+        def refresh(self, *_args: object, **_kwargs: object) -> None:
+            raise StrategyEvidenceIntegrityError("sensitive evidence artifact path")
+
+    class CorruptAutomationService:
+        def create_simulation_plan(self, *_args: object, **_kwargs: object) -> None:
+            raise StrategyAutomationIntegrityError("sensitive execution seal")
+
+        def simulation_plan(self, *_args: object, **_kwargs: object) -> None:
+            raise StrategyAutomationIntegrityError("sensitive stored plan")
+
+    app = FastAPI()
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.include_router(strategy_lab.router)
+    app.dependency_overrides[strategy_lab.get_strategy_evidence_service] = CorruptEvidenceService
+    app.dependency_overrides[strategy_lab.get_strategy_automation_service] = CorruptAutomationService
+    client = TestClient(app)
+
+    responses = (
+        client.get("/api/strategy-lab/strategies/1/evidence"),
+        client.post("/api/strategy-lab/strategies/1/evidence/refresh", json={}),
+        client.post("/api/strategy-lab/executions/1/simulation-plan"),
+        client.get("/api/strategy-lab/executions/1/simulation-plan"),
+    )
+    assert {response.status_code for response in responses} == {409}
+    assert {
+        response.json()["detail"] for response in responses
+    } == {"研究 artifact 完整性校验失败，已拒绝读取"}
+    assert all("sensitive" not in response.text for response in responses)
 
 
 def _client(tmp_path) -> TestClient:

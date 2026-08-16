@@ -6,7 +6,11 @@ from typing import Awaitable, Callable
 
 from app.services.datahub import DataHub
 from app.services.market_scan_manager import MarketScanManager
-from app.services.scheduler_contracts import SchedulerInstanceGuard, _TASK_DEFINITIONS
+from app.services.scheduler_contracts import (
+    SchedulerInstanceGuard,
+    StrategyAutomationRunner,
+    _TASK_DEFINITIONS,
+)
 from app.services.scheduler_execution import SchedulerExecutionMixin
 from app.services.scheduler_helpers import _default_instance_guard
 from app.services.scheduler_lifecycle import SchedulerLifecycleMixin
@@ -26,6 +30,7 @@ class LocalDataScheduler(
         *,
         instance_guard: SchedulerInstanceGuard | None = None,
         market_scanner: MarketScanManager | None = None,
+        strategy_automation_service: StrategyAutomationRunner | None = None,
     ) -> None:
         self.datahub = datahub
         self.settings = datahub.settings
@@ -38,6 +43,7 @@ class LocalDataScheduler(
         self._manual_run_lock = asyncio.Lock()
         self._instance_guard = instance_guard if instance_guard is not None else _default_instance_guard(datahub)
         self.market_scanner = market_scanner
+        self._strategy_automation_service = strategy_automation_service
         self._guard_acquired = False
         self._scheduler_guard_active = False
         self._standby = False
@@ -53,6 +59,18 @@ class LocalDataScheduler(
         if self._guard_acquired or self._runner is not None or self._active_tasks:
             raise RuntimeError("运行中的调度器不能更换实例锁")
         self._instance_guard = instance_guard
+
+    @property
+    def strategy_automation_service(self) -> StrategyAutomationRunner | None:
+        return self._strategy_automation_service
+
+    def bind_strategy_automation_service(self, service: StrategyAutomationRunner) -> None:
+        if self._guard_acquired or self._runner is not None or self._active_tasks:
+            raise RuntimeError("运行中的调度器不能更换策略自动化服务")
+        current = self._strategy_automation_service
+        if current is not None and current is not service:
+            raise ValueError("scheduler.strategy_automation_service 已绑定到其他实例")
+        self._strategy_automation_service = service
 
     def set_runtime_standby(self, standby: bool) -> None:
         """Reflect coordinator-owned standby state in the public status view."""

@@ -33,6 +33,24 @@ const EVENT_CATEGORY_LABELS = Object.freeze({
   rule: "规则",
   cost: "成本",
 });
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function requirePaperStrategy(value, expectedPlan = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("模拟策略格式异常");
+  for (const field of ["id", "plan_id", "plan_revision", "advice_id"]) {
+    if (!Number.isSafeInteger(Number(value[field])) || Number(value[field]) <= 0) throw new TypeError("模拟策略身份无效");
+  }
+  if (typeof value.symbol !== "string" || !value.symbol.trim()) throw new TypeError("模拟策略股票身份无效");
+  if (!SHA256_HEX.test(String(value.plan_payload_digest || ""))) throw new TypeError("模拟策略计划摘要无效");
+  if (expectedPlan && (
+    Number(value.plan_id) !== Number(expectedPlan.id)
+    || Number(value.plan_revision) !== Number(expectedPlan.revision)
+    || Number(value.advice_id) !== Number(expectedPlan.advice_id)
+    || value.symbol !== expectedPlan.symbol
+    || value.plan_payload_digest !== expectedPlan.plan_payload_digest
+  )) throw new TypeError("模拟策略与冻结复盘计划不一致");
+  return value;
+}
 
 export async function loadPaperTradingDashboard(state, options = {}) {
   const sequence = Number(state.paperTradingSeq || 0) + 1;
@@ -63,12 +81,21 @@ export async function createPaperStrategy(state) {
   const allocationPct = positiveNumber($("paperAllocationPct")?.value, "资金占比无效");
   const priority = finiteNumber($("paperPriority")?.value, 0, "策略优先级无效");
   const entryExpirySessions = positiveNumber($("paperEntryExpirySessions")?.value || 5, "入场有效期无效");
-  const strategy = await mutatePaper("/api/paper-trading/strategies", "POST", {
+  const expectedPlan = (state.adviceReviewDashboardDetails || [])
+    .map((item) => item?.plan)
+    .find((plan) => Number(plan?.id) === planId);
+  if (!expectedPlan) throw new Error("冻结复盘计划不存在或版本已变化");
+  if (!SHA256_HEX.test(String(expectedPlan.plan_payload_digest || ""))) {
+    throw new TypeError("冻结复盘计划摘要无效，请刷新后重试");
+  }
+  const strategy = requirePaperStrategy(await mutatePaper("/api/paper-trading/strategies", "POST", {
     plan_id: planId,
+    expected_plan_revision: Number(expectedPlan.revision),
+    expected_plan_payload_digest: expectedPlan.plan_payload_digest,
     allocation_pct: allocationPct,
     priority,
     entry_expiry_sessions: entryExpirySessions,
-  });
+  }), expectedPlan);
   await loadPaperTradingDashboard(state);
   setPaperFeedback(`已将 ${strategy.symbol || "策略"} 加入模拟，请运行撮合`, "ok");
   return strategy;
@@ -94,6 +121,11 @@ export async function runPaperTradingSimulation(state) {
     benchmark_symbol: String($("paperBenchmarkSymbol")?.value || "").trim() || null,
   };
   const summary = await mutatePaper("/api/paper-trading/run", "POST", payload, PAPER_RUN_TIMEOUT_MS);
+  if (!summary || typeof summary !== "object") throw new TypeError("模拟运行结果格式异常");
+  requireDashboard(summary.dashboard);
+  if (Number(summary.run_id || 0) !== Number(summary.dashboard.selected_run_id || 0)) {
+    throw new TypeError("模拟运行与仪表盘身份不一致");
+  }
   state.paperTradingDashboard = summary.dashboard;
   renderPaperTradingDashboard(state);
   setPaperFeedback(summary.dashboard?.latest_run?.message || "模拟撮合完成", "ok");
@@ -115,6 +147,7 @@ export async function comparePaperTradingRuns(state) {
     `/api/paper-trading/runs/compare?left_run_id=${encodeURIComponent(leftRunId)}&right_run_id=${encodeURIComponent(rightRunId)}`,
     { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }
   );
+  requireRunComparison(comparison, leftRunId, rightRunId);
   state.paperTradingComparison = comparison;
   renderRunComparison(comparison);
   setPaperFeedback(`已比较运行 #${leftRunId} 与 #${rightRunId}`, "ok");
@@ -185,6 +218,88 @@ function requireDashboard(value) {
   if (!value || typeof value !== "object" || !value.account || !value.performance) {
     throw new TypeError("模拟交易数据格式异常");
   }
+  if (!Array.isArray(value.strategies)) throw new TypeError("模拟策略列表格式异常");
+  value.strategies.forEach((strategy) => requirePaperStrategy(strategy));
+  if (!Array.isArray(value.runs)) throw new TypeError("模拟运行列表格式异常");
+  value.runs.forEach(requirePaperRun);
+  const selected = value.selected_run_id == null ? null : positiveNumber(value.selected_run_id, "模拟运行身份无效");
+  if (selected !== null && !value.runs.some((run) => Number(run.id) === selected)) {
+    throw new TypeError("选中的模拟运行不存在");
+  }
+  if (value.latest_run != null) {
+    requirePaperRun(value.latest_run);
+    if (!value.runs.some((run) => Number(run.id) === Number(value.latest_run.id))) {
+      throw new TypeError("最新模拟运行不存在于运行列表");
+    }
+  }
+  for (const field of ["positions", "trades", "events", "equity_curve", "cost_profiles", "notes"]) {
+    if (!Array.isArray(value[field])) throw new TypeError(`模拟 ${field} 格式异常`);
+  }
+  if (selected !== null) {
+    const selectedRun = value.runs.find((run) => Number(run.id) === selected);
+    requireDashboardChildren(value, selectedRun);
+  }
+  return value;
+}
+
+function requirePaperRun(run) {
+  if (!run || typeof run !== "object" || !Number.isSafeInteger(Number(run.id)) || Number(run.id) <= 0
+    || !Number.isFinite(Date.parse(run.as_of)) || !SHA256_HEX.test(String(run.input_fingerprint || ""))
+    || !SHA256_HEX.test(String(run.output_digest || ""))) throw new TypeError("模拟运行完整性摘要无效");
+  for (const field of ["strategy_count", "execution_count", "closed_count", "data_unavailable_count"]) {
+    if (!Number.isSafeInteger(Number(run[field])) || Number(run[field]) < 0) throw new TypeError("模拟运行计数无效");
+  }
+  return run;
+}
+
+function requireDashboardChildren(value, selectedRun) {
+  const selectedRunId = Number(selectedRun.id);
+  const strategies = new Map(value.strategies.map((strategy) => [Number(strategy.id), strategy]));
+  value.trades.forEach((item) => requirePaperChild(item, selectedRunId, strategies, true));
+  value.events.forEach((item) => requirePaperChild(item, selectedRunId, strategies, false));
+  value.positions.forEach((item) => {
+    if (!value.strategies.some((strategy) => Number(strategy.id) === Number(item?.strategy_id)
+      && strategy.symbol === item?.symbol)) throw new TypeError("模拟持仓归属无效");
+  });
+  value.equity_curve.forEach((item) => {
+    if (item?.run_id !== undefined && Number(item.run_id) !== selectedRunId) {
+      throw new TypeError("模拟净值归属无效");
+    }
+    if (!String(item?.as_of_date || "")) throw new TypeError("模拟净值日期无效");
+  });
+  if (Number(selectedRun.strategy_count) !== value.strategies.length
+    || Number(selectedRun.execution_count) !== value.trades.length
+    || Number(selectedRun.closed_count) !== value.strategies.filter((item) => item.status === "closed").length
+    || Number(selectedRun.data_unavailable_count) !== value.strategies.filter((item) => item.status === "data_unavailable").length) {
+    throw new TypeError("模拟运行计数与子记录不一致");
+  }
+}
+
+function requirePaperChild(item, selectedRunId, strategies, needsStrategy) {
+  if (!item || typeof item !== "object" || Number(item.run_id) !== selectedRunId) {
+    throw new TypeError("模拟子记录运行归属无效");
+  }
+  const strategyId = item.strategy_id == null ? null : Number(item.strategy_id);
+  if (needsStrategy && (!Number.isSafeInteger(strategyId) || strategyId <= 0)) {
+    throw new TypeError("模拟成交策略归属无效");
+  }
+  if (strategyId !== null) {
+    const strategy = strategies.get(strategyId);
+    if (!strategy || (item.symbol != null && item.symbol !== strategy.symbol)) {
+      throw new TypeError("模拟子记录策略或股票归属无效");
+    }
+  }
+}
+
+function requireRunComparison(value, leftRunId, rightRunId) {
+  if (!value || typeof value !== "object" || !value.left_performance || !value.right_performance
+    || !value.deltas) throw new TypeError("模拟运行对比格式异常");
+  requirePaperRun(value.left_run);
+  requirePaperRun(value.right_run);
+  if (Number(value.left_run.id) !== leftRunId || Number(value.right_run.id) !== rightRunId) {
+    throw new TypeError("模拟运行对比身份不一致");
+  }
+  return value;
 }
 
 function renderAccount(account, strategies) {
@@ -469,8 +584,9 @@ function renderPaperLoading() {
 
 function renderPaperUnavailable(error) {
   const target = $("paperTradingSummary");
-  if (target) target.innerHTML = emptyState("模拟交易暂不可用", error?.message || "请稍后重试");
-  setPaperFeedback(error?.message || "模拟交易暂不可用", "error");
+  const message = Number(error?.status) >= 500 ? "模拟交易暂不可用" : error?.message || "模拟交易暂不可用";
+  if (target) target.innerHTML = emptyState("模拟交易暂不可用", message);
+  setPaperFeedback(message, "error");
 }
 
 function setPaperFeedback(message, tone = "") {

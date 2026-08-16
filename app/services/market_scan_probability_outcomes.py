@@ -41,16 +41,24 @@ from app.artifacts.io import (
     canonical_json_text,
     content_addressed_filename,
     decode_json_bytes,
-    exclusive_atomic_publish,
     path_has_only_trusted_aliases,
     read_regular_file,
     sha256_hex,
 )
+from app.db.market_scan_artifact_lease import (
+    MarketScanArtifactLeaseError,
+    publish_market_scan_artifact,
+    require_project_managed_artifact_database,
+    verified_market_scan_artifact_publication,
+)
+
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
 from app.models.paper_trading import CostProfileName
 from app.services.market_scan_probability import ProbabilitySample, stable_probability_hash
 from app.services.market_scan_probability_labels import (
+    LEGACY_PROBABILITY_LABEL_VERSION,
     PROBABILITY_DEFAULT_HORIZONS,
+    PROBABILITY_LABEL_VERSION,
     ProbabilityLabelConfig,
     ProbabilityLabelOutcome,
     build_probability_label_outcomes,
@@ -71,6 +79,8 @@ from app.services.trading_calendar import (
     next_trade_dates,
 )
 from app.utils.clock import market_now
+
+exclusive_atomic_publish = publish_market_scan_artifact
 
 
 PROBABILITY_OUTCOME_ARTIFACT_SCHEMA_VERSION = "market-scan-probability-outcome-artifact-v1"
@@ -144,9 +154,7 @@ _RECORD_KEYS = frozenset(
     }
 )
 _INSTRUMENT_KEYS = frozenset({"market", "list_date", "is_st", "quote_amount", "adjustment_mode"})
-_BAR_EVIDENCE_KEYS = frozenset(
-    {"version", "requested_dates", "observed_dates", "missing_dates", "bars", "bar_set_digest"}
-)
+_BAR_EVIDENCE_KEYS = frozenset({"version", "requested_dates", "observed_dates", "missing_dates", "bars", "bar_set_digest"})
 _BAR_KEYS = frozenset(
     {
         "date",
@@ -208,15 +216,42 @@ _HORIZON_QUALITY_KEYS = frozenset(
         "minimum_label_coverage",
     }
 )
-_OUTCOME_FILENAME = re.compile(
-    r"market-scan-probability-outcomes-run-(\d+)-through-(\d{4}-\d{2}-\d{2})-([0-9a-f]{64})\.json\.gz"
-)
+_OUTCOME_FILENAME = re.compile(r"market-scan-probability-outcomes-run-(\d+)-through-(\d{4}-\d{2}-\d{2})-([0-9a-f]{64})\.json\.gz")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SYMBOL = re.compile(r"\d{6}\.(SH|SZ|BJ)")
 
 
 class ProbabilityOutcomeError(ValueError):
     """Raised when probability outcome evidence is unsafe or inconsistent."""
+
+
+class ProbabilityOutcomeSemanticDriftError(ProbabilityOutcomeError):
+    """Raised for intact legacy evidence that cannot authorize current replay."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: int | None = None,
+        as_of_date: str | None = None,
+        generated_at: str | None = None,
+        integrity_digest: str | None = None,
+        source_digest: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.as_of_date = as_of_date
+        self.generated_at = generated_at
+        self.integrity_digest = integrity_digest
+        self.source_digest = source_digest
+
+
+class _RecordSemanticDriftError(ProbabilityOutcomeError):
+    """Internal marker accumulated until every sibling record is verified."""
+
+    def __init__(self, message: str, record: dict[str, object]) -> None:
+        super().__init__(message)
+        self.record = record
 
 
 def build_probability_outcome_artifact(
@@ -226,6 +261,7 @@ def build_probability_outcome_artifact(
     generated_at: str,
     as_of_date: str,
     config: ProbabilityLabelConfig | None = None,
+    database_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Build and deeply verify one fixed-session outcome artifact.
 
@@ -323,6 +359,7 @@ def publish_probability_outcome_artifact(
     generated_at: str,
     as_of_date: str,
     config: ProbabilityLabelConfig | None = None,
+    database_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Build and exclusively publish one deterministic gzip artifact."""
     artifact = build_probability_outcome_artifact(
@@ -332,20 +369,39 @@ def publish_probability_outcome_artifact(
         as_of_date=as_of_date,
         config=config,
     )
-    return publish_built_probability_outcome_artifact(directory, artifact)
+    return publish_built_probability_outcome_artifact(directory, artifact, database_path=database_path)
 
 
 def publish_built_probability_outcome_artifact(
     directory: str | Path,
     artifact: Mapping[str, object],
+    *,
+    database_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Publish an already verified candidate without rebuilding 5,000+ rows."""
     verified = verify_probability_outcome_artifact(artifact)
     payload = _mapping(verified["payload"], "payload")
     source = _mapping(payload["source"], "payload.source")
     target = Path(directory).expanduser().absolute() / probability_outcome_artifact_filename(verified)
-    _write_artifact(target, verified)
-    return _artifact_info(target, verified, run_id=int(cast(int, source["run_id"])))
+    try:
+        require_project_managed_artifact_database(target, database_path, "research/market_scan_probability_outcomes")
+    except MarketScanArtifactLeaseError as exc:
+        raise ProbabilityOutcomeError(str(exc)) from exc
+    run_id = int(cast(int, source["run_id"]))
+    if database_path is None:
+        _write_artifact(target, verified)
+    else:
+        try:
+            with verified_market_scan_artifact_publication(
+                database_path,
+                target,
+                (run_id,),
+                managed_directory="research/market_scan_probability_outcomes",
+            ):
+                _write_artifact(target, verified)
+        except MarketScanArtifactLeaseError as exc:
+            raise ProbabilityOutcomeError("outcome artifact 来源批次已失效") from exc
+    return _artifact_info(target, verified, run_id=run_id)
 
 
 def probability_outcome_required_dates(
@@ -375,6 +431,7 @@ def mature_probability_source_snapshot(
     generated_at: str | None = None,
     as_of_date: str | None = None,
     config: ProbabilityLabelConfig | None = None,
+    database_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Synchronously load bars, mature one source, and publish its artifact.
 
@@ -386,11 +443,7 @@ def mature_probability_source_snapshot(
     """
     source = load_probability_source_snapshot(source_path)
     settings = config or ProbabilityLabelConfig()
-    effective_as_of = (
-        _date_text(as_of_date, "as_of_date")
-        if as_of_date is not None
-        else latest_expected_daily_kline_date(now).isoformat()
-    )
+    effective_as_of = _date_text(as_of_date, "as_of_date") if as_of_date is not None else latest_expected_daily_kline_date(now).isoformat()
     effective_generated_at = _generated_at(generated_at, now)
     source_payload = _mapping(source["payload"], "source.payload")
     quote_date = _date_text(_mapping(source_payload["run"], "source.run")["quote_date"], "quote_date")
@@ -411,6 +464,7 @@ def mature_probability_source_snapshot(
         generated_at=effective_generated_at,
         as_of_date=effective_as_of,
         config=settings,
+        database_path=database_path,
     )
 
 
@@ -449,11 +503,59 @@ def load_probability_outcome_artifact(path: str | Path) -> dict[str, object]:
     encoded = _read_artifact_bytes(source)
     decoded = _decompress(encoded, source)
     artifact = _decode_artifact(decoded, source)
-    verified = verify_probability_outcome_artifact(artifact)
-    _validate_filename(source, verified)
-    if encoded != _compressed_artifact_bytes(verified):
-        raise ProbabilityOutcomeError(f"outcome artifact 不是规范确定性 gzip：{source}")
-    return verified
+    mechanically_verified = _verify_loaded_artifact_envelope(source, encoded, artifact)
+    try:
+        return verify_probability_outcome_artifact(mechanically_verified)
+    except ProbabilityOutcomeSemanticDriftError as exc:
+        raise _bound_semantic_drift(exc, mechanically_verified) from exc
+
+
+def _bound_semantic_drift(
+    error: ProbabilityOutcomeSemanticDriftError,
+    artifact: Mapping[str, object],
+) -> ProbabilityOutcomeSemanticDriftError:
+    payload = _mapping(artifact["payload"], "payload")
+    source = _mapping(payload["source"], "payload.source")
+    integrity = _mapping(artifact["integrity"], "integrity")
+    return ProbabilityOutcomeSemanticDriftError(
+        str(error),
+        run_id=_positive_integer(source["run_id"], "payload.source.run_id"),
+        as_of_date=_date_text(payload["as_of_date"], "payload.as_of_date"),
+        generated_at=_timestamp(artifact["generated_at"], "artifact.generated_at"),
+        integrity_digest=_sha256(integrity["integrity_digest"], "integrity.integrity_digest"),
+        source_digest=_sha256(source["integrity_digest"], "payload.source.integrity_digest"),
+    )
+
+
+def _verify_loaded_artifact_envelope(
+    path: Path,
+    encoded: bytes,
+    artifact: Mapping[str, object],
+) -> dict[str, object]:
+    """Verify immutable bytes before a known legacy semantic error may escape."""
+    normalized = _json_mapping(artifact, "artifact")
+    _exact_keys(normalized, _TOP_LEVEL_KEYS, "artifact")
+    if normalized["schema_version"] != PROBABILITY_OUTCOME_ARTIFACT_SCHEMA_VERSION:
+        raise ProbabilityOutcomeError("outcome artifact schema_version 不受支持")
+    _timestamp(normalized["generated_at"], "artifact.generated_at")
+    payload = _mapping(normalized["payload"], "artifact.payload")
+    integrity = _mapping(normalized["integrity"], "artifact.integrity")
+    _exact_keys(integrity, _INTEGRITY_KEYS, "artifact.integrity")
+    expected = {
+        "algorithm": PROBABILITY_OUTCOME_DIGEST_ALGORITHM,
+        "scope": PROBABILITY_OUTCOME_DIGEST_SCOPE,
+        "notice": PROBABILITY_OUTCOME_INTEGRITY_NOTICE,
+        "compression": PROBABILITY_OUTCOME_COMPRESSION,
+    }
+    if any(integrity.get(name) != value for name, value in expected.items()):
+        raise ProbabilityOutcomeError("outcome artifact integrity contract 冲突")
+    digest = _sha256(integrity.get("integrity_digest"), "integrity.integrity_digest")
+    if digest != probability_outcome_payload_digest(payload):
+        raise ProbabilityOutcomeError("outcome artifact payload digest 不一致")
+    _validate_filename(path, normalized)
+    if encoded != _compressed_canonical_artifact_bytes(normalized):
+        raise ProbabilityOutcomeError(f"outcome artifact 不是规范确定性 gzip：{path}")
+    return normalized
 
 
 def list_probability_outcome_artifacts(
@@ -850,7 +952,9 @@ def _trusted_calendar_contract(quote_date: str, horizons: Sequence[int]) -> dict
         "calendar_updated_at": (
             status.updated_at.replace(tzinfo=ASHARE_TIMEZONE).isoformat()
             if status.updated_at is not None and status.updated_at.tzinfo is None
-            else status.updated_at.isoformat() if status.updated_at is not None else None
+            else status.updated_at.isoformat()
+            if status.updated_at is not None
+            else None
         ),
         "missing_bar_policy": "fixed_session_unavailable_never_shift_v1",
     }
@@ -908,10 +1012,7 @@ def _horizon_quality(
     horizon: int,
     expected: int,
 ) -> dict[str, object]:
-    states = [
-        _mapping(_mapping(record["horizons"], "record.horizons")[str(horizon)], "horizon state")
-        for record in records
-    ]
+    states = [_mapping(_mapping(record["horizons"], "record.horizons")[str(horizon)], "horizon state") for record in records]
     mature = bool(states and all(state["maturity"] == "mature" for state in states))
     outcomes = [_mapping(state["outcome"], "horizon outcome") for state in states if state["maturity"] == "mature"]
     status_counts = {status: sum(outcome["status"] == status for outcome in outcomes) for status in ("modelled", "unfilled", "data_unavailable")}
@@ -953,16 +1054,13 @@ def _validate_payload(payload: Mapping[str, object], generated_at: str) -> dict[
         quote_date=str(source["quote_date"]),
         horizons=config.horizons,
     )
-    records = [
-        _validate_record(
-            _mapping(item, "payload.records[]"),
-            source=source,
-            calendar=calendar,
-            as_of_date=as_of_date,
-            config=config,
-        )
-        for item in _sequence(normalized["records"], "payload.records")
-    ]
+    records, drifted_symbols = _validate_records(
+        _sequence(normalized["records"], "payload.records"),
+        source=source,
+        calendar=calendar,
+        as_of_date=as_of_date,
+        config=config,
+    )
     if [record["symbol"] for record in records] != sorted(str(record["symbol"]) for record in records):
         raise ProbabilityOutcomeError("outcome records 必须按 symbol 排序")
     if len({str(record["symbol"]) for record in records}) != len(records):
@@ -975,6 +1073,11 @@ def _validate_payload(payload: Mapping[str, object], generated_at: str) -> dict[
     limitations = [_text(value, "payload.limitations[]") for value in _sequence(normalized["limitations"], "payload.limitations")]
     if limitations != _limitations():
         raise ProbabilityOutcomeError("outcome limitations contract 冲突")
+    if drifted_symbols:
+        raise ProbabilityOutcomeSemanticDriftError(
+            f"{','.join(drifted_symbols)} outcome 使用旧规则画像语义，不能授权当前重放",
+            run_id=int(cast(int, source["run_id"])),
+        )
     return {
         "contract_version": PROBABILITY_OUTCOME_PAYLOAD_CONTRACT_VERSION,
         "generated_at": generated_at,
@@ -988,6 +1091,32 @@ def _validate_payload(payload: Mapping[str, object], generated_at: str) -> dict[
         "quality": quality,
         "limitations": limitations,
     }
+
+
+def _validate_records(
+    values: Sequence[object],
+    *,
+    source: Mapping[str, object],
+    calendar: Mapping[str, object],
+    as_of_date: str,
+    config: ProbabilityLabelConfig,
+) -> tuple[list[dict[str, object]], list[str]]:
+    records: list[dict[str, object]] = []
+    drifted_symbols: list[str] = []
+    for item in values:
+        try:
+            record = _validate_record(
+                _mapping(item, "payload.records[]"),
+                source=source,
+                calendar=calendar,
+                as_of_date=as_of_date,
+                config=config,
+            )
+        except _RecordSemanticDriftError as exc:
+            record = exc.record
+            drifted_symbols.append(str(record["symbol"]))
+        records.append(record)
+    return records, drifted_symbols
 
 
 def _validate_source(source: Mapping[str, object], as_of_date: str) -> dict[str, object]:
@@ -1028,7 +1157,8 @@ def _validate_label_contract(contract: Mapping[str, object]) -> tuple[dict[str, 
     if profile_id not in profiles:
         raise ProbabilityOutcomeError("outcome cost_profile_id 不受支持")
     profile_name = next(
-        name for name in cast(tuple[CostProfileName, ...], ("base", "conservative", "stress"))
+        name
+        for name in cast(tuple[CostProfileName, ...], ("base", "conservative", "stress"))
         if profiles[profile_id].profile_id == profile_id and profile_id.startswith(f"{name}-")
     )
     config = ProbabilityLabelConfig(
@@ -1040,7 +1170,10 @@ def _validate_label_contract(contract: Mapping[str, object]) -> tuple[dict[str, 
             "label_contract.max_daily_participation_rate",
         ),
     )
-    expected = probability_label_contract(config)
+    label_version = _text(normalized.get("label_version"), "label_contract.label_version")
+    if label_version not in {PROBABILITY_LABEL_VERSION, LEGACY_PROBABILITY_LABEL_VERSION}:
+        raise ProbabilityOutcomeError("outcome label contract version 不受支持")
+    expected = probability_label_contract(config, label_version=label_version)
     if normalized != expected:
         raise ProbabilityOutcomeError("outcome label contract 与当前可执行标签契约冲突")
     return expected, config
@@ -1128,6 +1261,18 @@ def _validate_record(
     )
     horizons = _json_mapping(_mapping(normalized["horizons"], f"{symbol}.horizons"), f"{symbol}.horizons")
     if horizons != expected_horizons:
+        if _legacy_rule_profile_semantic_drift(horizons, expected_horizons):
+            raise _RecordSemanticDriftError(
+                f"{symbol} outcome 使用旧规则画像语义",
+                {
+                    "symbol": symbol,
+                    "feature_vector_digest": feature_digest,
+                    "source_evidence_digest": source_digest,
+                    "instrument": instrument,
+                    "bar_evidence": bar_evidence,
+                    "horizons": horizons,
+                },
+            )
         raise ProbabilityOutcomeError(f"{symbol} outcome horizons 不能由固定会话K线重放")
     return {
         "symbol": symbol,
@@ -1137,6 +1282,66 @@ def _validate_record(
         "bar_evidence": bar_evidence,
         "horizons": horizons,
     }
+
+
+def _legacy_rule_profile_semantic_drift(
+    recorded: Mapping[str, object],
+    replayed: Mapping[str, object],
+) -> bool:
+    """Recognize only the old degraded-profile shape fixed at calendar bounds."""
+    if recorded.keys() != replayed.keys():
+        return False
+    changed = False
+    for horizon, raw_recorded in recorded.items():
+        stored = _mapping(raw_recorded, f"horizons.{horizon}")
+        current = _mapping(replayed.get(horizon), f"replayed_horizons.{horizon}")
+        if stored == current:
+            continue
+        stable_fields = ("horizon", "target_session_date", "maturity")
+        if any(stored.get(name) != current.get(name) for name in stable_fields):
+            return False
+        stored_outcome = _mapping(stored.get("outcome"), f"horizons.{horizon}.outcome")
+        current_outcome = _mapping(current.get("outcome"), f"replayed_horizons.{horizon}.outcome")
+        if not _is_legacy_degraded_profile(stored_outcome, current_outcome):
+            return False
+        changed = True
+    return changed
+
+
+def _is_legacy_degraded_profile(
+    stored: Mapping[str, object],
+    current: Mapping[str, object],
+) -> bool:
+    horizon = current.get("horizon")
+    if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon <= 0:
+        return False
+    reason = stored.get("reason")
+    expected = {
+        "horizon": horizon,
+        "status": "data_unavailable",
+        "reason": reason,
+        "label": None,
+        "gross_return": None,
+        "net_return": None,
+        "cost_drag": None,
+        "entry_date": current.get("entry_date"),
+        "exit_date": None,
+        "entry_price": None,
+        "exit_price": None,
+        "model_limited": False,
+        "rule_profile_verified": False,
+        "daily_bar_model_limited": False,
+    }
+    if reason == "exit_rule_profile_degraded":
+        expected.update(
+            entry_price=current.get("entry_price"),
+            exit_date=current.get("exit_date"),
+        )
+    return (
+        reason in {"entry_rule_profile_degraded", "exit_rule_profile_degraded"}
+        and dict(stored) == expected
+        and current.get("rule_profile_verified") is True
+    )
 
 
 def _validate_instrument(
@@ -1286,13 +1491,14 @@ def _research_rows_for_artifact(
     if source_artifact is None:
         raise ProbabilityOutcomeError(f"outcome run {run_id} 缺少对应 source snapshot")
     archived_payload = _joined_source_payload(source_artifact, payload, source, cohort, run_id)
+    score_semantics = archived_payload.get("score_semantics")
+    normalized_score_semantics = _mapping(score_semantics, "source.score_semantics") if score_semantics is not None else {}
     source_records = {
         str(_mapping(item, "source.records[]")["symbol"]): _mapping(item, "source.records[]")
         for item in _sequence(archived_payload["records"], "source.records")
     }
     outcome_records = {
-        str(_mapping(item, "payload.records[]")["symbol"]): _mapping(item, "payload.records[]")
-        for item in _sequence(payload["records"], "payload.records")
+        str(_mapping(item, "payload.records[]")["symbol"]): _mapping(item, "payload.records[]") for item in _sequence(payload["records"], "payload.records")
     }
     if set(source_records) != set(outcome_records):
         raise ProbabilityOutcomeError(f"outcome run {run_id} 与 source symbol 集合冲突")
@@ -1302,8 +1508,10 @@ def _research_rows_for_artifact(
             source_records[symbol],
             outcome_records[symbol],
             cohort=cohort,
+            score_semantics=normalized_score_semantics,
             run_id=run_id,
             session_date=session_date,
+            source_integrity_digest=str(source["integrity_digest"]),
         )
         for symbol in sorted(outcome_records)
     ]
@@ -1333,8 +1541,10 @@ def _joined_research_row(
     outcome_record: Mapping[str, object],
     *,
     cohort: Mapping[str, object],
+    score_semantics: Mapping[str, object],
     run_id: int,
     session_date: str,
+    source_integrity_digest: str,
 ) -> ProbabilityResearchRow:
     symbol = str(outcome_record["symbol"])
     if (
@@ -1343,26 +1553,14 @@ def _joined_research_row(
         or outcome_record["source_evidence_digest"] != source_record["source_evidence_digest"]
     ):
         raise ProbabilityOutcomeError(f"{symbol} outcome/source 逐股身份或 digest 冲突")
-    source_instrument = _mapping(source_record["instrument"], "source record instrument")
-    expected_instrument = {
-        "market": source_instrument["market"],
-        "list_date": source_instrument["list_date"],
-        "is_st": source_instrument["is_st"],
-        "quote_amount": source_instrument["quote_amount"],
-        "adjustment_mode": source_instrument["adjustment_mode"],
-    }
-    if _mapping(outcome_record["instrument"], "outcome record instrument") != expected_instrument:
-        raise ProbabilityOutcomeError(f"{symbol} outcome/source instrument 冲突")
+    _validate_joined_instrument(symbol, source_record, outcome_record)
     states = _mapping(outcome_record["horizons"], "record.horizons")
     labels = {
         int(horizon): _outcome_from_mapping(_mapping(_mapping(state, "horizon state")["outcome"], "outcome"))
         for horizon, state in states.items()
         if _mapping(state, "horizon state")["maturity"] == "mature"
     }
-    dimensions = {
-        name: str(value)
-        for name, value in _mapping(source_record["dimensions"], "source record dimensions").items()
-    }
+    dimensions = {name: str(value) for name, value in _mapping(source_record["dimensions"], "source record dimensions").items()}
     return ProbabilityResearchRow(
         run_id=run_id,
         symbol=symbol,
@@ -1375,10 +1573,28 @@ def _joined_research_row(
         mature_horizons=frozenset(labels),
         dimensions=dimensions,
         source_evidence_digest=str(outcome_record["source_evidence_digest"]),
+        source_integrity_digest=source_integrity_digest,
         mode=str(cohort["mode"]),
         scope=str(cohort["scope"]),
         rule_version=str(cohort["rule_version"]),
+        production_score_rule_version=(
+            str(score_semantics["production_rule_version"]) if score_semantics.get("production_score_spec_hash") is not None else None
+        ),
+        production_score_spec_hash=(
+            str(score_semantics["production_score_spec_hash"]) if score_semantics.get("production_score_spec_hash") is not None else None
+        ),
     )
+
+
+def _validate_joined_instrument(
+    symbol: str,
+    source_record: Mapping[str, object],
+    outcome_record: Mapping[str, object],
+) -> None:
+    source = _mapping(source_record["instrument"], "source record instrument")
+    expected = {name: source[name] for name in ("market", "list_date", "is_st", "quote_amount", "adjustment_mode")}
+    if _mapping(outcome_record["instrument"], "outcome record instrument") != expected:
+        raise ProbabilityOutcomeError(f"{symbol} outcome/source instrument 冲突")
 
 
 def _require_compatible_corpus(artifacts: Sequence[Mapping[str, object]]) -> None:
@@ -1396,12 +1612,7 @@ def _require_compatible_corpus(artifacts: Sequence[Mapping[str, object]]) -> Non
 
 
 def _modelled_outcome(outcome: ProbabilityLabelOutcome | None) -> bool:
-    return bool(
-        outcome is not None
-        and outcome.status == "modelled"
-        and outcome.rule_profile_verified
-        and outcome.net_return is not None
-    )
+    return bool(outcome is not None and outcome.status == "modelled" and outcome.rule_profile_verified and outcome.net_return is not None)
 
 
 def _source_artifact(value: Mapping[str, object] | str | Path) -> dict[str, object]:
@@ -1451,7 +1662,11 @@ def _artifact_info(path: Path, artifact: Mapping[str, object], *, run_id: int) -
 
 
 def _compressed_artifact_bytes(artifact: Mapping[str, object]) -> bytes:
-    encoded = _canonical_json(verify_probability_outcome_artifact(artifact)).encode("utf-8")
+    return _compressed_canonical_artifact_bytes(verify_probability_outcome_artifact(artifact))
+
+
+def _compressed_canonical_artifact_bytes(artifact: Mapping[str, object]) -> bytes:
+    encoded = _canonical_json(artifact).encode("utf-8")
     if len(encoded) > PROBABILITY_OUTCOME_MAX_UNCOMPRESSED_BYTES:
         raise ProbabilityOutcomeError("outcome artifact 未压缩内容超过安全上限")
     compressed = gzip.compress(encoded, compresslevel=9, mtime=0)
@@ -1508,10 +1723,13 @@ def _decode_artifact(encoded: bytes, path: Path) -> Mapping[str, object]:
 
 def _validate_filename(path: Path, artifact: Mapping[str, object]) -> None:
     run_id, as_of_date, digest = _filename_identity(path)
-    payload = _mapping(artifact["payload"], "payload")
-    source = _mapping(payload["source"], "payload.source")
-    integrity = _mapping(artifact["integrity"], "integrity")
-    if run_id != source["run_id"] or as_of_date != payload["as_of_date"] or digest != integrity["integrity_digest"]:
+    payload = _mapping(artifact.get("payload"), "payload")
+    source = _mapping(payload.get("source"), "payload.source")
+    integrity = _mapping(artifact.get("integrity"), "integrity")
+    encoded_run = _positive_integer(source.get("run_id"), "payload.source.run_id")
+    encoded_as_of = _date_text(payload.get("as_of_date"), "payload.as_of_date")
+    encoded_digest = _sha256(integrity.get("integrity_digest"), "integrity.integrity_digest")
+    if run_id != encoded_run or as_of_date != encoded_as_of or digest != encoded_digest:
         raise ProbabilityOutcomeError("outcome artifact 文件名与内容地址冲突")
 
 

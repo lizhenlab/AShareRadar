@@ -9,9 +9,11 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, field_validator, model_validator
 
 from app.models.market import KlineAdjustmentMode
+from app.utils.market_time import market_local_naive
 
 
 PositiveFiniteFloat = Annotated[FiniteFloat, Field(gt=0)]
+OptionalSha256 = Annotated[str, Field(pattern=r"^(?:[0-9a-f]{64}|legacy-unverified)$")]
 AdviceReviewStatus = Literal["pending", "insufficient", "evaluated"]
 AdviceReviewConclusion = Literal[
     "pending",
@@ -34,13 +36,14 @@ DEFAULT_ADVICE_REVIEW_INVALIDATION_BASIS: AdviceReviewInvalidationBasis = "daily
 ResearchQueueRefreshStatus = Literal["saved", "unchanged", "skipped", "failed"]
 ResearchQueueRefreshReason = Literal[
     "not_after_close",
+    "non_official_research_mode",
     "stale_data_date",
     "low_data_quality",
     "invalid_rule_contract",
     "already_current",
     "analysis_failed",
 ]
-AdviceReviewBatchItemStatus = Literal["evaluated", "failed"]
+AdviceReviewBatchItemStatus = Literal["evaluated", "insufficient", "pending", "failed"]
 WatchlistScanUniverse = Literal["watchlist", "symbols"]
 WatchlistScanCondition = Literal[
     "close_above_ma20",
@@ -113,6 +116,7 @@ class AdviceReviewPlanInput(ReviewInputModel):
 
 
 class AdviceReviewPlanUpdate(ReviewInputModel):
+    expected_revision: int = Field(ge=1)
     hypothesis: str | None = Field(default=None, min_length=1, max_length=1000)
     trigger_condition: str | None = Field(default=None, min_length=1, max_length=1000)
     invalidation_condition: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -163,7 +167,7 @@ class AdviceReviewPlan(BaseModel):
     snapshot_price: float
     snapshot_adjustment_mode: KlineAdjustmentMode = "unknown"
     snapshot_anchor_date: str | None = None
-    snapshot_anchor_close: float | None = None
+    snapshot_anchor_close: FiniteFloat | None = None
     snapshot_data_version: str = "unknown"
     snapshot_contract_version: str = "unknown"
     hypothesis: str
@@ -176,11 +180,17 @@ class AdviceReviewPlan(BaseModel):
     horizon_days: int
     evidence_refs: list[AdviceEvidenceRefValue] = Field(default_factory=list)
     revision: int = Field(ge=1)
+    plan_payload_digest: OptionalSha256 = "legacy-unverified"
     created_at: str
     updated_at: str
 
 
 class AdviceReviewEvaluationRequest(ReviewInputModel):
+    as_of: datetime | None = None
+    expected_revision: int = Field(ge=1)
+
+
+class AdviceReviewBatchEvaluationRequest(ReviewInputModel):
     as_of: datetime | None = None
 
 
@@ -215,33 +225,49 @@ class AdviceReviewEvaluationDraft(BaseModel):
     evaluation_adjustment_mode: KlineAdjustmentMode = "unknown"
     evaluation_data_version: str = "unknown"
     evaluation_contract_version: str = "unknown"
-    anchor_evaluation_close: float | None = None
-    price_scale_factor: float | None = None
-    normalized_entry_price: float | None = None
-    normalized_target_price: float | None = None
-    normalized_stop_price: float | None = None
-    entry_price: float
-    target_price: float
-    stop_price: float
-    horizon_days: int
+    anchor_evaluation_close: FiniteFloat | None = None
+    price_scale_factor: FiniteFloat | None = None
+    normalized_entry_price: FiniteFloat | None = None
+    normalized_target_price: FiniteFloat | None = None
+    normalized_stop_price: FiniteFloat | None = None
+    entry_price: PositiveFiniteFloat
+    target_price: PositiveFiniteFloat
+    stop_price: PositiveFiniteFloat
+    horizon_days: int = Field(ge=1, le=60)
     visible_bar_count: int = Field(ge=0)
     visible_start_date: str | None = None
     visible_end_date: str | None = None
     available_forward_days: int = Field(ge=0)
     forward_start_date: str | None = None
     forward_end_date: str | None = None
-    return_pct: float | None = None
-    max_favorable_excursion_pct: float | None = None
-    max_adverse_excursion_pct: float | None = None
+    return_pct: FiniteFloat | None = None
+    max_favorable_excursion_pct: FiniteFloat | None = None
+    max_adverse_excursion_pct: FiniteFloat | None = None
     target_hit: bool = False
     target_hit_date: str | None = None
     stop_hit: bool = False
     stop_hit_date: str | None = None
+    attempt: int = Field(default=1, ge=1)
+    plan_payload_digest: OptionalSha256 = "legacy-unverified"
+    input_digest: OptionalSha256 = "legacy-unverified"
+    result_digest: OptionalSha256 = "legacy-unverified"
+    evidence_contract_version: Literal[
+        "advice-review-evidence.v2",
+        "advice-review-evidence.v1",
+        "legacy-unverified",
+    ] = "advice-review-evidence.v2"
+    source_window_digest: OptionalSha256
+    source_session_count: int = Field(ge=0)
+    expected_session_count: int = Field(ge=0)
+    observation_basis: Literal["gross_close_and_barrier_observation"] = (
+        "gross_close_and_barrier_observation"
+    )
     trigger_evidence: AdviceReviewOutcomeEvidence | None = None
     invalidation_evidence: AdviceReviewOutcomeEvidence | None = None
 
     @model_validator(mode="after")
     def populate_outcome_evidence(self) -> AdviceReviewEvaluationDraft:
+        _validate_evaluation_contract(self)
         if self.trigger_evidence is None:
             self.trigger_evidence = _review_outcome_evidence(self, trigger=True)
         if self.invalidation_evidence is None:
@@ -300,6 +326,8 @@ class AdviceReviewBatchSummary(BaseModel):
     candidate_count: int = Field(default=0, ge=0)
     attempted_count: int = Field(default=0, ge=0)
     evaluated_count: int = Field(default=0, ge=0)
+    insufficient_count: int = Field(default=0, ge=0)
+    pending_count: int = Field(default=0, ge=0)
     failed_count: int = Field(default=0, ge=0)
     items: list[AdviceReviewBatchItem] = Field(default_factory=list)
 
@@ -466,8 +494,163 @@ def _strict_iso_date_text(value: str, message: str) -> str:
     return text
 
 
+def _strict_datetime_text(value: str, field: str) -> datetime:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} 必须是有效日期时间") from exc
+    if "T" not in text and " " not in text:
+        raise ValueError(f"{field} 必须包含日期和时间")
+    return parsed
+
+
+def _validate_evaluation_contract(value: AdviceReviewEvaluationDraft) -> None:
+    snapshot_at = market_local_naive(_strict_datetime_text(value.snapshot_market_time, "snapshot_market_time"))
+    as_of = market_local_naive(_strict_datetime_text(value.as_of, "as_of"))
+    evaluated_at = market_local_naive(_strict_datetime_text(value.evaluated_at, "evaluated_at"))
+    if as_of < snapshot_at:
+        raise ValueError("as_of 不能早于 snapshot_market_time")
+    if as_of > evaluated_at:
+        raise ValueError("as_of 不能晚于 evaluated_at")
+    if not str(value.rule_version or "").strip():
+        raise ValueError("rule_version 不能为空")
+    _validate_status_and_conclusion(value)
+    _validate_evaluation_window(value)
+    _validate_evaluation_digests(value)
+
+
+def _validate_status_and_conclusion(value: AdviceReviewEvaluationDraft) -> None:
+    expected_conclusions = {
+        "pending": {"pending"},
+        "insufficient": {"insufficient_data"},
+        "evaluated": {
+            "target_hit",
+            "stop_hit",
+            "target_stop_ambiguous",
+            "horizon_gain",
+            "horizon_loss",
+            "horizon_flat",
+        },
+    }
+    if value.conclusion not in expected_conclusions[value.status]:
+        raise ValueError("status 与 conclusion 不一致")
+    _validate_hit_state(value)
+    _validate_evaluation_metric_state(value)
+    _validate_horizon_return_direction(value)
+
+
+def _validate_hit_state(value: AdviceReviewEvaluationDraft) -> None:
+    if value.target_hit != bool(value.target_hit_date):
+        raise ValueError("target_hit 与 target_hit_date 不一致")
+    if value.stop_hit != bool(value.stop_hit_date):
+        raise ValueError("stop_hit 与 stop_hit_date 不一致")
+    _validate_barrier_conclusion(value)
+
+
+def _validate_barrier_conclusion(value: AdviceReviewEvaluationDraft) -> None:
+    if value.conclusion == "target_hit" and (not value.target_hit or value.stop_hit):
+        raise ValueError("target_hit 结论与价格屏障命中不一致")
+    if value.conclusion == "stop_hit" and (not value.stop_hit or value.target_hit):
+        raise ValueError("stop_hit 结论与价格屏障命中不一致")
+    if value.conclusion == "target_stop_ambiguous" and not (value.target_hit and value.stop_hit):
+        raise ValueError("歧义结论必须同时包含目标和止损命中")
+    if value.conclusion.startswith("horizon_") and (value.target_hit or value.stop_hit):
+        raise ValueError("周期结论不能同时声明价格屏障命中")
+
+
+def _validate_evaluation_metric_state(value: AdviceReviewEvaluationDraft) -> None:
+    metrics = (
+        value.return_pct,
+        value.max_favorable_excursion_pct,
+        value.max_adverse_excursion_pct,
+    )
+    if value.status != "evaluated" and (
+        any(metric is not None for metric in metrics) or value.target_hit or value.stop_hit
+    ):
+        raise ValueError("未完成复盘不能携带收益或命中结果")
+    if value.status == "evaluated" and (
+        value.available_forward_days <= 0 or any(metric is None for metric in metrics)
+    ):
+        raise ValueError("正式复盘必须包含前向会话和完整指标")
+
+
+def _validate_horizon_return_direction(value: AdviceReviewEvaluationDraft) -> None:
+    if value.status != "evaluated" or value.return_pct is None:
+        return
+    invalid_direction = (
+        (value.conclusion == "horizon_gain" and value.return_pct <= 0)
+        or (value.conclusion == "horizon_loss" and value.return_pct >= 0)
+        or (value.conclusion == "horizon_flat" and value.return_pct != 0)
+    )
+    if invalid_direction:
+        raise ValueError(f"{value.conclusion} 与价格变化方向不一致")
+
+
+def _validate_evaluation_window(value: AdviceReviewEvaluationDraft) -> None:
+    visible_start = _optional_date_text(value.visible_start_date, "visible_start_date")
+    visible_end = _optional_date_text(value.visible_end_date, "visible_end_date")
+    forward_start = _optional_date_text(value.forward_start_date, "forward_start_date")
+    forward_end = _optional_date_text(value.forward_end_date, "forward_end_date")
+    _validate_window_bounds(value.visible_bar_count, visible_start, visible_end, "可见")
+    _validate_window_bounds(value.available_forward_days, forward_start, forward_end, "前向")
+    snapshot_date = _strict_iso_date_text(value.snapshot_market_time[:10], "snapshot date 无效")
+    if visible_end is not None and visible_end.isoformat() > snapshot_date:
+        raise ValueError("可见窗口不能晚于快照日期")
+    if forward_start is not None and forward_start.isoformat() <= snapshot_date:
+        raise ValueError("前向窗口必须晚于快照日期")
+    _validate_hit_dates(value, forward_start, forward_end)
+
+
+def _validate_window_bounds(count: int, start: date | None, end: date | None, label: str) -> None:
+    if count == 0 and (start is not None or end is not None):
+        raise ValueError(f"空{label}窗口不能包含日期")
+    if count > 0 and (start is None or end is None or start > end):
+        raise ValueError(f"{label}窗口日期不完整或顺序无效")
+
+
+def _validate_hit_dates(
+    value: AdviceReviewEvaluationDraft,
+    forward_start: date | None,
+    forward_end: date | None,
+) -> None:
+    for hit_date, field in (
+        (value.target_hit_date, "target_hit_date"),
+        (value.stop_hit_date, "stop_hit_date"),
+    ):
+        hit = _optional_date_text(hit_date, field)
+        if hit is not None and (
+            forward_start is None or forward_end is None or not forward_start <= hit <= forward_end
+        ):
+            raise ValueError(f"{field} 必须位于前向窗口")
+
+
+def _optional_date_text(value: str | None, field: str) -> date | None:
+    if value is None:
+        return None
+    return date.fromisoformat(_strict_iso_date_text(value, f"{field} 必须是 YYYY-MM-DD"))
+
+
+def _validate_evaluation_digests(value: AdviceReviewEvaluationDraft) -> None:
+    for field in ("plan_payload_digest", "input_digest", "result_digest"):
+        digest = str(getattr(value, field) or "")
+        if digest != "legacy-unverified" and (
+            len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(f"{field} 必须是 SHA-256")
+    digest = str(value.source_window_digest or "")
+    if digest != "legacy-unverified" and (
+        len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError("source_window_digest 必须是 SHA-256")
+    if value.available_forward_days > value.source_session_count:
+        raise ValueError("可用前向会话不能超过来源会话数")
+
+
 def _score_direction(value: object, *, positive: int, negative: int) -> AdviceEvidenceDirection:
     if isinstance(value, bool):
+        return "neutral"
+    if not isinstance(value, str | bytes | bytearray | int | float):
         return "neutral"
     try:
         score = float(value)
@@ -533,6 +716,7 @@ __all__ = [
     "AdviceReviewBatchItem",
     "AdviceReviewBatchSummary",
     "AdviceReviewEvaluation",
+    "AdviceReviewBatchEvaluationRequest",
     "AdviceReviewEvaluationDraft",
     "AdviceReviewEvaluationRequest",
     "AdviceReviewOutcomeEvidence",

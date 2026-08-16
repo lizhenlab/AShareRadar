@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from app.db.schema import initialize_schema
+from app.db.market_scan_integrity import seal_market_scan_snapshot
 from app.models.market_scan import MARKET_SCAN_TOP100_REFRESH_SCOPE, MarketScanResultItem
 from app.repositories.market_scan_mapping import encode_result_payload
 import app.services.market_scan_future_range as future_range_module
@@ -19,14 +20,17 @@ from app.services.market_scan_future_range import (
     evaluate_market_scan_future_range,
 )
 from app.services.market_scan_score_dimensions import build_market_scan_score_dimensions
+from app.services.trading_calendar import trading_dates_between
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.market_scan_probability_artifact import build_probability_artifact, write_probability_artifact
+from tests.market_scan_test_support import action_pass_publication_diagnostics
+from tests.market_scan_test_support import distribution_degraded_publication_diagnostics
 from app.services.market_scan_future_range_artifact import build_future_range_artifact
 from tests.factories import make_kline, make_quote
 from tests.test_market_scan_probability_artifact import _payload as _probability_payload
 
 
-SIGNAL_DATE = date(2026, 1, 2)
+SIGNAL_DATE = date(2025, 12, 31)
 TARGET_DATES = (date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7))
 
 
@@ -97,6 +101,33 @@ def test_future_range_uses_fixed_sessions_point_in_time_bar_and_execution_costs(
     assert block_ci is not None and block_ci[0] <= block_ci[1]
 
 
+def test_future_range_rejects_distribution_degraded_action_source(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "future-range-ineligible.sqlite3"
+    _initialize(path)
+    run_id = _seed_run(
+        path,
+        scope=FULL_MARKET_SCOPE,
+        with_targets=True,
+        action_eligible=False,
+    )
+
+    report = evaluate_market_scan_future_range(
+        path,
+        config=FutureRangeConfig(minimum_sample_size=1),
+        run_ids=[run_id],
+        generated_at="2026-01-08T08:00:00+00:00",
+    )
+
+    payload = cast(list[dict[str, Any]], report["reports"])[0]
+    assert payload["status"] == "insufficient_data"
+    source = cast(dict[str, Any], payload["source"])
+    exclusions = cast(list[dict[str, Any]], source["exclusions"])
+    assert exclusions[0]["reason"] == "market_scan_snapshot_integrity_failed"
+    assert "评分分布门禁" in exclusions[0]["detail"]
+
+
 def test_future_range_rejects_top100_refresh_and_adjustment_rebase(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -128,6 +159,40 @@ def test_future_range_rejects_top100_refresh_and_adjustment_rebase(
     )
     assert all(record["offsets"][0]["target_bar"] is None for record in payload["records"])
     assert build_future_range_artifact(payload, generated_at=str(payload["generated_at"]))["payload"]["status"] == "insufficient_data"  # type: ignore[index]
+
+
+def test_future_range_rejects_tampered_published_snapshot_before_result_use(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tampered-snapshot.sqlite3"
+    _initialize(path)
+    run_id = _seed_run(path, scope=FULL_MARKET_SCOPE, with_targets=True)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        for trigger in (
+            "trg_market_scan_published_run_immutable",
+            "trg_market_scan_published_run_no_delete",
+            "trg_market_scan_published_result_no_update",
+            "trg_market_scan_published_result_no_delete",
+            "trg_market_scan_published_result_no_insert",
+        ):
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        conn.execute(
+            """
+            UPDATE market_scan_result SET amount = amount + 1
+            WHERE run_id = ? AND symbol = '600001.SH'
+            """,
+            (run_id,),
+        )
+
+    report = evaluate_market_scan_future_range(path, run_ids=[run_id])
+
+    payload = cast(list[dict[str, Any]], report["reports"])[0]
+    assert payload["status"] == "insufficient_data"
+    assert payload["records"] == []
+    assert payload["source"]["calendar_error"] == "market_scan_snapshot_integrity_failed"
+    assert payload["source"]["exclusions"][0]["reason"] == (
+        "market_scan_snapshot_integrity_failed"
+    )
 
 
 def test_future_range_keeps_not_mature_records_without_zero_fabrication(
@@ -240,6 +305,7 @@ def _seed_run(
     with_targets: bool,
     suspended_second_symbol: bool = False,
     rule_version: str = "rule-v1",
+    action_eligible: bool = True,
 ) -> int:
     timestamp = f"{SIGNAL_DATE.isoformat()}T08:00:00Z"
     with closing(sqlite3.connect(path)) as conn, conn:
@@ -247,12 +313,21 @@ def _seed_run(
             """
             INSERT INTO market_scan_run (
                 status, trigger, mode, rule_version, as_of, data_date, quote_date, scope,
-                total_count, processed_count, success_count, created_at, updated_at, finished_at
-            ) VALUES ('success','manual','official',?,?,?,?,?,2,2,2,?,?,?)
+                total_count, processed_count, success_count, publication_diagnostics_json,
+                created_at, updated_at, finished_at
+            ) VALUES ('success','manual','official',?,?,?,?,?,2,2,2,?,?,?,?)
             """,
             (
                 rule_version, f"{SIGNAL_DATE.isoformat()} 15:00:00", SIGNAL_DATE.isoformat(), SIGNAL_DATE.isoformat(),
-                scope, timestamp, timestamp, timestamp,
+                scope,
+                (
+                    action_pass_publication_diagnostics()
+                    if action_eligible
+                    else distribution_degraded_publication_diagnostics()
+                ).model_dump_json(),
+                timestamp,
+                timestamp,
+                timestamp,
             ),
         ).lastrowid
         assert run_id is not None
@@ -261,6 +336,7 @@ def _seed_run(
             _seed_signal_overlap(conn, symbol)
             if with_targets:
                 _seed_targets(conn, symbol, rank, suspended_second_symbol)
+        seal_market_scan_snapshot(conn, int(run_id), sealed_at=timestamp)
     return int(run_id)
 
 
@@ -273,7 +349,7 @@ def _seed_result(conn: sqlite3.Connection, run_id: int, symbol: str, rank: int) 
     )
     quote = make_quote(
         price=100, prev_close=99, high=101, low=98, turnover_rate=4,
-        timestamp="2026-01-02 15:00:00",
+        timestamp=f"{SIGNAL_DATE.isoformat()} 15:00:00",
     ).model_copy(update={"code": code, "market": market, "name": item.name, "open": 99.5, "amount": 1_000_000_000})
     dimensions = build_market_scan_score_dimensions(
         item, quote, rows, data_quality_score=100, volume_ratio=1.2, mode="official",
@@ -290,23 +366,19 @@ def _seed_result(conn: sqlite3.Connection, run_id: int, symbol: str, rank: int) 
         (
             run_id, symbol, code, market, item.name, item.industry, item.list_date, rank,
             100-rank, 100-rank/10, 100-rank, 100, 1, 4, 1.2, 1_000_000_000,
-            payload, "2026-01-02T08:00:00Z",
+            payload, f"{SIGNAL_DATE.isoformat()}T08:00:00Z",
         ),
     )
 
 
 def _history_rows() -> list[Any]:
-    days: list[date] = []
-    cursor = SIGNAL_DATE
-    while len(days) < 61:
-        if cursor.weekday() < 5:
-            days.append(cursor)
-        cursor -= timedelta(days=1)
-    days.reverse()
+    days = list(trading_dates_between(SIGNAL_DATE - timedelta(days=140), SIGNAL_DATE)[-61:])
+    assert len(days) == 61
     return [
         make_kline(
             date=value.isoformat(), close=94 + index * 0.1, high=95 + index * 0.1,
             low=93 + index * 0.1, volume=1_000_000, data_version="signal-qfq-v1",
+            as_of=f"{SIGNAL_DATE.isoformat()} 15:00:00",
         )
         for index, value in enumerate(days)
     ]

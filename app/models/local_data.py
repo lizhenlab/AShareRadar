@@ -24,6 +24,7 @@ CORE_USER_DATA_TABLES = (
 )
 OPTIONAL_RESEARCH_USER_DATA_TABLES = (
     "advice_review_plan",
+    "advice_review_plan_revision",
     "advice_review_result",
     "watchlist_scan_history",
     "discovery_preset",

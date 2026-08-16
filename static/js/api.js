@@ -144,9 +144,21 @@ async function fetchJsonResponse(url, options) {
     const payload = await errorPayload(response);
     const error = new Error(errorMessage(payload, response.status));
     error.status = response.status;
+    const retryAfterMs = responseRetryAfterMs(response);
+    if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
     throw error;
   }
   return successPayload(response);
+}
+
+function responseRetryAfterMs(response) {
+  const value = response?.headers?.get?.("Retry-After");
+  if (typeof value !== "string" || !value.trim()) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  const deadline = Date.parse(value);
+  if (!Number.isFinite(deadline)) return null;
+  return Math.max(0, deadline - Date.now());
 }
 
 async function fetchResponse(url, options) {

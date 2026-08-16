@@ -160,7 +160,7 @@ class AdviceHistoryRepository(SQLiteRepository):
                 params,
                 self.settings.advice_history_dedupe_seconds,
                 require_same_provenance=snapshot_market_time is not None,
-            ):
+            ) and not _advice_snapshot_is_referenced(conn, int(latest["id"])):
                 row_id = int(latest["id"])
                 _update_advice_snapshot(conn, row_id, params)
                 return AdviceSnapshotSaveResult(
@@ -430,6 +430,19 @@ def _latest_advice_snapshot(conn: sqlite3.Connection, symbol: str) -> sqlite3.Ro
 
 def _update_advice_snapshot(conn: sqlite3.Connection, row_id: int, params: dict[str, Any]) -> None:
     conn.execute(_ADVICE_UPDATE_SQL, {**params, "row_id": row_id})
+
+
+def _advice_snapshot_is_referenced(conn: sqlite3.Connection, row_id: int) -> bool:
+    """Keep a review plan's source advice row immutable after it is referenced."""
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'advice_review_plan'"
+    ).fetchone()
+    if table is None:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM advice_review_plan WHERE advice_id = ? LIMIT 1",
+        (row_id,),
+    ).fetchone() is not None
 
 
 def _required_advice_by_id(conn: sqlite3.Connection, row_id: int, symbol: str, action: str) -> AdviceHistoryItem:

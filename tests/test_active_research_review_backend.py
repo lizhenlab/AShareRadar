@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,13 +26,16 @@ from app.models.rule_versions import RULE_VERSION
 from app.services import advice_review
 from app.services.advice_review import (
     build_advice_evidence_refs,
+    evaluate_advice_review_plan,
     evaluate_due_advice_reviews,
     list_due_advice_reviews,
 )
+from app.repositories.advice_reviews import AdviceReviewRevisionConflictError
 from app.services.analysis import build_analysis
 from app.services.cache import SQLiteCache
 from app.services.research_replay import evaluate_advice_forward_window
 from app.services.scheduler_contracts import _TASK_DEFINITIONS
+from app.services.trading_calendar import previous_trade_date
 from app.workflows import individual
 from app.workflows.individual import refresh_active_research_queue
 from tests.factories import make_kline, make_quote
@@ -96,6 +99,7 @@ def test_active_research_refresh_rejects_stale_low_quality_and_invalid_contract(
     invalid_contract = invalid_contract.model_copy(
         update={
             "klines": [
+                *invalid_contract.klines[:-1],
                 invalid_contract.klines[-1].model_copy(update={"contract_version": "unknown"}),
             ]
         }
@@ -123,6 +127,151 @@ def test_active_research_refresh_rejects_stale_low_quality_and_invalid_contract(
         "low_data_quality",
         "invalid_rule_contract",
     ]
+
+
+@pytest.mark.parametrize("defect", ["non_pit", "duplicate", "mixed_version", "suspended_unknown"])
+def test_active_research_formal_gate_rejects_unreplayable_window(
+    monkeypatch,
+    defect: str,
+) -> None:
+    cache = _ResearchQueueCache(active_symbols=("600001.SH",))
+    analysis = _valid_analysis("600001")
+    rows = list(analysis.klines)
+    if defect == "non_pit":
+        rows[10] = rows[10].model_copy(update={"point_in_time": False})
+    elif defect == "duplicate":
+        rows[10] = rows[10].model_copy(
+            update={"date": rows[9].date, "as_of": rows[9].as_of}
+        )
+    elif defect == "mixed_version":
+        rows[10] = rows[10].model_copy(update={"data_version": "another-vintage"})
+    else:
+        rows[10] = rows[10].model_copy(
+            update={"session_status": "unknown", "open_execution_status": "unknown"}
+        )
+    analysis = analysis.model_copy(update={"klines": rows})
+
+    async def analyze(_datahub, _symbol: str, *, persist_history: bool):
+        assert persist_history is False
+        return analysis
+
+    monkeypatch.setattr(individual, "analyze_individual_stock", analyze)
+    monkeypatch.setattr(individual, "is_trading_day", lambda _value: True)
+
+    summary = asyncio.run(
+        refresh_active_research_queue(SimpleNamespace(cache=cache), now=AFTER_CLOSE, limit=1)
+    )
+
+    assert summary.items[0].status == "skipped"
+    assert summary.items[0].reason_code == "invalid_rule_contract"
+    assert cache.saved_symbols == []
+
+
+def test_active_research_refresh_rejects_intraday_analysis_before_persistence(monkeypatch) -> None:
+    cache = _ResearchQueueCache(active_symbols=("600001.SH",))
+    hub = SimpleNamespace(cache=cache)
+    intraday = _valid_analysis("600001").model_copy(update={"research_mode": "intraday"})
+
+    async def analyze(_datahub, _symbol: str, *, persist_history: bool):
+        assert persist_history is False
+        return intraday
+
+    monkeypatch.setattr(individual, "analyze_individual_stock", analyze)
+    monkeypatch.setattr(individual, "is_trading_day", lambda _value: True)
+
+    summary = asyncio.run(refresh_active_research_queue(hub, now=AFTER_CLOSE, limit=1))
+
+    assert cache.saved_symbols == []
+    assert summary.items[0].reason_code == "non_official_research_mode"
+
+
+@pytest.mark.parametrize(
+    "quote_time",
+    ["10:00:00", "14:54:59", "15:00:01", "15:14:59", "15:15:00"],
+)
+def test_active_research_refresh_rejects_non_closing_quote_snapshot(
+    monkeypatch,
+    quote_time: str,
+) -> None:
+    cache = _ResearchQueueCache(active_symbols=("600001.SH",))
+    hub = SimpleNamespace(cache=cache)
+    analysis = _valid_analysis("600001")
+    analysis = analysis.model_copy(
+        update={
+            "quote": analysis.quote.model_copy(
+                update={"timestamp": f"2026-07-17 {quote_time}"}
+            )
+        }
+    )
+
+    async def analyze(_datahub, _symbol: str, *, persist_history: bool):
+        assert persist_history is False
+        return analysis
+
+    monkeypatch.setattr(individual, "analyze_individual_stock", analyze)
+    monkeypatch.setattr(individual, "is_trading_day", lambda _value: True)
+
+    summary = asyncio.run(refresh_active_research_queue(hub, now=AFTER_CLOSE, limit=1))
+
+    assert cache.saved_symbols == []
+    assert summary.items[0].reason_code == "low_data_quality"
+
+
+@pytest.mark.parametrize("quote_time", ["14:55:00", "15:00:00"])
+def test_active_research_refresh_accepts_closing_quote_snapshot(
+    monkeypatch,
+    quote_time: str,
+) -> None:
+    cache = _ResearchQueueCache(active_symbols=("600001.SH",))
+    hub = SimpleNamespace(cache=cache)
+    analysis = _valid_analysis("600001")
+    analysis = analysis.model_copy(
+        update={
+            "quote": analysis.quote.model_copy(
+                update={"timestamp": f"2026-07-17 {quote_time}"}
+            )
+        }
+    )
+
+    async def analyze(_datahub, _symbol: str, *, persist_history: bool):
+        assert persist_history is False
+        return analysis
+
+    monkeypatch.setattr(individual, "analyze_individual_stock", analyze)
+    monkeypatch.setattr(individual, "is_trading_day", lambda _value: True)
+
+    summary = asyncio.run(refresh_active_research_queue(hub, now=AFTER_CLOSE, limit=1))
+
+    assert cache.saved_symbols == ["600001.SH"]
+    assert summary.items[0].status == "saved"
+
+
+def test_active_research_refresh_rejects_short_history_even_with_high_quality(
+    monkeypatch,
+) -> None:
+    cache = _ResearchQueueCache(active_symbols=("600001.SH",))
+    hub = SimpleNamespace(cache=cache)
+    analysis = _valid_analysis("600001")
+    short_rows = analysis.klines[-19:]
+    analysis = build_analysis(
+        analysis.quote,
+        short_rows,
+        data_quality=analysis.data_quality.model_copy(
+            update={"kline_count": len(short_rows), "score": 80}
+        ),
+    )
+
+    async def analyze(_datahub, _symbol: str, *, persist_history: bool):
+        assert persist_history is False
+        return analysis
+
+    monkeypatch.setattr(individual, "analyze_individual_stock", analyze)
+    monkeypatch.setattr(individual, "is_trading_day", lambda _value: True)
+
+    summary = asyncio.run(refresh_active_research_queue(hub, now=AFTER_CLOSE, limit=1))
+
+    assert cache.saved_symbols == []
+    assert summary.items[0].reason_code == "low_data_quality"
 
 
 def test_active_research_refresh_runs_only_after_daily_bar_publication(monkeypatch) -> None:
@@ -197,7 +346,8 @@ def test_active_research_same_day_revision_is_not_mistaken_for_unchanged(
     same_conclusion_revision = original.model_copy(
         update={
             "klines": [
-                original.klines[-1].model_copy(update={"data_version": "test-daily-kline-qfq-v2"})
+                row.model_copy(update={"data_version": "test-daily-kline-qfq-v2"})
+                for row in original.klines
             ]
         }
     )
@@ -240,7 +390,10 @@ def test_plan_created_from_advice_snapshot_has_structured_evidence_refs(tmp_path
     path = tmp_path / "cache.sqlite3"
     settings = Settings(cache_path=path, advice_history_dedupe_seconds=0)
     cache = SQLiteCache(settings=settings)
-    advice = cache.save_advice_snapshot(_valid_analysis("600519"))
+    advice = cache.save_advice_snapshot(
+        _valid_analysis("600519"),
+        snapshot_market_time="2026-07-17 15:15:00",
+    )
 
     plan = cache.create_advice_review_plan(
         AdviceReviewPlanInput(
@@ -327,8 +480,8 @@ def test_structured_risk_evidence_direction(
 def test_forward_evaluation_exposes_trigger_and_invalidation_evidence_with_excursions() -> None:
     plan = _review_plan(horizon_days=3)
     rows = [
-        make_kline(date="2026-07-16", close=100, high=101, low=99),
-        make_kline(date="2026-07-17", close=104, high=106, low=98),
+        _evaluation_kline(date="2026-07-16", close=100, high=101, low=99),
+        _evaluation_kline(date="2026-07-17", close=104, high=106, low=98),
     ]
 
     draft = evaluate_advice_forward_window(
@@ -361,8 +514,8 @@ def test_review_price_evidence_does_not_claim_mismatched_free_text_condition() -
     draft = evaluate_advice_forward_window(
         plan,
         [
-            make_kline(date="2026-07-16", close=100, high=101, low=99),
-            make_kline(date="2026-07-17", close=104, high=106, low=98),
+            _evaluation_kline(date="2026-07-16", close=100, high=101, low=99),
+            _evaluation_kline(date="2026-07-17", close=104, high=106, low=98),
         ],
         as_of=AFTER_CLOSE,
         evaluated_at="2026-07-17T08:01:00.000000Z",
@@ -387,7 +540,8 @@ def test_due_review_batch_is_bounded_and_isolates_plan_failures(monkeypatch) -> 
     hub = SimpleNamespace(cache=cache)
     calls: list[int] = []
 
-    async def evaluate(_datahub, plan_id: int, *, as_of, now=None):
+    async def evaluate(_datahub, plan_id: int, *, expected_revision, as_of, now=None):
+        assert expected_revision == 1
         calls.append(plan_id)
         if plan_id == 2:
             raise RuntimeError("one plan failed")
@@ -403,6 +557,101 @@ def test_due_review_batch_is_bounded_and_isolates_plan_failures(monkeypatch) -> 
     assert summary.evaluated_count == 1
     assert summary.failed_count == 1
     assert [item.plan_id for item in summary.items] == [1, 2]
+
+
+def test_weekend_due_review_uses_the_latest_mature_trading_session() -> None:
+    detail = AdviceReviewDetail(plan=_review_plan(horizon_days=1))
+    cache = _DueReviewCache([detail], expected_as_of_date="2026-07-17")
+
+    due = asyncio.run(
+        list_due_advice_reviews(
+            SimpleNamespace(cache=cache),
+            as_of=datetime(2026, 7, 18, 16),
+            now=datetime(2026, 7, 18, 16),
+        )
+    )
+
+    assert len(due) == 1
+    assert due[0].due_date == "2026-07-17"
+
+
+def test_due_batch_does_not_count_insufficient_evidence_as_evaluated(monkeypatch) -> None:
+    detail = AdviceReviewDetail(plan=_review_plan(horizon_days=1))
+    cache = _DueReviewCache([detail])
+
+    async def evaluate(*_args, **_kwargs):
+        return SimpleNamespace(id=101, status="insufficient", conclusion="insufficient_data")
+
+    monkeypatch.setattr(advice_review, "evaluate_advice_review_plan", evaluate)
+    summary = asyncio.run(
+        evaluate_due_advice_reviews(
+            SimpleNamespace(cache=cache),
+            as_of=AFTER_CLOSE,
+            now=AFTER_CLOSE,
+            limit=1,
+        )
+    )
+
+    assert summary.attempted_count == 1
+    assert summary.evaluated_count == 0
+    assert summary.insufficient_count == 1
+    assert summary.failed_count == 0
+    assert summary.items[0].status == "insufficient"
+
+
+def test_public_review_evaluation_rejects_future_as_of_before_market_or_storage_io() -> None:
+    plan = _review_plan()
+    calls: list[str] = []
+
+    def load_plan(plan_id: int):
+        calls.append("plan")
+        return plan if plan_id == plan.id else None
+
+    cache = SimpleNamespace(
+        advice_review_plan=load_plan,
+        save_advice_review_evaluation=lambda _value: calls.append("save"),
+    )
+
+    async def kline(*_args, **_kwargs):
+        calls.append("kline")
+        return []
+
+    with pytest.raises(ValueError, match="as_of 不能晚于"):
+        asyncio.run(
+            evaluate_advice_review_plan(
+                SimpleNamespace(cache=cache, kline=kline),
+                plan.id,
+                expected_revision=plan.revision,
+                as_of=datetime(2026, 7, 18, 9),
+                now=datetime(2026, 7, 17, 15),
+            )
+        )
+
+    assert calls == []
+
+
+def test_public_review_evaluation_rejects_stale_revision_before_market_io() -> None:
+    plan = _review_plan()
+    calls: list[str] = []
+
+    async def kline(*_args, **_kwargs):
+        calls.append("kline")
+        return []
+
+    with pytest.raises(AdviceReviewRevisionConflictError):
+        asyncio.run(
+            evaluate_advice_review_plan(
+                SimpleNamespace(
+                    cache=SimpleNamespace(advice_review_plan=lambda _plan_id: plan),
+                    kline=kline,
+                ),
+                plan.id,
+                expected_revision=plan.revision + 1,
+                now=datetime(2026, 7, 17, 15),
+            )
+        )
+
+    assert calls == []
 
 
 def test_due_review_list_exposes_due_date_and_overdue_trading_days() -> None:
@@ -441,8 +690,8 @@ def test_due_review_repository_prioritizes_old_unfinished_plan_over_many_recent_
         evaluate_advice_forward_window(
             finished_plan,
             [
-                make_kline(date="2026-06-30", close=100, high=101, low=99),
-                make_kline(date="2026-07-01", close=104, high=106, low=98),
+                _evaluation_kline(date="2026-06-30", close=100, high=101, low=99),
+                _evaluation_kline(date="2026-07-01", close=104, high=106, low=98),
             ],
             as_of=datetime(2026, 7, 1, 16),
             evaluated_at="2026-07-01T08:01:00.000000Z",
@@ -509,7 +758,8 @@ def test_due_review_candidates_order_by_conservative_due_key_before_snapshot(
     )
     calls: list[int] = []
 
-    async def evaluate(_datahub, plan_id: int, *, as_of, now=None):
+    async def evaluate(_datahub, plan_id: int, *, expected_revision, as_of, now=None):
+        assert expected_revision == 1
         calls.append(plan_id)
         return SimpleNamespace(id=plan_id + 10_000, status="evaluated", conclusion="horizon_gain")
 
@@ -527,6 +777,42 @@ def test_due_review_candidates_order_by_conservative_due_key_before_snapshot(
     assert calls == [short_plan.id]
     assert summary.candidate_count == 1
     assert summary.attempted_count == 1
+
+
+def test_due_review_repository_does_not_starve_the_501st_truly_due_plan(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "cache.sqlite3")
+    template = _valid_analysis_on_date("601000", "2026-05-21")
+    for offset in range(500):
+        code = f"{601000 + offset:06d}"
+        analysis = template.model_copy(
+            update={
+                "quote": template.quote.model_copy(
+                    update={"code": code, "name": f"Test {code}"}
+                )
+            }
+        )
+        advice = cache.save_advice_snapshot(
+            analysis,
+            snapshot_market_time="2026-05-21 15:15:00",
+        )
+        cache.create_advice_review_plan(
+            _plan_input(advice.id, f"{code}.SH").model_copy(update={"horizon_days": 60})
+        )
+    short_analysis = _valid_analysis_on_date("603999", "2026-07-17")
+    short_advice = cache.save_advice_snapshot(
+        short_analysis,
+        snapshot_market_time="2026-07-17 15:15:00",
+    )
+    short_plan = cache.create_advice_review_plan(
+        _plan_input(short_advice.id, "603999.SH").model_copy(update={"horizon_days": 1})
+    )
+
+    candidates = cache.advice_review_evaluation_candidates(
+        as_of_date="2026-07-20",
+        limit=1,
+    )
+
+    assert [detail.plan.id for detail in candidates] == [short_plan.id]
 
 
 def test_background_refresh_and_review_errors_redact_configured_secrets(monkeypatch) -> None:
@@ -599,15 +885,21 @@ def test_review_summary_api_exposes_global_local_contract() -> None:
 
 def test_review_summary_uses_persisted_current_revision_results(tmp_path: Path) -> None:
     cache = SQLiteCache(tmp_path / "cache.sqlite3")
-    first_advice = cache.save_advice_snapshot(_valid_analysis("600519"))
-    second_advice = cache.save_advice_snapshot(_valid_analysis("600002"))
+    first_advice = cache.save_advice_snapshot(
+        _valid_analysis("600519"),
+        snapshot_market_time="2026-07-17 15:15:00",
+    )
+    second_advice = cache.save_advice_snapshot(
+        _valid_analysis("600002"),
+        snapshot_market_time="2026-07-17 15:15:00",
+    )
     first_plan = cache.create_advice_review_plan(_plan_input(first_advice.id, "600519.SH"))
     cache.create_advice_review_plan(_plan_input(second_advice.id, "600002.SH"))
     draft = evaluate_advice_forward_window(
         first_plan,
         [
-            make_kline(date="2026-07-17", close=100, high=101, low=98),
-            make_kline(date="2026-07-20", close=104, high=106, low=98),
+            _evaluation_kline(date="2026-07-17", close=100, high=101, low=98),
+            _evaluation_kline(date="2026-07-20", close=104, high=106, low=98),
         ],
         as_of=datetime(2026, 7, 20, 16),
         evaluated_at="2026-07-20T08:01:00.000000Z",
@@ -682,9 +974,9 @@ def _valid_analysis(code: str):
         prev_close=99,
         high=101,
         low=98,
-        timestamp="2026-07-17 16:00:00",
+        timestamp="2026-07-17 15:00:00",
     ).model_copy(update={"code": code, "name": f"Test {code}"})
-    rows = [make_kline(date="2026-07-17", close=100, high=101, low=98)]
+    rows = _research_rows_ending("2026-07-17")
     quality = DataQuality(
         level="good",
         source="test",
@@ -704,8 +996,8 @@ def _valid_analysis(code: str):
 
 def _valid_analysis_on_date(code: str, data_date: str):
     analysis = _valid_analysis(code)
-    quote = analysis.quote.model_copy(update={"timestamp": f"{data_date} 16:00:00"})
-    rows = [analysis.klines[-1].model_copy(update={"date": data_date})]
+    quote = analysis.quote.model_copy(update={"timestamp": f"{data_date} 15:00:00"})
+    rows = _research_rows_ending(data_date)
     quality = analysis.data_quality.model_copy(
         update={
             "quote_time": quote.timestamp,
@@ -719,6 +1011,30 @@ def _valid_analysis_on_date(code: str, data_date: str):
         }
     )
     return analysis.model_copy(update={"quote": quote, "klines": rows, "data_quality": quality})
+
+
+def _research_rows_ending(data_date: str):
+    current = date.fromisoformat(data_date)
+    dates: list[date] = []
+    while len(dates) < 60:
+        dates.append(current)
+        current = previous_trade_date(current - timedelta(days=1))
+    return [
+        make_kline(
+            date=item.isoformat(),
+            close=100,
+            high=101,
+            low=98,
+            replay_eligible=True,
+        ).model_copy(update={"data_version": "test-daily-kline-qfq-v1"})
+        for item in reversed(dates)
+    ]
+
+
+def _evaluation_kline(**values):
+    return make_kline(replay_eligible=True, **values).model_copy(
+        update={"data_version": "test-daily-kline-qfq-v1"}
+    )
 
 
 def _review_plan(

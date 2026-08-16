@@ -48,8 +48,10 @@ async def paper_trading_dashboard(
 @router.patch("/account", response_model=PaperTradingAccount)
 async def patch_paper_trading_account(
     payload: PaperTradingAccountUpdate,
+    response: Response,
     datahub: DataHub = Depends(get_datahub),
 ) -> PaperTradingAccount:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: update_paper_trading_account(datahub.cache, payload))
 
 
@@ -60,16 +62,20 @@ async def patch_paper_trading_account(
 )
 async def post_paper_strategy(
     payload: PaperStrategyCreate,
+    response: Response,
     datahub: DataHub = Depends(get_datahub),
 ) -> PaperStrategy:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: create_paper_strategy(datahub.cache, payload))
 
 
 @router.delete("/strategies/{strategy_id}", response_model=MutationResult)
 async def delete_paper_strategy(
     strategy_id: int,
+    response: Response,
     datahub: DataHub = Depends(get_datahub),
 ) -> MutationResult:
+    response.headers["Cache-Control"] = "no-store"
     def remove() -> MutationResult:
         delete_pending_paper_strategy(datahub.cache, strategy_id)
         return MutationResult(ok=True, removed=True)
@@ -80,8 +86,10 @@ async def delete_paper_strategy(
 @router.post("/run", response_model=PaperSimulationSummary)
 async def run_paper_trading(
     payload: PaperSimulationRequest,
+    response: Response,
     datahub: DataHub = Depends(get_datahub),
 ) -> PaperSimulationSummary:
+    response.headers["Cache-Control"] = "no-store"
     return await run_api(lambda: run_paper_simulation(datahub, payload))
 
 
@@ -97,10 +105,12 @@ async def paper_trading_runs(
 
 @router.get("/runs/compare", response_model=PaperRunComparison)
 async def compare_paper_trading_runs(
+    response: Response,
     left_run_id: int = Query(gt=0),
     right_run_id: int = Query(gt=0),
     datahub: DataHub = Depends(get_datahub),
 ) -> PaperRunComparison:
+    response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(
         lambda: datahub.cache.compare_paper_trading_runs(left_run_id, right_run_id)
     )

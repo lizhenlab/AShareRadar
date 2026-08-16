@@ -96,7 +96,7 @@ def test_historical_replay_uses_fixed_sessions_costs_and_pit_common_features(
     assert report["metadata_contract"]["historical_amount"] is None  # type: ignore[index]
     quality = cast(dict[str, Any], report["quality"])
     assert quality["horizons"]["5"]["modelled_independent_session_count"] == 2
-    assert quality["horizons"]["5"]["minimum_required_independent_session_count"] == 230
+    assert quality["horizons"]["5"]["minimum_required_independent_session_count"] == 232
     fit = cast(dict[str, Any], report["probability_fit"])["horizons"]["5"]
     assert fit["status"] == "insufficient_data"
     assert fit["probability"] is None
@@ -377,7 +377,7 @@ def test_historical_replay_cli_is_read_only_and_reports_exact_h5_dates(tmp_path:
     assert summary["database_sidecar_policy"] == "reject_db_wal_shm_journal_v1"
     assert summary["official"] is False
     assert summary["h5_coverage"]["modelled_independent_session_count"] == 1
-    assert summary["h5_coverage"]["minimum_required_independent_session_count"] == 230
+    assert summary["h5_coverage"]["minimum_required_independent_session_count"] == 232
     loaded = load_historical_replay_artifact(summary["artifact"])
     assert loaded["payload"]["probability_fit"]["horizons"]["5"]["probability"] is None  # type: ignore[index]
 

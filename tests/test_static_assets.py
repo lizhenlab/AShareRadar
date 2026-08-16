@@ -50,6 +50,7 @@ def test_index_loads_css_modules_in_parallel_and_in_order() -> None:
         "sidebar.css",
         "workspace-core.css",
         "research-panels.css",
+        "individual-probability.css",
         "market-scan.css",
         "market-scan-research.css",
         "interactions.css",
@@ -112,12 +113,19 @@ def test_frontend_js_functions_stay_small_enough_to_review() -> None:
 
 
 def test_frontend_entrypoints_have_reviewable_growth_budgets() -> None:
+    frontend_flow_specs = (
+        ROOT / "tests" / "e2e" / "frontend-flow.spec.js",
+        ROOT / "tests" / "e2e" / "market-scan-flow.spec.js",
+    )
     budgets = {
-        STATIC_DIR / "app.js": 3300,
+        STATIC_DIR / "app.js": 3100,
+        STATIC_DIR / "js" / "app-lifecycle.js": 140,
         STATIC_DIR / "css" / "interactions.css": 1850,
-        ROOT / "tests" / "e2e" / "frontend-flow.spec.js": 2800,
-        ROOT / "tests" / "e2e" / "frontend-flow-api-fixtures.mjs": 400,
+        frontend_flow_specs[0]: 1500,
+        frontend_flow_specs[1]: 1232,
+        ROOT / "tests" / "e2e" / "frontend-flow-api-fixtures.mjs": 373,
         ROOT / "tests" / "e2e" / "stock-search-flow.spec.js": 280,
+        STATIC_DIR / "js" / "strategy-template-catalog.js": 540,
     }
 
     oversized = {
@@ -126,6 +134,7 @@ def test_frontend_entrypoints_have_reviewable_growth_budgets() -> None:
         if len(path.read_text(encoding="utf-8").splitlines()) >= limit
     }
     assert oversized == {}
+    assert sum(len(path.read_text(encoding="utf-8").splitlines()) for path in frontend_flow_specs) <= 2747
 
 
 def test_ui_symbol_validation_supports_all_a_share_markets_and_rejects_conflicts() -> None:

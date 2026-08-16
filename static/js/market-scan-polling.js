@@ -6,6 +6,9 @@ const DEFAULT_IDLE_POLL_INTERVAL_MS = 30000;
 const DEFAULT_RESULT_RETRY_INTERVAL_MS = 5000;
 const DEFAULT_MAX_POLL_INTERVAL_MS = 30000;
 const DEFAULT_FAILURE_FALLBACK_THRESHOLD = 3;
+const DEFAULT_BUSY_RETRY_INTERVAL_MS = 2000;
+const MIN_BUSY_RETRY_INTERVAL_MS = 250;
+export const MARKET_SCAN_READ_BUSY_MESSAGE = "全市场冻结快照正在校验，请稍后重试";
 
 export function createMarketScanPolling(options) {
   const context = pollingContext(options);
@@ -19,8 +22,10 @@ export function createMarketScanPolling(options) {
     isCurrentRequest: (sequence, value) => isCurrentRequest(context.state, sequence, value),
     recoveryMessage,
     resetFailures: () => resetFailures(context.state),
+    retryBusy: (error, target) => retryBusy(context, error, target),
     retryLatest: () => retryLatest(context),
     scheduleDefault: (run) => scheduleDefault(context, run),
+    scheduleProbabilityResults: () => schedule(context, "probabilityResults", context.intervals.result),
   };
 }
 
@@ -75,6 +80,29 @@ function retryLatest(context) {
   schedule(context, "latest", failureDelay(context, context.intervals.poll));
 }
 
+function retryBusy(context, error, target) {
+  resetFailures(context.state);
+  schedule(context, target, marketScanReadRetryDelayMs(error));
+}
+
+export function isMarketScanReadBusy(error) {
+  return Number(error?.status) === 503 && error?.message === MARKET_SCAN_READ_BUSY_MESSAGE;
+}
+
+export function marketScanReadRetryDelayMs(error) {
+  const requested = Number(error?.retryAfterMs);
+  const delay = Number.isFinite(requested) && requested >= 0
+    ? requested
+    : DEFAULT_BUSY_RETRY_INTERVAL_MS;
+  return Math.min(DEFAULT_MAX_POLL_INTERVAL_MS, Math.max(MIN_BUSY_RETRY_INTERVAL_MS, Math.ceil(delay)));
+}
+
+export function marketScanReadBusyMessage(error, options = {}) {
+  const seconds = Math.max(1, Math.ceil(marketScanReadRetryDelayMs(error) / 1000));
+  const retained = options.retained ? "已保留上次已验证结果，" : "";
+  return `冻结快照正在校验，${retained}将在 ${seconds} 秒后自动重试。`;
+}
+
 function handleScopedFailure(context, error, retryTarget) {
   recordFailure(context.state);
   if (shouldRecoverLatest(context, error)) return true;
@@ -109,7 +137,9 @@ function failureDelay(context, base) {
 }
 
 function baseDelay(context, target) {
-  return target === "results" ? context.intervals.result : context.intervals.poll;
+  return target === "results" || target === "probabilityResults"
+    ? context.intervals.result
+    : context.intervals.poll;
 }
 
 function beginRequest(state, scopeField, sequenceField) {

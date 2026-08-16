@@ -189,10 +189,7 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             now=now,
             limit=DUE_REVIEW_EVALUATION_BATCH_LIMIT,
         )
-        message = (
-            f"到期研究计划候选 {summary.candidate_count} 条，"
-            f"本轮评估 {summary.evaluated_count} 条，失败 {summary.failed_count} 条"
-        )
+        message = f"到期研究计划候选 {summary.candidate_count} 条，" f"本轮评估 {summary.evaluated_count} 条，失败 {summary.failed_count} 条"
         await self._save_monitor_event("warning" if summary.failed_count else "info", "review", message)
         if summary.attempted_count and summary.failed_count == summary.attempted_count:
             raise RuntimeError(message)
@@ -209,7 +206,9 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             MarketScanProbabilityMaintenanceService,
         )
 
-        service = self._market_scan_probability_maintenance
+        service: MarketScanProbabilityMaintenanceService | None = (
+            getattr(self, "_market_scan_probability_maintenance", None)
+        )
         if service is None:
             service = MarketScanProbabilityMaintenanceService(self.datahub.cache)
             self._market_scan_probability_maintenance = service
@@ -217,6 +216,10 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             service.run,
             now=now,
         )
+        scanner = self.market_scanner
+        refresh = getattr(scanner, "refresh_probability_research_cache", None)
+        if callable(refresh):
+            await refresh()
         message = summary.message()
         if summary.failures:
             message += "；" + "；".join(summary.failures)
@@ -232,7 +235,10 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         return message
 
     async def _run_strategy_schedules(self) -> str:
-        summary = await _offload(self.datahub.cache.strategy_automation_service.run_due)
+        service = self._strategy_automation_service
+        if service is None:
+            raise RuntimeError("策略自动化服务尚未注入")
+        summary = await _offload(service.run_due)
         message = (
             f"版本化策略检查 {summary.checked_count} 条，执行 {summary.executed_count} 条，"
             f"跳过 {summary.skipped_count} 条，生成提醒 {summary.event_count} 条，"

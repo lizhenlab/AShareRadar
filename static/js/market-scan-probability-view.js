@@ -1,15 +1,22 @@
 import { escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
-
-export const MARKET_SCAN_PROBABILITY_HORIZONS = Object.freeze([1, 5, 20]);
-export const MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON = 5;
-const CALIBRATED_STATUS = "calibrated_shadow";
-const ALLOWED_STATUSES = new Set([
-  "calibrated_shadow",
-  "insufficient_data",
-  "insufficient_evidence",
-  "not_generated",
-]);
+import { probabilitySnapshotCopy } from "./market-scan-probability-copy.js";
+import {
+  CALIBRATED_PROBABILITY_STATUS as CALIBRATED_STATUS,
+  emptyProbabilityResearch,
+  finiteProbability,
+  MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON,
+  MARKET_SCAN_PROBABILITY_HORIZONS,
+  normalizedIntervals,
+  probabilityArtifact,
+} from "./market-scan-probability-contracts.js";
+export {
+  isMarketScanProbabilitySourceCapturePending,
+  MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON,
+  MARKET_SCAN_PROBABILITY_HORIZONS,
+  normalizeMarketScanProbabilityResearch,
+  normalizeMarketScanUpsideProbabilities,
+} from "./market-scan-probability-contracts.js";
 const LIMITATION_LABELS = Object.freeze({
   no_observations: "尚无成熟标签观察",
   minimum_label_coverage: "标签覆盖率不足",
@@ -26,6 +33,13 @@ const LIMITATION_LABELS = Object.freeze({
   individual_probability_projection_not_published: "尚未发布逐股概率投影",
   selection_filter_fail_closed: "选股筛选保持关闭",
   bounded_sample_benchmark_not_full_market_contract_selection_forbidden: "有界样本不满足全市场基准与 Top100 契约，禁止用于选股筛选",
+  legacy_run_binding_not_selection_eligible: "旧版证据未完整绑定当前榜单，禁止用于筛选",
+  source_capture_pending: "真实点时源样本正在进入研究归档",
+  source_scan_action_ineligible: "评分分布或动作源证据未通过，未进入研究归档",
+  source_capture_skipped: "研究归档已安全跳过，未生成概率证据",
+  source_capture_outbox_missing: "评分分布已通过，但研究归档任务缺失；概率与筛选保持关闭",
+  probability_artifact_source_unbound: "概率产物未绑定本次源归档；已忽略旧产物并关闭筛选",
+  probability_requires_published_official_full_market_run: "仅已发布的盘后正式全市场原发布封印批次可进入概率研究归档",
 });
 const SELECTION_GATE_LABELS = Object.freeze({
   complete_label_contract_bound: "标签/成本契约",
@@ -37,7 +51,6 @@ const SELECTION_GATE_LABELS = Object.freeze({
   full_market_top100_contract: "Top100 契约",
   deterministic_sample_replay: "有界样本重放",
 });
-
 export function marketScanProbabilityElements(root, requireElement) {
   const get = (id) => requireElement(root, id);
   const horizon1d = get("marketScanProbabilityHorizon1d");
@@ -62,53 +75,15 @@ export function marketScanProbabilityElements(root, requireElement) {
     probabilityFilterHelp: get("marketScanProbabilityFilterHelp"),
   };
 }
-
-export function normalizeMarketScanProbabilityResearch(value, expectedRunId) {
-  if (value === null || value === undefined) return emptyProbabilityResearch(expectedRunId);
-  const payload = requireObject(value, "扫描榜单响应.probability_research");
-  if (payload.run_id !== null && payload.run_id !== undefined) {
-    const runId = requirePositiveInteger(payload.run_id, "扫描榜单响应.probability_research.run_id");
-    if (runId !== expectedRunId) throw probabilityContractError("probability_research.run_id 与请求批次不匹配");
-  }
-  const rawHorizons = payload.horizons === undefined
-    ? payload
-    : requireObject(payload.horizons, "扫描榜单响应.probability_research.horizons");
-  const horizons = Object.fromEntries(MARKET_SCAN_PROBABILITY_HORIZONS.map((horizon) => [
-    String(horizon),
-    normalizeArtifact(primaryTarget(rawHorizons[String(horizon)]), horizon),
-  ]));
-  return {
-    ...payload,
-    schema_version: String(payload.schema_version || "market-scan-probability-not-generated-v1"),
-    run_id: expectedRunId,
-    default_horizon: MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON,
-    primary_target: "net_excess_positive",
-    horizons,
-  };
-}
-
-export function normalizeMarketScanUpsideProbabilities(value, research) {
-  const payload = value === null || value === undefined
-    ? {}
-    : requireObject(value, "扫描榜单响应.items[].upside_probabilities");
-  return Object.fromEntries(MARKET_SCAN_PROBABILITY_HORIZONS.map((horizon) => {
-    const artifact = probabilityArtifact(research, horizon);
-    const raw = primaryTarget(payload[String(horizon)]);
-    return [String(horizon), normalizePrediction(raw, artifact, horizon)];
-  }));
-}
-
 export function selectedMarketScanProbabilityHorizon(elements) {
   const selected = elements.probabilityHorizonInputs?.find((input) => input.checked);
   return validHorizon(selected?.value) || MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON;
 }
-
 export function bindMarketScanProbabilityHorizon(elements, onChange) {
   elements.probabilityHorizonInputs.forEach((input) => input.addEventListener("change", () => {
     if (input.checked) onChange?.(Number(input.value));
   }));
 }
-
 export function renderMarketScanProbabilityResearch(elements, research) {
   const normalized = research || emptyProbabilityResearch(null);
   const horizon = selectedMarketScanProbabilityHorizon(elements);
@@ -116,7 +91,7 @@ export function renderMarketScanProbabilityResearch(elements, research) {
   setAttribute(elements.probabilityResearch, "aria-busy", "false");
   setData(elements.probabilityResearch, "marketScanRunId", normalized.run_id ?? "");
   setData(elements.probabilityResearch, "evidenceStatus", artifact.status);
-  setText(elements.probabilityStatus, statusLabel(artifact.status));
+  setText(elements.probabilityStatus, statusLabel(artifact));
   elements.probabilityStatus.className = artifact.status === CALIBRATED_STATUS ? "calibrated" : "insufficient";
   setText(elements.probabilityTarget, targetLabel(artifact.target_definition));
   setText(elements.probabilityBaseRate, percentageText(artifact.base_rate));
@@ -131,19 +106,57 @@ export function renderMarketScanProbabilityResearch(elements, research) {
   syncMarketScanProbabilityFilter(elements, artifact);
 }
 
-export function resetMarketScanProbabilityResearch(elements, runId = null) {
-  setAttribute(elements.probabilityResearch, "aria-busy", runId ? "true" : "false");
+export function renderMarketScanReadWaiting(elements, message) {
+  setAttribute(elements.probabilityResearch, "aria-busy", "false");
+  elements.resultState.hidden = false;
+  elements.resultState.className = "market-scan-result-state loading";
+  setText(elements.resultState, message);
+  setAttribute(elements.tableWrap, "aria-busy", "false");
+  setAttribute(elements.pagination, "aria-busy", "false");
+}
+
+export function resetMarketScanProbabilityResearch(elements, runId = null, options = {}) {
+  const terminalUnpublished = options.terminalUnpublished === true;
+  const readError = options.readError === true && !terminalUnpublished;
+  const busyWait = options.busyWait === true && !terminalUnpublished && !readError;
+  const loading = Boolean(runId) && !terminalUnpublished && !readError && !busyWait;
+  setAttribute(elements.probabilityResearch, "aria-busy", loading ? "true" : "false");
   setData(elements.probabilityResearch, "marketScanRunId", runId ?? "");
   setData(elements.probabilityResearch, "evidenceStatus", "not_generated");
-  setText(elements.probabilityStatus, runId ? "正在读取证据" : "尚未生成研究证据");
+  setText(
+    elements.probabilityStatus,
+    terminalUnpublished
+      ? "批次未发布·未进入研究归档"
+      : readError
+        ? "证据读取失败·等待重试"
+        : busyWait ? "快照校验中·等待重试" : loading ? "正在读取证据" : "尚未生成研究证据",
+  );
   elements.probabilityStatus.className = "insufficient";
   setText(elements.probabilityTarget, "未来所选周期净超额收益为正");
   [elements.probabilityBaseRate, elements.probabilityEvidence, elements.probabilityEffectiveness, elements.probabilityVersion, elements.probabilityCutoff]
     .forEach((element) => setText(element, "--"));
-  setText(elements.probabilityLimitations, runId ? "正在读取该批次的冻结概率证据。" : "尚无可验证的上涨概率证据。");
+  setText(
+    elements.probabilityLimitations,
+    terminalUnpublished
+      ? "该批次未发布盘后正式全市场榜单，未进入研究归档；概率与筛选保持关闭。"
+      : readError
+        ? "该批次榜单或概率证据读取失败，稍后自动重试；概率与筛选保持关闭。"
+        : busyWait
+          ? "其他请求正在校验冻结快照，稍后自动重试；概率与筛选暂时保持关闭。"
+        : loading ? "正在读取该批次的冻结概率证据。" : "尚无可验证的上涨概率证据。",
+  );
   elements.probabilityMin.value = "";
   elements.probabilityMin.disabled = true;
-  setText(elements.probabilityFilterHelp, "只有样本外已校准的 Shadow 概率才可筛选。当前已禁用。");
+  setText(
+    elements.probabilityFilterHelp,
+    terminalUnpublished
+      ? "该批次未进入研究归档；概率为空，选股筛选保持关闭。"
+      : readError
+        ? "证据读取失败；概率为空，选股筛选保持关闭，等待自动重试。"
+        : busyWait
+          ? "冻结快照校验中；概率为空，选股筛选保持关闭，等待自动重试。"
+        : "只有样本外已校准的 Shadow 概率才可筛选。当前已禁用。",
+  );
 }
 
 export function marketScanProbabilityCell(value, horizon = MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON, research = null) {
@@ -152,11 +165,12 @@ export function marketScanProbabilityCell(value, horizon = MARKET_SCAN_DEFAULT_P
   const artifact = probabilityArtifact(research, horizon);
   const calibrated = artifact.status === CALIBRATED_STATUS && record.status === CALIBRATED_STATUS && finiteProbability(record.probability) !== null;
   if (!calibrated) return unavailableProbabilityCell(horizon, artifact);
-  const interval = normalizedInterval(record.confidence_interval, record.probability, false);
+  const intervals = normalizedIntervals(record, false);
+  const interval = intervals.adjusted;
   const intervalText = interval
-    ? `95% CI ${percentageText(interval.lower)}–${percentageText(interval.upper)}`
-    : "置信区间不可用";
-  return `<div class="market-scan-probability calibrated"><strong>${escapeHtml(horizon)}日 ${escapeHtml(percentageText(record.probability))}</strong><span>${escapeHtml(intervalText)} · 基础 ${escapeHtml(percentageText(record.base_rate))}</span><em>样本外已校准 · Shadow</em></div>`;
+    ? `群体校准调整区间 ${percentageText(interval.lower)}–${percentageText(interval.upper)}（非个股结果区间）`
+    : "群体校准调整区间不可用";
+  return `<div class="market-scan-probability calibrated"><strong>${escapeHtml(holdingPeriodLabel(horizon))} ${escapeHtml(percentageText(record.probability))}</strong><span>${escapeHtml(intervalText)} · 基础 ${escapeHtml(percentageText(record.base_rate))}</span><em>样本外已校准 · Shadow</em></div>`;
 }
 
 export function marketScanProbabilitySnapshot(value, research) {
@@ -166,12 +180,14 @@ export function marketScanProbabilitySnapshot(value, research) {
     const record = objectValue(probabilities[String(horizon)]);
     const artifact = probabilityArtifact(research, horizon);
     const calibrated = artifact.status === CALIBRATED_STATUS && record.status === CALIBRATED_STATUS && finiteProbability(record.probability) !== null;
-    const interval = calibrated ? normalizedInterval(record.confidence_interval, record.probability, false) : null;
+    const interval = calibrated ? normalizedIntervals(record, false).adjusted : null;
     const probability = calibrated ? percentageText(record.probability) : "—";
     const intervalText = interval ? `${percentageText(interval.lower)}–${percentageText(interval.upper)}` : "—";
     const status = calibrated ? CALIBRATED_STATUS : artifact.status;
-    const label = artifact.status === CALIBRATED_STATUS && !calibrated ? "个股预测不可用" : statusLabel(status);
-    return `<tr><th scope="row">${horizon} 日</th><td>${escapeHtml(probability)}</td><td>${escapeHtml(intervalText)}</td><td>${escapeHtml(percentageText(record.base_rate ?? artifact.base_rate))}</td><td>${escapeHtml(label)}</td></tr>`;
+    const label = artifact.status === CALIBRATED_STATUS && !calibrated
+      ? "个股预测不可用"
+      : statusLabel({ ...artifact, status });
+    return `<tr><th scope="row">${escapeHtml(holdingPeriodLabel(horizon))}</th><td>${escapeHtml(probability)}</td><td>${escapeHtml(intervalText)}</td><td>${escapeHtml(percentageText(record.base_rate ?? artifact.base_rate))}</td><td>${escapeHtml(label)}</td></tr>`;
   }).join("");
   const primary = probabilityArtifact(research, MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON);
   const primaryRecord = objectValue(probabilities[String(MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON)]);
@@ -179,143 +195,14 @@ export function marketScanProbabilitySnapshot(value, research) {
     ? { ...primary, ...primaryRecord }
     : primary;
   const copy = probabilitySnapshotCopy(primary);
-  return `<section class="market-scan-probability-snapshot"><h4>${escapeHtml(copy.title)}</h4><p class="market-scan-snapshot-rule">${escapeHtml(copy.description)}</p><div class="market-scan-probability-table-wrap"><table><thead><tr><th>周期</th><th>净超额为正</th><th>95% CI</th><th>基础胜率</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div><dl class="market-scan-probability-evidence"><div><dt>模型 / 特征</dt><dd>${escapeHtml(`${evidence.model_version || "--"} / ${evidence.feature_version || "--"}`)}</dd></div><div><dt>标签 / 成本</dt><dd>${escapeHtml(`${evidence.label_version || "--"} / ${evidence.cost_model_version || "--"}`)}</dd></div><div><dt>训练截止</dt><dd>${escapeHtml(evidence.training_cutoff || "--")}</dd></div><div><dt>样本证据</dt><dd>${escapeHtml(evidenceText(evidence))}</dd></div><div><dt>预测效力</dt><dd>${escapeHtml(effectivenessText(evidence))}</dd></div><div><dt>校准指标</dt><dd>${escapeHtml(calibrationMetricsText(evidence))}</dd></div><div><dt>局限</dt><dd>${escapeHtml(limitationsText(evidence))}</dd></div></dl></section>`;
-}
-
-function normalizeArtifact(value, horizon) {
-  if (value === null || value === undefined) return emptyArtifact(horizon);
-  const raw = requireObject(value, `probability_research.horizons.${horizon}`);
-  const status = normalizeStatus(raw.status);
-  const selection = normalizeSelectionQualification(raw, horizon, status);
-  const versions = objectValue(raw.versions);
-  if (raw.horizon !== null && raw.horizon !== undefined && Number(raw.horizon) !== horizon) {
-    throw probabilityContractError(`probability_research.horizons.${horizon}.horizon 不匹配`);
-  }
-  return {
-    ...raw,
-    ...selection,
-    status,
-    horizon,
-    target_definition: String(raw.target || raw.target_definition || "net_excess_positive"),
-    base_rate: optionalProbability(raw.base_rate, `probability_research.horizons.${horizon}.base_rate`),
-    model_version: raw.model_version || versions.model || null,
-    feature_version: raw.feature_version || versions.feature || null,
-    label_version: raw.label_version || versions.label || null,
-    cost_model_version: raw.cost_model_version || versions.cost_model || null,
-    limitations: stringList(raw.limitations, `probability_research.horizons.${horizon}.limitations`),
-  };
-}
-
-function normalizeSelectionQualification(raw, horizon, status) {
-  const qualified = raw.selection_qualified;
-  if (qualified !== null && qualified !== undefined && typeof qualified !== "boolean") {
-    throw probabilityContractError(`probability_research.horizons.${horizon}.selection_qualified 必须是 boolean`);
-  }
-  const qualification = raw.selection_qualification === null || raw.selection_qualification === undefined
-    ? null
-    : requireObject(raw.selection_qualification, `probability_research.horizons.${horizon}.selection_qualification`);
-  if (qualification && typeof qualification.passed !== "boolean") {
-    throw probabilityContractError(`probability_research.horizons.${horizon}.selection_qualification.passed 必须是 boolean`);
-  }
-  if (qualified === true && (status !== CALIBRATED_STATUS || qualification?.passed !== true)) {
-    throw probabilityContractError(`probability_research.horizons.${horizon} 的选股效力资格与证据状态不一致`);
-  }
-  return { selection_qualified: qualified === true, selection_qualification: qualification };
-}
-
-function normalizePrediction(value, artifact, horizon) {
-  if (value === null || value === undefined) return emptyPrediction(artifact, horizon);
-  const raw = requireObject(value, `upside_probabilities.${horizon}`);
-  const status = normalizeStatus(raw.status || artifact.status);
-  const probability = optionalProbability(raw.probability, `upside_probabilities.${horizon}.probability`);
-  if (status === CALIBRATED_STATUS && artifact.status !== CALIBRATED_STATUS) {
-    throw probabilityContractError(`upside_probabilities.${horizon} 不能超越批次研究证据状态`);
-  }
-  if (status === CALIBRATED_STATUS && probability === null) {
-    throw probabilityContractError(`upside_probabilities.${horizon}.probability 校准后不能为空`);
-  }
-  if (status !== CALIBRATED_STATUS && probability !== null) {
-    throw probabilityContractError(`upside_probabilities.${horizon}.probability 证据不足时必须为空`);
-  }
-  const interval = normalizedInterval(raw.confidence_interval, probability, status === CALIBRATED_STATUS);
-  const baseRate = optionalProbability(raw.base_rate ?? artifact.base_rate, `upside_probabilities.${horizon}.base_rate`);
-  return {
-    ...artifact,
-    ...raw,
-    status,
-    horizon,
-    probability,
-    confidence_interval: interval,
-    base_rate: baseRate,
-    limitations: stringList(raw.limitations ?? artifact.limitations, `upside_probabilities.${horizon}.limitations`),
-  };
-}
-
-function normalizedInterval(value, probability, required) {
-  if (value === null || value === undefined) {
-    if (required) throw probabilityContractError("calibrated_shadow 概率缺少 confidence_interval");
-    return null;
-  }
-  const raw = Array.isArray(value) ? { lower: value[0], upper: value[1], level: 0.95 } : requireObject(value, "confidence_interval");
-  const lower = optionalProbability(raw.lower, "confidence_interval.lower");
-  const upper = optionalProbability(raw.upper, "confidence_interval.upper");
-  const level = optionalProbability(raw.level ?? 0.95, "confidence_interval.level");
-  if (lower === null || upper === null || level === null || level <= 0 || lower > upper || probability === null || probability < lower || probability > upper) {
-    throw probabilityContractError("confidence_interval 必须覆盖概率且位于 0–1");
-  }
-  return { ...raw, level, lower, upper };
-}
-
-function primaryTarget(value) {
-  if (value === null || value === undefined) return value;
-  const source = objectValue(value);
-  return source.net_excess_positive ?? source;
-}
-
-function probabilityArtifact(research, horizon) {
-  const artifact = objectValue(objectValue(research?.horizons)[String(horizon)]);
-  return Object.keys(artifact).length ? artifact : emptyArtifact(horizon);
+  return `<section class="market-scan-probability-snapshot"><h4>${escapeHtml(copy.title)}</h4><p class="market-scan-snapshot-rule">${escapeHtml(copy.description)}</p><div class="market-scan-probability-table-wrap"><table><thead><tr><th>持有周期 / 退出日</th><th>净超额为正</th><th>群体校准调整区间（非个股结果区间）</th><th>基础胜率</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div><dl class="market-scan-probability-evidence"><div><dt>模型 / 特征</dt><dd>${escapeHtml(`${evidence.model_version || "--"} / ${evidence.feature_version || "--"}`)}</dd></div><div><dt>标签 / 成本</dt><dd>${escapeHtml(`${evidence.label_version || "--"} / ${evidence.cost_model_version || "--"}`)}</dd></div><div><dt>训练截止</dt><dd>${escapeHtml(evidence.training_cutoff || "--")}</dd></div><div><dt>样本证据</dt><dd>${escapeHtml(evidenceText(evidence))}</dd></div><div><dt>预测效力</dt><dd>${escapeHtml(effectivenessText(evidence))}</dd></div><div><dt>校准指标</dt><dd>${escapeHtml(calibrationMetricsText(evidence))}</dd></div><div><dt>局限</dt><dd>${escapeHtml(limitationsText(evidence))}</dd></div></dl></section>`;
 }
 
 function unavailableProbabilityCell(horizon, artifact) {
   if (artifact.status === CALIBRATED_STATUS) {
-    return `<div class="market-scan-probability insufficient"><strong>${escapeHtml(horizon)}日 —</strong><span>个股预测不可用</span></div>`;
+    return `<div class="market-scan-probability insufficient"><strong>${escapeHtml(holdingPeriodLabel(horizon))} —</strong><span>个股预测不可用</span></div>`;
   }
   return '<div class="market-scan-probability insufficient" title="概率不可用；详情见上方"><strong aria-label="概率不可用">—</strong></div>';
-}
-
-function probabilitySnapshotCopy(artifact) {
-  if (artifact.status === CALIBRATED_STATUS) {
-    return {
-      title: "上涨概率研究 · 冻结 Shadow 证据",
-      description: "趋势强度是序数状态分；以下概率来自该批次持久化的样本外校准证据，不参与生产排序。",
-    };
-  }
-  if (artifact.status === "not_generated") {
-    return {
-      title: "上涨概率研究 · 尚未生成",
-      description: "当前批次尚未生成上涨概率研究证据，不展示概率或置信区间，也不影响生产排序。",
-    };
-  }
-  if (artifact.fit_status === "sampled_oos_assessment" || artifact.pipeline_stage === "sampled_fit_assessed") {
-    return {
-      title: "上涨概率研究 · 有界样本评估完成",
-      description: "已完成可重放的有界样本评估，但它不满足全市场基准与 Top100 契约；逐股概率、置信区间和选股筛选继续保持为空或关闭。",
-    };
-  }
-  const counts = objectValue(artifact.counts);
-  const archivedSessions = countNumber(counts.archived_independent_session_count);
-  const sourceOnly = (archivedSessions !== null && archivedSessions > 0)
-    || artifact.limitations?.includes?.("live_point_in_time_source_archived");
-  return sourceOnly
-    ? {
-        title: "上涨概率研究 · 点时样本积累中",
-        description: "当前仅归档了真实点时源样本，尚未形成成熟标签和样本外校准概率；概率与置信区间保持为空。",
-      }
-    : {
-        title: "上涨概率研究 · 样本不足",
-        description: "研究证据已生成，但尚未通过独立日期、标签覆盖或校准门槛；概率与置信区间保持为空。",
-      };
 }
 
 function syncMarketScanProbabilityFilter(elements, artifact) {
@@ -330,13 +217,18 @@ function syncMarketScanProbabilityFilter(elements, artifact) {
       ? "按当前周期样本外校准概率筛选；只缩小结果集，不改变生产名次。"
       : fitted
         ? "概率已完成样本外校准，但预测效力门禁未通过，暂不允许用于选股筛选。"
-        : probabilityUnavailableHelp(artifact.status),
+        : probabilityUnavailableHelp(artifact),
   );
 }
 
 function selectionQualificationPassed(artifact) {
   const qualification = objectValue(artifact.selection_qualification);
-  return artifact.selection_qualified === true && qualification.passed === true;
+  const binding = objectValue(artifact.run_binding);
+  return artifact.selection_qualified === true
+    && qualification.passed === true
+    && artifact.filter_qualified === true
+    && binding.binding_status === "verified"
+    && binding.legacy === false;
 }
 
 function effectivenessText(artifact) {
@@ -372,40 +264,26 @@ function failedSelectionGateLabels(artifact) {
     .map(([, label]) => label);
 }
 
-function probabilityUnavailableHelp(status) {
-  return status === "not_generated"
-    ? "当前批次尚未生成 Shadow 研究，概率筛选不可用。"
+function probabilityUnavailableHelp(artifact) {
+  if (artifact.availability === "probability_artifact_source_unbound") {
+    return "已有概率产物未精确绑定本次源归档；逐股概率与筛选保持关闭。";
+  }
+  if (artifact.availability === "ineligible_run_contract") {
+    return artifact.limitations?.includes?.("probability_requires_published_official_full_market_run")
+      ? "仅已发布的盘后正式全市场原发布封印批次可进入研究归档；当前来源批次不符合该合同，概率筛选保持关闭。"
+      : "该批次不符合概率研究归档合同；概率筛选保持关闭。";
+  }
+  return artifact.status === "not_generated"
+    ? artifact.availability === "source_scan_action_ineligible"
+      ? "评分分布或动作源证据未通过，未进入研究归档；概率筛选保持关闭。"
+      : artifact.availability === "source_capture_pending"
+        ? "真实点时源样本正在归档；概率尚未生成，筛选保持关闭。"
+        : "当前批次尚未生成 Shadow 研究，概率筛选不可用。"
     : "当前研究样本不足，概率筛选不可用。";
 }
 
-function emptyProbabilityResearch(runId) {
-  return {
-    schema_version: "market-scan-probability-not-generated-v1",
-    run_id: runId,
-    default_horizon: MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON,
-    primary_target: "net_excess_positive",
-    horizons: Object.fromEntries(MARKET_SCAN_PROBABILITY_HORIZONS.map((horizon) => [String(horizon), emptyArtifact(horizon)])),
-  };
-}
-
-function emptyArtifact(horizon) {
-  return {
-    status: "not_generated",
-    horizon,
-    target_definition: "net_excess_positive",
-    base_rate: null,
-    limitations: ["旧批次或当前批次未持久化上涨概率证据"],
-  };
-}
-
-function emptyPrediction(artifact, horizon) {
-  return { ...artifact, status: "not_generated", horizon, probability: null, confidence_interval: null };
-}
-
-function normalizeStatus(value) {
-  const status = String(value || "not_generated").trim();
-  if (!ALLOWED_STATUSES.has(status)) throw probabilityContractError(`未知上涨概率状态：${status}`);
-  return status;
+function holdingPeriodLabel(horizon) {
+  return `持有${horizon}日（D+${Number(horizon) + 1}）`;
 }
 
 function targetLabel(value) {
@@ -499,9 +377,20 @@ function limitationLabel(value) {
   return LIMITATION_LABELS[String(value)] || String(value);
 }
 
-function statusLabel(status) {
+function statusLabel(value) {
+  const artifact = typeof value === "string" ? { status: value } : objectValue(value);
+  const status = String(artifact.status || "not_generated");
+  if (artifact.availability === "probability_artifact_source_unbound") return "概率产物源绑定无效";
   if (status === CALIBRATED_STATUS) return "样本外已校准";
-  return status === "not_generated" ? "尚未生成研究证据" : "研究已生成·样本不足";
+  if (status !== "not_generated") return "研究已生成·样本不足";
+  return {
+    source_capture_pending: "正在归档研究样本",
+    source_scan_action_ineligible: "未进入研究归档",
+    source_capture_skipped: "研究归档已跳过",
+    source_capture_outbox_missing: "研究归档状态异常",
+    probability_artifact_source_unbound: "概率产物源绑定无效",
+    ineligible_run_contract: "来源批次不符合研究归档合同·未进入归档",
+  }[artifact.availability] || "尚未生成研究证据";
 }
 
 function percentageText(value) {
@@ -509,31 +398,10 @@ function percentageText(value) {
   return number === null ? "--" : `${formatNumber(number * 100, 1)}%`;
 }
 
-function optionalProbability(value, path) {
-  if (value === null || value === undefined) return null;
-  const number = finiteProbability(value);
-  if (number === null) throw probabilityContractError(`${path} 必须是 0–1 的有限数值`);
-  return number;
-}
-
-function finiteProbability(value) {
-  if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 0 && number <= 1 ? number : null;
-}
-
 function finiteMetric(value) {
   if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
-}
-
-function stringList(value, path) {
-  if (value === null || value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw probabilityContractError(`${path} 必须是字符串数组`);
-  }
-  return value;
 }
 
 function validHorizon(value) {
@@ -552,25 +420,8 @@ function countNumber(value) {
   return value === null || value === undefined || value === "" || !Number.isInteger(number) || number < 0 ? null : number;
 }
 
-function requirePositiveInteger(value, path) {
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 1) throw probabilityContractError(`${path} 必须是正整数`);
-  return number;
-}
-
-function requireObject(value, path) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw probabilityContractError(`${path} 必须是对象`);
-  return value;
-}
-
 function objectValue(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-
-function probabilityContractError(message) {
-  const error = new Error(`扫描接口响应格式异常：${message}`);
-  error.name = "MarketScanContractError";
-  return error;
 }
 
 function setText(element, value) {

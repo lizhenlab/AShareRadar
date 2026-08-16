@@ -20,6 +20,8 @@ from app.repositories.discovery import DiscoveryRepository
 from app.repositories.maintenance import RuntimeMaintenanceRepository
 from app.repositories.market_data import MarketDataRepository
 from app.repositories.market_scan import MarketScanRepository
+from app.repositories.market_scan_delta import MarketScanDeltaRepository
+from app.repositories.market_scan_screen_alert import MarketScanScreenAlertRepository
 from app.repositories.notes import StockNoteRepository
 from app.repositories.paper_trading import PaperTradingRepository
 from app.repositories.provider_status import ProviderStatusRepository
@@ -45,6 +47,8 @@ class RepositoryBundle:
     strategy_automation: StrategyAutomationRepository
     market_data: MarketDataRepository
     market_scan: MarketScanRepository
+    market_scan_delta: MarketScanDeltaRepository
+    market_scan_screen_alert: MarketScanScreenAlertRepository
     provider_status: ProviderStatusRepository
     reliability: ReliabilityRepository
     runtime_event: RuntimeEventRepository
@@ -79,6 +83,8 @@ class RepositoryBundle:
             strategy_automation=StrategyAutomationRepository(path, lock),
             market_data=MarketDataRepository(path, lock),
             market_scan=MarketScanRepository(path, lock),
+            market_scan_delta=MarketScanDeltaRepository(path, lock),
+            market_scan_screen_alert=MarketScanScreenAlertRepository(path, lock),
             provider_status=ProviderStatusRepository(path, lock),
             reliability=ReliabilityRepository(path, lock),
             runtime_event=RuntimeEventRepository(path, lock),

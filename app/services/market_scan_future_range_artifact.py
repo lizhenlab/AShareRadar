@@ -23,10 +23,17 @@ from app.artifacts.io import (
     canonical_json_text,
     content_addressed_filename,
     decode_json_bytes,
-    exclusive_atomic_publish,
     read_regular_file,
     sha256_hex,
 )
+from app.db.market_scan_artifact_lease import (
+    MarketScanArtifactLeaseError,
+    publish_market_scan_artifact,
+    require_project_managed_artifact_database,
+    verified_market_scan_artifact_publication,
+)
+
+exclusive_atomic_publish = publish_market_scan_artifact
 
 
 FUTURE_RANGE_ARTIFACT_SCHEMA_VERSION = "market-scan-future-range-artifact-v1"
@@ -35,6 +42,7 @@ FUTURE_RANGE_ARTIFACT_DIGEST_ALGORITHM = "sha256"
 FUTURE_RANGE_ARTIFACT_DIGEST_SCOPE = "payload"
 FUTURE_RANGE_ARTIFACT_INTEGRITY_NOTICE = "integrity_digest_not_a_signature"
 FUTURE_RANGE_ARTIFACT_MAX_BYTES = 128 * 1024 * 1024
+FUTURE_RANGE_MANAGED_DIRECTORY = Path("research/market_scan_future_range")
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "generated_at", "payload", "integrity"})
 _INTEGRITY_KEYS = frozenset({"algorithm", "scope", "integrity_digest", "notice"})
@@ -140,15 +148,27 @@ def write_future_range_artifact(
     target = Path(path).expanduser().absolute()
     database = Path(database_path).expanduser().resolve()
     _reject_database_target(target, database)
+    try:
+        require_project_managed_artifact_database(target, database, FUTURE_RANGE_MANAGED_DIRECTORY)
+    except MarketScanArtifactLeaseError as exc:
+        raise FutureRangeArtifactError(str(exc)) from exc
     verified = verify_future_range_artifact(artifact)
     encoded = canonical_future_range_artifact_json(verified).encode("utf-8")
+    payload = cast(Mapping[str, object], verified["payload"])
+    run = cast(Mapping[str, object], payload["run"])
     try:
-        exclusive_atomic_publish(
+        with verified_market_scan_artifact_publication(
+            database,
             target,
-            encoded,
-            max_bytes=FUTURE_RANGE_ARTIFACT_MAX_BYTES,
-            before_publish=lambda: _reject_database_target(target, database),
-        )
+            (cast(int, run["run_id"]),),
+            managed_directory=FUTURE_RANGE_MANAGED_DIRECTORY,
+        ):
+            exclusive_atomic_publish(
+                target,
+                encoded,
+                max_bytes=FUTURE_RANGE_ARTIFACT_MAX_BYTES,
+                before_publish=lambda: _reject_database_target(target, database),
+            )
     except ArtifactContentConflictError as exc:
         raise FutureRangeArtifactError("未来区间 artifact 已存在且内容不同，拒绝覆盖") from exc
     except ArtifactPublishConflictError as exc:
@@ -157,6 +177,8 @@ def write_future_range_artifact(
         raise FutureRangeArtifactError(f"未来区间 artifact 写入失败：{target}") from exc
     except FutureRangeArtifactError:
         raise
+    except MarketScanArtifactLeaseError as exc:
+        raise FutureRangeArtifactError("未来区间 artifact 来源批次已失效") from exc
     except OSError as exc:
         raise FutureRangeArtifactError(f"未来区间 artifact 写入失败：{target}") from exc
     return target
@@ -166,17 +188,11 @@ def load_future_range_artifact(path: str | Path) -> dict[str, object]:
     """Read and strictly verify an artifact, including duplicate-key rejection."""
     source = Path(path).expanduser().absolute()
     try:
-        decoded = decode_json_bytes(
-            read_regular_file(source, max_bytes=FUTURE_RANGE_ARTIFACT_MAX_BYTES)
-        )
+        decoded = decode_json_bytes(read_regular_file(source, max_bytes=FUTURE_RANGE_ARTIFACT_MAX_BYTES))
     except ArtifactDuplicateKeyError as exc:
-        raise FutureRangeArtifactError(
-            f"未来区间 artifact 包含重复 JSON key：{exc.key}"
-        ) from exc
+        raise FutureRangeArtifactError(f"未来区间 artifact 包含重复 JSON key：{exc.key}") from exc
     except ArtifactNonFiniteConstantError as exc:
-        raise FutureRangeArtifactError(
-            f"未来区间 artifact 包含非法常量：{exc.constant}"
-        ) from exc
+        raise FutureRangeArtifactError(f"未来区间 artifact 包含非法常量：{exc.constant}") from exc
     except ArtifactIOError as exc:
         raise FutureRangeArtifactError(f"未来区间 artifact 读取失败：{source}") from exc
     if not isinstance(decoded, Mapping):
@@ -226,6 +242,8 @@ def _validate_payload_contracts(payload: Mapping[str, object]) -> None:
         raise FutureRangeArtifactError("未来区间研究仅接受 official 批次")
     if isinstance(run.get("run_id"), bool) or not isinstance(run.get("run_id"), int) or cast(int, run["run_id"]) <= 0:
         raise FutureRangeArtifactError("未来区间 payload.run_id 无效")
+    if run.get("snapshot_digest") is not None:
+        _required_sha256(run.get("snapshot_digest"), "payload.run.snapshot_digest")
     config = _required_mapping(payload["config"], "payload.config")
     if config.get("session_offsets") != [1, 2, 3]:
         raise FutureRangeArtifactError("未来区间 session_offsets 必须固定为 [1,2,3]")
@@ -323,7 +341,18 @@ def _validate_offset(
     if status not in {"available", "not_mature", "unavailable"}:
         raise FutureRangeArtifactError("record offset status 无效")
     if status != "available":
-        if any(offset.get(name) is not None for name in ("target_bar", "target_bar_digest", "level_shift", "d_close_reference", "d1_open_reference", "interval_structure", "daily_bar_path_unknown")):
+        if any(
+            offset.get(name) is not None
+            for name in (
+                "target_bar",
+                "target_bar_digest",
+                "level_shift",
+                "d_close_reference",
+                "d1_open_reference",
+                "interval_structure",
+                "daily_bar_path_unknown",
+            )
+        ):
             raise FutureRangeArtifactError("不可用 offset 不能携带伪造 outcome")
         return None
     target = _validated_bar(offset.get("target_bar"), "record.offset.target_bar")
@@ -383,7 +412,13 @@ def _validate_available_d1_path(
         raise FutureRangeArtifactError("D+1 open reference 无效")
     if reference.get("entry_date") != concrete[0]["date"]:
         raise FutureRangeArtifactError("D+1 open reference entry_date 无效")
-    _validate_return_mapping(reference.get("specified_day"), target, {name: entry for name in ("low", "hlc3_proxy", "high", "close")}, ("low", "hlc3_proxy", "high", "close"), "specified_day")
+    _validate_return_mapping(
+        reference.get("specified_day"),
+        target,
+        {name: entry for name in ("low", "hlc3_proxy", "high", "close")},
+        ("low", "hlc3_proxy", "high", "close"),
+        "specified_day",
+    )
     cumulative = _required_mapping(reference.get("cumulative_path"), "cumulative_path")
     expected = {
         "mae": min(float(cast(float, item["low"])) for item in concrete) / entry - 1,
@@ -397,10 +432,7 @@ def _validate_available_d1_path(
 
 
 def _outcomes_match(actual: Mapping[str, object], expected: Mapping[str, float]) -> bool:
-    return all(
-        math.isclose(_finite_number(actual.get(name), name), value, rel_tol=0, abs_tol=1e-9)
-        for name, value in expected.items()
-    )
+    return all(math.isclose(_finite_number(actual.get(name), name), value, rel_tol=0, abs_tol=1e-9) for name, value in expected.items())
 
 
 def _validate_execution(
@@ -431,8 +463,13 @@ def _validate_execution(
 
 def _validate_unmodelled_execution(execution: Mapping[str, object]) -> None:
     return_fields = (
-        "gross_return", "net_return", "cost_drag", "market_benchmark_net_return",
-        "net_excess_return", "entry_price", "exit_price",
+        "gross_return",
+        "net_return",
+        "cost_drag",
+        "market_benchmark_net_return",
+        "net_excess_return",
+        "entry_price",
+        "exit_price",
     )
     if any(execution.get(name) is not None for name in return_fields):
         raise FutureRangeArtifactError("非 modelled execution 不能携带收益或成交价格")
@@ -522,9 +559,7 @@ def _required_sha256(value: object, label: str) -> str:
 def _require_exact_keys(value: Mapping[str, object], keys: frozenset[str], label: str) -> None:
     actual = frozenset(value)
     if actual != keys:
-        raise FutureRangeArtifactError(
-            f"{label} 字段不匹配；missing={sorted(keys - actual)} extra={sorted(actual - keys)}"
-        )
+        raise FutureRangeArtifactError(f"{label} 字段不匹配；missing={sorted(keys - actual)} extra={sorted(actual - keys)}")
 
 
 def _reject_database_target(target: Path, database: Path) -> None:

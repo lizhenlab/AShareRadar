@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from app.market_scan_repository_contracts import (
+    MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
+    MARKET_SCAN_PUBLISH_MIN_COVERAGE,
+    MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
+)
 from app.models.market_scan import (
     MarketScanCoverageScope,
     MarketScanPublicationDiagnostic,
@@ -15,25 +20,12 @@ from app.models.market_scan import (
 from app.services.market_scan_publication_snapshot import snapshot_publication_diagnostics
 
 
-MARKET_SCAN_PUBLISH_MIN_COVERAGE = {
-    "ALL": 0.95,
-    "SH": 0.95,
-    "SZ": 0.95,
-    "BJ": 0.95,
-}
-MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO = {
-    "ALL": 0.90,
-    "SH": 0.90,
-    "SZ": 0.90,
-    "BJ": 0.90,
-}
 MARKET_SCAN_PUBLICATION_SCOPES: tuple[MarketScanCoverageScope, ...] = (
     "ALL",
     "SH",
     "SZ",
     "BJ",
 )
-MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS = 20 * 60
 MARKET_SCAN_SCORE_DISTRIBUTION_POLICY = MarketScanScoreDistributionPolicy()
 
 

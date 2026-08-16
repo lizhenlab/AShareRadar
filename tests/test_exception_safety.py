@@ -31,6 +31,12 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ("app/db/advice_review_schema.py", "apply_advice_review_compat_schema"): _BoundaryPolicy(
         "propagate", "Roll back the compatibility-schema transaction before preserving the original failure."
     ),
+    ("app/db/market_scan_artifact_lease.py", "market_scan_artifact_retention_lease"): _BoundaryPolicy(
+        "propagate", "Release every artifact lease resource before preserving cancellation or fatal validation failure."
+    ),
+    ("app/db/market_scan_artifact_lease.py", "verified_market_scan_artifact_batch_publication"): _BoundaryPolicy(
+        "propagate", "Roll back every newly linked artifact before preserving cancellation or fatal batch failure."
+    ),
     ("app/main.py", "lifespan"): _BoundaryPolicy(
         "propagate", "Clean up a partially started application before preserving startup cancellation or failure."
     ),

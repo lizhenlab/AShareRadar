@@ -1,13 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
+from app.models.market_scan import MarketScanProductionScoreContract, MarketScanRun
 from app.services import market_scan_probability_source_research as source_research
 from app.services.market_scan_manager import MarketScanManager
+from app.services.market_scan_probability_source import (
+    PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION,
+    PROBABILITY_SOURCE_PAYLOAD_CONTRACT_VERSION,
+)
+from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION
+from app.services.market_scan_universe import FULL_MARKET_SCOPE
+from tests.market_scan_test_support import action_pass_publication_diagnostics
+
+
+TEST_RULE_VERSION = f"full-market-scan-v6:{'a' * 64}"
 
 
 def test_source_research_store_rejects_empty_directory_through_ancestor_symlink(
@@ -48,6 +62,8 @@ def test_source_research_reports_canonical_archived_progress_without_probability
     monkeypatch.setattr(source_research, "load_probability_source_snapshot", load)
     store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
 
+    assert store.preload() == 2
+    assert len(calls) == 3
     superseded = store.research_projection(70)
     current = store.research_projection(71)
     repeated = store.research_projection(71)
@@ -56,6 +72,27 @@ def test_source_research_reports_canonical_archived_progress_without_probability
     assert current == repeated
     assert current["status"] == "insufficient_data"
     assert current["integrity_notice"] == "source_corpus_integrity_digest_not_probability_model_evidence"
+    assert current["run_binding"] == {
+        "schema_version": "market-scan-probability-run-binding-v1",
+        "binding_status": "verified",
+        "legacy": False,
+        "run_id": 71,
+        "mode": "official",
+        "scope": FULL_MARKET_SCOPE,
+        "rule_version": TEST_RULE_VERSION,
+        "quote_date": "2026-08-11",
+        "data_date": "2026-08-11",
+        "scan_rule_hash": "a" * 64,
+        "production_score_rule_version": FULL_MARKET_SCORE_RULE_VERSION,
+        "production_score_spec_hash": "b" * 64,
+        "cohort_contract": {
+            "mode": "official",
+            "scope": FULL_MARKET_SCOPE,
+            "rule_version": TEST_RULE_VERSION,
+        },
+        "record_contract_version": "market-scan-probability-source-corpus-v1",
+        "source_integrity_digest": f"{71:064x}",
+    }
     horizons = cast(dict[str, dict[str, dict[str, object]]], current["horizons"])
     study = horizons["5"]["net_excess_positive"]
     counts = cast(dict[str, object], study["counts"])
@@ -66,16 +103,11 @@ def test_source_research_reports_canonical_archived_progress_without_probability
     assert counts["mature_label_session_count"] == 0
     assert counts["observation_count"] == 20
     assert counts["label_coverage"] == 0.0
-    assert contract["split"] == {
-        "version": "grouped-date-multifold-train-gap-calibration-gap-test-v2",
-        "group": "session_date",
-        "random_split_forbidden": True,
-        "minimum_train_sessions": 120,
-        "minimum_calibration_sessions": 40,
-        "minimum_test_sessions": 60,
-        "gap_sessions": 5,
-        "walk_forward": "expanding_train_rolling_calibration_and_test",
-    }
+    assert contract["split"]["version"] == "grouped-date-multifold-target-offset-purge-v3"
+    assert contract["split"]["gap_sessions"] == 6
+    assert contract["split"]["target_session_offset"] == 6
+    assert contract["split"]["minimum_fit_independent_sessions"] == 232
+    assert contract["split"]["minimum_selection_independent_sessions"] == 292
     assert "waiting_fixed_horizon_labels" in cast(list[str], study["limitations"])
     corpus = cast(dict[str, object], current["source_corpus"])
     assert corpus["through"] == {
@@ -133,6 +165,10 @@ def test_source_research_canonical_order_uses_scan_as_of_before_run_id(
 
 def test_manager_uses_source_progress_only_when_model_artifact_is_not_generated() -> None:
     manager = object.__new__(MarketScanManager)
+    manager.cache = _ManagerCache(_published_run())
+    manager._query_service = None  # noqa: SLF001
+    manager._query_service_stores = None  # noqa: SLF001
+    manager._future_range_store = None  # noqa: SLF001
     manager._probability_store = _ProbabilityStore("not_generated")  # noqa: SLF001
     manager._probability_source_research_store = _SourceStore()  # noqa: SLF001
 
@@ -147,7 +183,9 @@ def test_manager_uses_source_progress_only_when_model_artifact_is_not_generated(
     manager._probability_store = _ProbabilityStore("calibrated_shadow")  # noqa: SLF001
     calibrated = manager._run_probability_research(71)  # noqa: SLF001
     assert calibrated["status"] == "calibrated_shadow"
-    assert manager._probability_source_research_store.calls == [71, 71]  # noqa: SLF001
+    # Even an existing model artifact must re-read the authoritative source
+    # binding before it can be exposed.
+    assert manager._probability_source_research_store.calls == [71, 71, 71]  # noqa: SLF001
 
 
 def test_source_research_newest_capture_uses_aware_instant_not_iso_text_order(
@@ -287,6 +325,7 @@ def test_source_research_fails_closed_when_directory_never_stabilizes(
     previous_snapshot = (  # noqa: SLF001
         ((1, 1, 1, 1), ()),
         (None, ()),
+        (None, ()),
         "2026-08-12",
     )
     previous_research = {80: {"run_id": 80, "status": "insufficient_data"}}
@@ -304,9 +343,23 @@ def test_source_research_fails_closed_when_directory_never_stabilizes(
     with pytest.raises(source_research.ProbabilitySourceError, match="多次读取期间持续变化"):
         store.research_projection(80)
 
-    assert calls == 6 * source_research._STABLE_SNAPSHOT_READ_ATTEMPTS  # noqa: SLF001
+    assert calls == 3 + 6 * source_research._STABLE_SNAPSHOT_READ_ATTEMPTS  # noqa: SLF001
     assert store._snapshot is previous_snapshot  # noqa: SLF001
     assert store._research_by_run is previous_research  # noqa: SLF001
+
+
+def test_source_research_warm_read_does_not_wait_for_single_refresher(tmp_path: Path) -> None:
+    store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
+    previous = {80: {"run_id": 80, "status": "insufficient_data"}}
+    store._research_by_run = previous  # noqa: SLF001
+    assert store._refresh_lock.acquire(blocking=False)  # noqa: SLF001
+    try:
+        projected = store.research_projection(80)
+    finally:
+        store._refresh_lock.release()  # noqa: SLF001
+
+    assert projected == previous[80]
+    assert projected is not previous[80]
 
 
 def test_source_research_does_not_fall_back_to_old_cache_when_new_archive_is_invalid(
@@ -335,6 +388,68 @@ def test_source_research_does_not_fall_back_to_old_cache_when_new_archive_is_inv
 
     assert store._snapshot == previous_snapshot  # noqa: SLF001
     assert store._research_by_run[80]["status"] == "insufficient_data"  # noqa: SLF001
+
+
+def test_source_research_preload_excludes_only_typed_legacy_outcome_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "sources"
+    outcome_dir = tmp_path / "outcomes"
+    fit_dir = tmp_path / "fits"
+    source_dir.mkdir()
+    outcome_dir.mkdir()
+    fit_dir.mkdir()
+    source_path = _source_file(source_dir, 71, "valid")
+    source = _artifact(71, "2026-08-11", 10, captured_at="2026-08-11T16:05:00+08:00")
+    drift_path = outcome_dir / f"market-scan-probability-outcomes-run-71-through-2026-08-13-{'a' * 64}.json.gz"
+    drift_path.write_bytes(b"intact-legacy-shape")
+    fit_path = fit_dir / f"market-scan-probability-fit-through-run-71-{'c' * 64}.json.gz"
+    fit_path.write_bytes(b"fit-that-depends-on-legacy-outcome")
+    monkeypatch.setattr(
+        source_research,
+        "load_probability_source_snapshot",
+        lambda path: source if Path(path) == source_path else None,
+    )
+
+    def load_outcome(path: str | Path) -> dict[str, object]:
+        if Path(path) == drift_path:
+            raise source_research.ProbabilityOutcomeSemanticDriftError(
+                "legacy rule profile",
+                run_id=71,
+            )
+        raise source_research.ProbabilityOutcomeError("invalid outcome")
+
+    monkeypatch.setattr(source_research, "load_probability_outcome_artifact", load_outcome)
+    monkeypatch.setattr(
+        source_research,
+        "load_probability_fit_assessment",
+        lambda path: _drift_dependent_fit() if Path(path) == fit_path else None,
+    )
+    store = source_research.MarketScanProbabilitySourceResearchStore(
+        source_dir,
+        outcome_directory=outcome_dir,
+        fit_directory=fit_dir,
+    )
+
+    assert store.preload() == 1
+    projection = store.research_projection(71)
+    assert projection["pipeline_stage"] == "source_archived"
+    assert projection["fit_status"] == "not_started"
+    assert projection["selection_qualified"] is False
+    assert projection["outcome_evidence_status"] == "legacy_semantic_drift_excluded"
+    assert store._excluded_outcome_run_ids == frozenset({71})  # noqa: SLF001
+
+    manager = object.__new__(MarketScanManager)
+    manager._lifecycle = SimpleNamespace(start=_zero_async)  # noqa: SLF001
+    manager._probability_source_research_store = store  # noqa: SLF001
+    manager._recover_terminal_persistence_failures = lambda: 0  # type: ignore[method-assign]
+    manager._activate_probability_capture_leader = _none_async  # type: ignore[method-assign]
+    assert asyncio.run(manager.start()) == 0
+    invalid_path = outcome_dir / f"market-scan-probability-outcomes-run-71-through-2026-08-13-{'b' * 64}.json.gz"
+    invalid_path.write_bytes(b"invalid")
+    with pytest.raises(source_research.ProbabilitySourceError, match="outcome archive 校验失败"):
+        store.preload()
 
 
 def test_sampled_fit_is_visible_but_never_qualifies_selection() -> None:
@@ -486,7 +601,7 @@ class _ProbabilityStore:
         self.status = status
 
     def research_projection(self, run_id: int) -> dict[str, object]:
-        return {"run_id": run_id, "status": self.status}
+        return _bound_projection(run_id, self.status)
 
     def run_projection(
         self,
@@ -495,7 +610,7 @@ class _ProbabilityStore:
         symbols=None,
     ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
         del symbols
-        return {"run_id": run_id, "status": self.status}, {}
+        return _bound_projection(run_id, self.status), {}
 
 
 class _SourceStore:
@@ -504,7 +619,138 @@ class _SourceStore:
 
     def research_projection(self, run_id: int) -> dict[str, object]:
         self.calls.append(run_id)
-        return {"run_id": run_id, "status": "insufficient_data"}
+        return _bound_projection(run_id, "insufficient_data")
+
+    def preload(self) -> int:
+        return 1
+
+
+async def _zero_async() -> int:
+    return 0
+
+
+async def _none_async() -> None:
+    return None
+
+
+def _drift_dependent_fit() -> dict[str, object]:
+    return {
+        "generated_at": "2026-08-13T18:00:00+08:00",
+        "payload": {
+            "through_run_id": 71,
+            "cohort": {
+                "mode": "official",
+                "scope": FULL_MARKET_SCOPE,
+                "rule_version": TEST_RULE_VERSION,
+            },
+            "members": [
+                {
+                    "source_content_digest": f"{71:064x}",
+                    "outcome_content_digest": "d" * 64,
+                }
+            ],
+            "input_pair_digest": "e" * 64,
+            "training_cutoff": "2026-08-11",
+            "fit_status": "sampled_oos_assessment",
+            "fit_replay_verified": True,
+            "fit_selection_qualification": {"passed": False},
+            "horizons": {},
+        },
+        "integrity": {"integrity_digest": "c" * 64},
+    }
+
+
+class _ManagerCache:
+    def __init__(self, run: MarketScanRun) -> None:
+        self.run = run
+
+    def market_scan_run(self, run_id: int) -> MarketScanRun:
+        assert run_id == self.run.id
+        return self.run
+
+    @contextmanager
+    def verified_market_scan_read(self, run_id: int):
+        assert run_id == self.run.id
+        yield SimpleNamespace(
+            run=self.run,
+            snapshot_digest=self.run.snapshot_digest,
+            action_source_digest=self.run.snapshot_digest,
+            probability_source_capture_state=self.probability_source_capture_status(
+                run_id
+            ),
+            success_score_contract=self.market_scan_success_score_contract(run_id),
+        )
+
+    def market_scan_action_source_digest(self, run_id: int) -> str:
+        assert run_id == self.run.id
+        return cast(str, self.run.snapshot_digest)
+
+    def market_scan_success_score_contract(
+        self,
+        run_id: int,
+    ) -> MarketScanProductionScoreContract:
+        assert run_id == self.run.id
+        return MarketScanProductionScoreContract(
+            FULL_MARKET_SCORE_RULE_VERSION,
+            "b" * 64,
+            self.run.success_count,
+        )
+
+    def probability_source_capture_status(self, run_id: int) -> dict[str, object]:
+        assert run_id == self.run.id
+        return {
+            "status": "succeeded",
+            "archive_digest": "c" * 64,
+            "last_error": None,
+        }
+
+
+def _published_run() -> MarketScanRun:
+    return MarketScanRun(
+        id=71, status="success", trigger="manual", mode="official",
+        rule_version=TEST_RULE_VERSION, as_of="2026-08-11 16:00:00",
+        data_date="2026-08-11", quote_date="2026-08-11", scope=FULL_MARKET_SCOPE,
+        total_count=1, excluded_count=0, processed_count=1, success_count=1,
+        missing_count=0, skipped_count=0, retry_count=0, progress_pct=100,
+        coverage_pct=100, created_at="2026-08-11 16:00:00",
+        updated_at="2026-08-11 16:01:00",
+        finished_at="2026-08-11 16:01:00", snapshot_digest="a" * 64,
+        snapshot_seal_origin="publication", snapshot_sealed_at="2026-08-11 16:01:00",
+        publication_diagnostics=action_pass_publication_diagnostics(),
+        market_progress=[
+            {"market": "SH", "total_count": 1, "processed_count": 1,
+             "success_count": 1, "missing_count": 0, "skipped_count": 0,
+             "coverage_pct": 100},
+            {"market": "SZ", "total_count": 0, "processed_count": 0,
+             "success_count": 0, "missing_count": 0, "skipped_count": 0,
+             "coverage_pct": 0},
+            {"market": "BJ", "total_count": 0, "processed_count": 0,
+             "success_count": 0, "missing_count": 0, "skipped_count": 0,
+             "coverage_pct": 0},
+        ],
+    )
+
+
+def _bound_projection(run_id: int, status: str) -> dict[str, object]:
+    if status == "not_generated":
+        return {"run_id": run_id, "status": status}
+    return {
+        "run_id": run_id,
+        "status": status,
+        "run_binding": {
+            "binding_status": "verified", "legacy": False, "run_id": run_id,
+            "mode": "official", "scope": FULL_MARKET_SCOPE,
+            "rule_version": TEST_RULE_VERSION, "quote_date": "2026-08-11",
+            "data_date": "2026-08-11", "scan_rule_hash": "a" * 64,
+            "production_score_rule_version": FULL_MARKET_SCORE_RULE_VERSION,
+            "production_score_spec_hash": "b" * 64,
+            "source_integrity_digest": "c" * 64,
+            "cohort_contract": {
+                "mode": "official", "scope": FULL_MARKET_SCOPE,
+                "rule_version": TEST_RULE_VERSION,
+            },
+        },
+    }
 
 
 def _source_file(directory: Path, run_id: int, suffix: str) -> Path:
@@ -522,8 +768,10 @@ def _artifact(
     as_of: str | None = None,
 ) -> dict[str, object]:
     return {
+        "schema_version": PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION,
         "captured_at": captured_at,
         "payload": {
+            "contract_version": PROBABILITY_SOURCE_PAYLOAD_CONTRACT_VERSION,
             "run": {
                 "run_id": run_id,
                 "quote_date": quote_date,
@@ -531,8 +779,12 @@ def _artifact(
             },
             "cohort": {
                 "mode": "official",
-                "scope": "全市场A股",
-                "rule_version": "full-market-scan-v6:test",
+                "scope": FULL_MARKET_SCOPE,
+                "rule_version": TEST_RULE_VERSION,
+            },
+            "score_semantics": {
+                "production_rule_version": FULL_MARKET_SCORE_RULE_VERSION,
+                "production_score_spec_hash": "b" * 64,
             },
             "quality": {"record_count": record_count},
         },

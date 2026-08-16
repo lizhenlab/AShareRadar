@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from datetime import date
 from pathlib import Path
@@ -12,14 +12,18 @@ from typing import Any, cast
 
 from app.config import Settings, get_settings, resolve_project_path
 from app.db.connection import SQLiteConnectionFactory
+from app.db.market_scan_artifact_lease import market_scan_artifact_retention_lease
 from app.db.schema import initialize_schema
 from app.db.schema_migrations import audit_timestamp_migration_pending
 from app.models.market import DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE, KlineAdjustmentMode
 from app.models.market_scan import (
     MarketScanPublicationDiagnostics,
+    MarketScanProductionScoreContract,
     MarketScanResultWrite,
+    MarketScanScoreDistributionObservation,
     MarketScanSeed,
 )
+from app.models.market_scan_probability_capture import ProbabilitySourceCaptureState
 from app.models.paper_trading import (
     PaperRunComparison,
     PaperRunExport,
@@ -90,6 +94,7 @@ from app.services.runtime_backup import destructive_local_data_lease
 from app.services.domain_service_bundle import DomainServiceBundle
 from app.services.discovery import DiscoveryService
 from app.services.instance_guard import FileInstanceGuard
+from app.services.market_scan_screen_alert import MarketScanScreenAlertService
 from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
 from app.services.strategy_automation import StrategyAutomationService
 from app.services.strategy_evidence import StrategyEvidenceService
@@ -155,18 +160,19 @@ class ExclusiveLocalDataOperation:
             raise RuntimeError("本地数据破坏性事务不能嵌套")
         self._transaction_active = True
         try:
-            with self._cache._connections.connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                repository = self._cache.maintenance_repo
-                original_connections = repository._connections
-                repository._connections = cast(
-                    SQLiteConnectionFactory,
-                    _BorrowedTransactionConnections(connection),
-                )
-                try:
-                    yield connection
-                finally:
-                    repository._connections = original_connections
+            with market_scan_artifact_retention_lease(self._cache.path):
+                with self._cache._connections.connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    repository = self._cache.maintenance_repo
+                    original_connections = repository._connections
+                    repository._connections = cast(
+                        SQLiteConnectionFactory,
+                        _BorrowedTransactionConnections(connection),
+                    )
+                    try:
+                        yield connection
+                    finally:
+                        repository._connections = original_connections
         finally:
             self._transaction_active = False
 
@@ -243,6 +249,10 @@ class SQLiteCache:
     @property
     def discovery_service(self) -> DiscoveryService:
         return self.domain_services.discovery
+
+    @property
+    def market_scan_screen_alert_service(self) -> MarketScanScreenAlertService:
+        return self.domain_services.market_scan_screen_alert
 
     @property
     def strategy_lab_service(self) -> StrategyLabService:
@@ -417,6 +427,12 @@ class SQLiteCache:
     def latest_full_market_scan_run(self, *, mode=None):
         return self.market_scan_repo.latest_full_run(mode=mode)
 
+    def latest_full_market_scan_automatic_state(self):
+        return self.market_scan_repo.latest_full_automatic_state()
+
+    def market_scan_polling_identity(self, *, mode):
+        return self.market_scan_repo.polling_identity(mode=mode)
+
     def latest_published_market_scan_run(self, *, mode=None):
         return self.market_scan_repo.latest_published_run(mode=mode)
 
@@ -452,12 +468,14 @@ class SQLiteCache:
         run_id: int,
         *,
         finished_at: str,
+        decision_as_of: str,
         duration_ms: int,
         count: int,
     ):
         return self.market_scan_repo.seal_quote_capture(
             run_id,
             finished_at=finished_at,
+            decision_as_of=decision_as_of,
             duration_ms=duration_ms,
             count=count,
         )
@@ -490,8 +508,20 @@ class SQLiteCache:
     def market_scan_retry_plan(self, run_id: int):
         return self.market_scan_repo.retry_plan(run_id)
 
-    def prepare_market_scan_retry(self, run_id: int, expected_plan=None, *, as_of: str | None = None):
-        return self.market_scan_repo.prepare_retry(run_id, expected_plan, as_of=as_of)
+    def prepare_market_scan_retry(
+        self,
+        run_id: int,
+        expected_plan=None,
+        *,
+        as_of: str | None = None,
+        rule_contract=None,
+    ):
+        return self.market_scan_repo.prepare_retry(
+            run_id,
+            expected_plan,
+            as_of=as_of,
+            rule_contract=rule_contract,
+        )
 
     def prepare_market_scan_top100_refresh(self, source_run_id: int, **kwargs):
         return self.market_scan_repo.prepare_top100_refresh(source_run_id, **kwargs)
@@ -523,11 +553,38 @@ class SQLiteCache:
     def market_scan_success_raw_scores(self, run_id: int) -> tuple[object, ...]:
         return self.market_scan_repo.success_raw_scores(run_id)
 
+    def market_scan_success_score_observations(
+        self,
+        run_id: int,
+    ) -> tuple[MarketScanScoreDistributionObservation, ...]:
+        return self.market_scan_repo.success_score_observations(run_id)
+
+    def market_scan_success_score_contract(
+        self,
+        run_id: int,
+    ) -> MarketScanProductionScoreContract | None:
+        return self.market_scan_repo.success_score_contract(run_id)
+
     def reconcile_incomplete_market_scans(self) -> int:
         return self.market_scan_repo.reconcile_incomplete_runs()
 
     def reconcile_probability_source_capture_outbox(self) -> int:
         return self.market_scan_repo.reconcile_probability_source_capture_outbox()
+
+    def probability_source_capture_status(
+        self,
+        run_id: int,
+    ) -> ProbabilitySourceCaptureState | None:
+        return self.market_scan_repo.probability_source_capture_status(run_id)
+
+    def market_scan_action_source_digest(self, run_id: int) -> str | None:
+        return self.market_scan_repo.market_scan_action_source_digest(run_id)
+
+    def verified_market_scan_read(self, run_id: int):
+        return self.market_scan_repo.verified_read(run_id)
+
+    def audit_probability_source_capture_archives(self, archives) -> int:
+        return self.market_scan_repo.audit_probability_source_capture_archives(archives)
 
     def claim_probability_source_capture(self, **kwargs):
         return self.market_scan_repo.claim_probability_source_capture(**kwargs)
@@ -541,6 +598,15 @@ class SQLiteCache:
     def market_scan_results(self, run_id: int, **kwargs):
         return self.market_scan_repo.results_page(run_id, **kwargs)
 
+    def market_scan_screening_breadth_snapshot(self, run_id: int):
+        return self.market_scan_repo.screening_breadth_snapshot(run_id)
+
+    def market_scan_screening_evaluation_snapshot(self, run_id: int):
+        return self.market_scan_repo.screening_evaluation_snapshot(run_id)
+
+    def market_scan_screening_result_items(self, run_id: int, symbols: Sequence[str]):
+        return self.market_scan_repo.screening_result_items(run_id, symbols)
+
     def save_plate_rank(self, rows: list[PlateItem]) -> None:
         self.market_data_repo.save_plate_rank(rows)
 
@@ -550,8 +616,20 @@ class SQLiteCache:
     def save_stock_concepts(self, symbol: str, rows: list[StockConceptItem]) -> None:
         self.market_data_repo.save_stock_concepts(symbol, rows)
 
-    def get_stock_concepts(self, symbol: str, max_age_seconds: int, limit: int = 8) -> list[StockConceptItem]:
-        return self.market_data_repo.get_stock_concepts(symbol, max_age_seconds, limit=limit)
+    def get_stock_concepts(
+        self,
+        symbol: str,
+        max_age_seconds: int,
+        limit: int = 8,
+        *,
+        excluded_source: str | None = None,
+    ) -> list[StockConceptItem]:
+        return self.market_data_repo.get_stock_concepts(
+            symbol,
+            max_age_seconds,
+            limit=limit,
+            excluded_source=excluded_source,
+        )
 
     def provider_enabled(self, name: str) -> bool:
         return self.provider_status_repo.enabled(name)
@@ -790,8 +868,8 @@ class SQLiteCache:
     ) -> AdviceReviewPlan | None:
         return self.advice_review_repo.update_plan(plan_id, payload)
 
-    def delete_advice_review_plan(self, plan_id: int) -> bool:
-        return self.advice_review_repo.delete_plan(plan_id)
+    def delete_advice_review_plan(self, plan_id: int, *, expected_revision: int) -> bool:
+        return self.advice_review_repo.delete_plan(plan_id, expected_revision=expected_revision)
 
     def advice_review_detail(self, plan_id: int) -> AdviceReviewDetail | None:
         return self.advice_review_repo.detail(plan_id)

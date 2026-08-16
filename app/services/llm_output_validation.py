@@ -101,8 +101,8 @@ def authority_bindings(rule_answer: StockQuestionAnswer, analysis: AnalysisResul
     return {
         "conclusion": rule_answer.conclusion,
         "confidence": rule_answer.confidence,
-        "support": analysis.support,
-        "resistance": analysis.resistance,
+        "support": analysis.support if analysis.support_available else None,
+        "resistance": analysis.resistance if analysis.resistance_available else None,
         "actions": list(rule_answer.actions),
         "invalidations": list(rule_answer.invalidations),
     }
@@ -115,8 +115,15 @@ def authority_binding_issue(rule_answer: StockQuestionAnswer, analysis: Analysis
         return "置信度不是整数"
     if not 0 <= rule_answer.confidence <= 100:
         return "置信度超出0到100"
-    for label, value in (("支撑位", analysis.support), ("压力位", analysis.resistance)):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+    for label, value, available in (
+        ("支撑位", analysis.support, analysis.support_available),
+        ("压力位", analysis.resistance, analysis.resistance_available),
+    ):
+        if available and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
             return f"{label}不是有限数值"
     for label, values in (("行动", rule_answer.actions), ("失效条件", rule_answer.invalidations)):
         if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
@@ -160,7 +167,7 @@ def _validate_authority_bindings(
     ):
         raise LlmOutputValidationError("置信度绑定不一致")
     for field, label in (("support", "支撑位"), ("resistance", "压力位")):
-        if not _bound_number_equal(output[field], expected[field]):
+        if not _bound_optional_number_equal(output[field], expected[field]):
             raise LlmOutputValidationError(f"{label}绑定不一致")
     for field, label in (("actions", "行动"), ("invalidations", "失效条件")):
         if not isinstance(output[field], list) or output[field] != expected[field]:
@@ -243,7 +250,8 @@ def _render_authoritative_answer(
             f"规则答案：{rule_text}",
             f"大模型解释：{explanation}",
             f"规则行动：{actions or '规则引擎未给出额外行动项'}",
-            f"关键位：支撑 {_format_price(analysis.support)} 元；压力 {_format_price(analysis.resistance)} 元",
+            f"关键位：支撑 {_available_price(analysis.support, analysis.support_available)}；"
+            f"压力 {_available_price(analysis.resistance, analysis.resistance_available)}",
             f"失效条件：{invalidations or '规则引擎未给出额外失效条件'}",
         )
     )
@@ -264,6 +272,16 @@ def _single_line(value: Any) -> str:
 
 def _format_price(value: float) -> str:
     return f"{float(value):.2f}"
+
+
+def _available_price(value: float, available: bool) -> str:
+    return f"{_format_price(value)} 元" if available else "待确认"
+
+
+def _bound_optional_number_equal(actual: Any, expected: Any) -> bool:
+    if expected is None:
+        return actual is None
+    return _bound_number_equal(actual, expected)
 
 
 def _bound_number_equal(actual: Any, expected: Any) -> bool:
@@ -443,22 +461,22 @@ def _semantic_values(semantic: str, rule_answer: StockQuestionAnswer, analysis: 
         "high_price": (quote.high,),
         "low_price": (quote.low,),
         "price_change": (quote.change,),
-        "support": (analysis.support,),
-        "resistance": (analysis.resistance,),
+        "support": (analysis.support,) if analysis.support_available else (),
+        "resistance": (analysis.resistance,) if analysis.resistance_available else (),
         "ma5": (analysis.ma5,),
         "ma10": (analysis.ma10,),
-        "ma20": (analysis.ma20,),
+        "ma20": (analysis.ma20,) if analysis.ma20_available else (),
         "generic_price": (
             quote.price,
             quote.prev_close,
             quote.open,
             quote.high,
             quote.low,
-            analysis.support,
-            analysis.resistance,
+            analysis.support if analysis.support_available else None,
+            analysis.resistance if analysis.resistance_available else None,
             analysis.ma5,
             analysis.ma10,
-            analysis.ma20,
+            analysis.ma20 if analysis.ma20_available else None,
         ),
         "change_pct": (quote.change_pct,),
         "turnover_rate": (quote.turnover_rate,),
@@ -555,11 +573,11 @@ def _allowed_numbers(rule_answer: StockQuestionAnswer, analysis: AnalysisResult)
         analysis.quote.turnover_rate,
         analysis.quote.pe,
         analysis.quote.pb,
-        analysis.support,
-        analysis.resistance,
+        analysis.support if analysis.support_available else None,
+        analysis.resistance if analysis.resistance_available else None,
         analysis.ma5,
         analysis.ma10,
-        analysis.ma20,
+        analysis.ma20 if analysis.ma20_available else None,
         analysis.trend_score,
         analysis.data_quality.score,
         analysis.data_quality.kline_count,

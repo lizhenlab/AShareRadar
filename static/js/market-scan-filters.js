@@ -20,6 +20,7 @@ const MARKET_SCAN_SORTS = Object.freeze(new Set([
   ...Object.keys(MARKET_SCAN_TO_DISCOVERY_SORT),
   ...MARKET_SCAN_RESEARCH_SORTS,
 ]));
+const DISCOVERY_COLUMN_VIEWS = Object.freeze(new Set(["overview", "trend", "liquidity", "risk", "research"]));
 
 const RANGE_FIELDS = Object.freeze([
   ["score", "scoreMin", "scoreMax", "min_score", "max_score", 0, 100, "趋势强度"],
@@ -60,7 +61,13 @@ export function marketScanFilterElements(root, requireElement) {
     confidenceMin: get("marketScanConfidenceMin"),
     riskMax: get("marketScanRiskMax"),
     tradabilityMin: get("marketScanTradabilityMin"),
+    probabilityMin: get("marketScanProbabilityMin"),
     keyword: get("marketScanKeyword"),
+    table: get("marketScanTable"),
+    columnViews: [
+      get("marketScanColumnOverview"), get("marketScanColumnTrend"), get("marketScanColumnLiquidity"),
+      get("marketScanColumnRisk"), get("marketScanColumnResearch"),
+    ],
     sort,
     sort2,
     sort3,
@@ -104,11 +111,8 @@ export function buildDiscoveryPresetDefinition(nameValue, elements) {
   const filters = readMarketScanFilters(elements);
   const unsupported = [];
   if (filters.status !== "success") unsupported.push("状态");
-  if (filters.keyword) unsupported.push("搜索关键词");
   if (unsupported.length) throw new Error(`筛选方案暂不支持保存${unsupported.join("、")}，请清除后再保存`);
-  if (Object.values(filters.research).some((value) => value !== null)) {
-    throw new Error("筛选方案暂不支持保存研究维度条件，请清除后再保存");
-  }
+  if (filters.research.probabilityMin !== null) throw new Error("筛选方案暂不支持保存上涨概率条件，请清除后再保存");
   if (filters.sort.some((item) => !MARKET_SCAN_TO_DISCOVERY_SORT[item.field])) {
     throw new Error("筛选方案暂不支持保存研究维度排序，请改用生产榜单字段");
   }
@@ -120,6 +124,10 @@ export function buildDiscoveryPresetDefinition(nameValue, elements) {
   for (const [field] of RANGE_FIELDS) {
     if (filters.ranges[field]) criteria[field] = filters.ranges[field];
   }
+  if (filters.research.confidenceMin !== null) criteria.confidence = { min: filters.research.confidenceMin };
+  if (filters.research.riskMax !== null) criteria.risk = { max: filters.research.riskMax };
+  if (filters.research.tradabilityMin !== null) criteria.tradability = { min: filters.research.tradabilityMin };
+  if (filters.keyword) criteria.keyword = filters.keyword;
   return {
     name,
     criteria,
@@ -127,40 +135,65 @@ export function buildDiscoveryPresetDefinition(nameValue, elements) {
       field: MARKET_SCAN_TO_DISCOVERY_SORT[field],
       order,
     })),
+    column_view: selectedColumnView(elements),
   };
 }
 
 export function isDiscoveryPresetUiRepresentable(preset) {
   const criteria = preset?.criteria;
   if (!criteria || typeof criteria !== "object" || Array.isArray(criteria)) return false;
-  const supported = new Set(["market", "industry", "is_st", "is_new", ...RANGE_FIELDS.map(([field]) => field)]);
+  const supported = new Set([
+    "market", "industry", "is_st", "is_new", "confidence", "risk", "tradability", "keyword",
+    ...RANGE_FIELDS.map(([field]) => field),
+  ]);
   if (Object.entries(criteria).some(([field, value]) => value != null && !supported.has(field))) return false;
   if (!validList(criteria.market, 3) || !validList(criteria.industry, 20)) return false;
   for (const [field, , , , , minimum, maximum] of RANGE_FIELDS) {
     if (!validRange(criteria[field], minimum, maximum)) return false;
   }
-  return validPresetSort(preset.sort);
+  for (const field of ["confidence", "risk", "tradability"]) {
+    if (!validRange(criteria[field], 0, 100)) return false;
+  }
+  if (criteria.keyword != null && (typeof criteria.keyword !== "string" || !criteria.keyword.trim() || criteria.keyword.length > 80)) return false;
+  return validPresetSort(preset.sort) && DISCOVERY_COLUMN_VIEWS.has(preset.column_view || "overview");
 }
 
 export function applyDiscoveryPresetFields(preset, elements) {
   const criteria = preset?.criteria || {};
+  applyDiscoveryCriteria(criteria, elements);
+  applyDiscoverySort(preset?.sort, elements);
+  applyColumnView(elements, preset?.column_view || "overview");
+}
+
+function applyDiscoveryCriteria(criteria, elements) {
   setElementValue(elements.status, "success");
-  setElementValue(elements.keyword, "");
+  setElementValue(elements.keyword, criteria.keyword || "");
   setMarketValues(elements.market, Array.isArray(criteria.market) ? criteria.market : []);
   setElementValue(elements.industry, Array.isArray(criteria.industry) ? criteria.industry.join("，") : "");
-  setElementValue(elements.isSt, typeof criteria.is_st === "boolean" ? String(criteria.is_st) : "");
-  setElementValue(elements.isNew, typeof criteria.is_new === "boolean" ? String(criteria.is_new) : "");
-  setElementValue(elements.confidenceMin, "");
-  setElementValue(elements.riskMax, "");
-  setElementValue(elements.tradabilityMin, "");
+  applyDiscoveryFlags(criteria, elements);
+  setElementValue(elements.confidenceMin, criteria.confidence?.min ?? "");
+  setElementValue(elements.riskMax, criteria.risk?.max ?? "");
+  setElementValue(elements.tradabilityMin, criteria.tradability?.min ?? "");
   setElementValue(elements.probabilityMin, "");
   for (const [field, minElement, maxElement] of RANGE_FIELDS) {
     setElementValue(elements[minElement], criteria[field]?.min ?? "");
     setElementValue(elements[maxElement], criteria[field]?.max ?? "");
   }
+}
+
+function applyDiscoveryFlags(criteria, elements) {
+  setElementValue(elements.isSt, booleanText(criteria.is_st));
+  setElementValue(elements.isNew, booleanText(criteria.is_new));
+}
+
+function booleanText(value) {
+  return typeof value === "boolean" ? String(value) : "";
+}
+
+function applyDiscoverySort(sort, elements) {
   const sorts = filterSortElements(elements);
   sorts.forEach(({ fieldElement, orderElement }, index) => {
-    const item = preset.sort?.[index];
+    const item = sort?.[index];
     setElementValue(fieldElement, item ? DISCOVERY_TO_MARKET_SCAN_SORT[item.field] : "");
     setElementValue(orderElement, item?.order || (index === 0 ? "asc" : "desc"));
   });
@@ -214,6 +247,23 @@ function filterSortElements(elements) {
     { fieldElement: elements.sort2, orderElement: elements.order2 },
     { fieldElement: elements.sort3, orderElement: elements.order3 },
   ];
+}
+
+function selectedColumnView(elements) {
+  const selected = elements.columnViews?.find((input) => input.checked)?.value || elements.table?.dataset?.columnView || "overview";
+  return DISCOVERY_COLUMN_VIEWS.has(selected) ? selected : "overview";
+}
+
+function applyColumnView(elements, value) {
+  const selected = DISCOVERY_COLUMN_VIEWS.has(value) ? value : "overview";
+  elements.columnViews?.forEach((input) => { input.checked = input.value === selected; });
+  if (elements.table?.dataset) elements.table.dataset.columnView = selected;
+  const wrap = elements.table?.closest?.(".market-scan-table-wrap");
+  wrap?.setAttribute?.("aria-label", `全市场扫描榜单，${columnViewLabel(selected)}列视图`);
+}
+
+function columnViewLabel(value) {
+  return ({ overview: "概览", trend: "趋势", liquidity: "流动性", risk: "风险", research: "研究" })[value] || "概览";
 }
 
 function readRange(minElement, maxElement, minimum, maximum, label) {

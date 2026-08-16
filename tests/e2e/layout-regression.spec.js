@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { marketScanPollingIdentityPayload, workbenchPayload as fixtureWorkbenchPayload } from "./frontend-flow-api-fixtures.mjs";
 
 const VIEWPORTS = [
   {
@@ -643,6 +644,9 @@ function layoutApiPayload(url, request) {
   if (pathname === "/api/discovery/presets") {
     return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
   }
+  if (pathname === "/api/market-scans/polling-identity") {
+    return marketScanPollingIdentityPayload(marketScanRun(), marketScanRun());
+  }
   if (pathname === "/api/market-scans/latest" || pathname === "/api/market-scans/latest-published") {
     return marketScanRun();
   }
@@ -663,50 +667,29 @@ function strongStock(code, name, rank, score) {
 }
 
 function workbenchPayload() {
-  return {
-    analysis: {
-      quote: {
-        code: "600519",
-        market: "SH",
-        name: "贵州茅台",
-        price: 1278.56,
-        change: 12.45,
-        change_pct: 0.98,
-        source: "E2E行情",
-        timestamp: "2026-07-28 15:00:00",
-      },
-      trend_score: 72,
-      trend_label: "趋势偏强，等待确认",
-      action_advice: { action: "观察", confidence: 72 },
-      support: 1248.2,
-      resistance: 1326.8,
-      ma5: 1266.4,
-      ma20: 1239.1,
-      beginner_summary: "当前趋势偏强，但仍需结合支撑、压力与数据质量确认，不宜只依据单一分数追涨。",
-      data_quality: { level: "优秀", score: 94, notes: [] },
-      signal_snapshot: { label: "观察", summary: "等待量价进一步确认" },
-      buy_points: [],
-      sell_points: [],
-      t_plan: [],
-      review: {},
-      klines: [],
-    },
-    insights: {
-      overview: {
-        total_score: 72,
-        total_level: "偏强",
-        main_conflict: "趋势保持向上，但短线位置接近压力区。",
-        beginner_takeaways: ["观察支撑有效性", "避免压力位附近追涨"],
-        key_prices: [],
-        factors: [],
-      },
-    },
-    chart_marks: { marks: [], categories: [] },
-    alert_rules: [],
-    alert_events: [],
-    notes: [],
-    local_data_warnings: [],
-  };
+  const payload = fixtureWorkbenchPayload("600519.SH");
+  Object.assign(payload.analysis, {
+    trend_score: 72,
+    trend_label: "趋势偏强，等待确认",
+    action_advice: { action: "观察", confidence: 72 },
+    support: 1248.2,
+    resistance: 1326.8,
+    ma5: 1266.4,
+    ma20: 1239.1,
+    beginner_summary: "当前趋势偏强，但仍需结合支撑、压力与数据质量确认，不宜只依据单一分数追涨。",
+    buy_points: [],
+    sell_points: [],
+    t_plan: [],
+  });
+  Object.assign(payload.insights.overview, {
+    total_score: 72,
+    total_level: "偏强",
+    main_conflict: "趋势保持向上，但短线位置接近压力区。",
+    beginner_takeaways: ["观察支撑有效性", "避免压力位附近追涨"],
+    key_prices: [],
+    factors: [],
+  });
+  return payload;
 }
 
 function minuteAnalysisPayload(interval) {
@@ -790,6 +773,9 @@ function marketScanRun() {
     updated_at: "2026-07-28 16:35:00",
     started_at: "2026-07-28 16:30:01",
     finished_at: "2026-07-28 16:35:00",
+    snapshot_digest: "a".repeat(64),
+    snapshot_seal_origin: "publication",
+    snapshot_sealed_at: "2026-07-28 16:35:00",
     duration_ms: 299000,
     message: "全市场扫描完成：有效排名 3/3",
     last_error: null,
@@ -829,6 +815,7 @@ function marketScanResult(symbol, name, market, industry, rank, score) {
     status: "success",
     rank,
     score,
+    raw_score: score,
     trend_score: score - 5,
     leader_score: score,
     data_quality_score: 94,
@@ -843,6 +830,7 @@ function marketScanResult(symbol, name, market, industry, rank, score) {
     error: null,
     data_date: "2026-07-28",
     quote_timestamp: "2026-07-28 15:00:00",
+    quote_observed_at: "2026-07-28 15:00:01",
     quote_source: "E2E行情",
     kline_source: "E2E日线",
     adjustment_mode: "qfq",

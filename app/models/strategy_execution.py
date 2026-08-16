@@ -72,6 +72,8 @@ class StrategyExecutionContext(BaseModel):
     execution_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     kind: StrategyExecutionKind
     market_scan_run_id: int = Field(ge=1)
+    source_snapshot_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_snapshot_seal_origin: Literal["publication", "legacy_backfill"]
     rule_version: str
     data_as_of: str
     data_date: str
@@ -128,7 +130,26 @@ class PortfolioDraftSummary(BaseModel):
     estimated_round_trip_cost_cny: float = Field(ge=0, allow_inf_nan=False)
     residual_cash_cny: float = Field(ge=0, allow_inf_nan=False)
     evidence_verified_count: int = Field(ge=0)
+    replacement_attempt_count: int = Field(default=0, ge=0)
+    pool_exhausted: bool = False
+    underinvested_reason: str | None = None
     notes: list[str]
+
+    @model_validator(mode="after")
+    def validate_summary_counts(self) -> Self:
+        if self.evaluated_count != self.selected_count + self.rejected_count + self.unfilled_count:
+            raise ValueError("组合摘要状态计数不能覆盖全部候选")
+        if self.adjusted_count > self.selected_count:
+            raise ValueError("约束调整数量不能大于入选数量")
+        if self.eligible_count < self.selected_count or self.eligible_count > self.evaluated_count:
+            raise ValueError("组合摘要可用候选数量与入选/总数不一致")
+        if self.evidence_verified_count > self.evaluated_count:
+            raise ValueError("组合摘要时点证据数量不能大于候选总数")
+        if self.no_trade != (self.status == "no_trade") or self.no_trade != (self.selected_count == 0):
+            raise ValueError("组合摘要 no_trade、状态与入选数量不一致")
+        if self.no_trade and not self.no_trade_reasons:
+            raise ValueError("无交易组合必须说明原因")
+        return self
 
 
 class PortfolioDraft(BaseModel):
@@ -139,6 +160,26 @@ class PortfolioDraft(BaseModel):
     candidate_total: int = Field(ge=0)
     result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+    @model_validator(mode="after")
+    def validate_draft_binding(self) -> Self:
+        if self.context.status != self.summary.status:
+            raise ValueError("策略执行上下文状态与组合摘要不一致")
+        if len(self.selected) != self.summary.selected_count:
+            raise ValueError("策略执行入选列表数量与摘要不一致")
+        if self.candidate_total != self.summary.evaluated_count:
+            raise ValueError("策略执行候选总数与摘要不一致")
+        if len(self.candidate_preview) > min(100, self.candidate_total):
+            raise ValueError("策略执行候选预览数量超出边界")
+        selected_symbols = [item.symbol for item in self.selected]
+        preview_symbols = [item.symbol for item in self.candidate_preview]
+        if len(selected_symbols) != len(set(selected_symbols)):
+            raise ValueError("策略执行入选股票不能重复")
+        if len(preview_symbols) != len(set(preview_symbols)):
+            raise ValueError("策略执行候选预览股票不能重复")
+        if any(item.status not in {"selected", "constraint_adjusted"} for item in self.selected):
+            raise ValueError("策略执行入选列表包含非入选状态")
+        return self
+
 
 class PortfolioCandidatePage(BaseModel):
     execution_id: int = Field(ge=1)
@@ -148,6 +189,15 @@ class PortfolioCandidatePage(BaseModel):
     page_size: int = Field(ge=1, le=200)
     page_count: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_page_shape(self) -> Self:
+        expected = (self.total + self.page_size - 1) // self.page_size if self.total else 0
+        if self.page_count != expected or len(self.items) > min(self.page_size, self.total):
+            raise ValueError("策略候选分页计数不一致")
+        if len({item.symbol for item in self.items}) != len(self.items):
+            raise ValueError("策略候选分页不能包含重复股票")
+        return self
+
 
 class StrategyExecutionPage(BaseModel):
     items: list[StrategyExecutionContext]
@@ -155,6 +205,15 @@ class StrategyExecutionPage(BaseModel):
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=100)
     page_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_page_shape(self) -> Self:
+        expected = (self.total + self.page_size - 1) // self.page_size if self.total else 0
+        if self.page_count != expected or len(self.items) > min(self.page_size, self.total):
+            raise ValueError("策略执行分页计数不一致")
+        if len({item.execution_id for item in self.items}) != len(self.items):
+            raise ValueError("策略执行分页不能包含重复执行")
+        return self
 
 
 class StrategyExecutionCandidateChange(BaseModel):

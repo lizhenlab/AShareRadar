@@ -48,8 +48,7 @@ def compile_strategy_spec(
     ambiguity_values = list(dict.fromkeys(ambiguities or []))
     blocked_reasons = _blocked_reasons(unsupported, ambiguity_values)
     required_fields = sorted(
-        {expression.source_field for expression in compiled_filters}
-        | _objective_source_fields(normalized.objectives)
+        {expression.source_field for expression in compiled_filters} | _objective_source_fields(normalized.objectives) | _portfolio_source_fields()
     )
     plan = _execution_plan(
         normalized,
@@ -84,9 +83,7 @@ def _compile_all_filters(
 def _compiler_warnings(spec: StrategySpecInput) -> list[str]:
     warnings: list[str] = []
     if spec.exclusions.min_data_quality_score != spec.evidence_policy.minimum_quality_score:
-        warnings.append(
-            "排除规则与证据策略的数据质量阈值不同；执行时采用两者中更严格的阈值，原始配置保持不变"
-        )
+        warnings.append("排除规则与证据策略的数据质量阈值不同；执行时采用两者中更严格的阈值，原始配置保持不变")
     if spec.portfolio_constraints.stock_count > 50:
         warnings.append("候选数量超过50只，组合换手、费用和流动性约束需要重点审计")
     if spec.evidence_policy.allowed_sources:
@@ -120,10 +117,7 @@ def _execution_plan(
         portfolio_summary=_portfolio_summary(spec),
         execution_summary=_execution_summary(spec),
         estimated_universe="当前已上市A股池；实际数量在 dry-run 绑定冻结扫描批次后确定",
-        estimated_work=(
-            f"最多评估全市场冻结结果，应用 {len(filters)} 个确定性条件，"
-            f"形成不超过 {spec.portfolio_constraints.stock_count} 只的研究组合草案"
-        ),
+        estimated_work=(f"最多评估全市场冻结结果，应用 {len(filters)} 个确定性条件，" f"形成不超过 {spec.portfolio_constraints.stock_count} 只的研究组合草案"),
     )
 
 
@@ -144,15 +138,10 @@ def normalize_strategy_spec(spec: StrategySpecInput) -> StrategySpecInput:
     )
     for field in ("allowed_sources", "blocked_sources"):
         payload["evidence_policy"][field] = sorted(payload["evidence_policy"][field])
-    payload["portfolio_constraints"]["custom_weights"] = dict(
-        sorted(payload["portfolio_constraints"]["custom_weights"].items())
-    )
+    payload["portfolio_constraints"]["custom_weights"] = dict(sorted(payload["portfolio_constraints"]["custom_weights"].items()))
     weights = payload["objectives"]
     total = sum(float(value) for value in weights.values())
-    payload["objectives"] = {
-        name: round(float(value) / total, 10)
-        for name, value in weights.items()
-    }
+    payload["objectives"] = {name: round(float(value) / total, 10) for name, value in weights.items()}
     return StrategySpecInput.model_validate(payload)
 
 
@@ -172,10 +161,7 @@ def _compile_filter(item: StrategyHardFilter) -> tuple[StrategyCompiledExpressio
         return None, f"指标 {item.field} 不支持运算符 {item.operator}"
     if metric.allowed_periods:
         if item.period_sessions not in metric.allowed_periods:
-            return None, (
-                f"指标 {item.field} 只支持周期 {metric.allowed_periods}，"
-                f"收到 {item.period_sessions}"
-            )
+            return None, (f"指标 {item.field} 只支持周期 {metric.allowed_periods}，" f"收到 {item.period_sessions}")
     elif item.period_sessions is not None:
         return None, f"指标 {item.field} 不接受周期参数"
     if not _value_matches_kind(item.value, metric.kind):
@@ -235,6 +221,16 @@ def _objective_source_fields(objectives: StrategyObjectives) -> set[str]:
         metric = STRATEGY_METRIC_BY_NAME[name]
         fields.add(metric.source_field)
     return fields
+
+
+def _portfolio_source_fields() -> set[str]:
+    return {
+        "derived.listing_board",
+        "market_scan_result.amount",
+        "market_scan_result.industry",
+        "market_scan_result.price",
+        "market_scan_result.status",
+    }
 
 
 def _objective_order(objectives: StrategyObjectives) -> list[str]:

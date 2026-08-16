@@ -40,7 +40,11 @@ def _rule_volume_breakout(analysis: AnalysisResult, latest_high_20: float, volum
             "只把站稳压力位后的回踩作为确认点。",
             "突破当日若放量过猛，次日承接更关键。",
         ],
-        invalidation=f"跌回压力位 {analysis.resistance:.2f} 下方或量能快速萎缩。",
+        invalidation=(
+            f"跌回压力位 {analysis.resistance:.2f} 下方或量能快速萎缩。"
+            if analysis.resistance_available
+            else "压力位不可用时，仅按20日高点与量能确认该规则。"
+        ),
         evidence=evidence,
         missing_data=_volume_breakout_missing_data(quote.price, latest_high_20, volume_ratio),
     )
@@ -110,7 +114,7 @@ def _rule_break_ma20(analysis: AnalysisResult) -> RuleMatch:
 def _break_ma20_state(analysis: AnalysisResult) -> BreakMa20State:
     config = RULE_PARAMETERS_BY_ID["break_ma20_risk"]
     price = _positive_price_level(analysis.quote.price)
-    ma20 = _positive_price_level(analysis.ma20)
+    ma20 = _positive_price_level(analysis.ma20) if analysis.ma20_available else None
     trend_score = _non_negative_score(analysis.trend_score)
     return BreakMa20State(
         broken=price is not None
@@ -137,13 +141,13 @@ def _break_ma20_confidence(status: str) -> int:
 def _break_ma20_evidence(analysis: AnalysisResult) -> list[str]:
     return [
         _price_level_evidence("现价", analysis.quote.price),
-        _price_level_evidence("20日线", analysis.ma20),
+        _price_level_evidence("20日线", analysis.ma20 if analysis.ma20_available else None),
         _score_evidence("趋势评分", analysis.trend_score),
     ]
 
 
 def _break_ma20_invalidation(analysis: AnalysisResult) -> str:
-    ma20 = _positive_price_level(analysis.ma20)
+    ma20 = _positive_price_level(analysis.ma20) if analysis.ma20_available else None
     if ma20 is None:
         return "缺少有效20日线时不启用该风控信号。"
     return f"重新站上20日线 {ma20:.2f} 且趋势评分回到50以上。"
@@ -153,7 +157,7 @@ def _break_ma20_missing_data(analysis: AnalysisResult) -> list[str]:
     missing_data = []
     if _positive_price_level(analysis.quote.price) is None:
         missing_data.append("现价")
-    if _positive_price_level(analysis.ma20) is None:
+    if not analysis.ma20_available or _positive_price_level(analysis.ma20) is None:
         missing_data.append("20日线")
     if _non_negative_score(analysis.trend_score) is None:
         missing_data.append("趋势评分")

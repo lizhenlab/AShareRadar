@@ -18,9 +18,14 @@ from statistics import fmean, pstdev
 from typing import Literal, Mapping, Sequence, cast
 
 from app.models.market import Kline
-from app.models.market_scan import MarketScanMode
+from app.models.market_scan import MARKET_SCAN_MIN_HISTORY_ROWS, MarketScanMode
 from app.models.paper_trading import PaperInstrumentMetadata
 from app.services.indicator_volume import recent_volume_ratio
+from app.services.market_scan_feature_windows import (
+    MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION,
+    snapshot_return_pct,
+    snapshot_skip_return_pct,
+)
 from app.services.paper_trading_rules import resolve_trade_rule_profile
 from app.services.trading_calendar import is_trading_day
 from app.utils.symbols import standard_symbol
@@ -32,9 +37,12 @@ SHADOW_SCORE_ALGORITHM_VERSION = "residual-momentum-volume-lifecycle-v4"
 SHADOW_SCORE_V54_SCHEMA_VERSION = 5
 SHADOW_SCORE_V54_CANDIDATE_VERSION = "full-market-shadow-score-v5.4"
 SHADOW_SCORE_V54_ALGORITHM_VERSION = "multilevel-residual-time-aligned-volume-risk-v1"
+SHADOW_SCORE_V55_SCHEMA_VERSION = 6
+SHADOW_SCORE_V55_CANDIDATE_VERSION = "full-market-shadow-score-v5.5"
+SHADOW_SCORE_V55_ALGORITHM_VERSION = "bounded-gated-residual-stability-v1"
 SHADOW_SCORE_RAW_DECIMALS = 6
 SHADOW_SCORE_NOTIONAL = 100_000.0
-SHADOW_SCORE_MIN_HISTORY_ROWS = 61
+SHADOW_SCORE_MIN_HISTORY_ROWS = MARKET_SCAN_MIN_HISTORY_ROWS
 SHADOW_SCORE_MAX_OFFICIAL_CLOSE_GAP_PCT = 0.5
 SHADOW_SCORE_MAX_OFFICIAL_CLOSE_GAP_ABSOLUTE = 0.02
 SHADOW_SCORE_NORMALIZATION_PRIOR_COUNT = 30
@@ -53,6 +61,7 @@ ShadowScoreVariant = Literal[
     "v5_3_skip5_residual_volume_lifecycle",
     "v5_4_skip5_multilevel_residual",
     "v5_4_skip5_multilevel_residual_volume_lifecycle",
+    "v5_5_bounded_nonlinear_stability",
 ]
 SHADOW_SCORE_VARIANTS: tuple[ShadowScoreVariant, ...] = (
     "v5_full",
@@ -65,6 +74,7 @@ SHADOW_SCORE_VARIANTS: tuple[ShadowScoreVariant, ...] = (
     "v5_3_skip5_residual_volume_lifecycle",
     "v5_4_skip5_multilevel_residual",
     "v5_4_skip5_multilevel_residual_volume_lifecycle",
+    "v5_5_bounded_nonlinear_stability",
 )
 SHADOW_SCORE_RESIDUAL_VARIANTS: frozenset[ShadowScoreVariant] = frozenset(
     {
@@ -73,6 +83,7 @@ SHADOW_SCORE_RESIDUAL_VARIANTS: frozenset[ShadowScoreVariant] = frozenset(
         "v5_3_skip5_residual_volume_lifecycle",
         "v5_4_skip5_multilevel_residual",
         "v5_4_skip5_multilevel_residual_volume_lifecycle",
+        "v5_5_bounded_nonlinear_stability",
     }
 )
 SHADOW_SCORE_SKIP5_VARIANTS: frozenset[ShadowScoreVariant] = frozenset(
@@ -81,6 +92,7 @@ SHADOW_SCORE_SKIP5_VARIANTS: frozenset[ShadowScoreVariant] = frozenset(
         "v5_3_skip5_residual_volume_lifecycle",
         "v5_4_skip5_multilevel_residual",
         "v5_4_skip5_multilevel_residual_volume_lifecycle",
+        "v5_5_bounded_nonlinear_stability",
     }
 )
 SHADOW_SCORE_V54_VARIANTS: frozenset[ShadowScoreVariant] = frozenset(
@@ -89,7 +101,11 @@ SHADOW_SCORE_V54_VARIANTS: frozenset[ShadowScoreVariant] = frozenset(
         "v5_4_skip5_multilevel_residual_volume_lifecycle",
     }
 )
-SHADOW_SCORE_MULTILEVEL_VARIANTS = SHADOW_SCORE_V54_VARIANTS
+SHADOW_SCORE_V55_VARIANTS: frozenset[ShadowScoreVariant] = frozenset(
+    {"v5_5_bounded_nonlinear_stability"}
+)
+SHADOW_SCORE_POINT_IN_TIME_VARIANTS = SHADOW_SCORE_V54_VARIANTS | SHADOW_SCORE_V55_VARIANTS
+SHADOW_SCORE_MULTILEVEL_VARIANTS = SHADOW_SCORE_POINT_IN_TIME_VARIANTS
 
 
 class ShadowScoreReplayError(ValueError):
@@ -181,7 +197,7 @@ def score_shadow_market(
     symbols = [item.symbol for item in items]
     if len(symbols) != len(set(symbols)):
         raise ValueError("影子评分输入包含重复股票")
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         _validate_v54_temporal_context(items)
 
     raw = tuple(_raw_factors(item) for item in items)
@@ -237,13 +253,17 @@ def replay_shadow_score_details(details: Mapping[str, object]) -> float:
     _require_component_range(normalized_trend, 5.0, 95.0, "normalized_trend")
     volume_bounds = _shadow_volume_bounds(variant)
     _require_component_range(volume_delta, *volume_bounds, "volume_confirmation_delta")
+    interaction_delta = _replayed_v55_interaction_delta(inputs, components, normalized_trend, variant)
     parsed_penalties = _validated_replay_penalties(components, variant)
     _verify_replayed_factor_components(inputs, components, volume_delta, parsed_penalties, variant)
     total_penalty = _applied_penalty_total(parsed_penalties, expected_applied)
     persisted_total = _finite(components.get("total_penalty"), "total_penalty")
     if not math.isclose(total_penalty, persisted_total, rel_tol=0, abs_tol=1e-8):
         raise ShadowScoreReplayError("影子评分总扣分无法重放")
-    raw = round(_clamp(normalized_trend + volume_delta - total_penalty, 0.0, 100.0), SHADOW_SCORE_RAW_DECIMALS)
+    raw = round(
+        _clamp(normalized_trend + volume_delta + interaction_delta - total_penalty, 0.0, 100.0),
+        SHADOW_SCORE_RAW_DECIMALS,
+    )
     persisted = _finite(components.get("raw_score"), "raw_score")
     if not math.isclose(raw, persisted, rel_tol=0, abs_tol=10 ** (-SHADOW_SCORE_RAW_DECIMALS)):
         raise ShadowScoreReplayError(f"影子评分重放不一致：{raw} != {persisted}")
@@ -268,7 +288,7 @@ def _validated_shadow_replay_context(
     applied = _mapping(components.get("applied_penalties"), "applied_penalties")
     component_spec = _mapping(spec.get("components"), "spec.components")
     names = ["overextension", "liquidity", "risk"]
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         names.append("tradability")
     expected_applied = {
         name: bool(_mapping(component_spec.get(f"{name}_penalty"), name).get("enabled"))
@@ -289,7 +309,7 @@ def _validated_replay_penalties(
         for name in ("overextension", "liquidity", "risk", "confidence", "special_status")
     }
     maxima = {"overextension": 20.0, "liquidity": 15.0, "risk": 15.0, "confidence": 20.0, "special_status": 8.0}
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         parsed["tradability"] = _finite(penalties.get("tradability"), "tradability")
         maxima["tradability"] = 20.0
     for name, maximum in maxima.items():
@@ -329,8 +349,31 @@ def _verify_replayed_factor_components(
         raise ShadowScoreReplayError("影子评分归一化因子无法从输入重放")
     if any(not _component_isclose(penalties[name], expected) for name, expected in expected_penalties.items()):
         raise ShadowScoreReplayError("影子评分风险扣分无法从输入重放")
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         _verify_v54_replayed_context(inputs, components, volume_delta)
+
+
+def _replayed_v55_interaction_delta(
+    inputs: Mapping[str, object],
+    components: Mapping[str, object],
+    normalized_alpha: float,
+    variant: ShadowScoreVariant,
+) -> float:
+    if variant not in SHADOW_SCORE_V55_VARIANTS:
+        if "bounded_nonlinear_delta" in components or "challenger_evidence" in components:
+            raise ShadowScoreReplayError("旧版影子评分包含未注册的 v5.5 交互证据")
+        return 0.0
+    persisted = _finite(components.get("bounded_nonlinear_delta"), "bounded_nonlinear_delta")
+    _require_component_range(persisted, -6.0, 6.0, "bounded_nonlinear_delta")
+    expected = _v55_challenger_evidence(inputs, normalized_alpha)
+    if dict(_mapping(components.get("challenger_evidence"), "challenger_evidence")) != expected:
+        raise ShadowScoreReplayError("v5.5 有界交互证据无法从冻结输入重放")
+    if not _component_isclose(
+        persisted,
+        _finite(expected["bounded_nonlinear_delta"], "challenger_evidence.bounded_nonlinear_delta"),
+    ):
+        raise ShadowScoreReplayError("v5.5 有界交互增量无法重放")
+    return persisted
 
 
 def _verify_v54_replayed_context(
@@ -399,7 +442,7 @@ def _applied_penalty_total(penalties: Mapping[str, float], applied: Mapping[str,
 
 
 def _shadow_volume_bounds(variant: ShadowScoreVariant) -> tuple[float, float]:
-    if variant == "v5_4_skip5_multilevel_residual":
+    if variant in {"v5_4_skip5_multilevel_residual", "v5_5_bounded_nonlinear_stability"}:
         return (0.0, 0.0)
     if variant in {
         "v5_3_skip5_residual_volume_lifecycle",
@@ -534,14 +577,14 @@ def market_scan_shadow_score_spec(
         "purpose": "read-only-shadow-research-not-production",
         "inputs": _shadow_input_spec(variant),
         "normalization": _shadow_normalization_spec(variant),
-        "components": _shadow_component_spec(_shadow_enabled_penalties(variant)),
+        "components": _shadow_component_spec(_shadow_enabled_penalties(variant), variant),
         "final_score": _shadow_final_score_spec(variant),
         "promotion": "forbidden-without-independent-session-evidence",
     }
 
 
 def _shadow_enabled_penalties(variant: ShadowScoreVariant) -> dict[str, bool]:
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         return {
             "overextension": True,
             "risk": True,
@@ -561,9 +604,11 @@ def _shadow_input_spec(variant: ShadowScoreVariant) -> dict[str, object]:
         "price_history": "qfq_daily_rows_not_after_data_date",
         "snapshot_quote": "persisted_market_scan_result",
         "minimum_history_rows": SHADOW_SCORE_MIN_HISTORY_ROWS,
+        "price_window_contract": MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION,
         "return60_reference": "close_60_completed_sessions_before_snapshot_price",
         "change_pct_source": "derived_from_snapshot_price_and_previous_completed_close",
         "volume_ratio_source": "derived_from_validated-qfq-history",
+        "intraday_volume_policy": "neutralize-without-time-aligned-intraday-volume",
         "volume_ratio_windows": {
             "recent": SHADOW_SCORE_VOLUME_RATIO_RECENT_WINDOW,
             "base": SHADOW_SCORE_VOLUME_RATIO_BASE_WINDOW,
@@ -571,7 +616,7 @@ def _shadow_input_spec(variant: ShadowScoreVariant) -> dict[str, object]:
         "duplicate_bar_policy": "reject_conflicting-same-date-bars",
         "notional": SHADOW_SCORE_NOTIONAL,
     }
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         spec.update(
             {
                 "scan_mode": "persisted-run-mode",
@@ -579,6 +624,16 @@ def _shadow_input_spec(variant: ShadowScoreVariant) -> dict[str, object]:
                 "intraday_volume_policy": "neutralize-without-time-aligned-intraday-volume",
             }
         )
+    if variant in SHADOW_SCORE_V55_VARIANTS:
+        spec["challenger_inputs"] = (
+            "normalized_skip5_multilevel_residual_rank; skip5_return20/55; ma20_slope10; completed-volume-ratio; "
+            "range_position20; turnover; notional_to_amount; frozen-confidence-penalty"
+        )
+        spec["challenger_limitations"] = [
+            "industry_breadth_not_available_in_v55",
+            "industry_effect_limited_to_existing_multilevel_residualization",
+            "no_peer_network_or_holdings_inputs",
+        ]
     return spec
 
 
@@ -615,6 +670,16 @@ def _shadow_normalization_spec(variant: ShadowScoreVariant) -> dict[str, object]
 
 
 def _shadow_final_score_spec(variant: ShadowScoreVariant) -> dict[str, object]:
+    if variant == "v5_5_bounded_nonlinear_stability":
+        return {
+            "formula": "normalized_alpha + bounded_nonlinear_delta - overextension-risk-confidence-special_status-tradability_penalties",
+            "bounded_nonlinear_delta": [-6.0, 6.0],
+            "volume_policy": "not-used-direct-v5.4-base",
+            "training_claim": "none-deterministic-preregistered-shadow-challenger",
+            "clamp": [0, 100],
+            "raw_decimals": SHADOW_SCORE_RAW_DECIMALS,
+            "tie_break": [["raw_score", "desc"], ["symbol", "asc"]],
+        }
     if variant == "v5_4_skip5_multilevel_residual":
         return {
             "formula": "normalized_alpha - overextension-risk-confidence-special_status-tradability_penalties",
@@ -644,10 +709,15 @@ def _shadow_final_score_spec(variant: ShadowScoreVariant) -> dict[str, object]:
     }
 
 
-def _shadow_component_spec(enabled: Mapping[str, bool]) -> dict[str, object]:
+def _shadow_component_spec(
+    enabled: Mapping[str, bool],
+    variant: ShadowScoreVariant,
+) -> dict[str, object]:
     components = _base_shadow_components(enabled)
     if enabled["tradability"]:
         components.update(_v54_shadow_components())
+    if variant in SHADOW_SCORE_V55_VARIANTS:
+        components.update(_v55_shadow_components())
     return components
 
 
@@ -723,15 +793,59 @@ def _v54_shadow_components() -> dict[str, object]:
     }
 
 
+def _v55_shadow_components() -> dict[str, object]:
+    return {
+        "bounded_nonlinear_interaction": {
+            "role": "bounded-shadow-alpha-delta",
+            "bounds": [-6.0, 6.0],
+            "cross_sectional_residual_strength": "clamp((normalized_alpha-50)/45,-1,1)",
+            "stability_gate": (
+                "0.60*clamp(1-pstdev(short,medium,slope)/0.75,0,1)"
+                "+0.40*abs(mean(short,medium,slope))"
+            ),
+            "implementability_gate": "clamp(1-0.55*crowding_risk-0.45*capacity_risk,0,1)",
+            "formula": (
+                "clamp(6*tanh(1.5*cross_sectional_residual_strength)*(0.35+0.65*stability_gate)"
+                "*quality_gate*(implementability_gate if cross_sectional_residual_strength>0 else 1),-6,6)"
+            ),
+            "negative_residual_policy": (
+                "implementability-gate-not-applied-to-negative-delta; conservative-downside-penalty"
+            ),
+            "limitations": [
+                "industry_breadth_not_available_in_v55",
+                "industry_effect_limited_to_existing_multilevel_residualization",
+                "no_peer_network_or_holdings_inputs",
+            ],
+            "training_claim": "none-deterministic-paper-inspired-interaction",
+        },
+        "crowding_risk": {
+            "bounds": [0.0, 1.0],
+            "formula": "0.45*turnover_extreme+0.35*completed_volume_surge+0.20*range_crowding",
+            "role": "positive-alpha-gate-only",
+        },
+        "capacity_risk": {
+            "bounds": [0.0, 1.0],
+            "formula": "unit(notional_to_amount,0.2%,1.0%)",
+            "role": "positive-alpha-gate-only",
+        },
+    }
+
+
 def _shadow_schema_version(variant: ShadowScoreVariant) -> int:
+    if variant in SHADOW_SCORE_V55_VARIANTS:
+        return SHADOW_SCORE_V55_SCHEMA_VERSION
     return SHADOW_SCORE_V54_SCHEMA_VERSION if variant in SHADOW_SCORE_V54_VARIANTS else SHADOW_SCORE_SCHEMA_VERSION
 
 
 def _shadow_candidate_version(variant: ShadowScoreVariant) -> str:
+    if variant in SHADOW_SCORE_V55_VARIANTS:
+        return SHADOW_SCORE_V55_CANDIDATE_VERSION
     return SHADOW_SCORE_V54_CANDIDATE_VERSION if variant in SHADOW_SCORE_V54_VARIANTS else SHADOW_SCORE_CANDIDATE_VERSION
 
 
 def _shadow_algorithm_version(variant: ShadowScoreVariant) -> str:
+    if variant in SHADOW_SCORE_V55_VARIANTS:
+        return SHADOW_SCORE_V55_ALGORITHM_VERSION
     return SHADOW_SCORE_V54_ALGORITHM_VERSION if variant in SHADOW_SCORE_V54_VARIANTS else SHADOW_SCORE_ALGORITHM_VERSION
 
 
@@ -746,7 +860,7 @@ def _raw_factors(item: ShadowScoreInput) -> _RawFactors:
     current = float(item.price)
     ma5, ma20, ma60 = fmean(closes[-5:]), fmean(closes[-20:]), fmean(closes[-60:])
     derived_change_pct = _snapshot_change_pct(item, rows, current)
-    momentum = _momentum_components(closes, current, ma20)
+    momentum = _momentum_components(closes, current, ma20, mode=item.mode)
     return20, return60, skip5_return20, skip5_return55 = momentum[:4]
     ma20_slope10, trend, skip5_momentum, return5 = momentum[4:]
     atr20 = _atr(rows[-21:])
@@ -805,11 +919,23 @@ def _momentum_components(
     closes: Sequence[float],
     current: float,
     ma20: float,
+    *,
+    mode: MarketScanMode,
 ) -> tuple[float, float, float, float, float, float, float, float]:
-    return20 = _pct_change(current, closes[-21])
-    return60 = _pct_change(current, closes[-61])
-    skip5_return20 = _pct_change(closes[-6], closes[-26])
-    skip5_return55 = _pct_change(closes[-6], closes[-61])
+    return20 = snapshot_return_pct(current, closes, horizon=20, mode=mode)
+    return60 = snapshot_return_pct(current, closes, horizon=60, mode=mode)
+    skip5_return20 = snapshot_skip_return_pct(
+        closes,
+        skip_sessions=5,
+        lookback_sessions=20,
+        mode=mode,
+    )
+    skip5_return55 = snapshot_skip_return_pct(
+        closes,
+        skip_sessions=5,
+        lookback_sessions=55,
+        mode=mode,
+    )
     slope = _pct_change(ma20, fmean(closes[-30:-10]))
     trend = 100 * (
         0.45 * _unit(return20, -15, 25)
@@ -821,7 +947,16 @@ def _momentum_components(
         + 0.35 * _unit(skip5_return55, -25, 50)
         + 0.10 * _unit(slope, -8, 12)
     )
-    return return20, return60, skip5_return20, skip5_return55, slope, trend, skip5, _pct_change(current, closes[-6])
+    return (
+        return20,
+        return60,
+        skip5_return20,
+        skip5_return55,
+        slope,
+        trend,
+        skip5,
+        snapshot_return_pct(current, closes, horizon=5, mode=mode),
+    )
 
 
 def _volume_components(
@@ -886,7 +1021,7 @@ def _risk_penalty(
     downside = [value for value in returns[-20:] if value < 0]
     downside_vol = pstdev(downside) * 100 if len(downside) >= 2 else 0.0
     drawdown = abs(min(0.0, _max_drawdown(closes[-60:]))) * 100
-    gap_rows = rows[-61:]
+    gap_rows = rows[-SHADOW_SCORE_MIN_HISTORY_ROWS:]
     gaps = [abs(_return(float(row.open), float(previous.close))) for previous, row in zip(gap_rows[:-1], gap_rows[1:], strict=True)]
     gap_frequency = sum(value >= 0.03 for value in gaps) / len(gaps) if gaps else 0.0
     risk = _risk_penalty_from_metrics(atr_pct, downside_vol, drawdown, gap_frequency)
@@ -972,6 +1107,8 @@ def _replay_factor_components(
     inputs: Mapping[str, object],
     variant: ShadowScoreVariant,
 ) -> tuple[float, float, float, float, dict[str, float]]:
+    if inputs.get("price_window_contract") != MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION:
+        raise ShadowScoreReplayError("影子评分价格窗口契约不一致")
     trend, skip5 = _replay_momentum_components(inputs)
     volume_delta, lifecycle = _replay_volume_components(inputs)
     return trend, skip5, volume_delta, lifecycle, _replay_penalties(inputs, variant)
@@ -983,7 +1120,9 @@ def _replayed_applied_volume_delta(
     base_volume_delta: float,
     lifecycle_delta: float,
 ) -> float:
-    if variant == "v5_4_skip5_multilevel_residual":
+    if inputs.get("mode") == "intraday":
+        return 0.0
+    if variant in {"v5_4_skip5_multilevel_residual", "v5_5_bounded_nonlinear_stability"}:
         return 0.0
     if variant == "v5_4_skip5_multilevel_residual_volume_lifecycle":
         return lifecycle_delta if inputs.get("mode") in {"official", "preopen"} else 0.0
@@ -1079,7 +1218,7 @@ def _replay_penalties(
         "confidence": round(_clamp(confidence, 0, 20), 8),
         "special_status": round(special, 8),
     }
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         penalties["tradability"] = round(
             _tradability_penalty(
                 amount=_finite(inputs.get("amount"), "amount"),
@@ -1136,6 +1275,7 @@ def _factor_inputs(
         "derived_volume_ratio": derived_volume_ratio,
         "volume_ratio_absolute_gap": round(abs(item.volume_ratio - derived_volume_ratio), 8),
         "mode": item.mode,
+        "price_window_contract": MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION,
         "market": item.market.upper(),
         "industry": _normalized_industry(item.industry),
         "liquidity_bucket": _shadow_liquidity_bucket(item.amount),
@@ -1377,8 +1517,9 @@ def _score_one(
 ) -> ShadowScoreResult:
     penalties, applied, total_penalty = _applied_score_penalties(factors, variant)
     volume_delta = _applied_volume_delta(factors, variant)
+    interaction_delta = _v55_interaction_delta(factors.inputs, normalized_trend, variant)
     raw_score = round(
-        _clamp(normalized_trend + volume_delta - total_penalty, 0, 100),
+        _clamp(normalized_trend + volume_delta + interaction_delta - total_penalty, 0, 100),
         SHADOW_SCORE_RAW_DECIMALS,
     )
     details = _score_details(
@@ -1419,7 +1560,7 @@ def _applied_score_penalties(
         "confidence": factors.confidence_penalty,
         "special_status": factors.special_status_penalty,
     }
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         penalties["tradability"] = factors.tradability_penalty
     applied = (
         enabled["overextension"], enabled["liquidity"], enabled["risk"], enabled["tradability"],
@@ -1493,6 +1634,11 @@ def _shadow_score_components(
         factors.skip5_momentum if variant in SHADOW_SCORE_SKIP5_VARIANTS else factors.trend_continuation
     )
     applied_volume_delta = _applied_volume_delta(factors, variant)
+    challenger_evidence = (
+        _v55_challenger_evidence(factors.inputs, normalized_trend)
+        if variant in SHADOW_SCORE_V55_VARIANTS
+        else None
+    )
     components: dict[str, object] = {
         "raw_trend_continuation": factors.trend_continuation,
         "raw_skip5_momentum": factors.skip5_momentum,
@@ -1507,13 +1653,16 @@ def _shadow_score_components(
             "overextension": apply_overextension,
             "liquidity": apply_liquidity,
             "risk": apply_risk,
-            **({"tradability": apply_tradability} if variant in SHADOW_SCORE_V54_VARIANTS else {}),
+            **({"tradability": apply_tradability} if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS else {}),
         },
         "total_penalty": round(total_penalty, 8),
         "raw_score": raw_score,
         "score": round(raw_score),
     }
-    if variant in SHADOW_SCORE_V54_VARIANTS:
+    if challenger_evidence is not None:
+        components["bounded_nonlinear_delta"] = challenger_evidence["bounded_nonlinear_delta"]
+        components["challenger_evidence"] = challenger_evidence
+    if variant in SHADOW_SCORE_POINT_IN_TIME_VARIANTS:
         components["explicit_constraints"] = {
             "flags": list(factors.constraint_flags),
             "clear": not factors.constraint_flags,
@@ -1529,8 +1678,109 @@ def _shadow_score_components(
     return components
 
 
+def _v55_interaction_delta(
+    inputs: Mapping[str, object],
+    normalized_alpha: float,
+    variant: ShadowScoreVariant,
+) -> float:
+    if variant not in SHADOW_SCORE_V55_VARIANTS:
+        return 0.0
+    evidence = _v55_challenger_evidence(inputs, normalized_alpha)
+    return float(cast(float, evidence["bounded_nonlinear_delta"]))
+
+
+def _v55_challenger_evidence(inputs: Mapping[str, object], normalized_alpha: float) -> dict[str, object]:
+    residual_strength = _clamp((normalized_alpha - 50.0) / 45.0, -1.0, 1.0)
+    stability_inputs = (
+        _clamp(_finite(inputs.get("skip5_return20_pct"), "skip5_return20_pct") / 25.0, -1.0, 1.0),
+        _clamp(_finite(inputs.get("skip5_return55_pct"), "skip5_return55_pct") / 50.0, -1.0, 1.0),
+        _clamp(_finite(inputs.get("ma20_slope10_pct"), "ma20_slope10_pct") / 12.0, -1.0, 1.0),
+    )
+    coherence = _clamp(1.0 - pstdev(stability_inputs) / 0.75, 0.0, 1.0)
+    directional_strength = abs(fmean(stability_inputs))
+    stability_gate = _clamp(0.60 * coherence + 0.40 * directional_strength, 0.0, 1.0)
+    turnover_heat = _unit(_finite(inputs.get("turnover_rate"), "turnover_rate"), 15.0, 35.0)
+    volume_surge = _unit(_finite(inputs.get("derived_volume_ratio"), "derived_volume_ratio"), 1.5, 4.0)
+    range_crowding = _unit(_finite(inputs.get("range_position20"), "range_position20"), 0.85, 1.0)
+    crowding_risk = _clamp(0.45 * turnover_heat + 0.35 * volume_surge + 0.20 * range_crowding, 0.0, 1.0)
+    notional_to_amount = _finite(inputs.get("notional_to_amount"), "notional_to_amount")
+    capacity_risk = _unit(notional_to_amount, 0.002, 0.01)
+    confidence_penalty = _replay_penalties(inputs, "v5_5_bounded_nonlinear_stability")["confidence"]
+    quality_gate = _clamp(1.0 - confidence_penalty / 20.0, 0.0, 1.0)
+    implementability_gate = _clamp(1.0 - 0.55 * crowding_risk - 0.45 * capacity_risk, 0.0, 1.0)
+    delta = _v55_bounded_delta(
+        residual_strength, stability_gate, quality_gate, implementability_gate,
+    )
+    return {
+        "formula_version": SHADOW_SCORE_V55_ALGORITHM_VERSION,
+        "input_digest": _v55_challenger_input_digest(inputs, normalized_alpha),
+        "cross_sectional_residual_strength": round(residual_strength, 8),
+        "residual_interpretation": (
+            "rank-after-market-board-industry-liquidity-residualization-not-industry-breadth"
+        ),
+        "stability": {
+            "short_skip5_strength": round(stability_inputs[0], 8),
+            "medium_skip5_strength": round(stability_inputs[1], 8),
+            "slope_strength": round(stability_inputs[2], 8),
+            "coherence": round(coherence, 8),
+            "directional_strength": round(directional_strength, 8),
+            "gate": round(stability_gate, 8),
+        },
+        "crowding": {
+            "turnover_heat": round(turnover_heat, 8),
+            "completed_volume_surge": round(volume_surge, 8),
+            "range_crowding": round(range_crowding, 8),
+            "risk": round(crowding_risk, 8),
+        },
+        "capacity": {
+            "notional_to_amount": round(notional_to_amount, 10),
+            "risk": round(capacity_risk, 8),
+        },
+        "quality_gate": round(quality_gate, 8),
+        "implementability_gate": round(implementability_gate, 8),
+        "positive_residual_gate_applied": residual_strength > 0,
+        "negative_residual_policy": (
+            "implementability-gate-not-applied-to-negative-delta; conservative-downside-penalty"
+        ),
+        "bounded_nonlinear_delta": round(delta, 8),
+        "bounds": [-6.0, 6.0],
+        "training_claim": "none-deterministic-paper-inspired-interaction",
+    }
+
+
+def _v55_bounded_delta(
+    residual_strength: float,
+    stability_gate: float,
+    quality_gate: float,
+    implementability_gate: float,
+) -> float:
+    positive_residual_gate = implementability_gate if residual_strength > 0 else 1.0
+    return _clamp(
+        6.0 * math.tanh(1.5 * residual_strength) * (0.35 + 0.65 * stability_gate)
+        * quality_gate * positive_residual_gate,
+        -6.0,
+        6.0,
+    )
+
+
+def _v55_challenger_input_digest(inputs: Mapping[str, object], normalized_alpha: float) -> str:
+    keys = (
+        "skip5_return20_pct", "skip5_return55_pct", "ma20_slope10_pct", "turnover_rate",
+        "derived_volume_ratio", "range_position20", "notional_to_amount", "data_quality_score",
+        "history_rows", "quote_fallback_used", "kline_fallback_used", "metadata_degraded",
+    )
+    payload = {
+        "normalized_alpha": round(normalized_alpha, 8),
+        "inputs": {key: inputs.get(key) for key in keys},
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _applied_volume_delta(factors: _RawFactors, variant: ShadowScoreVariant) -> float:
-    if variant == "v5_4_skip5_multilevel_residual":
+    if factors.item.mode == "intraday":
+        return 0.0
+    if variant in {"v5_4_skip5_multilevel_residual", "v5_5_bounded_nonlinear_stability"}:
         return 0.0
     if variant == "v5_4_skip5_multilevel_residual_volume_lifecycle":
         return (
@@ -1666,9 +1916,13 @@ def _validate_official_close_consistency(
 
 
 def _snapshot_change_pct(item: ShadowScoreInput, rows: Sequence[Kline], current: float) -> float:
-    data_date, quote_date = _snapshot_dates(item)
-    reference = float(rows[-2].close) if quote_date == data_date else float(rows[-1].close)
-    return _pct_change(current, reference)
+    _snapshot_dates(item)
+    return snapshot_return_pct(
+        current,
+        [float(row.close) for row in rows],
+        horizon=1,
+        mode=item.mode,
+    )
 
 
 def _bar_signature(row: Kline) -> tuple[float, float, float, float, float, str]:
@@ -1898,6 +2152,9 @@ __all__ = [
     "SHADOW_SCORE_MIN_HISTORY_ROWS",
     "SHADOW_SCORE_SCHEMA_VERSION",
     "SHADOW_SCORE_VARIANTS",
+    "SHADOW_SCORE_V55_ALGORITHM_VERSION",
+    "SHADOW_SCORE_V55_CANDIDATE_VERSION",
+    "SHADOW_SCORE_V55_SCHEMA_VERSION",
     "ShadowScoreBatch",
     "ShadowScoreInput",
     "ShadowScoreReplayError",

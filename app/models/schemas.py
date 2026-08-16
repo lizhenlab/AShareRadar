@@ -116,6 +116,7 @@ from app.models.user_data import (
     AdviceTimelineItem,
 )
 from app.models.reviews import (
+    AdviceReviewBatchEvaluationRequest,
     AdviceReviewConclusion,
     AdviceReviewDetail,
     AdviceReviewEvaluation,
@@ -291,6 +292,7 @@ __all__ = [
     "AdviceComparisonStatus",
     "AdviceTimelineChange",
     "AdviceTimelineItem",
+    "AdviceReviewBatchEvaluationRequest",
     "AdviceReviewConclusion",
     "AdviceReviewDetail",
     "AdviceReviewEvaluation",

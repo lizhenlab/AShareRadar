@@ -44,6 +44,8 @@ def test_architecture_inventory_includes_tooling_modules() -> None:
     assert "## Python Function Health" in inventory
     assert "#### `tools/api_inventory.py`" in inventory
     assert "`collect_endpoints`" in inventory
+    assert "#### `app/market_scan_repository_contracts.py`" in inventory
+    assert "Explicit re-export facade (`__all__`)" in inventory
 
 
 def test_architecture_inventory_source_collection_matches_config() -> None:
@@ -88,7 +90,7 @@ def test_api_inventory_documents_business_api_scope() -> None:
     assert "query `include_research: bool = True`" in rendered
     assert "`generation_status`/`artifact`/`research`/`record_page` wrapper" in rendered
     assert "response: Response" not in rendered
-    assert "POST | `/api/reviews/plans/{plan_id}/evaluate` | path `plan_id: int`<br>body `payload: AdviceReviewEvaluationRequest \\| None`" in rendered
+    assert "POST | `/api/reviews/plans/{plan_id}/evaluate` | path `plan_id: int`<br>body `payload: AdviceReviewEvaluationRequest`" in rendered
     assert "`503`: provider, runtime, scheduler, or SQLite failures" in rendered
     assert "`GET /api/stream/quotes` returns `text/event-stream`" in rendered
 

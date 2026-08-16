@@ -56,13 +56,17 @@ function abortHistory({ state }) {
   state.historyRequestSeq += 1;
 }
 
-async function selectHistoryRun(context) {
+function selectHistoryRun(context) {
+  return transitionHistory(context, () => selectHistoryRunOwned(context));
+}
+
+async function selectHistoryRunOwned(context) {
   const { state, view } = context;
   const runId = view.selectedHistoryRunId();
   state.selectedHistoryRunId = runId;
   if (runId === null) {
     context.applyPublishedRun(null);
-    return context.loadLatest();
+    return context.loadLatestOwned({ forceTrusted: true, renderLoading: true });
   }
   const run = state.historyRuns.find((item) => item.id === runId) || null;
   if (!run) {
@@ -70,10 +74,14 @@ async function selectHistoryRun(context) {
     return null;
   }
   context.applyPublishedRun(run);
-  return context.loadResults();
+  return context.loadResultsOwned();
 }
 
-async function changeHistoryMode(context) {
+function changeHistoryMode(context) {
+  return transitionHistory(context, () => changeHistoryModeOwned(context));
+}
+
+async function changeHistoryModeOwned(context) {
   const { state, view } = context;
   const mode = view.selectedMode();
   if (mode === state.browseMode) return null;
@@ -81,16 +89,29 @@ async function changeHistoryMode(context) {
   state.selectedHistoryRunId = null;
   state.historyRuns = [];
   context.applyPublishedRun(null);
-  context.abortResults();
-  return Promise.all([context.loadLatest(), loadHistory(context)]);
+  return Promise.all([
+    context.loadLatestOwned({ forceTrusted: true, renderLoading: true }),
+    loadHistory(context),
+  ]);
 }
 
-async function refreshHistory(context) {
+function refreshHistory(context) {
+  return transitionHistory(context, (owner) => refreshHistoryOwned(context, owner));
+}
+
+async function refreshHistoryOwned(context, owner) {
   context.state.selectedHistoryRunId = null;
   context.applyPublishedRun(null);
   const history = await loadHistory(context);
-  await context.loadLatest();
+  if (!owner.isCurrent()) return null;
+  await context.loadLatestOwned({ forceTrusted: true, renderLoading: true });
   return history;
+}
+
+function transitionHistory(context, operation) {
+  context.clearPolling();
+  abortHistory(context);
+  return context.transitionReads(operation);
 }
 
 function historyQuery(filters, mode) {

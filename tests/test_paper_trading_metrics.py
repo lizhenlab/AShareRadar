@@ -146,6 +146,7 @@ def _strategy(strategy_id: int, *, realized_pnl: float) -> PaperStrategy:
         id=strategy_id,
         plan_id=strategy_id,
         plan_revision=1,
+        plan_payload_digest="a" * 64,
         advice_id=strategy_id,
         symbol=f"600{strategy_id:03d}.SH",
         activation_market_time="2026-01-01 09:30:00",
@@ -178,6 +179,7 @@ def _run(*, configuration: dict[str, object], cost_profile_id: str) -> PaperTrad
             "data_unavailable_count": 0,
             "configuration": configuration,
             "message": "test",
+            "output_digest": "b" * 64,
             "created_at": "2026-01-10 16:00:00",
         }
     )

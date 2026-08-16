@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 import threading
 
 import pytest
 
 from app.workflows.stock_analysis import (
+    _completed_daily_klines,
     _peer_quote_sample_or_fallback,
     _peer_sample_info,
     _optional_plate_rank,
     _safe_quote_history,
-    _safe_save_advice_snapshot,
     analyze_individual_stock,
 )
-from tests.factories import make_plate_item, make_quote, make_stock_info
+from tests.factories import make_kline, make_plate_item, make_quote, make_stock_info
 
 
 def test_stale_plate_cache_is_not_used_as_current_industry_strength() -> None:
@@ -35,6 +36,20 @@ def test_stale_plate_cache_is_not_used_as_current_industry_strength() -> None:
 
     assert rows == []
     assert any("不参与强度评分" in message for _category, message in hub.cache.events)
+
+
+def test_interactive_daily_rows_exclude_unpublished_current_session(monkeypatch) -> None:
+    klines = [
+        make_kline(date="2026-08-11"),
+        make_kline(date="2026-08-12"),
+    ]
+    monkeypatch.setattr(
+        "app.workflows.stock_analysis.latest_expected_daily_kline_date",
+        lambda: date(2026, 8, 11),
+    )
+
+    assert [row.date for row in _completed_daily_klines(klines, "intraday")] == ["2026-08-11"]
+    assert _completed_daily_klines(klines, "official") == klines
 
 
 def test_peer_sample_stock_pool_failure_reaches_analysis_contract() -> None:
@@ -74,10 +89,6 @@ def test_analysis_cache_failures_and_logs_run_off_event_loop_thread() -> None:
             self.calls.append(("quote_history", threading.get_ident()))
             raise RuntimeError("history db unavailable")
 
-        def save_advice_snapshot(self, analysis: object) -> None:
-            self.calls.append(("save_advice_snapshot", threading.get_ident()))
-            raise RuntimeError("advice db unavailable")
-
         def log_event(self, category: str, message: str) -> None:
             self.calls.append(("log_event", threading.get_ident()))
             self.events.append((category, message))
@@ -88,7 +99,6 @@ def test_analysis_cache_failures_and_logs_run_off_event_loop_thread() -> None:
         hub = type("Hub", (), {"cache": cache})()
         event_loop_thread = threading.get_ident()
         history = await _safe_quote_history(hub, "600519.SH")  # type: ignore[arg-type]
-        await _safe_save_advice_snapshot(hub, object(), "600519.SH")  # type: ignore[arg-type]
         return cache, history, event_loop_thread
 
     cache, history, event_loop_thread = asyncio.run(run_check())
@@ -97,11 +107,9 @@ def test_analysis_cache_failures_and_logs_run_off_event_loop_thread() -> None:
     assert [operation for operation, _thread_id in cache.calls] == [
         "quote_history",
         "log_event",
-        "save_advice_snapshot",
-        "log_event",
     ]
     assert all(thread_id != event_loop_thread for _operation, thread_id in cache.calls)
-    assert len(cache.events) == 2
+    assert len(cache.events) == 1
 
 
 def test_analysis_required_child_cancellation_propagates() -> None:

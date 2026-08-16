@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.models.analysis import AnalysisResult
 from app.models.research import (
     AlphaEvidenceReport,
     EvidenceChainReport,
@@ -7,9 +8,11 @@ from app.models.research import (
     SignalValidationReport,
     StockDiagnosis,
 )
+from app.utils.symbols import standard_symbol
 
 
 def build_evidence_chain_report(
+    analysis: AnalysisResult,
     diagnosis: StockDiagnosis,
     alpha: AlphaEvidenceReport,
     validation: SignalValidationReport,
@@ -20,6 +23,8 @@ def build_evidence_chain_report(
     confirmations = [*diagnosis.confirmation_signals[:3], *[f"{item.name}：{item.confirmation_condition}" for item in validation.items[:2]]]
     invalidations = [*diagnosis.hard_risks[:3], f"风险收益降为「{risk_reward.rating}」且收益风险比低于 1.2。"]
     return EvidenceChainReport(
+        symbol=standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}"),
+        updated_at=analysis.quote.timestamp,
         verdict=alpha.verdict,
         summary=f"当前结论「{diagnosis.action}」不是单一指标给出，而是由证据、验证闭环和风险收益共同约束。",
         support=support or ["暂未形成足够强的正向证据。"],

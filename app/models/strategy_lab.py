@@ -67,9 +67,7 @@ class StrategyHardFilter(_StrictModel):
     @model_validator(mode="after")
     def validate_operator_value_shape(self) -> Self:
         is_list = isinstance(self.value, list)
-        if self.operator == "between" and (
-            not isinstance(self.value, list) or len(self.value) != 2
-        ):
+        if self.operator == "between" and (not isinstance(self.value, list) or len(self.value) != 2):
             raise ValueError("between 过滤条件必须提供两个边界值")
         if self.operator == "in" and (not is_list or not self.value):
             raise ValueError("in 过滤条件必须提供非空列表")
@@ -217,8 +215,11 @@ class StrategySpecInput(_StrictModel):
     def validate_profile_objectives(self) -> Self:
         if self.profile == "custom" and "objectives" not in self.model_fields_set:
             raise ValueError("custom 策略画像必须显式提供 objectives")
-        if self.profile != "custom" and "objectives" not in self.model_fields_set:
-            self.objectives = strategy_profile_objectives(self.profile)
+        if self.profile != "custom":
+            expected = strategy_profile_objectives(self.profile)
+            if "objectives" in self.model_fields_set and self.objectives != expected:
+                raise ValueError("命名策略画像不能覆盖固定目标权重；请改用 custom")
+            self.objectives = expected
         return self
 
     @field_validator("name", "description")
@@ -231,10 +232,7 @@ class StrategySpecInput(_StrictModel):
     @field_validator("hard_filters")
     @classmethod
     def validate_unique_filters(cls, value: list[StrategyHardFilter]) -> list[StrategyHardFilter]:
-        identities = [
-            (item.field, item.operator, item.period_sessions, repr(item.value))
-            for item in value
-        ]
+        identities = [(item.field, item.operator, item.period_sessions, repr(item.value)) for item in value]
         if len(identities) != len(set(identities)):
             raise ValueError("硬过滤条件不能重复")
         return value
@@ -271,6 +269,7 @@ def strategy_profile_objectives(profile: StrategyProfile) -> StrategyObjectives:
     if profile == "custom":
         raise ValueError("custom 策略画像没有隐式目标权重")
     return StrategyObjectives.model_validate(presets[profile])
+
 
 class StrategySpecCreate(_StrictModel):
     spec: StrategySpecInput

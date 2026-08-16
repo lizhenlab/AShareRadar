@@ -11,6 +11,7 @@ from statistics import fmean
 from typing import Literal, cast
 
 from app.services.market_scan_probability import (
+    LEGACY_PROBABILITY_FEATURE_VERSION,
     PROBABILITY_CALIBRATOR_VERSION,
     PROBABILITY_COST_MODEL_VERSION,
     PROBABILITY_FEATURE_VERSION,
@@ -43,7 +44,7 @@ PROBABILITY_MAXIMUM_REVIEW_ECE = 0.08
 ProbabilityPublicTarget = Literal["net_excess_positive", "absolute_net_positive"]
 _ArtifactCohortEvidence = dict[
     tuple[str, int, str],
-    tuple[Mapping[str, object], Mapping[str, object]],
+    tuple[Mapping[str, object], Mapping[str, object], Mapping[str, object]],
 ]
 
 
@@ -57,9 +58,12 @@ class ProbabilityResearchRow:
     mature_horizons: frozenset[int]
     dimensions: Mapping[str, str]
     source_evidence_digest: str | None = None
+    source_integrity_digest: str | None = None
     mode: str = "unspecified"
     scope: str = "unspecified"
     rule_version: str = "unspecified"
+    production_score_rule_version: str | None = None
+    production_score_spec_hash: str | None = None
 
 
 def probability_feature_vector(
@@ -74,6 +78,7 @@ def probability_feature_vector(
     market_strength: float = 50.0,
     board_relative_strength: float = 0.0,
     industry_relative_strength: float = 0.0,
+    feature_version: str = PROBABILITY_FEATURE_VERSION,
 ) -> dict[str, float]:
     """Build the registered finite feature vector from scan-time-only values."""
     features = {
@@ -107,7 +112,11 @@ def probability_feature_vector(
         ),
         **_status_and_limit_features(values, board, segment),
     }
-    features.update(_categorical_features(market, board, liquidity, regime, industry))
+    features.update(
+        _categorical_features(
+            market, board, liquidity, regime, industry, feature_version=feature_version,
+        )
+    )
     return features
 
 
@@ -187,9 +196,9 @@ def _build_cohort_research(
 def _isolated_cohort_rows(
     rows: Sequence[ProbabilityResearchRow],
 ) -> list[tuple[dict[str, str], tuple[ProbabilityResearchRow, ...]]]:
-    grouped: dict[tuple[str, str, str], list[ProbabilityResearchRow]] = defaultdict(list)
-    run_contracts: dict[int, tuple[str, str, str]] = {}
-    cohort_sessions: dict[tuple[tuple[str, str, str], str], int] = {}
+    grouped: dict[tuple[str, str, str, str, str], list[ProbabilityResearchRow]] = defaultdict(list)
+    run_contracts: dict[int, tuple[str, str, str, str, str]] = {}
+    cohort_sessions: dict[tuple[tuple[str, str, str, str, str], str], int] = {}
     for row in rows:
         key = _cohort_key(row)
         previous_contract = run_contracts.setdefault(row.run_id, key)
@@ -206,13 +215,15 @@ def _isolated_cohort_rows(
     ]
 
 
-def _cohort_key(row: ProbabilityResearchRow) -> tuple[str, str, str]:
+def _cohort_key(row: ProbabilityResearchRow) -> tuple[str, str, str, str, str]:
     return tuple(
         _nonempty_cohort_value(value, name)
         for value, name in (
             (row.mode, "mode"),
             (row.scope, "scope"),
             (row.rule_version, "rule_version"),
+            (row.production_score_rule_version or "legacy_unbound", "production_score_rule_version"),
+            (row.production_score_spec_hash or "legacy_unbound", "production_score_spec_hash"),
         )
     )  # type: ignore[return-value]
 
@@ -224,8 +235,15 @@ def _nonempty_cohort_value(value: str, name: str) -> str:
     return normalized
 
 
-def _cohort_contract(key: tuple[str, str, str]) -> dict[str, str]:
-    return dict(zip(("mode", "scope", "rule_version"), key, strict=True))
+def _cohort_contract(key: tuple[str, str, str, str, str]) -> dict[str, str]:
+    return dict(zip(("mode", "scope", "rule_version"), key[:3], strict=True))
+
+
+def _row_score_contract(row: ProbabilityResearchRow) -> dict[str, object]:
+    return {
+        "production_score_rule_version": row.production_score_rule_version,
+        "production_score_spec_hash": row.production_score_spec_hash,
+    }
 
 
 def _cohort_payload(
@@ -233,19 +251,35 @@ def _cohort_payload(
     rows: Sequence[ProbabilityResearchRow],
     horizons: Mapping[str, object],
 ) -> dict[str, object]:
-    identity = {
+    score_contract = _row_score_contract(rows[0])
+    identity: dict[str, object] = {
         "cohort_contract": dict(contract),
         "run_ids": sorted({row.run_id for row in rows}),
         "session_dates": sorted({row.session_date for row in rows}),
         "horizon_evidence_digests": _cohort_evidence_digests(horizons),
     }
+    if _current_production_score_contract(score_contract):
+        identity["production_score_contract"] = score_contract
     return {
         **identity,
+        "production_score_contract": score_contract,
         "cohort_digest": stable_probability_hash(identity),
         "status": "calibrated_shadow" if _any_calibrated(horizons) else "insufficient_data",
         "observation_count": len(rows),
         "horizons": dict(horizons),
     }
+
+
+def _current_production_score_contract(value: Mapping[str, object]) -> bool:
+    rule = value.get("production_score_rule_version")
+    digest = value.get("production_score_spec_hash")
+    return bool(
+        isinstance(rule, str)
+        and rule
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    )
 
 
 def _cohort_evidence_digests(horizons: Mapping[str, object]) -> dict[str, object]:
@@ -263,9 +297,15 @@ def _attach_cohort_evidence(
     cohort: Mapping[str, object],
 ) -> list[dict[str, object]]:
     contract = dict(cast(Mapping[str, object], cohort["cohort_contract"]))
+    score_contract = dict(cast(Mapping[str, object], cohort["production_score_contract"]))
     digest = str(cohort["cohort_digest"])
     return [
-        {**dict(record), "cohort_contract": contract, "cohort_digest": digest}
+        {
+            **dict(record),
+            "cohort_contract": contract,
+            "production_score_contract": score_contract,
+            "cohort_digest": digest,
+        }
         for record in records
     ]
 
@@ -314,6 +354,7 @@ def _cohort_target_summary(
     promotion = evidence.get("promotion_gates")
     return {
         "cohort_contract": cohort["cohort_contract"],
+        "production_score_contract": cohort["production_score_contract"],
         "cohort_digest": cohort["cohort_digest"],
         "status": evidence.get("status") or "insufficient_data",
         "counts": evidence.get("counts") or {},
@@ -368,8 +409,14 @@ def _artifact_cohort_evidence(research: Mapping[str, object]) -> _ArtifactCohort
         cohort = _artifact_mapping(raw_cohort)
         digest = str(cohort.get("cohort_digest") or "")
         contract = cohort.get("cohort_contract")
+        score_contract = cohort.get("production_score_contract")
         horizons = cohort.get("horizons")
-        if len(digest) != 64 or not isinstance(contract, Mapping) or not isinstance(horizons, Mapping):
+        if (
+            len(digest) != 64
+            or not isinstance(contract, Mapping)
+            or not isinstance(score_contract, Mapping)
+            or not isinstance(horizons, Mapping)
+        ):
             raise ValueError("probability research cohort identity is invalid")
         for horizon, targets in horizons.items():
             if not isinstance(targets, Mapping):
@@ -377,21 +424,25 @@ def _artifact_cohort_evidence(research: Mapping[str, object]) -> _ArtifactCohort
             for target, evidence in targets.items():
                 if not isinstance(evidence, Mapping):
                     raise ValueError("probability research cohort evidence is invalid")
-                output[(digest, int(horizon), str(target))] = evidence, contract
+                output[(digest, int(horizon), str(target))] = evidence, contract, score_contract
     return output
 
 
 def _record_cohort_evidence(
     record: Mapping[str, object],
     cohort_evidence: _ArtifactCohortEvidence,
-) -> tuple[Mapping[str, object], Mapping[str, object]]:
+) -> tuple[Mapping[str, object], Mapping[str, object], Mapping[str, object]]:
     key = (
         str(record.get("cohort_digest") or ""),
         _artifact_integer(record["horizon"]),
         str(record["target"]),
     )
     selected = cohort_evidence.get(key)
-    if selected is None or record.get("cohort_contract") != selected[1]:
+    if (
+        selected is None
+        or record.get("cohort_contract") != selected[1]
+        or record.get("production_score_contract") != selected[2]
+    ):
         raise ValueError("probability record cohort evidence is missing or conflicting")
     return selected
 
@@ -422,7 +473,7 @@ def _artifact_feature_evidence(
         dimensions = value.get("dimensions")
         if not isinstance(vector, list) or not isinstance(dimensions, Mapping):
             continue
-        evidence, _contract = _record_cohort_evidence(value, cohort_evidence)
+        evidence, _contract, _score_contract = _record_cohort_evidence(value, cohort_evidence)
         names = evidence.get("feature_names")
         if not isinstance(names, list) or len(names) != len(vector):
             raise ValueError("probability canonical feature evidence is incomplete")
@@ -456,11 +507,11 @@ def _artifact_study(
     artifact_set_run_ids: Sequence[int],
 ) -> dict[str, object]:
     run_id, target, horizon = key
-    if not records:
-        raise ValueError("probability artifact study has no records")
-    evidence, cohort_contract = _record_cohort_evidence(records[0], cohort_evidence)
-    if any(_record_cohort_evidence(value, cohort_evidence)[0] is not evidence for value in records[1:]):
-        raise ValueError("probability artifact study mixes cohort evidence")
+    evidence, cohort_contract, score_contract = _consistent_artifact_cohort_evidence(
+        records,
+        cohort_evidence,
+    )
+    source_digest = _consistent_artifact_source_digest(records)
     cohort_digest = str(records[0]["cohort_digest"])
     calibrated = any(item.get("status") == "calibrated_shadow" for item in records)
     status = "calibrated_shadow" if calibrated else "insufficient_data"
@@ -478,6 +529,12 @@ def _artifact_study(
         "metadata": {
             **dict(evidence),
             "cohort_contract": dict(cohort_contract),
+            "production_score_contract": dict(score_contract),
+            **(
+                {"source_integrity_digest": source_digest}
+                if source_digest is not None
+                else {}
+            ),
             "cohort_digest": cohort_digest,
             "artifact_set_run_ids": list(artifact_set_run_ids),
             "run_record_count": len(records),
@@ -486,16 +543,48 @@ def _artifact_study(
     }
 
 
+def _consistent_artifact_cohort_evidence(
+    records: Sequence[Mapping[str, object]],
+    cohort_evidence: _ArtifactCohortEvidence,
+) -> tuple[Mapping[str, object], Mapping[str, object], Mapping[str, object]]:
+    if not records:
+        raise ValueError("probability artifact study has no records")
+    resolved = _record_cohort_evidence(records[0], cohort_evidence)
+    if any(
+        _record_cohort_evidence(value, cohort_evidence)[0] is not resolved[0]
+        for value in records[1:]
+    ):
+        raise ValueError("probability artifact study mixes cohort evidence")
+    return resolved
+
+
+def _consistent_artifact_source_digest(
+    records: Sequence[Mapping[str, object]],
+) -> str | None:
+    source_digests = {value.get("source_integrity_digest") for value in records}
+    if len(source_digests) != 1:
+        raise ValueError("probability artifact study mixes source archive digests")
+    source_digest = next(iter(source_digests))
+    return (
+        _verified_artifact_digest(source_digest)
+        if source_digest is not None
+        else None
+    )
+
+
 def _artifact_record(
     value: Mapping[str, object],
     study: Mapping[str, object],
     feature_evidence: Mapping[str, object],
 ) -> dict[str, object]:
-    interval = value.get("confidence_interval")
-    bounds = None
-    if isinstance(interval, Mapping):
-        bounds = [interval.get("lower"), interval.get("upper")]
-    identity = {"run_id", "symbol", "target", "horizon", "status", "probability", "confidence_interval"}
+    bias = _artifact_interval_bounds(value.get("calibration_bias_interval"))
+    adjusted = _artifact_interval_bounds(
+        value.get("calibration_adjusted_probability_interval"),
+    )
+    identity = {
+        "run_id", "symbol", "target", "horizon", "status", "probability",
+        "calibration_bias_interval", "calibration_adjusted_probability_interval",
+    }
     details = {key: item for key, item in value.items() if key not in identity}
     for compact_name in ("feature_values", "feature_evidence_role", "feature_evidence_reference", "dimensions"):
         details.pop(compact_name, None)
@@ -507,9 +596,16 @@ def _artifact_record(
         "horizon": value["horizon"],
         "status": value["status"],
         "probability": value.get("probability"),
-        "confidence_interval": bounds,
+        "calibration_bias_interval": bias,
+        "calibration_adjusted_probability_interval": adjusted,
         "details": details,
     }
+
+
+def _artifact_interval_bounds(value: object) -> list[object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return [value.get("lower"), value.get("upper")]
 
 
 def _self_contained_record_evidence(
@@ -797,10 +893,10 @@ def _probability_record(
         "probability": estimate.get("probability"),
         "raw_probability": estimate.get("raw_probability"),
         "empirical_bayes_probability": estimate.get("empirical_bayes_probability"),
-        "confidence_interval": _confidence_interval(estimate),
-        "confidence_interval_definition": estimate.get("confidence_interval_definition"),
+        **_record_calibration_intervals(estimate),
         "feature_vector_digest": stable_probability_hash(row.features),
         "source_evidence_digest": row.source_evidence_digest,
+        "source_integrity_digest": row.source_integrity_digest,
         "observed_label": _target_value(target, net_return, net_excess),
         "label_status": outcome.status if outcome is not None else "data_unavailable",
         "label_reason": outcome.reason if outcome is not None else "label_missing",
@@ -817,6 +913,22 @@ def _probability_record(
         "exit_date": outcome.exit_date if outcome is not None else None,
         **_record_feature_evidence(row, horizon, target),
         **_record_common_evidence(evidence, limitations),
+    }
+
+
+def _record_calibration_intervals(
+    estimate: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "calibration_bias_interval": _calibration_interval(
+            estimate, "calibration_bias_interval", signed=True,
+        ),
+        "calibration_adjusted_probability_interval": _calibration_interval(
+            estimate, "calibration_adjusted_probability_interval", signed=False,
+        ),
+        "calibration_adjusted_probability_interval_definition": (
+            "calibration_adjusted_probability_interval_from_signed_bias_95pct"
+        ),
     }
 
 
@@ -842,12 +954,12 @@ def _row_estimate(
     persisted_predictions: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
     if evidence.get("status") != "calibrated_shadow":
-        return {"status": "insufficient_data", "probability": None, "confidence_interval": None}
+        return _unavailable_row_estimate()
     persisted = persisted_predictions.get(sample_id)
     if persisted is not None:
         return _persisted_oos_estimate(evidence, persisted)
     if test_end is None or row.session_date <= test_end:
-        return {"status": "insufficient_data", "probability": None, "confidence_interval": None}
+        return _unavailable_row_estimate()
     return predict_shadow_probability(evidence, row.features, sample_id=sample_id)
 
 
@@ -863,11 +975,20 @@ def _persisted_oos_estimate(
         "probability": probability,
         "raw_probability": prediction.get("raw_probability"),
         "empirical_bayes_probability": prediction.get("baseline_probability"),
-        "confidence_interval": [
+        "calibration_bias_interval": offset,
+        "calibration_adjusted_probability_interval": [
             min(1.0, max(0.0, probability + offset[0])),
             min(1.0, max(0.0, probability + offset[1])),
         ],
-        "confidence_interval_definition": "oos_session_block_bootstrap_calibration_offset_95pct",
+    }
+
+
+def _unavailable_row_estimate() -> dict[str, object]:
+    return {
+        "status": "insufficient_data",
+        "probability": None,
+        "calibration_bias_interval": None,
+        "calibration_adjusted_probability_interval": None,
     }
 
 
@@ -1378,7 +1499,7 @@ def _research_payload(
         "production_ranking_effect": "none",
         "automatic_promotion": False,
         "limitations": [
-            "Shadow 研究结果不参与 full-market-score-v4 排名、分数或回放。",
+            "Shadow 研究结果不会回写或改变来源批次的生产评分、排名或回放。",
             "日K无法复原盘口排队和盘中成交先后；不可成交与模型受限状态不会被假定为成交。",
             "缺少可验证扫描时点证据的特征不会进入模型训练、校准或测试。",
         ],
@@ -1395,15 +1516,25 @@ def _test_end_date(evidence: Mapping[str, object]) -> str | None:
     return str(dates[-1]) if isinstance(dates, list) and dates else None
 
 
-def _confidence_interval(estimate: Mapping[str, object]) -> dict[str, object] | None:
-    values = estimate.get("confidence_interval")
+def _calibration_interval(
+    estimate: Mapping[str, object], name: str, *, signed: bool,
+) -> dict[str, object] | None:
+    values = estimate.get(name)
     if not isinstance(values, list) or len(values) != 2:
         return None
     return {
         "level": 0.95,
         "lower": values[0],
         "upper": values[1],
-        "method": estimate.get("confidence_interval_definition") or "date_block_bootstrap",
+        "method": (
+            "date_block_bootstrap_signed_calibration_bias"
+            if signed else "date_block_bootstrap_calibration_adjusted_probability"
+        ),
+        "semantics": (
+            "signed_observed_rate_minus_probability_bias"
+            if signed
+            else "calibration_adjusted_probability_interval_not_individual_outcome_interval"
+        ),
     }
 
 
@@ -1503,8 +1634,17 @@ def _status_and_limit_features(
 
 
 def _categorical_features(
-    market: str, board: str, liquidity: str, regime: str, industry: str,
+    market: str,
+    board: str,
+    liquidity: str,
+    regime: str,
+    industry: str,
+    *,
+    feature_version: str,
 ) -> dict[str, float]:
+    if feature_version not in {PROBABILITY_FEATURE_VERSION, LEGACY_PROBABILITY_FEATURE_VERSION}:
+        raise ValueError("unsupported probability feature schema version")
+    medium_bucket = "medium" if feature_version == PROBABILITY_FEATURE_VERSION else "mid"
     features = {
         "market_sh": float(market == "SH"),
         "market_sz": float(market == "SZ"),
@@ -1515,7 +1655,7 @@ def _categorical_features(
         "board_chinext": float(board == "CHINEXT"),
         "board_bse": float(board == "BSE"),
         "liquidity_high": float(liquidity == "high"),
-        "liquidity_mid": float(liquidity == "mid"),
+        "liquidity_mid": float(liquidity == medium_bucket),
         "liquidity_low": float(liquidity == "low"),
         "regime_strong": float(regime == "strong"),
         "regime_neutral": float(regime == "neutral"),

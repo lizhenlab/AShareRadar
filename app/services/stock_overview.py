@@ -145,7 +145,12 @@ def _overview_scores(
     events: StockEventSummary,
 ) -> OverviewScores:
     factors = _overview_factors(analysis, fund_flow, order_pressure, events)
-    factor_score = round(sum(_bounded_score(item.score) for item in factors) / len(factors))
+    participating = [item for item in factors if item.score_available and item.participates_in_total_score]
+    factor_score = (
+        round(sum(_bounded_score(item.score) for item in participating) / len(participating))
+        if participating
+        else 50
+    )
     signal_quality_score = _signal_quality_score(analysis)
     total_score = _quality_adjusted_total_score(analysis, factor_score, signal_quality_score)
     return OverviewScores(factors=factors, factor_score=factor_score, signal_quality_score=signal_quality_score, total_score=total_score)
@@ -228,14 +233,18 @@ def _key_prices(analysis: AnalysisResult) -> list[KeyPriceLevel]:
         ("支撑位", support, "跌破后当前趋势判断需要降级。"),
         ("压力位", resistance, "放量突破后才算右侧确认。"),
         ("5日线", _positive_price(analysis.ma5), "短线强弱的第一观察线。"),
-        ("20日线", _positive_price(analysis.ma20), "波段风控的重要参考线。"),
+        (
+            "20日线",
+            _positive_price(analysis.ma20) if analysis.ma20_available else None,
+            "波段风控的重要参考线。",
+        ),
     ]
     return [KeyPriceLevel(label=label, price=price, note=note) for label, price, note in candidates if price is not None]
 
 
 def _normalized_support_resistance(analysis: AnalysisResult) -> tuple[float | None, float | None]:
-    support = _positive_price(analysis.support)
-    resistance = _positive_price(analysis.resistance)
+    support = _positive_price(analysis.support) if analysis.support_available else None
+    resistance = _positive_price(analysis.resistance) if analysis.resistance_available else None
     if support is not None and resistance is not None and support > resistance:
         return resistance, support
     return support, resistance
@@ -247,7 +256,8 @@ def _technical_factor(analysis: AnalysisResult) -> FactorScore:
     evidence = _unique_strings(
         [
             f"趋势评分 {trend_score}/100，状态为{trend_label}。",
-            f"现价 {_display_price(analysis.quote.price)}，5日线 {_display_price(analysis.ma5)}，20日线 {_display_price(analysis.ma20)}。",
+            f"现价 {_display_price(analysis.quote.price)}，5日线 {_display_price(analysis.ma5)}，"
+            f"20日线 {_display_price(analysis.ma20 if analysis.ma20_available else None)}。",
             *(_signal_contribution_evidence(item) for item in _top_signal_contributions(analysis)),
         ]
     )
@@ -279,13 +289,19 @@ def _signal_contribution_evidence(item: object) -> str | None:
 
 def _fund_factor(fund_flow: FundFlowAnalysis) -> FactorScore:
     score = _bounded_score(fund_flow.overall_score)
+    fallback_nature = "derived" if getattr(fund_flow, "available", False) else "unavailable"
+    available = bool(getattr(fund_flow, "available", False)) and getattr(fund_flow, "data_nature", fallback_nature) != "unavailable"
     return FactorScore(
         name="量价热度（衍生）",
         score=score,
         level=score_level(score),
         summary=_clean_text(fund_flow.price_volume_relation) or "量价关系待确认",
         evidence=_unique_strings(getattr(item, "summary", None) for item in (getattr(fund_flow, "windows", []) or [])),
-        missing_data=[] if getattr(fund_flow, "available", False) else ["逐笔大单/特大单资金流"],
+        missing_data=[] if available else ["逐笔大单/特大单资金流"],
+        score_available=available,
+        data_nature="derived" if available else "unavailable",
+        participates_in_total_score=available,
+        unavailable_reason=None if available else "量价热度证据不可用",
     )
 
 
@@ -295,6 +311,7 @@ def _fundamental_factor(analysis: AnalysisResult) -> FactorScore:
     missing = _unique_strings(item.missing_data for item in parts)
     score = FUNDAMENTAL_BASE_SCORE + sum(item.score_adjustment for item in parts)
     score = clamp_score(score)
+    available = _fundamental_score_available(analysis)
     return FactorScore(
         name="基本面",
         score=score,
@@ -302,7 +319,15 @@ def _fundamental_factor(analysis: AnalysisResult) -> FactorScore:
         summary="估值字段可用" if evidence else "基础财务数据待接入",
         evidence=evidence or ["当前只有行情字段，财报指标待接入。"],
         missing_data=missing,
+        score_available=available,
+        data_nature="derived" if available else "unavailable",
+        participates_in_total_score=available,
+        unavailable_reason=None if available else "PE/PB 评分证据均不可用",
     )
+
+
+def _fundamental_score_available(analysis: AnalysisResult) -> bool:
+    return any((value := finite_float(item)) is not None and value > 0 for item in (analysis.quote.pe, analysis.quote.pb))
 
 
 def _fundamental_parts(analysis: AnalysisResult) -> list[FundamentalFieldResult]:
@@ -357,18 +382,28 @@ def _valuation_metric_part(value: float | None, spec: ValuationMetricSpec) -> Fu
 
 def _event_factor(events: StockEventSummary) -> FactorScore:
     event_items = _unique_event_items(getattr(events, "events", []))
-    risk_count = sum(1 for item in event_items if _event_level(item) == "风险")
-    positive_count = sum(1 for item in event_items if _event_level(item) == "积极")
+    scorable_items = [item for item in event_items if _event_score_available(item)]
+    risk_count = sum(1 for item in scorable_items if _event_level(item) == "风险")
+    positive_count = sum(1 for item in scorable_items if _event_level(item) == "积极")
     score = clamp_score(58 + positive_count * 8 - risk_count * 10)
     notes = _unique_strings(getattr(events, "notes", []) or [])
+    available = bool(scorable_items)
     return FactorScore(
         name="事件面",
         score=score,
         level=score_level(score),
-        summary="事件偏积极" if positive_count > risk_count else "事件需观察" if event_items else "暂无事件",
+        summary="事件偏积极" if positive_count > risk_count else "事件需观察" if available else "暂无可评分事件",
         evidence=_unique_strings(_event_evidence(item) for item in event_items[:4]),
         missing_data=["公告全文", "研报摘要", "龙虎榜"] if notes else [],
+        score_available=available,
+        data_nature="derived" if available else "unavailable",
+        participates_in_total_score=available,
+        unavailable_reason=None if available else "仅有数据质量/观察提醒，没有可评分事件",
     )
+
+
+def _event_score_available(item: object) -> bool:
+    return (_clean_text(getattr(item, "category", None)) or "事件") not in {"数据", "观察"}
 
 
 def _event_level(item: object) -> str | None:
@@ -413,7 +448,8 @@ def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> Fac
         risk_score += 30
     elif risk_level == "中等风险":
         risk_score += 18
-    if _contains_text(order_pressure.pressure_level, "卖压"):
+    pressure_available = _order_pressure_evidence_available(order_pressure)
+    if pressure_available and _contains_text(order_pressure.pressure_level, "卖压"):
         risk_score += 10
     if confidence < LOW_SIGNAL_CONFIDENCE_THRESHOLD:
         risk_score += 10
@@ -426,7 +462,7 @@ def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> Fac
         evidence=_unique_strings(
             [
                 analysis.action_advice.reason,
-                order_pressure.summary,
+                order_pressure.summary if pressure_available else "盘口证据不可用，订单压力不参与风险评分。",
                 f"信号证据充分度 {confidence}/100，数据质量 {data_quality_score} 分。",
             ]
         ),
@@ -459,7 +495,13 @@ def _fund_flow_score(fund_flow: FundFlowAnalysis) -> int:
 
 
 def _fund_flow_available(fund_flow: FundFlowAnalysis) -> bool:
-    return bool(getattr(fund_flow, "available", True))
+    fallback_nature = "derived" if getattr(fund_flow, "available", False) else "unavailable"
+    return bool(getattr(fund_flow, "available", False)) and getattr(fund_flow, "data_nature", fallback_nature) != "unavailable"
+
+
+def _order_pressure_evidence_available(order_pressure: OrderPressure) -> bool:
+    fallback_nature = "observed" if getattr(order_pressure, "available", False) else "unavailable"
+    return getattr(order_pressure, "data_nature", fallback_nature) != "unavailable"
 
 
 def _has_weak_data_quality(context: MainConflictContext) -> bool:
@@ -487,7 +529,10 @@ def _has_strong_trend_weak_fund_flow(context: MainConflictContext) -> bool:
 
 
 def _has_order_sell_pressure(context: MainConflictContext) -> bool:
-    return _contains_text(context.order_pressure.pressure_level, "卖压")
+    return _order_pressure_evidence_available(context.order_pressure) and _contains_text(
+        context.order_pressure.pressure_level,
+        "卖压",
+    )
 
 
 MAIN_CONFLICT_RULES = (
@@ -525,7 +570,7 @@ def _risk_triggers(analysis: AnalysisResult, order_pressure: OrderPressure) -> l
         _ma20_break_trigger(analysis),
         "数据质量降为“一般”以下",
     ]
-    if _contains_text(order_pressure.pressure_level, "卖压"):
+    if _order_pressure_evidence_available(order_pressure) and _contains_text(order_pressure.pressure_level, "卖压"):
         triggers.append("盘口卖压持续强于买盘")
     if _unique_strings(getattr(analysis.data_quality, "anomalies", []) or []):
         triggers.append("行情字段异常未修复")
@@ -539,5 +584,5 @@ def _support_break_trigger(analysis: AnalysisResult) -> str:
 
 
 def _ma20_break_trigger(analysis: AnalysisResult) -> str:
-    ma20 = _price_text(analysis.ma20)
+    ma20 = _price_text(analysis.ma20) if analysis.ma20_available else None
     return f"收盘跌破20日线 {ma20}" if ma20 else "20日线缺失，先等待均线重算"

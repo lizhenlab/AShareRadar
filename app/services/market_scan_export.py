@@ -14,6 +14,10 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+from app.market_scan_screening import (
+    screen_spec_digest,
+    screen_spec_from_market_scan_filters,
+)
 from app.models.market_scan import (
     MarketScanResultItem,
     MarketScanResultPage,
@@ -21,6 +25,7 @@ from app.models.market_scan import (
     MarketScanSort,
     MarketScanSortOrder,
 )
+from app.models.market_scan_screening import ScreenSpecV2
 from app.utils.time import datetime_to_text
 
 
@@ -72,7 +77,9 @@ _DETAIL_COLUMNS: Final = (
     ("批次 ID", 10), ("股票代码", 12), ("交易所代码", 15), ("最终分", 10),
     ("原始排名分", 15), ("趋势分", 10), ("龙头分", 10), ("数据质量", 12),
     ("龙头基础分", 14), ("趋势增减分", 14), ("规则增减分", 42), ("质量扣分", 12),
-    ("扣分前基础分", 16), ("精排综合值", 14), ("精排组成", 48), ("精排扣分", 12),
+    ("扣分前基础分", 16), ("连续趋势/旧精排值", 20),
+    ("连续趋势/旧精排组成", 54),
+    ("基础分调整（旧版为负精排扣分）", 30),
     ("Tie-break 规则", 34), ("Tie-break 值", 34), ("规则版本", 34), ("规则哈希", 66),
     ("1日Alpha", 12), ("5日Alpha", 12), ("20日Alpha", 12), ("置信度", 12),
     ("风险分", 12), ("可交易性", 12), ("稳健效用", 12), ("均衡效用", 12), ("进取效用", 12),
@@ -83,9 +90,11 @@ _PROBABILITY_HORIZONS: Final = (1, 5, 20)
 _PROBABILITY_TARGETS: Final = ("net_excess_positive", "absolute_net_positive")
 _PROBABILITY_COLUMNS: Final = (
     ("批次 ID", 10), ("股票代码", 12), ("交易所代码", 15), ("股票名称", 18),
-    ("周期(日)", 10), ("目标", 22), ("状态", 20), ("概率", 12),
-    ("CI 下限", 12), ("CI 上限", 12), ("CI 水平", 12), ("基础胜率", 12),
-    ("版本", 52), ("训练截止", 14), ("Digests", 68), ("局限", 60),
+    ("持有周期(交易日)", 18), ("目标退出日", 12), ("目标", 22), ("状态", 20),
+    ("概率", 12), ("有符号校准偏差下限", 22), ("有符号校准偏差上限", 22),
+    ("校准调整概率下限", 20), ("校准调整概率上限", 20), ("区间水平", 12),
+    ("区间口径", 58), ("基础胜率", 12), ("版本", 52), ("训练截止", 14),
+    ("Digests", 68), ("局限", 60),
 )
 _PROBABILITY_LAST_COLUMN: Final = get_column_letter(len(_PROBABILITY_COLUMNS))
 _FUTURE_RANGE_COLUMNS: Final = (
@@ -304,7 +313,13 @@ def _score_detail_row(item: MarketScanResultItem) -> list[object]:
     components = _mapping(details.get("components"))
     leader = _mapping(components.get("leader_score"))
     final_score = _mapping(components.get("final_score"))
-    refinement = _mapping(components.get("rank_refinement"))
+    continuous_trend = _mapping(components.get("continuous_trend"))
+    if not continuous_trend:
+        continuous_trend = _mapping(components.get("rank_refinement"))
+    score_adjustment = final_score.get("continuous_trend_adjustment")
+    if score_adjustment is None:
+        legacy_rank_discount = _finite_number(final_score.get("rank_discount"))
+        score_adjustment = -legacy_rank_discount if legacy_rank_discount is not None else None
     ranking = _mapping(details.get("ranking"))
     dimensions = _mapping(components.get("score_dimensions"))
     dimension_scores = _mapping(dimensions.get("scores"))
@@ -315,8 +330,8 @@ def _score_detail_row(item: MarketScanResultItem) -> list[object]:
         item.raw_score, item.trend_score, item.leader_score, item.data_quality_score,
         _finite_number(leader.get("base")), _finite_number(leader.get("trend_delta")),
         _safe_json(leader.get("rule_deltas")), _finite_number(final_score.get("quality_penalty")),
-        _finite_number(final_score.get("base")), _finite_number(refinement.get("score")),
-        _safe_json(refinement.get("weighted_terms")), _finite_number(final_score.get("rank_discount")),
+        _finite_number(final_score.get("base")), _finite_number(continuous_trend.get("score")),
+        _safe_json(continuous_trend.get("weighted_terms")), _finite_number(score_adjustment),
         _safe_json(ranking.get("tie_break")), _safe_json(ranking.get("tie_break_values")),
         _safe_text(details.get("run_rule_version")), _safe_text(details.get("score_spec_hash")),
         _finite_number(dimension_scores.get("alpha_1d")),
@@ -366,7 +381,11 @@ def _populate_probability_sheet(sheet, page: MarketScanResultPage) -> None:
 
 
 def _probability_rows(page: MarketScanResultPage) -> Iterator[list[object]]:
-    research_horizons = _mapping(_mapping(page.probability_research).get("horizons"))
+    research = _mapping(page.probability_research)
+    binding = _mapping(research.get("run_binding"))
+    if binding.get("binding_status") != "verified" or binding.get("legacy") is not False:
+        return
+    research_horizons = _mapping(research.get("horizons"))
     for item in page.items:
         item_horizons = _mapping(item.upside_probabilities)
         for horizon in _PROBABILITY_HORIZONS:
@@ -374,6 +393,11 @@ def _probability_rows(page: MarketScanResultPage) -> Iterator[list[object]]:
             studies = _mapping(research_horizons.get(str(horizon)))
             for target in _PROBABILITY_TARGETS:
                 record = _target_mapping(records, target)
+                if (
+                    record.get("status") != "calibrated_shadow"
+                    or _probability_number(record.get("probability")) is None
+                ):
+                    continue
                 study = _target_mapping(studies, target)
                 yield _probability_row(item, horizon, target, record, study)
 
@@ -387,15 +411,25 @@ def _probability_row(
 ) -> list[object]:
     status = _safe_text(record.get("status") or "not_generated")
     probability = _probability_number(record.get("probability")) if status == "calibrated_shadow" else None
-    lower, upper, level = _probability_interval(record.get("confidence_interval"), probability)
+    bias_lower, bias_upper, level = _calibration_bias_interval(
+        record.get("calibration_bias_interval"), probability,
+    )
+    adjusted_lower, adjusted_upper, adjusted_level = _probability_interval(
+        record.get("calibration_adjusted_probability_interval"), probability,
+    )
+    if level != adjusted_level:
+        bias_lower = bias_upper = adjusted_lower = adjusted_upper = level = None
     base_rate = _probability_number(record.get("base_rate") if "base_rate" in record else study.get("base_rate"))
     versions = _probability_versions(record, study)
     digests = _probability_digests(record, study)
     limitations = record.get("limitations") if "limitations" in record else study.get("limitations")
     return [
         item.run_id, _safe_text(item.code.zfill(6)), _safe_text(item.symbol), _safe_text(item.name),
-        horizon, _safe_text(target), status, probability, lower, upper, level, base_rate,
-        _safe_json(versions) if versions else "", _safe_text(record.get("training_cutoff") or study.get("training_cutoff")),
+        horizon, f"D+{horizon + 1}", _safe_text(target), status, probability,
+        bias_lower, bias_upper, adjusted_lower, adjusted_upper, level,
+        "有符号偏差与群体校准调整概率区间；不是个股结果区间",
+        base_rate, _safe_json(versions) if versions else "",
+        _safe_text(record.get("training_cutoff") or study.get("training_cutoff")),
         _safe_json(digests) if digests else "", _safe_text("；".join(_string_values(limitations))),
     ]
 
@@ -403,9 +437,9 @@ def _probability_row(
 def _format_probability_columns(sheet, row_count: int) -> None:
     for row in range(2, row_count + 2):
         sheet.cell(row, 2).number_format = "@"
-        for column in (8, 9, 10, 11, 12):
+        for column in (9, 10, 11, 12, 13, 14, 16):
             sheet.cell(row, column).number_format = "0.00%"
-        for column in (13, 15, 16):
+        for column in (15, 17, 19, 20):
             sheet.cell(row, column).alignment = Alignment(wrap_text=True, vertical="top")
 
 
@@ -654,22 +688,40 @@ def _probability_number(value: object) -> float | None:
 
 
 def _probability_interval(value: object, probability: float | None) -> tuple[float | None, float | None, float | None]:
-    if probability is None:
+    if probability is None or not isinstance(value, dict):
         return None, None, None
-    if isinstance(value, dict):
-        lower, upper, level = value.get("lower"), value.get("upper"), value.get("level", 0.95)
-    elif isinstance(value, list | tuple) and len(value) == 2:
-        lower, upper, level = value[0], value[1], 0.95
-    else:
-        return None, None, None
+    lower, upper, level = value.get("lower"), value.get("upper"), value.get("level")
     lower_number = _probability_number(lower)
     upper_number = _probability_number(upper)
     level_number = _probability_number(level)
     if lower_number is None or upper_number is None or level_number is None:
         return None, None, None
-    if not lower_number <= probability <= upper_number:
+    if (
+        lower_number > upper_number or level_number != 0.95
+        or value.get("method") != "date_block_bootstrap_calibration_offset"
+        or value.get("semantics")
+        != "calibration_adjusted_probability_interval_not_individual_outcome_interval"
+    ):
         return None, None, None
     return lower_number, upper_number, level_number
+
+
+def _calibration_bias_interval(
+    value: object,
+    probability: float | None,
+) -> tuple[float | None, float | None, float | None]:
+    if probability is None or not isinstance(value, dict):
+        return None, None, None
+    lower, upper = _finite_number(value.get("lower")), _finite_number(value.get("upper"))
+    level = _probability_number(value.get("level"))
+    if (
+        lower is None or upper is None or level != 0.95
+        or not -1 <= lower <= upper <= 1
+        or value.get("method") != "date_block_bootstrap_signed_calibration_bias"
+        or value.get("semantics") != "signed_observed_rate_minus_probability_bias"
+    ):
+        return None, None, None
+    return lower, upper, level
 
 
 def _probability_versions(record: dict[str, object], study: dict[str, object]) -> dict[str, object]:
@@ -709,11 +761,15 @@ def _string_values(value: object) -> list[str]:
 
 def _populate_info_sheet(sheet, page: MarketScanResultPage, filters: MarketScanExportFilters, exported_at: datetime) -> None:
     run = page.run
+    screen_spec = _export_screen_spec(filters)
     rows = (
         ("项目", "AShareRadar"), ("导出类型", "全市场A股榜单"), ("批次 ID", run.id),
         ("榜单类型", _MODE_LABELS[run.mode]), ("批次状态", run.status), ("触发方式", run.trigger),
         ("批次基准时间", run.as_of), ("行情日期", run.quote_date),
         ("日K截止日", run.data_date), ("扫描完成时间", _text_or(run.finished_at, "--")), ("规则版本", run.rule_version),
+        ("快照摘要", _text_or(run.snapshot_digest, "--")),
+        ("封印来源", _text_or(run.snapshot_seal_origin, "--")),
+        ("封印时间", _text_or(run.snapshot_sealed_at, "--")),
         ("股票池范围", run.scope), ("股票池来源", _text_or(run.stock_pool_source, "--")),
         ("有效覆盖率", f"{run.coverage_pct:.2f}%"),
         ("筛选状态", _status_filter_label(filters.status)),
@@ -730,10 +786,13 @@ def _populate_info_sheet(sheet, page: MarketScanResultPage, filters: MarketScanE
         ("最低置信度", _range_filter_label(filters.min_confidence, None)),
         ("最高风险分", _range_filter_label(None, filters.max_risk)),
         ("最低可交易性", _range_filter_label(filters.min_tradability, None)),
-        ("上涨概率周期", f"{filters.probability_horizon}日"),
+        ("上涨概率周期", f"持有{filters.probability_horizon}个交易日（D+{filters.probability_horizon + 1}退出）"),
         ("最低上涨概率", _probability_filter_label(filters.min_upside_probability)),
         ("搜索关键词", _text_or(filters.keyword, "无")),
         ("排序", _sort_filter_label(filters.sort, filters.order)),
+        ("筛选合同", screen_spec.schema_version),
+        ("筛选摘要", screen_spec_digest(screen_spec)),
+        ("筛选合同 JSON", _safe_json(screen_spec.model_dump(mode="json"))),
         ("导出条数", page.total), ("导出时间", datetime_to_text(exported_at)),
         ("数据说明", "仅导出已持久化榜单快照，不会重新获取行情或重新计算。"),
     )
@@ -750,6 +809,23 @@ def _populate_info_sheet(sheet, page: MarketScanResultPage, filters: MarketScanE
         row[0].alignment = Alignment(wrap_text=True, vertical="top")
     for cell in sheet["A"]:
         cell.font = Font(bold=True)
+
+
+def _export_screen_spec(filters: MarketScanExportFilters) -> ScreenSpecV2:
+    return screen_spec_from_market_scan_filters(
+        status=filters.status, market=filters.market, industry=filters.industry,
+        is_st=filters.is_st, is_new=filters.is_new,
+        min_score=filters.min_score, max_score=filters.max_score,
+        min_trend_score=filters.min_trend_score, max_trend_score=filters.max_trend_score,
+        min_change_pct=filters.min_change_pct, max_change_pct=filters.max_change_pct,
+        min_turnover_rate=filters.min_turnover_rate, max_turnover_rate=filters.max_turnover_rate,
+        min_amount=filters.min_amount, max_amount=filters.max_amount,
+        min_data_quality_score=filters.min_data_quality_score,
+        max_data_quality_score=filters.max_data_quality_score,
+        min_confidence=filters.min_confidence, max_risk=filters.max_risk,
+        min_tradability=filters.min_tradability, keyword=filters.keyword,
+        sort=filters.sort, order=filters.order,
+    )
 
 
 def _safe_text(value: object | None) -> str:

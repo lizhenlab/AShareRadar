@@ -13,6 +13,7 @@ from app.services.market_scan_manager import MarketScanManager
 from app.services.runtime_coordinator import RuntimeCoordinator, RuntimeLeadership
 from app.services.scheduler import LocalDataScheduler
 from app.services.workbench_context import WorkbenchContextCache
+from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission
 
 
 _MISSING = object()
@@ -29,6 +30,7 @@ class AppContainer:
     market_scanner: MarketScanManager | None = None
     runtime_coordinator: RuntimeCoordinator | None = None
     local_data_import_previews: LocalDataImportPreviewRegistry = field(default_factory=LocalDataImportPreviewRegistry)
+    market_scan_heavy_read_admission: MarketScanHeavyReadAdmission = field(default_factory=MarketScanHeavyReadAdmission)
 
     def __post_init__(self) -> None:
         _require_settings_owner("datahub", self.datahub, self.settings)
@@ -76,6 +78,7 @@ def build_container(
         datahub,
         resolved_settings,
         market_scanner,
+        domain_services,
         instance_guard=leadership.service_guard(),
     )
     runtime_coordinator = RuntimeCoordinator(leadership, scheduler, market_scanner)
@@ -106,12 +109,7 @@ def _resolve_datahub_injection(
     scheduler_datahub = getattr(scheduler, "datahub", _MISSING)
     if datahub is None and scheduler_datahub is not _MISSING and scheduler_datahub is not None:
         return cast(DataHub, scheduler_datahub)
-    if (
-        datahub is not None
-        and scheduler_datahub is not _MISSING
-        and scheduler_datahub is not None
-        and scheduler_datahub is not datahub
-    ):
+    if datahub is not None and scheduler_datahub is not _MISSING and scheduler_datahub is not None and scheduler_datahub is not datahub:
         raise ValueError("不能注入绑定到其他 datahub 的 scheduler")
     return datahub
 
@@ -146,11 +144,17 @@ def _build_scheduler(
     datahub: DataHub,
     settings: Settings,
     market_scanner: MarketScanManager,
+    domain_services: DomainServiceBundle,
     *,
     instance_guard,
 ) -> LocalDataScheduler:
     if scheduler is None:
-        return LocalDataScheduler(datahub, market_scanner=market_scanner, instance_guard=instance_guard)
+        return LocalDataScheduler(
+            datahub,
+            market_scanner=market_scanner,
+            instance_guard=instance_guard,
+            strategy_automation_service=domain_services.strategy_automation,
+        )
     scheduler_datahub = getattr(scheduler, "datahub", _MISSING)
     if scheduler_datahub is not _MISSING and scheduler_datahub is not datahub:
         raise ValueError("scheduler.datahub 必须与容器 datahub 使用同一实例")
@@ -159,6 +163,7 @@ def _build_scheduler(
     if scanner is not None and scanner is not market_scanner:
         raise ValueError("scheduler.market_scanner 必须与容器使用同一实例")
     scheduler.market_scanner = market_scanner
+    scheduler.bind_strategy_automation_service(domain_services.strategy_automation)
     scheduler.bind_instance_guard(instance_guard)
     return scheduler
 

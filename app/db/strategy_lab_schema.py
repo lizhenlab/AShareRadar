@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 
+from app.db.market_scan_integrity import verify_market_scan_snapshot
+
 
 STRATEGY_LAB_SCHEMA_VERSION = "20260801_strategy_lab_v1"
+STRATEGY_EXECUTION_SOURCE_DIGEST_SCHEMA_VERSION = (
+    "20260813_strategy_execution_source_digest_v2"
+)
 
 STRATEGY_LAB_SCHEMA_SQL = f"""
 BEGIN IMMEDIATE;
@@ -50,6 +55,16 @@ CREATE TABLE IF NOT EXISTS strategy_execution (
     execution_fingerprint TEXT NOT NULL CHECK (length(execution_fingerprint) = 64),
     kind TEXT NOT NULL CHECK (kind IN ('latest_scan', 'historical_replay')),
     market_scan_run_id INTEGER NOT NULL CHECK (market_scan_run_id > 0),
+    source_snapshot_digest TEXT NOT NULL CHECK (
+        length(source_snapshot_digest) = 64
+        AND source_snapshot_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_snapshot_seal_origin TEXT NOT NULL CHECK (
+        source_snapshot_seal_origin IN ('publication', 'legacy_backfill')
+    ),
+    source_snapshot_verification_status TEXT NOT NULL DEFAULT 'verified' CHECK (
+        source_snapshot_verification_status IN ('verified', 'legacy_unverified')
+    ),
     rule_version TEXT NOT NULL CHECK (length(trim(rule_version)) > 0),
     data_as_of TEXT NOT NULL CHECK (length(trim(data_as_of)) > 0),
     data_date TEXT NOT NULL CHECK (length(data_date) = 10),
@@ -86,6 +101,30 @@ CREATE INDEX IF NOT EXISTS idx_strategy_execution_candidate_page
     ON strategy_execution_candidate(execution_id, utility_rank ASC, original_rank ASC, symbol ASC);
 CREATE INDEX IF NOT EXISTS idx_strategy_execution_candidate_status
     ON strategy_execution_candidate(execution_id, status, utility_rank ASC);
+
+CREATE TRIGGER IF NOT EXISTS trg_strategy_execution_no_update
+BEFORE UPDATE ON strategy_execution
+BEGIN
+    SELECT RAISE(ABORT, 'strategy_execution is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_strategy_execution_no_delete
+BEFORE DELETE ON strategy_execution
+BEGIN
+    SELECT RAISE(ABORT, 'strategy_execution is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_strategy_execution_candidate_no_update
+BEFORE UPDATE ON strategy_execution_candidate
+BEGIN
+    SELECT RAISE(ABORT, 'strategy_execution_candidate is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_strategy_execution_candidate_no_delete
+BEFORE DELETE ON strategy_execution_candidate
+BEGIN
+    SELECT RAISE(ABORT, 'strategy_execution_candidate is append-only');
+END;
 
 CREATE TABLE IF NOT EXISTS strategy_evidence_snapshot (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,10 +233,222 @@ COMMIT;
 
 def apply_strategy_lab_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(STRATEGY_LAB_SCHEMA_SQL)
+    _apply_strategy_execution_source_digest_migration(conn)
+
+
+def _apply_strategy_execution_source_digest_migration(
+    conn: sqlite3.Connection,
+) -> None:
+    columns = _strategy_execution_columns(conn)
+    if not columns:
+        return
+    if _source_digest_migration_is_current(conn, columns):
+        _verify_strategy_execution_source_runs(conn)
+        _require_safe_strategy_execution_sources(conn)
+        _create_strategy_execution_integrity_triggers(conn)
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _verify_strategy_execution_source_runs(conn)
+        _drop_strategy_execution_source_write_guards(conn)
+        _add_strategy_execution_source_columns(conn, columns)
+        _backfill_strategy_execution_sources(conn)
+        _require_safe_strategy_execution_sources(conn)
+        _create_strategy_execution_integrity_triggers(conn)
+        _record_strategy_execution_source_migration(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+
+
+def _strategy_execution_columns(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(strategy_execution)").fetchall()
+    }
+
+
+def _source_digest_migration_is_current(
+    conn: sqlite3.Connection,
+    columns: set[str],
+) -> bool:
+    required = {
+        "source_snapshot_digest",
+        "source_snapshot_seal_origin",
+        "source_snapshot_verification_status",
+    }
+    if not required.issubset(columns):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM schema_migration WHERE name = ?",
+        (STRATEGY_EXECUTION_SOURCE_DIGEST_SCHEMA_VERSION,),
+    ).fetchone()
+    return row is not None
+
+
+def _verify_strategy_execution_source_runs(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT execution.market_scan_run_id
+        FROM strategy_execution AS execution
+        JOIN market_scan_run AS run ON run.id = execution.market_scan_run_id
+        ORDER BY market_scan_run_id
+        """
+    ).fetchall()
+    for row in rows:
+        verify_market_scan_snapshot(conn, int(row[0]))
+
+
+def _drop_strategy_execution_source_write_guards(conn: sqlite3.Connection) -> None:
+    conn.execute("DROP TRIGGER IF EXISTS trg_strategy_execution_no_update")
+    conn.execute(
+        "DROP TRIGGER IF EXISTS trg_strategy_execution_source_digest_required"
+    )
+
+
+def _add_strategy_execution_source_columns(
+    conn: sqlite3.Connection,
+    columns: set[str],
+) -> None:
+    if "source_snapshot_digest" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE strategy_execution ADD COLUMN source_snapshot_digest TEXT
+            CHECK (
+                source_snapshot_digest IS NULL OR (
+                    length(source_snapshot_digest) = 64
+                    AND source_snapshot_digest NOT GLOB '*[^0-9a-f]*'
+                )
+            )
+            """
+        )
+    if "source_snapshot_seal_origin" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE strategy_execution
+            ADD COLUMN source_snapshot_seal_origin TEXT CHECK (
+                source_snapshot_seal_origin IS NULL
+                OR source_snapshot_seal_origin IN ('publication', 'legacy_backfill')
+            )
+            """
+        )
+    if "source_snapshot_verification_status" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE strategy_execution
+            ADD COLUMN source_snapshot_verification_status TEXT NOT NULL
+            DEFAULT 'legacy_unverified' CHECK (
+                source_snapshot_verification_status
+                    IN ('verified', 'legacy_unverified')
+            )
+            """
+        )
+
+
+def _backfill_strategy_execution_sources(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE strategy_execution
+        SET source_snapshot_digest = (
+            SELECT run.snapshot_digest FROM market_scan_run AS run
+            WHERE run.id = strategy_execution.market_scan_run_id
+        ),
+            source_snapshot_seal_origin = (
+                SELECT run.snapshot_seal_origin FROM market_scan_run AS run
+                WHERE run.id = strategy_execution.market_scan_run_id
+            ),
+            source_snapshot_verification_status = 'verified'
+        WHERE source_snapshot_digest IS NULL
+          AND source_snapshot_seal_origin IS NULL
+          AND EXISTS (
+              SELECT 1 FROM market_scan_run AS run
+              WHERE run.id = strategy_execution.market_scan_run_id
+          )
+        """
+    )
+    conn.execute(
+        """
+        UPDATE strategy_execution
+        SET source_snapshot_verification_status = 'verified'
+        WHERE EXISTS (
+            SELECT 1 FROM market_scan_run AS run
+            WHERE run.id = strategy_execution.market_scan_run_id
+              AND run.snapshot_digest = strategy_execution.source_snapshot_digest
+              AND run.snapshot_seal_origin = strategy_execution.source_snapshot_seal_origin
+        )
+        """
+    )
+
+
+def _require_safe_strategy_execution_sources(conn: sqlite3.Connection) -> None:
+    unresolved = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM strategy_execution AS execution
+        LEFT JOIN market_scan_run AS run ON run.id = execution.market_scan_run_id
+        WHERE (
+            execution.source_snapshot_verification_status = 'verified'
+            AND (
+                run.id IS NULL
+                OR execution.source_snapshot_digest IS NULL
+                OR execution.source_snapshot_seal_origin IS NULL
+                OR execution.source_snapshot_digest <> run.snapshot_digest
+                OR execution.source_snapshot_seal_origin <> run.snapshot_seal_origin
+            )
+        ) OR (
+            execution.source_snapshot_verification_status = 'legacy_unverified'
+            AND (
+                run.id IS NOT NULL
+                OR execution.source_snapshot_digest IS NOT NULL
+                OR execution.source_snapshot_seal_origin IS NOT NULL
+            )
+        )
+        """
+    ).fetchone()
+    if unresolved is None or int(unresolved[0]):
+        raise sqlite3.IntegrityError(
+            "legacy strategy_execution source snapshot cannot be verified"
+        )
+
+
+def _record_strategy_execution_source_migration(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
+        (STRATEGY_EXECUTION_SOURCE_DIGEST_SCHEMA_VERSION,),
+    )
+
+
+def _create_strategy_execution_integrity_triggers(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_execution_no_update
+        BEFORE UPDATE ON strategy_execution
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_execution is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_execution_source_digest_required
+        BEFORE INSERT ON strategy_execution
+        WHEN NEW.source_snapshot_digest IS NULL
+          OR length(NEW.source_snapshot_digest) <> 64
+          OR NEW.source_snapshot_digest GLOB '*[^0-9a-f]*'
+          OR NEW.source_snapshot_seal_origin NOT IN ('publication', 'legacy_backfill')
+          OR NEW.source_snapshot_verification_status <> 'verified'
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_execution source snapshot digest is required');
+        END
+        """
+    )
 
 
 __all__ = [
     "STRATEGY_LAB_SCHEMA_SQL",
     "STRATEGY_LAB_SCHEMA_VERSION",
+    "STRATEGY_EXECUTION_SOURCE_DIGEST_SCHEMA_VERSION",
     "apply_strategy_lab_schema",
 ]

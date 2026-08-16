@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.models.analysis import FundFlowAnalysis, OrderPressure
 from app.services.stock_rule_contracts import RULE_CONFIDENCE, STATUS_CLOSE, STATUS_MATCHED, STATUS_MISSED
 from app.utils.market_data import finite_float
 
@@ -25,6 +26,18 @@ def _positive_metric(value: object) -> float | None:
 def _non_negative_score(value: object) -> float | None:
     parsed = finite_float(value)
     return parsed if parsed is not None and parsed >= 0 else None
+
+
+def available_fund_score(fund_flow: FundFlowAnalysis) -> float | None:
+    fallback_nature = "derived" if fund_flow.available else "unavailable"
+    if not fund_flow.available or getattr(fund_flow, "data_nature", fallback_nature) == "unavailable":
+        return None
+    return _non_negative_score(fund_flow.overall_score)
+
+
+def order_pressure_evidence_available(order_pressure: OrderPressure) -> bool:
+    fallback_nature = "observed" if order_pressure.available else "unavailable"
+    return getattr(order_pressure, "data_nature", fallback_nature) != "unavailable"
 
 
 def _positive_score(value: object) -> float | None:

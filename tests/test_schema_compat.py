@@ -9,11 +9,17 @@ import unittest
 from unittest.mock import patch
 
 from app.db.schema import initialize_schema
+from app.db.market_scan_integrity import (
+    MarketScanSnapshotSealError,
+    require_publication_market_scan_snapshot,
+    verify_market_scan_snapshot,
+)
 from app.db.schema_definitions import SCHEMA_SQL
 from app.db.schema_migrations import (
     AUDIT_TIMESTAMP_UTC_MIGRATION,
     MARKET_SCAN_PREOPEN_MODE_MIGRATION,
     MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION,
+    MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION,
     QUOTE_HISTORY_CONTRACT_MIGRATION,
     QUOTE_HISTORY_UNIQUE_INDEX,
     SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,
@@ -22,6 +28,153 @@ from app.db.schema_migrations import (
 
 
 class SchemaCompatibilityTests(unittest.TestCase):
+    def test_full_legacy_startup_orders_discovery_rebuild_before_snapshot_guards(
+        self,
+    ) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        self.addCleanup(conn.close)
+        legacy_schema = _legacy_schema_without_market_scan_seals().replace(
+            "mode IN ('official', 'intraday', 'preopen')",
+            "mode IN ('official', 'intraday')",
+        )
+        conn.executescript(legacy_schema)
+        conn.executescript(
+            """
+            CREATE TABLE discovery_preset (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                schema_version INTEGER NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+                revision INTEGER NOT NULL DEFAULT 1,
+                criteria_json TEXT NOT NULL CHECK (json_valid(criteria_json)),
+                sort_json TEXT NOT NULL CHECK (json_valid(sort_json)),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE discovery_research_queue_source (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                source_run_id INTEGER NOT NULL,
+                source_preset_id INTEGER NOT NULL,
+                source_preset_revision INTEGER NOT NULL,
+                source_preset_name TEXT NOT NULL,
+                preset_schema_version INTEGER NOT NULL DEFAULT 1,
+                preset_snapshot_json TEXT NOT NULL CHECK (json_valid(preset_snapshot_json)),
+                enqueued_at TEXT NOT NULL
+            );
+            INSERT INTO discovery_preset (
+                name, schema_version, revision, criteria_json, sort_json,
+                created_at, updated_at
+            ) VALUES ('旧生产方案', 1, 1, '{}', '[{"field":"rank","order":"asc"}]',
+                      '2026-08-11T08:00:00Z', '2026-08-11T08:00:00Z');
+            CREATE TRIGGER trg_market_scan_published_run_immutable
+            BEFORE UPDATE ON market_scan_run
+            WHEN OLD.snapshot_digest IS NOT NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'published market_scan_run is immutable');
+            END;
+            """
+        )
+        run_id = conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                status, trigger, mode, rule_version, as_of, data_date, quote_date,
+                scope, created_at, updated_at, finished_at
+            ) VALUES (
+                'success', 'manual', 'official', 'legacy-production-v1',
+                '2026-08-11 16:30:00', '2026-08-11', '2026-08-11', 'legacy',
+                '2026-08-11T08:30:00Z', '2026-08-11T08:31:00Z',
+                '2026-08-11T08:31:00Z'
+            )
+            """
+        ).lastrowid
+        conn.commit()
+
+        initialize_schema(conn)
+        initialize_schema(conn)
+
+        preset = conn.execute(
+            "SELECT name, column_view FROM discovery_preset"
+        ).fetchone()
+        run = conn.execute(
+            """
+            SELECT snapshot_digest, snapshot_seal_origin, snapshot_sealed_at
+            FROM market_scan_run WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        trigger_names = {
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'trigger' AND name LIKE 'trg_market_scan_published_%'
+                """
+            )
+        }
+        self.assertEqual(tuple(preset), ("旧生产方案", "overview"))
+        self.assertEqual(run["snapshot_seal_origin"], "legacy_backfill")
+        self.assertEqual(len(run["snapshot_digest"]), 64)
+        self.assertTrue(run["snapshot_sealed_at"])
+        self.assertEqual(verify_market_scan_snapshot(conn, int(run_id)), run["snapshot_digest"])
+        self.assertEqual(len(trigger_names), 5)
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE market_scan_run SET message = 'tampered' WHERE id = ?",
+                (run_id,),
+            )
+
+    def test_legacy_published_snapshot_backfill_is_auditable_but_not_publication_authority(
+        self,
+    ) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        initialize_schema(conn)
+        conn.execute(
+            "DELETE FROM schema_migration WHERE name = ?",
+            (MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION,),
+        )
+        run_id = conn.execute(
+            """
+            INSERT INTO market_scan_run (
+                status, trigger, mode, rule_version, as_of, data_date, quote_date,
+                scope, created_at, updated_at, finished_at
+            ) VALUES (
+                'success', 'manual', 'official', 'legacy-v1',
+                '2026-08-11 16:30:00', '2026-08-11', '2026-08-11', 'legacy',
+                '2026-08-11T08:30:00Z', '2026-08-11T08:31:00Z',
+                '2026-08-11T08:31:00Z'
+            )
+            """
+        ).lastrowid
+        conn.execute(
+            """
+            UPDATE market_scan_run
+            SET snapshot_seal_origin = 'publication',
+                snapshot_sealed_at = '2026-08-11T08:31:00Z'
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
+
+        apply_compat_migrations(conn)
+
+        row = conn.execute(
+            """
+            SELECT snapshot_digest, snapshot_seal_origin, snapshot_sealed_at
+            FROM market_scan_run WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        self.assertEqual(len(row["snapshot_digest"]), 64)
+        self.assertEqual(row["snapshot_seal_origin"], "legacy_backfill")
+        self.assertTrue(row["snapshot_sealed_at"])
+        self.assertEqual(verify_market_scan_snapshot(conn, int(run_id)), row["snapshot_digest"])
+        with self.assertRaises(MarketScanSnapshotSealError):
+            require_publication_market_scan_snapshot(conn, int(run_id))
+
     def test_probability_capture_outbox_migration_backfills_retained_published_run(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -145,19 +298,21 @@ class SchemaCompatibilityTests(unittest.TestCase):
             )
             """
         )
-        conn.execute("DELETE FROM market_scan_run WHERE id = ?", (parent_id,))
-        self.assertIsNone(
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM market_scan_run WHERE id = ?", (parent_id,))
+        self.assertEqual(
             conn.execute(
                 "SELECT retry_of_run_id FROM market_scan_run WHERE id = ?",
                 (child_id,),
-            ).fetchone()[0]
+            ).fetchone()[0],
+            parent_id,
         )
         self.assertEqual(
             conn.execute(
                 "SELECT COUNT(*) FROM market_scan_result WHERE run_id = ?",
                 (parent_id,),
             ).fetchone()[0],
-            0,
+            1,
         )
         self.assertEqual(
             conn.execute(
@@ -1086,3 +1241,20 @@ conn.close()
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _legacy_schema_without_market_scan_seals() -> str:
+    seal_columns = """    snapshot_digest TEXT CHECK (
+        snapshot_digest IS NULL OR (
+            length(snapshot_digest) = 64
+            AND snapshot_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    snapshot_seal_origin TEXT CHECK (
+        snapshot_seal_origin IS NULL
+        OR snapshot_seal_origin IN ('publication', 'legacy_backfill')
+    ),
+    snapshot_sealed_at TEXT,
+"""
+    assert seal_columns in SCHEMA_SQL
+    return SCHEMA_SQL.replace(seal_columns, "")

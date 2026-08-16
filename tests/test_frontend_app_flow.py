@@ -7,6 +7,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_all_chart_redraws_share_typed_ma20_availability() -> None:
+    script = r'''
+      import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
+
+      const { __appTest } = await createAppHarness({ canvasContext: null });
+      const unavailable = { ma20_available: false, ma20: 1234.56 };
+      if (__appTest.availableAnalysisMa20(unavailable) !== null) {
+        throw new Error("unavailable MA20 placeholder escaped into a chart redraw");
+      }
+      const available = { ma20_available: true, ma20: 1234.56 };
+      if (__appTest.availableAnalysisMa20(available) !== 1234.56) {
+        throw new Error("available MA20 was not retained");
+      }
+    '''
+    _run_node_script(script)
+    source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert "state.lastAnalysis.ma5, state.lastAnalysis.ma20" not in source
+
+
 def test_symbol_inputs_and_stale_advice_request_are_scoped() -> None:
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
@@ -484,7 +503,7 @@ def test_overlapping_main_load_does_not_render_stale_workbench_or_companions() -
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
-      const { __appTest, element, jsonResponse, waitFor } = await createAppHarness({ canvasContext: null });
+      const { __appTest, element, jsonResponse, legacyWorkbenchFixture, legacyWorkbenchResponse, waitFor } = await createAppHarness({ canvasContext: null });
       let resolveFirstWorkbench;
       let workbenchCalls = 0;
       const minuteUrls = [];
@@ -497,7 +516,7 @@ def test_overlapping_main_load_does_not_render_stale_workbench_or_companions() -
               ok: true,
               json() {
                 return new Promise((resolve) => {
-                  resolveFirstWorkbench = () => resolve(workbench("600519", "SH", "贵州茅台"));
+                  resolveFirstWorkbench = () => resolve(legacyWorkbenchFixture(workbench("600519", "SH", "贵州茅台")));
                 });
               },
             };
@@ -508,7 +527,7 @@ def test_overlapping_main_load_does_not_render_stale_workbench_or_companions() -
             { component: "alert_rules", message: "预警规则暂不可用，当前显示空列表。" },
             { component: "bad", message: { unsafe: true } },
           ];
-          return jsonResponse(current);
+          return legacyWorkbenchResponse(current);
         }
         if (target.startsWith("/api/stock/minute-analysis")) {
           minuteUrls.push(target);
@@ -1360,23 +1379,23 @@ def test_workbench_missing_quote_source_renders_placeholder_without_load_failure
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
-      const { __appTest, element, jsonResponse } = await createAppHarness({ canvasContext: null });
+      const { __appTest, element, jsonResponse, legacyWorkbenchResponse } = await createAppHarness({ canvasContext: null });
       globalThis.fetch = async (url) => {
         const target = String(url);
         if (target.startsWith("/api/stock/workbench")) {
-          return {
-            ok: true,
-            async json() {
-              return {
+              return legacyWorkbenchResponse({
                 analysis: {
+                  quote: {
+                    code: "600706", market: "SH", name: "曲江文旅", price: 10,
+                    change: 0, change_pct: 0, timestamp: "2026-07-15 10:00:00",
+                  },
                   data_quality: {},
                   signal_snapshot: { label: "待确认", summary: "测试" },
                   review: {},
+                  klines: [],
                 },
                 insights: { overview: {} },
-              };
-            },
-          };
+              });
         }
         if (target === "/api/market") return jsonResponse({ indices: [] });
         if (target === "/api/strong-stocks") return jsonResponse({ items: [] });
@@ -1405,7 +1424,7 @@ def test_workbench_missing_quote_source_renders_placeholder_without_load_failure
         throw new Error(`missing quote source was treated as load/render failure: ${status}`);
       }
       const sourceLine = element("sourceLine").textContent;
-      if (sourceLine !== "数据源：--，更新时间：--") {
+          if (sourceLine !== "数据源：--，更新时间：2026-07-15 10:00:00") {
         throw new Error(`missing quote source did not render placeholders: ${sourceLine}`);
       }
       if (document.body.classList.contains("is-stale")) {
@@ -1781,11 +1800,11 @@ def test_hidden_delayed_load_tail_defers_quote_stream_until_visible() -> None:
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
-      const { __appTest, jsonResponse, streams, waitFor } = await createAppHarness({ canvasContext: null });
+      const { __appTest, jsonResponse, legacyWorkbenchResponse, streams, waitFor } = await createAppHarness({ canvasContext: null });
       let resolveWatchlist;
       globalThis.fetch = async (url) => {
         const target = String(url);
-        if (target.startsWith("/api/stock/workbench")) return jsonResponse(workbench());
+        if (target.startsWith("/api/stock/workbench")) return legacyWorkbenchResponse(workbench());
         if (target === "/api/watchlist") {
           return {
             ok: true,
@@ -2053,13 +2072,13 @@ def test_three_stock_loads_keep_global_requests_cached_across_stock_switches() -
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
-      const { __appTest, jsonResponse, streams } = await createAppHarness({ canvasContext: null });
+      const { __appTest, jsonResponse, legacyWorkbenchResponse, streams } = await createAppHarness({ canvasContext: null });
       const fetchCalls = [];
       globalThis.fetch = async (url) => {
         const target = String(url);
         fetchCalls.push(target);
         if (target.startsWith("/api/stock/workbench")) {
-          return jsonResponse(workbench(new URL(target, "http://local").searchParams.get("symbol")));
+          return legacyWorkbenchResponse(workbench(new URL(target, "http://local").searchParams.get("symbol")));
         }
         if (target.startsWith("/api/stock/minute-analysis")) {
           return jsonResponse({ sample_count: 0, missing_data: ["分钟K线"], t_plan: { suitability: "不适合主动做T" } });
@@ -2124,7 +2143,7 @@ def test_three_stock_loads_keep_global_requests_cached_across_stock_switches() -
         const [code, market] = String(symbol).split(".");
         return {
           analysis: {
-            quote: { code, market, name: symbol, price: 10, change: 0, change_pct: 0, source: "测试", timestamp: "2026-07-15" },
+                quote: { code, market, name: symbol, price: 10, change: 0, change_pct: 0, source: "测试", timestamp: "2026-07-15 10:00:00" },
             data_quality: {},
             signal_snapshot: { label: "观察", summary: "测试" },
             review: {},
@@ -2142,7 +2161,7 @@ def test_stock_switch_does_not_abort_or_duplicate_inflight_global_requests() -> 
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
-      const { __appTest, jsonResponse, waitFor } = await createAppHarness({ canvasContext: null });
+      const { __appTest, jsonResponse, legacyWorkbenchResponse, waitFor } = await createAppHarness({ canvasContext: null });
       const globalEndpoints = new Set(__appTest.GLOBAL_ENDPOINTS);
       const globalCalls = new Map();
       const globalResolvers = new Map();
@@ -2158,7 +2177,7 @@ def test_stock_switch_does_not_abort_or_duplicate_inflight_global_requests() -> 
         }
         if (target.startsWith("/api/stock/workbench")) {
           const symbol = new URL(target, "http://local").searchParams.get("symbol");
-          return Promise.resolve(jsonResponse(workbench(symbol)));
+          return Promise.resolve(legacyWorkbenchResponse(workbench(symbol)));
         }
         if (target.startsWith("/api/stock/minute-analysis")) {
           return Promise.resolve(jsonResponse({ sample_count: 0, missing_data: [], t_plan: {} }));
@@ -2331,7 +2350,7 @@ def test_watchlist_open_marks_viewed_only_after_current_workbench_success() -> N
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
-      const { __appTest, element, jsonResponse, waitFor } = await createAppHarness({ canvasContext: null });
+      const { __appTest, element, jsonResponse, legacyWorkbenchFixture, legacyWorkbenchResponse, waitFor } = await createAppHarness({ canvasContext: null });
       const firstWorkbench = deferred();
       const markUrls = [];
       const markBodies = [];
@@ -2354,7 +2373,7 @@ def test_watchlist_open_marks_viewed_only_after_current_workbench_success() -> N
           if (symbol === "600000.SH") {
             return { ok: false, status: 503, async json() { return { detail: "研究台加载失败" }; } };
           }
-          return jsonResponse(workbench(symbol));
+          return legacyWorkbenchResponse(workbench(symbol));
         }
         if (target.endsWith("/mark-viewed") && options.method === "POST") {
           markUrls.push(target);
@@ -2404,7 +2423,7 @@ def test_watchlist_open_marks_viewed_only_after_current_workbench_success() -> N
       if (markBodies[0].clear_unread !== true || markBodies[0].viewed_through_advice_id !== 73) {
         throw new Error(`mark-viewed did not use the rendered advice watermark: ${JSON.stringify(markBodies[0])}`);
       }
-      firstWorkbench.resolve(workbench("000001.SZ"));
+      firstWorkbench.resolve(legacyWorkbenchFixture(workbench("000001.SZ")));
       await Promise.resolve();
       await Promise.resolve();
       if (markUrls.some((url) => url.includes("000001.SZ"))) {
@@ -2518,7 +2537,7 @@ def test_committed_local_data_import_refreshes_all_runtime_owned_browser_state()
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
-      const { __appTest, element, jsonResponse, streams } = await createAppHarness({ canvasContext: null });
+      const { __appTest, element, jsonResponse, legacyWorkbenchResponse, streams } = await createAppHarness({ canvasContext: null });
       __appTest.state.symbol = "600519.SH";
       __appTest.state.loadSeq = 70;
       __appTest.state.lastAnalysis = workbench().analysis;
@@ -2561,7 +2580,7 @@ def test_committed_local_data_import_refreshes_all_runtime_owned_browser_state()
             rollback_backup_path: "/tmp/backup",
           });
         }
-        if (target.startsWith("/api/stock/workbench")) return jsonResponse(workbench());
+        if (target.startsWith("/api/stock/workbench")) return legacyWorkbenchResponse(workbench());
         if (target === "/api/watchlist") return jsonResponse([]);
         if (target === "/api/market") return jsonResponse({ indices: [] });
         if (target === "/api/strong-stocks") return jsonResponse({ items: [] });

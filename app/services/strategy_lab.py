@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.models.market_strategy_templates import MarketStrategyTemplateCatalog
 from app.models.strategy_lab import (
     StrategyCompileRequest,
     StrategyCompileResponse,
@@ -18,6 +19,7 @@ from app.models.strategy_lab import (
     StrategyVersionPage,
 )
 from app.repositories.strategy_lab import StrategyLabRepository
+from app.services.market_strategy_templates import market_strategy_template_catalog
 from app.services.strategy_compiler import compile_strategy_spec
 from app.services.strategy_metrics import strategy_metric_registry
 from app.services.strategy_natural_language import parse_chinese_strategy
@@ -30,6 +32,9 @@ class StrategyLabService:
 
     def metrics(self):
         return strategy_metric_registry()
+
+    def templates(self) -> MarketStrategyTemplateCatalog:
+        return market_strategy_template_catalog()
 
     def compile(self, request: StrategyCompileRequest) -> StrategyCompileResponse:
         return compile_strategy_spec(request.spec)

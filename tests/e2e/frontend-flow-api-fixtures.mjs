@@ -1,4 +1,18 @@
 import { expect } from "@playwright/test";
+import { marketScanPollingIdentity as marketScanPollingIdentityPayload } from "../frontend_app_flow_helpers.mjs";
+import { dailyKlines, workbenchPayload } from "./workbench-api-fixtures.mjs";
+
+export { dailyKlines, workbenchPayload } from "./workbench-api-fixtures.mjs";
+export { marketScanPollingIdentityPayload };
+
+export function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export async function selectPrimaryView(page, view) {
+  await primaryViewButton(page, view).click();
+  await expectPrimaryView(page, view);
+}
 
 export async function emitQuoteFrame(page) {
   await expect
@@ -117,8 +131,30 @@ export async function mockApi(page, options = {}) {
   });
 }
 
+export function primaryViewButton(page, view) {
+  return page.locator(`#primaryNavigation button[data-primary-view="${view}"]`);
+}
+
+export async function expectPrimaryView(page, view) {
+  await expect(page.locator("body")).toHaveAttribute("data-primary-view", view);
+  await expect(primaryViewButton(page, view)).toHaveAttribute("aria-current", "page");
+  await expect.poll(() => page.locator("#primaryNavigation button[data-primary-view]").evaluateAll(
+    (buttons) => buttons.map((button) => ({
+      view: button.dataset.primaryView,
+      current: button.getAttribute("aria-current"),
+    }))
+  )).toEqual(["research", "market", "review", "monitor"].map((candidate) => ({
+    view: candidate,
+    current: candidate === view ? "page" : "false",
+  })));
+}
+
 function apiPayload(url) {
   const pathname = url.pathname;
+  if (pathname === "/api/market-scans/polling-identity") {
+    return marketScanPollingIdentityPayload(null, null, url.searchParams.get("mode") || "official");
+  }
+  if (pathname === "/api/market-scans/latest" || pathname === "/api/market-scans/latest-published") return null;
   if (pathname === "/api/market") return { indices: [] };
   if (pathname === "/api/strong-stocks") return { items: [] };
   if (pathname === "/api/discovery/presets") {
@@ -207,51 +243,6 @@ export function stockSearchPayload(keyword) {
   ].filter((stock) => [stock.symbol, stock.code, stock.name].some((value) => value.toLowerCase().includes(query)));
 }
 
-export function workbenchPayload(symbol, { degraded = false, chartMarks = false, withKlines = false } = {}) {
-  const stock = stockDetails(symbol);
-  return {
-    analysis: {
-      quote: {
-        code: stock.code,
-        market: stock.market,
-        name: stock.name,
-        price: 100,
-        change: 1,
-        change_pct: 1,
-        source: "E2E行情",
-        timestamp: "2026-07-14 10:00:00",
-      },
-      data_quality: { level: "优秀", score: 95 },
-      signal_snapshot: { label: "观察", summary: "E2E" },
-      action_advice: { action: "观察", confidence: 60 },
-      review: {},
-      klines: withKlines ? dailyKlines(240) : [],
-    },
-    insights: { overview: {} },
-    local_data_warnings: degraded ? [{ component: "notes", message: "本地笔记暂不可用" }] : [],
-    chart_marks: chartMarks
-      ? { marks: [{ category: "买点", price: 100, trade_date: "2026-07-14" }], categories: ["买点"] }
-      : { marks: [], categories: [] },
-  };
-}
-
-export function dailyKlines(count) {
-  const start = Date.UTC(2025, 10, 17);
-  return Array.from({ length: count }, (_, index) => {
-    const date = new Date(start + index * 86400000).toISOString().slice(0, 10);
-    const open = 90 + index * 0.06 + Math.sin(index / 7) * 1.5;
-    const close = open + Math.sin(index / 3) * 0.7;
-    return {
-      date,
-      open,
-      close,
-      high: Math.max(open, close) + 0.8,
-      low: Math.min(open, close) - 0.8,
-      volume: 1000000 + index * 1000,
-    };
-  });
-}
-
 export function minuteAnalysisPayload(interval, symbol = "600519.SH") {
   const availability = interval === "30m" ? "unavailable" : interval === "60m" ? "degraded" : "ok";
   const rows = minuteKlines(interval, 24);
@@ -315,15 +306,6 @@ export function minuteKlines(interval, count) {
       amount: 1000000 + index * 1000,
     };
   });
-}
-
-function stockDetails(symbol) {
-  const rows = {
-    "000001.SZ": { code: "000001", market: "SZ", name: "平安银行" },
-    "300750.SZ": { code: "300750", market: "SZ", name: "宁德时代" },
-    "920066.BJ": { code: "920066", market: "BJ", name: "北交样本" },
-  };
-  return rows[symbol] || { code: "600519", market: "SH", name: "贵州茅台" };
 }
 
 function canonicalWatchlistSymbol(value) {

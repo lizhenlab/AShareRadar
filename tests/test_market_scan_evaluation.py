@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import closing
 from datetime import date, timedelta
@@ -13,7 +14,9 @@ from typing import Any, cast
 import pytest
 
 from app.db.schema import initialize_schema
+from app.db.market_scan_integrity import market_scan_snapshot_digest, seal_market_scan_snapshot
 from app.services import market_scan_evaluation as evaluation
+from app.services import market_scan_evaluation_metrics as evaluation_metrics
 from app.services.market_scan_evaluation import (
     DEFAULT_HORIZONS,
     DEFAULT_TOP_SIZES,
@@ -21,6 +24,11 @@ from app.services.market_scan_evaluation import (
     evaluate_market_scan_rankings,
     evaluate_market_scan_shadow_comparison,
     evaluate_market_scan_shadow_rankings,
+)
+from app.services.market_scan_evaluation_compact import compact_shadow_comparison_report
+from app.services.market_scan_evaluation_statistics import (
+    benjamini_hochberg,
+    moving_block_bootstrap_p_value,
 )
 from app.services.market_scan_probability_artifact import (
     PROBABILITY_RESULT_CONTRACT_VERSION,
@@ -41,6 +49,7 @@ from app.services.market_scan_evaluation_exposure import (
     regime_overlay,
     scan_time_bucket,
 )
+from tools import evaluate_market_scan_probability as probability_cli
 
 
 def test_exposure_helpers_cover_empty_invalid_and_market_boundary_contracts() -> None:
@@ -80,6 +89,29 @@ def test_exposure_helpers_cover_empty_invalid_and_market_boundary_contracts() ->
     assert scan_time_bucket("2026-01-01 10:00:00", "intraday") == "morning"
     assert scan_time_bucket("2026-01-01 13:00:00", "intraday") == "afternoon"
     assert scan_time_bucket("2026-01-01 10:00:00", "official") == "after_close"
+
+
+def test_evaluation_projects_v5_continuous_trend_and_keeps_v4_feature_alias() -> None:
+    components = {
+        "leader_score": {"base": 50, "trend_delta": 2, "score": 52},
+        "final_score": {
+            "quality_penalty": 0.0,
+            "base": 53.303336,
+            "continuous_trend_adjustment": 1.303336,
+            "raw": 53.303336,
+            "rounded": 53,
+            "score": 53,
+        },
+        "continuous_trend": {
+            "score": 0.662917,
+            "normalized_inputs": {"return_20d_pct": 0.75},
+        },
+    }
+
+    values = evaluation._production_score_component_values(components)
+
+    assert values["final_continuous_trend_adjustment"] == pytest.approx(1.303336)
+    assert values["refinement_return_20d_pct"] == pytest.approx(0.75)
     assert scan_time_bucket("2026-01-01 08:00:00", "preopen") == "preopen"
     assert board("920001.BJ", "BJ") == "BSE"
     assert board("688001.SH", "SH") == "STAR"
@@ -112,7 +144,52 @@ def test_shadow_promotion_primary_contract_never_selects_preopen_research() -> N
     }
 
 
+def test_bh_fdr_counts_null_hypotheses_and_preserves_insufficient_results() -> None:
+    adjusted, rejected = benjamini_hochberg(
+        (0.01, 0.03, None, 0.20),
+        alpha=0.05,
+    )
+
+    assert adjusted == pytest.approx((0.04, 0.06, None, 0.2666666667), nan_ok=True)
+    assert rejected == (True, False, None, False)
+    assert benjamini_hochberg((), alpha=0.05) == ((), ())
+    with pytest.raises(ValueError, match="alpha"):
+        benjamini_hochberg((0.1,), alpha=0)
+    with pytest.raises(ValueError, match="p-values"):
+        benjamini_hochberg((float("nan"),), alpha=0.05)
+
+
+def test_session_block_bootstrap_is_deterministic_and_null_when_insufficient() -> None:
+    positive = moving_block_bootstrap_p_value(
+        tuple(0.02 + index / 10_000 for index in range(40)),
+        samples=300,
+        block_length=5,
+        seed_text="candidate-a",
+        minimum_count=40,
+    )
+    replayed = moving_block_bootstrap_p_value(
+        tuple(0.02 + index / 10_000 for index in range(40)),
+        samples=300,
+        block_length=5,
+        seed_text="candidate-a",
+        minimum_count=40,
+    )
+
+    assert positive == replayed
+    assert positive is not None and positive < 0.05
+    assert moving_block_bootstrap_p_value(
+        (0.1,) * 39,
+        samples=300,
+        block_length=5,
+        seed_text="candidate-a",
+        minimum_count=40,
+    ) is None
+
+
 def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(tmp_path: Path) -> None:
+    assert evaluation._calibration_metrics is evaluation_metrics.calibration_metrics  # noqa: SLF001
+    assert evaluation._calibration_record is evaluation_metrics.calibration_record  # noqa: SLF001
+    assert evaluation._calibration_bucket is evaluation_metrics.calibration_bucket  # noqa: SLF001
     path = tmp_path / "evaluation.sqlite3"
     _initialize(path)
     run_id = _seed_run(
@@ -149,6 +226,29 @@ def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(
         ),
         run_ids=[run_id],
     )
+
+    normalized = json.loads(json.dumps(report))
+    normalized["generated_at"] = "<normalized>"
+    normalized["source"]["database"] = "<normalized>"
+    normalized["probability_research"] = "<normalized: independently clocked evidence>"
+    normalized_digest = hashlib.sha256(
+        json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    calibration_digest = hashlib.sha256(
+        json.dumps(
+            report["calibration"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert normalized_digest == "5c30f5a2c4006d9110375fcf34b1b7120649729c161ce036acc460cc6eca102a"
+    assert calibration_digest == "8f36b6d7a1035c20d245135b234cc2896e9b20d8750c7787b829e1cdf9519bb2"
 
     assert report["status"] == "ok"
     source = cast(dict[str, Any], report["source"])
@@ -418,7 +518,8 @@ def test_probability_cli_persists_null_shadow_records_without_mutating_database(
     assert summary["database_sha256_before"] == summary["database_sha256_after"]
     assert summary["credible_probability_available"] is False
     assert summary["calibrated_shadow_horizons"] == []
-    assert summary["production_rule"] == "full-market-score-v4"
+    assert summary["production_rule"] is None
+    assert summary["production_score_contract"] == summary["production_score_contracts"][0]
     assert summary["production_ranking_effect"] == "none"
     assert summary["automatic_promotion"] is False
     assert summary["full_input_replay_verified"] is True
@@ -485,6 +586,44 @@ def test_probability_cli_persists_null_shadow_records_without_mutating_database(
         assert load_probability_artifact(Path(tmp_summary["artifact"]))["payload"]
 
 
+def test_probability_cli_summary_projects_unique_v5_contract_and_exposes_mixed_contracts() -> None:
+    v4 = {
+        "production_score_rule_version": "full-market-score-v4",
+        "production_score_spec_hash": "4" * 64,
+    }
+    v5 = {
+        "production_score_rule_version": "full-market-score-v5",
+        "production_score_spec_hash": "5" * 64,
+    }
+
+    def summary(contracts: list[dict[str, object]]) -> dict[str, object]:
+        research = {
+            "status": "insufficient_data",
+            "cohorts": [
+                {"production_score_contract": contract}
+                for contract in contracts
+            ],
+        }
+        return probability_cli._summary(  # noqa: SLF001
+            [],
+            [],
+            research,
+            artifact_set_replay=None,
+            database_digest_before="a" * 64,
+            database_digest_after="a" * 64,
+        )
+
+    current = summary([v5, dict(v5)])
+    assert current["production_rule"] == "full-market-score-v5"
+    assert current["production_score_contract"] == v5
+    assert current["production_score_contracts"] == [v5]
+
+    mixed = summary([v5, v4])
+    assert mixed["production_rule"] is None
+    assert mixed["production_score_contract"] is None
+    assert mixed["production_score_contracts"] == [v4, v5]
+
+
 def test_probability_research_freezes_verified_new_stock_no_limit_profile(tmp_path: Path) -> None:
     path = tmp_path / "probability-new-stock.sqlite3"
     _initialize(path)
@@ -496,10 +635,12 @@ def test_probability_research_freezes_verified_new_stock_no_limit_profile(tmp_pa
         ranks=("688001.SH",),
     )
     with sqlite3.connect(path) as connection:
+        _disable_market_scan_immutability(connection)
         connection.execute(
             "UPDATE market_scan_result SET list_date = ?, is_new = 1 WHERE run_id = ?",
             ("2026-01-05", run_id),
         )
+        _reseal_market_scan_snapshot(connection, run_id)
         connection.commit()
     _seed_forward_prices(
         path,
@@ -531,6 +672,38 @@ def test_probability_research_freezes_verified_new_stock_no_limit_profile(tmp_pa
     assert features["price_limit_profile_uncertain"] == 0
     assert features["price_limit_absent"] == 1
     assert features["new_stock_no_limit_phase"] == 1
+
+
+def test_rank_evaluation_rejects_a_tampered_published_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "tampered-evaluation.sqlite3"
+    _initialize(path)
+    run_id = _seed_run(
+        path,
+        mode="official",
+        rule_version="production-v4",
+        quote_date="2026-01-05",
+        ranks=("600001.SH",),
+    )
+    with closing(sqlite3.connect(path)) as conn, conn:
+        _disable_market_scan_immutability(conn)
+        conn.execute(
+            "UPDATE market_scan_result SET raw_score = 1 WHERE run_id = ?",
+            (run_id,),
+        )
+
+    report = evaluate_market_scan_rankings(
+        path,
+        config=EvaluationConfig(bootstrap_samples=100),
+        run_ids=[run_id],
+    )
+
+    quality = cast(dict[str, object], report["evaluation_quality"])
+    failures = cast(list[dict[str, object]], quality["run_failures"])
+    assert report["status"] == "insufficient_data"
+    assert quality["evaluated_run_count"] == 0
+    assert quality["rejected_run_count"] == 1
+    assert failures[0]["run_id"] == run_id
+    assert failures[0]["reason_code"] == "MarketScanSnapshotSealError"
 
 
 def test_one_cross_section_cannot_satisfy_independent_session_gate(tmp_path: Path) -> None:
@@ -781,11 +954,21 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
     assert comparison["status"] == "insufficient_data"
     assert comparison["promotion"]["automatic_promotion"] is False  # type: ignore[index]
     assert comparison["promotion"]["point_in_time_input_integrity_verified"] is False  # type: ignore[index]
-    assert comparison["promotion"]["gate_version"] == "full-market-shadow-promotion-gate-v1"  # type: ignore[index]
+    assert comparison["promotion"]["gate_version"] == "full-market-shadow-promotion-gate-v2"  # type: ignore[index]
     assert comparison["promotion"]["eligible_candidates"] == []  # type: ignore[index]
+    multiple_testing = comparison["promotion"]["multiple_testing_control"]  # type: ignore[index]
+    assert multiple_testing["method"] == "benjamini-hochberg-fdr"
+    assert multiple_testing["status"] == "insufficient_data"
+    assert multiple_testing["tested_hypothesis_count"] == 0
+    assert multiple_testing["pbo"]["status"] == "not_computed"
+    assert multiple_testing["deflated_sharpe_ratio"]["status"] == "not_computed"
     gates = comparison["promotion"]["candidate_gates"]  # type: ignore[index]
     assert set(gates) == {"v5_full", "v5_without_overextension"}
     assert all("primary_contract" in gate["failed_criteria"] for gate in gates.values())
+    assert all(
+        "bh_fdr_primary_net_excess_improvement" in gate["failed_criteria"]
+        for gate in gates.values()
+    )
     assert "候选评分历史输入缺少可验证的扫描时点快照" in comparison["promotion"]["blocking_reasons"]  # type: ignore[index]
     assert comparison["promotion"]["conclusion"] == "候选评分已实现并可持续积累影子证据，但暂不晋级生产。"  # type: ignore[index]
     completed = subprocess.run(
@@ -798,6 +981,7 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
             str(run_id),
             "--variant",
             "v5_full",
+            "--compact",
             "--minimum-sample-size",
             "1",
             "--minimum-session-count",
@@ -812,8 +996,85 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
     )
     cli_payload = json.loads(completed.stdout)
     assert cli_payload["schema_version"] == "market-scan-shadow-comparison-v2"
+    assert cli_payload["artifact_projection"]["schema_version"] == (  # type: ignore[index]
+        "market-scan-shadow-comparison-compact-v1"
+    )
+    assert "probability_research" not in cli_payload["candidates"]["v5_full"]  # type: ignore[index]
     assert cli_payload["promotion"]["automatic_promotion"] is False
+    delta = shadow["rank_delta_vs_production"]
+    assert delta["status"] == "ok"
+    assert delta["common_symbol_count"] == 3
+    assert delta["top20_overlap_ratio"] == 1
     assert path.read_bytes() == before
+
+
+def test_shadow_compact_projection_keeps_product_evidence_and_drops_large_records() -> None:
+    report: dict[str, object] = {
+        "schema_version": "market-scan-shadow-comparison-v2",
+        "generated_at": "2026-08-12T00:00:00Z",
+        "status": "insufficient_data",
+        "promotion": {"automatic_promotion": False, "candidate_gates": {}},
+        "production": {
+            "status": "insufficient_data",
+            "source": {"database": "/private/tmp/local.sqlite3", "read_only": True},
+            "cohorts": [{
+                "dimensions": {"mode": "official", "scope": "full", "rule_version": "v4"},
+                "top_n": 100,
+            }],
+            "probability_research": {"records": [{"symbol": "600001.SH"}]},
+        },
+        "candidates": {
+            "v5_5_bounded_nonlinear_stability": {
+                "status": "insufficient_data",
+                "source": {
+                    "database": "/private/tmp/local.sqlite3",
+                    "independent_session_count": 1,
+                },
+                "cohorts": [{
+                    "dimensions": {"mode": "official", "scope": "full", "rule_version": "v5.5"},
+                    "top_n": 100,
+                    "horizon_trading_days": 5,
+                }],
+                "shadow": {
+                    "spec_hash": "a" * 64,
+                    "run_evidence": [{
+                        "run_id": 71,
+                        "candidate_id": "v5.5",
+                        "scored_count": 5_499,
+                        "ranking_digest": "b" * 64,
+                        "normalization": {"huge": [1, 2, 3]},
+                    }],
+                },
+                "rank_delta_vs_production": {"compared_item_count": 5_499},
+                "probability_research": {"records": [{"symbol": "600001.SH"}]},
+            }
+        },
+    }
+
+    compact = compact_shadow_comparison_report(report)
+
+    assert compact["schema_version"] == "market-scan-shadow-comparison-v2"
+    assert compact["artifact_projection"]["schema_version"] == (  # type: ignore[index]
+        "market-scan-shadow-comparison-compact-v1"
+    )
+    production = cast(dict[str, object], compact["production"])
+    candidate = cast(dict[str, dict[str, object]], compact["candidates"])[
+        "v5_5_bounded_nonlinear_stability"
+    ]
+    assert cast(list[dict[str, object]], production["cohorts"])[0]["top_n"] == 100
+    assert production["source"] == {"read_only": True}
+    assert candidate["rank_delta_vs_production"] == {"compared_item_count": 5_499}
+    assert cast(dict[str, object], candidate["source"])["independent_session_count"] == 1
+    assert "database" not in cast(dict[str, object], candidate["source"])
+    shadow = cast(dict[str, object], candidate["shadow"])
+    assert cast(list[dict[str, object]], shadow["run_evidence"])[0] == {
+        "run_id": 71,
+        "candidate_id": "v5.5",
+        "scored_count": 5_499,
+        "ranking_digest": "b" * 64,
+    }
+    assert "probability_research" not in production
+    assert "probability_research" not in candidate
 
 
 def test_shadow_evaluation_excludes_one_invalid_symbol_without_losing_the_run(tmp_path: Path) -> None:
@@ -830,10 +1091,12 @@ def test_shadow_evaluation_excludes_one_invalid_symbol_without_losing_the_run(tm
     for index, symbol in enumerate(symbols):
         _seed_shadow_history(path, symbol, end=date(2026, 1, 5), slope=(index + 1) * 0.001)
     with closing(sqlite3.connect(path)) as conn, conn:
+        _disable_market_scan_immutability(conn)
         conn.execute(
             "UPDATE market_scan_result SET price = 150 WHERE run_id = ? AND symbol = ?",
             (run_id, symbols[0]),
         )
+        _reseal_market_scan_snapshot(conn, run_id)
     _seed_forward_prices(
         path,
         dates=("2026-01-06",),
@@ -945,7 +1208,26 @@ def _seed_run(
                     timestamp,
                 ),
             )
+        seal_market_scan_snapshot(conn, int(run_id))
     return int(run_id)
+
+
+def _disable_market_scan_immutability(conn: sqlite3.Connection) -> None:
+    for trigger in (
+        "trg_market_scan_published_run_immutable",
+        "trg_market_scan_published_run_no_delete",
+        "trg_market_scan_published_result_no_update",
+        "trg_market_scan_published_result_no_delete",
+        "trg_market_scan_published_result_no_insert",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+
+
+def _reseal_market_scan_snapshot(conn: sqlite3.Connection, run_id: int) -> None:
+    conn.execute(
+        "UPDATE market_scan_run SET snapshot_digest = ? WHERE id = ?",
+        (market_scan_snapshot_digest(conn, run_id), run_id),
+    )
 
 
 def _seed_forward_prices(

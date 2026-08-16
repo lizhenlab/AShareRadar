@@ -7,6 +7,12 @@ from pathlib import Path
 from pydantic import TypeAdapter
 
 from app.db.connection import SQLITE_MARKET_EPOCH_FUNCTION
+from app.db.market_scan_action_source import require_market_scan_action_source
+from app.db.market_scan_integrity import (
+    MarketScanSnapshotSealError,
+    require_publication_market_scan_snapshot,
+)
+from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE
 from app.models.discovery import (
     DISCOVERY_PRESET_SCHEMA_VERSION,
     DiscoveryCriteria,
@@ -78,14 +84,15 @@ class DiscoveryRepository(SQLiteRepository):
                     """
                     INSERT INTO discovery_preset (
                         name, schema_version, revision, criteria_json, sort_json,
-                        created_at, updated_at
-                    ) VALUES (?, ?, 1, ?, ?, ?, ?)
+                        column_view, created_at, updated_at
+                    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload.name,
                         DISCOVERY_PRESET_SCHEMA_VERSION,
                         criteria_json,
                         sort_json,
+                        payload.column_view,
                         timestamp,
                         timestamp,
                     ),
@@ -160,14 +167,17 @@ class DiscoveryRepository(SQLiteRepository):
                 cursor = conn.execute(
                     """
                     UPDATE discovery_preset
-                    SET name = ?, criteria_json = ?, sort_json = ?,
+                    SET name = ?, schema_version = ?, criteria_json = ?, sort_json = ?,
+                        column_view = ?,
                         revision = revision + 1, updated_at = ?
                     WHERE id = ? AND revision = ?
                     """,
                     (
                         payload.name,
+                        DISCOVERY_PRESET_SCHEMA_VERSION,
                         criteria_json,
                         sort_json,
+                        payload.column_view,
                         timestamp,
                         preset_id,
                         payload.expected_revision,
@@ -192,14 +202,19 @@ class DiscoveryRepository(SQLiteRepository):
                 _raise_missing_or_revision(conn, preset_id, expected_revision)
 
     def run_reference(self, run_id: int) -> DiscoveryRunReference:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = conn.execute(
                 """
-                SELECT id, status, mode, rule_version, scope, data_date, as_of
+                SELECT id, status, mode, rule_version, scope, data_date, as_of,
+                       snapshot_digest, snapshot_seal_origin, snapshot_sealed_at
                 FROM market_scan_run WHERE id = ?
                 """,
                 (run_id,),
             ).fetchone()
+            if row is not None:
+                _require_full_market_scope(row, run_id)
+            if row is not None and str(row["status"]) in _COMPLETED_RUN_STATUSES:
+                require_publication_market_scan_snapshot(conn, run_id)
         if row is None:
             raise NotFoundError(f"全市场扫描批次不存在：{run_id}")
         return DiscoveryRunReference.model_validate(dict(row))
@@ -208,6 +223,10 @@ class DiscoveryRepository(SQLiteRepository):
         self,
         current: DiscoveryRunReference,
     ) -> DiscoveryRunReference | None:
+        if current.scope != MARKET_SCAN_FULL_MARKET_SCOPE:
+            raise MarketScanSnapshotSealError(
+                f"发现榜单仅接受完整全市场扫描批次：{current.id}"
+            )
         parameters: list[object] = [
             current.id,
             current.scope,
@@ -215,10 +234,11 @@ class DiscoveryRepository(SQLiteRepository):
             current.data_date,
             current.as_of,
         ]
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = conn.execute(
                 f"""
-                SELECT id, status, mode, rule_version, scope, data_date, as_of
+                SELECT id, status, mode, rule_version, scope, data_date, as_of,
+                       snapshot_digest, snapshot_seal_origin, snapshot_sealed_at
                 FROM market_scan_run
                 WHERE id != ?
                   AND status IN ('success', 'degraded')
@@ -234,6 +254,9 @@ class DiscoveryRepository(SQLiteRepository):
                 """,
                 parameters,
             ).fetchone()
+            if row is not None:
+                _require_full_market_scope(row, int(row["id"]))
+                require_publication_market_scan_snapshot(conn, int(row["id"]))
         return None if row is None else DiscoveryRunReference.model_validate(dict(row))
 
     def leaderboard(
@@ -248,7 +271,8 @@ class DiscoveryRepository(SQLiteRepository):
         order_sql = discovery_order_sql(preset.sort)
         offset = (page - 1) * page_size
         base_parameters = [run_id, *parameters]
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
+            _require_discovery_source(conn, run_id)
             total = int(
                 conn.execute(
                     f"SELECT COUNT(*) FROM market_scan_result AS r WHERE r.run_id = ? AND {where_sql}",
@@ -283,14 +307,22 @@ class DiscoveryRepository(SQLiteRepository):
             preset = _preset_from_row(_preset_row(conn, preset_id))
             if preset.revision != request.expected_preset_revision:
                 raise DiscoveryPresetRevisionError(f"筛选方案修订冲突：期望 {request.expected_preset_revision}，当前 {preset.revision}")
-            _require_completed_run(conn, request.run_id)
+            _require_discovery_source(conn, request.run_id)
+            require_market_scan_action_source(conn, request.run_id)
             result_rows = _matching_queue_rows(conn, preset.criteria, request.run_id, request.symbols)
             found = {str(row["symbol"]) for row in result_rows}
             rejected = [symbol for symbol in request.symbols if symbol not in found]
             if rejected:
                 raise ValueError(f"股票不属于当前榜单：{', '.join(rejected)}")
             rows_by_symbol = {str(row["symbol"]): row for row in result_rows}
-            snapshot = canonical_model_json(DiscoveryPresetPortable(name=preset.name, criteria=preset.criteria, sort=preset.sort))
+            snapshot = canonical_model_json(
+                DiscoveryPresetPortable(
+                    name=preset.name,
+                    criteria=preset.criteria,
+                    sort=preset.sort,
+                    column_view=preset.column_view,
+                )
+            )
             items = [_enqueue_symbol(conn, rows_by_symbol[symbol], preset, request.run_id, snapshot, timestamp) for symbol in request.symbols]
         return items
 
@@ -304,7 +336,9 @@ class DiscoveryRepository(SQLiteRepository):
     ) -> tuple[list[DiscoveryRankChangeItem], int]:
         offset = (page - 1) * page_size
         parameters = (current_run_id, previous_run_id)
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
+            _require_discovery_source(conn, current_run_id)
+            _require_discovery_source(conn, previous_run_id)
             total = int(conn.execute(f"{_RANK_COMPARISON_CTE} SELECT COUNT(*) FROM merged", parameters).fetchone()[0])
             rows = conn.execute(
                 f"""
@@ -336,6 +370,7 @@ def _preset_from_row(row: sqlite3.Row) -> DiscoveryPreset:
         revision=int(row["revision"]),
         criteria=DiscoveryCriteria.model_validate_json(str(row["criteria_json"])),
         sort=_SORT_ADAPTER.validate_json(str(row["sort_json"])),
+        column_view=str(row["column_view"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
@@ -356,12 +391,24 @@ def _leaderboard_item(row: sqlite3.Row, *, position: int) -> DiscoveryLeaderboar
     return DiscoveryLeaderboardItem.model_validate(values)
 
 
-def _require_completed_run(conn: sqlite3.Connection, run_id: int) -> None:
-    row = conn.execute("SELECT status FROM market_scan_run WHERE id = ?", (run_id,)).fetchone()
+def _require_discovery_source(conn: sqlite3.Connection, run_id: int) -> None:
+    row = conn.execute(
+        "SELECT status, scope FROM market_scan_run WHERE id = ?",
+        (run_id,),
+    ).fetchone()
     if row is None:
         raise NotFoundError(f"全市场扫描批次不存在：{run_id}")
+    _require_full_market_scope(row, run_id)
     if str(row["status"]) not in _COMPLETED_RUN_STATUSES:
         raise ValueError(f"全市场扫描批次尚未完成：{run_id}")
+    require_publication_market_scan_snapshot(conn, run_id)
+
+
+def _require_full_market_scope(row: sqlite3.Row, run_id: int) -> None:
+    if str(row["scope"]) != MARKET_SCAN_FULL_MARKET_SCOPE:
+        raise MarketScanSnapshotSealError(
+            f"发现榜单仅接受完整全市场扫描批次：{run_id}"
+        )
 
 
 def _matching_queue_rows(

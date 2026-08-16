@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
 import json
@@ -19,6 +20,8 @@ from app.services.market_scan_export import (
     market_scan_board_label,
 )
 from app.services.market_scan_manager import MarketScanManager
+from app.services.market_scan_probability_store import ProbabilityResearchUnavailable
+from app.services.market_scan_universe import FULL_MARKET_SCOPE
 
 
 EXPORTED_AT = datetime.fromisoformat("2026-07-29T16:20:30+08:00")
@@ -68,7 +71,7 @@ def test_workbook_contains_complete_ranked_snapshot_and_audit_metadata() -> None
     assert results["F2"].value == "深圳A股（主板）"
     assert results["G2"].value == "'+银行"
     assert results["W2"].value == "'@趋势和量价配合"
-    assert results["X2"].value == "错误文本"
+    assert results["X2"].value is None
     assert results["AD2"].value == "'-provider_reason"
     assert all(cell.data_type != "f" for row in results.iter_rows() for cell in row)
     details = workbook["评分明细"]
@@ -77,6 +80,7 @@ def test_workbook_contains_complete_ranked_snapshot_and_audit_metadata() -> None
     assert details["D2"].value == 92
     assert details["E2"].value == pytest.approx(91.123456)
     assert details["K2"].value == '{"amount":2.5}'
+    assert details["P2"].value == pytest.approx(-0.276544)
     assert details["Q2"].value == '[["raw_score","desc"],["symbol","asc"]]'
     assert all(cell.data_type != "f" for row in details.iter_rows() for cell in row)
     assert info["批次 ID"] == 12
@@ -94,8 +98,44 @@ def test_workbook_contains_complete_ranked_snapshot_and_audit_metadata() -> None
     assert info["成交额范围"] == "1000000 ～ 500000000"
     assert info["数据质量范围"] == "80 ～ 99"
     assert info["排序"] == "成交额（降序） → 趋势强度（降序） → 股票代码（升序）"
+    assert info["筛选合同"] == "screen-spec-v2"
+    assert len(info["筛选摘要"]) == 64
+    assert info["快照摘要"] == "a" * 64
+    exported_spec = json.loads(info["筛选合同 JSON"])
+    assert exported_spec["ranges"]["confidence"] == {"max": None, "min": 70.0}
+    assert exported_spec["keyword"] == "000001"
+    assert exported_spec["sort"] == [
+        {"field": "amount", "order": "desc"},
+        {"field": "score", "order": "desc"},
+        {"field": "symbol", "order": "asc"},
+    ]
     assert info["导出条数"] == 1
     assert info["数据说明"] == "仅导出已持久化榜单快照，不会重新获取行情或重新计算。"
+
+
+def test_score_detail_export_reads_v5_continuous_trend_without_losing_v4_columns() -> None:
+    item = _item()
+    details = deepcopy(item.score_details)
+    components = details["components"]
+    components["continuous_trend"] = components.pop("rank_refinement")
+    components["continuous_trend"]["score"] = 0.662917
+    final_score = components["final_score"]
+    final_score.pop("rank_discount")
+    final_score["continuous_trend_adjustment"] = 1.303336
+    workbook = load_workbook(
+        BytesIO(
+            build_market_scan_workbook(
+                _page([item.model_copy(update={"score_details": details})]),
+                MarketScanExportFilters(),
+                exported_at=EXPORTED_AT,
+            ).content
+        )
+    )
+    sheet = workbook["评分明细"]
+
+    assert sheet["N1"].value == "连续趋势/旧精排值"
+    assert sheet["N2"].value == pytest.approx(0.662917)
+    assert sheet["P2"].value == pytest.approx(1.303336)
 
 
 def test_workbook_supports_an_empty_filtered_result_without_an_invalid_table() -> None:
@@ -109,15 +149,24 @@ def test_workbook_supports_an_empty_filtered_result_without_an_invalid_table() -
     assert workbook["榜单"].tables == {}
     assert workbook["榜单"].auto_filter.ref == "A1:AE1"
     assert workbook["上涨概率研究"].tables == {}
-    assert workbook["上涨概率研究"].auto_filter.ref == "A1:P1"
+    assert workbook["上涨概率研究"].auto_filter.ref == "A1:T1"
 
 
-def test_probability_research_sheet_exports_six_auditable_rows_per_stock() -> None:
+def test_probability_research_sheet_exports_only_available_probabilities_with_explicit_semantics() -> None:
     probabilities = {
         "5": {
             "net_excess_positive": {
                 "status": "calibrated_shadow", "probability": 0.612,
-                "confidence_interval": {"lower": 0.56, "upper": 0.66, "level": 0.95},
+                "calibration_bias_interval": {
+                    "lower": -0.052, "upper": 0.048, "level": 0.95,
+                    "method": "date_block_bootstrap_signed_calibration_bias",
+                    "semantics": "signed_observed_rate_minus_probability_bias",
+                },
+                "calibration_adjusted_probability_interval": {
+                    "lower": 0.56, "upper": 0.66, "level": 0.95,
+                    "method": "date_block_bootstrap_calibration_offset",
+                    "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval",
+                },
                 "base_rate": 0.514, "model_version": "record-model-v1",
                 "input_digest": "record-input", "training_cutoff": "2026-07-15",
                 "limitations": ["=shadow_only"],
@@ -130,6 +179,7 @@ def test_probability_research_sheet_exports_six_auditable_rows_per_stock() -> No
         },
     }
     research: dict[str, object] = {
+        "run_binding": {"binding_status": "verified", "legacy": False},
         "horizons": {
             "1": {"net_excess_positive": {"status": "calibrated_shadow", "base_rate": 0.51}},
             "5": {
@@ -148,32 +198,27 @@ def test_probability_research_sheet_exports_six_auditable_rows_per_stock() -> No
 
     workbook = load_workbook(BytesIO(build_market_scan_workbook(page, MarketScanExportFilters(), exported_at=EXPORTED_AT).content))
     sheet = workbook["上涨概率研究"]
-    rows = {(row[4], row[5]): row for row in sheet.iter_rows(min_row=2, values_only=True)}
+    rows = {(row[4], row[6]): row for row in sheet.iter_rows(min_row=2, values_only=True)}
 
     assert sheet.freeze_panes == "A2"
-    assert sheet.auto_filter.ref == "A1:P7"
+    assert sheet.auto_filter.ref == "A1:T2"
     assert "MarketScanProbabilityResearch" in sheet.tables
-    assert len(rows) == 6
+    assert len(rows) == 1
     calibrated = rows[(5, "net_excess_positive")]
-    assert calibrated[6] == "calibrated_shadow"
-    assert calibrated[7:12] == pytest.approx((0.612, 0.56, 0.66, 0.95, 0.514))
-    assert json.loads(calibrated[12]) == {
+    assert calibrated[5] == "D+6"
+    assert calibrated[7] == "calibrated_shadow"
+    assert calibrated[8:14] == pytest.approx((0.612, -0.052, 0.048, 0.56, 0.66, 0.95))
+    assert calibrated[14] == "有符号偏差与群体校准调整概率区间；不是个股结果区间"
+    assert calibrated[15] == pytest.approx(0.514)
+    assert json.loads(calibrated[16]) == {
         "cost_model": "cost-v1", "feature": "feature-v1", "label": "label-v1", "model": "record-model-v1",
     }
-    assert calibrated[13] == "2026-07-15"
-    assert json.loads(calibrated[14]) == {
+    assert calibrated[17] == "2026-07-15"
+    assert json.loads(calibrated[18]) == {
         "calibrator": "study-calibrator-digest", "input": "record-input", "model": "study-model-digest",
     }
-    assert calibrated[15] == "'=shadow_only"
-    assert all(sheet.cell(2, column).number_format == "0.00%" for column in range(8, 13))
-    insufficient = rows[(5, "absolute_net_positive")]
-    assert insufficient[6] == "insufficient_data"
-    assert insufficient[7:11] == (None, None, None, None)
-    assert insufficient[11] == pytest.approx(0.48)
-    missing_record = rows[(1, "net_excess_positive")]
-    assert missing_record[6] == "not_generated"
-    assert missing_record[7] is None
-    assert missing_record[11] == pytest.approx(0.51)
+    assert calibrated[19] == "'=shadow_only"
+    assert all(sheet.cell(2, column).number_format == "0.00%" for column in (9, 10, 11, 12, 13, 14, 16))
     assert all(cell.data_type != "f" for row in sheet.iter_rows() for cell in row)
 
 
@@ -182,9 +227,90 @@ def test_probability_research_sheet_keeps_legacy_probabilities_blank() -> None:
     workbook = load_workbook(BytesIO(build_market_scan_workbook(page, MarketScanExportFilters(), exported_at=EXPORTED_AT).content))
 
     rows = list(workbook["上涨概率研究"].iter_rows(min_row=2, values_only=True))
-    assert len(rows) == 6
-    assert {row[6] for row in rows} == {"not_generated"}
-    assert all(row[7:12] == (None, None, None, None, None) for row in rows)
+    assert rows == []
+
+
+@pytest.mark.parametrize(
+    ("bias", "adjusted", "expected"),
+    (
+        (
+            {"lower": 0.10, "upper": 0.20, "level": 0.95, "method": "date_block_bootstrap_signed_calibration_bias", "semantics": "signed_observed_rate_minus_probability_bias"},
+            {"lower": 0.70, "upper": 0.80, "level": 0.95, "method": "date_block_bootstrap_calibration_offset", "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval"},
+            (0.10, 0.20, 0.70, 0.80, 0.95),
+        ),
+        (None, None, (None, None, None, None, None)),
+        (
+            {"lower": "invalid", "upper": 0.1, "level": 0.95, "method": "date_block_bootstrap_signed_calibration_bias", "semantics": "signed_observed_rate_minus_probability_bias"},
+            {"lower": 0.5, "upper": 0.7, "level": 0.95, "method": "date_block_bootstrap_calibration_offset", "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval"},
+            (None, None, None, None, None),
+        ),
+    ),
+)
+def test_probability_export_only_emits_valid_calibration_bias_intervals(
+    bias: object,
+    adjusted: object,
+    expected: tuple[float | None, float | None, float | None, float | None, float | None],
+) -> None:
+    record = {
+        "status": "calibrated_shadow",
+        "probability": 0.60,
+        "calibration_bias_interval": bias,
+        "calibration_adjusted_probability_interval": adjusted,
+    }
+    probabilities = {"5": {"net_excess_positive": record}}
+    research = {
+        "run_binding": {"binding_status": "verified", "legacy": False},
+        "horizons": {"5": {"net_excess_positive": {"status": "calibrated_shadow"}}},
+    }
+    item = _item().model_copy(update={"upside_probabilities": probabilities})
+    page = _page([item], probability_research=research)
+
+    workbook = load_workbook(
+        BytesIO(
+            build_market_scan_workbook(
+                page,
+                MarketScanExportFilters(),
+                exported_at=EXPORTED_AT,
+            ).content
+        )
+    )
+    rows = list(workbook["上涨概率研究"].iter_rows(min_row=2, values_only=True))
+
+    assert len(rows) == 1
+    assert rows[0][8] == pytest.approx(0.60)
+    if expected[0] is None:
+        assert rows[0][9:14] == expected
+    else:
+        assert rows[0][9:14] == pytest.approx(expected)
+
+
+def test_probability_export_rejects_boolean_probability_as_missing_evidence() -> None:
+    probabilities = {
+        "5": {
+            "net_excess_positive": {
+                "status": "calibrated_shadow",
+                "probability": True,
+                "calibration_bias_interval": [0.5, 0.7],
+            }
+        }
+    }
+    research = {
+        "run_binding": {"binding_status": "verified", "legacy": False},
+        "horizons": {"5": {"net_excess_positive": {"status": "calibrated_shadow"}}},
+    }
+    item = _item().model_copy(update={"upside_probabilities": probabilities})
+
+    workbook = load_workbook(
+        BytesIO(
+            build_market_scan_workbook(
+                _page([item], probability_research=research),
+                MarketScanExportFilters(),
+                exported_at=EXPORTED_AT,
+            ).content
+        )
+    )
+
+    assert list(workbook["上涨概率研究"].iter_rows(min_row=2, values_only=True)) == []
 
 
 def test_future_range_sheet_exports_fixed_sessions_and_marks_hlc3_as_proxy() -> None:
@@ -344,7 +470,7 @@ def test_manager_exports_only_published_runs_and_forwards_every_filter() -> None
         manager.export_results(page.run.id, filters=filters)
 
 
-def test_top100_refresh_export_does_not_attach_full_market_future_range_artifact() -> None:
+def test_top100_refresh_export_is_rejected_before_research_artifacts_are_read() -> None:
     page = _page([_item()])
     manager = object.__new__(MarketScanManager)
     future_range_calls: list[int] = []
@@ -360,12 +486,9 @@ def test_top100_refresh_export_does_not_attach_full_market_future_range_artifact
     manager._future_range_store = _FutureRangeStore()  # type: ignore[assignment]
     manager._now = lambda: EXPORTED_AT
 
-    exported = manager.export_results(top100.id, filters=MarketScanExportFilters())
-    workbook = load_workbook(BytesIO(exported.content))
-
+    with pytest.raises(ProbabilityResearchUnavailable, match="盘后正式全市场"):
+        manager.export_results(top100.id, filters=MarketScanExportFilters())
     assert future_range_calls == []
-    assert workbook["未来区间验证"]["A2"].value == "not_generated"
-    assert all(workbook["未来区间验证"].cell(2, column).value is None for column in range(3, 71))
 
 
 def _page(
@@ -518,7 +641,7 @@ def _run() -> MarketScanRun:
         as_of="2026-07-29 16:00:00",
         data_date="2026-07-29",
         quote_date="2026-07-29",
-        scope="SH/SZ/BJ listed A-shares",
+        scope=FULL_MARKET_SCOPE,
         stock_pool_source="akshare",
         total_count=1,
         excluded_count=0,
@@ -534,13 +657,16 @@ def _run() -> MarketScanRun:
         started_at="2026-07-29 16:00:01",
         finished_at="2026-07-29 16:10:00",
         duration_ms=599_000,
+        snapshot_digest="a" * 64,
+        snapshot_seal_origin="publication",
+        snapshot_sealed_at="2026-07-29 16:10:00",
     )
 
 
 def _item() -> MarketScanResultItem:
     return MarketScanResultItem(
         run_id=12,
-        symbol="SZ000001",
+        symbol="000001.SZ",
         code="000001",
         market="SZ",
         name='=HYPERLINK("https://example.invalid")',
@@ -560,9 +686,10 @@ def _item() -> MarketScanResultItem:
         amount=1_234_567_890.12,
         tags=["放量", "突破"],
         reason="@趋势和量价配合",
-        error="错误\x00文本",
+        error=None,
         data_date="2026-07-29",
         quote_timestamp="2026-07-29 15:00:00",
+        quote_observed_at="2026-07-29T07:00:00Z",
         quote_source="tencent",
         kline_source="akshare",
         adjustment_mode="qfq",
