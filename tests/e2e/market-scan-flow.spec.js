@@ -395,7 +395,18 @@ test("market-scan mode isolation and historical selection keep one explicit resu
           },
         };
       }
-      if (url.pathname === "/api/market-scans/90") return { payload: activeIntraday };
+      const runMatch = url.pathname.match(/^\/api\/market-scans\/(\d+)$/);
+      if (runMatch) {
+        const runId = Number(runMatch[1]);
+        const run = runId === 40
+          ? officialHistory
+          : runId === 38
+            ? intradayLatest
+            : runId === 36
+              ? preopenLatest
+              : runId === 90 ? activeIntraday : officialLatest;
+        return { payload: run };
+      }
       return null;
     },
   });
@@ -437,7 +448,8 @@ test("market-scan mode isolation and historical selection keep one explicit resu
     const params = new URLSearchParams(query);
     return params.get("mode") === "official"
       && params.get("status") === "success"
-      && params.get("data_date") === "2026-07-17";
+      && params.get("data_date") === "2026-07-17"
+      && params.get("authority") === "navigation";
   })).toBe(true);
 
   await page.locator("#marketScanModeIntraday").check();

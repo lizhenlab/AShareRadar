@@ -137,6 +137,12 @@ test("snapshot publication failure keeps a passed score-distribution gate visibl
   const resultRequests = [];
   await routeGateMessageFixture(page, failedRun, resultRequests);
   await page.goto("/");
+  await page.locator("#marketScanModeOfficial").evaluate((input) => {
+    input.checked = true;
+    document.querySelector("#marketScanModePreopen").checked = false;
+    document.querySelector("#marketScanModeIntraday").checked = false;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
   await page.locator('button[data-primary-view="market"]').click();
 
   await expect(page.locator("#marketScanDetails")).toBeHidden();
