@@ -82,6 +82,12 @@ class RiskRewardMetrics:
     atr14: float
     atr_pct: float
     volatility_pct: float
+    upside_available: bool
+    downside_available: bool
+    ratio_available: bool
+    upside_target_basis: str
+    downside_stop_basis: str
+    availability_reason: str | None
 
 
 @dataclass(frozen=True)

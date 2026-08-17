@@ -4,13 +4,16 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from app.config import Settings, get_settings
+from app.repositories.bundle import RepositoryBundle
 from app.services.cache import SQLiteCache, resolve_cache_settings
 from app.services.datahub import DataHub
+from app.services.domain_service_bundle import DomainServiceBundle
 from app.services.local_data_import_guard import LocalDataImportPreviewRegistry
 from app.services.market_scan_manager import MarketScanManager
 from app.services.runtime_coordinator import RuntimeCoordinator, RuntimeLeadership
 from app.services.scheduler import LocalDataScheduler
 from app.services.workbench_context import WorkbenchContextCache
+from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission
 
 
 _MISSING = object()
@@ -22,9 +25,12 @@ class AppContainer:
     datahub: DataHub
     scheduler: LocalDataScheduler
     workbench_contexts: WorkbenchContextCache
+    repositories: RepositoryBundle | None = None
+    domain_services: DomainServiceBundle | None = None
     market_scanner: MarketScanManager | None = None
     runtime_coordinator: RuntimeCoordinator | None = None
     local_data_import_previews: LocalDataImportPreviewRegistry = field(default_factory=LocalDataImportPreviewRegistry)
+    market_scan_heavy_read_admission: MarketScanHeavyReadAdmission = field(default_factory=MarketScanHeavyReadAdmission)
 
     def __post_init__(self) -> None:
         _require_settings_owner("datahub", self.datahub, self.settings)
@@ -40,6 +46,17 @@ class AppContainer:
         datahub_contexts = getattr(self.datahub, "workbench_contexts", _MISSING)
         if datahub_contexts is not _MISSING and datahub_contexts is not self.workbench_contexts:
             raise ValueError("workbench_contexts 必须与 datahub.workbench_contexts 使用同一实例")
+        cache = getattr(self.datahub, "cache", None)
+        cache_repositories = getattr(cache, "repositories", None)
+        cache_services = getattr(cache, "domain_services", None)
+        if self.repositories is None:
+            self.repositories = cache_repositories
+        if self.domain_services is None:
+            self.domain_services = cache_services
+        if cache_repositories is not self.repositories:
+            raise ValueError("repositories 必须与 datahub.cache 使用同一实例")
+        if cache_services is not self.domain_services:
+            raise ValueError("domain_services 必须与 datahub.cache 使用同一实例")
 
 
 def build_container(
@@ -53,6 +70,7 @@ def build_container(
     effective_cache = _resolve_cache_injection(datahub, cache)
     resolved_settings = _resolve_settings(settings, datahub, effective_cache, scheduler)
     datahub = _build_datahub(datahub, cache, resolved_settings)
+    domain_services = _compose_domain_services(datahub.cache)
     leadership = RuntimeLeadership.for_cache_path(datahub.cache.path)
     market_scanner = MarketScanManager(datahub, instance_guard=leadership.service_guard())
     scheduler = _build_scheduler(
@@ -60,6 +78,7 @@ def build_container(
         datahub,
         resolved_settings,
         market_scanner,
+        domain_services,
         instance_guard=leadership.service_guard(),
     )
     runtime_coordinator = RuntimeCoordinator(leadership, scheduler, market_scanner)
@@ -68,10 +87,19 @@ def build_container(
         datahub=datahub,
         scheduler=scheduler,
         workbench_contexts=datahub.workbench_contexts,
+        repositories=datahub.cache.repositories,
+        domain_services=domain_services,
         market_scanner=market_scanner,
         runtime_coordinator=runtime_coordinator,
         local_data_import_previews=LocalDataImportPreviewRegistry(),
     )
+
+
+def _compose_domain_services(cache: SQLiteCache) -> DomainServiceBundle:
+    services = cache.bound_domain_services
+    if services is None:
+        services = DomainServiceBundle.build(cache.path, cache.repositories)
+    return cache.bind_domain_services(services)
 
 
 def _resolve_datahub_injection(
@@ -81,12 +109,7 @@ def _resolve_datahub_injection(
     scheduler_datahub = getattr(scheduler, "datahub", _MISSING)
     if datahub is None and scheduler_datahub is not _MISSING and scheduler_datahub is not None:
         return cast(DataHub, scheduler_datahub)
-    if (
-        datahub is not None
-        and scheduler_datahub is not _MISSING
-        and scheduler_datahub is not None
-        and scheduler_datahub is not datahub
-    ):
+    if datahub is not None and scheduler_datahub is not _MISSING and scheduler_datahub is not None and scheduler_datahub is not datahub:
         raise ValueError("不能注入绑定到其他 datahub 的 scheduler")
     return datahub
 
@@ -121,11 +144,17 @@ def _build_scheduler(
     datahub: DataHub,
     settings: Settings,
     market_scanner: MarketScanManager,
+    domain_services: DomainServiceBundle,
     *,
     instance_guard,
 ) -> LocalDataScheduler:
     if scheduler is None:
-        return LocalDataScheduler(datahub, market_scanner=market_scanner, instance_guard=instance_guard)
+        return LocalDataScheduler(
+            datahub,
+            market_scanner=market_scanner,
+            instance_guard=instance_guard,
+            strategy_automation_service=domain_services.strategy_automation,
+        )
     scheduler_datahub = getattr(scheduler, "datahub", _MISSING)
     if scheduler_datahub is not _MISSING and scheduler_datahub is not datahub:
         raise ValueError("scheduler.datahub 必须与容器 datahub 使用同一实例")
@@ -134,6 +163,7 @@ def _build_scheduler(
     if scanner is not None and scanner is not market_scanner:
         raise ValueError("scheduler.market_scanner 必须与容器使用同一实例")
     scheduler.market_scanner = market_scanner
+    scheduler.bind_strategy_automation_service(domain_services.strategy_automation)
     scheduler.bind_instance_guard(instance_guard)
     return scheduler
 

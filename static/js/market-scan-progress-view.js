@@ -32,7 +32,9 @@ export function actionableDiagnostic(run) {
   const detail = String(run?.last_error || run?.message || "").trim();
   if (!detail || !["degraded", "failed", "interrupted"].includes(run?.status)) return "";
   if (/覆盖不足|有效样本占比不足/.test(detail)) return `诊断：${detail}。建议检查股票池与数据源完整性后重试；系统不会发布部分正式榜单。`;
-  if (/快照跨度|报价时间/.test(detail)) return `诊断：${detail}。建议待行情源稳定后重试，避免混用不同时点行情。`;
+  if (/快照跨度|报价(?:时间|采集|观测|事件)|采集信封/.test(detail)) {
+    return `诊断：${detail}。建议待行情源稳定后重试，避免混用不同时点行情。`;
+  }
   if (/数据源|provider|调用未结束|超时|不可用/i.test(detail)) return `诊断：${detail}。建议等待数据源恢复后从断点重试，不要提高不安全并发。`;
   if (/评分分布|tie|饱和/.test(detail)) return `诊断：${detail}。请核对规则版本与输入数据，当前结果不会作为正式榜单发布。`;
   return `诊断：${detail}。可从问题项重试；历史已发布快照不会被覆盖。`;

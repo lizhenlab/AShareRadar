@@ -7,15 +7,22 @@ from app.models.analysis import (
     IndividualReview,
     PeerSampleInfo,
 )
+from app.models.market import Kline, Quote
 from app.models.research import (
     MinuteAnalysisReport,
 )
+from app.models.market_scan import MarketScanMode
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.datahub import DataHub
-from app.services.datahub_cache import _normalize_minute_interval
+from app.services.datahub_cache import normalize_minute_interval
 from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
 from app.services.market_sampling import PeerQuoteSampleResult, peer_quote_sample as _peer_quote_sample
+from app.services.trading_calendar import (
+    MarketSessionPhase,
+    latest_expected_daily_kline_date,
+    market_session_phase,
+)
 from app.services.minute_analysis import build_minute_analysis_report, build_unavailable_minute_analysis_report
 from app.services.review import build_individual_review
 from app.utils.symbols import normalize_symbol
@@ -27,10 +34,60 @@ WORKBENCH_DAILY_KLINE_LIMIT = 240
 WORKBENCH_REVIEW_WINDOW_DAYS = 60
 
 
-async def analyze_individual_stock(datahub: DataHub, symbol: str, persist_history: bool = True) -> AnalysisResult:
+async def analyze_individual_stock(
+    datahub: DataHub,
+    symbol: str,
+    persist_history: bool = False,
+    *,
+    mode: MarketScanMode | None = None,
+) -> AnalysisResult:
+    """Build an interactive research result without persisting formal advice.
+
+    ``persist_history`` remains in the internal call signature for compatibility,
+    but formal advice publication is exclusively owned by the after-close active
+    research queue, which performs the full date/data-contract gate.
+    """
+    del persist_history
     code, market = normalize_symbol(symbol)
     standard = f"{code}.{market.upper()}"
     profile = await confirmed_stock_profile(datahub, standard)
+    quote_data, klines, plates = await _individual_market_inputs(datahub, symbol, standard)
+    analysis_mode = mode or _interactive_analysis_mode()
+    completed_klines = _completed_daily_klines(klines, analysis_mode)
+    quote_symbol = f"{quote_data.code}.{quote_data.market}"
+    data_quality = await _assess_quote_quality_or_fallback(
+        datahub,
+        quote_data,
+        completed_klines,
+        quote_symbol,
+    )
+    industry = match_industry(profile, plates)
+    review = build_individual_review(
+        quote_data,
+        completed_klines,
+        period_days=WORKBENCH_REVIEW_WINDOW_DAYS,
+    )
+    quote_history = await _safe_quote_history(datahub, quote_symbol)
+    peer_sample = await _peer_quote_sample_or_fallback(datahub, profile, quote_symbol)
+    return build_analysis(
+        quote_data,
+        completed_klines,
+        stock_profile=profile,
+        industry_context=industry,
+        review=review,
+        data_quality=data_quality,
+        quote_history=quote_history,
+        peer_quotes=list(peer_sample.quotes),
+        peer_sample=_peer_sample_info(peer_sample),
+        mode=analysis_mode,
+    )
+
+
+async def _individual_market_inputs(
+    datahub: DataHub,
+    symbol: str,
+    standard: str,
+) -> tuple[Quote, list[Kline], list]:
     quote_data, klines, plates_result = await asyncio.gather(
         datahub.quote(symbol),
         datahub.kline(symbol, WORKBENCH_DAILY_KLINE_LIMIT),
@@ -48,26 +105,30 @@ async def analyze_individual_stock(datahub: DataHub, symbol: str, persist_histor
     if isinstance(plates_result, asyncio.CancelledError):
         raise plates_result
     plates = plates_result if isinstance(plates_result, list) else []
-    quote_symbol = f"{quote_data.code}.{quote_data.market}"
-    data_quality = await _assess_quote_quality_or_fallback(datahub, quote_data, klines, quote_symbol)
-    industry = match_industry(profile, plates)
-    review = build_individual_review(quote_data, klines, period_days=WORKBENCH_REVIEW_WINDOW_DAYS)
-    quote_history = await _safe_quote_history(datahub, quote_symbol)
-    peer_sample = await _peer_quote_sample_or_fallback(datahub, profile, quote_symbol)
-    result = build_analysis(
-        quote_data,
-        klines,
-        stock_profile=profile,
-        industry_context=industry,
-        review=review,
-        data_quality=data_quality,
-        quote_history=quote_history,
-        peer_quotes=list(peer_sample.quotes),
-        peer_sample=_peer_sample_info(peer_sample),
-    )
-    if persist_history:
-        await _safe_save_advice_snapshot(datahub, result, quote_symbol)
-    return result
+    return quote_data, klines, plates
+
+
+def _interactive_analysis_mode() -> MarketScanMode:
+    """Keep live quotes from confirming completed-daily-bar volume evidence."""
+    phase = market_session_phase()
+    if phase in {MarketSessionPhase.PRE_OPEN, MarketSessionPhase.CALL_AUCTION}:
+        return "preopen"
+    if phase in {
+        MarketSessionPhase.MORNING,
+        MarketSessionPhase.MIDDAY_BREAK,
+        MarketSessionPhase.AFTERNOON_REOPEN_GRACE,
+        MarketSessionPhase.AFTERNOON,
+        MarketSessionPhase.CLOSE_PUBLISH_BUFFER,
+    }:
+        return "intraday"
+    return "official"
+
+
+def _completed_daily_klines(rows: list, mode: MarketScanMode) -> list:
+    if mode == "official":
+        return rows
+    cutoff = latest_expected_daily_kline_date().isoformat()
+    return [row for row in rows if str(getattr(row, "date", "")) <= cutoff]
 
 
 async def _safe_quote_history(datahub: DataHub, symbol: str) -> list[dict[str, float | str | None]]:
@@ -78,15 +139,6 @@ async def _safe_quote_history(datahub: DataHub, symbol: str) -> list[dict[str, f
     except Exception as exc:
         await _log_analysis_fallback(datahub, f"个股历史报价暂不可用：{symbol}；{_short_error(exc)}")
         return []
-
-
-async def _safe_save_advice_snapshot(datahub: DataHub, result: AnalysisResult, symbol: str) -> None:
-    try:
-        await run_cache_io(datahub.cache.save_advice_snapshot, result)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        await _log_analysis_fallback(datahub, f"分析建议快照暂不可写：{symbol}；{_short_error(exc)}")
 
 
 async def _optional_plate_rank(datahub: DataHub, symbol: str) -> list:
@@ -194,7 +246,7 @@ async def stock_minute_analysis(
 ) -> MinuteAnalysisReport:
     normalized = normalize_symbol(symbol)
     standard = f"{normalized[0]}.{normalized[1].upper()}"
-    normalized_interval = _normalize_minute_interval(interval)
+    normalized_interval = normalize_minute_interval(interval)
     await confirmed_stock_profile(datahub, standard)
     try:
         rows = await datahub.minute_kline(standard, interval=normalized_interval, limit=limit)

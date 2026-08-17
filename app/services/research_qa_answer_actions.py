@@ -14,7 +14,8 @@ def _t_strategy_actions(context: ActionContext) -> list[str]:
 
 
 def _risk_actions(context: ActionContext) -> list[str]:
-    ranked_actions = [item.action for item in sorted(context.risk_radar.items, key=lambda row: _sort_score(row.score), reverse=True)]
+    available_items = [item for item in context.risk_radar.items if getattr(item, "score_available", True)]
+    ranked_actions = [item.action for item in sorted(available_items, key=lambda row: _sort_score(row.score), reverse=True)]
     return _first_clean_items(ranked_actions, 4)
 
 
@@ -34,22 +35,26 @@ def _risk_reward_actions(context: ActionContext) -> list[str]:
 
 
 def _buy_actions(context: ActionContext) -> list[str]:
+    support = _available_level(context, "support", "support_available")
+    resistance = _available_level(context, "resistance", "resistance_available")
     actions = [
         item.action_hint
         for item in context.validation.items
         if item.category == "买点" and item.status in {"接近确认", "等待确认", "低置信观察", "环境压制", "周期冲突降级"}
     ][:3]
     return dedupe([
-        f"只有站稳支撑 {_format_number(context.analysis.support)} 且不过度贴近压力 {_format_number(context.analysis.resistance)} 时，才考虑观察级动作。",
+        f"只有站稳支撑 {support} 且不过度贴近压力 {resistance} 时，才考虑观察级动作。",
         *actions,
         "风险收益比没有修复前，不把反弹直接当买点。",
     ])
 
 
 def _sell_actions(context: ActionContext) -> list[str]:
+    support = _available_level(context, "support", "support_available")
+    resistance = _available_level(context, "resistance", "resistance_available")
     return dedupe([
-        f"接近压力 {_format_number(context.analysis.resistance)} 且量价乏力时优先保护利润。",
-        f"跌破支撑 {_format_number(context.analysis.support)} 后不要用主观预期替代纪律。",
+        f"接近压力 {resistance} 且量价乏力时优先保护利润。",
+        f"跌破支撑 {support} 后不要用主观预期替代纪律。",
         *[item.action_hint for item in context.validation.items if item.status in {"风险触发", "周期冲突降级"}][:3],
     ])
 
@@ -73,8 +78,10 @@ def _event_actions(context: ActionContext) -> list[str]:
 
 
 def _short_term_actions(context: ActionContext) -> list[str]:
+    support = _available_level(context, "support", "support_available")
+    resistance = _available_level(context, "resistance", "resistance_available")
     return dedupe([
-        f"明线看支撑 {_format_number(context.analysis.support)} 和压力 {_format_number(context.analysis.resistance)}。",
+        f"明线看支撑 {support} 和压力 {resistance}。",
         *context.diagnosis.confirmation_signals[:3],
         f"环境风险倍率 {_format_number(context.market_regime.risk_multiplier)}，风险收益评级 {_display_text(context.risk_reward.rating)}。",
     ])
@@ -82,3 +89,9 @@ def _short_term_actions(context: ActionContext) -> list[str]:
 
 def _default_actions(context: ActionContext) -> list[str]:
     return dedupe([context.diagnosis.action, *context.diagnosis.watch_focus, context.validation.summary])
+
+
+def _available_level(context: ActionContext, value_field: str, availability_field: str) -> str:
+    if getattr(context.analysis, availability_field, False) is not True:
+        return "待确认"
+    return _format_number(getattr(context.analysis, value_field, None))

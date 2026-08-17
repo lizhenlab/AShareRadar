@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     trigger TEXT NOT NULL
         CHECK (trigger IN ('manual', 'scheduled', 'retry')),
     mode TEXT NOT NULL DEFAULT 'official'
-        CHECK (mode IN ('official', 'intraday')),
+        CHECK (mode IN ('official', 'intraday', 'preopen')),
     rule_version TEXT NOT NULL,
     as_of TEXT NOT NULL,
     data_date TEXT NOT NULL,
@@ -185,6 +185,12 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     started_at TEXT,
     finished_at TEXT,
     duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    quote_capture_started_at TEXT,
+    quote_capture_finished_at TEXT,
+    quote_capture_duration_ms INTEGER
+        CHECK (quote_capture_duration_ms IS NULL OR quote_capture_duration_ms >= 0),
+    quote_capture_count INTEGER NOT NULL DEFAULT 0
+        CHECK (quote_capture_count >= 0),
     current_stage TEXT
         CHECK (current_stage IS NULL OR current_stage IN ('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication')),
     stage_started_at TEXT,
@@ -192,10 +198,45 @@ CREATE TABLE IF NOT EXISTS market_scan_run (
     market_progress_json TEXT NOT NULL DEFAULT '[]',
     message TEXT,
     last_error TEXT,
+    publication_diagnostics_json TEXT,
+    snapshot_digest TEXT CHECK (
+        snapshot_digest IS NULL OR (
+            length(snapshot_digest) = 64
+            AND snapshot_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    snapshot_seal_origin TEXT CHECK (
+        snapshot_seal_origin IS NULL
+        OR snapshot_seal_origin IN ('publication', 'legacy_backfill')
+    ),
+    snapshot_sealed_at TEXT,
     cancel_requested_at TEXT,
     FOREIGN KEY (task_run_id) REFERENCES task_run(id) ON DELETE SET NULL,
     FOREIGN KEY (retry_of_run_id) REFERENCES market_scan_run(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS market_scan_rule_contract (
+    rule_version TEXT PRIMARY KEY,
+    contract_json TEXT NOT NULL,
+    production_score_rule_version TEXT NOT NULL,
+    production_score_spec_hash TEXT NOT NULL CHECK (
+        length(production_score_spec_hash) = 64
+        AND production_score_spec_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_market_scan_rule_contract_immutable_update
+BEFORE UPDATE ON market_scan_rule_contract
+BEGIN
+    SELECT RAISE(ABORT, 'market_scan_rule_contract is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_market_scan_rule_contract_immutable_delete
+BEFORE DELETE ON market_scan_rule_contract
+BEGIN
+    SELECT RAISE(ABORT, 'market_scan_rule_contract is immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS market_scan_result (
     run_id INTEGER NOT NULL,
@@ -227,6 +268,7 @@ CREATE TABLE IF NOT EXISTS market_scan_result (
     error TEXT,
     data_date TEXT,
     quote_timestamp TEXT,
+    quote_observed_at TEXT,
     quote_source TEXT,
     kline_source TEXT,
     adjustment_mode TEXT,
@@ -240,6 +282,37 @@ CREATE TABLE IF NOT EXISTS market_scan_result (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (run_id, symbol),
     FOREIGN KEY (run_id) REFERENCES market_scan_run(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS market_scan_probability_capture_outbox (
+    run_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'succeeded', 'skipped')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    last_attempt_at TEXT,
+    completed_at TEXT,
+    archive_digest TEXT CHECK (
+        archive_digest IS NULL OR (
+            length(archive_digest) = 64
+            AND archive_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES market_scan_run(id) ON DELETE CASCADE,
+    CHECK (
+        (status = 'processing' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+        OR (status <> 'processing' AND lease_owner IS NULL AND lease_expires_at IS NULL)
+    ),
+    CHECK (
+        (status = 'succeeded' AND completed_at IS NOT NULL AND archive_digest IS NOT NULL)
+        OR (status = 'skipped' AND completed_at IS NOT NULL AND archive_digest IS NULL)
+        OR (status IN ('pending', 'processing') AND completed_at IS NULL AND archive_digest IS NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS monitor_event (
@@ -430,6 +503,8 @@ CREATE INDEX IF NOT EXISTS idx_market_scan_result_rank
     ON market_scan_result(run_id, status, rank, symbol);
 CREATE INDEX IF NOT EXISTS idx_market_scan_result_filters
     ON market_scan_result(run_id, market, industry, is_st, status);
+CREATE INDEX IF NOT EXISTS idx_market_scan_probability_capture_due
+    ON market_scan_probability_capture_outbox(status, next_attempt_at, run_id);
 CREATE INDEX IF NOT EXISTS idx_monitor_event_created
     ON monitor_event(created_at);
 CREATE INDEX IF NOT EXISTS idx_watchlist_updated

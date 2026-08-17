@@ -9,11 +9,18 @@ from app.services.stock_insights import build_stock_insight_bundle
 from app.services.stock_overview import (
     MAIN_CONFLICT_RULES,
     _event_factor,
+    _fund_factor,
     _fundamental_factor,
     _key_prices,
     _main_conflict,
+    _overview_scores,
     _quality_adjusted_total_score,
+    _risk_factor,
+    _risk_triggers,
+    _support_resistance_takeaway,
+    _technical_factor,
 )
+from app.services.research_alpha_points import overview_factor_points
 from tests.factories import make_kline, make_quote, make_stock_info
 
 
@@ -26,6 +33,9 @@ def test_fundamental_factor_reports_missing_fields_without_evidence() -> None:
     assert factor.summary == "基础财务数据待接入"
     assert factor.evidence == ["当前只有行情字段，财报指标待接入。"]
     assert factor.missing_data == ["PE", "PB", "市值", "行业/财务明细"]
+    assert factor.score_available is False
+    assert factor.participates_in_total_score is False
+    assert factor.data_nature == "unavailable"
 
 
 def test_fundamental_factor_rewards_low_pe_and_pb_with_context_evidence() -> None:
@@ -37,6 +47,8 @@ def test_fundamental_factor_rewards_low_pe_and_pb_with_context_evidence() -> Non
     assert factor.summary == "估值字段可用"
     assert factor.evidence == ["PE 18.50", "PB 2.20", "总市值 1200.0 亿", "行业：白酒"]
     assert factor.missing_data == []
+    assert factor.score_available is True
+    assert factor.participates_in_total_score is True
 
 
 def test_fundamental_factor_penalizes_high_pe_and_pb() -> None:
@@ -125,7 +137,8 @@ def test_overview_low_quality_caps_total_score() -> None:
     analysis = _analysis(pe=18.5, pb=2.2, market_cap=120_000_000_000, industry="白酒", data_quality_score=45)
 
     overview = build_stock_insight_bundle(analysis).overview
-    factor_score = round(sum(item.score for item in overview.factors) / len(overview.factors))
+    participating = [item for item in overview.factors if item.score_available and item.participates_in_total_score]
+    factor_score = round(sum(item.score for item in participating) / len(participating))
     signal_quality_score = round(analysis.signal_snapshot.confidence * 0.7 + analysis.data_quality.score * 0.3)
     raw_total = round(factor_score * 0.68 + signal_quality_score * 0.32)
     capped_total = round((factor_score + analysis.data_quality.score) / 2)
@@ -171,6 +184,80 @@ def test_overview_text_uses_normalized_support_resistance_consistently() -> None
     assert "有效跌破支撑位 120.00" not in overview.risk_triggers
 
 
+def test_unavailable_structural_placeholders_do_not_change_overview_outputs() -> None:
+    analysis = _analysis(pe=22.0, pb=2.5, market_cap=80_000_000_000, industry="制造")
+    first = analysis.model_copy(
+        update={
+            "support": 1.11,
+            "resistance": 2.22,
+            "ma20": 3.33,
+            "support_available": False,
+            "resistance_available": False,
+            "ma20_available": False,
+        }
+    )
+    second = first.model_copy(update={"support": 911.11, "resistance": 922.22, "ma20": 933.33})
+
+    def outputs(item):
+        return (
+            [level.model_dump() for level in _key_prices(item)],
+            _support_resistance_takeaway(item),
+            _risk_triggers(item, _order_pressure("均衡")),
+            _technical_factor(item).model_dump(),
+        )
+
+    assert outputs(first) == outputs(second)
+    rendered = str(outputs(first))
+    assert "1.11" not in rendered
+    assert "2.22" not in rendered
+    assert "3.33" not in rendered
+    assert "支撑/压力位待重算" in rendered
+    assert "20日线缺失" in rendered
+
+
+def test_available_structural_levels_keep_overview_price_contract() -> None:
+    analysis = _analysis(pe=22.0, pb=2.5, market_cap=80_000_000_000, industry="制造")
+
+    levels = {item.label: item.price for item in _key_prices(analysis)}
+
+    assert levels["支撑位"] == analysis.support
+    assert levels["压力位"] == analysis.resistance
+    assert levels["20日线"] == analysis.ma20
+
+
+def test_short_history_keeps_structural_levels_out_of_overview_strategies_and_rules() -> None:
+    quote = make_quote(price=105, prev_close=104, high=106, low=103, turnover_rate=4.0)
+    klines = [
+        make_kline(
+            date=f"2026-05-{index + 1:02d}",
+            close=100 + index,
+            high=101 + index,
+            low=99 + index,
+            volume=1500 + index * 20,
+        )
+        for index in range(10)
+    ]
+    quality = build_data_quality(quote, klines, now=datetime(2026, 5, 13, 16, 0, 0))
+    analysis = build_analysis(quote, klines, data_quality=quality)
+
+    bundle = build_stock_insight_bundle(analysis)
+    rules = {item.rule_id: item for item in bundle.rule_matches.matches}
+
+    assert analysis.support > 0 and analysis.resistance > 0 and analysis.ma20 > 0
+    assert analysis.support_available is False
+    assert analysis.resistance_available is False
+    assert analysis.ma20_available is False
+    assert {item.label for item in bundle.overview.key_prices}.isdisjoint({"支撑位", "压力位", "20日线"})
+    assert bundle.strategy_cards[1].reference_price == "压力位待重算"
+    assert bundle.strategy_cards[2].reference_price == "支撑位待重算"
+    assert bundle.strategy_cards[3].reference_price == "做T区间待重算"
+    assert bundle.strategy_cards[4].reference_price == "20日线待重算"
+    assert rules["break_ma20_risk"].status == "未触发"
+    assert "20日线" in rules["break_ma20_risk"].missing_data
+    assert rules["support_rebound_watch"].status == "未触发"
+    assert "支撑位" in rules["support_rebound_watch"].missing_data
+
+
 def test_event_factor_deduplicates_events_before_score_and_evidence() -> None:
     risk_event = SimpleNamespace(date="2026-05-13", category="公告", title="股东减持计划", level="风险")
     duplicate_risk_event = SimpleNamespace(date="2026-05-13", category="公告", title="股东减持计划", level="风险")
@@ -182,6 +269,7 @@ def test_event_factor_deduplicates_events_before_score_and_evidence() -> None:
     assert factor.summary == "事件需观察"
     assert factor.evidence == ["公告：股东减持计划", "业绩：订单增长"]
     assert factor.missing_data == ["公告全文", "研报摘要", "龙虎榜"]
+    assert factor.score_available is True
 
 
 def test_event_factor_deduplicates_same_visible_event_across_dates_and_ignores_dirty_notes() -> None:
@@ -197,6 +285,39 @@ def test_event_factor_deduplicates_same_visible_event_across_dates_and_ignores_d
     assert factor.score == 56
     assert factor.evidence == ["公告：股东减持计划", "业绩：订单增长"]
     assert factor.missing_data == []
+
+
+def test_quality_only_event_and_missing_fundamental_do_not_enter_overview_or_alpha_score() -> None:
+    analysis = _analysis(pe=None, pb=None, market_cap=None, industry=None, stock_profile=None)
+    bundle = build_stock_insight_bundle(analysis)
+    quality_event = SimpleNamespace(category="数据", title="数据质量提醒", level="观察")
+    events = SimpleNamespace(events=[quality_event], notes=["外部事件源不可用"])
+
+    scores = _overview_scores(analysis, bundle.fund_flow, bundle.order_pressure, events)
+    factors = {item.name: item for item in scores.factors}
+    participating = [item for item in scores.factors if item.score_available and item.participates_in_total_score]
+    patched_bundle = bundle.model_copy(update={"overview": bundle.overview.model_copy(update={"factors": scores.factors})})
+
+    assert factors["基本面"].score == 55
+    assert factors["基本面"].score_available is False
+    assert factors["事件面"].score == 58
+    assert factors["事件面"].score_available is False
+    assert scores.factor_score == round(sum(item.score for item in participating) / len(participating))
+    assert {item.title for item in overview_factor_points(patched_bundle)}.isdisjoint({"基本面", "事件面"})
+
+
+def test_unavailable_fund_flow_factor_keeps_score_for_compatibility_but_does_not_participate() -> None:
+    analysis = _analysis(pe=20, pb=2, market_cap=80_000_000_000, industry="制造")
+    fund_flow = build_stock_insight_bundle(analysis).fund_flow.model_copy(
+        update={"available": True, "data_nature": "unavailable", "overall_score": 88}
+    )
+
+    factor = _fund_factor(fund_flow)
+
+    assert factor.score == 88
+    assert factor.score_available is False
+    assert factor.participates_in_total_score is False
+    assert factor.data_nature == "unavailable"
 
 
 def test_main_conflict_rules_keep_priority_explicit() -> None:
@@ -231,6 +352,35 @@ def test_main_conflict_ignores_fund_trend_divergence_when_fund_flow_unavailable(
     )
 
 
+def test_unavailable_order_pressure_text_cannot_change_overview_risk_outputs() -> None:
+    analysis = _analysis(pe=22.0, pb=2.5, market_cap=80_000_000_000, industry="制造")
+    bundle = build_stock_insight_bundle(analysis)
+    pressures = [
+        bundle.order_pressure.model_copy(
+            update={
+                "available": False,
+                "data_nature": "unavailable",
+                "pressure_level": level,
+                "summary": f"不可信占位：{level}",
+            }
+        )
+        for level in ("订单压力不可用", "主动卖压", "强买盘")
+    ]
+
+    outputs = [
+        (
+            _risk_factor(analysis, pressure).model_dump(),
+            _main_conflict(analysis, bundle.fund_flow, pressure),
+            _risk_triggers(analysis, pressure),
+        )
+        for pressure in pressures
+    ]
+
+    assert outputs[0] == outputs[1] == outputs[2]
+    assert "盘口证据不可用" in str(outputs[0])
+    assert "不可信占位" not in str(outputs[0])
+
+
 def _conflict_analysis(*, data_quality_score: int = 80, confidence: int = 80, trend_score: int = 55):
     return SimpleNamespace(
         data_quality=SimpleNamespace(score=data_quality_score),
@@ -244,7 +394,12 @@ def _fund_flow(overall_score: int, *, available: bool = True):
 
 
 def _order_pressure(pressure_level: str):
-    return SimpleNamespace(pressure_level=pressure_level)
+    return SimpleNamespace(
+        pressure_level=pressure_level,
+        available=True,
+        data_nature="observed",
+        summary=pressure_level,
+    )
 
 
 def _analysis(

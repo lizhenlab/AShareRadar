@@ -1,22 +1,67 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 from pydantic import ValidationError
 import pytest
 
 from app.db.schema import initialize_schema
+from app.db.schema_definitions import SCHEMA_SQL
+from app.db.market_scan_action_source import MarketScanActionSourceError
+from app.db.market_scan_integrity import (
+    MarketScanSnapshotSealError,
+    seal_market_scan_snapshot,
+)
+from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE
 from app.models.discovery import (
     DiscoveryCriteria,
+    DiscoveryLeaderboardItem,
+    DiscoveryLeaderboardPage,
     DiscoveryPresetArchive,
     DiscoveryPresetCreate,
+    DiscoveryPresetPage,
     DiscoveryPresetRename,
     DiscoveryPresetUpdate,
     DiscoveryResearchQueueRequest,
+    DiscoveryResearchQueueItem,
+    DiscoveryResearchQueueResponse,
 )
 from app.repositories.discovery import DiscoveryRepository
+from app.repositories.discovery_sql import canonical_json
 from app.services.discovery import DiscoveryConflictError, DiscoveryImportError, DiscoveryService
 from app.utils.errors import NotFoundError
+from tests.market_scan_test_support import (
+    action_pass_publication_diagnostics,
+    distribution_degraded_publication_diagnostics,
+)
+
+
+_LEGACY_DISCOVERY_SCHEMA_SQL = """
+CREATE TABLE discovery_preset (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    schema_version INTEGER NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    criteria_json TEXT NOT NULL CHECK (json_valid(criteria_json)),
+    sort_json TEXT NOT NULL CHECK (json_valid(sort_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE discovery_research_queue_source (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    source_run_id INTEGER NOT NULL CHECK (source_run_id > 0),
+    source_preset_id INTEGER NOT NULL CHECK (source_preset_id > 0),
+    source_preset_revision INTEGER NOT NULL CHECK (source_preset_revision > 0),
+    source_preset_name TEXT NOT NULL,
+    preset_schema_version INTEGER NOT NULL CHECK (preset_schema_version = 1),
+    preset_snapshot_json TEXT NOT NULL CHECK (json_valid(preset_snapshot_json)),
+    enqueued_at TEXT NOT NULL,
+    FOREIGN KEY (symbol) REFERENCES watchlist(symbol) ON DELETE CASCADE,
+    UNIQUE (symbol, source_run_id, source_preset_id, source_preset_revision)
+);
+"""
 
 
 def test_preset_crud_and_application_are_persisted_and_paginated(tmp_path) -> None:
@@ -91,6 +136,121 @@ def test_preset_names_are_unique_case_insensitively(tmp_path) -> None:
         service.create_preset(_preset_payload(name="alpha"))
 
 
+def test_partial_scan_cannot_authorize_discovery_or_research_queue(tmp_path) -> None:
+    path, service = _service(tmp_path)
+    run_id = _seed_run(
+        path,
+        rule_version="discovery-partial-v1",
+        rows=[_result("600001.SH", rank=1, market="SH", score=92, quality=90)],
+        scope="TOP100",
+    )
+    preset = service.create_preset(_preset_payload())
+
+    with pytest.raises(MarketScanSnapshotSealError, match="完整全市场"):
+        service.apply_preset(preset.id, run_id=run_id, page=1, page_size=20)
+    with pytest.raises(MarketScanSnapshotSealError, match="完整全市场"):
+        service.enqueue_research(
+            preset.id,
+            DiscoveryResearchQueueRequest(
+                run_id=run_id,
+                expected_preset_revision=preset.revision,
+                symbols=["600001.SH"],
+            ),
+        )
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM discovery_research_queue_source"
+        ).fetchone()[0] == 0
+
+
+def test_distribution_degraded_scan_is_browsable_but_cannot_enqueue_research(
+    tmp_path,
+) -> None:
+    path, service = _service(tmp_path)
+    run_id = _seed_run(
+        path,
+        rule_version="discovery-distribution-degraded-v1",
+        rows=[_result("600001.SH", rank=1, market="SH", score=92, quality=90)],
+        action_eligible=False,
+    )
+    preset = service.create_preset(_preset_payload())
+
+    page = service.apply_preset(preset.id, run_id=run_id, page=1, page_size=20)
+    assert [item.symbol for item in page.items] == ["600001.SH"]
+    with pytest.raises(MarketScanActionSourceError, match="评分分布门禁"):
+        service.enqueue_research(
+            preset.id,
+            DiscoveryResearchQueueRequest(
+                run_id=run_id,
+                expected_preset_revision=preset.revision,
+                symbols=["600001.SH"],
+            ),
+        )
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM discovery_research_queue_source"
+        ).fetchone()[0] == 0
+
+
+def test_discovery_response_pages_positions_and_queue_counts_fail_closed(tmp_path) -> None:
+    _path, service = _service(tmp_path)
+    preset = service.create_preset(_preset_payload())
+    with pytest.raises(ValidationError, match="当前分页"):
+        DiscoveryPresetPage(
+            items=[preset],
+            total=2,
+            page=1,
+            page_size=2,
+            page_count=1,
+        )
+
+    first = DiscoveryLeaderboardItem(
+        position=1,
+        source_rank=1,
+        symbol="600001.SH",
+        code="600001",
+        market="SH",
+        name="样本一",
+        is_st=False,
+        is_new=False,
+        quality=90,
+        trend=85,
+        change=2,
+        turnover=1,
+        amount=100_000_000,
+        score=90,
+        raw_score=90.1,
+    )
+    second = first.model_copy(
+        update={"position": 3, "source_rank": 2, "symbol": "600002.SH", "code": "600002", "name": "样本二"}
+    )
+    with pytest.raises(ValidationError, match="position"):
+        DiscoveryLeaderboardPage(
+            preset=preset,
+            run_id=1,
+            rule_version="v1",
+            items=[first, second],
+            total=2,
+            page=1,
+            page_size=2,
+            page_count=1,
+        )
+
+    queued = DiscoveryResearchQueueItem(
+        symbol="600001.SH",
+        source_run_id=1,
+        source_preset_id=preset.id,
+        source_preset_revision=preset.revision,
+        source_preset_name=preset.name,
+        enqueued_at="2026-08-13T10:00:00Z",
+        added=True,
+    )
+    with pytest.raises(ValidationError, match="计数"):
+        DiscoveryResearchQueueResponse(items=[queued], added_count=0, existing_count=1)
+
+
 def test_preset_industry_filter_matches_ordinary_leaderboard_semantics_and_escapes_like(tmp_path) -> None:
     path, service = _service(tmp_path)
     run_id = _seed_run(
@@ -121,7 +281,7 @@ def test_preset_industry_filter_matches_ordinary_leaderboard_semantics_and_escap
 @pytest.mark.parametrize(
     "criteria",
     [
-        {"keyword": "600519"},
+        {"keyword": "600519\n贵州茅台"},
         {"is_st": "false"},
         {"market": ["SH", "HK"]},
         {"market": ["SH", "SH"]},
@@ -171,7 +331,7 @@ def test_export_import_is_versioned_checksummed_and_rejects_tampering(tmp_path) 
     imported = target.import_preset(archive)
 
     assert archive.format == "ashare-radar.discovery-preset"
-    assert archive.schema_version == 1
+    assert archive.schema_version == 2
     assert archive.checksum_algorithm == "sha256"
     assert len(archive.checksum) == 64
     assert imported.name == "可移植方案"
@@ -185,10 +345,102 @@ def test_export_import_is_versioned_checksummed_and_rejects_tampering(tmp_path) 
         _service(tmp_path / "tampered")[1].import_preset(tampered)
 
     unsupported_data = archive.model_dump(mode="json")
-    unsupported_data["schema_version"] = 2
+    unsupported_data["schema_version"] = 3
     unsupported = DiscoveryPresetArchive.model_validate(unsupported_data)
     with pytest.raises(DiscoveryImportError, match="版本"):
         _service(tmp_path / "unsupported")[1].import_preset(unsupported)
+
+
+def test_legacy_v1_sqlite_presets_migrate_without_losing_queue_provenance(tmp_path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA_SQL)
+        conn.executescript(_LEGACY_DISCOVERY_SCHEMA_SQL)
+        conn.execute(
+            """
+            INSERT INTO watchlist (symbol, code, market, name, created_at, updated_at)
+            VALUES ('600001.SH', '600001', 'SH', '旧方案样本', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z')
+            """
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO discovery_preset (
+                name, schema_version, revision, criteria_json, sort_json, created_at, updated_at
+            ) VALUES ('旧版方案', 1, 3, ?, ?, '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z')
+            """,
+            ('{"market":["SH"]}', '[{"field":"rank","order":"asc"}]'),
+        )
+        preset_id = int(cursor.lastrowid or 0)
+        conn.execute(
+            """
+            INSERT INTO discovery_research_queue_source (
+                symbol, source_run_id, source_preset_id, source_preset_revision,
+                source_preset_name, preset_schema_version, preset_snapshot_json, enqueued_at
+            ) VALUES ('600001.SH', 9, ?, 3, '旧版方案', 1, '{}', '2026-08-12T00:00:00Z')
+            """,
+            (preset_id,),
+        )
+        initialize_schema(conn)
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(discovery_preset)")}
+        alert_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'discovery_screen_alert_event'"
+        ).fetchone()
+        alert_foreign_keys = {
+            str(row[2]) for row in conn.execute("PRAGMA foreign_key_list(discovery_screen_alert_event)")
+        }
+        queued = conn.execute(
+            "SELECT preset_schema_version, source_preset_revision FROM discovery_research_queue_source"
+        ).fetchone()
+
+    migrated = DiscoveryRepository(path).preset(preset_id)
+    assert "column_view" in columns
+    assert alert_table == (1,)
+    assert alert_foreign_keys == {"discovery_preset", "market_scan_run"}
+    assert migrated.schema_version == 1
+    assert migrated.column_view == "overview"
+    assert migrated.revision == 3
+    assert migrated.criteria.market == ["SH"]
+    assert queued == (1, 3)
+
+
+def test_legacy_v1_archive_checksum_remains_importable(tmp_path) -> None:
+    preset_payload = _preset_payload(name="旧版归档").model_dump(mode="json")
+    preset_payload.pop("column_view")
+    for field in ("confidence", "risk", "tradability", "keyword"):
+        preset_payload["criteria"].pop(field)
+    checksum_payload = canonical_json(
+        {
+            "format": "ashare-radar.discovery-preset",
+            "schema_version": 1,
+            "preset": preset_payload,
+        }
+    )
+    archive = DiscoveryPresetArchive.model_validate(
+        {
+            "format": "ashare-radar.discovery-preset",
+            "schema_version": 1,
+            "checksum_algorithm": "sha256",
+            "checksum": hashlib.sha256(checksum_payload.encode("utf-8")).hexdigest(),
+            "exported_at": "2026-08-12T08:00:00+08:00",
+            "preset": preset_payload,
+        }
+    )
+
+    imported = _service(tmp_path / "legacy-archive")[1].import_preset(archive)
+
+    assert imported.schema_version == 2
+    assert imported.name == "旧版归档"
+    assert imported.column_view == "overview"
+
+    injected = archive.model_copy(
+        update={
+            "preset": archive.preset.model_copy(
+                update={"column_view": "research"}
+            )
+        }
+    )
+    with pytest.raises(DiscoveryImportError, match="v2 字段"):
+        _service(tmp_path / "legacy-injected")[1].import_preset(injected)
 
 
 def test_enqueue_research_is_atomic_idempotent_and_keeps_source_snapshot(tmp_path) -> None:
@@ -267,7 +519,8 @@ def test_enqueue_research_is_atomic_idempotent_and_keeps_source_snapshot(tmp_pat
     service.delete_preset(preset.id, expected_revision=2)
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("DELETE FROM market_scan_run WHERE id = ?", (run_id,))
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute("DELETE FROM market_scan_run WHERE id = ?", (run_id,))
         after_cleanup = conn.execute(
             """
             SELECT source_run_id, source_preset_id, source_preset_name, preset_snapshot_json
@@ -427,18 +680,36 @@ def _preset_payload(name: str = "半导体强势股") -> DiscoveryPresetCreate:
     )
 
 
-def _seed_run(path, *, rule_version: str, rows: list[dict[str, object]]) -> int:
+def _seed_run(
+    path,
+    *,
+    rule_version: str,
+    rows: list[dict[str, object]],
+    scope: str = MARKET_SCAN_FULL_MARKET_SCOPE,
+    action_eligible: bool = True,
+) -> int:
     timestamp = "2026-07-28T01:00:00.000000Z"
     with sqlite3.connect(path) as conn:
         run_id = conn.execute(
             """
             INSERT INTO market_scan_run (
                 status, trigger, rule_version, as_of, data_date, scope,
-                created_at, updated_at, finished_at
+                publication_diagnostics_json, created_at, updated_at, finished_at
             ) VALUES ('success', 'manual', ?, '2026-07-28 09:00:00', '2026-07-28',
-                      'test', ?, ?, ?)
+                      ?, ?, ?, ?, ?)
             """,
-            (rule_version, timestamp, timestamp, timestamp),
+            (
+                rule_version,
+                scope,
+                (
+                    action_pass_publication_diagnostics()
+                    if action_eligible
+                    else distribution_degraded_publication_diagnostics()
+                ).model_dump_json(),
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
         ).lastrowid
         assert run_id is not None
         for row in rows:
@@ -446,9 +717,9 @@ def _seed_run(path, *, rule_version: str, rows: list[dict[str, object]]) -> int:
                 """
                 INSERT INTO market_scan_result (
                     run_id, symbol, code, market, name, industry, is_st, is_new,
-                    status, rank, score, trend_score, data_quality_score,
+                    status, rank, score, raw_score, trend_score, data_quality_score,
                     change_pct, turnover_rate, amount, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -461,6 +732,7 @@ def _seed_run(path, *, rule_version: str, rows: list[dict[str, object]]) -> int:
                     int(bool(row["is_new"])),
                     row["rank"],
                     row["score"],
+                    float(row["score"]) + 0.1,
                     row["trend"],
                     row["quality"],
                     row["change"],
@@ -469,6 +741,7 @@ def _seed_run(path, *, rule_version: str, rows: list[dict[str, object]]) -> int:
                     timestamp,
                 ),
             )
+        seal_market_scan_snapshot(conn, int(run_id), sealed_at=timestamp)
     return int(run_id)
 
 

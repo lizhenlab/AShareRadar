@@ -118,9 +118,19 @@ def _scenario_plan_context(
     timeframe: TimeframeAlignmentReport | None = None,
 ) -> ScenarioPlanContext:
     price = _positive_or_zero(getattr(feature, "price", None))
-    support = _scenario_support_level(getattr(feature, "support", None), price)
-    resistance = _scenario_resistance_level(getattr(feature, "resistance", None), price)
-    ma20 = _positive_or_zero(getattr(feature, "ma20", None))
+    support = _scenario_support_level(
+        getattr(feature, "support", None) if getattr(feature, "support_available", False) is True else None,
+        price,
+    )
+    resistance = _scenario_resistance_level(
+        getattr(feature, "resistance", None) if getattr(feature, "resistance_available", False) is True else None,
+        price,
+    )
+    ma20 = (
+        _positive_or_zero(getattr(feature, "ma20", None))
+        if getattr(feature, "ma20_available", False) is True
+        else 0
+    )
     clean_upside_target = _scenario_resistance_level(upside_target, price)
     clean_downside_stop = _scenario_support_level(downside_stop, price)
     validation_status = _validation_status_text(validation)

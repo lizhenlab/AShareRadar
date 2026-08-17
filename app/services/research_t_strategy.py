@@ -13,6 +13,7 @@ from app.models.research import (
     TStrategyAssistantReport,
 )
 from app.utils.market_data import finite_float
+from app.utils.symbols import standard_symbol
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,9 @@ class TStrategyContext:
     resistance: float
     atr14: float
     atr_pct: float
+    support_available: bool
+    resistance_available: bool
+    atr_available: bool
     ma5: float
     trend_score: int
     risk_multiplier: float
@@ -51,17 +55,28 @@ def build_t_strategy_assistant_report(
     suitability = _t_strategy_suitability(context)
     low_zone = _low_zone(context)
     high_zone = _high_zone(context)
+    execution_available = suitability == "仅底仓可做T" and low_zone != "待确认" and high_zone != "待确认"
     return TStrategyAssistantReport(
+        symbol=standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}"),
+        updated_at=analysis.quote.timestamp,
         style=style,
         suitability=suitability,
-        summary=f"{style}，{suitability}。做T只服务于降低已有底仓成本，不等同于新增买入。",
+        summary=(
+            f"{style}，{suitability}。做T只服务于降低已有底仓成本，不等同于新增买入。"
+            if execution_available
+            else f"{style}，{suitability}。关键区间或执行证据未通过，不生成做T动作。"
+        ),
         low_zone=low_zone,
         high_zone=high_zone,
-        execution_steps=[
-            "先确认手里有可卖底仓，今日新增买入部分不参与当日T。",
-            f"低吸只看 {low_zone} 缩量止跌，不在放量下跌中接。",
-            f"高抛只看 {high_zone} 冲高乏力或接近压力，不恋战。",
-        ],
+        execution_steps=(
+            [
+                "先确认手里有可卖底仓，今日新增买入部分不参与当日T。",
+                f"低吸只看 {low_zone} 缩量止跌，不在放量下跌中接。",
+                f"高抛只看 {high_zone} 冲高乏力或接近压力，不恋战。",
+            ]
+            if execution_available
+            else ["关键区间或执行证据不可用，当前仅等待补齐，不生成低吸、高抛或止损价位。"]
+        ),
         stop_conditions=[
             _support_stop_condition(context),
             "成交突然放大向下或盘口卖压增强。",
@@ -82,10 +97,13 @@ def _t_strategy_context(
     validation: SignalValidationReport | None,
 ) -> TStrategyContext:
     price = _positive_or_zero(feature.price)
-    support = _positive_or_zero(feature.support)
-    resistance = _positive_or_zero(feature.resistance)
-    atr14 = _non_negative_or_zero(feature.atr14)
-    atr_pct = _non_negative_or_zero(feature.atr_pct)
+    support_available = feature.support_available is True
+    resistance_available = feature.resistance_available is True
+    atr_available = feature.atr14_available is True
+    support = _positive_or_zero(feature.support) if support_available else 0
+    resistance = _positive_or_zero(feature.resistance) if resistance_available else 0
+    atr14 = _non_negative_or_zero(feature.atr14) if atr_available else 0
+    atr_pct = _non_negative_or_zero(feature.atr_pct) if atr_available else 0
     ma5 = _positive_or_zero(feature.ma5)
     return TStrategyContext(
         analysis=analysis,
@@ -97,11 +115,14 @@ def _t_strategy_context(
         resistance=resistance,
         atr14=atr14,
         atr_pct=atr_pct,
+        support_available=support_available,
+        resistance_available=resistance_available,
+        atr_available=atr_available,
         ma5=ma5,
         trend_score=_score_or_zero(feature.trend_score),
         risk_multiplier=_positive_or_one(market_regime.risk_multiplier),
         width_pct=_range_width_pct(price, support, resistance),
-        swing_buffer=max(atr14, price * 0.012),
+        swing_buffer=atr14,
     )
 
 
@@ -149,8 +170,12 @@ def _t_strategy_suitability(context: TStrategyContext) -> str:
 
 def _low_zone(context: TStrategyContext) -> str:
     if context.price > 0 and context.support > 0:
-        return _zone_text(max(context.support, context.price - context.swing_buffer))
-    if context.price > 0:
+        return _zone_text(
+            max(context.support, context.price - context.swing_buffer)
+            if context.swing_buffer > 0
+            else context.support
+        )
+    if context.price > 0 and context.swing_buffer > 0:
         return _zone_text(max(0, context.price - context.swing_buffer))
     if context.support > 0:
         return _zone_text(context.support)
@@ -159,8 +184,12 @@ def _low_zone(context: TStrategyContext) -> str:
 
 def _high_zone(context: TStrategyContext) -> str:
     if context.price > 0 and context.resistance > 0:
-        return _zone_text(min(context.resistance, context.price + context.swing_buffer))
-    if context.price > 0:
+        return _zone_text(
+            min(context.resistance, context.price + context.swing_buffer)
+            if context.swing_buffer > 0
+            else context.resistance
+        )
+    if context.price > 0 and context.swing_buffer > 0:
         return _zone_text(context.price + context.swing_buffer)
     if context.resistance > 0:
         return _zone_text(context.resistance)

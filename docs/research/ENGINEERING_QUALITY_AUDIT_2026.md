@@ -216,7 +216,7 @@ $PYTHON tools/api_inventory.py --check
 $PYTHON tools/architecture_inventory.py --check
 $PYTHON -m pytest -q -p no:cacheprovider \
   --cov=app --cov=tools --cov-report=term-missing
-npx --no-install playwright install chromium
+npx --no-install playwright install chromium firefox webkit
 npm run test:e2e
 ```
 

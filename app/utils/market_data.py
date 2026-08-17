@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Buffer, Iterable
 import math
-from typing import TypeVar
+from typing import SupportsFloat, SupportsIndex, TypeVar
 
 
 T = TypeVar("T")
@@ -16,6 +16,8 @@ QUOTE_OPTIONAL_FINITE_FIELDS = ("pe", "pb", "market_cap")
 
 
 def finite_float(value: object) -> float | None:
+    if not isinstance(value, (str, Buffer, SupportsFloat, SupportsIndex)):
+        return None
     try:
         parsed = float(value)
     except (TypeError, ValueError):

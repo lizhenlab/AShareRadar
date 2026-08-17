@@ -88,9 +88,19 @@ def build_professional_summary(
     risk_reward: RiskRewardReport | None = None,
     timeframe: TimeframeAlignmentReport | None = None,
 ) -> str:
+    valuation_text = (
+        f"估值 {feature.valuation_score} 分"
+        if feature.valuation_score_available
+        else "估值证据不可用"
+    )
+    fund_flow_text = (
+        f"量价热度（衍生） {feature.fund_flow_score} 分"
+        if feature.fund_flow_data_nature != "unavailable"
+        else "量价热度证据不可用"
+    )
     return (
-        f"特征快照显示：趋势 {feature.trend_score} 分、量价热度（衍生） {feature.fund_flow_score} 分、"
-        f"估值 {feature.valuation_score} 分、龙头强度 {feature.leader_score} 分。"
+        f"特征快照显示：趋势 {feature.trend_score} 分、{fund_flow_text}、"
+        f"{valuation_text}、龙头强度 {feature.leader_score} 分。"
         f"Alpha证据结论为「{alpha.verdict}」，证据充分度 {alpha.confidence}/100。"
         f"{diagnosis_factor_regime_text(factor_lab, market_regime)}"
         f"{diagnosis_extra_text(validation, risk_reward, timeframe)}"
@@ -141,10 +151,22 @@ def _trend_repair_confirmation(feature: FeatureSnapshot) -> list[str]:
 
 
 def _base_confirmation_signals(feature: FeatureSnapshot) -> list[str]:
-    signals = ["量价热度评分（衍生）维持在 60 分以上，订单压力不再显示明显卖压。"]
+    signals: list[str] = []
+    if (
+        feature.fund_flow_data_nature != "unavailable"
+        and feature.order_pressure_data_nature != "unavailable"
+    ):
+        signals.append("量价热度评分（衍生）维持在 60 分以上，订单压力不再显示明显卖压。")
     if _valid_price(feature.ma5):
-        signals.insert(0, f"收盘站稳5日线 {feature.ma5:.2f}，且量能不低于近20日均量的 1.1 倍。")
-    if _valid_price(feature.resistance):
+        signals.insert(
+            0,
+            (
+                f"收盘站稳5日线 {feature.ma5:.2f}，且量能不低于近20日均量的 1.1 倍。"
+                if feature.volume_ratio_available
+                else f"收盘站稳5日线 {feature.ma5:.2f}；量能证据仍待确认。"
+            ),
+        )
+    if feature.resistance_available and _valid_price(feature.resistance):
         signals.append(f"放量突破压力位 {feature.resistance:.2f} 后，回踩不跌回压力位下方。")
     return signals
 
@@ -201,10 +223,10 @@ def _abnormal_hard_risk(insights: StockInsightBundle) -> list[str]:
 
 def _base_hard_risks(feature: FeatureSnapshot) -> list[str]:
     risks = ["数据质量降到“一般”以下，所有买卖点和做T计划必须降级。"]
-    if _valid_price(feature.support):
+    if feature.support_available and _valid_price(feature.support):
         risks.insert(0, f"有效跌破支撑位 {feature.support:.2f}。")
-    if _valid_price(feature.ma20):
-        risks.insert(1 if _valid_price(feature.support) else 0, f"收盘跌破20日线 {feature.ma20:.2f} 且次日不能快速修复。")
+    if feature.ma20_available and _valid_price(feature.ma20):
+        risks.insert(1 if feature.support_available else 0, f"收盘跌破20日线 {feature.ma20:.2f} 且次日不能快速修复。")
     return risks
 
 

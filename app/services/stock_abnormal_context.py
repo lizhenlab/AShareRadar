@@ -40,7 +40,11 @@ def build_abnormal_context(analysis: AnalysisResult) -> AbnormalEventContext:
     quote = analysis.quote
     rows = analysis.klines[-25:]
     prev_close = _previous_close(quote, rows)
-    volume_metrics = current_volume_metrics(quote, rows)
+    volume_metrics = current_volume_metrics(
+        quote,
+        rows,
+        allow_live_quote_volume=getattr(analysis, "research_mode", "official") == "official",
+    )
     amplitude_pct = _price_range_pct(quote.high, quote.low, prev_close)
     upper_shadow_pct, lower_shadow_pct = _shadow_percentages(quote, prev_close)
 
@@ -58,7 +62,21 @@ def build_abnormal_context(analysis: AnalysisResult) -> AbnormalEventContext:
     )
 
 
-def current_volume_metrics(quote: Quote, rows: list[Kline], *, avg_window: int = 5) -> CurrentVolumeMetrics:
+def current_volume_metrics(
+    quote: Quote,
+    rows: list[Kline],
+    *,
+    avg_window: int = 5,
+    allow_live_quote_volume: bool = True,
+) -> CurrentVolumeMetrics:
+    if not allow_live_quote_volume:
+        completed_rows = completed_kline_rows(quote, rows)
+        return CurrentVolumeMetrics(
+            latest_volume=0,
+            avg_volume=average_volume(completed_rows, avg_window),
+            volume_ratio=None,
+            history_count=len(completed_rows),
+        )
     if _quote_volume_is_usable(quote) and _quote_volume_matches_rows(quote, rows):
         completed_rows = completed_kline_rows(quote, rows)
         return _volume_metrics(quote.volume, average_volume(completed_rows, avg_window), len(completed_rows))

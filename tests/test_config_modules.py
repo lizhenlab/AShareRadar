@@ -171,7 +171,17 @@ def test_settings_reject_market_scan_history_larger_than_fetch_limit() -> None:
         ValidationError,
         match="market_scan_min_history_rows 不能大于 market_scan_kline_limit",
     ):
-        Settings(market_scan_min_history_rows=120, market_scan_kline_limit=60)
+        Settings(market_scan_min_history_rows=120, market_scan_kline_limit=61)
+
+
+def test_settings_enforce_the_shared_61_bar_market_scan_floor() -> None:
+    settings = Settings()
+
+    assert settings.market_scan_min_history_rows == 61
+    with pytest.raises(ValidationError, match="greater than or equal to 61"):
+        Settings(market_scan_min_history_rows=60)
+    with pytest.raises(ValidationError, match="greater than or equal to 61"):
+        Settings(market_scan_kline_limit=60)
 
 
 def test_settings_require_daily_retention_to_cover_the_scan_window() -> None:

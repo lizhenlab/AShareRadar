@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
+from math import isfinite
 from typing import Annotated, Literal, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 DISCOVERY_PRESET_FORMAT = "ashare-radar.discovery-preset"
-DISCOVERY_PRESET_SCHEMA_VERSION = 1
+DISCOVERY_PRESET_SCHEMA_VERSION = 2
 
 DiscoveryMarket = Literal["SH", "SZ", "BJ"]
-DiscoveryRunMode = Literal["official", "intraday"]
+DiscoveryRunMode = Literal["official", "intraday", "preopen"]
 DiscoverySortField = Literal[
     "rank",
     "symbol",
@@ -28,6 +30,7 @@ DiscoverySortField = Literal[
     "raw_score",
 ]
 DiscoverySortOrder = Literal["asc", "desc"]
+DiscoveryColumnView = Literal["overview", "trend", "liquidity", "risk", "research"]
 DiscoveryRankMovement = Literal["up", "down", "unchanged", "new", "exit", "unavailable"]
 DiscoveryComparisonReason = Literal["no_previous_run", "rule_version_mismatch"]
 
@@ -92,6 +95,10 @@ class DiscoveryCriteria(_StrictModel):
     turnover: DiscoveryTurnoverRange | None = None
     amount: DiscoveryAmountRange | None = None
     score: DiscoveryScoreRange | None = None
+    confidence: DiscoveryScoreRange | None = None
+    risk: DiscoveryScoreRange | None = None
+    tradability: DiscoveryScoreRange | None = None
+    keyword: Annotated[str, Field(min_length=1, max_length=80)] | None = None
 
     @field_validator("market")
     @classmethod
@@ -107,6 +114,13 @@ class DiscoveryCriteria(_StrictModel):
                 _reject_control_characters(industry, "industry")
         return checked
 
+    @field_validator("keyword")
+    @classmethod
+    def validate_keyword(cls, value: str | None) -> str | None:
+        if value is not None:
+            _reject_control_characters(value, "keyword")
+        return value
+
 
 class DiscoverySort(_StrictModel):
     field: DiscoverySortField
@@ -121,6 +135,7 @@ class DiscoveryPresetDefinition(_StrictModel):
     name: NameText
     criteria: DiscoveryCriteria = Field(default_factory=DiscoveryCriteria)
     sort: list[DiscoverySort] = Field(default_factory=_default_sort, min_length=1, max_length=3)
+    column_view: DiscoveryColumnView = "overview"
 
     @field_validator("name")
     @classmethod
@@ -175,6 +190,12 @@ class DiscoveryPresetPage(BaseModel):
     page_size: int = Field(ge=1, le=100)
     page_count: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_page_shape(self) -> Self:
+        _validate_page_shape(self.items, self.total, self.page, self.page_size, self.page_count)
+        _require_unique((item.id for item in self.items), "筛选方案 id")
+        return self
+
 
 class DiscoveryPresetArchive(_StrictModel):
     format: Literal["ashare-radar.discovery-preset"]
@@ -193,21 +214,27 @@ class DiscoveryPresetApplyRequest(_StrictModel):
 
 class DiscoveryLeaderboardItem(BaseModel):
     position: int = Field(ge=1)
-    source_rank: int | None = Field(default=None, ge=1)
-    symbol: str
-    code: str
+    source_rank: int = Field(ge=1)
+    symbol: SymbolText
+    code: str = Field(pattern=r"^\d{6}$")
     market: DiscoveryMarket
-    name: str
+    name: str = Field(min_length=1)
     industry: str | None = None
     is_st: bool
     is_new: bool
-    quality: int | None = Field(default=None, ge=0, le=100)
-    trend: int | None = Field(default=None, ge=0, le=100)
-    change: float | None = None
-    turnover: float | None = None
-    amount: float | None = None
-    score: int | None = Field(default=None, ge=0, le=100)
-    raw_score: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    quality: int = Field(ge=0, le=100)
+    trend: int = Field(ge=0, le=100)
+    change: float = Field(ge=-1000, le=1000, allow_inf_nan=False)
+    turnover: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    amount: float = Field(ge=0, allow_inf_nan=False)
+    score: int = Field(ge=0, le=100)
+    raw_score: float = Field(ge=0, le=100, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_symbol_binding(self) -> Self:
+        _validate_symbol_binding(self.symbol, self.code, self.market)
+        _validate_optional_finite_numbers(self.change, self.turnover, self.amount)
+        return self
 
 
 class DiscoveryLeaderboardPage(BaseModel):
@@ -219,6 +246,16 @@ class DiscoveryLeaderboardPage(BaseModel):
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=200)
     page_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_page_shape(self) -> Self:
+        _validate_page_shape(self.items, self.total, self.page, self.page_size, self.page_count)
+        _require_unique((item.position for item in self.items), "筛选结果位置")
+        _require_unique((item.symbol for item in self.items), "筛选结果股票")
+        offset = (self.page - 1) * self.page_size
+        if any(item.position != offset + index for index, item in enumerate(self.items, start=1)):
+            raise ValueError("筛选结果 position 与当前分页不一致")
+        return self
 
 
 class DiscoveryResearchQueueRequest(_StrictModel):
@@ -235,12 +272,12 @@ class DiscoveryResearchQueueRequest(_StrictModel):
 
 
 class DiscoveryResearchQueueItem(BaseModel):
-    symbol: str
+    symbol: SymbolText
     source_run_id: int = Field(ge=1)
     source_preset_id: int = Field(ge=1)
     source_preset_revision: int = Field(ge=1)
-    source_preset_name: str
-    enqueued_at: str
+    source_preset_name: str = Field(min_length=1)
+    enqueued_at: str = Field(min_length=1)
     added: bool
 
 
@@ -248,6 +285,14 @@ class DiscoveryResearchQueueResponse(BaseModel):
     items: list[DiscoveryResearchQueueItem]
     added_count: int = Field(ge=0)
     existing_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> Self:
+        _require_unique((item.symbol for item in self.items), "研究队列股票")
+        added_count = sum(item.added for item in self.items)
+        if self.added_count != added_count or self.existing_count != len(self.items) - added_count:
+            raise ValueError("研究队列计数与项目不一致")
+        return self
 
 
 class DiscoveryPresetDeleteResponse(BaseModel):
@@ -263,17 +308,26 @@ class DiscoveryRunReference(BaseModel):
     scope: str
     data_date: str
     as_of: str
+    snapshot_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    snapshot_seal_origin: Literal["publication", "legacy_backfill"] | None = None
+    snapshot_sealed_at: str | None = None
 
 
 class DiscoveryRankChangeItem(BaseModel):
-    symbol: str
-    code: str
+    symbol: SymbolText
+    code: str = Field(pattern=r"^\d{6}$")
     market: DiscoveryMarket
-    name: str
+    name: str = Field(min_length=1)
     previous_rank: int | None = Field(default=None, ge=1)
     current_rank: int | None = Field(default=None, ge=1)
     rank_delta: int | None = None
     movement: DiscoveryRankMovement
+
+    @model_validator(mode="after")
+    def validate_rank_state(self) -> Self:
+        _validate_symbol_binding(self.symbol, self.code, self.market)
+        _validate_rank_change_state(self)
+        return self
 
 
 class DiscoveryRankChangePage(BaseModel):
@@ -288,6 +342,64 @@ class DiscoveryRankChangePage(BaseModel):
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=200)
     page_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_page_and_comparison(self) -> Self:
+        _validate_page_shape(self.items, self.total, self.page, self.page_size, self.page_count)
+        _require_unique((item.symbol for item in self.items), "排名变化股票")
+        _validate_comparison_state(self)
+        return self
+
+
+def _validate_rank_change_state(item: DiscoveryRankChangeItem) -> None:
+    if item.movement in {"up", "down", "unchanged"}:
+        _validate_comparable_rank_change(item)
+    elif item.rank_delta is not None:
+        raise ValueError("不可比较排名变化不能包含 rank_delta")
+    if item.movement == "new" and (item.previous_rank is not None or item.current_rank is None):
+        raise ValueError("新进状态与排名不一致")
+    if item.movement == "exit" and (item.previous_rank is None or item.current_rank is not None):
+        raise ValueError("离榜状态与排名不一致")
+
+
+def _validate_comparable_rank_change(item: DiscoveryRankChangeItem) -> None:
+    if item.previous_rank is None or item.current_rank is None:
+        raise ValueError("可比较排名变化必须包含前后排名")
+    expected_delta = item.previous_rank - item.current_rank
+    if item.rank_delta != expected_delta:
+        raise ValueError("rank_delta 与前后排名不一致")
+    invalid_direction = (
+        (item.movement == "up" and expected_delta <= 0)
+        or (item.movement == "down" and expected_delta >= 0)
+        or (item.movement == "unchanged" and expected_delta != 0)
+    )
+    if invalid_direction:
+        raise ValueError("movement 与 rank_delta 不一致")
+
+
+def _validate_comparison_state(page: DiscoveryRankChangePage) -> None:
+    if page.comparable:
+        if page.previous_run_id is None or page.reason is not None or page.previous_rule_version != page.current_rule_version:
+            raise ValueError("可比较状态与批次/规则不一致")
+        return
+    if page.reason is None:
+        raise ValueError("不可比较状态必须包含原因")
+    if page.items or page.total or page.page_count:
+        raise ValueError("不可比较状态不能包含排名变化项目")
+    _validate_unavailable_comparison_reason(page)
+
+
+def _validate_unavailable_comparison_reason(page: DiscoveryRankChangePage) -> None:
+    if page.reason == "no_previous_run" and (
+        page.previous_run_id is not None or page.previous_rule_version is not None
+    ):
+        raise ValueError("无上一批次状态不能声明上一批次")
+    if page.reason == "rule_version_mismatch" and (
+        page.previous_run_id is None
+        or page.previous_rule_version is None
+        or page.previous_rule_version == page.current_rule_version
+    ):
+        raise ValueError("规则不一致状态缺少不同规则的上一批次")
 
 
 def _validate_range_order(minimum: int | float | None, maximum: int | float | None) -> None:
@@ -306,9 +418,41 @@ def _reject_control_characters(value: str, field: str) -> None:
         raise ValueError(f"{field} 不能包含控制字符")
 
 
+def _validate_page_shape(
+    items: Sequence[object],
+    total: int,
+    page: int,
+    page_size: int,
+    page_count: int,
+) -> None:
+    expected_page_count = (total + page_size - 1) // page_size if total else 0
+    if page_count != expected_page_count:
+        raise ValueError("page_count 与 total/page_size 不一致")
+    expected_items = 0 if page > page_count else min(page_size, total - (page - 1) * page_size)
+    if len(items) != expected_items:
+        raise ValueError("items 数量与当前分页不一致")
+
+
+def _require_unique(values: Iterable[object], label: str) -> None:
+    resolved = tuple(values)
+    if len(resolved) != len(set(resolved)):
+        raise ValueError(f"{label}不能重复")
+
+
+def _validate_symbol_binding(symbol: str, code: str, market: str) -> None:
+    if symbol != f"{code}.{market}":
+        raise ValueError("symbol/code/market 不一致")
+
+
+def _validate_optional_finite_numbers(*values: float | None) -> None:
+    if any(value is not None and not isfinite(value) for value in values):
+        raise ValueError("数值字段必须是有限数值")
+
+
 __all__ = [
     "DISCOVERY_PRESET_FORMAT",
     "DISCOVERY_PRESET_SCHEMA_VERSION",
+    "DiscoveryColumnView",
     "DiscoveryComparisonReason",
     "DiscoveryCriteria",
     "DiscoveryLeaderboardItem",

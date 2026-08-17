@@ -26,7 +26,11 @@ from app.services.stock_rule_values import (
 
 
 def _rule_high_valuation_chase(analysis: AnalysisResult, valuation: ValuationAnalysis) -> RuleMatch:
-    state = _high_valuation_chase_state(analysis.trend_score, valuation.score)
+    state = (
+        _high_valuation_chase_state(analysis.trend_score, valuation.score)
+        if valuation.score_available
+        else HighValuationChaseState(False, False)
+    )
     status = _high_valuation_chase_status(state)
     return RuleMatch(
         **_rule_match_fields("high_valuation_chase_risk"),
@@ -69,10 +73,14 @@ def _high_valuation_chase_confidence(status: str) -> int:
 
 
 def _high_valuation_chase_reason(analysis: AnalysisResult, valuation: ValuationAnalysis) -> str:
+    if not valuation.score_available:
+        return f"{_score_evidence('趋势评分', analysis.trend_score)}；估值证据不可用，本规则不形成方向判断。"
     return f"{_score_evidence('趋势评分', analysis.trend_score)}，{_score_evidence('估值评分', valuation.score, positive=True)}。{valuation.summary}"
 
 
 def _high_valuation_chase_evidence(analysis: AnalysisResult, valuation: ValuationAnalysis) -> list[str]:
+    if not valuation.score_available:
+        return [_score_evidence("趋势评分", analysis.trend_score), "估值证据不可用"]
     return [
         _score_evidence("趋势评分", analysis.trend_score),
         _score_evidence("估值评分", valuation.score, positive=True),
@@ -82,7 +90,7 @@ def _high_valuation_chase_evidence(analysis: AnalysisResult, valuation: Valuatio
 
 def _high_valuation_chase_missing_data(valuation: ValuationAnalysis) -> list[str]:
     missing_data = list(valuation.missing_data)
-    if _positive_score(valuation.score) is None:
+    if not valuation.score_available or _positive_score(valuation.score) is None:
         missing_data.append("估值评分")
     return _missing_data_items(missing_data)
 

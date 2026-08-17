@@ -306,18 +306,28 @@ def _eval_trend_score_below(rule: AlertRuleItem, quote: Quote, analysis: Analysi
 def _eval_break_support(rule: AlertRuleItem, quote: Quote, analysis: AnalysisResult | None) -> AlertEvaluationResult:
     if analysis is None:
         return _analysis_unavailable_result(quote)
-    target = _dynamic_level_target(rule.threshold, analysis.support)
+    target = _dynamic_level_target(
+        rule.threshold,
+        analysis.support if analysis.support_available else None,
+    )
+    if target is None:
+        return _analysis_unavailable_result(quote)
     return quote.price <= target, quote.price, f"{quote.name} 现价 {quote.price:.2f}，支撑参考 {target:.2f}。"
 
 
 def _eval_break_resistance(rule: AlertRuleItem, quote: Quote, analysis: AnalysisResult | None) -> AlertEvaluationResult:
     if analysis is None:
         return _analysis_unavailable_result(quote)
-    target = _dynamic_level_target(rule.threshold, analysis.resistance)
+    target = _dynamic_level_target(
+        rule.threshold,
+        analysis.resistance if analysis.resistance_available else None,
+    )
+    if target is None:
+        return _analysis_unavailable_result(quote)
     return quote.price >= target, quote.price, f"{quote.name} 现价 {quote.price:.2f}，压力参考 {target:.2f}。"
 
 
-def _dynamic_level_target(threshold: float, fallback: float) -> float:
+def _dynamic_level_target(threshold: float, fallback: float | None) -> float | None:
     return threshold if threshold > 0 else fallback
 
 

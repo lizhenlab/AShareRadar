@@ -67,3 +67,16 @@ def test_market_scan_universe_does_not_match_st_inside_regular_names(name: str) 
 def test_market_scan_universe_rejects_invalid_new_stock_window(new_stock_days: int) -> None:
     with pytest.raises(ValueError, match="新股天数必须为非负整数"):
         build_market_scan_universe([], data_date=DATA_DATE, new_stock_days=new_stock_days)
+
+
+def test_market_scan_universe_rejects_conflicting_duplicate_regardless_of_order() -> None:
+    first = _stock("600021", name="普通样本", list_date="20000101")
+    conflicting = first.model_copy(update={"name": "*ST冲突样本", "industry": "冲突行业"})
+
+    for rows in ([first, conflicting], [conflicting, first]):
+        with pytest.raises(ValueError, match="同一股票存在冲突元数据：600021.SH"):
+            build_market_scan_universe(
+                list(rows),
+                data_date=DATA_DATE,
+                new_stock_days=120,
+            )

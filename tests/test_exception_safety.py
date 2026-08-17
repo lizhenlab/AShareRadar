@@ -22,8 +22,20 @@ class _BoundaryPolicy:
 # ownership boundaries. Every exception must either propagate or follow one of the
 # narrowly reviewed hand-off policies below.
 _BASE_EXCEPTION_BOUNDARIES = {
+    ("app/artifacts/io.py", "_publish_at_directory_descriptor"): _BoundaryPolicy(
+        "propagate", "Remove an unpublished temporary artifact after cancellation or fatal publication failure."
+    ),
+    ("app/artifacts/io.py", "_publish_with_guarded_paths"): _BoundaryPolicy(
+        "propagate", "Remove an unpublished temporary artifact after cancellation or fatal fallback publication failure."
+    ),
     ("app/db/advice_review_schema.py", "apply_advice_review_compat_schema"): _BoundaryPolicy(
         "propagate", "Roll back the compatibility-schema transaction before preserving the original failure."
+    ),
+    ("app/db/market_scan_artifact_lease.py", "market_scan_artifact_retention_lease"): _BoundaryPolicy(
+        "propagate", "Release every artifact lease resource before preserving cancellation or fatal validation failure."
+    ),
+    ("app/db/market_scan_artifact_lease.py", "verified_market_scan_artifact_batch_publication"): _BoundaryPolicy(
+        "propagate", "Roll back every newly linked artifact before preserving cancellation or fatal batch failure."
     ),
     ("app/main.py", "lifespan"): _BoundaryPolicy(
         "propagate", "Clean up a partially started application before preserving startup cancellation or failure."
@@ -48,6 +60,12 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ),
     ("app/services/market_scan_lifecycle.py", "MarketScanLifecycle.release_instance_guard"): _BoundaryPolicy(
         "propagate", "Restore in-memory ownership state when lock release fails, then preserve the failure."
+    ),
+    ("app/services/market_scan_probability_history.py", "_stage_and_publish"): _BoundaryPolicy(
+        "propagate", "Remove a partially published history database before preserving cancellation or fatal failure."
+    ),
+    ("app/services/market_scan_probability_replay.py", "_readonly_connection"): _BoundaryPolicy(
+        "propagate", "Close the immutable replay connection before preserving cancellation or fatal body failure."
     ),
     ("app/services/runtime_backup.py", "_runtime_backup_operation_lease"): _BoundaryPolicy(
         "propagate", "Remember the body failure while releasing every backup-operation lease, then re-raise it."

@@ -84,6 +84,54 @@ class IndicatorTrendModuleTests(unittest.TestCase):
         self.assertEqual(volume_signal(2.0, 0.64)[0], 0)
         self.assertEqual(impact_level(-8), "风险")
 
+    def test_intraday_trend_neutralizes_unaligned_volume_confirmation(self) -> None:
+        klines = [
+            _kline(
+                close=100 + index * 0.1,
+                high=101 + index * 0.1,
+                low=99 + index * 0.1,
+                volume=5_000 if index >= 25 else 1_000,
+            )
+            for index in range(30)
+        ]
+        quote = _quote(
+            price=104,
+            prev_close=103,
+            high=104.5,
+            low=102.5,
+            change_pct=0.97,
+            turnover_rate=4,
+        )
+
+        _official_score, _official_label, official = trend_score_snapshot(
+            quote,
+            klines,
+            mode="official",
+        )
+        _intraday_score, _intraday_label, intraday = trend_score_snapshot(
+            quote,
+            klines,
+            mode="intraday",
+        )
+
+        assert official[-1].name == intraday[-1].name == "量价确认"
+        assert official[-1].impact == 6
+        assert intraday[-1].impact == 0
+        assert "缺少同进度成交量" in intraday[-1].reason
+
+    def test_preopen_trend_neutralizes_previous_session_volume_confirmation(self) -> None:
+        klines = [
+            _kline(close=100 + index * 0.1, volume=5_000 if index >= 25 else 1_000)
+            for index in range(30)
+        ]
+        quote = _quote(price=104, prev_close=103, change_pct=0.97)
+
+        preopen = trend_score_snapshot(quote, klines, mode="preopen")[2][-1]
+
+        assert preopen.name == "量价确认"
+        assert preopen.impact == 0
+        assert "盘前缺少同进度成交量" in preopen.reason
+
     def test_equal_moving_averages_and_slopes_are_neutral(self) -> None:
         context = _trend_context()
 

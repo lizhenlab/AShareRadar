@@ -75,6 +75,7 @@ export function conceptChangeClass(value) {
 }
 
 export function replayHeadline(replay) {
+  if (replay?.availability && replay.availability !== "available") return "回放统计不可用";
   return Number(replay.sample_count || 0) >= 5 ? `样本有效率 ${formatNumber(replay.success_rate, 1)}%` : "样本偏少";
 }
 

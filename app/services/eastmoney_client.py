@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
 import os
 import threading
-from typing import Any
+import time
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import requests
@@ -12,6 +14,7 @@ import requests
 from app.models.market import (
     Kline,
     MinuteKline,
+    PlateItem,
     Quote,
 )
 from app.services.data_quality_time import normalize_quote_event_time
@@ -26,6 +29,7 @@ from app.services.provider_utils import ensure_positive_limit
 from app.utils.market_data import valid_kline, valid_minute_kline
 from app.utils.parsing import MISSING_NUMERIC_VALUES, required_float, safe_float
 from app.utils.symbols import normalize_symbol, standard_symbol
+from app.utils.audit_time import audit_now_text
 
 
 EASTMONEY_BRIDGE_SOURCE_NAME = "AKShare·东方财富直连"
@@ -41,6 +45,7 @@ EASTMONEY_NO_PROXY_HOSTS = (
 EASTMONEY_QUOTE_HOSTS = ("82.push2.eastmoney.com", "23.push2.eastmoney.com", "53.push2.eastmoney.com")
 EASTMONEY_SCHEMES = ("https",)
 EASTMONEY_HIST_HOST = "push2his.eastmoney.com"
+EASTMONEY_INDUSTRY_PLATE_URL = "https://17.push2.eastmoney.com/api/qt/clist/get"
 EASTMONEY_UT_PARAM = "bd1d9ddb04089700cf9c27f6f7426281"
 EASTMONEY_HISTORY_UT_PARAM = "7eea3edcaed734bea9cbfc24409ed989"
 EASTMONEY_QUOTE_FIELDS = (
@@ -71,6 +76,11 @@ EASTMONEY_QUOTE_FIELDS = (
 EASTMONEY_HISTORY_FIELDS1 = "f1,f2,f3,f4,f5,f6"
 EASTMONEY_HISTORY_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
 EASTMONEY_DAILY_PERIOD = "101"
+EASTMONEY_INDUSTRY_PLATE_PAGE_SIZE = 100
+EASTMONEY_INDUSTRY_PLATE_MAX_BYTES = 512 * 1024
+EASTMONEY_INDUSTRY_PLATE_CONNECT_TIMEOUT_SECONDS = 2.0
+EASTMONEY_INDUSTRY_PLATE_READ_TIMEOUT_SECONDS = 2.0
+EASTMONEY_INDUSTRY_PLATE_DEADLINE_SECONDS = 4.0
 EASTMONEY_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
     "Referer": "https://quote.eastmoney.com/",
@@ -150,6 +160,193 @@ def eastmoney_get_json(url: str, params: dict[str, Any], timeout: float = 8) -> 
         detail = sanitize_provider_error(f"rc={data.get('rc')} {data.get('rt')}")
         raise ProviderProtocolError(f"东方财富接口返回异常：{detail}")
     return data
+
+
+def eastmoney_industry_plate_rank(limit: int = 20) -> list[PlateItem]:
+    """Fetch the complete, bounded Eastmoney industry-board page without SDK pagination."""
+    ensure_positive_limit(limit)
+    if limit > EASTMONEY_INDUSTRY_PLATE_PAGE_SIZE:
+        raise ValueError(f"板块排行 limit 不能超过 {EASTMONEY_INDUSTRY_PLATE_PAGE_SIZE}")
+    params = {
+        "pn": "1",
+        "pz": str(EASTMONEY_INDUSTRY_PLATE_PAGE_SIZE),
+        "po": "1",
+        "np": "1",
+        "ut": EASTMONEY_UT_PARAM,
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": "m:90 t:2 f:!50",
+        "fields": "f3,f6,f8,f12,f14,f128,f136",
+    }
+    data = _bounded_eastmoney_json(
+        EASTMONEY_INDUSTRY_PLATE_URL,
+        params,
+        max_bytes=EASTMONEY_INDUSTRY_PLATE_MAX_BYTES,
+    )
+    rows = _industry_plate_rows(data)
+    stamp = audit_now_text()
+    items = [_industry_plate_item(index, row, stamp) for index, row in enumerate(rows, start=1)]
+    _validate_industry_plate_order(items)
+    return items[:limit]
+
+
+def _bounded_eastmoney_json(
+    url: str,
+    params: dict[str, Any],
+    *,
+    max_bytes: int,
+) -> dict[str, Any]:
+    _require_https_url(url)
+    deadline = time.monotonic() + EASTMONEY_INDUSTRY_PLATE_DEADLINE_SECONDS
+    try:
+        with _eastmoney_session() as session:
+            response = session.get(
+                url,
+                params=params,
+                headers=EASTMONEY_HEADERS,
+                timeout=(
+                    EASTMONEY_INDUSTRY_PLATE_CONNECT_TIMEOUT_SECONDS,
+                    EASTMONEY_INDUSTRY_PLATE_READ_TIMEOUT_SECONDS,
+                ),
+                stream=True,
+                allow_redirects=False,
+            )
+            _require_industry_plate_http_200(response)
+            _reject_oversized_content_length(response, max_bytes)
+            encoded = _bounded_response_bytes(response, max_bytes=max_bytes, deadline=deadline)
+    except ProviderError:
+        raise
+    except requests.RequestException as exc:
+        raise ProviderTransportError(sanitize_provider_error(exc)) from exc
+    except Exception as exc:
+        raise ProviderTransportError(sanitize_provider_error(exc)) from exc
+    try:
+        data = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ProviderProtocolError("东方财富板块接口返回非 JSON 响应") from None
+    if not isinstance(data, dict):
+        raise ProviderProtocolError("东方财富板块接口返回结构异常")
+    if data.get("rc") != 0:
+        detail = sanitize_provider_error(f"rc={data.get('rc')} {data.get('rt')}")
+        raise ProviderProtocolError(f"东方财富板块接口返回异常：{detail}")
+    return data
+
+
+def _require_industry_plate_http_200(response: requests.Response) -> None:
+    status = response.status_code
+    if isinstance(status, bool) or not isinstance(status, int) or status != 200:
+        raise ProviderProtocolError(f"东方财富板块接口 HTTP 状态异常：{status}")
+
+
+def _reject_oversized_content_length(response: requests.Response, max_bytes: int) -> None:
+    raw = response.headers.get("Content-Length")
+    if raw is None:
+        return
+    try:
+        length = int(raw)
+    except ValueError:
+        raise ProviderProtocolError("东方财富板块接口 Content-Length 非法") from None
+    if length < 0 or length > max_bytes:
+        raise ProviderProtocolError("东方财富板块接口响应超过大小上限")
+
+
+def _bounded_response_bytes(
+    response: requests.Response,
+    *,
+    max_bytes: int,
+    deadline: float,
+) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if time.monotonic() > deadline:
+            raise ProviderTransportError("东方财富板块接口超过内部截止时间")
+        if not chunk:
+            continue
+        size += len(chunk)
+        if size > max_bytes:
+            raise ProviderProtocolError("东方财富板块接口响应超过大小上限")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _industry_plate_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        raise ProviderProtocolError("东方财富板块接口 data 字段结构异常")
+    rows = payload.get("diff")
+    total = _industry_plate_total(payload.get("total"))
+    if not isinstance(rows, list) or len(rows) != total:
+        raise ProviderProtocolError("东方财富板块接口 diff 与 total 不一致")
+    if not all(isinstance(row, dict) for row in rows):
+        raise ProviderProtocolError("东方财富板块接口包含非法行")
+    typed_rows = cast(list[dict[str, Any]], rows)
+    _validate_industry_plate_codes(typed_rows)
+    return typed_rows
+
+
+def _industry_plate_total(value: object) -> int:
+    total = value
+    if isinstance(total, bool) or not isinstance(total, int):
+        raise ProviderProtocolError("东方财富板块接口 total 字段非法")
+    if total < 0 or total > EASTMONEY_INDUSTRY_PLATE_PAGE_SIZE:
+        raise ProviderProtocolError("东方财富板块接口 total 超出单页边界")
+    return total
+
+
+def _validate_industry_plate_codes(rows: list[dict[str, Any]]) -> None:
+    codes = [str(row.get("f12") or "").strip() for row in rows]
+    if any(len(code) != 6 or not code.startswith("BK") or not code[2:].isdigit() for code in codes):
+        raise ProviderProtocolError("东方财富板块代码非法")
+    if len(set(codes)) != len(codes):
+        raise ProviderProtocolError("东方财富板块接口包含重复板块代码")
+
+
+def _industry_plate_item(rank: int, row: dict[str, Any], stamp: str) -> PlateItem:
+    name = str(row.get("f14") or "").strip()
+    if not name:
+        raise ProviderProtocolError("东方财富板块名称缺失")
+    try:
+        change_pct = required_float(row.get("f3"), "东方财富板块涨跌幅")
+        amount = _optional_non_negative_plate_number(row.get("f6"), "东方财富板块成交额")
+        turnover_rate = _optional_non_negative_plate_number(row.get("f8"), "东方财富板块换手率")
+        leading_change = _optional_plate_number(row.get("f136"), "东方财富领涨股涨跌幅")
+    except ValueError as exc:
+        raise ProviderProtocolError(str(exc)) from exc
+    leading_stock = str(row.get("f128") or "").strip() or None
+    return PlateItem(
+        rank=rank,
+        name=name,
+        change_pct=change_pct,
+        amount=amount,
+        turnover_rate=turnover_rate,
+        leading_stock=leading_stock,
+        leading_stock_change_pct=leading_change,
+        source=EASTMONEY_BRIDGE_SOURCE_NAME,
+        updated_at=stamp,
+    )
+
+
+def _optional_plate_number(value: object, field: str) -> float | None:
+    if value in MISSING_NUMERIC_VALUES:
+        return None
+    return required_float(value, field)
+
+
+def _optional_non_negative_plate_number(value: object, field: str) -> float | None:
+    number = _optional_plate_number(value, field)
+    if number is not None and number < 0:
+        raise ValueError(f"{field}不能为负数")
+    return number
+
+
+def _validate_industry_plate_order(items: list[PlateItem]) -> None:
+    names = [item.name for item in items]
+    if len(set(names)) != len(names):
+        raise ProviderProtocolError("东方财富板块接口包含重复板块名称")
+    if any(previous.change_pct < current.change_pct for previous, current in zip(items, items[1:], strict=False)):
+        raise ProviderProtocolError("东方财富板块接口未按涨跌幅降序返回")
 
 
 def eastmoney_quotes(symbols) -> list[Quote]:

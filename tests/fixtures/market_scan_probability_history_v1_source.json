@@ -1,0 +1,27 @@
+{
+  "database": "runtime.sqlite3",
+  "database_fingerprint": {
+    "mtime_ns": 1786460124764805133,
+    "size_bytes": 2335854592
+  },
+  "database_query_only": true,
+  "database_read_only": true,
+  "database_snapshot_transaction": true,
+  "provider": "TencentMarketDataProvider",
+  "provider_source": "腾讯行情",
+  "request_adjustment_mode": "qfq",
+  "request_bars_per_symbol": 360,
+  "sampling_strategy": "deterministic_sha256_balanced_SH_SZ_BJ_active_qfq_v1",
+  "selected_market_counts": {
+    "BJ": 40,
+    "SH": 40,
+    "SZ": 40
+  },
+  "selected_symbol_count": 120,
+  "universe_market_counts": {
+    "BJ": 334,
+    "SH": 2312,
+    "SZ": 2895
+  },
+  "universe_symbol_count": 5541
+}

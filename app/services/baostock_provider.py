@@ -159,7 +159,7 @@ def _query_baostock_stock_industries(bs) -> dict[str, str]:
     _raise_baostock_error(result, "BaoStock行业快照失败")
     industries: dict[str, str] = {}
     for row in rows:
-        item = stock_industry_from_baostock_row(dict(zip(result.fields, row)))
+        item = stock_industry_from_baostock_row(dict(zip(result.fields, row, strict=True)))
         if item is not None:
             industries.setdefault(*item)
     if not industries:
@@ -196,7 +196,7 @@ def _baostock_result_rows(result) -> list[list[str]]:
 def _stock_pool_from_rows(rows: list[list[str]], fields: list[str], source_name: str, stamp: str) -> list[StockInfo]:
     result: list[StockInfo] = []
     for row in rows:
-        item = stock_info_from_baostock_row(dict(zip(fields, row)), stamp=stamp, source_name=source_name)
+        item = stock_info_from_baostock_row(dict(zip(fields, row, strict=True)), stamp=stamp, source_name=source_name)
         if item:
             result.append(item)
     return result

@@ -11,15 +11,21 @@ from app.runtime_environment import isolate_user_site_packages
 
 isolate_user_site_packages()
 
-from fastapi import FastAPI
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.api.container import AppContainer, build_container
-from app.api.errors import internal_validation_exception_handler, validation_exception_handler
+from app.api.errors import (
+    internal_validation_exception_handler,
+    response_validation_exception_handler,
+    sensitive_individual_exception_handler,
+    sensitive_individual_http_exception_handler,
+    validation_exception_handler,
+)
 from app.api.routes import (
     alerts,
     analysis,
@@ -34,6 +40,7 @@ from app.api.routes import (
     quotes,
     reviews,
     stock,
+    strategy_lab,
     watchlist,
     watchlist_scan,
 )
@@ -117,6 +124,10 @@ async def _close_container_resources_safely(container: AppContainer) -> None:
 async def _shutdown_container(container: AppContainer) -> None:
     errors: list[BaseException] = []
     try:
+        await container.market_scan_heavy_read_admission.aclose()
+    except BaseException as exc:
+        errors.append(exc)
+    try:
         await _stop_runtime(container)
     except BaseException as exc:
         errors.append(exc)
@@ -193,6 +204,9 @@ def create_app(
     app.mount("/static", RevalidatingStaticFiles(directory=resolved_static_dir), name="static")
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(ValidationError, internal_validation_exception_handler)
+    app.add_exception_handler(ResponseValidationError, response_validation_exception_handler)
+    app.add_exception_handler(HTTPException, sensitive_individual_http_exception_handler)
+    app.add_exception_handler(Exception, sensitive_individual_exception_handler)
     _register_routes(app, resolved_static_dir)
     return app
 
@@ -213,6 +227,7 @@ def _register_routes(app: FastAPI, static_dir: Path) -> None:
     app.include_router(local_data.router)
     app.include_router(market_scan.router)
     app.include_router(discovery.router)
+    app.include_router(strategy_lab.router)
 
     @app.get("/")
     async def index() -> FileResponse:

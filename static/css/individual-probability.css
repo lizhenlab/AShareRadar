@@ -1,0 +1,268 @@
+.individual-probability-research {
+  min-width: 0;
+  margin: 0 22px 16px;
+  padding: 16px;
+  border: 1px solid #cfe0ff;
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #f7faff 0%, #fff 100%);
+  overflow: hidden;
+}
+
+.individual-probability-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.individual-probability-heading > div,
+.individual-probability-card,
+.individual-probability-card dl,
+.individual-probability-card dl > div {
+  min-width: 0;
+}
+
+.individual-probability-kicker {
+  color: #245fd6;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.individual-probability-heading h3 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 17px;
+}
+
+.individual-probability-heading p,
+.individual-probability-target,
+.individual-probability-card p,
+.individual-probability-limitations {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.individual-probability-heading p {
+  max-width: 760px;
+  margin: 5px 0 0;
+}
+
+.individual-probability-heading button {
+  min-height: 44px;
+  flex: 0 0 auto;
+}
+
+.individual-probability-target {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border: 1px solid #dbe7fb;
+  border-radius: var(--radius);
+  background: #fff;
+  color: #334155;
+}
+
+.individual-probability-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.individual-probability-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.individual-probability-card.calibrated {
+  border-color: #a7ddc0;
+  background: #f7fdf9;
+}
+
+.individual-probability-card.insufficient_data,
+.individual-probability-card.not_generated,
+.individual-probability-card.unavailable {
+  border-color: #e5e7eb;
+  background: #fbfcfe;
+}
+
+.individual-probability-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.individual-probability-card-head span,
+.individual-probability-value span,
+.individual-probability-evidence span,
+.individual-probability-card dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.individual-probability-card-head strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 16px;
+}
+
+.individual-probability-card-head em {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #667085;
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.individual-probability-card.calibrated .individual-probability-card-head em {
+  background: #e5f6ed;
+  color: #18794e;
+}
+
+.individual-probability-value {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.individual-probability-value strong {
+  color: #163f94;
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+}
+
+.individual-probability-card:not(.calibrated) .individual-probability-value strong {
+  color: #98a2b3;
+}
+
+.individual-probability-card dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.individual-probability-card dl > div {
+  display: grid;
+  grid-template-columns: minmax(72px, .9fr) minmax(0, 1.5fr);
+  gap: 8px;
+  padding-top: 5px;
+  border-top: 1px solid #eef1f5;
+}
+
+.individual-probability-card dd {
+  margin: 0;
+  color: #344054;
+  font-size: 11px;
+  font-weight: 650;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.individual-probability-card p {
+  margin: 0;
+}
+
+.individual-probability-diagnostics {
+  border-top: 1px solid #e7ecf3;
+  padding-top: 7px;
+}
+
+.individual-probability-diagnostics summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.individual-probability-diagnostics[open] summary {
+  margin-bottom: 4px;
+}
+
+.individual-probability-evidence {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.individual-probability-evidence > div {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #e3e9f2;
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.individual-probability-evidence strong {
+  display: block;
+  margin-top: 3px;
+  color: #344054;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.individual-probability-limitations {
+  display: grid;
+  gap: 3px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+@media (max-width: 820px) {
+  .individual-probability-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .individual-probability-evidence {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .individual-probability-research {
+    margin-right: 16px;
+    margin-left: 16px;
+  }
+
+  .individual-probability-heading {
+    flex-direction: column;
+  }
+
+  .individual-probability-heading button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 390px) {
+  .individual-probability-research {
+    padding: 12px;
+  }
+
+  .individual-probability-evidence {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .individual-probability-card dl > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .individual-probability-card dd {
+    text-align: left;
+  }
+}

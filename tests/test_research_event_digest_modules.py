@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 
 from app.models.schemas import AbnormalEventItem, AbnormalEventSummary, StockEventItem, StockEventSummary
 from app.services.analysis import build_analysis
@@ -21,7 +22,7 @@ def test_event_digest_risk_events_win_over_positive_events() -> None:
         ],
     )
 
-    report = build_event_digest_report(insights)
+    report = build_event_digest_report(_analysis(), insights)  # type: ignore[arg-type]
 
     assert report.impact_label == "事件偏风险"
     assert any("向下跳空" in item for item in report.negative_events)
@@ -34,7 +35,7 @@ def test_event_digest_positive_label_requires_no_negative_events() -> None:
         stock_events=[_stock_event(title="行业催化", level="积极", description="行业事件偏正面。")],
     )
 
-    report = build_event_digest_report(insights)
+    report = build_event_digest_report(_analysis(), insights)  # type: ignore[arg-type]
 
     assert report.impact_label == "事件偏积极"
     assert report.negative_events == []
@@ -42,7 +43,7 @@ def test_event_digest_positive_label_requires_no_negative_events() -> None:
 
 
 def test_event_digest_uses_default_watch_text_when_no_event_changes_conclusion() -> None:
-    report = build_event_digest_report(_insights_with_events())
+    report = build_event_digest_report(_analysis(), _insights_with_events())  # type: ignore[arg-type]
 
     assert report.impact_label == "事件待确认"
     assert report.watch_events == [DEFAULT_WATCH_EVENT]
@@ -55,7 +56,7 @@ def test_event_digest_missing_data_is_deduped_and_capped() -> None:
         abnormal_notes=["逐笔成交", "盘后公告"],
     )
 
-    report = build_event_digest_report(insights)
+    report = build_event_digest_report(_analysis(), insights)  # type: ignore[arg-type]
 
     assert report.missing_data == ["公告源", "研报源", "融资融券", "交易所问询", "行业新闻", "龙虎榜席位"]
 
@@ -94,6 +95,10 @@ def _insights_with_events(
             "lhb": insights.lhb.model_copy(update={"missing_data": lhb_missing or []}),
         }
     )
+
+
+def _analysis() -> SimpleNamespace:
+    return SimpleNamespace(quote=make_quote())
 
 
 def _abnormal_event(title: str, level: str, direction: str, description: str) -> AbnormalEventItem:

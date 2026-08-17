@@ -155,11 +155,11 @@ def endpoint_inputs(node: ast.FunctionDef | ast.AsyncFunctionDef, path: str) -> 
     inputs: list[str] = []
     args = list(node.args.posonlyargs) + list(node.args.args)
     defaults: list[ast.expr | object] = [MISSING_DEFAULT] * (len(args) - len(node.args.defaults)) + list(node.args.defaults)
-    for arg, default in zip(args, defaults):
+    for arg, default in zip(args, defaults, strict=True):
         formatted = endpoint_input(arg, default, path)
         if formatted:
             inputs.append(formatted)
-    for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+    for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True):
         formatted = endpoint_input(arg, default if default is not None else MISSING_DEFAULT, path)
         if formatted:
             inputs.append(formatted)
@@ -302,10 +302,22 @@ def render(endpoints: list[Endpoint]) -> str:
             "- All user-facing failures should pass through `app/api/errors.py` or explicit `HTTPException` with Chinese messages.",
             "- New endpoints should be added to the relevant route module and this file should be regenerated.",
             "- Prefer `GET /api/stock/workbench` for frontend workbench loading to avoid repeated provider calls.",
+            *future_range_design_notes(endpoints),
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def future_range_design_notes(endpoints: Sequence[Endpoint]) -> list[str]:
+    path = "/api/market-scans/{run_id}/future-range-research"
+    if not any(endpoint.method == "GET" and endpoint.path == path for endpoint in endpoints):
+        return []
+    return [
+        "- `GET /api/market-scans/{run_id}/future-range-research` returns the stable "
+        "`generation_status`/`artifact`/`research`/`record_page` wrapper; use "
+        "`include_research=false` on follow-up record pages after aggregate evidence is loaded.",
+    ]
 
 
 def input_cell(inputs: tuple[str, ...]) -> str:

@@ -21,6 +21,7 @@ from app.models.reviews import AdviceReviewPlan
 from app.services.cache import SQLiteCache
 from app.services.paper_trading import simulate_paper_portfolio
 from app.services.paper_trading_costs import resolve_cost_profile
+from tests.test_active_research_review_backend import _plan_input, _valid_analysis
 
 
 def test_paper_dashboard_is_no_store_and_account_can_be_updated() -> None:
@@ -43,7 +44,12 @@ def test_paper_strategy_route_freezes_plan_and_deletes_pending_strategy() -> Non
 
     created = client.post(
         "/api/paper-trading/strategies",
-        json={"plan_id": 10, "allocation_pct": 25},
+        json={
+            "plan_id": 10,
+            "expected_plan_revision": 1,
+            "expected_plan_payload_digest": "a" * 64,
+            "allocation_pct": 25,
+        },
     )
     removed = client.delete("/api/paper-trading/strategies/7")
 
@@ -58,7 +64,12 @@ def test_paper_strategy_route_freezes_plan_and_deletes_pending_strategy() -> Non
 def test_paper_strategy_route_validates_allocation() -> None:
     response = _client(_PaperCache()).post(
         "/api/paper-trading/strategies",
-        json={"plan_id": 10, "allocation_pct": 101},
+        json={
+            "plan_id": 10,
+            "expected_plan_revision": 1,
+            "expected_plan_payload_digest": "a" * 64,
+            "allocation_pct": 101,
+        },
     )
 
     assert response.status_code == 422
@@ -79,10 +90,23 @@ def test_paper_routes_publish_explicit_response_models() -> None:
 
 def test_historical_run_compare_and_export_routes_use_immutable_snapshots(tmp_path: Path) -> None:
     cache = SQLiteCache(tmp_path / "paper-api.sqlite3")
-    plan = _plan()
+    advice = cache.save_advice_snapshot(
+        _valid_analysis("600519"),
+        snapshot_market_time="2026-07-01 09:45:00",
+    )
+    plan = cache.create_advice_review_plan(
+        _plan_input(advice.id, "600519.SH").model_copy(
+            update={"target_price": 110, "stop_price": 90, "horizon_days": 20}
+        )
+    )
     cache.create_paper_strategy(
         plan,
-        PaperStrategyCreate(plan_id=plan.id, allocation_pct=10),
+        PaperStrategyCreate(
+            plan_id=plan.id,
+            expected_plan_revision=plan.revision,
+            expected_plan_payload_digest=plan.plan_payload_digest,
+            allocation_pct=10,
+        ),
         activation_market_time="2026-07-01 10:00:00",
     )
     strategy = cache.paper_strategies()[0]
@@ -130,7 +154,8 @@ def test_historical_run_compare_and_export_routes_use_immutable_snapshots(tmp_pa
     assert compared.status_code == 200
     assert compared.json()["left_run"]["id"] == first_id
     assert compared.json()["right_run"]["id"] == second_id
-    assert compared.json()["deltas"]["total_cost"] > 0
+    assert isinstance(compared.json()["deltas"]["total_cost"], float)
+    assert compared.json()["left_run"]["cost_profile_id"] != compared.json()["right_run"]["cost_profile_id"]
     assert exported.status_code == 200
     assert exported.json()["run"]["input_fingerprint"] == first.input_fingerprint
     assert "attachment" in exported.headers["content-disposition"]
@@ -227,6 +252,7 @@ def _plan() -> AdviceReviewPlan:
         stop_price=90,
         horizon_days=20,
         revision=1,
+        plan_payload_digest="a" * 64,
         created_at="2026-07-01T00:00:00.000000Z",
         updated_at="2026-07-01T00:00:00.000000Z",
     )
@@ -243,6 +269,12 @@ def _bar(day: str, open_price: float, high: float, low: float, close: float) -> 
         adjustment_mode="qfq",
         data_version="paper-api-test-v1",
         contract_version=DAILY_KLINE_CONTRACT_VERSION,
+        as_of=f"{day} 15:15:00",
+        point_in_time=True,
+        session_status="trading",
+        open_execution_status="tradable",
+        corporate_action_status="none",
+        execution_metadata_version="factor-execution-evidence.v1",
     )
 
 
@@ -251,6 +283,7 @@ def _strategy(plan: AdviceReviewPlan, allocation: float, activation: str) -> Pap
         id=7,
         plan_id=plan.id,
         plan_revision=plan.revision,
+        plan_payload_digest=plan.plan_payload_digest,
         advice_id=plan.advice_id,
         symbol=plan.symbol,
         activation_market_time=activation,

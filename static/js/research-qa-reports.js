@@ -365,6 +365,9 @@ function renderRiskRadarCard(report) {
 
 function renderRiskRadarItem(item) {
   item = asObject(item);
+  if (item.score_available === false || item.data_nature === "unavailable") {
+    return `<span>${escapeHtml(item.name)} 不可用 · --</span>`;
+  }
   return `<span class="${thresholdClass(item.score, { higherIsRisk: true, riskAt: 68, goodAt: 35 })}">${escapeHtml(item.name)} ${escapeHtml(item.level)} · ${escapeHtml(item.score)}</span>`;
 }
 
@@ -471,6 +474,7 @@ export function renderReplay(replay) {
     if (el) el.innerHTML = "";
     return;
   }
+  const available = replay.availability === undefined || replay.availability === "available";
   el.innerHTML = `
     <div class="replay-head">
       <strong>${escapeHtml(replayHeadline(replay))}</strong>
@@ -478,16 +482,20 @@ export function renderReplay(replay) {
     </div>
     <p>${escapeHtml(replay.summary)}</p>
     <div class="replay-baseline">
-      <span><small>信号相对基准</small><strong>${formatSignedReplayReturn(replay.excess_vs_baseline_pct)}</strong></span>
-      <span><small>同期基准5日</small><strong>${formatReplayReturn(replay.baseline_avg_forward_5d_return)}</strong></span>
-      <span><small>基准胜率</small><strong>${formatNumber(replay.baseline_win_rate, 1)}%</strong></span>
-      <span><small>模型往返摩擦</small><strong>${formatNumber(replay.modelled_round_trip_friction_pct, 2)}%</strong></span>
+      <span><small>信号相对基准</small><strong>${available ? formatSignedReplayReturn(replay.excess_vs_baseline_pct) : "--"}</strong></span>
+      <span><small>同期基准5日</small><strong>${available ? formatReplayReturn(replay.baseline_avg_forward_5d_return) : "--"}</strong></span>
+      <span><small>基准胜率</small><strong>${available ? formatOptionalPercent(replay.baseline_win_rate, 1) : "--"}</strong></span>
+      <span><small>模型往返摩擦</small><strong>${formatOptionalPercent(replay.modelled_round_trip_friction_pct, 2)}</strong></span>
     </div>
-    <div class="replay-stats">${renderReplayStats(replay.pattern_stats)}</div>
-    <div class="replay-regimes">${renderReplayRegimes(replay.regime_stats)}</div>
-    <div class="replay-cases">${renderReplayCases(replay.cases)}</div>
+    <div class="replay-stats">${available ? renderReplayStats(replay.pattern_stats) : replayUnavailableHtml(replay)}</div>
+    <div class="replay-regimes">${available ? renderReplayRegimes(replay.regime_stats) : ""}</div>
+    <div class="replay-cases">${available ? renderReplayCases(replay.cases) : ""}</div>
     <div class="replay-notes">${asArray(replay.notes).map((item) => `<small>${escapeHtml(item)}</small>`).join("")}</div>
   `;
+}
+
+function replayUnavailableHtml(replay) {
+  return `<div class="research-unavailable-note"><strong>回放统计不可用</strong><span>${escapeHtml(replay.unavailable_reason || "成熟执行证据不足，未生成胜率或收益统计。")}</span></div>`;
 }
 
 function renderReplayStats(items) {
@@ -496,10 +504,14 @@ function renderReplayStats(items) {
 }
 
 function renderReplayStat(item) {
+  const evaluated = Number(item.evaluated_count || 0) > 0;
+  const metrics = evaluated
+    ? `胜率 ${formatOptionalPercent(item.win_rate, 1)} · 5日 ${formatReplayReturn(item.avg_forward_5d_return)} · 超额 ${formatSignedReplayReturn(item.excess_vs_baseline_pct)}`
+    : "成熟样本不足，胜率与收益暂不可用";
   return `
     <div>
       <strong>${escapeHtml(item.pattern)}</strong>
-      <span>${escapeHtml(item.sample_count)}次 · 胜率 ${formatNumber(item.win_rate, 1)}% · 5日 ${formatNumber(item.avg_forward_5d_return)}% · 超额 ${formatSignedReplayReturn(item.excess_vs_baseline_pct)}</span>
+      <span>${escapeHtml(item.sample_count)}次 / 已评估 ${escapeHtml(item.evaluated_count ?? 0)}次 · ${metrics}</span>
       <small>${escapeHtml(item.note)}</small>
     </div>`;
 }

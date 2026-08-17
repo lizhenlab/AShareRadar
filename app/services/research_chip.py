@@ -46,10 +46,10 @@ def build_chip_analysis(analysis: AnalysisResult, feature: FeatureSnapshot) -> C
     rows = _valid_chip_rows(analysis.klines[-CHIP_LOOKBACK_DAYS:])
     current_price = _effective_chip_price(feature.price, rows)
     if len(rows) < MIN_CHIP_KLINES:
-        return _insufficient_chip_analysis(feature, current_price)
+        return _insufficient_chip_analysis(feature, len(rows))
     distribution = _chip_distribution(rows)
     if distribution is None:
-        return _insufficient_chip_analysis(feature, current_price)
+        return _insufficient_chip_analysis(feature, len(rows))
     support_bands = _support_bands(distribution.bins, distribution.total_volume, current_price)
     pressure_bands = _pressure_bands(distribution.bins, distribution.total_volume, current_price)
     label = _chip_distribution_label(distribution.concentration)
@@ -60,6 +60,9 @@ def build_chip_analysis(analysis: AnalysisResult, feature: FeatureSnapshot) -> C
     return ChipAnalysis(
         symbol=feature.symbol,
         updated_at=feature.updated_at,
+        distribution_available=True,
+        data_nature="derived",
+        valid_session_count=len(rows),
         center_price=round(distribution.center_price, 2),
         concentration=distribution.concentration,
         distribution_label=label,
@@ -74,14 +77,17 @@ def build_chip_analysis(analysis: AnalysisResult, feature: FeatureSnapshot) -> C
     )
 
 
-def _insufficient_chip_analysis(feature: FeatureSnapshot, current_price: float) -> ChipAnalysis:
+def _insufficient_chip_analysis(feature: FeatureSnapshot, valid_session_count: int) -> ChipAnalysis:
     return ChipAnalysis(
         symbol=feature.symbol,
         updated_at=feature.updated_at,
-        center_price=round(current_price, 2),
-        concentration=35,
+        distribution_available=False,
+        data_nature="unavailable",
+        valid_session_count=valid_session_count,
+        center_price=0,
+        concentration=0,
         distribution_label="筹码样本不足",
-        summary="有效K线样本不足，暂不能形成有效筹码分布估算。",
+        summary=f"仅有 {valid_session_count} 根有效K线，暂不能形成有效筹码分布估算。",
         notes=["筹码为日K成交量按价格区间近似分布，不等同于交易所真实持仓成本。"],
     )
 

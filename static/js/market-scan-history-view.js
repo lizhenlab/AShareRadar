@@ -1,6 +1,6 @@
 import { escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
-import { marketScanModeLabel } from "./market-scan-contracts.js";
+import { isMarketScanTop100RefreshRun, marketScanModeLabel } from "./market-scan-contracts.js";
 
 const RUN_STATUS_LABELS = Object.freeze({
   success: "扫描完成",
@@ -18,7 +18,8 @@ export function renderMarketScanHistory(elements, payload, selectedRunId, select
   const selected = selectedRunId == null ? "" : String(selectedRunId);
   const options = payload.items.map((run) => {
     const status = RUN_STATUS_LABELS[run.status] || run.status;
-    const label = `#${run.id} · ${run.quote_date || run.data_date} · ${status} · ${formatNumber(run.coverage_pct, 1)}%`;
+    const kind = isMarketScanTop100RefreshRun(run) ? "TOP100快更" : "全市场";
+    const label = `#${run.id} · ${kind} · ${run.quote_date || run.data_date} · ${status} · ${formatNumber(run.coverage_pct, 1)}%`;
     return `<option value="${run.id}">${escapeHtml(label)}</option>`;
   }).join("");
   elements.historyRun.innerHTML = `<option value="">最近发布</option>${options}`;

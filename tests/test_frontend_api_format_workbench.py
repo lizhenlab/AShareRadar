@@ -111,6 +111,30 @@ def test_fetch_json_normalizes_network_and_non_json_errors() -> None:
     _run_node_script(script)
 
 
+def test_fetch_json_preserves_retry_after_for_recoverable_http_errors() -> None:
+    script = r'''
+      import { fetchJson } from "./static/js/api.js";
+
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 503,
+        headers: { get(name) { return name.toLowerCase() === "retry-after" ? "1.5" : null; } },
+        async text() {
+          return JSON.stringify({ detail: "全市场冻结快照正在校验，请稍后重试" });
+        },
+      });
+      try {
+        await fetchJson("/api/market-scans/latest");
+        throw new Error("expected 503 to throw");
+      } catch (error) {
+        if (error.status !== 503 || error.retryAfterMs !== 1500) {
+          throw new Error(`Retry-After was not preserved: ${error.status} ${error.retryAfterMs}`);
+        }
+      }
+    '''
+    _run_node_script(script)
+
+
 def test_fetch_json_accepts_empty_success_and_message_error_payloads() -> None:
     script = r'''
       import { fetchJson } from "./static/js/api.js";
@@ -329,7 +353,7 @@ def test_workbench_renderers_tolerate_missing_quote_ma_and_arrays() -> None:
       if (element("stockChange").className !== "neutral") {
         throw new Error(`missing quote change got tone ${element("stockChange").className}`);
       }
-      if (element("actionAdvice").textContent !== "观察 · 建议强度 68/100") {
+      if (element("actionAdvice").textContent !== "观察 · 证据强度 68/100") {
         throw new Error(`action advice used ambiguous score semantics: ${element("actionAdvice").textContent}`);
       }
       const signalEvidenceHtml = element("signalEvidence").innerHTML;
@@ -358,6 +382,21 @@ def test_workbench_renderers_tolerate_missing_quote_ma_and_arrays() -> None:
       }
       if (!element("signalEvidence").innerHTML.includes("当前没有明显加分依据")) {
         throw new Error("signal evidence empty state was not rendered");
+      }
+
+      renderAnalysis({
+        ...analysis,
+        support: 99,
+        resistance: 101,
+        ma20: 100,
+        support_available: false,
+        resistance_available: false,
+        ma20_available: false,
+      });
+      for (const id of ["support", "resistance", "ma20"]) {
+        if (element(id).textContent !== "--") {
+          throw new Error(`${id} rendered a compatibility placeholder as evidence`);
+        }
       }
 
       renderInsights({ overview: {} }, {});

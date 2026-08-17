@@ -70,13 +70,23 @@ def test_paper_strategy_creation_uses_frozen_plan_endpoint_and_refreshes_dashboa
         elements.get("paperAllocationPct").value = "25";
         globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
         const calls = [];
+        const digest = "a".repeat(64);
         globalThis.fetch = async (url, options = {}) => {
           calls.push({ url: String(url), options });
-          if (options.method === "POST") return json({ id: 7, symbol: "600519" }, 201);
+          if (options.method === "POST") return json({
+            id: 7, plan_id: 10, plan_revision: 1, advice_id: 20,
+            symbol: "600519.SH", plan_payload_digest: digest,
+          }, 201);
           return json(dashboard());
         };
         const { createPaperStrategy } = await import("./static/js/paper-trading.js");
-        const state = { adviceReviewDashboardDetails: [], paperTradingSeq: 0 };
+        const state = {
+          adviceReviewDashboardDetails: [{ plan: {
+            id: 10, revision: 1, advice_id: 20, symbol: "600519.SH",
+            plan_payload_digest: digest,
+          } }],
+          paperTradingSeq: 0,
+        };
 
         await createPaperStrategy(state);
 
@@ -91,7 +101,8 @@ def test_paper_strategy_creation_uses_frozen_plan_endpoint_and_refreshes_dashboa
           return {
             account: { initial_cash: 1000000 },
             performance: { total_equity: 1000000 },
-            strategies: [], positions: [], trades: [], equity_curve: [], notes: [],
+            strategies: [], runs: [], positions: [], trades: [], events: [],
+            equity_curve: [], cost_profiles: [], notes: [],
           };
         }
         function paperElements() {
@@ -235,8 +246,126 @@ def test_paper_dashboard_load_failure_renders_actionable_error_state() -> None:
         assert(elements.get("paperTradingSummary").innerHTML.includes("模拟交易暂不可用"), "error state title was omitted");
         assert(elements.get("paperTradingFeedback").hidden === false, "error feedback stayed hidden");
         assert(elements.get("paperTradingFeedback").dataset.tone === "error", "error tone was omitted");
-        assert(elements.get("paperTradingFeedback").textContent.includes("行情服务暂不可用"), "server detail was omitted");
+        assert(elements.get("paperTradingFeedback").textContent.includes("模拟交易暂不可用"), "generic error detail was omitted");
+        assert(!elements.get("paperTradingFeedback").textContent.includes("行情服务暂不可用"), "server detail leaked to the client");
 
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_paper_contract_rejects_bad_run_digests_before_state_mutation() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["paperTradingSummary", { innerHTML: "" }],
+          ["paperTradingFeedback", { textContent: "", hidden: true, dataset: {} }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        globalThis.fetch = async () => json(dashboard("not-a-sha256"));
+        const { loadPaperTradingDashboard } = await import("./static/js/paper-trading.js");
+        const previous = { marker: "trusted" };
+        const state = { paperTradingSeq: 0, paperTradingDashboard: previous };
+
+        const loaded = await loadPaperTradingDashboard(state);
+
+        assert(loaded === false, "malformed dashboard was accepted");
+        assert(state.paperTradingDashboard === previous, "malformed dashboard mutated trusted state");
+        assert(elements.get("paperTradingFeedback").dataset.tone === "error", "contract error was not surfaced");
+
+        function dashboard(outputDigest) {
+          return {
+            account: { initial_cash: 1000000 }, performance: { total_equity: 1000000 },
+            selected_run_id: 1,
+            runs: [{
+              id: 1, as_of: "2026-07-03T16:00:00+08:00",
+              input_fingerprint: "a".repeat(64), output_digest: outputDigest,
+              strategy_count: 0, execution_count: 0, closed_count: 0,
+              data_unavailable_count: 0,
+            }],
+            strategies: [], positions: [], trades: [], events: [], equity_curve: [],
+            cost_profiles: [], notes: [],
+          };
+        }
+        function json(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_paper_contract_rejects_orphan_trade_and_bad_counts_before_state_mutation() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["paperTradingSummary", { innerHTML: "" }],
+          ["paperTradingFeedback", { textContent: "", hidden: true, dataset: {} }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        globalThis.fetch = async () => json(dashboard());
+        const { loadPaperTradingDashboard } = await import("./static/js/paper-trading.js");
+        const previous = { marker: "trusted" };
+        const state = { paperTradingSeq: 0, paperTradingDashboard: previous };
+
+        const loaded = await loadPaperTradingDashboard(state);
+
+        assert(loaded === false, "orphan trade and inconsistent counts were accepted");
+        assert(state.paperTradingDashboard === previous, "malformed child records mutated trusted state");
+
+        function dashboard() {
+          return {
+            account: { initial_cash: 1000000 }, performance: { total_equity: 1000000 },
+            selected_run_id: 1,
+            runs: [{
+              id: 1, as_of: "2026-07-03T16:00:00+08:00",
+              input_fingerprint: "a".repeat(64), output_digest: "b".repeat(64),
+              strategy_count: 0, execution_count: 1, closed_count: 0,
+              data_unavailable_count: 0,
+            }],
+            strategies: [], positions: [],
+            trades: [{ run_id: 1, strategy_id: 999, symbol: "000001.SZ" }],
+            events: [], equity_curve: [], cost_profiles: [], notes: [],
+          };
+        }
+        function json(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_paper_comparison_rejects_cross_run_response_before_state_mutation() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["paperCompareLeft", { value: "1" }], ["paperCompareRight", { value: "2" }],
+          ["paperTradingFeedback", { textContent: "", hidden: true, dataset: {} }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        globalThis.fetch = async () => json(comparison());
+        const { comparePaperTradingRuns } = await import("./static/js/paper-trading.js");
+        const previous = { marker: "trusted" };
+        const state = { paperTradingComparison: previous };
+        let rejected = false;
+
+        try { await comparePaperTradingRuns(state); } catch (error) { rejected = error instanceof TypeError; }
+
+        assert(rejected, "cross-run comparison was accepted");
+        assert(state.paperTradingComparison === previous, "cross-run comparison mutated trusted state");
+
+        function run(id) {
+          return {
+            id, as_of: "2026-07-03T16:00:00+08:00",
+            input_fingerprint: "a".repeat(64), output_digest: "b".repeat(64),
+            strategy_count: 0, execution_count: 0, closed_count: 0,
+            data_unavailable_count: 0,
+          };
+        }
+        function comparison() {
+          return {
+            left_run: run(99), right_run: run(2),
+            left_performance: {}, right_performance: {}, deltas: {},
+          };
+        }
+        function json(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''
     )

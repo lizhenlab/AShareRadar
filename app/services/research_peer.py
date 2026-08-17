@@ -15,6 +15,7 @@ from app.models.market import (
     Quote,
 )
 from app.utils.market_data import finite_float
+from app.utils.symbols import standard_symbol
 
 PEER_LEADER_LIMIT = 3
 HIGH_PEER_PE_PERCENTILE = 80
@@ -34,9 +35,11 @@ def build_peer_comparison_report(analysis: AnalysisResult, insights: StockInsigh
     stats = _peer_comparison_stats(analysis)
     sample_status = _peer_report_sample_status(analysis, stats.peers)
     if not stats.peers:
-        return _empty_peer_comparison_report(stats.industry, sample_status)
+        return _empty_peer_comparison_report(analysis, stats.industry, sample_status)
     warnings = _peer_warnings(sample_status)
     return PeerComparisonReport(
+        symbol=standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}"),
+        updated_at=analysis.quote.timestamp,
         industry=stats.industry,
         sample_count=len(stats.peers),
         valuation_position=_peer_position_label(insights.valuation.peer_pe_percentile, "估值"),
@@ -93,7 +96,11 @@ def _peer_strength_percentile(change_pct: float, peers: list[Quote]) -> float:
     return sum(1 for item in peers if item.change_pct <= clean_change) / len(peers) * 100
 
 
-def _empty_peer_comparison_report(industry: str, sample_status: PeerSampleInfo) -> PeerComparisonReport:
+def _empty_peer_comparison_report(
+    analysis: AnalysisResult,
+    industry: str,
+    sample_status: PeerSampleInfo,
+) -> PeerComparisonReport:
     warnings = _peer_warnings(sample_status)
     if sample_status.status == "unavailable":
         summary = "同行数据源暂不可用，当前仅基于个股自身历史和行业背景判断。"
@@ -102,6 +109,8 @@ def _empty_peer_comparison_report(industry: str, sample_status: PeerSampleInfo) 
     else:
         summary = "同行样本不足，暂以个股自身历史和行业涨跌背景为主。"
     return PeerComparisonReport(
+        symbol=standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}"),
+        updated_at=analysis.quote.timestamp,
         industry=industry,
         sample_count=0,
         summary=summary,

@@ -8,7 +8,9 @@ from app.services.research_qa_utils import dedupe
 def _base_evidence(context: EvidenceContext) -> list[str]:
     return [
         context.diagnosis.headline,
-        f"当前价 {_format_number(context.analysis.quote.price)}，支撑 {_format_number(context.analysis.support)}，压力 {_format_number(context.analysis.resistance)}。",
+        f"当前价 {_format_number(context.analysis.quote.price)}，"
+        f"支撑 {_level(context, 'support', 'support_available')}，"
+        f"压力 {_level(context, 'resistance', 'resistance_available')}。",
         f"{_display_text(context.market_regime.market_label)}，风险倍率 {_format_number(context.market_regime.risk_multiplier)}。",
     ]
 
@@ -110,3 +112,9 @@ def _default_evidence(context: EvidenceContext) -> list[str]:
         *context.evidence_chain.support[:2],
         *context.evidence_chain.opposition[:2],
     ])
+
+
+def _level(context: EvidenceContext, value_field: str, availability_field: str) -> str:
+    if getattr(context.analysis, availability_field, False) is not True:
+        return "待确认"
+    return _format_number(getattr(context.analysis, value_field, None))

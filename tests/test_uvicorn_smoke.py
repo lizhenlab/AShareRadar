@@ -100,6 +100,7 @@ from types import SimpleNamespace
 import uvicorn
 
 from app import main as app_main
+from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission
 from app.config import Settings
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import ProviderCallTimeoutError, run_provider_io
@@ -138,6 +139,7 @@ container = SimpleNamespace(
     datahub=hub,
     scheduler=Scheduler(hub),
     workbench_contexts=hub.workbench_contexts,
+    market_scan_heavy_read_admission=MarketScanHeavyReadAdmission(),
     market_scanner=None,
     runtime_coordinator=None,
 )

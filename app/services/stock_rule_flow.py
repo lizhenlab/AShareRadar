@@ -26,6 +26,8 @@ from app.services.stock_rule_values import (
     _rule_confidence,
     _score_evidence,
     _status_from_flags,
+    available_fund_score,
+    order_pressure_evidence_available,
 )
 
 
@@ -61,7 +63,7 @@ def _support_rebound_state(
     quote = analysis.quote
     config = RULE_PARAMETERS_BY_ID["support_rebound_watch"]
     price = _positive_price_level(quote.price)
-    support_level = _positive_price_level(analysis.support)
+    support_level = _positive_price_level(analysis.support) if analysis.support_available else None
     has_support = support_level is not None
     near_support = price is not None and has_support and price <= support_level * float(config["near_support_pct"])
     return SupportReboundState(
@@ -78,7 +80,7 @@ def _has_rebound_evidence(fund_flow: FundFlowAnalysis, abnormal_events: Abnormal
         item.title == "长下影承接" or item.direction == "承接"
         for item in abnormal_events.events
     )
-    fund_score = _non_negative_score(fund_flow.overall_score)
+    fund_score = available_fund_score(fund_flow)
     return has_lower_shadow or (fund_score is not None and fund_score >= float(config["fund_score"]))
 
 
@@ -109,8 +111,8 @@ def _support_rebound_evidence(
     quote = analysis.quote
     evidence = [
         _price_level_evidence("现价", quote.price),
-        _price_level_evidence("支撑", analysis.support),
-        _score_evidence("量价热度评分（衍生）", fund_flow.overall_score),
+        _price_level_evidence("支撑", analysis.support if analysis.support_available else None),
+        _score_evidence("量价热度评分（衍生）", available_fund_score(fund_flow)),
     ]
     if state.has_rebound:
         evidence.append("存在止跌承接证据")
@@ -120,7 +122,7 @@ def _support_rebound_evidence(
 
 
 def _support_rebound_invalidation(analysis: AnalysisResult) -> str:
-    support_level = _positive_price_level(analysis.support)
+    support_level = _positive_price_level(analysis.support) if analysis.support_available else None
     if support_level is not None:
         return f"有效跌破支撑 {support_level:.2f}。"
     return "缺少有效支撑位时不启用该观察信号。"
@@ -136,7 +138,7 @@ def _support_rebound_missing_data(
         missing_data.append("现价")
     if not state.has_support:
         missing_data.append("支撑位")
-    if _non_negative_score(fund_flow.overall_score) is None:
+    if available_fund_score(fund_flow) is None:
         missing_data.append("量价热度评分（衍生）")
     return missing_data
 
@@ -146,7 +148,7 @@ def _rule_fund_tech_divergence(
     fund_flow: FundFlowAnalysis,
     order_pressure: OrderPressure,
 ) -> RuleMatch:
-    state = _fund_tech_divergence_state(analysis.trend_score, fund_flow.overall_score)
+    state = _fund_tech_divergence_state(analysis.trend_score, available_fund_score(fund_flow))
     status = _fund_tech_divergence_status(state)
     evidence = _fund_tech_divergence_evidence(analysis, fund_flow, order_pressure)
     return RuleMatch(
@@ -161,11 +163,11 @@ def _rule_fund_tech_divergence(
         ],
         invalidation="趋势评分和量价热度评分（衍生）重新回到同向区间。",
         evidence=evidence,
-        missing_data=_fund_tech_divergence_missing_data(analysis, fund_flow),
+        missing_data=_fund_tech_divergence_missing_data(analysis, fund_flow, order_pressure),
     )
 
 
-def _fund_tech_divergence_state(trend_score: int, fund_score: int) -> FundTechDivergenceState:
+def _fund_tech_divergence_state(trend_score: int, fund_score: int | None) -> FundTechDivergenceState:
     config = RULE_PARAMETERS_BY_ID["fund_tech_divergence"]
     clean_trend_score = _non_negative_score(trend_score)
     clean_fund_score = _non_negative_score(fund_score)
@@ -185,7 +187,9 @@ def _fund_tech_divergence_status(state: FundTechDivergenceState) -> str:
 
 
 def _fund_tech_divergence_level(status: str, state: FundTechDivergenceState, order_pressure: OrderPressure) -> str:
-    has_risk_pressure = state.negative_divergence or "卖压" in order_pressure.pressure_level
+    has_risk_pressure = state.negative_divergence or (
+        order_pressure_evidence_available(order_pressure) and "卖压" in order_pressure.pressure_level
+    )
     return LEVEL_RISK if status == STATUS_MATCHED and has_risk_pressure else LEVEL_WATCH
 
 
@@ -196,17 +200,21 @@ def _fund_tech_divergence_evidence(
 ) -> list[str]:
     return [
         _score_evidence("趋势评分", analysis.trend_score),
-        _score_evidence("量价热度评分（衍生）", fund_flow.overall_score),
-        f"盘口 {order_pressure.pressure_level}",
+        _score_evidence("量价热度评分（衍生）", available_fund_score(fund_flow)),
+        f"盘口 {order_pressure.pressure_level}" if order_pressure_evidence_available(order_pressure) else "盘口证据不可用",
     ]
 
 
-def _fund_tech_divergence_missing_data(analysis: AnalysisResult, fund_flow: FundFlowAnalysis) -> list[str]:
+def _fund_tech_divergence_missing_data(
+    analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure
+) -> list[str]:
     missing_data = []
     if _non_negative_score(analysis.trend_score) is None:
         missing_data.append("趋势评分")
-    if _non_negative_score(fund_flow.overall_score) is None:
+    if available_fund_score(fund_flow) is None:
         missing_data.append("量价热度评分（衍生）")
     if not fund_flow.available:
         missing_data.append("逐笔资金流")
+    if not order_pressure_evidence_available(order_pressure):
+        missing_data.append("盘口证据")
     return missing_data

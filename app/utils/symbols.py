@@ -114,6 +114,15 @@ def standard_symbol(symbol: str) -> str:
     return f"{code}.{market.upper()}"
 
 
+def standard_a_share_stock_symbol(symbol: str) -> str:
+    """Normalize and require a code/exchange pair that denotes an A-share stock."""
+    normalized = standard_symbol(symbol)
+    code, market = normalized.split(".", maxsplit=1)
+    if not is_a_share_stock_code(code, market):
+        raise ValueError("股票代码与 A 股交易所不一致")
+    return normalized
+
+
 def is_a_share_stock_code(code: str, market: str) -> bool:
     try:
         normalized_code = _validated_symbol_code(str(code).strip())

@@ -9,6 +9,8 @@ export function inertMarketScanController() {
     loadLatest: async () => null,
     loadResults: async () => null,
     retry: async () => null,
+    refreshTop100: async () => null,
+    setSurfaceActive: noOp,
     setVisible: noOp,
     start: async () => null,
     state: { activated: false, browseMode: "official", exportBusy: false, publishedRun: null, run: null },

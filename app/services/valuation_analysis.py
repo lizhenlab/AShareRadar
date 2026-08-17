@@ -24,6 +24,7 @@ from app.services.valuation_components import (
     valuation_percentile_score_delta,
     valuation_summary,
 )
+from app.utils.market_data import finite_float
 
 
 def build_valuation_analysis(analysis: AnalysisResult) -> ValuationAnalysis:
@@ -31,11 +32,14 @@ def build_valuation_analysis(analysis: AnalysisResult) -> ValuationAnalysis:
     anchors = build_valuation_anchor_snapshot(analysis)
     state = build_valuation_score_state(analysis, anchors)
     score = clamp_score(state.score)
+    score_available = _valuation_score_available(analysis, anchors)
     return ValuationAnalysis(
         symbol=f"{quote.code}.{quote.market}",
         updated_at=quote.timestamp,
         score=score,
-        level=score_level(score),
+        score_available=score_available,
+        data_nature="derived" if score_available else "unavailable",
+        level=score_level(score) if score_available else "不可用",
         summary=valuation_summary(score, state.missing),
         pe=quote.pe,
         pb=quote.pb,
@@ -52,6 +56,17 @@ def build_valuation_analysis(analysis: AnalysisResult) -> ValuationAnalysis:
         watch_points=state.watch_points,
         missing_data=state.missing,
         source=f"{quote.source}·估值字段",
+    )
+
+
+def _valuation_score_available(analysis: AnalysisResult, anchors: object) -> bool:
+    quote = analysis.quote
+    observed = (quote.pe, quote.pb, quote.market_cap)
+    if any(finite_float(value) is not None for value in observed):
+        return True
+    return any(
+        finite_float(getattr(anchors, name, None)) is not None
+        for name in ("pe_percentile", "pb_percentile", "peer_pe_percentile", "peer_pb_percentile")
     )
 
 

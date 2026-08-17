@@ -338,7 +338,7 @@ def test_minute_report_sorts_supported_timestamp_formats_by_actual_time() -> Non
         "2026-05-15T09:55:00+0800",
         "20260515100000",
     ]
-    mixed_rows = [row.model_copy(update={"timestamp": timestamp}) for row, timestamp in zip(reversed(rows), reversed(timestamp_values))]
+    mixed_rows = [row.model_copy(update={"timestamp": timestamp}) for row, timestamp in zip(reversed(rows), reversed(timestamp_values), strict=True)]
 
     report = build_minute_analysis_report("600519.SH", mixed_rows)
 
@@ -403,7 +403,7 @@ def test_minute_report_uses_only_latest_date_for_all_intraday_analysis() -> None
 def test_minute_report_assigns_utc_rows_by_shanghai_local_date() -> None:
     rows = _rows()[:9]
     timestamp_values = ["2026-05-14T15:59:00Z", *[f"2026-05-14T16:0{index}:00Z" for index in range(8)]]
-    utc_rows = [row.model_copy(update={"timestamp": timestamp}) for row, timestamp in zip(rows, timestamp_values)]
+    utc_rows = [row.model_copy(update={"timestamp": timestamp}) for row, timestamp in zip(rows, timestamp_values, strict=True)]
 
     report = build_minute_analysis_report("600519.SH", list(reversed(utc_rows)))
 
@@ -579,7 +579,7 @@ def _rows(
             interval="5m",
             source="测试分钟线",
         )
-        for index, (low, high, close, volume) in enumerate(zip(lows, highs, closes, volumes))
+        for index, (low, high, close, volume) in enumerate(zip(lows, highs, closes, volumes, strict=False))
     ]
 
 

@@ -64,7 +64,7 @@ class RegimeRiskAdjustment:
 class RegimeMetrics:
     data_quality_score: int
     trend_score: int
-    fund_flow_score: int
+    fund_flow_score: int | None
     factor_score: int
     price: float
     support: float
@@ -111,6 +111,7 @@ class RegimeContext:
     def right_side_candidate(self) -> bool:
         return (
             self.metrics.trend_score >= 65
+            and self.metrics.fund_flow_score is not None
             and self.metrics.fund_flow_score >= 58
             and self.metrics.factor_score >= 60
         )
@@ -188,11 +189,15 @@ def _regime_metrics(feature: FeatureSnapshot, factor_lab: FactorLabReport | None
     return RegimeMetrics(
         data_quality_score=_data_quality_score(feature.data_quality_score),
         trend_score=_score(feature.trend_score),
-        fund_flow_score=_score(feature.fund_flow_score),
+        fund_flow_score=(
+            None
+            if feature.fund_flow_data_nature == "unavailable"
+            else _score(feature.fund_flow_score)
+        ),
         factor_score=_factor_score(feature, factor_lab),
         price=_positive_number(feature.price),
-        support=_positive_number(feature.support),
-        resistance=_positive_number(feature.resistance),
+        support=_positive_number(feature.support) if feature.support_available else 0.0,
+        resistance=_positive_number(feature.resistance) if feature.resistance_available else 0.0,
         ma5=_positive_number(feature.ma5),
         industry_change_pct=_optional_number(feature.industry_change_pct),
     )
@@ -546,6 +551,11 @@ def _positive_factor_suggestion(factor_lab: FactorLabReport | None) -> str | Non
 
 def _regime_evidence(context: RegimeContext) -> list[str]:
     feature = context.feature
+    fund_flow_text = (
+        f"量价热度（衍生） {_score_text(feature.fund_flow_score)}。"
+        if feature.fund_flow_data_nature != "unavailable"
+        else "量价热度证据不可用，未用于上调环境判断。"
+    )
     evidence = [
         (
             f"数据质量 {feature.data_quality_level} "
@@ -553,7 +563,7 @@ def _regime_evidence(context: RegimeContext) -> list[str]:
         ),
         (
             f"个股趋势 {feature.trend_label} {_score_text(feature.trend_score)}，"
-            f"量价热度（衍生） {_score_text(feature.fund_flow_score)}。"
+            f"{fund_flow_text}"
         ),
         _breadth_summary_text(context.breadth),
         *_breadth_warning_evidence(context.breadth),

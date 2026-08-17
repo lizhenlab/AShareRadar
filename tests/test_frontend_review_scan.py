@@ -27,7 +27,7 @@ def test_advice_review_detail_rendering_escapes_content_and_shows_evaluation() -
         assert(!html.includes("<script>"), "review content was not escaped");
         assert(html.includes("目标价先触达") && html.includes("data-review-evaluate=\"7\""), "evaluation or action was not rendered");
         assert(html.includes("type=\"date\"") && html.includes("data-review-history=\"7\""), "historical evaluation controls were not rendered");
-        assert(html.includes("data-review-delete=\"7\"") && html.includes("aria-label=\"删除复盘计划\""), "delete action was not rendered accessibly");
+        assert(html.includes("data-review-delete=\"7\"") && html.includes("aria-label=\"归档复盘计划\""), "archive action was not rendered accessibly");
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''
     )
@@ -74,19 +74,19 @@ def test_advice_review_delete_confirms_cascading_history_and_invalidates_local_r
           isCurrent: () => true,
           confirm(message) {
             confirmations += 1;
-            assert(message.includes("全部评估历史") && message.includes("不可撤销"), "confirmation did not describe the destructive scope");
+            assert(message.includes("归档") && message.includes("不再显示"), "confirmation did not describe the archive scope");
             return true;
           },
         });
 
         assert(cancelled === false && calls.length === 1, "cancelled deletion still called the API");
-        assert(calls[0].url === "/api/reviews/plans/7" && calls[0].options.method === "DELETE", "delete request contract changed");
+        assert(calls[0].url === "/api/reviews/plans/7?expected_revision=2" && calls[0].options.method === "DELETE", "archive request lost revision CAS");
         assert(removed === true && confirmations === 1, "confirmed deletion did not complete");
         assert(state.adviceReviewDetails.length === 0 && state.adviceReviewEditingPlanId === null, "deleted plan remained locally visible or editable");
         assert(!state.adviceReviewHistories["7"] && !state.adviceReviewAsOfByPlan["7"], "deleted plan retained transient history state");
         assert(state.adviceReviewEvaluationSeqByPlan["7"] === 5, "pending evaluation was not invalidated");
         assert(elements.get("reviewPlanList").innerHTML.includes("暂无复盘计划"), "empty plan state was not rendered");
-        assert(elements.get("reviewPlanFeedback").textContent.includes("已删除"), "delete success was not confirmed");
+        assert(elements.get("reviewPlanFeedback").textContent.includes("已归档"), "archive success was not confirmed");
 
         function plan() {
           return {
@@ -109,7 +109,7 @@ def test_advice_review_create_uses_selected_snapshot_and_strict_price_order() ->
         const calls = [];
         globalThis.fetch = async (url, options = {}) => {
           calls.push({ url: String(url), options });
-          const payload = options.method === "POST" ? { id: 9 } : [];
+          const payload = options.method === "POST" ? completeReviewPlan({ id: 9 }) : [];
           return new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } });
         };
         const { submitAdviceReviewPlan } = await import("./static/js/advice-reviews.js");
@@ -193,13 +193,13 @@ def test_advice_review_create_and_update_keep_displayed_owner_during_pending_swi
         assert(state.adviceReviewDetails[0].plan.symbol === "600519.SH" && state.adviceReviewDetails[0].plan.revision === 2, "displayed-owner readback was rejected");
 
         function plan(revision) {
-          return {
+          return completeReviewPlan({
             id: 9, advice_id: 3, symbol: "600519.SH", revision,
             snapshot_market_time: "2026-07-16 10:00:00", snapshot_price: 100,
             target_price: revision === 1 ? 110 : 112, stop_price: 95, horizon_days: 20,
             hypothesis: revision === 1 ? "趋势延续" : "趋势延续，等待确认",
             trigger_condition: "站稳100", invalidation_condition: "跌破95",
-          };
+          });
         }
         function formElements() {
           const values = {
@@ -236,11 +236,12 @@ def test_advice_review_details_refresh_defaults_after_excluding_planned_snapshot
         ]);
         globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
         globalThis.fetch = async () => new Response(JSON.stringify([{
-          plan: {
+          plan: completeReviewPlan({
             id: 8, advice_id: 1, revision: 1, snapshot_price: 100,
+            symbol: "600519.SH", snapshot_market_time: "2026-07-15 10:00:00",
             target_price: 105, stop_price: 95, horizon_days: 10,
             hypothesis: "旧计划", trigger_condition: "旧触发", invalidation_condition: "旧失效",
-          },
+          }),
           latest_evaluation: null,
         }]), { status: 200, headers: { "Content-Type": "application/json" } });
         const { loadAdviceReviews } = await import("./static/js/advice-reviews.js");
@@ -323,13 +324,13 @@ def test_advice_review_evaluation_posts_optional_as_of_and_updates_loaded_histor
         globalThis.fetch = async (url, options = {}) => {
           calls.push({ url: String(url), options });
           const round = calls.length;
-          return new Response(JSON.stringify({
+          return new Response(JSON.stringify(completeReviewEvaluation({
             id: round, plan_id: 7, plan_revision: 2, status: "evaluated",
             conclusion: round === 1 ? "target_hit" : "horizon_gain",
             return_pct: round === 1 ? 8.5 : 2.1,
             as_of: round === 1 ? "2026-07-16 23:59:59" : "2026-07-17 15:00:00",
             evaluated_at: `2026-07-17 15:0${round}:00`, rule_version: "review-v1",
-          }), { status: 200, headers: { "Content-Type": "application/json" } });
+          }, plan())), { status: 200, headers: { "Content-Type": "application/json" } });
         };
         const { evaluateAdviceReviewPlan } = await import("./static/js/advice-reviews.js");
         const state = {
@@ -347,18 +348,18 @@ def test_advice_review_evaluation_posts_optional_as_of_and_updates_loaded_histor
         const second = await evaluateAdviceReviewPlan(state, 7, { symbol: state.symbol, isCurrent: () => true });
 
         assert(first === true && second === true, "evaluation did not complete");
-        assert(JSON.stringify(JSON.parse(calls[0].options.body)) === JSON.stringify({ as_of: "2026-07-16T23:59:59" }), "historical as_of payload changed");
-        assert(calls[1].options.body === "{}", "blank as_of did not use the current-time contract");
+        assert(JSON.stringify(JSON.parse(calls[0].options.body)) === JSON.stringify({ expected_revision: 2, as_of: "2026-07-16T23:59:59" }), "historical as_of payload changed");
+        assert(calls[1].options.body === JSON.stringify({ expected_revision: 2 }), "blank as_of lost revision CAS");
         assert(state.adviceReviewHistories["7"].items.length === 2, "loaded history did not receive new evaluations");
         assert(elements.get("reviewPlanList").innerHTML.includes("观察期收益为正"), "latest evaluation was not rendered");
 
         function plan() {
-          return {
+          return completeReviewPlan({
             id: 7, advice_id: 3, symbol: "600519.SH", revision: 2,
             snapshot_market_time: "2026-07-01 15:00:00", snapshot_price: 100,
             target_price: 110, stop_price: 95, horizon_days: 20,
             hypothesis: "趋势延续", trigger_condition: "站稳100", invalidation_condition: "跌破95",
-          };
+          });
         }
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''
@@ -376,11 +377,14 @@ def test_noon_today_as_of_uses_backend_current_time_for_review_and_scan() -> Non
         let evaluationRequest;
         globalThis.fetch = async (url, options = {}) => {
           evaluationRequest = { url: String(url), options };
-          return new Response(JSON.stringify({
+          return new Response(JSON.stringify(completeReviewEvaluation({
             id: 1, plan_id: 7, plan_revision: 2, status: "pending", conclusion: "pending",
-            return_pct: null, as_of: "2026-07-17 12:00:00", evaluated_at: "2026-07-17 12:00:00",
+            return_pct: null, max_favorable_excursion_pct: null,
+            max_adverse_excursion_pct: null, forward_start_date: null, forward_end_date: null,
+            as_of: "2026-07-17 12:00:00", evaluated_at: "2026-07-17 12:00:00",
             rule_version: "review-v1",
-          }), { status: 200, headers: { "Content-Type": "application/json" } });
+            available_forward_days: 0, source_session_count: 0,
+          }, completeReviewPlan())), { status: 200, headers: { "Content-Type": "application/json" } });
         };
         const { evaluateAdviceReviewPlan } = await import("./static/js/advice-reviews.js");
         const { watchlistScanPayload } = await import("./static/js/watchlist-scan.js");
@@ -389,18 +393,18 @@ def test_noon_today_as_of_uses_backend_current_time_for_review_and_scan() -> Non
           symbol: "600519.SH",
           adviceReviewHistorySymbol: "600519.SH",
           adviceReviewEvaluationSeqByPlan: {}, adviceReviewAsOfByPlan: {}, adviceReviewHistories: {},
-          adviceReviewDetails: [{ plan: {
+          adviceReviewDetails: [{ plan: completeReviewPlan({
             id: 7, advice_id: 3, symbol: "600519.SH", revision: 2,
             snapshot_market_time: "2026-07-01 15:00:00", snapshot_price: 100,
             target_price: 110, stop_price: 95, horizon_days: 20,
             hypothesis: "趋势延续", trigger_condition: "站稳100", invalidation_condition: "跌破95",
-          }, latest_evaluation: null }],
+          }), latest_evaluation: null }],
         };
 
         assert(await evaluateAdviceReviewPlan(state, 7, {
           symbol: state.symbol, asOf: "2026-07-17", now, isCurrent: () => true,
         }) === true, "today review evaluation did not complete");
-        assert(evaluationRequest.options.body === "{}", "today review sent a future end-of-day timestamp");
+        assert(evaluationRequest.options.body === JSON.stringify({ expected_revision: 2 }), "today review sent a future timestamp or lost revision CAS");
 
         const asOf = { value: "2026-07-17" };
         const form = {
@@ -437,15 +441,16 @@ def test_advice_review_history_is_lazy_collapsible_and_renders_full_audit_fields
 
         const loading = toggleAdviceReviewHistory(state, 7, { symbol: "600519.SH", isCurrent: () => true });
         assert(target.innerHTML.includes("评估历史加载中") && target.innerHTML.includes('aria-expanded="true"'), "history loading state was not visible");
-        resolveRequest(new Response(JSON.stringify([{
+        resolveRequest(new Response(JSON.stringify([completeReviewEvaluation({
           id: 4, plan_id: 7, plan_revision: 2, status: "evaluated", conclusion: "target_hit",
           return_pct: 8.5, as_of: "2026-07-16 23:59:59", evaluated_at: "2026-07-17 09:00:00",
           rule_version: "review-v1",
-        }]), { status: 200, headers: { "Content-Type": "application/json" } }));
+        }, completeReviewPlan())]), { status: 200, headers: { "Content-Type": "application/json" } }));
         assert(await loading === true, "history did not finish loading");
         assert(target.innerHTML.includes("计划版本") && target.innerHTML.includes(">2</strong>"), "plan revision was not rendered");
         assert(target.innerHTML.includes("2026-07-16 23:59:59") && target.innerHTML.includes("目标价先触达"), "history date or conclusion was missing");
         assert(target.innerHTML.includes("8.50%") && target.innerHTML.includes("已评估"), "history return or status was missing");
+        assert(target.innerHTML.includes("review-v1") && target.innerHTML.includes("2026-07-17 09:00:00"), "history attempt provenance was missing");
 
         assert(await toggleAdviceReviewHistory(state, 7, { symbol: "600519.SH" }) === true, "history did not collapse");
         assert(target.innerHTML.includes('aria-expanded="false"') && target.innerHTML.includes(" hidden>"), "collapsed history stayed exposed");
@@ -456,11 +461,11 @@ def test_advice_review_history_is_lazy_collapsible_and_renders_full_audit_fields
           return {
             symbol: "600519", adviceReviewHistorySymbol: "600519.SH", adviceReviewHistoryEpoch: 1,
             adviceReviewHistories: {}, adviceReviewAsOfByPlan: {}, adviceReviewEvaluationSeqByPlan: {},
-            adviceReviewDetails: [{ plan: {
+            adviceReviewDetails: [{ plan: completeReviewPlan({
               id: 7, symbol: "600519.SH", revision: 2, snapshot_market_time: "2026-07-01 15:00:00",
               snapshot_price: 100, target_price: 110, stop_price: 95, horizon_days: 20,
               hypothesis: "趋势延续", trigger_condition: "站稳100", invalidation_condition: "跌破95",
-            }, latest_evaluation: null }],
+            }), latest_evaluation: null }],
           };
         }
         function assert(condition, message) { if (!condition) throw new Error(message); }
@@ -494,10 +499,10 @@ def test_advice_review_history_handles_error_retry_empty_and_stale_stock_respons
         const stale = toggleAdviceReviewHistory(state, 7, { symbol: state.symbol, isCurrent: () => state.symbol === "600519.SH" });
         state.symbol = "000001.SZ";
         target.innerHTML = "CURRENT_STOCK";
-        resolveStale(new Response(JSON.stringify([{
+        resolveStale(new Response(JSON.stringify([completeReviewEvaluation({
           id: 99, plan_revision: 2, status: "evaluated", conclusion: "stop_hit",
           return_pct: -5, as_of: "2026-07-16 15:00:00", evaluated_at: "2026-07-16 15:01:00",
-        }]), { status: 200, headers: { "Content-Type": "application/json" } }));
+        }, completeReviewPlan())]), { status: 200, headers: { "Content-Type": "application/json" } }));
         assert(await stale === false, "stale stock history was accepted");
         assert(target.innerHTML === "CURRENT_STOCK", "stale stock history rewrote the current view");
 
@@ -505,11 +510,11 @@ def test_advice_review_history_handles_error_retry_empty_and_stale_stock_respons
           return {
             symbol: "600519.SH", adviceReviewHistorySymbol: "600519.SH", adviceReviewHistoryEpoch: 1,
             adviceReviewHistories: {}, adviceReviewAsOfByPlan: {}, adviceReviewEvaluationSeqByPlan: {},
-            adviceReviewDetails: [{ plan: {
+            adviceReviewDetails: [{ plan: completeReviewPlan({
               id: 7, symbol: "600519.SH", revision: 2, snapshot_market_time: "2026-07-01 15:00:00",
               snapshot_price: 100, target_price: 110, stop_price: 95, horizon_days: 20,
               hypothesis: "趋势延续", trigger_condition: "站稳100", invalidation_condition: "跌破95",
-            }, latest_evaluation: null }],
+            }), latest_evaluation: null }],
           };
         }
         function assert(condition, message) { if (!condition) throw new Error(message); }
@@ -617,7 +622,12 @@ def test_review_dashboard_loads_global_summary_due_queue_and_all_pages() -> None
         globalThis.fetch = async (url) => {
           const target = String(url);
           calls.push(target);
-          if (target === "/api/reviews/summary") return json({ total_plan_count: 1, pending_count: 1, evaluated_count: 0, insufficient_count: 0 });
+          if (target === "/api/reviews/summary") return json({
+            generated_at: "2026-07-17 15:00:00", total_plan_count: 1, pending_count: 1,
+            evaluated_count: 0, insufficient_count: 0, favorable_count: 0, unfavorable_count: 0,
+            ambiguous_count: 0, target_hit_count: 0, stop_hit_count: 0, favorable_rate_pct: null,
+            average_return_pct: null, average_mfe_pct: null, average_mae_pct: null, conclusion_counts: { pending: 1 },
+          });
           if (target === "/api/reviews/due?limit=200") return json([{ plan: plan(), latest_evaluation: null, due_date: "2026-07-17", overdue_trading_days: 2 }]);
           if (target === "/api/reviews?limit=100") return json([{ plan: plan(), latest_evaluation: null }]);
           throw new Error(`unexpected dashboard request: ${target}`);
@@ -634,9 +644,96 @@ def test_review_dashboard_loads_global_summary_due_queue_and_all_pages() -> None
         assert(elements.get("reviewDashboardQueue").innerHTML.includes("没有符合筛选条件"), "dashboard filter did not apply");
 
         function plan() {
-          return { id: 7, symbol: "600519.SH", snapshot_market_time: "2026-07-16 15:00:00", horizon_days: 1, revision: 1 };
+          return completeReviewPlan({ id: 7, symbol: "600519.SH", snapshot_market_time: "2026-07-16 15:00:00", horizon_days: 1, revision: 1 });
         }
         function json(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_review_contracts_reject_cross_revision_digest_and_evidence_mismatch() -> None:
+    _run_node(
+        r'''
+        const { assertEvaluation, assertReviewPlan } = await import("./static/js/advice-review-contracts.js");
+        const plan = completeReviewPlan();
+        assertReviewPlan(plan, "600519.SH");
+        expectReject(() => assertReviewPlan({ ...plan, plan_payload_digest: "legacy-unverified" }), "计划摘要");
+        expectReject(() => assertEvaluation(completeReviewEvaluation({ plan_payload_digest: "f".repeat(64) }, plan), plan), "不一致");
+        expectReject(() => assertEvaluation(completeReviewEvaluation({ conclusion: "target_hit", target_hit: false, target_hit_date: null }, plan), plan), "证据");
+        expectReject(() => assertEvaluation(completeReviewEvaluation({ evaluated_at: "2026-07-16 14:59:59" }, plan), plan), "时间窗口");
+        const historical = completeReviewEvaluation({
+          plan_revision: 1, plan_payload_digest: "e".repeat(64), target_price: 108,
+        }, { ...plan, revision: 1, plan_payload_digest: "e".repeat(64), target_price: 108 });
+        assertEvaluation(historical, plan);
+        function expectReject(task, expected) {
+          let message = "";
+          try { task(); } catch (error) { message = error.message; }
+          if (!message.includes(expected)) throw new Error(`expected ${expected}, got ${message}`);
+        }
+        '''
+    )
+
+
+def test_review_dashboard_keeps_healthy_sections_when_due_endpoint_fails() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["reviewDashboardSummary", { innerHTML: "", setAttribute() {} }],
+          ["reviewDashboardQueue", { innerHTML: "", setAttribute() {} }],
+          ["reviewDashboardFeedback", { textContent: "", dataset: {}, hidden: true }],
+          ["reviewDashboardStatus", { value: "all" }], ["reviewDashboardSymbol", { value: "" }],
+          ["reviewDashboardFrom", { value: "" }], ["reviewDashboardHorizon", { value: "all" }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        globalThis.fetch = async (url) => {
+          const target = String(url);
+          if (target === "/api/reviews/summary") return json({
+            generated_at: "2026-07-17 15:00:00", total_plan_count: 1, pending_count: 1,
+            insufficient_count: 0, evaluated_count: 0, favorable_count: 0, unfavorable_count: 0,
+            ambiguous_count: 0, target_hit_count: 0, stop_hit_count: 0, favorable_rate_pct: null,
+            conclusion_counts: { pending: 1 },
+          });
+          if (target === "/api/reviews/due?limit=200") return json({ detail: "internal-private-error" }, 503);
+          if (target === "/api/reviews?limit=100") return json([{ plan: completeReviewPlan(), latest_evaluation: null }]);
+          throw new Error(`unexpected ${target}`);
+        };
+        const { loadAdviceReviewDashboard } = await import("./static/js/advice-reviews.js");
+        const state = {};
+        assert(await loadAdviceReviewDashboard(state) === true, "partial dashboard was rejected");
+        assert(elements.get("reviewDashboardSummary").innerHTML.includes("计划总数"), "healthy summary disappeared");
+        assert(elements.get("reviewDashboardQueue").innerHTML.includes("600519.SH"), "healthy plans disappeared");
+        assert(!elements.get("reviewDashboardFeedback").textContent.includes("internal-private-error"), "server 5xx leaked to UI");
+        function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        '''
+    )
+
+
+def test_paper_strategy_create_binds_frozen_plan_revision_digest_and_response_identity() -> None:
+    _run_node(
+        r'''
+        const elements = new Map([
+          ["paperReviewPlan", { value: "7" }], ["paperAllocationPct", { value: "10" }],
+          ["paperPriority", { value: "2" }], ["paperEntryExpirySessions", { value: "5" }],
+          ["paperTradingFeedback", { textContent: "", dataset: {}, hidden: true }],
+        ]);
+        globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+        const calls = [];
+        const plan = completeReviewPlan();
+        const strategy = { id: 8, plan_id: plan.id, plan_revision: plan.revision, plan_payload_digest: plan.plan_payload_digest, advice_id: plan.advice_id, symbol: plan.symbol };
+        globalThis.fetch = async (url, options = {}) => {
+          calls.push({ url: String(url), options });
+          if (options.method === "POST") return json(strategy, 201);
+          return json({ account: {}, performance: {}, strategies: [strategy] });
+        };
+        const { createPaperStrategy } = await import("./static/js/paper-trading.js");
+        await createPaperStrategy({ adviceReviewDashboardDetails: [{ plan }] });
+        const body = JSON.parse(calls[0].options.body);
+        assert(body.expected_plan_revision === plan.revision, "paper create lost plan revision CAS");
+        assert(body.expected_plan_payload_digest === plan.plan_payload_digest, "paper create lost plan digest CAS");
+        assert(calls[0].url === "/api/paper-trading/strategies", "paper create endpoint changed");
+        function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''
     )
@@ -711,8 +808,42 @@ def test_review_and_scan_controls_are_accessible_in_static_markup() -> None:
 
 
 def _run_node(script: str) -> None:
+    fixture_prelude = r'''
+      globalThis.completeReviewPlan = (overrides = {}) => ({
+        id: 7, advice_id: 3, symbol: "600519.SH", revision: 2,
+        snapshot_market_time: "2026-07-01 15:00:00", snapshot_price: 100,
+        snapshot_adjustment_mode: "qfq", snapshot_anchor_date: "2026-06-30", snapshot_anchor_close: 100,
+        snapshot_data_version: "frontend-qfq-v1", snapshot_contract_version: "daily-kline.v1",
+        target_price: 110, stop_price: 95, horizon_days: 20,
+        hypothesis: "趋势延续", trigger_condition: "站稳100", invalidation_condition: "跌破95",
+        trigger_basis: "daily_high_gte_target_price", invalidation_basis: "daily_low_lte_stop_price",
+        plan_payload_digest: "a".repeat(64), created_at: "2026-07-01 15:00:00", updated_at: "2026-07-01 15:00:00",
+        ...overrides,
+      });
+      globalThis.completeReviewEvaluation = (overrides = {}, plan = completeReviewPlan()) => {
+        const conclusion = overrides.conclusion || "horizon_gain";
+        const targetHit = overrides.target_hit ?? ["target_hit", "target_stop_ambiguous"].includes(conclusion);
+        const stopHit = overrides.stop_hit ?? ["stop_hit", "target_stop_ambiguous"].includes(conclusion);
+        return {
+          id: 1, plan_id: plan.id, plan_revision: plan.revision, advice_id: plan.advice_id, symbol: plan.symbol,
+          snapshot_market_time: plan.snapshot_market_time, as_of: "2026-07-17 15:00:00", evaluated_at: "2026-07-17 15:01:00",
+          status: "evaluated", conclusion, rule_version: "advice-review-v5-gross-observation", attempt: 1,
+          trigger_basis: plan.trigger_basis, invalidation_basis: plan.invalidation_basis,
+          entry_price: plan.snapshot_price, target_price: plan.target_price, stop_price: plan.stop_price, horizon_days: plan.horizon_days,
+          visible_bar_count: 1, visible_start_date: "2026-07-01", visible_end_date: "2026-07-01",
+          source_session_count: plan.horizon_days, expected_session_count: plan.horizon_days,
+          available_forward_days: plan.horizon_days, forward_start_date: "2026-07-02", forward_end_date: "2026-07-17",
+          return_pct: 8.5, max_favorable_excursion_pct: 10, max_adverse_excursion_pct: -2,
+          target_hit: targetHit, target_hit_date: targetHit ? "2026-07-17" : null,
+          stop_hit: stopHit, stop_hit_date: stopHit ? "2026-07-17" : null,
+          plan_payload_digest: plan.plan_payload_digest, input_digest: "b".repeat(64), result_digest: "c".repeat(64),
+          source_window_digest: "d".repeat(64), evidence_contract_version: "advice-review-evidence.v2",
+          observation_basis: "gross_close_and_barrier_observation", ...overrides,
+        };
+      };
+    '''
     subprocess.run(
-        ["node", "--input-type=module", "--eval", script],
+        ["node", "--input-type=module", "--eval", fixture_prelude + script],
         cwd=ROOT,
         check=True,
         capture_output=True,

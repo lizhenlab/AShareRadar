@@ -4,8 +4,10 @@ from pathlib import Path
 import sqlite3
 
 from app.db.paper_trading_schema import (
+    PAPER_TRADING_OUTPUT_DIGEST_SCHEMA_VERSION,
     PAPER_TRADING_SCHEMA_VERSION,
     apply_paper_trading_schema,
+    paper_run_output_digest,
 )
 
 
@@ -25,6 +27,15 @@ def test_v1_paper_ledger_migrates_in_place_and_is_idempotent(tmp_path: Path) -> 
             "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
             (PAPER_TRADING_SCHEMA_VERSION,),
         ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
+            (PAPER_TRADING_OUTPUT_DIGEST_SCHEMA_VERSION,),
+        ).fetchone()[0] == 1
+        run_id, output_digest = conn.execute(
+            "SELECT id, output_digest FROM paper_trading_run"
+        ).fetchone()
+        assert len(output_digest) == 64
+        assert output_digest == paper_run_output_digest(conn, run_id)
         strategy = conn.execute(
             "SELECT priority, entry_expiry_sessions FROM paper_strategy"
         ).fetchone()
@@ -50,6 +61,28 @@ def test_v1_paper_ledger_migrates_in_place_and_is_idempotent(tmp_path: Path) -> 
         ).fetchone()
         assert result == (1, 1, "closed", 900.0)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_output_digest_backfill_does_not_bless_an_existing_digest_after_tampering(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "paper-v1-tamper.sqlite3"
+    with sqlite3.connect(path) as conn:
+        _create_v1_schema(conn)
+        _insert_v1_ledger(conn)
+        apply_paper_trading_schema(conn)
+        run_id, stored = conn.execute(
+            "SELECT id, output_digest FROM paper_trading_run"
+        ).fetchone()
+        conn.execute("UPDATE paper_trade SET price = price + 1 WHERE run_id = ?", (run_id,))
+
+        apply_paper_trading_schema(conn)
+
+        assert conn.execute(
+            "SELECT output_digest FROM paper_trading_run WHERE id = ?",
+            (run_id,),
+        ).fetchone()[0] == stored
+        assert paper_run_output_digest(conn, run_id) != stored
 
 
 def _v2_counts(conn: sqlite3.Connection) -> tuple[int, int, int, int]:

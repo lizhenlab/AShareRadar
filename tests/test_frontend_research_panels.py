@@ -100,15 +100,17 @@ def test_factor_lab_renders_all_seven_production_factors_and_participation_note(
         name,
         score: 60 + index,
         weight: 1,
-        value: index === 6 ? "估值中性" : "观察",
+        value: index === 5 ? "不可用占位<script>" : index === 6 ? "估值中性" : "观察",
         direction: "正向",
-        evidence: index === 0 ? ["证据<script>"] : [],
+        evidence: index === 0 ? ["证据<script>"] : index === 5 ? ["排除证据<script>"] : [],
         calibration: {
           sample_count: index === 6 ? 0 : 12,
           confidence_level: index === 6 ? "待补数据" : "中等",
           expected_level: index === 6 ? "待补数据" : "偏正",
-          participates_in_historical_aggregate: index !== 6,
+          participates_in_historical_aggregate: index !== 5 && index !== 6,
         },
+        participates_in_current_score: index !== 5,
+        data_nature: index === 5 ? "unavailable" : "derived",
       }));
 
       renderFactorLab({
@@ -134,11 +136,89 @@ def test_factor_lab_renders_all_seven_production_factors_and_participation_note(
       for (const [, name] of factorSpecs) {
         if (!html.includes(name)) throw new Error(`production factor was hidden: ${name}`);
       }
-      if (!html.includes("历史聚合口径：估值锚仍参与当前评分，但不参与综合证据充分度、正负证据与历史样本聚合")) {
+      if (!html.includes("当前评分口径：龙头强度当前不计分/不可用。")) {
+        throw new Error(`current-score exclusion note was missing: ${html}`);
+      }
+      if (!html.includes("历史聚合口径：估值锚参与当前评分，但不参与综合证据充分度、正负证据与历史样本聚合")) {
         throw new Error(`explicit participation note was missing: ${html}`);
+      }
+      const excludedCard = html.slice(html.indexOf("<strong>龙头强度</strong>"), html.indexOf("</div>", html.indexOf("<strong>龙头强度</strong>") + 1));
+      if (!excludedCard.includes("当前不计分/不可用 · 权重不生效") || excludedCard.includes("65 · 权重")) {
+        throw new Error(`excluded factor was rendered as a scored factor: ${excludedCard}`);
+      }
+      if (html.includes("不可用占位") || html.includes("排除证据")) {
+        throw new Error(`excluded factor leaked compatibility values/evidence: ${html}`);
+      }
+      const historicalOnlyCard = html.slice(html.indexOf("<strong>估值锚</strong>"), html.indexOf("</div>", html.indexOf("<strong>估值锚</strong>") + 1));
+      if (!historicalOnlyCard.includes("66 · 权重") || historicalOnlyCard.includes("当前不计分/不可用")) {
+        throw new Error(`historically uncalibrated factor lost current-score semantics: ${historicalOnlyCard}`);
       }
       if (html.includes("第三条保持紧凑") || html.includes("<script>") || !html.includes("证据&lt;script&gt;")) {
         throw new Error(`factor rendering was not compact and escaped: ${html}`);
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_missing_risk_reward_and_volume_evidence_never_render_compatibility_zeroes() -> None:
+    script = r'''
+      import { renderFeatureSnapshot } from "./static/js/research-factor-diagnostics.js";
+      import { renderRiskReward } from "./static/js/research-risk-reward.js";
+
+      const elements = new Map([["featureSnapshot", { innerHTML: "" }], ["riskReward", { innerHTML: "" }]]);
+      globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+      renderFeatureSnapshot({ volume_ratio: 0, volume_ratio_available: false });
+      renderRiskReward({
+        rating: "等待确认", current_price: 10, upside_target: 0, upside_pct: 0,
+        downside_stop: 0, downside_pct: 0, reward_risk_ratio: 0, atr_pct: 0,
+        volatility_pct: 0, upside_available: false, downside_available: false,
+        ratio_available: false, upside_target_basis: "unavailable",
+        downside_stop_basis: "unavailable", availability_reason: "结构证据<script>不可用",
+        summary: "等待数据", scenarios: [], notes: [],
+      });
+
+      const feature = elements.get("featureSnapshot").innerHTML;
+      const risk = elements.get("riskReward").innerHTML;
+      if (!feature.includes("—（证据不可用）") || feature.includes("0.00倍")) {
+        throw new Error(`unavailable volume ratio rendered as evidence: ${feature}`);
+      }
+      if (!risk.includes("收益风险比 —") || !risk.includes("— / 证据不可用")
+          || risk.includes("0.00 / 0.00%") || risk.includes("0.00% / 0.00%")
+          || risk.includes("<script>") || !risk.includes("结构证据&lt;script&gt;不可用")) {
+        throw new Error(`unavailable risk/reward zeroes or unsafe text leaked: ${risk}`);
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_unavailable_chip_distribution_never_renders_placeholder_cost_evidence() -> None:
+    script = r'''
+      import { renderChipAnalysis } from "./static/js/research-factor-diagnostics.js";
+
+      const target = { innerHTML: "" };
+      globalThis.document = { getElementById(id) { return id === "chipPanel" ? target : null; } };
+      renderChipAnalysis({
+        distribution_available: false,
+        data_nature: "unavailable",
+        valid_session_count: 7,
+        distribution_label: "筹码样本不足",
+        concentration: 35,
+        center_price: 123.45,
+        summary: "有效样本<script>不足",
+        support_bands: [],
+        pressure_bands: [],
+        notes: ["不可用<script>说明"],
+      });
+
+      const html = target.innerHTML;
+      if (!html.includes("筹码证据不可用") || !html.includes("有效样本 7")) {
+        throw new Error(`unavailable chip status/sample count missing: ${html}`);
+      }
+      for (const leaked of ["成本中枢", "123.45", "筹码样本不足 · 35", "支撑区", "压力区"]) {
+        if (html.includes(leaked)) throw new Error(`placeholder chip evidence leaked (${leaked}): ${html}`);
+      }
+      if (html.includes("<script>") || !html.includes("有效样本&lt;script&gt;不足") || !html.includes("不可用&lt;script&gt;说明")) {
+        throw new Error(`unavailable chip copy was not escaped: ${html}`);
       }
     '''
     _run_node_script(script)

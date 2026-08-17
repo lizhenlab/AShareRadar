@@ -12,6 +12,11 @@ from app.api.errors import validation_exception_handler
 from app.api.routes import discovery
 from app.db.schema import initialize_schema
 from app.repositories.discovery import DiscoveryRepository
+from app.models.market_scan_screen_alert import (
+    MarketScanScreenAlertPresetRef,
+    MarketScanScreenAlertResponse,
+    MarketScanScreenAlertRunRef,
+)
 from app.services.cache import SQLiteCache
 from app.services.discovery import DiscoveryService
 
@@ -68,9 +73,13 @@ def test_discovery_preset_routes_expose_typed_crud_and_export_contract(tmp_path)
     assert renamed.status_code == 200
     assert renamed.json()["revision"] == 3
     assert exported.status_code == 200
-    assert exported.json()["schema_version"] == 1
+    assert exported.json()["schema_version"] == 2
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True, "preset_id": preset_id}
+    assert all(
+        response.headers["cache-control"] == "no-store"
+        for response in (created, listed, updated, renamed, exported, deleted)
+    )
 
 
 @pytest.mark.parametrize(
@@ -79,7 +88,7 @@ def test_discovery_preset_routes_expose_typed_crud_and_export_contract(tmp_path)
         ("get", "/api/discovery/presets?page=0", None),
         ("get", "/api/discovery/presets?page_size=101", None),
         ("delete", "/api/discovery/presets/1?expected_revision=0", None),
-        ("post", "/api/discovery/presets", {**_payload(), "criteria": {"keyword": "茅台"}}),
+        ("post", "/api/discovery/presets", {**_payload(), "criteria": {"keyword": "茅台\n非法"}}),
         ("post", "/api/discovery/presets", {**_payload(), "criteria": {"is_new": "false"}}),
         ("post", "/api/discovery/presets", {**_payload(), "unknown": True}),
         (
@@ -91,6 +100,11 @@ def test_discovery_preset_routes_expose_typed_crud_and_export_contract(tmp_path)
             "post",
             "/api/discovery/presets/1/research-queue",
             {"run_id": 1, "expected_preset_revision": 1, "symbols": []},
+        ),
+        (
+            "post",
+            "/api/discovery/presets/1/screen-alerts",
+            {"current_run_id": 0, "expected_preset_revision": 1},
         ),
         ("get", "/api/discovery/runs/1/rank-changes?page_size=201", None),
     ],
@@ -118,20 +132,39 @@ def test_main_app_registers_discovery_routes() -> None:
 
     assert "/api/discovery/presets" in paths
     assert "/api/discovery/presets/{preset_id}/apply" in paths
+    assert "/api/discovery/presets/{preset_id}/screen-alerts" in paths
     assert "/api/discovery/runs/{run_id}/rank-changes" in paths
 
 
-def test_route_reuses_cache_owned_discovery_service_and_shared_lock(tmp_path) -> None:
+def test_route_reuses_composed_discovery_service_and_shared_lock(tmp_path) -> None:
     cache = SQLiteCache(tmp_path / "shared.sqlite3")
-    hub = _CacheHub(cache)
+    services = cache.domain_services
 
-    first = discovery.get_discovery_service(hub)
-    second = discovery.get_discovery_service(hub)
+    first = discovery.get_discovery_service(services)
+    second = discovery.get_discovery_service(services)
 
     assert first is cache.discovery_service
     assert second is first
     assert cache.discovery_service.repository is cache.discovery_repo
     assert cache.discovery_repo._lock is cache._lock
+
+
+def test_discovery_screen_alert_route_exposes_typed_idempotent_contract(tmp_path) -> None:
+    digest = "a" * 64
+    service = _ScreenAlertRouteService(digest)
+    app = FastAPI()
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.include_router(discovery.router)
+    app.dependency_overrides[discovery.get_discovery_service] = lambda: service
+
+    first = TestClient(app).post(
+        "/api/discovery/presets/7/screen-alerts",
+        json={"current_run_id": 42, "expected_preset_revision": 3},
+    )
+
+    assert first.status_code == 200
+    assert first.json() == service.response.model_dump(mode="json")
+    assert service.called_with == (7, 42, 3)
 
 
 def test_exclusive_local_data_operation_blocks_discovery_database_access(tmp_path) -> None:
@@ -172,6 +205,36 @@ def _client(tmp_path) -> TestClient:
     return TestClient(app)
 
 
-class _CacheHub:
-    def __init__(self, cache: SQLiteCache) -> None:
-        self.cache = cache
+class _ScreenAlertRouteService:
+    def __init__(self, digest: str) -> None:
+        run = {
+            "status": "success",
+            "mode": "official",
+            "scope": "SH/SZ/BJ listed A-shares",
+            "rule_version": "full-market-score-v4",
+            "data_date": "2026-08-11",
+            "finished_at": "2026-08-11T15:30:00+08:00",
+        }
+        self.response = MarketScanScreenAlertResponse(
+            status="ready",
+            preset=MarketScanScreenAlertPresetRef(
+                preset_id=7,
+                preset_revision=3,
+                preset_name="高质量",
+                spec_digest=digest,
+            ),
+            current=MarketScanScreenAlertRunRef(run_id=42, **run),
+            previous=MarketScanScreenAlertRunRef(run_id=41, **run),
+            entered_symbols=("600519.SH",),
+            event_digest=digest,
+            created=True,
+        )
+        self.called_with: tuple[int, int, int | None] | None = None
+
+    def record_screen_alert(self, preset_id, request):
+        self.called_with = (
+            preset_id,
+            request.current_run_id,
+            request.expected_preset_revision,
+        )
+        return self.response

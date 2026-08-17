@@ -12,6 +12,7 @@ from app.services.providers import (
     MarketDataProtocolError,
     TENCENT_KLINE_URL,
     TencentMarketDataProvider,
+    _fetch_tencent_quote_text,
     _format_timestamp,
     _parse_tencent_quote_payload,
     _tencent_kline_response_is_coverage_miss,
@@ -68,13 +69,274 @@ def test_tencent_quotes_from_text_filters_invalid_payloads() -> None:
 
 
 def test_tencent_provider_quotes_raises_when_payloads_are_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_fetch(_: str, __: float) -> str:
+    async def fake_fetch(
+        _: str,
+        __: float,
+        *,
+        client: object | None = None,
+    ) -> str:
+        assert client is not None
         return 'v_sh600519="1~贵州茅台";'
 
     monkeypatch.setattr("app.services.providers._fetch_tencent_quote_text", fake_fetch)
 
-    with pytest.raises(MarketDataError, match="实时行情返回为空"):
-        asyncio.run(TencentMarketDataProvider(timeout=8.0).quotes(["600519.SH"]))
+    async def scenario() -> None:
+        provider = TencentMarketDataProvider(timeout=8.0)
+        try:
+            with pytest.raises(MarketDataError, match="实时行情返回为空"):
+                await provider.quotes(["600519.SH"])
+        finally:
+            await provider.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_tencent_quote_transport_ignores_environment_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        encoding = "utf-8"
+        text = 'v_sh600519="1~贵州茅台~600519";'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, timeout: float, *, trust_env: bool) -> None:
+            assert timeout == 8.0
+            assert trust_env is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str) -> FakeResponse:
+            assert url == "https://qt.gtimg.cn/q=sh600519"
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.providers.httpx.AsyncClient", FakeClient)
+
+    text = asyncio.run(_fetch_tencent_quote_text("https://qt.gtimg.cn/q=sh600519", 8.0))
+
+    assert "600519" in text
+
+
+def test_tencent_provider_reuses_one_client_and_closes_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients: list[FakeClient] = []
+
+    class FakeResponse:
+        def __init__(self, url: str) -> None:
+            self.url = url
+            self.encoding = "utf-8"
+
+        @property
+        def text(self) -> str:
+            return f'v_sh600519="{"~".join(_quote_parts())}";'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "data": {
+                    "sh600519": {
+                        "qfqday": [
+                            ["2026-07-22", "10", "10.5", "10.8", "9.9", "12345"],
+                        ],
+                    },
+                },
+            }
+
+    class FakeClient:
+        def __init__(self, timeout: float, *, trust_env: bool) -> None:
+            assert timeout == 8.0
+            assert trust_env is False
+            self.closed = False
+            self.close_calls = 0
+            self.urls: list[str] = []
+            clients.append(self)
+
+        async def get(self, url: str) -> FakeResponse:
+            assert self.closed is False
+            self.urls.append(url)
+            return FakeResponse(url)
+
+        async def aclose(self) -> None:
+            assert self.closed is False
+            self.closed = True
+            self.close_calls += 1
+
+    monkeypatch.setattr("app.services.providers.httpx.AsyncClient", FakeClient)
+
+    async def scenario() -> tuple[int, int]:
+        provider = TencentMarketDataProvider(timeout=8.0)
+        quotes = await provider.quotes(["600519.SH"])
+        klines = await provider.kline("600519.SH", limit=1)
+        await provider.aclose()
+        await provider.aclose()
+        return len(quotes), len(klines)
+
+    quote_count, kline_count = asyncio.run(scenario())
+
+    assert (quote_count, kline_count) == (1, 1)
+    assert len(clients) == 1
+    assert clients[0].urls == [
+        "https://qt.gtimg.cn/q=sh600519",
+        f"{TENCENT_KLINE_URL}?param=sh600519,day,,,1,qfq",
+    ]
+    assert clients[0].closed is True
+    assert clients[0].close_calls == 1
+
+
+def test_tencent_provider_rejects_network_calls_after_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_client(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("closed provider unexpectedly created an HTTP client")
+
+    monkeypatch.setattr("app.services.providers.httpx.AsyncClient", unexpected_client)
+
+    async def scenario() -> None:
+        provider = TencentMarketDataProvider(timeout=8.0)
+        await provider.aclose()
+        await provider.aclose()
+
+        with pytest.raises(RuntimeError, match="Provider 已关闭"):
+            await provider.quotes(["600519.SH"])
+        with pytest.raises(RuntimeError, match="Provider 已关闭"):
+            await provider.kline("600519.SH", limit=1)
+
+    asyncio.run(scenario())
+
+
+def test_tencent_provider_failed_close_is_fail_closed_and_reuses_same_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingCloseClient:
+        def __init__(self, timeout: float, *, trust_env: bool) -> None:
+            assert timeout == 8.0
+            assert trust_env is False
+            self.close_calls = 0
+            clients.append(self)
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("close failed")
+
+    clients: list[FailingCloseClient] = []
+    fetch_calls = 0
+
+    async def fake_fetch(
+        _: str,
+        __: float,
+        *,
+        client: object | None = None,
+    ) -> str:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert clients and client is clients[0]
+        return f'v_sh600519="{"~".join(_quote_parts())}";'
+
+    monkeypatch.setattr("app.services.providers.httpx.AsyncClient", FailingCloseClient)
+    monkeypatch.setattr("app.services.providers._fetch_tencent_quote_text", fake_fetch)
+
+    async def scenario() -> None:
+        provider = TencentMarketDataProvider(timeout=8.0)
+        assert len(await provider.quotes(["600519.SH"])) == 1
+
+        with pytest.raises(RuntimeError, match="close failed") as first_error:
+            await provider.aclose()
+
+        with pytest.raises(RuntimeError, match="Provider 正在关闭"):
+            await provider.quotes(["600519.SH"])
+        with pytest.raises(RuntimeError, match="close failed") as second_error:
+            await provider.aclose()
+
+        assert second_error.value is first_error.value
+        with pytest.raises(RuntimeError, match="Provider 正在关闭"):
+            await provider.kline("600519.SH", limit=1)
+
+    asyncio.run(scenario())
+
+    assert len(clients) == 1
+    assert clients[0].close_calls == 1
+    assert fetch_calls == 1
+
+
+def test_tencent_provider_caller_cancellation_does_not_cancel_client_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ShieldedCloseClient:
+        def __init__(self, timeout: float, *, trust_env: bool) -> None:
+            assert timeout == 8.0
+            assert trust_env is False
+            self.close_calls = 0
+            self.close_started = asyncio.Event()
+            self.close_release = asyncio.Event()
+            self.close_finished = asyncio.Event()
+            self.close_cancelled = False
+            clients.append(self)
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            self.close_started.set()
+            try:
+                await self.close_release.wait()
+            except asyncio.CancelledError:
+                self.close_cancelled = True
+                raise
+            self.close_finished.set()
+
+    clients: list[ShieldedCloseClient] = []
+
+    async def fake_fetch(
+        _: str,
+        __: float,
+        *,
+        client: object | None = None,
+    ) -> str:
+        assert clients and client is clients[0]
+        return f'v_sh600519="{"~".join(_quote_parts())}";'
+
+    monkeypatch.setattr("app.services.providers.httpx.AsyncClient", ShieldedCloseClient)
+    monkeypatch.setattr("app.services.providers._fetch_tencent_quote_text", fake_fetch)
+
+    async def scenario() -> None:
+        provider = TencentMarketDataProvider(timeout=8.0)
+        await provider.quotes(["600519.SH"])
+        client = clients[0]
+        caller = asyncio.create_task(provider.aclose())
+        try:
+            await client.close_started.wait()
+            with pytest.raises(RuntimeError, match="Provider 正在关闭"):
+                await provider.quotes(["600519.SH"])
+
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            await asyncio.sleep(0)
+
+            assert client.close_cancelled is False
+            assert client.close_finished.is_set() is False
+            client.close_release.set()
+            await provider.aclose()
+
+            with pytest.raises(RuntimeError, match="Provider 已关闭"):
+                await provider.kline("600519.SH", limit=1)
+        finally:
+            client.close_release.set()
+            await asyncio.gather(caller, return_exceptions=True)
+            await asyncio.gather(provider.aclose(), return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    assert len(clients) == 1
+    assert clients[0].close_calls == 1
+    assert clients[0].close_cancelled is False
+    assert clients[0].close_finished.is_set() is True
 
 
 def test_demo_provider_does_not_mutate_global_random_state() -> None:
@@ -224,8 +486,9 @@ def test_tencent_provider_kline_raises_when_all_rows_are_malformed(monkeypatch: 
             return {"data": {"sh600519": {"qfqday": [["2026-05-26", "100", "101", "99", "98", "1000"]]}}}
 
     class FakeClient:
-        def __init__(self, timeout: float) -> None:
+        def __init__(self, timeout: float, *, trust_env: bool) -> None:
             self.timeout = timeout
+            assert trust_env is False
 
         async def __aenter__(self):
             return self
@@ -254,8 +517,9 @@ def test_tencent_provider_rejects_nonzero_business_status(monkeypatch: pytest.Mo
             return {"code": 429, "msg": "upstream throttled", "data": {}}
 
     class FakeClient:
-        def __init__(self, timeout: float) -> None:
+        def __init__(self, timeout: float, *, trust_env: bool) -> None:
             self.timeout = timeout
+            assert trust_env is False
 
         async def __aenter__(self):
             return self
@@ -295,8 +559,9 @@ def test_tencent_provider_uses_new_qfq_endpoint_for_beijing_stocks(
             }
 
     class FakeClient:
-        def __init__(self, timeout: float) -> None:
+        def __init__(self, timeout: float, *, trust_env: bool) -> None:
             self.timeout = timeout
+            assert trust_env is False
 
         async def __aenter__(self):
             return self

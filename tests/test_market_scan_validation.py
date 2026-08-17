@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
+from app.services.market_scan_validation import MarketScanRuntimeGuard
 from tests.market_scan_test_support import (
     SCAN_AS_OF,
     _MarketScanHub,
@@ -75,3 +76,41 @@ def test_market_scan_rejects_historical_as_of_before_any_side_effect(tmp_path: P
     assert hub.stock_pool_calls == 0
     assert hub.kline_calls == {}
     assert Path(f"{hub.cache.path}.market-scan.lock").exists() is False
+
+
+def test_preopen_runtime_guard_allows_work_before_call_auction() -> None:
+    guard = MarketScanRuntimeGuard(
+        data_date=date(2026, 7, 17),
+        quote_date=date(2026, 7, 17),
+        mode="preopen",
+        wall_clock_budget_seconds=60,
+        now=lambda: datetime(2026, 7, 20, 8, 59),
+        monotonic=lambda: 1.0,
+        started_monotonic=0.0,
+    )
+
+    guard.checkpoint()
+
+
+@pytest.mark.parametrize(
+    "current",
+    (
+        datetime(2026, 7, 20, 9, 15),
+        datetime(2026, 7, 19, 8, 0),
+    ),
+)
+def test_preopen_runtime_guard_stops_at_boundary_or_non_trading_day(
+    current: datetime,
+) -> None:
+    guard = MarketScanRuntimeGuard(
+        data_date=date(2026, 7, 17),
+        quote_date=date(2026, 7, 17),
+        mode="preopen",
+        wall_clock_budget_seconds=60,
+        now=lambda: current,
+        monotonic=lambda: 1.0,
+        started_monotonic=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="盘前复盘.*09:15"):
+        guard.checkpoint()

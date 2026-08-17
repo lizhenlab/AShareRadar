@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, datetime
 from math import isfinite
 
 from app.models.analysis import (
@@ -14,6 +15,10 @@ from app.models.market import (
     Quote,
 )
 from app.services.indicators import max_drawdown, pct_change, trend_days, volatility
+from app.services.research_factor_execution_contract import factor_calibration_evidence_issue
+from app.services.research_replay import completed_daily_bar_cutoff
+from app.utils.clock import market_now_naive
+from app.utils.market_time import market_local_naive, normalize_market_datetime
 
 
 MIN_REVIEW_ROWS = 2
@@ -87,10 +92,22 @@ REVIEW_EVENT_RULES: tuple[ReviewEventRule, ...] = (
 )
 
 
-def build_individual_review(quote: Quote, klines: list[Kline], period_days: int = 60) -> IndividualReview:
-    rows = _review_rows(klines, period_days)
+def build_individual_review(
+    quote: Quote,
+    klines: list[Kline],
+    period_days: int = 60,
+    *,
+    as_of: datetime | None = None,
+    now: datetime | None = None,
+) -> IndividualReview:
+    trusted_as_of = _review_as_of(quote, as_of, now=now)
+    if trusted_as_of is None:
+        return _insufficient_review(quote, 0, "复盘截止时间不可验证，暂不计算历史表现。")
+    rows = _review_rows(klines, period_days, as_of=trusted_as_of)
     if len(rows) < MIN_REVIEW_ROWS:
         return _insufficient_review(quote, len(rows))
+    if issue := factor_calibration_evidence_issue(rows):
+        return _insufficient_review(quote, 0, f"历史日K执行证据不可用：{issue}。")
     metrics = _review_metrics(rows)
     return IndividualReview(
         symbol=f"{quote.code}.{quote.market}",
@@ -112,18 +129,59 @@ def build_individual_review(quote: Quote, klines: list[Kline], period_days: int 
     )
 
 
-def _review_rows(klines: list[Kline], period_days: int) -> list[Kline]:
+def _review_rows(
+    klines: list[Kline],
+    period_days: int,
+    *,
+    as_of: datetime,
+) -> list[Kline]:
     if period_days <= 0:
         return []
-    rows = klines[-period_days:] if len(klines) > period_days else klines
-    return [item for item in rows if _valid_review_bar(item)]
+    cutoff = completed_daily_bar_cutoff(as_of)
+    rows = [
+        item
+        for item in klines
+        if (row_date := _strict_review_date(item.date)) is None or row_date <= cutoff
+    ]
+    rows = rows[-period_days:] if len(rows) > period_days else rows
+    return rows
+
+
+def _strict_review_date(value: object) -> date | None:
+    text = str(value or "").strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.isoformat() == text else None
+
+
+def _review_as_of(
+    quote: Quote,
+    value: datetime | None,
+    *,
+    now: datetime | None,
+) -> datetime | None:
+    current = market_local_naive(now) if now is not None else market_now_naive()
+    normalized = normalize_market_datetime(quote.timestamp)
+    if normalized is None:
+        return None
+    quote_time = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    decision_time = market_local_naive(value) if value is not None else quote_time
+    if quote_time > decision_time or decision_time > current:
+        return None
+    return decision_time
 
 
 def _valid_review_bar(row: Kline) -> bool:
     return min(row.open, row.close, row.high, row.low) > 0 and row.low <= row.close <= row.high
 
 
-def _insufficient_review(quote: Quote, row_count: int) -> IndividualReview:
+def _insufficient_review(
+    quote: Quote,
+    row_count: int,
+    reason: str = "有效历史K线不足，暂不做复盘判断。",
+) -> IndividualReview:
     return IndividualReview(
         symbol=f"{quote.code}.{quote.market}",
         code=quote.code,
@@ -138,7 +196,7 @@ def _insufficient_review(quote: Quote, row_count: int) -> IndividualReview:
         negative_days=0,
         trend_days=0,
         review_label="数据不足",
-        review_summary="有效历史K线不足，暂不做复盘判断。",
+        review_summary=reason,
         key_points=[],
         events=[],
     )

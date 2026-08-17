@@ -77,7 +77,7 @@ def answer_context(rule_answer: StockQuestionAnswer, analysis: AnalysisResult) -
             "turnover_rate": quote.turnover_rate,
             "ma5": analysis.ma5,
             "ma10": analysis.ma10,
-            "ma20": analysis.ma20,
+            "ma20": analysis.ma20 if analysis.ma20_available else None,
             "trend_score": analysis.trend_score,
             "trend_label": analysis.trend_label,
             "risk_level": analysis.risk_level,

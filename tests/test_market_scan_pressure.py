@@ -148,6 +148,20 @@ def test_backoff_jitter_is_bounded_deterministic_and_retry_after_is_a_floor() ->
     assert first.current_concurrency == 1
 
 
+def test_systemic_cooldown_recheck_does_not_wait_for_the_full_provider_cooldown() -> None:
+    controller = MarketScanPressureController(5, retry_backoff_seconds=1)
+
+    decision = controller.observe_failures(
+        (ProviderChainUnavailable("all quote providers cooling", retry_after_seconds=90),),
+        attempted_count=50,
+        unavailable_count=50,
+    )
+
+    assert decision.minimum_delay_seconds == 5
+    assert controller.snapshot().last_retry_after_seconds == 90
+    assert controller.snapshot().last_signal == "retry_after+systemic_unavailable"
+
+
 def test_busy_retry_after_cannot_exceed_the_whole_provider_wait_budget(tmp_path: Path) -> None:
     async def scenario() -> tuple[float, float]:
         hub = _MarketScanHub(tmp_path)
@@ -197,7 +211,14 @@ def test_adaptive_concurrency_changes_later_batch_inflight_limits(tmp_path: Path
             self.active_by_batch: defaultdict[int, int] = defaultdict(int)
             self.max_active_by_batch: defaultdict[int, int] = defaultdict(int)
             self.quotes_by_symbol = {row.symbol: _quote_for(row.code, row.market, row.name, change_pct=1.0) for row in self.rows}
-            self.klines_by_symbol = {row.symbol: _daily_rows(SCAN_DATA_DATE, 80) for row in self.rows}
+            self.klines_by_symbol = {
+                row.symbol: _daily_rows(
+                    SCAN_DATA_DATE,
+                    80,
+                    last_close=self.quotes_by_symbol[row.symbol].price,
+                )
+                for row in self.rows
+            }
 
         async def kline(
             self,

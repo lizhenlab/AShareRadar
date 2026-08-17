@@ -51,10 +51,29 @@ def test_risk_radar_handles_missing_amount_and_non_risk_event() -> None:
     liquidity = next(item for item in report.items if item.name == "流动性")
     event = next(item for item in report.items if item.name == "事件异动")
     reward = next(item for item in report.items if item.name == "性价比")
-    assert liquidity.score == 35
-    assert liquidity.reason == "成交额缺失。"
+    assert liquidity.score == 0
+    assert liquidity.score_available is False
+    assert liquidity.level == "不可用"
+    assert "未纳入" in liquidity.reason
     assert event.score == 35
     assert reward.score == 38
+
+
+def test_unavailable_valuation_is_excluded_from_risk_ranking_and_overall_score() -> None:
+    report = build_risk_radar_report(
+        _analysis(),
+        _insights(valuation_label="估值待确认"),
+        _feature(valuation_score=0, valuation_score_available=False),
+        _market_regime(),
+        _risk_reward(),
+        _timeframe(),
+    )
+
+    valuation = next(item for item in report.items if item.name == "估值压力")
+    assert valuation.score_available is False
+    assert valuation.score == 0
+    assert valuation.level == "不可用"
+    assert all(not risk.startswith("估值压力：") for risk in report.top_risks)
 
 
 def test_timeframe_conflict_score_boundaries_are_stable() -> None:
@@ -72,7 +91,10 @@ def test_risk_radar_overall_level_boundaries_are_stable() -> None:
 
 
 def _analysis(*, data_quality_score: int = 90, data_quality_level: str = "优秀"):
-    return SimpleNamespace(data_quality=SimpleNamespace(score=data_quality_score, level=data_quality_level))
+    return SimpleNamespace(
+        quote=SimpleNamespace(code="600519", market="SH", timestamp="2026-05-13 10:00:00"),
+        data_quality=SimpleNamespace(score=data_quality_score, level=data_quality_level),
+    )
 
 
 def _insights(*, valuation_label: str = "估值适中", abnormal_level: str = "观察", abnormal_signal: str = "暂无异常"):
@@ -82,8 +104,20 @@ def _insights(*, valuation_label: str = "估值适中", abnormal_level: str = "�
     )
 
 
-def _feature(*, trend_score: int = 60, valuation_score: int = 60, amount: float | None = 1_000_000_000):
-    return SimpleNamespace(trend_score=trend_score, ma20=100.0, valuation_score=valuation_score, amount=amount)
+def _feature(
+    *,
+    trend_score: int = 60,
+    valuation_score: int = 60,
+    valuation_score_available: bool = True,
+    amount: float | None = 1_000_000_000,
+):
+    return SimpleNamespace(
+        trend_score=trend_score,
+        ma20=100.0,
+        valuation_score=valuation_score,
+        valuation_score_available=valuation_score_available,
+        amount=amount,
+    )
 
 
 def _market_regime(*, risk_multiplier: float = 1.0, market_label: str = "环境中性"):

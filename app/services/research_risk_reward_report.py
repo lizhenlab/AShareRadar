@@ -39,7 +39,11 @@ def _risk_reward_report_parts(
     timeframe: TimeframeAlignmentReport | None,
 ) -> RiskRewardReportParts:
     metrics = _risk_reward_metrics(feature, factor_lab, market_regime)
-    rating = _risk_reward_rating(metrics.ratio, factor_lab, market_regime, validation, timeframe)
+    rating = (
+        _risk_reward_rating(metrics.ratio, factor_lab, market_regime, validation, timeframe)
+        if metrics.ratio_available
+        else "等待确认"
+    )
     scenarios = _scenario_plans(
         analysis,
         feature,
@@ -85,6 +89,12 @@ def _risk_reward_report_from_parts(feature: FeatureSnapshot, parts: RiskRewardRe
         atr14=round(metrics.atr14, 2),
         atr_pct=round(metrics.atr_pct, 2),
         volatility_pct=round(metrics.volatility_pct, 2),
+        upside_available=metrics.upside_available,
+        downside_available=metrics.downside_available,
+        ratio_available=metrics.ratio_available,
+        upside_target_basis=metrics.upside_target_basis,
+        downside_stop_basis=metrics.downside_stop_basis,
+        availability_reason=metrics.availability_reason,
         rating=parts.rating,
         summary=parts.summary,
         scenarios=parts.scenarios,

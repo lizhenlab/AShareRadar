@@ -188,10 +188,54 @@ class CacheFreshness(BaseModel):
     checked_domains: list[str] = Field(default_factory=list)
 
 
+class ResearchArtifactCategoryDiagnostics(BaseModel):
+    """Read-only storage facts for one known research-artifact directory."""
+
+    category: str
+    relative_path: str
+    retention_disposition: str
+    scan_status: str = "missing"
+    regular_file_count: int = 0
+    size_bytes: int = 0
+    ignored_symlink_count: int = 0
+    ignored_non_regular_count: int = 0
+    scan_error_count: int = 0
+
+
+class ResearchArtifactRetentionPreview(BaseModel):
+    """Non-destructive retention assessment; it never authorizes deletion."""
+
+    policy_version: str = "research-artifact-retention-preview-v1"
+    mode: str = "preview_only"
+    automatic_deletion_allowed: bool = False
+    safe_delete_file_count: int = 0
+    safe_delete_size_bytes: int = 0
+    manual_review_file_count: int = 0
+    manual_review_size_bytes: int = 0
+    protected_evidence_file_count: int = 0
+    protected_evidence_size_bytes: int = 0
+    blocked_reasons: list[str] = Field(default_factory=list)
+    summary: str = "未扫描研究证据目录。"
+
+
+class ResearchArtifactStorageDiagnostics(BaseModel):
+    """Catalog of file-backed research evidence adjacent to the cache database."""
+
+    root_path: str | None = None
+    scan_status: str = "not_configured"
+    categories: list[ResearchArtifactCategoryDiagnostics] = Field(default_factory=list)
+    regular_file_count: int = 0
+    size_bytes: int = 0
+    ignored_symlink_count: int = 0
+    ignored_non_regular_count: int = 0
+    scan_error_count: int = 0
+    retention_preview: ResearchArtifactRetentionPreview = Field(default_factory=ResearchArtifactRetentionPreview)
+
+
 class StorageDiagnostics(BaseModel):
     db_path: str
-    db_size_bytes: int
-    db_size_mb: float
+    db_size_bytes: int = Field(description="兼容容量口径：SQLite 主库、WAL/SHM 与受管备份，不含研究 artifact。")
+    db_size_mb: float = Field(description="db_size_bytes 的 MiB 表示，保留原数据库预算口径。")
     sqlite_size_bytes: int = 0
     backup_size_bytes: int = 0
     managed_backup_count: int = 0
@@ -205,8 +249,15 @@ class StorageDiagnostics(BaseModel):
     other_runtime_rows: int = 0
     budget_bytes: int
     warning_at_pct: float
-    usage_pct: float
-    over_budget: bool
+    usage_pct: float = Field(description="兼容预算口径：db_size_bytes / budget_bytes。")
+    over_budget: bool = Field(description="兼容预算口径是否超限，不包含研究 artifact。")
+    research_artifacts: ResearchArtifactStorageDiagnostics = Field(default_factory=ResearchArtifactStorageDiagnostics)
+    research_artifact_size_bytes: int = 0
+    research_artifact_size_mb: float = 0.0
+    total_managed_size_bytes: int = Field(default=0, description="数据库兼容口径与已识别研究 artifact 的合计。")
+    total_managed_size_mb: float = 0.0
+    total_managed_usage_pct: float = Field(default=0.0, description="总受管占用相对数据库预算的参考比例。")
+    total_managed_over_budget: bool = Field(default=False, description="总受管占用是否超过数据库预算参考值。")
 
 
 class SystemDiagnostics(BaseModel):

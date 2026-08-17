@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.market import Kline, PlateItem, Quote, StockInfo
 
@@ -80,12 +80,22 @@ class FeatureSnapshot(BaseModel):
     ma10: float
     ma20: float
     volume_ratio: float
+    metric_availability_contract_version: Literal["feature-metric-availability.v1"] = "feature-metric-availability.v1"
+    volume_ratio_available: bool = False
+    volume_positive_session_count: int = 0
+    support_available: bool = False
+    resistance_available: bool = False
+    ma20_available: bool = False
     atr14: float = 0
     atr_pct: float = 0
     volatility_pct: float = 0
+    atr14_available: bool = False
+    volatility_available: bool = False
     turnover_rate: float | None = None
     amount: float | None = None
     valuation_score: int = 0
+    valuation_score_available: bool = False
+    valuation_data_nature: Literal["derived", "unavailable"] = "unavailable"
     financial_score: int | None = None
     fund_flow_score: int = 0
     fund_flow_data_nature: Literal["derived", "estimated", "observed", "unavailable"] = "unavailable"
@@ -144,6 +154,9 @@ class PeerSampleInfo(BaseModel):
 
 class AnalysisResult(BaseModel):
     quote: Quote
+    research_mode: Literal["official", "preopen", "intraday"] = "official"
+    production_effect: Literal["none"] = "none"
+    advice_persistence: Literal["disabled"] = "disabled"
     stock_profile: StockInfo | None = None
     industry_context: PlateItem | None = None
     action_advice: ActionAdvice
@@ -154,9 +167,12 @@ class AnalysisResult(BaseModel):
     trend_label: str
     support: float
     resistance: float
+    support_available: bool = False
+    resistance_available: bool = False
     ma5: float
     ma10: float
     ma20: float
+    ma20_available: bool = False
     risk_level: str
     beginner_summary: str
     buy_points: list[SignalItem]
@@ -176,6 +192,22 @@ class FactorScore(BaseModel):
     summary: str
     evidence: list[str]
     missing_data: list[str] = Field(default_factory=list)
+    score_available: bool = True
+    data_nature: Literal["derived", "unavailable"] = "derived"
+    participates_in_total_score: bool = True
+    unavailable_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_score_availability(self) -> FactorScore:
+        unavailable = self.data_nature == "unavailable" or not self.score_available
+        if unavailable:
+            if self.score_available or self.participates_in_total_score:
+                raise ValueError("unavailable factor must not participate in scoring")
+            if not str(self.unavailable_reason or "").strip():
+                raise ValueError("unavailable factor requires a reason")
+        elif self.data_nature != "derived":
+            raise ValueError("available factor must use derived data nature")
+        return self
 
 
 class KeyPriceLevel(BaseModel):
@@ -221,6 +253,26 @@ class FundFlowAnalysis(BaseModel):
     windows: list[FundFlowWindow]
     notes: list[str]
 
+    @model_validator(mode="after")
+    def validate_unavailable_state(self) -> FundFlowAnalysis:
+        if self.data_nature != "unavailable":
+            return self
+        if (
+            self.available
+            or self.overall_score != 50
+            or self.level != "不可用"
+            or self.estimated_main_net_inflow is not None
+            or self.price_volume_relation != "量价代理输入不足，方向不可用。"
+            or any(
+                item.score != 50
+                or item.estimated_net_inflow is not None
+                or item.summary != "量价证据不可用，未生成窗口方向结论。"
+                for item in self.windows
+            )
+        ):
+            raise ValueError("unavailable fund flow must use the canonical null evidence state")
+        return self
+
 
 class OrderPressure(BaseModel):
     symbol: str
@@ -236,6 +288,20 @@ class OrderPressure(BaseModel):
     ask_amount: float | None = None
     summary: str
     notes: list[str]
+
+    @model_validator(mode="after")
+    def validate_unavailable_state(self) -> OrderPressure:
+        if self.data_nature != "unavailable":
+            return self
+        values = (self.spread_pct, self.bid_ask_ratio, self.bid_amount, self.ask_amount)
+        if (
+            self.available
+            or any(value is not None for value in values)
+            or self.pressure_level != "订单压力不可用"
+            or self.summary != "缺少有效实时盘口和日内价格区间，订单压力不可用。"
+        ):
+            raise ValueError("unavailable order pressure must not carry directional evidence")
+        return self
 
 
 class StockEventItem(BaseModel):
@@ -267,6 +333,8 @@ class StockEventSummary(BaseModel):
 
 
 class StrategyCard(BaseModel):
+    symbol: str
+    updated_at: str
     name: str
     status: str
     level: str
@@ -314,6 +382,8 @@ class ValuationAnalysis(BaseModel):
     symbol: str
     updated_at: str
     score: int
+    score_available: bool = False
+    data_nature: Literal["derived", "unavailable"] = "unavailable"
     level: str
     summary: str
     pe: float | None = None

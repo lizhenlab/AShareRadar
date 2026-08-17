@@ -18,8 +18,9 @@ from tests.market_scan_test_support import (
 )
 
 
-def test_market_scan_retry_finalizes_fully_processed_interrupted_run(tmp_path: Path) -> None:
+def test_market_scan_retry_recomputes_fully_processed_v6_interrupted_run(tmp_path: Path) -> None:
     hub = _MarketScanHub(tmp_path)
+    _configure_clean_full_market(hub)
     run = hub.cache.create_market_scan_run(
         trigger="manual",
         rule_version=_rule_version(hub),
@@ -58,7 +59,7 @@ def test_market_scan_retry_finalizes_fully_processed_interrupted_run(tmp_path: P
     )
 
     async def scenario():
-        scanner = _scanner(hub, now=datetime(2026, 7, 20, 10, 30))
+        scanner = _scanner(hub, now=datetime(2026, 7, 17, 16, 30))
         assert await scanner.start() == 1
         assert scanner.run(run.id).status == "interrupted"
         retried = await scanner.retry_scan(run.id)
@@ -73,7 +74,7 @@ def test_market_scan_retry_finalizes_fully_processed_interrupted_run(tmp_path: P
     assert retried.run.retry_of_run_id == run.id
     assert final.status == "success"
     assert final.processed_count == final.total_count == 3
-    assert hub.stock_pool_calls == 0
+    assert hub.stock_pool_calls == 1
     ranked = hub.cache.market_scan_results(
         retried.run.id,
         page=1,
@@ -93,7 +94,7 @@ def test_market_scan_retry_finalizes_fully_processed_interrupted_run(tmp_path: P
     assert original.finished_at is not None
 
 
-def test_market_scan_retry_refreshes_only_pending_metadata(tmp_path: Path) -> None:
+def test_market_scan_v6_retry_refreshes_all_metadata(tmp_path: Path) -> None:
     hub = _MarketScanHub(tmp_path)
     _configure_clean_full_market(hub)
     run = hub.cache.create_market_scan_run(
@@ -174,9 +175,9 @@ def test_market_scan_retry_refreshes_only_pending_metadata(tmp_path: Path) -> No
     assert final.total_count == 3
     assert final.success_count == 3
     assert hub.stock_pool_calls == 1
-    assert by_symbol["600001.SH"].name == "保留沪市样本"
-    assert by_symbol["600001.SH"].industry == "保留行业"
-    assert by_symbol["600001.SH"].metadata_source == "legacy-clean"
+    assert by_symbol["600001.SH"].name == "沪市样本"
+    assert by_symbol["600001.SH"].industry == "测试行业"
+    assert by_symbol["600001.SH"].metadata_source == "测试股票池"
     assert by_symbol["000001.SZ"].name == "深市样本"
     assert by_symbol["000001.SZ"].list_date == "1991-04-03"
     assert "上市日期未知" not in by_symbol["000001.SZ"].tags

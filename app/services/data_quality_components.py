@@ -15,6 +15,7 @@ from app.models.market import (
 )
 from app.services.data_quality_kline import assess_kline_quality, kline_quality_penalty
 from app.services.data_quality_time import quote_delay_seconds, quote_freshness_penalty
+from app.utils.market_data import filter_valid_klines
 from app.utils.time import datetime_to_text
 
 
@@ -22,6 +23,7 @@ CHANGE_PCT_TOLERANCE = 0.3
 PRICE_BOUNDARY_REL_TOLERANCE = 1e-12
 PRICE_BOUNDARY_ABS_TOLERANCE = 1e-9
 MIN_KLINE_COUNT_FOR_ANALYSIS = 60
+MAX_INVALID_KLINE_PENALTY = 40
 CONSISTENCY_ANOMALY_LEVELS = {"存在差异", "字段异常"}
 
 
@@ -60,10 +62,12 @@ def build_data_quality_report(
     now: datetime,
 ) -> DataQuality:
     state = DataQualityScoreState()
-    kline_quality = assess_kline_quality(klines, now=now) if require_kline or klines else None
+    valid_klines = filter_valid_klines(klines)
+    kline_quality = assess_kline_quality(valid_klines, now=now) if require_kline or klines else None
 
     apply_source_quality(state, quote, penalize_cached_quote=penalize_cached_quote)
-    apply_kline_quality(state, klines, kline_quality, require_kline=require_kline)
+    apply_kline_quality(state, valid_klines, kline_quality, require_kline=require_kline)
+    apply_invalid_kline_quality(state, raw_count=len(klines), valid_count=len(valid_klines))
     apply_quote_field_quality(state, quote)
     apply_quote_freshness(state, quote, now)
     apply_consistency_quality(state, consistency_level, consistency_notes, consistency_penalty)
@@ -75,7 +79,7 @@ def build_data_quality_report(
         level=data_quality_level(score),
         source=quote.source,
         quote_time=quote.timestamp,
-        kline_count=len(klines),
+        kline_count=len(valid_klines),
         score=score,
         checked_at=datetime_to_text(now),
         quote_delay_seconds=quote_delay_seconds(quote.timestamp, now=now),
@@ -122,6 +126,24 @@ def apply_kline_quality(
     state.score -= normalized_penalty(kline_penalty)
     state.anomalies.extend(kline_anomalies)
     state.notes.extend(kline_quality.notes)
+
+
+def apply_invalid_kline_quality(
+    state: DataQualityScoreState,
+    *,
+    raw_count: int,
+    valid_count: int,
+) -> None:
+    invalid_count = max(0, raw_count - valid_count)
+    if invalid_count == 0:
+        return
+    invalid_ratio = invalid_count / max(raw_count, 1)
+    penalty = min(MAX_INVALID_KLINE_PENALTY, 10 + round(30 * invalid_ratio))
+    state.penalize(
+        penalty,
+        note=f"{invalid_count} 根日K的OHLC或成交量字段无效，已从研究样本剔除。",
+        anomaly="K线字段无效",
+    )
 
 
 def apply_quote_field_quality(state: DataQualityScoreState, quote: Quote) -> None:

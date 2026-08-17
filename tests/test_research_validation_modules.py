@@ -141,6 +141,31 @@ def test_each_validation_waits_when_any_required_price_is_not_positive_and_finit
         ).status == "等待确认"
 
 
+def test_unavailable_structural_and_volume_metrics_never_confirm_signals() -> None:
+    feature = _feature(
+        price=11.9,
+        support=10,
+        resistance=12,
+        ma20=10,
+        volume_ratio=1.5,
+        support_available=False,
+        resistance_available=False,
+        ma20_available=False,
+        volume_ratio_available=False,
+    )
+
+    breakout = _breakout_validation(feature, _regime(1.0), None, None)
+    defense = _support_defense_validation(feature, _regime(1.0), None, None)
+    t_range = _t_range_validation(feature, _regime(1.0), None, None)
+
+    assert breakout.status == defense.status == t_range.status == "等待确认"
+    assert "不完整" in breakout.trigger_condition
+    assert "12.00" not in breakout.trigger_condition
+    assert "不完整" in defense.trigger_condition
+    assert "10.00" not in defense.trigger_condition
+    assert "不完整" in t_range.trigger_condition
+
+
 def test_t_range_validation_requires_strict_open_interval_and_precise_text() -> None:
     support_touch = _t_range_validation(_feature(price=10), _regime(1.0), None, None)
     resistance_touch = _t_range_validation(_feature(price=12), _regime(1.0), None, None)
@@ -223,7 +248,7 @@ def _raw_factor(expected_level: str, *, score: object, stability_score: object):
     )
 
 
-def _feature(**updates: float):
+def _feature(**updates: object):
     values = {
         "price": 11,
         "support": 10,
@@ -234,6 +259,10 @@ def _feature(**updates: float):
         "volume_ratio": 1.2,
         "signal_confidence": 70,
         "data_quality_score": 80,
+        "support_available": True,
+        "resistance_available": True,
+        "ma20_available": True,
+        "volume_ratio_available": True,
     }
     values.update(updates)
     return SimpleNamespace(**values)

@@ -2479,6 +2479,36 @@ def test_daily_kline_batch_lookup_matches_individual_cache_contract() -> None:
         assert batch["300001.SZ"] == []
 
 
+def test_daily_kline_exact_date_batch_lookup_avoids_full_retained_windows() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        symbols = ("600519.SH", "000001.SZ")
+        for offset, symbol in enumerate(symbols):
+            cache.save_klines(
+                symbol,
+                [
+                    make_kline(date=f"2026-05-{day:02d}", close=100 + offset + day)
+                    for day in range(1, 31)
+                ],
+                "测试日线",
+            )
+
+        batch = cache.get_klines_by_dates_many(
+            (*symbols, symbols[0], "920066.BJ"),
+            ("2026-05-02", "2026-05-29", "2026-05-02"),
+        )
+
+        assert set(batch) == {*symbols, "920066.BJ"}
+        assert [[row.date for row in batch[symbol]] for symbol in symbols] == [
+            ["2026-05-02", "2026-05-29"],
+            ["2026-05-02", "2026-05-29"],
+        ]
+        assert batch["920066.BJ"] == []
+        assert cache.get_klines_by_dates_many(symbols, ()) == {}
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            cache.get_klines_by_dates_many(symbols, ("2026-5-2",))
+
+
 def test_kline_cache_filters_invalid_ohlc_and_non_finite_rows() -> None:
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "cache.sqlite3"

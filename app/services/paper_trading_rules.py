@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from math import isclose
 
 from app.models.market import Kline
 from app.models.paper_trading_config import PAPER_TRADING_RULE_VERSION
 from app.models.paper_trading import PaperInstrumentMetadata, PaperTradeRuleProfile
-from app.services.trading_calendar import TradingCalendarCoverageError, trading_day_gap
+from app.services.trading_calendar import TradingCalendarCoverageError, trading_session_count
 from app.utils.symbols import normalize_symbol
 
 
@@ -170,7 +170,7 @@ def resolve_trade_rule_profile(
 ) -> PaperTradeRuleProfile:
     template = _rule_template(symbol, trade_date)
     limit_pct, reasons = _effective_price_limit(template, trade_date, metadata)
-    limit_pct, status_reasons = _status_price_limit(limit_pct, metadata)
+    limit_pct, status_reasons = _status_price_limit(limit_pct, metadata, trade_date)
     reasons.extend(status_reasons)
     suffix = "-no-limit" if limit_pct is None else ""
     return PaperTradeRuleProfile(
@@ -209,7 +209,7 @@ def _effective_price_limit(
             limit_pct = None
         else:
             try:
-                listing_session = trading_day_gap(listing_date - timedelta(days=1), trade_date)
+                listing_session = trading_session_count(listing_date, trade_date)
             except TradingCalendarCoverageError:
                 reasons.append("trading_calendar_out_of_coverage")
                 limit_pct = None
@@ -222,8 +222,12 @@ def _effective_price_limit(
 def _status_price_limit(
     limit_pct: float | None,
     metadata: PaperInstrumentMetadata | None,
+    trade_date: date,
 ) -> tuple[float | None, list[str]]:
     if metadata is None or metadata.is_st is None or not metadata.status_effective_date:
+        return limit_pct, ["historical_st_status_unknown"]
+    status_effective_date = _date_or_none(metadata.status_effective_date)
+    if status_effective_date is None or status_effective_date > trade_date:
         return limit_pct, ["historical_st_status_unknown"]
     if metadata.is_st:
         return None, ["st_rule_requires_historical_exchange_parameter"]
@@ -236,6 +240,9 @@ def assess_daily_tradeability(
     previous_close: float | None,
     profile: PaperTradeRuleProfile,
 ) -> DailyTradeability:
+    explicit = _explicit_execution_status(row)
+    if explicit is not None:
+        return explicit
     if row.volume <= 0:
         return DailyTradeability(
             can_buy=False,
@@ -287,13 +294,34 @@ def assess_daily_tradeability(
     )
 
 
+def _explicit_execution_status(row: Kline) -> DailyTradeability | None:
+    if row.session_status == "suspended" or row.open_execution_status == "unavailable":
+        return DailyTradeability(
+            can_buy=False,
+            can_sell=False,
+            code="execution_metadata_unavailable",
+            message="执行元数据显示停牌或开盘不可成交，买卖均不撮合",
+        )
+    if row.open_execution_status == "locked_limit_up":
+        return DailyTradeability(
+            can_buy=False,
+            can_sell=True,
+            code="locked_limit_up",
+            message="执行元数据显示涨停锁单，买入不撮合",
+        )
+    if row.open_execution_status == "locked_limit_down":
+        return DailyTradeability(
+            can_buy=True,
+            can_sell=False,
+            code="locked_limit_down",
+            message="执行元数据显示跌停锁单，卖出不撮合",
+        )
+    return None
+
+
 def _rule_template(symbol: str, trade_date: date) -> _RuleTemplate:
     templates = _RULE_BOOK[_rule_book_key(symbol)]
-    eligible = [
-        item
-        for item in templates
-        if date.fromisoformat(item.effective_from) <= trade_date
-    ]
+    eligible = [item for item in templates if date.fromisoformat(item.effective_from) <= trade_date]
     return eligible[-1] if eligible else templates[0]
 
 

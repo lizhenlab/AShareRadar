@@ -9,6 +9,7 @@ from typing import Any
 
 from app.services.datahub_runtime import run_cache_io
 from app.services.instance_guard import FileInstanceGuard, InstanceGuard
+from app.services.storage_contracts import MarketScanLifecycleStorage
 
 
 RunExecutor = Callable[[int, asyncio.Event], Coroutine[Any, Any, None]]
@@ -23,12 +24,18 @@ class MarketScanStopSnapshot:
 class MarketScanLifecycle:
     """Own process leadership and local background-task bookkeeping."""
 
-    def __init__(self, cache: object, *, instance_guard: InstanceGuard | None = None) -> None:
+    def __init__(
+        self,
+        cache: MarketScanLifecycleStorage,
+        *,
+        instance_guard: InstanceGuard | None = None,
+    ) -> None:
         self._cache = cache
         self._instance_guard = instance_guard if instance_guard is not None else default_market_scan_guard(cache)
         self.lock = asyncio.Lock()
         self._guard_acquired = False
         self._ownership_reconciled = False
+        self._instance_guard_epoch = 0
         self._started = False
         self._stopping = False
         self._closed = False
@@ -48,6 +55,23 @@ class MarketScanLifecycle:
     @property
     def is_quiescent(self) -> bool:
         return self._quiescent_event.is_set()
+
+    def owns_instance_guard(self) -> bool:
+        """Confirm this lifecycle still owns its process lease."""
+        if self._closed or not self._guard_acquired:
+            return False
+        try:
+            return bool(self._instance_guard.acquire())
+        except Exception:
+            return False
+
+    @property
+    def instance_guard_epoch(self) -> int:
+        return self._instance_guard_epoch
+
+    @property
+    def has_instance_guard(self) -> bool:
+        return self._guard_acquired
 
     async def wait_until_quiescent(self) -> None:
         if self.is_quiescent:
@@ -129,6 +153,7 @@ class MarketScanLifecycle:
         self._guard_acquired = acquired
         if not acquired:
             return False, 0
+        self._instance_guard_epoch += 1
         try:
             return True, await self._reconcile_ownership()
         except BaseException:
@@ -172,7 +197,7 @@ class MarketScanLifecycle:
     async def _reconcile_ownership(self) -> int:
         if self._ownership_reconciled:
             return 0
-        reconciled = await run_cache_io(getattr(self._cache, "reconcile_incomplete_market_scans"))
+        reconciled = await run_cache_io(self._cache.reconcile_incomplete_market_scans)
         self._ownership_reconciled = True
         return reconciled
 
@@ -192,11 +217,8 @@ class MarketScanLifecycle:
             self._quiescent_event.set()
 
 
-def default_market_scan_guard(cache: object) -> InstanceGuard:
-    cache_path = getattr(cache, "path", None)
-    if cache_path is None:
-        raise ValueError("全市场扫描需要可定位的 SQLite 缓存路径")
-    return FileInstanceGuard(Path(f"{cache_path}.market-scan.lock"))
+def default_market_scan_guard(cache: MarketScanLifecycleStorage) -> InstanceGuard:
+    return FileInstanceGuard(Path(f"{cache.path}.market-scan.lock"))
 
 
 __all__ = ["MarketScanLifecycle", "MarketScanStopSnapshot", "default_market_scan_guard"]

@@ -206,13 +206,22 @@ class MarketMetadataRepositoryMixin:
             conn.execute("DELETE FROM stock_concept WHERE symbol = ?", (normalized,))
             conn.executemany(_STOCK_CONCEPT_UPSERT_SQL, payload)
 
-    def get_stock_concepts(self, symbol: str, max_age_seconds: int, limit: int = 8) -> list[StockConceptItem]:
+    def get_stock_concepts(
+        self,
+        symbol: str,
+        max_age_seconds: int,
+        limit: int = 8,
+        *,
+        excluded_source: str | None = None,
+    ) -> list[StockConceptItem]:
         if limit <= 0:
             return []
         normalized = standard_symbol(symbol)
         window = self._time_window(max_age_seconds)
         if window is None:
             return []
+        source_clause = "AND TRIM(source) <> ?" if excluded_source is not None else ""
+        params = (normalized, *window, excluded_source, limit) if excluded_source is not None else (normalized, *window, limit)
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 f"""
@@ -220,10 +229,11 @@ class MarketMetadataRepositoryMixin:
                 WHERE symbol = ?
                   AND ashare_audit_epoch(updated_at)
                       BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)
+                  {source_clause}
                 ORDER BY change_pct DESC, rank ASC, name ASC
                 LIMIT ?
                 """,
-                (normalized, *window, limit),
+                params,
             ).fetchall()
         return [row_to_stock_concept_item(row) for row in rows]
 

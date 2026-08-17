@@ -41,25 +41,55 @@ def test_static_assets_always_revalidate_nested_modules() -> None:
     assert module.headers["cache-control"] == "no-cache"
 
 
-def test_css_entrypoint_imports_existing_modules_in_order() -> None:
-    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
-    imports = re.findall(r'@import url\("/static/css/([^"]+)"\);', css)
+def test_index_loads_css_modules_in_parallel_and_in_order() -> None:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    modules = re.findall(r'<link rel="stylesheet" href="/static/css/([^"]+)\?v=[^"]+" />', html)
 
-    assert imports == [
+    assert modules == [
         "base.css",
         "sidebar.css",
         "workspace-core.css",
         "research-panels.css",
+        "individual-probability.css",
         "market-scan.css",
+        "market-scan-research.css",
         "interactions.css",
         "side-footer.css",
         "responsive.css",
         "primary-navigation.css",
+        "layout-optimizations.css",
     ]
-    for filename in imports:
+    assert "@import" not in (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    for filename in modules:
         path = STATIC_DIR / "css" / filename
         assert path.exists(), f"missing CSS module: {filename}"
         assert path.read_text(encoding="utf-8").strip(), f"empty CSS module: {filename}"
+
+
+def test_local_data_import_uses_a_localized_accessible_file_picker() -> None:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "css" / "layout-optimizations.css").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'class="local-data-file-picker"' in html
+    assert 'id="localDataImportFileName"' in html
+    assert "选择备份文件" in html
+    assert "尚未选择文件" in html
+    assert ".local-data-file-picker:focus-within" in css
+    assert '$("localDataImportFileName").textContent = file?.name || "尚未选择文件";' in script
+
+
+def test_market_scan_keeps_auxiliary_panels_before_the_live_results() -> None:
+    script = (STATIC_DIR / "js" / "layout-optimizations.js").read_text(encoding="utf-8")
+
+    assert "wireMarketScanAuxiliaryOrder(root, mobile);" in script
+    assert 'wireDisclosure(root, mobile, "marketScanHistoryToggle", "marketScanHistory", false, false);' in script
+    assert 'wireDisclosure(root, mobile, "marketScanFilterToggle", "marketScanFilterPanel", false, false);' in script
+    assert 'wireDisclosure(root, mobile, "marketScanDetailsToggle", "marketScanDetails", false, false);' in script
+    assert 'wireDetailsDisclosure(root, "marketScanStrategyToggle", "strategyLab");' in script
+    assert 'root.createComment("market-scan-details-position")' in script
+    assert "parent.insertBefore(filters, resultAnchor);" in script
+    assert "parent.insertBefore(details, detailsMarker.nextSibling);" in script
 
 
 def test_side_leader_rows_do_not_force_cjk_letter_breaks() -> None:
@@ -80,6 +110,31 @@ def test_frontend_js_functions_stay_small_enough_to_review() -> None:
     ]
 
     assert hotspots == []
+
+
+def test_frontend_entrypoints_have_reviewable_growth_budgets() -> None:
+    frontend_flow_specs = (
+        ROOT / "tests" / "e2e" / "frontend-flow.spec.js",
+        ROOT / "tests" / "e2e" / "market-scan-flow.spec.js",
+    )
+    budgets = {
+        STATIC_DIR / "app.js": 3100,
+        STATIC_DIR / "js" / "app-lifecycle.js": 140,
+        STATIC_DIR / "css" / "interactions.css": 1850,
+        frontend_flow_specs[0]: 1500,
+        frontend_flow_specs[1]: 1232,
+        ROOT / "tests" / "e2e" / "frontend-flow-api-fixtures.mjs": 373,
+        ROOT / "tests" / "e2e" / "stock-search-flow.spec.js": 280,
+        STATIC_DIR / "js" / "strategy-template-catalog.js": 540,
+    }
+
+    oversized = {
+        path.relative_to(ROOT).as_posix(): len(path.read_text(encoding="utf-8").splitlines())
+        for path, limit in budgets.items()
+        if len(path.read_text(encoding="utf-8").splitlines()) >= limit
+    }
+    assert oversized == {}
+    assert sum(len(path.read_text(encoding="utf-8").splitlines()) for path in frontend_flow_specs) <= 2747
 
 
 def test_ui_symbol_validation_supports_all_a_share_markets_and_rejects_conflicts() -> None:

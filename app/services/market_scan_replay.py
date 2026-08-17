@@ -3,23 +3,26 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import cmp_to_key
-import hashlib
-import json
 import math
 
 from app.services.market_scan_rank_refinement import (
+    MARKET_SCAN_CONTINUOUS_TREND_ALGORITHM_VERSION,
+    MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT,
     MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION,
     MARKET_SCAN_RANK_REFINEMENT_BOUNDS,
     MARKET_SCAN_RANK_REFINEMENT_MAX_DISCOUNT,
     MARKET_SCAN_RANK_REFINEMENT_SCORE_DECIMALS,
     MARKET_SCAN_RANK_REFINEMENT_WEIGHTS,
+    market_scan_continuous_trend_spec,
     market_scan_rank_refinement_spec,
 )
+from app.services.market_scan_score_contract import MarketScanReplayError, stable_score_spec_hash
 
 
 _LEGACY_SCORE_SPEC_SCHEMA_VERSION = 2
 _V3_SCORE_SPEC_SCHEMA_VERSION = 3
-_CURRENT_SCORE_SPEC_SCHEMA_VERSION = 4
+_V4_SCORE_SPEC_SCHEMA_VERSION = 4
+_CURRENT_SCORE_SPEC_SCHEMA_VERSION = 5
 _SUPPORTED_ALGORITHMS_BY_SCHEMA = {
     _LEGACY_SCORE_SPEC_SCHEMA_VERSION: {
         "trend_score": "trend-score-v1",
@@ -35,13 +38,21 @@ _SUPPORTED_ALGORITHMS_BY_SCHEMA = {
         "leader_score": "leader-score-additive-v1",
         "final_score": "weighted-trend-quality-v2",
     },
-    _CURRENT_SCORE_SPEC_SCHEMA_VERSION: {
+    _V4_SCORE_SPEC_SCHEMA_VERSION: {
         "trend_score": "trend-score-v2-continuous-soft-clip",
         "volume_ratio": "recent-volume-ratio-v2-explicit-windows",
         "data_quality": "data-quality-v2-cache-neutral",
         "leader_score": "leader-score-additive-v1",
         "final_score": "trend-quality-penalty-v3",
         "rank_refinement": MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION,
+    },
+    _CURRENT_SCORE_SPEC_SCHEMA_VERSION: {
+        "trend_score": "trend-score-v2-continuous-soft-clip",
+        "volume_ratio": "recent-volume-ratio-v2-explicit-windows",
+        "data_quality": "data-quality-v2-cache-neutral",
+        "leader_score": "leader-score-additive-v1",
+        "final_score": "trend-quality-continuous-component-v4",
+        "continuous_trend": MARKET_SCAN_CONTINUOUS_TREND_ALGORITHM_VERSION,
     },
 }
 _SUPPORTED_ROUNDING_MODE = "python-round-half-to-even"
@@ -70,8 +81,11 @@ _CURRENT_DATA_QUALITY_POLICY = {
     "kline_anomalies": "penalize",
 }
 _V3_FINAL_SCORE_FORMULA = "leader_score * leader_weight + data_quality_score * quality_weight"
-_CURRENT_FINAL_SCORE_FORMULA = (
+_V4_FINAL_SCORE_FORMULA = (
     "leader_score - (100 - data_quality_score) * quality_penalty_per_missing_point"
+)
+_CURRENT_FINAL_SCORE_FORMULA = (
+    "leader_score - quality_penalty + continuous_trend_adjustment"
 )
 _CURRENT_QUALITY_PENALTY_PER_MISSING_POINT = 0.15
 _CURRENT_CLOSE_CONSISTENCY = {
@@ -80,10 +94,8 @@ _CURRENT_CLOSE_CONSISTENCY = {
     "accept_when": "within-either-limit",
 }
 _CURRENT_SINGLE_PRICE_SESSION_EXCLUDED = True
-
-
-class MarketScanReplayError(ValueError):
-    pass
+_CURRENT_VALID_QUOTE_FIELDS_REQUIRED = True
+_CURRENT_MAX_CHANGE_PCT_GAP = 0.3
 
 
 @dataclass(frozen=True)
@@ -111,6 +123,7 @@ class _FinalReplayBreakdown:
     base_score: float
     quality_penalty: float | None = None
     rank_discount: float | None = None
+    continuous_trend_adjustment: float | None = None
     rank_refinement: _RankRefinementReplay | None = None
     weighted_terms: dict[str, float] | None = None
 
@@ -124,41 +137,14 @@ class MarketScanScoreReplay:
     final_score: int
     tie_break: tuple[tuple[str, str], ...]
     tie_break_values: dict[str, int | float | str]
-
-
-def stable_score_spec_hash(spec: object) -> str:
-    try:
-        canonical = json.dumps(
-            spec,
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("ascii")
-    except (TypeError, ValueError) as exc:
-        raise MarketScanReplayError("评分规范损坏：不是有限、可序列化的 JSON") from exc
-    return hashlib.sha256(canonical).hexdigest()
+    inputs: dict[str, float]
 
 
 def replay_score_details(details: Mapping[str, object]) -> MarketScanScoreReplay:
     payload = _mapping(details, "score_details")
     if payload.get("schema_version") != 1:
         raise MarketScanReplayError(f"未知 score_details schema：{payload.get('schema_version')!r}")
-    score_spec = _mapping(payload.get("score_spec"), "score_spec")
-    score_spec_schema = _integer(score_spec.get("schema_version"), "score_spec.schema_version")
-    if score_spec_schema not in _SUPPORTED_ALGORITHMS_BY_SCHEMA:
-        raise MarketScanReplayError(f"未知 score_spec schema：{score_spec_schema!r}；仅兼容版本 2、3 和当前版 4")
-    expected_hash = _text(payload.get("score_spec_hash"), "score_spec_hash")
-    actual_hash = stable_score_spec_hash(score_spec)
-    if expected_hash != actual_hash:
-        raise MarketScanReplayError("评分规范 hash 不一致，持久化明细已损坏")
-    algorithms = _require_supported_algorithms(score_spec, schema_version=score_spec_schema)
-    _require_supported_rounding(score_spec)
-    if score_spec_schema == _V3_SCORE_SPEC_SCHEMA_VERSION:
-        _require_v3_score_contract(score_spec)
-    elif score_spec_schema == _CURRENT_SCORE_SPEC_SCHEMA_VERSION:
-        _require_current_score_contract(score_spec)
-
+    score_spec, score_spec_schema, actual_hash, algorithms = _verified_score_spec(payload)
     inputs = _score_inputs(payload, schema_version=score_spec_schema)
     leader_breakdown = _replay_leader_score(
         score_spec,
@@ -195,7 +181,32 @@ def replay_score_details(details: Mapping[str, object]) -> MarketScanScoreReplay
         final_score=final_breakdown.final_score,
         tie_break=tie_break,
         tie_break_values=tie_break_values,
+        inputs=dict(inputs),
     )
+
+
+def _verified_score_spec(
+    payload: Mapping[str, object],
+) -> tuple[Mapping[str, object], int, str, Mapping[str, str]]:
+    score_spec = _mapping(payload.get("score_spec"), "score_spec")
+    schema = _integer(score_spec.get("schema_version"), "score_spec.schema_version")
+    if schema not in _SUPPORTED_ALGORITHMS_BY_SCHEMA:
+        raise MarketScanReplayError(
+            f"未知 score_spec schema：{schema!r}；仅兼容版本 2、3、4 和当前版 5"
+        )
+    expected_hash = _text(payload.get("score_spec_hash"), "score_spec_hash")
+    actual_hash = stable_score_spec_hash(score_spec)
+    if expected_hash != actual_hash:
+        raise MarketScanReplayError("评分规范 hash 不一致，持久化明细已损坏")
+    algorithms = _require_supported_algorithms(score_spec, schema_version=schema)
+    _require_supported_rounding(score_spec)
+    if schema == _V3_SCORE_SPEC_SCHEMA_VERSION:
+        _require_v3_score_contract(score_spec)
+    elif schema == _V4_SCORE_SPEC_SCHEMA_VERSION:
+        _require_v4_score_contract(score_spec)
+    elif schema == _CURRENT_SCORE_SPEC_SCHEMA_VERSION:
+        _require_current_score_contract(score_spec)
+    return score_spec, schema, actual_hash, algorithms
 
 
 def verify_score_details(
@@ -279,6 +290,14 @@ def _require_v3_score_contract(score_spec: Mapping[str, object]) -> None:
     _require_v3_ranking_contract(score_spec)
 
 
+def _require_v4_score_contract(score_spec: Mapping[str, object]) -> None:
+    _require_current_leader_profile(score_spec)
+    _require_v4_data_contract(score_spec)
+    _require_v4_final_score_contract(score_spec)
+    _require_v4_rounding_contract(score_spec)
+    _require_v4_ranking_contract(score_spec)
+
+
 def _require_current_score_contract(score_spec: Mapping[str, object]) -> None:
     _require_current_leader_profile(score_spec)
     _require_current_data_contract(score_spec)
@@ -330,16 +349,43 @@ def _require_v3_data_contract(score_spec: Mapping[str, object]) -> None:
     _require_quality_floor(eligibility)
 
 
-def _require_current_data_contract(score_spec: Mapping[str, object]) -> None:
+def _require_v4_data_contract(score_spec: Mapping[str, object]) -> None:
     eligibility = _require_shared_data_contract(score_spec)
     if set(eligibility) != {
         "min_data_quality_score",
+        "valid_quote_fields_required",
+        "max_change_pct_gap",
         "quote_timestamp_not_after_as_of",
         "single_price_session_excluded",
         "quote_kline_close_consistency",
     }:
+        raise MarketScanReplayError("v4 eligibility 字段不完整或包含未知条目")
+    _require_v4_and_current_data_values(eligibility)
+
+
+def _require_current_data_contract(score_spec: Mapping[str, object]) -> None:
+    eligibility = _require_shared_data_contract(score_spec)
+    if set(eligibility) != {
+        "min_data_quality_score",
+        "valid_quote_fields_required",
+        "max_change_pct_gap",
+        "quote_timestamp_not_after_as_of",
+        "single_price_session_excluded",
+        "official_contiguous_session_coverage_required",
+        "quote_kline_close_consistency",
+    }:
         raise MarketScanReplayError("当前 eligibility 字段不完整或包含未知条目")
+    if eligibility.get("official_contiguous_session_coverage_required") is not True:
+        raise MarketScanReplayError("v5 盘后成功结果必须具备连续可信交易会话")
+    _require_v4_and_current_data_values(eligibility)
+
+
+def _require_v4_and_current_data_values(eligibility: Mapping[str, object]) -> None:
     _require_quality_floor(eligibility)
+    if eligibility.get("valid_quote_fields_required") is not _CURRENT_VALID_QUOTE_FIELDS_REQUIRED:
+        raise MarketScanReplayError("排名准入必须校验报价 OHLC 与成交字段")
+    if _number(eligibility.get("max_change_pct_gap"), "eligibility.max_change_pct_gap") != _CURRENT_MAX_CHANGE_PCT_GAP:
+        raise MarketScanReplayError("未知报价涨跌幅一致性阈值")
     if eligibility.get("quote_timestamp_not_after_as_of") is not True:
         raise MarketScanReplayError("报价时间必须不晚于批次截止时点")
     if eligibility.get("single_price_session_excluded") is not _CURRENT_SINGLE_PRICE_SESSION_EXCLUDED:
@@ -363,12 +409,25 @@ def _require_v3_final_score_contract(score_spec: Mapping[str, object]) -> None:
         raise MarketScanReplayError("未知 final score clamp")
 
 
+def _require_v4_final_score_contract(score_spec: Mapping[str, object]) -> None:
+    final = _mapping(score_spec.get("final_score"), "score_spec.final_score")
+    if set(final) != {"formula", "quality_policy", "quality_penalty_per_missing_point", "clamp"}:
+        raise MarketScanReplayError("v4 final score 字段不完整或包含未知条目")
+    if final.get("formula") != _V4_FINAL_SCORE_FORMULA:
+        raise MarketScanReplayError("未知 final score 公式")
+    _require_v4_and_current_final_values(final)
+
+
 def _require_current_final_score_contract(score_spec: Mapping[str, object]) -> None:
     final = _mapping(score_spec.get("final_score"), "score_spec.final_score")
     if set(final) != {"formula", "quality_policy", "quality_penalty_per_missing_point", "clamp"}:
         raise MarketScanReplayError("当前 final score 字段不完整或包含未知条目")
     if final.get("formula") != _CURRENT_FINAL_SCORE_FORMULA:
         raise MarketScanReplayError("未知 final score 公式")
+    _require_v4_and_current_final_values(final)
+
+
+def _require_v4_and_current_final_values(final: Mapping[str, object]) -> None:
     if final.get("quality_policy") != "penalty-only":
         raise MarketScanReplayError("数据质量只能作为评分惩罚，不能作为强度加分")
     if (
@@ -393,10 +452,24 @@ def _require_v3_rounding_contract(score_spec: Mapping[str, object]) -> None:
         raise MarketScanReplayError("未知指标精度")
 
 
-def _require_current_rounding_contract(score_spec: Mapping[str, object]) -> None:
+def _require_v4_rounding_contract(score_spec: Mapping[str, object]) -> None:
     rounding = _mapping(score_spec.get("rounding"), "score_spec.rounding")
     if rounding.get("component_stage") != "after-quality-penalty-before-rank-refinement":
-        raise MarketScanReplayError("未知评分舍入阶段")
+        raise MarketScanReplayError("未知 v4 评分舍入阶段")
+    _require_v4_and_current_rounding_values(rounding)
+
+
+def _require_current_rounding_contract(score_spec: Mapping[str, object]) -> None:
+    rounding = _mapping(score_spec.get("rounding"), "score_spec.rounding")
+    if (
+        rounding.get("component_stage")
+        != "after-quality-penalty-and-continuous-trend-adjustment"
+    ):
+        raise MarketScanReplayError("未知 v5 评分舍入阶段")
+    _require_v4_and_current_rounding_values(rounding)
+
+
+def _require_v4_and_current_rounding_values(rounding: Mapping[str, object]) -> None:
     if _integer(rounding.get("raw_score_decimals"), "rounding.raw_score_decimals") != 6:
         raise MarketScanReplayError("未知 raw score 精度")
     if _integer(rounding.get("metric_decimals"), "rounding.metric_decimals") != 4:
@@ -409,10 +482,10 @@ def _require_v3_ranking_contract(score_spec: Mapping[str, object]) -> None:
         raise MarketScanReplayError("v3 评分规范必须按 score、raw_score 及稳定决胜字段排序")
 
 
-def _require_current_ranking_contract(score_spec: Mapping[str, object]) -> None:
+def _require_v4_ranking_contract(score_spec: Mapping[str, object]) -> None:
     ranking = _mapping(score_spec.get("ranking"), "score_spec.ranking")
     if set(ranking) != {"refinement", "raw_score_formula", "base_score_minimum_step", "tie_break"}:
-        raise MarketScanReplayError("当前 ranking 字段不完整或包含未知条目")
+        raise MarketScanReplayError("v4 ranking 字段不完整或包含未知条目")
     if dict(_mapping(ranking.get("refinement"), "ranking.refinement")) != market_scan_rank_refinement_spec():
         raise MarketScanReplayError("未知全市场连续趋势精排规范")
     if ranking.get("raw_score_formula") != "base_score - (1 - refinement_score) * max_rank_discount":
@@ -420,6 +493,26 @@ def _require_current_ranking_contract(score_spec: Mapping[str, object]) -> None:
     minimum_step = _number(ranking.get("base_score_minimum_step"), "ranking.base_score_minimum_step")
     if minimum_step != 0.05 or MARKET_SCAN_RANK_REFINEMENT_MAX_DISCOUNT >= minimum_step:
         raise MarketScanReplayError("连续精排折扣必须小于基础分最小步长")
+    if _parse_tie_break(ranking.get("tie_break")) != _CURRENT_TIE_BREAK:
+        raise MarketScanReplayError("v4 评分规范必须按 raw_score 和 symbol 稳定排序")
+
+
+def _require_current_ranking_contract(score_spec: Mapping[str, object]) -> None:
+    ranking = _mapping(score_spec.get("ranking"), "score_spec.ranking")
+    if set(ranking) != {
+        "continuous_trend",
+        "base_score_formula",
+        "raw_score_formula",
+        "tie_break",
+    }:
+        raise MarketScanReplayError("当前 ranking 字段不完整或包含未知条目")
+    continuous = _mapping(ranking.get("continuous_trend"), "ranking.continuous_trend")
+    if dict(continuous) != market_scan_continuous_trend_spec():
+        raise MarketScanReplayError("未知全市场连续中期趋势规范")
+    if ranking.get("base_score_formula") != _CURRENT_FINAL_SCORE_FORMULA:
+        raise MarketScanReplayError("未知 v5 基础分公式")
+    if ranking.get("raw_score_formula") != "base_score":
+        raise MarketScanReplayError("v5 raw_score 必须等于真实基础分")
     if _parse_tie_break(ranking.get("tie_break")) != _CURRENT_TIE_BREAK:
         raise MarketScanReplayError("当前评分规范必须按 raw_score 和 symbol 稳定排序")
 
@@ -440,10 +533,21 @@ def _score_inputs(payload: Mapping[str, object], *, schema_version: int) -> dict
             "inputs.data_quality_score",
         ),
     }
-    if schema_version == _CURRENT_SCORE_SPEC_SCHEMA_VERSION:
+    if schema_version in {
+        _V4_SCORE_SPEC_SCHEMA_VERSION,
+        _CURRENT_SCORE_SPEC_SCHEMA_VERSION,
+    }:
+        prefix = (
+            "rank_"
+            if schema_version == _V4_SCORE_SPEC_SCHEMA_VERSION
+            else "continuous_trend_"
+        )
         inputs.update(
             {
-                f"rank_{name}": _number(raw.get(f"rank_{name}"), f"inputs.rank_{name}")
+                f"rank_{name}": _number(
+                    raw.get(f"{prefix}{name}"),
+                    f"inputs.{prefix}{name}",
+                )
                 for name in MARKET_SCAN_RANK_REFINEMENT_BOUNDS
             }
         )
@@ -453,7 +557,10 @@ def _score_inputs(payload: Mapping[str, object], *, schema_version: int) -> dict
     for field in ("volume_ratio", "amount", "turnover_rate"):
         if inputs[field] < 0:
             raise MarketScanReplayError(f"评分明细损坏：inputs.{field} 不能为负数")
-    if schema_version == _CURRENT_SCORE_SPEC_SCHEMA_VERSION:
+    if schema_version in {
+        _V4_SCORE_SPEC_SCHEMA_VERSION,
+        _CURRENT_SCORE_SPEC_SCHEMA_VERSION,
+    }:
         position = inputs["rank_range_position_20d"]
         if not 0 <= position <= 1:
             raise MarketScanReplayError("评分明细损坏：inputs.rank_range_position_20d 必须位于 0 到 1")
@@ -500,51 +607,47 @@ def _replay_leader_score(
 def _rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
     kind = _text(rule.get("kind"), "leader rule.kind")
     if kind == "high-low-threshold":
-        value = _input_number(rule, inputs)
-        high = _threshold_delta(value, rule.get("high_steps"), high=True)
-        return (
-            high
-            if high != 0
-            else _threshold_delta(
-                value,
-                rule.get("low_steps"),
-                high=False,
-            )
-        )
+        return _high_low_rule_delta(rule, inputs)
     if kind == "signed-volume-threshold":
-        value = _input_number(rule, inputs)
-        threshold = _number(rule.get("threshold"), "leader rule.threshold")
-        if value < threshold:
-            return 0
-        direction = inputs[_text(rule.get("direction_input"), "leader rule.direction_input")]
-        if direction > 0:
-            return _integer(rule.get("positive_delta"), "leader rule.positive_delta")
-        if direction < 0:
-            return _integer(rule.get("negative_delta"), "leader rule.negative_delta")
-        return 0
+        return _signed_volume_rule_delta(rule, inputs)
     if kind == "bounded-active-with-overheat":
-        value = _input_number(rule, inputs)
-        if value == 0:
-            return 0
-        active_min = _number(rule.get("active_min"), "leader rule.active_min")
-        active_max = _number(rule.get("active_max"), "leader rule.active_max")
-        if active_min <= value <= active_max:
-            return _integer(rule.get("active_delta"), "leader rule.active_delta")
-        overheated = _number(
-            rule.get("overheated_above"),
-            "leader rule.overheated_above",
-        )
-        if value > overheated:
-            return _integer(
-                rule.get("overheated_delta"),
-                "leader rule.overheated_delta",
-            )
-        return 0
+        return _bounded_active_rule_delta(rule, inputs)
     if kind == "high-threshold":
         value = _input_number(rule, inputs)
         delta = _threshold_delta(value, rule.get("high_steps"), high=True)
         return delta if delta != 0 else _integer(rule.get("default"), "leader rule.default")
     raise MarketScanReplayError(f"未知 leader rule 算法：{kind}")
+
+
+def _high_low_rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
+    value = _input_number(rule, inputs)
+    high = _threshold_delta(value, rule.get("high_steps"), high=True)
+    return high if high != 0 else _threshold_delta(value, rule.get("low_steps"), high=False)
+
+
+def _signed_volume_rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
+    value = _input_number(rule, inputs)
+    if value < _number(rule.get("threshold"), "leader rule.threshold"):
+        return 0
+    direction = inputs[_text(rule.get("direction_input"), "leader rule.direction_input")]
+    if direction > 0:
+        return _integer(rule.get("positive_delta"), "leader rule.positive_delta")
+    if direction < 0:
+        return _integer(rule.get("negative_delta"), "leader rule.negative_delta")
+    return 0
+
+
+def _bounded_active_rule_delta(rule: Mapping[str, object], inputs: Mapping[str, float]) -> int:
+    value = _input_number(rule, inputs)
+    if value == 0:
+        return 0
+    active_min = _number(rule.get("active_min"), "leader rule.active_min")
+    active_max = _number(rule.get("active_max"), "leader rule.active_max")
+    if active_min <= value <= active_max:
+        return _integer(rule.get("active_delta"), "leader rule.active_delta")
+    if value > _number(rule.get("overheated_above"), "leader rule.overheated_above"):
+        return _integer(rule.get("overheated_delta"), "leader rule.overheated_delta")
+    return 0
 
 
 def _threshold_delta(value: float, raw_steps: object, *, high: bool) -> int:
@@ -580,9 +683,18 @@ def _replay_final_score(
 ) -> _FinalReplayBreakdown:
     if final_algorithm in {"weighted-leader-quality-v1", "weighted-trend-quality-v2"}:
         return _replay_legacy_final_score(score_spec, inputs, leader_score)
-    if final_algorithm != "trend-quality-penalty-v3":
-        raise MarketScanReplayError(f"未知 final score 算法：{final_algorithm}")
+    if final_algorithm == "trend-quality-penalty-v3":
+        return _replay_v4_final_score(score_spec, inputs, leader_score)
+    if final_algorithm == "trend-quality-continuous-component-v4":
+        return _replay_current_final_score(score_spec, inputs, leader_score)
+    raise MarketScanReplayError(f"未知 final score 算法：{final_algorithm}")
 
+
+def _replay_v4_final_score(
+    score_spec: Mapping[str, object],
+    inputs: Mapping[str, float],
+    leader_score: int,
+) -> _FinalReplayBreakdown:
     final = _mapping(score_spec.get("final_score"), "score_spec.final_score")
     penalty_per_point = _number(
         final.get("quality_penalty_per_missing_point"),
@@ -608,6 +720,52 @@ def _replay_final_score(
         quality_penalty=quality_penalty,
         rank_discount=rank_discount,
         rank_refinement=rank_refinement,
+    )
+
+
+def _replay_current_final_score(
+    score_spec: Mapping[str, object],
+    inputs: Mapping[str, float],
+    leader_score: int,
+) -> _FinalReplayBreakdown:
+    final = _mapping(score_spec.get("final_score"), "score_spec.final_score")
+    penalty_per_point = _number(
+        final.get("quality_penalty_per_missing_point"),
+        "final_score.quality_penalty_per_missing_point",
+    )
+    rounding = _mapping(score_spec.get("rounding"), "score_spec.rounding")
+    metric_decimals = _integer(
+        rounding.get("metric_decimals"),
+        "rounding.metric_decimals",
+    )
+    raw_decimals = _integer(
+        rounding.get("raw_score_decimals"),
+        "rounding.raw_score_decimals",
+    )
+    quality_penalty = round(
+        (100 - inputs["data_quality_score"]) * penalty_per_point,
+        metric_decimals,
+    )
+    continuous_trend = _replay_rank_refinement(inputs)
+    adjustment = round(
+        (2 * continuous_trend.score - 1)
+        * MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT,
+        raw_decimals,
+    )
+    base_score = round(
+        min(100.0, max(0.0, leader_score - quality_penalty + adjustment)),
+        metric_decimals,
+    )
+    raw_score = round(base_score, raw_decimals)
+    rounded_score = round(base_score)
+    return _FinalReplayBreakdown(
+        raw_score=raw_score,
+        final_score=_clamp_score(rounded_score),
+        rounded_score=rounded_score,
+        base_score=base_score,
+        quality_penalty=quality_penalty,
+        continuous_trend_adjustment=adjustment,
+        rank_refinement=continuous_trend,
     )
 
 
@@ -770,9 +928,18 @@ def _verify_persisted_components(
     _verify_persisted_leader_component(leader, leader_breakdown)
     _verify_persisted_data_quality_component(components, inputs)
     if final_breakdown.rank_refinement is not None:
-        _verify_persisted_rank_refinement_component(
-            _mapping(components.get("rank_refinement"), "components.rank_refinement"),
+        component_name = (
+            "continuous_trend"
+            if final_breakdown.continuous_trend_adjustment is not None
+            else "rank_refinement"
+        )
+        _verify_persisted_continuous_component(
+            _mapping(
+                components.get(component_name),
+                f"components.{component_name}",
+            ),
             final_breakdown.rank_refinement,
+            component_name=component_name,
         )
     _verify_persisted_final_component(
         final,
@@ -852,35 +1019,52 @@ def _verify_persisted_final_component(
         raise MarketScanReplayError("持久化 final component 与重放结果不一致")
 
 
-def _verify_persisted_rank_refinement_component(
+def _verify_persisted_continuous_component(
     persisted: Mapping[str, object],
     expected: _RankRefinementReplay,
+    *,
+    component_name: str,
 ) -> None:
     for field, expected_values in (
         ("normalized_inputs", expected.normalized_inputs),
         ("components", expected.components),
         ("weighted_terms", expected.weighted_terms),
     ):
-        values = _mapping(persisted.get(field), f"components.rank_refinement.{field}")
+        values = _mapping(
+            persisted.get(field),
+            f"components.{component_name}.{field}",
+        )
         if set(values) != set(expected_values) or any(
             not _same_number(values.get(name), value) for name, value in expected_values.items()
         ):
-            raise MarketScanReplayError(f"持久化 rank refinement {field} 与重放结果不一致")
+            raise MarketScanReplayError(
+                f"持久化 {component_name} {field} 与重放结果不一致"
+            )
     if not _same_number(persisted.get("score"), expected.score):
-        raise MarketScanReplayError("持久化 rank refinement score 与重放结果不一致")
+        raise MarketScanReplayError(
+            f"持久化 {component_name} score 与重放结果不一致"
+        )
 
 
 def _verify_current_final_fields(
     persisted: Mapping[str, object],
     expected: _FinalReplayBreakdown,
 ) -> None:
-    expected_values = {
-        "quality_penalty": expected.quality_penalty,
-        "base": expected.base_score,
-        "rank_discount": expected.rank_discount,
-    }
+    expected_values = (
+        {
+            "quality_penalty": expected.quality_penalty,
+            "continuous_trend_adjustment": expected.continuous_trend_adjustment,
+            "base": expected.base_score,
+        }
+        if expected.continuous_trend_adjustment is not None
+        else {
+            "quality_penalty": expected.quality_penalty,
+            "base": expected.base_score,
+            "rank_discount": expected.rank_discount,
+        }
+    )
     if any(value is None for value in expected_values.values()):
-        raise MarketScanReplayError("当前 final score 重放缺少质量惩罚或精排折扣")
+        raise MarketScanReplayError("当前 final score 重放缺少质量惩罚或趋势调整")
     for field, value in expected_values.items():
         assert value is not None
         if not _same_number(persisted.get(field), value):

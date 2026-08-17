@@ -16,6 +16,7 @@ from app.models.research import (
     TimeframeAlignmentReport,
 )
 from app.services.scoring import clamp_score
+from app.utils.symbols import standard_symbol
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,8 @@ def build_risk_radar_report(
     top = _top_risk_items(items)
     overall_level = _risk_radar_overall_level(items)
     return RiskRadarReport(
+        symbol=standard_symbol(f"{analysis.quote.code}.{analysis.quote.market}"),
+        updated_at=analysis.quote.timestamp,
         overall_level=overall_level,
         summary=f"{overall_level}：优先处理" + "、".join(item.name for item in top) + "。",
         items=items,
@@ -60,16 +63,34 @@ def _risk_radar_item(name: str, raw_score: float, reason: str, action: str) -> R
     return RiskRadarItem(name=name, level=level, score=score, reason=reason, action=action)
 
 
+def _unavailable_risk_radar_item(name: str, reason: str, action: str) -> RiskRadarItem:
+    return RiskRadarItem(
+        name=name,
+        level="不可用",
+        score=0,
+        score_available=False,
+        data_nature="unavailable",
+        reason=reason,
+        action=action,
+    )
+
+
 def _risk_radar_items(context: RiskRadarContext) -> list[RiskRadarItem]:
     return [rule.build(context) for rule in RISK_RADAR_RULES]
 
 
 def _top_risk_items(items: list[RiskRadarItem]) -> list[RiskRadarItem]:
-    return sorted(items, key=lambda item: item.score, reverse=True)[:3]
+    available_items = [item for item in items if item.score_available]
+    return sorted(available_items, key=lambda item: item.score, reverse=True)[:3]
 
 
 def _risk_radar_overall_level(items: list[RiskRadarItem]) -> str:
-    overall_score = round(sum(item.score for item in items) / len(items)) if items else 0
+    available_items = [item for item in items if item.score_available]
+    overall_score = (
+        round(sum(item.score for item in available_items) / len(available_items))
+        if available_items
+        else 0
+    )
     if overall_score >= 68:
         return "高风险"
     if overall_score >= 45:
@@ -79,15 +100,26 @@ def _risk_radar_overall_level(items: list[RiskRadarItem]) -> str:
 
 def _trend_break_risk(context: RiskRadarContext) -> RiskRadarItem:
     feature = context.feature
+    ma20_text = (
+        f"20日线 {feature.ma20:.2f}"
+        if getattr(feature, "ma20_available", False) is True
+        else "20日线证据不可用"
+    )
     return _risk_radar_item(
         "趋势破位",
         100 - feature.trend_score,
-        f"趋势评分 {feature.trend_score}，20日线 {feature.ma20:.2f}。",
+        f"趋势评分 {feature.trend_score}，{ma20_text}。",
         "跌破关键均线先降级。",
     )
 
 
 def _valuation_risk(context: RiskRadarContext) -> RiskRadarItem:
+    if not context.feature.valuation_score_available:
+        return _unavailable_risk_radar_item(
+            "估值压力",
+            "估值证据不可用，未纳入风险排序与总评。",
+            "补齐点时估值证据后再评估。",
+        )
     return _risk_radar_item(
         "估值压力",
         100 - context.feature.valuation_score,
@@ -108,10 +140,16 @@ def _abnormal_event_risk(context: RiskRadarContext) -> RiskRadarItem:
 
 def _liquidity_risk(context: RiskRadarContext) -> RiskRadarItem:
     amount = context.feature.amount
+    if not amount or amount <= 0:
+        return _unavailable_risk_radar_item(
+            "流动性",
+            "成交额证据不可用，未纳入风险排序与总评。",
+            "补齐点时成交额后再评估可交易性。",
+        )
     return _risk_radar_item(
         "流动性",
-        65 if amount and amount < 300_000_000 else 35,
-        f"成交额 {amount / 100000000:.1f} 亿。" if amount else "成交额缺失。",
+        65 if amount < 300_000_000 else 35,
+        f"成交额 {amount / 100000000:.1f} 亿。",
         "低流动性信号容易失真。",
     )
 

@@ -1,32 +1,45 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 import json
+import re
+import sqlite3
 
+from app.db.market_scan_action_source import require_market_scan_action_source
+from app.db.market_scan_integrity import require_publication_market_scan_snapshot
 from app.models.market_scan import (
+    MARKET_SCAN_FULL_MARKET_SCOPE,
+    MARKET_SCAN_TOP100_REFRESH_SCOPE,
     MarketScanRetryPlan,
     MarketScanMode,
+    MarketScanPublicationDiagnostics,
     MarketScanRun,
     MarketScanRunStatus,
     MarketScanStage,
     MarketScanTrigger,
 )
-from app.repositories.market_scan_context import MarketScanRepositoryContext
 from app.repositories.market_scan_lifecycle_support import (
     ACTIVE_SCAN_STATUSES,
     RETRYABLE_SCAN_STATUSES,
     TERMINAL_SCAN_STATUSES,
     _decoded_stage_metrics,
-    _duration_ms,
     _finish_stage_metric,
     _required_lastrowid,
     _stage_metric,
     build_retry_plan,
     finish_linked_task_run,
     finish_run_row,
+    reconcile_incomplete_run_rows,
+    retry_as_of,
     validate_terminal_status,
 )
 from app.repositories.market_scan_mapping import run_from_row
+from app.repositories.market_scan_quote_capture import MarketScanQuoteCaptureLifecycleMixin
 from app.repositories.market_scan_results import required_run_row
+from app.repositories.market_scan_rule_contracts import (
+    register_market_scan_rule_contract,
+)
+from app.repositories.market_scan_top100_refresh import prepare_top100_refresh_snapshot
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.clock import monotonic_now
 
@@ -35,6 +48,7 @@ MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
         SELECT result.*,
             CASE WHEN result.status = 'success'
                 AND run.status IN ('degraded', 'cancelled', 'interrupted')
+                AND run.rule_version NOT LIKE 'full-market-scan-v6:%'
                 AND result.quote_fallback_used = 0
                 AND result.kline_fallback_used = 0
                 AND result.metadata_degraded = 0
@@ -49,7 +63,7 @@ MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
         is_st, is_new, metadata_source, status, rank, score, raw_score, trend_score,
         leader_score, data_quality_score, price, change_pct, turnover_rate,
         volume_ratio, amount, tags_json, metrics_json, reason, error,
-        data_date, quote_timestamp, quote_source, kline_source,
+        data_date, quote_timestamp, quote_observed_at, quote_source, kline_source,
         adjustment_mode, quote_fallback_used, kline_fallback_used,
         metadata_degraded, degradation_reasons_json, updated_at
     )
@@ -74,6 +88,7 @@ MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
         NULL,
         CASE WHEN preserve_success = 1 THEN data_date END,
         CASE WHEN preserve_success = 1 THEN quote_timestamp END,
+        CASE WHEN preserve_success = 1 THEN quote_observed_at END,
         CASE WHEN preserve_success = 1 THEN quote_source END,
         CASE WHEN preserve_success = 1 THEN kline_source END,
         CASE WHEN preserve_success = 1 THEN adjustment_mode END,
@@ -86,7 +101,7 @@ MARKET_SCAN_RESULT_RETRY_COPY_SQL = """
 """
 
 
-class MarketScanLifecycleMixin(MarketScanRepositoryContext):
+class MarketScanLifecycleMixin(MarketScanQuoteCaptureLifecycleMixin):
     def create_run(
         self,
         *,
@@ -97,10 +112,28 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
         data_date: str,
         quote_date: str | None = None,
         scope: str,
+        rule_contract: Mapping[str, object] | None = None,
     ) -> MarketScanRun:
         stamp = now_text()
-        message = "等待盘中临时扫描" if mode == "intraday" else "等待盘后正式扫描"
+        message = {
+            "intraday": "等待盘中临时扫描",
+            "preopen": "等待盘前复盘扫描",
+            "official": "等待盘后正式扫描",
+        }[mode]
         with self._lock, self._connect() as conn:
+            if rule_contract is not None:
+                register_market_scan_rule_contract(
+                    conn,
+                    rule_version=rule_version,
+                    contract=rule_contract,
+                    stamp=stamp,
+                )
+            elif (
+                re.fullmatch(r"full-market-scan-v6:[0-9a-f]{64}", rule_version)
+                is not None
+                and scope in {MARKET_SCAN_FULL_MARKET_SCOPE, MARKET_SCAN_TOP100_REFRESH_SCOPE}
+            ):
+                raise ValueError("新生产扫描必须封存精确规则合同")
             cursor = conn.execute(
                 """
                 INSERT INTO market_scan_run (
@@ -116,11 +149,18 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
 
     def attach_task_run(self, run_id: int, task_run_id: int) -> None:
         with self._lock, self._connect() as conn:
-            required_run_row(conn, run_id)
-            conn.execute(
-                "UPDATE market_scan_run SET task_run_id = ?, updated_at = ? WHERE id = ?",
+            row = required_run_row(conn, run_id)
+            if row["status"] not in {"queued", "running"} or row["task_run_id"] is not None:
+                raise ValueError(f"扫描批次 {run_id} 当前状态不能挂接任务记录")
+            updated = conn.execute(
+                """
+                UPDATE market_scan_run SET task_run_id = ?, updated_at = ?
+                WHERE id = ? AND status IN ('queued', 'running') AND task_run_id IS NULL
+                """,
                 (task_run_id, now_text(), run_id),
             )
+            if updated.rowcount != 1:
+                raise RuntimeError(f"扫描批次 {run_id} 的任务记录挂接失败")
 
     def create_and_attach_task_run(self, run_id: int, task_name: str) -> int:
         normalized_task_name = " ".join(str(task_name).split()).strip()[:120]
@@ -218,18 +258,33 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
             row = required_run_row(conn, run_id)
             if row["status"] != "queued":
                 raise ValueError(f"扫描批次 {run_id} 当前状态不能启动：{row['status']}")
+            top100_refresh = row["scope"] == MARKET_SCAN_TOP100_REFRESH_SCOPE
+            initial_stage = "bulk_quotes" if top100_refresh else "stock_pool"
+            initial_message = (
+                "正在获取 TOP100 最新行情并重新评分"
+                if top100_refresh
+                else "正在加载全市场股票池"
+            )
+            initial_metrics = json.dumps(
+                {initial_stage: {"duration_ms": 0, "work_duration_ms": 0, "calls": 1, "items": 0}},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
             conn.execute(
                 """
                 UPDATE market_scan_run
                 SET status = 'running', started_at = COALESCE(started_at, ?),
                     finished_at = NULL, duration_ms = NULL, updated_at = ?,
-                    current_stage = 'stock_pool', stage_started_at = ?,
-                    stage_metrics_json = '{"stock_pool":{"duration_ms":0,"work_duration_ms":0,"calls":1,"items":0}}',
-                    message = '正在加载全市场股票池', last_error = NULL,
+                    quote_capture_started_at = NULL,
+                    quote_capture_finished_at = NULL,
+                    quote_capture_duration_ms = NULL,
+                    quote_capture_count = 0,
+                    current_stage = ?, stage_started_at = ?, stage_metrics_json = ?,
+                    message = ?, last_error = NULL,
                     cancel_requested_at = NULL
                 WHERE id = ?
                 """,
-                (stamp, stamp, stamp, run_id),
+                (stamp, stamp, initial_stage, stamp, initial_metrics, initial_message, run_id),
             )
             updated = required_run_row(conn, run_id)
         self._run_started_monotonic[run_id] = monotonic_now()
@@ -254,55 +309,93 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
         return run_from_row(updated)
 
     def retry_plan(self, run_id: int) -> MarketScanRetryPlan:
-        with self._lock, self._connect() as conn:
+        with self._read_snapshot() as conn:
             row = required_run_row(conn, run_id)
-            return build_retry_plan(conn, row)
+            if row["status"] == "degraded":
+                require_publication_market_scan_snapshot(conn, run_id)
+            plan = build_retry_plan(conn, row)
+            if row["status"] == "degraded" and plan.preserved_success_count:
+                require_market_scan_action_source(conn, run_id)
+            return plan
 
     def prepare_retry(
         self,
         run_id: int,
         expected_plan: MarketScanRetryPlan | None = None,
+        *,
+        as_of: str | None = None,
+        rule_contract: Mapping[str, object] | None = None,
     ) -> MarketScanRun:
         stamp = now_text()
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = required_run_row(conn, run_id)
+            if rule_contract is not None:
+                register_market_scan_rule_contract(
+                    conn,
+                    rule_version=str(row["rule_version"]),
+                    contract=rule_contract,
+                    stamp=stamp,
+                )
             if row["status"] not in RETRYABLE_SCAN_STATUSES:
                 raise ValueError(f"扫描批次 {run_id} 当前状态不能重试：{row['status']}")
+            if row["status"] == "degraded":
+                require_publication_market_scan_snapshot(conn, run_id)
             plan = build_retry_plan(conn, row)
+            if row["status"] == "degraded" and plan.preserved_success_count:
+                require_market_scan_action_source(conn, run_id)
             if expected_plan is not None and plan != expected_plan:
                 raise ValueError("扫描批次在重试准备期间发生变化，请重新获取状态后再试")
-            cursor = conn.execute(
-                """
-                INSERT INTO market_scan_run (
-                    retry_of_run_id, status, trigger, mode, rule_version, as_of, data_date, quote_date,
-                    scope, stock_pool_source, total_count, excluded_count,
-                    processed_count, success_count, retry_count, created_at,
-                    updated_at, message
-                ) VALUES (?, 'queued', 'retry', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    row["mode"],
-                    row["rule_version"],
-                    row["as_of"],
-                    row["data_date"],
-                    row["quote_date"] or row["data_date"],
-                    row["scope"],
-                    row["stock_pool_source"],
-                    row["total_count"],
-                    row["excluded_count"],
-                    plan.preserved_success_count,
-                    plan.preserved_success_count,
-                    int(row["retry_count"] or 0) + 1,
-                    stamp,
-                    stamp,
-                    "等待完整重算" if row["status"] == "failed" else "等待断点续跑",
-                ),
+            next_as_of = retry_as_of(row, as_of)
+            retry_run_id = _insert_retry_run(
+                conn,
+                row,
+                source_run_id=run_id,
+                plan=plan,
+                as_of=next_as_of,
+                stamp=stamp,
             )
-            retry_run_id = _required_lastrowid(cursor, operation="创建重试批次")
             conn.execute(MARKET_SCAN_RESULT_RETRY_COPY_SQL, (run_id, retry_run_id, stamp))
             updated = required_run_row(conn, retry_run_id)
         return run_from_row(updated)
+
+    def prepare_top100_refresh(
+        self,
+        source_run_id: int,
+        *,
+        rule_version: str,
+        as_of: str,
+        data_date: str,
+        quote_date: str,
+        limit: int,
+        rule_contract: Mapping[str, object] | None = None,
+    ) -> MarketScanRun:
+        stamp = now_text()
+        with self._lock, self._connect() as conn:
+            source = required_run_row(conn, source_run_id)
+            if rule_contract is not None:
+                register_market_scan_rule_contract(
+                    conn,
+                    rule_version=rule_version,
+                    contract=rule_contract,
+                    stamp=stamp,
+                )
+            if source["status"] not in {"success", "degraded"}:
+                raise ValueError(f"扫描批次 {source_run_id} 尚未发布，不能快速更新 TOP100")
+            require_market_scan_action_source(conn, source_run_id)
+            refresh_run_id = prepare_top100_refresh_snapshot(
+                conn,
+                source,
+                source_run_id=source_run_id,
+                rule_version=rule_version,
+                as_of=as_of,
+                data_date=data_date,
+                quote_date=quote_date,
+                limit=limit,
+                stamp=stamp,
+            )
+            refreshed = required_run_row(conn, refresh_run_id)
+        return run_from_row(refreshed)
 
     def finish_run(
         self,
@@ -311,7 +404,9 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
         *,
         message: str,
         error: str | None = None,
+        publication_diagnostics: MarketScanPublicationDiagnostics | None = None,
         task_status: str | None = None,
+        validate_before_commit: Callable[[], None] | None = None,
     ) -> MarketScanRun:
         if status not in TERMINAL_SCAN_STATUSES:
             raise ValueError(f"不是终态：{status}")
@@ -325,60 +420,55 @@ class MarketScanLifecycleMixin(MarketScanRepositoryContext):
                 stamp=stamp,
                 message=message,
                 error=error,
+                publication_diagnostics=publication_diagnostics,
                 task_status=task_status,
                 started_monotonic=self._run_started_monotonic.get(run_id),
+                validate_before_commit=validate_before_commit,
             )
         self._run_started_monotonic.pop(run_id, None)
         return run_from_row(updated)
 
     def reconcile_incomplete_runs(self) -> int:
         stamp = now_text()
-        placeholders = ", ".join("?" for _status in ACTIVE_SCAN_STATUSES)
         with self._lock, self._connect() as conn:
-            terminal_rows = conn.execute(
-                """
-                SELECT * FROM market_scan_run
-                WHERE status IN ('success', 'degraded', 'failed', 'cancelled', 'interrupted')
-                  AND task_run_id IS NOT NULL
-                """
-            ).fetchall()
-            for row in terminal_rows:
-                finish_linked_task_run(
-                    conn,
-                    row,
-                    scan_status=str(row["status"]),
-                    task_status=None,
-                    stamp=str(row["finished_at"] or stamp),
-                    message=str(row["message"] or "全市场扫描已结束"),
-                    duration_ms=row["duration_ms"],
-                )
-            rows = conn.execute(
-                f"SELECT * FROM market_scan_run WHERE status IN ({placeholders})",
-                ACTIVE_SCAN_STATUSES,
-            ).fetchall()
-            for row in rows:
-                conn.execute(
-                    """
-                    UPDATE market_scan_run
-                    SET status = 'interrupted', updated_at = ?, finished_at = ?, duration_ms = ?,
-                        message = '应用重启中断扫描，可从断点重试',
-                        last_error = '应用重启时终止遗留扫描任务'
-                    WHERE id = ?
-                    """,
-                    (stamp, stamp, _duration_ms(row["started_at"], stamp), row["id"]),
-                )
-                interrupted = required_run_row(conn, int(row["id"]))
-                finish_linked_task_run(
-                    conn,
-                    interrupted,
-                    scan_status="interrupted",
-                    task_status="cancelled",
-                    stamp=stamp,
-                    message="应用重启时终止遗留全市场扫描记录",
-                    duration_ms=interrupted["duration_ms"],
-                )
+            count = reconcile_incomplete_run_rows(conn, stamp=stamp)
             self._run_started_monotonic.clear()
-        return len(rows)
+        return count
+
+
+def _insert_retry_run(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    source_run_id: int,
+    plan: MarketScanRetryPlan,
+    as_of: str,
+    stamp: str,
+) -> int:
+    message = (
+        "等待完整重算"
+        if plan.preserved_success_count == 0 and plan.pending_count == plan.result_count
+        else "等待断点续跑"
+    )
+    cursor = conn.execute(
+        """
+        INSERT INTO market_scan_run (
+            retry_of_run_id, status, trigger, mode, rule_version, as_of, data_date, quote_date,
+            scope, stock_pool_source, total_count, excluded_count,
+            processed_count, success_count, retry_count, created_at,
+            updated_at, message
+        ) VALUES (?, 'queued', 'retry', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            source_run_id, row["mode"], row["rule_version"], as_of,
+            row["data_date"], row["quote_date"] or row["data_date"],
+            row["scope"], row["stock_pool_source"], row["total_count"],
+            row["excluded_count"], plan.preserved_success_count,
+            plan.preserved_success_count, int(row["retry_count"] or 0) + 1,
+            stamp, stamp, message,
+        ),
+    )
+    return _required_lastrowid(cursor, operation="创建重试批次")
 
 
 __all__ = [

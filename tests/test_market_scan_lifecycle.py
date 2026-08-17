@@ -211,7 +211,7 @@ def test_market_scan_retries_transient_terminal_write_and_commits_linked_task(
     assert "terminal persistence failed" not in capsys.readouterr().err
 
 
-def test_market_scan_permanent_terminal_failure_recovers_on_next_owned_status(
+def test_market_scan_permanent_terminal_failure_recovers_only_on_explicit_command(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -238,6 +238,8 @@ def test_market_scan_permanent_terminal_failure_recovers_on_next_owned_status(
         assert current.status == "running"
 
         hub.cache.finish_market_scan_run = original_finish  # type: ignore[method-assign]
+        assert scanner.run(started.run.id).status == "running"
+        assert scanner.recover_terminal_failures(started.run.id) == 1
         recovered = scanner.run(started.run.id)
         task_runs = hub.cache.recent_task_runs(limit=10)
         await scanner.stop()
