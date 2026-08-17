@@ -3,6 +3,16 @@ import { auditTimestampEpoch, formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { normalizeUiSymbol } from "./symbols.js";
+import {
+  assertDueItem,
+  assertEvaluation,
+  assertReviewBatch,
+  assertReviewDetail,
+  assertReviewPlan,
+  assertReviewSummary,
+  sameReviewIdentity,
+  validAdviceSnapshot,
+} from "./advice-review-contracts.js";
 
 const CONCLUSION_LABELS = Object.freeze({
   pending: "等待后续行情",
@@ -24,6 +34,7 @@ const EVALUATION_STATUS_LABELS = Object.freeze({
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const REVIEW_PAGE_SIZE = 20;
 const REVIEW_DASHBOARD_PAGE_SIZE = 100;
+const REVIEW_DASHBOARD_MAX_PAGES = 100;
 const REVIEW_BATCH_TIMEOUT_MS = 120000;
 const SHANGHAI_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Shanghai",
@@ -51,6 +62,7 @@ export async function loadAdviceReviews(state, options = {}) {
     );
     if (!reviewReadIsCurrent(state, sequence, symbol, options)) return false;
     if (!Array.isArray(details)) throw new TypeError("复盘计划格式异常");
+    details.forEach((detail) => assertReviewDetail(detail, symbol));
     state.adviceReviewDetails = append ? mergeReviewDetails(state.adviceReviewDetails, details) : details;
     state.adviceReviewHasMore = details.length === REVIEW_PAGE_SIZE;
     renderAdviceReviewDetails(state.adviceReviewDetails, state);
@@ -73,59 +85,101 @@ export async function loadAdviceReviewDashboard(state, options = {}) {
   const sequence = Number(state.adviceReviewDashboardSeq || 0) + 1;
   state.adviceReviewDashboardSeq = sequence;
   renderAdviceReviewDashboardLoading();
-  try {
-    const [summary, dueItems, details] = await Promise.all([
+  const results = await Promise.allSettled([
       fetchJson("/api/reviews/summary", { signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }),
       fetchJson("/api/reviews/due?limit=200", { signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }),
       loadAllAdviceReviewDetails(options),
-    ]);
-    if (state.adviceReviewDashboardSeq !== sequence) return false;
-    if (!Array.isArray(dueItems) || !Array.isArray(details) || !summary || typeof summary !== "object") {
-      throw new TypeError("全局复盘数据格式异常");
-    }
-    state.adviceReviewDashboardSummary = summary;
-    state.adviceReviewDueItems = dueItems;
-    state.adviceReviewDashboardDetails = details;
-    renderAdviceReviewDashboard(state);
-    setDashboardFeedback("");
-    return true;
+  ]);
+  if (state.adviceReviewDashboardSeq !== sequence || options.signal?.aborted) return false;
+  const dashboard = dashboardSettledResults(results);
+  state.adviceReviewDashboardSummary = dashboard.summary;
+  state.adviceReviewDueItems = dashboard.dueItems;
+  state.adviceReviewDashboardDetails = dashboard.details;
+  state.adviceReviewDashboardFailures = dashboard.failures;
+  renderAdviceReviewDashboard(state);
+  renderDashboardFailures(dashboard.failures);
+  return dashboard.availableCount > 0;
+}
+
+function dashboardSettledResults(results) {
+  const failures = {};
+  const summary = settledDashboardValue(results[0], assertReviewSummary, "统计", failures);
+  const dueItems = settledDashboardArray(results[1], assertDueItem, "到期队列", failures);
+  const details = settledDashboardValue(results[2], (value) => value, "计划列表", failures);
+  const reconciledDue = reconcileDueItems(dueItems, details, failures);
+  return {
+    summary,
+    dueItems: reconciledDue,
+    details,
+    failures,
+    availableCount: [summary, dueItems, details].filter((value) => value !== null).length,
+  };
+}
+
+function settledDashboardArray(result, validator, label, failures) {
+  return settledDashboardValue(result, (value) => {
+    if (!Array.isArray(value)) throw new TypeError(`${label}格式异常`);
+    value.forEach(validator);
+    return value;
+  }, label, failures);
+}
+
+function settledDashboardValue(result, validator, label, failures) {
+  if (result?.status !== "fulfilled") {
+    failures[label] = reviewErrorMessage(result?.reason, "请稍后重试");
+    return null;
+  }
+  try {
+    return validator(result.value);
   } catch (error) {
-    if (isAbortError(error) || state.adviceReviewDashboardSeq !== sequence) return false;
-    renderAdviceReviewDashboardUnavailable(error);
-    return false;
+    failures[label] = reviewErrorMessage(error, `${label}格式异常`);
+    return null;
   }
 }
 
+function reconcileDueItems(dueItems, details, failures) {
+  if (!Array.isArray(dueItems) || !Array.isArray(details)) return dueItems;
+  const plans = new Map(details.map((detail) => [Number(detail.plan.id), detail.plan]));
+  const reconciled = dueItems.filter((item) => sameReviewIdentity(item.plan, plans.get(Number(item.plan.id))));
+  if (reconciled.length !== dueItems.length) failures["到期版本"] = "已忽略与当前计划版本不一致的到期记录";
+  return reconciled;
+}
+
 async function loadAllAdviceReviewDetails(options) {
-  const details = [];
+  const details = new Map();
   let offset = 0;
-  do {
+  for (let pageIndex = 0; pageIndex < REVIEW_DASHBOARD_MAX_PAGES; pageIndex += 1) {
     const offsetQuery = offset ? `&offset=${offset}` : "";
     const page = await fetchJson(`/api/reviews?limit=${REVIEW_DASHBOARD_PAGE_SIZE}${offsetQuery}`, {
       signal: options.signal,
       timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     });
     if (!Array.isArray(page)) throw new TypeError("全局复盘计划格式异常");
-    details.push(...page);
+    page.forEach((detail) => assertReviewDetail(detail));
+    const previousSize = details.size;
+    page.forEach((detail) => details.set(Number(detail.plan.id), detail));
     if (page.length < REVIEW_DASHBOARD_PAGE_SIZE) break;
+    if (details.size === previousSize) throw new TypeError("全局复盘分页没有前进");
     offset += page.length;
-  } while (offset <= 100000);
-  return details;
+    if (pageIndex === REVIEW_DASHBOARD_MAX_PAGES - 1) throw new TypeError("全局复盘计划超过展示上限");
+  }
+  return Array.from(details.values());
 }
 
 export async function evaluateDueAdviceReviews(state, options = {}) {
-  const result = await fetchJson("/api/reviews/evaluate-due?limit=100", {
+  const result = assertReviewBatch(await fetchJson("/api/reviews/evaluate-due?limit=100", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
     timeoutMs: REVIEW_BATCH_TIMEOUT_MS,
     signal: options.signal,
-  });
-  const attempted = Number(result?.attempted_count || 0);
-  const failed = Number(result?.failed_count || 0);
+  }));
+  const attempted = result.attempted_count;
+  const failed = result.failed_count;
+  const unavailable = Number(result.insufficient_count || 0) + Number(result.pending_count || 0);
   setDashboardFeedback(
-    attempted ? `已处理 ${attempted} 条到期计划，失败 ${failed} 条` : "当前没有到期计划",
-    failed ? "error" : "ok"
+    attempted ? `已处理 ${attempted} 条到期计划，正式完成 ${result.evaluated_count} 条，证据不足或待成熟 ${unavailable} 条，失败 ${failed} 条` : "当前没有到期计划",
+    failed || unavailable ? "error" : "ok"
   );
   await loadAdviceReviewDashboard(state, options);
   return result;
@@ -136,7 +190,9 @@ export function updateAdviceReviewDashboardFilters(state) {
 }
 
 export function syncAdviceReviewSnapshots(state, items, analysis) {
-  state.adviceReviewSnapshots = Array.isArray(items) ? items.filter(validSnapshot) : [];
+  state.adviceReviewSnapshots = Array.isArray(items)
+    ? items.filter((item) => validAdviceSnapshot(item, state.symbol))
+    : [];
   state.adviceReviewAnalysis = analysis || null;
   renderSnapshotOptions(state);
   if (!state.adviceReviewEditingPlanId) applySelectedSnapshotDefaults(state, { preserveText: false });
@@ -162,6 +218,10 @@ export async function submitAdviceReviewPlan(state, options = {}) {
     timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   });
   if (!reviewOwnerIsCurrent(state, symbol, options)) return false;
+  assertReviewPlan(saved, symbol);
+  if (plan && (Number(saved.id) !== Number(plan.id) || Number(saved.revision) <= Number(plan.revision))) {
+    throw new TypeError("复盘计划更新响应版本异常");
+  }
   state.adviceReviewEditingPlanId = null;
   setReviewFormMode(null);
   setReviewFeedback(plan ? "复盘计划已更新" : "复盘计划已建立", "ok");
@@ -175,10 +235,10 @@ export async function deleteAdviceReviewPlan(state, planId, options = {}) {
   const plan = detail.plan;
   const symbol = reviewOwnerSymbol(state, options, plan.symbol);
   if (!sameSymbol(plan.symbol, symbol)) throw new Error("复盘计划不存在或已切换股票");
-  if (options.confirm && !options.confirm("删除该复盘计划及全部评估历史？此操作不可撤销。")) {
+  if (options.confirm && !options.confirm("归档该复盘计划？归档后将不再显示该计划及评估历史。")) {
     return false;
   }
-  const result = await fetchJson(`/api/reviews/plans/${encodeURIComponent(plan.id)}`, {
+  const result = await fetchJson(`/api/reviews/plans/${encodeURIComponent(plan.id)}?expected_revision=${encodeURIComponent(plan.revision)}`, {
     method: "DELETE",
     timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   });
@@ -189,7 +249,7 @@ export async function deleteAdviceReviewPlan(state, planId, options = {}) {
   renderAdviceReviewDetails(state.adviceReviewDetails, state);
   renderSnapshotOptions(state);
   if (!state.adviceReviewEditingPlanId) applySelectedSnapshotDefaults(state, { preserveText: false });
-  setReviewFeedback("复盘计划及评估历史已删除", "ok");
+  setReviewFeedback("复盘计划已归档", "ok");
   return true;
 }
 
@@ -208,13 +268,13 @@ export async function evaluateAdviceReviewPlan(state, planId, options = {}) {
   const asOf = shanghaiAsOfTimestamp(asOfDate, now);
   setAdviceReviewEvaluationAsOf(state, plan.id, asOfDate || "");
   const sequence = nextPlanSequence(state, "adviceReviewEvaluationSeqByPlan", plan.id);
-  const evaluation = await fetchJson(`/api/reviews/plans/${encodeURIComponent(plan.id)}/evaluate`, {
+  const evaluation = assertEvaluation(await fetchJson(`/api/reviews/plans/${encodeURIComponent(plan.id)}/evaluate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(asOf ? { as_of: asOf } : {}),
+    body: JSON.stringify({ expected_revision: Number(plan.revision), ...(asOf ? { as_of: asOf } : {}) }),
     timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     signal: options.signal,
-  });
+  }), plan, { currentRevision: true });
   if (!evaluationRequestIsCurrent(state, plan, sequence, symbol, options)) return false;
   state.adviceReviewDetails = (state.adviceReviewDetails || []).map((detail) =>
     Number(detail?.plan?.id) === Number(plan.id) ? { ...detail, latest_evaluation: evaluation } : detail
@@ -283,6 +343,7 @@ export async function loadAdviceReviewHistory(state, planId, options = {}) {
     );
     if (!historyRequestIsCurrent(state, plan, history, sequence, epoch, symbol, options)) return false;
     if (!Array.isArray(evaluations)) throw new TypeError("评估历史格式异常");
+    evaluations.forEach((evaluation) => assertEvaluation(evaluation, plan));
     history.items = mergeEvaluationItems(evaluations, history.items);
     history.phase = history.items.length ? "ready" : "empty";
     renderAdviceReviewDetails(state.adviceReviewDetails || [], state);
@@ -292,7 +353,7 @@ export async function loadAdviceReviewHistory(state, planId, options = {}) {
       return false;
     }
     history.phase = "error";
-    history.error = error?.message || "请稍后重试";
+    history.error = reviewErrorMessage(error, "请稍后重试");
     renderAdviceReviewDetails(state.adviceReviewDetails || [], state);
     return false;
   }
@@ -344,23 +405,38 @@ function renderAdviceReviewDashboard(state) {
   const summaryTarget = $("reviewDashboardSummary");
   const queueTarget = $("reviewDashboardQueue");
   if (!summaryTarget || !queueTarget) return;
-  const summary = state.adviceReviewDashboardSummary || {};
-  summaryTarget.innerHTML = [
+  const summary = state.adviceReviewDashboardSummary;
+  const decidedCount = summary ? Number(summary.favorable_count) + Number(summary.unfavorable_count) : 0;
+  summaryTarget.innerHTML = summary ? [
     ["计划总数", summary.total_plan_count],
     ["待评估", summary.pending_count],
     ["已评估", summary.evaluated_count],
     ["数据不足", summary.insufficient_count],
+    ["有利率分母", decidedCount],
     ["有利比例", dashboardPercent(summary.favorable_rate_pct)],
-    ["平均收益", dashboardPercent(summary.average_return_pct)],
+    ["平均观察期价格变化（毛值）", dashboardPercent(summary.average_return_pct)],
     ["平均MFE", dashboardPercent(summary.average_mfe_pct)],
     ["平均MAE", dashboardPercent(summary.average_mae_pct)],
-  ].map(([label, value]) => `<span><small>${escapeHtml(label)}</small><strong>${escapeHtml(value ?? "--")}</strong></span>`).join("");
+  ].map(([label, value]) => `<span><small>${escapeHtml(label)}</small><strong>${escapeHtml(value ?? "--")}</strong></span>`).join("")
+    : dashboardUnavailableHtml("统计暂不可用");
   const dueIds = new Set((state.adviceReviewDueItems || []).map((item) => Number(item?.plan?.id)));
   const dueById = new Map((state.adviceReviewDueItems || []).map((item) => [Number(item?.plan?.id), item]));
-  const rows = filteredDashboardDetails(state, dueIds);
-  queueTarget.innerHTML = rows.length
+  const detailsAvailable = Array.isArray(state.adviceReviewDashboardDetails);
+  const rows = detailsAvailable ? filteredDashboardDetails(state, dueIds) : [];
+  queueTarget.innerHTML = !detailsAvailable
+    ? dashboardUnavailableHtml("计划列表暂不可用")
+    : rows.length
     ? rows.map((detail) => dashboardDetailHtml(detail, dueById.get(Number(detail?.plan?.id)))).join("")
     : `<div class="review-plan-state"><strong>没有符合筛选条件的计划</strong><span>可调整状态、股票、日期或周期。</span></div>`;
+}
+
+function dashboardUnavailableHtml(message) {
+  return `<div class="review-plan-state is-unavailable"><strong>${escapeHtml(message)}</strong><span>其他复盘板块仍可继续使用。</span></div>`;
+}
+
+function renderDashboardFailures(failures) {
+  const messages = Object.entries(failures || {}).map(([label, message]) => `${label}：${message}`);
+  setDashboardFeedback(messages.join("；"), messages.length ? "error" : "");
 }
 
 function filteredDashboardDetails(state, dueIds) {
@@ -410,12 +486,14 @@ function renderAdviceReviewDashboardLoading() {
   const queue = $("reviewDashboardQueue");
   if (summary) summary.innerHTML = `<div class="review-plan-state"><strong>正在读取全局复盘统计</strong></div>`;
   if (queue) queue.innerHTML = "";
+  summary?.setAttribute?.("aria-busy", "true");
+  queue?.setAttribute?.("aria-busy", "true");
 }
 
 function renderAdviceReviewDashboardUnavailable(error) {
   const summary = $("reviewDashboardSummary");
   const queue = $("reviewDashboardQueue");
-  if (summary) summary.innerHTML = `<div class="review-plan-state is-unavailable"><strong>全局复盘统计暂不可用</strong><span>${escapeHtml(error?.message || "请稍后重试")}</span></div>`;
+  if (summary) summary.innerHTML = `<div class="review-plan-state is-unavailable"><strong>全局复盘统计暂不可用</strong><span>${escapeHtml(Number(error?.status) >= 500 ? "请稍后重试" : error?.message || "请稍后重试")}</span></div>`;
   if (queue) queue.innerHTML = "";
 }
 
@@ -425,6 +503,8 @@ function setDashboardFeedback(message, tone = "") {
   target.textContent = message;
   target.dataset.tone = tone;
   target.hidden = !message;
+  $("reviewDashboardSummary")?.setAttribute?.("aria-busy", "false");
+  $("reviewDashboardQueue")?.setAttribute?.("aria-busy", "false");
 }
 
 function reviewDetailHtml(detail, state) {
@@ -445,9 +525,10 @@ function reviewDetailHtml(detail, state) {
           <button type="button" class="mini-button primary" data-paper-from-review="${escapeHtml(plan.id)}">加入模拟</button>
           <button type="button" class="mini-button" data-review-edit="${escapeHtml(plan.id)}">编辑</button>
           <button type="button" class="mini-button" data-review-history="${escapeHtml(plan.id)}" aria-expanded="${historyExpanded}" aria-controls="review-history-${escapeHtml(plan.id)}">${historyExpanded ? "收起历史" : "评估历史"}</button>
-          <button type="button" class="icon-button" title="删除复盘计划" aria-label="删除复盘计划" data-review-delete="${escapeHtml(plan.id)}">×</button>
+          <button type="button" class="icon-button" title="归档复盘计划" aria-label="归档复盘计划" data-review-delete="${escapeHtml(plan.id)}">×</button>
         </div>
       </div>
+      <p class="review-shadow-boundary"><b>研究属性</b>本地 Research Shadow · 价格路径观察，不代表真实成交或收益 · production_effect=none</p>
       <dl class="review-plan-levels">
         <div><dt>快照价</dt><dd>${escapeHtml(formatNumber(plan.snapshot_price))}</dd></div>
         <div><dt>目标</dt><dd>${escapeHtml(formatNumber(plan.target_price))}</dd></div>
@@ -471,7 +552,7 @@ function evaluationHtml(evaluation) {
   if (!evaluation) return `<p class="review-evaluation pending"><b>最新评估</b>尚未评估当前版本</p>`;
   const conclusion = CONCLUSION_LABELS[evaluation.conclusion] || evaluation.conclusion || "待确认";
   const returnText = evaluation.return_pct !== null && evaluation.return_pct !== undefined && Number.isFinite(Number(evaluation.return_pct))
-    ? ` · 收益 ${formatNumber(evaluation.return_pct)}%`
+    ? ` · 收盘价格变化 ${formatNumber(evaluation.return_pct)}%（未计成交/成本/基准）`
     : "";
   return `
     <div class="review-evaluation ${escapeHtml(evaluation.status || "pending")}">
@@ -544,17 +625,20 @@ function historyContentHtml(planId, history) {
 }
 
 function evaluationHistoryItemHtml(evaluation) {
-  const conclusion = CONCLUSION_LABELS[evaluation?.conclusion] || evaluation?.conclusion || "待确认";
-  const status = EVALUATION_STATUS_LABELS[evaluation?.status] || evaluation?.status || "未知";
-  const returnText = evaluation?.return_pct !== null && evaluation?.return_pct !== undefined && Number.isFinite(Number(evaluation.return_pct))
-    ? `${formatNumber(evaluation.return_pct)}%`
+  const item = evaluation || {};
+  const conclusion = CONCLUSION_LABELS[item.conclusion] || item.conclusion || "待确认";
+  const status = EVALUATION_STATUS_LABELS[item.status] || item.status || "未知";
+  const returnText = item.return_pct !== null && item.return_pct !== undefined && Number.isFinite(Number(item.return_pct))
+    ? `${formatNumber(item.return_pct)}%`
     : "--";
   return `
     <li class="review-history-item">
-      <span><small>计划版本</small><strong>${escapeHtml(evaluation?.plan_revision || "--")}</strong></span>
-      <span><small>截至日</small><strong>${escapeHtml(evaluation?.as_of || "--")}</strong></span>
+      <span><small>计划版本</small><strong>${escapeHtml(item.plan_revision || "--")}</strong></span>
+      <span><small>尝试 / 规则</small><strong>${escapeHtml(item.attempt || "--")} · ${escapeHtml(item.rule_version || "--")}</strong></span>
+      <span><small>截至日</small><strong>${escapeHtml(item.as_of || "--")}</strong></span>
+      <span><small>评估时间</small><strong>${escapeHtml(item.evaluated_at || "--")}</strong></span>
       <span><small>结论</small><strong>${escapeHtml(conclusion)}</strong></span>
-      <span><small>收益</small><strong>${escapeHtml(returnText)}</strong></span>
+      <span><small>收盘价格变化（毛值）</small><strong>${escapeHtml(returnText)}</strong></span>
       <span><small>状态</small><strong>${escapeHtml(status)}</strong></span>
     </li>`;
 }
@@ -568,6 +652,7 @@ function reviewPlanPayload(state, plan, symbol) {
     throw new Error("价格需满足：目标价 > 快照价 > 止损价");
   }
   const payload = {
+    ...(plan ? { expected_revision: Number(plan.revision) } : {}),
     hypothesis: requiredValue("reviewHypothesis", "请输入研究假设"),
     trigger_condition: requiredValue("reviewTrigger", "请输入触发条件"),
     invalidation_condition: requiredValue("reviewInvalidation", "请输入失效条件"),
@@ -705,25 +790,34 @@ function mergeEvaluationIntoLoadedHistory(state, planId, evaluation) {
 function mergeEvaluationItems(primary, retained = []) {
   const merged = [];
   const seen = new Set();
-  [...(Array.isArray(primary) ? primary : []), ...(Array.isArray(retained) ? retained : [])].forEach((item) => {
+  appendUniqueEvaluations(merged, seen, primary);
+  appendUniqueEvaluations(merged, seen, retained);
+  return merged.sort(compareEvaluations);
+}
+
+function appendUniqueEvaluations(merged, seen, items) {
+  (Array.isArray(items) ? items : []).forEach((item) => {
     const identity = evaluationIdentity(item);
     if (!item || seen.has(identity)) return;
     seen.add(identity);
     merged.push(item);
   });
-  return merged.sort((left, right) => {
-    const byTime = evaluationSortEpoch(right) - evaluationSortEpoch(left);
-    return byTime || Number(right?.id || 0) - Number(left?.id || 0);
-  });
+}
+
+function compareEvaluations(left, right) {
+  const leftItem = left || {};
+  const rightItem = right || {};
+  const byAsOf = auditTimestampEpoch(String(rightItem.as_of || ""))
+    - auditTimestampEpoch(String(leftItem.as_of || ""));
+  const byAttempt = Number(rightItem.attempt || 0) - Number(leftItem.attempt || 0);
+  const byEvaluated = auditTimestampEpoch(String(rightItem.evaluated_at || ""))
+    - auditTimestampEpoch(String(leftItem.evaluated_at || ""));
+  return byAsOf || byAttempt || byEvaluated || Number(rightItem.id || 0) - Number(leftItem.id || 0);
 }
 
 function evaluationIdentity(item) {
   if (Number.isSafeInteger(Number(item?.id)) && Number(item.id) > 0) return `id:${Number(item.id)}`;
   return [item?.plan_revision, item?.as_of, item?.rule_version].map((value) => String(value || "")).join(":");
-}
-
-function evaluationSortEpoch(item) {
-  return auditTimestampEpoch(String(item?.evaluated_at || item?.as_of || "")) ?? Number.NEGATIVE_INFINITY;
 }
 
 function nextPlanSequence(state, field, planId) {
@@ -740,7 +834,7 @@ function evaluationRequestIsCurrent(state, plan, sequence, symbol, options) {
   return (
     state.adviceReviewEvaluationSeqByPlan?.[key] === sequence
     && sameSymbol(state.symbol, symbol)
-    && Number(currentPlan?.revision) === Number(plan.revision)
+    && sameReviewIdentity(currentPlan, plan)
     && (!options.isCurrent || options.isCurrent())
   );
 }
@@ -753,7 +847,7 @@ function historyRequestIsCurrent(state, plan, history, sequence, epoch, symbol, 
     && state.adviceReviewHistories?.[key] === history
     && history.sequence === sequence
     && sameSymbol(state.symbol, symbol)
-    && Boolean(reviewDetail(state, plan.id))
+    && sameReviewIdentity(reviewDetail(state, plan.id)?.plan, plan)
     && (!options.isCurrent || options.isCurrent())
   );
 }
@@ -853,7 +947,11 @@ function renderReviewLoading() {
 
 function renderReviewUnavailable(error) {
   const target = $("reviewPlanList");
-  if (target) target.innerHTML = `<div class="review-plan-state is-unavailable"><strong>复盘计划暂不可用</strong><span>${escapeHtml(error?.message || "请稍后重试")}</span></div>`;
+  if (target) target.innerHTML = `<div class="review-plan-state is-unavailable"><strong>复盘计划暂不可用</strong><span>${escapeHtml(reviewErrorMessage(error, "请稍后重试"))}</span></div>`;
+}
+
+function reviewErrorMessage(error, fallback) {
+  return Number(error?.status) >= 500 ? fallback : error?.message || fallback;
 }
 
 function setReviewFeedback(message, tone = "") {
@@ -862,21 +960,6 @@ function setReviewFeedback(message, tone = "") {
   target.textContent = message;
   target.dataset.tone = tone;
   target.hidden = !message;
-}
-
-function validSnapshot(item) {
-  return Boolean(
-    item
-    && Number.isSafeInteger(Number(item.id))
-    && Number(item.id) > 0
-    && item.market_time
-    && Number(item.price) > 0
-    && item.kline_adjustment_mode === "qfq"
-    && item.kline_anchor_date
-    && Number(item.kline_anchor_close) > 0
-    && !["", "unknown", "legacy"].includes(String(item.kline_data_version || ""))
-    && !["", "unknown", "legacy"].includes(String(item.kline_contract_version || ""))
-  );
 }
 
 function requiredValue(id, message) {

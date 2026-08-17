@@ -1,16 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
-from app.models.market_scan import MarketScanResultItem
+import app.repositories.market_scan_rule_contracts as market_scan_rule_contracts_repository
+import app.repositories.market_scan_action_gate_replay as market_scan_action_gate_replay
+from app.models.market_scan import (
+    MARKET_SCAN_TOP100_REFRESH_SCOPE,
+    MarketScanResultItem,
+    MarketScanResultWrite,
+    MarketScanSeed,
+)
 from app.models.schemas import Kline, Quote, StockInfo
+import app.services.market_scan_completion as market_scan_completion
 from app.services.market_scan_execution import MarketScanExecutor
+import app.services.market_scan_manager as market_scan_manager
+import app.services.market_scan_publication_decision as market_scan_publication_decision
+from app.services.market_scan_manager import MarketScanManager
+from app.services.market_scan_quote_provenance import normalized_quote_batch
+from app.services.cache import SQLiteCache
 from app.services.market_scan_recovery import ProviderWaitBudget
+from app.services.market_scan_stock_evaluation import MarketScanStockEvaluator
 from app.services.provider_errors import ProviderChainUnavailable
+from app.utils.audit_time import parse_audit_time
+from app.utils.market_time import market_local_naive
 from tests.factories import make_stock_info
 from tests.market_scan_test_support import (
     SCAN_AS_OF,
@@ -29,6 +48,12 @@ from tests.market_scan_test_support import (
 def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_path: Path) -> None:
     async def scenario():
         hub = _MarketScanHub(tmp_path)
+        with sqlite3.connect(hub.cache.path) as conn:
+            conn.execute("DROP TRIGGER trg_market_scan_rule_contract_immutable_update")
+            conn.execute("DROP TRIGGER trg_market_scan_rule_contract_immutable_delete")
+            conn.execute("DROP TABLE market_scan_rule_contract")
+        # Exercise the deployed-existing-schema path, not only a fresh database.
+        SQLiteCache(settings=hub.settings)
         scanner = _scanner(hub)
         await scanner.start()
         started = await scanner.create_scan(as_of=SCAN_AS_OF)
@@ -55,7 +80,7 @@ def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_pa
     assert started.accepted is True
     assert started.run.status == "queued"
     assert started.run.rule_version == _rule_version(hub)
-    assert started.run.rule_version.startswith("full-market-scan-v5:")
+    assert started.run.rule_version.startswith("full-market-scan-v6:")
     assert len(started.run.rule_version.rsplit(":", 1)[1]) == 64
     assert final.status == "failed"
     assert final.total_count == 3
@@ -89,6 +114,240 @@ def test_full_market_scan_persists_every_symbol_and_ranks_only_valid_rows(tmp_pa
     assert "行情" in (by_symbol["920066.BJ"].error or "")
     assert "测试行情源部分缺失" in (by_symbol["920066.BJ"].error or "")
     assert hub.max_active_klines <= hub.settings.market_scan_concurrency
+    with sqlite3.connect(hub.cache.path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM market_scan_rule_contract WHERE rule_version = ?",
+            (started.run.rule_version,),
+        ).fetchone() == (1,)
+
+
+def test_top100_refresh_reuses_ranked_symbols_but_fetches_fresh_data_and_reranks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_distribution_policy = replace(
+        market_scan_completion.MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
+        minimum_sample_count=3,
+    )
+    monkeypatch.setattr(
+        market_scan_completion,
+        "MARKET_SCAN_SCORE_DISTRIBUTION_POLICY",
+        test_distribution_policy,
+    )
+    monkeypatch.setattr(
+        market_scan_manager,
+        "MARKET_SCAN_SCORE_DISTRIBUTION_POLICY",
+        test_distribution_policy,
+    )
+    monkeypatch.setattr(
+        market_scan_publication_decision,
+        "assess_market_scan_score_distribution",
+        test_distribution_policy.assess,
+    )
+    monkeypatch.setattr(
+        market_scan_rule_contracts_repository,
+        "validate_current_rule_contract_policy",
+        lambda _contract: None,
+    )
+    monkeypatch.setattr(
+        market_scan_action_gate_replay,
+        "_require_current_publication_thresholds",
+        lambda _contract: None,
+    )
+
+    class RefreshHub(_MarketScanHub):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.quote_cache_flags: list[bool] = []
+            self.kline_provider_flags: list[bool] = []
+
+        async def partial_quotes_with_errors(self, symbols, use_cache: bool = True):
+            self.quote_cache_flags.append(use_cache)
+            return await super().partial_quotes_with_errors(symbols, use_cache=use_cache)
+
+        async def kline(
+            self,
+            symbol: str,
+            limit: int = 120,
+            use_cache: bool = True,
+            *,
+            allow_stale: bool = False,
+            require_provider_response: bool = False,
+        ):
+            self.kline_provider_flags.append(require_provider_response)
+            return await super().kline(
+                symbol,
+                limit,
+                use_cache,
+                allow_stale=allow_stale,
+                require_provider_response=require_provider_response,
+            )
+
+    async def scenario():
+        hub = RefreshHub(tmp_path)
+        _configure_clean_full_market(hub)
+        scanner = _scanner(hub)
+        await scanner.start()
+        started = await scanner.create_scan(as_of=SCAN_AS_OF)
+        source = await _wait_for_terminal(scanner, started.run.id)
+        source_page = scanner.results(
+            source.id,
+            page=1,
+            page_size=100,
+            status="success",
+            market=None,
+            industry=None,
+            is_st=None,
+            is_new=None,
+            min_data_quality_score=None,
+            keyword=None,
+            sort="rank",
+            order="asc",
+        )
+        pool_calls = hub.stock_pool_calls
+        hub.quote_cache_flags.clear()
+        hub.kline_provider_flags.clear()
+
+        response = await scanner.refresh_top100_scores(source.id)
+        refreshed = await _wait_for_terminal(scanner, response.run.id)
+        refreshed_page = scanner.results(
+            refreshed.id,
+            page=1,
+            page_size=100,
+            status="success",
+            market=None,
+            industry=None,
+            is_st=None,
+            is_new=None,
+            min_data_quality_score=None,
+            keyword=None,
+            sort="rank",
+            order="asc",
+        )
+        source_after = scanner.results(
+            source.id,
+            page=1,
+            page_size=100,
+            status="success",
+            market=None,
+            industry=None,
+            is_st=None,
+            is_new=None,
+            min_data_quality_score=None,
+            keyword=None,
+            sort="rank",
+            order="asc",
+        )
+        await scanner.stop()
+        return hub, source, source_page, source_after, response, refreshed, refreshed_page, pool_calls
+
+    hub, source, source_page, source_after, response, refreshed, refreshed_page, pool_calls = asyncio.run(scenario())
+
+    assert response.accepted is True
+    assert refreshed.status == "success"
+    assert refreshed.scope == MARKET_SCAN_TOP100_REFRESH_SCOPE
+    assert refreshed.retry_of_run_id == source.id
+    assert refreshed.total_count == refreshed.success_count == source.success_count == 3
+    assert refreshed.finished_at is not None
+    assert refreshed.duration_ms is not None
+    assert "stock_pool" not in refreshed.stage_metrics
+    assert hub.stock_pool_calls == pool_calls
+    assert hub.quote_cache_flags and set(hub.quote_cache_flags) == {False}
+    assert hub.kline_provider_flags and all(hub.kline_provider_flags)
+    assert [item.symbol for item in refreshed_page.items] == [
+        item.symbol for item in source_page.items
+    ]
+    assert [item.rank for item in refreshed_page.items] == [1, 2, 3]
+    assert all(item.run_id == refreshed.id and item.score is not None for item in refreshed_page.items)
+    assert source_after.items == source_page.items
+
+
+def test_manager_rejects_old_rule_retry_and_top100_before_preparing_child_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[int, list[str]]:
+        hub = _MarketScanHub(tmp_path)
+        repo = hub.cache.market_scan_repo
+        run = repo.create_run(
+            trigger="manual",
+            mode="official",
+            rule_version="full-market-scan-v5",
+            as_of="2026-07-17 16:30:00",
+            data_date=SCAN_DATA_DATE.isoformat(),
+            scope="沪市 + 深市 + 北交所当前上市A股",
+        )
+        repo.start_run(run.id)
+        repo.seed_results(
+            run.id,
+            [
+                MarketScanSeed("600001.SH", "600001", "SH", "旧规则成功"),
+                MarketScanSeed("000001.SZ", "000001", "SZ", "旧规则缺失"),
+            ],
+            excluded_count=0,
+        )
+        repo.save_result_batch(
+            run.id,
+            [
+                MarketScanResultWrite(
+                    symbol="600001.SH",
+                    status="success",
+                    score=60,
+                    raw_score=60.1,
+                    trend_score=60,
+                    leader_score=60,
+                    data_quality_score=90,
+                    price=10.0,
+                    change_pct=1.0,
+                    turnover_rate=1.0,
+                    volume_ratio=1.0,
+                    amount=1_000_000.0,
+                    metrics={"ma20": 9.5},
+                    reason="historical fixture",
+                    data_date=SCAN_DATA_DATE.isoformat(),
+                    quote_timestamp="2026-07-17 15:00:00",
+                    quote_source="historical-quote",
+                    kline_source="historical-qfq",
+                    adjustment_mode="qfq",
+                ),
+                MarketScanResultWrite(
+                    symbol="000001.SZ",
+                    status="missing",
+                    error="historical missing",
+                ),
+            ],
+        )
+        repo.finish_run(run.id, "degraded", message="historical v5 scan")
+        scanner = _scanner(hub)
+        await scanner.start()
+        lower_calls: list[str] = []
+
+        def unexpected_retry(*_args, **_kwargs):
+            lower_calls.append("retry")
+            raise AssertionError("old-rule retry reached repository prepare")
+
+        def unexpected_top100(*_args, **_kwargs):
+            lower_calls.append("top100")
+            raise AssertionError("old-rule TOP100 reached repository prepare")
+
+        monkeypatch.setattr(hub.cache, "prepare_market_scan_retry", unexpected_retry)
+        monkeypatch.setattr(
+            hub.cache,
+            "prepare_market_scan_top100_refresh",
+            unexpected_top100,
+        )
+        with pytest.raises(ValueError, match="规则/评分配置已变更"):
+            await scanner.retry_scan(run.id)
+        with pytest.raises(ValueError, match="评分规则已经变更"):
+            await scanner.refresh_top100_scores(run.id)
+        run_count = repo.list_runs(page=1, page_size=20).total
+        await scanner.stop()
+        return run_count, lower_calls
+
+    run_count, lower_calls = asyncio.run(scenario())
+
+    assert run_count == 1
+    assert lower_calls == []
 
 
 def test_market_scan_prefetches_each_batch_but_still_refreshes_every_symbol(
@@ -148,6 +407,70 @@ def test_market_scan_prefetches_each_batch_but_still_refreshes_every_symbol(
     assert all(allow_stale and required for _, allow_stale, required in hub.provider_refreshes)
 
 
+def test_every_batch_scores_at_the_sealed_quote_capture_decision_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AdvancingClock:
+        def __init__(self) -> None:
+            self.current = SCAN_AS_OF
+            self.returned: list[datetime] = []
+
+        def __call__(self):
+            value = self.current
+            self.returned.append(value)
+            self.current += timedelta(minutes=1)
+            return value
+
+    recorded: dict[str, datetime] = {}
+    original = MarketScanStockEvaluator.scan_one
+
+    async def recording_scan_one(self, item, quote, **kwargs):
+        recorded[item.symbol] = kwargs["as_of"]
+        return await original(self, item, quote, **kwargs)
+
+    async def scenario():
+        hub = _MarketScanHub(tmp_path)
+        _configure_clean_full_market(hub)
+        clock = AdvancingClock()
+        scanner = MarketScanManager(hub, now=clock)  # type: ignore[arg-type]
+        await scanner.start()
+        started = await scanner.create_scan(as_of=SCAN_AS_OF)
+        final = await _wait_for_terminal(scanner, started.run.id)
+        page = scanner.results(
+            final.id,
+            page=1,
+            page_size=10,
+            status="success",
+            market=None,
+            industry=None,
+            is_st=None,
+            is_new=None,
+            min_data_quality_score=None,
+            keyword=None,
+            sort="rank",
+            order="asc",
+        )
+        await scanner.stop()
+        return clock, final, page
+
+    monkeypatch.setattr(MarketScanStockEvaluator, "scan_one", recording_scan_one)
+    clock, final, page = asyncio.run(scenario())
+
+    assert final.status == "success"
+    assert len(recorded) == len(page.items) == 3
+    decision_as_of = datetime.fromisoformat(final.as_of)
+    observed_times: set[datetime] = set()
+    for item in page.items:
+        assert item.quote_observed_at is not None
+        observed_local = market_local_naive(parse_audit_time(item.quote_observed_at))
+        observed_times.add(observed_local)
+        assert observed_local <= decision_as_of
+        assert recorded[item.symbol] == decision_as_of
+    assert len(observed_times) == 2
+    assert clock.returned[-1] > max(recorded.values())
+
+
 def test_market_scan_stops_without_persisting_false_missing_rows_when_provider_chain_is_cooling(
     tmp_path: Path,
 ) -> None:
@@ -181,6 +504,145 @@ def test_market_scan_stops_without_persisting_false_missing_rows_when_provider_c
     assert final.missing_count == 0
     assert "均在冷却" in (final.last_error or "")
     assert retry_plan.pending_count == final.total_count
+
+
+def test_kline_retry_reuses_the_frozen_quote_batches_without_refetching_quotes(
+    tmp_path: Path,
+) -> None:
+    class RetryKlineHub(_MarketScanHub):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.quote_calls = 0
+            self.kline_attempts: dict[str, int] = {}
+            self.settings.market_scan_batch_retry_attempts = 2
+            self.settings.market_scan_provider_wait_budget_seconds = 5
+            self.settings.market_scan_retry_backoff_seconds = 0
+
+        async def partial_quotes_with_errors(self, symbols, use_cache: bool = True):
+            self.quote_calls += 1
+            return await super().partial_quotes_with_errors(symbols, use_cache=use_cache)
+
+        async def kline(
+            self,
+            symbol: str,
+            limit: int = 120,
+            use_cache: bool = True,
+            *,
+            allow_stale: bool = False,
+            require_provider_response: bool = False,
+        ) -> list[Kline]:
+            self.kline_attempts[symbol] = self.kline_attempts.get(symbol, 0) + 1
+            if self.kline_attempts[symbol] == 1:
+                raise ProviderChainUnavailable("日K瞬时失败", retry_after_seconds=0)
+            return await super().kline(
+                symbol,
+                limit,
+                use_cache,
+                allow_stale=allow_stale,
+                require_provider_response=require_provider_response,
+            )
+
+    async def scenario():
+        hub = RetryKlineHub(tmp_path)
+        _configure_clean_full_market(hub)
+        scanner = _scanner(hub)
+        await scanner.start()
+        started = await scanner.create_scan(as_of=SCAN_AS_OF)
+        final = await _wait_for_terminal(scanner, started.run.id)
+        await scanner.stop()
+        return hub, final
+
+    hub, final = asyncio.run(scenario())
+
+    assert final.status == "success"
+    assert hub.quote_calls == 2
+    assert set(hub.kline_attempts.values()) == {2}
+
+
+def test_v6_snapshot_rejects_cached_quotes_even_when_the_hub_returns_them(
+    tmp_path: Path,
+) -> None:
+    async def scenario():
+        hub = _MarketScanHub(tmp_path)
+        _configure_clean_full_market(hub)
+        hub.quotes_by_symbol = {
+            symbol: quote.model_copy(update={"from_cache": True, "fallback_used": True})
+            for symbol, quote in hub.quotes_by_symbol.items()
+        }
+        scanner = _scanner(hub)
+        await scanner.start()
+        started = await scanner.create_scan(as_of=SCAN_AS_OF)
+        final = await _wait_for_terminal(scanner, started.run.id)
+        page = scanner.results(
+            final.id,
+            page=1,
+            page_size=10,
+            status=None,
+            market=None,
+            industry=None,
+            is_st=None,
+            is_new=None,
+            min_data_quality_score=None,
+            keyword=None,
+            sort="rank",
+            order="asc",
+        )
+        await scanner.stop()
+        return final, page
+
+    final, page = asyncio.run(scenario())
+
+    assert final.status == "failed"
+    assert final.processed_count == final.total_count == 3
+    assert final.success_count == 0
+    assert final.missing_count == 3
+    assert final.quote_capture_started_at is not None
+    assert final.quote_capture_finished_at is not None
+    assert all(
+        item.status == "missing"
+        and item.score is None
+        and item.rank is None
+        and "缓存报价" in (item.error or "")
+        for item in page.items
+    )
+
+
+def test_realtime_fallback_provider_quotes_remain_eligible_but_degrade_the_run(
+    tmp_path: Path,
+) -> None:
+    async def scenario():
+        hub = _MarketScanHub(tmp_path)
+        _configure_clean_full_market(hub)
+        hub.quotes_by_symbol = {
+            symbol: quote.model_copy(update={"from_cache": False, "fallback_used": True})
+            for symbol, quote in hub.quotes_by_symbol.items()
+        }
+        scanner = _scanner(hub)
+        await scanner.start()
+        started = await scanner.create_scan(as_of=SCAN_AS_OF)
+        final = await _wait_for_terminal(scanner, started.run.id)
+        page = scanner.results(
+            final.id,
+            page=1,
+            page_size=10,
+            status="success",
+            market=None,
+            industry=None,
+            is_st=None,
+            is_new=None,
+            min_data_quality_score=None,
+            keyword=None,
+            sort="rank",
+            order="asc",
+        )
+        await scanner.stop()
+        return final, page
+
+    final, page = asyncio.run(scenario())
+
+    assert final.status == "degraded"
+    assert final.success_count == final.total_count == 3
+    assert all(item.quote_fallback_used and "兜底行情" in item.tags for item in page.items)
 
 
 def test_market_scan_quote_chain_failure_preserves_every_pending_symbol(tmp_path: Path) -> None:
@@ -285,6 +747,55 @@ def test_market_scan_rejects_severely_truncated_bulk_quotes(
     assert final.missing_count == 0
     assert f"批量行情覆盖率异常：{returned_count}/12" in (final.last_error or "")
     assert retry_plan.pending_count == 12
+
+
+def test_duplicate_provider_quotes_fail_closed_independent_of_response_order() -> None:
+    first = _quote_for("600001", "SH", "样本", change_pct=1.0)
+    conflicting = first.model_copy(
+        update={"price": first.price + 1, "high": first.high + 1}
+    )
+
+    for quotes in ([first, conflicting], [conflicting, first]):
+        normalized, errors, cached_count = normalized_quote_batch(
+            quotes,
+            (),
+            require_provider_response=False,
+        )
+        assert normalized == {}
+        assert cached_count == 0
+        assert any("报价响应包含重复股票 1 只：600001.SH" in error for error in errors)
+
+
+def test_unsolicited_quotes_cannot_mask_requested_quote_coverage(tmp_path: Path) -> None:
+    class ExtraQuoteHub(_MarketScanHub):
+        async def partial_quotes_with_errors(self, symbols, use_cache: bool = True):
+            del symbols, use_cache
+            quotes = [_quote_for("600001", "SH", "所需样本", change_pct=1.0)]
+            quotes.extend(
+                _quote_for(f"600{index:03d}", "SH", f"额外样本{index}", change_pct=1.0)
+                for index in range(100, 111)
+            )
+            return quotes, ()
+
+    async def scenario() -> None:
+        hub = ExtraQuoteHub(tmp_path)
+        executor = MarketScanExecutor(hub)  # type: ignore[arg-type]
+        items = [
+            MarketScanResultItem(
+                run_id=1,
+                symbol=f"600{index:03d}.SH",
+                code=f"600{index:03d}",
+                market="SH",
+                name=f"样本{index}",
+                status="pending",
+                updated_at="2026-07-17 16:30:00",
+            )
+            for index in range(1, 13)
+        ]
+        with pytest.raises(ProviderChainUnavailable, match="批量行情覆盖率异常：1/12"):
+            await executor._quote_batch(items)  # noqa: SLF001
+
+    asyncio.run(scenario())
 
 
 def test_market_scan_retries_only_unavailable_rows_after_provider_recovers(
@@ -402,9 +913,9 @@ def test_missing_quote_with_current_zero_volume_bar_is_possible_suspension(
         quote_error="报价源未覆盖",
     )
 
-    assert result.status == "skipped"
-    assert "可能停牌" in (result.reason or "")
-    assert result.error is None
+    assert result.status == "missing"
+    assert "可能停牌" in (result.error or "")
+    assert result.reason is None
     assert result.data_date == SCAN_DATA_DATE.isoformat()
 
 
@@ -495,7 +1006,16 @@ def test_full_market_scan_with_all_scores_still_degrades_for_fallback_data(tmp_p
             change_pct=1.2,
         )
         hub.klines_by_symbol["600001.SH"] = [row.model_copy(update={"fallback_used": True}) for row in hub.klines_by_symbol["600001.SH"]]
-        hub.klines_by_symbol["000001.SZ"] = _daily_rows(SCAN_DATA_DATE, 80)
+        hub.klines_by_symbol["000001.SZ"] = _daily_rows(
+            SCAN_DATA_DATE,
+            80,
+            last_close=hub.quotes_by_symbol["000001.SZ"].price,
+        )
+        hub.klines_by_symbol["920066.BJ"] = _daily_rows(
+            SCAN_DATA_DATE,
+            80,
+            last_close=hub.quotes_by_symbol["920066.BJ"].price,
+        )
         scanner = _scanner(hub)
         await scanner.start()
         started = await scanner.create_scan(as_of=SCAN_AS_OF)

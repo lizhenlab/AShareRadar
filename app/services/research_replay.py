@@ -4,6 +4,8 @@ from collections.abc import Callable
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import hashlib
+import json
 from math import isfinite
 from typing import Protocol, TypeGuard
 
@@ -26,9 +28,15 @@ from app.services.research_execution_model import (
     net_forward_return,
     next_session_open,
 )
+from app.services.research_factor_execution_contract import (
+    calibration_row_has_session_evidence,
+    calibration_row_is_observed,
+    factor_calibration_evidence_issue,
+)
 from app.services.trading_calendar import (
     DAILY_KLINE_PUBLISH_TIME,
     is_trading_day,
+    trading_dates_between,
 )
 from app.utils.market_data import valid_kline
 
@@ -105,6 +113,8 @@ def build_replay_analysis(analysis: AnalysisResult, window_days: int = 120) -> S
     symbol = f"{analysis.quote.code}.{analysis.quote.market}"
     if len(rows) < MIN_REPLAY_KLINES:
         return _insufficient_replay_report(symbol, analysis.quote.timestamp, len(rows))
+    if issue := factor_calibration_evidence_issue(rows):
+        return _unavailable_replay_report(symbol, analysis.quote.timestamp, len(rows), issue)
     cases = _replay_cases(rows)
     baseline_returns = _baseline_forward_returns(rows)
     baseline_average = _average_return(baseline_returns)
@@ -140,11 +150,34 @@ def _insufficient_replay_report(symbol: str, updated_at: str, row_count: int) ->
     return StockReplayAnalysis(
         symbol=symbol,
         updated_at=updated_at,
+        availability="insufficient_history",
+        unavailable_reason=f"至少需要{MIN_REPLAY_KLINES}根连续可信日K",
         window_days=row_count,
         sample_count=0,
-        success_rate=0,
+        success_rate=None,
+        modelled_round_trip_friction_pct=MODELLED_ROUND_TRIP_FRICTION_PCT,
         summary="历史K线不足，暂不能做信号回放。",
         notes=[f"至少需要{MIN_REPLAY_KLINES}根日K才能做基本回放。"],
+    )
+
+
+def _unavailable_replay_report(
+    symbol: str,
+    updated_at: str,
+    row_count: int,
+    issue: str,
+) -> StockReplayAnalysis:
+    return StockReplayAnalysis(
+        symbol=symbol,
+        updated_at=updated_at,
+        availability="execution_evidence_unavailable",
+        unavailable_reason=issue,
+        window_days=row_count,
+        sample_count=0,
+        success_rate=None,
+        modelled_round_trip_friction_pct=MODELLED_ROUND_TRIP_FRICTION_PCT,
+        summary="历史日K缺少可逐会话重放的 PIT/执行证据，暂不计算信号表现。",
+        notes=[f"不可用原因：{issue}", "未对旧日K补造 PIT、停牌或成交资格元数据。"],
     )
 
 
@@ -198,9 +231,12 @@ def _forward_return(rows: list[Kline], index: int, entry: float, days: int) -> f
     target_index = index + days
     if target_index >= len(rows) or not _is_positive_finite(entry):
         return None
-    if not _valid_price_bar(rows[target_index]):
+    target = rows[target_index]
+    if not calibration_row_is_observed(target, require_tradable_open=True):
         return None
-    return net_forward_return(rows[target_index].close, entry)
+    if not _valid_price_bar(target):
+        return None
+    return net_forward_return(target.close, entry)
 
 
 def _replay_outcome(forward_5d: float | None) -> str:
@@ -340,8 +376,9 @@ def _replay_stats(cases: list[ReplayCase], *, baseline_average: float = 0) -> li
             ReplayPatternStat(
                 pattern=pattern,
                 sample_count=len(rows),
-                win_rate=round(win_rate, 1),
-                avg_forward_5d_return=round(avg_return, 2),
+                evaluated_count=evaluated_count,
+                win_rate=round(win_rate, 1) if valid_returns else None,
+                avg_forward_5d_return=round(avg_return, 2) if valid_returns else None,
                 excess_vs_baseline_pct=round(avg_return - baseline_average, 2) if valid_returns else None,
                 note=_replay_pattern_note(
                     pattern,
@@ -352,7 +389,14 @@ def _replay_stats(cases: list[ReplayCase], *, baseline_average: float = 0) -> li
                 ),
             )
         )
-    return sorted(stats, key=lambda item: (item.sample_count, item.win_rate), reverse=True)
+    return sorted(
+        stats,
+        key=lambda item: (
+            item.sample_count,
+            item.win_rate if item.win_rate is not None else -1.0,
+        ),
+        reverse=True,
+    )
 
 
 def _baseline_forward_returns(rows: list[Kline]) -> list[float]:
@@ -577,13 +621,14 @@ REPLAY_PATTERN_NOTE_RULES = (
 )
 
 
-ADVICE_REVIEW_RULE_VERSION = "advice-review-v4"
+ADVICE_REVIEW_RULE_VERSION = "advice-review-v5-gross-observation"
 
 
 @dataclass(frozen=True)
 class AdviceReviewWindow:
     visible_rows: list[Kline]
     forward_rows: list[Kline]
+    source_rows: list[Kline]
     snapshot_date: date
     as_of_cutoff: date
 
@@ -645,7 +690,7 @@ def evaluate_advice_forward_window(
         raise ValueError("as_of 不能早于 advice snapshot 的 market_time")
     window = advice_review_window(rows, snapshot_time=snapshot_time, as_of=as_of)
     coverage = _advice_review_forward_coverage(window, plan.horizon_days)
-    prices = _advice_review_price_context(plan, rows)
+    prices = _advice_review_price_context(plan, rows, cutoff=window.as_of_cutoff)
     barrier = _advice_review_barrier_outcome(coverage.rows, prices)
     evaluation_rows = _terminal_review_rows(coverage.rows, barrier.terminal_index)
     status, conclusion = _advice_review_status_and_conclusion(
@@ -655,7 +700,11 @@ def evaluate_advice_forward_window(
         barrier.conclusion,
         prices,
     )
-    metrics = _advice_review_metrics(evaluation_rows, prices.entry_price) if prices else (None, None, None)
+    metrics = (
+        _advice_review_metrics(evaluation_rows, prices.entry_price)
+        if prices and status == "evaluated"
+        else (None, None, None)
+    )
     return _advice_review_evaluation_draft(plan, window, evaluation_rows, barrier, prices, status, conclusion, metrics, as_of, evaluated_at)
 
 
@@ -671,6 +720,7 @@ def _advice_review_evaluation_draft(
     as_of: datetime,
     evaluated_at: str,
 ) -> AdviceReviewEvaluationDraft:
+    source_rows, source_session_count, expected_session_count = _review_source_metadata(window)
     return AdviceReviewEvaluationDraft(
         plan_id=plan.id,
         plan_revision=plan.revision,
@@ -701,6 +751,9 @@ def _advice_review_evaluation_draft(
         target_price=plan.target_price,
         stop_price=plan.stop_price,
         horizon_days=plan.horizon_days,
+        source_window_digest=_review_source_window_digest(source_rows),
+        source_session_count=source_session_count,
+        expected_session_count=expected_session_count,
         visible_bar_count=len(window.visible_rows),
         visible_start_date=_first_row_date(window.visible_rows),
         visible_end_date=_last_row_date(window.visible_rows),
@@ -717,6 +770,86 @@ def _advice_review_evaluation_draft(
     )
 
 
+def _review_source_metadata(
+    window: AdviceReviewWindow,
+) -> tuple[list[Kline], int, int]:
+    rows = _review_source_rows(window)
+    observed, expected = _review_source_coverage(rows)
+    return rows, observed, expected
+
+
+def _review_source_rows(window: AdviceReviewWindow) -> list[Kline]:
+    return sorted(
+        window.source_rows,
+        key=lambda row: (
+            row.date,
+            json.dumps(
+                _review_source_row_payload(row),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+
+
+def _review_source_coverage(rows: list[Kline]) -> tuple[int, int]:
+    observed_dates = sorted(
+        {
+            row_date
+            for row in rows
+            if (row_date := _strict_daily_date(row.date)) is not None
+            and is_trading_day(row_date)
+        }
+    )
+    if not observed_dates:
+        return 0, 0
+    expected_dates = trading_dates_between(observed_dates[0], observed_dates[-1])
+    return len(observed_dates), len(expected_dates)
+
+
+def _review_source_window_digest(rows: list[Kline]) -> str:
+    payload = [_review_source_row_payload(row) for row in rows]
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _review_source_row_payload(row: Kline) -> dict[str, object]:
+    return {
+        "date": row.date,
+        "open": _canonical_review_number(row.open),
+        "close": _canonical_review_number(row.close),
+        "high": _canonical_review_number(row.high),
+        "low": _canonical_review_number(row.low),
+        "volume": _canonical_review_number(row.volume),
+        "adjustment_mode": row.adjustment_mode,
+        "data_version": row.data_version,
+        "contract_version": row.contract_version,
+        "as_of": row.as_of,
+        "point_in_time": row.point_in_time,
+        "session_status": row.session_status,
+        "open_execution_status": row.open_execution_status,
+        "corporate_action_status": row.corporate_action_status,
+        "adjustment_factor": _canonical_review_number(row.adjustment_factor),
+        "execution_metadata_version": row.execution_metadata_version,
+        "fallback_used": row.fallback_used,
+    }
+
+
+def _canonical_review_number(value: object) -> float | str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return str(value)
+    return float(value) if isfinite(value) else str(value)
+
+
 def advice_review_window(
     rows: list[Kline],
     *,
@@ -725,18 +858,30 @@ def advice_review_window(
 ) -> AdviceReviewWindow:
     if as_of < snapshot_time:
         raise ValueError("as_of 不能早于 advice snapshot 的 market_time")
-    dated_rows = _valid_unique_daily_rows(rows)
+    _require_review_source_dates(rows)
     snapshot_date = snapshot_time.date()
     visible_cutoff = completed_daily_bar_cutoff(snapshot_time)
     as_of_cutoff = completed_daily_bar_cutoff(as_of)
+    dated_rows = _valid_unique_daily_rows(rows, cutoff=as_of_cutoff)
     visible = [row for row_date, row in dated_rows if row_date <= visible_cutoff]
     forward = [row for row_date, row in dated_rows if snapshot_date < row_date <= as_of_cutoff]
     return AdviceReviewWindow(
         visible_rows=visible,
         forward_rows=forward,
+        source_rows=[
+            row
+            for row in rows
+            if (row_date := _strict_daily_date(row.date)) is not None
+            and row_date <= as_of_cutoff
+        ],
         snapshot_date=snapshot_date,
         as_of_cutoff=as_of_cutoff,
     )
+
+
+def _require_review_source_dates(rows: list[Kline]) -> None:
+    if any(_strict_daily_date(row.date) is None for row in rows):
+        raise ValueError("复盘来源包含无法归属交易日的日K")
 
 
 def completed_daily_bar_cutoff(value: datetime) -> date:
@@ -756,7 +901,11 @@ def _advice_review_forward_coverage(
         window.as_of_cutoff,
         horizon_days,
     )
-    rows_by_date = {_strict_daily_date(row.date): row for row in window.forward_rows}
+    rows_by_date = {
+        _strict_daily_date(row.date): row
+        for row in window.forward_rows
+        if calibration_row_has_session_evidence(row)
+    }
     contiguous_rows: list[Kline] = []
     for expected_date in expected_dates:
         row = rows_by_date.get(expected_date)
@@ -780,13 +929,47 @@ def _expected_review_dates(
     return tuple(expected)
 
 
-def _valid_unique_daily_rows(rows: list[Kline]) -> list[tuple[date, Kline]]:
+def _valid_unique_daily_rows(
+    rows: list[Kline],
+    *,
+    cutoff: date | None = None,
+) -> list[tuple[date, Kline]]:
     by_date: dict[date, Kline] = {}
     for row in rows:
         row_date = _strict_daily_date(row.date)
-        if row_date is not None and valid_kline(row):
-            by_date[row_date] = row
+        if (
+            row_date is None
+            or (cutoff is not None and row_date > cutoff)
+            or not is_trading_day(row_date)
+            or not valid_kline(row)
+        ):
+            continue
+        existing = by_date.get(row_date)
+        if existing is not None and _review_bar_signature(existing) != _review_bar_signature(row):
+            raise ValueError(f"同一交易日 {row_date.isoformat()} 存在冲突日K，无法执行无未来函数复盘")
+        by_date[row_date] = row
     return sorted(by_date.items(), key=lambda item: item[0])
+
+
+def _review_bar_signature(row: Kline) -> tuple[object, ...]:
+    return (
+        row.open,
+        row.close,
+        row.high,
+        row.low,
+        row.volume,
+        row.adjustment_mode,
+        row.data_version,
+        row.contract_version,
+        row.as_of,
+        row.point_in_time,
+        row.session_status,
+        row.open_execution_status,
+        row.corporate_action_status,
+        row.adjustment_factor,
+        row.execution_metadata_version,
+        row.fallback_used,
+    )
 
 
 def _strict_daily_date(value: object) -> date | None:
@@ -808,20 +991,25 @@ def _review_market_datetime(value: str) -> datetime:
 def normalized_advice_review_prices(
     plan: AdviceReviewPricePlan,
     rows: list[Kline],
+    *,
+    cutoff: date | None = None,
 ) -> AdviceReviewPriceContext | None:
     """Rebase frozen qfq price levels onto the current reproducible data vintage."""
 
-    return _advice_review_price_context(plan, rows)
+    return _advice_review_price_context(plan, rows, cutoff=cutoff)
 
 
 def _advice_review_price_context(
     plan: AdviceReviewPricePlan,
     rows: list[Kline],
+    *,
+    cutoff: date | None = None,
 ) -> AdviceReviewPriceContext | None:
     snapshot_anchor = _review_snapshot_anchor(plan)
-    if snapshot_anchor is None:
+    snapshot_anchor_date = plan.snapshot_anchor_date
+    if snapshot_anchor is None or snapshot_anchor_date is None:
         return None
-    dated_rows = _valid_unique_daily_rows(rows)
+    dated_rows = _valid_unique_daily_rows(rows, cutoff=cutoff)
     contract = _review_evaluation_contract(
         dated_rows,
         plan.snapshot_adjustment_mode,
@@ -829,7 +1017,7 @@ def _advice_review_price_context(
     )
     if contract is None:
         return None
-    anchor_close = _review_evaluation_anchor_close(dated_rows, plan.snapshot_anchor_date)
+    anchor_close = _review_evaluation_anchor_close(dated_rows, snapshot_anchor_date)
     if anchor_close is None:
         return None
     scale = anchor_close / snapshot_anchor
@@ -879,7 +1067,12 @@ def _review_evaluation_anchor_close(
     anchor_date: str,
 ) -> float | None:
     anchor = next((row for _row_date, row in rows if row.date == anchor_date), None)
-    if anchor is None or not isfinite(anchor.close) or anchor.close <= 0:
+    if (
+        anchor is None
+        or not calibration_row_has_session_evidence(anchor)
+        or not isfinite(anchor.close)
+        or anchor.close <= 0
+    ):
         return None
     return anchor.close
 
@@ -891,6 +1084,10 @@ def _advice_review_barrier_outcome(
     if prices is None:
         return AdviceReviewBarrierOutcome(None, None, False, None, False, None)
     for index, row in enumerate(rows):
+        # A suspended session is an expected market session, but its synthetic or
+        # carried OHLC values are not executable price touches.
+        if row.session_status != "trading":
+            continue
         target_hit = row.high >= prices.target_price
         stop_hit = row.low <= prices.stop_price
         if target_hit and stop_hit:
@@ -949,6 +1146,8 @@ def _advice_review_status_and_conclusion(
         return "pending", "pending"
     if prices is None:
         return "insufficient", "insufficient_data"
+    if len(coverage.expected_dates) >= horizon_days and rows[-1].session_status != "trading":
+        return "insufficient", "insufficient_data"
     if len(coverage.expected_dates) >= horizon_days:
         return "evaluated", _horizon_review_conclusion(rows[-1].close, prices.entry_price)
     return "pending", "pending"
@@ -967,12 +1166,13 @@ def _advice_review_metrics(
     rows: list[Kline],
     entry_price: float,
 ) -> tuple[float | None, float | None, float | None]:
-    if not rows:
+    trading_rows = [row for row in rows if row.session_status == "trading"]
+    if not trading_rows:
         return None, None, None
     return (
-        round(pct_change(rows[-1].close, entry_price), 4),
-        round(max(pct_change(row.high, entry_price) for row in rows), 4),
-        round(min(pct_change(row.low, entry_price) for row in rows), 4),
+        round(pct_change(trading_rows[-1].close, entry_price), 4),
+        round(max(pct_change(row.high, entry_price) for row in trading_rows), 4),
+        round(min(pct_change(row.low, entry_price) for row in trading_rows), 4),
     )
 
 

@@ -228,6 +228,7 @@ function researchSmokeWorkbench() {
       leader_score: 40,
       leader_level: "普通",
       volume_ratio: 1.2,
+      volume_ratio_available: true,
       valuation_score: 57,
       data_quality_level: "优秀",
       data_quality_score: 90,
@@ -297,6 +298,11 @@ function researchSmokeWorkbench() {
       downside_pct: -10,
       atr_pct: 2,
       volatility_pct: 3,
+      upside_available: true,
+      downside_available: true,
+      ratio_available: true,
+      upside_target_basis: "resistance_and_atr",
+      downside_stop_basis: "structure_and_atr",
       summary: "收益风险<script>",
       scenarios: [
         { name: "防守情景<script>", probability: 55, rule_weight: 56, trigger: "跌破支撑<script>", expected_move: "-6%", response: "降仓<script>", invalidation: "收回支撑<script>" },
@@ -350,7 +356,7 @@ function researchSmokeWorkbench() {
       evidence: ["证据"],
       missing_data: [],
     },
-    chip_analysis: { distribution_label: "均衡", concentration: "一般", center_price: 10, summary: "筹码", support_bands: [], pressure_bands: [], notes: [] },
+    chip_analysis: { distribution_available: true, data_nature: "derived", valid_session_count: 30, distribution_label: "均衡", concentration: "一般", center_price: 10, summary: "筹码", support_bands: [], pressure_bands: [], notes: [] },
     leadership: { score: 40, level: "普通", summary: "龙头", tags: [], evidence: [], missing_data: [] },
     replay: {
       sample_count: 6,

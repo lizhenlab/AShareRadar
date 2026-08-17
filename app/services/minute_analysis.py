@@ -661,7 +661,7 @@ def _minute_levels(rows: list[MinuteKline], latest_price: float, level_type: str
         return []
     sorted_values = sorted(candidates)
     result = []
-    for label, ratio in zip(spec.labels, spec.ratios):
+    for label, ratio in zip(spec.labels, spec.ratios, strict=True):
         price = _quantile(sorted_values, ratio)
         result.append(_minute_level(label, price, candidates, parsed_latest_price, len(rows)))
     return _dedupe_levels(result, parsed_latest_price)

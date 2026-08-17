@@ -9,7 +9,7 @@ from functools import partial
 import threading
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
-from app.services.datahub_status import _provider_error_text
+from app.services.datahub_status import provider_error_text
 from app.services.daemon_executor import DaemonThreadPoolExecutor
 from app.utils.clock import monotonic_now, performance_now
 from app.utils.provider_errors import (
@@ -83,10 +83,10 @@ async def run_provider_io(call: Callable[P, T], /, *args: P.args, **kwargs: P.kw
 
 
 @dataclass(frozen=True)
-class ProviderAttempt:
+class ProviderAttempt(Generic[T]):
     index: int
     name: str
-    provider: object
+    provider: T
 
 
 @dataclass(frozen=True)
@@ -337,10 +337,10 @@ class ProviderRuntime:
     def attempts(
         self,
         priority_rows: Iterable[tuple[int, str]],
-        providers: Mapping[str, object],
+        providers: Mapping[str, T],
         kind: str,
         errors: list[str],
-    ) -> Iterator[ProviderAttempt]:
+    ) -> Iterator[ProviderAttempt[T]]:
         for index, name in priority_rows:
             if self.is_cooling(name, kind):
                 errors.append(f"{name}: 最近失败，短暂冷却中")
@@ -569,7 +569,7 @@ class ProviderRuntime:
 
     def _sanitized_error_text(self, exc: Exception) -> str:
         return sanitize_provider_error(
-            _provider_error_text(exc),
+            provider_error_text(exc),
             sensitive_values=_settings_sensitive_values(self.settings),
         )
 

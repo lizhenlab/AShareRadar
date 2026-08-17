@@ -86,7 +86,13 @@ def test_stock_qa_report_exit_normalizes_dirty_items() -> None:
 
 def test_next_session_focus_hides_invalid_or_inverted_price_levels() -> None:
     item = _next_session_focus_item(
-        SimpleNamespace(support=math.nan, resistance=math.inf, quote=SimpleNamespace(price=100)),
+        SimpleNamespace(
+            support=math.nan,
+            resistance=math.inf,
+            support_available=False,
+            resistance_available=False,
+            quote=SimpleNamespace(price=100),
+        ),
         SimpleNamespace(watch_focus=[" ", math.nan], confirmation_signals=["inf", None]),
     )
     text = _item_text(item)
@@ -101,13 +107,43 @@ def test_next_session_focus_hides_invalid_or_inverted_price_levels() -> None:
 
 def test_next_session_focus_rejects_price_levels_on_wrong_side() -> None:
     item = _next_session_focus_item(
-        SimpleNamespace(support=101, resistance=99, quote=SimpleNamespace(price=100)),
+        SimpleNamespace(
+            support=101,
+            resistance=99,
+            support_available=True,
+            resistance_available=True,
+            quote=SimpleNamespace(price=100),
+        ),
         SimpleNamespace(watch_focus=["守住支撑"], confirmation_signals=["放量突破"]),
     )
 
     assert "支撑 待确认" in item.answer
     assert "压力 待确认" in item.answer
     assert item.evidence == ["守住支撑", "放量突破"]
+
+
+def test_next_session_focus_ignores_unavailable_level_placeholders() -> None:
+    diagnosis = SimpleNamespace(watch_focus=[], confirmation_signals=[])
+    base = SimpleNamespace(
+        support=90,
+        resistance=110,
+        support_available=False,
+        resistance_available=False,
+        quote=SimpleNamespace(price=100),
+    )
+    perturbed = SimpleNamespace(
+        support=1,
+        resistance=9999,
+        support_available=False,
+        resistance_available=False,
+        quote=SimpleNamespace(price=100),
+    )
+
+    assert _next_session_focus_item(base, diagnosis) == _next_session_focus_item(
+        perturbed,
+        diagnosis,
+    )
+    assert "支撑 待确认" in _next_session_focus_item(base, diagnosis).answer
 
 
 def test_t_strategy_qa_item_cleans_summary_and_plan_reasons() -> None:
@@ -169,15 +205,24 @@ def _risk_reward_report(
     downside_stop: float,
     ratio: float,
 ) -> RiskRewardReport:
-    return RiskRewardReport(
+    upside_available = current_price > 0 and upside_target > current_price
+    downside_available = current_price > 0 and 0 < downside_stop < current_price
+    constructor = RiskRewardReport if upside_available and downside_available and ratio > 0 else RiskRewardReport.model_construct
+    return constructor(
         symbol="600519.SH",
         updated_at="2026-05-13 10:00:00",
         current_price=current_price,
         upside_target=upside_target,
         downside_stop=downside_stop,
-        upside_pct=0,
-        downside_pct=0,
-        reward_risk_ratio=ratio,
+        upside_pct=max(0, (upside_target / current_price - 1) * 100) if upside_available else 0,
+        downside_pct=max(0, (1 - downside_stop / current_price) * 100) if downside_available else 0,
+        reward_risk_ratio=ratio if upside_available and downside_available else 0,
+        upside_available=upside_available,
+        downside_available=downside_available,
+        ratio_available=upside_available and downside_available,
+        upside_target_basis="resistance" if upside_available else "unavailable",
+        downside_stop_basis="structure" if downside_available else "unavailable",
+        availability_reason=None if upside_available and downside_available else "测试缺失边界",
         rating="性价比一般",
         summary="风险收益待确认。",
         scenarios=[

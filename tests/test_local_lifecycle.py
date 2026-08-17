@@ -1571,11 +1571,20 @@ class WorkbenchCacheTests(unittest.TestCase):
         self.assertNotIn("000000.SH", cache.entries)
         self.assertIn(f"{cache.max_size + 3:06d}.SH", cache.entries)
 
-    def test_stock_workbench_does_not_repeat_advice_snapshot_for_cached_context(self) -> None:
+    def test_stock_workbench_does_not_persist_interactive_advice_snapshot(self) -> None:
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
             quote = _quote(pe=26.8, pb=2.95, market_cap=1_000_000_000)
-            klines = [_kline(date=f"2026-05-{index + 1:02d}", close=100 + index, high=101 + index, low=99 + index, volume=2000) for index in range(40)]
+            klines = [
+                _kline(
+                    date=(datetime(2026, 4, 1) + timedelta(days=index)).date().isoformat(),
+                    close=100 + index,
+                    high=101 + index,
+                    low=99 + index,
+                    volume=2000,
+                )
+                for index in range(40)
+            ]
             quality = build_data_quality(quote, klines)
             pool = [_stock_info(code="600519", market="SH")] + [_stock_info(code=f"600{index:03d}", market="SH") for index in range(20)]
 
@@ -1642,8 +1651,7 @@ class WorkbenchCacheTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             history = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0].repeat_count, 1)
+        self.assertEqual(history, [])
 
     def test_strong_stock_symbol_sampling_deduplicates_normalized_symbols(self) -> None:
         rows = unique_standard_symbols(["000333", "000333.SZ", "SZ000333", "600036", "600036.SH"])
@@ -1862,7 +1870,7 @@ class WorkbenchCacheTests(unittest.TestCase):
         self.assertEqual(analysis.quote_history, [])
         self.assertIn(("fallback", "个股历史报价暂不可用：600519.SH；quote history readonly"), events)
 
-    def test_analyze_individual_stock_degrades_when_advice_snapshot_write_fails(self) -> None:
+    def test_interactive_analysis_never_attempts_advice_snapshot_write(self) -> None:
         async def run_check(path: Path):
             hub = DataHub(cache=SQLiteCache(path))
             events: list[tuple[str, str]] = []
@@ -1911,7 +1919,7 @@ class WorkbenchCacheTests(unittest.TestCase):
             analysis, events = __import__("asyncio").run(run_check(Path(tmpdir) / "cache.sqlite3"))
 
         self.assertEqual(analysis.quote.code, "600519")
-        self.assertIn(("fallback", "分析建议快照暂不可写：600519.SH；advice readonly"), events)
+        self.assertEqual(events, [])
 
 
 class _FailingRuntimeEventRepo:

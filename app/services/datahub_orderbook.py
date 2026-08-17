@@ -6,7 +6,7 @@ from app.models.market import (
     OrderBook,
 )
 from app.services.datahub_runtime import ProviderRuntime
-from app.services.datahub_status import _provider_error_text
+from app.services.datahub_status import provider_error_text
 from app.utils.clock import performance_now
 from app.utils.provider_errors import sanitize_provider_error
 from app.utils.symbols import standard_symbol
@@ -52,7 +52,7 @@ class OrderBookCoordinator:
             return result
         except Exception as exc:
             await self.runtime.record_failure_async("futu", self.provider_index("futu"), exc, "order_book")
-            raise RuntimeError(sanitize_provider_error(_provider_error_text(exc))) from exc
+            raise RuntimeError(sanitize_provider_error(provider_error_text(exc))) from exc
 
     async def futu_ping(self) -> dict[str, object]:
         provider = self._futu_provider()

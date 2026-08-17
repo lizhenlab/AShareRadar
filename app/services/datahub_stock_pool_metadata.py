@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from functools import partial
 
 from app.models.market import StockInfo
 from app.services.datahub_metadata_provider import _safe_log_metadata_event_async
@@ -95,7 +96,7 @@ class StockIndustryEnricher:
                 result: TimedProviderCall[Mapping[object, object]] = await self.runtime.timed_provider_call(
                     attempt.name,
                     "stock_industry",
-                    lambda: _required_stock_industry_call(attempt.provider),
+                    partial(_required_stock_industry_call, attempt.provider),
                     request_key=("stock_industries",),
                     timeout_seconds=self.settings.stock_pool_provider_timeout_seconds,
                 )

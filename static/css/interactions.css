@@ -680,6 +680,17 @@
   color: var(--red);
 }
 
+.review-shadow-boundary {
+  margin: 10px 14px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.review-plan-item .review-shadow-boundary {
+  margin: 8px 0 0;
+}
+
 .review-dashboard-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

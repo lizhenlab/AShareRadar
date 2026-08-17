@@ -87,6 +87,9 @@ FUND_FLOW_UNAVAILABLE_NOTES = (
     "数据性质：unavailable（不可用）。缺少有效量价输入，不生成方向性量价代理结论。",
     "未接入逐笔成交或正式资金流，不输出真实资金流、大单或主力净流入结论。",
 )
+INTRADAY_FUND_FLOW_NOTE = (
+    "盘中累计成交量、成交额和换手率缺少同分钟历史进度基线，已从量价方向评分剔除。"
+)
 FUND_FLOW_DERIVED_METHODOLOGY = "成交额、涨跌幅、换手率和量价关系的规则衍生指标；不等于真实资金流。"
 FUND_FLOW_UNAVAILABLE_METHODOLOGY = "有效量价输入不足，衍生指标不可用；未观测真实资金流。"
 ORDER_BOOK_REALTIME_NOTE = "数据性质：observed（实测）。来自实时盘口挂单深度，仅反映当前时点订单压力，不代表已成交资金。"
@@ -148,7 +151,7 @@ def build_fund_flow_analysis(analysis: AnalysisResult) -> FundFlowAnalysis:
     relation = _price_volume_relation(analysis, volume_score=context.volume_score) if data_nature == "derived" else "量价代理输入不足，方向不可用。"
     return FundFlowAnalysis(
         symbol=_analysis_symbol(analysis),
-        available=context.amount > 0,
+        available=data_nature == "derived" and context.amount > 0,
         source=f"{quote.source}·{'量价衍生指标（非真实资金流）' if data_nature == 'derived' else '量价代理不可用'}",
         data_nature=data_nature,
         methodology=FUND_FLOW_DERIVED_METHODOLOGY if data_nature == "derived" else FUND_FLOW_UNAVAILABLE_METHODOLOGY,
@@ -157,7 +160,11 @@ def build_fund_flow_analysis(analysis: AnalysisResult) -> FundFlowAnalysis:
         level=score_level(overall) if data_nature == "derived" else "不可用",
         estimated_main_net_inflow=None,
         price_volume_relation=relation,
-        windows=_fund_flow_windows(analysis, overall, relation),
+        windows=(
+            _fund_flow_windows(analysis, overall, relation)
+            if data_nature == "derived"
+            else _unavailable_fund_flow_windows()
+        ),
         notes=_fund_flow_notes(analysis, data_nature),
     )
 
@@ -214,6 +221,18 @@ def _fund_flow_windows(analysis: AnalysisResult, overall: int, relation: str) ->
     ]
 
 
+def _unavailable_fund_flow_windows() -> list[FundFlowWindow]:
+    return [
+        FundFlowWindow(
+            label=label,
+            score=DEFAULT_RULE_SCORE,
+            estimated_net_inflow=None,
+            summary="量价证据不可用，未生成窗口方向结论。",
+        )
+        for label in (TODAY_FUND_FLOW_LABEL, "5日连续性", "10日连续性")
+    ]
+
+
 def _recent_fund_flow_window(klines: list[Kline], window: int) -> FundFlowWindow:
     return FundFlowWindow(
         label=f"{window}日连续性",
@@ -225,6 +244,8 @@ def _recent_fund_flow_window(klines: list[Kline], window: int) -> FundFlowWindow
 
 def _fund_flow_notes(analysis: AnalysisResult, data_nature: str) -> list[str]:
     notes = list(FUND_FLOW_BASE_NOTES if data_nature == "derived" else FUND_FLOW_UNAVAILABLE_NOTES)
+    if analysis.research_mode != "official":
+        notes.append(INTRADAY_FUND_FLOW_NOTE)
     if _should_downgrade_quality(analysis):
         notes.append(_data_quality_note(analysis, "量价热度评分已降权。"))
     return notes
@@ -365,6 +386,8 @@ def _range_pressure_notes(analysis: AnalysisResult, order_book_error: str | None
 
 
 def _fund_flow_data_nature(analysis: AnalysisResult, context: FundFlowScoreContext) -> str:
+    if analysis.research_mode != "official":
+        return "unavailable"
     quote = analysis.quote
     has_turnover = (turnover := finite_float(quote.turnover_rate)) is not None and turnover >= 0
     has_change = finite_float(quote.change_pct) is not None
@@ -426,7 +449,11 @@ def _score_from_rules(value: float | None, rules: tuple[NumericScoreRule, ...]) 
 
 def _volume_score(analysis: AnalysisResult) -> int:
     rows = analysis.klines[-10:]
-    metrics = current_volume_metrics(analysis.quote, rows)
+    metrics = current_volume_metrics(
+        analysis.quote,
+        rows,
+        allow_live_quote_volume=analysis.research_mode == "official",
+    )
     ratio = _current_volume_ratio(metrics.latest_volume, metrics.avg_volume)
     if metrics.history_count < 5 or ratio is None:
         return DEFAULT_RULE_SCORE

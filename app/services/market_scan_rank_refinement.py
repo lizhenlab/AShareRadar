@@ -3,9 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.models.market import Kline, Quote
+from app.models.market_scan import MarketScanMode
+from app.services.market_scan_feature_windows import snapshot_return_pct
 
 
 MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION = "bounded-medium-term-refinement-v1"
+MARKET_SCAN_CONTINUOUS_TREND_ALGORITHM_VERSION = "bounded-medium-term-continuous-trend-v2"
+MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT = 4.0
 MARKET_SCAN_RANK_REFINEMENT_INPUT_DECIMALS = 6
 MARKET_SCAN_RANK_REFINEMENT_SCORE_DECIMALS = 6
 MARKET_SCAN_RANK_REFINEMENT_MAX_DISCOUNT = 0.0499
@@ -35,7 +39,12 @@ class MarketScanRankRefinement:
     score: float
 
 
-def market_scan_rank_refinement(quote: Quote, rows: list[Kline]) -> MarketScanRankRefinement:
+def market_scan_rank_refinement(
+    quote: Quote,
+    rows: list[Kline],
+    *,
+    mode: MarketScanMode = "official",
+) -> MarketScanRankRefinement:
     closes = [row.close for row in rows]
     current = quote.price
     ma5 = sum(closes[-5:]) / 5
@@ -49,8 +58,8 @@ def market_scan_rank_refinement(quote: Quote, rows: list[Kline]) -> MarketScanRa
         "ma5_vs_ma20_pct": _pct_change(ma5, ma20),
         "ma20_vs_ma60_pct": _pct_change(ma20, ma60),
         "range_position_20d": _range_position(current, low20, high20),
-        "return_5d_pct": _pct_change(current, closes[-6]),
-        "return_20d_pct": _pct_change(current, closes[-21]),
+        "return_5d_pct": snapshot_return_pct(current, closes, horizon=5, mode=mode),
+        "return_20d_pct": snapshot_return_pct(current, closes, horizon=20, mode=mode),
     }
     rounded_inputs = {
         name: round(value, MARKET_SCAN_RANK_REFINEMENT_INPUT_DECIMALS)
@@ -110,6 +119,29 @@ def market_scan_rank_refinement_spec() -> dict[str, object]:
     }
 
 
+def market_scan_continuous_trend_spec() -> dict[str, object]:
+    """Versioned material use of the same PIT medium-term trend features.
+
+    The v4 refinement contract remains frozen above for historical replay.  V5
+    promotes the bounded feature composite into the economic score layer with
+    an explicit +/-4 point range; it is no longer a sub-tick rank discount.
+    """
+    legacy = market_scan_rank_refinement_spec()
+    legacy.pop("max_rank_discount")
+    return {
+        **legacy,
+        "algorithm": MARKET_SCAN_CONTINUOUS_TREND_ALGORITHM_VERSION,
+        "score_role": "material-base-score-component",
+        "center": 0.5,
+        "adjustment_formula": "(2 * score - 1) * max_adjustment",
+        "max_adjustment": MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT,
+        "adjustment_range": [
+            -MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT,
+            MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT,
+        ],
+    }
+
+
 def _pct_change(current: float, reference: float) -> float:
     return (current / reference - 1) * 100 if current > 0 and reference > 0 else 0.0
 
@@ -128,6 +160,8 @@ def _bounded_linear(value: float, lower: float, upper: float) -> float:
 
 
 __all__ = [
+    "MARKET_SCAN_CONTINUOUS_TREND_ALGORITHM_VERSION",
+    "MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT",
     "MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION",
     "MARKET_SCAN_RANK_REFINEMENT_BOUNDS",
     "MARKET_SCAN_RANK_REFINEMENT_INPUT_DECIMALS",
@@ -137,4 +171,5 @@ __all__ = [
     "MarketScanRankRefinement",
     "market_scan_rank_refinement",
     "market_scan_rank_refinement_spec",
+    "market_scan_continuous_trend_spec",
 ]

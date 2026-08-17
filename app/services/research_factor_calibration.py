@@ -8,6 +8,11 @@ from app.models.research import (
     FactorCalibration,
 )
 from app.services.research_execution_model import net_forward_return, next_session_open
+from app.services.research_factor_execution_contract import (
+    FACTOR_EXECUTION_METADATA_VERSION,
+    calibration_row_is_observed,
+    factor_calibration_evidence_issue,
+)
 from app.services.research_factor_specs import FactorSpec, _trend_proxy_score_at
 from app.services.scoring import clamp_score as _clamp
 from app.utils.market_data import finite_float, valid_kline
@@ -110,6 +115,9 @@ CALIBRATION_CONFIDENCE_RULES = (
 
 
 def _calibrate_factor(rows: list, spec: FactorSpec, current_score: int) -> FactorCalibration:
+    evidence_issue = factor_calibration_evidence_issue(rows)
+    if evidence_issue is not None:
+        return _unavailable_execution_calibration(evidence_issue)
     if len(rows) < MIN_CALIBRATION_ROWS:
         return _insufficient_calibration()
     samples = _matching_calibration_samples(rows, spec, current_score)
@@ -125,12 +133,14 @@ def _calibrate_factor(rows: list, spec: FactorSpec, current_score: int) -> Facto
         stability_score=_calibration_stability_score(stats),
         expected_level=_calibration_expected_level(spec.direction, stats.win_rate, stats.avg_5d, stats.avg_10d),
         confidence_level=_calibration_confidence_level(stats.sample_count, stats.win_rate, stats.avg_5d),
+        availability="available",
+        execution_contract_version=FACTOR_EXECUTION_METADATA_VERSION,
         note=_calibration_note(spec.name, stats.sample_count, stats.win_rate, stats.avg_5d),
     )
 
 
 def _calibration_buckets(rows: list, spec: FactorSpec, current_score: int) -> list[CalibrationBucket]:
-    if len(rows) < MIN_BUCKET_ROWS:
+    if len(rows) < MIN_BUCKET_ROWS or factor_calibration_evidence_issue(rows) is not None:
         return []
     buckets = _empty_calibration_buckets()
     for index, sample in _non_overlapping_calibration_samples(rows, spec, current_score):
@@ -146,6 +156,9 @@ def _insufficient_calibration() -> FactorCalibration:
         avg_forward_10d_return=0,
         max_adverse_return=0,
         confidence_level="样本不足",
+        participates_in_historical_aggregate=False,
+        availability="insufficient_history",
+        unavailable_reason=f"少于{MIN_CALIBRATION_ROWS}根日K",
         note=f"少于{MIN_CALIBRATION_ROWS}根日K，暂不能形成历史校准样本。",
     )
 
@@ -160,7 +173,28 @@ def _no_similar_sample_calibration(name: str) -> FactorCalibration:
         stability_score=0,
         expected_level="待确认",
         confidence_level="无相似样本",
+        participates_in_historical_aggregate=False,
+        availability="no_similar_samples",
+        unavailable_reason=f"没有足够接近当前「{name}」状态的样本",
         note=f"历史中没有找到足够接近当前「{name}」状态的样本。",
+    )
+
+
+def _unavailable_execution_calibration(reason: str) -> FactorCalibration:
+    return FactorCalibration(
+        sample_count=0,
+        win_rate=0,
+        avg_forward_5d_return=0,
+        avg_forward_10d_return=0,
+        max_adverse_return=0,
+        stability_score=0,
+        expected_level="待补执行证据",
+        confidence_level="执行证据不足",
+        participates_in_historical_aggregate=False,
+        availability="execution_evidence_unavailable",
+        unavailable_reason=reason,
+        execution_contract_version=FACTOR_EXECUTION_METADATA_VERSION,
+        note=f"缺少可证明固定交易会话、PIT复权与成交资格的执行证据（{reason}），历史校准已停用。",
     )
 
 
@@ -209,7 +243,7 @@ def _valid_row_at(rows: list, index: int):
     if index < 0 or index >= len(rows):
         return None
     row = rows[index]
-    return row if valid_kline(row) else None
+    return row if calibration_row_is_observed(row) else None
 
 
 def _trigger_matches(spec: FactorSpec, rows: list, index: int, current_score: int) -> bool:
@@ -220,7 +254,11 @@ def _trigger_matches(spec: FactorSpec, rows: list, index: int, current_score: in
 
 
 def _adverse_return(rows: list, index: int, entry: float) -> float:
-    lows = [item.low for item in rows[index + 1 : index + FORWARD_5D_OFFSET + 1] if valid_kline(item)]
+    lows = [
+        item.low
+        for item in rows[index + 1 : index + FORWARD_5D_OFFSET + 1]
+        if calibration_row_is_observed(item)
+    ]
     return min(net_forward_return(low, entry) for low in lows) if lows else 0
 
 
@@ -308,7 +346,7 @@ def _local_support_resistance(rows: list, index: int) -> tuple[float, float]:
 
 
 def _factor_percentile(rows: list, evaluator: Callable[[list, int], float], current_score: int) -> float | None:
-    if len(rows) < 30:
+    if len(rows) < 30 or factor_calibration_evidence_issue(rows) is not None:
         return None
     values = _factor_percentile_values(rows, evaluator)
     if not values:
@@ -320,7 +358,7 @@ def _factor_percentile_values(rows: list, evaluator: Callable[[list, int], float
     return [
         value
         for index in range(20, len(rows) - 1)
-        if valid_kline(rows[index])
+        if calibration_row_is_observed(rows[index])
         if (value := _factor_value_at(rows, evaluator, index)) is not None
     ]
 

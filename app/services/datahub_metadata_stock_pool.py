@@ -30,7 +30,7 @@ from app.services.datahub_runtime import (
     run_cache_io_best_effort,
 )
 from app.services.datahub_stock_pool_metadata import StockIndustryEnricher, merge_cached_stock_fields
-from app.services.datahub_status import _provider_error_text
+from app.services.datahub_status import provider_error_text
 from app.utils.provider_errors import ProviderProtocolError, sanitize_provider_error
 from app.services.provider_utils import ensure_positive_limit
 from app.utils.stock_pool import StockPoolMetadataDiagnostic, diagnose_stock_pool_metadata, normalize_stock_pool_rows
@@ -483,7 +483,7 @@ class StockPoolResolver:
             await _safe_log_metadata_event_async(
                 self.cache,
                 "fallback",
-                f"本地个股基础资料不可用，行业兜底跳过：{target}；" f"{sanitize_provider_error(_provider_error_text(exc))}",
+                f"本地个股基础资料不可用，行业兜底跳过：{target}；" f"{sanitize_provider_error(provider_error_text(exc))}",
             )
             return None
         return _stock_profile_match(local_rows, target)

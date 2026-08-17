@@ -12,6 +12,7 @@ from app.services.provider_failure_status import (
     capability_recently_failed as provider_capability_recently_failed,
     provider_recently_failed,
 )
+from app.services.research_artifact_catalog import research_artifact_storage
 from app.services.runtime_backup import runtime_backup_storage
 from app.services.trading_calendar import TradeCalendarSource, TradeCalendarStatus, calendar_status
 from app.utils.audit_time import audit_datetime_to_text, normalize_audit_time_text, parse_audit_time
@@ -29,6 +30,7 @@ class DiagnosticDecision:
 
 
 STORAGE_WARNING_AT_PCT = 80.0
+RESEARCH_STORAGE_NOTICE_AT_PCT = 10.0
 QUOTE_STORAGE_TABLES = frozenset({"quote_snapshot", "quote_history"})
 KLINE_STORAGE_TABLES = frozenset({"kline_daily", "kline_minute"})
 MARKET_SCAN_STORAGE_TABLES = frozenset({"market_scan_run", "market_scan_result"})
@@ -199,6 +201,26 @@ def _extend_environment_diagnostics(
     elif storage.usage_pct >= storage.warning_at_pct:
         warnings.append("本地数据库容量已接近预算上限。")
         suggestions.append("建议预览运行期清理结果，并检查行情缓存保留上限。")
+    _extend_research_storage_diagnostics(warnings, suggestions, storage)
+
+
+def _extend_research_storage_diagnostics(
+    warnings: list[str],
+    suggestions: list[str],
+    storage: StorageDiagnostics,
+) -> None:
+    research_usage_pct = storage.research_artifact_size_bytes / storage.budget_bytes * 100
+    if storage.total_managed_over_budget and not storage.over_budget:
+        warnings.append("本地受管存储（数据库、备份与研究证据）已超过数据库容量预算参考值。")
+        suggestions.append("查看研究 artifact 的预览式保留摘要；确认引用与完整性前不要删除研究证据。")
+    elif storage.total_managed_usage_pct >= storage.warning_at_pct and storage.usage_pct < storage.warning_at_pct:
+        warnings.append("本地受管存储（数据库、备份与研究证据）已接近数据库容量预算参考值。")
+        suggestions.append("检查研究证据目录占用，并将大型探索产物迁移到单独监控的卷。")
+    elif research_usage_pct >= RESEARCH_STORAGE_NOTICE_AT_PCT:
+        warnings.append("研究证据归档占用已达到数据库容量预算参考值的 10%。")
+        suggestions.append("定期检查研究 artifact 目录；仅按预览摘要人工核验，不执行自动删除。")
+    if storage.research_artifacts.ignored_symlink_count:
+        warnings.append("研究 artifact 目录中存在符号链接，安全扫描已忽略这些条目。")
 
 
 def cache_freshness(
@@ -298,6 +320,8 @@ def storage_diagnostics(
     backup_size_bytes = backup_storage.size_bytes if backup_storage is not None else 0
     size_bytes = sqlite_size_bytes + backup_size_bytes
     budget_bytes = _storage_budget_bytes(budget_mb)
+    research_artifacts = research_artifact_storage(path)
+    total_managed_size_bytes = size_bytes + research_artifacts.size_bytes
     quote_rows = _table_group_count(table_counts, QUOTE_STORAGE_TABLES)
     kline_rows = _table_group_count(table_counts, KLINE_STORAGE_TABLES)
     market_scan_rows = _table_group_count(table_counts, MARKET_SCAN_STORAGE_TABLES)
@@ -324,6 +348,13 @@ def storage_diagnostics(
         warning_at_pct=STORAGE_WARNING_AT_PCT,
         usage_pct=usage_pct,
         over_budget=size_bytes > budget_bytes,
+        research_artifacts=research_artifacts,
+        research_artifact_size_bytes=research_artifacts.size_bytes,
+        research_artifact_size_mb=round(research_artifacts.size_bytes / 1024 / 1024, 2),
+        total_managed_size_bytes=total_managed_size_bytes,
+        total_managed_size_mb=round(total_managed_size_bytes / 1024 / 1024, 2),
+        total_managed_usage_pct=round(total_managed_size_bytes / budget_bytes * 100, 2),
+        total_managed_over_budget=total_managed_size_bytes > budget_bytes,
     )
 
 

@@ -7,12 +7,12 @@ import re
 from app.models.market import (
     StockInfo,
 )
-from app.models.market_scan import MarketScanSeed
+from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE, MarketScanSeed
 from app.utils.stock_pool import normalize_stock_metadata_text
 from app.utils.symbols import is_a_share_stock_code, standard_symbol
 
 
-FULL_MARKET_SCOPE = "沪市 + 深市 + 北交所当前上市A股"
+FULL_MARKET_SCOPE = MARKET_SCAN_FULL_MARKET_SCOPE
 FULL_MARKET_MARKETS = frozenset({"SH", "SZ", "BJ"})
 _ST_NAME_PREFIX = re.compile(r"^(?:S\*ST|\*ST|SST|ST)(?=[\u3400-\u9fff])", re.IGNORECASE)
 
@@ -59,6 +59,10 @@ def build_market_scan_universe(
             future_list_date_count += candidate.list_date_state == "future"
             continue
         if seed.symbol in by_symbol:
+            if by_symbol[seed.symbol] != seed:
+                raise ValueError(
+                    f"股票池同一股票存在冲突元数据：{seed.symbol}"
+                )
             excluded_count += 1
             continue
         by_symbol[seed.symbol] = seed

@@ -8,7 +8,20 @@ import threading
 from typing import Literal
 
 from app.config import Settings
+from app.db.market_scan_artifact_lease import (
+    market_scan_artifact_retention_lease,
+    require_market_scan_artifact_lease_namespace_current,
+)
 from app.repositories.base import SQLiteRepository
+from app.repositories.market_scan_retention import (
+    delete_market_scan_candidates,
+    market_scan_cleanup_candidate_ids,
+)
+from app.repositories.runtime_research_artifact_retention import (
+    MarketScanArtifactProtection,
+    market_scan_artifact_protection,
+    require_market_scan_artifacts_unchanged,
+)
 from app.repositories.market_klines import DAILY_KLINE_RETENTION_ORDER_BY, DAILY_KLINE_RETENTION_PARTITION
 from app.repositories.watchlist import cap_watchlist_unread_change_counts_to_viewable
 from app.utils.clock import monotonic_now
@@ -148,6 +161,7 @@ TABLE_COUNT_NAMES = (
     "reliability_bucket",
     "market_scan_run",
     "market_scan_result",
+    "market_scan_probability_capture_outbox",
     "monitor_event",
     "watchlist",
     "advice_history",
@@ -155,6 +169,7 @@ TABLE_COUNT_NAMES = (
     "alert_event",
     "stock_note",
     "advice_review_plan",
+    "advice_review_plan_revision",
     "advice_review_result",
     "watchlist_scan_history",
     "paper_trading_account",
@@ -175,8 +190,9 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
 
     def cleanup_runtime_rows(self) -> dict[str, int]:
         with self._lock:
-            removed = self._cleanup_specs(RUNTIME_CLEANUP_SPECS)
-            self._last_regenerable_cleanup_at = monotonic_now()
+            with market_scan_artifact_retention_lease(self._path):
+                removed = self._cleanup_specs(RUNTIME_CLEANUP_SPECS)
+                self._last_regenerable_cleanup_at = monotonic_now()
         self._compact_after_cleanup(removed)
         return removed
 
@@ -186,22 +202,36 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             interval = int(self.settings.runtime_maintenance_interval_seconds)
             if self._last_regenerable_cleanup_at is not None and now - self._last_regenerable_cleanup_at < interval:
                 return {}
-            removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
-            self._last_regenerable_cleanup_at = monotonic_now()
+            with market_scan_artifact_retention_lease(self._path):
+                removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
+                self._last_regenerable_cleanup_at = monotonic_now()
         self._compact_after_cleanup(removed)
         return removed
 
     def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]:
         removed: dict[str, int] = {}
+        artifact_protection = market_scan_artifact_protection(self._path)
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             for spec in specs:
                 limit = int(getattr(self.settings, spec.limit_setting))
                 candidates = _cleanup_advice_candidates(conn, spec, limit)
-                removed[spec.table] = _cleanup_table(conn, spec, limit)
+                if spec.table == "market_scan_run":
+                    require_market_scan_artifacts_unchanged(
+                        self._path,
+                        artifact_protection,
+                    )
+                removed[spec.table] = _cleanup_table(
+                    conn,
+                    spec,
+                    limit,
+                    artifact_protection=artifact_protection,
+                )
                 if candidates:
                     deleted_symbols = _deleted_advice_symbols(conn, candidates)
                     cap_watchlist_unread_change_counts_to_viewable(conn, deleted_symbols)
+            require_market_scan_artifacts_unchanged(self._path, artifact_protection)
+            require_market_scan_artifact_lease_namespace_current(self._path)
         return removed
 
     def _compact_after_cleanup(self, removed: dict[str, int]) -> None:
@@ -232,15 +262,20 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             return False
 
     def preview_runtime_cleanup(self) -> dict[str, int]:
-        with self._lock, self._connect() as conn:
-            return {
-                spec.table: _cleanup_candidate_count(
-                    conn,
-                    spec,
-                    int(getattr(self.settings, spec.limit_setting)),
-                )
-                for spec in RUNTIME_CLEANUP_SPECS
-            }
+        with self._lock:
+            artifact_protection = market_scan_artifact_protection(self._path)
+            with self._connect() as conn:
+                preview = {
+                    spec.table: _cleanup_candidate_count(
+                        conn,
+                        spec,
+                        int(getattr(self.settings, spec.limit_setting)),
+                        artifact_protection=artifact_protection,
+                    )
+                    for spec in RUNTIME_CLEANUP_SPECS
+                }
+            require_market_scan_artifacts_unchanged(self._path, artifact_protection)
+            return preview
 
     def table_counts(self) -> dict[str, int]:
         with self._lock, self._connect() as conn:
@@ -252,17 +287,42 @@ def _cleanup_table(
     spec: RuntimeCleanupSpec,
     limit: int,
     delete_batch_rows: int | None = None,
+    *,
+    artifact_protection: MarketScanArtifactProtection | None = None,
 ) -> int:
     del delete_batch_rows
     if limit <= 0:
         return 0
+    if spec.table == "market_scan_run":
+        run_ids = market_scan_cleanup_candidate_ids(
+            conn,
+            _retention_overflow_sql(spec),
+            limit,
+            artifact_protection or MarketScanArtifactProtection(),
+        )
+        return delete_market_scan_candidates(conn, run_ids)
     cursor = conn.execute(_cleanup_sql(spec), {"retention_limit": limit})
     return max(0, int(cursor.rowcount))
 
 
-def _cleanup_candidate_count(conn: sqlite3.Connection, spec: RuntimeCleanupSpec, limit: int) -> int:
+def _cleanup_candidate_count(
+    conn: sqlite3.Connection,
+    spec: RuntimeCleanupSpec,
+    limit: int,
+    *,
+    artifact_protection: MarketScanArtifactProtection | None = None,
+) -> int:
     if limit <= 0:
         return 0
+    if spec.table == "market_scan_run":
+        return len(
+            market_scan_cleanup_candidate_ids(
+                conn,
+                _retention_overflow_sql(spec),
+                limit,
+                artifact_protection or MarketScanArtifactProtection(),
+            )
+        )
     row = conn.execute(
         f"""
         SELECT COUNT(*)
@@ -333,6 +393,17 @@ def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str:
 
 def _candidate_protection_sql(spec: RuntimeCleanupSpec) -> str:
     predicates: list[str] = []
+    if spec.table == "market_scan_run":
+        # Only live source-capture work pins the DB graph. Terminal rows cascade
+        # with the run; verified archive files are protected by the artifact catalog.
+        predicates.append(
+            """NOT EXISTS (
+                SELECT 1
+                FROM market_scan_probability_capture_outbox AS capture_outbox
+                WHERE capture_outbox.run_id = candidate.retention_key
+                  AND capture_outbox.status IN ('pending', 'processing')
+            )"""
+        )
     if spec.protected_reference is not None:
         table, reference_column = spec.protected_reference
         if spec.protect_references_from_retained_only:

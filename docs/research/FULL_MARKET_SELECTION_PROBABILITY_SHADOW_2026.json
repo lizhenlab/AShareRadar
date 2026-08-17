@@ -1,0 +1,1149 @@
+{
+  "artifact": null,
+  "artifact_count": 8,
+  "artifact_set_replay": {
+    "generated_at": "2026-08-11T07:09:44Z",
+    "run_ids": [
+      37,
+      38,
+      41,
+      45,
+      51,
+      54,
+      58,
+      62
+    ],
+    "schema_version": "market-scan-probability-artifact-set-replay-v1",
+    "studies": [
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "8d4573572cfa54b02306252ceb8fc215a115cc3a3e12d00b32ac43224a6bf5cd",
+        "horizon": 1,
+        "input_digest": "772881c24b2397015b6ac8999a64050b4a3e1bd82d1ae160f7f57f92bcf57a2e",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          37,
+          38,
+          41,
+          45
+        ],
+        "sample_count": 16470,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "4cf5558e5ae51cd5ee39121b672ee7e2b3c0eaee8a3ee0197ddf9302b630e1df",
+        "horizon": 1,
+        "input_digest": "9b27fe7b8b4c28cced8005bdb625d711469fcaa824d36b506950fbd9eaa7b190",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          37,
+          38,
+          41,
+          45
+        ],
+        "sample_count": 16470,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "e003ca5d59ba2ffee1c318079d5f19df98d31e6ec2523c0eba4fb521e65c6f6d",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          37,
+          38,
+          41,
+          45
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "0df2205e51a9acb9dccc9b0ef0fbcf9f667f6b039c0e890c40bb05c30c65dd49",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          37,
+          38,
+          41,
+          45
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "78dc432d5a557602099f81ed59ea5914b7cf7a905c647b7bc3bf9fb5790beaee",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          37,
+          38,
+          41,
+          45
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "26124c4a01920d5f0e9c475f8bd46049e028f990f7c3bb698d509c1be8b657c3",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          37,
+          38,
+          41,
+          45
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "727343df5f4de4aeeafc2b77651af33b82812d8bb435f9599e77bbf5d386bf1b",
+        "horizon": 1,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          51
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "c78074a9483867b6628ec02503efcf05e5ea2b4a493790d225ad5a8b59bdff48",
+        "horizon": 1,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          51
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "e003ca5d59ba2ffee1c318079d5f19df98d31e6ec2523c0eba4fb521e65c6f6d",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          51
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "0df2205e51a9acb9dccc9b0ef0fbcf9f667f6b039c0e890c40bb05c30c65dd49",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          51
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "78dc432d5a557602099f81ed59ea5914b7cf7a905c647b7bc3bf9fb5790beaee",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          51
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "26124c4a01920d5f0e9c475f8bd46049e028f990f7c3bb698d509c1be8b657c3",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          51
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "727343df5f4de4aeeafc2b77651af33b82812d8bb435f9599e77bbf5d386bf1b",
+        "horizon": 1,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          54,
+          62
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "c78074a9483867b6628ec02503efcf05e5ea2b4a493790d225ad5a8b59bdff48",
+        "horizon": 1,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          54,
+          62
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "e003ca5d59ba2ffee1c318079d5f19df98d31e6ec2523c0eba4fb521e65c6f6d",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          54,
+          62
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "0df2205e51a9acb9dccc9b0ef0fbcf9f667f6b039c0e890c40bb05c30c65dd49",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          54,
+          62
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "78dc432d5a557602099f81ed59ea5914b7cf7a905c647b7bc3bf9fb5790beaee",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          54,
+          62
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "沪市 + 深市 + 北交所当前上市A股"
+        },
+        "evidence_digest": "26124c4a01920d5f0e9c475f8bd46049e028f990f7c3bb698d509c1be8b657c3",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          54,
+          62
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "727343df5f4de4aeeafc2b77651af33b82812d8bb435f9599e77bbf5d386bf1b",
+        "horizon": 1,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          58
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "c78074a9483867b6628ec02503efcf05e5ea2b4a493790d225ad5a8b59bdff48",
+        "horizon": 1,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          58
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "e003ca5d59ba2ffee1c318079d5f19df98d31e6ec2523c0eba4fb521e65c6f6d",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          58
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "0df2205e51a9acb9dccc9b0ef0fbcf9f667f6b039c0e890c40bb05c30c65dd49",
+        "horizon": 5,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          58
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "78dc432d5a557602099f81ed59ea5914b7cf7a905c647b7bc3bf9fb5790beaee",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_return_positive",
+        "run_ids": [
+          58
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "absolute_net_positive"
+      },
+      {
+        "cohort_contract": {
+          "mode": "intraday",
+          "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+          "scope": "TOP100快速更新评分"
+        },
+        "evidence_digest": "26124c4a01920d5f0e9c475f8bd46049e028f990f7c3bb698d509c1be8b657c3",
+        "horizon": 20,
+        "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "model_target": "net_excess_positive",
+        "run_ids": [
+          58
+        ],
+        "sample_count": 0,
+        "status": "insufficient_data",
+        "target": "net_excess_positive"
+      }
+    ],
+    "study_count": 24
+  },
+  "artifacts": [
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-37-4caea61f08e11741e3a1ff3efbc7cbae973a0f182b9bcb4bd7ccfe33c60767b7.json",
+      "integrity_digest": "4caea61f08e11741e3a1ff3efbc7cbae973a0f182b9bcb4bd7ccfe33c60767b7",
+      "run_id": 37
+    },
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-38-a6865f5a524e5a7eab8463219eb090b0ec658aaf0cdcd8d9b58a1b67ab7bd775.json",
+      "integrity_digest": "a6865f5a524e5a7eab8463219eb090b0ec658aaf0cdcd8d9b58a1b67ab7bd775",
+      "run_id": 38
+    },
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-41-585cc2dfe57981b3c741cb8196b8b0c75fb5ed52f1c6d7595328f5b90dcc9754.json",
+      "integrity_digest": "585cc2dfe57981b3c741cb8196b8b0c75fb5ed52f1c6d7595328f5b90dcc9754",
+      "run_id": 41
+    },
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-45-0d95e90686313f9f6960bce4a601ed9fd46ea4fe2e2f790a9e558a0471e344f1.json",
+      "integrity_digest": "0d95e90686313f9f6960bce4a601ed9fd46ea4fe2e2f790a9e558a0471e344f1",
+      "run_id": 45
+    },
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-51-2ecbf3604bd6326d0b84ccfd540e84a4074ef7a8990eed2600aa6648e6692b6f.json",
+      "integrity_digest": "2ecbf3604bd6326d0b84ccfd540e84a4074ef7a8990eed2600aa6648e6692b6f",
+      "run_id": 51
+    },
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-54-082ab42e26f51ce183061ca0bfde470fd239a070fc022e362b9d04e4c18b73cb.json",
+      "integrity_digest": "082ab42e26f51ce183061ca0bfde470fd239a070fc022e362b9d04e4c18b73cb",
+      "run_id": 54
+    },
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-58-8dae56a858b4abdeed33c104b3f2d21bd7266ae76b94e9dfc4f4898e7aa7774e.json",
+      "integrity_digest": "8dae56a858b4abdeed33c104b3f2d21bd7266ae76b94e9dfc4f4898e7aa7774e",
+      "run_id": 58
+    },
+    {
+      "artifact": "/Users/zl/Documents/AShareRadar/data/market-scan-probability/market-scan-probability-run-62-c7b136680e6bffb15074ea6020b641493a2980f2253f7c1cbbeb1378e0fc1fda.json",
+      "integrity_digest": "c7b136680e6bffb15074ea6020b641493a2980f2253f7c1cbbeb1378e0fc1fda",
+      "run_id": 62
+    }
+  ],
+  "automatic_promotion": false,
+  "calibrated_shadow_horizons": [],
+  "cohorts": [
+    {
+      "cohort_contract": {
+        "mode": "intraday",
+        "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+        "scope": "TOP100快速更新评分"
+      },
+      "cohort_digest": "4390dc4b44efe94df61e1768ef565176c6d6c93cafb72020e88bdce700900115",
+      "horizons": {
+        "1": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "20": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "5": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        }
+      },
+      "observation_count": 100,
+      "run_ids": [
+        58
+      ],
+      "session_count": 1,
+      "status": "insufficient_data"
+    },
+    {
+      "cohort_contract": {
+        "mode": "intraday",
+        "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+        "scope": "TOP100快速更新评分"
+      },
+      "cohort_digest": "95800d0dd8613eeb2a634cf5dc500d10e962fac5d629992e7a5c8a0d7c0a5386",
+      "horizons": {
+        "1": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "20": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "5": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        }
+      },
+      "observation_count": 100,
+      "run_ids": [
+        51
+      ],
+      "session_count": 1,
+      "status": "insufficient_data"
+    },
+    {
+      "cohort_contract": {
+        "mode": "intraday",
+        "rule_version": "full-market-scan-v5:3b6cb8bdd58a38eb81bc43ba5b554e4f05390f9c77cd4ab45647f543218e8a70",
+        "scope": "沪市 + 深市 + 北交所当前上市A股"
+      },
+      "cohort_digest": "ac131cc8ea5123ba6caae1066aa4e61485f2daf3eb28ee08aba60cbcc9451d93",
+      "horizons": {
+        "1": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "20": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "5": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        }
+      },
+      "observation_count": 10989,
+      "run_ids": [
+        54,
+        62
+      ],
+      "session_count": 2,
+      "status": "insufficient_data"
+    },
+    {
+      "cohort_contract": {
+        "mode": "intraday",
+        "rule_version": "full-market-scan-v5:fa9f1c09afc10f53cea22e737f2ff893ad27798097a33377031c00157d5cffec",
+        "scope": "沪市 + 深市 + 北交所当前上市A股"
+      },
+      "cohort_digest": "7bd7268a945ec21228a1390b332ac5d0e8a2232edb5b497a3d5a49bec8e9b450",
+      "horizons": {
+        "1": {
+          "counts": {
+            "available_independent_session_count": 3,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 14654,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.889738919247116,
+            "observation_count": 16470,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 3,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "20": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "5": {
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "eligible_for_human_review": false,
+          "failed_gates": [
+            "auc_at_least_0_52",
+            "brier_skill_positive",
+            "calibrated_shadow",
+            "ece_at_most_5pct",
+            "highest_bin_above_base_rate",
+            "label_coverage_at_least_95pct",
+            "major_board_calibration_acceptable",
+            "major_market_calibration_acceptable",
+            "maximum_drawdown_at_least_minus_25pct",
+            "mean_turnover_at_most_80pct",
+            "point_in_time_evidence_at_least_95pct",
+            "probability_bin_outcomes_complete",
+            "probability_bins_monotonic",
+            "temporal_stability_acceptable",
+            "top100_independent_sessions_at_least_60",
+            "top100_mean_net_excess_return_positive"
+          ],
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "probability": null,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        }
+      },
+      "observation_count": 21961,
+      "run_ids": [
+        37,
+        38,
+        41,
+        45
+      ],
+      "session_count": 4,
+      "status": "insufficient_data"
+    }
+  ],
+  "credible_probability_available": false,
+  "database_bytes_unchanged": true,
+  "database_read_only": true,
+  "database_sha256_after": "63f460431fcc4b11f99e23ea592b605e4c784aa1b8584f69f3c13eb808a1e7ec",
+  "database_sha256_before": "63f460431fcc4b11f99e23ea592b605e4c784aa1b8584f69f3c13eb808a1e7ec",
+  "default_horizon": 5,
+  "full_input_replay_verified": true,
+  "horizons": {
+    "1": {
+      "counts": {
+        "cohort_count": 4
+      },
+      "eligible_for_human_review": false,
+      "failed_gates": [],
+      "limitations": [
+        "cohort_isolated_summary_has_no_pooled_probability"
+      ],
+      "probability": null,
+      "status": "insufficient_data",
+      "training_cutoff": null
+    },
+    "20": {
+      "counts": {
+        "cohort_count": 4
+      },
+      "eligible_for_human_review": false,
+      "failed_gates": [],
+      "limitations": [
+        "cohort_isolated_summary_has_no_pooled_probability"
+      ],
+      "probability": null,
+      "status": "insufficient_data",
+      "training_cutoff": null
+    },
+    "5": {
+      "counts": {
+        "cohort_count": 4
+      },
+      "eligible_for_human_review": false,
+      "failed_gates": [],
+      "limitations": [
+        "cohort_isolated_summary_has_no_pooled_probability"
+      ],
+      "probability": null,
+      "status": "insufficient_data",
+      "training_cutoff": null
+    }
+  },
+  "integrity_notice": "integrity_digest_not_a_signature",
+  "primary_target": "net_excess_positive",
+  "production_ranking_effect": "none",
+  "production_rule": "full-market-score-v4",
+  "record_count": 198900,
+  "run_count": 8,
+  "schema_version": "market-scan-probability-evaluation-summary-v1",
+  "status": "insufficient_data"
+}

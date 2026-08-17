@@ -4,27 +4,67 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AShareRadar</title>
-    <noscript><link rel="stylesheet" href="/static/styles.css" /></noscript>
-    <link rel="stylesheet" href="/static/styles.css?v=20260730-paper-trading-2" />
-    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260730-paper-trading-2" />
+    <link rel="stylesheet" href="/static/css/base.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/sidebar.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/workspace-core.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/research-panels.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/individual-probability.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/market-scan-research.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/interactions.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/side-footer.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/responsive.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/primary-navigation.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/css/layout-optimizations.css?v=20260815-market-scan-busy-local-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260815-market-scan-busy-local-1" />
     <script type="importmap">
       {
         "imports": {
-          "/static/js/discovery.js": "/static/js/discovery.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-controller-inert.js": "/static/js/market-scan-controller-inert.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-export-client.js": "/static/js/market-scan-export-client.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-filters.js": "/static/js/market-scan-filters.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-history.js": "/static/js/market-scan-history.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-history-view.js": "/static/js/market-scan-history-view.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-progress-view.js": "/static/js/market-scan-progress-view.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-row-actions.js": "/static/js/market-scan-row-actions.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-snapshot-view.js": "/static/js/market-scan-snapshot-view.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260730-paper-trading-2",
-          "/static/js/market-scan-view-export.js": "/static/js/market-scan-view-export.js?v=20260730-paper-trading-2"
+          "/static/js/api.js": "/static/js/api.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/discovery.js": "/static/js/discovery.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/individual-probability-contracts.js": "/static/js/individual-probability-contracts.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/individual-probability-controller.js": "/static/js/individual-probability-controller.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/individual-probability-view.js": "/static/js/individual-probability-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/workbench-contracts.js": "/static/js/workbench-contracts.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-controller-inert.js": "/static/js/market-scan-controller-inert.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-export-client.js": "/static/js/market-scan-export-client.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-export-action.js": "/static/js/market-scan-export-action.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-executable-shadow-contracts.js": "/static/js/market-scan-executable-shadow-contracts.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-executable-shadow-controller.js": "/static/js/market-scan-executable-shadow-controller.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-executable-shadow-view.js": "/static/js/market-scan-executable-shadow-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-filters.js": "/static/js/market-scan-filters.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-future-range-controller.js": "/static/js/market-scan-future-range-controller.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-future-range-view.js": "/static/js/market-scan-future-range-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-history.js": "/static/js/market-scan-history.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-history-view.js": "/static/js/market-scan-history-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/layout-optimizations.js": "/static/js/layout-optimizations.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-message-view.js": "/static/js/market-scan-message-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-latest-sync.js": "/static/js/market-scan-latest-sync.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-probability-binding.js": "/static/js/market-scan-probability-binding.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-probability-contracts.js": "/static/js/market-scan-probability-contracts.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-probability-copy.js": "/static/js/market-scan-probability-copy.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-probability-interval.js": "/static/js/market-scan-probability-interval.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-probability-horizon-controller.js": "/static/js/market-scan-probability-horizon-controller.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-probability-polling.js": "/static/js/market-scan-probability-polling.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-probability-view.js": "/static/js/market-scan-probability-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-read-transition.js": "/static/js/market-scan-read-transition.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-progress-view.js": "/static/js/market-scan-progress-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-row-actions.js": "/static/js/market-scan-row-actions.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-run-context-view.js": "/static/js/market-scan-run-context-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-snapshot-view.js": "/static/js/market-scan-snapshot-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-surface.js": "/static/js/market-scan-surface.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-top100-refresh.js": "/static/js/market-scan-top100-refresh.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/market-scan-view-export.js": "/static/js/market-scan-view-export.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/strategy-lab.js": "/static/js/strategy-lab.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/strategy-lab-contracts.js": "/static/js/strategy-lab-contracts.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/strategy-lab-controller.js": "/static/js/strategy-lab-controller.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/strategy-lab-view.js": "/static/js/strategy-lab-view.js?v=20260815-market-scan-busy-local-1",
+          "/static/js/strategy-template-catalog.js": "/static/js/strategy-template-catalog.js?v=20260815-market-scan-busy-local-1"
         }
       }
     </script>
@@ -67,6 +107,7 @@
         <div class="panel-title">
           <span>个股查询</span>
           <small>代码或名称</small>
+          <button type="button" class="mini-button layout-toggle" id="queryPanelToggle" aria-controls="searchForm" aria-expanded="true">收起查询</button>
         </div>
         <form class="search-row" id="searchForm">
           <div class="stock-search-field">
@@ -76,6 +117,20 @@
           <button type="submit">分析</button>
         </form>
         <p class="form-error" id="symbolError" role="alert" hidden></p>
+        <section class="stock-search-history" id="stockSearchHistory" aria-label="最近搜索的股票">
+          <header>
+            <div class="stock-search-history-title">
+              <strong>搜索记录</strong>
+              <span id="stockSearchHistoryCount" aria-label="历史记录数量">0</span>
+            </div>
+            <button type="button" id="stockSearchHistoryClear">清空</button>
+          </header>
+          <div class="stock-search-history-list" id="stockSearchHistoryList"></div>
+          <p id="stockSearchHistoryEmpty">暂无搜索记录；记录保存在当前浏览器，服务重启后仍会保留。</p>
+        </section>
+        <div class="stock-query-shortcuts">
+          <span>常用股票</span>
+        </div>
         <div class="quick-list" id="quickList">
           <button type="button" data-symbol="600519">贵州茅台</button>
           <button type="button" data-symbol="000001">平安银行</button>
@@ -103,7 +158,11 @@
           <div class="metrics-grid">
             <div class="metric-card"><span>趋势评分</span><strong id="trendScore">--</strong></div>
             <div class="metric-card"><span>趋势状态</span><strong id="trendLabel">--</strong></div>
-            <div class="metric-card"><span>当前建议</span><strong id="actionAdvice">--</strong></div>
+            <div class="metric-card">
+              <span>互动研究观点（Shadow）</span>
+              <strong id="actionAdvice">--</strong>
+              <span class="research-boundary">不写建议历史、不影响正式建议</span>
+            </div>
             <div class="metric-card"><span>支撑位</span><strong id="support">--</strong></div>
             <div class="metric-card"><span>压力位</span><strong id="resistance">--</strong></div>
             <div class="metric-card"><span>5日线</span><strong id="ma5">--</strong></div>
@@ -192,37 +251,90 @@
           <div class="quality-panel" id="qualityPanel"></div>
           <div class="evidence-panel" id="signalEvidence"></div>
           <div class="alpha-panel" id="alphaEvidence"></div>
+          <section
+            class="individual-probability-research"
+            id="individualProbabilityResearch"
+            data-individual-probability-surface="true"
+            data-status="not_generated"
+            aria-labelledby="individualProbabilityTitle"
+            aria-describedby="individualProbabilitySemantics individualProbabilityTarget"
+            aria-busy="false"
+          >
+            <div class="individual-probability-heading">
+              <div>
+                <span class="individual-probability-kicker">Shadow 独立研究</span>
+                <h3 id="individualProbabilityTitle">D+2 / D+3 / D+4 上涨概率</h3>
+                <p id="individualProbabilitySemantics">趋势分是序数状态分，不是上涨概率；这里的结果不参与生产评分、排名或操作建议。</p>
+              </div>
+              <button type="button" class="mini-button" id="individualProbabilityRetry" hidden>重试概率研究</button>
+            </div>
+            <p class="individual-probability-target" id="individualProbabilityTarget">D+1 官方日K开盘价代理（不保证成交）→ 固定 D+2 / D+3 / D+4 收盘；持有 1 / 2 / 3 个交易日；目标：扣除声明成本后的日K代理净收益 &gt; 0</p>
+            <div class="individual-probability-cards" id="individualProbabilityCards">
+              <article class="individual-probability-card not_generated" data-display-day="2" data-status="not_generated"><div class="individual-probability-card-head"><div><span>目标交易日</span><strong>D+2</strong></div><em>尚未生成</em></div><div class="individual-probability-value"><strong>—</strong><span>上涨概率</span></div><p>等待读取独立研究证据。</p></article>
+              <article class="individual-probability-card not_generated" data-display-day="3" data-status="not_generated"><div class="individual-probability-card-head"><div><span>目标交易日</span><strong>D+3</strong></div><em>尚未生成</em></div><div class="individual-probability-value"><strong>—</strong><span>上涨概率</span></div><p>等待读取独立研究证据。</p></article>
+              <article class="individual-probability-card not_generated" data-display-day="4" data-status="not_generated"><div class="individual-probability-card-head"><div><span>目标交易日</span><strong>D+4</strong></div><em>尚未生成</em></div><div class="individual-probability-value"><strong>—</strong><span>上涨概率</span></div><p>等待读取独立研究证据。</p></article>
+            </div>
+            <div class="individual-probability-evidence" id="individualProbabilityEvidence">
+              <div><span>最新正式 PIT 日</span><strong>—</strong></div><div><span>正式 PIT 日期</span><strong>0 / 288</strong></div><div><span>非官方历史回放</span><strong>0 日（非正式）</strong></div><div><span>证据截止</span><strong>—</strong></div><div><span>模型版本</span><strong>—</strong></div><div><span>证据版本</span><strong>—</strong></div>
+            </div>
+            <ul class="individual-probability-limitations" id="individualProbabilityLimitations"><li>尚未读取上涨概率研究证据。</li></ul>
+            <p class="ai-visually-hidden" id="individualProbabilityAnnouncement" role="status" aria-live="polite" aria-atomic="true">尚未读取上涨概率研究证据</p>
+          </section>
         </section>
 
         <section class="workspace-view" id="workspace-panel-market-scan" data-view-panel="market-scan" role="tabpanel" aria-labelledby="primary-nav-market">
           <section class="panel market-scan-panel" aria-labelledby="marketScanTitle">
             <div class="market-scan-heading">
               <div>
-                <span class="market-scan-kicker">沪市 / 深市 / 北交所</span>
-                <h3 id="marketScanTitle">全市场A股榜单</h3>
-                <p id="marketScanHeadline">等待读取最近扫描</p>
+                <div class="market-scan-kicker" aria-label="覆盖板块：上海A股、科创板、深圳A股、创业板、北交所">
+                  <span>上海A股</span><span>科创板</span><span>深圳A股</span><span>创业板</span><span>北交所</span>
+                </div>
+                <h3 id="marketScanTitle">全市场选股</h3>
+                <p class="market-scan-subtitle">先看生产榜单，再按需展开筛选和研究维度；趋势强度是序数状态分，不代表上涨概率。</p>
+                <div class="market-scan-task-line"><span>后台扫描</span><p id="marketScanHeadline">等待读取最近扫描</p></div>
+                <div class="market-scan-gate-summary" id="marketScanGateSummary" aria-label="扫描发布门禁摘要" hidden>
+                  <div class="market-scan-gate-row blocker" id="marketScanPublicationBlockers" hidden><strong>发布阻断</strong><span id="marketScanPublicationBlockersText"></span></div>
+                  <div class="market-scan-gate-row passed" id="marketScanPassedGates" hidden><strong>已通过门禁</strong><span id="marketScanPassedGatesText"></span></div>
+                  <div class="market-scan-gate-row warning" id="marketScanSourceWarnings" hidden><strong>数据源告警</strong><span id="marketScanSourceWarningsText"></span></div>
+                </div>
               </div>
               <div class="market-scan-actions">
-                <fieldset class="market-scan-mode-control" id="marketScanModeControl">
-                  <legend>浏览和新建榜单模式</legend>
-                  <div class="market-scan-mode-options">
-                    <label><input type="radio" id="marketScanModeIntraday" name="marketScanMode" value="intraday" /><span>盘中临时</span></label>
-                    <label><input type="radio" id="marketScanModeOfficial" name="marketScanMode" value="official" checked /><span>盘后正式</span></label>
-                  </div>
-                </fieldset>
-                <button type="button" id="marketScanStart">开始扫描</button>
-                <button type="button" class="mini-button" id="marketScanExport" aria-busy="false" disabled>导出 Excel</button>
-                <button type="button" class="mini-button" id="marketScanCancel" hidden>取消</button>
-                <button type="button" class="mini-button" id="marketScanRetry" hidden>重试问题项</button>
+                <div class="market-scan-mode-block">
+                  <span>榜单模式</span>
+                  <fieldset class="market-scan-mode-control" id="marketScanModeControl">
+                    <legend>浏览和新建榜单模式</legend>
+                    <div class="market-scan-mode-options">
+                      <label><input type="radio" id="marketScanModePreopen" name="marketScanMode" value="preopen" /><span>盘前复盘</span></label>
+                      <label><input type="radio" id="marketScanModeIntraday" name="marketScanMode" value="intraday" /><span>盘中临时</span></label>
+                      <label><input type="radio" id="marketScanModeOfficial" name="marketScanMode" value="official" checked /><span>盘后正式</span></label>
+                    </div>
+                  </fieldset>
+                </div>
+                <div class="market-scan-action-buttons" aria-label="扫描操作">
+                  <button type="button" id="marketScanStart">开始扫描</button>
+                  <button type="button" class="mini-button" id="marketScanRefreshTop100" aria-busy="false" disabled>更新 TOP100 评分</button>
+                  <button type="button" class="mini-button" id="marketScanExport" aria-busy="false" disabled>导出 Excel</button>
+                  <button type="button" class="mini-button" id="marketScanHistoryToggle" aria-controls="marketScanHistory" aria-expanded="false" data-open-label="收起历史榜单" data-closed-label="历史榜单">历史榜单</button>
+                  <button type="button" class="mini-button" id="marketScanCancel" hidden>取消</button>
+                  <button type="button" class="mini-button" id="marketScanRetry" hidden>重试问题项</button>
+                </div>
               </div>
             </div>
 
             <section class="market-scan-context" id="marketScanContext">
-              <strong id="marketScanBrowseContext">当前浏览：盘后正式 · 最近发布</strong>
+              <div class="market-scan-browse-context">
+                <strong id="marketScanBrowseContext">当前浏览：盘后正式 · 最近发布</strong>
+                <time id="marketScanExecutedAt">评分执行时间：--</time>
+              </div>
               <span id="marketScanTaskContext">后台任务：读取中</span>
             </section>
 
-            <section class="market-scan-history" id="marketScanHistory" aria-label="历史扫描批次" aria-busy="false">
+            <div class="market-scan-progress market-scan-progress-primary" id="marketScanProgress">
+              <div><span>任务进度</span><strong id="marketScanProgressText">--</strong></div>
+              <progress id="marketScanProgressBar" max="100" value="0" aria-label="全市场扫描进度" aria-describedby="marketScanProgressText" aria-valuetext="尚无扫描进度" aria-busy="false">0%</progress>
+            </div>
+
+            <section class="market-scan-history market-scan-history-switcher" id="marketScanHistory" aria-label="历史扫描批次" aria-busy="false" hidden>
               <label>
                 <span>历史榜单</span>
                 <select id="marketScanHistoryRun">
@@ -245,11 +357,301 @@
               <p id="marketScanHistoryFeedback">按当前模式读取最近已发布榜单。</p>
             </section>
 
-            <div class="market-scan-progress" id="marketScanProgress">
-              <div><span>任务进度</span><strong id="marketScanProgressText">--</strong></div>
-              <progress id="marketScanProgressBar" max="100" value="0" aria-label="全市场扫描进度" aria-describedby="marketScanProgressText" aria-valuetext="尚无扫描进度" aria-busy="false">0%</progress>
+            <section class="discovery-preset-controls discovery-preset-controls-top" id="discoveryPresetControls" aria-label="榜单筛选方案" aria-busy="false">
+              <label>
+                <span>筛选方案</span>
+                <select id="discoveryPresetSelect" aria-describedby="discoveryPresetFeedback">
+                  <option value="">选择已保存方案</option>
+                </select>
+              </label>
+              <label class="discovery-preset-name">
+                <span>方案名称</span>
+                <input id="discoveryPresetName" maxlength="80" autocomplete="off" placeholder="输入方案名称" aria-describedby="discoveryPresetFeedback" />
+              </label>
+              <div class="discovery-preset-actions">
+                <button type="button" id="discoveryPresetApply" disabled>应用方案</button>
+                <button type="button" id="discoveryPresetSave" class="mini-button">另存方案</button>
+                <details class="discovery-preset-more" id="discoveryPresetMore">
+                  <summary>更多管理</summary>
+                  <div class="discovery-preset-more-actions">
+                    <button type="button" id="discoveryPresetRename" class="mini-button" disabled>重命名</button>
+                    <button type="button" id="discoveryPresetScreenAlert" class="mini-button" disabled>记录变化提醒</button>
+                    <button type="button" id="discoveryPresetExport" class="mini-button" disabled>导出方案</button>
+                    <button type="button" id="discoveryPresetImport" class="mini-button">导入方案</button>
+                    <input id="discoveryPresetImportFile" type="file" accept="application/json,.json" hidden />
+                    <button type="button" id="discoveryPresetDelete" class="mini-button danger" disabled>删除</button>
+                  </div>
+                </details>
+              </div>
+              <p id="discoveryPresetFeedback"></p>
+              <p id="discoveryRankSummary" hidden></p>
+            </section>
+
+            <section class="market-scan-probability-research" id="marketScanProbabilityResearch" aria-labelledby="marketScanProbabilityTitle" aria-busy="false" data-evidence-status="not_generated">
+              <div class="market-scan-probability-heading">
+                <div>
+                  <span class="market-scan-probability-kicker">Shadow 研究</span>
+                  <h4 id="marketScanProbabilityTitle">上涨概率研究</h4>
+                  <p id="marketScanProbabilitySemantics">趋势强度是序数状态分；上涨概率是样本外校准估计，不参与生产评分或排名。</p>
+                </div>
+                <fieldset class="market-scan-probability-horizons" id="marketScanProbabilityHorizonControl">
+                  <legend>预测周期</legend>
+                  <label><input type="radio" id="marketScanProbabilityHorizon1d" name="marketScanProbabilityHorizon" value="1" /><span>持有1日（D+2）</span></label>
+                  <label><input type="radio" id="marketScanProbabilityHorizon5d" name="marketScanProbabilityHorizon" value="5" checked /><span>持有5日（D+6）</span></label>
+                  <label><input type="radio" id="marketScanProbabilityHorizon20d" name="marketScanProbabilityHorizon" value="20" /><span>持有20日（D+21）</span></label>
+                </fieldset>
+              </div>
+              <div class="market-scan-probability-summary">
+                <div><span>证据状态</span><strong id="marketScanProbabilityStatus" class="insufficient">尚未生成研究证据</strong></div>
+                <div><span>目标</span><strong id="marketScanProbabilityTarget">未来所选周期净超额收益为正</strong></div>
+                <div><span>基础胜率</span><strong id="marketScanProbabilityBaseRate">--</strong></div>
+                <div><span>独立日期 / 观察</span><strong id="marketScanProbabilityEvidence">--</strong></div>
+                <div><span>预测效力</span><strong id="marketScanProbabilityEffectiveness" class="insufficient">--</strong></div>
+                <div><span>模型与证据版本</span><strong id="marketScanProbabilityVersion">--</strong></div>
+                <div><span>训练截止</span><strong id="marketScanProbabilityCutoff">--</strong></div>
+              </div>
+              <p class="market-scan-probability-limitations" id="marketScanProbabilityLimitations">当前批次尚未生成上涨概率研究。</p>
+            </section>
+
+            <details class="market-scan-future-range" id="marketScanFutureRangeResearch" data-generation-status="not_generated" aria-busy="false">
+              <summary>
+                <span class="market-scan-future-range-summary-copy">
+                  <span class="market-scan-future-range-kicker">独立研究 · 不改变生产排序</span>
+                  <strong id="marketScanFutureRangeTitle">未来区间验证</strong>
+                  <small>D+1 / D+2 / D+3 · 指定日与累计路径</small>
+                </span>
+                <span class="market-scan-future-range-status" id="marketScanFutureRangeSummaryStatus" data-kind="idle">展开查看</span>
+              </summary>
+              <div class="market-scan-future-range-body">
+                <div class="market-scan-future-range-intro">
+                  <p>验证冻结趋势评分、上涨概率与后续价格区间的关系。D+1 受 A 股 T+1 约束，仅作区间诊断；D+2/D+3 另行展示成本后的可执行模型结果。</p>
+                  <button type="button" class="mini-button" id="marketScanFutureRangeRefresh" aria-busy="false">刷新证据</button>
+                </div>
+                <div class="market-scan-future-range-controls">
+                  <fieldset id="marketScanFutureRangeOffsetControl">
+                    <legend>未来交易日</legend>
+                    <label><input type="radio" name="marketScanFutureRangeOffset" value="1" checked /><span>D+1</span></label>
+                    <label><input type="radio" name="marketScanFutureRangeOffset" value="2" /><span>D+2</span></label>
+                    <label><input type="radio" name="marketScanFutureRangeOffset" value="3" /><span>D+3</span></label>
+                  </fieldset>
+                  <fieldset id="marketScanFutureRangePathControl">
+                    <legend>观察口径</legend>
+                    <label><input type="radio" name="marketScanFutureRangePath" value="specified_day" checked /><span>指定日区间</span></label>
+                    <label><input type="radio" name="marketScanFutureRangePath" value="cumulative_path" /><span>累计路径</span></label>
+                  </fieldset>
+                  <label class="market-scan-future-range-group"><span>观察分组</span><select id="marketScanFutureRangeGroup"><option value="top100">Top100</option><option value="top50">Top50</option><option value="top20">Top20</option><option value="all">全市场</option></select></label>
+                </div>
+                <div class="market-scan-future-range-context" id="marketScanFutureRangeContext">
+                  <div><span>证据状态</span><strong id="marketScanFutureRangeEvidenceStatus">尚未生成</strong></div>
+                  <div><span>独立日期 / 观察</span><strong id="marketScanFutureRangeEvidenceCount">--</strong></div>
+                  <div><span>价格中枢</span><strong>HLC3 典型价代理 · 非 VWAP</strong></div>
+                  <div><span>数据范围</span><strong id="marketScanFutureRangeCoverage">仅盘后正式批次</strong></div>
+                </div>
+                <p class="market-scan-future-range-state" id="marketScanFutureRangeState" role="status">展开后读取当前盘后正式批次的冻结研究证据。</p>
+                <section class="market-scan-future-range-content" id="marketScanFutureRangeContent" hidden>
+                  <div class="market-scan-future-range-metrics" id="marketScanFutureRangeMetrics"></div>
+                  <div class="market-scan-future-range-evidence-grid">
+                    <section aria-labelledby="marketScanFutureRangeGroupTitle">
+                      <div class="market-scan-future-range-section-title"><div><h5 id="marketScanFutureRangeGroupTitle">分组与十分位摘要</h5><p>同一交易日先聚合，再比较评分分层；缺失证据保持为空。</p></div></div>
+                      <div class="market-scan-future-range-table-wrap"><table><thead><tr><th>分组</th><th>日期 / 观察</th><th>典型价</th><th>MFE</th><th>MAE</th><th>净收益</th><th>净超额</th></tr></thead><tbody id="marketScanFutureRangeGroups"></tbody></table></div>
+                    </section>
+                    <section aria-labelledby="marketScanFutureRangeProbabilityTitle">
+                      <div class="market-scan-future-range-section-title"><div><h5 id="marketScanFutureRangeProbabilityTitle">评分与上涨概率对照</h5><p>概率只按其原标签校准；这里仅作关联诊断。</p></div></div>
+                      <div class="market-scan-future-range-probability" id="marketScanFutureRangeProbability"></div>
+                    </section>
+                  </div>
+                  <section class="market-scan-future-range-details" aria-labelledby="marketScanFutureRangeDetailsTitle">
+                    <div class="market-scan-future-range-section-title"><div><h5 id="marketScanFutureRangeDetailsTitle">个股明细钻取</h5><p id="marketScanFutureRangeDetailsHelp">展示冻结信号日与目标交易日；每页 20 条。</p></div><label><span>查找股票</span><input id="marketScanFutureRangeKeyword" type="search" autocomplete="off" placeholder="精确代码或当前页名称" /></label></div>
+                    <div id="marketScanFutureRangeDetails"></div>
+                    <div class="market-scan-future-range-pagination" id="marketScanFutureRangePagination" hidden><span id="marketScanFutureRangePageText">第 1/1 页</span><span><button type="button" class="mini-button" id="marketScanFutureRangePrev">上一页</button><button type="button" class="mini-button" id="marketScanFutureRangeNext">下一页</button></span></div>
+                  </section>
+                  <p class="market-scan-future-range-limitations" id="marketScanFutureRangeLimitations"></p>
+                </section>
+              </div>
+            </details>
+
+            <div class="market-scan-layout-actions" aria-label="榜单辅助区域">
+              <div class="market-scan-layout-copy"><strong>按需设置</strong><span>日常只需选择方案；需要时再展开条件、运行详情或策略研究</span></div>
+              <div class="market-scan-layout-buttons">
+                <button type="button" class="mini-button layout-toggle" id="marketScanFilterToggle" aria-controls="marketScanFilterPanel" aria-expanded="false" data-open-label="收起筛选条件" data-closed-label="筛选条件">筛选条件</button>
+                <button type="button" class="mini-button layout-toggle" id="marketScanDetailsToggle" aria-controls="marketScanDetails" aria-expanded="false" data-open-label="收起运行详情" data-closed-label="运行详情">运行详情</button>
+                <button type="button" class="mini-button layout-toggle" id="marketScanStrategyToggle" aria-controls="strategyLab" aria-expanded="false" data-open-label="收起策略研究" data-closed-label="策略研究">策略研究</button>
+              </div>
             </div>
 
+            <details class="strategy-lab-shell" id="strategyLab" hidden>
+              <summary>
+                <span><strong>高级研究 · 策略决策实验室</strong><small>完成榜单筛选后再使用 · 仅研究与模拟</small></span>
+                <span class="strategy-lab-status" id="strategyLabStatus" data-kind="idle">等待选择或创建策略</span>
+              </summary>
+              <p class="strategy-lab-disclaimer">离线评估基线固定绑定其历史评分合同，实际执行批次会按自身生产评分合同校验兼容性；这里的目标权重、Pareto、组合约束和 Shadow 结果不会覆盖生产排名，也不会自动下单或自动晋级。</p>
+              <nav class="strategy-lab-nav" aria-label="策略实验室区域">
+                <a href="#strategyEditor">策略编辑器</a><a href="#strategyRanking">多目标榜单</a><a href="#strategyPortfolio">组合草案</a><a href="#strategyEvidence">证据中心</a><a href="#strategyExecutableShadow">可执行候选 Shadow</a><a href="#strategyHistory">历史与版本</a>
+              </nav>
+
+              <details class="strategy-template-catalog" id="strategyTemplateCatalog" open>
+                <summary>
+                  <span><strong>策略镜头模板</strong><small>互斥单选 · 只载入研究草案</small></span>
+                  <span id="strategyTemplateCatalogSummary">等待读取</span>
+                </summary>
+                <div class="strategy-template-catalog-body">
+                  <p class="strategy-template-boundary">模板用于组织研究目标与约束，不是上涨概率、投资建议或自动交易信号；模板身份固定绑定历史合同，来源批次生产评分与排名不会改变。</p>
+                  <p class="strategy-template-status" id="strategyTemplateCatalogStatus" role="status" aria-atomic="true">进入全市场选股后按需读取模板目录。</p>
+                  <fieldset class="strategy-template-picker" id="strategyTemplatePicker" aria-describedby="strategyTemplateCatalogStatus strategyTemplateDraftStatus">
+                    <legend>选择一个策略镜头</legend>
+                    <div class="strategy-template-grid" id="strategyTemplateCards"></div>
+                  </fieldset>
+                  <p class="strategy-template-draft-status" id="strategyTemplateDraftStatus">尚未载入模板；编辑器保持当前草案。</p>
+                </div>
+              </details>
+
+              <div class="strategy-lab-grid">
+                <section class="strategy-lab-card strategy-editor" id="strategyEditor" aria-labelledby="strategyEditorTitle">
+                  <div class="strategy-lab-card-head">
+                    <div><span class="eyebrow">01 · Intent to spec</span><h4 id="strategyEditorTitle">策略编辑器</h4></div>
+                    <button type="button" class="mini-button" id="strategyListRefresh">刷新策略</button>
+                  </div>
+                  <label class="strategy-field-wide"><span>中文策略描述</span><textarea id="strategyNaturalText" rows="4" maxlength="1000">排除 ST 和上市不足 120 天，选择沪深 A 股中近 20 日趋势较强、成交额超过 1 亿、风险较低的股票，行业最多 3 只，持有 5 天。</textarea></label>
+                  <div class="strategy-editor-actions">
+                    <label><span>策略名称</span><input id="strategyName" maxlength="80" value="证据优先选股策略" /></label>
+                    <button type="button" id="strategyParse">解析为草案</button>
+                  </div>
+                  <div class="strategy-parse-output" id="strategyParseOutput" data-state="empty">
+                    <p>先解析自然语言；系统会显示默认值、歧义和未支持条件，不会静默猜测。</p>
+                  </div>
+
+                  <fieldset class="strategy-board-picker">
+                    <legend>股票池（明确到上市板块）</legend>
+                    <label><input type="checkbox" value="sh_main" data-strategy-board checked />上海主板</label>
+                    <label><input type="checkbox" value="star" data-strategy-board checked />科创板</label>
+                    <label><input type="checkbox" value="sz_main" data-strategy-board checked />深圳主板</label>
+                    <label><input type="checkbox" value="chinext" data-strategy-board checked />创业板</label>
+                    <label><input type="checkbox" value="beijing" data-strategy-board checked />北交所</label>
+                  </fieldset>
+                  <div class="strategy-form-grid">
+                    <label><span>目标画像</span><select id="strategyProfile"><option value="conservative">稳健</option><option value="balanced" selected>均衡</option><option value="aggressive">进取</option><option value="custom">自定义</option></select></label>
+                    <label><span>权重方式</span><select id="strategyWeightingMethod"><option value="equal">等权</option><option value="risk_adjusted">风险约束</option><option value="custom">自定义</option></select></label>
+                    <label><span>组合股票数</span><input id="strategyStockCount" type="number" min="1" max="100" value="20" /></label>
+                    <label><span>单股权重上限（%）</span><input id="strategyMaxStockWeight" type="number" min="0.01" max="100" step="0.01" value="10" /></label>
+                    <label><span>行业最多持有</span><input id="strategyIndustryCount" type="number" min="1" max="100" value="3" /></label>
+                    <label><span>行业权重上限（%）</span><input id="strategyMaxIndustryWeight" type="number" min="0.01" max="100" step="0.01" value="30" /></label>
+                    <label><span>板块权重上限（%）</span><input id="strategyMaxBoardWeight" type="number" min="0.01" max="100" step="0.01" value="50" /></label>
+                    <label><span>计划持有（日）</span><input id="strategyHoldSessions" type="number" min="1" max="60" value="5" /></label>
+                    <label><span>新买入效用阈值</span><input id="strategyBuyThreshold" type="number" min="0" max="100" step="0.01" value="0" /></label>
+                    <label><span>继续持有效用阈值</span><input id="strategyHoldThreshold" type="number" min="0" max="100" step="0.01" value="0" /></label>
+                    <label><span>最低成交额（元）</span><input id="strategyMinAmount" type="number" min="0" max="1000000000000000" step="10000000" value="100000000" /></label>
+                    <label><span>最低质量</span><input id="strategyMinQuality" type="number" min="0" max="100" value="70" /></label>
+                    <label><span>最小持仓金额（元）</span><input id="strategyMinPositionAmount" type="number" min="0" max="1000000000" step="1000" value="5000" /></label>
+                    <label><span>日成交额容量上限（%）</span><input id="strategyCapacityPct" type="number" min="0.0001" max="5" step="0.01" value="0.1" /></label>
+                  </div>
+                  <fieldset class="strategy-custom-objectives" id="strategyCustomObjectivesField" hidden>
+                    <legend>自定义多目标权重（%）</legend>
+                    <label><span>Alpha 1d</span><input id="strategyObjectiveAlpha1d" type="number" min="0" max="100" step="0.01" value="5" /></label>
+                    <label><span>Alpha 5d</span><input id="strategyObjectiveAlpha5d" type="number" min="0" max="100" step="0.01" value="20" /></label>
+                    <label><span>Alpha 20d</span><input id="strategyObjectiveAlpha20d" type="number" min="0" max="100" step="0.01" value="35" /></label>
+                    <label><span>置信度</span><input id="strategyObjectiveConfidence" type="number" min="0" max="100" step="0.01" value="15" /></label>
+                    <label><span>风险</span><input id="strategyObjectiveRisk" type="number" min="0" max="100" step="0.01" value="15" /></label>
+                    <label><span>可交易性</span><input id="strategyObjectiveTradability" type="number" min="0" max="100" step="0.01" value="10" /></label>
+                  </fieldset>
+                  <label class="strategy-field-wide" id="strategyCustomWeightsField" hidden><span>自定义权重 JSON（股票代码 → 0~1 权重）</span><textarea id="strategyCustomWeights" rows="3" maxlength="4000" spellcheck="false" placeholder='{"600519.SH": 0.10}'>{}</textarea></label>
+                  <div class="strategy-editor-actions split">
+                    <label><span>已保存策略</span><select id="strategySavedSelect"><option value="">尚无策略</option></select></label>
+                    <span>
+                      <button type="button" class="mini-button" id="strategyLoad" disabled>载入</button>
+                      <button type="button" class="mini-button" id="strategyCopy" disabled>复制</button>
+                      <button type="button" id="strategySave" disabled>确认并保存</button>
+                    </span>
+                  </div>
+                </section>
+
+                <section class="strategy-lab-card strategy-plan" id="strategyPlan" aria-labelledby="strategyPlanTitle">
+                  <div class="strategy-lab-card-head"><div><span class="eyebrow">02 · Deterministic compile</span><h4 id="strategyPlanTitle">执行计划预览</h4></div><span class="strategy-state-pill" id="strategyPlanState">未编译</span></div>
+                  <div id="strategyPlanContent" class="strategy-plan-content"><p>解析草案后显示预计股票池、白名单过滤、依赖数据、目标顺序、组合约束与成本规则。预览不会启动扫描。</p></div>
+                  <div class="strategy-execution-toolbar">
+                    <label><span>名义资金</span><input id="strategyNotional" type="number" min="10000" max="1000000000" step="10000" value="1000000" /></label>
+                    <button type="button" id="strategyExecuteLatest" disabled>执行最近冻结榜单</button>
+                    <label><span>历史数据日</span><input id="strategyReplayDate" type="date" /></label>
+                    <button type="button" class="mini-button" id="strategyExecuteReplay" disabled>时点回放</button>
+                  </div>
+                  <div class="strategy-lifecycle-actions">
+                    <button type="button" class="mini-button" id="strategyCreateSimulation" disabled>生成模拟交易计划</button>
+                    <button type="button" class="mini-button" id="strategyCreateSchedule" disabled>保存盘后定时执行</button>
+                    <button type="button" class="mini-button danger" id="strategyArchive" disabled>归档策略</button>
+                  </div>
+                  <div id="strategyLifecycleContent" class="strategy-lifecycle-content"><p>模拟计划和定时任务会固定绑定当前策略版本与全部证据指纹。</p></div>
+                </section>
+              </div>
+
+              <section class="strategy-lab-card strategy-ranking" id="strategyRanking" aria-labelledby="strategyRankingTitle">
+                <div class="strategy-lab-card-head">
+                  <div><span class="eyebrow">03 · Independent objectives</span><h4 id="strategyRankingTitle">榜单与多目标视图</h4></div>
+                  <span id="strategyExecutionContext">尚未执行</span>
+                </div>
+                <div class="strategy-sort-tabs" role="group" aria-label="候选排序维度">
+                  <button type="button" class="active" data-strategy-sort="utility_score" aria-pressed="true">配置后效用</button>
+                  <button type="button" data-strategy-sort="original_rank" aria-pressed="false">生产原排名</button>
+                  <button type="button" data-strategy-sort="alpha_1d" aria-pressed="false">Alpha 1d</button>
+                  <button type="button" data-strategy-sort="alpha_5d" aria-pressed="false">Alpha 5d</button>
+                  <button type="button" data-strategy-sort="alpha_20d" aria-pressed="false">Alpha 20d</button>
+                  <button type="button" data-strategy-sort="confidence" aria-pressed="false">置信度</button>
+                  <button type="button" data-strategy-sort="risk" aria-pressed="false">风险</button>
+                  <button type="button" data-strategy-sort="tradability" aria-pressed="false">可交易性</button>
+                </div>
+                <div class="strategy-table-wrap" role="region" aria-label="策略候选分页表格" tabindex="0">
+                  <table><thead><tr><th>原排名 / 效用排名</th><th>股票 / 板块</th><th>效用 / Pareto</th><th>Alpha 1/5/20</th><th>置信 / 风险 / 可交易</th><th>状态</th><th>解释</th></tr></thead><tbody id="strategyCandidateRows"><tr><td colspan="7">执行策略后显示候选；每页最多 50 行。</td></tr></tbody></table>
+                </div>
+                <div class="strategy-pagination"><span id="strategyCandidatePage">--</span><span><button type="button" class="mini-button" id="strategyCandidatePrev" disabled>上一页</button><button type="button" class="mini-button" id="strategyCandidateNext" disabled>下一页</button></span></div>
+              </section>
+
+              <div class="strategy-lab-grid evidence-grid">
+                <section class="strategy-lab-card" id="strategyPortfolio" aria-labelledby="strategyPortfolioTitle">
+                  <div class="strategy-lab-card-head"><div><span class="eyebrow">04 · A-share constraints</span><h4 id="strategyPortfolioTitle">候选组合草案</h4></div><span id="strategyPortfolioState">等待执行</span></div>
+                  <div id="strategyPortfolioContent"><p>组合草案会单独标记 selected、rejected、constraint_adjusted、unfilled 或 no_trade，不会篡改生产原始排名。</p></div>
+                </section>
+                <section class="strategy-lab-card" id="strategyEvidence" aria-labelledby="strategyEvidenceTitle">
+                  <div class="strategy-lab-card-head"><div><span class="eyebrow">05 · Evaluation proof</span><h4 id="strategyEvidenceTitle">策略证据中心</h4></div><button type="button" class="mini-button" id="strategyEvidenceRefresh" disabled>刷新证据</button></div>
+                  <div id="strategyEvidenceContent"><p>这里会区分本策略执行证据与生产/Shadow 跨日期基线；样本不足时不会声称策略有效。</p></div>
+                </section>
+              </div>
+
+              <section class="strategy-lab-card executable-shadow-card" id="strategyExecutableShadow" aria-labelledby="executableShadowTitle" aria-busy="false">
+                <div class="strategy-lab-card-head">
+                  <div><span class="eyebrow">Shadow · On-demand projection</span><h4 id="executableShadowTitle">全市场可执行候选 Shadow</h4></div>
+                  <span class="strategy-state-pill">只读 · 不自动运行</span>
+                </div>
+                <p class="executable-shadow-intro">仅对一个已发布的盘后正式全市场冻结批次做按需投影。来源批次生产评分与排名保持不变；本面板不写数据库，也不生成已验证 Alpha。</p>
+                <form class="executable-shadow-form" id="executableShadowForm">
+                  <label><span>正式全市场 run_id</span><input id="executableShadowRunId" type="number" min="1" step="1" inputmode="numeric" required aria-describedby="executableShadowStatus" /></label>
+                  <label><span>名义资金（元）</span><input id="executableShadowNotional" type="number" min="10000" max="1000000000" step="10000" value="1000000" required /></label>
+                  <button type="button" class="mini-button" id="executableShadowUseCurrent">使用当前正式批次</button>
+                  <button type="submit" id="executableShadowGenerate">生成只读投影</button>
+                  <button type="button" class="mini-button" id="executableShadowCancel" hidden>取消</button>
+                </form>
+                <p class="executable-shadow-status" id="executableShadowStatus" role="status" aria-atomic="true" data-kind="idle">尚未请求。</p>
+                <div class="executable-shadow-result" id="executableShadowResult" data-state="idle"></div>
+              </section>
+
+              <section class="strategy-lab-card" id="strategyHistory" aria-labelledby="strategyHistoryTitle">
+                <div class="strategy-lab-card-head"><div><span class="eyebrow">06 · Reproducible history</span><h4 id="strategyHistoryTitle">历史执行与版本对比</h4></div><button type="button" class="mini-button" id="strategyHistoryRefresh" disabled>刷新历史</button></div>
+                <div class="strategy-history-controls">
+                  <label><span>左侧执行</span><select id="strategyCompareLeft"><option value="">请选择</option></select></label>
+                  <label><span>右侧执行</span><select id="strategyCompareRight"><option value="">请选择</option></select></label>
+                  <button type="button" class="mini-button" id="strategyCompare" disabled>比较股票池与排名</button>
+                  <label><span>左侧版本</span><select id="strategyVersionLeft"><option value="">请选择</option></select></label>
+                  <label><span>右侧版本</span><select id="strategyVersionRight"><option value="">请选择</option></select></label>
+                  <button type="button" class="mini-button" id="strategyVersionCompare" disabled>比较 StrategySpec</button>
+                </div>
+                <div id="strategyHistoryContent"><p>保存新 revision 不会修改旧版本；历史回放固定使用目标时点已发布的数据。</p></div>
+              </section>
+
+              <dialog id="strategyCandidateDialog" class="strategy-evidence-dialog" aria-labelledby="strategyCandidateDialogTitle">
+                <div class="strategy-lab-card-head"><h4 id="strategyCandidateDialogTitle">股票证据与反事实</h4><button type="button" class="mini-button" id="strategyCandidateDialogClose">关闭</button></div>
+                <div id="strategyCandidateDialogContent"></div>
+              </dialog>
+              <p class="strategy-lab-announcement" id="strategyLabAnnouncement" role="status" aria-live="polite" aria-atomic="true"></p>
+            </details>
+
+            <div class="market-scan-details" id="marketScanDetails" hidden>
             <section class="market-scan-observability" aria-label="扫描时效与分市场进度">
               <div class="market-scan-runtime-metrics">
                 <div><span>当前阶段</span><strong id="marketScanStage">--</strong></div>
@@ -269,71 +671,92 @@
               <div><span>有效排名</span><strong id="marketScanSuccess">--</strong></div>
               <div><span>缺失 / 跳过</span><strong id="marketScanIssues">--</strong></div>
               <div><span>有效覆盖率</span><strong id="marketScanCoverage">--</strong></div>
-              <div><span>最近扫描</span><strong id="marketScanFinishedAt">--</strong></div>
+              <div><span>执行完成时间</span><strong id="marketScanFinishedAt">--</strong></div>
               <div><span>规则版本</span><strong id="marketScanRule">--</strong></div>
             </div>
+            </div>
 
-            <section class="discovery-preset-controls" id="discoveryPresetControls" aria-label="榜单筛选方案" aria-busy="false">
-              <label>
-                <span>筛选方案</span>
-                <select id="discoveryPresetSelect" aria-describedby="discoveryPresetFeedback">
-                  <option value="">选择已保存方案</option>
-                </select>
-              </label>
-              <label class="discovery-preset-name">
-                <span>方案名称</span>
-                <input id="discoveryPresetName" maxlength="80" autocomplete="off" placeholder="输入方案名称" aria-describedby="discoveryPresetFeedback" />
-              </label>
-              <div class="discovery-preset-actions">
-                <button type="button" id="discoveryPresetSave">保存</button>
-                <button type="button" id="discoveryPresetApply" class="mini-button" disabled>应用方案</button>
-                <button type="button" id="discoveryPresetRename" class="mini-button" disabled>重命名</button>
-                <button type="button" id="discoveryPresetExport" class="mini-button" disabled>导出方案</button>
-                <button type="button" id="discoveryPresetImport" class="mini-button">导入方案</button>
-                <input id="discoveryPresetImportFile" type="file" accept="application/json,.json" hidden />
-                <button type="button" id="discoveryPresetDelete" class="mini-button danger" disabled>删除</button>
-              </div>
-              <p id="discoveryPresetFeedback"></p>
-              <p id="discoveryRankSummary" hidden></p>
-            </section>
-
+            <div class="market-scan-filter-panel" id="marketScanFilterPanel" hidden>
             <form class="market-scan-filters" id="marketScanFilters">
+              <div class="market-scan-filter-section-heading"><strong>常用筛选</strong><span>保留日常选股最常用的条件</span></div>
               <label><span>状态</span><select id="marketScanStatus"><option value="success">有效排名</option><option value="missing">数据缺失</option><option value="skipped">已跳过</option><option value="pending">待处理</option><option value="all">全部状态</option></select></label>
               <label><span>市场（可多选）</span><select id="marketScanMarket" multiple size="3" aria-label="市场，可多选"><option value="SH">沪市</option><option value="SZ">深市</option><option value="BJ">北交所</option></select></label>
               <label><span>行业（逗号分隔）</span><input id="marketScanIndustry" maxlength="800" placeholder="银行，半导体" /></label>
               <label><span>ST</span><select id="marketScanSt"><option value="">不限</option><option value="true">仅 ST</option><option value="false">排除 ST</option></select></label>
               <label><span>新股</span><select id="marketScanNew"><option value="">不限</option><option value="true">仅新股</option><option value="false">排除新股</option></select></label>
-              <fieldset class="market-scan-range"><legend>强势分</legend><input id="marketScanScoreMin" type="number" min="0" max="100" step="1" placeholder="最小" aria-label="强势分最小值" /><span>—</span><input id="marketScanScoreMax" type="number" min="0" max="100" step="1" placeholder="最大" aria-label="强势分最大值" /></fieldset>
-              <fieldset class="market-scan-range"><legend>趋势分</legend><input id="marketScanTrendMin" type="number" min="0" max="100" step="1" placeholder="最小" aria-label="趋势分最小值" /><span>—</span><input id="marketScanTrendMax" type="number" min="0" max="100" step="1" placeholder="最大" aria-label="趋势分最大值" /></fieldset>
-              <fieldset class="market-scan-range"><legend>涨跌幅 (%)</legend><input id="marketScanChangeMin" type="number" min="-1000" max="1000" step="0.01" placeholder="最小" aria-label="涨跌幅最小值" /><span>—</span><input id="marketScanChangeMax" type="number" min="-1000" max="1000" step="0.01" placeholder="最大" aria-label="涨跌幅最大值" /></fieldset>
-              <fieldset class="market-scan-range"><legend>换手率 (%)</legend><input id="marketScanTurnoverMin" type="number" min="0" max="10000" step="0.01" placeholder="最小" aria-label="换手率最小值" /><span>—</span><input id="marketScanTurnoverMax" type="number" min="0" max="10000" step="0.01" placeholder="最大" aria-label="换手率最大值" /></fieldset>
-              <fieldset class="market-scan-range"><legend>成交额（元）</legend><input id="marketScanAmountMin" type="number" min="0" max="1000000000000000" step="1" placeholder="最小" aria-label="成交额最小值" /><span>—</span><input id="marketScanAmountMax" type="number" min="0" max="1000000000000000" step="1" placeholder="最大" aria-label="成交额最大值" /></fieldset>
-              <fieldset class="market-scan-range"><legend>数据质量</legend><input id="marketScanQuality" type="number" min="0" max="100" step="1" placeholder="最小" aria-label="数据质量最小值" /><span>—</span><input id="marketScanQualityMax" type="number" min="0" max="100" step="1" placeholder="最大" aria-label="数据质量最大值" /></fieldset>
               <label><span>搜索</span><input id="marketScanKeyword" maxlength="80" placeholder="代码或名称" /></label>
-              <label><span>一级排序</span><select id="marketScanSort"><option value="rank">短线强势排名</option><option value="score">短线强势分</option><option value="raw_score">原始得分</option><option value="trend_score">趋势分</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
+              <label><span>最低趋势强度</span><input id="marketScanScoreMin" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="趋势强度最小值" /></label>
+              <label><span>最低数据质量</span><input id="marketScanQuality" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="数据质量最小值" /></label>
+              <label><span>一级排序</span><select id="marketScanSort"><option value="rank">趋势强度排名</option><option value="score">趋势强度</option><option value="raw_score">原始得分</option><option value="trend_score">基础趋势分</option><option value="alpha_5d">5日 Alpha（研究）</option><option value="confidence">置信度（研究）</option><option value="risk">风险分（研究）</option><option value="tradability">可交易性（研究）</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
               <label><span>一级方向</span><select id="marketScanOrder"><option value="asc">升序</option><option value="desc">降序</option></select></label>
-              <label><span>二级排序</span><select id="marketScanSort2"><option value="">不启用</option><option value="rank">短线强势排名</option><option value="score">短线强势分</option><option value="raw_score">原始得分</option><option value="trend_score">趋势分</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
-              <label><span>二级方向</span><select id="marketScanOrder2"><option value="desc">降序</option><option value="asc">升序</option></select></label>
-              <label><span>三级排序</span><select id="marketScanSort3"><option value="">不启用</option><option value="rank">短线强势排名</option><option value="score">短线强势分</option><option value="raw_score">原始得分</option><option value="trend_score">趋势分</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
-              <label><span>三级方向</span><select id="marketScanOrder3"><option value="desc">降序</option><option value="asc">升序</option></select></label>
+              <details class="market-scan-advanced-filters" id="marketScanAdvancedFilters">
+                <summary><span><strong>高级筛选</strong><small>指标区间、成交额和多级排序</small></span><em>按需展开</em></summary>
+                <div class="market-scan-advanced-filter-grid">
+                  <label><span>趋势强度上限</span><input id="marketScanScoreMax" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="趋势强度最大值" /></label>
+                  <label><span>数据质量上限</span><input id="marketScanQualityMax" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="数据质量最大值" /></label>
+                  <label><span>最低置信度</span><input id="marketScanConfidenceMin" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="最低置信度；序数研究分" /></label>
+                  <label><span>最高风险分</span><input id="marketScanRiskMax" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="最高风险分；分数越高风险越大" /></label>
+                  <label><span>最低可交易性</span><input id="marketScanTradabilityMin" type="number" min="0" max="100" step="1" placeholder="不限" aria-label="最低可交易性；序数研究分" /></label>
+                  <label><span>最低上涨概率 (%)</span><input id="marketScanProbabilityMin" type="number" min="0" max="100" step="0.1" placeholder="概率不可用" aria-describedby="marketScanProbabilityFilterHelp" disabled /><small id="marketScanProbabilityFilterHelp">当前批次尚未生成 Shadow 研究，概率筛选不可用。</small></label>
+                  <fieldset class="market-scan-range"><legend>趋势分</legend><input id="marketScanTrendMin" type="number" min="0" max="100" step="1" placeholder="最小" aria-label="趋势分最小值" /><span>—</span><input id="marketScanTrendMax" type="number" min="0" max="100" step="1" placeholder="最大" aria-label="趋势分最大值" /></fieldset>
+                  <fieldset class="market-scan-range"><legend>涨跌幅 (%)</legend><input id="marketScanChangeMin" type="number" min="-1000" max="1000" step="0.01" placeholder="最小" aria-label="涨跌幅最小值" /><span>—</span><input id="marketScanChangeMax" type="number" min="-1000" max="1000" step="0.01" placeholder="最大" aria-label="涨跌幅最大值" /></fieldset>
+                  <fieldset class="market-scan-range"><legend>换手率 (%)</legend><input id="marketScanTurnoverMin" type="number" min="0" max="10000" step="0.01" placeholder="最小" aria-label="换手率最小值" /><span>—</span><input id="marketScanTurnoverMax" type="number" min="0" max="10000" step="0.01" placeholder="最大" aria-label="换手率最大值" /></fieldset>
+                  <fieldset class="market-scan-range"><legend>成交额（元）</legend><input id="marketScanAmountMin" type="number" min="0" max="1000000000000000" step="1" placeholder="最小" aria-label="成交额最小值" /><span>—</span><input id="marketScanAmountMax" type="number" min="0" max="1000000000000000" step="1" placeholder="最大" aria-label="成交额最大值" /></fieldset>
+                  <label><span>二级排序</span><select id="marketScanSort2"><option value="">不启用</option><option value="rank">趋势强度排名</option><option value="score">趋势强度</option><option value="raw_score">原始得分</option><option value="trend_score">基础趋势分</option><option value="alpha_5d">5日 Alpha（研究）</option><option value="confidence">置信度（研究）</option><option value="risk">风险分（研究）</option><option value="tradability">可交易性（研究）</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
+                  <label><span>二级方向</span><select id="marketScanOrder2"><option value="desc">降序</option><option value="asc">升序</option></select></label>
+                  <label><span>三级排序</span><select id="marketScanSort3"><option value="">不启用</option><option value="rank">趋势强度排名</option><option value="score">趋势强度</option><option value="raw_score">原始得分</option><option value="trend_score">基础趋势分</option><option value="alpha_5d">5日 Alpha（研究）</option><option value="confidence">置信度（研究）</option><option value="risk">风险分（研究）</option><option value="tradability">可交易性（研究）</option><option value="change_pct">涨跌幅</option><option value="amount">成交额</option><option value="turnover_rate">换手率</option><option value="data_quality_score">数据质量</option><option value="symbol">股票代码</option></select></label>
+                  <label><span>三级方向</span><select id="marketScanOrder3"><option value="desc">降序</option><option value="asc">升序</option></select></label>
+                </div>
+              </details>
               <div class="market-scan-filter-actions">
                 <button type="submit">应用</button>
                 <button type="reset" class="mini-button">重置</button>
               </div>
             </form>
-
-            <div class="discovery-bulk-controls" id="discoveryBulkControls" hidden>
-              <label><input id="discoverySelectPage" type="checkbox" />选择当前页</label>
-              <span id="discoverySelectedCount">已选 0 项</span>
-              <button type="button" id="discoveryEnqueueSelected" class="mini-button" disabled>批量加入已选</button>
-              <button type="button" id="discoveryEnqueueAll" class="mini-button">将当前筛选结果全部加入</button>
             </div>
+
+            <details class="market-scan-screening-workbench" id="marketScanScreeningWorkbench" aria-busy="false">
+              <summary>
+                <span class="market-scan-screening-summary-copy">
+                  <span class="market-scan-screening-kicker">冻结证据 · 不请求当前行情</span>
+                  <strong id="marketScanScreeningTitle">可信筛选工作台</strong>
+                  <small>市场宽度、筛选漏斗、近失候选与同 cohort 变化</small>
+                </span>
+                <span class="market-scan-screening-summary-status" id="marketScanScreeningSummaryStatus" data-kind="idle">展开后读取</span>
+              </summary>
+              <div class="market-scan-screening-body" aria-labelledby="marketScanScreeningTitle">
+                <div class="market-scan-screening-intro">
+                  <div>
+                    <p>所有聚合与条件均在当前冻结批次内计算；空值保持缺失，不会当作 0，也不会重新计算生产评分。</p>
+                    <p class="market-scan-screening-evidence" id="marketScanScreeningEvidence">等待冻结批次</p>
+                  </div>
+                  <button type="button" class="mini-button" id="marketScanScreeningRefresh" disabled>重新读取</button>
+                </div>
+                <p class="market-scan-screening-feedback" id="marketScanScreeningFeedback" role="status">首次展开后按当前筛选条件读取。</p>
+                <section class="market-scan-screening-spec-section" aria-labelledby="marketScanScreeningSpecTitle">
+                  <div class="market-scan-screening-section-head"><div><h5 id="marketScanScreeningSpecTitle">ScreenSpecV2</h5><p>直接来自当前页面筛选状态；未支持的条件会明确报错，不会静默忽略。</p></div></div>
+                  <div class="market-scan-screening-spec" id="marketScanScreeningSpec"></div>
+                </section>
+                <section class="market-scan-screening-region" id="marketScanScreeningBreadth" aria-label="市场宽度摘要"></section>
+                <section class="market-scan-screening-region" id="marketScanScreeningEvaluation" aria-label="筛选漏斗与近失候选"></section>
+                <section class="market-scan-screening-region" id="marketScanScreeningDiff" aria-label="同 cohort 变化"></section>
+              </div>
+            </details>
+
+            <fieldset class="market-scan-column-views" id="marketScanColumnViews" aria-controls="marketScanTable">
+              <legend>榜单列视图</legend>
+              <label><input type="radio" id="marketScanColumnOverview" name="marketScanColumnView" value="overview" checked /><span>概览</span></label>
+              <label><input type="radio" id="marketScanColumnTrend" name="marketScanColumnView" value="trend" /><span>趋势</span></label>
+              <label><input type="radio" id="marketScanColumnLiquidity" name="marketScanColumnView" value="liquidity" /><span>流动性</span></label>
+              <label><input type="radio" id="marketScanColumnRisk" name="marketScanColumnView" value="risk" /><span>风险</span></label>
+              <label><input type="radio" id="marketScanColumnResearch" name="marketScanColumnView" value="research" /><span>研究</span></label>
+            </fieldset>
 
             <p class="market-scan-announcement" id="marketScanAnnouncement" role="status" aria-live="polite" aria-atomic="true" aria-relevant="text"></p>
             <div class="market-scan-result-state" id="marketScanResultState">暂无榜单数据</div>
             <div class="market-scan-table-wrap" id="marketScanTableWrap" role="region" aria-label="全市场扫描榜单" aria-busy="false" tabindex="0" hidden>
-              <table class="market-scan-table">
-                <thead><tr><th>排名</th><th>股票</th><th>市场 / 行业</th><th>短线强势</th><th>趋势</th><th>涨跌幅</th><th>换手率</th><th>成交额</th><th>质量</th><th>状态 / 标签</th></tr></thead>
+              <table class="market-scan-table" id="marketScanTable" data-column-view="overview">
+                <thead><tr><th>排名</th><th>股票</th><th>上市板块 / 行业</th><th title="生产 v4 的序数趋势状态分，不代表上涨概率">趋势强度</th><th title="样本外上涨概率与独立研究维度；均不参与生产 v4 排名">研究信号</th><th>涨跌幅</th><th>换手率</th><th>成交额</th><th>质量</th><th>状态 / 标签</th></tr></thead>
                 <tbody id="marketScanRows"></tbody>
               </table>
             </div>
@@ -344,6 +767,14 @@
                 <button type="button" class="mini-button" id="marketScanNext">下一页</button>
               </div>
             </div>
+
+            <div class="discovery-bulk-controls" id="discoveryBulkControls" hidden>
+              <label><input id="discoverySelectPage" type="checkbox" />选择当前页</label>
+              <span id="discoverySelectedCount">已选 0 项</span>
+              <button type="button" id="discoveryEnqueueSelected" class="mini-button" disabled>批量加入已选</button>
+              <button type="button" id="discoveryEnqueueAll" class="mini-button">将当前筛选结果全部加入</button>
+            </div>
+
           </section>
         </section>
 
@@ -429,10 +860,10 @@
         </section>
 
         <section class="workspace-view" id="workspace-panel-replay" data-view-panel="replay" role="tabpanel" aria-labelledby="workspace-tab-replay">
-          <section class="panel review-dashboard-panel" aria-labelledby="reviewDashboardTitle">
+          <section class="panel review-dashboard-panel" aria-labelledby="reviewDashboardTitle" data-layout-collapsible>
             <div class="panel-title">
               <span id="reviewDashboardTitle">全局复盘看板</span>
-              <small>全部计划 / 到期队列 / 当前版本统计</small>
+              <small>本地 Research Shadow / 到期队列 / 当前版本统计 / production_effect=none</small>
             </div>
             <div class="review-dashboard-actions">
               <label><span>状态</span><select id="reviewDashboardStatus"><option value="all">全部</option><option value="due">已到期</option><option value="pending">待评估</option><option value="evaluated">已评估</option><option value="insufficient">数据不足</option></select></label>
@@ -442,12 +873,14 @@
               <button type="button" class="mini-button primary" id="evaluateDueReviews">批量评估到期计划</button>
             </div>
             <p id="reviewDashboardFeedback" role="status" aria-live="polite" hidden></p>
-            <div id="reviewDashboardSummary" class="review-dashboard-summary"><div class="review-plan-state"><strong>正在读取全局复盘统计</strong></div></div>
-            <div id="reviewDashboardQueue" class="review-dashboard-queue"></div>
+            <p class="review-shadow-boundary">统计来自本地冻结计划的价格路径观察，不代表真实成交、可执行收益或正式投资建议；有利比例只使用有利/不利已决样本为分母。</p>
+            <div id="reviewDashboardSummary" class="review-dashboard-summary" role="region" aria-label="全局复盘统计" aria-live="polite" aria-busy="true"><div class="review-plan-state"><strong>正在读取全局复盘统计</strong></div></div>
+            <div id="reviewDashboardQueue" class="review-dashboard-queue" role="region" aria-label="复盘到期队列" aria-live="polite" aria-busy="true"></div>
           </section>
-          <section class="panel advice-review-panel">
+          <section class="panel advice-review-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>建议复盘计划</span><small>快照绑定 / 无前视评估</small></div>
             <form id="reviewPlanForm" class="review-plan-form">
+              <label class="review-plan-wide review-advice-search"><span>查找建议快照</span><input id="reviewAdviceSearch" type="search" autocomplete="off" placeholder="输入股票、日期或建议关键词" aria-describedby="reviewAdviceSearchFeedback" /><small id="reviewAdviceSearchFeedback">可先缩小快照范围，再从下方选择</small></label>
               <label class="review-plan-wide"><span>建议快照</span><select id="reviewAdviceId" aria-label="建议快照"><option value="">等待建议记录</option></select></label>
               <label><span>目标价</span><input id="reviewTarget" type="number" min="0.01" step="0.01" required /></label>
               <label><span>止损价</span><input id="reviewStop" type="number" min="0.01" step="0.01" required /></label>
@@ -467,7 +900,7 @@
             <div id="reviewPlanList" class="review-plan-list"></div>
             <div class="review-plan-pagination"><button type="button" class="mini-button" id="reviewPlanLoadMore" hidden>加载更早计划</button></div>
           </section>
-          <section class="panel watchlist-scan-panel">
+          <section class="panel watchlist-scan-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>观察池条件扫描</span><small>固定规则 / 完整日K</small></div>
             <div class="watchlist-scan-history-controls">
               <label><span>扫描历史</span><select id="watchlistScanHistory"><option value="">暂无历史记录</option></select></label>
@@ -505,24 +938,24 @@
             </form>
             <div id="watchlistScanResults" class="watchlist-scan-results" role="status" aria-live="polite" aria-busy="false"><div class="scan-state"><strong>等待扫描</strong></div></div>
           </section>
-          <section class="panel review-panel">
+          <section class="panel review-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>历史复盘</span><small>单股表现校验</small></div>
             <div class="review-summary" id="reviewSummary">正在加载历史复盘...</div>
             <div class="review-grid" id="reviewPoints"></div>
             <div class="review-events" id="reviewEvents"></div>
           </section>
-          <section class="panel replay-panel">
+          <section class="panel replay-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>信号回放</span><small>历史相似信号验证</small></div>
             <div class="replay-box" id="replayPanel"></div>
           </section>
-          <section class="panel event-panel">
+          <section class="panel event-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>事件摘要</span><small>行情复盘 + 行业 + 数据提醒</small></div>
             <div class="event-list" id="stockEvents"></div>
           </section>
         </section>
 
         <section class="workspace-view" id="workspace-panel-paper" data-view-panel="paper" role="tabpanel" aria-labelledby="workspace-tab-paper">
-          <section class="panel paper-trading-panel" aria-labelledby="paperTradingTitle">
+          <section class="panel paper-trading-panel" aria-labelledby="paperTradingTitle" data-layout-collapsible>
             <div class="panel-title">
               <span id="paperTradingTitle">模拟交易账户</span>
               <small>复盘计划 / 无前视日线撮合 / 不连接券商</small>
@@ -541,7 +974,7 @@
             <div id="paperTradingSummary" class="paper-trading-summary"><div class="review-plan-state"><strong>正在读取模拟账户</strong></div></div>
           </section>
 
-          <section class="panel paper-strategy-create-panel">
+          <section class="panel paper-strategy-create-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>加入冻结策略</span><small>激活后的首个完整交易日开盘入场</small></div>
             <form id="paperStrategyForm" class="paper-strategy-form">
               <label><span>复盘计划</span><select id="paperReviewPlan" required><option value="">等待复盘计划</option></select></label>
@@ -553,7 +986,7 @@
             <div id="paperStrategyList" class="paper-strategy-list"></div>
           </section>
 
-          <section class="panel paper-run-panel">
+          <section class="panel paper-run-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>不可变运行</span><small>历史切换 / 情景对比 / 导出</small></div>
             <div class="paper-run-actions">
               <label><span>当前查看</span><select id="paperRunHistory"><option value="">选择运行</option></select></label>
@@ -572,27 +1005,27 @@
           </section>
 
           <section class="paper-trading-grid">
-            <section class="panel">
+            <section class="panel" data-layout-collapsible data-layout-default-mobile="closed">
               <div class="panel-title"><span>净值 / 基准 / 回撤</span><small>含交易标记与估算退出成本</small></div>
               <div id="paperEquityChart" class="paper-equity-chart" role="img" aria-label="模拟账户净值曲线"></div>
             </section>
-            <section class="panel">
+            <section class="panel" data-layout-collapsible data-layout-default-mobile="closed">
               <div class="panel-title"><span>当前持仓</span><small>成本 / 浮盈亏 / 风控价</small></div>
               <div id="paperPositionList" class="paper-table-wrap"></div>
             </section>
           </section>
 
-          <section class="panel">
+          <section class="panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>模拟成交</span><small>成交价 / 数量 / 摩擦成本 / 原因</small></div>
             <div id="paperTradeList" class="paper-table-wrap"></div>
           </section>
 
-          <section class="panel">
+          <section class="panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>逐日事件流水</span><small>未成交 / T+1 / 规则降级 / 退出解释</small></div>
             <div id="paperEventList" class="paper-table-wrap"></div>
           </section>
 
-          <section class="panel paper-rule-panel">
+          <section class="panel paper-rule-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>模型边界</span><small>结果解读前请确认</small></div>
             <ul id="paperTradingNotes" class="paper-trading-notes"></ul>
           </section>
@@ -681,7 +1114,11 @@
             <p class="local-data-intro">导入、完整替换和保留策略清理会改变本地记录。请先导出备份，并在预览确认影响范围后再执行。</p>
             <div class="local-data-actions">
               <button type="button" id="exportLocalData">导出用户数据</button>
-              <input type="file" id="localDataImportFile" accept="application/json,.json" aria-label="选择用户数据文件" />
+              <label class="local-data-file-picker">
+                <input type="file" id="localDataImportFile" accept="application/json,.json" aria-label="选择用户数据文件" />
+                <span aria-hidden="true">选择备份文件</span>
+                <small id="localDataImportFileName" aria-live="polite">尚未选择文件</small>
+              </label>
               <select id="localDataImportMode" aria-label="导入模式"><option value="merge">合并</option><option value="replace">完整替换</option></select>
               <button type="button" id="previewLocalDataImport">预览导入</button>
               <button type="button" id="commitLocalDataImport" disabled>确认导入</button>
@@ -699,7 +1136,7 @@
 
       <section class="control-panel" data-primary-regions="monitor" hidden>
         <div class="watchlist-box">
-          <div class="panel-title compact"><span>我的自选</span><small>个人关注</small></div>
+          <div class="panel-title compact"><span>我的自选</span><small>个人关注</small><button type="button" class="mini-button layout-toggle" id="watchFormToggle" aria-controls="watchForm" aria-expanded="true" data-open-label="收起新增" data-closed-label="新增自选">收起新增</button></div>
           <form class="watch-form" id="watchForm" aria-busy="false">
             <div class="stock-search-field watch-stock-search">
               <input id="watchSymbolInput" value="600519" maxlength="30" autocomplete="off" placeholder="股票代码或名称" aria-label="自选股票代码或名称" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="watchSymbolSuggestions" />
@@ -739,7 +1176,7 @@
           <strong>新手提示</strong>
           <p>平台只做研究分析和风险提示，不替代你的交易决策。实盘前请确认行情授权、交易规则和自己的仓位计划。</p>
         </div>
-        <div class="data-health">
+        <div class="data-health" data-layout-collapsible data-layout-default-mobile="closed">
           <div class="panel-title compact"><span>数据源状态</span><small id="cachePath">--</small></div>
           <div id="sourcePlan" class="source-plan"></div>
           <div id="providerStatus" class="provider-status"></div>
@@ -747,7 +1184,7 @@
           <div id="storageDiagnostics" class="storage-diagnostics"></div>
           <div id="diagnosticMessages" class="diagnostic-messages"></div>
         </div>
-        <div class="data-monitor">
+        <div class="data-monitor" data-layout-collapsible data-layout-default-mobile="closed">
           <div class="panel-title compact"><span>本地监控</span><small id="schedulerState">待连接</small></div>
           <div id="taskCards" class="task-cards"></div>
           <div class="monitor-actions">
@@ -783,6 +1220,8 @@
       <span>研究辅助工具，不构成投资建议</span>
     </footer>
 
-    <script type="module" src="/static/app.js?v=20260730-paper-trading-2"></script>
+    <script type="module" src="/static/js/layout-optimizations.js?v=20260815-market-scan-busy-local-1"></script>
+    <script type="module" src="/static/js/market-scan-screening.js?v=20260815-market-scan-busy-local-1"></script>
+    <script type="module" src="/static/app.js?v=20260815-market-scan-busy-local-1"></script>
   </body>
 </html>

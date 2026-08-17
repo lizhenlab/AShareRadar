@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.api.container import AppContainer
 from app.api.errors import run_sync_api_async
+from app.api.market_scan_read_admission import run_admitted_market_scan_read
 from app.config import Settings
 from app.main import create_app
 from app.services.workbench_context import WorkbenchContextCache
@@ -107,6 +108,14 @@ class _StuckDataHubStub:
             return False
         await asyncio.Event().wait()
         return False
+
+
+class _TrackingMarketScanAdmission:
+    def __init__(self, close_events: list[str]) -> None:
+        self.close_events = close_events
+
+    async def aclose(self) -> None:
+        self.close_events.append("market-scan-reads")
 
 
 def _static_tree(root: Path) -> Path:
@@ -236,6 +245,58 @@ def test_readiness_is_generic_and_unavailable_when_sqlite_probe_fails(tmp_path: 
         "runtime": "single",
     }
     assert "/private/secret" not in response.text
+
+
+def test_lifespan_drains_market_scan_reads_before_runtime_and_storage_close(tmp_path: Path) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(cache_path=tmp_path / "never-created.sqlite3", scheduler_enabled=False)
+    container = _container(settings)
+    close_events = container.workbench_contexts.close_events  # type: ignore[attr-defined]
+    container.market_scan_heavy_read_admission = _TrackingMarketScanAdmission(close_events)  # type: ignore[assignment]
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+
+    with TestClient(application):
+        pass
+
+    assert close_events == ["market-scan-reads", "runtime", "workbench", "datahub"]
+
+
+def test_lifespan_waits_for_cancelled_request_worker_before_closing_resources(tmp_path: Path) -> None:
+    static_dir = _static_tree(tmp_path)
+    settings = Settings(cache_path=tmp_path / "never-created.sqlite3", scheduler_enabled=False)
+    container = _container(settings)
+    close_events = container.workbench_contexts.close_events  # type: ignore[attr-defined]
+    started, release = threading.Event(), threading.Event()
+    application = create_app(settings=settings, container_factory=lambda: container, static_dir=static_dir)
+
+    def admitted_read() -> None:
+        close_events.append("worker-start")
+        started.set()
+        assert release.wait(timeout=5)
+        close_events.append("worker-finish")
+
+    async def scenario() -> None:
+        lifespan = application.router.lifespan_context(application)
+        await lifespan.__aenter__()
+        caller = asyncio.create_task(
+            run_admitted_market_scan_read(container.market_scan_heavy_read_admission, admitted_read)
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+        assert close_events == ["worker-start"]
+
+        release.set()
+        await shutdown
+
+    asyncio.run(scenario())
+
+    assert close_events == ["worker-start", "worker-finish", "runtime", "workbench", "datahub"]
 
 
 def test_separate_apps_receive_separate_lifespan_containers(tmp_path: Path) -> None:

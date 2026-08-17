@@ -12,7 +12,7 @@ from app.services.indicator_math import (
     volatility,
 )
 from app.services.indicator_trend import trend_score, trend_score_snapshot
-from app.services.indicator_volume import average_volume, recent_volume_ratio
+from app.services.indicator_volume import average_volume, recent_volume_ratio, recent_volume_ratio_if_available
 
 
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "moving_average",
     "pct_change",
     "recent_volume_ratio",
+    "recent_volume_ratio_if_available",
     "support_resistance",
     "trend_days",
     "trend_score",

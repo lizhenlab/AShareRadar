@@ -4,6 +4,7 @@ import asyncio
 from contextlib import redirect_stderr
 from datetime import date, datetime, timedelta
 import io
+import json
 import math
 import re
 import sqlite3
@@ -42,7 +43,9 @@ from app.services.akshare_mappers import (
     stock_info_from_code_name_row,
 )
 from app.services.eastmoney_client import (
+    EASTMONEY_INDUSTRY_PLATE_MAX_BYTES,
     eastmoney_get_json,
+    eastmoney_industry_plate_rank,
     eastmoney_kline,
     eastmoney_minute_kline,
     eastmoney_no_proxy,
@@ -306,6 +309,194 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 eastmoney_get_json("http://example.test/quote", {})
 
         session.assert_not_called()
+
+    def test_eastmoney_plate_rank_uses_one_bounded_page_and_maps_rows(self) -> None:
+        payload = json.dumps(
+            {
+                "rc": 0,
+                "data": {
+                    "total": 2,
+                    "diff": [
+                        {"f3": 3.5, "f6": 1200, "f8": 1.2, "f12": "BK1036", "f14": "半导体", "f128": "领涨A", "f136": 9.8},
+                        {"f3": 2.1, "f6": 800, "f8": 0.8, "f12": "BK0737", "f14": "软件开发", "f128": "", "f136": "-"},
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ).encode()
+        calls: list[dict[str, object]] = []
+
+        class FakeResponse:
+            status_code = 200
+            headers = {"Content-Length": str(len(payload))}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_content(self, *, chunk_size: int):
+                self.assert_chunk_size = chunk_size
+                yield payload
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def get(self, _url, **kwargs):
+                calls.append(kwargs)
+                return FakeResponse()
+
+        with patch("app.services.eastmoney_client._eastmoney_session", return_value=FakeSession()):
+            rows = eastmoney_industry_plate_rank(limit=1)
+
+        self.assertEqual([item.name for item in rows], ["半导体"])
+        self.assertEqual(rows[0].change_pct, 3.5)
+        self.assertEqual(rows[0].source, "AKShare·东方财富直连")
+        self.assertEqual(calls[0]["params"]["pn"], "1")
+        self.assertEqual(calls[0]["params"]["pz"], "100")
+        self.assertEqual(calls[0]["timeout"], (2.0, 2.0))
+        self.assertIs(calls[0]["stream"], True)
+        self.assertIs(calls[0]["allow_redirects"], False)
+
+    def test_eastmoney_plate_rank_rejects_redirect_without_following(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class RedirectResponse:
+            status_code = 302
+            headers = {"Location": "http://redirect.invalid/unbounded"}
+
+            def iter_content(self, *, chunk_size: int):
+                raise AssertionError(f"redirect response must not be read: {chunk_size}")
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def get(self, _url, **kwargs):
+                calls.append(kwargs)
+                return RedirectResponse()
+
+        with patch("app.services.eastmoney_client._eastmoney_session", return_value=FakeSession()), patch(
+            "app.services.eastmoney_client.json.loads",
+            side_effect=AssertionError("redirect response must not decode"),
+        ):
+            with self.assertRaisesRegex(ProviderProtocolError, "HTTP 状态异常：302"):
+                eastmoney_industry_plate_rank()
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0]["allow_redirects"], False)
+
+    def test_eastmoney_plate_rank_rejects_oversized_body_before_json_decode(self) -> None:
+        class OversizedResponse:
+            status_code = 200
+            headers = {"Content-Length": str(EASTMONEY_INDUSTRY_PLATE_MAX_BYTES + 1)}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_content(self, *, chunk_size: int):
+                raise AssertionError(f"oversized response must not stream: {chunk_size}")
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return OversizedResponse()
+
+        with patch("app.services.eastmoney_client._eastmoney_session", return_value=FakeSession()), patch(
+            "app.services.eastmoney_client.json.loads",
+            side_effect=AssertionError("oversized response must not decode"),
+        ):
+            with self.assertRaisesRegex(ProviderProtocolError, "超过大小上限"):
+                eastmoney_industry_plate_rank()
+
+    def test_eastmoney_plate_rank_rejects_unbounded_or_incomplete_pagination(self) -> None:
+        for total, rows in ((101, []), (2, [{"f3": 1, "f12": "BK0001", "f14": "仅一行"}])):
+            payload = json.dumps({"rc": 0, "data": {"total": total, "diff": rows}}).encode()
+
+            class FakeResponse:
+                status_code = 200
+                headers: dict[str, str] = {}
+
+                def __init__(self, body: bytes) -> None:
+                    self.body = body
+
+                def raise_for_status(self) -> None:
+                    return None
+
+                def iter_content(self, *, chunk_size: int):
+                    del chunk_size
+                    yield self.body
+
+            class FakeSession:
+                def __init__(self, body: bytes) -> None:
+                    self.body = body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb) -> None:
+                    return None
+
+                def get(self, *_args, **_kwargs):
+                    return FakeResponse(self.body)
+
+            with self.subTest(total=total), patch(
+                "app.services.eastmoney_client._eastmoney_session",
+                return_value=FakeSession(payload),
+            ):
+                with self.assertRaisesRegex(ProviderProtocolError, "单页边界|diff 与 total"):
+                    eastmoney_industry_plate_rank()
+
+    def test_eastmoney_plate_rank_stops_stream_at_internal_deadline(self) -> None:
+        class SlowResponse:
+            status_code = 200
+            headers: dict[str, str] = {}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_content(self, *, chunk_size: int):
+                del chunk_size
+                yield b'{"rc":0}'
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return SlowResponse()
+
+        with patch("app.services.eastmoney_client._eastmoney_session", return_value=FakeSession()), patch(
+            "app.services.eastmoney_client.time.monotonic",
+            side_effect=(100.0, 105.0),
+        ):
+            with self.assertRaisesRegex(ProviderTransportError, "内部截止时间"):
+                eastmoney_industry_plate_rank()
+
+    def test_akshare_plate_rank_does_not_enter_akshare_sdk_pagination(self) -> None:
+        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        direct = _plate_item().model_copy(update={"source": "AKShare·东方财富直连"})
+
+        with patch("app.services.akshare_provider._import_akshare", side_effect=AssertionError("SDK must not run")), patch(
+            "app.services.akshare_provider._eastmoney_industry_plate_rank",
+            return_value=[direct],
+        ):
+            rows = asyncio.run(provider.plate_rank(limit=1))
+
+        self.assertEqual(rows, [direct])
 
     def test_eastmoney_light_quote_maps_to_quote_model(self) -> None:
         quote = eastmoney_quote_from_row(
@@ -653,7 +844,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             def __getitem__(self, key):
                 if isinstance(key, str):
                     return FakeSeries([row[key] for row in self.rows])
-                return FakeFrame([row for row, include in zip(self.rows, key) if include])
+                return FakeFrame([row for row, include in zip(self.rows, key, strict=True) if include])
 
             def iterrows(self):
                 return iter(enumerate(self.rows))
@@ -735,6 +926,18 @@ class DataSourceReliabilityTests(unittest.TestCase):
         class FakeFrame:
             def iterrows(self):
                 return iter(enumerate([{"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38}]))
+
+        with self.assertRaisesRegex(ProviderProtocolError, "缺少可解析的事件时间"):
+            _ordered_spot_quotes(FakeFrame(), ["600519"], "AKShare")
+
+    def test_akshare_spot_quotes_reject_epoch_placeholder_event_time(self) -> None:
+        class FakeFrame:
+            def iterrows(self):
+                return iter(
+                    enumerate(
+                        [{"代码": "600519", "名称": "贵州茅台", "最新价": 1303.0, "昨收": 1273.38, "更新时间": 1}]
+                    )
+                )
 
         with self.assertRaisesRegex(ProviderProtocolError, "缺少可解析的事件时间"):
             _ordered_spot_quotes(FakeFrame(), ["600519"], "AKShare")

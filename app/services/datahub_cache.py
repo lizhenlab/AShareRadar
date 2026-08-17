@@ -283,7 +283,7 @@ def _parse_minute_timestamp(value: str) -> datetime | None:
 
 def _minute_interval_minutes(interval: str) -> int | None:
     try:
-        text = _normalize_minute_interval(interval)
+        text = normalize_minute_interval(interval)
         return int(text[:-1])
     except ValueError:
         return None
@@ -348,8 +348,11 @@ def _normalize_stock_concepts(symbol: str, rows: list[StockConceptItem], limit: 
     return list(deduped.values())
 
 
-def _normalize_minute_interval(interval: str) -> str:
+def normalize_minute_interval(interval: str) -> str:
     normalized = str(interval or "5m").lower().strip()
     if normalized in MINUTE_INTERVAL_ALIASES:
         return MINUTE_INTERVAL_ALIASES[normalized]
     raise ValueError(f"分钟周期只支持 {SUPPORTED_MINUTE_INTERVAL_TEXT}")
+
+
+_normalize_minute_interval = normalize_minute_interval

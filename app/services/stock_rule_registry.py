@@ -103,7 +103,11 @@ def _rule_match_context(
         completed_rows,
         int(RULE_CONFIG["volume_breakout_20d"]["window"]),
     )
-    volume_metrics = current_volume_metrics(analysis.quote, rows)
+    volume_metrics = current_volume_metrics(
+        analysis.quote,
+        rows,
+        allow_live_quote_volume=analysis.research_mode == "official",
+    )
     return RuleMatchContext(
         analysis=analysis,
         fund_flow=fund_flow,

@@ -410,6 +410,54 @@ def test_answer_text_does_not_leak_non_finite_numbers() -> None:
     assert "待确认" in answer_text
 
 
+def test_unavailable_structural_placeholders_do_not_change_qa_outputs() -> None:
+    args = _qa_args()
+    analysis = args[0]
+    first = analysis.model_copy(
+        update={
+            "support": 1.11,
+            "resistance": 2.22,
+            "ma20": 3.33,
+            "support_available": False,
+            "resistance_available": False,
+            "ma20_available": False,
+        }
+    )
+    second = first.model_copy(update={"support": 911.11, "resistance": 922.22, "ma20": 933.33})
+
+    def outputs(item):
+        evidence = {
+            topic: question_evidence(topic, item, *args[1:])
+            for topic in ("做T", "买点", "卖点", "短线观察", "综合判断")
+        }
+        actions = {
+            topic: question_actions(topic, item, args[1], args[3], args[6], args[7], args[8], args[9], args[11])
+            for topic in ("买点", "卖点", "短线观察")
+        }
+        invalidations = {
+            topic: question_invalidations(topic, item, args[1], args[2], args[3], args[6], args[9], args[11])
+            for topic in ("做T", "买点", "卖点", "风险收益", "主题概念", "短线观察")
+        }
+        return evidence, actions, invalidations
+
+    assert outputs(first) == outputs(second)
+    rendered = str(outputs(first))
+    assert "1.11" not in rendered
+    assert "2.22" not in rendered
+    assert "3.33" not in rendered
+    assert "待确认" in rendered
+
+
+def test_available_structural_levels_keep_qa_price_wording() -> None:
+    args = _qa_args()
+
+    evidence = question_evidence("买点", *args)
+    actions = question_actions("买点", args[0], args[1], args[3], args[6], args[7], args[8], args[9], args[11])
+
+    assert any("支撑 1262.00，压力 1326.00" in item for item in evidence)
+    assert actions[0].startswith("只有站稳支撑 1262.00 且不过度贴近压力 1326.00")
+
+
 def _qa_args(include_theme: bool = True) -> tuple:
     analysis = _analysis()
     diagnosis = StockDiagnosis(
@@ -425,6 +473,8 @@ def _qa_args(include_theme: bool = True) -> tuple:
         confidence=82,
     )
     evidence_chain = EvidenceChainReport(
+        symbol="600519.SH",
+        updated_at="2026-06-28 10:00:00",
         verdict="观察为主",
         summary="支持与反对证据并存。",
         support=["靠近支撑", "估值不极端"],
@@ -433,6 +483,8 @@ def _qa_args(include_theme: bool = True) -> tuple:
         invalidations=["跌破支撑", "放量下跌"],
     )
     risk_radar = RiskRadarReport(
+        symbol="600519.SH",
+        updated_at="2026-06-28 10:00:00",
         overall_level="中等风险",
         summary="风险主要来自趋势和支撑。",
         items=[
@@ -442,6 +494,8 @@ def _qa_args(include_theme: bool = True) -> tuple:
         top_risks=["趋势转弱：低于均线", "支撑考验：临近支撑"],
     )
     event_digest = EventDigestReport(
+        symbol="600519.SH",
+        updated_at="2026-06-28 10:00:00",
         impact_label="事件影响中性偏谨慎",
         summary="近期事件没有明显改变趋势。",
         positive_events=["分红预案稳定"],
@@ -450,6 +504,8 @@ def _qa_args(include_theme: bool = True) -> tuple:
         missing_data=["公告细节待确认"],
     )
     peer = PeerComparisonReport(
+        symbol="600519.SH",
+        updated_at="2026-06-28 10:00:00",
         industry="白酒",
         sample_count=6,
         valuation_position="估值处于同行中位",
@@ -460,6 +516,8 @@ def _qa_args(include_theme: bool = True) -> tuple:
         risks=["行业整体偏弱"],
     )
     t_strategy = TStrategyAssistantReport(
+        symbol="600519.SH",
+        updated_at="2026-06-28 10:00:00",
         style="轻仓试错",
         suitability="不适合频繁做T",
         summary="波动不足，纪律要求高。",
@@ -516,8 +574,13 @@ def _qa_args(include_theme: bool = True) -> tuple:
         upside_target=1326.0,
         downside_stop=1262.0,
         upside_pct=3.59,
-        downside_pct=-1.41,
+        downside_pct=1.41,
         reward_risk_ratio=1.45,
+        upside_available=True,
+        downside_available=True,
+        ratio_available=True,
+        upside_target_basis="resistance",
+        downside_stop_basis="structure",
         atr14=18.0,
         atr_pct=1.4,
         volatility_pct=2.1,
@@ -572,9 +635,12 @@ def _analysis() -> AnalysisResult:
         trend_label="偏弱",
         support=1262.0,
         resistance=1326.0,
+        support_available=True,
+        resistance_available=True,
         ma5=1284.0,
         ma10=1292.0,
         ma20=1300.0,
+        ma20_available=True,
         risk_level="中等风险",
         beginner_summary="先等支撑确认。",
         buy_points=[SignalItem(title="支撑低吸", level="观察", reason="靠近支撑但未确认")],

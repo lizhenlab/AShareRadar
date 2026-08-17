@@ -423,6 +423,9 @@ export function renderSystemDiagnostics(diagnostics) {
     const budgetMb = Number(storage.budget_bytes || 0) / 1024 / 1024;
     const sqliteMb = Number(storage.sqlite_size_bytes || 0) / 1024 / 1024;
     const backupMb = Number(storage.backup_size_bytes || 0) / 1024 / 1024;
+    const researchMb = Number(storage.research_artifact_size_bytes || 0) / 1024 / 1024;
+    const totalManagedMb = Number(storage.total_managed_size_bytes || 0) / 1024 / 1024;
+    const totalManagedUsage = nonNegativePercent(storage.total_managed_usage_pct);
     const usage = nonNegativePercent(storage.usage_pct);
     const meterValue = Math.min(100, usage);
     storageTarget.innerHTML = `
@@ -432,6 +435,7 @@ export function renderSystemDiagnostics(diagnostics) {
       </div>
       <meter min="0" max="100" low="0" high="80" optimum="0" value="${escapeHtml(meterValue)}">${escapeHtml(usage)}%</meter>
       <small>SQLite ${escapeHtml(formatNumber(sqliteMb))} MB · 备份 ${escapeHtml(formatNumber(backupMb))} MB（${escapeHtml(storage.managed_backup_count || 0)} 份）</small>
+      <small>研究证据 ${escapeHtml(formatNumber(researchMb))} MB · 总受管 ${escapeHtml(formatNumber(totalManagedMb))} MB（预算 ${escapeHtml(formatNumber(totalManagedUsage))}%）</small>
       <div class="storage-row-counts">
         <span><b>${escapeHtml(storage.cache_rows || 0)}</b>可再生缓存</span>
         <span><b>${escapeHtml(storage.runtime_rows || 0)}</b>运行日志</span>

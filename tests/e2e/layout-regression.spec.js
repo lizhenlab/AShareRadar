@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { marketScanPollingIdentityPayload, workbenchPayload as fixtureWorkbenchPayload } from "./frontend-flow-api-fixtures.mjs";
 
 const VIEWPORTS = [
   {
@@ -26,7 +27,7 @@ const VIEWPORTS = [
     layout: "stacked",
     scanScrollable: false,
     sideColumns: 1,
-    scanColumns: { summary: 2, presets: 2, filters: 2, table: 2 },
+    scanColumns: { summary: 2, presets: 2, filters: 2, table: 4 },
   },
   {
     name: "mobile 390x844",
@@ -65,7 +66,13 @@ test.describe("responsive layout regression", () => {
       await assertChartToolbarFits(page, viewport);
       await assertResearchLayout(page, viewport);
 
+      await selectPrimaryView(page, "review");
+      await assertReviewWorkspaceLayout(page, viewport);
+
       await selectPrimaryView(page, "market");
+      await page.locator("#marketScanModeOfficial").check();
+      await page.locator("#marketScanFilterToggle").click();
+      await page.locator("#marketScanDetailsToggle").click();
       await expect(page.locator("#workspace-panel-market-scan")).toBeVisible();
       await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(3);
       await settleLayout(page);
@@ -75,6 +82,7 @@ test.describe("responsive layout regression", () => {
       await assertMarketScanLayout(page, viewport);
 
       await selectPrimaryView(page, "monitor");
+      if (viewport.width <= 820) await page.locator("#watchFormToggle").click();
       await settleLayout(page);
       await assertNoDocumentOverflow(page);
       await assertMonitorLayout(page, viewport);
@@ -164,7 +172,7 @@ async function assertWorkspaceTabsAreReachable(page, viewport) {
     firstHeight: element.querySelector("button").getBoundingClientRect().height,
   }));
   expect(initial.overflowX).toBe("auto");
-  expect(initial.position).toBe(viewport.width <= 820 ? "static" : "sticky");
+  expect(initial.position).toBe("sticky");
   expect(initial.firstHeight).toBeGreaterThanOrEqual(viewport.width <= 820 ? 44 : 30);
   expectWithinViewport(initial.rect, viewport.width);
   if (viewport.width > 820) {
@@ -286,6 +294,42 @@ async function assertResearchLayout(page, viewport) {
   expect(layout.workspace.width).toBeCloseTo(layout.query.width, 0);
 }
 
+async function assertReviewWorkspaceLayout(page, viewport) {
+  await assertNoDocumentOverflow(page);
+  const replayTab = page.locator("#workspace-tab-replay");
+  const paperTab = page.locator("#workspace-tab-paper");
+  await expect(replayTab).toBeVisible();
+  await expect(paperTab).toBeVisible();
+  await expect(page.locator(".workspace-tabs button:visible")).toHaveCount(4);
+
+  const dashboard = await page.locator(".review-dashboard-actions").evaluate((actions) => ({
+    columns: window.__layoutGridColumnCount(actions),
+    rect: window.__layoutRect(actions),
+    button: window.__layoutRect(actions.querySelector("button")),
+  }));
+  expectWithinViewport(dashboard.rect, viewport.width);
+  expect(dashboard.columns).toBe(viewport.width >= 600 && viewport.width <= 1180 ? 2 : viewport.width < 600 ? 1 : 5);
+  expect(dashboard.button.height).toBeGreaterThanOrEqual(viewport.width <= 820 ? 44 : 36);
+
+  await paperTab.click();
+  await expect(page.locator("#workspace-panel-paper")).toBeVisible();
+  const paper = await page.locator(".paper-account-actions").evaluate((actions) => ({
+    columns: window.__layoutGridColumnCount(actions),
+    rect: window.__layoutRect(actions),
+    controls: Array.from(actions.querySelectorAll("input, select, button")).map((control) => ({
+      rect: window.__layoutRect(control),
+      scrollWidth: control.scrollWidth,
+      clientWidth: control.clientWidth,
+    })),
+  }));
+  expectWithinViewport(paper.rect, viewport.width);
+  expect(paper.columns).toBe(viewport.width >= 600 && viewport.width <= 1180 ? 2 : viewport.width < 600 ? 1 : 4);
+  for (const control of paper.controls) {
+    expectWithinViewport(control.rect, viewport.width);
+    expect(control.scrollWidth).toBeLessThanOrEqual(control.clientWidth + 1);
+  }
+}
+
 async function assertMarketPrimaryLayout(page, viewport) {
   const layout = await page.evaluate(() => {
     const rect = (selector) => window.__layoutRect(document.querySelector(selector));
@@ -307,6 +351,8 @@ async function assertMarketPrimaryLayout(page, viewport) {
   expect(layout.workbenchHidden).toBe(true);
   expect(layout.controlsHidden).toBe(true);
   expect(layout.sideHidden).toBe(true);
+  await expect(page.locator(".topbar-status")).toBeHidden();
+  await expect(page.locator("#sourceLine")).toBeHidden();
   expectWithinViewport(layout.workspace, layout.viewportWidth);
   expect(layout.display).toBe(viewport.layout === "split" ? "grid" : "flex");
 }
@@ -323,6 +369,7 @@ async function assertMonitorLayout(page, viewport) {
       viewportWidth: document.documentElement.clientWidth,
       controls: rect(".control-panel"),
       side: rect(".side-column"),
+      controlsDisplay: getComputedStyle(controls).display,
       queryHidden: document.querySelector(".query-panel").hidden,
       workspaceHidden: document.querySelector(".workspace").hidden,
       controlColumns: window.__layoutGridColumnCount(controls),
@@ -333,22 +380,24 @@ async function assertMonitorLayout(page, viewport) {
   expect(layout.primaryView).toBe("monitor");
   expect(layout.queryHidden).toBe(true);
   expect(layout.workspaceHidden).toBe(true);
-  expectWithinViewport(layout.controls, layout.viewportWidth);
+  await expect(page.locator(".topbar-status")).toBeHidden();
+  await expect(page.locator("#sourceLine")).toBeHidden();
   expectWithinViewport(layout.side, layout.viewportWidth);
-  expect(layout.controlColumns).toBe(viewport.layout === "split" ? 2 : 1);
   expect(layout.sideColumns).toBe(viewport.sideColumns);
 
   if (viewport.layout === "split") {
+    expectWithinViewport(layout.controls, layout.viewportWidth);
     expect(layout.display).toBe("grid");
+    expect(layout.controlColumns).toBe(2);
     expect(layout.controls.right).toBeLessThanOrEqual(layout.side.left - 17);
     expect(layout.controls.top).toBeCloseTo(layout.side.top, 0);
     return;
   }
 
   expect(layout.display).toBe("flex");
-  expect(layout.controls.bottom).toBeLessThanOrEqual(layout.side.top - 17);
-  expect(layout.side.left).toBeCloseTo(layout.controls.left, 0);
-  expect(layout.side.width).toBeCloseTo(layout.controls.width, 0);
+  expect(layout.controlsDisplay).toBe("contents");
+  expect(layout.controlColumns).toBe(0);
+  return;
 }
 
 async function assertMarketScanLayout(page, viewport) {
@@ -357,8 +406,21 @@ async function assertMarketScanLayout(page, viewport) {
     const tableWrap = panel.querySelector("#marketScanTableWrap");
     const table = panel.querySelector(".market-scan-table");
     const firstRow = panel.querySelector("#marketScanRows tr.market-scan-result-row");
+    const rankCell = firstRow.querySelector("td:first-child");
+    const stockActions = firstRow.querySelector(".market-scan-stock-actions");
+    const stockMetaRow = firstRow.querySelector(".market-scan-stock-meta-row");
+    const stockActionButtons = Array.from(stockActions.querySelectorAll("button"));
     const actions = panel.querySelector(".market-scan-actions");
     const start = panel.querySelector("#marketScanStart");
+    const strategyLab = panel.querySelector("#strategyLab");
+    const filterPanel = panel.querySelector("#marketScanFilterPanel");
+    const progress = panel.querySelector("#marketScanProgress");
+    const history = panel.querySelector("#marketScanHistory");
+    const presets = panel.querySelector("#discoveryPresetControls");
+    const filtersBeforeTable = Boolean(
+      filterPanel.compareDocumentPosition(tableWrap)
+        & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
     return {
       panel: window.__layoutRect(panel),
       heading: rect(".market-scan-heading"),
@@ -372,6 +434,15 @@ async function assertMarketScanLayout(page, viewport) {
       presetColumns: window.__layoutGridColumnCount(panel.querySelector("#discoveryPresetControls")),
       filterColumns: window.__layoutGridColumnCount(panel.querySelector("#marketScanFilters")),
       rowColumns: window.__layoutGridColumnCount(firstRow),
+      firstRowRect: window.__layoutRect(firstRow),
+      rankPosition: getComputedStyle(rankCell).position,
+      rankZIndex: Number.parseInt(getComputedStyle(rankCell).zIndex, 10) || 0,
+      rankRect: window.__layoutRect(rankCell),
+      stockActionsDisplay: getComputedStyle(stockActions).display,
+      stockActionColumns: window.__layoutGridColumnCount(stockActions),
+      stockActionRects: stockActionButtons.map((button) => window.__layoutRect(button)),
+      stockMetaRowRect: window.__layoutRect(stockMetaRow),
+      cellRects: Array.from(firstRow.cells, (cell) => window.__layoutRect(cell)),
       tableDisplay: getComputedStyle(table).display,
       tableScrollable: tableWrap.scrollWidth > tableWrap.clientWidth + 1,
       tableClientWidth: tableWrap.clientWidth,
@@ -381,6 +452,14 @@ async function assertMarketScanLayout(page, viewport) {
       tableOverflowY: getComputedStyle(tableWrap).overflowY,
       actionRect: window.__layoutRect(actions),
       startRect: window.__layoutRect(start),
+      filtersBeforeTable,
+      strategyBeforeTable: Boolean(
+        strategyLab.compareDocumentPosition(tableWrap) & Node.DOCUMENT_POSITION_FOLLOWING
+      ),
+      strategyOpen: strategyLab.open,
+      progressBeforeTable: Boolean(progress.compareDocumentPosition(tableWrap) & Node.DOCUMENT_POSITION_FOLLOWING),
+      presetsBeforeTable: Boolean(presets.compareDocumentPosition(tableWrap) & Node.DOCUMENT_POSITION_FOLLOWING),
+      historyHidden: getComputedStyle(history).display === "none",
     };
   });
 
@@ -403,6 +482,16 @@ async function assertMarketScanLayout(page, viewport) {
   expect(metrics.startRect.width).toBeGreaterThan(0);
   expect(metrics.startRect.left).toBeGreaterThanOrEqual(metrics.actionRect.left - 1);
   expect(metrics.startRect.right).toBeLessThanOrEqual(metrics.actionRect.right + 1);
+  expect(metrics.filtersBeforeTable).toBe(true);
+  expect(metrics.strategyBeforeTable).toBe(true);
+  expect(metrics.strategyOpen).toBe(false);
+  expect(metrics.progressBeforeTable).toBe(true);
+  expect(metrics.presetsBeforeTable).toBe(true);
+  expect(metrics.historyHidden).toBe(true);
+  expect(metrics.stockActionRects).toHaveLength(2);
+  expect(metrics.stockActionRects[0].top).toBeCloseTo(metrics.stockActionRects[1].top, 0);
+  expect(metrics.stockActionRects[0].top).toBeGreaterThanOrEqual(metrics.stockMetaRowRect.top - 1);
+  expect(metrics.stockActionRects[0].bottom).toBeLessThanOrEqual(metrics.stockMetaRowRect.bottom + 1);
 
   if (viewport.width <= 820) {
     expect(metrics.tableDisplay).toBe("block");
@@ -413,9 +502,23 @@ async function assertMarketScanLayout(page, viewport) {
     expect(metrics.tableMaxHeight).toBeGreaterThan(0);
     expect(metrics.tableMaxHeight).toBeLessThanOrEqual(viewport.height * 0.72 + 1);
     expect(metrics.tableClientHeight).toBeLessThanOrEqual(metrics.tableMaxHeight + 1);
+    expect(metrics.rankPosition).toBe("absolute");
+    expect(metrics.rankZIndex).toBeGreaterThanOrEqual(1);
+    expect(metrics.rankRect.top).toBeGreaterThanOrEqual(metrics.firstRowRect.top);
+    expect(metrics.rankRect.right).toBeLessThanOrEqual(metrics.firstRowRect.right);
+    expect(metrics.stockActionColumns).toBe(2);
+    if (viewport.width >= 600) {
+      expect(metrics.firstRowRect.height).toBeLessThanOrEqual(300);
+      expect(metrics.cellRects[3].top).toBeCloseTo(metrics.cellRects[4].top, 0);
+      for (const rect of metrics.cellRects.slice(5, 9)) {
+        expect(rect.top).toBeCloseTo(metrics.cellRects[5].top, 0);
+      }
+    }
   } else {
     expect(metrics.tableDisplay).toBe("table");
     expect(metrics.tableScrollable).toBe(viewport.scanScrollable);
+    expect(metrics.stockActionsDisplay).toBe("flex");
+    expect(metrics.firstRowRect.height).toBeLessThanOrEqual(120);
   }
 }
 
@@ -541,6 +644,9 @@ function layoutApiPayload(url, request) {
   if (pathname === "/api/discovery/presets") {
     return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
   }
+  if (pathname === "/api/market-scans/polling-identity") {
+    return marketScanPollingIdentityPayload(marketScanRun(), marketScanRun());
+  }
   if (pathname === "/api/market-scans/latest" || pathname === "/api/market-scans/latest-published") {
     return marketScanRun();
   }
@@ -561,50 +667,29 @@ function strongStock(code, name, rank, score) {
 }
 
 function workbenchPayload() {
-  return {
-    analysis: {
-      quote: {
-        code: "600519",
-        market: "SH",
-        name: "贵州茅台",
-        price: 1278.56,
-        change: 12.45,
-        change_pct: 0.98,
-        source: "E2E行情",
-        timestamp: "2026-07-28 15:00:00",
-      },
-      trend_score: 72,
-      trend_label: "趋势偏强，等待确认",
-      action_advice: { action: "观察", confidence: 72 },
-      support: 1248.2,
-      resistance: 1326.8,
-      ma5: 1266.4,
-      ma20: 1239.1,
-      beginner_summary: "当前趋势偏强，但仍需结合支撑、压力与数据质量确认，不宜只依据单一分数追涨。",
-      data_quality: { level: "优秀", score: 94, notes: [] },
-      signal_snapshot: { label: "观察", summary: "等待量价进一步确认" },
-      buy_points: [],
-      sell_points: [],
-      t_plan: [],
-      review: {},
-      klines: [],
-    },
-    insights: {
-      overview: {
-        total_score: 72,
-        total_level: "偏强",
-        main_conflict: "趋势保持向上，但短线位置接近压力区。",
-        beginner_takeaways: ["观察支撑有效性", "避免压力位附近追涨"],
-        key_prices: [],
-        factors: [],
-      },
-    },
-    chart_marks: { marks: [], categories: [] },
-    alert_rules: [],
-    alert_events: [],
-    notes: [],
-    local_data_warnings: [],
-  };
+  const payload = fixtureWorkbenchPayload("600519.SH");
+  Object.assign(payload.analysis, {
+    trend_score: 72,
+    trend_label: "趋势偏强，等待确认",
+    action_advice: { action: "观察", confidence: 72 },
+    support: 1248.2,
+    resistance: 1326.8,
+    ma5: 1266.4,
+    ma20: 1239.1,
+    beginner_summary: "当前趋势偏强，但仍需结合支撑、压力与数据质量确认，不宜只依据单一分数追涨。",
+    buy_points: [],
+    sell_points: [],
+    t_plan: [],
+  });
+  Object.assign(payload.insights.overview, {
+    total_score: 72,
+    total_level: "偏强",
+    main_conflict: "趋势保持向上，但短线位置接近压力区。",
+    beginner_takeaways: ["观察支撑有效性", "避免压力位附近追涨"],
+    key_prices: [],
+    factors: [],
+  });
+  return payload;
 }
 
 function minuteAnalysisPayload(interval) {
@@ -688,6 +773,9 @@ function marketScanRun() {
     updated_at: "2026-07-28 16:35:00",
     started_at: "2026-07-28 16:30:01",
     finished_at: "2026-07-28 16:35:00",
+    snapshot_digest: "a".repeat(64),
+    snapshot_seal_origin: "publication",
+    snapshot_sealed_at: "2026-07-28 16:35:00",
     duration_ms: 299000,
     message: "全市场扫描完成：有效排名 3/3",
     last_error: null,
@@ -727,6 +815,7 @@ function marketScanResult(symbol, name, market, industry, rank, score) {
     status: "success",
     rank,
     score,
+    raw_score: score,
     trend_score: score - 5,
     leader_score: score,
     data_quality_score: 94,
@@ -741,6 +830,7 @@ function marketScanResult(symbol, name, market, industry, rank, score) {
     error: null,
     data_date: "2026-07-28",
     quote_timestamp: "2026-07-28 15:00:00",
+    quote_observed_at: "2026-07-28 15:00:01",
     quote_source: "E2E行情",
     kline_source: "E2E日线",
     adjustment_mode: "qfq",

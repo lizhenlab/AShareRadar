@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import date
 
 from app.services.research_factor_calibration import (
     CalibrationBucketStats,
@@ -16,6 +17,7 @@ from app.services.research_factor_calibration import (
 )
 from app.services.research_execution_model import MODELLED_ROUND_TRIP_FRICTION_PCT
 from app.services.research_factor_specs import FactorSpec
+from app.services.trading_calendar import next_trade_dates
 from tests.factories import make_kline
 
 
@@ -54,15 +56,15 @@ def test_calibrate_factor_collects_matching_samples_and_statistics() -> None:
     assert calibration.confidence_level == "偏低"
 
 
-def test_calibrate_factor_skips_invalid_entry_or_forward_rows() -> None:
+def test_calibrate_factor_fails_closed_on_invalid_window_row() -> None:
     rows = _rows([100 + index for index in range(50)])
     rows[30] = rows[30].model_copy(update={"high": math.inf})
 
     calibration = _calibrate_factor(rows, _spec(), 60)
 
-    assert calibration.sample_count == 2
-    assert math.isfinite(calibration.avg_forward_5d_return)
-    assert math.isfinite(calibration.avg_forward_10d_return)
+    assert calibration.sample_count == 0
+    assert calibration.availability == "execution_evidence_unavailable"
+    assert "日K价格或成交量无效" in (calibration.unavailable_reason or "")
 
 
 def test_calibration_uses_next_session_open_and_net_forward_return() -> None:
@@ -81,6 +83,72 @@ def test_calibration_rejects_zero_volume_next_session_entry() -> None:
     rows[26] = rows[26].model_copy(update={"volume": 0})
 
     assert _calibration_sample_at(rows, _spec(), 60, 25) is None
+
+
+def test_calibration_fails_closed_without_execution_metadata() -> None:
+    rows = _rows([100 + index for index in range(40)])
+    rows[0] = rows[0].model_copy(
+        update={
+            "point_in_time": False,
+            "session_status": "unknown",
+            "open_execution_status": "unknown",
+            "corporate_action_status": "unknown",
+            "execution_metadata_version": None,
+        }
+    )
+
+    calibration = _calibrate_factor(rows, _spec(), 60)
+
+    assert calibration.availability == "execution_evidence_unavailable"
+    assert calibration.participates_in_historical_aggregate is False
+    assert calibration.sample_count == 0
+    assert "PIT" in (calibration.unavailable_reason or "")
+
+
+def test_calibration_fails_closed_on_duplicate_or_missing_exchange_session() -> None:
+    rows = _rows([100 + index for index in range(40)])
+    duplicate = list(rows)
+    duplicate[26] = duplicate[26].model_copy(update={"date": duplicate[25].date, "as_of": duplicate[25].as_of})
+    missing = rows[:20] + rows[21:]
+
+    duplicate_result = _calibrate_factor(duplicate, _spec(), 60)
+    missing_result = _calibrate_factor(missing, _spec(), 60)
+
+    assert duplicate_result.availability == "execution_evidence_unavailable"
+    assert "重复交易日" in (duplicate_result.unavailable_reason or "")
+    assert missing_result.availability == "execution_evidence_unavailable"
+    assert "每个固定交易会话" in (missing_result.unavailable_reason or "")
+
+
+def test_calibration_does_not_assume_locked_open_is_executable() -> None:
+    rows = _rows([100 + index for index in range(40)])
+    rows[26] = rows[26].model_copy(update={"open_execution_status": "locked_limit_up"})
+
+    assert _calibration_sample_at(rows, _spec(), 60, 25) is None
+
+
+def test_calibration_requires_corporate_action_adjustment_evidence() -> None:
+    rows = _rows([100 + index for index in range(40)])
+    rows[10] = rows[10].model_copy(update={"corporate_action_status": "effective_event", "adjustment_factor": None})
+
+    calibration = _calibrate_factor(rows, _spec(), 60)
+
+    assert calibration.availability == "execution_evidence_unavailable"
+    assert "复权因子" in (calibration.unavailable_reason or "")
+
+
+def test_calibration_rejects_unregistered_contract_fallback_and_session_contradiction() -> None:
+    rows = _rows([100 + index for index in range(40)])
+    invalid_contract = list(rows)
+    invalid_contract[5] = invalid_contract[5].model_copy(update={"contract_version": "daily-kline.v2"})
+    fallback = list(rows)
+    fallback[5] = fallback[5].model_copy(update={"fallback_used": True})
+    contradictory = list(rows)
+    contradictory[5] = contradictory[5].model_copy(update={"session_status": "suspended"})
+
+    assert "数据合同" in (_calibrate_factor(invalid_contract, _spec(), 60).unavailable_reason or "")
+    assert "降级数据源" in (_calibrate_factor(fallback, _spec(), 60).unavailable_reason or "")
+    assert "矛盾" in (_calibrate_factor(contradictory, _spec(), 60).unavailable_reason or "")
 
 
 def test_calibration_expected_level_normalizes_reverse_direction() -> None:
@@ -154,13 +222,15 @@ def _spec(*, trigger=None) -> FactorSpec:
 
 
 def _rows(closes: list[float]):
+    dates = next_trade_dates(date(2026, 3, 31), len(closes))
     return [
         make_kline(
-            date=f"2026-05-{(index % 28) + 1:02d}",
+            date=dates[index].isoformat(),
             close=close,
             high=close + 1,
             low=close - 1,
             volume=1000 + index * 10,
+            replay_eligible=True,
         )
         for index, close in enumerate(closes)
     ]

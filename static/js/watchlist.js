@@ -169,7 +169,7 @@ function renderWatchlistRow(item, index, today) {
 
 function renderWatchlistEditor({ editorId, symbol, status, priority, reviewDate, groupName, note, pinned }) {
   return `
-    <form class="watch-edit-form" id="${editorId}" data-watch-edit data-symbol="${escapeHtml(symbol)}" hidden>
+    <form class="watch-edit-form" id="${editorId}" data-watch-edit data-symbol="${escapeHtml(symbol)}" novalidate hidden>
       <div class="watch-edit-grid">
         <label><span>研究状态</span><select name="research_status">${choiceOptions(RESEARCH_STATUS_LABELS, status)}</select></label>
         <label><span>优先级</span><select name="priority">${choiceOptions(PRIORITY_LABELS, priority)}</select></label>

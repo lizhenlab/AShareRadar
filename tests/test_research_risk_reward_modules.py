@@ -4,8 +4,11 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from pydantic import ValidationError
+
 import app.services.research_risk_reward as risk_reward
-from app.models.schemas import FactorLabReport, ScenarioPlan
+from app.models.schemas import FactorLabReport, RiskRewardReport, ScenarioPlan
 from app.services.research_risk_reward import (
     DOWNSIDE_STOP_ADJUSTMENT_RULES,
     RISK_REWARD_RATING_RULES,
@@ -26,6 +29,28 @@ from app.services.research_risk_reward_report import build_risk_reward_report as
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_risk_reward_model_rejects_ratio_without_evidenced_levels() -> None:
+    with pytest.raises(ValidationError):
+        RiskRewardReport(
+            symbol="600519.SH",
+            updated_at="2026-08-13T15:15:00+08:00",
+            current_price=100,
+            upside_target=0,
+            downside_stop=0,
+            upside_pct=0,
+            downside_pct=0,
+            reward_risk_ratio=2,
+            upside_available=False,
+            downside_available=False,
+            ratio_available=True,
+            upside_target_basis="unavailable",
+            downside_stop_basis="unavailable",
+            availability_reason=None,
+            rating="等待确认",
+            summary="证据不足",
+        )
 
 
 def test_scenario_plan_keeps_legacy_probability_as_explicit_rule_weight() -> None:
@@ -242,7 +267,7 @@ def test_downside_stop_sanitizes_non_finite_inputs() -> None:
         _market_regime(risk_multiplier=math.inf),
     )
 
-    assert stop == 97
+    assert stop == 0
 
 
 def test_rating_defaults_invalid_market_risk_to_neutral_multiplier() -> None:
@@ -568,14 +593,14 @@ def test_build_risk_reward_report_returns_finite_metrics_for_invalid_price() -> 
         "atr_pct",
         "volatility_pct",
     ]
-    assert report.rating == "性价比不足"
+    assert report.rating == "等待确认"
     assert all(math.isfinite(getattr(report, field)) for field in metric_fields)
     assert all(getattr(report, field) == 0 for field in metric_fields)
     assert "上方预估空间待确认" in report.summary
     assert "下方防守距离待确认" in report.summary
     assert "收益风险比待确认" in report.summary
     assert "环境风险倍率待确认" in report.summary
-    assert any("待确认项" in item for item in report.notes)
+    assert any("兼容数值字段不参与评级" in item for item in report.notes)
     assert report.scenarios[0].probability == 0
     assert all("0.00" not in item.trigger for item in report.scenarios)
 
@@ -596,7 +621,7 @@ def test_build_risk_reward_report_degrades_negative_current_price_to_waiting_pla
     assert report.upside_target == 0
     assert report.downside_stop == 0
     assert report.reward_risk_ratio == 0
-    assert report.rating == "性价比不足"
+    assert report.rating == "等待确认"
     assert report.scenarios[0].probability == 0
     assert "当前价待确认" in scenario_text
     assert "收益风险比待确认" in report.summary
@@ -673,6 +698,109 @@ def test_build_risk_reward_report_handles_missing_numeric_fields() -> None:
     assert "维持「观察」口径" in scenario_text
 
 
+def test_missing_structure_and_atr_do_not_create_synthetic_risk_reward_levels() -> None:
+    report = build_risk_reward_report(
+        _analysis(),
+        _feature(
+            price=100,
+            support=95,
+            resistance=108,
+            ma20=96,
+            atr14=2,
+            atr_pct=2,
+            volatility_pct=3,
+            support_available=False,
+            resistance_available=False,
+            ma20_available=False,
+            atr14_available=False,
+            volatility_available=False,
+        ),
+        _factor_lab(total_score=90, positive_factor_count=4, negative_factor_count=0),
+        _market_regime(risk_multiplier=0.8, breadth_score=70),
+        _validation("条件较好"),
+    )
+
+    assert report.upside_target == 0
+    assert report.downside_stop == 0
+    assert report.reward_risk_ratio == 0
+    assert report.upside_available is False
+    assert report.downside_available is False
+    assert report.ratio_available is False
+    assert report.upside_target_basis == "unavailable"
+    assert report.downside_stop_basis == "unavailable"
+    assert report.rating == "等待确认"
+    assert report.availability_reason
+
+
+def test_tick_sized_levels_use_the_same_published_precision_as_availability() -> None:
+    small_tick = build_risk_reward_report(
+        _analysis(),
+        _feature(
+            price=100,
+            resistance=100.01,
+            support=95,
+            ma20=96,
+            atr14=0,
+            atr_pct=0,
+            volatility_pct=0,
+            atr14_available=False,
+            volatility_available=False,
+        ),
+        _factor_lab(),
+        _market_regime(),
+        _validation("条件较好"),
+    )
+    sub_precision_tick = build_risk_reward_report(
+        _analysis(),
+        _feature(
+            price=1000,
+            resistance=1000.01,
+            support=950,
+            ma20=960,
+            atr14=0,
+            atr_pct=0,
+            volatility_pct=0,
+            atr14_available=False,
+            volatility_available=False,
+        ),
+        _factor_lab(),
+        _market_regime(),
+        _validation("条件较好"),
+    )
+
+    assert small_tick.upside_available is True
+    assert small_tick.upside_pct == 0.01
+    assert small_tick.ratio_available is False
+    assert small_tick.reward_risk_ratio == 0
+    assert sub_precision_tick.upside_available is False
+    assert sub_precision_tick.upside_target == 0
+    assert sub_precision_tick.upside_pct == 0
+
+
+def test_unavailable_volatility_placeholders_cannot_change_targets_or_stops() -> None:
+    common = dict(
+        price=100,
+        resistance=150,
+        support=95,
+        ma20=96,
+        atr14=1,
+        atr14_available=True,
+        volatility_available=False,
+    )
+    first = _risk_reward_metrics(
+        _feature(**common, atr_pct=1, volatility_pct=0),
+        _factor_lab(total_score=80, positive_factor_count=4, negative_factor_count=0),
+        _market_regime(),
+    )
+    perturbed = _risk_reward_metrics(
+        _feature(**common, atr_pct=1, volatility_pct=20),
+        _factor_lab(total_score=80, positive_factor_count=4, negative_factor_count=0),
+        _market_regime(),
+    )
+
+    assert first == perturbed
+
+
 def _factor_lab(*, total_score: object = 50, positive_factor_count: object = 1, negative_factor_count: object = 1):
     return SimpleNamespace(
         total_score=total_score,
@@ -696,6 +824,11 @@ def _feature(
     atr14: float = 1,
     atr_pct: float = 1,
     volatility_pct: float = 2,
+    support_available: bool = True,
+    resistance_available: bool = True,
+    ma20_available: bool = True,
+    atr14_available: bool = True,
+    volatility_available: bool = True,
 ):
     return SimpleNamespace(
         symbol=symbol,
@@ -707,6 +840,11 @@ def _feature(
         atr14=atr14,
         atr_pct=atr_pct,
         volatility_pct=volatility_pct,
+        support_available=support_available,
+        resistance_available=resistance_available,
+        ma20_available=ma20_available,
+        atr14_available=atr14_available,
+        volatility_available=volatility_available,
     )
 
 

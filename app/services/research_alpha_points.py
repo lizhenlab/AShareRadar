@@ -71,6 +71,7 @@ def overview_factor_points(insights: StockInsightBundle) -> list[AlphaEvidencePo
             reason=factor.summary,
         )
         for factor in insights.overview.factors
+        if factor.score_available and factor.participates_in_total_score
     ]
 
 

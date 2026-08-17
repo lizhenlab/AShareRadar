@@ -17,7 +17,6 @@ from app.workflows.individual import (
     WORKBENCH_ALERT_RULE_LIMIT,
     WORKBENCH_CHART_MARK_LIMIT,
     WORKBENCH_NOTE_LIMIT,
-    _ensure_advice_snapshot,
     _workbench_is_non_fallback,
     _workbench_local_state,
 )
@@ -200,78 +199,6 @@ def test_workbench_local_state_degrades_when_local_reads_fail() -> None:
     assert all("RuntimeError" in item[1] for item in cache.events)
     assert cache.io_threads
     assert all(thread_id != event_loop_thread for thread_id in cache.io_threads)
-
-
-def test_advice_snapshot_failure_does_not_block_workbench_response() -> None:
-    class FailingAdviceCache:
-        def save_advice_snapshot(self, analysis: object) -> None:
-            raise RuntimeError("advice db readonly")
-
-    hub = SimpleNamespace(cache=FailingAdviceCache())
-    context = SimpleNamespace(analysis=object(), advice_snapshot_saved=False)
-
-    warning = asyncio.run(_ensure_advice_snapshot(hub, context))  # type: ignore[arg-type]
-
-    assert context.advice_snapshot_saved is False
-    assert warning is not None
-    assert warning.component == "advice_snapshot"
-    assert warning.message == "分析建议快照暂未保存，本次分析结果仍可正常查看。"
-
-
-def test_advice_snapshot_marks_cached_context_only_after_success() -> None:
-    class AdviceCache:
-        def __init__(self) -> None:
-            self.calls = 0
-            self.io_threads: list[int] = []
-
-        def save_advice_snapshot(self, analysis: object) -> None:
-            self.calls += 1
-            self.io_threads.append(threading.get_ident())
-
-    cache = AdviceCache()
-    hub = SimpleNamespace(cache=cache)
-    context = SimpleNamespace(analysis=object(), advice_snapshot_saved=False)
-
-    async def run_check():
-        event_loop_thread = threading.get_ident()
-        first_warning = await _ensure_advice_snapshot(hub, context)  # type: ignore[arg-type]
-        second_warning = await _ensure_advice_snapshot(hub, context)  # type: ignore[arg-type]
-        return first_warning, second_warning, event_loop_thread
-
-    first_warning, second_warning, event_loop_thread = asyncio.run(run_check())
-
-    assert context.advice_snapshot_saved is True
-    assert cache.calls == 1
-    assert cache.io_threads[0] != event_loop_thread
-    assert first_warning is None
-    assert second_warning is None
-
-
-def test_advice_snapshot_cancellation_propagates_without_marking_context_saved() -> None:
-    started = threading.Event()
-    release = threading.Event()
-
-    class BlockingAdviceCache:
-        def save_advice_snapshot(self, analysis: object) -> None:
-            started.set()
-            release.wait(timeout=2)
-
-    hub = SimpleNamespace(cache=BlockingAdviceCache())
-    context = SimpleNamespace(analysis=object(), advice_snapshot_saved=False)
-
-    async def run_check() -> None:
-        task = asyncio.create_task(_ensure_advice_snapshot(hub, context))  # type: ignore[arg-type]
-        assert await asyncio.to_thread(started.wait, 1)
-        task.cancel()
-        try:
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        finally:
-            release.set()
-
-    asyncio.run(run_check())
-
-    assert context.advice_snapshot_saved is False
 
 
 class _CacheStub:

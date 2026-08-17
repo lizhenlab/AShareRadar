@@ -9,6 +9,7 @@ from app.models.market import (
 from app.models.analysis import (
     SignalContribution,
 )
+from app.models.market_scan import MarketScanMode
 from app.services.indicator_trend_components import (
     build_trend_context,
     change_impact as _change_impact,
@@ -27,16 +28,26 @@ TREND_SCORE_CENTER = 50
 TREND_SCORE_SOFT_CLIP_SCALE = 50.0
 
 
-def trend_score(quote: Quote, klines: list[Kline]) -> tuple[int, str]:
-    score, label, _ = trend_score_snapshot(quote, klines)
+def trend_score(
+    quote: Quote,
+    klines: list[Kline],
+    *,
+    mode: MarketScanMode = "official",
+) -> tuple[int, str]:
+    score, label, _ = trend_score_snapshot(quote, klines, mode=mode)
     return score, label
 
 
-def trend_score_snapshot(quote: Quote, klines: list[Kline]) -> tuple[int, str, list[SignalContribution]]:
+def trend_score_snapshot(
+    quote: Quote,
+    klines: list[Kline],
+    *,
+    mode: MarketScanMode = "official",
+) -> tuple[int, str, list[SignalContribution]]:
     valid_klines = filter_valid_klines(klines)
     if len(valid_klines) < 20:
         return 50, "数据不足", insufficient_sample_contributions()
-    contributions = trend_contributions(build_trend_context(quote, valid_klines))
+    contributions = trend_contributions(build_trend_context(quote, valid_klines, mode=mode))
     score = trend_score_from_impact(sum(item.impact for item in contributions))
     return score, _trend_label(score), contributions
 

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import fcntl
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import multiprocessing
 import os
@@ -11,14 +12,19 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
+
+from tests.market_scan_test_support import action_pass_publication_diagnostics
 
 import app.repositories.maintenance as maintenance_module
 import app.services.runtime_backup as runtime_backup_module
 from app.services.cache import SQLiteCache
 from app.config import Settings
 from app.repositories.market_scan import MarketScanResultWrite, MarketScanSeed
+from app.services.market_scan_universe import FULL_MARKET_SCOPE
+from app.services.market_scan_manager import market_scan_rule_contract, market_scan_rule_version
 from app.services.runtime_backup import (
     RuntimeBackupError,
     create_runtime_backup,
@@ -27,6 +33,67 @@ from app.services.runtime_backup import (
     runtime_backup_storage,
     verify_runtime_backup,
 )
+from tools import runtime_data
+
+
+class _RuntimeDataResult:
+    def __init__(self, operation: str) -> None:
+        self.operation = operation
+
+    def model_dump(self, *, mode: str) -> dict[str, str]:
+        assert mode == "json"
+        return {"operation": self.operation}
+
+
+@pytest.mark.parametrize(
+    ("argv", "function_name", "operation"),
+    [
+        (["verify", "backup"], "verify_runtime_backup", "verify"),
+        (["backup", "--destination", "backup"], "create_runtime_backup", "backup"),
+        (
+            ["restore", "backup", "--confirm-service-stopped", "--rollback-destination", "rollback"],
+            "restore_runtime_backup",
+            "restore",
+        ),
+    ],
+)
+def test_runtime_data_cli_dispatches_each_operation_in_process(
+    argv: list[str],
+    function_name: str,
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed: list[tuple[object, ...]] = []
+
+    def operation_call(*args: object, **kwargs: object) -> _RuntimeDataResult:
+        observed.append((*args, kwargs))
+        return _RuntimeDataResult(operation)
+
+    monkeypatch.setattr(runtime_data, function_name, operation_call)
+    monkeypatch.setattr(
+        runtime_data,
+        "Settings",
+        lambda: SimpleNamespace(cache_path=Path("runtime.sqlite3"), max_runtime_backups=7),
+    )
+
+    assert runtime_data.main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": operation}
+    assert len(observed) == 1
+
+
+def test_runtime_data_cli_maps_operation_failure_to_exit_one(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        runtime_data,
+        "verify_runtime_backup",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("broken backup")),
+    )
+
+    assert runtime_data.main(["verify", "backup"]) == 1
+    assert "runtime-data: broken backup" in capsys.readouterr().err
 
 
 def _create_runtime_backups_in_process(database_path: str, start_event, results, count: int) -> None:
@@ -43,7 +110,19 @@ def _create_runtime_backups_in_process(database_path: str, start_event, results,
 
 def test_backup_verify_restore_and_automatic_rollback_snapshot(tmp_path: Path) -> None:
     target = tmp_path / "runtime.sqlite3"
-    SQLiteCache(target)
+    settings = Settings(cache_path=target, scheduler_enabled=False)
+    cache = SQLiteCache(settings=settings)
+    rule_contract = market_scan_rule_contract(settings)
+    rule_version = market_scan_rule_version(settings)
+    cache.create_market_scan_run(
+        trigger="manual",
+        mode="official",
+        rule_version=rule_version,
+        rule_contract=rule_contract,
+        as_of="2026-07-17 16:30:00",
+        data_date="2026-07-17",
+        scope=FULL_MARKET_SCOPE,
+    )
     _insert_watchlist(target, "before")
     backup = create_runtime_backup(target, tmp_path / "backup")
     _update_watchlist(target, "after")
@@ -61,6 +140,31 @@ def test_backup_verify_restore_and_automatic_rollback_snapshot(tmp_path: Path) -
     assert restored.rollback_backup_path == str(tmp_path / "rollback")
     rollback = verify_runtime_backup(Path(restored.rollback_backup_path))
     assert _watchlist_note(Path(rollback.database_path)) == "after"
+    with sqlite3.connect(target) as conn:
+        assert conn.execute(
+            "SELECT production_score_rule_version FROM market_scan_rule_contract WHERE rule_version = ?",
+            (rule_version,),
+        ).fetchone() == ("full-market-score-v5",)
+
+
+def test_restore_rejects_managed_research_artifacts_before_database_write(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "runtime.sqlite3"
+    SQLiteCache(target)
+    _insert_watchlist(target, "before")
+    backup = create_runtime_backup(target, tmp_path / "backup")
+    _update_watchlist(target, "after")
+    digest_before = hashlib.sha256(target.read_bytes()).hexdigest()
+    managed = tmp_path / "research" / "market_scan_future_range"
+    managed.mkdir(parents=True)
+    (managed / "evidence.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeBackupError, match="DB-only restore"):
+        restore_runtime_backup(Path(backup.backup_path), target, service_stopped=True)
+
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == digest_before
+    assert _watchlist_note(target) == "after"
 
 
 def test_backup_verification_rejects_tampered_database(tmp_path: Path) -> None:
@@ -73,6 +177,69 @@ def test_backup_verification_rejects_tampered_database(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeBackupError, match="SHA-256"):
         verify_runtime_backup(Path(backup.backup_path))
+
+
+def test_backup_create_verify_and_staged_restore_reject_foreign_key_violations(
+    tmp_path: Path,
+) -> None:
+    corrupt_source = tmp_path / "corrupt-source.sqlite3"
+    SQLiteCache(corrupt_source)
+    _insert_orphan_review_revision(corrupt_source)
+
+    rejected_destination = tmp_path / "rejected-backup"
+    with pytest.raises(RuntimeBackupError, match="foreign_key_check"):
+        create_runtime_backup(corrupt_source, rejected_destination)
+    assert rejected_destination.exists() is False
+
+    valid_source = tmp_path / "valid-source.sqlite3"
+    SQLiteCache(valid_source)
+    backup = create_runtime_backup(valid_source, tmp_path / "crafted-backup")
+    backup_database = Path(backup.database_path)
+    _insert_orphan_review_revision(backup_database)
+    _refresh_manifest_after_controlled_corruption(
+        backup_database,
+        Path(backup.manifest_path),
+    )
+
+    with pytest.raises(RuntimeBackupError, match="foreign_key_check"):
+        verify_runtime_backup(Path(backup.backup_path))
+
+    restore_target = tmp_path / "restore-target.sqlite3"
+    SQLiteCache(restore_target)
+    _insert_watchlist(restore_target, "must-stay")
+    with pytest.raises(RuntimeBackupError, match="foreign_key_check"):
+        restore_runtime_backup(
+            Path(backup.backup_path),
+            restore_target,
+            service_stopped=True,
+        )
+    assert _watchlist_note(restore_target) == "must-stay"
+    assert not tuple(tmp_path.glob(f".{restore_target.name}.restore-source.*"))
+
+
+def test_integrity_check_rejects_partial_market_scan_schema(tmp_path: Path) -> None:
+    path = tmp_path / "partial-scan.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE market_scan_run (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                snapshot_digest TEXT
+            );
+            INSERT INTO market_scan_run VALUES (
+                1, 'success',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+            );
+            """
+        )
+        with pytest.raises(RuntimeBackupError, match="缺少.*market_scan_result"):
+            runtime_backup_module._integrity_check(conn)
+
+
+def test_integrity_check_accepts_database_predating_market_scan_tables() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        assert runtime_backup_module._integrity_check(conn) == "ok"
 
 
 def test_backup_manifest_uses_portable_source_name_and_accepts_legacy_absolute_path(tmp_path: Path) -> None:
@@ -104,11 +271,7 @@ def test_managed_runtime_backups_are_pruned_to_configured_bound(tmp_path: Path) 
     assert len(retained) == 2
     assert all(not Path(result.backup_path).exists() for result in backups[:2])
     assert all(verify_runtime_backup(Path(result.backup_path)).ok for result in backups[2:])
-    assert storage.size_bytes == sum(
-        candidate.stat().st_size
-        for candidate in (tmp_path / "backups").rglob("*")
-        if candidate.is_file()
-    )
+    assert storage.size_bytes == sum(candidate.stat().st_size for candidate in (tmp_path / "backups").rglob("*") if candidate.is_file())
 
 
 def test_storage_counts_corrupt_bundles_and_crash_residual_bytes(tmp_path: Path) -> None:
@@ -123,11 +286,7 @@ def test_storage_counts_corrupt_bundles_and_crash_residual_bytes(tmp_path: Path)
     (backup_directory / "crash.partial").write_bytes(b"partial")
 
     storage = runtime_backup_storage(target)
-    actual_root_bytes = sum(
-        candidate.stat().st_size
-        for candidate in backup_directory.rglob("*")
-        if candidate.is_file()
-    )
+    actual_root_bytes = sum(candidate.stat().st_size for candidate in backup_directory.rglob("*") if candidate.is_file())
 
     assert storage.managed_bundle_count == 1
     assert storage.size_bytes == actual_root_bytes
@@ -215,10 +374,7 @@ def test_operation_lease_releases_every_guard_and_thread_lock_after_release_fail
     assert isinstance(raised.value.__cause__, OSError)
     assert str(raised.value.__cause__) == "first release"
     assert [guard.release_calls for guard in guards] == [1, 1]
-    assert all(
-        runtime_backup_module._thread_operation_lock(path.resolve()).locked() is False
-        for path in paths
-    )
+    assert all(runtime_backup_module._thread_operation_lock(path.resolve()).locked() is False for path in paths)
 
 
 def test_operation_lease_continues_after_a_thread_lock_release_failure(
@@ -550,9 +706,7 @@ def test_backup_operation_lease_timeout_is_bounded_readable_and_redacted(
 ) -> None:
     target = tmp_path / "api_key=very-secret.sqlite3"
     SQLiteCache(target)
-    guard = runtime_backup_module.FileInstanceGuard(
-        runtime_backup_module._database_operation_lock_path(target)
-    )
+    guard = runtime_backup_module.FileInstanceGuard(runtime_backup_module._database_operation_lock_path(target))
     assert guard.acquire() is True
     monkeypatch.setattr(runtime_backup_module, "BACKUP_OPERATION_LOCK_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(runtime_backup_module, "BACKUP_OPERATION_LOCK_POLL_SECONDS", 0.005)
@@ -686,6 +840,146 @@ def test_runtime_cleanup_keeps_configured_market_scan_snapshots_and_cascades_res
     assert counts["market_scan_result"] == 1
 
 
+def test_runtime_cleanup_never_deletes_published_snapshot_as_regenerable_overflow(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.sqlite3"
+    settings = Settings(cache_path=path, max_market_scan_runs=1)
+    cache = SQLiteCache(path, settings=settings)
+    protected = cache.create_market_scan_run(
+        trigger="manual",
+        mode="official",
+        rule_version="full-market-score-v1",
+        as_of="2026-07-15 16:30:00",
+        data_date="2026-07-15",
+        scope=FULL_MARKET_SCOPE,
+    )
+    cache.start_market_scan_run(protected.id)
+    cache.seed_market_scan_results(
+        protected.id,
+        [MarketScanSeed("600519.SH", "600519", "SH", "贵州茅台")],
+        excluded_count=0,
+    )
+    cache.save_market_scan_result_batch(
+        protected.id,
+        [
+            MarketScanResultWrite(
+                symbol="600519.SH",
+                status="success",
+                score=80,
+                raw_score=80.0,
+                trend_score=80,
+                leader_score=80,
+                data_quality_score=100,
+                price=100.0,
+                data_date="2026-07-15",
+                quote_timestamp="2026-07-15 15:00:00",
+                quote_source="test",
+                kline_source="test",
+                adjustment_mode="qfq",
+                metrics={"test": 1},
+                reason="test",
+            )
+        ],
+    )
+    cache.finish_market_scan_run(
+        protected.id,
+        "success",
+        message="待PIT归档",
+        publication_diagnostics=action_pass_publication_diagnostics(),
+    )
+    for day in (16, 17):
+        run = cache.create_market_scan_run(
+            trigger="manual",
+            rule_version="test",
+            as_of=f"2026-07-{day} 16:30:00",
+            data_date=f"2026-07-{day}",
+            scope="test",
+        )
+        cache.start_market_scan_run(run.id)
+        cache.finish_market_scan_run(run.id, "failed", message="test")
+
+    first = cache.cleanup_runtime_rows()
+    assert first["market_scan_run"] == 1
+    assert cache.market_scan_run(protected.id).id == protected.id
+    second = cache.cleanup_runtime_rows()
+    assert second["market_scan_run"] == 0
+    assert cache.market_scan_run(protected.id).id == protected.id
+
+
+def test_runtime_cleanup_preserves_failed_parent_referenced_by_published_retry(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.sqlite3"
+    cache = SQLiteCache(
+        path,
+        settings=Settings(cache_path=path, max_market_scan_runs=1),
+    )
+    parent = cache.create_market_scan_run(
+        trigger="manual",
+        rule_version="legacy-retry-v1",
+        as_of="2026-07-15 16:30:00",
+        data_date="2026-07-15",
+        scope=FULL_MARKET_SCOPE,
+    )
+    cache.start_market_scan_run(parent.id)
+    cache.seed_market_scan_results(
+        parent.id,
+        [MarketScanSeed("600519.SH", "600519", "SH", "贵州茅台")],
+        excluded_count=0,
+    )
+    cache.finish_market_scan_run(parent.id, "failed", message="可重试")
+    retry = cache.prepare_market_scan_retry(
+        parent.id,
+        as_of="2026-07-15 16:45:00",
+    )
+    cache.start_market_scan_run(retry.id)
+    cache.save_market_scan_result_batch(
+        retry.id,
+        [
+            MarketScanResultWrite(
+                symbol="600519.SH",
+                status="success",
+                score=80,
+                raw_score=80.0,
+                trend_score=80,
+                leader_score=80,
+                data_quality_score=100,
+                price=100.0,
+                data_date="2026-07-15",
+                quote_timestamp="2026-07-15 15:00:00",
+                quote_observed_at="2026-07-15T15:00:01+08:00",
+                quote_source="test",
+                kline_source="test",
+                adjustment_mode="qfq",
+                metrics={"test": 1},
+                reason="test",
+            )
+        ],
+    )
+    cache.finish_market_scan_run(
+        retry.id,
+        "success",
+        message="重试已发布",
+        publication_diagnostics=action_pass_publication_diagnostics(),
+    )
+    newer = cache.create_market_scan_run(
+        trigger="manual",
+        rule_version="newer-failed",
+        as_of="2026-07-16 16:30:00",
+        data_date="2026-07-16",
+        scope="test",
+    )
+    cache.start_market_scan_run(newer.id)
+    cache.finish_market_scan_run(newer.id, "failed", message="较新失败")
+
+    removed = cache.cleanup_runtime_rows()
+
+    assert removed["market_scan_run"] == 0
+    assert cache.market_scan_run(retry.id).retry_of_run_id == parent.id
+    assert cache.market_scan_run(parent.id).status == "failed"
+
+
 def test_runtime_cleanup_preserves_market_scan_retry_and_task_lineage(tmp_path: Path) -> None:
     path = tmp_path / "runtime.sqlite3"
     settings = Settings(
@@ -717,7 +1011,10 @@ def test_runtime_cleanup_preserves_market_scan_retry_and_task_lineage(tmp_path: 
         cache.start_market_scan_run(unrelated.id)
         cache.finish_market_scan_run(unrelated.id, "failed", message="test")
 
-    retry = cache.prepare_market_scan_retry(original.id)
+    retry = cache.prepare_market_scan_retry(
+        original.id,
+        as_of="2026-07-16 16:45:00",
+    )
     cache.start_market_scan_run(retry.id)
     cache.finish_market_scan_run(retry.id, "failed", message="test")
 
@@ -751,7 +1048,10 @@ def test_runtime_cleanup_releases_expired_retry_and_task_lineage_in_one_pass(tmp
     cache.attach_market_scan_task_run(original.id, task_run_id)
     cache.start_market_scan_run(original.id)
     cache.finish_market_scan_run(original.id, "failed", message="test")
-    retry = cache.prepare_market_scan_retry(original.id)
+    retry = cache.prepare_market_scan_retry(
+        original.id,
+        as_of="2026-07-16 16:45:00",
+    )
     cache.start_market_scan_run(retry.id)
     cache.finish_market_scan_run(retry.id, "failed", message="test")
     latest = cache.create_market_scan_run(
@@ -971,6 +1271,45 @@ def test_regenerable_cleanup_is_throttled_between_health_checks(tmp_path: Path, 
     assert first["cache_event"] == 1
     assert throttled == {}
     assert after_interval["cache_event"] == 2
+
+
+def _insert_orphan_review_revision(path: Path) -> None:
+    payload_json = '{"orphan":true}'
+    payload_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            """
+            INSERT INTO advice_review_plan_revision (
+                plan_id, revision, payload_json, payload_digest, created_at
+            ) VALUES (999999, 1, ?, ?, '2026-08-13T00:00:00.000000Z')
+            """,
+            (payload_json, payload_digest),
+        )
+
+
+def _refresh_manifest_after_controlled_corruption(
+    database_path: Path,
+    manifest_path: Path,
+) -> None:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    with sqlite3.connect(database_path) as conn:
+        table_names = sorted(
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                """
+            )
+        )
+        counts = {name: int(conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]) for name in table_names}
+    digest = hashlib.sha256(database_path.read_bytes()).hexdigest()
+    payload["database_size_bytes"] = database_path.stat().st_size
+    payload["sha256"] = digest
+    payload["table_row_counts"] = counts
+    payload["user_table_row_counts"] = {name: counts[name] for name in payload["user_table_row_counts"]}
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _insert_watchlist(path: Path, note: str) -> None:

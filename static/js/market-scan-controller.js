@@ -1,35 +1,28 @@
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { compactErrorMessage } from "./errors.js";
-import {
-  isActiveMarketScanRun,
-  isPublishedMarketScanRun,
-  isRetryableMarketScanRun,
-  marketScanContractError,
-  marketScanRunIdentityChanged,
-  marketScanRunStateChanged,
-  validateMarketScanRun,
-  validateResultPage,
-  validateStartResponse,
-} from "./market-scan-contracts.js";
-import { createMarketScanPolling } from "./market-scan-polling.js";
+import { isActiveMarketScanRun, isPublishedMarketScanRun, isRetryableMarketScanRun, marketScanContractError, marketScanRunIdentityChanged, marketScanRunStateChanged, validateMarketScanRun, validateStartResponse } from "./market-scan-contracts.js";
+import { createMarketScanPolling, isMarketScanReadBusy } from "./market-scan-polling.js";
+import { MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS, createMarketScanLatestLoader, samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
+import { createMarketScanLatestSync } from "./market-scan-latest-sync.js";
 import { createMarketScanHistory } from "./market-scan-history.js";
-import {
-  exportTimeoutScope,
-  MARKET_SCAN_XLSX_MEDIA_TYPE,
-  marketScanExportError,
-  marketScanExportMediaType,
-} from "./market-scan-export-client.js";
+import { createMarketScanSurface } from "./market-scan-surface.js";
+import { createMarketScanExportAction } from "./market-scan-export-action.js";
+import { bindMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
+import { createMarketScanProbabilityHorizonController } from "./market-scan-probability-horizon-controller.js";
+import { createMarketScanProbabilityPolling } from "./market-scan-probability-polling.js";
+import { createMarketScanReadTransition } from "./market-scan-read-transition.js";
+import { createMarketScanFutureRangeController } from "./market-scan-future-range-controller.js";
 import { inertMarketScanController } from "./market-scan-controller-inert.js";
 import { createMarketScanRowClickHandler } from "./market-scan-row-actions.js";
-import { buildMarketScanExportUrl, buildMarketScanResultsUrl, createMarketScanView } from "./market-scan-view.js";
+import { createMarketScanTop100Refresh } from "./market-scan-top100-refresh.js";
+import { buildMarketScanResultsUrl, createMarketScanView } from "./market-scan-view.js";
 export { buildMarketScanExportUrl, buildMarketScanResultsUrl, marketScanResultsUrl } from "./market-scan-view.js";
-
 export function createMarketScanController(options = {}) {
   const root = options.root || globalThis.document;
   const panel = root?.getElementById?.("workspace-panel-market-scan");
   if (!panel) return inertMarketScanController();
   const request = options.fetcher || fetchJson;
-  const exportRequest = options.exportFetcher || globalThis.fetch;
+  const exportRequest = options.exportFetcher || globalThis.fetch.bind(globalThis);
   const onSelectStock = typeof options.onSelectStock === "function" ? options.onSelectStock : () => {};
   const onOpen = typeof options.onOpen === "function" ? options.onOpen : () => {};
   const connectivityTarget = options.connectivityTarget || root?.defaultView || globalThis.window;
@@ -37,7 +30,8 @@ export function createMarketScanController(options = {}) {
   const { elements } = view;
   const state = {
     activated: false, actionBusy: false, exportBusy: false, visible: !root.hidden,
-    run: null, publishedRun: null,
+    surfaceActive: options.surfaceActive !== false,
+    run: null, publishedRun: null, pollingIdentity: null,
     browseMode: view.selectedMode(), selectedHistoryRunId: null, historyRuns: [],
     page: 1, pageCount: 0,
     pollTimer: null, resetTimer: null,
@@ -47,25 +41,98 @@ export function createMarketScanController(options = {}) {
     historyRequest: null, historyRequestSeq: 0,
     onlineRecoveryPromise: null,
   };
+  let probabilityHorizonController = null;
+  let readTransition = null;
+  let pollRunPromise = null;
+  const exportResults = createMarketScanExportAction({ elements, exportRequest, resultRun, state, view });
   const polling = createMarketScanPolling({
     ...options,
     state,
-    callbacks: { latest: loadLatest, results: loadResults, run: pollRun },
+    callbacks: { latest: pollLatestIdentity, probabilityResults: () => probabilityPolling.poll(loadResults), results: loadResults, run: pollRun },
     isEnabled: () => state.activated && state.visible && !state.actionBusy,
   });
+  const probabilityPolling = createMarketScanProbabilityPolling({ options, polling, resultRun, state });
   const { abortRequest, beginRequest, finishRequest, isCurrentRequest } = polling;
-  const history = createMarketScanHistory({
-    applyPublishedRun,
-    abortResults: () => abortRequest("resultRequest", "resultRequestSeq"),
-    loadLatest,
-    loadResults,
+  const latestLoader = createMarketScanLatestLoader({
+    beforeResultsRead: (query, run) => probabilityHorizonController?.trustedReadStarted(query, run),
+    isCurrentRequest,
     request,
+    resultsUrl: (runId, queryOptions = {}) => buildMarketScanResultsUrl(
+      runId,
+      queryOptions.resetQuery ? 1 : state.page,
+      elements,
+      { includeProbability: !queryOptions.resetQuery },
+    ),
+    state,
+  });
+  const latestSync = createMarketScanLatestSync({
+    abortRequest,
+    beginRequest,
+    commit: commitLatestSnapshot,
+    finishRequest,
+    handleError: handleLatestSyncError,
+    handleStaleError: (error) => probabilityHorizonController?.staleTrustedFailure(error),
+    isCurrentRequest,
+    polling,
+    renderLoading: () => view.renderHeadline("正在读取最近扫描...", "loading"),
+    request,
+    stage: latestLoader.stage,
+    state,
+  });
+  probabilityHorizonController = createMarketScanProbabilityHorizonController({
+    abortLatest: latestSync.abort,
+    beginRequest,
+    clearResetTimer,
+    detachOwnedRead: (detachOptions) => readTransition.invalidateOwner(detachOptions),
+    elements,
+    finishRequest,
+    isCurrentRequest,
+    polling,
+    probabilityPolling,
+    recoverLatest,
+    request,
+    resultErrorMessage: (error) => `榜单读取失败：${compactErrorMessage(error?.message)}`,
+    resultRun,
+    resultsUrl: (runId, page) => buildMarketScanResultsUrl(runId, page, elements),
     state,
     view,
+    withHeavyRead: (operation) => readTransition.run(operation),
+  });
+  readTransition = createMarketScanReadTransition({
+    latestSync, probabilityHorizon: probabilityHorizonController, state,
+  });
+  const history = createMarketScanHistory({
+    applyPublishedRun,
+    clearPolling: polling.clear,
+    loadLatestOwned: syncLatestWithOwnership,
+    loadResultsOwned: probabilityHorizonController.loadWithinGate,
+    request,
+    state,
+    transitionReads: readTransition.transition,
+    view,
+  });
+  const surface = createMarketScanSurface({
+    abortHistory: history.abort, scheduleTracking: () => polling.scheduleDefault(state.run),
+    elements,
+    loadResults,
+    refreshOwned: () => Promise.all([
+      isActiveMarketScanRun(state.run)
+        ? pollRunOnce().then((outcome) => finishPolledRun(outcome, { withinHeavyRead: true }))
+        : state.publishedRun
+          ? probabilityHorizonController.loadWithinGate()
+          : syncLatestWithOwnership({ forceTrusted: true, renderLoading: !state.run }),
+      history.load(),
+    ]),
+    releaseResults: () => releaseResults({ preserveCache: true }),
+    state,
+    transitionReads: readTransition.transition,
   });
   const handleRowClick = createMarketScanRowClickHandler({ onSelectStock, view });
+  const top100Refresh = createMarketScanTop100Refresh({ applyRun, elements, mutate, polling, resultRun, state, view });
+  const futureRange = createMarketScanFutureRangeController({ root, request, getRun: resultRun });
   bindEvents();
   view.renderRun(null);
+  view.resetProbabilityResearch(null);
   view.renderExportBusy(false, null);
   syncBrowsingContext();
   function activate() {
@@ -75,63 +142,92 @@ export function createMarketScanController(options = {}) {
   }
   function deactivate() {
     state.activated = false;
+    futureRange.abort();
     clearControllerTimers();
-    abortRequest("runRequest", "runRequestSeq");
-    abortRequest("resultRequest", "resultRequestSeq");
+    void readTransition.transition(() => null);
     history.abort();
+    releaseResults();
+  }
+  function releaseResults(options = {}) {
+    probabilityHorizonController.supersede(options);
+    elements.rows.innerHTML = "";
+    elements.tableWrap.hidden = true;
+    elements.pagination.hidden = true;
+    state.renderedResultRunId = null;
   }
   function setVisible(visible) {
     state.visible = Boolean(visible);
     if (!state.visible) {
+      futureRange.abort();
       clearControllerTimers();
-      abortRequest("runRequest", "runRequestSeq");
-      abortRequest("resultRequest", "resultRequestSeq");
+      void readTransition.transition(() => null, { preserveCache: true });
       history.abort();
       return;
     }
     if (!state.activated || state.actionBusy) return;
-    if (isActiveMarketScanRun(state.run)) void pollRun();
-    else void loadLatest();
-  }
-  async function loadLatest(options = {}) {
-    if (state.actionBusy) return null;
-    polling.clear();
-    const sequence = beginRequest("runRequest", "runRequestSeq");
-    if (!state.run) view.renderHeadline("正在读取最近扫描...", "loading");
-    try {
-      const payload = await request("/api/market-scans/latest", {
-        signal: state.runRequest.signal,
-        timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    void readTransition.transition(() => {
+      if (!state.activated || !state.visible || state.actionBusy) return;
+      if (isActiveMarketScanRun(state.run)) {
+        return pollRunOnce().then((outcome) => finishPolledRun(outcome, { withinHeavyRead: true }));
+      }
+      return syncLatestWithOwnership({
+        forceTrusted: probabilityHorizonController.needsTrustedRefresh(), renderLoading: !state.run,
       });
-      if (!isCurrentRequest("runRequestSeq", sequence)) return null;
-      const run = validateMarketScanRun(payload, { allowNull: true, context: "最近扫描响应" });
-      applyRun(run, options.recoveryMessage || "");
-      const publishedRun = await resolvePublishedRun(run, state.runRequest.signal);
-      if (!isCurrentRequest("runRequestSeq", sequence)) return null;
-      polling.resetFailures();
-      const publishedChanged = applyPublishedRun(publishedRun);
-      if (publishedRun && (publishedChanged || state.renderedResultRunId !== publishedRun.id)) {
-        const outcome = await loadResultsOnce();
-        if (!outcome.ok) {
-          if (!outcome.aborted && state.publishedRun?.id === publishedRun.id) {
-            polling.handleResultFailureAfterLatest(outcome.error);
-          }
-          return null;
-        }
-      }
-      polling.scheduleDefault(state.run);
-      return run;
-    } catch (error) {
-      if (!isAbortError(error) && isCurrentRequest("runRequestSeq", sequence)) {
-        polling.retryLatest();
-        const message = `最近扫描读取失败：${compactErrorMessage(error?.message)}`;
-        view.renderHeadline(message, "error");
-        view.announce(message, `latest-error:${state.consecutiveFailures}`);
-      }
-      return null;
-    } finally {
-      finishRequest("runRequest", "runRequestSeq", sequence);
+    }, { preserveCache: true });
+  }
+  function loadLatest(options = {}) {
+    return readTransition.transition(() => {
+      if (!state.activated || !state.visible || state.actionBusy) return null;
+      return syncLatestWithOwnership({
+        forceTrusted: true,
+        recoveryMessage: options.recoveryMessage || "",
+        renderLoading: true,
+      });
+    }, { preserveCache: true });
+  }
+  function pollLatestIdentity() {
+    return readTransition.run(() => {
+      if (!state.activated || !state.visible || state.actionBusy) return null;
+      return syncLatestWithOwnership({ renderLoading: !state.run });
+    });
+  }
+  function syncLatestWithOwnership(syncOptions) {
+    probabilityHorizonController.trustedChainStarted();
+    return latestSync.sync(syncOptions).finally(finishLatestRead);
+  }
+  function commitLatestSnapshot(staged, identity, syncOptions = {}) {
+    const acceptResult = Boolean(
+      staged.resultPage && probabilityHorizonController.acceptTrusted(staged.resultQuery)
+    );
+    applyRun(staged.run, syncOptions.recoveryMessage || "");
+    applyPublishedRun(staged.publishedRun);
+    if (acceptResult) {
+      state.page = staged.resultPage.page;
+      state.pageCount = staged.resultPage.page_count;
+      view.renderResults(staged.resultPage);
+      state.renderedResultRunId = staged.resultPage.run.id;
+      probabilityHorizonController.remember(staged.resultPage, staged.resultQuery, identity);
     }
+    probabilityPolling.schedule(acceptResult ? staged.resultPage : null);
+  }
+  function finishLatestRead() {
+    probabilityHorizonController.trustedReadFinished();
+    probabilityHorizonController.requestFinished();
+  }
+  function handleLatestSyncError(error, syncOptions = {}) {
+    const resultError = Boolean(error?.marketScanResultsRead);
+    if (isMarketScanReadBusy(error)) {
+      polling.retryBusy(error, "latest"); probabilityHorizonController.presentBusy(error); return;
+    }
+    probabilityHorizonController.invalidate({ clearLastGood: true });
+    if (syncOptions.deterministicFailure) { polling.resetFailures(); polling.scheduleDefault(state.run); } else polling.retryLatest();
+    const prefix = resultError ? "榜单读取失败" : "最近扫描读取失败";
+    const message = `${prefix}：${compactErrorMessage(error?.message)}`;
+    if (resultError) {
+      view.resetProbabilityResearch(state.publishedRun?.id ?? null, { readError: true });
+      view.renderResultState(message, "error");
+    } else view.renderHeadline(message, "error");
+    view.announce(message, `latest-error:${state.consecutiveFailures}`);
   }
   async function start() {
     const requestedMode = view.selectedMode();
@@ -186,50 +282,15 @@ export function createMarketScanController(options = {}) {
       }
     );
   }
-  async function exportResults() {
-    const publishedRun = resultRun();
-    if (!publishedRun || state.exportBusy) return null;
-    state.exportBusy = true;
-    view.renderExportBusy(true, publishedRun);
-    view.announce("正在导出当前筛选条件下的 Excel 榜单。", `export:start:${publishedRun.id}`);
-    const timeout = exportTimeoutScope();
-    try {
-      const response = await exportRequest(buildMarketScanExportUrl(publishedRun.id, elements), {
-        headers: { Accept: MARKET_SCAN_XLSX_MEDIA_TYPE },
-        signal: timeout.signal,
-      });
-      if (!response?.ok) throw new Error(await marketScanExportError(response));
-      if (marketScanExportMediaType(response) !== MARKET_SCAN_XLSX_MEDIA_TYPE) {
-        throw new Error("服务返回的不是 Excel 文件");
-      }
-      const blob = await response.blob();
-      if (!blob?.size) throw new Error("服务返回了空的 Excel 文件");
-      const filename = view.saveExport(
-        blob,
-        response.headers?.get?.("content-disposition") || "",
-        publishedRun,
-      );
-      view.announce(`Excel 榜单已导出：${filename}`, `export:success:${publishedRun.id}:${filename}`);
-      return filename;
-    } catch (error) {
-      const detail = timeout.didTimeout() ? "请求超时，请稍后重试" : compactErrorMessage(error?.message);
-      const message = `导出 Excel 失败：${detail}`;
-      view.announce(message, `export:error:${publishedRun.id}:${String(error?.message || "")}`);
-      return null;
-    } finally {
-      timeout.dispose();
-      state.exportBusy = false;
-      view.renderExportBusy(false, resultRun());
-    }
-  }
   async function mutate(label, url, init, apply) {
     if (state.actionBusy) return null;
     const previousRun = state.run ? { id: state.run.id, status: state.run.status } : null;
     state.actionBusy = true;
     polling.clear();
-    abortRequest("runRequest", "runRequestSeq");
+    void readTransition.transition(() => null);
     const sequence = beginRequest("actionRequest", "actionRequestSeq");
     view.renderActionBusy(true, state.run, `${label}请求处理中。`);
+    top100Refresh.sync();
     let completionMessage = "";
     try {
       const payload = await request(url, {
@@ -255,29 +316,36 @@ export function createMarketScanController(options = {}) {
       if (isCurrentRequest("actionRequestSeq", sequence)) {
         state.actionBusy = false;
         view.renderActionBusy(false, state.run, completionMessage);
+        top100Refresh.sync();
       }
       finishRequest("actionRequest", "actionRequestSeq", sequence);
       if (!state.actionBusy) polling.scheduleDefault(state.run);
     }
   }
-  async function reconcileMutation(previousRun) {
+  function reconcileMutation(previousRun) {
     polling.clear();
+    return readTransition.transition(() => reconcileMutationOnce(previousRun));
+  }
+  async function reconcileMutationOnce(previousRun) {
     const sequence = beginRequest("runRequest", "runRequestSeq");
+    const requestScope = state.runRequest;
+    let loadTerminalResults = false;
+    let recoveredRun = null;
     try {
       const payload = await request("/api/market-scans/latest", {
         signal: state.runRequest.signal,
-        timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+        timeoutMs: MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS,
       });
       if (!isCurrentRequest("runRequestSeq", sequence)) return null;
       const run = validateMarketScanRun(payload, { allowNull: true, context: "任务状态恢复响应" });
+      recoveredRun = run;
       polling.resetFailures();
       if (marketScanRunStateChanged(previousRun, run)) {
         applyRun(run, "请求响应未确认，已从服务端恢复任务状态。");
         if (isPublishedMarketScanRun(run)) applyPublishedRun(run);
-        if (run && !isActiveMarketScanRun(run)) return await loadResults({ allowDuringAction: true });
+        loadTerminalResults = Boolean(run && !isActiveMarketScanRun(run));
       }
       polling.scheduleDefault(state.run);
-      return run;
     } catch (error) {
       if (!isAbortError(error) && isCurrentRequest("runRequestSeq", sequence)) {
         polling.retryLatest();
@@ -285,30 +353,60 @@ export function createMarketScanController(options = {}) {
       return null;
     } finally {
       finishRequest("runRequest", "runRequestSeq", sequence);
+      releaseStaleRunScope(requestScope);
+      probabilityHorizonController.requestFinished();
     }
+    if (loadTerminalResults) {
+      await probabilityHorizonController.loadWithinGate({ allowDuringAction: true });
+    }
+    return recoveredRun;
   }
-  async function pollRun() {
+  function pollRun() {
+    if (pollRunPromise) return pollRunPromise;
+    const operation = readTransition.run(() => pollRunOnce()).then(finishPolledRun);
+    const owned = operation.finally(() => {
+      if (pollRunPromise === owned) pollRunPromise = null;
+    });
+    pollRunPromise = owned;
+    return owned;
+  }
+  async function pollRunOnce() {
     polling.clear();
     if (!state.activated || !state.visible || state.actionBusy || !isActiveMarketScanRun(state.run)) return null;
     const runId = state.run.id;
     const sequence = beginRequest("runRequest", "runRequestSeq");
+    const requestScope = state.runRequest;
     let recoveryError = null;
     try {
       const run = await requestPolledRun(runId, sequence);
-      if (!run) return null;
+      if (!run) return { recoveryError: null, run: null, runId };
       recoveryError = await processPolledRun(run);
-      return run;
+      return { recoveryError, run, runId };
     } catch (error) {
       recoveryError = handlePollRunError(error, runId, sequence);
-      return null;
+      return { recoveryError, run: null, runId };
     } finally {
       finishRequest("runRequest", "runRequestSeq", sequence);
-      if (recoveryError && state.run?.id === runId) await recoverLatest(recoveryError);
+      releaseStaleRunScope(requestScope);
+      probabilityHorizonController.requestFinished();
     }
+  }
+  async function finishPolledRun(outcome, options = {}) {
+    if (outcome?.recoveryError && state.run?.id === outcome.runId) {
+      const recovery = recoverLatest(outcome.recoveryError);
+      if (options.withinHeavyRead) void recovery;
+      else await recovery;
+    }
+    return outcome?.run ?? null;
+  }
+  function releaseStaleRunScope(scope) {
+    if (state.runRequest !== scope) return;
+    scope?.dispose?.();
+    state.runRequest = null;
   }
   async function requestPolledRun(runId, sequence) {
     const payload = await request(`/api/market-scans/${encodeURIComponent(runId)}`, {
-      signal: state.runRequest.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS });
+      signal: state.runRequest.signal, timeoutMs: MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS });
     if (!isCurrentRequest("runRequestSeq", sequence) || state.run?.id !== runId) return null;
     const run = validateMarketScanRun(payload, { context: "扫描进度响应" });
     if (run.id !== runId) throw marketScanContractError("扫描进度响应的运行批次不匹配");
@@ -317,16 +415,22 @@ export function createMarketScanController(options = {}) {
   async function processPolledRun(run) {
     polling.resetFailures(); applyRun(run);
     if (isActiveMarketScanRun(run)) { polling.scheduleDefault(state.run); return null; }
-    if (
+    const publishedForBrowse = (
       state.selectedHistoryRunId === null
       && isPublishedMarketScanRun(run)
       && run.mode === state.browseMode
-    ) {
+    );
+    if (publishedForBrowse) {
       applyPublishedRun(run);
-      void history.load();
+      if (state.surfaceActive) void history.load();
     }
-    const outcome = await loadResultsOnce();
-    if (outcome.ok) { polling.scheduleDefault(state.run); return null; }
+    if (!state.surfaceActive) { polling.scheduleDefault(state.run); return null; }
+    if (!publishedForBrowse) {
+      probabilityPolling.schedule(null);
+      return null;
+    }
+    const outcome = await loadResultsOnce({ withinHeavyRead: true });
+    if (outcome.ok) { probabilityPolling.schedule(outcome.payload); return null; }
     if (outcome.aborted) return null;
     return polling.handleScopedFailure(outcome.error, "results") ? outcome.error : null;
   }
@@ -338,59 +442,8 @@ export function createMarketScanController(options = {}) {
     view.announce(message, `run-error:${runId}:${state.consecutiveFailures}`);
     return shouldRecover ? error : null;
   }
-  async function loadResults(options = {}) {
-    if (state.actionBusy && !options.allowDuringAction) return null;
-    polling.clear();
-    const runId = resultRun()?.id ?? null;
-    const outcome = await loadResultsOnce();
-    if (outcome.ok) {
-      polling.resetFailures();
-      polling.scheduleDefault(state.run);
-      return outcome.payload;
-    }
-    if (!outcome.aborted) {
-      if (runId !== null && polling.handleScopedFailure(outcome.error, "results")) {
-        await recoverLatest(outcome.error);
-      }
-    }
-    return null;
-  }
-  async function loadResultsOnce() {
-    const publishedRun = resultRun();
-    if (!publishedRun) {
-      state.renderedResultRunId = null;
-      view.resetResultPresentation(state.run);
-      return { ok: true, payload: null };
-    }
-    const runId = publishedRun.id;
-    const sequence = beginRequest("resultRequest", "resultRequestSeq");
-    view.renderResultsLoading();
-    try {
-      const response = await request(buildMarketScanResultsUrl(runId, state.page, elements), {
-        signal: state.resultRequest.signal,
-        timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-      });
-      if (!isCurrentRequest("resultRequestSeq", sequence) || resultRun()?.id !== runId) {
-        return { ok: false, aborted: true, error: null };
-      }
-      const payload = validateResultPage(response, runId);
-      state.page = payload.page;
-      state.pageCount = payload.page_count;
-      view.renderResults(payload);
-      state.renderedResultRunId = runId;
-      return { ok: true, payload };
-    } catch (error) {
-      if (!isAbortError(error) && isCurrentRequest("resultRequestSeq", sequence)) {
-        const message = `榜单读取失败：${compactErrorMessage(error?.message)}`;
-        view.renderResultState(message, "error");
-        view.announce(message, `results-error:${runId}:${String(error?.message || "")}`);
-        return { ok: false, aborted: false, error };
-      }
-      return { ok: false, aborted: true, error };
-    } finally {
-      finishRequest("resultRequest", "resultRequestSeq", sequence);
-    }
-  }
+  function loadResults(options = {}) { return probabilityHorizonController.load(options); }
+  function loadResultsOnce(options = {}) { return probabilityHorizonController.loadOnce(options); }
   function applyRun(run, overrideMessage = "") {
     const previousRun = state.run;
     const runChanged = marketScanRunIdentityChanged(previousRun, run);
@@ -400,6 +453,7 @@ export function createMarketScanController(options = {}) {
     syncBrowsingContext();
     view.announceRunUpdate(previousRun, state.run, overrideMessage);
     if (runChanged && !resultRun()) {
+      probabilityHorizonController.supersede();
       state.page = 1; state.pageCount = 0; state.renderedResultRunId = null;
       view.resetResultPresentation(state.run);
     }
@@ -407,11 +461,12 @@ export function createMarketScanController(options = {}) {
   }
   function applyPublishedRun(run) {
     if (run && run.mode !== state.browseMode) return false;
-    const changed = marketScanRunIdentityChanged(state.publishedRun, run);
+    const changed = !samePublishedMarketScanRun(state.publishedRun, run);
     state.publishedRun = run || null;
     view.renderExportBusy(state.exportBusy, resultRun());
     syncBrowsingContext();
     if (changed) {
+      probabilityHorizonController.publicationChanged(run);
       state.page = 1; state.pageCount = 0;
       state.renderedResultRunId = null;
       view.resetResultPresentation(state.publishedRun || state.run);
@@ -427,21 +482,6 @@ export function createMarketScanController(options = {}) {
     ) return state.run;
     return null;
   }
-  async function resolvePublishedRun(run, signal) {
-    if (state.selectedHistoryRunId !== null) return resultRun();
-    if (isPublishedMarketScanRun(run) && run.mode === state.browseMode) return run;
-    try {
-      const payload = await request(`/api/market-scans/latest-published?mode=${encodeURIComponent(state.browseMode)}`, {
-        signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-      });
-      const published = validateMarketScanRun(payload, { allowNull: true, context: "最近已发布扫描响应" });
-      return isPublishedMarketScanRun(published) && published.mode === state.browseMode ? published : null;
-    } catch (error) {
-      if (isAbortError(error)) throw error;
-      return state.publishedRun?.mode === state.browseMode ? state.publishedRun : null;
-    }
-  }
-
   function syncBrowsingContext() {
     view.renderBrowsingContext(
       state.run,
@@ -449,12 +489,13 @@ export function createMarketScanController(options = {}) {
       state.browseMode,
       state.selectedHistoryRunId !== null,
     );
+    top100Refresh.sync();
+    futureRange.sync(resultRun());
   }
   async function recoverLatest(error) {
     if (!state.activated || !state.visible || state.actionBusy) return null;
     const message = polling.recoveryMessage(error);
     view.announce(message, `recover-latest:${state.run?.id ?? "none"}:${state.consecutiveFailures}`);
-    abortRequest("resultRequest", "resultRequestSeq");
     return loadLatest({ recoveryMessage: message });
   }
   function clearResetTimer() {
@@ -470,6 +511,7 @@ export function createMarketScanController(options = {}) {
     elements.cancel.addEventListener("click", () => void cancel());
     elements.retry.addEventListener("click", () => void retry());
     elements.exportButton.addEventListener("click", () => void exportResults());
+    bindMarketScanProbabilityHorizon(elements, probabilityHorizonController.change);
     elements.filters.addEventListener("submit", (event) => {
       event.preventDefault();
       clearResetTimer();
@@ -491,11 +533,13 @@ export function createMarketScanController(options = {}) {
     elements.prev.addEventListener("click", () => {
       if (state.page <= 1) return;
       state.page -= 1;
+      view.focusResults();
       void loadResults();
     });
     elements.next.addEventListener("click", () => {
       if (state.pageCount && state.page >= state.pageCount) return;
       state.page += 1;
+      view.focusResults();
       void loadResults();
     });
     elements.globalOpen.addEventListener("click", () => onOpen());
@@ -508,34 +552,23 @@ export function createMarketScanController(options = {}) {
     if (!state.activated || !state.visible || state.actionBusy || state.onlineRecoveryPromise) return false;
     polling.clear();
     polling.resetFailures();
-    abortRequest("runRequest", "runRequestSeq");
-    abortRequest("resultRequest", "resultRequestSeq");
     history.abort();
     const message = "网络已恢复，正在同步最近扫描。";
     view.renderHeadline(message, "loading");
     view.announce(message, "network:online");
-    const recovery = Promise.all([
-      loadLatest({ recoveryMessage: message }),
+    const recovery = readTransition.transition(() => Promise.all([
+      syncLatestWithOwnership({ forceTrusted: true, recoveryMessage: message, renderLoading: true }),
       history.load(),
-    ]).finally(() => {
+    ])).finally(() => {
       if (state.onlineRecoveryPromise === recovery) state.onlineRecoveryPromise = null;
     });
     state.onlineRecoveryPromise = recovery;
     void recovery;
     return true;
   }
-
   return {
-    activate,
-    cancel,
-    deactivate,
-    exportResults,
-    loadHistory: history.load,
-    loadLatest,
-    loadResults,
-    retry,
-    setVisible,
-    start,
-    state,
+    activate, cancel, deactivate, exportResults, loadHistory: history.load, loadLatest, loadResults,
+    releaseResults, retry, refreshTop100: top100Refresh.refresh,
+    setSurfaceActive: surface.setActive, setVisible, start, state,
   };
 }

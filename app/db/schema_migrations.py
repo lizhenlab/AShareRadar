@@ -11,6 +11,11 @@ from app.db.schema_definitions import (
     QUOTE_HISTORY_COLUMN_DEFINITIONS,
     SCHEMA_MIGRATION_APPLIED_AT_DEFAULT_SQL,
 )
+from app.db.market_scan_integrity import (
+    backfill_market_scan_snapshot_digests,
+    create_market_scan_immutability_triggers,
+    drop_market_scan_immutability_triggers,
+)
 from app.utils.audit_time import normalize_audit_time_text
 
 
@@ -26,6 +31,11 @@ JOURNAL_MODE_RETRY_COUNT = 5
 QUOTE_HISTORY_UNIQUE_INDEX = "uq_quote_history_symbol_trade_date"
 QUOTE_HISTORY_CONTRACT_MIGRATION = "20260715_quote_history_not_null_contract"
 KLINE_DAILY_CONTRACT_MIGRATION = "20260716_kline_daily_adjustment_contract"
+MARKET_SCAN_PREOPEN_MODE_MIGRATION = "20260812_market_scan_preopen_mode_v2"
+MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION = (
+    "20260812_market_scan_probability_capture_outbox_v1"
+)
+MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION = "20260813_market_scan_snapshot_digest_v3"
 AUDIT_TIMESTAMP_UTC_MIGRATION = "20260724_audit_timestamps_utc_v2"
 ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION = "20260724_advice_review_audit_timestamps_utc_v2"
 SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION = "20260724_schema_migration_applied_at_utc_v2"
@@ -35,6 +45,8 @@ _SCHEMA_MIGRATION_NORMALIZER_FUNCTION = "_ashare_normalize_schema_migration_time
 _SCHEMA_MIGRATION_REBUILD_TABLE = "schema_migration__utc_rebuild"
 _QUOTE_HISTORY_REBUILD_TABLE = "quote_history__compat_rebuild"
 _KLINE_DAILY_REBUILD_TABLE = "kline_daily__compat_rebuild"
+_MARKET_SCAN_RUN_REBUILD_TABLE = "market_scan_run__preopen_rebuild"
+_MARKET_SCAN_RESULT_REBUILD_TABLE = "market_scan_result__preopen_rebuild"
 _QUOTE_HISTORY_COLUMNS = (
     "id",
     "symbol",
@@ -112,9 +124,19 @@ AUDIT_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
         "updated_at",
         "started_at",
         "finished_at",
+        "quote_capture_started_at",
+        "quote_capture_finished_at",
         "cancel_requested_at",
     ),
-    "market_scan_result": ("updated_at",),
+    "market_scan_result": ("quote_observed_at", "updated_at"),
+    "market_scan_probability_capture_outbox": (
+        "next_attempt_at",
+        "lease_expires_at",
+        "last_attempt_at",
+        "completed_at",
+        "created_at",
+        "updated_at",
+    ),
     "monitor_event": ("created_at", "last_seen_at"),
     "watchlist": ("created_at", "updated_at", "last_viewed_at"),
     "advice_history": ("created_at", "updated_at"),
@@ -130,6 +152,7 @@ AUDIT_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
     "plate_rank": ("updated_at",),
     "stock_concept": ("updated_at",),
     "advice_review_plan": ("created_at", "updated_at"),
+    "advice_review_plan_revision": ("created_at",),
     "advice_review_result": ("evaluated_at",),
 }
 
@@ -187,6 +210,7 @@ COMPAT_COLUMNS = {
     "market_scan_result": {
         "metadata_source": "TEXT",
         "raw_score": "REAL CHECK (raw_score IS NULL OR raw_score BETWEEN 0 AND 100)",
+        "quote_observed_at": "TEXT",
         "quote_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (quote_fallback_used IN (0, 1))",
         "kline_fallback_used": "INTEGER NOT NULL DEFAULT 0 CHECK (kline_fallback_used IN (0, 1))",
         "metadata_degraded": "INTEGER NOT NULL DEFAULT 0 CHECK (metadata_degraded IN (0, 1))",
@@ -195,13 +219,29 @@ COMPAT_COLUMNS = {
     "market_scan_run": {
         "retry_of_run_id": "INTEGER REFERENCES market_scan_run(id) ON DELETE SET NULL",
         "stock_pool_source": "TEXT",
-        "mode": "TEXT NOT NULL DEFAULT 'official' CHECK (mode IN ('official', 'intraday'))",
+        "mode": "TEXT NOT NULL DEFAULT 'official' CHECK (mode IN ('official', 'intraday', 'preopen'))",
         "quote_date": "TEXT",
+        "quote_capture_started_at": "TEXT",
+        "quote_capture_finished_at": "TEXT",
+        "quote_capture_duration_ms": (
+            "INTEGER CHECK (quote_capture_duration_ms IS NULL OR quote_capture_duration_ms >= 0)"
+        ),
+        "quote_capture_count": "INTEGER NOT NULL DEFAULT 0 CHECK (quote_capture_count >= 0)",
         "current_stage": ("TEXT CHECK (current_stage IS NULL OR current_stage IN "
                           "('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication'))"),
         "stage_started_at": "TEXT",
         "stage_metrics_json": "TEXT NOT NULL DEFAULT '{}'",
         "market_progress_json": "TEXT NOT NULL DEFAULT '[]'",
+        "publication_diagnostics_json": "TEXT",
+        "snapshot_digest": (
+            "TEXT CHECK (snapshot_digest IS NULL OR (length(snapshot_digest) = 64 "
+            "AND snapshot_digest NOT GLOB '*[^0-9a-f]*'))"
+        ),
+        "snapshot_seal_origin": (
+            "TEXT CHECK (snapshot_seal_origin IS NULL OR "
+            "snapshot_seal_origin IN ('publication', 'legacy_backfill'))"
+        ),
+        "snapshot_sealed_at": "TEXT",
     },
     "stock_concept": {
         "match_reason": "TEXT NOT NULL DEFAULT '概念成分匹配'",
@@ -264,9 +304,35 @@ def _apply_compat_migrations(
     _apply_monitor_event_migration(conn)
     _apply_market_scan_degradation_migration(conn)
     _apply_market_scan_mode_migration(conn)
+    _apply_market_scan_preopen_mode_migration(conn)
+    _apply_market_scan_probability_capture_outbox_migration(conn)
     _apply_audit_timestamp_utc_migration(
         conn,
         legacy_audit_timezone=legacy_audit_timezone,
+    )
+    _apply_market_scan_snapshot_digest_migration(conn)
+
+
+def _apply_market_scan_snapshot_digest_migration(conn: sqlite3.Connection) -> None:
+    if not table_has_columns(
+        conn,
+        "market_scan_run",
+        "snapshot_digest",
+        "snapshot_seal_origin",
+        "snapshot_sealed_at",
+    ):
+        return
+    existing = conn.execute(
+        "SELECT 1 FROM schema_migration WHERE name = ?",
+        (MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION,),
+    ).fetchone()
+    if existing is not None:
+        create_market_scan_immutability_triggers(conn)
+        return
+    backfill_market_scan_snapshot_digests(conn)
+    conn.execute(
+        "INSERT INTO schema_migration (name) VALUES (?)",
+        (MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION,),
     )
 
 
@@ -431,12 +497,187 @@ def _apply_market_scan_mode_migration(conn: sqlite3.Connection) -> None:
         """
             UPDATE market_scan_run
             SET mode = CASE
-                    WHEN mode IN ('official', 'intraday') THEN mode
+                    WHEN mode IN ('official', 'intraday', 'preopen') THEN mode
                     ELSE 'official'
                 END,
                 quote_date = COALESCE(NULLIF(trim(quote_date), ''), data_date)
         """,
     )
+
+
+def _apply_market_scan_preopen_mode_migration(conn: sqlite3.Connection) -> None:
+    if not table_has_columns(conn, "market_scan_run", "mode"):
+        return
+    ensure_migration_table(conn)
+    claimed = conn.execute(
+        "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
+        (MARKET_SCAN_PREOPEN_MODE_MIGRATION,),
+    )
+    if claimed.rowcount == 0 or _market_scan_mode_accepts_preopen(conn):
+        return
+    _rebuild_market_scan_tables_for_preopen(conn)
+
+
+def _apply_market_scan_probability_capture_outbox_migration(
+    conn: sqlite3.Connection,
+) -> None:
+    if not table_exists(conn, "market_scan_run"):
+        return
+    _create_market_scan_probability_capture_outbox(conn)
+    claimed = conn.execute(
+        "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
+        (MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION,),
+    )
+    if claimed.rowcount:
+        _backfill_market_scan_probability_capture_outbox(conn)
+
+
+def _create_market_scan_probability_capture_outbox(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_probability_capture_outbox (
+            run_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'processing', 'succeeded', 'skipped')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            next_attempt_at TEXT NOT NULL,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            last_attempt_at TEXT,
+            completed_at TEXT,
+            archive_digest TEXT CHECK (
+                archive_digest IS NULL OR (
+                    length(archive_digest) = 64
+                    AND archive_digest NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES market_scan_run(id) ON DELETE CASCADE,
+            CHECK (
+                (status = 'processing' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+                OR (status <> 'processing' AND lease_owner IS NULL AND lease_expires_at IS NULL)
+            ),
+            CHECK (
+                (status = 'succeeded' AND completed_at IS NOT NULL AND archive_digest IS NOT NULL)
+                OR (status = 'skipped' AND completed_at IS NOT NULL AND archive_digest IS NULL)
+                OR (status IN ('pending', 'processing') AND completed_at IS NULL AND archive_digest IS NULL)
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_probability_capture_due
+        ON market_scan_probability_capture_outbox(status, next_attempt_at, run_id)
+        """
+    )
+
+
+def _backfill_market_scan_probability_capture_outbox(conn: sqlite3.Connection) -> None:
+    # Backfill retained, published source candidates so upgrading an existing
+    # runtime resumes capture instead of starting the corpus at upgrade time.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO market_scan_probability_capture_outbox (
+            run_id, status, attempt_count, next_attempt_at, created_at, updated_at
+        )
+        SELECT id, 'pending', 0,
+               COALESCE(finished_at, updated_at, created_at),
+               COALESCE(finished_at, updated_at, created_at),
+               COALESCE(finished_at, updated_at, created_at)
+        FROM market_scan_run
+        WHERE status IN ('success', 'degraded')
+          AND mode = 'official'
+          AND scope = '沪市 + 深市 + 北交所当前上市A股'
+          AND success_count > 0
+        """
+    )
+
+
+def _market_scan_mode_accepts_preopen(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'market_scan_run'"
+    ).fetchone()
+    return row is not None and "'preopen'" in str(row[0] or "")
+
+
+def _rebuild_market_scan_tables_for_preopen(conn: sqlite3.Connection) -> None:
+    drop_market_scan_immutability_triggers(conn)
+    run_sql = _table_sql(conn, "market_scan_run")
+    result_sql = _table_sql(conn, "market_scan_result")
+    dependent_sql = _market_scan_dependent_schema(conn)
+    conn.execute(f"DROP TABLE IF EXISTS {_MARKET_SCAN_RESULT_REBUILD_TABLE}")
+    conn.execute(f"DROP TABLE IF EXISTS {_MARKET_SCAN_RUN_REBUILD_TABLE}")
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    conn.execute(_preopen_run_rebuild_sql(run_sql))
+    conn.execute(_preopen_result_rebuild_sql(result_sql))
+    _copy_table_rows(conn, "market_scan_run", _MARKET_SCAN_RUN_REBUILD_TABLE)
+    _copy_table_rows(conn, "market_scan_result", _MARKET_SCAN_RESULT_REBUILD_TABLE)
+    conn.execute("DROP TABLE market_scan_result")
+    conn.execute("DROP TABLE market_scan_run")
+    conn.execute(
+        f"ALTER TABLE {_MARKET_SCAN_RUN_REBUILD_TABLE} RENAME TO market_scan_run"
+    )
+    conn.execute(
+        f"ALTER TABLE {_MARKET_SCAN_RESULT_REBUILD_TABLE} RENAME TO market_scan_result"
+    )
+    for statement in dependent_sql:
+        conn.execute(statement)
+
+
+def _table_sql(conn: sqlite3.Connection, table: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if row is None or not str(row[0] or "").strip():
+        raise sqlite3.DatabaseError(f"missing schema for {table}")
+    return str(row[0])
+
+
+def _market_scan_dependent_schema(conn: sqlite3.Connection) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type IN ('index', 'trigger')
+          AND tbl_name IN ('market_scan_run', 'market_scan_result')
+          AND sql IS NOT NULL
+        ORDER BY type, name
+        """
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows)
+
+
+def _preopen_run_rebuild_sql(value: str) -> str:
+    updated = value.replace("market_scan_run", _MARKET_SCAN_RUN_REBUILD_TABLE)
+    old_contract = "mode IN ('official', 'intraday')"
+    if old_contract not in updated:
+        raise sqlite3.DatabaseError("unsupported legacy market_scan_run mode contract")
+    return updated.replace(
+        old_contract,
+        "mode IN ('official', 'intraday', 'preopen')",
+    )
+
+
+def _preopen_result_rebuild_sql(value: str) -> str:
+    return value.replace(
+        "market_scan_result",
+        _MARKET_SCAN_RESULT_REBUILD_TABLE,
+    ).replace("market_scan_run", _MARKET_SCAN_RUN_REBUILD_TABLE)
+
+
+def _copy_table_rows(conn: sqlite3.Connection, source: str, target: str) -> None:
+    columns = tuple(
+        _pragma_column_name(row)
+        for row in conn.execute(f"PRAGMA table_info({source})").fetchall()
+    )
+    if not columns:
+        raise sqlite3.DatabaseError(f"missing columns for {source}")
+    names = ", ".join(f'"{column}"' for column in columns)
+    conn.execute(f"INSERT INTO {target} ({names}) SELECT {names} FROM {source}")
 
 
 def _apply_kline_daily_migration(conn: sqlite3.Connection) -> None:
@@ -904,6 +1145,7 @@ __all__ = [
     "JOURNAL_MODE_RETRY_COUNT",
     "KLINE_DAILY_CONTRACT_MIGRATION",
     "MIGRATION_BUSY_TIMEOUT_MS",
+    "MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION",
     "QUOTE_HISTORY_CONTRACT_MIGRATION",
     "QUOTE_HISTORY_UNIQUE_INDEX",
     "SCHEMA_MIGRATION_SQL",

@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, datetime, timezone
 import gc
 import time
+from types import SimpleNamespace
 
+import pytest
+
+import app.services.workbench_context as workbench_context_service
 from app.config import Settings
 from app.services.cache import SQLiteCache
-from app.services.workbench_context import WorkbenchContextCache
+from app.services.workbench_context import (
+    WorkbenchContext,
+    WorkbenchContextCache,
+    WorkbenchContextIntegrityError,
+)
 from app.services.datahub import DataHub
+from app.workflows.individual import stock_strategy_cards
 
 
 def test_datahub_instances_own_separate_workbench_context_caches(tmp_path) -> None:
@@ -19,6 +29,157 @@ def test_datahub_instances_own_separate_workbench_context_caches(tmp_path) -> No
     assert first.workbench_contexts is not second.workbench_contexts
 
 
+def test_workbench_cache_rejects_cross_symbol_builder_result_without_caching() -> None:
+    async def run_check():
+        cache = WorkbenchContextCache()
+
+        async def build(_symbol: str):
+            return _bound_context("000001.SZ")
+
+        with pytest.raises(WorkbenchContextIntegrityError):
+            await cache.get("600519.SH", build)
+        return dict(cache.entries)
+
+    assert asyncio.run(run_check()) == {}
+
+
+def _bound_context(symbol: str) -> WorkbenchContext:
+    code, market = symbol.split(".")
+    quote_time = "2026-08-13 05:59:00"
+
+    def research_child() -> SimpleNamespace:
+        return SimpleNamespace(symbol=symbol, updated_at=quote_time)
+
+    insights = SimpleNamespace(
+        overview=research_child(),
+        fund_flow=research_child(),
+        order_pressure=research_child(),
+        events=research_child(),
+        financial_health=research_child(),
+        valuation=research_child(),
+        lhb=research_child(),
+        abnormal_events=research_child(),
+        rule_matches=research_child(),
+        strategy_cards=[research_child(), research_child()],
+    )
+    context = object.__new__(WorkbenchContext)
+    context.analysis = SimpleNamespace(
+        quote=SimpleNamespace(code=code, market=market, timestamp=quote_time),
+        stock_profile=None,
+        review=None,
+    )
+    context.insights = insights
+    for field in (
+        "feature_snapshot", "factor_lab", "market_regime", "signal_validation",
+        "risk_reward", "timeframe_alignment", "alpha_evidence", "diagnosis",
+        "evidence_chain", "qa_report", "event_digest", "peer_comparison",
+        "t_strategy", "risk_radar", "chip_analysis", "leadership",
+        "theme_context", "replay",
+    ):
+        setattr(context, field, research_child())
+    context.requested_symbol = symbol
+    context.observed_symbol = symbol
+    context.context_generated_at = "2026-08-13 06:00:00"
+    context.signal_date = "2026-08-13"
+    context.daily_bar_cutoff = "2026-08-12"
+    context.quote_event_time = quote_time
+    context.cache_cohort_key = "test"
+    return context
+
+
+def test_valid_bound_workbench_context_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> tuple[WorkbenchContext, int]:
+        cache = WorkbenchContextCache()
+        build_count = 0
+
+        async def build(_symbol: str) -> WorkbenchContext:
+            nonlocal build_count
+            build_count += 1
+            return _bound_context("600519.SH")
+
+        await cache.get("600519", build)
+        second = await cache.get("600519.SH", build)
+        return second, build_count
+
+    monkeypatch.setattr(
+        workbench_context_service,
+        "workbench_cache_cohort_key",
+        lambda: "test",
+    )
+    context, build_count = asyncio.run(run_check())
+
+    assert context.requested_symbol == "600519.SH"
+    assert build_count == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "evidence_chain",
+        "qa_report",
+        "event_digest",
+        "peer_comparison",
+        "t_strategy",
+        "risk_radar",
+        "insights.strategy_cards[1]",
+    ],
+)
+def test_cached_workbench_context_rejects_every_swapped_support_owner(
+    field: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> dict[str, tuple[float, WorkbenchContext]]:
+        cache = WorkbenchContextCache()
+        context = _bound_context("600519.SH")
+        child = (
+            context.insights.strategy_cards[1]
+            if field == "insights.strategy_cards[1]"
+            else getattr(context, field)
+        )
+        child.symbol = "000001.SZ"
+        cache.entries["600519.SH"] = (time.monotonic(), context)
+
+        async def should_not_build(_symbol: str) -> WorkbenchContext:
+            raise AssertionError("poisoned fresh cache entry must fail closed")
+
+        with pytest.raises(WorkbenchContextIntegrityError, match="身份绑定"):
+            await cache.get("600519.SH", should_not_build)
+        return dict(cache.entries)
+
+    monkeypatch.setattr(
+        workbench_context_service,
+        "workbench_cache_cohort_key",
+        lambda: "test",
+    )
+
+    assert asyncio.run(run_check()) == {}
+
+
+def test_direct_strategy_cards_route_rejects_future_cached_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> dict[str, tuple[float, WorkbenchContext]]:
+        cache = WorkbenchContextCache()
+        context = _bound_context("600519.SH")
+        context.insights.strategy_cards[0].updated_at = "2099-01-01 09:59:00"
+        cache.entries["600519.SH"] = (time.monotonic(), context)
+        datahub = SimpleNamespace(workbench_contexts=cache)
+
+        with pytest.raises(WorkbenchContextIntegrityError, match="晚于研究决策时点"):
+            await stock_strategy_cards(datahub, "600519")
+        return dict(cache.entries)
+
+    monkeypatch.setattr(
+        workbench_context_service,
+        "workbench_cache_cohort_key",
+        lambda: "test",
+    )
+
+    assert asyncio.run(run_check()) == {}
+
+
 def test_expired_workbench_context_is_pruned_and_rebuilt() -> None:
     async def run_check():
         cache = WorkbenchContextCache(ttl_seconds=0.01)
@@ -28,7 +189,7 @@ def test_expired_workbench_context_is_pruned_and_rebuilt() -> None:
         async def build(symbol: str):
             nonlocal build_count
             build_count += 1
-            return f"fresh:{symbol}"  # type: ignore[return-value]
+            return f"fresh:{symbol}"
 
         result = await cache.get("600519", build)
         return result, build_count, cache.entries["600519.SH"][1]
@@ -46,7 +207,7 @@ def test_cancelled_inflight_task_does_not_poison_future_gets() -> None:
 
         async def cancelled_build():
             await asyncio.sleep(10)
-            return "cancelled"  # type: ignore[return-value]
+            return "cancelled"
 
         task = asyncio.create_task(cancelled_build())
         task.cancel()
@@ -57,7 +218,7 @@ def test_cancelled_inflight_task_does_not_poison_future_gets() -> None:
         cache._inflight["600519.SH"] = task  # noqa: SLF001
 
         async def build(symbol: str):
-            return f"fresh:{symbol}"  # type: ignore[return-value]
+            return f"fresh:{symbol}"
 
         result = await cache.get("600519", build)
         return result, list(cache._inflight)  # noqa: SLF001
@@ -77,7 +238,7 @@ def test_clear_during_inflight_build_prevents_stale_cache_writeback() -> None:
         async def build(symbol: str):
             started.set()
             await release.wait()
-            return f"fresh:{symbol}"  # type: ignore[return-value]
+            return f"fresh:{symbol}"
 
         pending = asyncio.create_task(cache.get("600519", build))
         await started.wait()
@@ -101,7 +262,7 @@ def test_concurrent_workbench_context_requests_share_inflight_build() -> None:
             nonlocal build_count
             build_count += 1
             await asyncio.sleep(0)
-            return f"fresh:{symbol}"  # type: ignore[return-value]
+            return f"fresh:{symbol}"
 
         first, second = await asyncio.gather(cache.get("600519", build), cache.get("600519.SH", build))
         return first, second, build_count
@@ -130,7 +291,7 @@ def test_cancelled_waiter_does_not_cancel_shared_workbench_build() -> None:
             except asyncio.CancelledError:
                 build_cancelled = True
                 raise
-            return f"fresh:{symbol}"  # type: ignore[return-value]
+            return f"fresh:{symbol}"
 
         cancelled_waiter = asyncio.create_task(cache.get("600519", build))
         surviving_waiter = asyncio.create_task(cache.get("600519.SH", build))
@@ -209,7 +370,7 @@ def test_workbench_cache_close_is_bounded_and_consumes_late_failure() -> None:
             raise RuntimeError("late workbench close failure")
 
         task = asyncio.create_task(stubborn_build(), name="stubborn-workbench-build")
-        cache._inflight["600519.SH"] = task  # type: ignore[assignment]  # noqa: SLF001
+        cache._inflight["600519.SH"] = task  # noqa: SLF001
         await started.wait()
         fallback_release = loop.call_later(0.5, release.set)
         began = loop.time()
@@ -265,3 +426,289 @@ def test_cleared_orphaned_build_exception_is_consumed() -> None:
         return loop_errors
 
     assert asyncio.run(run_check()) == []
+
+
+def test_restore_and_trim_keep_only_newest_cache_entries() -> None:
+    cache = WorkbenchContextCache(max_size=1)
+    older = _bound_context("600519.SH")
+    newer = _bound_context("000001.SZ")
+
+    cache.restore_entries(
+        {
+            "600519.SH": (1.0, older),
+            "000001.SZ": (2.0, newer),
+        }
+    )
+    cache.trim()
+
+    assert cache.entries == {"000001.SZ": (2.0, newer)}
+
+
+def test_use_cache_false_bypasses_a_fresh_cached_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> tuple[object, int]:
+        cache = WorkbenchContextCache()
+        cache.entries["600519.SH"] = (time.monotonic(), _bound_context("600519.SH"))
+        build_count = 0
+
+        async def build(symbol: str) -> str:
+            nonlocal build_count
+            build_count += 1
+            return f"rebuilt:{symbol}"
+
+        result = await cache.get("600519", build, use_cache=False)  # type: ignore[arg-type]
+        return result, build_count
+
+    monkeypatch.setattr(workbench_context_service, "workbench_cache_cohort_key", lambda: "test")
+
+    assert asyncio.run(run_check()) == ("rebuilt:600519.SH", 1)
+
+
+def test_stale_cache_cohort_is_pruned_and_rebuilt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> tuple[WorkbenchContext, int]:
+        cache = WorkbenchContextCache()
+        stale = _bound_context("600519.SH")
+        stale.cache_cohort_key = "previous-session"
+        cache.entries["600519.SH"] = (time.monotonic(), stale)
+        build_count = 0
+
+        async def build(_symbol: str) -> WorkbenchContext:
+            nonlocal build_count
+            build_count += 1
+            return _bound_context("600519.SH")
+
+        return await cache.get("600519", build), build_count
+
+    monkeypatch.setattr(workbench_context_service, "workbench_cache_cohort_key", lambda: "test")
+
+    rebuilt, build_count = asyncio.run(run_check())
+    assert rebuilt.cache_cohort_key == "test"
+    assert build_count == 1
+
+
+def test_builder_result_from_stale_cohort_is_never_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> dict[str, tuple[float, WorkbenchContext]]:
+        cache = WorkbenchContextCache()
+
+        async def build(_symbol: str) -> WorkbenchContext:
+            context = _bound_context("600519.SH")
+            context.cache_cohort_key = "previous-session"
+            return context
+
+        with pytest.raises(WorkbenchContextIntegrityError, match="时段已切换"):
+            await cache.get("600519", build)
+        return dict(cache.entries)
+
+    monkeypatch.setattr(workbench_context_service, "workbench_cache_cohort_key", lambda: "test")
+
+    assert asyncio.run(run_check()) == {}
+
+
+def test_builder_failure_clears_inflight_and_does_not_cache() -> None:
+    async def run_check() -> tuple[dict, dict]:
+        cache = WorkbenchContextCache()
+
+        async def build(_symbol: str) -> WorkbenchContext:
+            raise RuntimeError("deterministic builder failure")
+
+        with pytest.raises(RuntimeError, match="builder failure"):
+            await cache.get("600519", build)
+        return dict(cache.entries), dict(cache._inflight)  # noqa: SLF001
+
+    assert asyncio.run(run_check()) == ({}, {})
+
+
+def test_invalid_requested_identity_is_rejected_and_cache_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> dict[str, tuple[float, WorkbenchContext]]:
+        cache = WorkbenchContextCache()
+        context = _bound_context("600519.SH")
+        context.requested_symbol = None  # type: ignore[assignment]
+        cache.entries["600519.SH"] = (time.monotonic(), context)
+
+        async def should_not_build(_symbol: str) -> WorkbenchContext:
+            raise AssertionError("invalid fresh cache entry must fail closed")
+
+        with pytest.raises(WorkbenchContextIntegrityError, match="请求身份字段无效"):
+            await cache.get("600519", should_not_build)
+        return dict(cache.entries)
+
+    monkeypatch.setattr(workbench_context_service, "workbench_cache_cohort_key", lambda: "test")
+
+    assert asyncio.run(run_check()) == {}
+
+
+def test_profile_and_review_owners_are_part_of_context_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _bound_context("600519.SH")
+    context.analysis.stock_profile = SimpleNamespace(symbol="600519.SH")
+    context.analysis.review = SimpleNamespace(symbol="000001.SZ")
+
+    monkeypatch.setattr(workbench_context_service, "workbench_cache_cohort_key", lambda: "test")
+
+    with pytest.raises(WorkbenchContextIntegrityError, match="股票身份绑定不一致"):
+        workbench_context_service._require_context_binding(context, "600519.SH")  # noqa: SLF001
+
+
+def test_malformed_child_owner_is_rejected_as_invalid_identity() -> None:
+    context = _bound_context("600519.SH")
+    context.factor_lab.symbol = object()
+
+    with pytest.raises(WorkbenchContextIntegrityError, match="股票身份字段无效"):
+        workbench_context_service._require_context_binding(context, "600519.SH")  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: setattr(value, "context_generated_at", "not-a-time"), "研究时点字段无效"),
+        (lambda value: setattr(value, "context_generated_at", "2099-01-01 06:00:00"), "决策时点不能位于未来"),
+        (lambda value: setattr(value, "quote_event_time", "2026-08-13 05:58:00"), "行情时点与研究决策不一致"),
+        (lambda value: setattr(value, "signal_date", "2026-08-12"), "行情交易日与研究批次不一致"),
+        (lambda value: setattr(value.factor_lab, "updated_at", "not-a-time"), "factor_lab 研究时点无效"),
+        (lambda value: setattr(value.factor_lab, "updated_at", "2026-08-12 05:59:00"), "factor_lab 不属于行情交易日"),
+    ],
+)
+def test_context_time_metadata_attacks_fail_closed(
+    mutation,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _bound_context("600519.SH")
+    mutation(context)
+    monkeypatch.setattr(
+        workbench_context_service,
+        "utc_now",
+        lambda: datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(WorkbenchContextIntegrityError, match=message):
+        workbench_context_service._require_context_binding(context, "600519.SH")  # noqa: SLF001
+
+
+def test_calendar_resolution_failure_marks_context_cohort_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _bound_context("600519.SH")
+    monkeypatch.setattr(
+        workbench_context_service,
+        "workbench_cache_cohort_key",
+        lambda: (_ for _ in ()).throw(RuntimeError("calendar unavailable")),
+    )
+
+    assert workbench_context_service._context_cache_cohort_is_current(context) is False  # noqa: SLF001
+
+
+@pytest.mark.parametrize("value", [None, "bad", 0, -1, float("inf")])
+def test_invalid_shutdown_timeout_uses_bounded_default(value: object) -> None:
+    cache = WorkbenchContextCache(shutdown_timeout_seconds=value)  # type: ignore[arg-type]
+
+    assert cache.shutdown_timeout_seconds == 5.0
+
+
+def test_completed_cache_task_preserves_context_and_normalized_name() -> None:
+    async def run_check() -> tuple[WorkbenchContext, str]:
+        context = _bound_context("600519.SH")
+        task = workbench_context_service._completed_context_task(  # noqa: SLF001
+            context,
+            "600519.SH",
+        )
+        return await task, task.get_name()
+
+    context, name = asyncio.run(run_check())
+
+    assert context.requested_symbol == "600519.SH"
+    assert name == "stock-workbench-cached-600519.SH"
+
+
+def test_close_without_inflight_work_is_a_noop() -> None:
+    cache = WorkbenchContextCache()
+
+    asyncio.run(cache.aclose())
+
+    assert cache.entries == {}
+
+
+@pytest.mark.parametrize("appears_on_call", [2, 3])
+def test_cache_entry_appearing_during_locked_double_check_is_reused(
+    appears_on_call: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_check() -> tuple[WorkbenchContext, int, int]:
+        cache = WorkbenchContextCache()
+        context = _bound_context("600519.SH")
+        fresh_calls = 0
+        build_calls = 0
+
+        def entry_appears(_symbol: str) -> WorkbenchContext | None:
+            nonlocal fresh_calls
+            fresh_calls += 1
+            return context if fresh_calls >= appears_on_call else None
+
+        async def must_not_build(_symbol: str) -> WorkbenchContext:
+            nonlocal build_calls
+            build_calls += 1
+            raise AssertionError("cache entry appeared before build creation")
+
+        monkeypatch.setattr(cache, "_fresh_entry", entry_appears)
+        result = await cache.get("600519", must_not_build)
+        return result, fresh_calls, build_calls
+
+    monkeypatch.setattr(workbench_context_service, "workbench_cache_cohort_key", lambda: "test")
+
+    result, fresh_calls, build_calls = asyncio.run(run_check())
+    assert result.requested_symbol == "600519.SH"
+    assert fresh_calls == appears_on_call
+    assert build_calls == 0
+
+
+def test_workbench_cohort_key_binds_phase_quote_and_bar_dates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workbench_context_service, "market_session_phase", lambda: "after_close")
+    monkeypatch.setattr(workbench_context_service, "expected_quote_date", lambda: date(2026, 8, 13))
+    monkeypatch.setattr(
+        workbench_context_service,
+        "latest_expected_daily_kline_date",
+        lambda: date(2026, 8, 12),
+    )
+
+    assert workbench_context_service.workbench_cache_cohort_key() == (
+        "after_close:2026-08-13:2026-08-12"
+    )
+
+
+def test_requested_symbol_cannot_disagree_with_observed_owners() -> None:
+    context = _bound_context("600519.SH")
+    context.requested_symbol = "000001.SZ"
+
+    with pytest.raises(WorkbenchContextIntegrityError, match="请求身份绑定不一致"):
+        workbench_context_service._require_context_binding(context, "600519.SH")  # noqa: SLF001
+
+
+def test_compact_but_noncanonical_signal_date_is_rejected() -> None:
+    context = _bound_context("600519.SH")
+    context.signal_date = "20260813"
+
+    with pytest.raises(WorkbenchContextIntegrityError, match="研究时点字段无效"):
+        workbench_context_service._require_context_binding(context, "600519.SH")  # noqa: SLF001
+
+
+def test_cleanup_consumes_cancelled_error_from_future_exception_reader() -> None:
+    class CancelledDuringRead:
+        @staticmethod
+        def cancelled() -> bool:
+            return False
+
+        @staticmethod
+        def exception() -> None:
+            raise asyncio.CancelledError
+
+    workbench_context_service._consume_task_exception(CancelledDuringRead())  # type: ignore[arg-type]  # noqa: SLF001

@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
+from hashlib import sha256
 import json
-from math import sqrt
-from statistics import fmean, pstdev
 import sqlite3
 
+from app.db.paper_trading_schema import paper_run_output_digest
 from app.models.paper_trading import (
-    PaperCostProfile,
     PaperEquityPoint,
     PaperEquityPointDraft,
-    PaperPosition,
     PaperRunComparison,
     PaperRunExport,
     PaperSimulationDraft,
@@ -27,20 +23,36 @@ from app.models.paper_trading import (
     PaperTradingDashboard,
     PaperTradingEvent,
     PaperTradingEventDraft,
-    PaperTradingPerformance,
     PaperTradingRun,
 )
-from app.models.paper_trading_config import PAPER_TRADING_RULE_VERSION
-from app.models.paper_trading_costs import available_cost_profiles, resolve_cost_profile, trade_costs
+from app.models.paper_trading_config import (
+    DEFAULT_PAPER_ACCOUNT_NAME,
+    DEFAULT_PAPER_INITIAL_CASH,
+    MODELLED_ONE_WAY_FRICTION_PCT,
+    PAPER_TRADING_RULE_VERSION,
+)
+from app.models.paper_trading_costs import available_cost_profiles
 from app.models.reviews import AdviceReviewPlan
 from app.repositories.base import SQLiteRepository
+from app.repositories.paper_trading_metrics import (
+    ClosedMetrics,
+    LatestMetrics,
+    build_positions,
+    calculate_closed_metrics,
+    calculate_performance,
+    calculate_risk_metrics,
+    cost_profile_from_run,
+    drawdown_durations,
+    exposure_metrics,
+    latest_metrics,
+    optional_metric_delta,
+    payoff_ratio,
+    sample_warning,
+)
 from app.utils.audit_time import audit_now_text
 from app.utils.errors import NotFoundError
 
 
-DEFAULT_PAPER_ACCOUNT_NAME = "本地模拟账户"
-DEFAULT_PAPER_INITIAL_CASH = 1_000_000.0
-MODELLED_ONE_WAY_FRICTION_PCT = 0.05
 PAPER_TRADING_NOTES = (
     "模拟策略只使用激活日之后的完整日K，绝不回填激活前成交。",
     "股票执行 T+1；买入日触及止盈或止损只锁定信号，下一可卖交易日才执行。",
@@ -50,30 +62,29 @@ PAPER_TRADING_NOTES = (
 )
 
 
-@dataclass(frozen=True)
-class _ClosedMetrics:
-    win_count: int
-    win_rate: float | None
-    average_win: float | None
-    average_loss: float | None
-    payoff_ratio: float | None
-    expectancy: float | None
-    profit_factor: float | None
+_ClosedMetrics = ClosedMetrics
+_LatestMetrics = LatestMetrics
+_performance = calculate_performance
+_closed_metrics = calculate_closed_metrics
+_payoff_ratio = payoff_ratio
+_latest_metrics = latest_metrics
+_exposure_metrics = exposure_metrics
+_sample_warning = sample_warning
+_risk_metrics = calculate_risk_metrics
+_drawdown_durations = drawdown_durations
+_positions = build_positions
+_cost_profile_from_run = cost_profile_from_run
+_optional_delta = optional_metric_delta
 
-
-@dataclass(frozen=True)
-class _LatestMetrics:
-    cash_balance: float
-    market_value: float
-    total_equity: float
-    gross_equity: float
-    realized_pnl: float
-    unrealized_pnl: float
-    total_cost: float
-    total_return_pct: float
-    gross_return_pct: float
-    benchmark_return_pct: float | None
-    excess_return_pct: float | None
+_PAPER_STRATEGY_SELECT = """
+    SELECT strategy.*,
+           ledger.payload_json AS revision_payload_json,
+           ledger.payload_digest AS revision_payload_digest
+    FROM paper_strategy AS strategy
+    LEFT JOIN advice_review_plan_revision AS ledger
+      ON ledger.plan_id = strategy.plan_id
+     AND ledger.revision = strategy.plan_revision
+"""
 
 
 class PaperTradingRepository(SQLiteRepository):
@@ -87,9 +98,11 @@ class PaperTradingRepository(SQLiteRepository):
         with self._lock, self._connect() as conn:
             _account_row(conn, create=True)
             if payload.initial_cash is not None:
-                strategy_count = int(conn.execute("SELECT COUNT(*) FROM paper_strategy").fetchone()[0])
-                if strategy_count:
-                    raise ValueError("已有模拟策略时不能修改初始资金")
+                has_paper_history = conn.execute(
+                    "SELECT 1 FROM paper_strategy UNION ALL SELECT 1 FROM paper_trading_run LIMIT 1"
+                ).fetchone()
+                if has_paper_history is not None:
+                    raise ValueError("已有模拟策略或运行时不能修改初始资金")
                 conn.execute(
                     "UPDATE paper_trading_account SET initial_cash = ?, updated_at = ? WHERE id = 1",
                     (payload.initial_cash, timestamp),
@@ -109,50 +122,21 @@ class PaperTradingRepository(SQLiteRepository):
         *,
         activation_market_time: str,
     ) -> PaperStrategy:
+        if (
+            plan.revision != payload.expected_plan_revision
+            or plan.plan_payload_digest != payload.expected_plan_payload_digest
+        ):
+            raise ValueError("复盘计划版本已变化，请刷新后重新确认模拟策略")
         timestamp = audit_now_text()
         with self._lock, self._connect() as conn:
-            _account_row(conn, create=True)
-            try:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO paper_strategy (
-                        plan_id, plan_revision, advice_id, symbol,
-                        activation_market_time, allocation_pct, priority,
-                        entry_expiry_sessions, snapshot_market_time, snapshot_price,
-                        snapshot_adjustment_mode, snapshot_anchor_date,
-                        snapshot_anchor_close, snapshot_data_version,
-                        snapshot_contract_version, target_price, stop_price,
-                        horizon_days, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-                    """,
-                    (
-                        plan.id,
-                        plan.revision,
-                        plan.advice_id,
-                        plan.symbol,
-                        activation_market_time,
-                        payload.allocation_pct,
-                        payload.priority,
-                        payload.entry_expiry_sessions,
-                        plan.snapshot_market_time,
-                        plan.snapshot_price,
-                        plan.snapshot_adjustment_mode,
-                        plan.snapshot_anchor_date,
-                        plan.snapshot_anchor_close,
-                        plan.snapshot_data_version,
-                        plan.snapshot_contract_version,
-                        plan.target_price,
-                        plan.stop_price,
-                        plan.horizon_days,
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                if "paper_strategy.plan_id, paper_strategy.plan_revision" in str(exc):
-                    raise ValueError("该复盘计划版本已加入模拟交易") from exc
-                raise
-            row = conn.execute("SELECT * FROM paper_strategy WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            current = _current_plan_for_strategy(conn, plan.id, payload)
+            row = _insert_paper_strategy(
+                conn,
+                current,
+                payload,
+                activation_market_time,
+                timestamp,
+            )
         return _strategy_from_row(_required_row(row, "模拟策略创建失败"))
 
     def delete_pending_strategy(self, strategy_id: int) -> bool:
@@ -173,12 +157,7 @@ class PaperTradingRepository(SQLiteRepository):
 
     def strategies(self) -> list[PaperStrategy]:
         with self._lock, self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM paper_strategy
-                ORDER BY activation_market_time ASC, priority DESC, plan_id ASC, id ASC
-                """
-            ).fetchall()
+            rows = _paper_strategy_rows(conn)
         return [_strategy_from_row(row) for row in rows]
 
     def save_simulation(self, draft: PaperSimulationDraft) -> PaperTradingDashboard:
@@ -192,28 +171,35 @@ class PaperTradingRepository(SQLiteRepository):
             _insert_paper_trades(conn, run_id, draft.trades, timestamp)
             _insert_paper_equity(conn, run_id, draft.equity_curve, timestamp)
             _insert_paper_events(conn, run_id, draft.events, timestamp)
+            _finalize_paper_run_output_digest(conn, run_id)
         return self.dashboard(run_id=run_id)
 
     def dashboard(self, *, run_id: int | None = None) -> PaperTradingDashboard:
         with self._lock, self._read_snapshot() as conn:
             account = _account_from_row(_required_row(_account_row(conn, create=False), "模拟账户不存在"))
-            runs = [_run_from_row(row) for row in conn.execute("SELECT * FROM paper_trading_run ORDER BY id DESC LIMIT 100").fetchall()]
+            runs = [
+                _verified_run_from_row(conn, row)
+                for row in conn.execute(
+                    "SELECT * FROM paper_trading_run ORDER BY id DESC LIMIT 100"
+                ).fetchall()
+            ]
             selected_id = run_id if run_id is not None else (runs[0].id if runs else None)
             if run_id is not None and not any(item.id == run_id for item in runs):
                 row = conn.execute("SELECT * FROM paper_trading_run WHERE id = ?", (run_id,)).fetchone()
                 if row is None:
                     raise NotFoundError("模拟运行不存在")
-                runs.append(_run_from_row(row))
-            sources = [_strategy_from_row(row) for row in conn.execute("SELECT * FROM paper_strategy ORDER BY id ASC").fetchall()]
+                runs.append(_verified_run_from_row(conn, row))
+            sources = [_strategy_from_row(row) for row in _paper_strategy_rows(conn)]
             strategies = _strategies_for_run(conn, sources, selected_id)
             trades = _trades_for_run(conn, selected_id)
             events = _events_for_run(conn, selected_id)
             equity = _equity_for_run(conn, selected_id)
             selected_run = next((item for item in runs if item.id == selected_id), None)
         profile = _cost_profile_from_run(selected_run)
+        performance_account = _account_for_run(account, selected_run)
         return PaperTradingDashboard(
             account=account,
-            performance=_performance(account, strategies, equity, trades),
+            performance=_performance(performance_account, strategies, equity, trades),
             strategies=sorted(strategies, key=lambda item: (item.allocation_order or 1_000_000, item.id)),
             positions=_positions(strategies, profile),
             trades=trades,
@@ -225,14 +211,13 @@ class PaperTradingRepository(SQLiteRepository):
             cost_profiles=available_cost_profiles(),
             notes=list(PAPER_TRADING_NOTES),
         )
-
     def runs(self, *, limit: int = 100) -> list[PaperTradingRun]:
         with self._lock, self._read_snapshot() as conn:
             rows = conn.execute(
                 "SELECT * FROM paper_trading_run ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [_run_from_row(row) for row in rows]
+            return [_verified_run_from_row(conn, row) for row in rows]
 
     def run_export(self, run_id: int) -> PaperRunExport:
         dashboard = self.dashboard(run_id=run_id)
@@ -282,10 +267,140 @@ class PaperTradingRepository(SQLiteRepository):
         )
 
 
+def _account_for_run(
+    account: PaperTradingAccount,
+    run: PaperTradingRun | None,
+) -> PaperTradingAccount:
+    initial_cash = run.configuration.get("initial_cash") if run is not None else None
+    if isinstance(initial_cash, bool) or not isinstance(initial_cash, int | float) or initial_cash <= 0:
+        return account
+    return account.model_copy(update={"initial_cash": float(initial_cash)})
+
+
 def _validate_simulation_strategy_ids(conn: sqlite3.Connection, expected_ids: list[int]) -> None:
-    current_ids = [int(row[0]) for row in conn.execute("SELECT id FROM paper_strategy ORDER BY id").fetchall()]
+    current_ids = sorted(_strategy_from_row(row).id for row in _paper_strategy_rows(conn))
     if current_ids != sorted(expected_ids):
         raise RuntimeError("模拟策略在计算期间已变化，请重新运行")
+
+
+def _current_plan_for_strategy(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    payload: PaperStrategyCreate,
+) -> sqlite3.Row:
+    # Serialize CAS plus insert across processes so a concurrent plan revision
+    # cannot commit between validation and freezing the paper strategy.
+    conn.execute("BEGIN IMMEDIATE")
+    _account_row(conn, create=True)
+    current = conn.execute(
+        """
+        SELECT plan.*,
+               ledger.payload_json AS ledger_payload_json,
+               ledger.payload_digest AS ledger_payload_digest
+        FROM advice_review_plan AS plan
+        JOIN advice_review_plan_revision AS ledger
+          ON ledger.plan_id = plan.id AND ledger.revision = plan.revision
+        WHERE plan.id = ? AND plan.deleted_at IS NULL
+        """,
+        (plan_id,),
+    ).fetchone()
+    if (
+        current is None
+        or int(current["revision"]) != payload.expected_plan_revision
+        or str(current["plan_payload_digest"]) != payload.expected_plan_payload_digest
+        or str(current["ledger_payload_digest"]) != payload.expected_plan_payload_digest
+    ):
+        raise ValueError("复盘计划版本已变化，请刷新后重新确认模拟策略")
+    _validate_plan_ledger_projection(current)
+    return current
+
+
+def _insert_paper_strategy(
+    conn: sqlite3.Connection,
+    current: sqlite3.Row,
+    payload: PaperStrategyCreate,
+    activation_market_time: str,
+    timestamp: str,
+) -> sqlite3.Row | None:
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO paper_strategy (
+                plan_id, plan_revision, plan_payload_digest, advice_id, symbol,
+                activation_market_time, allocation_pct, priority,
+                entry_expiry_sessions, snapshot_market_time, snapshot_price,
+                snapshot_adjustment_mode, snapshot_anchor_date,
+                snapshot_anchor_close, snapshot_data_version,
+                snapshot_contract_version, target_price, stop_price,
+                horizon_days, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (
+                int(current["id"]), int(current["revision"]), str(current["plan_payload_digest"]),
+                int(current["advice_id"]), str(current["symbol"]), activation_market_time,
+                payload.allocation_pct, payload.priority, payload.entry_expiry_sessions,
+                str(current["snapshot_market_time"]), float(current["snapshot_price"]),
+                str(current["snapshot_adjustment_mode"]), current["snapshot_anchor_date"],
+                current["snapshot_anchor_close"], str(current["snapshot_data_version"]),
+                str(current["snapshot_contract_version"]), float(current["target_price"]),
+                float(current["stop_price"]), int(current["horizon_days"]), timestamp, timestamp,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        if "paper_strategy.plan_id, paper_strategy.plan_revision" in str(exc):
+            raise ValueError("该复盘计划版本已加入模拟交易") from exc
+        raise
+    return conn.execute(
+        f"{_PAPER_STRATEGY_SELECT} WHERE strategy.id = ?",
+        (cursor.lastrowid,),
+    ).fetchone()
+
+
+def _validate_plan_ledger_projection(row: sqlite3.Row) -> None:
+    ledger_json = row["ledger_payload_json"]
+    ledger_digest = row["ledger_payload_digest"]
+    if not isinstance(ledger_json, str) or not isinstance(ledger_digest, str):
+        raise ValueError("复盘计划缺少不可变修订账本")
+    try:
+        ledger_payload = json.loads(ledger_json)
+        canonical_ledger = _json_dump(ledger_payload)
+        evidence_refs = json.loads(str(row["evidence_refs_json"]))
+        if not isinstance(evidence_refs, list):
+            raise ValueError("evidence_refs 不是数组")
+        projection = _json_dump(
+            {
+                "advice_id": int(row["advice_id"]),
+                "evidence_refs": evidence_refs,
+                "horizon_days": int(row["horizon_days"]),
+                "hypothesis": str(row["hypothesis"]),
+                "invalidation_basis": str(row["invalidation_basis"]),
+                "invalidation_condition": str(row["invalidation_condition"]),
+                "snapshot": {
+                    "adjustment_mode": str(row["snapshot_adjustment_mode"]),
+                    "anchor_close": row["snapshot_anchor_close"],
+                    "anchor_date": row["snapshot_anchor_date"],
+                    "contract_version": str(row["snapshot_contract_version"]),
+                    "data_version": str(row["snapshot_data_version"]),
+                    "market_time": str(row["snapshot_market_time"]),
+                    "price": float(row["snapshot_price"]),
+                },
+                "stop_price": float(row["stop_price"]),
+                "symbol": str(row["symbol"]),
+                "target_price": float(row["target_price"]),
+                "trigger_basis": str(row["trigger_basis"]),
+                "trigger_condition": str(row["trigger_condition"]),
+            }
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("复盘计划修订账本损坏，不能创建模拟策略") from exc
+    expected_digest = sha256(canonical_ledger.encode("utf-8")).hexdigest()
+    if (
+        ledger_json != canonical_ledger
+        or ledger_digest != expected_digest
+        or str(row["plan_payload_digest"]) != ledger_digest
+        or projection != ledger_json
+    ):
+        raise ValueError("复盘计划修订账本与当前投影不一致，不能创建模拟策略")
 
 
 def _insert_paper_run(conn: sqlite3.Connection, draft: PaperSimulationDraft, timestamp: str) -> int:
@@ -296,11 +411,11 @@ def _insert_paper_run(conn: sqlite3.Connection, draft: PaperSimulationDraft, tim
             cost_profile_id, cost_profile_name, cost_profile_version,
             benchmark_symbol, benchmark_status, benchmark_message,
             strategy_count, execution_count, closed_count,
-            data_unavailable_count, input_fingerprint,
+            data_unavailable_count, input_fingerprint, output_digest,
             strategy_snapshot_hash, market_data_hash, data_start_date,
             data_end_date, configuration_json, rule_profiles_json,
             data_sources_json, message, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy-unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             draft.as_of,
@@ -328,7 +443,23 @@ def _insert_paper_run(conn: sqlite3.Connection, draft: PaperSimulationDraft, tim
             timestamp,
         ),
     )
-    return int(cursor.lastrowid)
+    run_id = cursor.lastrowid
+    if run_id is None:
+        raise RuntimeError("模拟交易运行保存失败")
+    return int(run_id)
+
+
+def _finalize_paper_run_output_digest(conn: sqlite3.Connection, run_id: int) -> None:
+    digest = paper_run_output_digest(conn, run_id)
+    cursor = conn.execute(
+        """
+        UPDATE paper_trading_run SET output_digest = ?
+        WHERE id = ? AND output_digest = 'legacy-unverified'
+        """,
+        (digest, run_id),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError("模拟运行输出摘要保存失败")
 
 
 def _insert_strategy_results(
@@ -531,10 +662,11 @@ def _account_from_row(row: sqlite3.Row) -> PaperTradingAccount:
 
 
 def _strategy_from_row(row: sqlite3.Row) -> PaperStrategy:
-    return PaperStrategy(
+    strategy = PaperStrategy(
         id=int(row["id"]),
         plan_id=int(row["plan_id"]),
         plan_revision=int(row["plan_revision"]),
+        plan_payload_digest=str(row["plan_payload_digest"]),
         advice_id=int(row["advice_id"]),
         symbol=str(row["symbol"]),
         activation_market_time=str(row["activation_market_time"]),
@@ -571,6 +703,55 @@ def _strategy_from_row(row: sqlite3.Row) -> PaperStrategy:
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
+    _validate_frozen_strategy_revision(row, strategy)
+    return strategy
+
+
+def _paper_strategy_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        f"""
+        {_PAPER_STRATEGY_SELECT}
+        ORDER BY strategy.activation_market_time ASC, strategy.priority DESC,
+                 strategy.plan_id ASC, strategy.id ASC
+        """
+    ).fetchall()
+
+
+def _validate_frozen_strategy_revision(
+    row: sqlite3.Row,
+    strategy: PaperStrategy,
+) -> None:
+    payload_json = row["revision_payload_json"]
+    payload_digest = row["revision_payload_digest"]
+    if not isinstance(payload_json, str) or not isinstance(payload_digest, str):
+        raise ValueError("模拟策略缺少冻结计划修订账本")
+    try:
+        payload = json.loads(payload_json)
+        canonical = _json_dump(payload)
+        snapshot = payload["snapshot"]
+        observed = (
+            int(payload["advice_id"]), str(payload["symbol"]), int(payload["horizon_days"]),
+            str(snapshot["market_time"]), float(snapshot["price"]),
+            str(snapshot["adjustment_mode"]), snapshot["anchor_date"], snapshot["anchor_close"],
+            str(snapshot["data_version"]), str(snapshot["contract_version"]),
+            float(payload["target_price"]), float(payload["stop_price"]),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("模拟策略冻结计划修订账本损坏") from exc
+    expected = (
+        strategy.advice_id, strategy.symbol, strategy.horizon_days,
+        strategy.snapshot_market_time, strategy.snapshot_price,
+        strategy.snapshot_adjustment_mode, strategy.snapshot_anchor_date,
+        strategy.snapshot_anchor_close, strategy.snapshot_data_version,
+        strategy.snapshot_contract_version, strategy.target_price, strategy.stop_price,
+    )
+    if (
+        canonical != payload_json
+        or sha256(canonical.encode("utf-8")).hexdigest() != payload_digest
+        or strategy.plan_payload_digest != payload_digest
+        or observed != expected
+    ):
+        raise ValueError("模拟策略与冻结计划修订账本不一致")
 
 
 def _strategies_for_run(
@@ -746,6 +927,7 @@ def _run_from_row(row: sqlite3.Row) -> PaperTradingRun:
         closed_count=int(row["closed_count"]),
         data_unavailable_count=int(row["data_unavailable_count"]),
         input_fingerprint=str(row["input_fingerprint"]),
+        output_digest=str(row["output_digest"]),
         strategy_snapshot_hash=str(row["strategy_snapshot_hash"]),
         market_data_hash=str(row["market_data_hash"]),
         data_start_date=str(row["data_start_date"]) if row["data_start_date"] is not None else None,
@@ -758,241 +940,25 @@ def _run_from_row(row: sqlite3.Row) -> PaperTradingRun:
     )
 
 
-def _performance(
-    account: PaperTradingAccount,
-    strategies: list[PaperStrategy],
-    equity: list[PaperEquityPoint],
-    trades: list[PaperTrade],
-) -> PaperTradingPerformance:
-    closed = [item for item in strategies if item.status == "closed"]
-    outcomes = _closed_metrics(closed)
-    counts = Counter(item.status for item in strategies)
-    latest = _latest_metrics(account.initial_cash, equity)
-    risk_values = _risk_metrics(account.initial_cash, equity, len(closed))
-    drawdown_duration, recovery = _drawdown_durations(equity)
-    average_exposure, maximum_exposure = _exposure_metrics(equity)
-    gross_pnl = latest.gross_equity - account.initial_cash
-    modeled_cost_drag = latest.gross_equity - latest.total_equity
-    return PaperTradingPerformance(
-        strategy_count=len(strategies),
-        pending_count=counts["pending"],
-        open_count=counts["open"],
-        closed_count=counts["closed"],
-        skipped_count=counts["skipped"],
-        expired_count=counts["expired"],
-        data_unavailable_count=counts["data_unavailable"],
-        win_count=outcomes.win_count,
-        win_rate_pct=outcomes.win_rate,
-        cash_balance=latest.cash_balance,
-        market_value=latest.market_value,
-        total_equity=latest.total_equity,
-        gross_equity=latest.gross_equity,
-        realized_pnl=latest.realized_pnl,
-        unrealized_pnl=latest.unrealized_pnl,
-        gross_pnl=round(gross_pnl, 2),
-        total_cost=latest.total_cost,
-        cost_drag_pct=round(modeled_cost_drag / account.initial_cash * 100, 4),
-        cost_to_gross_profit_pct=(
-            round(modeled_cost_drag / gross_pnl * 100, 4)
-            if gross_pnl > 0
-            else None
-        ),
-        total_return_pct=latest.total_return_pct,
-        gross_return_pct=latest.gross_return_pct,
-        benchmark_return_pct=latest.benchmark_return_pct,
-        excess_return_pct=latest.excess_return_pct,
-        max_drawdown_pct=min((item.drawdown_pct for item in equity), default=0),
-        max_drawdown_duration_sessions=drawdown_duration,
-        recovery_duration_sessions=recovery,
-        average_win=outcomes.average_win,
-        average_loss=outcomes.average_loss,
-        payoff_ratio=outcomes.payoff_ratio,
-        expectancy=outcomes.expectancy,
-        profit_factor=outcomes.profit_factor,
-        turnover_pct=round(sum(item.gross_amount for item in trades) / account.initial_cash * 100, 4),
-        average_exposure_pct=average_exposure,
-        maximum_exposure_pct=maximum_exposure,
-        return_observation_count=len(equity),
-        sample_warning=_sample_warning(len(closed), len(equity)),
-        **risk_values,
-    )
-
-
-def _closed_metrics(closed: list[PaperStrategy]) -> _ClosedMetrics:
-    values = [float(item.realized_pnl or 0) for item in closed]
-    wins = [value for value in values if value > 0]
-    losses = [value for value in values if value < 0]
-    average_win = round(fmean(wins), 2) if wins else None
-    average_loss = round(fmean(losses), 2) if losses else None
-    payoff = _payoff_ratio(average_win, average_loss)
-    return _ClosedMetrics(
-        win_count=len(wins),
-        win_rate=round(len(wins) / len(closed) * 100, 2) if closed else None,
-        average_win=average_win,
-        average_loss=average_loss,
-        payoff_ratio=payoff,
-        expectancy=round(fmean(values), 2) if values else None,
-        profit_factor=round(sum(wins) / abs(sum(losses)), 4) if losses else None,
-    )
-
-
-def _payoff_ratio(average_win: float | None, average_loss: float | None) -> float | None:
-    if average_win is None or average_loss in {None, 0}:
-        return None
-    return round(average_win / abs(average_loss), 4)
-
-
-def _latest_metrics(initial_cash: float, equity: list[PaperEquityPoint]) -> _LatestMetrics:
-    if not equity:
-        return _LatestMetrics(initial_cash, 0, initial_cash, initial_cash, 0, 0, 0, 0, 0, None, None)
-    item = equity[-1]
-    return _LatestMetrics(
-        item.cash_balance,
-        item.market_value,
-        item.total_equity,
-        item.gross_equity,
-        item.realized_pnl,
-        item.unrealized_pnl,
-        item.cumulative_cost,
-        item.return_pct,
-        item.gross_return_pct,
-        item.benchmark_return_pct,
-        item.excess_return_pct,
-    )
-
-
-def _exposure_metrics(equity: list[PaperEquityPoint]) -> tuple[float, float]:
-    values = [item.exposure_pct for item in equity]
-    if not values:
-        return 0, 0
-    return round(fmean(values), 4), round(max(values), 4)
-
-
-def _sample_warning(closed_count: int, observation_count: int) -> str | None:
-    if closed_count < 5:
-        return f"仅有 {closed_count} 笔已平仓策略，胜率和盈亏统计只作描述性参考"
-    if observation_count < 60:
-        return f"仅有 {observation_count} 个收益观察值，暂不计算年化风险指标"
-    return None
-
-
-def _risk_metrics(
-    initial_cash: float,
-    equity: list[PaperEquityPoint],
-    closed_count: int,
-) -> dict[str, object]:
-    if len(equity) < 60 or closed_count < 5:
-        return {
-            "sharpe_ratio": None,
-            "sortino_ratio": None,
-            "calmar_ratio": None,
-            "risk_metric_status": "unavailable",
-            "risk_metric_message": "至少需要60个收益观察值和5笔已平仓策略",
-        }
-    values = [initial_cash, *[item.total_equity for item in equity]]
-    returns = [current / previous - 1 for previous, current in zip(values, values[1:]) if previous > 0]
-    if len(returns) < 2 or pstdev(returns) == 0:
-        return {
-            "sharpe_ratio": None,
-            "sortino_ratio": None,
-            "calmar_ratio": None,
-            "risk_metric_status": "unavailable",
-            "risk_metric_message": "收益序列缺少可计算的波动",
-        }
-    mean_return = fmean(returns)
-    volatility = pstdev(returns)
-    downside = sqrt(fmean([min(item, 0) ** 2 for item in returns]))
-    maximum_drawdown = abs(min((item.drawdown_pct for item in equity), default=0)) / 100
-    annualized = (equity[-1].total_equity / initial_cash) ** (252 / len(returns)) - 1 if initial_cash > 0 else 0
-    return {
-        "sharpe_ratio": round(mean_return / volatility * sqrt(252), 4),
-        "sortino_ratio": round(mean_return / downside * sqrt(252), 4) if downside > 0 else None,
-        "calmar_ratio": round(annualized / maximum_drawdown, 4) if maximum_drawdown > 0 else None,
-        "risk_metric_status": "available",
-        "risk_metric_message": "按日收益观察值年化；无风险利率按0处理",
-    }
-
-
-def _drawdown_durations(equity: list[PaperEquityPoint]) -> tuple[int, int | None]:
-    longest = 0
-    current = 0
-    trough_index: int | None = None
-    minimum = 0.0
-    for index, item in enumerate(equity):
-        if item.drawdown_pct < 0:
-            current += 1
-            longest = max(longest, current)
-        else:
-            current = 0
-        if item.drawdown_pct < minimum:
-            minimum = item.drawdown_pct
-            trough_index = index
-    if trough_index is None:
-        return longest, 0
-    recovery_index = next(
-        (index for index in range(trough_index + 1, len(equity)) if equity[index].drawdown_pct >= 0),
-        None,
-    )
-    return longest, recovery_index - trough_index if recovery_index is not None else None
-
-
-def _positions(
-    strategies: list[PaperStrategy],
-    profile: PaperCostProfile,
-) -> list[PaperPosition]:
-    positions: list[PaperPosition] = []
-    for item in strategies:
-        if item.status != "open" or not item.entry_date or item.entry_price is None or item.last_price is None:
-            continue
-        gross_cost = item.entry_price * item.quantity
-        cost_basis = gross_cost + item.buy_friction
-        market_value = item.last_price * item.quantity
-        exit_friction = trade_costs(profile, side="sell", gross_amount=market_value).total
-        unrealized = market_value - exit_friction - cost_basis
-        positions.append(
-            PaperPosition(
-                strategy_id=item.id,
-                symbol=item.symbol,
-                quantity=item.quantity,
-                entry_date=item.entry_date,
-                entry_price=item.entry_price,
-                cost_basis=round(cost_basis, 2),
-                last_price=item.last_price,
-                market_value=round(market_value, 2),
-                estimated_exit_friction=round(exit_friction, 2),
-                unrealized_pnl=round(unrealized, 2),
-                return_pct=round(unrealized / cost_basis * 100, 4) if cost_basis else 0,
-                target_price=item.normalized_target_price or item.target_price,
-                stop_price=item.normalized_stop_price or item.stop_price,
-                held_sessions=item.held_sessions,
-                pending_exit_reason=item.pending_exit_reason,
-            )
-        )
-    return positions
-
-
-def _cost_profile_from_run(run: PaperTradingRun | None) -> PaperCostProfile:
-    if run is not None:
-        raw = run.configuration.get("cost_profile")
-        if isinstance(raw, dict):
-            try:
-                return PaperCostProfile.model_validate(raw)
-            except ValueError:
-                pass
-        for profile in available_cost_profiles():
-            if profile.profile_id == run.cost_profile_id:
-                return profile
-    return resolve_cost_profile("base")
-
-
-def _optional_delta(right: float | None, left: float | None) -> float | None:
-    if right is None or left is None:
-        return None
-    return round(float(right) - float(left), 4)
+def _verified_run_from_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> PaperTradingRun:
+    stored = str(row["output_digest"] or "")
+    expected = paper_run_output_digest(conn, int(row["id"]))
+    if stored != expected:
+        raise ValueError("模拟运行输出账本校验失败，已拒绝读取")
+    return _run_from_row(row)
 
 
 def _json_dump(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _json_load(value: str, fallback: object) -> object:

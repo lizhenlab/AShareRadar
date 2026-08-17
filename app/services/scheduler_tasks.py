@@ -189,14 +189,70 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             now=now,
             limit=DUE_REVIEW_EVALUATION_BATCH_LIMIT,
         )
-        message = (
-            f"到期研究计划候选 {summary.candidate_count} 条，"
-            f"本轮评估 {summary.evaluated_count} 条，失败 {summary.failed_count} 条"
-        )
+        message = f"到期研究计划候选 {summary.candidate_count} 条，" f"本轮评估 {summary.evaluated_count} 条，失败 {summary.failed_count} 条"
         await self._save_monitor_event("warning" if summary.failed_count else "info", "review", message)
         if summary.attempted_count and summary.failed_count == summary.attempted_count:
             raise RuntimeError(message)
         if summary.failed_count:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
+        return message
+
+    async def _maintain_market_scan_probability(self, *, now: datetime | None = None) -> str:
+        if not _research_maintenance_window_open(now):
+            message = "当前不在交易日盘后日K发布窗口，已跳过上涨概率标签维护"
+            await self._save_monitor_event("info", "market_scan_probability", message)
+            return message
+        from app.services.market_scan_probability_maintenance import (
+            MarketScanProbabilityMaintenanceService,
+        )
+
+        service: MarketScanProbabilityMaintenanceService | None = (
+            getattr(self, "_market_scan_probability_maintenance", None)
+        )
+        if service is None:
+            service = MarketScanProbabilityMaintenanceService(self.datahub.cache)
+            self._market_scan_probability_maintenance = service
+        summary = await _offload(
+            service.run,
+            now=now,
+        )
+        scanner = self.market_scanner
+        refresh = getattr(scanner, "refresh_probability_research_cache", None)
+        if callable(refresh):
+            await refresh()
+        message = summary.message()
+        if summary.failures:
+            message += "；" + "；".join(summary.failures)
+        await self._save_monitor_event(
+            "warning" if summary.degraded else "info",
+            "market_scan_probability",
+            message,
+        )
+        if summary.due_count and summary.failed_count == summary.due_count:
+            raise RuntimeError(message)
+        if summary.degraded:
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
+        return message
+
+    async def _run_strategy_schedules(self) -> str:
+        service = self._strategy_automation_service
+        if service is None:
+            raise RuntimeError("策略自动化服务尚未注入")
+        summary = await _offload(service.run_due)
+        message = (
+            f"版本化策略检查 {summary.checked_count} 条，执行 {summary.executed_count} 条，"
+            f"跳过 {summary.skipped_count} 条，生成提醒 {summary.event_count} 条，"
+            f"失败 {summary.failed_count} 条"
+        )
+        degraded = summary.failed_count > 0
+        await self._save_monitor_event(
+            "warning" if degraded else "info",
+            "strategy_lab",
+            message,
+        )
+        if summary.checked_count and summary.failed_count == summary.checked_count:
+            raise RuntimeError(message)
+        if degraded:
             return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
 

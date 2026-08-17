@@ -28,12 +28,19 @@ class SQLiteConnectionFactory:
         conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
-            conn.commit()
         except Exception:
-            conn.rollback()
+            if _connection_is_open(conn):
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
             raise
+        else:
+            if _connection_is_open(conn):
+                conn.commit()
         finally:
-            conn.close()
+            if _connection_is_open(conn):
+                conn.close()
 
     @contextmanager
     def read_snapshot(self) -> Iterator[sqlite3.Connection]:
@@ -41,3 +48,11 @@ class SQLiteConnectionFactory:
             conn.execute("PRAGMA query_only = ON")
             conn.execute("BEGIN")
             yield conn
+
+
+def _connection_is_open(conn: sqlite3.Connection) -> bool:
+    try:
+        _ = conn.in_transaction
+    except sqlite3.ProgrammingError:
+        return False
+    return True

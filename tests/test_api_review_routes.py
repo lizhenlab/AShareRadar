@@ -11,15 +11,17 @@ from app.api.routes import reviews
 
 def test_delete_review_plan_returns_mutation_result() -> None:
     cache = _DeleteCache(removed=True)
-    response = _client(_DataHubStub(cache)).delete("/api/reviews/plans/9")
+    response = _client(_DataHubStub(cache)).delete("/api/reviews/plans/9?expected_revision=3")
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "removed": True}
-    assert cache.deleted_ids == [9]
+    assert cache.deleted_ids == [(9, 3)]
 
 
 def test_delete_review_plan_returns_404_when_missing() -> None:
-    response = _client(_DataHubStub(_DeleteCache(removed=False))).delete("/api/reviews/plans/999")
+    response = _client(_DataHubStub(_DeleteCache(removed=False))).delete(
+        "/api/reviews/plans/999?expected_revision=1"
+    )
 
     assert response.status_code == 404
     assert response.json() == {"detail": "研究计划不存在"}
@@ -51,8 +53,8 @@ class _DataHubStub:
 class _DeleteCache:
     def __init__(self, *, removed: bool) -> None:
         self.removed = removed
-        self.deleted_ids: list[int] = []
+        self.deleted_ids: list[tuple[int, int]] = []
 
-    def delete_advice_review_plan(self, plan_id: int) -> bool:
-        self.deleted_ids.append(plan_id)
+    def delete_advice_review_plan(self, plan_id: int, *, expected_revision: int) -> bool:
+        self.deleted_ids.append((plan_id, expected_revision))
         return self.removed

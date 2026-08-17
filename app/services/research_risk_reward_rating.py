@@ -114,8 +114,16 @@ def _risk_reward_summary(
     timeframe_text = _timeframe_summary_text(timeframe)
     volatility_text = ""
     if feature:
-        atr_text = _non_negative_percent_text("ATR", getattr(feature, "atr_pct", None))
-        volatility_pct_text = _non_negative_percent_text("20日波动", getattr(feature, "volatility_pct", None))
+        atr_text = _available_metric_percent_text(
+            "ATR",
+            getattr(feature, "atr_pct", None),
+            getattr(feature, "atr14_available", False) is True,
+        )
+        volatility_pct_text = _available_metric_percent_text(
+            "20日波动",
+            getattr(feature, "volatility_pct", None),
+            getattr(feature, "volatility_available", False) is True,
+        )
         volatility_text = f"{atr_text}、{volatility_pct_text}；"
     availability = _risk_reward_level_availability(
         feature=feature,
@@ -162,11 +170,14 @@ def _risk_reward_level_availability(
 
 def _risk_reward_notes(metrics: RiskRewardMetrics) -> list[str]:
     notes = ["风险收益比只用于单股观察，不代表收益承诺。"]
-    if not _metric_levels_are_valid(metrics):
-        notes.append("当前价格、目标位或防守位存在待确认项，先按观察口径处理。")
+    if not metrics.ratio_available:
+        notes.append(
+            f"{metrics.availability_reason or '当前价格、目标位或防守位存在待确认项'}，"
+            "兼容数值字段不参与评级，先按观察口径处理。"
+        )
     else:
         notes.append(
-            "目标位和防守位已参考ATR和近期波动率；"
+            f"目标位依据 {metrics.upside_target_basis}，防守位依据 {metrics.downside_stop_basis}；"
             "若数据质量或市场环境恶化，应优先使用下方失效位。"
         )
     return notes
@@ -188,6 +199,10 @@ def _non_negative_percent_text(label: str, value: object) -> str:
     if parsed is not None and parsed >= 0:
         return f"{label} {parsed:.2f}%"
     return f"{label}待确认"
+
+
+def _available_metric_percent_text(label: str, value: object, available: bool) -> str:
+    return _non_negative_percent_text(label, value) if available else f"{label}待确认"
 
 
 def _conditional_percent_text(label: str, value: object, available: bool) -> str:

@@ -159,6 +159,31 @@ class LlmExplainerTests(unittest.TestCase):
         self.assertIn("test-model", result.answer_source)
         self.assertIn("仅增强解释", result.llm_status or "")
 
+    def test_llm_explainer_never_exposes_unavailable_level_placeholders(self) -> None:
+        analysis, rule_answer = _llm_test_case()
+        unavailable = analysis.model_copy(
+            update={
+                "support": 1.0,
+                "resistance": 9999.0,
+                "ma20": 8888.0,
+                "support_available": False,
+                "resistance_available": False,
+                "ma20_available": False,
+            }
+        )
+        output = _structured_output(unavailable, rule_answer, "关键结构证据仍待确认。")
+
+        result = _enhance_with_output(
+            unavailable,
+            rule_answer,
+            json.dumps(output, ensure_ascii=False),
+        )
+
+        self.assertTrue(result.llm_used)
+        self.assertIn("关键位：支撑 待确认；压力 待确认", result.answer)
+        self.assertNotIn("9999", result.answer)
+        self.assertNotIn("8888", result.answer)
+
     def test_llm_explainer_repairs_one_invalid_output_then_succeeds(self) -> None:
         analysis, rule_answer = _llm_test_case()
         valid = _structured_json(analysis, rule_answer, "趋势与风险仍支持规则保持等待。")
@@ -617,8 +642,8 @@ def _structured_output(analysis, rule_answer, explanation: str) -> dict:
     return {
         "conclusion": rule_answer.conclusion,
         "confidence": rule_answer.confidence,
-        "support": analysis.support,
-        "resistance": analysis.resistance,
+        "support": analysis.support if analysis.support_available else None,
+        "resistance": analysis.resistance if analysis.resistance_available else None,
         "actions": list(rule_answer.actions),
         "invalidations": list(rule_answer.invalidations),
         "explanation": explanation,

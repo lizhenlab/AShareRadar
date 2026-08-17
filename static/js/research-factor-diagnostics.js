@@ -27,8 +27,8 @@ export function renderFeatureSnapshot(feature) {
     ["趋势", joinedMetric(feature.trend_score, feature.trend_label)],
     ["量价热度", proxyScoreText(feature.fund_flow_score, feature.fund_flow_data_nature)],
     ["龙头", joinedMetric(feature.leader_score, feature.leader_level)],
-    ["量能", `${formatNumber(feature.volume_ratio)}倍`],
-    ["估值", fallbackText(feature.valuation_score)],
+    ["量能", feature.volume_ratio_available === true ? `${formatNumber(feature.volume_ratio)}倍` : "—（证据不可用）"],
+    ["估值", feature.valuation_score_available === true ? fallbackText(feature.valuation_score) : "—（证据不可用）"],
     ["质量", joinedMetric(feature.data_quality_level, feature.data_quality_score, " ")],
   ];
   el.innerHTML = `
@@ -57,7 +57,7 @@ export function renderDiagnosis(diagnosis) {
         <span>个股诊断</span>
         <strong>${escapeHtml(diagnosis.headline)}</strong>
       </div>
-      <i>${escapeHtml(diagnosis.action)} · 诊断证据充分度 ${escapeHtml(diagnosis.confidence)}/100</i>
+      <i>研究诊断（不写建议历史）：${escapeHtml(diagnosis.action)} · 诊断证据充分度 ${escapeHtml(diagnosis.confidence)}/100</i>
     </div>
     <p>${escapeHtml(diagnosis.beginner_summary)}</p>
     <small>${escapeHtml(diagnosis.professional_summary)}</small>
@@ -224,36 +224,53 @@ function renderFactorLabItems(items) {
 }
 
 function renderFactorParticipationNote(items) {
-  const excludedNames = [
+  const factors = asArray(items).map(asObject);
+  const currentExcludedNames = uniqueFactorNames(
+    factors.filter((item) => item.participates_in_current_score === false),
+  );
+  const historicalExcludedNames = uniqueFactorNames(
+    factors.filter((item) => item.participates_in_current_score !== false
+      && asObject(item.calibration).participates_in_historical_aggregate === false),
+  );
+  return [
+    currentExcludedNames.length
+      ? `<small>${escapeHtml(`当前评分口径：${currentExcludedNames.join("、")}当前不计分/不可用。`)}</small>`
+      : "",
+    historicalExcludedNames.length
+      ? `<small>${escapeHtml(`历史聚合口径：${historicalExcludedNames.join("、")}参与当前评分，但不参与综合证据充分度、正负证据与历史样本聚合。`)}</small>`
+      : "",
+  ].join("");
+}
+
+function uniqueFactorNames(items) {
+  return [
     ...new Set(
-      asArray(items)
-        .filter((item) => asObject(asObject(item).calibration).participates_in_historical_aggregate === false)
-        .map((item) => asObject(item).name)
+      items
+        .map((item) => item.name)
         .filter((name) => typeof name === "string" && name.trim())
         .map((name) => name.trim()),
     ),
   ];
-  if (!excludedNames.length) return "";
-  return `<small>${escapeHtml(`历史聚合口径：${excludedNames.join("、")}仍参与当前评分，但不参与综合证据充分度、正负证据与历史样本聚合。`)}</small>`;
 }
 
 function renderStandardFactor(item) {
   item = asObject(item);
   const calibration = asObject(item.calibration);
   const bucket = asArray(item.calibration_buckets)[0];
+  const participates = item.participates_in_current_score !== false;
   return `
-    <div class="standard-factor ${factorDirectionClass(item)}">
+    <div class="standard-factor ${participates ? factorDirectionClass(item) : "unavailable"}">
       <div>
         <strong>${escapeHtml(item.name)}</strong>
-        <span>${escapeHtml(item.score)} · 权重 ${formatNumber(item.weight, 2)}</span>
+        <span>${participates ? `${escapeHtml(item.score)} · 权重 ${formatNumber(item.weight, 2)}` : "当前不计分/不可用 · 权重不生效"}</span>
       </div>
-      <div class="score-bar"><i style="width:${Math.max(0, Math.min(100, Number(item.score) || 0))}%"></i></div>
-      <p>${escapeHtml(item.value)}</p>
-      <small>${factorCalibrationSampleText(calibration)}</small>
-      ${factorCalibrationReturnLine(calibration)}
-      ${factorPercentileLine(item)}
-      ${factorBucketLine(bucket)}
-      ${renderInlineItems(item.evidence, "small", 1)}
+      <div class="score-bar"><i style="width:${participates ? Math.max(0, Math.min(100, Number(item.score) || 0)) : 0}%"></i></div>
+      <p>${participates ? escapeHtml(item.value) : "当前观测值不可用，未形成评分证据。"}</p>
+      <small>${participates ? factorCalibrationSampleText(calibration) : "当前观测证据不可用，不纳入当前评分。"}</small>
+      ${participates ? factorCalibrationReturnLine(calibration) : ""}
+      ${participates ? factorPercentileLine(item) : ""}
+      ${participates ? factorBucketLine(bucket) : ""}
+      ${participates ? renderInlineItems(item.evidence, "small", 1) : ""}
     </div>
   `;
 }
@@ -288,6 +305,20 @@ export function renderChipAnalysis(chip) {
   const el = $("chipPanel");
   if (!el || !chip) {
     if (el) el.innerHTML = "";
+    return;
+  }
+  if (chip.distribution_available !== true) {
+    const validSessionCount = Number.isInteger(chip.valid_session_count) && chip.valid_session_count >= 0
+      ? chip.valid_session_count
+      : 0;
+    el.innerHTML = `
+      <div class="chip-head">
+        <strong>筹码证据不可用</strong>
+        <span>有效样本 ${escapeHtml(validSessionCount)}</span>
+      </div>
+      <p>${escapeHtml(chip.summary || "有效日K样本不足，暂不能形成筹码分布估算。")}</p>
+      ${renderInlineItems(chip.notes, "small", 2)}
+    `;
     return;
   }
   el.innerHTML = `

@@ -49,6 +49,7 @@ class MarketScanStockEvaluator:
         quote: Quote | None,
         *,
         quote_error: str | None,
+        quote_observed_at: str,
         semaphore: asyncio.Semaphore,
         cancel_event: asyncio.Event,
         as_of: datetime,
@@ -71,7 +72,18 @@ class MarketScanStockEvaluator:
                     expected_data_date=expected_data_date,
                     quote_error=quote_error,
                 )
-            return self._score(item, quote, rows, as_of, cutoff, expected_data_date, expected_quote_date, mode, rule_version)
+            return self._score(
+                item,
+                quote,
+                rows,
+                as_of,
+                cutoff,
+                expected_data_date,
+                expected_quote_date,
+                mode,
+                rule_version,
+                quote_observed_at,
+            )
         except asyncio.CancelledError:
             raise
         except ProviderChainUnavailable:
@@ -84,6 +96,7 @@ class MarketScanStockEvaluator:
                 cutoff=cutoff,
                 exc=exc,
                 sensitive_values=self._sensitive_values,
+                quote_observed_at=quote_observed_at,
             )
 
     async def _timed_kline_fetch(
@@ -111,6 +124,7 @@ class MarketScanStockEvaluator:
         expected_quote_date: date,
         mode: MarketScanMode,
         rule_version: str,
+        quote_observed_at: str,
     ) -> MarketScanResultWrite:
         started = self._monotonic()
         try:
@@ -126,6 +140,8 @@ class MarketScanStockEvaluator:
                 min_data_quality_score=self.settings.market_scan_min_data_quality_score,
                 mode=mode,
                 rule_version=rule_version,
+                quote_observed_at=quote_observed_at,
+                new_stock_days=self.settings.market_scan_new_stock_days,
             )
         finally:
             self._work_duration_ms["scoring"] += _elapsed_ms(started, self._monotonic())

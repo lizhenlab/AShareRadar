@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from app.models.execution import MODELLED_ROUND_TRIP_FRICTION_PCT
 from app.services.indicators import pct_change
-from app.utils.market_data import finite_float, valid_kline
+from app.services.research_factor_execution_contract import calibration_row_is_observed
+from app.utils.market_data import finite_float
 
 def next_session_open(rows: list, signal_index: int) -> float | None:
     entry_index = signal_index + 1
@@ -11,7 +12,13 @@ def next_session_open(rows: list, signal_index: int) -> float | None:
     entry_row = rows[entry_index]
     open_price = finite_float(getattr(entry_row, "open", None))
     volume = finite_float(getattr(entry_row, "volume", None))
-    if not valid_kline(entry_row) or open_price is None or open_price <= 0 or volume is None or volume <= 0:
+    if (
+        not calibration_row_is_observed(entry_row, require_tradable_open=True)
+        or open_price is None
+        or open_price <= 0
+        or volume is None
+        or volume <= 0
+    ):
         return None
     return open_price
 

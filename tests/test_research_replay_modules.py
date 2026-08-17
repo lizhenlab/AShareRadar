@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import math
+from datetime import date
 
+import pytest
+from pydantic import ValidationError
+
+from app.models.research import ReplayPatternStat, StockReplayAnalysis
 from app.models.schemas import ReplayCase
 from app.services.research_replay import (
     MIN_REPLAY_KLINES,
@@ -17,6 +22,7 @@ from app.services.research_replay import (
     build_replay_analysis,
 )
 from app.services.research_execution_model import MODELLED_ROUND_TRIP_FRICTION_PCT
+from app.services.trading_calendar import next_trade_dates
 from tests.factories import make_kline, make_quote
 
 
@@ -40,20 +46,39 @@ def test_replay_analysis_treats_non_positive_window_as_empty() -> None:
 
 
 def test_replay_case_ignores_zero_entry_price() -> None:
-    rows = [make_kline(date=f"2026-04-{index + 1:02d}", close=100, high=102, low=98, volume=1000) for index in range(20)]
-    rows.append(make_kline(date="2026-05-01", close=105, high=106, low=104, volume=2500))
-    rows.append(make_kline(date="2026-05-02", close=106, high=107, low=105, volume=1000).model_copy(update={"open": 0}))
-    rows.extend(make_kline(date=f"2026-05-{index + 3:02d}", close=107, high=108, low=106, volume=1000) for index in range(9))
+    dates = _trusted_replay_dates(31)
+    rows = [
+        _trusted_replay_kline(dates, index, close=100, high=102, low=98, volume=1000)
+        for index in range(20)
+    ]
+    rows.append(_trusted_replay_kline(dates, 20, close=105, high=106, low=104, volume=2500))
+    rows.append(
+        _trusted_replay_kline(dates, 21, close=106, high=107, low=105, volume=1000).model_copy(
+            update={"open": 0}
+        )
+    )
+    rows.extend(
+        _trusted_replay_kline(dates, index, close=107, high=108, low=106, volume=1000)
+        for index in range(22, 31)
+    )
 
     assert _replay_case(rows, 20) is None
 
 
 def test_replay_case_excludes_latest_signal_without_an_executable_next_open() -> None:
+    dates = _trusted_replay_dates(21)
     rows = [
-        make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000)
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=100 + index * 0.2,
+            high=101 + index * 0.2,
+            low=99,
+            volume=1000,
+        )
         for index in range(20)
     ]
-    rows.append(make_kline(date="2026-05-01", close=108, high=109, low=104, volume=1800))
+    rows.append(_trusted_replay_kline(dates, 20, close=108, high=109, low=104, volume=1800))
 
     case = _replay_case(rows, 20)
 
@@ -61,12 +86,24 @@ def test_replay_case_excludes_latest_signal_without_an_executable_next_open() ->
 
 
 def test_replay_case_uses_next_open_and_keeps_immature_return_pending() -> None:
+    dates = _trusted_replay_dates(22)
     rows = [
-        make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000)
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=100 + index * 0.2,
+            high=101 + index * 0.2,
+            low=99,
+            volume=1000,
+        )
         for index in range(20)
     ]
-    rows.append(make_kline(date="2026-05-01", close=108, high=109, low=104, volume=1800))
-    rows.append(make_kline(date="2026-05-02", close=111, high=112, low=109, volume=1200).model_copy(update={"open": 110}))
+    rows.append(_trusted_replay_kline(dates, 20, close=108, high=109, low=104, volume=1800))
+    rows.append(
+        _trusted_replay_kline(dates, 21, close=111, high=112, low=109, volume=1200).model_copy(
+            update={"open": 110}
+        )
+    )
 
     case = _replay_case(rows, 20)
 
@@ -78,14 +115,29 @@ def test_replay_case_uses_next_open_and_keeps_immature_return_pending() -> None:
 
 
 def test_replay_case_returns_include_standardized_round_trip_friction() -> None:
+    dates = _trusted_replay_dates(31)
     rows = [
-        make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000)
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=100 + index * 0.2,
+            high=101 + index * 0.2,
+            low=99,
+            volume=1000,
+        )
         for index in range(20)
     ]
-    rows.append(make_kline(date="2026-05-01", close=108, high=109, low=104, volume=1800))
+    rows.append(_trusted_replay_kline(dates, 20, close=108, high=109, low=104, volume=1800))
     rows.extend(
-        make_kline(date=f"2026-05-{index + 2:02d}", close=110 + index, high=111 + index, low=109 + index, volume=1100)
-        for index in range(10)
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=110 + index - 21,
+            high=111 + index - 21,
+            low=109 + index - 21,
+            volume=1100,
+        )
+        for index in range(21, 31)
     )
 
     case = _replay_case(rows, 20)
@@ -96,14 +148,30 @@ def test_replay_case_returns_include_standardized_round_trip_friction() -> None:
 
 
 def test_replay_case_keeps_invalid_forward_bar_pending() -> None:
+    dates = _trusted_replay_dates(31)
     rows = [
-        make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000)
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=100 + index * 0.2,
+            high=101 + index * 0.2,
+            low=99,
+            volume=1000,
+        )
         for index in range(20)
     ]
-    rows.append(make_kline(date="2026-05-01", close=108, high=109, low=104, volume=1800))
-    for index in range(10):
-        day = make_kline(date=f"2026-05-{index + 2:02d}", close=109 + index, high=110 + index, low=108 + index, volume=1100)
-        rows.append(day.model_copy(update={"high": math.inf}) if index == 4 else day)
+    rows.append(_trusted_replay_kline(dates, 20, close=108, high=109, low=104, volume=1800))
+    for index in range(21, 31):
+        offset = index - 21
+        day = _trusted_replay_kline(
+            dates,
+            index,
+            close=109 + offset,
+            high=110 + offset,
+            low=108 + offset,
+            volume=1100,
+        )
+        rows.append(day.model_copy(update={"high": math.inf}) if offset == 4 else day)
 
     case = _replay_case(rows, 20)
 
@@ -111,6 +179,63 @@ def test_replay_case_keeps_invalid_forward_bar_pending() -> None:
     assert case.forward_3d_return is not None
     assert case.forward_5d_return is None
     assert case.forward_10d_return is not None
+    assert case.outcome == "待确认"
+
+
+@pytest.mark.parametrize(
+    "execution_update",
+    [
+        {
+            "volume": 0,
+            "session_status": "suspended",
+            "open_execution_status": "unavailable",
+        },
+        {"open_execution_status": "unavailable"},
+    ],
+)
+def test_replay_case_keeps_non_executable_exit_session_pending(
+    execution_update: dict[str, object],
+) -> None:
+    dates = _trusted_replay_dates(31)
+    rows = [
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=100 + index * 0.2,
+            high=101 + index * 0.2,
+            low=99,
+            volume=1_000,
+        )
+        for index in range(20)
+    ]
+    rows.append(
+        _trusted_replay_kline(
+            dates,
+            20,
+            close=108,
+            high=109,
+            low=104,
+            volume=1_800,
+        )
+    )
+    rows.extend(
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=110 + index - 21,
+            high=111 + index - 21,
+            low=109 + index - 21,
+            volume=1_100,
+        )
+        for index in range(21, 31)
+    )
+    rows[25] = rows[25].model_copy(update=execution_update)
+
+    case = _replay_case(rows, 20)
+
+    assert case is not None
+    assert case.forward_3d_return is not None
+    assert case.forward_5d_return is None
     assert case.outcome == "待确认"
 
 
@@ -159,10 +284,64 @@ def test_replay_stats_uses_only_valid_forward_returns_for_win_rate() -> None:
     assert "待确认" in stats[0].note
 
 
+def test_replay_models_reject_fake_or_non_finite_available_metrics() -> None:
+    with pytest.raises(ValidationError):
+        StockReplayAnalysis(
+            symbol="600519.SH",
+            updated_at="2026-05-13 16:00:00",
+            availability="available",
+            window_days=30,
+            sample_count=0,
+            success_rate=None,
+            baseline_win_rate=None,
+            baseline_avg_forward_5d_return=None,
+            modelled_round_trip_friction_pct=0.25,
+            summary="invalid",
+        )
+    with pytest.raises(ValidationError):
+        ReplayPatternStat(
+            pattern="放量突破",
+            sample_count=1,
+            evaluated_count=1,
+            win_rate=math.nan,
+            avg_forward_5d_return=1,
+            note="invalid",
+        )
+    with pytest.raises(ValidationError):
+        ReplayPatternStat(
+            pattern="放量突破",
+            sample_count=1,
+            evaluated_count=0,
+            excess_vs_baseline_pct=1,
+            note="invalid",
+        )
+
+
 def test_replay_analysis_detects_volume_breakout_case() -> None:
-    rows = [make_kline(date=f"2026-04-{index + 1:02d}", close=100 + index * 0.2, high=101 + index * 0.2, low=99, volume=1000) for index in range(20)]
-    rows.append(make_kline(date="2026-05-01", close=108, high=109, low=104, volume=1800))
-    rows.extend(make_kline(date=f"2026-05-{index + 2:02d}", close=109 + index, high=110 + index, low=108 + index, volume=1100) for index in range(12))
+    dates = _trusted_replay_dates(33)
+    rows = [
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=100 + index * 0.2,
+            high=101 + index * 0.2,
+            low=99,
+            volume=1000,
+        )
+        for index in range(20)
+    ]
+    rows.append(_trusted_replay_kline(dates, 20, close=108, high=109, low=104, volume=1800))
+    rows.extend(
+        _trusted_replay_kline(
+            dates,
+            index,
+            close=109 + index - 21,
+            high=110 + index - 21,
+            low=108 + index - 21,
+            volume=1100,
+        )
+        for index in range(21, 33)
+    )
     analysis = _analysis_with_klines(rows)
 
     replay = build_replay_analysis(analysis, window_days=len(rows))
@@ -176,6 +355,22 @@ def test_replay_analysis_detects_volume_breakout_case() -> None:
     assert replay.cases[-1].trend_regime in {"强势趋势", "弱势趋势", "震荡环境"}
     assert sum(item.sample_count for item in replay.regime_stats) == replay.sample_count
     assert all(item.evaluated_count <= item.sample_count for item in replay.regime_stats)
+
+
+def test_replay_analysis_fails_closed_when_any_window_row_is_not_pit() -> None:
+    dates = _trusted_replay_dates(MIN_REPLAY_KLINES)
+    rows = [
+        _trusted_replay_kline(dates, index, close=100, high=101, low=99, volume=1000)
+        for index in range(MIN_REPLAY_KLINES)
+    ]
+    rows[10] = rows[10].model_copy(update={"point_in_time": False})
+
+    replay = build_replay_analysis(_analysis_with_klines(rows), window_days=len(rows))
+
+    assert replay.availability == "execution_evidence_unavailable"
+    assert replay.sample_count == 0
+    assert replay.unavailable_reason is not None
+    assert "PIT" in replay.summary
 
 
 def test_replay_pattern_ignores_malformed_lookback_bar() -> None:
@@ -289,3 +484,19 @@ def _analysis_with_klines(klines):
     from app.services.data_quality import build_data_quality
 
     return build_analysis(quote, klines, data_quality=build_data_quality(quote, klines))
+
+
+def _trusted_replay_dates(count: int) -> tuple[date, ...]:
+    return next_trade_dates(date(2026, 2, 27), count)
+
+
+def _trusted_replay_kline(
+    dates: tuple[date, ...],
+    index: int,
+    **values: float,
+):
+    return make_kline(
+        date=dates[index].isoformat(),
+        replay_eligible=True,
+        **values,
+    )

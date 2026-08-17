@@ -78,6 +78,35 @@ class TencentMarketDataProvider:
 
     def __init__(self, *, timeout: float) -> None:
         self.timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+        self._close_task: asyncio.Task[None] | None = None
+        self._closed = False
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._closed:
+            raise RuntimeError("腾讯行情 Provider 已关闭")
+        if self._close_task is not None:
+            raise RuntimeError("腾讯行情 Provider 正在关闭")
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout, trust_env=False)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        client = self._client
+        if client is None:
+            self._closed = True
+            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                client.aclose(),
+                name="tencent-provider-client-close",
+            )
+            self._close_task.add_done_callback(_consume_tencent_close_exception)
+        await asyncio.shield(self._close_task)
+        self._client = None
+        self._closed = True
 
     async def quote(self, symbol: str) -> Quote:
         return (await self.quotes([symbol]))[0]
@@ -86,7 +115,11 @@ class TencentMarketDataProvider:
         url = _tencent_quote_url(symbols)
         if not url:
             return []
-        text = await _fetch_tencent_quote_text(url, self.timeout)
+        text = await _fetch_tencent_quote_text(
+            url,
+            self.timeout,
+            client=self._http_client(),
+        )
         quotes = _tencent_quotes_from_text(text, self.source_name)
         if not quotes:
             if _tencent_quote_response_is_coverage_miss(text):
@@ -98,15 +131,7 @@ class TencentMarketDataProvider:
         ensure_positive_limit(limit)
         code = tencent_symbol(symbol)
         url = f"{TENCENT_KLINE_URL}?param={code},day,,,{limit},qfq"
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPError as exc:
-            raise MarketDataTransportError(f"K线请求失败：{sanitize_provider_error(exc)}") from exc
-        except ValueError as exc:
-            raise MarketDataProtocolError(f"K线响应解析失败：{sanitize_provider_error(exc)}") from exc
+        data = await _fetch_tencent_kline_json(url, self._http_client())
 
         _validate_tencent_kline_envelope(data)
         rows = _tencent_kline_rows(data, code)
@@ -124,13 +149,50 @@ class TencentMarketDataProvider:
         )
 
 
-async def _fetch_tencent_quote_text(url: str, timeout: float) -> str:
+def _consume_tencent_close_exception(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    task.exception()
+
+
+async def _fetch_tencent_kline_json(
+    url: str,
+    client: httpx.AsyncClient,
+) -> object:
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(url)
-            response.encoding = "gbk"
-            response.raise_for_status()
-            return response.text
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as exc:
+        raise MarketDataTransportError(f"K线请求失败：{sanitize_provider_error(exc)}") from exc
+    except ValueError as exc:
+        raise MarketDataProtocolError(f"K线响应解析失败：{sanitize_provider_error(exc)}") from exc
+
+
+async def _fetch_tencent_quote_text(
+    url: str,
+    timeout: float,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    if client is not None:
+        return await _tencent_quote_text_response(client, url)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            return await _tencent_quote_text_response(client, url)
+    except httpx.HTTPError as exc:
+        raise MarketDataTransportError(f"实时行情请求失败：{sanitize_provider_error(exc)}") from exc
+
+
+async def _tencent_quote_text_response(
+    client: httpx.AsyncClient,
+    url: str,
+) -> str:
+    try:
+        response = await client.get(url)
+        response.encoding = "gbk"
+        response.raise_for_status()
+        return response.text
     except httpx.HTTPError as exc:
         raise MarketDataTransportError(f"实时行情请求失败：{sanitize_provider_error(exc)}") from exc
 

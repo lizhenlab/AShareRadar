@@ -146,6 +146,29 @@ def test_rule_context_uses_today_quote_volume_when_klines_stop_yesterday() -> No
     assert match.status == "命中"
 
 
+def test_intraday_rule_context_does_not_compare_partial_volume_to_full_days() -> None:
+    quote = make_quote(
+        price=101.0,
+        prev_close=98.0,
+        high=102.0,
+        low=97.0,
+        change_pct=3.06,
+        timestamp="2026-05-26 09:31:00",
+    ).model_copy(update={"open": 98.5, "volume": 10_000.0})
+    klines = [
+        make_kline(close=98.0, high=100.0, volume=1000.0, date=f"2026-05-{day:02d}")
+        for day in range(1, 26)
+    ]
+    analysis = build_analysis(quote, klines, mode="intraday")
+
+    context = _context_for(analysis)
+    match = _rule_volume_breakout(analysis, context.latest_high_20, context.volume_ratio)
+
+    assert context.volume_ratio is None
+    assert match.status != "命中"
+    assert "近5日成交量" in match.missing_data
+
+
 def test_rule_context_excludes_current_kline_from_20_day_high_threshold() -> None:
     previous_rows = [
         make_kline(close=98.0, high=100.0, low=96.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(1, 21)
@@ -286,10 +309,33 @@ def test_fund_tech_divergence_gap_only_is_close_and_tracks_missing_fund_flow() -
 
     match = _rule_fund_tech_divergence(analysis, fund_flow, order_pressure)
 
-    assert match.status == "接近"
+    assert match.status == "未触发"
     assert match.level == "观察"
-    assert match.confidence == 55
-    assert match.missing_data == ["逐笔资金流"]
+    assert match.confidence == 34
+    assert match.evidence[1] == "量价热度评分（衍生） 缺失"
+    assert match.missing_data == ["量价热度评分（衍生）", "逐笔资金流"]
+
+
+def test_unavailable_order_pressure_text_cannot_change_fund_divergence_rule() -> None:
+    analysis, fund_flow, pressure = _rule_inputs(
+        trend_score=44,
+        fund_score=64,
+        pressure="买盘均衡",
+        fund_available=True,
+    )
+    pressures = [
+        pressure.model_copy(
+            update={"available": False, "data_nature": "unavailable", "pressure_level": level}
+        )
+        for level in ("订单压力不可用", "主动卖压", "强买盘")
+    ]
+
+    matches = [_rule_fund_tech_divergence(analysis, fund_flow, item) for item in pressures]
+
+    assert matches[0].model_dump() == matches[1].model_dump() == matches[2].model_dump()
+    assert matches[0].level == "观察"
+    assert matches[0].evidence[-1] == "盘口证据不可用"
+    assert "盘口证据" in matches[0].missing_data
 
 
 def test_support_rebound_is_downgraded_when_risk_event_is_present() -> None:
@@ -349,6 +395,70 @@ def test_support_rebound_treats_non_finite_fund_score_as_missing() -> None:
     assert "存在止跌承接证据" not in match.evidence
     assert match.evidence[2] == "量价热度评分（衍生） 缺失"
     assert match.missing_data == ["量价热度评分（衍生）"]
+
+
+def test_unavailable_structural_placeholders_do_not_change_price_or_flow_rules() -> None:
+    analysis, fund_flow, _order_pressure = _rule_inputs(
+        trend_score=49,
+        fund_score=70,
+        pressure="买盘均衡",
+        fund_available=True,
+    )
+    first = analysis.model_copy(
+        update={
+            "support": 1.11,
+            "resistance": 2.22,
+            "ma20": 3.33,
+            "support_available": False,
+            "resistance_available": False,
+            "ma20_available": False,
+        }
+    )
+    second = first.model_copy(update={"support": 911.11, "resistance": 922.22, "ma20": 933.33})
+
+    def outputs(item):
+        return [
+            _rule_volume_breakout(item, latest_high_20=100, volume_ratio=1.5).model_dump(),
+            _rule_break_ma20(item).model_dump(),
+            _rule_support_rebound(item, fund_flow, _abnormal_summary([])).model_dump(),
+        ]
+
+    assert outputs(first) == outputs(second)
+    rendered = str(outputs(first))
+    assert "1.11" not in rendered
+    assert "2.22" not in rendered
+    assert "3.33" not in rendered
+    assert outputs(first)[1]["status"] == "未触发"
+    assert outputs(first)[2]["status"] == "未触发"
+
+
+def test_unavailable_fund_score_perturbations_do_not_change_flow_rules() -> None:
+    analysis, fund_flow, order_pressure = _rule_inputs(
+        trend_score=44,
+        fund_score=70,
+        pressure="买盘均衡",
+        fund_available=True,
+    )
+    flows = [
+        fund_flow.model_copy(update={"available": True, "data_nature": "unavailable", "overall_score": score})
+        for score in (0, 50, 100)
+    ]
+
+    outputs = [
+        (
+            _rule_support_rebound(analysis, item, _abnormal_summary([])).model_dump(),
+            _rule_fund_tech_divergence(analysis, item, order_pressure).model_dump(),
+        )
+        for item in flows
+    ]
+
+    assert outputs[0] == outputs[1] == outputs[2]
+    assert outputs[0][0]["status"] == "未触发"
+    assert outputs[0][1]["status"] == "未触发"
+    rendered = str(outputs[0])
+    assert "评分（衍生） 缺失" in rendered
+    assert "评分（衍生） 50" not in rendered
+    assert "评分（衍生） 100" not in rendered
 
 
 def test_abnormal_risk_uses_main_signal_for_non_risk_events() -> None:
@@ -566,6 +676,7 @@ def _valuation(*, score: int, summary: str = "估值摘要。", missing_data: li
 
     valuation = ValuationStub()
     valuation.score = score
+    valuation.score_available = True
     valuation.summary = summary
     valuation.missing_data = missing_data or []
     return valuation

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from contextlib import redirect_stderr
 from dataclasses import dataclass
+from datetime import datetime
 import importlib
 import io
 from typing import Any, cast
@@ -19,6 +20,7 @@ from app.models.market import (
 from app.runtime_environment import isolate_user_site_packages
 from app.services.akshare_mappers import minute_klines_from_hist_rows, quote_from_spot_row, stock_info_from_code_name_row
 from app.services.eastmoney_client import (
+    eastmoney_industry_plate_rank as _eastmoney_industry_plate_rank,
     eastmoney_kline as _eastmoney_kline,
     eastmoney_minute_kline as _eastmoney_minute_kline,
     eastmoney_no_proxy as _eastmoney_no_proxy,
@@ -225,27 +227,8 @@ class AKShareProvider:
         self._ensure_installed()
 
         def load() -> list[PlateItem]:
-            ak = _import_akshare()
-
             with _eastmoney_no_proxy():
-                df = ak.stock_board_industry_name_em()
-            stamp = now_text()
-            result = []
-            for index, (_, row) in enumerate(df.head(limit).iterrows(), start=1):
-                result.append(
-                    PlateItem(
-                        rank=index,
-                        name=str(pick(row, "板块名称", "名称", default="--")),
-                        change_pct=safe_float(str(pick(row, "涨跌幅", default=0))),
-                        amount=safe_float(str(pick(row, "成交额", default=0))) or None,
-                        turnover_rate=safe_float(str(pick(row, "换手率", default=0))) or None,
-                        leading_stock=str(pick(row, "领涨股票", default="")) or None,
-                        leading_stock_change_pct=safe_float(str(pick(row, "领涨股票-涨跌幅", default=0))) or None,
-                        source=self.source_name,
-                        updated_at=stamp,
-                    )
-                )
-            return result
+                return _eastmoney_industry_plate_rank(limit)
 
         return await run_provider_io(load)
 
@@ -433,7 +416,14 @@ def _akshare_quote_event_time(row) -> str | None:
         default=None,
     )
     event_date = pick(row, "交易日期", "日期", "trade_date", "date", default=None)
-    return normalize_quote_event_time(value, event_date=event_date)
+    normalized = normalize_quote_event_time(value, event_date=event_date)
+    if normalized is None:
+        return None
+    try:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return normalized if parsed.year >= 2000 else None
 
 
 def _stock_concepts_from_em(ak, normalized: str, code: str, stamp: str, limit: int) -> list[StockConceptItem]:

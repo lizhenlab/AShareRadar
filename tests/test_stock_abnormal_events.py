@@ -118,6 +118,23 @@ class StockAbnormalEventTests(unittest.TestCase):
 
         self.assertIn("放量上涨", [item.title for item in summary.events])
 
+    def test_intraday_abnormal_events_do_not_compare_partial_volume_to_full_days(self) -> None:
+        klines = [_kline(close=100.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(1, 26)]
+        quote = _quote(
+            price=102.0,
+            prev_close=100.0,
+            open_price=100.0,
+            high=103.0,
+            low=99.0,
+            change_pct=2.0,
+            volume=10_000.0,
+            timestamp="2026-05-26 09:31:00",
+        )
+
+        summary = build_abnormal_events(build_analysis(quote, klines, mode="intraday"))
+
+        self.assertNotIn("放量上涨", [item.title for item in summary.events])
+
     def test_abnormal_context_falls_back_to_kline_volume_when_quote_volume_is_invalid(self) -> None:
         rows = [_kline(close=100.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(8, 13)]
         rows.append(_kline(close=103.0, volume=3000.0, date="2026-05-13"))

@@ -409,6 +409,210 @@ def test_stock_search_binding_clears_blur_close_on_focus_input_and_destroy() -> 
     _run_node_script(script)
 
 
+def test_stock_search_surface_injects_dom_keyboard_history_validation_and_lifecycle() -> None:
+    script = r'''
+      import assert from "node:assert/strict";
+      import { createStockSearchSurface } from "./static/js/stock-search-surface.js";
+
+      const elements = new Map();
+      const root = { getElementById: (id) => element(id) };
+      const controllers = [];
+      const selected = [];
+      const timers = new Map();
+      const historyCalls = { close: 0, destroy: 0 };
+      let historyOptions;
+      let invalidMain = 0;
+      let nextTimer = 0;
+      const suggestion = {
+        symbol: "600519.SH", code: "600519", market: "SH", name: "<茅台>",
+        industry: "白酒", source: "test",
+      };
+
+      const surface = createStockSearchSurface({
+        root,
+        createSearchController(callbacks) {
+          let view = { phase: "idle", query: "", items: [], activeIndex: -1, message: "" };
+          const calls = { input: [], move: [], close: 0, destroy: 0, select: [] };
+          const controller = {
+            calls,
+            input(value) {
+              calls.input.push(value);
+              view = { phase: "ready", query: value, items: [suggestion], activeIndex: -1, message: "" };
+              callbacks.onState(view);
+              return true;
+            },
+            move(delta) {
+              calls.move.push(delta);
+              view = { ...view, activeIndex: 0 };
+              callbacks.onState(view);
+              return 0;
+            },
+            selectIndex(index) {
+              calls.select.push(index);
+              if (view.phase !== "ready" || index !== 0) return null;
+              this.close();
+              callbacks.onSelect(suggestion.symbol, { ...suggestion });
+              return { ...suggestion };
+            },
+            close() {
+              calls.close += 1;
+              view = { ...view, phase: "closed", items: [], activeIndex: -1 };
+              callbacks.onState(view);
+              return true;
+            },
+            destroy() { calls.destroy += 1; return true; },
+          };
+          controllers.push(controller);
+          return controller;
+        },
+        createSearchHistory(options) {
+          historyOptions = options;
+          return {
+            close() { historyCalls.close += 1; return false; },
+            destroy() { historyCalls.destroy += 1; },
+            record() { return true; },
+          };
+        },
+        validateSymbol(value) {
+          if (!/^\d{6}$/.test(value)) throw new Error("股票代码无效");
+          return `${value}.SH`;
+        },
+        escapeHtml: (value) => String(value).replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
+        compactErrorMessage: (value) => String(value),
+        setTimer(callback, delay) {
+          const timer = ++nextTimer;
+          timers.set(timer, { callback, delay });
+          return timer;
+        },
+        clearTimer: (timer) => timers.delete(timer),
+        onInvalidMain() { invalidMain += 1; },
+        onMainSelect: (symbol) => selected.push(["main", symbol]),
+        onHistorySelect: (symbol) => selected.push(["history", symbol]),
+        onQuickSelect: (symbol) => selected.push(["quick", symbol]),
+      });
+
+      const input = element("symbolInput");
+      input.value = "茅台";
+      input.listeners.input({ currentTarget: input });
+      assert.deepEqual(controllers[0].calls.input, ["茅台"]);
+      assert.match(element("symbolSuggestions").innerHTML, /&lt;茅台&gt;/);
+      assert.equal(input.attributes["aria-expanded"], "true");
+
+      let prevented = 0;
+      input.listeners.keydown({ key: "ArrowDown", preventDefault() { prevented += 1; } });
+      input.listeners.keydown({ key: "Enter", preventDefault() { prevented += 1; } });
+      assert.equal(prevented, 2);
+      assert.deepEqual(controllers[0].calls.move, [1]);
+      assert.deepEqual(selected, [["main", "600519.SH"]]);
+      assert.equal(input.value, "600519");
+
+      let focusOptions;
+      input.focus = (options) => { focusOptions = options; };
+      input.value = "bad";
+      element("searchForm").listeners.submit({ preventDefault() {} });
+      assert.equal(invalidMain, 1);
+      assert.equal(element("symbolError").textContent, "股票代码无效");
+      assert.equal(input.attributes["aria-invalid"], "true");
+      assert.deepEqual(focusOptions, { preventScroll: true });
+
+      input.value = "600519";
+      element("searchForm").listeners.submit({ preventDefault() {} });
+      assert.deepEqual(selected.at(-1), ["main", "600519.SH"]);
+      assert.equal(element("symbolError").hidden, true);
+
+      historyOptions.onSelect("000001.SZ", { symbol: "000001.SZ", name: "平安银行" });
+      element("quickList").listeners.click({
+        target: { closest: () => ({ dataset: { symbol: "300750.SZ" } }) },
+      });
+      assert.deepEqual(selected.slice(-2), [["history", "000001.SZ"], ["quick", "300750.SZ"]]);
+
+      const watch = element("watchSymbolInput");
+      watch.value = "宁德";
+      watch.listeners.input({ currentTarget: watch });
+      assert.deepEqual(controllers[1].calls.input, ["宁德"]);
+      input.listeners.blur();
+      assert.equal([...timers.values()][0].delay, 120);
+      input.listeners.focus();
+      assert.equal(timers.size, 0);
+
+      surface.handlePageHide({ persisted: true });
+      assert.equal(historyCalls.close, 1);
+      assert.ok(controllers.every((controller) => controller.calls.close > 0));
+      surface.handlePageHide({ persisted: false });
+      assert.equal(historyCalls.destroy, 1);
+      assert.ok(controllers.every((controller) => controller.calls.destroy === 1));
+      assert.equal(element("searchForm").listeners.submit, undefined);
+
+      function element(id) {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id, value: "", hidden: false, innerHTML: "", textContent: "", dataset: {},
+            attributes: {}, listeners: {},
+            addEventListener(type, handler) { this.listeners[type] = handler; },
+            removeEventListener(type, handler) {
+              if (this.listeners[type] === handler) delete this.listeners[type];
+            },
+            setAttribute(name, value) { this.attributes[name] = String(value); },
+          });
+        }
+        return elements.get(id);
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_stock_search_surface_uses_only_explicit_browser_dependencies() -> None:
+    script = r'''
+      import assert from "node:assert/strict";
+      import { createStockSearchSurface } from "./static/js/stock-search-surface.js";
+
+      const elements = new Map();
+      const root = {
+        getElementById(id) {
+          if (!elements.has(id)) {
+            elements.set(id, {
+              id, listeners: {}, dataset: {},
+              addEventListener(type, handler) { this.listeners[type] = handler; },
+              removeEventListener(type) { delete this.listeners[type]; },
+              setAttribute() {},
+            });
+          }
+          return elements.get(id);
+        },
+      };
+      const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+      Object.defineProperty(globalThis, "document", {
+        configurable: true,
+        get() { throw new Error("implicit document access"); },
+      });
+      try {
+        const surface = createStockSearchSurface({
+          root,
+          createSearchController: () => ({
+            input() {}, move() {}, selectIndex() { return null; }, close() {}, destroy() {},
+          }),
+          createSearchHistory: () => ({ close() {}, destroy() {} }),
+          validateSymbol: (value) => value,
+          escapeHtml: (value) => value,
+          compactErrorMessage: (value) => value,
+          setTimer: () => 1,
+          clearTimer() {},
+          onMainSelect() {},
+          onHistorySelect() {},
+          onQuickSelect() {},
+        });
+        assert.ok(surface.main && surface.watch && surface.history);
+        surface.destroy();
+      } finally {
+        if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+        else delete globalThis.document;
+      }
+
+      assert.throws(() => createStockSearchSurface({}), /root is required/);
+    '''
+    _run_node_script(script)
+
+
 def _run_node_script(test_body: str) -> None:
     subprocess.run(
         ["node", "--input-type=module", "-e", f"{test_body}\n{NODE_HELPERS}"],

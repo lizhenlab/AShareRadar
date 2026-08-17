@@ -44,10 +44,13 @@ from app.services.paper_trading_rules import (
     resolve_trade_rule_profile,
 )
 from app.services.research_replay import (
+    AdviceReviewPriceContext,
     completed_daily_bar_cutoff,
     normalized_advice_review_prices,
 )
-from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME
+from app.services.research_factor_execution_contract import factor_calibration_evidence_issue
+from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
+from app.services.storage_contracts import PaperTradingStorage
 from app.utils.market_data import valid_kline
 from app.utils.market_time import market_local_naive
 from app.utils.provider_errors import sanitize_provider_error
@@ -148,21 +151,25 @@ class _PortfolioValuation:
     unrealized: float
 
 
-def get_paper_trading_dashboard(cache: object, *, run_id: int | None = None) -> PaperTradingDashboard:
+def get_paper_trading_dashboard(
+    cache: PaperTradingStorage,
+    *,
+    run_id: int | None = None,
+) -> PaperTradingDashboard:
     if run_id is None:
         return cache.paper_trading_dashboard()
     return cache.paper_trading_dashboard(run_id=run_id)
 
 
 def update_paper_trading_account(
-    cache: object,
+    cache: PaperTradingStorage,
     payload: PaperTradingAccountUpdate,
 ) -> PaperTradingAccount:
     return cache.update_paper_trading_account(payload)
 
 
 def create_paper_strategy(
-    cache: object,
+    cache: PaperTradingStorage,
     payload: PaperStrategyCreate,
     *,
     now: datetime | None = None,
@@ -170,6 +177,11 @@ def create_paper_strategy(
     plan = cache.advice_review_plan(payload.plan_id)
     if plan is None:
         raise ValueError("复盘计划不存在")
+    if (
+        plan.revision != payload.expected_plan_revision
+        or plan.plan_payload_digest != payload.expected_plan_payload_digest
+    ):
+        raise ValueError("复盘计划版本已变化，请刷新后重新确认模拟策略")
     activation = market_local_naive(now) if now is not None else normalize_review_as_of(None, allow_future=True)
     return cache.create_paper_strategy(
         plan,
@@ -178,7 +190,7 @@ def create_paper_strategy(
     )
 
 
-def delete_pending_paper_strategy(cache: object, strategy_id: int) -> None:
+def delete_pending_paper_strategy(cache: PaperTradingStorage, strategy_id: int) -> None:
     cache.delete_pending_paper_strategy(strategy_id)
 
 
@@ -344,19 +356,20 @@ def simulate_paper_portfolio(
 ) -> PaperSimulationDraft:
     ordered = _ordered_strategies(strategies)
     profile = cost_profile or resolve_cost_profile(account.default_cost_profile)
-    metadata = metadata_by_symbol or {}
-    benchmark_values = benchmark_rows or []
+    metadata, benchmark_values = metadata_by_symbol or {}, benchmark_rows or []
+    normalized_errors = _normalized_data_errors(data_errors or {})
+    normalized_benchmark_error = _normalized_error_message(benchmark_error)
     recorder = _EventRecorder()
     states, bars, rule_profiles = _prepare_paper_states(
         ordered,
         rows_by_symbol,
         as_of,
-        data_errors or {},
+        normalized_errors,
         metadata,
         recorder,
     )
-    benchmark = _prepare_benchmark(benchmark_values, as_of, benchmark_error)
-    trades, equity = _simulate_trade_days(account, states, bars, profile, benchmark, recorder)
+    benchmark = _prepare_benchmark(benchmark_values, as_of, normalized_benchmark_error)
+    trades, equity, benchmark = _simulate_trade_days(account, states, bars, profile, benchmark, recorder)
     simulations = [_simulation_from_state(states[item.id]) for item in ordered]
     unavailable_count = sum(item.status == "data_unavailable" for item in simulations)
     closed_count = sum(item.status == "closed" for item in simulations)
@@ -369,6 +382,9 @@ def simulate_paper_portfolio(
         profile,
         rule_profiles,
         benchmark_symbol,
+        normalized_errors,
+        normalized_benchmark_error,
+        account.initial_cash,
     )
     return _paper_simulation_draft(
         strategies=strategies,
@@ -450,10 +466,22 @@ def _simulation_provenance(
     profile: PaperCostProfile,
     rule_profiles: list[PaperTradeRuleProfile],
     benchmark_symbol: str | None,
+    data_errors: dict[str, str],
+    benchmark_error: str | None,
+    initial_cash: float,
 ) -> _SimulationProvenance:
     strategy_hash = _stable_hash([_strategy_fingerprint_values(item) for item in strategies])
-    market_hash = _stable_hash(_market_fingerprint_values(rows_by_symbol, benchmark_rows, metadata, as_of))
-    configuration = _simulation_configuration(profile)
+    market_hash = _stable_hash(
+        _market_fingerprint_values(
+            rows_by_symbol,
+            benchmark_rows,
+            metadata,
+            as_of,
+            data_errors,
+            benchmark_error,
+        )
+    )
+    configuration = _simulation_configuration(profile, initial_cash)
     fingerprint = _stable_hash(
         {
             "as_of": as_of.strftime("%Y-%m-%d %H:%M:%S"),
@@ -470,13 +498,19 @@ def _simulation_provenance(
     return _SimulationProvenance(strategy_hash, market_hash, fingerprint, configuration, start, end, sources)
 
 
-def _simulation_configuration(profile: PaperCostProfile) -> dict[str, object]:
+def _simulation_configuration(
+    profile: PaperCostProfile,
+    initial_cash: float,
+) -> dict[str, object]:
     return {
         "allocation_order": "activation_market_time ASC, priority DESC, plan_id ASC, strategy_id ASC",
         "entry_fill": "first eligible complete daily bar open",
         "t1": "entry-day target/stop signal is latched; exit at next sellable session open",
         "same_bar": "stop wins when target and stop are both touched",
+        "benchmark_start": "first simulated trade-day open; previous close only when that open is unavailable",
+        "daily_bar_filter": "completed canonical trading dates only; conflicting duplicates are rejected",
         "daily_bar_limit": "order-book queue and intraday sequence are not reconstructed",
+        "initial_cash": initial_cash,
         "cost_profile_id": profile.profile_id,
         "cost_profile": profile.model_dump(mode="json"),
     }
@@ -487,13 +521,15 @@ def _data_extent_and_sources(
     benchmark_rows: list[Kline],
     as_of: datetime,
 ) -> tuple[str | None, str | None, list[str]]:
+    cutoff = completed_daily_bar_cutoff(as_of)
     rows = [row for values in rows_by_symbol.values() for row in values]
-    dates = [row.date for row in rows if _valid_row_through(row, as_of.date())]
+    all_rows = [*rows, *benchmark_rows]
+    dates = [row.date for row in all_rows if _valid_row_through(row, cutoff)]
     sources = sorted(
         {
             str(row.source or row.data_version or "unknown")
-            for row in [*rows, *benchmark_rows]
-            if valid_kline(row)
+            for row in all_rows
+            if _valid_row_through(row, cutoff)
         }
     )
     return (min(dates) if dates else None, max(dates) if dates else None, sources)
@@ -501,7 +537,12 @@ def _data_extent_and_sources(
 
 def _valid_row_through(row: Kline, cutoff: date) -> bool:
     row_date = _date_or_none(row.date)
-    return valid_kline(row) and row_date is not None and row_date <= cutoff
+    return (
+        valid_kline(row)
+        and row_date is not None
+        and row_date <= cutoff
+        and is_trading_day(row_date)
+    )
 
 
 def _prepare_paper_states(
@@ -521,7 +562,7 @@ def _prepare_paper_states(
             allocation_order,
             rows_by_symbol.get(source.symbol, []),
             as_of,
-            errors.get(source.symbol),
+            errors.get(source.symbol.strip().upper()),
             metadata.get(source.symbol),
             recorder,
         )
@@ -544,22 +585,24 @@ def _prepare_strategy(
     state = _PaperState(source=source, allocation_order=allocation_order)
     activation_date = _market_date(source.activation_market_time)
     _record_strategy_activation(state, activation_date, recorder)
-    if data_error:
-        _mark_strategy_unavailable(state, as_of.date(), "market_data_unavailable", data_error, recorder)
-        return state, {}
-    prices = normalized_advice_review_prices(source, rows)
-    if prices is None:
+    if len(source.plan_payload_digest) != 64:
         _mark_strategy_unavailable(
             state,
             as_of.date(),
-            "adjustment_anchor_mismatch",
-            "日K复权基准与冻结计划不一致，未执行模拟撮合",
+            "plan_revision_unverifiable",
+            "冻结策略缺少可验证的计划版本摘要，未执行模拟撮合",
             recorder,
         )
         return state, {}
+    if data_error:
+        _mark_strategy_unavailable(state, as_of.date(), "market_data_unavailable", data_error, recorder)
+        return state, {}
+    cutoff = completed_daily_bar_cutoff(as_of)
+    prices = _verified_paper_prices(state, rows, as_of, cutoff, recorder)
+    if prices is None:
+        return state, {}
     state.target = prices.target_price
     state.stop = prices.stop_price
-    cutoff = completed_daily_bar_cutoff(as_of)
     bars, degraded_reasons = _prepared_strategy_bars(source, rows, cutoff, activation_date, metadata)
     _apply_rule_degradation(state, bars, degraded_reasons, activation_date, recorder)
     if not bars and cutoff > activation_date:
@@ -571,6 +614,49 @@ def _prepare_strategy(
             recorder,
         )
     return state, bars
+
+
+def _verified_paper_prices(
+    state: _PaperState,
+    rows: list[Kline],
+    as_of: datetime,
+    cutoff: date,
+    recorder: _EventRecorder,
+) -> AdviceReviewPriceContext | None:
+    try:
+        prices = normalized_advice_review_prices(
+            state.source,
+            rows,
+            cutoff=cutoff,
+        )
+    except ValueError:
+        _mark_strategy_unavailable(
+            state,
+            as_of.date(),
+            "conflicting_daily_bar",
+            "同一交易日存在冲突K线，未执行模拟撮合",
+            recorder,
+        )
+        return None
+    if issue := factor_calibration_evidence_issue(_paper_evidence_rows(rows, cutoff)):
+        _mark_strategy_unavailable(
+            state,
+            as_of.date(),
+            "execution_evidence_unavailable",
+            f"日K缺少完整PIT/执行证据：{issue}",
+            recorder,
+        )
+        return None
+    if prices is None:
+        _mark_strategy_unavailable(
+            state,
+            as_of.date(),
+            "adjustment_anchor_mismatch",
+            "日K复权基准与冻结计划不一致，未执行模拟撮合",
+            recorder,
+        )
+        return None
+    return prices
 
 
 def _record_strategy_activation(
@@ -615,6 +701,7 @@ def _prepared_strategy_bars(
         if valid_kline(row)
         and (row_date := _date_or_none(row.date)) is not None
         and row_date <= cutoff
+        and is_trading_day(row_date)
     }
     ordered_rows = [by_date[key] for key in sorted(by_date)]
     previous_close_by_date: dict[str, float | None] = {}
@@ -664,7 +751,7 @@ def _simulate_trade_days(
     cost_profile: PaperCostProfile,
     benchmark: _BenchmarkSeries,
     recorder: _EventRecorder,
-) -> tuple[list[PaperTradeDraft], list[PaperEquityPointDraft]]:
+) -> tuple[list[PaperTradeDraft], list[PaperEquityPointDraft], _BenchmarkSeries]:
     trade_dates = sorted({trade_date for strategy_bars in bars.values() for trade_date in strategy_bars})
     cash = account.initial_cash
     peak_equity = account.initial_cash
@@ -695,7 +782,7 @@ def _simulate_trade_days(
             peak_equity,
         )
         equity.append(point)
-    return trades, equity
+    return trades, equity, benchmark
 
 
 def _process_open_positions(
@@ -712,7 +799,6 @@ def _process_open_positions(
         if state.status != "open" or prepared is None:
             continue
         state.held_sessions += 1
-        state.last_price = prepared.row.close
         state.last_processed_date = trade_date
         assessment = assess_daily_tradeability(
             prepared.row,
@@ -735,6 +821,9 @@ def _process_open_positions(
                 "上一交易日信号因 T+1 或不可交易被延迟，本日开盘退出",
             )
             continue
+        if not (assessment.can_buy or assessment.can_sell):
+            continue
+        state.last_price = prepared.row.close
         reason, price = _exit_decision(state, prepared.row)
         if reason is None or price is None:
             continue
@@ -797,11 +886,6 @@ def _process_single_entry(
     row = prepared.row
     state.entry_wait_sessions += 1
     state.last_processed_date = trade_date
-    state.last_price = row.close
-    open_reason = _open_barrier_reason(state, row)
-    if open_reason is not None:
-        _skip_entry(state, row, open_reason, recorder)
-        return cash
     assessment = assess_daily_tradeability(
         row,
         previous_close=prepared.previous_close,
@@ -809,6 +893,11 @@ def _process_single_entry(
     )
     if not assessment.can_buy:
         _record_unbuyable_entry(state, row, assessment, recorder)
+        return cash
+    state.last_price = row.close
+    open_reason = _open_barrier_reason(state, row)
+    if open_reason is not None:
+        _skip_entry(state, row, open_reason, recorder)
         return cash
     budget = min(cash, initial_cash * state.source.allocation_pct / 100)
     quantity = _board_lot_quantity(budget, row.open, cost_profile, prepared.rule)
@@ -842,7 +931,34 @@ def _record_unbuyable_entry(
         assessment.message,
         allocation_order=state.allocation_order,
     )
-    _finish_waiting_day(state, row, recorder)
+    if assessment.can_sell:
+        _finish_waiting_day(state, row, recorder)
+    else:
+        _finish_unavailable_waiting_day(state, row, recorder)
+
+
+def _finish_unavailable_waiting_day(
+    state: _PaperState,
+    row: Kline,
+    recorder: _EventRecorder,
+) -> None:
+    """Advance expiry without interpreting non-executable OHLC as price evidence."""
+
+    if state.entry_wait_sessions < state.source.entry_expiry_sessions:
+        return
+    state.status = "expired"
+    state.exit_date = row.date
+    state.exit_reason = "entry_expired"
+    state.error_message = f"等待入场已达到 {state.source.entry_expiry_sessions} 个交易日"
+    recorder.add(
+        state,
+        row.date,
+        "entry_expired",
+        "lifecycle",
+        "warning",
+        state.error_message,
+        waited_sessions=state.entry_wait_sessions,
+    )
 
 
 def _record_insufficient_cash(
@@ -1094,15 +1210,20 @@ def _skip_entry(state: _PaperState, row: Kline, reason: str, recorder: _EventRec
 @dataclass(frozen=True)
 class _BenchmarkSeries:
     closes: dict[str, float]
+    opens: dict[str, float]
     base_close: float | None
     available: bool
     message: str | None
 
     def starting_at(self, trade_date: str) -> _BenchmarkSeries:
-        eligible = [key for key in self.closes if key <= trade_date]
+        if not self.available:
+            return self
+        if trade_date in self.opens:
+            return _BenchmarkSeries(self.closes, self.opens, self.opens[trade_date], True, None)
+        eligible = [key for key in self.closes if key < trade_date]
         if not eligible:
-            return _BenchmarkSeries(self.closes, None, False, "基准在模拟起始日前没有可用日K")
-        return _BenchmarkSeries(self.closes, self.closes[max(eligible)], True, None)
+            return _BenchmarkSeries(self.closes, self.opens, None, False, "基准在模拟起始日前没有可用日K")
+        return _BenchmarkSeries(self.closes, self.opens, self.closes[max(eligible)], True, "基准起始日缺失，使用前收盘价")
 
     def values(self, trade_date: str, initial_cash: float) -> tuple[float | None, float | None]:
         if not self.available or self.base_close is None:
@@ -1117,20 +1238,65 @@ class _BenchmarkSeries:
 
 def _prepare_benchmark(rows: list[Kline], as_of: datetime, error: str | None) -> _BenchmarkSeries:
     if error:
-        return _BenchmarkSeries({}, None, False, error)
+        return _BenchmarkSeries({}, {}, None, False, error)
     cutoff = completed_daily_bar_cutoff(as_of)
-    closes = {
-        row.date: row.close
-        for row in rows
-        if valid_kline(row)
-        and row.volume >= 0
-        and (row_date := _date_or_none(row.date)) is not None
-        and row_date <= cutoff
+    evidence_rows = _paper_evidence_rows(rows, cutoff)
+    by_date: dict[str, Kline] = {}
+    for row in rows:
+        row_date = _date_or_none(row.date)
+        if row_date is None or row_date > cutoff or not is_trading_day(row_date) or not valid_kline(row):
+            continue
+        existing = by_date.get(row.date)
+        if existing is not None and _paper_bar_signature(existing) != _paper_bar_signature(row):
+            return _BenchmarkSeries({}, {}, None, False, f"基准同一交易日 {row.date} 存在冲突日K")
+        by_date[row.date] = row
+    if issue := factor_calibration_evidence_issue(evidence_rows):
+        return _BenchmarkSeries({}, {}, None, False, f"基准缺少完整PIT/执行证据：{issue}")
+    if not by_date:
+        return _BenchmarkSeries({}, {}, None, False, "基准没有可用的完整日K")
+    ordered = dict(sorted(by_date.items()))
+    trading_rows = {
+        row_date: row
+        for row_date, row in ordered.items()
+        if row.session_status == "trading"
     }
-    if not closes:
-        return _BenchmarkSeries({}, None, False, "基准没有可用的完整日K")
-    first = min(closes)
-    return _BenchmarkSeries(dict(sorted(closes.items())), closes[first], True, None)
+    if not trading_rows:
+        return _BenchmarkSeries({}, {}, None, False, "基准窗口没有可估值的交易会话")
+    closes = {row_date: row.close for row_date, row in trading_rows.items()}
+    opens = {row_date: row.open for row_date, row in trading_rows.items()}
+    first = min(trading_rows)
+    return _BenchmarkSeries(closes, opens, opens[first], True, None)
+
+
+def _paper_evidence_rows(rows: list[Kline], cutoff: date) -> list[Kline]:
+    """Keep the entire supplied window through cutoff, including malformed dates."""
+
+    return [
+        row
+        for row in rows
+        if (row_date := _date_or_none(row.date)) is None or row_date <= cutoff
+    ]
+
+
+def _paper_bar_signature(row: Kline) -> tuple[object, ...]:
+    return (
+        row.open,
+        row.close,
+        row.high,
+        row.low,
+        row.volume,
+        row.adjustment_mode,
+        row.data_version,
+        row.contract_version,
+        row.as_of,
+        row.point_in_time,
+        row.session_status,
+        row.open_execution_status,
+        row.corporate_action_status,
+        row.adjustment_factor,
+        row.execution_metadata_version,
+        row.fallback_used,
+    )
 
 
 def _paper_equity_point(
@@ -1292,10 +1458,8 @@ def _allocation_ordered_states(states: dict[int, _PaperState]) -> list[_PaperSta
 
 def _strategy_fingerprint_values(item: PaperStrategy) -> dict[str, object]:
     return {
-        "id": item.id,
-        "plan_id": item.plan_id,
         "plan_revision": item.plan_revision,
-        "advice_id": item.advice_id,
+        "plan_payload_digest": item.plan_payload_digest,
         "symbol": item.symbol,
         "activation_market_time": item.activation_market_time,
         "allocation_pct": item.allocation_pct,
@@ -1319,27 +1483,16 @@ def _market_fingerprint_values(
     benchmark_rows: list[Kline],
     metadata: dict[str, PaperInstrumentMetadata],
     as_of: datetime,
+    data_errors: dict[str, str],
+    benchmark_error: str | None,
 ) -> dict[str, object]:
     cutoff = completed_daily_bar_cutoff(as_of)
 
     def rows(values: list[Kline]) -> list[dict[str, object]]:
         return [
-            {
-                "date": item.date,
-                "open": item.open,
-                "high": item.high,
-                "low": item.low,
-                "close": item.close,
-                "volume": item.volume,
-                "adjustment_mode": item.adjustment_mode,
-                "data_version": item.data_version,
-                "contract_version": item.contract_version,
-                "source": item.source,
-            }
+            _paper_market_row_payload(item)
             for item in sorted(values, key=lambda value: value.date)
-            if valid_kline(item)
-            and (row_date := _date_or_none(item.date)) is not None
-            and row_date <= cutoff
+            if (row_date := _date_or_none(item.date)) is None or row_date <= cutoff
         ]
 
     return {
@@ -1349,6 +1502,49 @@ def _market_fingerprint_values(
             symbol: item.model_dump(mode="json")
             for symbol, item in sorted(metadata.items())
         },
+        "data_errors": dict(sorted(data_errors.items())),
+        "benchmark_error": benchmark_error,
+    }
+
+
+def _normalized_data_errors(values: dict[str, str]) -> dict[str, str]:
+    grouped: dict[str, set[str]] = {}
+    for raw_symbol, raw_message in values.items():
+        symbol = str(raw_symbol).strip().upper()
+        message = _normalized_error_message(raw_message)
+        if symbol and message:
+            grouped.setdefault(symbol, set()).add(message)
+    return {
+        symbol: " | ".join(sorted(messages))
+        for symbol, messages in sorted(grouped.items())
+    }
+
+
+def _normalized_error_message(value: object) -> str | None:
+    message = " ".join(str(value or "").split()).strip()
+    return message[:160] or None
+
+
+def _paper_market_row_payload(item: Kline) -> dict[str, object]:
+    return {
+        "date": item.date,
+        "open": item.open,
+        "high": item.high,
+        "low": item.low,
+        "close": item.close,
+        "volume": item.volume,
+        "adjustment_mode": item.adjustment_mode,
+        "data_version": item.data_version,
+        "contract_version": item.contract_version,
+        "source": item.source,
+        "as_of": item.as_of,
+        "point_in_time": item.point_in_time,
+        "session_status": item.session_status,
+        "open_execution_status": item.open_execution_status,
+        "corporate_action_status": item.corporate_action_status,
+        "adjustment_factor": item.adjustment_factor,
+        "execution_metadata_version": item.execution_metadata_version,
+        "fallback_used": item.fallback_used,
     }
 
 

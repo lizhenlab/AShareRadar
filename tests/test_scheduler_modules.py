@@ -17,14 +17,45 @@ from app.services.scheduler import (
     LocalDataScheduler,
     LocalTask,
 )
-from app.services.scheduler_execution import _next_market_scan_run_at
+from app.services.scheduler_contracts import NoopSchedulerInstanceGuard, TaskExecutionResult
+from app.services.scheduler_execution import (
+    _next_market_scan_run_at,
+    _scanner_automatic_due_at,
+)
 from app.services.scheduler_health import _data_health_events, _runtime_cleanup_message
-from app.services.scheduler_schedule import _build_local_tasks, _reschedule_task, _task_state
+from app.services.scheduler_helpers import (
+    _consume_future_exception,
+    _default_instance_guard,
+    _wait_for_tasks_bounded,
+)
+from app.services.scheduler_schedule import (
+    _build_local_tasks,
+    _positive_float_or_default,
+    _positive_int_or_none,
+    _reschedule_task,
+    _task_state,
+)
+from app.services.scheduler_tasks import _research_maintenance_window_open
 from app.utils.time import seconds_ago_text
 
 
 async def _handler() -> str:
     return "ok"
+
+
+class _StrategyAutomationRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_due(self):
+        self.calls += 1
+        return SimpleNamespace(
+            checked_count=3,
+            executed_count=2,
+            skipped_count=1,
+            event_count=1,
+            failed_count=0,
+        )
 
 
 def test_scheduler_uses_datahub_settings_instance() -> None:
@@ -38,6 +69,27 @@ def test_scheduler_uses_datahub_settings_instance() -> None:
     scheduler = LocalDataScheduler(SimpleNamespace(settings=settings))  # type: ignore[arg-type]
 
     assert scheduler.settings is settings
+
+
+def test_scheduler_strategy_automation_uses_explicit_service() -> None:
+    service = _StrategyAutomationRunner()
+    scheduler = LocalDataScheduler(  # type: ignore[arg-type]
+        _SchedulerHub(),
+        strategy_automation_service=service,
+    )
+
+    message = asyncio.run(scheduler._run_strategy_schedules())
+
+    assert service.calls == 1
+    assert message == "版本化策略检查 3 条，执行 2 条，跳过 1 条，生成提醒 1 条，失败 0 条"
+
+
+def test_direct_scheduler_does_not_implicitly_compose_strategy_automation() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+
+    assert scheduler.strategy_automation_service is None
+    with pytest.raises(RuntimeError, match="策略自动化服务尚未注入"):
+        asyncio.run(scheduler._run_strategy_schedules())
 
 
 def test_file_scheduler_guard_allows_only_one_holder(tmp_path) -> None:
@@ -494,9 +546,11 @@ def test_build_local_tasks_uses_explicit_specs_min_intervals_and_offsets() -> No
         "evaluate_alerts",
         "refresh_research_queue",
         "evaluate_due_reviews",
+        "run_strategy_schedules",
+        "maintain_market_scan_probability",
     ]
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30, 300, 300]
-    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20, 24, 28]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30, 300, 300, 300, 300]
+    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20, 24, 28, 32, 36]
 
 
 def test_scheduler_loop_lets_market_scanner_use_its_shanghai_clock() -> None:
@@ -639,7 +693,7 @@ def test_build_local_tasks_clamps_invalid_interval_settings() -> None:
 
     tasks = _build_local_tasks(settings, now, _handlers())
 
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 45, 30, 300, 300]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 45, 30, 300, 300, 300, 300]
 
 
 def test_run_once_and_status_use_task_spec_order() -> None:
@@ -1373,6 +1427,325 @@ def test_runtime_cleanup_message_ignores_non_finite_and_blank_counts() -> None:
     )
 
 
+def test_scheduler_healthy_plate_and_alert_tasks_persist_success() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    alert_summary = SimpleNamespace(
+        checked_count=2,
+        triggered_count=0,
+        new_event_count=0,
+        failed_count=0,
+    )
+
+    plate_message = asyncio.run(scheduler._refresh_plate_rank())
+    with patch("app.services.alerts.evaluate_alert_rules", return_value=alert_summary):
+        alert_message = asyncio.run(scheduler._evaluate_alerts())
+
+    assert plate_message == "已刷新 1 条行业背景数据"
+    assert alert_message == "已评估 2 条本地预警，当前触发 0 条，新增事件 0 条"
+    assert scheduler.datahub.cache.monitor_events[-2:] == [
+        ("info", "plate", plate_message),
+        ("info", "alert", alert_message),
+    ]
+
+
+def test_scheduler_health_includes_runtime_cleanup_result() -> None:
+    cache = _ThreadRecordingCache()
+    cache.cleanup_regenerable_runtime_rows = lambda: {"task_run": 2, "monitor_event": 1}  # type: ignore[method-assign]
+    scheduler = LocalDataScheduler(_SchedulerHub(cache=cache))
+
+    message = asyncio.run(scheduler._check_data_health(now=datetime(2026, 5, 13, 10, 30)))
+
+    assert message.endswith("已清理 3 条过期运行记录")
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected_status", "raises"),
+    [
+        (SimpleNamespace(active_count=3, selected_count=2, saved_count=2, unchanged_count=0, skipped_count=0, failed_count=0), None, False),
+        (SimpleNamespace(active_count=3, selected_count=2, saved_count=1, unchanged_count=0, skipped_count=1, failed_count=0), "degraded", False),
+        (SimpleNamespace(active_count=3, selected_count=2, saved_count=0, unchanged_count=0, skipped_count=0, failed_count=2), None, True),
+    ],
+)
+def test_research_queue_outcomes_are_explicit(summary, expected_status, raises) -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+
+    async def refresh(*args, **kwargs):
+        return summary
+
+    with patch("app.workflows.individual.refresh_active_research_queue", new=refresh):
+        if raises:
+            with pytest.raises(RuntimeError, match="失败 2 只"):
+                asyncio.run(scheduler._refresh_research_queue(now=datetime(2026, 5, 13, 16, 0)))
+        else:
+            result = asyncio.run(scheduler._refresh_research_queue(now=datetime(2026, 5, 13, 16, 0)))
+            assert getattr(result, "status", None) == expected_status
+
+
+def test_research_queue_and_due_reviews_skip_outside_publish_window() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    now = datetime(2026, 5, 13, 8, 0)
+
+    research = asyncio.run(scheduler._refresh_research_queue(now=now))
+    review = asyncio.run(scheduler._evaluate_due_reviews(now=now))
+    probability = asyncio.run(scheduler._maintain_market_scan_probability(now=now))
+
+    assert "已跳过主动研究刷新" in research
+    assert "已跳过到期研究计划评估" in review
+    assert "已跳过上涨概率标签维护" in probability
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected_status", "raises"),
+    [
+        (SimpleNamespace(candidate_count=3, evaluated_count=2, attempted_count=2, failed_count=0), None, False),
+        (SimpleNamespace(candidate_count=3, evaluated_count=1, attempted_count=2, failed_count=1), "degraded", False),
+        (SimpleNamespace(candidate_count=3, evaluated_count=0, attempted_count=2, failed_count=2), None, True),
+    ],
+)
+def test_due_review_outcomes_are_explicit(summary, expected_status, raises) -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+
+    async def evaluate(*args, **kwargs):
+        return summary
+
+    with patch("app.services.advice_review.evaluate_due_advice_reviews", new=evaluate):
+        if raises:
+            with pytest.raises(RuntimeError, match="失败 2 条"):
+                asyncio.run(scheduler._evaluate_due_reviews(now=datetime(2026, 5, 13, 16, 0)))
+        else:
+            result = asyncio.run(scheduler._evaluate_due_reviews(now=datetime(2026, 5, 13, 16, 0)))
+            assert getattr(result, "status", None) == expected_status
+
+
+class _ProbabilityMaintenanceSummary:
+    def __init__(self, *, due: int, failed: int, degraded: bool, failures: tuple[str, ...] = ()) -> None:
+        self.due_count = due
+        self.failed_count = failed
+        self.degraded = degraded
+        self.failures = failures
+
+    def message(self) -> str:
+        return f"维护 {self.due_count} 条，失败 {self.failed_count} 条"
+
+
+class _ProbabilityMaintenanceRunner:
+    def __init__(self, summary: _ProbabilityMaintenanceSummary) -> None:
+        self.summary = summary
+        self.calls = 0
+
+    def run(self, *, now=None):
+        self.calls += 1
+        return self.summary
+
+
+def test_probability_maintenance_lazy_composes_once_and_reuses_service() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    runner = _ProbabilityMaintenanceRunner(
+        _ProbabilityMaintenanceSummary(due=2, failed=0, degraded=False)
+    )
+
+    with patch(
+        "app.services.market_scan_probability_maintenance.MarketScanProbabilityMaintenanceService",
+        return_value=runner,
+    ) as factory:
+        first = asyncio.run(scheduler._maintain_market_scan_probability(now=datetime(2026, 5, 13, 16, 0)))
+        second = asyncio.run(scheduler._maintain_market_scan_probability(now=datetime(2026, 5, 13, 16, 1)))
+
+    assert first == second == "维护 2 条，失败 0 条"
+    assert runner.calls == 2
+    factory.assert_called_once_with(scheduler.datahub.cache)
+
+
+def test_probability_maintenance_terminal_semantic_skip_is_success() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    scheduler._market_scan_probability_maintenance = _ProbabilityMaintenanceRunner(  # noqa: SLF001
+        _ProbabilityMaintenanceSummary(due=0, failed=0, degraded=False)
+    )
+
+    result = asyncio.run(
+        scheduler._maintain_market_scan_probability(now=datetime(2026, 5, 13, 16, 0))  # noqa: SLF001
+    )
+
+    assert result == "维护 0 条，失败 0 条"
+    assert not isinstance(result, TaskExecutionResult)
+
+
+def test_probability_maintenance_refreshes_shared_projection_cache_before_return() -> None:
+    class Scanner:
+        def __init__(self) -> None:
+            self.refreshed = 0
+
+        async def refresh_probability_research_cache(self) -> int:
+            self.refreshed += 1
+            return 1
+
+    scanner = Scanner()
+    scheduler = LocalDataScheduler(_SchedulerHub(), market_scanner=scanner)  # type: ignore[arg-type]
+    scheduler._market_scan_probability_maintenance = _ProbabilityMaintenanceRunner(  # noqa: SLF001
+        _ProbabilityMaintenanceSummary(due=1, failed=0, degraded=False)
+    )
+
+    result = asyncio.run(
+        scheduler._maintain_market_scan_probability(now=datetime(2026, 5, 13, 16, 0))  # noqa: SLF001
+    )
+
+    assert result == "维护 1 条，失败 0 条"
+    assert scanner.refreshed == 1
+
+
+@pytest.mark.parametrize(
+    ("summary", "raises"),
+    [
+        (_ProbabilityMaintenanceSummary(due=2, failed=1, degraded=True, failures=("单项失败",)), False),
+        (_ProbabilityMaintenanceSummary(due=2, failed=2, degraded=True), True),
+    ],
+)
+def test_probability_maintenance_degraded_and_total_failure(summary, raises) -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    scheduler._market_scan_probability_maintenance = _ProbabilityMaintenanceRunner(summary)
+
+    if raises:
+        with pytest.raises(RuntimeError, match="失败 2 条"):
+            asyncio.run(scheduler._maintain_market_scan_probability(now=datetime(2026, 5, 13, 16, 0)))
+    else:
+        result = asyncio.run(scheduler._maintain_market_scan_probability(now=datetime(2026, 5, 13, 16, 0)))
+        assert isinstance(result, TaskExecutionResult)
+        assert result.status == "degraded"
+        assert str(result).endswith("单项失败")
+
+
+@pytest.mark.parametrize(("checked", "failed", "raises"), [(2, 1, False), (2, 2, True)])
+def test_strategy_schedule_failures_are_degraded_or_failed(checked, failed, raises) -> None:
+    service = _StrategyAutomationRunner()
+    service.run_due = lambda: SimpleNamespace(  # type: ignore[method-assign]
+        checked_count=checked,
+        executed_count=0,
+        skipped_count=0,
+        event_count=0,
+        failed_count=failed,
+    )
+    scheduler = LocalDataScheduler(_SchedulerHub(), strategy_automation_service=service)  # type: ignore[arg-type]
+
+    if raises:
+        with pytest.raises(RuntimeError, match=f"失败 {failed} 条"):
+            asyncio.run(scheduler._run_strategy_schedules())
+    else:
+        result = asyncio.run(scheduler._run_strategy_schedules())
+        assert isinstance(result, TaskExecutionResult)
+        assert result.status == "degraded"
+
+
+def test_scheduler_binding_contracts_are_idempotent_and_reject_replacement() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+    guard = _ExclusiveGuard()
+    service = _StrategyAutomationRunner()
+
+    scheduler.bind_instance_guard(guard)
+    scheduler.bind_strategy_automation_service(service)
+    scheduler.bind_strategy_automation_service(service)
+
+    assert scheduler.strategy_automation_service is service
+    with pytest.raises(ValueError, match="已绑定到其他实例"):
+        scheduler.bind_strategy_automation_service(_StrategyAutomationRunner())
+
+    scheduler._guard_acquired = True
+    with pytest.raises(RuntimeError, match="运行中的调度器不能更换实例锁"):
+        scheduler.bind_instance_guard(_ExclusiveGuard())
+    with pytest.raises(RuntimeError, match="运行中的调度器不能更换策略自动化服务"):
+        scheduler.bind_strategy_automation_service(service)
+
+    scheduler._runner = None
+    scheduler._active_tasks.add(object())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="运行中的调度器不能更换实例锁"):
+        scheduler.bind_instance_guard(_ExclusiveGuard())
+    with pytest.raises(RuntimeError, match="运行中的调度器不能更换策略自动化服务"):
+        scheduler.bind_strategy_automation_service(service)
+
+    scheduler._guard_acquired = False
+    scheduler._runner = SimpleNamespace()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="运行中的调度器不能更换实例锁"):
+        scheduler.bind_instance_guard(_ExclusiveGuard())
+    with pytest.raises(RuntimeError, match="运行中的调度器不能更换策略自动化服务"):
+        scheduler.bind_strategy_automation_service(service)
+
+
+def test_scheduler_execution_compatibility_and_missing_task_errors() -> None:
+    scheduler = LocalDataScheduler(_SchedulerHub())
+
+    with pytest.raises(RuntimeError, match="全市场扫描管理器未启用"):
+        asyncio.run(scheduler.run_once("full_market_scan"))
+    with pytest.raises(ValueError, match="未知任务"):
+        asyncio.run(scheduler.run_once("missing"))
+
+    task = LocalTask("busy", "忙任务", 10, _handler, datetime.now(), running=True)
+    assert asyncio.run(scheduler._execute(task)) == "忙任务 正在运行，已跳过重复触发"
+
+
+@pytest.mark.parametrize("deduplicated", [False, True])
+def test_manual_market_scan_reports_created_and_deduplicated(deduplicated) -> None:
+    class Scanner:
+        async def create_scan(self, *, trigger):
+            assert trigger == "manual"
+            return SimpleNamespace(deduplicated=deduplicated, run=SimpleNamespace(id=7))
+
+    scheduler = LocalDataScheduler(_SchedulerHub(), market_scanner=Scanner())  # type: ignore[arg-type]
+
+    result = asyncio.run(scheduler.run_once("full_market_scan"))
+
+    assert result == [f"全市场A股扫描{'已在运行' if deduplicated else '已创建'}：批次 7"]
+
+
+def test_market_scan_tick_errors_are_monitored_but_cancellation_propagates() -> None:
+    class Scanner:
+        def __init__(self, error):
+            self.error = error
+
+        async def scheduled_tick(self, now=None):
+            raise self.error
+
+    scheduler = LocalDataScheduler(_SchedulerHub(), market_scanner=Scanner(RuntimeError("boom")))  # type: ignore[arg-type]
+    asyncio.run(scheduler._tick_market_scan())
+    assert scheduler.datahub.cache.monitor_events[-1] == (
+        "warning",
+        "market_scan",
+        "全市场自动扫描调度失败：boom",
+    )
+
+    scheduler.market_scanner = Scanner(asyncio.CancelledError())  # type: ignore[assignment]
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(scheduler._tick_market_scan())
+
+
+def test_scheduler_helpers_cover_empty_cancelled_and_guard_fallbacks(tmp_path) -> None:
+    assert asyncio.run(_wait_for_tasks_bounded([], timeout=0.01)) == set()
+
+    future = SimpleNamespace(cancelled=lambda: False, exception=lambda: (_ for _ in ()).throw(asyncio.CancelledError()))
+    _consume_future_exception(future)
+
+    assert isinstance(_default_instance_guard(SimpleNamespace(cache=SimpleNamespace())), NoopSchedulerInstanceGuard)
+    guard = _default_instance_guard(SimpleNamespace(cache=SimpleNamespace(path=tmp_path / "cache.sqlite3")))
+    assert isinstance(guard, FileSchedulerInstanceGuard)
+    assert _positive_int_or_none(True) == 1
+    assert _positive_float_or_default(object(), 2.5) == 2.5
+    assert NoopSchedulerInstanceGuard().held_by_other() is False
+
+
+def test_scheduler_time_helpers_cover_unavailable_and_exhausted_schedules() -> None:
+    assert _scanner_automatic_due_at(object(), datetime(2026, 5, 13, 16, 0)) is None
+    assert _scanner_automatic_due_at(SimpleNamespace(next_automatic_run_at=lambda: "bad"), datetime(2026, 5, 13, 16, 0)) is None
+    settings = SimpleNamespace(market_scan_schedule_hour=16, market_scan_schedule_minute=0)
+    with patch("app.services.scheduler_execution.is_trading_day", return_value=False):
+        assert _next_market_scan_run_at(settings, None, datetime(2026, 5, 13, 16, 0)) is None
+
+
+def test_scheduler_window_uses_runtime_clock_when_now_is_omitted() -> None:
+    with (
+        patch("app.services.scheduler_tasks.market_now_naive", return_value=datetime(2026, 5, 13, 16, 0)),
+        patch("app.services.scheduler_tasks.is_trading_day", return_value=True),
+    ):
+        assert _research_maintenance_window_open() is True
+
+
 def _settings(*, quote_stale_warning_seconds: int = 60, kline_cache_seconds: int = 300):
     return SimpleNamespace(
         quote_stale_warning_seconds=quote_stale_warning_seconds,
@@ -1398,6 +1771,8 @@ def _handlers():
         "evaluate_alerts": _handler,
         "refresh_research_queue": _handler,
         "evaluate_due_reviews": _handler,
+        "run_strategy_schedules": _handler,
+        "maintain_market_scan_probability": _handler,
     }
 
 

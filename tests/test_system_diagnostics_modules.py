@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.models.schemas import CacheStats, ProviderCapability, ProviderCapabilityStatus, ProviderStatus, SchedulerStatus
+from app.models.schemas import CacheStats, ProviderCapability, ProviderCapabilityStatus, ProviderStatus, SchedulerStatus, StorageDiagnostics
 from app.services.cache import SQLiteCache
 from app.services.runtime_backup import create_runtime_backup, runtime_backup_storage
 from app.services.trading_calendar import TradeCalendarSource, TradeCalendarStatus
@@ -22,6 +22,27 @@ from app.services.system_diagnostics import (
 
 
 class SystemDiagnosticsModuleTests(unittest.TestCase):
+    def test_storage_diagnostics_model_keeps_legacy_payload_compatible(self) -> None:
+        storage = StorageDiagnostics.model_validate(
+            {
+                "db_path": ":memory:",
+                "db_size_bytes": 0,
+                "db_size_mb": 0,
+                "cache_rows": 0,
+                "runtime_rows": 0,
+                "user_rows": 0,
+                "budget_bytes": 1024,
+                "warning_at_pct": 80,
+                "usage_pct": 0,
+                "over_budget": False,
+            }
+        )
+
+        self.assertEqual(storage.research_artifact_size_bytes, 0)
+        self.assertEqual(storage.total_managed_size_bytes, 0)
+        self.assertEqual(storage.research_artifacts.scan_status, "not_configured")
+        self.assertFalse(storage.research_artifacts.retention_preview.automatic_deletion_allowed)
+
     def test_diagnostics_reports_stale_cache_failed_capability_and_stopped_scheduler(self) -> None:
         checked_base = datetime(2026, 5, 13, 10, 30, 0)
         fetched_at = "2026-05-13 10:29:30"
@@ -462,6 +483,120 @@ class SystemDiagnosticsModuleTests(unittest.TestCase):
         self.assertEqual(diagnostics.sqlite_size_bytes, sqlite_bytes)
         self.assertEqual(diagnostics.backup_size_bytes, backup_storage.size_bytes)
         self.assertEqual(diagnostics.managed_backup_count, 1)
+
+    def test_storage_diagnostics_catalogs_research_files_without_changing_database_budget_scope(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "cache.sqlite3"
+            path.write_bytes(b"d" * 1024)
+            probability = root / "market-scan-probability"
+            source = root / "research" / "market_scan_probability_source"
+            future_range = root / "research" / "market_scan_future_range"
+            probability.mkdir()
+            source.mkdir(parents=True)
+            future_range.mkdir(parents=True)
+            (probability / "projection.json").write_bytes(b"p" * 2048)
+            (source / "source.json.gz").write_bytes(b"s" * 4096)
+            (future_range / "range.json").write_bytes(b"f" * 512)
+            (root / "research" / "summary.json").write_bytes(b"r" * 256)
+            (future_range / "nested").mkdir()
+            (source / "source-link.json.gz").symlink_to(source / "source.json.gz")
+
+            diagnostics = storage_diagnostics(path, {})
+
+        self.assertEqual(diagnostics.db_size_bytes, 1024)
+        self.assertEqual(diagnostics.research_artifact_size_bytes, 2048 + 4096 + 512 + 256)
+        self.assertEqual(diagnostics.total_managed_size_bytes, 1024 + 2048 + 4096 + 512 + 256)
+        self.assertEqual(
+            diagnostics.usage_pct,
+            round(diagnostics.db_size_bytes / diagnostics.budget_bytes * 100, 2),
+        )
+        self.assertEqual(
+            diagnostics.total_managed_usage_pct,
+            round(diagnostics.total_managed_size_bytes / diagnostics.budget_bytes * 100, 2),
+        )
+        self.assertEqual(diagnostics.research_artifacts.regular_file_count, 4)
+        self.assertEqual(diagnostics.research_artifacts.ignored_symlink_count, 1)
+        self.assertEqual(diagnostics.research_artifacts.ignored_non_regular_count, 1)
+        preview = diagnostics.research_artifacts.retention_preview
+        self.assertFalse(preview.automatic_deletion_allowed)
+        self.assertEqual(preview.safe_delete_file_count, 0)
+        self.assertEqual(preview.manual_review_file_count, 3)
+        self.assertEqual(preview.protected_evidence_file_count, 1)
+
+    def test_storage_diagnostics_does_not_follow_a_symlinked_research_directory(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "cache.sqlite3"
+            path.write_bytes(b"database")
+            external = root / "external"
+            external.mkdir()
+            (external / "must-not-count.json").write_bytes(b"evidence")
+            (root / "market-scan-probability").symlink_to(external, target_is_directory=True)
+
+            diagnostics = storage_diagnostics(path, {})
+
+        probability = next(
+            item for item in diagnostics.research_artifacts.categories if item.category == "probability_projection"
+        )
+        self.assertEqual(probability.scan_status, "ignored_symlink")
+        self.assertEqual(probability.regular_file_count, 0)
+        self.assertEqual(diagnostics.research_artifact_size_bytes, 0)
+        self.assertEqual(diagnostics.research_artifacts.ignored_symlink_count, 1)
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "cache.sqlite3"
+            path.write_bytes(b"database")
+            external = root / "external-research"
+            history = external / "market_scan_probability_history"
+            history.mkdir(parents=True)
+            (history / "must-not-count.sqlite3").write_bytes(b"evidence")
+            (root / "research").symlink_to(external, target_is_directory=True)
+
+            diagnostics = storage_diagnostics(path, {})
+
+        history_category = next(
+            item for item in diagnostics.research_artifacts.categories if item.category == "probability_history"
+        )
+        self.assertEqual(history_category.scan_status, "ignored_symlink")
+        self.assertEqual(history_category.regular_file_count, 0)
+        self.assertEqual(diagnostics.research_artifact_size_bytes, 0)
+
+    def test_system_diagnostics_warns_about_material_research_evidence_usage(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "cache.sqlite3"
+            path.write_bytes(b"database")
+            probability = root / "market-scan-probability"
+            probability.mkdir()
+            (probability / "projection.json").write_bytes(b"p" * (2 * 1024 * 1024))
+            cache = _Cache(
+                CacheStats(
+                    path=str(path),
+                    quote_count=0,
+                    quote_history_count=0,
+                    kline_count=0,
+                    stock_count=0,
+                    plate_count=0,
+                    provider_count=0,
+                ),
+                providers=[],
+                capability_statuses=[],
+                table_counts={},
+            )
+            datahub = _DataHub(cache, capabilities=[])
+            datahub.settings = SimpleNamespace(max_database_size_mb=16)
+
+            with patch("app.services.system_diagnostics.calendar_status", return_value=_calendar_status()):
+                diagnostics = build_system_diagnostics(
+                    datahub,
+                    _Scheduler(running=True),
+                    now=datetime(2026, 5, 13, 10, 30),
+                )
+
+        self.assertIn("研究证据归档占用已达到数据库容量预算参考值的 10%。", diagnostics.warnings)
+        self.assertIn("定期检查研究 artifact 目录；仅按预览摘要人工核验，不执行自动删除。", diagnostics.suggestions)
 
     def test_storage_diagnostics_sanitizes_malformed_table_counts(self) -> None:
         diagnostics = storage_diagnostics(

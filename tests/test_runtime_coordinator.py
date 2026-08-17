@@ -110,7 +110,8 @@ class _GuardedService:
 
 
 class _RuntimeCache:
-    def __init__(self) -> None:
+    def __init__(self, path: Path) -> None:
+        self.path = path
         self.monitor_events: list[tuple[str, str, str]] = []
 
     def reconcile_orphaned_task_runs(self) -> int:
@@ -118,6 +119,12 @@ class _RuntimeCache:
 
     def reconcile_incomplete_market_scans(self) -> int:
         return 0
+
+    def reconcile_probability_source_capture_outbox(self) -> int:
+        return 0
+
+    def claim_probability_source_capture(self, **_kwargs):
+        return None
 
     def save_monitor_event(self, *args, **_kwargs) -> None:
         self.monitor_events.append((str(args[0]), str(args[1]), str(args[2])))
@@ -340,8 +347,8 @@ def test_runtime_leader_lock_survives_bounded_stop_until_stubborn_scheduler_exit
     async def scenario():
         first_leadership = RuntimeLeadership.for_cache_path(tmp_path / "cache.sqlite3")
         second_leadership = RuntimeLeadership.for_cache_path(tmp_path / "cache.sqlite3")
-        first_scheduler = _runtime_scheduler(first_leadership)
-        second_scheduler = _runtime_scheduler(second_leadership)
+        first_scheduler = _runtime_scheduler(first_leadership, tmp_path / "first.sqlite3")
+        second_scheduler = _runtime_scheduler(second_leadership, tmp_path / "second.sqlite3")
         started = asyncio.Event()
         cancelled = asyncio.Event()
         release = asyncio.Event()
@@ -396,7 +403,7 @@ def test_runtime_leader_lock_survives_bounded_stop_until_stubborn_scheduler_exit
 
 def test_standby_retries_after_scheduler_activation_failure_without_closing_scanner(tmp_path: Path) -> None:
     async def scenario():
-        cache = _RuntimeCache()
+        cache = _RuntimeCache(tmp_path / "runtime-cache.sqlite3")
         holder = RuntimeLeadership.for_cache_path(tmp_path / "cache.sqlite3")
         standby = RuntimeLeadership.for_cache_path(tmp_path / "cache.sqlite3")
         assert holder.try_acquire() is True
@@ -430,9 +437,9 @@ def test_standby_retries_after_scheduler_activation_failure_without_closing_scan
     assert closed_after_final_stop is True
 
 
-def test_market_scanner_stop_is_bounded_but_guard_waits_for_stubborn_task() -> None:
+def test_market_scanner_stop_is_bounded_but_guard_waits_for_stubborn_task(tmp_path: Path) -> None:
     async def scenario():
-        cache = _RuntimeCache()
+        cache = _RuntimeCache(tmp_path / "runtime-cache.sqlite3")
         guard = _TrackingGuard()
         settings = SimpleNamespace(scheduler_shutdown_timeout_seconds=0.01)
         scanner = MarketScanManager(
@@ -506,7 +513,7 @@ def test_activation_failure_monitor_event_redacts_credentials(tmp_path: Path) ->
     assert message.count("<redacted>") == 2
 
 
-def _runtime_scheduler(leadership: RuntimeLeadership) -> LocalDataScheduler:
+def _runtime_scheduler(leadership: RuntimeLeadership, cache_path: Path) -> LocalDataScheduler:
     settings = SimpleNamespace(
         scheduler_enabled=True,
         scheduler_quote_interval_seconds=3600,
@@ -515,7 +522,7 @@ def _runtime_scheduler(leadership: RuntimeLeadership) -> LocalDataScheduler:
         scheduler_health_interval_seconds=3600,
         scheduler_shutdown_timeout_seconds=0.01,
     )
-    hub = SimpleNamespace(settings=settings, cache=_RuntimeCache())
+    hub = SimpleNamespace(settings=settings, cache=_RuntimeCache(cache_path))
     scheduler = LocalDataScheduler(  # type: ignore[arg-type]
         hub,
         instance_guard=leadership.service_guard(),

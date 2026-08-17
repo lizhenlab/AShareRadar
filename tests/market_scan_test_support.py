@@ -6,6 +6,10 @@ from pathlib import Path
 import threading
 
 from app.config import Settings
+from app.models.market_scan import (
+    MarketScanPublicationDiagnostic,
+    MarketScanPublicationDiagnostics,
+)
 from app.models.schemas import Kline, Quote, StockInfo
 from app.services.cache import SQLiteCache
 from app.services.datahub_metadata import StockPoolResolution
@@ -15,6 +19,34 @@ from tests.factories import make_kline, make_quote, make_stock_info
 
 SCAN_AS_OF = datetime(2026, 7, 17, 16, 30)
 SCAN_DATA_DATE = date(2026, 7, 17)
+
+
+def action_pass_publication_diagnostics() -> MarketScanPublicationDiagnostics:
+    return MarketScanPublicationDiagnostics(
+        headline="测试批次已通过动作源评分分布门禁",
+        passed_gates=[
+            MarketScanPublicationDiagnostic(
+                code="score_distribution.pass",
+                label="评分分布",
+                detail="测试评分分布通过",
+                severity="info",
+            )
+        ],
+    )
+
+
+def distribution_degraded_publication_diagnostics() -> MarketScanPublicationDiagnostics:
+    return MarketScanPublicationDiagnostics(
+        headline="评分分布退化，仅允许审计展示",
+        source_warnings=[
+            MarketScanPublicationDiagnostic(
+                code="score_distribution.degraded",
+                label="评分分布",
+                detail="基础分档过少且头部并列，未通过动作源门禁",
+                severity="warning",
+            )
+        ],
+    )
 
 
 class _MarketScanHub:
@@ -53,11 +85,14 @@ class _MarketScanHub:
             "600001.SH": _quote_for("600001", "SH", "*ST测试", change_pct=3.2),
             "000001.SZ": _quote_for("000001", "SZ", "停牌样本", change_pct=0.0),
         }
-        current_rows = _daily_rows(SCAN_DATA_DATE, 80)
         self.klines_by_symbol = {
-            "600001.SH": current_rows,
+            "600001.SH": _daily_rows(
+                SCAN_DATA_DATE,
+                80,
+                last_close=self.quotes_by_symbol["600001.SH"].price,
+            ),
             "000001.SZ": _daily_rows(date(2026, 7, 10), 80),
-            "920066.BJ": current_rows,
+            "920066.BJ": _daily_rows(SCAN_DATA_DATE, 80),
         }
 
     async def stock_pool(
@@ -173,7 +208,10 @@ def _configure_clean_full_market(hub: _MarketScanHub) -> None:
         "000001.SZ": _quote_for("000001", "SZ", "深市样本", change_pct=1.1),
         "920066.BJ": _quote_for("920066", "BJ", "北交样本", change_pct=1.2),
     }
-    hub.klines_by_symbol = {symbol: _daily_rows(SCAN_DATA_DATE, 80) for symbol in hub.quotes_by_symbol}
+    hub.klines_by_symbol = {
+        symbol: _daily_rows(SCAN_DATA_DATE, 80, last_close=quote.price)
+        for symbol, quote in hub.quotes_by_symbol.items()
+    }
 
 
 async def _wait_for_status(scanner: MarketScanManager, run_id: int, statuses: set[str]):
@@ -186,10 +224,11 @@ async def _wait_for_status(scanner: MarketScanManager, run_id: int, statuses: se
 
 
 def _quote_for(code: str, market: str, name: str, *, change_pct: float) -> Quote:
+    price = 10.0 * (1 + change_pct / 100)
     return make_quote(
-        price=10.3,
+        price=price,
         prev_close=10.0,
-        high=10.5,
+        high=max(10.5, price),
         low=9.9,
         change_pct=change_pct,
         turnover_rate=4.2,
@@ -199,13 +238,14 @@ def _quote_for(code: str, market: str, name: str, *, change_pct: float) -> Quote
             "code": code,
             "market": market,
             "name": name,
+            "open": 10.0,
             "amount": 800_000_000,
-            "change": 0.3,
+            "change": price - 10.0,
         }
     )
 
 
-def _daily_rows(latest: date, count: int) -> list[Kline]:
+def _daily_rows(latest: date, count: int, *, last_close: float = 10.3) -> list[Kline]:
     days: list[date] = []
     cursor = latest
     while len(days) < count:
@@ -213,7 +253,7 @@ def _daily_rows(latest: date, count: int) -> list[Kline]:
             days.append(cursor)
         cursor -= timedelta(days=1)
     days.reverse()
-    first_close = 10.3 - (count - 1) * 0.03
+    first_close = last_close - (count - 1) * 0.03
     return [
         make_kline(
             date=day.isoformat(),

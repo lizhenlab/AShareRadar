@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 import sqlite3
 
+from app.models.market_scan import MARKET_SCAN_TOP100_REFRESH_SCOPE
 from app.repositories.base import SQLiteRepository
 from app.utils.audit_time import audit_datetime_to_text
 from app.utils.clock import utc_now
@@ -140,11 +141,12 @@ class ReliabilityRepository(SQLiteRepository):
                 SELECT status, trigger, total_count, success_count, skipped_count, duration_ms
                 FROM market_scan_run
                 WHERE status IN ('success', 'degraded', 'failed', 'interrupted')
+                  AND scope != ?
                   AND ashare_audit_epoch(COALESCE(finished_at, updated_at, created_at))
                       >= ashare_audit_epoch(?)
                 ORDER BY id ASC
                 """,
-                (since,),
+                (MARKET_SCAN_TOP100_REFRESH_SCOPE, since),
             ).fetchall()
         durations = tuple(
             max(0, int(row["duration_ms"]))

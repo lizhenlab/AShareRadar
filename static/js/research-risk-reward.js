@@ -123,7 +123,7 @@ export function renderRiskReward(report) {
         <span>风险收益与情景</span>
         <strong>${escapeHtml(view.rating)}</strong>
       </div>
-      <i class="${view.ratingClass}">收益风险比 ${formatNumber(view.rewardRiskRatio, 2)}</i>
+      <i class="${view.ratingClass}">收益风险比 ${view.ratioAvailable ? formatNumber(view.rewardRiskRatio, 2) : "—"}</i>
     </div>
     <div class="risk-reward-metrics">${renderRiskRewardMetrics(view)}</div>
     <p>${escapeHtml(view.summary)}</p>
@@ -136,10 +136,15 @@ export function renderRiskReward(report) {
 
 function riskRewardView(report) {
   report = asObject(report);
+  const upsideAvailable = report.upside_available === true && report.upside_target_basis !== "unavailable";
+  const downsideAvailable = report.downside_available === true && report.downside_stop_basis !== "unavailable";
+  const atrAvailable = [report.upside_target_basis, report.downside_stop_basis]
+    .some((basis) => String(basis || "").includes("atr"));
   return {
     rating: report.rating,
     ratingClass: riskRewardRatingClass(report.rating),
     rewardRiskRatio: report.reward_risk_ratio,
+    ratioAvailable: report.ratio_available === true && upsideAvailable && downsideAvailable,
     currentPrice: report.current_price,
     upsideTarget: report.upside_target,
     upsidePct: report.upside_pct,
@@ -147,19 +152,51 @@ function riskRewardView(report) {
     downsidePct: report.downside_pct,
     atrPct: report.atr_pct,
     volatilityPct: report.volatility_pct,
+    upsideAvailable,
+    downsideAvailable,
+    atrAvailable,
+    upsideBasis: report.upside_target_basis,
+    downsideBasis: report.downside_stop_basis,
     summary: report.summary,
     scenarios: asArray(report.scenarios),
-    notes: asArray(report.notes),
+    notes: [report.availability_reason, ...asArray(report.notes)].filter(Boolean),
   };
 }
 
 function renderRiskRewardMetrics(view) {
   return renderMetricPairs([
-    ["现价", formatNumber(view.currentPrice)],
-    ["上方目标", `${formatNumber(view.upsideTarget)} / ${formatNumber(view.upsidePct)}%`],
-    ["下方防守", `${formatNumber(view.downsideStop)} / ${formatNumber(view.downsidePct)}%`],
-    ["ATR / 波动", `${formatNumber(view.atrPct, 2)}% / ${formatNumber(view.volatilityPct, 2)}%`],
+    ["现价", positiveMetric(view.currentPrice)],
+    ["上方目标", levelMetric(view.upsideAvailable, view.upsideTarget, view.upsidePct, view.upsideBasis)],
+    ["下方防守", levelMetric(view.downsideAvailable, view.downsideStop, view.downsidePct, view.downsideBasis)],
+    ["ATR / 波动", volatilityMetric(view)],
   ]);
+}
+
+function positiveMetric(value, digits = 2) {
+  return Number.isFinite(Number(value)) && Number(value) > 0 ? formatNumber(value, digits) : "—";
+}
+
+function levelMetric(available, level, percent, basis) {
+  if (!available) return "— / 证据不可用";
+  return `${formatNumber(level)} / ${formatNumber(percent)}% · ${levelBasisLabel(basis)}`;
+}
+
+function volatilityMetric(view) {
+  const atrValue = view.atrAvailable ? positiveMetric(view.atrPct) : "—";
+  const volatilityValue = positiveMetric(view.volatilityPct);
+  const atr = atrValue === "—" ? atrValue : `${atrValue}%`;
+  const volatility = volatilityValue === "—" ? volatilityValue : `${volatilityValue}%`;
+  return atr === "—" && volatility === "—" ? "— / 证据不可用" : `${atr} / ${volatility}`;
+}
+
+function levelBasisLabel(value) {
+  return {
+    resistance: "压力位证据",
+    atr: "ATR 证据",
+    resistance_and_atr: "压力位 + ATR 证据",
+    structure: "结构位证据",
+    structure_and_atr: "结构位 + ATR 证据",
+  }[value] || "证据不可用";
 }
 
 function renderScenarioPlan(item) {

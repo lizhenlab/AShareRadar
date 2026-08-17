@@ -27,6 +27,9 @@ def test_chip_analysis_filters_invalid_rows_and_keeps_distribution_available() -
     chip = build_chip_analysis(analysis, feature)
 
     assert chip.center_price > 0
+    assert chip.distribution_available is True
+    assert chip.data_nature == "derived"
+    assert chip.valid_session_count == 10
     assert chip.distribution_label in {"筹码相对集中", "筹码分布适中", "筹码较分散"}
     assert "10根有效日K" in chip.summary
     assert any("异常" in note for note in chip.notes)
@@ -40,7 +43,11 @@ def test_chip_analysis_requires_enough_valid_rows_after_filtering() -> None:
     chip = build_chip_analysis(analysis, feature)
 
     assert chip.distribution_label == "筹码样本不足"
-    assert chip.center_price == 108
+    assert chip.distribution_available is False
+    assert chip.data_nature == "unavailable"
+    assert chip.valid_session_count == 9
+    assert chip.center_price == 0
+    assert chip.concentration == 0
     assert chip.support_bands == []
     assert chip.pressure_bands == []
 

@@ -546,7 +546,13 @@ class AlertRuleEvaluationTests(unittest.TestCase):
 
     def test_break_support_uses_dynamic_support_when_threshold_is_zero(self) -> None:
         quote = _quote(price=99.0)
-        analysis = SimpleNamespace(trend_score=50, support=100.0, resistance=120.0)
+        analysis = SimpleNamespace(
+            trend_score=50,
+            support=100.0,
+            resistance=120.0,
+            support_available=True,
+            resistance_available=True,
+        )
         rule = _alert_rule(
             condition_type="break_support",
             threshold=0,
@@ -563,7 +569,13 @@ class AlertRuleEvaluationTests(unittest.TestCase):
 
     def test_break_resistance_explicit_threshold_overrides_dynamic_resistance(self) -> None:
         quote = _quote(price=112.0)
-        analysis = SimpleNamespace(trend_score=50, support=100.0, resistance=120.0)
+        analysis = SimpleNamespace(
+            trend_score=50,
+            support=100.0,
+            resistance=120.0,
+            support_available=False,
+            resistance_available=False,
+        )
         rule = _alert_rule(
             condition_type="break_resistance",
             threshold=110.0,
@@ -577,6 +589,31 @@ class AlertRuleEvaluationTests(unittest.TestCase):
         self.assertTrue(triggered)
         self.assertEqual(current_value, 112.0)
         self.assertIn("压力参考 110.00", message)
+
+    def test_dynamic_level_alert_rejects_unavailable_placeholder(self) -> None:
+        quote = _quote(price=99.0)
+        analysis = SimpleNamespace(
+            trend_score=50,
+            support=100.0,
+            resistance=98.0,
+            support_available=False,
+            resistance_available=False,
+        )
+
+        for condition_type in ("break_support", "break_resistance"):
+            with self.subTest(condition_type=condition_type):
+                rule = _alert_rule(
+                    condition_type=condition_type,
+                    threshold=0,
+                    last_state="未触发",
+                    last_triggered_at=None,
+                    cooldown_seconds=300,
+                )
+                triggered, current_value, message = _evaluate_rule(rule, quote, analysis)
+
+                self.assertFalse(triggered)
+                self.assertIsNone(current_value)
+                self.assertIn("暂不能评估", message)
 
 class ChartMarkTests(unittest.TestCase):
     def test_note_marks_preserve_visibility_and_kline_date(self) -> None:

@@ -21,6 +21,7 @@ def test_discovery_controls_are_wired_into_the_existing_market_scan_surface() ->
         "discoveryPresetSave",
         "discoveryPresetApply",
         "discoveryPresetRename",
+        "discoveryPresetScreenAlert",
         "discoveryPresetDelete",
         "discoveryPresetFeedback",
         "discoveryRankSummary",
@@ -53,8 +54,14 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
             changeMin: value("-2.5"), changeMax: value("9.5"),
             turnoverMin: value("1"), turnoverMax: value("20"),
             amountMin: value("1000000"), amountMax: value("500000000"),
+            confidenceMin: value("72"), riskMax: value("45"), tradabilityMin: value("66"),
+            probabilityMin: { value: "", disabled: true },
             status: value("missing"),
             keyword: value("600519"),
+            columnViews: [
+              { value: "overview", checked: false },
+              { value: "risk", checked: true },
+            ],
             sort: value("trend_score"),
             order: value("desc"),
             sort2: value("score"), order2: value("desc"),
@@ -67,7 +74,6 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
             unsupportedMessage = error.message;
           }
           elements.status.value = "success";
-          elements.keyword.value = "";
           const definition = buildDiscoveryPresetDefinition("高质量白酒", elements);
           elements.sort.value = "rank";
           elements.order.value = "asc";
@@ -102,6 +108,7 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
               turnover: 1.2,
               amount: 123000000,
               score: 90,
+              raw_score: 90.1,
             }],
             total: 1,
             page: 1,
@@ -144,15 +151,20 @@ def test_discovery_payload_uses_only_existing_supported_filter_fields() -> None:
             "change": {"min": -2.5, "max": 9.5},
             "turnover": {"min": 1, "max": 20},
             "amount": {"min": 1_000_000, "max": 500_000_000},
+            "confidence": {"min": 72},
+            "risk": {"max": 45},
+            "tradability": {"min": 66},
+            "keyword": "600519",
         },
         "sort": [
             {"field": "trend", "order": "desc"},
             {"field": "score", "order": "desc"},
             {"field": "symbol", "order": "asc"},
         ],
+        "column_view": "risk",
     }
     assert "状态" in payload["unsupportedMessage"]
-    assert "搜索关键词" in payload["unsupportedMessage"]
+    assert "搜索关键词" not in payload["unsupportedMessage"]
     assert payload["rankSort"] == [{"field": "rank", "order": "asc"}]
     assert payload["symbolSort"] == [{"field": "symbol", "order": "asc"}]
     assert payload["representable"] == [True, True, True]
@@ -254,6 +266,18 @@ def test_discovery_invalidates_stale_requests_and_fully_edits_complex_presets() 
           assert.match(element("discoveryPresetFeedback").textContent, /旧请求结果已忽略/);
 
           pending = deferredPair();
+          const staleRevisionApply = controller.applyPreset(1);
+          await flushPromises();
+          pending.page.resolve({
+            ...leaderboard(editable, 43),
+            preset: { ...editable, revision: 2 },
+          });
+          pending.rank.resolve(rankChanges(43));
+          await staleRevisionApply;
+          assert.equal(controller.state.applied, null);
+          assert.match(element("discoveryPresetFeedback").textContent, /旧请求结果已忽略/);
+
+          pending = deferredPair();
           const currentApply = controller.applyPreset(2);
           await flushPromises();
           pending.page.resolve(leaderboard(editable, 43, 2));
@@ -286,10 +310,10 @@ def test_discovery_invalidates_stale_requests_and_fully_edits_complex_presets() 
           assert.equal(element("marketScanSort").value, "score");
           assert.equal(element("marketScanSort2").value, "turnover_rate");
           pending.page.resolve(leaderboard(complex, 44));
-          pending.rank.resolve(rankChanges(44));
+          pending.rank.resolve({ current_run_id: 44, items: "malformed" });
           await complexApply;
           assert.equal(controller.state.applied.preset.id, 8);
-          assert.match(element("discoveryPresetFeedback").textContent, /已应用筛选方案/);
+          assert.match(element("discoveryPresetFeedback").textContent, /方案已应用.*排名变化暂不可用/);
           element("marketScanMarket").value = "BJ";
           element("marketScanSort").value = "symbol";
           element("marketScanSort2").value = "";
@@ -308,23 +332,28 @@ def test_discovery_invalidates_stale_requests_and_fully_edits_complex_presets() 
             element("marketScanTableWrap").dataset.marketScanRunId = String(id);
             element("marketScanTableWrap")["data-market-scan-run-id"] = String(id);
           }
-          function leaderboard(preset, runId, page = 1) {
-            return {
-              preset, run_id: runId, rule_version: "leader-v2", total: 101,
-              page, page_size: 100, page_count: 2,
-              items: [{
-                position: 1, source_rank: 350, symbol: "600519.SH", code: "600519",
-                market: "SH", name: "贵州茅台", industry: "白酒", is_st: false,
-                is_new: false, quality: 93, trend: 81, change: 2.5, turnover: 1.2,
-                amount: 123000000, score: 90,
-              }],
-            };
-          }
+              function leaderboard(preset, runId, page = 1) {
+                const count = page === 1 ? 100 : 1;
+                return {
+                  preset, run_id: runId, rule_version: "leader-v2", total: 101,
+                  page, page_size: 100, page_count: 2,
+                  items: Array.from({ length: count }, (_, index) => {
+                    const position = ((page - 1) * 100) + index + 1;
+                    const code = index === 0 ? "600519" : String(600000 + index).padStart(6, "0");
+                    return {
+                      position, source_rank: index === 0 ? 350 : position, symbol: `${code}.SH`, code,
+                      market: "SH", name: index === 0 ? "贵州茅台" : `样本${code}`, industry: "白酒", is_st: false,
+                      is_new: false, quality: 93, trend: 81, change: 2.5, turnover: 1.2,
+                      amount: 123000000, score: 90, raw_score: 90.1,
+                    };
+                  }),
+                };
+              }
           function rankChanges(runId) {
             return {
               current_run_id: runId, previous_run_id: runId - 1, comparable: true,
               reason: null, current_rule_version: "leader-v2", previous_rule_version: "leader-v2",
-              items: [], total: 500, page: 1, page_size: 200, page_count: 3,
+                  items: [], total: 0, page: 1, page_size: 200, page_count: 0,
             };
           }
           function deferredPair() { return { page: deferred(), rank: deferred() }; }
@@ -336,6 +365,62 @@ def test_discovery_invalidates_stale_requests_and_fully_edits_complex_presets() 
           async function flushPromises() {
             for (let index = 0; index < 20; index += 1) await Promise.resolve();
           }
+        '''
+    )
+
+
+def test_discovery_records_one_typed_idempotent_screen_change_event() -> None:
+    _run_node(
+        r'''
+          import assert from "node:assert/strict";
+          import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+          import { createDiscoveryController } from "./static/js/discovery.js";
+
+          const { elements } = installAppDom({ canvasContext: null });
+          for (const node of elements.values()) {
+            node.setAttribute = function setAttribute(name, value) { this[name] = String(value); };
+          }
+          const digest = "a".repeat(64);
+          let alertRequest = null;
+          const preset = {
+            id: 7, name: "高质量", schema_version: 2, revision: 3,
+            criteria: { score: { min: 80 } }, sort: [{ field: "rank", order: "asc" }],
+            column_view: "overview", created_at: "2026-08-12", updated_at: "2026-08-12",
+          };
+          const controller = createDiscoveryController({
+            root: document,
+            getRun: () => ({ id: 42, status: "success" }),
+            async fetcher(url, options = {}) {
+              if (String(url).startsWith("/api/discovery/presets?page=")) {
+                return { items: [preset], total: 1, page: 1, page_size: 100, page_count: 1 };
+              }
+              if (String(url) === "/api/discovery/presets/7/screen-alerts") {
+                alertRequest = JSON.parse(options.body);
+                return {
+                  schema_version: "market-scan-screen-alert-v1", status: "ready", unavailable_reason: null,
+                  preset: { preset_id: 7, preset_revision: 3, preset_name: "高质量", spec_digest: digest },
+                  current: { run_id: 42 }, previous: { run_id: 41 }, entered_symbols: ["600519.SH"],
+                  exited_symbols: [], suppressed_unrankable_symbols: ["600000.SH"],
+                  event_digest: digest, created: true,
+                };
+              }
+              throw new Error(`unexpected ${url}`);
+            },
+          });
+          for (const node of elements.values()) {
+            node.setAttribute = function setAttribute(name, value) { this[name] = String(value); };
+          }
+          await controller.activate();
+          const select = elements.get("discoveryPresetSelect");
+          select.value = "7";
+          select.listeners.change();
+
+          const payload = await controller.recordScreenAlert();
+
+          assert.deepEqual(alertRequest, { current_run_id: 42, expected_preset_revision: 3 });
+          assert.equal(payload.created, true);
+          assert.match(elements.get("discoveryPresetFeedback").textContent, /新进入 1、退出 0/);
+          assert.match(elements.get("discoveryPresetFeedback").textContent, /未误报退出/);
         '''
     )
 
@@ -385,7 +470,19 @@ def test_discovery_bulk_queue_and_preset_import_export_preserve_provenance() -> 
               if (target.endsWith("/research-queue")) {
                 const body = JSON.parse(options.body);
                 queueBodies.push(body);
-                return { items: [], added_count: body.symbols.length, existing_count: 0 };
+                return {
+                  items: body.symbols.map((symbol) => ({
+                    symbol,
+                    source_run_id: body.run_id,
+                    source_preset_id: 7,
+                    source_preset_revision: body.expected_preset_revision,
+                    source_preset_name: preset.name,
+                    enqueued_at: "2026-07-29T10:00:00Z",
+                    added: true,
+                  })),
+                  added_count: body.symbols.length,
+                  existing_count: 0,
+                };
               }
               throw new Error(`unexpected request: ${target}`);
             },
@@ -433,13 +530,14 @@ def test_discovery_bulk_queue_and_preset_import_export_preserve_provenance() -> 
               position, source_rank: position, symbol: `${code}.SH`, code, market: "SH",
               name: `样本${code}`, industry: "半导体", is_st: false, is_new: false,
               quality: 90, trend: 85, change: 2, turnover: 3, amount: 100000000, score: 88,
+              raw_score: 88.1,
             };
           }
           function rankChanges() {
             return {
               current_run_id: 42, previous_run_id: 41, comparable: true, reason: null,
               current_rule_version: "leader-v2", previous_rule_version: "leader-v2",
-              items: [], total: 205, page: 1, page_size: 200, page_count: 2,
+              items: [], total: 0, page: 1, page_size: 200, page_count: 0,
             };
           }
         '''
