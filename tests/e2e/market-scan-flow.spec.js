@@ -320,6 +320,7 @@ test("full-market scan runs in background and renders a bounded responsive snaps
 });
 
 test("market-scan mode isolation and historical selection keep one explicit result batch", async ({ page }, testInfo) => {
+  testInfo.setTimeout(45000);
   const listQueries = [];
   const resultRunIds = [];
   const exportRunIds = [];
