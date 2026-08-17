@@ -591,7 +591,10 @@ for (const viewport of [
     await page.goto("/");
     await selectPrimaryView(page, "market");
     await page.locator("#marketScanModeOfficial").check();
-    await page.locator("#marketScanFilterToggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-layout-optimizations", "ready");
+    const filterPanel = page.locator("#marketScanFilterPanel");
+    if (await filterPanel.isHidden()) await page.locator("#marketScanFilterToggle").click();
+    await expect(filterPanel).toBeVisible();
     await page.locator("#marketScanMarket").selectOption(["SH", "BJ"]);
     await page.locator("#marketScanIndustry").fill("白酒，专用设备");
     await page.locator("#marketScanSt").selectOption("false");
