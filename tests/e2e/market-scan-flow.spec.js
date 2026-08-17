@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { filterMarketScanRange, filterMarketScanResearchRange } from "./market-scan-fixture-filters.mjs";
+import { filterMarketScanRange, filterMarketScanResearchRange, marketScanResultCompare } from "./market-scan-fixture-filters.mjs";
 import { delay, mockApi, selectPrimaryView } from "./frontend-flow-api-fixtures.mjs";
 
 test("full-market scan runs in background and renders a bounded responsive snapshot", async ({ page }, testInfo) => {
@@ -397,14 +397,8 @@ test("market-scan mode isolation and historical selection keep one explicit resu
       }
       const runMatch = url.pathname.match(/^\/api\/market-scans\/(\d+)$/);
       if (runMatch) {
-        const runId = Number(runMatch[1]);
-        const run = runId === 40
-          ? officialHistory
-          : runId === 38
-            ? intradayLatest
-            : runId === 36
-              ? preopenLatest
-              : runId === 90 ? activeIntraday : officialLatest;
+        const runs = { 36: preopenLatest, 38: intradayLatest, 40: officialHistory, 90: activeIntraday };
+        const run = runs[Number(runMatch[1])] || officialLatest;
         return { payload: run };
       }
       return null;
@@ -1171,18 +1165,6 @@ function marketScanFixtureRows() {
     marketScanResult("300999.SZ", "行情缺失样本", "SZ", null, null, { status: "missing", error: "批量行情缺失" }),
     marketScanResult("600999.SH", "停牌样本", "SH", null, null, { status: "skipped", reason: "日K停留在前一交易日" }),
   ];
-}
-
-function marketScanResultCompare(left, right, sort, direction) {
-  const leftValue = left[sort];
-  const rightValue = right[sort];
-  if (leftValue == null && rightValue != null) return 1;
-  if (leftValue != null && rightValue == null) return -1;
-  let compared = typeof leftValue === "string"
-    ? leftValue.localeCompare(rightValue)
-    : Number(leftValue || 0) - Number(rightValue || 0);
-  compared *= direction;
-  return compared || (left.rank ?? Number.MAX_SAFE_INTEGER) - (right.rank ?? Number.MAX_SAFE_INTEGER) || left.symbol.localeCompare(right.symbol);
 }
 
 function marketScanResult(symbol, name, market, rank, score, options = {}) {

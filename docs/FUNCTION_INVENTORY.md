@@ -8,8 +8,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 404 | 1015 | 6052 | 1399 | 135464 |
-| `tests/` | 230 | 199 | 3560 | 884 | 117243 |
+| `app/` | 404 | 1015 | 6052 | 1400 | 135468 |
+| `tests/` | 230 | 199 | 3560 | 884 | 117251 |
 | `tools/` | 15 | 7 | 152 | 6 | 3314 |
 
 ## Python Function Health
@@ -18,7 +18,7 @@ Branch points count `if`, loops, `try/except`, boolean operators, ternaries, `ma
 
 | Area | Longest function | Branchiest function |
 | --- | --- | --- |
-| `app/` | 64 lines: `app/services/market_scan_manager.py:MarketScanManager.export_results` | 12 branches: `app/repositories/advice_reviews.py:_validate_evaluation_binding` |
+| `app/` | 60 lines: `app/services/strategy_portfolio.py:_candidate_allocation_decision` | 12 branches: `app/repositories/advice_reviews.py:_validate_evaluation_binding` |
 | `tests/` | 389 lines: `tests/test_market_scan_frontend.py:test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries` | 37 branches: `tests/test_market_scan_release_boundary_coverage.py:test_public_probability_replay_rejects_resealed_boundary_counterexamples` |
 | `tools/` | 57 lines: `tools/provider_canary.py:_run_contract_probes` | 12 branches: `tools/provider_canary.py:_stock_pool_result` |
 
@@ -5775,7 +5775,7 @@ Lines: 224
 
 #### `app/services/market_scan_manager.py`
 
-Lines: 1178
+Lines: 1182
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -5825,33 +5825,34 @@ Lines: 1178
 | method | `MarketScanManager._run_probability_projection` | 727 | `def _run_probability_projection(self, run_id: int, *, symbols: tuple[str, ...] \| None=None) -> tuple[dict[str, object], dict[str, dict[str, object]]]` |
 | method | `MarketScanManager._queries` | 735 | `def _queries(self) -> MarketScanQueryService` |
 | method | `MarketScanManager.export_results` | 750 | `def export_results(self, run_id: int, *, filters: MarketScanExportFilters) -> MarketScanWorkbookExport` |
-| method | `MarketScanManager._launch` | 815 | `def _launch(self, run_id: int) -> None` |
-| method | `MarketScanManager._execute_run` | 819 | `async def _execute_run(self, run_id: int, cancel_event: asyncio.Event) -> None` |
-| method | `MarketScanManager._start_probability_capture_worker` | 863 | `def _start_probability_capture_worker(self) -> None` |
-| method | `MarketScanManager._activate_probability_capture_leader` | 875 | `async def _activate_probability_capture_leader(self) -> None` |
-| method | `MarketScanManager._stop_probability_capture_worker` | 884 | `async def _stop_probability_capture_worker(self) -> None` |
-| method | `MarketScanManager._probability_capture_worker` | 892 | `async def _probability_capture_worker(self) -> None` |
-| method | `MarketScanManager._drain_probability_capture_outbox` | 921 | `async def _drain_probability_capture_outbox(self) -> dict[str, int]` |
-| method | `MarketScanManager._finish_cancelled` | 934 | `async def _finish_cancelled(self, run_id: int) -> None` |
-| method | `MarketScanManager._finish_interrupted` | 938 | `async def _finish_interrupted(self, run_id: int) -> None` |
-| method | `MarketScanManager._finish_failed` | 942 | `async def _finish_failed(self, run_id: int, exc: Exception) -> None` |
-| method | `MarketScanManager._track_terminal_persistence` | 952 | `def _track_terminal_persistence(self, run_id: int, persisted: bool) -> None` |
-| method | `MarketScanManager._recover_terminal_persistence_failures` | 955 | `def _recover_terminal_persistence_failures(self, run_id: int \| None=None) -> int` |
-| method | `MarketScanManager._validate_settings` | 958 | `def _validate_settings(self) -> None` |
-| method | `MarketScanManager._validate_retry_candidate` | 962 | `def _validate_retry_candidate(self, run: MarketScanRun, plan: MarketScanRetryPlan, *, current: datetime) -> None` |
-| method | `MarketScanManager._validate_top100_refresh_source` | 978 | `def _validate_top100_refresh_source(self, run: MarketScanRun, *, current: datetime) -> None` |
-| method | `MarketScanManager._validate_retry_data_date` | 1000 | `def _validate_retry_data_date(self, run: MarketScanRun, plan: MarketScanRetryPlan, *, current: datetime) -> None` |
-| method | `MarketScanManager._validate_publication_window` | 1019 | `def _validate_publication_window(self, run: MarketScanRun) -> None` |
-| method | `MarketScanManager._current_time` | 1032 | `def _current_time(self, value: datetime \| None=None) -> datetime` |
-| function | `_requested_scan_temporal` | 1036 | `def _requested_scan_temporal(as_of: datetime \| None, *, current: datetime, mode: MarketScanMode) -> tuple[datetime, MarketScanTemporalContract]` |
-| function | `_fresh_scan_temporal` | 1050 | `def _fresh_scan_temporal(requested: datetime \| None, *, normalized_as_of: datetime, temporal: MarketScanTemporalContract, fresh_current: datetime, mode: MarketScanMode) -> tuple[datetime, MarketScanTemporalContract]` |
-| function | `_temporal_dates_differ` | 1066 | `def _temporal_dates_differ(left: MarketScanTemporalContract, right: MarketScanTemporalContract) -> bool` |
-| function | `_market_scan_shutdown_timeout` | 1073 | `def _market_scan_shutdown_timeout(settings: object) -> float` |
-| function | `_consume_stop_exception` | 1081 | `def _consume_stop_exception(task: asyncio.Task[None]) -> None` |
-| function | `market_scan_rule_contract` | 1090 | `def market_scan_rule_contract(settings: object, *, mode: MarketScanMode='official') -> dict[str, object]` |
-| function | `market_scan_rule_version` | 1151 | `def market_scan_rule_version(settings: object, *, mode: MarketScanMode='official') -> str` |
-| function | `_market_now` | 1160 | `def _market_now() -> datetime` |
-| function | `_required_datetime_text` | 1164 | `def _required_datetime_text(value: datetime) -> str` |
+| method | `MarketScanManager._launch` | 806 | `def _launch(self, run_id: int) -> None` |
+| method | `MarketScanManager._execute_run` | 810 | `async def _execute_run(self, run_id: int, cancel_event: asyncio.Event) -> None` |
+| method | `MarketScanManager._start_probability_capture_worker` | 854 | `def _start_probability_capture_worker(self) -> None` |
+| method | `MarketScanManager._activate_probability_capture_leader` | 866 | `async def _activate_probability_capture_leader(self) -> None` |
+| method | `MarketScanManager._stop_probability_capture_worker` | 875 | `async def _stop_probability_capture_worker(self) -> None` |
+| method | `MarketScanManager._probability_capture_worker` | 883 | `async def _probability_capture_worker(self) -> None` |
+| method | `MarketScanManager._drain_probability_capture_outbox` | 912 | `async def _drain_probability_capture_outbox(self) -> dict[str, int]` |
+| method | `MarketScanManager._finish_cancelled` | 925 | `async def _finish_cancelled(self, run_id: int) -> None` |
+| method | `MarketScanManager._finish_interrupted` | 929 | `async def _finish_interrupted(self, run_id: int) -> None` |
+| method | `MarketScanManager._finish_failed` | 933 | `async def _finish_failed(self, run_id: int, exc: Exception) -> None` |
+| method | `MarketScanManager._track_terminal_persistence` | 943 | `def _track_terminal_persistence(self, run_id: int, persisted: bool) -> None` |
+| method | `MarketScanManager._recover_terminal_persistence_failures` | 946 | `def _recover_terminal_persistence_failures(self, run_id: int \| None=None) -> int` |
+| method | `MarketScanManager._validate_settings` | 949 | `def _validate_settings(self) -> None` |
+| method | `MarketScanManager._validate_export_run` | 954 | `def _validate_export_run(run: MarketScanRun) -> None` |
+| method | `MarketScanManager._validate_retry_candidate` | 966 | `def _validate_retry_candidate(self, run: MarketScanRun, plan: MarketScanRetryPlan, *, current: datetime) -> None` |
+| method | `MarketScanManager._validate_top100_refresh_source` | 982 | `def _validate_top100_refresh_source(self, run: MarketScanRun, *, current: datetime) -> None` |
+| method | `MarketScanManager._validate_retry_data_date` | 1004 | `def _validate_retry_data_date(self, run: MarketScanRun, plan: MarketScanRetryPlan, *, current: datetime) -> None` |
+| method | `MarketScanManager._validate_publication_window` | 1023 | `def _validate_publication_window(self, run: MarketScanRun) -> None` |
+| method | `MarketScanManager._current_time` | 1036 | `def _current_time(self, value: datetime \| None=None) -> datetime` |
+| function | `_requested_scan_temporal` | 1040 | `def _requested_scan_temporal(as_of: datetime \| None, *, current: datetime, mode: MarketScanMode) -> tuple[datetime, MarketScanTemporalContract]` |
+| function | `_fresh_scan_temporal` | 1054 | `def _fresh_scan_temporal(requested: datetime \| None, *, normalized_as_of: datetime, temporal: MarketScanTemporalContract, fresh_current: datetime, mode: MarketScanMode) -> tuple[datetime, MarketScanTemporalContract]` |
+| function | `_temporal_dates_differ` | 1070 | `def _temporal_dates_differ(left: MarketScanTemporalContract, right: MarketScanTemporalContract) -> bool` |
+| function | `_market_scan_shutdown_timeout` | 1077 | `def _market_scan_shutdown_timeout(settings: object) -> float` |
+| function | `_consume_stop_exception` | 1085 | `def _consume_stop_exception(task: asyncio.Task[None]) -> None` |
+| function | `market_scan_rule_contract` | 1094 | `def market_scan_rule_contract(settings: object, *, mode: MarketScanMode='official') -> dict[str, object]` |
+| function | `market_scan_rule_version` | 1155 | `def market_scan_rule_version(settings: object, *, mode: MarketScanMode='official') -> str` |
+| function | `_market_now` | 1164 | `def _market_now() -> datetime` |
+| function | `_required_datetime_text` | 1168 | `def _required_datetime_text(value: datetime) -> str` |
 
 #### `app/services/market_scan_modes.py`
 
@@ -14100,7 +14101,7 @@ Lines: 101
 
 #### `tests/test_market_scan_frontend.py`
 
-Lines: 4996
+Lines: 5004
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |

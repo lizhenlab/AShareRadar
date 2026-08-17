@@ -755,16 +755,7 @@ class MarketScanManager:
     ) -> MarketScanWorkbookExport:
         filters = filters.normalized()
         run = self.run(run_id)
-        if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
-            raise ProbabilityResearchUnavailable("只有已发布的全市场榜单可以导出 Excel")
-        if run.mode not in {"official", "intraday"} or run.scope != FULL_MARKET_SCOPE:
-            raise ProbabilityResearchUnavailable(
-                "只有盘后正式或盘中临时全市场榜单可以导出 Excel"
-            )
-        if run.mode == "official" and run.quote_date != run.data_date:
-            raise ProbabilityResearchUnavailable(
-                "盘后正式榜单导出要求行情日期与完整日K截止日一致"
-            )
+        self._validate_export_run(run)
         page = self.results(
             run_id,
             page=1,
@@ -958,6 +949,19 @@ class MarketScanManager:
     def _validate_settings(self) -> None:
         if self.settings.market_scan_min_history_rows > self.settings.market_scan_kline_limit:
             raise ValueError("全市场扫描最少历史行数不能大于K线抓取行数")
+
+    @staticmethod
+    def _validate_export_run(run: MarketScanRun) -> None:
+        if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
+            raise ProbabilityResearchUnavailable("只有已发布的全市场榜单可以导出 Excel")
+        if run.mode not in {"official", "intraday"} or run.scope != FULL_MARKET_SCOPE:
+            raise ProbabilityResearchUnavailable(
+                "只有盘后正式或盘中临时全市场榜单可以导出 Excel"
+            )
+        if run.mode == "official" and run.quote_date != run.data_date:
+            raise ProbabilityResearchUnavailable(
+                "盘后正式榜单导出要求行情日期与完整日K截止日一致"
+            )
 
     def _validate_retry_candidate(
         self,

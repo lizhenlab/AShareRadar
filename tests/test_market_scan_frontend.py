@@ -4986,8 +4986,16 @@ async function flushPromises() {
 
 
 def _run_node_script(script: str) -> None:
+    fixed_clock = r'''
+const NativeDate = globalThis.Date;
+globalThis.Date = class extends NativeDate {
+  constructor(...args) {
+    super(...(args.length ? args : [2026, 6, 17, 16, 30]));
+  }
+};
+'''
     completed = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        ["node", "--input-type=module", "-e", fixed_clock + script],
         cwd=ROOT,
         check=False,
         text=True,
