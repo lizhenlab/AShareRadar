@@ -117,6 +117,16 @@ class _Cache:
         }
         return MarketScanRunPage(items=[], total=1, page=2, page_size=10, page_count=1)
 
+    def market_scan_run_identities(self, **query: object) -> MarketScanRunPage:
+        assert query == {
+            "page": 1,
+            "page_size": 100,
+            "mode": "intraday",
+            "status": "published",
+            "data_date": None,
+        }
+        return MarketScanRunPage(items=[self.current_run], total=1, page=1, page_size=100, page_count=1)
+
     def market_scan_results(self, run_id: int, **query: object) -> MarketScanResultPage:
         assert run_id == self.current_run.id
         self.result_queries.append(query)
@@ -341,6 +351,12 @@ def test_query_service_delegates_read_models_and_returns_explicit_missing_artifa
         status="published",
         data_date="2026-08-11",
     ).items == []
+    assert service.run_identities(
+        page=1,
+        page_size=100,
+        mode="intraday",
+        status="published",
+    ).items == [run]
     research, probabilities = service.probability_projection(29)
     assert research["status"] == "not_generated"
     assert probabilities == {}

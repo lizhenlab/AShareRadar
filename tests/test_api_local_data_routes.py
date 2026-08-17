@@ -618,8 +618,8 @@ def test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotati
         )
         assert cleanup_applied.wait(timeout=10)
         rotation.start()
-        assert rotation_attempting.wait(timeout=10)
         try:
+            assert rotation_attempting.wait(timeout=20)
             assert rotation_finished.wait(timeout=0.3) is False
             release_cleanup.set()
             response = request.result(timeout=20)

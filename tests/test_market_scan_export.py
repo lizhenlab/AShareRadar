@@ -469,6 +469,55 @@ def test_manager_exports_only_published_runs_and_forwards_every_filter() -> None
     with pytest.raises(ValueError, match="只有已发布"):
         manager.export_results(page.run.id, filters=filters)
 
+    manager.run = lambda run_id: page.run.model_copy(update={"mode": "preopen"})  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="盘后正式或盘中临时"):
+        manager.export_results(page.run.id, filters=filters)
+
+    manager.run = lambda run_id: page.run.model_copy(update={"quote_date": "2026-07-30"})  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="行情日期与完整日K截止日一致"):
+        manager.export_results(page.run.id, filters=filters)
+
+
+def test_manager_exports_published_intraday_without_official_research_artifacts() -> None:
+    page = _page([_item()])
+    intraday_run = page.run.model_copy(
+        update={
+            "mode": "intraday",
+            "as_of": "2026-07-30 10:30:00",
+            "quote_date": "2026-07-30",
+        }
+    )
+    intraday_page = page.model_copy(update={"run": intraday_run})
+    manager = object.__new__(MarketScanManager)
+    future_range_calls: list[int] = []
+
+    class _FutureRangeStore:
+        def export_projection(self, run_id: int) -> dict[str, object]:
+            future_range_calls.append(run_id)
+            return _future_range_projection()
+
+    manager.run = lambda _run_id: intraday_run  # type: ignore[method-assign]
+    manager.results = lambda _run_id, **_kwargs: intraday_page  # type: ignore[method-assign]
+    manager._future_range_store = _FutureRangeStore()  # type: ignore[assignment]
+    manager._now = lambda: EXPORTED_AT
+
+    exported = manager.export_results(intraday_run.id, filters=MarketScanExportFilters())
+    workbook = load_workbook(BytesIO(exported.content))
+    info = {
+        row[0].value: row[1].value
+        for row in workbook["导出信息"].iter_rows(min_row=2)
+    }
+
+    assert exported.filename == "AShareRadar-market-scan-2026-07-30-intraday-run-12.xlsx"
+    assert exported.row_count == 1
+    assert info["榜单类型"] == "盘中临时"
+    assert info["行情日期"] == "2026-07-30"
+    assert info["日K截止日"] == "2026-07-29"
+    assert "上涨概率研究与未来区间验证未生成" in info["数据说明"]
+    assert workbook["上涨概率研究"].max_row == 1
+    assert workbook["未来区间验证"]["A2"].value == "not_generated"
+    assert future_range_calls == []
+
 
 def test_top100_refresh_export_is_rejected_before_research_artifacts_are_read() -> None:
     page = _page([_item()])
@@ -486,7 +535,7 @@ def test_top100_refresh_export_is_rejected_before_research_artifacts_are_read() 
     manager._future_range_store = _FutureRangeStore()  # type: ignore[assignment]
     manager._now = lambda: EXPORTED_AT
 
-    with pytest.raises(ProbabilityResearchUnavailable, match="盘后正式全市场"):
+    with pytest.raises(ProbabilityResearchUnavailable, match="盘后正式或盘中临时全市场"):
         manager.export_results(top100.id, filters=MarketScanExportFilters())
     assert future_range_calls == []
 

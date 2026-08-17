@@ -100,6 +100,24 @@ class MarketScanQueryService:
             data_date=data_date,
         )
 
+    def run_identities(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None = None,
+        status: MarketScanRunStatus | Literal["published"] | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage:
+        """Return non-authorizing identities for history navigation only."""
+        return self._cache.market_scan_run_identities(
+            page=page,
+            page_size=page_size,
+            mode=mode,
+            status=status,
+            data_date=data_date,
+        )
+
     def results(
         self,
         run_id: int,

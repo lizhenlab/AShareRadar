@@ -2,7 +2,7 @@ import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { compactErrorMessage } from "./errors.js";
 import { isActiveMarketScanRun, isPublishedMarketScanRun, isRetryableMarketScanRun, marketScanContractError, marketScanRunIdentityChanged, marketScanRunStateChanged, validateMarketScanRun, validateStartResponse } from "./market-scan-contracts.js";
 import { createMarketScanPolling, isMarketScanReadBusy } from "./market-scan-polling.js";
-import { createMarketScanLatestLoader, samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
+import { MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS, createMarketScanLatestLoader, samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
 import { createMarketScanLatestSync } from "./market-scan-latest-sync.js";
 import { createMarketScanHistory } from "./market-scan-history.js";
 import { createMarketScanSurface } from "./market-scan-surface.js";
@@ -334,7 +334,7 @@ export function createMarketScanController(options = {}) {
     try {
       const payload = await request("/api/market-scans/latest", {
         signal: state.runRequest.signal,
-        timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+        timeoutMs: MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS,
       });
       if (!isCurrentRequest("runRequestSeq", sequence)) return null;
       const run = validateMarketScanRun(payload, { allowNull: true, context: "任务状态恢复响应" });
@@ -406,7 +406,7 @@ export function createMarketScanController(options = {}) {
   }
   async function requestPolledRun(runId, sequence) {
     const payload = await request(`/api/market-scans/${encodeURIComponent(runId)}`, {
-      signal: state.runRequest.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS });
+      signal: state.runRequest.signal, timeoutMs: MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS });
     if (!isCurrentRequest("runRequestSeq", sequence) || state.run?.id !== runId) return null;
     const run = validateMarketScanRun(payload, { context: "扫描进度响应" });
     if (run.id !== runId) throw marketScanContractError("扫描进度响应的运行批次不匹配");

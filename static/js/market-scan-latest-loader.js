@@ -8,6 +8,7 @@ import {
 import { marketScanPollingTokenChanged } from "./market-scan-polling-identity.js";
 
 const FULL_MARKET_SCOPE = "沪市 + 深市 + 北交所当前上市A股";
+export const MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS = Math.max(DEFAULT_REQUEST_TIMEOUT_MS, 60000);
 const PUBLISHED_BINDING_FIELDS = Object.freeze([
   "id", "status", "mode", "scope", "rule_version", "data_date", "quote_date", "updated_at",
   "finished_at", "snapshot_digest", "snapshot_seal_origin", "snapshot_sealed_at",
@@ -87,7 +88,7 @@ function requireCurrentRequest(options, sequence) {
 }
 
 function requestOptions(options) {
-  return { signal: options.state.runRequest.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS };
+  return { signal: options.state.runRequest.signal, timeoutMs: MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS };
 }
 
 function requireTrustedSelectorPair(latest, published, mode) {

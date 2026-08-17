@@ -1,6 +1,6 @@
 export const MARKET_SCAN_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-const MARKET_SCAN_EXPORT_TIMEOUT_MS = 30000;
+const MARKET_SCAN_EXPORT_TIMEOUT_MS = 120000;
 
 export async function marketScanExportError(response) {
   let payload = null;

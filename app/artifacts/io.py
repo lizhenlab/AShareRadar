@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 import hashlib
 import json
 import math
@@ -266,23 +266,36 @@ def _validate_json_tree(value: object) -> None:
     pending = [(value, 0)]
     while pending:
         item, depth = pending.pop()
-        if isinstance(item, dict):
-            if depth >= _MAX_JSON_NESTING_DEPTH or any(
-                not isinstance(key, str) for key in item
-            ):
-                raise ArtifactCanonicalJsonError
-            pending.extend((child, depth + 1) for child in item.values())
+        children = _json_container_items(item, depth)
+        if children is not None:
+            pending.extend((child, depth + 1) for child in children)
             continue
-        if isinstance(item, list):
-            if depth >= _MAX_JSON_NESTING_DEPTH:
-                raise ArtifactCanonicalJsonError
-            pending.extend((child, depth + 1) for child in item)
-            continue
-        if item is None or isinstance(item, str | bool | int):
-            continue
-        if isinstance(item, float) and math.isfinite(item):
-            continue
+        _validate_json_scalar(item)
+
+
+def _json_container_items(value: object, depth: int) -> Iterable[object] | None:
+    if isinstance(value, dict):
+        _validate_json_container_depth(depth)
+        if any(not isinstance(key, str) for key in value):
+            raise ArtifactCanonicalJsonError
+        return value.values()
+    if isinstance(value, list):
+        _validate_json_container_depth(depth)
+        return value
+    return None
+
+
+def _validate_json_container_depth(depth: int) -> None:
+    if depth >= _MAX_JSON_NESTING_DEPTH:
         raise ArtifactCanonicalJsonError
+
+
+def _validate_json_scalar(value: object) -> None:
+    if value is None or isinstance(value, str | bool | int):
+        return
+    if isinstance(value, float) and math.isfinite(value):
+        return
+    raise ArtifactCanonicalJsonError
 
 
 def _validate_json_text_nesting(text: str) -> None:

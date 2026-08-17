@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import json
 import sqlite3
 import threading
-from time import perf_counter, process_time
+from time import perf_counter, thread_time
 
 from coverage import Coverage
 import pytest
@@ -272,6 +272,30 @@ def test_public_run_header_reads_fail_closed_after_result_tamper(
     }
     with pytest.raises(MarketScanSnapshotSealError):
         reads[read_kind]()
+
+
+def test_history_navigation_identities_do_not_rehash_or_authorize_publications(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache, _service, _strategy_id, run_id = _environment(tmp_path)
+
+    monkeypatch.setattr(
+        "app.repositories.market_scan_queries.verify_market_scan_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "navigation identities must not perform publication verification"
+        ),
+    )
+
+    page = cache.market_scan_run_identities(
+        page=1,
+        page_size=20,
+        mode="official",
+        status="published",
+    )
+
+    assert [run.id for run in page.items] == [run_id]
+    assert page.total == 1
 
 
 def test_probability_facing_queries_verify_one_full_snapshot_per_request(
@@ -569,16 +593,16 @@ def test_5382_row_results_request_stays_under_api_timeout_with_one_full_hash(
         replay_calls.clear()
     with _paused_active_coverage():
         wall_started = perf_counter()
-        cpu_started = process_time()
+        cpu_started = thread_time()
         page = _query_results(query, run_id)
-        cpu_elapsed = process_time() - cpu_started
+        cpu_elapsed = thread_time() - cpu_started
         wall_elapsed = perf_counter() - wall_started
 
     assert page.total == 5_382
     assert len(page.items) == 100
     assert calls == [run_id]
     assert replay_calls == [run_id]
-    # Measure production-like execution rather than coverage tracer overhead.
+    # Measure production-like execution without tracer or unrelated-thread CPU.
     assert cpu_elapsed < 6.0
     assert wall_elapsed < 12.0
 

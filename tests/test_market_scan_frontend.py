@@ -300,6 +300,10 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
     assert "calibrated_shadow" in probability_contracts and "probability_horizon" not in probability_view
     assert "buildMarketScanExportUrl" in view and "marketScanQueryParams" in view
     assert "exportBusy" in controller and "exportFetcher" in controller
+    assert "const MARKET_SCAN_EXPORT_TIMEOUT_MS = 120000" in export_client
+    assert "MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS = Math.max(DEFAULT_REQUEST_TIMEOUT_MS, 60000)" in latest_loader
+    assert 'authority: "navigation"' in history
+    assert "历史扫描可信批次响应" in history and "samePublishedMarketScanRun" in history
     assert "fetchJson" not in view and "setTimeout" not in view
 
 
@@ -666,18 +670,21 @@ import { createMarketScanController } from "./static/js/market-scan.js";
 const { element } = installAppDom({ canvasContext: null });
 const officialLatest = scanRun(31, "official", "2026-07-29");
 const officialHistory = scanRun(30, "official", "2026-07-28");
+const mismatchedHistory = scanRun(29, "official", "2026-07-27");
+const mismatchedTrusted = { ...mismatchedHistory, snapshot_digest: "b".repeat(64) };
 const intradayLatest = scanRun(41, "intraday", "2026-07-29");
 const preopenLatest = scanRun(45, "preopen", "2026-07-29");
 const activeTask = { ...scanRun(50, "official", "2026-07-29"), status: "running", finished_at: null, snapshot_digest: null, snapshot_seal_origin: null, snapshot_sealed_at: null, total_count: 100, processed_count: 20, success_count: 20, progress_pct: 20, coverage_pct: 20 };
 const calls = [];
 const exportCalls = [];
+let historyDetailTimeout = null;
 document.createElement = () => ({ click() {} });
 globalThis.URL = { createObjectURL() { return "blob:history"; }, revokeObjectURL() {} };
 const controller = createMarketScanController({
   root: document,
   now: new Date(2026, 6, 29, 16, 0),
   pollIntervalMs: 60000,
-  async fetcher(url) {
+  async fetcher(url, options = {}) {
     const target = String(url);
     calls.push(target);
     if (target.startsWith("/api/market-scans/polling-identity?")) {
@@ -693,8 +700,15 @@ const controller = createMarketScanController({
       const query = new URLSearchParams(target.split("?", 2)[1]);
       const items = query.get("mode") === "intraday"
         ? [intradayLatest]
-        : query.get("mode") === "preopen" ? [preopenLatest] : [officialLatest, officialHistory];
+        : query.get("mode") === "preopen" ? [preopenLatest] : [officialLatest, officialHistory, mismatchedHistory];
       return { items, total: items.length, page: 1, page_size: 100, page_count: 1 };
+    }
+    const detail = /^\/api\/market-scans\/(\d+)$/.exec(target);
+    if (detail) {
+      historyDetailTimeout = options.timeoutMs;
+      if (Number(detail[1]) === 29) return mismatchedTrusted;
+      return [officialLatest, officialHistory, intradayLatest, preopenLatest]
+        .find((item) => item.id === Number(detail[1]));
     }
     const match = /^\/api\/market-scans\/(\d+)\/results\?/.exec(target);
     if (match) return resultPage(Number(match[1]));
@@ -721,16 +735,27 @@ element("marketScanHistoryDate").value = "2026-07-28";
 element("marketScanHistoryRefresh").listeners.click();
 await flushPromises();
 assert.equal(calls.some((url) => url.includes("mode=official") && url.includes("status=success") && url.includes("data_date=2026-07-28")), true);
+assert.equal(calls.some((url) => url.includes("authority=navigation")), true);
 
 element("marketScanHistoryRun").value = "30";
 element("marketScanHistoryRun").listeners.change();
 await flushPromises();
 assert.equal(controller.state.selectedHistoryRunId, 30);
+assert.equal(historyDetailTimeout, 60000);
 assert.equal(controller.state.publishedRun.id, 30);
 assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "30");
 assert.match(element("marketScanBrowseContext").textContent, /历史批次 #30/);
 await controller.exportResults();
 assert.equal(exportCalls.at(-1).startsWith("/api/market-scans/30/export.xlsx?"), true);
+
+element("marketScanHistoryRun").value = "29";
+element("marketScanHistoryRun").listeners.change();
+await flushPromises();
+assert.equal(controller.state.selectedHistoryRunId, 30);
+assert.equal(controller.state.publishedRun.id, 30);
+assert.equal(element("marketScanHistoryRun").value, "30");
+assert.match(element("marketScanHistoryFeedback").textContent, /导航身份不一致/);
+assert.equal(calls.some((url) => url.startsWith("/api/market-scans/29/results?")), false);
 
 element("marketScanModeOfficial").checked = false;
 element("marketScanModeIntraday").checked = true;
@@ -3451,6 +3476,7 @@ async function historySelectionRace() {
       if (target.startsWith("/api/market-scans?")) {
         return { items: [current, historical], total: 2, page: 1, page_size: 100, page_count: 1 };
       }
+      if (target === "/api/market-scans/9") return historical;
       if (target.startsWith("/api/market-scans/11/results?")) {
         delayedSignal = options.signal;
         return delayed.promise;

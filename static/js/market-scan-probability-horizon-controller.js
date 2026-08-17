@@ -1,6 +1,6 @@
-import { DEFAULT_REQUEST_TIMEOUT_MS, isAbortError } from "./api.js";
+import { isAbortError } from "./api.js";
 import { validateResultPage } from "./market-scan-contracts.js";
-import { samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
+import { MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS, samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
 import { isMarketScanReadBusy, marketScanReadBusyMessage } from "./market-scan-polling.js";
 
 export function createMarketScanProbabilityHorizonController(options) {
@@ -269,7 +269,7 @@ async function requestOwnedResult(context, owned, publishedRun, loadOptions) {
   try {
     const response = await options.request(owned.query, {
       signal: options.state.resultRequest.signal,
-      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+      timeoutMs: MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS,
     });
     if (!options.isCurrentRequest("resultRequestSeq", owned.sequence)) return staleOutcome();
     const payload = validateResultPage(response, publishedRun.id);

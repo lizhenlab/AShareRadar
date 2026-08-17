@@ -3,8 +3,13 @@ import { compactErrorMessage } from "./errors.js";
 import {
   isPublishedMarketScanRun,
   marketScanContractError,
+  validateMarketScanRun,
   validateMarketScanRunPage,
 } from "./market-scan-contracts.js";
+import {
+  MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS,
+  samePublishedMarketScanRun,
+} from "./market-scan-latest-loader.js";
 
 export function createMarketScanHistory(options) {
   const context = { ...options };
@@ -57,24 +62,41 @@ function abortHistory({ state }) {
 }
 
 function selectHistoryRun(context) {
-  return transitionHistory(context, () => selectHistoryRunOwned(context));
+  return transitionHistory(context, (owner) => selectHistoryRunOwned(context, owner));
 }
 
-async function selectHistoryRunOwned(context) {
+async function selectHistoryRunOwned(context, owner) {
   const { state, view } = context;
   const runId = view.selectedHistoryRunId();
-  state.selectedHistoryRunId = runId;
   if (runId === null) {
+    state.selectedHistoryRunId = null;
     context.applyPublishedRun(null);
     return context.loadLatestOwned({ forceTrusted: true, renderLoading: true });
   }
-  const run = state.historyRuns.find((item) => item.id === runId) || null;
-  if (!run) {
+  const identity = state.historyRuns.find((item) => item.id === runId) || null;
+  if (!identity) {
     view.renderHistoryError("所选历史批次已不在当前查询结果中，请重新查询。");
     return null;
   }
-  context.applyPublishedRun(run);
-  return context.loadResultsOwned();
+  try {
+    const payload = await context.request(`/api/market-scans/${encodeURIComponent(runId)}`, {
+      timeoutMs: MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS,
+    });
+    if (!owner.isCurrent()) return null;
+    const run = validateMarketScanRun(payload, { context: "历史扫描可信批次响应" });
+    if (!isPublishedMarketScanRun(run) || !samePublishedMarketScanRun(run, identity)) {
+      throw marketScanContractError("历史扫描可信批次与导航身份不一致");
+    }
+    state.selectedHistoryRunId = runId;
+    context.applyPublishedRun(run);
+    return context.loadResultsOwned();
+  } catch (error) {
+    if (owner.isCurrent()) {
+      view.elements.historyRun.value = state.selectedHistoryRunId === null ? "" : String(state.selectedHistoryRunId);
+      view.renderHistoryError(`历史批次可信读取失败：${compactErrorMessage(error?.message)}`);
+    }
+    return null;
+  }
 }
 
 function changeHistoryMode(context) {
@@ -116,7 +138,7 @@ function transitionHistory(context, operation) {
 
 function historyQuery(filters, mode) {
   const params = new URLSearchParams({
-    page: "1", page_size: "100", mode, status: filters.status,
+    page: "1", page_size: "100", mode, status: filters.status, authority: "navigation",
   });
   if (filters.dataDate) params.set("data_date", filters.dataDate);
   return params;

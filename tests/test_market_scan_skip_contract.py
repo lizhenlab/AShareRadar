@@ -28,6 +28,7 @@ from app.models.market import Kline, Quote
 from app.models.market_scan import (
     MarketScanCoverage,
     MarketScanMarketProgress,
+    MarketScanMode,
     MarketScanPublicationDiagnostic,
     MarketScanResultItem,
     MarketScanResultWrite,
@@ -56,6 +57,7 @@ from app.services.market_scan_validation import (
 )
 from app.services.trading_calendar import trading_date_range
 from app.repositories import market_scan_action_gate_replay
+from app.repositories import market_scan_terminal_publication
 from app.repositories.market_scan_action_gate_replay import (
     MARKET_SCAN_CANONICAL_REPLAY_RECEIPT_CODE,
     validate_current_action_gate_claim,
@@ -223,6 +225,80 @@ def test_typed_skip_accepts_supported_kline_snapshot_times(
     assert result.score_details["skip_evidence"]
 
 
+@pytest.mark.parametrize("mode", ["official", "intraday", "preopen"])
+def test_new_listing_skip_is_replayable_in_every_scan_mode(
+    mode: MarketScanMode,
+) -> None:
+    settings, rule_version = _settings_and_rule()
+    as_of, data_date, quote_date, quote_observed_at, quote_timestamp = (
+        _mode_context(mode)
+    )
+    item, quote, rows = _case(
+        "new_listing_insufficient_history",
+        data_date=data_date,
+        quote_timestamp=quote_timestamp,
+    )
+    quote = _quote_for_mode(quote, mode)
+
+    result = _skip_result(
+        item,
+        quote,
+        rows,
+        settings=settings,
+        rule_version=rule_version,
+        mode=mode,
+        as_of=as_of,
+        data_date=data_date,
+        quote_date=quote_date,
+        quote_observed_at=quote_observed_at,
+    )
+
+    evidence = result.score_details["skip_evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["mode"] == mode
+
+
+def test_intraday_new_listing_skip_rejects_previous_close_mismatch() -> None:
+    settings, rule_version = _settings_and_rule()
+    mode: MarketScanMode = "intraday"
+    as_of, data_date, quote_date, quote_observed_at, quote_timestamp = (
+        _mode_context(mode)
+    )
+    item, quote, rows = _case(
+        "new_listing_insufficient_history",
+        data_date=data_date,
+        quote_timestamp=quote_timestamp,
+    )
+    quote = _quote_for_mode(quote, mode)
+    mismatched_previous = round(float(quote.prev_close) * 0.95, 4)
+    quote = quote.model_copy(
+        update={
+            "prev_close": mismatched_previous,
+            "change": round(float(quote.price) - mismatched_previous, 4),
+            "change_pct": round(
+                (float(quote.price) - mismatched_previous)
+                / mismatched_previous
+                * 100,
+                4,
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="跳过证据不满足规范"):
+        _score(
+            item,
+            quote,
+            rows,
+            settings=settings,
+            rule_version=rule_version,
+            mode=mode,
+            as_of=as_of,
+            data_date=data_date,
+            quote_date=quote_date,
+            quote_observed_at=quote_observed_at,
+        )
+
+
 @pytest.mark.parametrize("snapshot_as_of", ["2026-07-18", "2026/07/17"])
 @pytest.mark.parametrize(
     "reason_code",
@@ -291,19 +367,76 @@ def test_current_write_rejects_resigned_skip_tampering(
         )
 
 
-def test_current_write_accepts_a_fully_verified_new_listing_skip(tmp_path: Path) -> None:
-    repo, run, item, settings, rule_version = _running_repository(tmp_path)
-    _case_item, quote, rows = _case("new_listing_insufficient_history", item=item)
+@pytest.mark.parametrize("mode", ["official", "intraday", "preopen"])
+def test_current_write_accepts_a_fully_verified_new_listing_skip(
+    tmp_path: Path,
+    mode: MarketScanMode,
+) -> None:
+    repo, run, item, settings, rule_version = _running_repository(tmp_path, mode=mode)
+    as_of, data_date, quote_date, quote_observed_at, quote_timestamp = (
+        _mode_context(mode)
+    )
+    _case_item, quote, rows = _case(
+        "new_listing_insufficient_history",
+        item=item,
+        data_date=data_date,
+        quote_timestamp=quote_timestamp,
+    )
+    quote = _quote_for_mode(quote, mode)
     rows = [
-        row.model_copy(update={"as_of": DATA_DATE.isoformat()})
+        row.model_copy(update={"as_of": data_date.isoformat()})
         for row in rows
     ]
-    result = _skip_result(item, quote, rows, settings=settings, rule_version=rule_version)
+    result = _skip_result(
+        item,
+        quote,
+        rows,
+        settings=settings,
+        rule_version=rule_version,
+        mode=mode,
+        as_of=as_of,
+        data_date=data_date,
+        quote_date=quote_date,
+        quote_observed_at=quote_observed_at,
+    )
 
     updated = repo.save_result_batch(run.id, [result])
 
     assert updated.skipped_count == 1
     assert updated.missing_count == 0
+
+
+@pytest.mark.parametrize("mode", ["intraday", "preopen"])
+def test_nonofficial_skip_publication_omits_action_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    diagnostics = action_pass_publication_diagnostics()
+    validated: list[object] = []
+    monkeypatch.setattr(
+        market_scan_terminal_publication,
+        "validate_persisted_production_skips",
+        lambda _conn, run: validated.append(run),
+    )
+    monkeypatch.setattr(
+        market_scan_terminal_publication,
+        "validate_current_action_gate_claim",
+        lambda *_args, **_kwargs: pytest.fail(
+            "nonofficial publication with skips must remain action-ineligible"
+        ),
+    )
+    run = {"mode": mode, "skipped_count": 1}
+
+    with sqlite3.connect(":memory:") as conn:
+        observed = market_scan_terminal_publication.validated_publication_diagnostics(
+            conn,
+            run,  # type: ignore[arg-type]
+            status="degraded",
+            diagnostics=diagnostics,
+        )
+
+    assert observed == diagnostics
+    assert validated == [run]
 
 
 def test_two_quote_batches_persist_both_justified_skips_at_one_sealed_decision_time(
@@ -870,12 +1003,14 @@ def _case(
     reason_code: str,
     *,
     item: MarketScanResultItem | None = None,
+    data_date: date = DATA_DATE,
+    quote_timestamp: str | None = None,
 ) -> tuple[MarketScanResultItem, object, list[object]]:
     if reason_code == "new_listing_insufficient_history":
-        dates, _status = trading_date_range(date(2026, 6, 10), DATA_DATE)
+        dates, _status = trading_date_range(date(2026, 6, 10), data_date)
         result_item = item or _item(list_date="2026-06-10", is_new=True)
     else:
-        dates, _status = trading_date_range(date(2026, 4, 1), DATA_DATE)
+        dates, _status = trading_date_range(date(2026, 4, 1), data_date)
         selected = list(dates[-62:])
         selected.pop(-10)
         dates = tuple(selected)
@@ -900,7 +1035,7 @@ def _case(
         low=price - 0.2,
         change_pct=(price - previous) / previous * 100,
         turnover_rate=1.0,
-        timestamp="2026-07-17T15:00:00+08:00",
+        timestamp=quote_timestamp or "2026-07-17T15:00:00+08:00",
     ).model_copy(
         update={
             "code": result_item.code,
@@ -958,48 +1093,90 @@ def _item(*, list_date: str, is_new: bool) -> MarketScanResultItem:
     )
 
 
-def _score(item, quote, rows, *, settings: Settings, rule_version: str):
+def _score(
+    item,
+    quote,
+    rows,
+    *,
+    settings: Settings,
+    rule_version: str,
+    mode: MarketScanMode = "official",
+    as_of: datetime = AS_OF,
+    data_date: date = DATA_DATE,
+    quote_date: date = DATA_DATE,
+    quote_observed_at: str = QUOTE_OBSERVED_AT,
+):
     return score_market_scan_item(
         item,
         quote,
         rows,
-        as_of=AS_OF,
-        completed_cutoff=DATA_DATE,
-        expected_data_date=DATA_DATE,
+        as_of=as_of,
+        completed_cutoff=data_date,
+        expected_data_date=data_date,
+        expected_quote_date=quote_date,
         min_history_rows=settings.market_scan_min_history_rows,
         min_data_quality_score=settings.market_scan_min_data_quality_score,
-        mode="official",
+        mode=mode,
         rule_version=rule_version,
-        quote_observed_at=QUOTE_OBSERVED_AT,
+        quote_observed_at=quote_observed_at,
         new_stock_days=settings.market_scan_new_stock_days,
     )
 
 
-def _skip_result(item, quote, rows, *, settings: Settings, rule_version: str):
+def _skip_result(
+    item,
+    quote,
+    rows,
+    *,
+    settings: Settings,
+    rule_version: str,
+    mode: MarketScanMode = "official",
+    as_of: datetime = AS_OF,
+    data_date: date = DATA_DATE,
+    quote_date: date = DATA_DATE,
+    quote_observed_at: str = QUOTE_OBSERVED_AT,
+):
     with pytest.raises(MarketScanSkipped) as raised:
-        _score(item, quote, rows, settings=settings, rule_version=rule_version)
+        _score(
+            item,
+            quote,
+            rows,
+            settings=settings,
+            rule_version=rule_version,
+            mode=mode,
+            as_of=as_of,
+            data_date=data_date,
+            quote_date=quote_date,
+            quote_observed_at=quote_observed_at,
+        )
     result = failed_scan_result_for_exception(
         item=item,
         quote=quote,
         rows=rows,
-        cutoff=DATA_DATE,
+        cutoff=data_date,
         exc=raised.value,
         sensitive_values=(),
     )
-    return replace(result, quote_observed_at=QUOTE_OBSERVED_AT)
+    return replace(result, quote_observed_at=quote_observed_at)
 
 
-def _running_repository(tmp_path: Path):
+def _running_repository(
+    tmp_path: Path,
+    *,
+    mode: MarketScanMode = "official",
+):
     settings, rule_version = _settings_and_rule(cache_path=tmp_path / "skip.sqlite3")
     cache = SQLiteCache(settings=settings)
     repo = cache.market_scan_repo
     contract = market_scan_rule_contract(settings)
+    as_of, data_date, quote_date, _observed_at, _quote_timestamp = _mode_context(mode)
     run = repo.create_run(
         trigger="manual",
-        mode="official",
+        mode=mode,
         rule_version=rule_version,
-        as_of="2026-07-17 16:30:00",
-        data_date=DATA_DATE.isoformat(),
+        as_of=as_of.isoformat(sep=" "),
+        data_date=data_date.isoformat(),
+        quote_date=quote_date.isoformat(),
         scope=FULL_MARKET_SCOPE,
         rule_contract=contract,
     )
@@ -1020,15 +1197,70 @@ def _running_repository(tmp_path: Path):
         ],
         excluded_count=0,
     )
-    repo.begin_quote_capture(run.id, "2026-07-17T08:29:59Z")
+    capture_started_at, capture_finished_at = _capture_times(mode)
+    repo.begin_quote_capture(run.id, capture_started_at)
     repo.seal_quote_capture(
         run.id,
-        finished_at="2026-07-17T08:30:02Z",
-        decision_as_of="2026-07-17 16:30:00",
+        finished_at=capture_finished_at,
+        decision_as_of=as_of.isoformat(sep=" "),
         duration_ms=3_000,
         count=1,
     )
     return repo, run, repo.pending_items(run.id)[0], settings, rule_version
+
+
+def _mode_context(
+    mode: MarketScanMode,
+) -> tuple[datetime, date, date, str, str]:
+    if mode == "official":
+        return (
+            AS_OF,
+            DATA_DATE,
+            DATA_DATE,
+            QUOTE_OBSERVED_AT,
+            "2026-07-17T15:00:00+08:00",
+        )
+    if mode == "intraday":
+        return (
+            datetime(2026, 7, 17, 10, 30),
+            date(2026, 7, 16),
+            date(2026, 7, 17),
+            "2026-07-17 10:30:00",
+            "2026-07-17T10:29:30+08:00",
+        )
+    return (
+        datetime(2026, 7, 17, 8, 30),
+        date(2026, 7, 16),
+        date(2026, 7, 16),
+        "2026-07-17 08:30:00",
+        "2026-07-16T15:00:00+08:00",
+    )
+
+
+def _capture_times(mode: MarketScanMode) -> tuple[str, str]:
+    if mode == "intraday":
+        return "2026-07-17T02:29:59Z", "2026-07-17T02:30:02Z"
+    if mode == "preopen":
+        return "2026-07-17T00:29:59Z", "2026-07-17T00:30:02Z"
+    return "2026-07-17T08:29:59Z", "2026-07-17T08:30:02Z"
+
+
+def _quote_for_mode(quote: Quote, mode: MarketScanMode) -> Quote:
+    if mode != "intraday":
+        return quote
+    previous = float(quote.price)
+    current = round(previous * 1.03, 4)
+    return quote.model_copy(
+        update={
+            "prev_close": previous,
+            "price": current,
+            "open": round(previous * 1.01, 4),
+            "high": round(current * 1.01, 4),
+            "low": round(previous * 0.99, 4),
+            "change": round(current - previous, 4),
+            "change_pct": round((current - previous) / previous * 100, 4),
+        }
+    )
 
 
 def _valid_action_source_run(

@@ -63,8 +63,7 @@ def validate_production_result_write(
     if not _is_current_production_run(run, rule_version=rule_version):
         return
     if result.status == "skipped":
-        if str(run["mode"] or "") == "official":
-            _require_production_skip_evidence(result, run, conn)
+        _require_production_skip_evidence(result, run, conn)
         return
     if result.status != "success":
         return
@@ -90,10 +89,7 @@ def validate_persisted_production_skips(
     run: sqlite3.Row,
 ) -> int:
     rule_version = str(run["rule_version"] or "")
-    if (
-        not _is_current_production_run(run, rule_version=rule_version)
-        or str(run["mode"] or "") != "official"
-    ):
+    if not _is_current_production_run(run, rule_version=rule_version):
         return 0
     rows = conn.execute(
         """

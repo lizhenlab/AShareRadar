@@ -43,6 +43,7 @@ router = APIRouter()
 MarketCode: TypeAlias = Literal["SH", "SZ", "BJ"]
 MarketScanStatusFilter: TypeAlias = MarketScanResultStatus | Literal["all"]
 MarketScanRunStatusFilter: TypeAlias = MarketScanRunStatus | Literal["published"]
+MarketScanRunAuthority: TypeAlias = Literal["verified", "navigation"]
 T = TypeVar("T")
 
 
@@ -107,11 +108,15 @@ async def market_scan_runs(
     mode: MarketScanMode | None = Query(None),
     status: MarketScanRunStatusFilter | None = Query(None),
     data_date: date | None = Query(None),
+    authority: MarketScanRunAuthority = Query("verified"),
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketScanRunPage:
     response.headers["Cache-Control"] = "no-store"
+    if authority == "navigation":
+        response.headers["X-Market-Scan-Authority"] = "navigation-only"
+    read = scanner.run_identities if authority == "navigation" else scanner.runs
     return await run_sync_api_async(
-        lambda: scanner.runs(
+        lambda: read(
             page=page,
             page_size=page_size,
             mode=mode,

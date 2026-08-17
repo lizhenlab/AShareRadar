@@ -281,10 +281,20 @@ def _valid_skip_contract(
         value.get("schema_version") == MARKET_SCAN_SKIP_EVIDENCE_SCHEMA_VERSION
         and value.get("contract_version") == MARKET_SCAN_SKIP_EVIDENCE_CONTRACT_VERSION
         and value.get("reason_code") in MARKET_SCAN_SKIP_REASON_CODES
-        and expected[7] == "official"
+        and _valid_skip_mode(value.get("reason_code"), expected[7])
         and _RULE_PATTERN.fullmatch(str(expected[8])) is not None
         and isinstance(facts, Mapping)
     )
+
+
+def _valid_skip_mode(reason_code: object, mode: object) -> bool:
+    if reason_code == "official_session_gap":
+        return mode == "official"
+    return reason_code == "new_listing_insufficient_history" and mode in {
+        "official",
+        "intraday",
+        "preopen",
+    }
 
 
 def _verified_skip_pit_context(

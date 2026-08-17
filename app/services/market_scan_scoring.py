@@ -659,7 +659,7 @@ def _rankable_completed_rows(
             f"完整前复权日K不足：需要 {required_history_rows} 根，"
             f"当前 {len(completed_rows)} 根"
         )
-        if mode == "official" and item.is_new and item.list_date:
+        if item.is_new and item.list_date:
             _require_justified_skip_liquidity(quote, completed_rows)
             try:
                 facts = new_listing_insufficient_history_facts(

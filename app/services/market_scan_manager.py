@@ -608,6 +608,23 @@ class MarketScanManager:
             data_date=data_date,
         )
 
+    def run_identities(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None = None,
+        status: MarketScanRunStatus | Literal["published"] | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage:
+        return self._queries().run_identities(
+            page=page,
+            page_size=page_size,
+            mode=mode,
+            status=status,
+            data_date=data_date,
+        )
+
     def results(
         self,
         run_id: int,
@@ -740,8 +757,14 @@ class MarketScanManager:
         run = self.run(run_id)
         if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
             raise ProbabilityResearchUnavailable("只有已发布的全市场榜单可以导出 Excel")
-        if run.mode != "official" or run.scope != FULL_MARKET_SCOPE or run.quote_date != run.data_date:
-            raise ProbabilityResearchUnavailable("只有盘后正式全市场榜单可以导出概率研究 Excel")
+        if run.mode not in {"official", "intraday"} or run.scope != FULL_MARKET_SCOPE:
+            raise ProbabilityResearchUnavailable(
+                "只有盘后正式或盘中临时全市场榜单可以导出 Excel"
+            )
+        if run.mode == "official" and run.quote_date != run.data_date:
+            raise ProbabilityResearchUnavailable(
+                "盘后正式榜单导出要求行情日期与完整日K截止日一致"
+            )
         page = self.results(
             run_id,
             page=1,
@@ -778,7 +801,8 @@ class MarketScanManager:
                 run_id,
                 expected_run=page.run,
             )
-            if getattr(self, "_future_range_store", None) is not None
+            if run.mode == "official"
+            and getattr(self, "_future_range_store", None) is not None
             else not_generated_future_range_research(run_id)
         )
         return build_market_scan_workbook(

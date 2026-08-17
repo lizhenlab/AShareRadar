@@ -794,7 +794,13 @@ def _populate_info_sheet(sheet, page: MarketScanResultPage, filters: MarketScanE
         ("筛选摘要", screen_spec_digest(screen_spec)),
         ("筛选合同 JSON", _safe_json(screen_spec.model_dump(mode="json"))),
         ("导出条数", page.total), ("导出时间", datetime_to_text(exported_at)),
-        ("数据说明", "仅导出已持久化榜单快照，不会重新获取行情或重新计算。"),
+        (
+            "数据说明",
+            "仅导出已持久化的盘中临时榜单快照，不会重新获取行情或重新计算；"
+            "上涨概率研究与未来区间验证未生成。"
+            if run.mode == "intraday"
+            else "仅导出已持久化榜单快照，不会重新获取行情或重新计算。",
+        ),
     )
     sheet.append(["字段", "内容"])
     for key, value in rows:

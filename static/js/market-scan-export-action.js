@@ -13,7 +13,10 @@ export function createMarketScanExportAction(options) {
     if (!publishedRun || options.state.exportBusy) return null;
     options.state.exportBusy = true;
     options.view.renderExportBusy(true, publishedRun);
-    options.view.announce("正在导出当前筛选条件下的 Excel 榜单。", `export:start:${publishedRun.id}`);
+    options.view.announce(
+      "正在导出当前筛选条件下的 Excel 榜单，全市场文件可能需要 1–2 分钟。",
+      `export:start:${publishedRun.id}`
+    );
     const timeout = exportTimeoutScope();
     try {
       const response = await options.exportRequest(buildMarketScanExportUrl(publishedRun.id, options.elements), {

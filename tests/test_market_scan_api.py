@@ -226,17 +226,31 @@ def test_latest_and_history_routes_forward_mode_status_and_date_filters() -> Non
             "data_date": "2026-07-16",
         },
     )
+    navigation = client.get(
+        "/api/market-scans",
+        params={
+            "page": 1,
+            "page_size": 50,
+            "mode": "intraday",
+            "status": "published",
+            "data_date": "2026-07-16",
+            "authority": "navigation",
+        },
+    )
 
     assert latest.status_code == 200
     assert published.status_code == 200
     assert preopen.status_code == 200
     assert history.status_code == 200
+    assert navigation.status_code == 200
+    assert navigation.headers["x-market-scan-authority"] == "navigation-only"
     assert scanner.latest_calls == [
         ("intraday", False),
         ("official", True),
         ("preopen", False),
     ]
     assert scanner.list_calls == [(1, 50, "intraday", "published", "2026-07-16")]
+    assert scanner.identity_list_calls == [(1, 50, "intraday", "published", "2026-07-16")]
 
 
 def test_polling_identity_route_is_explicit_non_authorizing_and_no_store() -> None:
@@ -319,6 +333,10 @@ def test_four_snapshot_read_routes_share_one_nonblocking_admission_slot(tmp_path
         client.get(f"/api/market-scans/{scanner.active.id}/results"),
     ]
     identity = client.get("/api/market-scans/polling-identity", params={"mode": "official"})
+    navigation = client.get(
+        "/api/market-scans",
+        params={"mode": "official", "status": "published", "authority": "navigation"},
+    )
 
     assert [response.status_code for response in busy] == [503, 503, 503]
     assert all(response.headers["cache-control"] == "no-store" for response in busy)
@@ -329,6 +347,9 @@ def test_four_snapshot_read_routes_share_one_nonblocking_admission_slot(tmp_path
     assert scanner.result_calls == []
     assert identity.status_code == 200
     assert scanner.polling_identity_calls == ["official"]
+    assert navigation.status_code == 200
+    assert navigation.headers["x-market-scan-authority"] == "navigation-only"
+    assert scanner.identity_list_calls == [(1, 20, "official", "published", None)]
 
     release.set()
     first.join(timeout=5)
@@ -441,6 +462,7 @@ def test_history_route_rejects_invalid_mode_status_and_date() -> None:
     assert client.get("/api/market-scans/latest", params={"mode": "bad"}).status_code == 422
     assert client.get("/api/market-scans", params={"status": "pending-result"}).status_code == 422
     assert client.get("/api/market-scans", params={"data_date": "2026-02-30"}).status_code == 422
+    assert client.get("/api/market-scans", params={"authority": "cached"}).status_code == 422
     assert scanner.calls == []
 
 
@@ -990,6 +1012,7 @@ class _ScannerStub:
         self.create_calls: list[tuple[datetime | None, str]] = []
         self.latest_calls: list[tuple[str | None, bool]] = []
         self.list_calls: list[tuple[int, int, str | None, str | None, str | None]] = []
+        self.identity_list_calls: list[tuple[int, int, str | None, str | None, str | None]] = []
         self.detail_calls: list[int] = []
         self.result_calls: list[tuple[int, dict[str, object]]] = []
         self.export_calls: list[tuple[int, MarketScanExportFilters]] = []
@@ -1005,6 +1028,7 @@ class _ScannerStub:
             *self.create_calls,
             *self.latest_calls,
             *self.list_calls,
+            *self.identity_list_calls,
             *self.detail_calls,
             *self.result_calls,
             *self.export_calls,
@@ -1061,6 +1085,24 @@ class _ScannerStub:
         data_date: str | None = None,
     ) -> MarketScanRunPage:
         self.list_calls.append((page, page_size, mode, status, data_date))
+        return MarketScanRunPage(
+            items=[self.active] if page_size == 1 else [self.active, self.previous],
+            total=2,
+            page=page,
+            page_size=page_size,
+            page_count=(2 + page_size - 1) // page_size,
+        )
+
+    def run_identities(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: str | None = None,
+        status: str | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage:
+        self.identity_list_calls.append((page, page_size, mode, status, data_date))
         return MarketScanRunPage(
             items=[self.active] if page_size == 1 else [self.active, self.previous],
             total=2,

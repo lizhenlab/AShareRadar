@@ -167,6 +167,44 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
         status: MarketScanRunStatus | Literal["published"] | None = None,
         data_date: str | None = None,
     ) -> MarketScanRunPage:
+        return self._list_runs(
+            page=page,
+            page_size=page_size,
+            mode=mode,
+            status=status,
+            data_date=data_date,
+            verify_published=True,
+        )
+
+    def list_run_identities(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None = None,
+        status: MarketScanRunStatus | Literal["published"] | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage:
+        """Return navigation-only rows that cannot authorize a publication read."""
+        return self._list_runs(
+            page=page,
+            page_size=page_size,
+            mode=mode,
+            status=status,
+            data_date=data_date,
+            verify_published=False,
+        )
+
+    def _list_runs(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None,
+        status: MarketScanRunStatus | Literal["published"] | None,
+        data_date: str | None,
+        verify_published: bool,
+    ) -> MarketScanRunPage:
         clauses: list[str] = []
         parameters: list[object] = []
         append_exact_filter(clauses, parameters, "mode", mode)
@@ -193,8 +231,9 @@ class MarketScanQueryMixin(MarketScanRepositoryContext):
                 """,
                 (*parameters, page_size, offset),
             ).fetchall()
-            for row in rows:
-                _verify_published_row(conn, row)
+            if verify_published:
+                for row in rows:
+                    _verify_published_row(conn, row)
         return MarketScanRunPage(
             items=[run_from_row(row) for row in rows],
             total=total,

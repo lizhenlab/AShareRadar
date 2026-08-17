@@ -109,7 +109,12 @@ def verify_market_scan_skip_pit(
         or event_epoch > observed_epoch
         or observed_epoch > decision_epoch
         or bars[-1].date != expected_data_date
-        or not _same_quote_close(quote.price, bars[-1].close)
+        or not _quote_matches_completed_bar(
+            quote,
+            bars[-1].close,
+            expected_data_date=expected_data_date,
+            expected_quote_date=expected_quote_date,
+        )
     ):
         return False
     return (
@@ -286,6 +291,23 @@ def _same_quote_close(price: float, close: float) -> bool:
     absolute_gap = abs(price - close)
     relative_limit = max(price, close) * 0.5 / 100
     return absolute_gap <= max(0.02, relative_limit)
+
+
+def _quote_matches_completed_bar(
+    quote: Quote,
+    close: float,
+    *,
+    expected_data_date: str,
+    expected_quote_date: str,
+) -> bool:
+    if expected_quote_date == expected_data_date:
+        return _same_quote_close(quote.price, close)
+    try:
+        data_session = date.fromisoformat(expected_data_date)
+        quote_session = date.fromisoformat(expected_quote_date)
+    except ValueError:
+        return False
+    return quote_session > data_session and _same_quote_close(quote.prev_close, close)
 
 
 def _single_price_quote(quote: Quote) -> bool:

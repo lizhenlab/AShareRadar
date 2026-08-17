@@ -273,6 +273,16 @@ class MarketScanCacheProtocol(Protocol):
         data_date: str | None = None,
     ) -> MarketScanRunPage: ...
 
+    def market_scan_run_identities(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        mode: MarketScanMode | None = None,
+        status: MarketScanRunStatus | Literal["published"] | None = None,
+        data_date: str | None = None,
+    ) -> MarketScanRunPage: ...
+
     def pending_market_scan_items(self, run_id: int) -> list[MarketScanResultItem]: ...
 
     def prepare_market_scan_retry(

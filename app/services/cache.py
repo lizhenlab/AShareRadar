@@ -445,6 +445,15 @@ class SQLiteCache:
             data_date=data_date,
         )
 
+    def market_scan_run_identities(self, *, page: int, page_size: int, mode=None, status=None, data_date=None):
+        return self.market_scan_repo.list_run_identities(
+            page=page,
+            page_size=page_size,
+            mode=mode,
+            status=status,
+            data_date=data_date,
+        )
+
     def attach_market_scan_task_run(self, run_id: int, task_run_id: int) -> None:
         self.market_scan_repo.attach_task_run(run_id, task_run_id)
 

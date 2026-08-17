@@ -27,6 +27,8 @@ def validated_publication_diagnostics(
     validate_persisted_production_skips(conn, run)
     if diagnostics is None or not market_scan_diagnostics_authorize_action(diagnostics):
         return diagnostics
+    if str(run["mode"] or "") != "official" and int(run["skipped_count"] or 0):
+        return diagnostics
     receipt = validate_current_action_gate_claim(conn, run, diagnostics)
     if receipt is None:
         return diagnostics
