@@ -4,9 +4,9 @@
 #
 #    pip-compile --allow-unsafe --annotation-style=line --generate-hashes --output-file=requirements-lock.txt --strip-extras requirements.txt
 #
-akshare==1.18.60 \
-    --hash=sha256:14e47cd2df694faf6efa6e7b1e4812061dbe76fd5f6ed04964b3119ee94a2c5f \
-    --hash=sha256:959cb82dfcdd8c792e3304d4fe467d2fbff3ca31e469cf3ef0749bed01c1b158
+akshare==1.18.91 \
+    --hash=sha256:0f7f5622ed1b2c6cee85038402c32c7cdb244e1677106fdaec732f1dbcc1f077 \
+    --hash=sha256:340b8a490513fd3a1fd329bd0ec645e667faf5052f9b8c65aef14e06580e9846
     # via -r requirements.txt
 annotated-doc==0.0.4 \
     --hash=sha256:571ac1dc6991c450b25a9c2d84a3705e2ae7a53467b5d111c24fa8baabbed320 \
@@ -20,9 +20,9 @@ anyio==4.14.2 \
     --hash=sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494 \
     --hash=sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f
     # via httpx, openai, starlette
-baostock==0.9.1 \
-    --hash=sha256:5ec3a44cbec9471872b0a4ae02c39aea29db688bb740b769167393bc6e244a39 \
-    --hash=sha256:a30749f095fd58ecd7ba3799dad605d355ad8e6d19310bc437039e1e526f15fe
+baostock==0.9.3 \
+    --hash=sha256:16699d82d05037a8c133577fcdeb9ac0d5a7f31edc2432c4e883004e0a95e3f7 \
+    --hash=sha256:acbd19403285bc4e254cee8297cf0e2646ae2276e5af7e549deed3988ab02293
     # via -r requirements.txt
 beautifulsoup4==4.15.0 \
     --hash=sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7 \
@@ -836,9 +836,9 @@ pytz==2026.2 \
     --hash=sha256:04156e608bee23d3792fd45c94ae47fae1036688e75032eea2e3bf0323d1f126 \
     --hash=sha256:0e60b47b29f21574376f218fe21abc009894a2321ea16c6754f3cad6eb7cdd6a
     # via pandas
-requests==2.33.1 \
-    --hash=sha256:18817f8c57c6263968bc123d237e3b8b08ac046f5456bd1e307ee8f4250d3517 \
-    --hash=sha256:4e6d1ef462f3626a1f0a0a9c42dd93c63bad33f9f1c1937509b8c5c8718ab56a
+requests==2.34.2 \
+    --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
+    --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
     # via -r requirements.txt, akshare, tushare
 rich==15.0.0 \
     --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb \

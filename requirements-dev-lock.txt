@@ -4,9 +4,9 @@
 #
 #    pip-compile --allow-unsafe --annotation-style=line --generate-hashes --output-file=requirements-dev-lock.txt --strip-extras requirements-dev.txt
 #
-akshare==1.18.60 \
-    --hash=sha256:14e47cd2df694faf6efa6e7b1e4812061dbe76fd5f6ed04964b3119ee94a2c5f \
-    --hash=sha256:959cb82dfcdd8c792e3304d4fe467d2fbff3ca31e469cf3ef0749bed01c1b158
+akshare==1.18.91 \
+    --hash=sha256:0f7f5622ed1b2c6cee85038402c32c7cdb244e1677106fdaec732f1dbcc1f077 \
+    --hash=sha256:340b8a490513fd3a1fd329bd0ec645e667faf5052f9b8c65aef14e06580e9846
     # via -r requirements.txt
 annotated-doc==0.0.4 \
     --hash=sha256:571ac1dc6991c450b25a9c2d84a3705e2ae7a53467b5d111c24fa8baabbed320 \
@@ -28,9 +28,9 @@ attrs==26.1.0 \
     --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309 \
     --hash=sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32
     # via jsonschema, referencing
-baostock==0.9.1 \
-    --hash=sha256:5ec3a44cbec9471872b0a4ae02c39aea29db688bb740b769167393bc6e244a39 \
-    --hash=sha256:a30749f095fd58ecd7ba3799dad605d355ad8e6d19310bc437039e1e526f15fe
+baostock==0.9.3 \
+    --hash=sha256:16699d82d05037a8c133577fcdeb9ac0d5a7f31edc2432c4e883004e0a95e3f7 \
+    --hash=sha256:acbd19403285bc4e254cee8297cf0e2646ae2276e5af7e549deed3988ab02293
     # via -r requirements.txt
 beautifulsoup4==4.15.0 \
     --hash=sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7 \
@@ -1151,9 +1151,9 @@ referencing==0.37.0 \
     --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231 \
     --hash=sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8
     # via cyclonedx-python-lib, jsonschema, jsonschema-specifications
-requests==2.33.1 \
-    --hash=sha256:18817f8c57c6263968bc123d237e3b8b08ac046f5456bd1e307ee8f4250d3517 \
-    --hash=sha256:4e6d1ef462f3626a1f0a0a9c42dd93c63bad33f9f1c1937509b8c5c8718ab56a
+requests==2.34.2 \
+    --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
+    --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
     # via -r requirements.txt, akshare, cachecontrol, pip-audit, tushare
 rfc3339-validator==0.1.4 \
     --hash=sha256:138a2abdf93304ad60530167e51d2dfb9549521a836871b88d7f4695d0022f6b \
