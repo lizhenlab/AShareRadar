@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 404 | 1015 | 6052 | 1400 | 135468 |
-| `tests/` | 230 | 199 | 3560 | 884 | 117251 |
+| `tests/` | 230 | 199 | 3561 | 884 | 117266 |
 | `tools/` | 15 | 7 | 152 | 6 | 3314 |
 
 ## Python Function Health
@@ -16945,7 +16945,7 @@ Lines: 270
 
 #### `tests/test_stock_pool_metadata.py`
 
-Lines: 118
+Lines: 133
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -16954,9 +16954,10 @@ Lines: 118
 | function | `test_stock_pool_metadata_normalization_removes_placeholder_fields` | 41 | `def test_stock_pool_metadata_normalization_removes_placeholder_fields() -> None` |
 | function | `test_stock_pool_industry_normalization_removes_exchange_classification_prefixes` | 62 | `def test_stock_pool_industry_normalization_removes_exchange_classification_prefixes() -> None` |
 | function | `test_stock_pool_metadata_diagnostic_treats_invalid_date_as_incomplete` | 68 | `def test_stock_pool_metadata_diagnostic_treats_invalid_date_as_incomplete() -> None` |
-| function | `test_stock_pool_shrinkage_guard_applies_98_percent_per_market` | 77 | `def test_stock_pool_shrinkage_guard_applies_98_percent_per_market() -> None` |
-| function | `test_stock_pool_shrinkage_guard_accepts_exact_98_percent_boundary` | 94 | `def test_stock_pool_shrinkage_guard_accepts_exact_98_percent_boundary() -> None` |
-| function | `test_stock_pool_shrinkage_guard_keeps_fixed_floor_behavior_without_baseline` | 108 | `def test_stock_pool_shrinkage_guard_keeps_fixed_floor_behavior_without_baseline() -> None` |
+| function | `test_stock_pool_shrinkage_guard_applies_95_percent_per_market` | 77 | `def test_stock_pool_shrinkage_guard_applies_95_percent_per_market() -> None` |
+| function | `test_stock_pool_shrinkage_guard_accepts_exact_95_percent_boundary` | 94 | `def test_stock_pool_shrinkage_guard_accepts_exact_95_percent_boundary() -> None` |
+| function | `test_stock_pool_shrinkage_guard_accepts_current_bj_coverage` | 108 | `def test_stock_pool_shrinkage_guard_accepts_current_bj_coverage() -> None` |
+| function | `test_stock_pool_shrinkage_guard_keeps_fixed_floor_behavior_without_baseline` | 123 | `def test_stock_pool_shrinkage_guard_keeps_fixed_floor_behavior_without_baseline() -> None` |
 
 #### `tests/test_stock_rule_modules.py`
 

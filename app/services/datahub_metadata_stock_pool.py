@@ -40,7 +40,7 @@ from app.utils.symbols import normalize_symbol
 STOCK_POOL_FALLBACK_SECONDS = 60 * 60 * 24 * 30
 STOCK_POOL_MARKETS = frozenset({"SH", "SZ", "BJ"})
 STOCK_POOL_BASELINE_COMPARISON_MIN_COUNT = 100
-STOCK_POOL_MIN_BASELINE_RETAIN_RATIO = 0.98
+STOCK_POOL_MIN_BASELINE_RETAIN_RATIO = 0.95
 
 
 def _ensure_optional_positive_limit(limit: int | None) -> None:

@@ -74,9 +74,9 @@ def test_stock_pool_metadata_diagnostic_treats_invalid_date_as_incomplete() -> N
     assert any("上市日期完整率" in issue for issue in diagnostic.issues)
 
 
-def test_stock_pool_shrinkage_guard_applies_98_percent_per_market() -> None:
+def test_stock_pool_shrinkage_guard_applies_95_percent_per_market() -> None:
     baseline = [*_market_rows("SH", 100), *_market_rows("SZ", 100), *_market_rows("BJ", 100)]
-    candidate = [*baseline[3:100], *baseline[100:]]
+    candidate = [*baseline[6:100], *baseline[100:]]
 
     diagnostic = _stock_pool_shrinkage_diagnostic(
         candidate,
@@ -85,15 +85,15 @@ def test_stock_pool_shrinkage_guard_applies_98_percent_per_market() -> None:
         minimum_market_counts=(("BJ", 1), ("SH", 1), ("SZ", 1)),
     )
 
-    assert STOCK_POOL_MIN_BASELINE_RETAIN_RATIO == 0.98
+    assert STOCK_POOL_MIN_BASELINE_RETAIN_RATIO == 0.95
     assert diagnostic is not None
-    assert "SH 97/100" in diagnostic
+    assert "SH 94/100" in diagnostic
     assert "总量" not in diagnostic
 
 
-def test_stock_pool_shrinkage_guard_accepts_exact_98_percent_boundary() -> None:
+def test_stock_pool_shrinkage_guard_accepts_exact_95_percent_boundary() -> None:
     baseline = [*_market_rows("SH", 100), *_market_rows("SZ", 100), *_market_rows("BJ", 100)]
-    candidate = [*baseline[2:100], *baseline[100:]]
+    candidate = [*baseline[5:100], *baseline[100:]]
 
     diagnostic = _stock_pool_shrinkage_diagnostic(
         candidate,
@@ -102,6 +102,21 @@ def test_stock_pool_shrinkage_guard_accepts_exact_98_percent_boundary() -> None:
         minimum_market_counts=(("BJ", 1), ("SH", 1), ("SZ", 1)),
     )
 
+    assert diagnostic is None
+
+
+def test_stock_pool_shrinkage_guard_accepts_current_bj_coverage() -> None:
+    baseline = [*_market_rows("SH", 100), *_market_rows("SZ", 100), *_market_rows("BJ", 344)]
+    candidate = [*baseline[:200], *baseline[200:536]]
+
+    diagnostic = _stock_pool_shrinkage_diagnostic(
+        candidate,
+        baseline,
+        authoritative_min_count=100,
+        minimum_market_counts=(("BJ", 1), ("SH", 1), ("SZ", 1)),
+    )
+
+    assert len([row for row in candidate if row.market == "BJ"]) == 336
     assert diagnostic is None
 
 
