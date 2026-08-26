@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cmp_to_key
+import json
+from pathlib import Path
+import sqlite3
+from types import SimpleNamespace
 from typing import Any, Iterator, cast
 
 import pytest
@@ -15,6 +20,8 @@ from app.models.market_scan import (
     MarketScanRun,
     MarketScanRunPage,
 )
+from app.models.market_scan_screening import ScreenSortV2, ScreenSpecV2
+from app.repositories.market_scan_screening_sql import screen_spec_order_sql
 from app.services.market_scan_export import MarketScanExportFilters
 from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
 from app.services.market_scan_probability import (
@@ -24,6 +31,10 @@ from app.services.market_scan_probability import (
 from app.services.market_scan_probability_artifact import ProbabilityArtifactError
 from app.services.market_scan_probability_historical_context import (
     HistoricalProbabilityContextError,
+)
+from app.services.market_scan_official_execution_store import OfficialExecutionStoreStatus
+from app.services.market_scan_joint_execution_maintenance import (
+    MarketScanJointExecutionMaintenanceService,
 )
 from app.services.market_scan_probability_store import (
     ProbabilityFilterUnavailable,
@@ -35,6 +46,7 @@ from app.services.market_scan_probability_ranking import (
 )
 from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION
 from app.services.market_scan_query_service import MarketScanQueryService
+from app.services import market_scan_query_service as query_service_module
 from app.services.market_scan_research_stores import MarketScanResearchStores
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 
@@ -310,11 +322,30 @@ class _HistoricalProbabilityStore:
             "filter_qualified": False,
         }
         self.broken = broken
+        self.calls = 0
 
     def research_projection(self) -> dict[str, object]:
+        self.calls += 1
         if self.broken:
             raise HistoricalProbabilityContextError("fixture integrity failure")
         return self.projection
+
+
+class _CountingEvidenceCatalog:
+    def __init__(self) -> None:
+        self.official_calls = 0
+        self.joint_calls = 0
+
+    def status(self) -> OfficialExecutionStoreStatus:
+        self.official_calls += 1
+        return OfficialExecutionStoreStatus(False, "store_unavailable", None, 0, None, None)
+
+    def status_projection(self) -> dict[str, object]:
+        self.joint_calls += 1
+        return {"status": "store_unavailable", "filter_ready": False}
+
+    def has_current_projection(self, _run_id: int) -> bool:
+        return False
 
 
 def _run_binding(run: MarketScanRun | None = None, *, legacy: bool = False) -> dict[str, object]:
@@ -797,6 +828,49 @@ def test_probability_research_attaches_non_authorizing_historical_context(
     assert context["filter_qualified"] is False  # type: ignore[index]
 
 
+@pytest.mark.parametrize("mode,capture_status", (("official", None), ("official", "succeeded"), ("intraday", None)))
+@pytest.mark.parametrize("exported", (False, True))
+@pytest.mark.parametrize("broken", (False, True))
+def test_results_and_export_read_optional_context_catalogs_once(
+    mode: str, capture_status: str | None, exported: bool, broken: bool,
+) -> None:
+    historical = _HistoricalProbabilityStore(broken=broken)
+    catalogs = _CountingEvidenceCatalog()
+    probability = _ProbabilityStore(_calibrated_research(), {}) if capture_status == "succeeded" else None
+    service = _service(
+        _Cache(_run(mode=mode), capture_status=capture_status), probability=probability,
+        historical=historical, official=catalogs, joint=catalogs,
+    )
+    if exported:
+        page, _future = service.export_projection(29, filters=MarketScanExportFilters())
+    else:
+        page = _results(service, minimum=None)
+    assert historical.calls == catalogs.official_calls == catalogs.joint_calls == 1
+    context = cast(dict[str, object], page.probability_research["historical_context"])
+    assert context["status"] == ("unavailable" if broken else "ready")
+    assert context["filter_qualified"] is False
+    assert context["production_ranking_effect"] == "none"
+    assert cast(dict[str, object], page.probability_research["official_execution_evidence"])["formal_evidence_available"] is False
+    assert cast(dict[str, object], page.probability_research["joint_execution_evidence"])["filter_ready"] is False
+
+
+@pytest.mark.parametrize("minimum", (None, 0.70))
+def test_results_reject_invalid_probability_binding_before_reading_optional_catalogs(minimum: float | None) -> None:
+    research = _calibrated_research()
+    cast(dict[str, object], research["run_binding"])["quote_date"] = "2026-08-10"
+    historical = _HistoricalProbabilityStore()
+    catalogs = _CountingEvidenceCatalog()
+    cache = _Cache(_run())
+    service = _service(
+        cache, probability=_ProbabilityStore(research, {}),
+        historical=historical, official=catalogs, joint=catalogs,
+    )
+    with pytest.raises(ProbabilityArtifactError, match="quote_date"):
+        _results(service, minimum=minimum)
+    assert historical.calls == catalogs.official_calls == catalogs.joint_calls == 0
+    assert len(cache.result_queries) == (1 if minimum is None else 0)
+
+
 def test_succeeded_capture_without_source_artifact_fails_closed() -> None:
     run = _run(action_eligible=True)
     source = _RacingResearchSource(
@@ -896,6 +970,8 @@ def test_probability_filter_rejects_self_attested_mapping_even_when_all_checks_a
 
 def test_joint_opaque_store_projection_is_preferred_and_really_filters_symbols() -> None:
     run = _run()
+    historical = _HistoricalProbabilityStore()
+    context_calls: list[int] = []
     summary = {
         "status": "calibrated_shadow",
         "selection_qualified": True,
@@ -946,15 +1022,145 @@ def test_joint_opaque_store_projection_is_preferred_and_really_filters_symbols()
 
         @staticmethod
         def status_projection() -> dict[str, object]:
+            context_calls.append(run.id)
             return {"status": "current_prediction_ready", "filter_ready": True}
 
     cache = _Cache(run, capture_status="succeeded")
-    service = _service(cache, joint=_JointStore())
+    service = _service(cache, joint=_JointStore(), historical=historical)
     page = _results(service, minimum=0.70)
 
     assert [item.symbol for item in page.items] == ["600519.SH"]
     assert cache.result_queries[-1]["symbols"] == ("600519.SH",)
     assert page.probability_research["authority_backend"] == "joint_execution_opaque_v1"
+    assert historical.calls == 1
+    assert context_calls == [run.id]
+
+
+class _ForbiddenAuthorityCatalog:
+    registry_digest = "a" * 64
+
+    def status(self) -> OfficialExecutionStoreStatus:
+        pytest.fail("maintenance pending/failed must not deep-read the official store")
+
+    def research_projection(self) -> dict[str, object]:
+        pytest.fail("maintenance pending/failed must not reuse the old historical context")
+
+
+def _maintenance_store(
+    tmp_path: Path,
+) -> MarketScanJointExecutionMaintenanceService:
+    return MarketScanJointExecutionMaintenanceService(
+        cast(Any, SimpleNamespace(path=tmp_path / "runtime.sqlite3")),
+        cast(Any, _ForbiddenAuthorityCatalog()),
+        ranking_store=cast(Any, object()),
+    )
+
+
+@pytest.mark.parametrize("status", ["maintenance_pending", "maintenance_failed"])
+@pytest.mark.parametrize("capture_status", ["succeeded", "pending"])
+def test_maintenance_unavailable_queries_never_fall_back_to_old_authority_or_official_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str, capture_status: str,
+) -> None:
+    joint = _maintenance_store(tmp_path)
+    if status == "maintenance_pending":
+        joint._maintenance_running = True
+    else:
+        def fail(_now: object) -> object:
+            raise RuntimeError("maintenance failed")
+        monkeypatch.setattr(joint, "_run_locked", fail)
+        with pytest.raises(RuntimeError, match="maintenance failed"):
+            joint.run()
+    cache = _Cache(_run(), capture_status=capture_status)
+    catalog = _ForbiddenAuthorityCatalog()
+    service = _service(
+        cache, joint=joint, probability=_ForbiddenProbabilityStore(),
+        source=_ForbiddenResearchSource(), official=catalog, historical=catalog,
+    )
+
+    research = service.probability_research(29)
+    projected, probabilities = service.probability_projection(29)
+    page = _results(service, minimum=None)
+    exported, _future = service.export_projection(29, filters=MarketScanExportFilters())
+    for evidence in (research, projected, page.probability_research, exported.probability_research):
+        assert evidence["status"] == "not_generated"
+        assert evidence["availability"] == evidence["pipeline_stage"] == status
+        assert evidence["filter_qualified"] is False
+        assert evidence["run_binding"] is None
+        assert evidence["official_execution_evidence"]["formal_evidence_available"] is False
+        assert evidence["official_execution_evidence"]["verified_session_count"] == 0
+        assert evidence["joint_execution_evidence"]["filter_ready"] is False
+        assert evidence["historical_context"]["availability"] == status
+        for targets in evidence["horizons"].values():
+            for summary in targets.values():
+                assert summary["status"] == "not_generated"
+                assert summary["filter_qualified"] is False
+                assert summary["probability"] is None
+    assert probabilities == {}
+    assert all(item.upside_probabilities == {} for item in page.items + exported.items)
+    assert page.production_ranking["status"] == exported.production_ranking["status"] == "inactive"
+    assert all(item.base_production_rank is None for item in page.items + exported.items)
+    cache.result_queries.clear()
+    with pytest.raises(ProbabilityFilterUnavailable, match="尚无已校准 Shadow 概率"):
+        _results(service, minimum=0.5)
+    with pytest.raises(ProbabilityFilterUnavailable, match="尚无已校准 Shadow 概率"):
+        service.export_projection(29, filters=MarketScanExportFilters(min_upside_probability=0.5))
+    assert cache.result_queries == []
+
+
+def test_maintenance_starting_after_probability_projection_discards_old_records(
+    tmp_path: Path,
+) -> None:
+    joint = _maintenance_store(tmp_path)
+    pending = joint._maintenance_summary("maintenance_pending").payload()
+
+    class _RacingJoint:
+        @staticmethod
+        def run_projection(_run_id: int, **_query: object) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+            return _calibrated_research(), {"600519.SH": _probability_horizons(0.9)}
+
+        @staticmethod
+        def status_projection() -> dict[str, object]:
+            return pending
+
+    service = _service(
+        _Cache(_run(), capture_status="succeeded"), joint=_RacingJoint(),
+        probability=_ForbiddenProbabilityStore(), source=_ForbiddenResearchSource(),
+        official=_ForbiddenAuthorityCatalog(), historical=_ForbiddenAuthorityCatalog(),
+    )
+    research, records = service.probability_projection(29)
+    assert research["availability"] == "maintenance_pending"
+    assert research["status"] == "not_generated" and research["run_binding"] is None
+    assert records == {}
+
+
+def test_maintenance_pending_after_old_ranking_capture_restores_base_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    joint = _maintenance_store(tmp_path)
+    joint._maintenance_running = True
+    cache = _Cache(_run(), capture_status="succeeded")
+    service = _service(
+        cache, joint=joint, probability=_ForbiddenProbabilityStore(),
+        source=_ForbiddenResearchSource(), official=_ForbiddenAuthorityCatalog(),
+    )
+    monkeypatch.setattr(service, "_production_ranking_projection", lambda _run_id: ({"status": "active"}, {}))
+
+    def old_ranking(verified: Any, *, query: dict[str, object], symbols: object, **_extra: object) -> MarketScanResultPage:
+        page = verified.results_page(**query, symbols=symbols)
+        return page.model_copy(update={
+            "items": [item.model_copy(update={"score": 99, "base_production_rank": 1}) for item in page.items],
+            "production_ranking": {"status": "active"},
+        })
+
+    monkeypatch.setattr(query_service_module, "_results_page_with_production_ranking", old_ranking)
+    page = _results(service, minimum=None)
+    assert page.probability_research["availability"] == "maintenance_pending"
+    assert page.production_ranking["status"] == "inactive"
+    assert page.production_ranking["reason"] == "maintenance_pending"
+    assert [(item.score, item.base_production_rank) for item in page.items] == [(80, None)]
+    assert all(item.upside_probabilities == {} for item in page.items)
+    assert len(cache.result_queries) == 2 and cache.result_queries[0] == cache.result_queries[1]
+    assert cache.verified_read_calls == [29]
 
 
 def test_active_v6_ranking_reorders_filters_and_preserves_v5_fields() -> None:
@@ -1109,6 +1315,59 @@ def test_active_v6_ranking_reorders_filters_and_preserves_v5_fields() -> None:
             "order": "asc",
             "symbols": None,
         }
+    ]
+
+
+@pytest.mark.parametrize("direction", ("asc", "desc"))
+@pytest.mark.parametrize(
+    "field",
+    (
+        "rank", "score", "raw_score", "trend_score", "change_pct", "amount",
+        "turnover_rate", "data_quality_score", "alpha_5d", "confidence", "risk", "tradability",
+    ),
+)
+def test_v6_sort_matches_frozen_sql_with_missing_values_and_ties(field: str, direction: str) -> None:
+    rows = _production_sort_rows(field)
+    _assert_production_sort_matches_sql(rows, [(field, direction)])
+
+
+@pytest.mark.parametrize("directions", (("asc", "desc"), ("desc", "asc"), ("desc", "desc")))
+def test_v6_multilevel_sort_keeps_missing_values_last_before_paging(directions: tuple[str, str]) -> None:
+    rows = _production_sort_rows("amount")
+    _assert_production_sort_matches_sql(rows, [("amount", directions[0]), ("raw_score", directions[1])])
+
+
+def _production_sort_rows(field: str) -> list[MarketScanResultItem]:
+    rows: list[MarketScanResultItem] = []
+    for index, (value, raw_score) in enumerate(((10, 80), (None, 90), (20, 70), (None, None), (10, None), (10, 80))):
+        updates: dict[str, object] = {"raw_score": raw_score}
+        if field in {"alpha_5d", "confidence", "risk", "tradability"}:
+            updates["score_details"] = {"components": {"score_dimensions": {"scores": {field: value}}}}
+        else:
+            updates[field] = value
+        rows.append(_result(29, f"60000{index}.SH").model_copy(update=updates))
+    return rows
+
+
+def _assert_production_sort_matches_sql(rows: list[MarketScanResultItem], sorts: list[tuple[str, str]]) -> None:
+    spec = ScreenSpecV2(sort=[ScreenSortV2.model_validate({"field": field, "order": order}) for field, order in sorts])
+    columns = ("symbol", "rank", "score", "raw_score", "trend_score", "change_pct", "amount", "turnover_rate", "data_quality_score")
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(f"CREATE TABLE results ({','.join(columns)}, metrics_json)")
+        connection.executemany(
+            f"INSERT INTO results VALUES ({','.join('?' for _ in range(len(columns) + 1))})",
+            [tuple(getattr(item, column) for column in columns) + (json.dumps({"score_details": item.score_details}),) for item in rows],
+        )
+        expected = [row[0] for row in connection.execute(f"SELECT symbol FROM results ORDER BY {screen_spec_order_sql(spec)}")]
+    def compare(left: MarketScanResultItem, right: MarketScanResultItem) -> int:
+        return query_service_module._compare_production_ranking_items(  # noqa: SLF001
+            left, right, sort=tuple(field for field, _ in sorts), order=tuple(order for _, order in sorts),
+        )
+    actual = sorted(rows, key=cmp_to_key(compare))
+    assert [item.symbol for item in actual] == expected
+    # Paginated results and the full export share this ordering; page boundaries must not move missing data to the front.
+    assert [[item.symbol for item in actual[start : start + 2]] for start in range(0, len(actual), 2)] == [
+        expected[start : start + 2] for start in range(0, len(expected), 2)
     ]
 
 
@@ -1412,6 +1671,7 @@ def _service(
     source: object | None = None,
     future_range: object | None = None,
     historical: object | None = None,
+    official: object | None = None,
     joint: object | None = None,
 ) -> MarketScanQueryService:
     if probability is not None and source is None:
@@ -1429,6 +1689,7 @@ def _service(
         probability_source=cast(Any, source),
         future_range=cast(Any, future_range),
         historical_probability=cast(Any, historical),
+        official_execution=cast(Any, official),
         joint_probability=cast(Any, joint),
     )
     return MarketScanQueryService(cast(Any, cache), stores)

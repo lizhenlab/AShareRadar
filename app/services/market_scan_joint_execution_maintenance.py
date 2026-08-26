@@ -9,7 +9,8 @@ reconstructed from those inputs on restart.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -67,6 +68,7 @@ from app.services.market_scan_joint_execution_source import (
 from app.services.market_scan_official_execution import VerifiedOfficialExecutionSession
 from app.services.market_scan_official_execution_store import (
     MarketScanOfficialExecutionStore,
+    OfficialExecutionStoreStatus,
 )
 from app.services.market_scan_probability import (
     VerifiedProbabilityFilterAuthorization,
@@ -342,6 +344,7 @@ class MarketScanJointExecutionMaintenanceService:
             cache.path
         )
         self._lock = RLock()
+        self._maintenance_running = False
         self._current_authority: _CurrentAuthority | None = None
         self._ranking_publications: dict[
             int, VerifiedProbabilityRankingPublication
@@ -369,16 +372,67 @@ class MarketScanJointExecutionMaintenanceService:
 
     def run(self, *, now: datetime | None = None) -> JointExecutionMaintenanceSummary:
         with self._lock:
-            summary = self._run_locked(now or market_now())
-            self._last_summary = summary
-            if summary.status == "official_execution_unavailable":
-                self._current_authority = None
-                self._active_ranking_control = None
-                self._ranking_publications = {}
-            return summary
+            if self._maintenance_running:
+                raise RuntimeError("joint execution maintenance is already running")
+            self._maintenance_running = True
+            self._revoke_current_authority()
+            try:
+                self._last_summary = self._maintenance_summary("maintenance_pending")
+                summary = self._run_locked(now or market_now())
+                self._last_summary = summary
+                return summary
+            except BaseException as exc:
+                self._revoke_current_authority()
+                self._last_summary = self._maintenance_summary(
+                    "maintenance_failed", failures=(_short_error(exc),)
+                )
+                raise
+            finally:
+                self._maintenance_running = False
+
+    @contextmanager
+    def _projection_read(self) -> Iterator[bool]:
+        acquired = self._lock.acquire(blocking=False)
+        try:
+            # RLock reentry succeeds in maintenance callbacks too. Those reads must
+            # not observe a partially rebuilt authority, even on the writer thread.
+            yield acquired and not self._maintenance_running
+        finally:
+            if acquired:
+                self._lock.release()
+
+    def _revoke_current_authority(self) -> None:
+        self._current_authority = None
+        self._active_ranking_control = None
+        self._ranking_publications = {}
+
+    def _maintenance_summary(
+        self, status: str, *, failures: tuple[str, ...] = ()
+    ) -> JointExecutionMaintenanceSummary:
+        registry_digest = getattr(self.official_store, "registry_digest", None)
+        official = OfficialExecutionStoreStatus(
+            configured=registry_digest is not None,
+            status="maintenance_pending" if status == "maintenance_pending" else "store_unavailable",
+            registry_digest=registry_digest,
+            verified_session_count=0,
+            first_session_date=None,
+            latest_session_date=None,
+            failures=failures,
+        ).payload()
+        return self._summary(
+            status=status,
+            generated_at=market_now().isoformat(),
+            official_status=official,
+            authorization_configured=self.authorization_digest is not None,
+            probability_ranking_control_configured=self.ranking_control_digest is not None,
+            blockers=(f"joint_execution_{status}",),
+            failures=failures,
+        )
 
     def status_projection(self) -> dict[str, object]:
-        with self._lock:
+        with self._projection_read() as available:
+            if not available:
+                return self._maintenance_summary("maintenance_pending").payload()
             if self._last_summary is None:
                 official = self.official_store.status().payload()
                 return self._summary(
@@ -394,11 +448,13 @@ class MarketScanJointExecutionMaintenanceService:
             return self._last_summary.payload()
 
     def has_current_projection(self, run_id: int, *, as_of: str | None = None) -> bool:
-        with self._lock:
-            return self._authority_is_current(run_id, as_of=as_of)
+        with self._projection_read() as available:
+            return available and self._authority_is_current(run_id, as_of=as_of)
 
     def filter_qualified(self, run_id: int, *, as_of: str | None = None) -> bool:
-        with self._lock:
+        with self._projection_read() as available:
+            if not available:
+                return False
             authority = self._current_authority
             return bool(
                 authority is not None
@@ -410,7 +466,7 @@ class MarketScanJointExecutionMaintenanceService:
             )
 
     def research_projection(self, run_id: int) -> dict[str, object]:
-        research, _records = self.run_projection(run_id)
+        research, _records = self.run_projection(run_id, symbols=())
         return research
 
     def run_projection(
@@ -419,7 +475,11 @@ class MarketScanJointExecutionMaintenanceService:
         *,
         symbols: Sequence[str] | None = None,
     ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-        with self._lock:
+        with self._projection_read() as available:
+            if not available:
+                return _not_generated_joint_projection(
+                    run_id, self._maintenance_summary("maintenance_pending").payload()
+                ), {}
             if not self._authority_is_current(run_id):
                 return _not_generated_joint_projection(
                     run_id,
@@ -431,7 +491,9 @@ class MarketScanJointExecutionMaintenanceService:
             return deepcopy(research), deepcopy(records)
 
     def has_production_ranking(self, run_id: int) -> bool:
-        with self._lock:
+        with self._projection_read() as available:
+            if not available:
+                return False
             publication = self._ranking_publications.get(run_id)
             if publication is None:
                 return False
@@ -447,16 +509,17 @@ class MarketScanJointExecutionMaintenanceService:
         self,
         run_id: int,
     ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-        with self._lock:
+        with self._projection_read() as available:
+            if not available:
+                return _inactive_production_ranking_projection(run_id, "maintenance_pending"), {}
             if not self.has_production_ranking(run_id):
-                return {
-                    "contract_version": "market-scan-probability-ranking-projection-v1",
-                    "status": "inactive",
-                    "run_id": run_id,
-                    "score_rule_version": PROBABILITY_RANKING_SCORE_RULE_VERSION,
-                    "base_v5_mutated": False,
-                    "historical_ranks_mutated": False,
-                }, {}
+                reason = (
+                    "maintenance_failed"
+                    if self._last_summary is not None
+                    and self._last_summary.status == "maintenance_failed"
+                    else None
+                )
+                return _inactive_production_ranking_projection(run_id, reason), {}
             publication = self._ranking_publications[run_id]
             context = {
                 "contract_version": "market-scan-probability-ranking-projection-v1",
@@ -477,14 +540,14 @@ class MarketScanJointExecutionMaintenanceService:
 
     def _authority_is_current(self, run_id: int, *, as_of: str | None = None) -> bool:
         authority = self._current_authority
+        if authority is None or authority.predictions.run_id != run_id:
+            return False
         try:
             official_ready = self.official_store.status().formal_evidence_available
         except Exception:
             return False
         return bool(
-            authority is not None
-            and authority.predictions.run_id == run_id
-            and official_ready
+            official_ready
             and joint_execution_deployment_is_fresh(
                 authority.deployment,
                 as_of=as_of,
@@ -2147,6 +2210,22 @@ def _interval_projection(
     }
 
 
+def _inactive_production_ranking_projection(
+    run_id: int, reason: str | None = None
+) -> dict[str, object]:
+    context: dict[str, object] = {
+        "contract_version": "market-scan-probability-ranking-projection-v1",
+        "status": "inactive",
+        "run_id": run_id,
+        "score_rule_version": PROBABILITY_RANKING_SCORE_RULE_VERSION,
+        "base_v5_mutated": False,
+        "historical_ranks_mutated": False,
+    }
+    if reason is not None:
+        context["reason"] = reason
+    return context
+
+
 def _not_generated_joint_projection(
     run_id: int,
     status: Mapping[str, object],
@@ -2156,6 +2235,7 @@ def _not_generated_joint_projection(
         "run_id": run_id,
         "status": "not_generated",
         "availability": str(status.get("status") or "maintenance_not_run"),
+        "pipeline_stage": str(status.get("status") or "maintenance_not_run"),
         "default_horizon": JOINT_EXECUTION_HORIZON,
         "primary_target": PROBABILITY_PRIMARY_TARGET,
         "horizons": {"1": {}, "5": {}, "20": {}},
@@ -2183,7 +2263,7 @@ def _timestamp(value: str) -> datetime:
     return parsed
 
 
-def _short_error(exc: Exception) -> str:
+def _short_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {' '.join(str(exc).split())[:600]}"
 
 

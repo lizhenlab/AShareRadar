@@ -9,6 +9,7 @@ from typing import cast
 
 from app.db.market_scan_integrity import verify_market_scan_snapshot
 from app.models.market_scan import MarketScanResultItem, MarketScanResultStatus, MarketScanRun
+from app.models.market_scan_snapshot import validate_market_scan_run_binding
 from app.repositories.market_scan_context import MarketScanRepositoryContext
 from app.repositories.market_scan_mapping import result_from_row, run_from_row
 from app.repositories.market_scan_results import required_run_row
@@ -94,6 +95,8 @@ class MarketScanScreeningMixin(MarketScanRepositoryContext):
         self,
         run_id: int,
         symbols: Sequence[str],
+        *,
+        expected_run: MarketScanRun | None = None,
     ) -> list[MarketScanResultItem]:
         """Hydrate only response rows after a terminal run has been validated."""
 
@@ -107,6 +110,8 @@ class MarketScanScreeningMixin(MarketScanRepositoryContext):
             run_row = required_run_row(conn, run_id)
             if str(run_row["status"]) in {"success", "degraded"}:
                 verify_market_scan_snapshot(conn, run_id)
+            if expected_run is not None:
+                validate_market_scan_run_binding(expected_run, run_from_row(run_row))
             rows = conn.execute(
                 f"""
                 SELECT * FROM market_scan_result

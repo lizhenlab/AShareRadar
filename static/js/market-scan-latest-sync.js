@@ -135,6 +135,6 @@ function isDeterministicContractError(error) {
   const status = Number(error?.status);
   return error?.name === "MarketScanContractError"
     || error?.code === "market_scan_polling_identity_contract_error"
-    || error?.message === "请求超时，请稍后重试"
-    || (Number.isInteger(status) && status >= 400);
+    || (Number.isInteger(status) && status >= 400 && status < 500
+      && ![408, 425, 429].includes(status));
 }

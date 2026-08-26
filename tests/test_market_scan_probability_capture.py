@@ -555,6 +555,81 @@ def test_public_capture_rejects_symlink_output_root_without_writing_target(
     assert list(real_directory.iterdir()) == []
 
 
+@pytest.mark.parametrize("status", ["succeeded", "skipped", "pending", "processing"])
+def test_capture_reconcile_does_not_reverify_existing_outbox_for_enqueue_but_keeps_live_checks(tmp_path, monkeypatch, status):
+    from app.repositories import market_scan_lifecycle_support as lifecycle_support
+    from app.repositories import market_scan_probability_capture as capture_repository
+
+    cache, final = _canonical_action_source_cache(tmp_path)
+    archive_digest = "a" * 64 if status == "succeeded" else None
+    with sqlite3.connect(cache.path) as conn:
+        conn.execute(
+            """
+            UPDATE market_scan_probability_capture_outbox
+            SET status = ?, archive_digest = ?, lease_owner = ?, lease_expires_at = ?, completed_at = ?
+            WHERE run_id = ?
+            """,
+            (status, archive_digest, "previous-leader" if status == "processing" else None,
+             "2099-01-01T00:00:00Z" if status == "processing" else None,
+             "2026-08-11T09:00:00Z" if status in {"succeeded", "skipped"} else None, final.id),
+        )
+    checked = []
+    require_action = capture_repository.require_action_source
+
+    def forbid_enqueue_verification(*_args, **_kwargs):
+        raise AssertionError("existing outbox must be excluded before expensive enqueue verification")
+
+    def check_live_state(conn, run_id):
+        checked.append(run_id)
+        return require_action(conn, run_id)
+
+    monkeypatch.setattr(lifecycle_support, "require_market_scan_action_source", forbid_enqueue_verification)
+    monkeypatch.setattr(capture_repository, "require_action_source", check_live_state)
+    assert cache.reconcile_probability_source_capture_outbox() == 0
+    assert checked == ([final.id] if status in {"pending", "processing"} else [])
+    with sqlite3.connect(cache.path) as conn:
+        row = conn.execute(
+            "SELECT status, archive_digest, lease_owner, lease_expires_at FROM market_scan_probability_capture_outbox WHERE run_id = ?",
+            (final.id,),
+        ).fetchone()
+    assert row == ("pending" if status == "processing" else status, archive_digest, None, None)
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_capture_reconcile_new_outbox_still_requires_full_snapshot_verification(tmp_path, monkeypatch, tampered):
+    from app.db.market_scan_integrity import create_market_scan_immutability_triggers, drop_market_scan_immutability_triggers
+    from app.repositories import market_scan_lifecycle_support as lifecycle_support
+
+    cache, final = _canonical_action_source_cache(tmp_path)
+    with sqlite3.connect(cache.path) as conn:
+        conn.execute("DELETE FROM market_scan_probability_capture_outbox WHERE run_id = ?", (final.id,))
+        if tampered:
+            drop_market_scan_immutability_triggers(conn)
+            conn.execute(
+                """
+                UPDATE market_scan_result SET score = score + 0.125
+                WHERE run_id = ? AND symbol = (
+                    SELECT symbol FROM market_scan_result WHERE run_id = ? AND status = 'success' ORDER BY symbol LIMIT 1
+                )
+                """,
+                (final.id, final.id),
+            )
+            create_market_scan_immutability_triggers(conn)
+    checked = []
+    require_action = lifecycle_support.require_market_scan_action_source
+
+    def verify_before_enqueue(conn, run_id):
+        checked.append(run_id)
+        return require_action(conn, run_id)
+
+    monkeypatch.setattr(lifecycle_support, "require_market_scan_action_source", verify_before_enqueue)
+    assert cache.reconcile_probability_source_capture_outbox() == (0 if tampered else 1)
+    assert checked == [final.id]
+    with sqlite3.connect(cache.path) as conn:
+        row = conn.execute("SELECT status FROM market_scan_probability_capture_outbox WHERE run_id = ?", (final.id,)).fetchone()
+    assert row == (None if tampered else ("pending",))
+
+
 def _canonical_action_source_cache(tmp_path: Path) -> tuple[SQLiteCache, MarketScanRun]:
     # This shared fixture executes the real v5 scorer over 100 varied successes,
     # verifies one canonical production skip, and lets finish_run seal the replay

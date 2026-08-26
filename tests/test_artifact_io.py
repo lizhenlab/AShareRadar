@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+import json
+import os
 from pathlib import Path
+import random
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 
@@ -187,6 +193,148 @@ def test_strict_json_decode_rejects_duplicate_and_nonfinite_values() -> None:
         deeply_nested_value = [deeply_nested_value]
     with pytest.raises(ArtifactCanonicalJsonError):
         canonical_json_text(deeply_nested_value)
+
+
+@pytest.mark.parametrize("depth", [0, 1, 255, 256, 257, 2_000])
+@pytest.mark.parametrize("opening,closing", [("[", "]"), ('{"value":', "}")])
+def test_json_nesting_limit_counts_arrays_and_objects_exactly(
+    depth: int, opening: str, closing: str,
+) -> None:
+    encoded = (opening * depth + "0" + closing * depth).encode()
+    if depth > 256:
+        with pytest.raises(ArtifactJsonDecodeError, match="JSON nesting exceeds the supported limit"):
+            decode_json_bytes(encoded)
+    else:
+        assert canonical_json_bytes(decode_json_bytes(encoded)) == encoded
+
+
+@pytest.mark.parametrize("value", [
+    "[]{}" * 400,
+    '\\"' * 300,
+    "\\\\" * 300 + '"[{}]',
+    "中😀\n\r\t[{}]",
+    "trailing-backslash\\",
+])
+def test_json_strings_do_not_contribute_nesting_and_cannot_hide_real_depth(value: str) -> None:
+    text = "[" * 255 + json.dumps({"text": value}, ensure_ascii=False) + "]" * 255
+    decoded = decode_json_bytes(text.encode())
+    for _depth in range(255):
+        assert isinstance(decoded, list)
+        decoded = decoded[0]
+    assert decoded == {"text": value}
+
+    too_deep = '{"text":' + json.dumps(value) + ',"nested":' + "[" * 256 + "0" + "]" * 256 + "}"
+    with pytest.raises(ArtifactJsonDecodeError, match="JSON nesting exceeds the supported limit"):
+        decode_json_bytes(too_deep.encode())
+
+
+def _legacy_json_text_nesting(text: str) -> None:
+    """Frozen pre-optimization scanner: keep arbitrary malformed-input semantics."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+            continue
+        if character in "[{":
+            depth += 1
+            if depth > 256:
+                raise ArtifactJsonDecodeError("JSON nesting exceeds the supported limit")
+        elif character in "]}":
+            depth -= 1
+
+
+def _json_guard_outcome(guard: Callable[[str], None], text: str) -> tuple[type[Exception], str] | None:
+    try:
+        guard(text)
+    except ArtifactJsonDecodeError as exc:
+        return type(exc), str(exc)
+    return None
+
+
+def _json_decode_outcome(encoded: bytes) -> tuple[object, object]:
+    try:
+        return "decoded", decode_json_bytes(encoded)
+    except ArtifactJsonDecodeError as exc:
+        return type(exc), str(exc)
+
+
+def test_json_nesting_scanner_matches_legacy_on_malformed_and_random_text() -> None:
+    cases = [
+        "", '"', '"\\', '"' + "[" * 300, '\\"' + "{" * 300,
+        '"\\\n' + "[" * 300, '"\\\\"' + "[" * 257,
+        "]" * 300 + "[" * 400, '{"a":"\\\\\\\"[{}]", "b":' + "[" * 257,
+    ]
+    rng = random.Random(20260826)
+    for _case in range(5_000):
+        prefix = rng.choice(("", "[" * 254, "[" * 255, "[" * 256, "[" * 257, "]" * 12))
+        cases.append(prefix + "".join(rng.choices('[]{}"\\abc ,:\t\r\n012中😀', k=rng.randrange(250))))
+    for text in cases:
+        assert _json_guard_outcome(artifact_io._validate_json_text_nesting, text) == (
+            _json_guard_outcome(_legacy_json_text_nesting, text)
+        ), repr(text)
+
+
+def test_json_decoder_matches_legacy_for_random_values_and_corrupted_encodings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        b'{"a":1,"a":2}', b'{"a":1,"\\u0061":2}', b'[NaN]', b'[Infinity]', b'[-Infinity]',
+        b'{"a": NaN, "a": 1}', b'{"a": 1, "a": 2, "b": Infinity}', b'"\\q"', b'"\\u123"', b'\xff',
+    ]
+    rng = random.Random(73129)
+    for _case in range(300):
+        value: object = rng.choice((None, True, False, 3.5, -123, "中😀", 'quote"slash\\[{}]'))
+        for depth in range(rng.randrange(8)):
+            value = [value, depth] if rng.randrange(2) else {str(depth): value}
+        text = json.dumps(value, ensure_ascii=bool(rng.randrange(2)))
+        wrapping = rng.choice((0, 1, 248, 255, 256, 257))
+        text = "[" * wrapping + text + "]" * wrapping
+        position = rng.randrange(len(text))
+        cases.extend((
+            text.encode(), text[:position].encode(),
+            (text[:position] + rng.choice(('"', "\\", "[", "}", "\x00")) + text[position:]).encode(),
+        ))
+    with monkeypatch.context() as reference:
+        reference.setattr(artifact_io, "_validate_json_text_nesting", _legacy_json_text_nesting)
+        expected = [_json_decode_outcome(encoded) for encoded in cases]
+    assert [_json_decode_outcome(encoded) for encoded in cases] == expected
+
+
+def test_json_nesting_scanner_has_bounded_work_on_long_hostile_strings() -> None:
+    # Run hostile inputs separately so a future backtracking regression cannot hang pytest.
+    script = '''
+import json
+from app.artifacts.io import _validate_json_text_nesting
+cases = [
+    "x" * 2_000_000,
+    '"' + "x" * 2_000_000,
+    '"' + "x" * 2_000_000 + chr(92),
+    json.dumps((chr(92) + '"[{}]') * 200_000)[:-1],
+    '"" ' * 400_000,
+]
+for text in cases:
+    _validate_json_text_nesting(text)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_low_level_json_and_content_address_contracts_are_strict() -> None:

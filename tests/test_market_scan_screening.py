@@ -8,7 +8,8 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_market_scanner
+from app.api.deps import get_market_scan_heavy_read_admission, get_market_scanner
+from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission
 from app.api.errors import validation_exception_handler
 from app.api.routes import market_scan
 from app.artifacts.io import canonical_json_text, sha256_hex
@@ -67,8 +68,11 @@ class _FrozenRepository:
         self,
         run_id: int,
         symbols: list[str] | tuple[str, ...],
+        *,
+        expected_run: MarketScanRun,
     ) -> list[MarketScanResultItem]:
         assert run_id == self.run.id
+        assert expected_run is self.run
         selected = tuple(symbols)
         self.hydrated_symbols.append(selected)
         by_symbol = {item.symbol: item for item in self.rows}
@@ -397,6 +401,8 @@ def test_screening_routes_return_typed_payloads_and_map_unavailable_to_422() -> 
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.include_router(market_scan.router)
     app.dependency_overrides[get_market_scanner] = lambda: scanner
+    admission = MarketScanHeavyReadAdmission()
+    app.dependency_overrides[get_market_scan_heavy_read_admission] = lambda: admission
     client = TestClient(app)
 
     breadth = client.get("/api/market-scans/41/breadth")

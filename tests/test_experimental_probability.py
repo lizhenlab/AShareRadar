@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
-from app.api.deps import get_market_scan_heavy_read_admission, get_market_scanner
+from app.api.deps import get_market_scan_experimental_read_admission, get_market_scanner
 from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission
 from app.api.routes.market_scan import router
 from app.artifacts.io import canonical_json_bytes, exclusive_atomic_publish, sha256_hex
@@ -21,6 +21,7 @@ from app.services.experimental_probability_model import (
     experimental_probability, fit_experimental_estimator, load_experimental_model,
 )
 from app.services.market_scan_experimental_probability import _validate_signal_date, experimental_results
+from app.services.market_scan_probability_history import trusted_probability_history_dates
 from app.services.market_scan_probability import PROBABILITY_CALIBRATOR_VERSION, PROBABILITY_MODEL_VERSION
 from app.services.market_scan_probability_replay import HISTORICAL_REPLAY_FEATURE_NAMES
 
@@ -118,10 +119,11 @@ def _database(tmp_path):
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE kline_daily (symbol TEXT,adjustment_mode TEXT,date TEXT,open REAL,close REAL,high REAL,low REAL,volume REAL,as_of TEXT,data_version TEXT,contract_version TEXT,fallback_used INTEGER,source TEXT,fetched_at TEXT)")
     symbols = ["600001.SH", "000001.SZ", "920001.BJ", "600002.SH"]
+    days = trusted_probability_history_dates("2026-08-25", 21)
     for number, symbol in enumerate(symbols):
         count = 20 if number == 3 else 21
         for offset in range(count):
-            day = date(2026, 8, 5) + timedelta(days=offset)
+            day = date.fromisoformat(days[offset])
             close = 10 + offset * .01 * (number + 1)
             volume = 0 if number == 2 and offset == 20 else 1000
             connection.execute("INSERT INTO kline_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
@@ -184,14 +186,18 @@ def test_api_requires_explicit_experimental_acknowledgment_and_separate_paramete
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_market_scanner] = lambda: scanner
-    app.dependency_overrides[get_market_scan_heavy_read_admission] = lambda: MarketScanHeavyReadAdmission()
+    app.dependency_overrides[get_market_scan_experimental_read_admission] = lambda: MarketScanHeavyReadAdmission()
     with TestClient(app) as client:
         uri = "/api/market-scans/3/experimental-probability"
         assert client.get(uri).status_code == 422 and not scanner.calls
         assert client.get(uri + "?acknowledge_experimental=true&min_probability=2").status_code == 422
         response = client.get(uri + "?acknowledge_experimental=true&min_probability=0.4&market=BJ&sort=probability&page=2")
         assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
-        assert scanner.calls[0] == (3, {"minimum": .4, "market": "BJ", "keyword": "", "sort": "probability", "page": 2, "page_size": 50})
+        assert scanner.calls[0] == (3, {"prediction_kind": "net_h5", "minimum": .4, "market": "BJ", "keyword": "", "sort": "probability", "page": 2, "page_size": 50})
+        for kind in ["close_d1", "close_d2", "close_d5"]:
+            assert client.get(uri + f"?acknowledge_experimental=true&prediction_kind={kind}").status_code == 200
+            assert scanner.calls[-1][1]["prediction_kind"] == kind
+        assert client.get(uri + "?acknowledge_experimental=true&prediction_kind=h1").status_code == 422
         scanner.unavailable = True
         missing = client.get(uri + "?acknowledge_experimental=true")
         assert missing.status_code == 422 and missing.json()["detail"] == "实验模型已过期"
@@ -338,4 +344,5 @@ def test_experimental_cli_binds_paths_and_reports_non_authorizing_result(tmp_pat
     assert cli.main() == 0 and calls == [(source, directory)]
     report = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert report == {"status": "experimental_model_built", "path": str(target),
+                      "prediction_kind": "net_h5",
                       "formal_filter_qualified": False, "production_ranking_effect": "none"}

@@ -28,7 +28,8 @@ export function createMarketScanScreeningView(root) {
     renderEvaluationError: (message) => renderRegionError(elements.evaluation, message),
     renderLoading: (runId) => renderLoading(elements, runId),
     renderNoRun: () => renderNoRun(elements),
-    renderRequestFinished: () => renderRequestFinished(elements),
+    renderRequestFinished: (complete = true) => renderRequestFinished(elements, complete),
+    renderRequestCancelled: () => renderRequestCancelled(elements),
     renderScreenSpec: (spec) => renderScreenSpec(elements, spec),
     setColumnView: (value) => setColumnView(elements, value),
   };
@@ -42,7 +43,9 @@ export function renderScreenSpecChips(spec) {
   if (spec.is_st !== null) chips.push(spec.is_st ? "仅 ST" : "排除 ST");
   if (spec.is_new !== null) chips.push(spec.is_new ? "仅新股" : "排除新股");
   if (spec.keyword) chips.push(`搜索：${spec.keyword}`);
-  Object.entries(spec.ranges).forEach(([field, range]) => chips.push(rangeChip(field, range)));
+  Object.entries(spec.ranges).forEach(([field, range]) => {
+    if (range !== null && range !== undefined) chips.push(rangeChip(field, range));
+  });
   spec.sort.forEach((sort, index) => chips.push(`${index + 1}级排序：${RANGE_LABELS[sort.field] || sort.field}${sort.order === "desc" ? "降序" : "升序"}`));
   return chips;
 }
@@ -83,13 +86,28 @@ function resetScreenEvidence(elements, message) {
   elements.spec.removeAttribute("aria-label");
 }
 
-function renderRequestFinished(elements) {
+function renderRequestFinished(elements, complete) {
   elements.shell.setAttribute("aria-busy", "false");
   elements.refresh.disabled = false;
+  if (!complete) {
+    elements.summaryStatus.dataset.kind = "error";
+    elements.summaryStatus.textContent = "部分证据读取失败";
+    elements.feedback.className = "market-scan-screening-feedback error";
+    elements.feedback.textContent = "部分冻结证据未能读取，可点击刷新重试；失败内容不会作为有效筛选证据。";
+    return;
+  }
   if (elements.summaryStatus.dataset.kind === "loading") {
     elements.summaryStatus.dataset.kind = "ready";
     elements.summaryStatus.textContent = "冻结证据已读取";
   }
+}
+
+function renderRequestCancelled(elements) {
+  elements.shell.setAttribute("aria-busy", "false");
+  elements.refresh.disabled = false;
+  elements.summaryStatus.dataset.kind = "idle";
+  elements.summaryStatus.textContent = "读取已取消";
+  elements.feedback.textContent = "重新展开后将重新校验当前批次。";
 }
 
 function renderScreenSpec(elements, spec) {
@@ -261,8 +279,8 @@ function renderRegionError(region, message) {
 
 function rangeChip(field, range) {
   const label = RANGE_LABELS[field] || field;
-  const lower = range.min === undefined ? "不限" : screeningNumber(range.min, 2);
-  const upper = range.max === undefined ? "不限" : screeningNumber(range.max, 2);
+  const lower = range.min === undefined || range.min === null ? "不限" : screeningNumber(range.min, 2);
+  const upper = range.max === undefined || range.max === null ? "不限" : screeningNumber(range.max, 2);
   return `${label}：${lower}–${upper}`;
 }
 

@@ -8,30 +8,34 @@ from datetime import date, timedelta
 import math
 from pathlib import Path
 import sqlite3
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from app.artifacts.io import canonical_json_bytes, path_has_only_trusted_aliases, sha256_hex
 from app.db.market_mappers import row_to_kline
 from app.models.market_scan import MarketScanResultItem, MarketScanRun
 from app.repositories.market_scan_experimental import ExperimentalCandidate
 from app.services.experimental_probability_model import (
-    MODEL_DIRECTORY, WARNING, ExperimentalEstimator, ExperimentalProbabilityUnavailable,
-    experimental_probability, load_experimental_model,
+    MODEL_DIRECTORY, ExperimentalEstimator, ExperimentalPredictionKind, ExperimentalProbabilityUnavailable,
+    experimental_definition, experimental_probability, load_experimental_model,
 )
 from app.services.market_scan_probability_replay import OHLCVBar, historical_replay_feature_values
+from app.services.trading_calendar import next_trade_dates, trading_date_range
 from app.utils.clock import market_now
 
 
 ExperimentalSort = Literal["probability", "base_rank"]
-Candidate = MarketScanResultItem | ExperimentalCandidate
+Candidate: TypeAlias = MarketScanResultItem | ExperimentalCandidate
 
 
 def experimental_results(database: Path, run: MarketScanRun, items: Sequence[Candidate], *,
+                         prediction_kind: ExperimentalPredictionKind = "net_h5",
                          minimum: float | None = None, market: str | None = None, keyword: str = "",
                          sort: ExperimentalSort = "probability", page: int = 1, page_size: int = 50) -> dict[str, Any]:
     _validate_query(minimum, market, keyword, sort, page, page_size)
-    estimator, digest = load_experimental_model(database.parent / MODEL_DIRECTORY)
+    definition = experimental_definition(prediction_kind)
+    estimator, digest = load_experimental_model(database.parent / MODEL_DIRECTORY, prediction_kind=prediction_kind)
     _validate_signal_date(estimator, run.data_date)
+    target_date = next_trade_dates(date.fromisoformat(run.data_date), definition["target_offset"])[-1].isoformat()
     records, missing, input_digest = _current_predictions(database, run.data_date, items, estimator)
     records.sort(key=lambda row: (-row["probability"], row["symbol"]))
     for rank, record in enumerate(records, start=1):
@@ -45,7 +49,10 @@ def experimental_results(database: Path, run: MarketScanRun, items: Sequence[Can
         "formal_filter_qualified": False, "production_ranking_effect": "none",
         "base_snapshot_digest": run.snapshot_digest, "base_rule_version": run.rule_version,
         "signal_date": run.data_date, "generated_at": market_now().isoformat(),
-        "horizon": 5, "target": "net_return_positive", "warning": WARNING,
+        "prediction_kind": prediction_kind, "horizon": estimator.horizon, "target": estimator.target,
+        "reference": definition["reference"], "target_session_offset": definition["target_offset"],
+        "target_session_date": target_date,
+        "probability_label": definition["label"], "warning": definition["warning"],
         "input_digest": input_digest, "model_digest": digest,
         "model": {
             "generated_at": estimator.generated_at, "latest_label_date": estimator.latest_label_date,
@@ -55,12 +62,13 @@ def experimental_results(database: Path, run: MarketScanRun, items: Sequence[Can
             "training_symbol_count": len(estimator.training_symbols),
             "source_filename": estimator.source_filename, "source_integrity_digest": estimator.source_integrity_digest,
             "historical_recipe_evaluation": evaluation,
+            "direction_evidence": estimator.direction_evidence.model_dump() if estimator.direction_evidence else None,
         },
         "coverage": {"successful_scan_count": len(items), "predicted_count": len(records),
                      "unavailable_count": sum(missing.values()), "unavailable_reasons": dict(missing)},
         "total": len(filtered), "page": page, "page_size": page_size,
         "page_count": (len(filtered) + page_size - 1) // page_size,
-        "filters": {"min_probability": minimum, "market": market, "keyword": keyword, "sort": sort},
+        "filters": {"prediction_kind": prediction_kind, "min_probability": minimum, "market": market, "keyword": keyword, "sort": sort},
         "items": filtered[offset:offset + page_size],
     }
 
@@ -71,7 +79,7 @@ def _validate_query(minimum: float | None, market: str | None, keyword: str,
         raise ExperimentalProbabilityUnavailable("实验概率阈值必须在 0 到 1 之间")
     if market not in {None, "SH", "SZ", "BJ"} or sort not in {"probability", "base_rank"} or len(keyword) > 80:
         raise ExperimentalProbabilityUnavailable("实验筛选条件无效")
-    if isinstance(page, bool) or isinstance(page_size, bool) or page < 1 or not 1 <= page_size <= 200:
+    if type(page) is not int or type(page_size) is not int or page < 1 or not 1 <= page_size <= 200:
         raise ExperimentalProbabilityUnavailable("实验分页条件无效")
 
 
@@ -91,6 +99,10 @@ def _current_predictions(database: Path, signal_date: str, items: Sequence[Candi
     if len(items) > 10000 or not path_has_only_trusted_aliases(database):
         raise ExperimentalProbabilityUnavailable("实验行情源路径或批次数量无效")
     start = (date.fromisoformat(signal_date) - timedelta(days=90)).isoformat()
+    expected_dates = None
+    if estimator.target == "close_return_positive":
+        sessions, _status = trading_date_range(date.fromisoformat(start), date.fromisoformat(signal_date))
+        expected_dates = tuple(day.isoformat() for day in sessions[-21:])
     records: list[dict[str, Any]] = []
     missing: Counter[str] = Counter()
     fingerprints: list[dict[str, Any]] = []
@@ -108,7 +120,7 @@ def _current_predictions(database: Path, signal_date: str, items: Sequence[Candi
                 (item.symbol, start, signal_date),
             ).fetchall()
             fingerprints.append({"symbol": item.symbol, "sha256": sha256_hex(canonical_json_bytes([dict(row) for row in raw_rows]))})
-            record, reason = _predict_item(item, raw_rows, signal_date, estimator, training_symbols)
+            record, reason = _predict_item(item, raw_rows, signal_date, estimator, training_symbols, expected_dates)
             if record is None:
                 missing[reason] += 1
             else:
@@ -119,9 +131,12 @@ def _current_predictions(database: Path, signal_date: str, items: Sequence[Candi
 
 
 def _predict_item(item: Candidate, raw_rows: Sequence[sqlite3.Row], signal_date: str,
-                  estimator: ExperimentalEstimator, training_symbols: set[str]) -> tuple[dict[str, Any] | None, str]:
+                  estimator: ExperimentalEstimator, training_symbols: set[str],
+                  expected_dates: tuple[str, ...] | None = None) -> tuple[dict[str, Any] | None, str]:
     if len(raw_rows) != 21 or raw_rows[0]["date"] != signal_date:
         return None, "missing_exact_date_or_21_bars"
+    if expected_dates is not None and tuple(row["date"] for row in reversed(raw_rows)) != expected_dates:
+        return None, "missing_fixed_session_window"
     try:
         bars = [row_to_kline(row) for row in reversed(raw_rows)]
         if bars[-1].volume <= 0:

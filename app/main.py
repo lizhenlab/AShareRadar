@@ -130,7 +130,7 @@ async def _close_container_resources_safely(container: AppContainer) -> None:
 async def _shutdown_container(container: AppContainer) -> None:
     errors: list[BaseException] = []
     try:
-        await container.market_scan_heavy_read_admission.aclose()
+        await _close_market_scan_read_admissions(container)
     except BaseException as exc:
         errors.append(exc)
     try:
@@ -146,6 +146,14 @@ async def _shutdown_container(container: AppContainer) -> None:
     except BaseException as exc:
         errors.append(exc)
     _raise_cleanup_errors("application shutdown failed", errors)
+
+
+async def _close_market_scan_read_admissions(container: AppContainer) -> None:
+    admissions = (container.market_scan_heavy_read_admission,
+                  getattr(container, "market_scan_experimental_read_admission", None))
+    results = await asyncio.gather(*(admission.aclose() for admission in admissions if admission is not None),
+                                   return_exceptions=True)
+    _raise_cleanup_errors("market-scan read shutdown failed", [item for item in results if isinstance(item, BaseException)])
 
 
 async def _close_datahub(datahub: object) -> None:

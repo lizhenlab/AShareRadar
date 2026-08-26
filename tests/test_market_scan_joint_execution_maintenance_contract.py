@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from datetime import datetime
 import gzip
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 from typing import cast
 
@@ -173,6 +174,174 @@ def test_service_fail_closed_status_and_timezone_contract(tmp_path: Path) -> Non
     assert not service.filter_qualified(1)
     assert not service.has_production_ranking(1)
     assert service.production_ranking_projection(1)[0]["status"] == "inactive"
+
+
+def _seed_old_maintenance_authority(
+    service: maintenance.MarketScanJointExecutionMaintenanceService,
+) -> None:
+    service._current_authority = cast(maintenance._CurrentAuthority, object())
+    service._active_ranking_control = cast(
+        maintenance.VerifiedProbabilityRankingManualControl, object()
+    )
+    service._ranking_publications[29] = cast(
+        maintenance.VerifiedProbabilityRankingPublication, object()
+    )
+    service._last_summary = service._summary(
+        status="current_prediction_ready",
+        generated_at="2026-08-23T16:00:00+08:00",
+        official_status={"status": "ready", "formal_evidence_available": True},
+        selection_qualified=True,
+        authorization_verified=True,
+        deployment_verified=True,
+        current_prediction_run_id=29,
+        current_prediction_count=10,
+        probability_ranking_status="production_ranking_ready",
+        probability_ranking_count=10,
+    )
+
+
+def _assert_closed_maintenance_reads(
+    service: maintenance.MarketScanJointExecutionMaintenanceService,
+    *,
+    status: str,
+) -> None:
+    projected = service.status_projection()
+    assert projected["status"] == status
+    for key in ("filter_ready", "selection_qualified", "authorization_verified", "deployment_verified"):
+        assert projected[key] is False
+    assert projected["current_prediction_count"] == 0
+    assert projected["probability_ranking_count"] == 0
+    assert projected["probability_ranking_control_verified"] is False
+    assert projected["official_execution"]["formal_evidence_available"] is False
+    assert projected["official_execution"]["verified_session_count"] == 0
+    assert not service.has_current_projection(29)
+    assert not service.filter_qualified(29)
+    research = service.research_projection(29)
+    assert research["availability"] == status
+    assert research["pipeline_stage"] == status
+    assert research["status"] == "not_generated"
+    assert research["filter_qualified"] is False
+    assert research["run_binding"] is None
+    research_with_records, records = service.run_projection(29)
+    assert research_with_records["availability"] == status and records == {}
+    assert not service.has_production_ranking(29)
+    ranking, ranked_records = service.production_ranking_projection(29)
+    assert ranking["status"] == "inactive" and ranked_records == {}
+    assert ranking["reason"] == status
+
+
+def _forbid_authority_store_reads(
+    service: maintenance.MarketScanJointExecutionMaintenanceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("pending/failed maintenance must not inspect authority stores")
+
+    monkeypatch.setattr(service.official_store, "status", forbidden)
+    monkeypatch.setattr(service.ranking_store, "is_rolled_back", forbidden)
+    monkeypatch.setattr(service.ranking_store, "verify_mirror", forbidden)
+
+
+def test_all_projection_reads_return_pending_before_background_maintenance_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path, authorization_digest="a" * 64, ranking_control_digest="b" * 64)
+    _seed_old_maintenance_authority(service)
+    _forbid_authority_store_reads(service, monkeypatch)
+    entered, release, read_done = Event(), Event(), Event()
+    errors: list[BaseException] = []
+
+    def maintain(_now: datetime) -> maintenance.JointExecutionMaintenanceSummary:
+        entered.set()
+        assert release.wait(5)
+        return service._maintenance_summary("maintenance_failed")
+
+    def read() -> None:
+        try:
+            _assert_closed_maintenance_reads(service, status="maintenance_pending")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            read_done.set()
+
+    monkeypatch.setattr(service, "_run_locked", maintain)
+    worker = Thread(target=service.run, daemon=True)
+    reader = Thread(target=read, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        reader.start()
+        assert read_done.wait(1), "projection read waited for the maintenance writer"
+        assert not errors
+        assert worker.is_alive()
+    finally:
+        release.set()
+        worker.join(timeout=2)
+        if reader.ident is not None:
+            reader.join(timeout=2)
+    assert not worker.is_alive() and not reader.is_alive()
+
+
+def test_same_thread_rlock_reentry_cannot_observe_partial_maintenance_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    _forbid_authority_store_reads(service, monkeypatch)
+
+    def maintain(_now: datetime) -> maintenance.JointExecutionMaintenanceSummary:
+        _seed_old_maintenance_authority(service)
+        _assert_closed_maintenance_reads(service, status="maintenance_pending")
+        with pytest.raises(RuntimeError, match="already running"):
+            service.run()
+        assert service._maintenance_running
+        service._revoke_current_authority()
+        return service._maintenance_summary("maintenance_failed")
+
+    monkeypatch.setattr(service, "_run_locked", maintain)
+    service.run()
+    assert not service._maintenance_running
+    _assert_closed_maintenance_reads(service, status="maintenance_failed")
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("fit failed"), KeyboardInterrupt()])
+def test_failed_maintenance_revokes_partial_authority_and_releases_read_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    service = _service(tmp_path)
+    _seed_old_maintenance_authority(service)
+    _forbid_authority_store_reads(service, monkeypatch)
+
+    def maintain(_now: datetime) -> maintenance.JointExecutionMaintenanceSummary:
+        assert service._current_authority is None
+        assert service._active_ranking_control is None
+        assert service._ranking_publications == {}
+        _seed_old_maintenance_authority(service)
+        raise failure
+
+    monkeypatch.setattr(service, "_run_locked", maintain)
+    with pytest.raises(type(failure)):
+        service.run()
+    assert service._current_authority is None
+    assert service._active_ranking_control is None
+    assert service._ranking_publications == {}
+    assert not service._maintenance_running
+    _assert_closed_maintenance_reads(service, status="maintenance_failed")
+    assert type(failure).__name__ in service.status_projection()["failures"][0]
+    monkeypatch.setattr(service, "_run_locked", lambda _now: service._maintenance_summary("maintenance_pending"))
+    assert service.run().status == "maintenance_pending"
+
+
+@pytest.mark.parametrize("rolled_back,mirror_valid", [(True, True), (False, False), (False, True)])
+def test_nonbusy_ranking_reads_still_require_rollback_and_mirror_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rolled_back: bool, mirror_valid: bool
+) -> None:
+    service = _service(tmp_path)
+    _seed_old_maintenance_authority(service)
+    calls: list[str] = []
+    monkeypatch.setattr(service.ranking_store, "is_rolled_back", lambda _value: calls.append("rollback") or rolled_back)
+    monkeypatch.setattr(service.ranking_store, "verify_mirror", lambda _value: calls.append("mirror") or mirror_valid)
+    assert service.has_production_ranking(29) is (not rolled_back and mirror_valid)
+    assert calls == (["rollback"] if rolled_back else ["rollback", "mirror"])
 
 
 def test_collect_sources_isolates_missing_waiting_success_and_failure(

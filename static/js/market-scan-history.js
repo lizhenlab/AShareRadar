@@ -17,7 +17,7 @@ export function createMarketScanHistory(options) {
     abort: () => abortHistory(context),
     changeMode: () => changeHistoryMode(context),
     load: () => loadHistory(context),
-    refresh: () => refreshHistory(context),
+    refresh: () => context.scheduleReads(() => loadHistory(context)),
     select: () => selectHistoryRun(context),
   };
 }
@@ -39,11 +39,11 @@ async function loadHistory(context) {
     if (sequence !== state.historyRequestSeq) return null;
     const page = validateMarketScanRunPage(payload, { context: "历史扫描批次响应" });
     validateHistoryItems(page.items, state.browseMode);
-    state.historyRuns = page.items;
-    if (!page.items.some((run) => run.id === state.selectedHistoryRunId)) {
-      state.selectedHistoryRunId = null;
-    }
-    view.renderHistory(page, state.selectedHistoryRunId);
+    const retained = retainedHistorySelection(state, page.items);
+    state.historyRuns = retained ? [retained, ...page.items] : page.items;
+    const previousSelection = view.selectedHistoryRunId();
+    view.renderHistory(page, state.selectedHistoryRunId, retained);
+    if (view.selectedHistoryRunId() !== previousSelection) context.onNavigationChanged?.();
     return page;
   } catch (error) {
     if (!isAbortError(error) && sequence === state.historyRequestSeq) {
@@ -75,7 +75,7 @@ async function selectHistoryRunOwned(context, owner) {
   }
   const identity = state.historyRuns.find((item) => item.id === runId) || null;
   if (!identity) {
-    view.renderHistoryError("所选历史批次已不在当前查询结果中，请重新查询。");
+    restoreHistorySelection(context, "所选历史批次已不在当前查询结果中，请重新查询。");
     return null;
   }
   try {
@@ -92,14 +92,17 @@ async function selectHistoryRunOwned(context, owner) {
     return context.loadResultsOwned();
   } catch (error) {
     if (owner.isCurrent()) {
-      view.elements.historyRun.value = state.selectedHistoryRunId === null ? "" : String(state.selectedHistoryRunId);
-      view.renderHistoryError(`历史批次可信读取失败：${compactErrorMessage(error?.message)}`);
+      restoreHistorySelection(context, `历史批次可信读取失败：${compactErrorMessage(error?.message)}`);
     }
     return null;
   }
 }
 
 function changeHistoryMode(context) {
+  if (context.view.selectedMode() !== context.state.browseMode) {
+    context.view.renderHistory({ items: [], total: 0 }, null);
+    context.onNavigationChanged?.();
+  }
   return transitionHistory(context, () => changeHistoryModeOwned(context));
 }
 
@@ -110,6 +113,7 @@ async function changeHistoryModeOwned(context) {
   state.browseMode = mode;
   state.selectedHistoryRunId = null;
   state.historyRuns = [];
+  view.renderHistory({ items: [], total: 0 }, null);
   context.applyPublishedRun(null);
   return Promise.all([
     context.loadLatestOwned({ forceTrusted: true, renderLoading: true }),
@@ -117,17 +121,20 @@ async function changeHistoryModeOwned(context) {
   ]);
 }
 
-function refreshHistory(context) {
-  return transitionHistory(context, (owner) => refreshHistoryOwned(context, owner));
+function restoreHistorySelection(context, message) {
+  context.view.elements.historyRun.value = context.state.selectedHistoryRunId === null ? "" : String(context.state.selectedHistoryRunId);
+  context.onNavigationChanged?.();
+  context.view.renderHistoryError(message);
+  context.resumeTracking?.();
 }
 
-async function refreshHistoryOwned(context, owner) {
-  context.state.selectedHistoryRunId = null;
-  context.applyPublishedRun(null);
-  const history = await loadHistory(context);
-  if (!owner.isCurrent()) return null;
-  await context.loadLatestOwned({ forceTrusted: true, renderLoading: true });
-  return history;
+function retainedHistorySelection(state, items) {
+  if (state.selectedHistoryRunId === null || items.some((run) => run.id === state.selectedHistoryRunId)) return null;
+  const run = state.publishedRun;
+  if (run?.id !== state.selectedHistoryRunId || run.mode !== state.browseMode || !isPublishedMarketScanRun(run)) {
+    throw marketScanContractError("历史导航缺少当前已校验批次，请刷新后重新选择");
+  }
+  return run;
 }
 
 function transitionHistory(context, operation) {

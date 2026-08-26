@@ -49,6 +49,7 @@ from app.services.market_scan_future_range_store import (
 from app.services.market_scan_future_range_artifact import FutureRangeArtifactError
 from app.services.market_scan_probability_research import PROBABILITY_PRIMARY_TARGET
 from app.services.market_scan_probability import probability_filter_qualified
+from app.services.market_scan_official_execution_store import OfficialExecutionStoreStatus
 from app.services.market_scan_probability_artifact import ProbabilityArtifactError
 from app.services.market_scan_probability_ranking import (
     PROBABILITY_RANKING_SCORE_RULE_VERSION,
@@ -98,6 +99,7 @@ _RESULT_QUERY_FIELDS = (
     "sort",
     "order",
 )
+_JOINT_MAINTENANCE_UNAVAILABLE = frozenset({"maintenance_pending", "maintenance_failed"})
 
 
 class MarketScanQueryService:
@@ -229,20 +231,12 @@ class MarketScanQueryService:
     ) -> MarketScanResultPage:
         run = verified.run
         eligible = _probability_run_eligible(run)
-        if minimum is not None and not eligible:
-            raise ProbabilityFilterUnavailable("上涨概率筛选仅支持已发布的盘后正式全市场批次")
-        research = self._attach_historical_probability_context(_unavailable_probability_research(run))
-        all_probabilities: dict[str, dict[str, object]] = {}
-        if eligible and minimum is not None:
-            research, all_probabilities = self._probability_projection_for_verified(verified)
-        symbols = _probability_filter_symbols(
-            research,
-            all_probabilities,
-            horizon=probability_horizon,
-            minimum=minimum,
-            joint_filter_qualified=self._joint_filter_qualified(run.id, research),
+        research, all_probabilities, symbols = self._result_probability_filter(
+            verified, eligible=eligible, horizon=probability_horizon, minimum=minimum,
         )
         ranking_context, ranking_records = self._production_ranking_projection(run.id)
+        if minimum is not None and ranking_context.get("reason") in _JOINT_MAINTENANCE_UNAVAILABLE:
+            raise ProbabilityFilterUnavailable("正式概率证据维护尚未完成，暂不能使用概率筛选")
         if ranking_context.get("status") == "active":
             page_result = _results_page_with_production_ranking(
                 verified,
@@ -262,12 +256,34 @@ class MarketScanQueryService:
             )
         else:
             probabilities = {symbol: all_probabilities[symbol] for symbol in page_symbols if symbol in all_probabilities}
+        if _maintenance_projection_unavailable(research) and ranking_context.get("status") == "active":
+            page_result = verified.results_page(**query, symbols=symbols)
+            _validate_result_page_binding(run, page_result)
+            ranking_context = _inactive_ranking_context(run.id, str(research["availability"]))
         return _attach_probability_projection(
             page_result,
             research,
             probabilities,
             production_ranking=ranking_context,
         )
+
+    def _result_probability_filter(
+        self, verified: MarketScanVerifiedReadProtocol, *, eligible: bool,
+        horizon: Literal[1, 5, 20], minimum: float | None,
+    ) -> tuple[dict[str, object], dict[str, dict[str, object]], tuple[str, ...] | None]:
+        if minimum is not None and not eligible:
+            raise ProbabilityFilterUnavailable("上涨概率筛选仅支持已发布的盘后正式全市场批次")
+        research = _unavailable_probability_research(verified.run)
+        if not eligible:
+            research = self._attach_historical_probability_context(research)
+        probabilities: dict[str, dict[str, object]] = {}
+        if eligible and minimum is not None:
+            research, probabilities = self._probability_projection_for_verified(verified)
+        symbols = _probability_filter_symbols(
+            research, probabilities, horizon=horizon, minimum=minimum,
+            joint_filter_qualified=self._joint_filter_qualified(verified.run.id, research),
+        )
+        return research, probabilities, symbols
 
     def breadth(self, run_id: int) -> MarketBreadthV1:
         return self._screening.breadth(run_id)
@@ -287,13 +303,12 @@ class MarketScanQueryService:
     def experimental_probability_results(
         self, run_id: int, *, minimum: float | None = None, market: str | None = None,
         keyword: str = "", sort: Literal["probability", "base_rank"] = "probability", page: int = 1, page_size: int = 50,
+        prediction_kind: Literal["net_h5", "close_d1", "close_d2", "close_d5"] = "net_h5",
     ) -> dict[str, object]:
-        from app.repositories.market_scan_experimental import read_experimental_candidates
-        from app.services.market_scan_experimental_probability import experimental_results
+        from app.services.experimental_probability_process import isolated_experimental_results
 
-        run, items = read_experimental_candidates(Path(self._cache.path), run_id)
-        return experimental_results(
-            Path(self._cache.path), run, items, minimum=minimum, market=market,
+        return isolated_experimental_results(
+            Path(self._cache.path), run_id, prediction_kind=prediction_kind, minimum=minimum, market=market,
             keyword=keyword, sort=sort, page=page, page_size=page_size,
         )
 
@@ -305,16 +320,10 @@ class MarketScanQueryService:
         capture, gated = _probability_capture_gate(verified)
         if gated is not None:
             return self._attach_historical_probability_context(gated)
-        joint = self._stores.joint_probability
-        if joint is not None and joint.has_current_projection(run.id):
-            research = joint.research_projection(run.id)
-            return self._attach_historical_probability_context(
-                _validate_probability_run_binding(
-                    run,
-                    research,
-                    score_contract=self._score_contract(verified, research),
-                )
-            )
+        joint_projection = self._joint_probability_projection(run.id, symbols=())
+        if joint_projection is not None:
+            research, _records = joint_projection
+            return self._finalize_probability_projection(verified, research, {})[0]
         store = self._stores.probability
         research = store.research_projection(run.id) if store is not None else not_generated_probability_research(run.id)
         research = self._resolve_probability_source_research(
@@ -322,13 +331,7 @@ class MarketScanQueryService:
             research,
             capture=capture,
         )
-        return self._attach_historical_probability_context(
-            _validate_probability_run_binding(
-                run,
-                research,
-                score_contract=self._score_contract(verified, research),
-            )
-        )
+        return self._finalize_probability_projection(verified, research, {})[0]
 
     def probability_projection(
         self,
@@ -353,31 +356,15 @@ class MarketScanQueryService:
         capture, gated = _probability_capture_gate(verified)
         if gated is not None:
             return self._attach_historical_probability_context(gated), {}
-        joint = self._stores.joint_probability
-        if joint is not None and joint.has_current_projection(run.id):
-            research, probabilities = joint.run_projection(run.id, symbols=symbols)
-            validated = _validate_probability_run_binding(
-                run,
-                research,
-                score_contract=self._score_contract(verified, research),
-            )
-            return self._attach_historical_probability_context(validated), probabilities
+        joint_projection = self._joint_probability_projection(run.id, symbols=symbols)
+        if joint_projection is not None:
+            return self._finalize_probability_projection(verified, *joint_projection)
         store = self._stores.probability
         if store is None:
             research = not_generated_probability_research(run.id)
-            research = self._resolve_probability_source_research(
-                run,
-                research,
-                capture=capture,
-            )
-            return self._attach_historical_probability_context(
-                _validate_probability_run_binding(
-                    run,
-                    research,
-                    score_contract=self._score_contract(verified, research),
-                )
-            ), {}
-        research, probabilities = store.run_projection(run.id, symbols=symbols)
+            probabilities: dict[str, dict[str, object]] = {}
+        else:
+            research, probabilities = store.run_projection(run.id, symbols=symbols)
         research = self._resolve_probability_source_research(
             run,
             research,
@@ -385,17 +372,49 @@ class MarketScanQueryService:
         )
         if research.get("availability") is not None:
             probabilities = {}
+        return self._finalize_probability_projection(verified, research, probabilities)
+
+    def _joint_probability_projection(
+        self, run_id: int, *, symbols: tuple[str, ...] | None
+    ) -> tuple[dict[str, object], dict[str, dict[str, object]]] | None:
+        joint = self._stores.joint_probability
+        projection = getattr(joint, "run_projection", None)
+        if not callable(projection):
+            return None
+        research, probabilities = projection(run_id, symbols=symbols)
+        # A false has_current_projection() cannot distinguish rebuilding evidence
+        # from an unavailable model; rebuilding must never authorize a legacy fallback.
+        if research.get("status") != "not_generated" or _maintenance_projection_unavailable(research):
+            return research, probabilities
+        return None
+
+    def _finalize_probability_projection(
+        self, verified: MarketScanVerifiedReadProtocol, research: dict[str, object],
+        probabilities: dict[str, dict[str, object]],
+    ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
         validated = _validate_probability_run_binding(
-            run,
+            verified.run,
             research,
             score_contract=self._score_contract(verified, research),
         )
-        return self._attach_historical_probability_context(validated), probabilities
+        output = self._attach_historical_probability_context(validated)
+        return output, {} if _maintenance_projection_unavailable(output) else probabilities
 
     def _attach_historical_probability_context(
         self,
         research: dict[str, object],
     ) -> dict[str, object]:
+        joint_context = research.get("joint_execution_evidence")
+        if not isinstance(joint_context, Mapping) or joint_context.get("status") not in _JOINT_MAINTENANCE_UNAVAILABLE:
+            joint = self._stores.joint_probability
+            joint_context = joint.status_projection() if joint is not None else {
+                "contract_version": "market-scan-joint-execution-maintenance-v1",
+                "status": "store_unavailable",
+                "filter_ready": False,
+                "blockers": ["joint_execution_store_unavailable"],
+            }
+        if joint_context.get("status") in _JOINT_MAINTENANCE_UNAVAILABLE:
+            return _maintenance_probability_context(research, joint_context)
         output = deepcopy(research)
         store = self._stores.historical_probability
         if store is None:
@@ -423,17 +442,7 @@ class MarketScanQueryService:
                 "public_vendor_auto_upgrade_forbidden": True,
             }
         )
-        joint = self._stores.joint_probability
-        output["joint_execution_evidence"] = (
-            joint.status_projection()
-            if joint is not None
-            else {
-                "contract_version": "market-scan-joint-execution-maintenance-v1",
-                "status": "store_unavailable",
-                "filter_ready": False,
-                "blockers": ["joint_execution_store_unavailable"],
-            }
-        )
+        output["joint_execution_evidence"] = deepcopy(dict(joint_context))
         return output
 
     def _joint_filter_qualified(
@@ -452,23 +461,10 @@ class MarketScanQueryService:
     ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
         joint = self._stores.joint_probability
         if joint is None:
-            return {
-                "contract_version": "market-scan-probability-ranking-projection-v1",
-                "status": "inactive",
-                "run_id": run_id,
-                "base_v5_mutated": False,
-                "historical_ranks_mutated": False,
-            }, {}
+            return _inactive_ranking_context(run_id), {}
         projection = getattr(joint, "production_ranking_projection", None)
         if not callable(projection):
-            return {
-                "contract_version": "market-scan-probability-ranking-projection-v1",
-                "status": "inactive",
-                "run_id": run_id,
-                "base_v5_mutated": False,
-                "historical_ranks_mutated": False,
-                "reason": "ranking_projection_unavailable",
-            }, {}
+            return _inactive_ranking_context(run_id, "ranking_projection_unavailable"), {}
         return projection(run_id)
 
     def _resolve_probability_source_research(
@@ -569,6 +565,53 @@ class MarketScanQueryService:
         projection = store.export_projection(run.id)
         _validate_future_range_run_binding(run, projection)
         return projection
+
+
+def _maintenance_projection_unavailable(research: Mapping[str, object]) -> bool:
+    return research.get("availability") in _JOINT_MAINTENANCE_UNAVAILABLE
+
+
+def _maintenance_probability_context(
+    research: Mapping[str, object], joint_context: Mapping[str, object]
+) -> dict[str, object]:
+    run_id = research.get("run_id")
+    binding = research.get("run_binding")
+    if run_id is None and isinstance(binding, Mapping):
+        run_id = binding.get("run_id")
+    if not isinstance(run_id, int) or isinstance(run_id, bool):
+        raise ProbabilityArtifactError("维护中的概率投影缺少当前批次标识")
+    status = str(joint_context["status"])
+    output = _probability_capture_state(
+        run_id, availability=status, limitation=f"joint_execution_{status}", pipeline_stage=status,
+    )
+    official = joint_context.get("official_execution")
+    pinned_digest = official.get("registry_digest") if isinstance(official, Mapping) else None
+    official_context = OfficialExecutionStoreStatus(
+        configured=isinstance(pinned_digest, str),
+        status="maintenance_pending" if status == "maintenance_pending" else "store_unavailable",
+        registry_digest=pinned_digest if isinstance(pinned_digest, str) else None,
+        verified_session_count=0, first_session_date=None, latest_session_date=None,
+        failures=(f"joint_execution_{status}",),
+    ).payload()
+    historical = not_generated_historical_probability_context()
+    historical.update({"status": "unavailable", "availability": status})
+    output.update({
+        "authority_backend": "joint_execution_opaque_v1", "filter_qualified": False,
+        "run_binding": None, "joint_execution_evidence": deepcopy(dict(joint_context)),
+        "official_execution_evidence": official_context, "historical_context": historical,
+    })
+    return output
+
+
+def _inactive_ranking_context(run_id: int, reason: str | None = None) -> dict[str, object]:
+    context: dict[str, object] = {
+        "contract_version": "market-scan-probability-ranking-projection-v1",
+        "status": "inactive", "run_id": run_id,
+        "base_v5_mutated": False, "historical_ranks_mutated": False,
+    }
+    if reason is not None:
+        context["reason"] = reason
+    return context
 
 
 def _export_result_query(
@@ -1152,18 +1195,27 @@ def _compare_production_ranking_items(
     for name, direction in zip(sorts, orders, strict=True):
         if direction not in {"asc", "desc"}:
             raise ProbabilityArtifactError("v6 生产排名排序方向无效")
-        comparison = _compare_optional_values(
+        comparison = _compare_ordered_optional_values(
             _production_sort_value(left, name),
             _production_sort_value(right, name),
+            direction=direction,
         )
         if comparison:
-            return comparison if direction == "asc" else -comparison
+            return comparison
     if sorts == ("rank",):
         return (left.symbol > right.symbol) - (left.symbol < right.symbol)
-    raw_comparison = _compare_optional_values(left.raw_score, right.raw_score)
+    raw_comparison = _compare_ordered_optional_values(left.raw_score, right.raw_score, direction="desc")
     if raw_comparison:
-        return -raw_comparison
+        return raw_comparison
     return (left.symbol > right.symbol) - (left.symbol < right.symbol)
+
+
+def _compare_ordered_optional_values(left: object, right: object, *, direction: str) -> int:
+    """Match frozen SQL: missing values stay last regardless of sort direction."""
+    comparison = _compare_optional_values(left, right)
+    if left is None or right is None:
+        return comparison
+    return comparison if direction == "asc" else -comparison
 
 
 def _production_sort_value(item: MarketScanResultItem, name: str) -> object:

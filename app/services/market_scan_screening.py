@@ -61,6 +61,8 @@ class MarketScanScreeningRepositoryProtocol(Protocol):
         self,
         run_id: int,
         symbols: Sequence[str],
+        *,
+        expected_run: MarketScanRun,
     ) -> list[MarketScanResultItem]: ...
 
 
@@ -98,7 +100,7 @@ class MarketScanScreeningService:
         ordered = _ordered(matched_rows, request.spec.sort)
         page_items, near_misses = _hydrate_evaluation_items(
             self._repository,
-            run_id,
+            run,
             population,
             failures,
             ordered,
@@ -351,7 +353,7 @@ def _near_miss_candidates(
 
 def _hydrate_evaluation_items(
     repository: MarketScanScreeningRepositoryProtocol,
-    run_id: int,
+    run: MarketScanRun,
     population: Sequence[MarketScanScreeningRow],
     failures: dict[str, list[MarketScanFailedCondition]],
     ordered: Sequence[MarketScanScreeningRow],
@@ -368,7 +370,7 @@ def _hydrate_evaluation_items(
     )
     hydrated = _hydrate_selected(
         repository,
-        run_id,
+        run,
         [item.symbol for item in (*page_rows, *near_miss_rows)],
     )
     page_items = [hydrated[item.symbol] for item in page_rows]
@@ -384,13 +386,13 @@ def _hydrate_evaluation_items(
 
 def _hydrate_selected(
     repository: MarketScanScreeningRepositoryProtocol,
-    run_id: int,
+    run: MarketScanRun,
     symbols: Sequence[str],
 ) -> dict[str, MarketScanResultItem]:
     unique_symbols = tuple(dict.fromkeys(symbols))
     if not unique_symbols:
         return {}
-    items = repository.market_scan_screening_result_items(run_id, unique_symbols)
+    items = repository.market_scan_screening_result_items(run.id, unique_symbols, expected_run=run)
     observed_symbols = [item.symbol for item in items]
     if len(observed_symbols) != len(set(observed_symbols)):
         raise RuntimeError("冻结筛选结果详情包含重复股票")

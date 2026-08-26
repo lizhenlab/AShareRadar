@@ -274,6 +274,8 @@ class MarketScanCacheProtocol(Protocol):
         self,
         run_id: int,
         symbols: Sequence[str],
+        *,
+        expected_run: MarketScanRun | None = None,
     ) -> list[MarketScanResultItem]: ...
 
     def market_scan_retry_plan(self, run_id: int) -> MarketScanRetryPlan: ...

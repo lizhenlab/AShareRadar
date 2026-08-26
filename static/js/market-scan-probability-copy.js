@@ -1,4 +1,6 @@
 export function probabilitySnapshotCopy(artifact) {
+  const waiting = pendingProbabilityCopy(artifact.availability);
+  if (waiting) return waiting;
   if (artifact.availability === "probability_artifact_source_unbound") {
     return {
       title: "上涨概率研究 · 源绑定无效",
@@ -54,6 +56,23 @@ export function probabilitySnapshotCopy(artifact) {
         title: "上涨概率研究 · 样本不足",
         description: "研究证据已生成，但尚未通过独立日期、标签覆盖或校准门槛；概率与群体校准调整区间保持为空。",
       };
+}
+
+function pendingProbabilityCopy(availability) {
+  return {
+    source_index_verification_pending: {
+      title: "上涨概率研究 · 归档证据校验中",
+      description: "归档证据校验中，完成后自动更新；概率、区间与选股筛选保持为空或关闭。",
+    },
+    maintenance_pending: {
+      title: "上涨概率研究 · 正式证据维护中",
+      description: "正式执行证据正在重放与校验，完成后自动更新；旧概率授权暂不使用，概率筛选关闭，生产排名保持 v5。",
+    },
+    maintenance_failed: {
+      title: "上涨概率研究 · 正式证据维护失败",
+      description: "正式证据维护未完成；旧概率授权已停用，概率筛选关闭，生产排名保持 v5，等待维护恢复后重新验证。",
+    },
+  }[availability];
 }
 
 function objectValue(value) {

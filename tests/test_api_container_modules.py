@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 from starlette.requests import Request
 
-from app.api.deps import get_domain_services, get_market_scan_heavy_read_admission
+from app.api.deps import get_domain_services, get_market_scan_experimental_read_admission, get_market_scan_heavy_read_admission
 from app.api.container import build_container
 from app.config import Settings
 from app.services.cache import SQLiteCache
@@ -45,6 +45,8 @@ def test_domain_services_dependency_uses_container_owned_bundle(tmp_path) -> Non
 
     assert get_domain_services(request) is container.domain_services
     assert get_market_scan_heavy_read_admission(request) is container.market_scan_heavy_read_admission
+    assert get_market_scan_experimental_read_admission(request) is container.market_scan_experimental_read_admission
+    assert container.market_scan_experimental_read_admission is not container.market_scan_heavy_read_admission
 
 
 def test_domain_services_dependency_fails_fast_when_uninitialized(tmp_path) -> None:

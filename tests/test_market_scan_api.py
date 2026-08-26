@@ -309,7 +309,7 @@ def test_polling_identity_contract_rejects_impossible_slot_ordering() -> None:
         )
 
 
-def test_six_snapshot_read_routes_share_one_nonblocking_admission_slot(
+def test_all_snapshot_read_routes_share_one_nonblocking_admission_slot(
     tmp_path: Path,
 ) -> None:
     scanner = _ScannerStub()
@@ -336,6 +336,11 @@ def test_six_snapshot_read_routes_share_one_nonblocking_admission_slot(
         client.get(f"/api/market-scans/{scanner.active.id}/results"),
         client.get(f"/api/market-scans/{scanner.active.id}/probability-research"),
         client.get(f"/api/market-scans/{scanner.active.id}/export.xlsx"),
+        client.get("/api/market-scans", params={"authority": "verified"}),
+        client.get(f"/api/market-scans/{scanner.active.id}/breadth"),
+        client.post(f"/api/market-scans/{scanner.active.id}/screen/evaluate", json={}),
+        client.get(f"/api/market-scans/{scanner.active.id}/delta"),
+        client.get(f"/api/market-scans/{scanner.active.id}/future-range-research"),
     ]
     identity = client.get("/api/market-scans/polling-identity", params={"mode": "official"})
     navigation = client.get(
@@ -343,7 +348,7 @@ def test_six_snapshot_read_routes_share_one_nonblocking_admission_slot(
         params={"mode": "official", "status": "published", "authority": "navigation"},
     )
 
-    assert [response.status_code for response in busy] == [503, 503, 503, 503, 503]
+    assert [response.status_code for response in busy] == [503] * 10
     assert all(response.headers["cache-control"] == "no-store" for response in busy)
     assert all(response.headers["retry-after"] == "2" for response in busy)
     assert all(response.json() == {"detail": MARKET_SCAN_BUSY_DETAIL} for response in busy)

@@ -69,11 +69,15 @@ class MarketScanProbabilityCaptureOutboxMixin(MarketScanRepositoryContext):
         with self._lock, self._connect() as conn:
             candidates = conn.execute(
                 """
-                SELECT * FROM market_scan_run
-                WHERE status IN ('success', 'degraded')
-                  AND mode = 'official'
-                  AND scope = ?
-                ORDER BY id
+                SELECT run.* FROM market_scan_run AS run
+                WHERE run.status IN ('success', 'degraded')
+                  AND run.mode = 'official'
+                  AND run.scope = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM market_scan_probability_capture_outbox AS outbox
+                      WHERE outbox.run_id = run.id
+                  )
+                ORDER BY run.id
                 """,
                 (PROBABILITY_SOURCE_CAPTURE_FULL_MARKET_SCOPE,),
             ).fetchall()

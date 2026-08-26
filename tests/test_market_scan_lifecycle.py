@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -110,6 +113,253 @@ def test_joint_probability_maintenance_normalizes_legacy_naive_market_time(
 
     assert normalized.utcoffset() == timedelta(hours=8)
     assert normalized.replace(tzinfo=None) == datetime(2026, 8, 23, 1, 30)
+
+
+def test_probability_preloads_serialize_and_refresh_new_capture_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        scanner = _scanner(_MarketScanHub(tmp_path))
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = Event()
+        bindings = {1: "a" * 64}
+        observed: list[dict[int, str]] = []
+        cancellations: list[Event] = []
+
+        def preload(*, archive_bindings, cancel_event) -> int:
+            observed.append(dict(archive_bindings))
+            cancellations.append(cancel_event)
+            if len(observed) == 1:
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(3)
+            return len(observed)
+
+        source = _preload_probe(preload, isolated=True)
+        history = _preload_probe(lambda: 0)
+        scanner._probability_source_research_store = source  # noqa: SLF001
+        scanner._historical_probability_store = history  # noqa: SLF001
+        monkeypatch.setattr(scanner.cache, "probability_source_capture_archive_bindings", lambda: dict(bindings))
+        first = asyncio.create_task(scanner.refresh_probability_research_cache())
+        await asyncio.wait_for(entered.wait(), 1)
+        second = asyncio.create_task(scanner.refresh_probability_research_cache())
+        discarded = asyncio.create_task(scanner.refresh_probability_research_cache())
+        await asyncio.sleep(0)
+        discarded.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await discarded
+        assert observed == [{1: "a" * 64}]
+        assert cancellations[0].is_set() is False
+        bindings[2] = "b" * 64
+        release.set()
+        assert await asyncio.wait_for(asyncio.gather(first, second), 2) == [1, 2]
+        assert observed == [{1: "a" * 64}, bindings]
+        assert source.pending is False and history.pending is False
+
+    asyncio.run(scenario())
+
+
+def test_probability_preload_failure_drains_other_worker_before_clearing_pending(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        scanner = _scanner(_MarketScanHub(tmp_path))
+        loop = asyncio.get_running_loop()
+        history_entered = asyncio.Event()
+        source_failed = asyncio.Event()
+        release = Event()
+        history_finished = Event()
+
+        def failing(**_arguments) -> int:
+            loop.call_soon_threadsafe(source_failed.set)
+            raise ValueError("invalid archive")
+
+        def history_preload() -> int:
+            loop.call_soon_threadsafe(history_entered.set)
+            assert release.wait(3)
+            history_finished.set()
+            return 1
+
+        source = _preload_probe(failing, isolated=True)
+        history = _preload_probe(history_preload)
+        scanner._probability_source_research_store = source  # noqa: SLF001
+        scanner._historical_probability_store = history  # noqa: SLF001
+        refresh = asyncio.create_task(scanner.refresh_probability_research_cache())
+        await asyncio.wait_for(asyncio.gather(history_entered.wait(), source_failed.wait()), 1)
+        await asyncio.sleep(0)
+        assert refresh.done() is False
+        assert source.pending is True and history.pending is True
+        release.set()
+        with pytest.raises(ValueError, match="invalid archive"):
+            await asyncio.wait_for(refresh, 2)
+        assert history_finished.is_set()
+        assert source.pending is False and history.pending is False
+
+    asyncio.run(scenario())
+
+
+def test_probability_preload_repeated_cancellation_drains_real_workers(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        scanner = _scanner(_MarketScanHub(tmp_path))
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = Event()
+        source_finished = Event()
+        history_finished = Event()
+
+        def preload(*, cancel_event, **_arguments) -> int:
+            loop.call_soon_threadsafe(entered.set)
+            assert cancel_event.wait(3)
+            loop.call_soon_threadsafe(cancelled.set)
+            assert release.wait(3)
+            source_finished.set()
+            raise ValueError("source worker cancelled before publication")
+
+        def history_preload() -> int:
+            assert release.wait(3)
+            history_finished.set()
+            return 1
+
+        source = _preload_probe(preload, isolated=True)
+        history = _preload_probe(history_preload)
+        scanner._probability_source_research_store = source  # noqa: SLF001
+        scanner._historical_probability_store = history  # noqa: SLF001
+        refresh = asyncio.create_task(scanner.refresh_probability_research_cache())
+        await asyncio.wait_for(entered.wait(), 1)
+        refresh.cancel()
+        await asyncio.wait_for(cancelled.wait(), 1)
+        assert refresh.done() is False
+        assert source.pending is True and history.pending is True
+        refresh.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(refresh, 2)
+        assert source_finished.is_set() and history_finished.is_set()
+        assert source.pending is False and history.pending is False
+        assert scanner._probability_preload_lock.locked() is False  # noqa: SLF001
+
+    asyncio.run(scenario())
+
+
+def _preload_probe(read: Callable[..., int], *, isolated: bool = False) -> SimpleNamespace:
+    probe = SimpleNamespace(pending=False)
+    probe.mark_preload_pending = lambda: setattr(probe, "pending", True)
+    probe.clear_preload_pending = lambda: setattr(probe, "pending", False)
+    probe.refresh_pending = lambda: probe.pending
+    if isolated:
+        probe.preload_isolated = read
+        probe.preload = lambda: pytest.fail("isolated preload must be preferred")
+    else:
+        probe.preload = read
+    return probe
+
+
+def test_market_scan_stop_cancels_and_reaps_isolated_warmup_before_returning(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        scanner = _scanner(_MarketScanHub(tmp_path))
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        finished = Event()
+
+        def preload(*, cancel_event, **_arguments) -> int:
+            loop.call_soon_threadsafe(entered.set)
+            assert cancel_event.wait(3)
+            finished.set()
+            raise ValueError("cancelled worker")
+
+        source = _preload_probe(preload, isolated=True)
+        history = _preload_probe(lambda: 1)
+        scanner._probability_source_research_store = source  # noqa: SLF001
+        scanner._historical_probability_store = history  # noqa: SLF001
+        await scanner.start()
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(scanner.stop(), 1)
+        assert finished.is_set()
+        assert scanner.is_quiescent is True
+        assert scanner._probability_runtime_warmup_task is None  # noqa: SLF001
+        assert source.pending is False and history.pending is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("close", [True, False])
+def test_market_scan_stop_repeated_cancellation_still_waits_for_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close: bool,
+) -> None:
+    async def scenario() -> None:
+        scanner = _scanner(_MarketScanHub(tmp_path))
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        finished = False
+
+        async def cleanup(*, close: bool) -> None:
+            nonlocal finished
+            entered.set()
+            await release.wait()
+            finished = True
+
+        monkeypatch.setattr(scanner, "_stop", cleanup)
+        stop = asyncio.create_task(scanner.stop() if close else scanner.rollback_activation())
+        await asyncio.wait_for(entered.wait(), 1)
+        for _attempt in range(3):
+            stop.cancel()
+            await asyncio.sleep(0)
+            assert stop.done() is False
+            assert finished is False
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stop, 1)
+        assert finished is True
+
+    asyncio.run(scenario())
+
+
+def test_real_probability_store_keeps_batch_pending_after_its_preload_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        scanner = _scanner(_MarketScanHub(tmp_path))
+        loop = asyncio.get_running_loop()
+        source_entered = asyncio.Event()
+        history_finished = asyncio.Event()
+        release_source = Event()
+        source = scanner._probability_source_research_store  # noqa: SLF001
+        historical = scanner._historical_probability_store  # noqa: SLF001
+        original_source = source.preload_isolated
+        original_history = historical.preload
+        reads: list[bool] = []
+
+        def source_preload(**arguments) -> int:
+            loop.call_soon_threadsafe(source_entered.set)
+            assert release_source.wait(3)
+            return original_source(**arguments)
+
+        def history_preload() -> int:
+            result = original_history()
+            loop.call_soon_threadsafe(history_finished.set)
+            return result
+
+        monkeypatch.setattr(source, "preload_isolated", source_preload)
+        monkeypatch.setattr(historical, "preload", history_preload)
+        refresh = asyncio.create_task(scanner.refresh_probability_research_cache())
+        try:
+            await asyncio.wait_for(asyncio.gather(source_entered.wait(), history_finished.wait()), 1)
+            assert historical.refresh_pending() is True
+            monkeypatch.setattr(historical, "_refresh_if_changed", lambda *, blocking: reads.append(blocking))
+            historical.research_projection()
+            assert reads == [], "completed store must not begin a competing interactive refresh"
+        finally:
+            release_source.set()
+            await asyncio.wait_for(refresh, 2)
+        assert source.refresh_pending() is False
+        assert historical.refresh_pending() is False
+
+    asyncio.run(scenario())
 
 
 def test_market_scan_cancellation_closes_atomically_linked_task_returned_late(tmp_path: Path) -> None:

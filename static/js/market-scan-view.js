@@ -49,8 +49,8 @@ export function createMarketScanView(root, now = new Date()) {
       renderBrowsingContext(context, taskRun, displayedRun, mode, historical)
     ),
     renderHeadline: (message, kind) => renderHeadline(context, message, kind),
-    renderHistory: (payload, selectedRunId) => (
-      renderMarketScanHistory(elements, payload, selectedRunId, selectedMarketScanMode(elements))
+    renderHistory: (payload, selectedRunId, retainedRun) => (
+      renderMarketScanHistory(elements, payload, selectedRunId, selectedMarketScanMode(elements), retainedRun)
     ),
     renderHistoryError: (message) => renderMarketScanHistoryError(elements, message),
     renderHistoryLoading: () => renderMarketScanHistoryLoading(elements),

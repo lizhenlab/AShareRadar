@@ -10,11 +10,12 @@ export const MARKET_SCAN_PROBABILITY_HORIZONS = Object.freeze([1, 5, 20]);
 export const MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON = 5;
 export const CALIBRATED_PROBABILITY_STATUS = "calibrated_shadow";
 const ALLOWED_STATUSES = new Set([
-  CALIBRATED_PROBABILITY_STATUS,
-  "insufficient_data",
-  "insufficient_evidence",
-  "not_generated",
+  CALIBRATED_PROBABILITY_STATUS, "insufficient_data", "insufficient_evidence", "not_generated",
 ]);
+const PENDING_PROBABILITY_STAGES = new Set([
+  "source_capture_pending", "source_index_verification_pending", "maintenance_pending",
+]);
+const unavailableAuthorityStage = (stage) => PENDING_PROBABILITY_STAGES.has(stage) || stage === "maintenance_failed";
 
 export function normalizeMarketScanProbabilityResearch(value, expectedRunId) {
   if (value === null || value === undefined) return emptyProbabilityResearch(expectedRunId);
@@ -27,6 +28,10 @@ export function normalizeMarketScanProbabilityResearch(value, expectedRunId) {
     ? payload
     : requireObject(payload.horizons, "扫描榜单响应.probability_research.horizons");
   const availability = optionalText(payload.availability, "扫描榜单响应.probability_research.availability");
+  if (unavailableAuthorityStage(availability)
+      && (normalizeStatus(payload.status) !== "not_generated" || payload.filter_qualified === true)) {
+    throw probabilityContractError("概率证据校验或维护未完成时，不得保留已生成概率或筛选授权");
+  }
   const pipelineStage = optionalText(payload.pipeline_stage, "扫描榜单响应.probability_research.pipeline_stage");
   const topLimitations = stringList(payload.limitations, "扫描榜单响应.probability_research.limitations");
   const runBinding = normalizeProbabilityRunBinding(
@@ -77,6 +82,8 @@ export function normalizeJointExecutionEvidence(value) {
   const status = String(raw.status || "").trim();
   const statuses = new Set([
     "maintenance_not_run",
+    "maintenance_pending",
+    "maintenance_failed",
     "official_execution_unavailable",
     "waiting_mature_official_h5",
     "selection_evidence_accumulating",
@@ -93,6 +100,12 @@ export function normalizeJointExecutionEvidence(value) {
   }
   if (filterReady !== (status === "current_prediction_ready")) {
     throw probabilityContractError("joint execution evidence filter_ready 与状态不一致");
+  }
+  if (["maintenance_pending", "maintenance_failed"].includes(status)
+      && (["selection_qualified", "authorization_verified", "deployment_verified", "probability_ranking_shadow_qualified", "probability_ranking_control_verified"]
+        .some((name) => raw[name] === true)
+        || Number(raw.current_prediction_count ?? 0) !== 0 || raw.current_prediction_run_id != null)) {
+    throw probabilityContractError("joint execution 维护未完成时不得保留旧授权或当前预测");
   }
   const ranking = normalizeProbabilityRankingEvidence(raw, status);
   return {
@@ -115,13 +128,16 @@ export function normalizeOfficialExecutionEvidence(value) {
     throw probabilityContractError("official execution evidence contract_version 不受支持");
   }
   const status = String(raw.status || "").trim();
-  if (!["unconfigured_pinned_registry", "verification_failed", "waiting_sessions", "ready", "store_unavailable"].includes(status)) {
+  if (!["unconfigured_pinned_registry", "verification_failed", "waiting_sessions", "maintenance_pending", "ready", "store_unavailable"].includes(status)) {
     throw probabilityContractError(`official execution evidence status 无效：${status}`);
   }
   if (typeof raw.configured !== "boolean" || typeof raw.formal_evidence_available !== "boolean") {
     throw probabilityContractError("official execution evidence configured/available 必须是 boolean");
   }
   const count = requireNonNegativeInteger(raw.verified_session_count, "official_execution_evidence.verified_session_count");
+  if (status === "maintenance_pending" && count !== 0) {
+    throw probabilityContractError("官方执行证据维护中不得使用旧校验计数");
+  }
   const failures = stringList(raw.failures, "official_execution_evidence.failures");
   if (raw.public_vendor_auto_upgrade_forbidden !== true) {
     throw probabilityContractError("公开供应商数据不得自动升级为官方执行证据");
@@ -192,8 +208,8 @@ export function normalizeHistoricalProbabilityContext(value) {
 export function isMarketScanProbabilitySourceCapturePending(research) {
   const payload = objectValue(research);
   return payload.status === "not_generated"
-    && payload.availability === "source_capture_pending"
-    && payload.pipeline_stage === "source_capture_pending";
+    && PENDING_PROBABILITY_STAGES.has(payload.availability)
+    && payload.pipeline_stage === payload.availability;
 }
 
 export function normalizeMarketScanUpsideProbabilities(value, research) {
@@ -335,6 +351,10 @@ function normalizeArtifact(
   }
   const raw = requireObject(value, `probability_research.horizons.${horizon}`);
   const status = normalizeStatus(raw.status);
+  if ((unavailableAuthorityStage(inherited.availability)
+      || ["maintenance_pending", "maintenance_failed"].includes(inherited.jointExecutionEvidence?.status)) && status !== "not_generated") {
+    throw probabilityContractError("概率证据校验或维护未完成时，不得保留旧周期概率");
+  }
   if (status !== CALIBRATED_PROBABILITY_STATUS && raw.probability !== null && raw.probability !== undefined) {
     throw probabilityContractError(`probability_research.horizons.${horizon}.probability 证据不足时必须为空`);
   }

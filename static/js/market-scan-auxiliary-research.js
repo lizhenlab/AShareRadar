@@ -3,9 +3,11 @@ import { createExperimentalProbabilityController } from "./market-scan-experimen
 
 export function createMarketScanAuxiliaryResearch(options) {
   const future = createMarketScanFutureRangeController(options);
-  const experimental = createExperimentalProbabilityController(options);
+  const experimental = createExperimentalProbabilityController({ ...options,
+    getNavigation: () => ({ mode: options.view.selectedMode(), selectedRunId: options.view.selectedHistoryRunId() }) });
   return {
     abort() { future.abort(); experimental.abort(); },
     sync(run) { future.sync(run); experimental.sync(run); },
+    resetExperiment() { experimental.navigationChanged(); },
   };
 }

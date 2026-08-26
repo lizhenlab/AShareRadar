@@ -44,11 +44,11 @@ export function createMarketScanController(options = {}) {
   let probabilityHorizonController = null;
   let readTransition = null;
   let pollRunPromise = null;
-  const exportResults = createMarketScanExportAction({ elements, exportRequest, resultRun, state, view });
+  const exportResults = createMarketScanExportAction({ elements, exportRequest, resultRun, state, view, withHeavyRead: (read) => readTransition.run(read) });
   const polling = createMarketScanPolling({
     ...options,
     state,
-    callbacks: { latest: pollLatestIdentity, probabilityResults: () => probabilityPolling.poll(loadResults), results: loadResults, run: pollRun },
+    callbacks: { latest: pollLatestIdentity, probabilityResults: () => probabilityPolling.poll(() => probabilityHorizonController.refresh()), results: () => probabilityHorizonController.refresh(), run: pollRun },
     isEnabled: () => state.activated && state.visible && !state.actionBusy,
   });
   const probabilityPolling = createMarketScanProbabilityPolling({ options, polling, resultRun, state });
@@ -57,10 +57,9 @@ export function createMarketScanController(options = {}) {
     beforeResultsRead: (query, run) => probabilityHorizonController?.trustedReadStarted(query, run),
     isCurrentRequest,
     request,
-    resultsUrl: (runId, queryOptions = {}) => buildMarketScanResultsUrl(
+    resultsUrl: (runId, queryOptions = {}) => probabilityHorizonController.refreshQuery(
       runId,
       queryOptions.resetQuery ? 1 : state.page,
-      elements,
       { includeProbability: !queryOptions.resetQuery },
     ),
     state,
@@ -109,12 +108,13 @@ export function createMarketScanController(options = {}) {
     request,
     state,
     transitionReads: readTransition.transition,
-    view,
+    scheduleReads: readTransition.run,
+    view, onNavigationChanged: () => auxiliaryResearch.resetExperiment(), resumeTracking: () => polling.scheduleDefault(state.run),
   });
   const surface = createMarketScanSurface({
     abortHistory: history.abort, scheduleTracking: () => polling.scheduleDefault(state.run),
     elements,
-    loadResults,
+    loadResults: () => probabilityHorizonController.refresh(),
     refreshOwned: () => Promise.all([
       isActiveMarketScanRun(state.run)
         ? pollRunOnce().then((outcome) => finishPolledRun(outcome, { withinHeavyRead: true }))
@@ -129,7 +129,7 @@ export function createMarketScanController(options = {}) {
   });
   const handleRowClick = createMarketScanRowClickHandler({ onSelectStock, view });
   const top100Refresh = createMarketScanTop100Refresh({ applyRun, elements, mutate, polling, resultRun, state, view });
-  const auxiliaryResearch = createMarketScanAuxiliaryResearch({ root, request, getRun: resultRun, onSelectStock });
+  const auxiliaryResearch = createMarketScanAuxiliaryResearch({ root, request, view, getRun: resultRun, onSelectStock });
   bindEvents();
   view.renderRun(null);
   view.resetProbabilityResearch(null);
@@ -258,7 +258,7 @@ export function createMarketScanController(options = {}) {
         applyRun(run);
         if (!isActiveMarketScanRun(run)) {
           applyPublishedRun(isPublishedMarketScanRun(run) ? run : state.publishedRun);
-          await loadResults({ allowDuringAction: true });
+          await probabilityHorizonController.refresh({ allowDuringAction: true });
         }
         else polling.scheduleDefault(state.run);
         return run;
@@ -505,7 +505,7 @@ export function createMarketScanController(options = {}) {
   function clearControllerTimers() { polling.clear(); clearResetTimer(); }
   function bindEvents() {
     elements.modeInputs.forEach((input) => input.addEventListener("change", () => void history.changeMode()));
-    elements.historyRun.addEventListener("change", () => void history.select());
+    elements.historyRun.addEventListener("change", () => { auxiliaryResearch.resetExperiment(); void history.select(); });
     elements.historyRefresh.addEventListener("click", () => void history.refresh());
     elements.start.addEventListener("click", () => void start());
     elements.cancel.addEventListener("click", () => void cancel());
@@ -532,15 +532,13 @@ export function createMarketScanController(options = {}) {
     });
     elements.prev.addEventListener("click", () => {
       if (state.page <= 1) return;
-      state.page -= 1;
       view.focusResults();
-      void loadResults();
+      void probabilityHorizonController.page(state.page - 1);
     });
     elements.next.addEventListener("click", () => {
       if (state.pageCount && state.page >= state.pageCount) return;
-      state.page += 1;
       view.focusResults();
-      void loadResults();
+      void probabilityHorizonController.page(state.page + 1);
     });
     elements.globalOpen.addEventListener("click", () => onOpen());
     elements.globalCancel.addEventListener("click", () => void cancel());

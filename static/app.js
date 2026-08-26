@@ -174,6 +174,7 @@ const state = {
   loadSeq: 0,
   loadRequest: null,
   pendingLoad: null,
+  workbenchDeferred: false,
   failedLoadSymbol: "",
   onlineRecoveryPromise: null,
   watchlist: [],
@@ -301,6 +302,7 @@ function setPrimaryView(view, options = {}) {
     if (surfaceActive && !strategyLabController.state.activated) void strategyLabController.activate();
     persistWorkspacePreferences();
   }
+  syncWorkbenchSurface();
   if (previousView !== target && state.lastAnalysis) requestAnimationFrame(redrawResearchCharts);
   if (target === "review" && previousView !== target) {
     void loadAdviceReviewDashboard(state).then(() => syncPaperTradingPlans(state));
@@ -338,20 +340,37 @@ function setWorkspaceView(view, options = {}) {
   const surfaceChanged = marketScanController.setSurfaceActive(surfaceActive);
   persistWorkspacePreferences();
   if (surfaceActive && previousView !== target) {
-    let refresh = Promise.resolve(marketScanController.state.run);
-    if (!marketScanController.state.activated) refresh = marketScanController.activate();
-    else if (!surfaceChanged && options.refreshMarketScan !== false) refresh = marketScanController.loadLatest();
-    void refresh;
+    if (!marketScanController.state.activated) void marketScanController.activate();
+    else if (!surfaceChanged && options.refreshMarketScan !== false) void marketScanController.loadLatest();
     void discoveryController.activate();
     void strategyLabController.activate();
   }
   if (target === "data") void loadRuntimeCleanupPreview().catch(() => {});
   if (target === "paper" && previousView !== target) void loadPaperTradingDashboard(state);
+  syncWorkbenchSurface();
   const analysis = state.lastAnalysis;
   if (!analysis) return;
   requestAnimationFrame(() => {
-    if (state.lastAnalysis !== analysis) return;
-    redrawResearchCharts();
+    if (state.lastAnalysis === analysis) redrawResearchCharts();
+  });
+}
+
+function isMarketWorkspaceActive() {
+  return state.primaryView === "market" && state.workspaceView === "market-scan";
+}
+function syncWorkbenchSurface() {
+  if (isMarketWorkspaceActive()) {
+    state.workbenchDeferred = true;
+    invalidateActiveLoad();
+    clearInterval(state.monitorTimer);
+    state.monitorTimer = null;
+    cancelMonitoringRefresh(state);
+    cancelDataStatusRefresh(state);
+    return;
+  }
+  if (restoringWorkspacePreferences || !state.workbenchDeferred) return;
+  queueMicrotask(() => {
+    if (!isMarketWorkspaceActive() && state.workbenchDeferred && !state.pendingLoad) void loadAll();
   });
 }
 
@@ -464,6 +483,8 @@ function loadingState(title, detail = "正在读取数据，请稍候。") {
 }
 
 async function loadAll(options = {}) {
+  if (isMarketWorkspaceActive()) return marketScanController.loadLatest().then(() => false);
+  state.workbenchDeferred = false;
   const request = beginLoadRequest(options);
   const workbenchLoad = loadCurrentWorkbench(request);
   const globalLoads = refreshGlobalPanels({ force: Boolean(options.forceGlobal) });
@@ -526,6 +547,7 @@ async function refreshWatchlist(options = {}) {
 }
 
 function refreshGlobalPanels(options = {}) {
+  if (isMarketWorkspaceActive()) return {};
   const refreshOptions = { force: Boolean(options.force) };
   return {
     dataStatus: refreshDataStatus(refreshOptions),
@@ -569,10 +591,8 @@ function beginLoadRequest(options = {}) {
 function invalidateActiveLoad() {
   cancelMinuteRequest();
   individualProbabilityController.cancel();
-  if (state.loadRequest) {
-    state.loadRequest.abort();
-    state.loadRequest = null;
-  }
+  state.loadRequest?.abort();
+  state.loadRequest = null;
   stopStream();
   state.pendingLoad = null;
   state.loadSeq += 1;
@@ -885,6 +905,7 @@ function syncWorkbenchChartMarks(chartMarks) {
 }
 
 function refreshStockPanels(request, workbench = null) {
+  if (isMarketWorkspaceActive()) return {};
   const context = {
     ...loadContextFromRequest(request),
     signalDate: workbenchSignalDate(workbench),
@@ -1606,7 +1627,7 @@ function handleWatchlistItemsChanged() {
 }
 
 function reconcileStreamSubscription({ context = currentLoadContext() } = {}) {
-  if (document.hidden || state.pendingLoad || !state.lastAnalysis || isStaleContext(context)) return false;
+  if (isMarketWorkspaceActive() || document.hidden || state.pendingLoad || !state.lastAnalysis || isStaleContext(context)) return false;
   const subscriptionKey = streamSymbols().join(",");
   const streamContext = state.streamContext;
   if (
@@ -1622,7 +1643,7 @@ function reconcileStreamSubscription({ context = currentLoadContext() } = {}) {
 }
 
 function startStream({ retry = false, context = currentLoadContext() } = {}) {
-  if (document.hidden || isStaleContext(context)) return false;
+  if (isMarketWorkspaceActive() || document.hidden || isStaleContext(context)) return false;
   clearStreamRetryTimer();
   if (!retry) state.streamRetryCount = 0;
   const streamId = ++state.streamSeq;
@@ -3020,7 +3041,6 @@ const appLifecycleController = createAppLifecycleController({
   onPageHide: stockSearchSurface.handlePageHide,
 });
 
-function workbenchNeedsOnlineRecovery() { return appLifecycleController.needsOnlineRecovery(); }
 function handleWorkbenchOnline() { return appLifecycleController.handleOnline(); }
 function destroyStockSearchBindings() { stockSearchSurface.destroy(); }
 function handleStockSearchPageHide(event) { appLifecycleController.handlePageHide(event); }
@@ -3074,6 +3094,6 @@ export const __appTest = {
   discoveryController,
 };
 
-if (!globalThis.__ASHARE_RADAR_DISABLE_AUTOLOAD__) {
+if (!globalThis.__ASHARE_RADAR_DISABLE_AUTOLOAD__ && !isMarketWorkspaceActive()) {
   loadAll();
 }

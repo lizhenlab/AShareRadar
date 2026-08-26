@@ -14,19 +14,22 @@ export function renderMarketScanHistoryLoading(elements) {
   elements.historyFeedback.className = "";
 }
 
-export function renderMarketScanHistory(elements, payload, selectedRunId, selectedMode) {
+export function renderMarketScanHistory(elements, payload, selectedRunId, selectedMode, retainedRun = null) {
   const selected = selectedRunId == null ? "" : String(selectedRunId);
-  const options = payload.items.map((run) => {
+  const items = retainedRun ? [retainedRun, ...payload.items] : payload.items;
+  const options = items.map((run) => {
     const status = RUN_STATUS_LABELS[run.status] || run.status;
     const kind = isMarketScanTop100RefreshRun(run) ? "TOP100快更" : "全市场";
-    const label = `#${run.id} · ${kind} · ${run.quote_date || run.data_date} · ${status} · ${formatNumber(run.coverage_pct, 1)}%`;
+    const retained = run === retainedRun ? " · 当前浏览（不在本次查询中）" : "";
+    const label = `#${run.id} · ${kind} · ${run.quote_date || run.data_date} · ${status} · ${formatNumber(run.coverage_pct, 1)}%${retained}`;
     return `<option value="${run.id}">${escapeHtml(label)}</option>`;
   }).join("");
   elements.historyRun.innerHTML = `<option value="">最近发布</option>${options}`;
-  elements.historyRun.value = payload.items.some((run) => String(run.id) === selected) ? selected : "";
+  elements.historyRun.value = items.some((run) => String(run.id) === selected) ? selected : "";
   setAttribute(elements.history, "aria-busy", "false");
   elements.historyRefresh.disabled = false;
-  setText(elements.historyFeedback, `找到 ${payload.total} 个${marketScanModeLabel(selectedMode)}已发布批次。`);
+  const limited = payload.total > payload.items.length ? `，本次显示最近 ${payload.items.length} 个，请按日期缩小范围` : "";
+  setText(elements.historyFeedback, `找到 ${payload.total} 个${marketScanModeLabel(selectedMode)}已发布批次${limited}。`);
   elements.historyFeedback.className = "";
 }
 

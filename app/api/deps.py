@@ -50,6 +50,11 @@ def get_market_scan_heavy_read_admission(request: Request) -> MarketScanHeavyRea
     return get_container(request).market_scan_heavy_read_admission
 
 
+def get_market_scan_experimental_read_admission(request: Request) -> MarketScanHeavyReadAdmission:
+    """Separate single-worker lane; only the isolated read-only experiment uses it."""
+    return get_container(request).market_scan_experimental_read_admission
+
+
 def get_workbench_context_cache(request: Request) -> WorkbenchContextCache:
     return get_container(request).workbench_contexts
 

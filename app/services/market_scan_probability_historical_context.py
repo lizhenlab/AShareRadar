@@ -73,6 +73,7 @@ class MarketScanHistoricalProbabilityContextStore:
         self._lock = RLock()
         self._refresh_lock = Lock()
         self._preload_pending = False
+        self._preload_leases = 0
         self._snapshot: _DirectorySnapshot | None = None
         self._projection: dict[str, object] | None = None
 
@@ -101,9 +102,20 @@ class MarketScanHistoricalProbabilityContextStore:
         with self._lock:
             self._preload_pending = False
 
+    def acquire_preload_lease(self) -> None:
+        """A coordinator owns this independently of a single preload attempt."""
+        with self._lock:
+            self._preload_leases += 1
+
+    def release_preload_lease(self) -> None:
+        with self._lock:
+            if self._preload_leases <= 0:
+                raise RuntimeError("历史概率 context preload lease 未持有")
+            self._preload_leases -= 1
+
     def refresh_pending(self) -> bool:
         with self._lock:
-            scheduled = self._preload_pending
+            scheduled = self._preload_pending or self._preload_leases > 0
         return scheduled or self._refresh_lock.locked()
 
     def _refresh_if_changed(self, *, blocking: bool) -> None:

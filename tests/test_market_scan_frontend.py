@@ -161,6 +161,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/market-scan-controller.js",
         "/static/js/market-scan-auxiliary-research.js",
         "/static/js/market-scan-experimental.js",
+        "/static/js/market-scan-experimental-context.js",
         "/static/js/market-scan-controller-inert.js",
         "/static/js/market-scan-contracts.js",
         "/static/js/market-scan-export-client.js",
@@ -185,6 +186,8 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/market-scan-probability-polling.js",
         "/static/js/market-scan-probability-view.js",
         "/static/js/market-scan-read-transition.js",
+        "/static/js/market-scan-read-client.js",
+        "/static/js/market-scan-result-query.js",
         "/static/js/market-scan-progress-view.js",
         "/static/js/market-scan-row-actions.js",
         "/static/js/market-scan-run-context-view.js",
@@ -270,6 +273,7 @@ def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None:
         "market-scan-probability-horizon-controller.js": probability_horizon_controller,
         "market-scan-probability-polling.js": probability_polling,
         "market-scan-read-transition.js": (module_dir / "market-scan-read-transition.js").read_text(encoding="utf-8"),
+        "market-scan-result-query.js": (module_dir / "market-scan-result-query.js").read_text(encoding="utf-8"),
         "market-scan-future-range-controller.js": future_range_controller,
         "market-scan-future-range-view.js": future_range_view,
         "market-scan-view.js": view,
@@ -682,6 +686,7 @@ const activeTask = { ...scanRun(50, "official", "2026-07-29"), status: "running"
 const calls = [];
 const exportCalls = [];
 let historyDetailTimeout = null;
+let excludeSelectedHistory = false;
 document.createElement = () => ({ click() {} });
 globalThis.URL = { createObjectURL() { return "blob:history"; }, revokeObjectURL() {} };
 const controller = createMarketScanController({
@@ -704,7 +709,8 @@ const controller = createMarketScanController({
       const query = new URLSearchParams(target.split("?", 2)[1]);
       const items = query.get("mode") === "intraday"
         ? [intradayLatest]
-        : query.get("mode") === "preopen" ? [preopenLatest] : [officialLatest, officialHistory, mismatchedHistory];
+        : query.get("mode") === "preopen" ? [preopenLatest]
+          : excludeSelectedHistory ? [officialLatest] : [officialLatest, officialHistory, mismatchedHistory];
       return { items, total: items.length, page: 1, page_size: 100, page_count: 1 };
     }
     const detail = /^\/api\/market-scans\/(\d+)$/.exec(target);
@@ -752,6 +758,20 @@ assert.match(element("marketScanBrowseContext").textContent, /历史批次 #30/)
 await controller.exportResults();
 assert.equal(exportCalls.at(-1).startsWith("/api/market-scans/30/export.xlsx?"), true);
 
+excludeSelectedHistory = true;
+const readsBeforeHistoryQuery = calls.length;
+element("marketScanHistoryRefresh").listeners.click();
+assert.equal(element("marketScanHistoryRun").value, "30", "query intent must keep the selected batch visible");
+await flushPromises();
+assert.equal(controller.state.selectedHistoryRunId, 30, "navigation truncation changed the trusted selection");
+assert.equal(controller.state.publishedRun.id, 30);
+assert.equal(element("marketScanHistoryRun").value, "30");
+assert.match(element("marketScanHistoryRun").innerHTML, /当前浏览（不在本次查询中）/);
+assert.deepEqual(calls.slice(readsBeforeHistoryQuery).filter((url) => !url.startsWith("/api/market-scans?")), [], "history query needlessly reloaded latest/results");
+assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "30");
+excludeSelectedHistory = false;
+await controller.loadHistory();
+
 element("marketScanHistoryRun").value = "29";
 element("marketScanHistoryRun").listeners.change();
 await flushPromises();
@@ -760,10 +780,12 @@ assert.equal(controller.state.publishedRun.id, 30);
 assert.equal(element("marketScanHistoryRun").value, "30");
 assert.match(element("marketScanHistoryFeedback").textContent, /导航身份不一致/);
 assert.equal(calls.some((url) => url.startsWith("/api/market-scans/29/results?")), false);
+assert.notEqual(controller.state.pollTimer, null, "failed history selection stopped tracking the active task");
 
 element("marketScanModeOfficial").checked = false;
 element("marketScanModeIntraday").checked = true;
 element("marketScanModeIntraday").listeners.change();
+assert.equal(element("marketScanHistoryRun").value, "", "mode intent left an old-mode history id visible to auxiliary readers");
 await flushPromises();
 assert.equal(controller.state.browseMode, "intraday");
 assert.equal(controller.state.selectedHistoryRunId, null);
@@ -783,6 +805,18 @@ assert.equal(element("marketScanTableWrap").dataset.marketScanRunId, "45");
 assert.match(element("marketScanBrowseContext").textContent, /盘前复盘/);
 assert.match(element("marketScanTaskContext").textContent, /盘后正式.*不同/);
 assert.equal(calls.some((url) => url.includes("mode=preopen")), true);
+element("marketScanHistoryRun").value = "45";
+element("marketScanHistoryRun").listeners.change();
+await flushPromises();
+element("marketScanHistoryRefresh").listeners.click();
+assert.equal(element("marketScanHistoryRun").value, "45", "history query must not select latest implicitly");
+await flushPromises();
+assert.equal(controller.state.selectedHistoryRunId, 45);
+assert.equal(controller.state.publishedRun.id, 45);
+element("marketScanHistoryRun").value = "";
+element("marketScanHistoryRun").listeners.change();
+await flushPromises();
+assert.equal(controller.state.selectedHistoryRunId, null, "explicit latest selection must still leave history mode");
 controller.deactivate();
 
 function scanRun(id, mode, dataDate) {
@@ -1447,6 +1481,94 @@ assert.throws(
     )
 
 
+def test_probability_pending_states_are_honest_non_authorizing_and_refreshable() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import {
+  emptyJointExecutionEvidence, emptyOfficialExecutionEvidence,
+  isMarketScanProbabilitySourceCapturePending,
+  normalizeJointExecutionEvidence, normalizeOfficialExecutionEvidence,
+  normalizeMarketScanProbabilityResearch, normalizeMarketScanUpsideProbabilities,
+} from "./static/js/market-scan-probability-contracts.js";
+import {
+  marketScanProbabilityElements, marketScanProbabilitySnapshot, renderMarketScanProbabilityResearch,
+} from "./static/js/market-scan-probability-view.js";
+
+const element = () => ({
+  value: "", disabled: false, checked: false, dataset: {}, className: "", textContent: "",
+  setAttribute(name, value) { this[name] = String(value); },
+});
+const elements = marketScanProbabilityElements({}, () => element());
+elements.probabilityHorizonInputs.forEach((node, index) => { node.value = String([1, 5, 20][index]); });
+elements.probabilityHorizonInputs[1].checked = true;
+const payload = (stage) => ({
+  run_id: 42, status: "not_generated", availability: stage, pipeline_stage: stage,
+  filter_qualified: false, horizons: {}, run_binding: null,
+  limitations: [stage === "source_index_verification_pending" ? stage : `joint_execution_${stage}`],
+  ...(stage === "source_index_verification_pending" ? {} : {
+    joint_execution_evidence: { ...emptyJointExecutionEvidence(), status: stage },
+    official_execution_evidence: {
+      ...emptyOfficialExecutionEvidence(), configured: true, registry_digest: "a".repeat(64),
+      status: stage === "maintenance_pending" ? stage : "store_unavailable",
+    },
+    historical_context: {
+      status: "unavailable", availability: stage, filter_qualified: false,
+      selection_qualified: false, production_ranking_effect: "none",
+    },
+  }),
+});
+for (const [stage, label, retry] of [
+  ["source_index_verification_pending", "归档证据校验中", true],
+  ["maintenance_pending", "正式证据维护中", true],
+  ["maintenance_failed", "正式证据维护失败", false],
+]) {
+  const research = normalizeMarketScanProbabilityResearch(payload(stage), 42);
+  const predictions = normalizeMarketScanUpsideProbabilities({}, research);
+  assert.equal(isMarketScanProbabilitySourceCapturePending(research), retry);
+  assert.equal(isMarketScanProbabilitySourceCapturePending({ ...research, pipeline_stage: "source_archived" }), false);
+  assert.equal(research.joint_execution_evidence.filter_ready, false);
+  assert.equal(research.official_execution_evidence.formal_evidence_available, false);
+  for (const horizon of ["1", "5", "20"]) {
+    assert.equal(research.horizons[horizon].filter_qualified, false);
+    assert.equal(predictions[horizon].probability, null);
+  }
+  elements.probabilityMin.value = "80";
+  renderMarketScanProbabilityResearch(elements, research);
+  assert.equal(elements.probabilityStatus.textContent, label);
+  assert.equal(elements.probabilityMin.disabled, true);
+  assert.equal(elements.probabilityMin.value, "");
+  assert.match(elements.probabilityFilterHelp.textContent, /筛选保持关闭/);
+  assert.doesNotMatch(elements.historicalStatus.textContent, /历史证据校验失败/);
+  const snapshot = marketScanProbabilitySnapshot({ upside_probabilities: predictions }, research);
+  assert.match(snapshot, new RegExp(`上涨概率研究 · ${label}`));
+  if (retry) assert.match(snapshot, /完成后自动更新/);
+  else assert.match(snapshot, /旧概率授权已停用/);
+}
+
+for (const stage of ["maintenance_pending", "maintenance_failed"]) {
+  const raw = payload(stage);
+  assert.throws(() => normalizeMarketScanProbabilityResearch({ ...raw, filter_qualified: true }, 42), /不得保留/);
+  assert.throws(() => normalizeMarketScanProbabilityResearch({ ...raw, status: "calibrated_shadow" }, 42), /不得保留/);
+  assert.throws(() => normalizeMarketScanProbabilityResearch({
+    ...raw, horizons: { "5": { status: "calibrated_shadow", probability: 0.9, filter_qualified: true } },
+  }, 42), /不得保留旧周期概率/);
+  assert.throws(() => normalizeJointExecutionEvidence({ ...raw.joint_execution_evidence, filter_ready: true }), /状态不一致/);
+  assert.throws(() => normalizeJointExecutionEvidence({ ...raw.joint_execution_evidence, authorization_verified: true }), /不得保留旧授权/);
+  assert.throws(() => normalizeJointExecutionEvidence({ ...raw.joint_execution_evidence, current_prediction_count: 5 }), /不得保留旧授权/);
+  assert.throws(() => normalizeJointExecutionEvidence({
+    ...raw.joint_execution_evidence, probability_ranking_status: "production_ranking_ready",
+    probability_ranking_count: 5, probability_ranking_run_id: 42,
+    production_ranking_effect: "v6_active_for_exact_published_run",
+  }), /生产排名缺少/);
+}
+const official = payload("maintenance_pending").official_execution_evidence;
+assert.throws(() => normalizeOfficialExecutionEvidence({ ...official, formal_evidence_available: true }), /availability 与状态不一致/);
+assert.throws(() => normalizeOfficialExecutionEvidence({ ...official, verified_session_count: 5 }), /不得使用旧校验计数/);
+'''
+    )
+
+
 def test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures() -> None:
     _run_node_script(
         r'''
@@ -1494,7 +1616,7 @@ await arrival.coordinator.poll(async () => {
 assert.equal(arrivalCalls, 1);
 assert.deepEqual(arrival.timers, ["default"]);
 
-for (const availability of ["source_scan_action_ineligible", "source_capture_skipped", "ineligible_run_contract"]) {
+for (const availability of ["source_scan_action_ineligible", "source_capture_skipped", "ineligible_run_contract", "maintenance_failed"]) {
   const terminalState = fakeTimerHarness();
   terminalState.coordinator.schedule({
     run: pending.run,
@@ -1502,6 +1624,25 @@ for (const availability of ["source_scan_action_ineligible", "source_capture_ski
   });
   assert.deepEqual(terminalState.timers, ["default"]);
   assert.equal(terminalState.timers.includes("probabilityResults"), false);
+}
+
+for (const stage of ["source_index_verification_pending", "maintenance_pending"]) {
+  const waiting = fakeTimerHarness(2);
+  const evidence = {
+    run: pending.run,
+    probability_research: { status: "not_generated", availability: stage, pipeline_stage: stage },
+  };
+  waiting.coordinator.schedule(evidence);
+  let calls = 0;
+  while (waiting.timers.shift() === "probabilityResults") {
+    await waiting.coordinator.poll(async () => {
+      calls += 1;
+      waiting.coordinator.schedule(evidence);
+      return evidence;
+    });
+  }
+  assert.equal(calls, 2);
+  assert.equal(waiting.timers.includes("probabilityResults"), false);
 }
 
 const failures = fakeTimerHarness(3);
@@ -2914,6 +3055,11 @@ const terminal = {
 };
 const secondPage = deferred();
 let resultCalls = 0;
+const resultUrls = [];
+const unhandled = [];
+process.on("unhandledRejection", (error) => unhandled.push(error));
+element("marketScanMarket").value = "SH";
+element("marketScanKeyword").value = "已应用";
 const controller = createMarketScanController({
   root: document,
   now: new Date(2026, 6, 17, 16, 30),
@@ -2927,6 +3073,7 @@ const controller = createMarketScanController({
         if (String(url).startsWith("/api/market-scans/latest-published?mode=")) return terminal;
         if (String(url).includes("/results?")) {
       resultCalls += 1;
+      resultUrls.push(String(url));
       if (resultCalls === 1) return page(1, stock("600519.SH", 1));
       return secondPage.promise;
     }
@@ -2938,9 +3085,17 @@ await controller.activate();
 assert.equal(element("marketScanPagination").hidden, false);
 assert.equal(element("marketScanNext").disabled, false);
 document.activeElement = element("marketScanNext");
-controller.state.page = 2;
-const loading = controller.loadResults();
+element("marketScanMarket").value = "BJ";
+element("marketScanKeyword").value = "尚未应用";
+element("marketScanScoreMin").value = "90";
+element("marketScanScoreMax").value = "10";
+element("marketScanNext").listeners.click();
 while (resultCalls < 2) await Promise.resolve();
+const secondQuery = new URLSearchParams(resultUrls.at(-1).split("?", 2)[1]);
+assert.equal(secondQuery.get("page"), "2");
+assert.equal(secondQuery.get("market"), "SH", "pagination applied a draft market filter");
+assert.equal(secondQuery.get("keyword"), "已应用", "pagination applied a draft keyword");
+assert.equal(secondQuery.has("min_score"), false, "pagination validated an unapplied draft range");
 assert.equal(element("marketScanTableWrap").hidden, false, "page load hid the stable result region");
 assert.equal(element("marketScanPagination").hidden, false, "page load hid pagination");
 assert.equal(element("marketScanPagination")["aria-busy"], "true");
@@ -2949,10 +3104,17 @@ assert.equal(element("marketScanNext").disabled, true);
 assert.equal(document.activeElement, element("marketScanTableWrap"), "page load dropped focus");
 
 secondPage.resolve(page(2, stock("920066.BJ", 101)));
-await loading;
+for (let index = 0; index < 80; index += 1) await Promise.resolve();
 assert.equal(element("marketScanPagination")["aria-busy"], "false");
 assert.equal(element("marketScanNext").disabled, true);
 assert.equal(document.activeElement, element("marketScanTableWrap"), "terminal page dropped focus");
+element("marketScanFilters").listeners.submit({ preventDefault() {} });
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(resultCalls, 2, "invalid filters were sent to the server");
+assert.equal(controller.state.page, 2, "invalid filters changed the displayed page identity");
+assert.match(element("marketScanAnnouncement").textContent, /筛选条件无效.*下限不能大于上限/);
+assert.match(element("marketScanRows").innerHTML, /920066/);
+assert.deepEqual(unhandled, [], "filter validation escaped as an unhandled rejection");
 controller.deactivate();
 
 function page(number, item) {
@@ -3423,12 +3585,22 @@ for (let tick = 0; tick < 100; tick += 1) await sync.sync();
 assert.equal(stageCalls, circuitStageCalls + 8, "stable HTTP 409 repeated trusted selectors");
 
 requestImpl = async () => identityG;
-stageImpl = async () => { throw new Error("请求超时，请稍后重试"); };
+for (const status of [undefined, 408, 425, 429, 500, 502, 503, 504]) {
+  stageImpl = async () => {
+    const error = new Error("请求超时，请稍后重试");
+    error.status = status;
+    throw error;
+  };
+  const priorStageCalls = stageCalls;
+  await sync.sync();
+  await sync.sync();
+  assert.equal(stageCalls, priorStageCalls + 2, `transient timeout/status ${status} blocked unchanged-token recovery`);
+  assert.deepEqual(errorOptions.slice(-2).map((options) => options.deterministicFailure), [false, false]);
+}
+stageImpl = async () => ({ run: run(7) });
 await sync.sync();
-for (let tick = 0; tick < 100; tick += 1) await sync.sync();
-assert.equal(stageCalls, circuitStageCalls + 9, "stable request timeout repeated trusted selectors");
-await sync.sync({ forceTrusted: true });
-assert.equal(stageCalls, circuitStageCalls + 10, "explicit retry did not reopen timed-out fingerprint once");
+assert.equal(state.pollingIdentity.fingerprint, identityG.fingerprint);
+assert.deepEqual(committed.at(-1), [7, 7]);
 
 function abortRequest(controllerField, sequenceField) {
   state[controllerField]?.abort?.();
@@ -3451,6 +3623,99 @@ function deferred() {
 }
 function run(id) {
   return { id, status: "success", mode: "official", scope: "full", updated_at: `2026-08-${String(id).padStart(2, "0")}` };
+}
+'''
+    )
+
+
+def test_latest_timeout_recovers_on_same_identity_after_existing_capped_backoff() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { installAppDom, marketScanPollingIdentity } from "./tests/frontend_app_flow_helpers.mjs";
+import { createMarketScanController } from "./static/js/market-scan.js";
+
+const { element } = installAppDom({ canvasContext: null });
+const timers = new Map();
+let timerId = 0;
+globalThis.setTimeout = (callback, delay = 0) => {
+  const id = ++timerId;
+  timers.set(id, { callback, delay });
+  return id;
+};
+globalThis.clearTimeout = (id) => timers.delete(id);
+const run = {
+  id: 50, status: "success", trigger: "manual", mode: "official", rule_version: "full-market-score-v5",
+  as_of: "2026-08-14 16:30:00", data_date: "2026-08-14", quote_date: "2026-08-14",
+  scope: "沪市 + 深市 + 北交所当前上市A股", total_count: 1, excluded_count: 0,
+  processed_count: 1, success_count: 1, missing_count: 0, skipped_count: 0, retry_count: 0,
+  progress_pct: 100, coverage_pct: 100, created_at: "2026-08-14 16:30:00",
+  updated_at: "2026-08-14 16:31:00", finished_at: "2026-08-14 16:31:00", message: "扫描完成",
+  snapshot_digest: "a".repeat(64), snapshot_seal_origin: "publication",
+  snapshot_sealed_at: "2026-08-14 16:31:00",
+};
+const identity = marketScanPollingIdentity(run, run);
+for (const failures of [1, 7]) {
+  let identityCalls = 0;
+  let latestCalls = 0;
+  let publishedCalls = 0;
+  let resultCalls = 0;
+  const controller = createMarketScanController({
+    root: document, pollIntervalMs: 1000, maxPollIntervalMs: 30000, idlePollIntervalMs: 30000,
+    async fetcher(url) {
+      const target = String(url);
+      if (target.startsWith("/api/market-scans/polling-identity?")) {
+        identityCalls += 1;
+        return identity;
+      }
+      if (target === "/api/market-scans/latest") {
+        latestCalls += 1;
+        if (latestCalls <= failures) throw new Error("请求超时，请稍后重试");
+        return run;
+      }
+      if (target.startsWith("/api/market-scans/latest-published?")) {
+        publishedCalls += 1;
+        return run;
+      }
+      if (target.startsWith("/api/market-scans?")) {
+        return { items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
+      }
+      if (target.includes("/results?")) {
+        resultCalls += 1;
+        return { run, items: [], total: 0, page: 1, page_size: 100, page_count: 0 };
+      }
+      throw new Error(`unexpected request: ${target}`);
+    },
+  });
+  await controller.activate();
+  assert.match(element("marketScanHeadline").textContent, /最近扫描读取失败.*请求超时/);
+  assert.equal(controller.state.run, null);
+  assert.equal(publishedCalls, 0);
+  assert.equal(resultCalls, 0);
+  for (let attempt = 1; attempt <= failures; attempt += 1) {
+    assert.equal(latestCalls, attempt, "timeout retried without waiting for the timer");
+    assert.equal(controller.state.pollingIdentity, null, "failed trusted read committed a change token");
+    assert.equal(timers.size, 1, "temporary failure created overlapping retries");
+    const [id, timer] = [...timers.entries()][0];
+    assert.equal(timer.delay, Math.min(30000, 1000 * (2 ** (attempt - 1))));
+    timers.delete(id);
+    timer.callback();
+    for (let tick = 0; tick < 300; tick += 1) await Promise.resolve();
+  }
+  assert.equal(latestCalls, failures + 1);
+  assert.equal(identityCalls, failures + 2, "recovery must verify unchanged identity before and after trusted reads");
+  assert.equal(publishedCalls, 1);
+  assert.equal(resultCalls, 1);
+  assert.equal(controller.state.run.id, run.id);
+  assert.equal(controller.state.publishedRun.id, run.id);
+  assert.equal(controller.state.renderedResultRunId, run.id);
+  assert.equal(controller.state.pollingIdentity.fingerprint, identity.fingerprint);
+  assert.equal(controller.state.consecutiveFailures, 0);
+  assert.doesNotMatch(element("marketScanHeadline").textContent, /读取失败/);
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0].delay, 30000);
+  controller.deactivate();
+  assert.equal(timers.size, 0);
 }
 '''
     )
@@ -3964,11 +4229,15 @@ await controller.activate();
 controller.state.page = 2;
 element("marketScanProbabilityMin").disabled = false;
 element("marketScanProbabilityMin").value = "70";
+await controller.loadResults();
+element("marketScanProbabilityMin").value = "85";
+element("marketScanKeyword").value = "尚未应用的草稿";
 await controller.loadLatest();
 const sameTokenUrl = resultUrls.at(-1);
 assert.match(sameTokenUrl, /page=2/);
 assert.match(sameTokenUrl, /probability_horizon=5/);
 assert.match(sameTokenUrl, /min_upside_probability=0.7/);
+assert.doesNotMatch(sameTokenUrl, /min_upside_probability=0.85|keyword=/, "forced refresh applied draft controls");
 
 controller.state.page = 2;
 element("marketScanProbabilityMin").disabled = false;
@@ -5062,6 +5331,212 @@ function installFakeTimers() {
 }
 async function flushPromises() {
   for (let index = 0; index < 80; index += 1) await Promise.resolve();
+}
+'''
+    )
+
+
+def test_market_scan_applied_query_refresh_ignores_drafts_and_requalifies_new_publications() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import {
+  createAppliedMarketScanQueries, paginatedResultsQuery, validResultsQuery,
+} from "./static/js/market-scan-result-query.js";
+
+let selected = { id: 31, mode: "official", snapshot_digest: "a".repeat(64) };
+const state = { page: 1, renderedResultRunId: 31, run: selected };
+const applied = "/api/market-scans/31/results?page=2&page_size=100&market=SH&market=BJ&keyword=applied&probability_horizon=5&min_upside_probability=0.7";
+let reads = 0;
+let resumes = 0;
+const announcements = [];
+const queries = createAppliedMarketScanQueries({
+  elements: {}, getBaseline: () => ({ query: applied }), resultRun: () => selected, state,
+  resultsUrl() { reads += 1; throw new Error("范围下限不能大于上限"); },
+  polling: { scheduleDefault() { resumes += 1; } },
+  view: {
+    announce(message) { announcements.push(message); },
+    renderResultState() { throw new Error("invalid draft erased a verified displayed page"); },
+  },
+});
+queries.capture(applied, selected);
+assert.equal(queries.matchesFilters(paginatedResultsQuery(applied, 5)), true);
+const passive = params(queries.request(selected, { applied: true }));
+assert.equal(passive.get("keyword"), "applied");
+assert.equal(passive.get("min_upside_probability"), "0.7");
+assert.deepEqual(passive.getAll("market"), ["SH", "BJ"]);
+assert.equal(reads, 0, "background retry inspected draft controls");
+
+globalThis.matchMedia = () => ({ matches: true });
+const mobile = params(queries.refresh(31, 1));
+assert.equal(mobile.get("page_size"), "30");
+assert.equal(mobile.get("keyword"), "applied");
+assert.equal(reads, 0, "responsive refresh inspected draft controls");
+
+assert.equal(queries.request(selected), null);
+assert.equal(reads, 1);
+assert.equal(state.page, 2);
+assert.equal(resumes, 1, "invalid inputs stopped automatic task tracking");
+assert.match(announcements.at(-1), /筛选条件无效/);
+assert.equal(params(queries.refresh(31, 2)).get("keyword"), "applied");
+
+selected = { ...selected, snapshot_digest: "b".repeat(64) };
+const resealed = params(queries.refresh(31, 1));
+assert.equal(resealed.has("probability_horizon"), false);
+assert.equal(resealed.has("min_upside_probability"), false, "a changed seal reused old probability qualification");
+assert.equal(resealed.get("keyword"), "applied");
+selected = { ...selected, id: 32, mode: "intraday" };
+const rebound = queries.refresh(32, 1);
+assert.match(rebound, /^\/api\/market-scans\/32\/results\?/);
+assert.equal(params(rebound).has("min_upside_probability"), false);
+assert.equal(params(rebound).get("keyword"), "applied");
+
+queries.capture(rebound + "&probability_horizon=5&min_upside_probability=0.8", selected);
+assert.equal(queries.matchesFilters(rebound), false, "paging accepted a page from before the pending filter intent");
+queries.clearProbability();
+assert.equal(queries.matchesFilters(rebound), true);
+assert.equal(params(queries.refresh(32, 1)).has("min_upside_probability"), false, "horizon switch kept a busy pending old-horizon filter");
+assert.equal(validResultsQuery("/api/market-scans/0/results", 0), false);
+assert.equal(validResultsQuery("/api/market-scans/9007199254740993/results", "9007199254740993"), false);
+for (const page of [0, -1, 1.5, NaN, Infinity, true, "2"]) {
+  assert.equal(paginatedResultsQuery(applied, page), null);
+}
+function params(query) { return new URLSearchParams(query.split("?", 2)[1]); }
+'''
+    )
+
+
+def test_market_scan_export_serializes_full_download_and_discards_stale_queued_intent() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { createMarketScanExportAction } from "./static/js/market-scan-export-action.js";
+import { createMarketScanReadTransition } from "./static/js/market-scan-read-transition.js";
+
+const state = { runRequest: null, runRequestSeq: 0, exportBusy: false };
+const run = { id: 31 };
+const elements = {
+  status: { value: "success" }, keyword: { value: "点击时条件" }, market: { value: "SH" },
+  sort: { value: "rank" }, order: { value: "asc" }, scoreMin: { value: "" }, scoreMax: { value: "" },
+};
+const announcements = [];
+const calls = [];
+let downloads = 0;
+let body = deferred();
+let failureResponse = null;
+const transition = createMarketScanReadTransition({
+  latestSync: { supersede: async () => null },
+  probabilityHorizon: { supersede() {} }, state,
+});
+const exportResults = createMarketScanExportAction({
+  elements, resultRun: () => run, state,
+  withHeavyRead: (read) => transition.run(read),
+  async exportRequest(url, options) {
+    calls.push(url);
+    assert.equal(options.signal.aborted, false);
+    if (failureResponse) {
+      const response = failureResponse;
+      failureResponse = null;
+      return response;
+    }
+    return {
+      ok: true,
+      headers: { get(name) {
+        return name === "content-type" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : null;
+      } },
+      async blob() { return body.promise; },
+    };
+  },
+  view: {
+    announce(message) { announcements.push(message); },
+    renderExportBusy() {},
+    saveExport(blob, disposition, selected) {
+      assert.equal(blob.size > 0, true);
+      assert.equal(selected.id, 31);
+      downloads += 1;
+      return "scan-31.xlsx";
+    },
+  },
+});
+
+const blocker = deferred();
+let heldReadStarted = false;
+const heldRead = transition.run(() => { heldReadStarted = true; return blocker.promise; });
+await flushPromises();
+assert.equal(heldReadStarted, true);
+const exporting = exportResults();
+await flushPromises();
+assert.equal(state.exportBusy, true);
+assert.equal(calls.length, 0, "export overlapped an admitted results read");
+elements.keyword.value = "排队时新草稿";
+elements.market.value = "BJ";
+blocker.resolve();
+await heldRead;
+await flushPromises();
+assert.equal(calls.length, 1);
+const captured = new URLSearchParams(calls[0].split("?", 2)[1]);
+assert.equal(captured.get("keyword"), "点击时条件");
+assert.equal(captured.get("market"), "SH");
+let followingReadStarted = false;
+const followingRead = transition.run(() => { followingReadStarted = true; });
+await flushPromises();
+assert.equal(followingReadStarted, false, "export released the heavy-read tail before consuming its body");
+body.resolve(new Blob(["xlsx"]));
+assert.equal(await exporting, "scan-31.xlsx");
+await followingRead;
+assert.equal(followingReadStarted, true);
+assert.equal(downloads, 1);
+assert.equal(state.exportBusy, false);
+
+const staleBlocker = deferred();
+const staleHeldRead = transition.run(() => staleBlocker.promise);
+await flushPromises();
+const staleExport = exportResults();
+const changedSelection = transition.transition(() => null);
+staleBlocker.resolve();
+await staleHeldRead;
+assert.equal(await staleExport, null);
+await changedSelection;
+assert.equal(calls.length, 1, "superseded export issued a stale HTTP request");
+assert.equal(downloads, 1);
+assert.equal(state.exportBusy, false);
+assert.match(announcements.at(-1), /已取消排队中的导出/);
+
+elements.scoreMin.value = "90";
+elements.scoreMax.value = "10";
+assert.equal(await exportResults(), null);
+assert.equal(calls.length, 1);
+assert.equal(state.exportBusy, false);
+assert.match(announcements.at(-1), /下限不能大于上限/);
+
+elements.scoreMin.value = "";
+elements.scoreMax.value = "";
+failureResponse = failedResponse(503, "0");
+assert.equal(await exportResults(), "scan-31.xlsx");
+assert.equal(calls.length, 3, "busy export did not perform exactly one server-signalled retry");
+assert.equal(downloads, 2);
+failureResponse = failedResponse(409, "0");
+assert.equal(await exportResults(), null);
+assert.equal(calls.length, 4, "snapshot conflict was retried as a busy response");
+assert.equal(downloads, 2);
+failureResponse = failedResponse(503, null);
+assert.equal(await exportResults(), null);
+assert.equal(calls.length, 5, "unclassified 503 without Retry-After was automatically retried");
+
+function failedResponse(status, retryAfter) {
+  return {
+    ok: false, status,
+    headers: { get(name) { return name === "Retry-After" ? retryAfter : null; } },
+    async json() { return { detail: "冻结快照检查" }; },
+  };
+}
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+async function flushPromises() {
+  for (let index = 0; index < 30; index += 1) await Promise.resolve();
 }
 '''
     )

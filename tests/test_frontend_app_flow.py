@@ -2642,11 +2642,185 @@ def test_alert_evaluation_uses_an_accessible_dedicated_status_region() -> None:
     assert 'id="alertEvaluation" role="status" aria-live="polite" aria-atomic="true" aria-busy="false" hidden' in html
 
 
+_WORKSPACE_BOOTSTRAP_HARNESS = r'''
+  import assert from "node:assert/strict";
+  import { installAppDom, marketScanPollingIdentity } from "./tests/frontend_app_flow_helpers.mjs";
+  import { WORKSPACE_PREFERENCES_STORAGE_KEY, WORKSPACE_PREFERENCES_VERSION } from "./static/js/workspace-preferences.js";
+
+  const { element: rawElement, streams, jsonResponse, legacyWorkbenchResponse } = installAppDom({ canvasContext: null });
+  const element = (id) => Object.assign(rawElement(id), {
+    setAttribute(name, value) { this[name] = String(value); },
+    removeAttribute(name) { delete this[name]; },
+    replaceChildren(...children) { this.children = children; },
+  });
+  document.getElementById = element;
+  const tabs = ["overview", "market-scan", "qa", "data", "paper"].map((view) => {
+    const tab = element(`tab-${view}`);
+    tab.dataset.view = view;
+    return tab;
+  });
+  document.querySelectorAll = (selector) => selector === ".workspace-tabs button[data-view]" ? tabs : [];
+  element("individualProbabilityResearch").dataset.individualProbabilitySurface = "true";
+  const preferences = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => preferences.get(key) ?? null,
+    setItem: (key, value) => preferences.set(key, value),
+  };
+  const timers = new Map();
+  let timerId = 0;
+  globalThis.setTimeout = (callback, delay) => {
+    timers.set(++timerId, { callback, delay });
+    return timerId;
+  };
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  globalThis.__ASHARE_RADAR_DISABLE_AUTOLOAD__ = false;
+  const calls = [];
+  const workbenchResolvers = [];
+  const watchlistResolvers = [];
+  let holdWorkbench = false;
+  let holdWatchlist = false;
+  const workbench = {
+    analysis: {
+      quote: { code: "600519", market: "SH", name: "贵州茅台", price: 10, change: 0, change_pct: 0,
+        source: "测试行情", timestamp: "2026-07-15 10:00:00" },
+      data_quality: {}, signal_snapshot: { label: "观察", summary: "测试" }, review: {}, klines: [],
+    },
+    insights: { overview: {} },
+  };
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    calls.push(target);
+    if (target.startsWith("/api/stock/workbench")) {
+      if (holdWorkbench) return new Promise((resolve) => workbenchResolvers.push(() => resolve(legacyWorkbenchResponse(workbench))));
+      return legacyWorkbenchResponse(workbench);
+    }
+    if (target === "/api/watchlist") {
+      if (holdWatchlist) return new Promise((resolve) => watchlistResolvers.push(() => resolve(jsonResponse([]))));
+      return jsonResponse([]);
+    }
+    if (target.startsWith("/api/market-scans/polling-identity?")) {
+      return jsonResponse(marketScanPollingIdentity(null, null, new URL(target, "http://test").searchParams.get("mode")));
+    }
+    if (target === "/api/market-scans/latest" || target.startsWith("/api/market-scans/latest-published?")) return jsonResponse(null);
+    if (target.startsWith("/api/market-scans?")) return jsonResponse({ items: [], total: 0, page: 1, page_size: 100, page_count: 0 });
+    if (target === "/api/market") return jsonResponse({ indices: [] });
+    if (target === "/api/strong-stocks") return jsonResponse({ items: [] });
+    if (target === "/api/data/status") return jsonResponse({ providers: [], source_plan: {}, cache: {}, capabilities: [], capability_statuses: [] });
+    if (target === "/api/tasks/status") return jsonResponse({ enabled: false, running: false, tasks: [] });
+    if (["/api/plates", "/api/tasks/runs", "/api/monitor/events", "/api/advice/timeline", "/api/reviews?"].some((prefix) => target.startsWith(prefix))) return jsonResponse([]);
+    return { ok: false, status: 503, async json() { return { detail: "fixture unavailable" }; } };
+  };
+  function restoreMarketPreference() {
+    preferences.set(WORKSPACE_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      version: WORKSPACE_PREFERENCES_VERSION, preferences: { primaryView: "market", workspaceView: "market-scan" },
+    }));
+  }
+  async function settle() { for (let index = 0; index < 500; index += 1) await Promise.resolve(); }
+  function stockCalls() { return calls.filter((url) => url.startsWith("/api/stock/")); }
+  function workbenchCalls() { return calls.filter((url) => url.startsWith("/api/stock/workbench")); }
+  function assertMarketOnly() {
+    assert.deepEqual(stockCalls(), [], "hidden stock research must not start on the market workspace");
+    assert.deepEqual(calls.filter((url) => !["/api/market-scans", "/api/strategy-lab", "/api/discovery"].some((prefix) => url.startsWith(prefix))), [], "unrelated global lists must remain deferred");
+    assert.equal(streams.length, 0, "hidden stock must not subscribe to quotes");
+  }
+'''
+
+
+def test_market_workspace_bootstrap_defers_stock_until_return() -> None:
+    _run_node_script(_WORKSPACE_BOOTSTRAP_HARNESS + r'''
+      restoreMarketPreference();
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.equal(__appTest.state.workspaceView, "market-scan");
+      assert.equal(__appTest.marketScanController.state.activated, true);
+      assert.ok(calls.some((url) => url.startsWith("/api/market-scans/polling-identity?")));
+      assert.equal(__appTest.state.workbenchDeferred, true);
+      assertMarketOnly();
+
+      assert.equal(await __appTest.loadAll({ forceGlobal: true }), false);
+      assert.deepEqual(__appTest.refreshGlobalPanels({ force: true }), {});
+      document.hidden = true;
+      __appTest.handleVisibilityChange();
+      document.hidden = false;
+      __appTest.handleVisibilityChange();
+      __appTest.state.coreStatus = { phase: "error" };
+      __appTest.state.failedLoadSymbol = "600519.SH";
+      assert.equal(__appTest.handleWorkbenchOnline(), true);
+      await __appTest.state.onlineRecoveryPromise;
+      await settle();
+      assertMarketOnly();
+
+      __appTest.setPrimaryView("research");
+      __appTest.setWorkspaceView("overview");
+      await settle();
+      assert.equal(workbenchCalls().length, 1, "nested navigation must resume stock only once");
+      assert.ok(stockCalls().some((url) => url.startsWith("/api/stock/minute-analysis")));
+      assert.ok(stockCalls().some((url) => url.startsWith("/api/stock/upside-probability")));
+      assert.ok(calls.includes("/api/watchlist"));
+      assert.ok(calls.some((url) => url.startsWith("/api/plates")));
+      assert.equal(__appTest.state.coreStatus.phase, "ready");
+      assert.equal(__appTest.state.workbenchDeferred, false);
+      assert.equal(streams.length, 1);
+      __appTest.setPrimaryView("market");
+      assert.equal(streams[0].closed, true, "returning to market must stop hidden quote streaming");
+      assert.equal(__appTest.state.monitorTimer, null);
+      __appTest.marketScanController.deactivate();
+    ''')
+
+
+def test_default_stock_bootstrap_remains_core_first_with_slow_globals() -> None:
+    _run_node_script(_WORKSPACE_BOOTSTRAP_HARNESS + r'''
+      holdWatchlist = true;
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.equal(__appTest.state.workspaceView, "overview");
+      assert.ok(calls[0].startsWith("/api/stock/workbench"));
+      assert.equal(workbenchCalls().length, 1);
+      assert.equal(watchlistResolvers.length, 1);
+      assert.ok(__appTest.state.lastAnalysis, "core analysis must render before the global list finishes");
+      assert.equal(__appTest.state.coreStatus.phase, "ready");
+      assert.ok(stockCalls().some((url) => url.startsWith("/api/stock/minute-analysis")));
+      assert.ok(stockCalls().some((url) => url.startsWith("/api/stock/upside-probability")));
+      assert.equal(calls.some((url) => url.startsWith("/api/market-scans")), false);
+      assert.equal(streams.length, 0);
+      watchlistResolvers[0]();
+      await settle();
+      assert.equal(streams.length, 1, "quotes resume only after the current watchlist is available");
+    ''')
+
+
+def test_market_navigation_cancels_stock_tail_and_deduplicates_explicit_return() -> None:
+    _run_node_script(_WORKSPACE_BOOTSTRAP_HARNESS + r'''
+      globalThis.__ASHARE_RADAR_DISABLE_AUTOLOAD__ = true;
+      holdWorkbench = true;
+      const { __appTest } = await import("./static/app.js");
+      const oldLoad = __appTest.loadAll();
+      await settle();
+      assert.equal(workbenchResolvers.length, 1);
+      __appTest.setPrimaryView("market");
+      assert.equal(__appTest.state.pendingLoad, null);
+      workbenchResolvers[0]();
+      assert.equal(await oldLoad, false);
+      await settle();
+      assert.equal(stockCalls().some((url) => !url.startsWith("/api/stock/workbench")), false);
+      assert.equal(__appTest.state.lastAnalysis, null);
+      assert.equal(streams.length, 0);
+      holdWorkbench = false;
+      __appTest.setPrimaryView("research");
+      assert.equal(await __appTest.loadAll({ reveal: true }), true);
+      await settle();
+      assert.equal(workbenchCalls().length, 2, "an explicit stock action must supersede the queued lazy resume");
+      assert.equal(__appTest.state.coreStatus.phase, "ready");
+      __appTest.marketScanController.deactivate();
+    ''')
+
+
 def _run_node_script(script: str) -> None:
-    subprocess.run(
+    result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         cwd=ROOT,
-        check=True,
+        check=False,
         text=True,
         capture_output=True,
     )
+    assert result.returncode == 0, result.stderr

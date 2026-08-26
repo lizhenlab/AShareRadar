@@ -18,6 +18,14 @@ import tempfile
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _READ_CHUNK_BYTES = 1024 * 1024
 _MAX_JSON_NESTING_DEPTH = 256
+# Consume non-structural spans in C, yielding only brackets outside strings.
+# Disjoint alternatives and possessive repeats keep malformed/escape-heavy input
+# linear. Optional terminators let a final span succeed without a failed search
+# restarting at each character. json.loads still rejects unterminated strings.
+_JSON_NESTING_TOKENS = re.compile(
+    r'(?:[^\[\]{}"]++|"[^"\\]*+(?:\\.[^"\\]*+)*+"?)*+([\[\]{}])?',
+    re.DOTALL,
+)
 _DARWIN_SYSTEM_ALIASES = {
     "tmp": Path("/private/tmp"),
     "var": Path("/private/var"),
@@ -300,25 +308,15 @@ def _validate_json_scalar(value: object) -> None:
 
 def _validate_json_text_nesting(text: str) -> None:
     depth = 0
-    in_string = False
-    escaped = False
-    for character in text:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-            continue
-        if character == '"':
-            in_string = True
+    for token in _JSON_NESTING_TOKENS.finditer(text):
+        character = token[1]
+        if character is None:
             continue
         if character in "[{":
             depth += 1
             if depth > _MAX_JSON_NESTING_DEPTH:
                 raise ArtifactJsonDecodeError("JSON nesting exceeds the supported limit")
-        elif character in "]}":
+        else:
             depth -= 1
 
 

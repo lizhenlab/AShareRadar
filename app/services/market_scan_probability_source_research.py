@@ -10,7 +10,8 @@ import json
 from pathlib import Path
 import re
 import stat
-from threading import Lock, RLock
+from threading import Event, Lock, RLock
+import time
 from typing import cast
 
 from app.artifacts.io import path_has_only_trusted_aliases
@@ -53,7 +54,8 @@ from app.services.trading_calendar import (
 PROBABILITY_SOURCE_RESEARCH_SCHEMA_VERSION = "market-scan-probability-source-research-v1"
 _HORIZONS = (1, 5, 20)
 _TARGETS = (PROBABILITY_PRIMARY_TARGET, PROBABILITY_ABSOLUTE_TARGET)
-_FileFingerprint = tuple[Path, int, int, int, int, int, int]
+ProbabilityArchiveFingerprint = tuple[Path, int, int, int, int, int, int]
+_FileFingerprint = ProbabilityArchiveFingerprint
 _DirectorySnapshot = tuple[tuple[int, int, int, int] | None, tuple[_FileFingerprint, ...]]
 _ResearchSnapshot = tuple[
     _DirectorySnapshot,
@@ -89,7 +91,9 @@ class MarketScanProbabilitySourceResearchStore:
         self.fit_directory = Path(fit_directory).expanduser().absolute() if fit_directory is not None else self.directory.parent / "market_scan_probability_fit"
         self._lock = RLock()
         self._refresh_lock = Lock()
+        self._isolated_refresh = False
         self._preload_pending = False
+        self._preload_leases = 0
         self._snapshot: _ResearchSnapshot | None = None
         self._archive_bindings: dict[int, str] | None = None
         self._research_by_run: dict[int, dict[str, object]] = {}
@@ -110,6 +114,10 @@ class MarketScanProbabilitySourceResearchStore:
         archive_bindings: Mapping[int, str] | None = None,
     ) -> int:
         """Verify archives and atomically publish the compact in-memory run index."""
+        with self._lock:
+            isolated = self._isolated_refresh
+        if isolated:
+            return self.preload_isolated(archive_bindings=archive_bindings)
         normalized_bindings = _normalize_archive_bindings(archive_bindings)
         with self._lock:
             previous_bindings = self._archive_bindings
@@ -125,6 +133,43 @@ class MarketScanProbabilitySourceResearchStore:
         finally:
             self.clear_preload_pending()
 
+    def preload_isolated(
+        self,
+        *,
+        archive_bindings: Mapping[int, str] | None = None,
+        cancel_event: Event | None = None,
+    ) -> int:
+        """Opt this store into isolated cold and incremental deep verification."""
+        from app.services.market_scan_probability_preload_process import WORKER_POLL_SECONDS, WORKER_TIMEOUT_SECONDS, check_preload_active
+
+        deadline = time.monotonic() + WORKER_TIMEOUT_SECONDS
+        acquired = False
+        with self._lock:
+            self._isolated_refresh = True
+        try:
+            normalized = _normalize_archive_bindings(archive_bindings)
+            check_preload_active(cancel_event, deadline)
+            while not self._refresh_lock.acquire(timeout=WORKER_POLL_SECONDS):
+                check_preload_active(cancel_event, deadline)
+            acquired = True
+            check_preload_active(cancel_event, deadline)
+            with self._lock:
+                previous = self._archive_bindings
+                self._archive_bindings = normalized
+            try:
+                self._refresh_isolated_stable_snapshot(cancel_event, deadline)
+                with self._lock:
+                    return len(self._research_by_run)
+            except Exception:
+                with self._lock:
+                    if self._archive_bindings is normalized:
+                        self._archive_bindings = previous
+                raise
+        finally:
+            if acquired:
+                self._refresh_lock.release()
+            self.clear_preload_pending()
+
     def mark_preload_pending(self) -> None:
         """Prevent request threads from stealing a scheduled deep refresh."""
         with self._lock:
@@ -134,9 +179,20 @@ class MarketScanProbabilitySourceResearchStore:
         with self._lock:
             self._preload_pending = False
 
+    def acquire_preload_lease(self) -> None:
+        """Keep requests non-blocking until the coordinating batch has settled."""
+        with self._lock:
+            self._preload_leases += 1
+
+    def release_preload_lease(self) -> None:
+        with self._lock:
+            if self._preload_leases <= 0:
+                raise RuntimeError("上涨概率 source preload lease 未持有")
+            self._preload_leases -= 1
+
     def refresh_pending(self) -> bool:
         with self._lock:
-            scheduled = self._preload_pending
+            scheduled = self._preload_pending or self._preload_leases > 0
         return scheduled or self._refresh_lock.locked()
 
     def verified_archive_digests(self) -> dict[int, str]:
@@ -168,9 +224,41 @@ class MarketScanProbabilitySourceResearchStore:
             # while the sole refresher verifies/decompresses the next snapshot.
             return
         try:
-            self._refresh_stable_snapshot()
+            with self._lock:
+                isolated = self._isolated_refresh
+            if isolated:
+                from app.services.market_scan_probability_preload_process import WORKER_TIMEOUT_SECONDS
+
+                self._refresh_isolated_stable_snapshot(None, time.monotonic() + WORKER_TIMEOUT_SECONDS)
+            else:
+                self._refresh_stable_snapshot()
         finally:
             self._refresh_lock.release()
+
+    def _refresh_isolated_stable_snapshot(self, cancel_event: Event | None, deadline: float) -> None:
+        from app.services.market_scan_probability_preload_process import check_preload_active
+
+        with self._lock:
+            caches = self._candidate_caches()
+            binding_token = _archive_binding_token(self._archive_bindings)
+        for _attempt in range(_STABLE_SNAPSHOT_READ_ATTEMPTS):
+            check_preload_active(cancel_event, deadline)
+            snapshot, bindings = self._candidate_snapshot()
+            if snapshot[4] != binding_token:
+                raise ProbabilitySourceError("上涨概率 source archive binding 在只读预热期间已变化")
+            with self._lock:
+                if self._snapshot == snapshot:
+                    check_preload_active(cancel_event, deadline)
+                    return
+            summaries, outcomes, fits, excluded = _isolated_snapshot_summaries(snapshot, bindings, caches, cancel_event, deadline)
+            for cache, verified in zip(caches, (summaries, outcomes, fits), strict=True):
+                cache.update(verified)
+            check_preload_active(cancel_event, deadline)
+            if self._observed_snapshot() != snapshot:
+                continue
+            self._commit_refresh(snapshot, summaries, outcomes, fits, excluded, snapshot[3], isolated_guard=(cancel_event, deadline))
+            return
+        raise ProbabilitySourceError("上涨概率 source archive 目录在多次读取期间持续变化，请重试")
 
     def _refresh_stable_snapshot(self) -> None:
         with self._lock:
@@ -251,6 +339,8 @@ class MarketScanProbabilitySourceResearchStore:
         fits: dict[_FileFingerprint, _FitSummary],
         excluded_run_ids: frozenset[int],
         effective_as_of: str,
+        *,
+        isolated_guard: tuple[Event | None, float] | None = None,
     ) -> None:
         index = _research_index(
             tuple(summaries.values()),
@@ -260,6 +350,12 @@ class MarketScanProbabilitySourceResearchStore:
             excluded_outcome_run_ids=excluded_run_ids,
         )
         with self._lock:
+            if isolated_guard is not None:
+                from app.services.market_scan_probability_preload_process import check_preload_active
+
+                check_preload_active(*isolated_guard)
+                if _archive_binding_token(self._archive_bindings) != snapshot[4]:
+                    raise ProbabilitySourceError("上涨概率 source archive binding 在只读预热期间已变化")
             self._research_by_run = index
             self._summary_by_fingerprint = summaries
             self._outcome_by_fingerprint = outcomes
@@ -298,6 +394,76 @@ class MarketScanProbabilitySourceResearchStore:
             latest_expected_daily_kline_date().isoformat(),
             binding_token,
         )
+
+
+def _isolated_snapshot_summaries(
+    snapshot: _ResearchSnapshot,
+    bindings: Mapping[int, str] | None,
+    caches: tuple[dict[_FileFingerprint, _SourceSummary], dict[_FileFingerprint, _OutcomeSummary], dict[_FileFingerprint, _FitSummary]],
+    cancel_event: Event | None,
+    deadline: float,
+) -> tuple[dict[_FileFingerprint, _SourceSummary], dict[_FileFingerprint, _OutcomeSummary], dict[_FileFingerprint, _FitSummary], frozenset[int]]:
+    from app.services.market_scan_probability_preload_process import isolated_probability_summaries
+
+    sources = _bound_source_fingerprints(snapshot[0], bindings)
+    # Filename binding selects candidates only. The child still replays every
+    # cache miss before the parent can use or commit any of these run identities.
+    allowed = frozenset(_source_fingerprint_run_id(fingerprint) for fingerprint in sources) if bindings is not None else None
+    selected = (sources, _latest_outcome_fingerprints(snapshot[1], allowed_run_ids=allowed), _bound_fit_fingerprints(snapshot[2], allowed))
+    groups = tuple(zip(("source", "outcome", "fit"), selected, caches, strict=True))
+    missing = [(kind, fingerprint) for kind, fingerprints, cache in groups for fingerprint in fingerprints if fingerprint not in cache]
+    verified = isolated_probability_summaries(missing, cancel_event=cancel_event, deadline=deadline)
+    compact: list[dict[_FileFingerprint, dict[str, object]]] = []
+    excluded: set[int] = set()
+    for kind, fingerprints, cache in groups:
+        summaries: dict[_FileFingerprint, dict[str, object]] = {}
+        for fingerprint in fingerprints:
+            summary = cache[fingerprint] if fingerprint in cache else verified[(kind, fingerprint)]
+            if summary is None:
+                match = _OUTCOME_FILENAME.fullmatch(fingerprint[0].name)
+                if kind != "outcome" or match is None:
+                    raise ProbabilitySourceError("上涨概率只读校验缺少摘要")
+                excluded.add(int(match.group(1)))
+            else:
+                summaries[fingerprint] = summary
+        compact.append(summaries)
+    return compact[0], compact[1], compact[2], frozenset(excluded)
+
+
+def _source_fingerprint_run_id(fingerprint: _FileFingerprint) -> int:
+    match = _SOURCE_FILENAME.fullmatch(fingerprint[0].name)
+    if match is None:
+        raise ProbabilitySourceError("上涨概率 source archive 文件名无效")
+    return int(match.group(1))
+
+
+def probability_archive_identity(kind: str, fingerprint: ProbabilityArchiveFingerprint) -> tuple[int, str, str | None]:
+    """Decode a content-addressed archive identity, without granting authority."""
+    pattern = {"source": _SOURCE_FILENAME, "outcome": _OUTCOME_FILENAME, "fit": _FIT_FILENAME}.get(kind)
+    match = pattern.fullmatch(fingerprint[0].name) if pattern is not None else None
+    if match is None or int(match.group(1)) < 1:
+        raise ProbabilitySourceError("上涨概率只读校验文件名无效")
+    return int(match.group(1)), match.group(3 if kind == "outcome" else 2), match.group(2) if kind == "outcome" else None
+
+
+def load_verified_probability_archive_summary(kind: str, fingerprint: ProbabilityArchiveFingerprint) -> dict[str, object] | None:
+    """Pure read boundary shared by the worker and the existing deep validators."""
+    run_id, digest, as_of = probability_archive_identity(kind, fingerprint)
+    _verify_archive_fingerprint(fingerprint)
+    loaders = {"source": _fingerprint_summary, "outcome": _fingerprint_outcome, "fit": _fingerprint_fit}
+    try:
+        summary = loaders[kind](fingerprint, {})
+    except ProbabilityOutcomeSemanticDriftError as exc:
+        if kind != "outcome" or (exc.run_id, exc.integrity_digest, exc.as_of_date) != (run_id, digest, as_of):
+            raise ProbabilitySourceError("legacy outcome semantic drift 缺少内容绑定") from None
+        summary = None
+    _verify_archive_fingerprint(fingerprint)
+    return summary
+
+
+def _verify_archive_fingerprint(fingerprint: ProbabilityArchiveFingerprint) -> None:
+    if not path_has_only_trusted_aliases(fingerprint[0].parent) or _file_fingerprint(fingerprint[0]) != fingerprint:
+        raise ProbabilitySourceError("上涨概率只读校验文件指纹已变化")
 
 
 def _snapshot_summaries(
@@ -1322,4 +1488,7 @@ def _file_fingerprint(path: Path) -> _FileFingerprint:
 __all__ = [
     "PROBABILITY_SOURCE_RESEARCH_SCHEMA_VERSION",
     "MarketScanProbabilitySourceResearchStore",
+    "ProbabilityArchiveFingerprint",
+    "load_verified_probability_archive_summary",
+    "probability_archive_identity",
 ]

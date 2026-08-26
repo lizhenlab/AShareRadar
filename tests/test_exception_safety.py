@@ -55,6 +55,9 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ("app/services/instance_guard.py", "FileInstanceGuard.acquire"): _BoundaryPolicy(
         "propagate", "Release the partially acquired file handle and lock before preserving the failure."
     ),
+    ("app/services/market_scan_joint_execution_maintenance.py", "MarketScanJointExecutionMaintenanceService.run"): _BoundaryPolicy(
+        "propagate", "Revoke old and partially rebuilt probability/ranking authority before re-raising any maintenance failure."
+    ),
     ("app/services/market_scan_lifecycle.py", "MarketScanLifecycle.ensure_instance_guard"): _BoundaryPolicy(
         "propagate", "Release market-scan ownership when reconciliation fails, including during cancellation."
     ),
@@ -141,6 +144,11 @@ _CANCELLATION_CONSUMERS = {
     ("app/services/scheduler_helpers.py", "_consume_future_exception"): "Done callback prevents unobserved-exception warnings after completion.",
     ("app/services/task_run_lifecycle.py", "_consume_future_exception"): "Done callback observes a completed thread hand-off Future.",
     ("app/services/workbench_context.py", "_consume_task_exception"): "Done callback observes a completed shared context task.",
+}
+
+_DEFERRED_CANCELLATION_PROPAGATION = {
+    ("app/services/market_scan_manager.py", "MarketScanManager._run_stop"): "Retain repeated cancellation until the shielded stop task finishes, then re-raise it.",
+    ("app/services/market_scan_manager.py", "_drain_probability_preloads"): "Cancel the isolated worker and drain both real workers before releasing the preload lease and re-raising cancellation.",
 }
 
 _PROVIDER_SANITIZER = "app.utils.provider_errors"
@@ -402,17 +410,28 @@ def test_base_exception_suppression_is_limited_to_documented_cleanup_paths() -> 
 
 def test_cancelled_error_propagates_except_at_terminal_observers() -> None:
     non_propagating: Counter[tuple[str, str]] = Counter()
+    deferred: Counter[tuple[str, str]] = Counter()
     offenders: list[str] = []
 
     assert issubclass(asyncio.CancelledError, BaseException)
     assert not issubclass(asyncio.CancelledError, Exception)
 
     for path, tree in _python_units():
+        functions = dict(_scoped_nodes(tree, (ast.FunctionDef, ast.AsyncFunctionDef)))
         for qualname, node in _scoped_nodes(tree, ast.ExceptHandler):
             assert isinstance(node, ast.ExceptHandler)
             if "CancelledError" not in _caught_names(node.type) or _handler_has_raise(node):
                 continue
             key = (path, qualname)
+            if key in _DEFERRED_CANCELLATION_PROPAGATION:
+                deferred[key] += 1
+                function = functions[qualname]
+                assert any(
+                    isinstance(child, ast.Raise) and isinstance(child.exc, ast.Name) and child.exc.id == "cancelled"
+                    for child in ast.walk(function)
+                ), f"{key} must propagate cancellation after cleanup"
+                assert any(isinstance(child, ast.Await) for child in ast.walk(function))
+                continue
             non_propagating[key] += 1
             if key not in _CANCELLATION_CONSUMERS:
                 offenders.append(f"{path}:{node.lineno} {qualname}")
@@ -420,6 +439,8 @@ def test_cancelled_error_propagates_except_at_terminal_observers() -> None:
     expected = Counter({key: 1 for key in _CANCELLATION_CONSUMERS})
     assert all(len(reason.strip()) >= 20 for reason in _CANCELLATION_CONSUMERS.values())
     assert non_propagating == expected
+    assert deferred == Counter({key: 1 for key in _DEFERRED_CANCELLATION_PROPAGATION})
+    assert all(len(reason.strip()) >= 20 for reason in _DEFERRED_CANCELLATION_PROPAGATION.values())
     assert offenders == []
 
 

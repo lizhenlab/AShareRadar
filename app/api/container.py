@@ -31,6 +31,7 @@ class AppContainer:
     runtime_coordinator: RuntimeCoordinator | None = None
     local_data_import_previews: LocalDataImportPreviewRegistry = field(default_factory=LocalDataImportPreviewRegistry)
     market_scan_heavy_read_admission: MarketScanHeavyReadAdmission = field(default_factory=MarketScanHeavyReadAdmission)
+    market_scan_experimental_read_admission: MarketScanHeavyReadAdmission = field(default_factory=MarketScanHeavyReadAdmission)
 
     def __post_init__(self) -> None:
         _require_settings_owner("datahub", self.datahub, self.settings)

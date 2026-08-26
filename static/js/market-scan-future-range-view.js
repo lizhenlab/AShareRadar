@@ -3,6 +3,8 @@ import { formatNumber } from "./format.js";
 import { isMarketScanTop100RefreshRun, marketScanModeLabel } from "./market-scan-contracts.js";
 
 const GENERATION_STATUSES = new Set(["ready", "not_generated", "insufficient_data"]);
+const FUTURE_RANGE_API_SCHEMA = "market-scan-future-range-api-v1";
+const FUTURE_RANGE_ARTIFACT_SCHEMA = "market-scan-future-range-artifact-v1";
 const OFFSET_VALUES = Object.freeze([1, 2, 3]);
 const GROUP_CHOICES = Object.freeze(["top20", "top50", "top100", "all"]);
 
@@ -37,15 +39,18 @@ export function selectedFutureRangeOptions(elements) {
 
 export function normalizeMarketScanFutureRangeResponse(value, expectedRunId) {
   const payload = requiredObject(value, "未来区间响应");
+  if (payload.schema_version !== FUTURE_RANGE_API_SCHEMA) throw futureRangeContractError("schema_version 不受支持");
   const generation = String(payload.generation_status || "");
   if (!GENERATION_STATUSES.has(generation)) throw futureRangeContractError("generation_status 无效");
   const research = payload.research === null || payload.research === undefined
     ? null : requiredObject(payload.research, "未来区间响应.research");
+  const artifact = normalizeArtifact(payload.artifact);
   if (generation === "not_generated" && research !== null) throw futureRangeContractError("未生成状态不能携带 research");
+  if ((generation === "not_generated") !== (artifact === null)) throw futureRangeContractError("归档身份与生成状态不匹配");
   validateResearchRun(research, expectedRunId);
   return {
     ...payload, schema_version: String(payload.schema_version || ""), generation_status: generation,
-    artifact: normalizeArtifact(payload.artifact), research,
+    artifact, research,
     record_page: normalizeRecordPage(payload.record_page, research, expectedRunId),
   };
 }
@@ -54,6 +59,7 @@ export function renderFutureRangeRun(elements, run) {
   const official = run?.mode === "official";
   const top100Refresh = isMarketScanTop100RefreshRun(run);
   setAttribute(elements.research, "aria-busy", "false");
+  setAttribute(elements.refresh, "aria-busy", "false");
   setData(elements.research, "generationStatus", "not_generated");
   elements.content.hidden = true;
   elements.pagination.hidden = true;
@@ -76,6 +82,9 @@ export function renderFutureRangeLoading(elements, pageOnly = false) {
   setAttribute(elements.research, "aria-busy", "true");
   elements.refresh.disabled = true;
   setAttribute(elements.refresh, "aria-busy", "true");
+  elements.content.hidden = true;
+  elements.prev.disabled = true;
+  elements.next.disabled = true;
   setSummaryStatus(elements, "读取中", "busy");
   setState(elements, pageOnly ? "正在读取该页个股明细…" : "正在读取冻结的未来区间研究证据…", "");
 }
@@ -86,6 +95,8 @@ export function renderFutureRangeFailure(elements, message) {
   setAttribute(elements.refresh, "aria-busy", "false");
   elements.content.hidden = true;
   elements.pagination.hidden = true;
+  setText(elements.evidenceStatus, "证据不可用");
+  setText(elements.evidenceCount, "--");
   setSummaryStatus(elements, "证据不可用", "error");
   setState(elements, `未来区间证据读取失败：${message}`, "error");
 }
@@ -352,6 +363,13 @@ function normalizeRecordPage(value, research, runId) {
 function normalizeArtifact(value) {
   if (value === null || value === undefined) return null;
   const source = requiredObject(value, "未来区间响应.artifact");
+  if (source.schema_version !== FUTURE_RANGE_ARTIFACT_SCHEMA) throw futureRangeContractError("artifact.schema_version 不受支持");
+  if (typeof source.integrity_digest !== "string" || !/^[0-9a-f]{64}$/.test(source.integrity_digest)) {
+    throw futureRangeContractError("artifact.integrity_digest 无效");
+  }
+  if (typeof source.generated_at !== "string" || !Number.isFinite(Date.parse(source.generated_at))) {
+    throw futureRangeContractError("artifact.generated_at 无效");
+  }
   return { schema_version: String(source.schema_version || ""), generated_at: source.generated_at || null, integrity_digest: source.integrity_digest || null };
 }
 

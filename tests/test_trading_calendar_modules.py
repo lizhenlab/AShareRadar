@@ -325,6 +325,82 @@ def test_inclusive_session_count_accepts_catalog_left_boundary_and_reports_real_
         trading_calendar.trading_session_count(date(1990, 12, 18), date(1990, 12, 19))
 
 
+@pytest.mark.parametrize(
+    ("start_text", "end_text", "expected_count", "expected_source"),
+    [
+        ("2026-01-02", "2026-01-02", 1, "bundled_baseline"),
+        ("2026-01-03", "2026-01-04", 0, "bundled_baseline"),
+        ("2026-01-05", "2026-01-05", 1, "runtime_cache"),
+        ("2026-01-06", "2026-01-06", 0, "runtime_cache"),
+        ("2026-01-05", "2026-01-07", 2, "runtime_cache"),
+        ("2026-01-02", "2026-01-07", 4, "bundled_baseline"),
+        ("2026-01-05", "2026-01-09", 4, "bundled_baseline"),
+        ("2026-01-02", "2026-01-09", 5, "bundled_baseline"),
+    ],
+)
+def test_session_count_matches_range_without_sorting_or_materializing_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start_text: str,
+    end_text: str,
+    expected_count: int,
+    expected_source: str,
+) -> None:
+    runtime_path, bundle_path = tmp_path / "runtime.json", tmp_path / "bundle.json"
+    _write_calendar(runtime_path, ["2026-01-05", "2026-01-07"], updated_at="2026-01-08 12:00:00")
+    _write_calendar(bundle_path, ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-09"])
+    _use_paths(monkeypatch, runtime_path, bundle_path)
+    start, end = date.fromisoformat(start_text), date.fromisoformat(end_text)
+    sessions, status = trading_calendar.trading_date_range(start, end)
+    assert len(sessions) == expected_count
+    assert status.source.value == expected_source
+    sorting = Mock(side_effect=AssertionError("session count must not sort calendar dates"))
+    materializing = Mock(side_effect=AssertionError("session count must not build the session tuple"))
+    monkeypatch.setattr(trading_calendar, "sorted", sorting, raising=False)
+    monkeypatch.setattr(trading_calendar, "trading_date_range", materializing)
+
+    assert trading_calendar.trading_session_count(start, end) == expected_count
+    sorting.assert_not_called()
+    materializing.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("start_text", "end_text"),
+    [
+        ("2026-01-01", "2026-01-02"),
+        ("2026-01-09", "2026-01-10"),
+        ("2026-01-01", "2026-01-10"),
+    ],
+)
+def test_session_count_keeps_exact_range_coverage_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start_text: str,
+    end_text: str,
+) -> None:
+    bundle_path = tmp_path / "bundle.json"
+    _write_calendar(bundle_path, ["2026-01-02", "2026-01-05", "2026-01-09"])
+    _use_paths(monkeypatch, tmp_path / "missing-runtime.json", bundle_path)
+    start, end = date.fromisoformat(start_text), date.fromisoformat(end_text)
+    with pytest.raises(trading_calendar.TradingCalendarCoverageError) as range_error:
+        trading_calendar.trading_date_range(start, end)
+    with pytest.raises(trading_calendar.TradingCalendarCoverageError) as count_error:
+        trading_calendar.trading_session_count(start, end)
+
+    assert str(count_error.value) == str(range_error.value)
+
+
+def test_session_count_rejects_reversed_dates_before_resolving_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolution = Mock(side_effect=AssertionError("reversed range must not resolve calendar"))
+    monkeypatch.setattr(trading_calendar, "_calendar_resolution", resolution)
+
+    with pytest.raises(ValueError, match="start 不能晚于 end"):
+        trading_calendar.trading_session_count(date(2026, 1, 7), date(2026, 1, 5))
+    resolution.assert_not_called()
+
+
 def test_next_trade_dates_fails_closed_when_future_coverage_is_short(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

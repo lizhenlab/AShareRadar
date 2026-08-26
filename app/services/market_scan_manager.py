@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 import math
 import sqlite3
+from threading import Event as ThreadEvent
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -207,6 +208,7 @@ class MarketScanManager:
         self._probability_runtime_warmup_task: asyncio.Task[None] | None = None
         self._probability_capture_task: asyncio.Task[None] | None = None
         self._probability_activation_lock = asyncio.Lock()
+        self._probability_preload_lock = asyncio.Lock()
         self._probability_capture_lock = asyncio.Lock()
         self._probability_capture_wakeup = asyncio.Event()
         self._probability_capture_owner = f"market-scan-manager-{uuid4().hex}"
@@ -220,7 +222,15 @@ class MarketScanManager:
 
     async def refresh_probability_research_cache(self) -> int:
         """Verify and atomically publish the compact source/outcome/fit index."""
+        # Waiters do not occupy I/O threads. Re-read bindings after admission so
+        # an outbox capture arriving during a refresh is not silently dropped.
+        async with self._probability_preload_lock:
+            return await self._refresh_probability_research_cache()
+
+    async def _refresh_probability_research_cache(self) -> int:
         self._mark_probability_preloads_pending()
+        release_leases = self._acquire_probability_preload_leases()
+        cancel_event = ThreadEvent()
         try:
             probability_source = self._probability_source_research_store
             bindings_loader = getattr(
@@ -229,16 +239,8 @@ class MarketScanManager:
                 None,
             )
             archive_bindings = await run_cache_io(bindings_loader) if probability_source is not None and callable(bindings_loader) else None
-            source_task = (
-                None
-                if probability_source is None
-                else asyncio.create_task(
-                    run_cache_io(
-                        probability_source.preload,
-                        **({"archive_bindings": archive_bindings} if callable(bindings_loader) else {}),
-                    ),
-                    name="market-scan-probability-source-preload",
-                )
+            source_task = self._start_probability_source_preload(
+                archive_bindings, bound=callable(bindings_loader), cancel_event=cancel_event,
             )
             historical = getattr(self, "_historical_probability_store", None)
             historical_task = (
@@ -251,10 +253,32 @@ class MarketScanManager:
             )
             tasks = tuple(task for task in (source_task, historical_task) if task is not None)
             if tasks:
-                await asyncio.gather(*tasks)
+                await _drain_probability_preloads(tasks, cancel_event)
             return 0 if source_task is None else source_task.result()
         finally:
             self._clear_probability_preloads_pending()
+            for release in release_leases:
+                release()
+
+    def _start_probability_source_preload(
+        self,
+        archive_bindings: dict[int, str] | None,
+        *,
+        bound: bool,
+        cancel_event: ThreadEvent,
+    ) -> asyncio.Task[int] | None:
+        source = self._probability_source_research_store
+        if source is None:
+            return None
+        preload = getattr(source, "preload_isolated", None)
+        arguments: dict[str, object] = {"archive_bindings": archive_bindings} if bound else {}
+        if callable(preload):
+            arguments["cancel_event"] = cancel_event
+        else:
+            preload = source.preload
+        return asyncio.create_task(
+            run_cache_io(preload, **arguments), name="market-scan-probability-source-preload",
+        )
 
     async def maintain_joint_execution_probability(
         self,
@@ -289,11 +313,15 @@ class MarketScanManager:
     async def _run_stop(self, *, close: bool, task_name: str) -> None:
         cleanup = asyncio.create_task(self._stop(close=close), name=task_name)
         cleanup.add_done_callback(_consume_stop_exception)
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await asyncio.shield(cleanup)
-            raise
+        cancelled: asyncio.CancelledError | None = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        if cancelled is not None:
+            raise cancelled
+        cleanup.result()
 
     async def _stop(self, *, close: bool) -> None:
         await run_cache_io(self._recover_terminal_persistence_failures)
@@ -772,9 +800,10 @@ class MarketScanManager:
     def experimental_probability_results(
         self, run_id: int, *, minimum: float | None = None, market: str | None = None,
         keyword: str = "", sort: Literal["probability", "base_rank"] = "probability", page: int = 1, page_size: int = 50,
+        prediction_kind: Literal["net_h5", "close_d1", "close_d2", "close_d5"] = "net_h5",
     ) -> dict[str, object]:
         return self._queries().experimental_probability_results(
-            run_id, minimum=minimum, market=market, keyword=keyword, sort=sort, page=page, page_size=page_size,
+            run_id, prediction_kind=prediction_kind, minimum=minimum, market=market, keyword=keyword, sort=sort, page=page, page_size=page_size,
         )
 
     def breadth(self, run_id: int) -> MarketBreadthV1:
@@ -960,8 +989,19 @@ class MarketScanManager:
                 )
             except Exception:
                 pass
-        finally:
-            self._clear_probability_preloads_pending()
+
+    def _acquire_probability_preload_leases(self) -> tuple[Callable[[], None], ...]:
+        releases: list[Callable[[], None]] = []
+        for store in (
+            getattr(self, "_probability_source_research_store", None),
+            getattr(self, "_historical_probability_store", None),
+        ):
+            acquire = getattr(store, "acquire_preload_lease", None)
+            release = getattr(store, "release_preload_lease", None)
+            if callable(acquire) and callable(release):
+                acquire()
+                releases.append(release)
+        return tuple(releases)
 
     def _mark_probability_preloads_pending(self) -> None:
         for store in (
@@ -984,10 +1024,11 @@ class MarketScanManager:
     async def _stop_probability_runtime_warmup(self) -> None:
         task = getattr(self, "_probability_runtime_warmup_task", None)
         self._probability_runtime_warmup_task = None
-        if task is None or task.done() or task is asyncio.current_task():
-            return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if not self._probability_preload_lock.locked():
+            self._clear_probability_preloads_pending()
 
     async def _activate_probability_capture_leader(self) -> None:
         if not self._lifecycle.owns_instance_guard():
@@ -1151,6 +1192,27 @@ class MarketScanManager:
 
     def _current_time(self, value: datetime | None = None) -> datetime:
         return normalize_review_as_of(value if value is not None else self._now(), allow_future=True)
+
+
+async def _drain_probability_preloads(
+    tasks: tuple[asyncio.Task[int], ...], cancel_event: ThreadEvent,
+) -> None:
+    # Cancelling to_thread only cancels its awaiter, not the real worker. Shield
+    # both workers until they settle; the isolated source worker is cooperatively
+    # terminated/reaped, while the finite historical hash read is drained.
+    completed = asyncio.gather(*tasks, return_exceptions=True)
+    cancelled: asyncio.CancelledError | None = None
+    while not completed.done():
+        try:
+            await asyncio.shield(completed)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+            cancel_event.set()
+    if cancelled is not None:
+        raise cancelled
+    for result in completed.result():
+        if isinstance(result, BaseException):
+            raise result
 
 
 def _requested_scan_temporal(

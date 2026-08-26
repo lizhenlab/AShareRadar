@@ -226,8 +226,11 @@ def trading_day_gap(start: date, end: date) -> int:
 def trading_session_count(start: date, end: date) -> int:
     """Count trusted exchange sessions in an inclusive covered date range."""
 
-    days, _status = trading_date_range(start, end)
-    return len(days)
+    if start > end:
+        raise ValueError("start 不能晚于 end")
+    days, status = _calendar_resolution(end, range_start=start)
+    _require_coverage(status, range_start=start)
+    return sum(start <= item <= end for item in days)
 
 
 def trading_dates_between(start: date, end: date) -> tuple[date, ...]:

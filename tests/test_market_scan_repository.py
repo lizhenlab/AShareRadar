@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.db.market_scan_integrity import MarketScanSnapshotSealError, market_scan_snapshot_digest
+from app.db.market_scan_integrity import MarketScanSnapshotSealError, create_market_scan_immutability_triggers, market_scan_snapshot_digest
 from app.db.market_scan_action_source import market_scan_diagnostics_authorize_action
 from app.config import Settings
 from app.models.market_scan import (
@@ -21,9 +22,12 @@ from app.models.market_scan import (
     MarketScanPublicationDiagnostic,
     MarketScanPublicationDiagnostics,
     MarketScanResultItem,
+    MarketScanRun,
     MarketScanScoreDistribution,
     MarketScanScoreDistributionPolicy,
 )
+from app.models.market_scan_screening import MarketScanScreenEvaluateRequest
+from app.models.market_scan_snapshot import MarketScanSnapshotIntegrityError
 from app.repositories.market_scan import (
     MarketScanRepository,
     MarketScanResultWrite,
@@ -36,6 +40,7 @@ from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.market_scan_publication_decision import assess_market_scan_score_distribution
 from app.services.market_scan_manager import market_scan_rule_contract
 from app.services.market_scan_scoring import score_market_scan_item, stable_score_spec_hash
+from app.services.market_scan_screening import MarketScanScreeningService
 from tests.factories import make_kline, make_quote
 from tests.test_strategy_execution import _disable_market_scan_immutability
 from tests.market_scan_test_support import (
@@ -581,6 +586,75 @@ def test_screening_projections_read_frozen_run_without_full_hydration(tmp_path: 
     assert len(breadth_rows) == finished.total_count
     assert {item.status for item in rows} == {"success", "missing", "skipped"}
     assert [item.symbol for item in hydrated] == sorted([rows[-1].symbol, rows[0].symbol])
+    assert repo.screening_result_items(run.id, [rows[-1].symbol, rows[0].symbol], expected_run=snapshot_run) == hydrated
+
+
+@pytest.mark.parametrize("mutation", ("selected_row", "unselected_row", "run_header"))
+def test_screening_evaluation_rejects_a_new_valid_seal_between_projection_and_hydration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    cache = SQLiteCache(tmp_path / "screening-boundary.sqlite3")
+    repo = cache.market_scan_repo
+    run = _seed_running_run(repo, _sample_seeds())
+    repo.save_result_batch(run.id, _sample_results())
+    published = repo.finish_run(run.id, "degraded", message="冻结筛选快照")
+    service = MarketScanScreeningService(cache)
+    request = MarketScanScreenEvaluateRequest.model_validate({"spec": {"ranges": {"score": {"min": 80}}}, "near_miss_limit": 0})
+    original_read = cache.market_scan_screening_result_items
+    expectations: list[MarketScanRun] = []
+
+    def racing_read(run_id: int, symbols: Sequence[str], *, expected_run: MarketScanRun | None = None):
+        assert expected_run is not None
+        expectations.append(expected_run)
+        _rewrite_screening_snapshot(cache.path, run_id, mutation=mutation, reseal=True)
+        return original_read(run_id, symbols, expected_run=expected_run)
+
+    monkeypatch.setattr(cache, "market_scan_screening_result_items", racing_read)
+    with pytest.raises(MarketScanSnapshotIntegrityError, match="snapshot_digest"):
+        service.evaluate(run.id, request)
+    assert len(expectations) == 1
+    assert expectations[0] == published
+    replacement = repo.run(run.id)  # A valid new seal alone must not authorize mixing two reads.
+    assert replacement.snapshot_digest != published.snapshot_digest
+    monkeypatch.setattr(cache, "market_scan_screening_result_items", original_read)
+    accepted = service.evaluate(run.id, request)
+    assert accepted.evidence.snapshot_digest == replacement.snapshot_digest
+    assert {item.symbol for item in accepted.matched.items} == {"600001.SH", "000001.SZ", "600002.SH"}
+
+
+def test_bound_screening_hydration_still_hashes_unrequested_rows(tmp_path: Path) -> None:
+    repo, path = _repository(tmp_path)
+    run = _seed_running_run(repo, _sample_seeds())
+    repo.save_result_batch(run.id, _sample_results())
+    repo.finish_run(run.id, "degraded", message="冻结筛选快照")
+    expected, _rows = repo.screening_evaluation_snapshot(run.id)
+    _rewrite_screening_snapshot(path, run.id, mutation="unselected_row", reseal=False)
+    with pytest.raises(MarketScanSnapshotSealError, match="已发布快照摘要不一致"):
+        repo.screening_result_items(run.id, ["600001.SH"], expected_run=expected)
+
+
+@pytest.mark.parametrize("changes", ({"id": 999}, {"rule_version": "other-rule"}, {"quote_date": "2026-07-18"}))
+def test_bound_screening_hydration_requires_the_complete_run_identity(tmp_path: Path, changes: dict[str, object]) -> None:
+    repo, _path = _repository(tmp_path)
+    run = _seed_running_run(repo, _sample_seeds())
+    repo.save_result_batch(run.id, _sample_results())
+    published = repo.finish_run(run.id, "degraded", message="冻结筛选快照")
+    expected = published.model_copy(update=changes)
+    with pytest.raises(MarketScanSnapshotIntegrityError, match="冻结批次绑定发生变化"):
+        repo.screening_result_items(run.id, ["600001.SH"], expected_run=expected)
+
+
+def _rewrite_screening_snapshot(path: Path, run_id: int, *, mutation: str, reseal: bool) -> None:
+    with sqlite3.connect(path) as conn:
+        _disable_market_scan_immutability(conn)
+        if mutation == "run_header":
+            conn.execute("UPDATE market_scan_run SET message = '另一版本的冻结批次' WHERE id = ?", (run_id,))
+        else:
+            symbol = "600001.SH" if mutation == "selected_row" else "920066.BJ"
+            conn.execute("UPDATE market_scan_result SET name = '另一版本的股票名称' WHERE run_id = ? AND symbol = ?", (run_id, symbol))
+        if reseal:
+            conn.execute("UPDATE market_scan_run SET snapshot_digest = ? WHERE id = ?", (market_scan_snapshot_digest(conn, run_id), run_id))
+        create_market_scan_immutability_triggers(conn)
 
 
 def test_run_queries_keep_preopen_official_and_intraday_cohorts_isolated(

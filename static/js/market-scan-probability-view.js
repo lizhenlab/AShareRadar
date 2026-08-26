@@ -35,6 +35,9 @@ const LIMITATION_LABELS = Object.freeze({
   bounded_sample_benchmark_not_full_market_contract_selection_forbidden: "有界样本不满足全市场基准与 Top100 契约，禁止用于选股筛选",
   legacy_run_binding_not_selection_eligible: "旧版证据未完整绑定当前榜单，禁止用于筛选",
   source_capture_pending: "真实点时源样本正在进入研究归档",
+  source_index_verification_pending: "归档证据校验中，完成后自动更新",
+  joint_execution_maintenance_pending: "正式执行证据正在重放与校验，旧授权暂停使用",
+  joint_execution_maintenance_failed: "正式证据维护失败，旧授权已停用",
   source_scan_action_ineligible: "评分分布或动作源证据未通过，未进入研究归档",
   source_capture_skipped: "研究归档已安全跳过，未生成概率证据",
   source_capture_outbox_missing: "评分分布已通过，但研究归档任务缺失；概率与筛选保持关闭",
@@ -173,17 +176,7 @@ function renderHistoricalProbabilityContext(elements, context, horizon) {
   const status = String(historical.status || "not_generated");
   setData(elements.historicalResearch, "status", status);
   if (status !== "ready") {
-    setText(
-      elements.historicalStatus,
-      status === "unavailable" ? "历史证据校验失败" : "尚未生成历史参考",
-    );
-    setText(elements.historicalSample, "--");
-    setText(elements.historicalMetrics, "--");
-    setText(
-      elements.historicalConclusion,
-      status === "unavailable" ? "完整历史重放或其绑定文件不可验证" : "需要先生成历史重放上下文",
-    );
-    setText(elements.historicalLimitations, "历史数据不会替代当前正式点时证据，也不会开放概率筛选。");
+    renderDeferredHistoricalProbability(elements, historical, status);
     return;
   }
   const sample = objectValue(historical.sample);
@@ -223,6 +216,21 @@ function renderHistoricalProbabilityContext(elements, context, horizon) {
     elements.historicalLimitations,
     "腾讯 qfq 均衡样本 · 绝对净收益目标 · 存在当前股票池幸存者偏差 · 非当前全市场点时合同 · 不用于筛选或排名。",
   );
+}
+
+function renderDeferredHistoricalProbability(elements, historical, status) {
+  const maintenanceDeferred = ["maintenance_pending", "maintenance_failed"].includes(historical.availability);
+  setText(
+    elements.historicalStatus,
+    maintenanceDeferred ? "正式证据维护未完成·历史参考暂缓" : status === "unavailable" ? "历史证据校验失败" : "尚未生成历史参考",
+  );
+  setText(elements.historicalSample, "--");
+  setText(elements.historicalMetrics, "--");
+  setText(
+    elements.historicalConclusion,
+    maintenanceDeferred ? "本次未重新读取历史参考，待正式证据维护恢复后更新" : status === "unavailable" ? "完整历史重放或其绑定文件不可验证" : "需要先生成历史重放上下文",
+  );
+  setText(elements.historicalLimitations, "历史数据不会替代当前正式点时证据，也不会开放概率筛选。");
 }
 
 function resetHistoricalProbabilityContext(elements, state = {}) {
@@ -345,6 +353,9 @@ function failedSelectionGateLabels(artifact) {
 }
 
 function probabilityUnavailableHelp(artifact) {
+  if (artifact.availability === "source_index_verification_pending") {
+    return "归档证据校验中，完成后自动更新；概率与筛选保持关闭。";
+  }
   const evidenceBlocker = jointExecutionBlockerText(artifact) || officialExecutionBlockerText(artifact);
   if (evidenceBlocker) return `${evidenceBlocker}；概率筛选保持关闭。`;
   if (artifact.availability === "probability_artifact_source_unbound") {
@@ -465,13 +476,19 @@ function limitationLabel(value) {
 function statusLabel(value) {
   const artifact = typeof value === "string" ? { status: value } : objectValue(value);
   const status = String(artifact.status || "not_generated");
+  const joint = objectValue(artifact.joint_execution_evidence);
+  const pending = {
+    source_index_verification_pending: "归档证据校验中",
+    maintenance_pending: "正式证据维护中",
+    maintenance_failed: "正式证据维护失败",
+  }[artifact.availability || joint.status];
+  if (pending) return pending;
   if (artifact.availability === "probability_artifact_source_unbound") return "概率产物源绑定无效";
   if (status === CALIBRATED_STATUS) return "样本外已校准";
   const official = objectValue(artifact.official_execution_evidence);
   if (official.status === "unconfigured_pinned_registry") return "官方执行证据未配置";
   if (official.status === "verification_failed") return "官方执行证据校验失败";
   if (official.status === "waiting_sessions") return "等待官方执行会话";
-  const joint = objectValue(artifact.joint_execution_evidence);
   if (joint.status === "waiting_mature_official_h5") return "等待官方 H5 路径成熟";
   if (joint.status === "selection_evidence_accumulating") return "正式会话未达选择门槛";
   if (joint.status === "selection_passed_waiting_authorization") return "等待精确筛选授权";
@@ -495,6 +512,7 @@ function officialExecutionBlockerText(artifact) {
     unconfigured_pinned_registry: "尚未配置经许可的官方执行数据注册表及其外部固定摘要",
     verification_failed: "经许可的官方执行数据或原始文件校验失败",
     waiting_sessions: "官方执行数据已配置，正在等待可验证交易会话",
+    maintenance_pending: "官方执行证据正在校验，暂不提供正式授权",
     store_unavailable: "官方执行证据存储当前不可用",
   }[official.status] || "";
 }
@@ -506,6 +524,8 @@ function jointExecutionBlockerText(artifact) {
   const required = countValue(joint.selection_minimum_session_count);
   const pipeline = {
     maintenance_not_run: "联合执行概率维护尚未运行",
+    maintenance_pending: "正式执行证据正在重放与校验，完成后自动更新；旧授权暂停使用，生产排名保持 v5",
+    maintenance_failed: "正式证据维护失败，旧授权已停用，生产排名保持 v5；等待维护恢复后重新验证",
     waiting_mature_official_h5: "正在等待固定决策集的官方 D+1 至 D+6 执行路径成熟",
     selection_evidence_accumulating: `正式 H5 独立会话 ${mature}/${required}，尚未达到预注册选择门槛`,
     selection_passed_waiting_authorization: "OOS 选择证据已通过，等待 exact-digest 筛选授权",

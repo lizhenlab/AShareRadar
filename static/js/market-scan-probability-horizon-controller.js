@@ -2,6 +2,11 @@ import { isAbortError } from "./api.js";
 import { validateResultPage } from "./market-scan-contracts.js";
 import { MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS, samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
 import { isMarketScanReadBusy, marketScanReadBusyMessage } from "./market-scan-polling.js";
+import {
+  createAppliedMarketScanQueries, paginatedResultsQuery, queryHasProbabilityMinimum, queryRunId,
+  rebaseResultsQuery, unfilteredResultsQuery, validResultsQuery,
+} from "./market-scan-result-query.js";
+export { unfilteredResultsQuery } from "./market-scan-result-query.js";
 
 export function createMarketScanProbabilityHorizonController(options) {
   const context = {
@@ -19,13 +24,17 @@ export function createMarketScanProbabilityHorizonController(options) {
     refreshPromise: null,
     queuedLoad: null,
   };
+  context.queries = createAppliedMarketScanQueries({ ...options, getBaseline: () => currentBaseline(context) });
   return {
     acceptTrusted: (query) => acceptTrusted(context, query),
     change: () => changeHorizon(context),
     drain: () => drain(context),
     invalidate: (invalidateOptions) => invalidate(context, invalidateOptions),
     load: (loadOptions) => load(context, loadOptions),
-    loadOnce: (loadOptions) => loadOnce(context, loadOptions),
+    loadOnce: (loadOptions) => loadOnce(context, { applied: true, ...loadOptions }),
+    page: (page) => loadAppliedPage(context, page),
+    refresh: (loadOptions) => load(context, { applied: true, ...loadOptions }),
+    refreshQuery: context.queries.refresh,
     needsTrustedRefresh: () => context.needsTrustedRefresh,
     presentBusy: (error) => presentBusy(context, error),
     publicationChanged: (run) => publicationChanged(context, run),
@@ -36,7 +45,7 @@ export function createMarketScanProbabilityHorizonController(options) {
     trustedChainStarted: () => trustedChainStarted(context),
     trustedReadFinished: () => trustedReadFinished(context),
     trustedReadStarted: (query, run) => trustedReadStarted(context, query, run),
-    loadWithinGate: (loadOptions) => performLoad(context, { ...loadOptions, withinHeavyRead: true }),
+    loadWithinGate: (loadOptions) => performLoad(context, { applied: true, ...loadOptions, withinHeavyRead: true }),
     whenIdle: () => whenIdle(context),
   };
 }
@@ -77,6 +86,7 @@ function remember(context, payload, query, identity) {
     }
     const owner = resultContext(options, page.run);
     context.lastValidatedQuery = { ...owner, query };
+    context.queries.capture(query, page.run);
     const cache = {
       ...owner,
       identityBinding: identityBinding(identity, owner.historyRunId, page.run.id),
@@ -132,6 +142,7 @@ function changeHorizon(context) {
   const retained = currentCache(context);
   const { activeQuery, baselineQuery, queuedQuery } = horizonChangeQueries(context, retained);
   options.elements.probabilityMin.value = "";
+  context.queries.clearProbability();
   if (queuedQuery && !queryHasProbabilityMinimum(queuedQuery)) return;
   if (!queuedQuery && retained && !queryHasProbabilityMinimum(retained.query)) {
     options.view.renderProbabilityHorizon(retained.page);
@@ -164,6 +175,7 @@ function queueHorizonRefresh(context, retained, queuedQuery, baselineQuery) {
   if (queuedQuery) settleQueuedLoad(context, null);
   context.intentGeneration += 1;
   context.refreshBaseQuery = unfiltered;
+  context.queries.capture(unfiltered, options.resultRun());
   context.refreshQueued = true;
   options.detachOwnedRead?.({ allowTrustedSelection: Boolean(context.trustedInFlight?.query) });
   if (resetPage) options.state.page = 1;
@@ -180,6 +192,9 @@ function load(context, loadOptions = {}) {
   if (options.state.actionBusy && !loadOptions.allowDuringAction) return Promise.resolve(null);
   if (loadOptions.horizonRefresh === true) return performLoad(context, loadOptions);
   const run = options.resultRun();
+  const query = run ? context.queries.request(run, loadOptions) : null;
+  if (run && !query) return Promise.resolve(null);
+  context.queries.capture(query, run);
   context.intentGeneration += 1;
   context.refreshQueued = false;
   context.refreshBaseQuery = null;
@@ -187,7 +202,7 @@ function load(context, loadOptions = {}) {
     ...loadOptions,
     context: resultContext(options, run),
     intentGeneration: context.intentGeneration,
-    query: loadOptions.query || (run ? options.resultsUrl(run.id, options.state.page) : null),
+    query,
   };
   options.detachOwnedRead?.({ allowTrustedSelection: Boolean(context.trustedInFlight?.query) });
   if (
@@ -200,6 +215,17 @@ function load(context, loadOptions = {}) {
     return queueLoad(context, spec);
   }
   return performLoad(context, spec);
+}
+
+function loadAppliedPage(context, page) {
+  const baseline = currentBaseline(context)?.query;
+  if (!context.queries.matchesFilters(baseline)) {
+    context.options.view.announce("新的筛选条件正在校验，请等待结果更新后再翻页。", "results-page:pending-filters");
+    return Promise.resolve(null);
+  }
+  const query = paginatedResultsQuery(baseline, page);
+  if (!query || (context.options.state.pageCount && page > context.options.state.pageCount)) return Promise.resolve(null);
+  return load(context, { query });
 }
 
 async function performLoad(context, loadOptions) {
@@ -241,7 +267,7 @@ async function loadOnce(context, loadOptions = {}) {
   const publishedRun = options.resultRun();
   if (!publishedRun) return clearMissingResultRun(context);
   const runId = publishedRun.id;
-  const query = loadOptions.query || options.resultsUrl(runId, options.state.page);
+  const query = context.queries.request(publishedRun, loadOptions);
   if (!validResultsQuery(query, runId)) return staleOutcome();
   invalidate(context);
   const sequence = options.beginRequest("resultRequest", "resultRequestSeq");
@@ -548,45 +574,6 @@ function renderUnsafeRefresh(context, runId) {
   context.options.view.resetProbabilityResearch(runId, { readError: true });
   context.options.view.renderResultState(message, "error");
   context.options.view.announce(message, `results-error:${runId ?? "none"}:unsafe-query`);
-}
-
-export function unfilteredResultsQuery(query, runId, options = {}) {
-  if (!validResultsQuery(query, runId)) return null;
-  const parsed = parseResultsQuery(query);
-  parsed.params.delete("probability_horizon");
-  parsed.params.delete("min_upside_probability");
-  if (options.resetPage !== false) parsed.params.set("page", "1");
-  const search = parsed.params.toString();
-  return `${parsed.path}${search ? `?${search}` : ""}`;
-}
-
-function validResultsQuery(query, runId) {
-  if (typeof query !== "string" || !query || !Number.isInteger(Number(runId))) return false;
-  const parsed = parseResultsQuery(query);
-  return parsed !== null && parsed.runId === Number(runId);
-}
-
-function queryRunId(query) { return parseResultsQuery(query)?.runId ?? null; }
-
-function queryHasProbabilityMinimum(query) {
-  return parseResultsQuery(query)?.params.has("min_upside_probability") ?? false;
-}
-
-function rebaseResultsQuery(query, runId) {
-  const parsed = parseResultsQuery(query);
-  if (!parsed || !Number.isInteger(Number(runId))) return null;
-  const search = parsed.params.toString();
-  return `/api/market-scans/${encodeURIComponent(runId)}/results${search ? `?${search}` : ""}`;
-}
-
-function parseResultsQuery(query) {
-  if (typeof query !== "string" || query.includes("#")) return null;
-  const separator = query.indexOf("?");
-  const path = separator === -1 ? query : query.slice(0, separator);
-  const search = separator === -1 ? "" : query.slice(separator + 1);
-  const match = path.match(/^\/api\/market-scans\/(\d+)\/results$/);
-  if (!match) return null;
-  return { path, params: new URLSearchParams(search), runId: Number(match[1]) };
 }
 
 function identityBinding(identity, historyRunId, runId) {
