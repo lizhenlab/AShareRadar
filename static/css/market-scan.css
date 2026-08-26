@@ -958,6 +958,78 @@ body.market-scan-view-active .market-scan-global-progress {
   color: var(--amber);
 }
 
+.market-scan-historical-probability {
+  margin-top: 10px;
+  border: 1px solid #d9e2ef;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.market-scan-historical-probability > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.market-scan-historical-probability > summary span {
+  display: grid;
+  gap: 2px;
+}
+
+.market-scan-historical-probability > summary strong,
+.market-scan-historical-probability > summary em {
+  font-size: 11px;
+  font-style: normal;
+}
+
+.market-scan-historical-probability > summary small,
+.market-scan-historical-probability-grid span,
+.market-scan-historical-probability p {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.market-scan-historical-probability[data-status="ready"] > summary em {
+  color: var(--amber);
+  font-weight: 800;
+}
+
+.market-scan-historical-probability-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.45fr 1.25fr;
+  gap: 8px;
+  padding: 0 10px 9px;
+}
+
+.market-scan-historical-probability-grid > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.market-scan-historical-probability-grid span,
+.market-scan-historical-probability-grid strong {
+  display: block;
+}
+
+.market-scan-historical-probability-grid strong {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.market-scan-historical-probability p {
+  margin: 0;
+  padding: 0 10px 10px;
+  line-height: 1.5;
+}
+
 #marketScanProbabilityFilterHelp {
   color: var(--muted);
   font-size: 10px;
@@ -1276,6 +1348,21 @@ body.market-scan-view-active .market-scan-global-progress {
 
 .market-scan-score {
   font-size: 15px;
+}
+
+.market-scan-production-rank,
+.market-scan-production-score {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-scan-production-rank small,
+.market-scan-production-score small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.25;
 }
 
 .market-scan-dimensions {
@@ -1840,6 +1927,10 @@ body.market-scan-view-active .market-scan-global-progress {
 
   .market-scan-probability-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .market-scan-historical-probability-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .market-scan-mode-block {
@@ -2793,3 +2884,27 @@ body.market-scan-view-active .market-scan-global-progress {
   .executable-shadow-exposures { grid-template-columns: minmax(0, 1fr); }
   .strategy-lab-nav { padding-inline: 10px; }
 }
+.market-scan-experimental {
+  margin: 16px 0;
+  padding: 18px;
+  border: 1px solid #a78bfa;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel, #fff) 96%, #8b5cf6);
+  min-width: 0;
+}
+.market-scan-experimental-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+.market-scan-experimental h3 { margin: 6px 0; font-size: 17px; }
+.market-scan-experimental p { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.market-scan-experimental-opt-in { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; font-size: 13px; }
+.market-scan-experimental-opt-in input { width: 18px; height: 18px; }
+.market-scan-experimental-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 16px 0; }
+.market-scan-experimental-controls[hidden], .market-scan-experimental-table[hidden] { display: none; }
+.market-scan-experimental-controls label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; min-width: 120px; flex: 1; }
+.market-scan-experimental-controls input, .market-scan-experimental-controls select { width: 100%; min-height: 42px; box-sizing: border-box; }
+.market-scan-experimental-table { width: 100%; overflow-x: auto; border: 1px solid var(--line, #e5e7eb); border-radius: 10px; }
+.market-scan-experimental-table table { width: 100%; min-width: 620px; border-collapse: collapse; font-size: 13px; }
+.market-scan-experimental-table td, .market-scan-experimental-table th { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line, #e5e7eb); white-space: nowrap; }
+.market-scan-experimental-table small { display: block; font-size: 11px; opacity: .7; }
+.market-scan-experimental-evidence { opacity: .8; }
+.market-scan-experimental-pagination { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; font-size: 12px; }
+.market-scan-experimental-pagination button { min-height: 44px; }

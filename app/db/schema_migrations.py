@@ -32,10 +32,9 @@ QUOTE_HISTORY_UNIQUE_INDEX = "uq_quote_history_symbol_trade_date"
 QUOTE_HISTORY_CONTRACT_MIGRATION = "20260715_quote_history_not_null_contract"
 KLINE_DAILY_CONTRACT_MIGRATION = "20260716_kline_daily_adjustment_contract"
 MARKET_SCAN_PREOPEN_MODE_MIGRATION = "20260812_market_scan_preopen_mode_v2"
-MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION = (
-    "20260812_market_scan_probability_capture_outbox_v1"
-)
+MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION = "20260812_market_scan_probability_capture_outbox_v1"
 MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION = "20260813_market_scan_snapshot_digest_v3"
+MARKET_SCAN_PROBABILITY_RANKING_V6_MIGRATION = "20260822_market_scan_probability_ranking_v6"
 AUDIT_TIMESTAMP_UTC_MIGRATION = "20260724_audit_timestamps_utc_v2"
 ADVICE_REVIEW_AUDIT_UTC_SCHEMA_VERSION = "20260724_advice_review_audit_timestamps_utc_v2"
 SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION = "20260724_schema_migration_applied_at_utc_v2"
@@ -223,24 +222,17 @@ COMPAT_COLUMNS = {
         "quote_date": "TEXT",
         "quote_capture_started_at": "TEXT",
         "quote_capture_finished_at": "TEXT",
-        "quote_capture_duration_ms": (
-            "INTEGER CHECK (quote_capture_duration_ms IS NULL OR quote_capture_duration_ms >= 0)"
-        ),
+        "quote_capture_duration_ms": ("INTEGER CHECK (quote_capture_duration_ms IS NULL OR quote_capture_duration_ms >= 0)"),
         "quote_capture_count": "INTEGER NOT NULL DEFAULT 0 CHECK (quote_capture_count >= 0)",
-        "current_stage": ("TEXT CHECK (current_stage IS NULL OR current_stage IN "
-                          "('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication'))"),
+        "current_stage": (
+            "TEXT CHECK (current_stage IS NULL OR current_stage IN " "('stock_pool', 'bulk_quotes', 'klines', 'scoring', 'persistence', 'publication'))"
+        ),
         "stage_started_at": "TEXT",
         "stage_metrics_json": "TEXT NOT NULL DEFAULT '{}'",
         "market_progress_json": "TEXT NOT NULL DEFAULT '[]'",
         "publication_diagnostics_json": "TEXT",
-        "snapshot_digest": (
-            "TEXT CHECK (snapshot_digest IS NULL OR (length(snapshot_digest) = 64 "
-            "AND snapshot_digest NOT GLOB '*[^0-9a-f]*'))"
-        ),
-        "snapshot_seal_origin": (
-            "TEXT CHECK (snapshot_seal_origin IS NULL OR "
-            "snapshot_seal_origin IN ('publication', 'legacy_backfill'))"
-        ),
+        "snapshot_digest": ("TEXT CHECK (snapshot_digest IS NULL OR (length(snapshot_digest) = 64 " "AND snapshot_digest NOT GLOB '*[^0-9a-f]*'))"),
+        "snapshot_seal_origin": ("TEXT CHECK (snapshot_seal_origin IS NULL OR " "snapshot_seal_origin IN ('publication', 'legacy_backfill'))"),
         "snapshot_sealed_at": "TEXT",
     },
     "stock_concept": {
@@ -311,6 +303,145 @@ def _apply_compat_migrations(
         legacy_audit_timezone=legacy_audit_timezone,
     )
     _apply_market_scan_snapshot_digest_migration(conn)
+    _apply_market_scan_probability_ranking_v6_migration(conn)
+
+
+_MARKET_SCAN_PROBABILITY_RANKING_V6_STATEMENTS = (
+    """
+        CREATE TABLE IF NOT EXISTS market_scan_probability_ranking_publication (
+            run_id INTEGER PRIMARY KEY,
+            schema_version TEXT NOT NULL,
+            score_rule_version TEXT NOT NULL CHECK (score_rule_version = 'full-market-score-v6'),
+            score_spec_hash TEXT NOT NULL CHECK (
+                length(score_spec_hash) = 64
+                AND score_spec_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            base_snapshot_digest TEXT NOT NULL CHECK (
+                length(base_snapshot_digest) = 64
+                AND base_snapshot_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            prediction_artifact_digest TEXT NOT NULL CHECK (
+                length(prediction_artifact_digest) = 64
+                AND prediction_artifact_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            promotion_digest TEXT NOT NULL CHECK (
+                length(promotion_digest) = 64
+                AND promotion_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            artifact_digest TEXT NOT NULL UNIQUE CHECK (
+                length(artifact_digest) = 64
+                AND artifact_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            artifact_path TEXT NOT NULL,
+            record_count INTEGER NOT NULL CHECK (record_count > 0),
+            generated_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES market_scan_run(id) ON DELETE RESTRICT
+        )
+        """,
+    """
+        CREATE TABLE IF NOT EXISTS market_scan_probability_ranking_result (
+            run_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            rank INTEGER NOT NULL CHECK (rank > 0),
+            score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
+            raw_score REAL NOT NULL CHECK (raw_score BETWEEN 0 AND 100),
+            base_rank INTEGER NOT NULL CHECK (base_rank > 0),
+            base_score INTEGER NOT NULL CHECK (base_score BETWEEN 0 AND 100),
+            base_raw_score REAL NOT NULL CHECK (base_raw_score BETWEEN 0 AND 100),
+            probability REAL NOT NULL CHECK (probability BETWEEN 0 AND 1),
+            reference_base_rate REAL NOT NULL CHECK (reference_base_rate BETWEEN 0 AND 1),
+            probability_adjustment REAL NOT NULL CHECK (probability_adjustment BETWEEN -6 AND 6),
+            record_digest TEXT NOT NULL CHECK (
+                length(record_digest) = 64
+                AND record_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            PRIMARY KEY (run_id, symbol),
+            UNIQUE (run_id, rank),
+            FOREIGN KEY (run_id)
+                REFERENCES market_scan_probability_ranking_publication(run_id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (run_id, symbol)
+                REFERENCES market_scan_result(run_id, symbol)
+                ON DELETE RESTRICT
+        )
+        """,
+    """
+        CREATE TABLE IF NOT EXISTS market_scan_probability_ranking_rollback (
+            control_digest TEXT PRIMARY KEY CHECK (
+                length(control_digest) = 64
+                AND control_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            promotion_digest TEXT NOT NULL CHECK (
+                length(promotion_digest) = 64
+                AND promotion_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            publication_artifact_digest TEXT CHECK (
+                publication_artifact_digest IS NULL OR (
+                    length(publication_artifact_digest) = 64
+                    AND publication_artifact_digest NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            effective_after_run_id INTEGER NOT NULL CHECK (effective_after_run_id > 0),
+            generated_at TEXT NOT NULL,
+            reason TEXT NOT NULL
+        )
+        """,
+    """
+        CREATE TRIGGER IF NOT EXISTS trg_market_scan_probability_ranking_publication_immutable_update
+        BEFORE UPDATE ON market_scan_probability_ranking_publication
+        BEGIN
+            SELECT RAISE(ABORT, 'market_scan_probability_ranking_publication is immutable');
+        END
+        """,
+    """
+        CREATE TRIGGER IF NOT EXISTS trg_market_scan_probability_ranking_publication_immutable_delete
+        BEFORE DELETE ON market_scan_probability_ranking_publication
+        BEGIN
+            SELECT RAISE(ABORT, 'market_scan_probability_ranking_publication is immutable');
+        END
+        """,
+    """
+        CREATE TRIGGER IF NOT EXISTS trg_market_scan_probability_ranking_result_immutable_update
+        BEFORE UPDATE ON market_scan_probability_ranking_result
+        BEGIN
+            SELECT RAISE(ABORT, 'market_scan_probability_ranking_result is immutable');
+        END
+        """,
+    """
+        CREATE TRIGGER IF NOT EXISTS trg_market_scan_probability_ranking_result_immutable_delete
+        BEFORE DELETE ON market_scan_probability_ranking_result
+        BEGIN
+            SELECT RAISE(ABORT, 'market_scan_probability_ranking_result is immutable');
+        END
+        """,
+    """
+        CREATE TRIGGER IF NOT EXISTS trg_market_scan_probability_ranking_rollback_immutable_update
+        BEFORE UPDATE ON market_scan_probability_ranking_rollback
+        BEGIN
+            SELECT RAISE(ABORT, 'market_scan_probability_ranking_rollback is immutable');
+        END
+        """,
+    """
+        CREATE TRIGGER IF NOT EXISTS trg_market_scan_probability_ranking_rollback_immutable_delete
+        BEFORE DELETE ON market_scan_probability_ranking_rollback
+        BEGIN
+            SELECT RAISE(ABORT, 'market_scan_probability_ranking_rollback is immutable');
+        END
+        """,
+)
+
+
+def _apply_market_scan_probability_ranking_v6_migration(
+    conn: sqlite3.Connection,
+) -> None:
+    if not table_exists(conn, "market_scan_run") or not table_exists(conn, "market_scan_result"):
+        return
+    for statement in _MARKET_SCAN_PROBABILITY_RANKING_V6_STATEMENTS:
+        conn.execute(statement)
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
+        (MARKET_SCAN_PROBABILITY_RANKING_V6_MIGRATION,),
+    )
 
 
 def _apply_market_scan_snapshot_digest_migration(conn: sqlite3.Connection) -> None:
@@ -366,9 +497,7 @@ def _apply_schema_migration_applied_at_utc_migration(conn: sqlite3.Connection) -
         """
     )
     conn.execute("DROP TABLE schema_migration")
-    conn.execute(
-        f"ALTER TABLE {_SCHEMA_MIGRATION_REBUILD_TABLE} RENAME TO schema_migration"
-    )
+    conn.execute(f"ALTER TABLE {_SCHEMA_MIGRATION_REBUILD_TABLE} RENAME TO schema_migration")
     conn.execute(
         "INSERT INTO schema_migration (name) VALUES (?)",
         (SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,),
@@ -414,10 +543,7 @@ def normalize_legacy_audit_timestamps(
         deterministic=True,
     )
     for table, columns in columns_by_table.items():
-        existing_columns = {
-            _pragma_column_name(row)
-            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-        }
+        existing_columns = {_pragma_column_name(row) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         for column in columns:
             if column not in existing_columns:
                 continue
@@ -432,9 +558,7 @@ def normalize_legacy_audit_timestamps(
             except sqlite3.OperationalError as exc:
                 if "user-defined function" not in str(exc).lower():
                     raise
-                raise ValueError(
-                    f"{table}.{column} contains an invalid audit timestamp"
-                ) from exc
+                raise ValueError(f"{table}.{column} contains an invalid audit timestamp") from exc
 
 
 def _audit_timestamp_normalizer(legacy_audit_timezone: str):
@@ -597,9 +721,7 @@ def _backfill_market_scan_probability_capture_outbox(conn: sqlite3.Connection) -
 
 
 def _market_scan_mode_accepts_preopen(conn: sqlite3.Connection) -> bool:
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'market_scan_run'"
-    ).fetchone()
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'market_scan_run'").fetchone()
     return row is not None and "'preopen'" in str(row[0] or "")
 
 
@@ -617,12 +739,8 @@ def _rebuild_market_scan_tables_for_preopen(conn: sqlite3.Connection) -> None:
     _copy_table_rows(conn, "market_scan_result", _MARKET_SCAN_RESULT_REBUILD_TABLE)
     conn.execute("DROP TABLE market_scan_result")
     conn.execute("DROP TABLE market_scan_run")
-    conn.execute(
-        f"ALTER TABLE {_MARKET_SCAN_RUN_REBUILD_TABLE} RENAME TO market_scan_run"
-    )
-    conn.execute(
-        f"ALTER TABLE {_MARKET_SCAN_RESULT_REBUILD_TABLE} RENAME TO market_scan_result"
-    )
+    conn.execute(f"ALTER TABLE {_MARKET_SCAN_RUN_REBUILD_TABLE} RENAME TO market_scan_run")
+    conn.execute(f"ALTER TABLE {_MARKET_SCAN_RESULT_REBUILD_TABLE} RENAME TO market_scan_result")
     for statement in dependent_sql:
         conn.execute(statement)
 
@@ -670,10 +788,7 @@ def _preopen_result_rebuild_sql(value: str) -> str:
 
 
 def _copy_table_rows(conn: sqlite3.Connection, source: str, target: str) -> None:
-    columns = tuple(
-        _pragma_column_name(row)
-        for row in conn.execute(f"PRAGMA table_info({source})").fetchall()
-    )
+    columns = tuple(_pragma_column_name(row) for row in conn.execute(f"PRAGMA table_info({source})").fetchall())
     if not columns:
         raise sqlite3.DatabaseError(f"missing columns for {source}")
     names = ", ".join(f'"{column}"' for column in columns)
@@ -815,7 +930,12 @@ def _apply_monitor_event_migration(conn: sqlite3.Connection) -> None:
 def _ensure_quote_history_contract(conn: sqlite3.Connection) -> None:
     if _quote_history_requires_rebuild(conn):
         _rebuild_quote_history(conn)
-    else:
+    elif not _has_exact_unique_index(
+        conn,
+        table="quote_history",
+        index=QUOTE_HISTORY_UNIQUE_INDEX,
+        columns=("symbol", "trade_date"),
+    ):
         _delete_quote_history_duplicates(conn)
     for name in _QUOTE_HISTORY_MIGRATION_NAMES:
         conn.execute("INSERT OR IGNORE INTO schema_migration (name) VALUES (?)", (name,))
@@ -1061,17 +1181,44 @@ def _ensure_unique_index(
     index: str,
     columns: tuple[str, ...],
 ) -> None:
-    existing = next(
-        (row for row in conn.execute(f"PRAGMA index_list({table})").fetchall() if _pragma_index_name(row) == index),
-        None,
-    )
+    existing = _index_row(conn, table=table, index=index)
     if existing is not None:
-        existing_columns = tuple(_pragma_index_column_name(row) for row in conn.execute(f"PRAGMA index_info({index})"))
-        if _pragma_index_unique(existing) and existing_columns == columns:
+        if _has_exact_unique_index(
+            conn,
+            table=table,
+            index=index,
+            columns=columns,
+        ):
             return
         conn.execute(f"DROP INDEX {index}")
     column_sql = ", ".join(columns)
     conn.execute(f"CREATE UNIQUE INDEX {index} ON {table}({column_sql})")
+
+
+def _has_exact_unique_index(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    index: str,
+    columns: tuple[str, ...],
+) -> bool:
+    existing = _index_row(conn, table=table, index=index)
+    if existing is None or not _pragma_index_unique(existing):
+        return False
+    existing_columns = tuple(_pragma_index_column_name(row) for row in conn.execute(f"PRAGMA index_info({index})"))
+    return existing_columns == columns
+
+
+def _index_row(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    index: str,
+) -> sqlite3.Row | tuple | None:
+    return next(
+        (row for row in conn.execute(f"PRAGMA index_list({table})").fetchall() if _pragma_index_name(row) == index),
+        None,
+    )
 
 
 def table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -1090,52 +1237,45 @@ def table_has_columns(conn: sqlite3.Connection, table: str, *columns: str) -> bo
 
 
 def _pragma_column_name(row: sqlite3.Row | tuple) -> str:
-    try:
+    if isinstance(row, sqlite3.Row):
         return str(row["name"])
-    except (TypeError, IndexError):
-        return str(row[1])
+    return str(row[1])
 
 
 def _pragma_column_not_null(row: sqlite3.Row | tuple) -> bool:
-    try:
+    if isinstance(row, sqlite3.Row):
         return bool(row["notnull"])
-    except (TypeError, IndexError):
-        return bool(row[3])
+    return bool(row[3])
 
 
 def _pragma_column_default(row: sqlite3.Row | tuple) -> object:
-    try:
+    if isinstance(row, sqlite3.Row):
         return row["dflt_value"]
-    except (TypeError, IndexError):
-        return row[4]
+    return row[4]
 
 
 def _pragma_column_primary_key_position(row: sqlite3.Row | tuple) -> int:
-    try:
+    if isinstance(row, sqlite3.Row):
         return int(row["pk"])
-    except (TypeError, IndexError):
-        return int(row[5])
+    return int(row[5])
 
 
 def _pragma_index_name(row: sqlite3.Row | tuple) -> str:
-    try:
+    if isinstance(row, sqlite3.Row):
         return str(row["name"])
-    except (TypeError, IndexError):
-        return str(row[1])
+    return str(row[1])
 
 
 def _pragma_index_unique(row: sqlite3.Row | tuple) -> bool:
-    try:
+    if isinstance(row, sqlite3.Row):
         return bool(row["unique"])
-    except (TypeError, IndexError):
-        return bool(row[2])
+    return bool(row[2])
 
 
 def _pragma_index_column_name(row: sqlite3.Row | tuple) -> str:
-    try:
+    if isinstance(row, sqlite3.Row):
         return str(row["name"])
-    except (TypeError, IndexError):
-        return str(row[2])
+    return str(row[2])
 
 
 __all__ = [
@@ -1146,6 +1286,7 @@ __all__ = [
     "KLINE_DAILY_CONTRACT_MIGRATION",
     "MIGRATION_BUSY_TIMEOUT_MS",
     "MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION",
+    "MARKET_SCAN_PROBABILITY_RANKING_V6_MIGRATION",
     "QUOTE_HISTORY_CONTRACT_MIGRATION",
     "QUOTE_HISTORY_UNIQUE_INDEX",
     "SCHEMA_MIGRATION_SQL",

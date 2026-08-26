@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 156
+Total endpoints: 157
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -53,6 +53,7 @@ Total endpoints: 156
 | GET | `/api/market-scans/{run_id}/breadth` | path `run_id: int` | `market_scan_breadth` | `MarketBreadthV1` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans/{run_id}/cancel` | path `run_id: int` | `cancel_market_scan` | `MarketScanRun` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/delta` | path `run_id: int` | `market_scan_delta` | `MarketScanDeltaResponse` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/{run_id}/experimental-probability` | path `run_id: int`<br>query `acknowledge_experimental: bool = False`<br>query `min_probability: float \| None = None` (ge=0; le=1)<br>query `market: MarketCode \| None = None`<br>query `keyword: str = ''` (max_length=80)<br>query `sort: Literal['probability', 'base_rank'] = 'probability'`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200) | `market_scan_experimental_probability` | `dict[str, object]` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/export.xlsx` | path `run_id: int` | `export_market_scan_results` | `-` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/future-range-research` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200)<br>query `session_offset: int \| None = None` (ge=1; le=3)<br>query `symbol: str \| None = None` (max_length=20)<br>query `include_research: bool = True` | `market_scan_future_range_research` | `MarketScanFutureRangeResearchResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/probability-research` | path `run_id: int` | `market_scan_probability_research` | `dict[str, object]` | `app/api/routes/market_scan.py` |

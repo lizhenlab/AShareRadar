@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from app.services.market_scan_probability_maintenance import (
         MarketScanProbabilityMaintenanceService,
     )
+    from app.services.market_scan_joint_execution_maintenance import (
+        MarketScanJointExecutionMaintenanceService,
+    )
     from app.config import Settings
     from app.services.datahub import DataHub
     from app.services.market_scan_manager import MarketScanManager
@@ -157,6 +160,7 @@ if TYPE_CHECKING:
         _shutdown_tasks: set[asyncio.Task]
         _guard_release_task: asyncio.Task[None] | None
         _market_scan_probability_maintenance: MarketScanProbabilityMaintenanceService | None
+        _market_scan_joint_execution_maintenance: MarketScanJointExecutionMaintenanceService | None
         _strategy_automation_service: StrategyAutomationRunner | None
         _quiescent_event: asyncio.Event
 

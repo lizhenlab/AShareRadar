@@ -3,6 +3,7 @@ import {
   normalizeMarketScanProbabilityResearch,
   normalizeMarketScanUpsideProbabilities,
 } from "./market-scan-probability-view.js";
+import { normalizeProductionRanking, validateProbabilityRankingItem } from "./market-scan-ranking-contracts.js";
 export {
   buildDiscoveryPresetDefinition,
   isDiscoveryPresetUiRepresentable,
@@ -323,10 +324,11 @@ export function validateResultPage(value, expectedRunId) {
     pageCount: page.page_count,
     context,
   });
-  const probabilityResearch = normalizeMarketScanProbabilityResearch(page.probability_research, expectedRunId);
-  page.probability_research = probabilityResearch;
+  const probabilityResearch = normalizeMarketScanProbabilityResearch(page.probability_research, expectedRunId), productionRanking = normalizeProductionRanking(page.production_ranking, run);
+  page.probability_research = probabilityResearch; page.production_ranking = productionRanking;
   page.items.forEach((item, index) => {
     validateResultItem(item, expectedRunId, `${context}.items[${index}]`);
+    validateProbabilityRankingItem(item, productionRanking, `${context}.items[${index}]`);
     if (item.status === "success" && item.data_date !== run.data_date) {
       throw marketScanContractError(`${context}.items[${index}].data_date 与批次不一致`);
     }
@@ -576,8 +578,7 @@ function requireInteger(value, path, options = {}) {
 }
 
 function requireNullableInteger(value, path, options = {}) {
-  if (value === null || value === undefined) return value;
-  return requireInteger(value, path, options);
+  return value === null || value === undefined ? value : requireInteger(value, path, options);
 }
 
 function requireNumber(value, path, options = {}) {
@@ -594,6 +595,5 @@ function requireNumber(value, path, options = {}) {
 }
 
 function requireNullableNumber(value, path, options = {}) {
-  if (value === null || value === undefined) return value;
-  return requireNumber(value, path, options);
+  return value === null || value === undefined ? value : requireNumber(value, path, options);
 }

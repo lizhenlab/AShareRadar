@@ -54,6 +54,14 @@ class MarketScanSettingsProtocol(Protocol):
     market_scan_min_sz_count: int
     market_scan_min_universe_count: int
     market_scan_new_stock_days: int
+    market_scan_official_execution_raw_root: Path
+    market_scan_official_execution_registry_digest: str | None
+    market_scan_official_execution_registry_path: Path
+    market_scan_official_execution_session_directory: Path
+    market_scan_joint_execution_authorization_digest: str | None
+    market_scan_joint_execution_authorization_path: Path
+    market_scan_probability_ranking_control_digest: str | None
+    market_scan_probability_ranking_control_path: Path
     market_scan_provider_wait_budget_seconds: float
     market_scan_preflight_enabled: bool
     market_scan_preflight_timeout_seconds: float
@@ -108,6 +116,8 @@ class MarketScanVerifiedReadProtocol(Protocol):
 
     def results_page(self, **query: object) -> MarketScanResultPage: ...
 
+    def execution_session_evidence(self) -> Mapping[str, object]: ...
+
 
 @runtime_checkable
 class MarketScanCacheProtocol(Protocol):
@@ -127,6 +137,13 @@ class MarketScanCacheProtocol(Protocol):
         self,
         run_id: int,
     ) -> ProbabilitySourceCaptureState | None: ...
+
+    def probability_source_capture_archive_bindings(self) -> dict[int, str]: ...
+
+    def audit_probability_source_capture_archives(
+        self,
+        archives: Mapping[int, str],
+    ) -> int: ...
 
     def market_scan_action_source_digest(self, run_id: int) -> str | None: ...
 

@@ -71,6 +71,12 @@ export function marketScanProbabilityElements(root, requireElement) {
     probabilityVersion: get("marketScanProbabilityVersion"),
     probabilityCutoff: get("marketScanProbabilityCutoff"),
     probabilityLimitations: get("marketScanProbabilityLimitations"),
+    historicalResearch: get("marketScanHistoricalProbability"),
+    historicalStatus: get("marketScanHistoricalProbabilityStatus"),
+    historicalSample: get("marketScanHistoricalProbabilitySample"),
+    historicalMetrics: get("marketScanHistoricalProbabilityMetrics"),
+    historicalConclusion: get("marketScanHistoricalProbabilityConclusion"),
+    historicalLimitations: get("marketScanHistoricalProbabilityLimitations"),
     probabilityMin: get("marketScanProbabilityMin"),
     probabilityFilterHelp: get("marketScanProbabilityFilterHelp"),
   };
@@ -103,6 +109,7 @@ export function renderMarketScanProbabilityResearch(elements, research) {
   setText(elements.probabilityVersion, versionText(artifact));
   setText(elements.probabilityCutoff, artifact.training_cutoff || "--");
   setText(elements.probabilityLimitations, limitationsText(artifact));
+  renderHistoricalProbabilityContext(elements, normalized.historical_context, horizon);
   syncMarketScanProbabilityFilter(elements, artifact);
 }
 
@@ -145,6 +152,7 @@ export function resetMarketScanProbabilityResearch(elements, runId = null, optio
           ? "其他请求正在校验冻结快照，稍后自动重试；概率与筛选暂时保持关闭。"
         : loading ? "正在读取该批次的冻结概率证据。" : "尚无可验证的上涨概率证据。",
   );
+  resetHistoricalProbabilityContext(elements, { loading, readError, busyWait });
   elements.probabilityMin.value = "";
   elements.probabilityMin.disabled = true;
   setText(
@@ -157,6 +165,76 @@ export function resetMarketScanProbabilityResearch(elements, runId = null, optio
           ? "冻结快照校验中；概率为空，选股筛选保持关闭，等待自动重试。"
         : "只有样本外已校准的 Shadow 概率才可筛选。当前已禁用。",
   );
+}
+
+function renderHistoricalProbabilityContext(elements, context, horizon) {
+  if (!elements.historicalResearch) return;
+  const historical = objectValue(context);
+  const status = String(historical.status || "not_generated");
+  setData(elements.historicalResearch, "status", status);
+  if (status !== "ready") {
+    setText(
+      elements.historicalStatus,
+      status === "unavailable" ? "历史证据校验失败" : "尚未生成历史参考",
+    );
+    setText(elements.historicalSample, "--");
+    setText(elements.historicalMetrics, "--");
+    setText(
+      elements.historicalConclusion,
+      status === "unavailable" ? "完整历史重放或其绑定文件不可验证" : "需要先生成历史重放上下文",
+    );
+    setText(elements.historicalLimitations, "历史数据不会替代当前正式点时证据，也不会开放概率筛选。");
+    return;
+  }
+  const sample = objectValue(historical.sample);
+  const evidence = objectValue(objectValue(historical.horizons)[String(horizon)]);
+  const noSkill = historical.availability === "historical_replay_no_verified_predictive_skill";
+  const sampleReady = Number(evidence.available_independent_session_count || 0)
+    >= Number(evidence.minimum_required_independent_session_count || Number.POSITIVE_INFINITY);
+  const horizonHasNoSkill = (typeof evidence.brier_skill_score === "number" && evidence.brier_skill_score <= 0)
+    || (typeof evidence.auc === "number" && evidence.auc <= 0.5);
+  setText(
+    elements.historicalStatus,
+    noSkill ? sampleReady ? "样本已足·未证明预测效力" : "未证明预测效力"
+      : historical.availability === "historical_shadow_calibrated_reference_only"
+      ? "历史样本已校准·仅参考" : "历史证据仍不足",
+  );
+  setText(
+    elements.historicalSample,
+    `${countValue(sample.independent_session_count)} 日 · ${countValue(sample.record_count)} 条 · ${countValue(sample.symbol_count)} 只 · 覆盖 ${percentageText(sample.label_coverage)}`,
+  );
+  setText(
+    elements.historicalMetrics,
+    `H${horizon} AUC ${metricText(evidence.auc, 3)} · Brier Skill ${metricText(evidence.brier_skill_score, 3)} · ECE ${metricText(evidence.ece, 3)} · OOS ${countValue(evidence.out_of_sample_session_count)} 日/${countValue(evidence.evaluated_fold_count)} 折`,
+  );
+  setText(
+    elements.historicalConclusion,
+    !sampleReady
+      ? "历史独立日期未达拟合门槛"
+      : horizonHasNoSkill
+        ? "样本已达拟合门槛；未胜过基础胜率，不能输出当前逐股概率"
+        : evidence.assessment_status === CALIBRATED_STATUS
+          ? "样本已达拟合门槛；历史 Shadow 已拟合，但不属于当前正式合同"
+          : Array.isArray(evidence.limitations) && evidence.limitations.includes("minimum_probability_bin_sessions")
+            ? "样本已达拟合门槛；极端概率分箱的独立日期仍不足"
+            : "样本已达拟合门槛；仍未通过完整校准门禁",
+  );
+  setText(
+    elements.historicalLimitations,
+    "腾讯 qfq 均衡样本 · 绝对净收益目标 · 存在当前股票池幸存者偏差 · 非当前全市场点时合同 · 不用于筛选或排名。",
+  );
+}
+
+function resetHistoricalProbabilityContext(elements, state = {}) {
+  if (!elements.historicalResearch) return;
+  setData(elements.historicalResearch, "status", "not_generated");
+  setText(
+    elements.historicalStatus,
+    state.readError ? "历史参考读取失败" : state.busyWait ? "等待当前证据校验" : state.loading ? "正在读取历史参考" : "尚未生成历史参考",
+  );
+  [elements.historicalSample, elements.historicalMetrics].forEach((element) => setText(element, "--"));
+  setText(elements.historicalConclusion, "历史数据不会自动获得正式概率授权");
+  setText(elements.historicalLimitations, "历史研究与当前正式点时证据保持隔离。");
 }
 
 export function marketScanProbabilityCell(value, horizon = MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON, research = null) {
@@ -247,6 +325,8 @@ function effectivenessText(artifact) {
     return "有界样本评估完成 · 不具备选股资格";
   }
   if (artifact.status === "not_generated") return "--";
+  const evidenceBlocker = jointExecutionBlockerText(artifact) || officialExecutionBlockerText(artifact);
+  if (evidenceBlocker) return evidenceBlocker;
   return {
     source_archived: "等待首次标签维护",
     waiting_labels: "等待固定交易日标签成熟",
@@ -265,6 +345,8 @@ function failedSelectionGateLabels(artifact) {
 }
 
 function probabilityUnavailableHelp(artifact) {
+  const evidenceBlocker = jointExecutionBlockerText(artifact) || officialExecutionBlockerText(artifact);
+  if (evidenceBlocker) return `${evidenceBlocker}；概率筛选保持关闭。`;
   if (artifact.availability === "probability_artifact_source_unbound") {
     return "已有概率产物未精确绑定本次源归档；逐股概率与筛选保持关闭。";
   }
@@ -368,7 +450,10 @@ function versionText(artifact) {
 
 function limitationsText(artifact) {
   const values = Array.isArray(artifact.limitations) ? artifact.limitations.filter(Boolean) : [];
-  if (values.length) return values.map(limitationLabel).join("；");
+  const evidenceBlocker = jointExecutionBlockerText(artifact) || officialExecutionBlockerText(artifact);
+  if (values.length || evidenceBlocker) {
+    return [...values.map(limitationLabel), evidenceBlocker].filter(Boolean).join("；");
+  }
   if (artifact.status === CALIBRATED_STATUS) return "仅用于 Shadow 研究，不参与生产排序。";
   return artifact.status === "not_generated" ? "当前批次尚未生成上涨概率研究。" : "研究已生成，但样本不足，暂不输出概率。";
 }
@@ -382,6 +467,16 @@ function statusLabel(value) {
   const status = String(artifact.status || "not_generated");
   if (artifact.availability === "probability_artifact_source_unbound") return "概率产物源绑定无效";
   if (status === CALIBRATED_STATUS) return "样本外已校准";
+  const official = objectValue(artifact.official_execution_evidence);
+  if (official.status === "unconfigured_pinned_registry") return "官方执行证据未配置";
+  if (official.status === "verification_failed") return "官方执行证据校验失败";
+  if (official.status === "waiting_sessions") return "等待官方执行会话";
+  const joint = objectValue(artifact.joint_execution_evidence);
+  if (joint.status === "waiting_mature_official_h5") return "等待官方 H5 路径成熟";
+  if (joint.status === "selection_evidence_accumulating") return "正式会话未达选择门槛";
+  if (joint.status === "selection_passed_waiting_authorization") return "等待精确筛选授权";
+  if (joint.status === "authorization_or_deployment_blocked") return "授权或部署校验阻断";
+  if (joint.status === "deployment_ready_waiting_new_official_batch") return "等待新 official 批次预测";
   if (status !== "not_generated") return "研究已生成·样本不足";
   return {
     source_capture_pending: "正在归档研究样本",
@@ -391,6 +486,45 @@ function statusLabel(value) {
     probability_artifact_source_unbound: "概率产物源绑定无效",
     ineligible_run_contract: "来源批次不符合研究归档合同·未进入归档",
   }[artifact.availability] || "尚未生成研究证据";
+}
+
+function officialExecutionBlockerText(artifact) {
+  const official = objectValue(artifact.official_execution_evidence);
+  if (official.reported !== true) return "";
+  return {
+    unconfigured_pinned_registry: "尚未配置经许可的官方执行数据注册表及其外部固定摘要",
+    verification_failed: "经许可的官方执行数据或原始文件校验失败",
+    waiting_sessions: "官方执行数据已配置，正在等待可验证交易会话",
+    store_unavailable: "官方执行证据存储当前不可用",
+  }[official.status] || "";
+}
+
+function jointExecutionBlockerText(artifact) {
+  const joint = objectValue(artifact.joint_execution_evidence);
+  if (joint.reported !== true) return "";
+  const mature = countValue(joint.mature_h5_session_count);
+  const required = countValue(joint.selection_minimum_session_count);
+  const pipeline = {
+    maintenance_not_run: "联合执行概率维护尚未运行",
+    waiting_mature_official_h5: "正在等待固定决策集的官方 D+1 至 D+6 执行路径成熟",
+    selection_evidence_accumulating: `正式 H5 独立会话 ${mature}/${required}，尚未达到预注册选择门槛`,
+    selection_passed_waiting_authorization: "OOS 选择证据已通过，等待 exact-digest 筛选授权",
+    authorization_or_deployment_blocked: "筛选授权、漂移、执行经济性或 36 小时部署校验尚未通过",
+    deployment_ready_waiting_new_official_batch: "部署模型已验证，等待同日新 official 全市场批次生成逐股概率",
+    store_unavailable: "联合执行概率证据存储当前不可用",
+  }[joint.status] || "";
+  const ranking = {
+    shadow_not_available: "v6 生产排名尚无 Shadow 评估",
+    shadow_evaluation_unavailable: "v6 生产排名 Shadow 评估不可用",
+    shadow_gates_failed: "v6 Shadow 对照门禁未通过，生产排名保持 v5",
+    waiting_explicit_human_promotion: "v6 Shadow 已通过，等待显式人工晋级",
+    promotion_verified_waiting_new_official_batch: "v6 人工晋级已验证，等待晋级后的新 official 批次",
+    rollback_active: "v6 已按人工回滚控制停用，生产排名使用 v5",
+    shadow_or_control_verification_failed: "v6 Shadow 或人工控制校验失败，生产排名保持 v5",
+    production_ranking_ready: `v6 概率生产排名已对批次 ${countValue(joint.probability_ranking_run_id)} 启用，共 ${countValue(joint.probability_ranking_count)} 只`,
+    production_ranking_publication_failed: "v6 排名发布失败，生产排名保持 v5",
+  }[joint.probability_ranking_status] || "";
+  return [pipeline, ranking].filter(Boolean).join("；");
 }
 
 function percentageText(value) {

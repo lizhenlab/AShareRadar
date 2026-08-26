@@ -208,6 +208,32 @@ def test_canonical_source_and_incremental_manifest_cache(
     assert len(loads) == load_count
 
 
+def test_canonical_sources_exclude_superseded_read_only_source_contracts(
+    tmp_path: Path,
+) -> None:
+    current = maintenance._SourceManifest(  # noqa: SLF001 - orchestration boundary fixture
+        path=tmp_path / "current.json.gz",
+        run_id=90,
+        quote_date="2026-08-14",
+        as_of="2026-08-15T13:44:35+08:00",
+        captured_at="2026-08-15T05:52:23+00:00",
+        cohort=("official", "全市场A股", "current"),
+        digest="a" * 64,
+    )
+    superseded = maintenance._SourceManifest(  # noqa: SLF001 - orchestration boundary fixture
+        path=tmp_path / "legacy.json.gz",
+        run_id=77,
+        quote_date="2026-08-12",
+        as_of="2026-08-12T16:30:00+08:00",
+        captured_at="2026-08-12T08:45:13+00:00",
+        cohort=("official", "全市场A股", "legacy"),
+        digest="b" * 64,
+        schema_version="market-scan-probability-source-artifact-v1",
+    )
+
+    assert maintenance._canonical_sources((superseded, current)) == (current,)  # noqa: SLF001
+
+
 def test_manifest_refresh_fails_closed_on_directory_race(
     tmp_path: Path,
     monkeypatch,
@@ -615,6 +641,7 @@ def _service(tmp_path: Path, monkeypatch, sources):
 def _source(run_id: int, quote_date: str, *, as_of: str | None = None):
     timestamp = as_of or f"{quote_date}T16:00:00+08:00"
     return {
+        "schema_version": maintenance.PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION,
         "run_id": run_id,
         "quote_date": quote_date,
         "as_of": timestamp,

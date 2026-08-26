@@ -22,6 +22,10 @@ from app.db.market_scan_integrity import seal_market_scan_snapshot
 from app.services.joint_execution_probability import (
     build_decision_time_joint_execution_probability_evidence,
 )
+from app.services.joint_execution_probability_v3 import (
+    build_joint_execution_probability_corpus_v3,
+    joint_execution_v3_decision_identity_digest,
+)
 from app.services.cache import SQLiteCache
 from app.services.market_scan_probability import (
     LEGACY_PROBABILITY_FEATURE_VERSION,
@@ -349,7 +353,7 @@ def test_filter_qualification_requires_bound_promotion_statistics_drift_and_exec
         "selection_probability": "joint_execution_action_probability",
     }
     assert probability_module._joint_execution_estimand_supported(future_contract)
-    assert not probability_module._verified_execution_validation(
+    assert probability_module._verified_execution_validation(
         authorization_artifact["payload"], future_contract,
     )
 
@@ -1959,89 +1963,234 @@ def _complete_test_label_contract() -> dict[str, object]:
     }
 
 
-def _qualified_joint_execution_probability(
-    sample_id: str = "71:600519.SH:1:net_excess_positive",
-    session: str = "2025-01-01",
-) -> dict[str, object]:
-    horizon = int(sample_id.split(":")[2])
-
-    def bar(role: str, session: str, price: float) -> dict[str, object]:
-        return {
-            "role": role, "session_date": session,
-            "session_offset_from_signal": 1 if role == "entry" else horizon + 1,
-            "source_kind": "official_exchange_daily_ohlcv_amount",
-            "adjustment_mode": "none", "open": price, "high": price * 1.02,
-            "low": price * 0.98, "close": price * 1.01, "volume": 1_000_000.0,
-            "amount": 20_000_000.0, "source_dataset_digest": "a" * 64,
+def _qualified_joint_execution_probability_v3_corpus(
+    predictions: list[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    grouped: dict[str, list[Mapping[str, object]]] = {}
+    for prediction in predictions:
+        grouped.setdefault(str(prediction["session_date"]), []).append(prediction)
+    for session, session_predictions in sorted(grouped.items()):
+        sample_ids = [str(item["sample_id"]) for item in session_predictions]
+        identity_digest = joint_execution_v3_decision_identity_digest(sample_ids)
+        signal_day = date.fromisoformat(session)
+        entry_session = (signal_day + timedelta(days=1)).isoformat()
+        exit_session = (signal_day + timedelta(days=2)).isoformat()
+        source_run_id = int(sample_ids[0].split(":")[0])
+        decision_set = {
+            "population_policy": (
+                "all_fixed_full_market_decisions_including_unfilled_and_unexecutable"
+            ),
+            "signal_session": session,
+            "horizon": 1,
+            "target": "net_excess_positive",
+            "source_run_id": source_run_id,
+            "expected_decision_count": len(session_predictions),
+            "decision_identity_digest": identity_digest,
+            "universe_definition_digest": "e" * 64,
+            "universe_membership_digest": "f" * 64,
+            "source_snapshot_digest": stable_probability_hash([session, sample_ids]),
+            "frozen_at": f"{session}T15:01:00+08:00",
+            "universe_frozen_before_outcomes": True,
         }
+        for prediction in session_predictions:
+            sample_id = str(prediction["sample_id"])
+            symbol = sample_id.split(":")[1]
+            net_return = float(prediction["net_return"])
+            net_excess = float(prediction["net_excess_return"])
+            benchmark = net_return - net_excess
+            cost = 0.002
+            entry_price = 10.0
+            exit_price = entry_price * (1.0 + net_return + cost)
+            probability = float(prediction["probability"])
 
-    def rules(role: str, session: str) -> dict[str, object]:
-        return {
-            "role": role, "session_date": session,
-            "source_kind": "official_effective_dated", "effective_date": session,
-            "board": "main", "is_st": False, "listing_status": "listed",
-            "board_rule_id": "main-v1", "st_rule_id": "st-v1",
-            "delisting_rule_id": "delisting-v1", "ruleset_digest": "b" * 64,
-        }
+            def bar(role: str, session_date: str, price: float) -> dict[str, object]:
+                close = price if role == "exit" else price * 1.001
+                return {
+                    "role": role,
+                    "session_date": session_date,
+                    "session_offset_from_signal": 1 if role == "entry" else 2,
+                    "source_kind": "official_exchange_daily_ohlcv_amount",
+                    "adjustment_mode": "none",
+                    "open": price,
+                    "high": max(price, close) * 1.01,
+                    "low": min(price, close) * 0.99,
+                    "close": close,
+                    "volume": 1_000_000.0,
+                    "amount": 20_000_000.0,
+                    "source_dataset_digest": "a" * 64,
+                }
 
-    def reference(role: str, session: str, price: float) -> dict[str, object]:
-        return {
-            "role": role, "session_date": session,
-            "basis": "official_unadjusted_reference_with_effective_corporate_action",
-            "previous_close": price, "reference_price": price,
-            "corporate_action_status": "none", "reference_price_rule_id": "ref-v1",
-            "source_dataset_digest": "c" * 64,
-        }
+            def rules(role: str, session_date: str) -> dict[str, object]:
+                return {
+                    "role": role,
+                    "session_date": session_date,
+                    "source_kind": "official_effective_dated",
+                    "effective_date": session_date,
+                    "board": "main",
+                    "is_st": False,
+                    "listing_status": "listed",
+                    "board_rule_id": "main-v1",
+                    "st_rule_id": "st-v1",
+                    "delisting_rule_id": "delisting-v1",
+                    "ruleset_digest": "b" * 64,
+                }
 
-    signal_day = date.fromisoformat(session)
-    entry_session = (signal_day + timedelta(days=1)).isoformat()
-    exit_session = (signal_day + timedelta(days=horizon + 1)).isoformat()
-    symbol = sample_id.split(":")[1]
-    evidence = {
-        "entry_bar": bar("entry", entry_session, 10.0),
-        "exit_bar": bar("exit", exit_session, 10.2),
-        "entry_rules": rules("entry", entry_session),
-        "exit_rules": rules("exit", exit_session),
-        "entry_reference": reference("entry", entry_session, 9.9),
-        "exit_reference": reference("exit", exit_session, 10.1),
-        "participation": {
-            "basis": "entry_and_exit_same_session_amount",
-            "entry_order_notional": 100_000.0, "entry_session_amount": 20_000_000.0,
-            "entry_participation_rate": 0.005, "exit_order_notional": 102_000.0,
-            "exit_session_amount": 20_000_000.0, "exit_participation_rate": 0.0051,
-            "maximum_participation_rate": 0.01, "evidence_digest": "d" * 64,
-        },
-        "benchmark": {
-            "universe_basis": "fixed_full_market_at_signal", "outcome_population": "all_decisions",
-            "benchmark_method": "fixed_universe_leave_one_out", "universe_frozen_before_outcomes": True,
-            "benchmark_predeclared": True, "subject_excluded": True,
-            "universe_definition_digest": "e" * 64, "universe_membership_digest": "f" * 64,
-            "decision_cohort_digest": "1" * 64, "benchmark_series_digest": "2" * 64,
-        },
-        "calibration": {
-            "estimator_contract": "three_component_joint_chain", "training_cutoff": "2024-12-31",
-            "prediction_generated_at": "2025-01-01T15:05:00+08:00",
-            "entry_model_digest": "3" * 64, "exit_model_digest": "4" * 64,
-            "net_model_digest": "5" * 64, "calibrator_digest": "6" * 64,
-            "feature_schema_digest": "7" * 64, "decision_information_digest": "8" * 64,
-            "out_of_sample_assessment_digest": "9" * 64,
-            "out_of_sample_verified": True, "calibration_verified": True,
-            "selection_qualified": True,
-        },
-    }
-    report = build_decision_time_joint_execution_probability_evidence(
-        sample_id=sample_id, symbol=symbol, signal_session=session,
-        generated_at=f"{(signal_day + timedelta(days=3)).isoformat()}T09:00:00+08:00",
-        evidence=evidence,
-        probabilities={
-            "entry_fill_probability": 0.8,
-            "exit_executable_given_entry_probability": 0.9,
-            "net_positive_given_entry_and_exit_probability": 0.6,
-            "joint_net_positive_probability": 0.432,
-            "action_probability": 0.432,
-        },
-    )
-    return report.model_dump(mode="json")
+            def reference(role: str, session_date: str) -> dict[str, object]:
+                return {
+                    "role": role,
+                    "session_date": session_date,
+                    "basis": "official_unadjusted_reference_with_effective_corporate_action",
+                    "previous_close": 9.9,
+                    "reference_price": 9.9,
+                    "corporate_action_status": "none",
+                    "reference_price_rule_id": "ref-v1",
+                    "source_dataset_digest": "c" * 64,
+                }
+
+            def state(role: str, session_date: str) -> dict[str, object]:
+                return {
+                    "role": role,
+                    "session_date": session_date,
+                    "source_kind": "official_effective_dated_trading_state",
+                    "exchange_session_state": "trading",
+                    "execution_state": "executable",
+                    "reason_code": "official_session_executable",
+                    "observed_at": f"{session_date}T15:05:00+08:00",
+                    "effective_rules_digest": "b" * 64,
+                    "trading_state_digest": "d" * 64,
+                }
+
+            path_steps: list[dict[str, object]] = []
+            for offset, path_session in enumerate(
+                (entry_session, exit_session), start=1
+            ):
+                path_step: dict[str, object] = {
+                    "offset_from_signal": offset,
+                    "session_date": path_session,
+                    "official_session_artifact_digest": stable_probability_hash(
+                        ["official-session", path_session]
+                    ),
+                    "official_raw_file_set_digest": stable_probability_hash(
+                        ["official-raw", path_session]
+                    ),
+                    "official_row_digest": stable_probability_hash(
+                        ["official-row", symbol, path_session]
+                    ),
+                    "official_reference_evidence_digest": stable_probability_hash(
+                        ["official-reference", symbol, path_session]
+                    ),
+                    "corporate_action_status": "none",
+                    "corporate_action_event_id": None,
+                    "previous_close": 9.9,
+                    "reference_price": 9.9,
+                    "reference_continuity_factor": 1.0,
+                    "applied_to_holding_return": offset > 1,
+                }
+                path_step["step_digest"] = stable_probability_hash(path_step)
+                path_steps.append(path_step)
+            holding_path: dict[str, object] = {
+                "horizon": 1,
+                "entry_session": entry_session,
+                "exit_session": exit_session,
+                "steps": path_steps,
+                "corporate_action_factor": 1.0,
+            }
+            holding_path["path_digest"] = stable_probability_hash(holding_path)
+
+            outcome = bool(prediction["outcome"])
+            candidates.append({
+                "sample_id": sample_id,
+                "symbol": symbol,
+                "signal_session": session,
+                "generated_at": f"{(signal_day + timedelta(days=3)).isoformat()}T09:00:00+08:00",
+                "evidence": {
+                    "entry_bar": bar("entry", entry_session, entry_price),
+                    "exit_bar": bar("exit", exit_session, exit_price),
+                    "entry_rules": rules("entry", entry_session),
+                    "exit_rules": rules("exit", exit_session),
+                    "entry_reference": reference("entry", entry_session),
+                    "exit_reference": reference("exit", exit_session),
+                    "participation": {
+                        "basis": "entry_and_exit_same_session_amount",
+                        "entry_order_notional": 100_000.0,
+                        "entry_session_amount": 20_000_000.0,
+                        "entry_participation_rate": 0.005,
+                        "exit_order_notional": 100_000.0,
+                        "exit_session_amount": 20_000_000.0,
+                        "exit_participation_rate": 0.005,
+                        "maximum_participation_rate": 0.01,
+                        "evidence_digest": "d" * 64,
+                    },
+                    "benchmark": {
+                        "universe_basis": "fixed_full_market_at_signal",
+                        "outcome_population": "all_decisions",
+                        "benchmark_method": "fixed_universe_leave_one_out",
+                        "universe_frozen_before_outcomes": True,
+                        "benchmark_predeclared": True,
+                        "subject_excluded": True,
+                        "universe_definition_digest": "e" * 64,
+                        "universe_membership_digest": "f" * 64,
+                        "decision_cohort_digest": identity_digest,
+                        "benchmark_series_digest": "2" * 64,
+                    },
+                    "calibration": {
+                        "estimator_contract": "three_component_joint_chain",
+                        "training_cutoff": (signal_day - timedelta(days=1)).isoformat(),
+                        "prediction_generated_at": f"{session}T15:05:00+08:00",
+                        "entry_model_digest": "3" * 64,
+                        "exit_model_digest": "4" * 64,
+                        "net_model_digest": "5" * 64,
+                        "calibrator_digest": "6" * 64,
+                        "feature_schema_digest": "7" * 64,
+                        "decision_information_digest": "8" * 64,
+                        "out_of_sample_assessment_digest": stable_probability_hash(
+                            ["assessment", prediction["fold_id"]],
+                        ),
+                        "out_of_sample_verified": True,
+                        "calibration_verified": True,
+                        "selection_qualified": True,
+                    },
+                },
+                "entry_state": state("entry", entry_session),
+                "exit_state": state("exit", exit_session),
+                "holding_path": holding_path,
+                "costs": {
+                    "model_version": PROBABILITY_COST_MODEL_VERSION,
+                    "profile_id": "test-base-v1",
+                    "slippage_model_version": "amount-participation-slippage-v1",
+                    "entry_order_notional": 100_000.0,
+                    "exit_order_notional": 100_000.0,
+                    "maximum_participation_rate": 0.01,
+                    "entry_cost_return": 0.0005,
+                    "exit_cost_return": 0.0015,
+                    "total_cost_return": cost,
+                },
+                "observed_outcome": {
+                    "target": "net_excess_positive",
+                    "entry_fill": True,
+                    "exit_executable": True,
+                    "net_positive": outcome,
+                    "joint_action_positive": outcome,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "gross_return": net_return + cost,
+                    "net_return": net_return,
+                    "benchmark_return": benchmark,
+                    "net_excess_return": net_excess,
+                    "observed_at": f"{exit_session}T15:05:00+08:00",
+                    "outcome_reason_codes": ["observed_executable_round_trip"],
+                },
+                "decision_set": decision_set,
+                "probabilities": {
+                    "entry_fill_probability": 1.0,
+                    "exit_executable_given_entry_probability": 1.0,
+                    "net_positive_given_entry_and_exit_probability": probability,
+                    "joint_net_positive_probability": probability,
+                    "action_probability": probability,
+                },
+            })
+    return build_joint_execution_probability_corpus_v3(candidates, predictions).reports
 
 
 def _filter_authorization(evidence: Mapping[str, object]) -> dict[str, object]:
@@ -2098,12 +2247,7 @@ def _filter_authorization(evidence: Mapping[str, object]) -> dict[str, object]:
         probability_module._validated_drift_series(reference_drift, "reference"),
         probability_module._validated_drift_series(current_drift, "current"),
     )
-    joint_corpus = [
-        _qualified_joint_execution_probability(
-            str(prediction["sample_id"]), str(prediction["session_date"]),
-        )
-        for prediction in predictions
-    ]
+    joint_corpus = _qualified_joint_execution_probability_v3_corpus(predictions)
     session_economics = probability_module._execution_session_economics(
         predictions, joint_corpus,
     )
@@ -2553,8 +2697,8 @@ def _signal_samples(session_count: int) -> list[ProbabilitySample]:
                     session_date=_day(session_index),
                     features={"trend": signal, "risk": -signal * 0.4 + shift},
                     target=outcome,
-                    net_return=0.01 if outcome else -0.01,
-                    net_excess_return=0.005 if outcome else -0.005,
+                    net_return=0.011 if outcome else -0.009,
+                    net_excess_return=0.006 if outcome else -0.004,
                 )
             )
     return samples

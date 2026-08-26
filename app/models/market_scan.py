@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
-from math import fsum, isfinite, log2
+from math import fsum, isclose, isfinite, log2
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -1327,6 +1327,19 @@ class MarketScanResultItem(BaseModel):
     rank: int | None = Field(default=None, ge=1)
     score: int | None = Field(default=None, ge=0, le=100)
     raw_score: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    base_production_rank: int | None = Field(default=None, ge=1)
+    base_production_score: int | None = Field(default=None, ge=0, le=100)
+    base_production_raw_score: float | None = Field(
+        default=None, ge=0, le=100, allow_inf_nan=False
+    )
+    production_score_rule_version: str | None = None
+    probability_ranking_adjustment: float | None = Field(
+        default=None, ge=-6, le=6, allow_inf_nan=False
+    )
+    probability_ranking_artifact_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    probability_ranking_details: dict[str, object] = Field(default_factory=dict)
     trend_score: int | None = Field(default=None, ge=0, le=100)
     leader_score: int | None = Field(default=None, ge=0, le=100)
     data_quality_score: int | None = Field(default=None, ge=0, le=100)
@@ -1353,6 +1366,11 @@ class MarketScanResultItem(BaseModel):
     upside_probabilities: dict[str, dict[str, dict[str, object]]] = Field(default_factory=dict)
     updated_at: str
 
+    @model_validator(mode="after")
+    def validate_probability_ranking_contract(self) -> "MarketScanResultItem":
+        _validate_probability_ranking_result(self)
+        return self
+
     def validate_public_response(self, *, run: MarketScanRun) -> None:
         if self.run_id != run.id:
             raise ValueError("榜单项目 run_id 与榜单批次不一致")
@@ -1378,6 +1396,7 @@ class MarketScanResultPage(BaseModel):
     page_size: int = Field(ge=1)
     page_count: int = Field(ge=0)
     probability_research: dict[str, object] | None = None
+    production_ranking: dict[str, object] | None = None
 
     @model_validator(mode="after")
     def validate_page_binding(self) -> "MarketScanResultPage":
@@ -1633,6 +1652,60 @@ def _validate_success_result(item: MarketScanResultItem, run: MarketScanRun) -> 
         raise ValueError("success 榜单项目不能包含 error")
     _required_timestamp(item.quote_timestamp or "", "result.quote_timestamp")
     _required_timestamp(item.quote_observed_at or "", "result.quote_observed_at")
+
+
+def _validate_probability_ranking_result(item: MarketScanResultItem) -> None:
+    optional_values = (
+        item.base_production_rank,
+        item.base_production_score,
+        item.base_production_raw_score,
+        item.production_score_rule_version,
+        item.probability_ranking_adjustment,
+        item.probability_ranking_artifact_digest,
+    )
+    if all(value is None for value in optional_values) and not item.probability_ranking_details:
+        return
+    if item.status != "success":
+        raise ValueError("非 success 榜单项目不得包含 v6 生产排名")
+    if item.production_score_rule_version != "full-market-score-v6":
+        raise ValueError("概率生产排名必须使用 full-market-score-v6")
+    if any(value is None for value in optional_values) or not item.probability_ranking_details:
+        raise ValueError("v6 生产排名字段必须完整成组出现")
+    _validate_probability_ranking_exact_values(item)
+    _validate_probability_ranking_numeric_values(item)
+
+
+def _validate_probability_ranking_exact_values(item: MarketScanResultItem) -> None:
+    details = item.probability_ranking_details
+    exact_values = {
+        "symbol": item.symbol,
+        "run_id": item.run_id,
+        "base_rank": item.base_production_rank,
+        "base_score": item.base_production_score,
+        "rank": item.rank,
+        "score": item.score,
+        "score_rule_version": item.production_score_rule_version,
+    }
+    if any(details.get(name) != value for name, value in exact_values.items()):
+        raise ValueError("v6 生产排名明细与公开字段不一致")
+
+
+def _validate_probability_ranking_numeric_values(item: MarketScanResultItem) -> None:
+    details = item.probability_ranking_details
+    numeric_values = {
+        "base_raw_score": item.base_production_raw_score,
+        "raw_score": item.raw_score,
+        "probability_adjustment": item.probability_ranking_adjustment,
+    }
+    for name, value in numeric_values.items():
+        detail = details.get(name)
+        if (
+            isinstance(detail, bool)
+            or not isinstance(detail, int | float)
+            or value is None
+            or not isclose(float(detail), float(value), rel_tol=0, abs_tol=1e-9)
+        ):
+            raise ValueError("v6 生产排名数值明细与公开字段不一致")
 
 
 def _validate_non_success_result(item: MarketScanResultItem) -> None:

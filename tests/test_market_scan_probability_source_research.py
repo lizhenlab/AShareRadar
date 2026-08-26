@@ -64,6 +64,11 @@ def test_source_research_reports_canonical_archived_progress_without_probability
 
     assert store.preload() == 2
     assert len(calls) == 3
+    assert store.verified_archive_digests() == {
+        70: f"{70:064x}",
+        71: f"{71:064x}",
+        72: f"{72:064x}",
+    }
     superseded = store.research_projection(70)
     current = store.research_projection(71)
     repeated = store.research_projection(71)
@@ -362,6 +367,26 @@ def test_source_research_warm_read_does_not_wait_for_single_refresher(tmp_path: 
     assert projected is not previous[80]
 
 
+def test_source_research_scheduled_preload_keeps_request_read_nonblocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
+    store.mark_preload_pending()
+    monkeypatch.setattr(
+        store,
+        "_observed_snapshot",
+        lambda: pytest.fail("request must not perform a scheduled deep refresh"),
+    )
+
+    projected = store.research_projection(80)
+
+    assert projected["status"] == "not_generated"
+    assert store.refresh_pending() is True
+    store.clear_preload_pending()
+    assert store.refresh_pending() is False
+
+
 def test_source_research_does_not_fall_back_to_old_cache_when_new_archive_is_invalid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -452,6 +477,131 @@ def test_source_research_preload_excludes_only_typed_legacy_outcome_drift(
         store.preload()
 
 
+def test_source_research_loads_only_latest_outcome_date_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = tmp_path / ("market-scan-probability-outcomes-run-90-through-2026-08-20-" f"{'a' * 64}.json.gz")
+    newest = tmp_path / ("market-scan-probability-outcomes-run-90-through-2026-08-21-" f"{'b' * 64}.json.gz")
+    same_date = tmp_path / ("market-scan-probability-outcomes-run-90-through-2026-08-21-" f"{'c' * 64}.json.gz")
+    for path in (old, newest, same_date):
+        path.write_bytes(path.name.encode())
+    loaded: list[Path] = []
+
+    def load(path: str | Path) -> dict[str, object]:
+        resolved = Path(path)
+        loaded.append(resolved)
+        if resolved == old:
+            pytest.fail("superseded outcome must not enter the interactive index")
+        return _outcome_artifact(90, resolved.name[-72:-8])
+
+    monkeypatch.setattr(source_research, "load_probability_outcome_artifact", load)
+    snapshot = source_research._directory_snapshot(  # noqa: SLF001
+        tmp_path,
+        "market-scan-probability-outcomes-run-*.json.gz",
+    )
+
+    outcomes, excluded = source_research._snapshot_outcomes(snapshot, {})  # noqa: SLF001
+
+    assert set(loaded) == {newest, same_date}
+    assert len(outcomes) == 2
+    assert excluded == frozenset()
+
+
+def test_source_research_preload_uses_exact_succeeded_archive_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "sources"
+    outcome_dir = tmp_path / "outcomes"
+    fit_dir = tmp_path / "fits"
+    source_dir.mkdir()
+    outcome_dir.mkdir()
+    fit_dir.mkdir()
+    digests = {71: "c" * 64, 90: "a" * 64, 128: "b" * 64}
+    source_paths = {run_id: source_dir / f"market-scan-probability-source-run-{run_id}-{digest}.json.gz" for run_id, digest in digests.items()}
+    for path in source_paths.values():
+        path.write_bytes(path.name.encode())
+    outcome_paths = {
+        run_id: outcome_dir / (f"market-scan-probability-outcomes-run-{run_id}-through-2026-08-21-" f"{digest}.json.gz") for run_id, digest in digests.items()
+    }
+    for path in outcome_paths.values():
+        path.write_bytes(path.name.encode())
+    loaded_sources: list[int] = []
+    loaded_outcomes: list[int] = []
+
+    def load_source(path: str | Path) -> dict[str, object]:
+        run_id = int(Path(path).name.split("-run-", 1)[1].split("-", 1)[0])
+        loaded_sources.append(run_id)
+        artifact = _artifact(
+            run_id,
+            "2026-08-14" if run_id == 90 else "2026-08-21",
+            10,
+            captured_at=("2026-08-15T13:44:35+08:00" if run_id == 90 else "2026-08-22T17:16:28+08:00"),
+        )
+        artifact["integrity"]["integrity_digest"] = digests[run_id]  # type: ignore[index]
+        return artifact
+
+    def load_outcome(path: str | Path) -> dict[str, object]:
+        run_id = int(Path(path).name.split("-run-", 1)[1].split("-", 1)[0])
+        loaded_outcomes.append(run_id)
+        return _outcome_artifact(
+            run_id,
+            digests[run_id],
+            source_digest=digests[run_id],
+        )
+
+    monkeypatch.setattr(source_research, "load_probability_source_snapshot", load_source)
+    monkeypatch.setattr(
+        source_research,
+        "load_probability_outcome_artifact",
+        load_outcome,
+    )
+    store = source_research.MarketScanProbabilitySourceResearchStore(
+        source_dir,
+        outcome_directory=outcome_dir,
+        fit_directory=fit_dir,
+    )
+
+    assert store.preload(archive_bindings={90: digests[90], 128: digests[128]}) == 2
+    assert loaded_sources == [128, 90]
+    assert loaded_outcomes == [128, 90]
+    assert store.verified_archive_digests() == {
+        90: digests[90],
+        128: digests[128],
+    }
+    assert store.research_projection(71)["status"] == "not_generated"
+
+
+def test_manager_reuses_deep_verified_source_index_for_outbox_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = object.__new__(MarketScanManager)
+    manager._lifecycle = SimpleNamespace(owns_instance_guard=lambda: True)  # noqa: SLF001
+    manager._probability_activation_lock = asyncio.Lock()  # noqa: SLF001
+    manager._probability_archives_audited = False  # noqa: SLF001
+    started: list[bool] = []
+    audited: list[dict[int, str]] = []
+    manager._start_probability_capture_worker = lambda: started.append(True)  # type: ignore[method-assign]  # noqa: SLF001
+    manager._probability_source_research_store = SimpleNamespace(  # noqa: SLF001
+        verified_archive_digests=lambda: {90: "a" * 64}
+    )
+    manager.cache = SimpleNamespace(
+        reconcile_probability_source_capture_outbox=lambda: 0,
+        audit_probability_source_capture_archives=lambda value: audited.append(value) or 0,
+    )
+    monkeypatch.setattr(
+        "app.services.market_scan_manager.audit_market_scan_probability_source_archives",
+        lambda _cache: pytest.fail("deep source archives must not be read twice"),
+    )
+
+    asyncio.run(manager._activate_probability_capture_leader())  # noqa: SLF001
+
+    assert audited == [{90: "a" * 64}]
+    assert started == [True]
+    assert manager._probability_archives_audited is True  # noqa: SLF001
+
+
 def test_sampled_fit_is_visible_but_never_qualifies_selection() -> None:
     progress = {
         "available_independent_session_count": 260,
@@ -478,12 +628,14 @@ def test_sampled_fit_is_visible_but_never_qualifies_selection() -> None:
             "fit_replay_verified": True,
             "fit_selection_qualification": {"passed": False},
             "horizons": {
-                "5": {"net_excess_positive": {
-                    "fit_status": "fitted_oos",
-                    "deterministic_replay_verified": True,
-                    "selection_qualified": True,
-                    "selection_qualification": {"passed": True},
-                }},
+                "5": {
+                    "net_excess_positive": {
+                        "fit_status": "fitted_oos",
+                        "deterministic_replay_verified": True,
+                        "selection_qualified": True,
+                        "selection_qualification": {"passed": True},
+                    }
+                },
             },
         },
         "integrity": {"integrity_digest": "a" * 64},
@@ -561,10 +713,12 @@ def test_fit_binding_uses_chronological_rolling_source_outcome_pairs() -> None:
         99: {"integrity_digest": "c" * 64},
         100: {"integrity_digest": "d" * 64},
     }
-    expected = source_research.stable_probability_hash([
-        ("a" * 64, "c" * 64),
-        ("b" * 64, "d" * 64),
-    ])
+    expected = source_research.stable_probability_hash(
+        [
+            ("a" * 64, "c" * 64),
+            ("b" * 64, "d" * 64),
+        ]
+    )
     fit = {
         "cohort": cohort,
         "through_source_digest": "b" * 64,
@@ -579,13 +733,16 @@ def test_fit_binding_uses_chronological_rolling_source_outcome_pairs() -> None:
     )
 
     assert actual == expected
-    assert source_research._fit_for_source(  # noqa: SLF001
-        through,
-        outcomes[100],
-        fit,
-        canonical_sources=(through, earlier),
-        outcomes=outcomes,
-    ) is fit
+    assert (
+        source_research._fit_for_source(  # noqa: SLF001
+            through,
+            outcomes[100],
+            fit,
+            canonical_sources=(through, earlier),
+            outcomes=outcomes,
+        )
+        is fit
+    )
     with pytest.raises(source_research.ProbabilitySourceError, match="rolling corpus digest"):
         source_research._fit_for_source(  # noqa: SLF001
             through,
@@ -675,9 +832,7 @@ class _ManagerCache:
             run=self.run,
             snapshot_digest=self.run.snapshot_digest,
             action_source_digest=self.run.snapshot_digest,
-            probability_source_capture_state=self.probability_source_capture_status(
-                run_id
-            ),
+            probability_source_capture_state=self.probability_source_capture_status(run_id),
             success_score_contract=self.market_scan_success_score_contract(run_id),
         )
 
@@ -707,26 +862,35 @@ class _ManagerCache:
 
 def _published_run() -> MarketScanRun:
     return MarketScanRun(
-        id=71, status="success", trigger="manual", mode="official",
-        rule_version=TEST_RULE_VERSION, as_of="2026-08-11 16:00:00",
-        data_date="2026-08-11", quote_date="2026-08-11", scope=FULL_MARKET_SCOPE,
-        total_count=1, excluded_count=0, processed_count=1, success_count=1,
-        missing_count=0, skipped_count=0, retry_count=0, progress_pct=100,
-        coverage_pct=100, created_at="2026-08-11 16:00:00",
+        id=71,
+        status="success",
+        trigger="manual",
+        mode="official",
+        rule_version=TEST_RULE_VERSION,
+        as_of="2026-08-11 16:00:00",
+        data_date="2026-08-11",
+        quote_date="2026-08-11",
+        scope=FULL_MARKET_SCOPE,
+        total_count=1,
+        excluded_count=0,
+        processed_count=1,
+        success_count=1,
+        missing_count=0,
+        skipped_count=0,
+        retry_count=0,
+        progress_pct=100,
+        coverage_pct=100,
+        created_at="2026-08-11 16:00:00",
         updated_at="2026-08-11 16:01:00",
-        finished_at="2026-08-11 16:01:00", snapshot_digest="a" * 64,
-        snapshot_seal_origin="publication", snapshot_sealed_at="2026-08-11 16:01:00",
+        finished_at="2026-08-11 16:01:00",
+        snapshot_digest="a" * 64,
+        snapshot_seal_origin="publication",
+        snapshot_sealed_at="2026-08-11 16:01:00",
         publication_diagnostics=action_pass_publication_diagnostics(),
         market_progress=[
-            {"market": "SH", "total_count": 1, "processed_count": 1,
-             "success_count": 1, "missing_count": 0, "skipped_count": 0,
-             "coverage_pct": 100},
-            {"market": "SZ", "total_count": 0, "processed_count": 0,
-             "success_count": 0, "missing_count": 0, "skipped_count": 0,
-             "coverage_pct": 0},
-            {"market": "BJ", "total_count": 0, "processed_count": 0,
-             "success_count": 0, "missing_count": 0, "skipped_count": 0,
-             "coverage_pct": 0},
+            {"market": "SH", "total_count": 1, "processed_count": 1, "success_count": 1, "missing_count": 0, "skipped_count": 0, "coverage_pct": 100},
+            {"market": "SZ", "total_count": 0, "processed_count": 0, "success_count": 0, "missing_count": 0, "skipped_count": 0, "coverage_pct": 0},
+            {"market": "BJ", "total_count": 0, "processed_count": 0, "success_count": 0, "missing_count": 0, "skipped_count": 0, "coverage_pct": 0},
         ],
     )
 
@@ -738,15 +902,21 @@ def _bound_projection(run_id: int, status: str) -> dict[str, object]:
         "run_id": run_id,
         "status": status,
         "run_binding": {
-            "binding_status": "verified", "legacy": False, "run_id": run_id,
-            "mode": "official", "scope": FULL_MARKET_SCOPE,
-            "rule_version": TEST_RULE_VERSION, "quote_date": "2026-08-11",
-            "data_date": "2026-08-11", "scan_rule_hash": "a" * 64,
+            "binding_status": "verified",
+            "legacy": False,
+            "run_id": run_id,
+            "mode": "official",
+            "scope": FULL_MARKET_SCOPE,
+            "rule_version": TEST_RULE_VERSION,
+            "quote_date": "2026-08-11",
+            "data_date": "2026-08-11",
+            "scan_rule_hash": "a" * 64,
             "production_score_rule_version": FULL_MARKET_SCORE_RULE_VERSION,
             "production_score_spec_hash": "b" * 64,
             "source_integrity_digest": "c" * 64,
             "cohort_contract": {
-                "mode": "official", "scope": FULL_MARKET_SCOPE,
+                "mode": "official",
+                "scope": FULL_MARKET_SCOPE,
                 "rule_version": TEST_RULE_VERSION,
             },
         },
@@ -789,4 +959,41 @@ def _artifact(
             "quality": {"record_count": record_count},
         },
         "integrity": {"integrity_digest": f"{run_id:064x}"},
+    }
+
+
+def _outcome_artifact(
+    run_id: int,
+    digest: str,
+    *,
+    source_digest: str | None = None,
+) -> dict[str, object]:
+    return {
+        "generated_at": "2026-08-21T18:00:00+08:00",
+        "payload": {
+            "as_of_date": "2026-08-21",
+            "source": {
+                "run_id": run_id,
+                "integrity_digest": source_digest or f"{run_id:064x}",
+            },
+            "cohort": {
+                "mode": "official",
+                "scope": FULL_MARKET_SCOPE,
+                "rule_version": TEST_RULE_VERSION,
+            },
+            "quality": {
+                "horizons": {
+                    str(horizon): {
+                        "mature": False,
+                        "target_session_date": "2026-09-30",
+                        "mature_record_count": 0,
+                        "eligible_observation_count": 0,
+                        "available_for_study": False,
+                        "data_unavailable_record_count": 0,
+                    }
+                    for horizon in (1, 5, 20)
+                }
+            },
+        },
+        "integrity": {"integrity_digest": digest},
     }

@@ -44,6 +44,25 @@ class MarketScanProbabilityCaptureOutboxMixin(MarketScanRepositoryContext):
         with self._read_snapshot() as conn:
             return read_probability_source_capture_state(conn, run_id)
 
+    def probability_source_capture_archive_bindings(self) -> dict[int, str]:
+        """Return exact digests for durable succeeded capture claims."""
+        with self._read_snapshot() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, archive_digest
+                FROM market_scan_probability_capture_outbox
+                WHERE status = 'succeeded'
+                ORDER BY run_id
+                """
+            ).fetchall()
+        return {
+            int(row["run_id"]): _required_sha256(
+                row["archive_digest"],
+                "archive digest",
+            )
+            for row in rows
+        }
+
     def reconcile_probability_source_capture_outbox(self) -> int:
         """Backfill eligible runs and recover leases after leader startup."""
         stamp = now_text()
@@ -58,10 +77,7 @@ class MarketScanProbabilityCaptureOutboxMixin(MarketScanRepositoryContext):
                 """,
                 (PROBABILITY_SOURCE_CAPTURE_FULL_MARKET_SCOPE,),
             ).fetchall()
-            inserted = sum(
-                enqueue_probability_source_capture(conn, row, stamp=stamp)
-                for row in candidates
-            )
+            inserted = sum(enqueue_probability_source_capture(conn, row, stamp=stamp) for row in candidates)
             conn.execute(
                 """
                 UPDATE market_scan_probability_capture_outbox
@@ -122,11 +138,7 @@ class MarketScanProbabilityCaptureOutboxMixin(MarketScanRepositoryContext):
             message=message,
         )
         stamp = now_text()
-        terminal_error = (
-            " ".join(str(message or "").split())[:800] or None
-            if status == "skipped"
-            else None
-        )
+        terminal_error = " ".join(str(message or "").split())[:800] or None if status == "skipped" else None
         with self._lock, self._connect() as conn:
             if status == "succeeded":
                 require_action_source(conn, run_id)
@@ -183,10 +195,7 @@ class MarketScanProbabilityCaptureOutboxMixin(MarketScanRepositoryContext):
     ) -> int:
         """Reset false succeeded claims after restore or external archive loss."""
 
-        normalized = {
-            int(run_id): _required_sha256(digest, "archive digest")
-            for run_id, digest in archives.items()
-        }
+        normalized = {int(run_id): _required_sha256(digest, "archive digest") for run_id, digest in archives.items()}
         stamp = now_text()
         repaired = 0
         with self._lock, self._connect() as conn:

@@ -47,6 +47,7 @@ from app.api.routes import (
 from app.api.security import SameOriginMutationMiddleware
 from app.api.static_assets import RevalidatingStaticFiles
 from app.config import PROJECT_ROOT, Settings, get_settings, resolve_project_path
+from app.services.daemon_executor import install_daemon_loop_executor
 from app.utils.clock import monotonic_now
 
 
@@ -59,20 +60,25 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.accepting_requests = False
-    container: AppContainer = await run_in_threadpool(app.state.container_factory)
-    await _validate_container_settings(app, container)
-    app.state.container = container
+    loop_executor = install_daemon_loop_executor(asyncio.get_running_loop())
     try:
-        await _start_runtime(container)
-    except BaseException:
-        await _cleanup_failed_start(container)
-        raise
-    app.state.accepting_requests = True
-    try:
-        yield
+        container: AppContainer = await run_in_threadpool(app.state.container_factory)
+        await _validate_container_settings(app, container)
+        app.state.container = container
+        try:
+            await _start_runtime(container)
+        except BaseException:
+            await _cleanup_failed_start(container)
+            raise
+        app.state.accepting_requests = True
+        try:
+            yield
+        finally:
+            app.state.accepting_requests = False
+            await _shutdown_container(container)
     finally:
         app.state.accepting_requests = False
-        await _shutdown_container(container)
+        loop_executor.close()
 
 
 async def _validate_container_settings(app: FastAPI, container: AppContainer) -> None:

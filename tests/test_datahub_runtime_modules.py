@@ -15,9 +15,11 @@ from app.services.datahub_runtime import (
     ProviderCallBusyError,
     ProviderCallTimeoutError,
     ProviderRuntime,
+    await_provider_worker,
     provider_source_name,
     run_provider_io,
 )
+from app.services.daemon_executor import DaemonThreadPoolExecutor
 from app.services.provider_errors import ProviderCoverageMiss
 
 
@@ -173,6 +175,82 @@ def test_provider_runtime_allows_two_distinct_keys_and_queues_the_third() -> Non
     asyncio.run(run_check())
 
 
+def test_provider_runtime_uses_configured_tencent_kline_capacity_only() -> None:
+    async def run_check() -> None:
+        runtime = ProviderRuntime(
+            _FailingStatusCache(),
+            Settings(
+                provider_call_timeout_seconds=1,
+                tencent_kline_max_in_flight=5,
+            ),
+        )
+        releases = {key: asyncio.Event() for key in range(6)}
+        five_started = asyncio.Event()
+        sixth_started = asyncio.Event()
+        started: list[int] = []
+        callers: list[asyncio.Task[int]] = []
+
+        async def provider_call(key: int) -> int:
+            await releases[key].wait()
+            return key
+
+        def start(key: int):
+            started.append(key)
+            if len(started) == 5:
+                five_started.set()
+            if key == 5:
+                sixth_started.set()
+            return provider_call(key)
+
+        try:
+            for key in range(5):
+                callers.append(
+                    asyncio.create_task(
+                        runtime.call_provider(
+                            "tencent",
+                            "kline",
+                            lambda key=key: start(key),
+                            request_key=key,
+                        )
+                    )
+                )
+            await asyncio.wait_for(five_started.wait(), timeout=0.2)
+
+            sixth = asyncio.create_task(
+                runtime.call_provider(
+                    "tencent",
+                    "kline",
+                    lambda: start(5),
+                    request_key=5,
+                )
+            )
+            callers.append(sixth)
+            await asyncio.sleep(0)
+
+            assert started == [0, 1, 2, 3, 4]
+            assert sixth.done() is False
+            assert runtime.chain_state(
+                [(1, "tencent")],
+                {"tencent": object()},
+                "kline",
+            ).status == "temporary_unavailable"
+
+            releases[0].set()
+            assert await callers[0] == 0
+            await asyncio.wait_for(sixth_started.wait(), timeout=0.2)
+
+            for release in releases.values():
+                release.set()
+            assert await asyncio.gather(*callers[1:]) == [1, 2, 3, 4, 5]
+        finally:
+            for release in releases.values():
+                release.set()
+            await asyncio.gather(*callers, return_exceptions=True)
+            await runtime.aclose()
+
+    asyncio.run(run_check())
+
+
 @pytest.mark.parametrize("departing_waiter", ["cancel", "timeout"])
 def test_provider_runtime_shared_key_waiter_departure_does_not_cancel_call(
     departing_waiter: str,
@@ -319,22 +397,26 @@ def test_provider_runtime_queue_timeout_busy_does_not_start_cooldown() -> None:
     asyncio.run(run_check())
 
 
-def test_provider_runtime_orphan_blocks_new_key_but_same_key_can_rejoin() -> None:
+def test_provider_runtime_timeout_cancels_unshared_async_call() -> None:
     async def run_check() -> None:
         settings = Settings(provider_call_timeout_seconds=0.02)
         runtime = ProviderRuntime(_FailingStatusCache(), settings)
         release = asyncio.Event()
         provider_started = asyncio.Event()
+        provider_cancelled = asyncio.Event()
         provider_calls = 0
         different_key_calls = 0
-        rejoined: asyncio.Task[str] | None = None
 
         async def provider_call() -> str:
             nonlocal provider_calls
             provider_calls += 1
             provider_started.set()
-            await release.wait()
-            return "late-result"
+            try:
+                await release.wait()
+                return "late-result"
+            except asyncio.CancelledError:
+                provider_cancelled.set()
+                raise
 
         def start_different_key():
             nonlocal different_key_calls
@@ -342,7 +424,7 @@ def test_provider_runtime_orphan_blocks_new_key_but_same_key_can_rejoin() -> Non
             return _async_value("different-result")
 
         try:
-            with pytest.raises(ProviderCallTimeoutError):
+            with pytest.raises(ProviderCallTimeoutError, match="已取消未完成的异步请求"):
                 await runtime.call_provider(
                     "orphaned",
                     "quote",
@@ -350,39 +432,59 @@ def test_provider_runtime_orphan_blocks_new_key_but_same_key_can_rejoin() -> Non
                     request_key="original",
                 )
             assert provider_started.is_set()
-            assert runtime.provider_call_in_flight("orphaned", "quote") is True
+            assert provider_cancelled.is_set()
+            assert runtime.provider_call_in_flight("orphaned", "quote") is False
 
             settings.provider_call_timeout_seconds = 1
-            with pytest.raises(ProviderCallBusyError, match="仍在后台执行"):
-                await asyncio.wait_for(
-                    runtime.call_provider(
-                        "orphaned",
-                        "quote",
-                        start_different_key,
-                        request_key="different",
-                    ),
-                    timeout=0.05,
-                )
-            assert different_key_calls == 0
-
-            rejoined = asyncio.create_task(
-                runtime.call_provider(
+            assert (
+                await runtime.call_provider(
                     "orphaned",
                     "quote",
-                    provider_call,
-                    request_key="original",
+                    start_different_key,
+                    request_key="different",
                 )
+                == "different-result"
             )
-            await _wait_for_provider_waiters(runtime, "orphaned", "quote", "original", 1)
-
             assert provider_calls == 1
-            release.set()
-            assert await rejoined == "late-result"
-            assert provider_calls == 1
+            assert different_key_calls == 1
         finally:
             release.set()
-            if rejoined is not None:
-                await asyncio.gather(rejoined, return_exceptions=True)
+            await runtime.aclose()
+
+    asyncio.run(run_check())
+
+
+def test_provider_runtime_caller_cancellation_cancels_unshared_async_call() -> None:
+    async def run_check() -> None:
+        runtime = ProviderRuntime(_FailingStatusCache(), Settings(provider_call_timeout_seconds=1))
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def provider_call() -> str:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        caller = asyncio.create_task(
+            runtime.call_provider(
+                "cancelled",
+                "quote",
+                provider_call,
+                request_key="request",
+            )
+        )
+        try:
+            await asyncio.wait_for(started.wait(), timeout=0.2)
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            assert cancelled.is_set()
+            assert runtime.provider_call_in_flight("cancelled", "quote") is False
+        finally:
+            await asyncio.gather(caller, return_exceptions=True)
             await runtime.aclose()
 
     asyncio.run(run_check())
@@ -415,7 +517,7 @@ def test_provider_runtime_timeout_keeps_one_background_sdk_call_per_capability()
     async def run_check() -> tuple[int, int]:
         runtime = ProviderRuntime(_FailingStatusCache(), Settings(provider_call_timeout_seconds=0.02))
         try:
-            with pytest.raises(ProviderCallTimeoutError, match="后台任务仍在收尾"):
+            with pytest.raises(ProviderCallTimeoutError, match="底层同步调用仍在受控收尾"):
                 await runtime.timed_provider_call("slow", "quote", start_quote_call)
 
             assert worker_started.is_set()
@@ -452,6 +554,41 @@ def test_provider_runtime_timeout_keeps_one_background_sdk_call_per_capability()
 
     assert observed_factory_calls == 1
     assert observed_worker_calls == 1
+
+
+def test_provider_runtime_tracks_provider_owned_executor_worker() -> None:
+    release = threading.Event()
+    worker_started = threading.Event()
+    executor = DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="owned-provider")
+
+    def blocking_call() -> str:
+        worker_started.set()
+        release.wait(timeout=2)
+        return "late-result"
+
+    def start_call():
+        async def invoke() -> str:
+            return await await_provider_worker(executor.submit(blocking_call))
+
+        return invoke()
+
+    async def run_check() -> None:
+        runtime = ProviderRuntime(_FailingStatusCache(), Settings(provider_call_timeout_seconds=0.02))
+        try:
+            with pytest.raises(ProviderCallTimeoutError, match="底层同步调用仍在受控收尾"):
+                await runtime.timed_provider_call("owned", "kline", start_call)
+            assert worker_started.is_set()
+            assert runtime.provider_call_in_flight("owned", "kline") is True
+        finally:
+            release.set()
+            for _ in range(100):
+                if not runtime.provider_call_in_flight("owned", "kline"):
+                    break
+                await asyncio.sleep(0.005)
+            await runtime.aclose()
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    asyncio.run(run_check())
 
 
 def test_provider_runtime_uses_owned_bounded_executor_and_closes_idempotently() -> None:

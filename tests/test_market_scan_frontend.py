@@ -78,6 +78,8 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'id="marketScanHistory" aria-label="历史扫描批次" aria-busy="false" hidden' in html
     assert 'id="marketScanProbabilityResearch"' in html
     assert 'id="marketScanProbabilityEffectiveness"' in html
+    assert 'id="marketScanHistoricalProbability" data-status="not_generated"' in html
+    assert 'id="marketScanHistoricalProbabilityMetrics"' in html
     assert 'id="marketScanProbabilityHorizon5d" name="marketScanProbabilityHorizon" value="5" checked' in html
     assert 'id="marketScanProbabilityMin"' in html and 'aria-describedby="marketScanProbabilityFilterHelp" disabled' in html
     assert 'id="marketScanFutureRangeResearch" data-generation-status="not_generated" aria-busy="false"' in html
@@ -157,6 +159,8 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/api.js",
         "/static/js/market-scan.js",
         "/static/js/market-scan-controller.js",
+        "/static/js/market-scan-auxiliary-research.js",
+        "/static/js/market-scan-experimental.js",
         "/static/js/market-scan-controller-inert.js",
         "/static/js/market-scan-contracts.js",
         "/static/js/market-scan-export-client.js",
@@ -954,6 +958,16 @@ assert.equal(row.includes("&lt;script&gt;"), true);
 assert.equal(row.includes("page_size=5000"), false);
 assert.equal(row.includes("+1.25%"), true);
 assert.equal(row.includes("1.3亿"), true);
+const v6Row = marketScanResultRow({
+  rank: 1, symbol: "600519.SH", code: "600519", market: "SH", name: "贵州茅台",
+  status: "success", score: 86, trend_score: 80, change_pct: 1,
+  turnover_rate: 2, amount: 1000000, data_quality_score: 90, tags: [],
+  base_production_rank: 7, base_production_score: 80,
+  production_score_rule_version: "full-market-score-v6",
+  probability_ranking_adjustment: 6,
+});
+assert.match(v6Row, /v5 7 → v6/);
+assert.match(v6Row, /v5 80 · 概率调整 \+6\.00/);
 '''
     )
 
@@ -1070,10 +1084,37 @@ const binding = (runId) => ({
     rule_version: `full-market-scan-v6:${"a".repeat(64)}`,
   },
 });
+const historicalHorizon = (horizon, auc, brierSkill) => ({
+  horizon, assessment_status: "insufficient_data", probability: null, base_rate: 0.55,
+  available_independent_session_count: 279,
+  minimum_required_independent_session_count: horizon === 1 ? 222 : horizon === 5 ? 230 : 260,
+  out_of_sample_session_count: 60, evaluated_fold_count: 1, observation_count: 26784,
+  auc, brier_score: 0.25, brier_skill_score: brierSkill, ece: 0.08,
+  bin_monotonic: false, highest_bin_above_base_rate: false,
+  training_cutoff: "2025-11-13", limitations: ["shadow_only_no_production_ranking_effect"],
+});
 const artifact = {
   schema_version: "market-scan-probability-artifact-v1",
   run_id: 42,
   run_binding: binding(42),
+  historical_context: {
+    schema_version: "market-scan-probability-historical-context-v1",
+    status: "ready", availability: "historical_replay_no_verified_predictive_skill",
+    generated_at: "2026-08-11T15:58:07+00:00", target: "net_return_positive",
+    cohort: { mode: "historical_replay_v1", official: false, live_cohort_compatible: false },
+    sample: {
+      start_date: "2025-05-21", end_date: "2026-07-13",
+      independent_session_count: 279, record_count: 26784, symbol_count: 96, label_coverage: 1,
+    },
+    horizons: {
+      "1": historicalHorizon(1, 0.499, -0.001),
+      "5": historicalHorizon(5, 0.494, -0.01),
+      "20": historicalHorizon(20, 0.452, -0.005),
+    },
+    source_artifact: { full_replay_verified: true },
+    production_ranking_effect: "none", selection_qualified: false, filter_qualified: false,
+    limitations: ["historical_replay_not_filter_authority"],
+  },
   horizons: {
     "5": { net_excess_positive: {
       status: "calibrated_shadow", horizon: 5, target: "net_excess_positive", base_rate: 0.514,
@@ -1148,6 +1189,8 @@ const elements = {
   probabilityResearch: element(), probabilityStatus: element(), probabilityTarget: element(),
   probabilityBaseRate: element(), probabilityEvidence: element(), probabilityEffectiveness: element(), probabilityVersion: element(),
   probabilityCutoff: element(), probabilityLimitations: element(), probabilityMin: element(),
+  historicalResearch: element(), historicalStatus: element(), historicalSample: element(),
+  historicalMetrics: element(), historicalConclusion: element(), historicalLimitations: element(),
   probabilityFilterHelp: element(), probabilityHorizonInputs: [element(), element(), element()],
 };
 elements.probabilityHorizonInputs[0].value = "1";
@@ -1161,6 +1204,12 @@ assert.equal(elements.probabilityTarget.textContent, "未来所选周期净超�
 assert.equal(elements.probabilityBaseRate.textContent, "51.4%");
 assert.equal(elements.probabilityEffectiveness.textContent, "通过选股门禁");
 assert.equal(elements.probabilityMin.disabled, false);
+assert.equal(elements.historicalResearch.dataset.status, "ready");
+assert.equal(elements.historicalStatus.textContent, "样本已足·未证明预测效力");
+assert.equal(elements.historicalSample.textContent, "279 日 · 26784 条 · 96 只 · 覆盖 100.0%");
+assert.equal(elements.historicalMetrics.textContent, "H5 AUC 0.494 · Brier Skill -0.010 · ECE 0.080 · OOS 60 日/1 折");
+assert.equal(elements.historicalConclusion.textContent, "样本已达拟合门槛；未胜过基础胜率，不能输出当前逐股概率");
+assert.equal(research.historical_context.filter_qualified, false);
 
 research.horizons["5"].selection_qualified = false;
 research.horizons["5"].selection_qualification = {
@@ -2431,8 +2480,41 @@ const resultItem = {
 };
 const validatedPage = validateResultPage(resultPage(resultItem), 70);
 assert.equal(validatedPage.items[0].symbol, "920066.BJ");
+assert.equal(validatedPage.production_ranking.status, "inactive");
 assert.equal(validatedPage.probability_research.horizons["5"].status, "not_generated");
 assert.equal(validatedPage.items[0].upside_probabilities["5"].probability, null);
+const rankingDetails = {
+  run_id: 70, symbol: "920066.BJ", base_rank: 2, base_score: 80,
+  base_raw_score: 80.1, probability: 0.8, reference_base_rate: 0.5,
+  probability_adjustment: 6, rank: 1, score: 86, raw_score: 86.1,
+  score_rule_version: "full-market-score-v6", score_spec_hash: "b".repeat(64),
+  source_record_digest: "c".repeat(64), prediction_record_digest: "d".repeat(64),
+  record_digest: "e".repeat(64),
+};
+const v6Item = {
+  ...resultItem, rank: 1, score: 86, raw_score: 86.1,
+  base_production_rank: 2, base_production_score: 80, base_production_raw_score: 80.1,
+  production_score_rule_version: "full-market-score-v6",
+  probability_ranking_adjustment: 6,
+  probability_ranking_artifact_digest: "f".repeat(64),
+  probability_ranking_details: rankingDetails,
+};
+const v6Context = {
+  contract_version: "market-scan-probability-ranking-projection-v1", status: "active",
+  run_id: 70, score_rule_version: "full-market-score-v6", score_spec_hash: "b".repeat(64),
+  artifact_digest: "f".repeat(64), promotion_digest: "1".repeat(64),
+  generated_at: "2026-07-17T16:31:00+08:00", record_count: 1,
+  base_snapshot_digest: "a".repeat(64), base_v5_mutated: false,
+  historical_ranks_mutated: false, rollback_available: true,
+};
+const validatedV6 = validateResultPage({ ...resultPage(v6Item), production_ranking: v6Context }, 70);
+assert.equal(validatedV6.production_ranking.status, "active");
+assert.equal(validatedV6.items[0].base_production_rank, 2);
+assert.throws(
+  () => validateResultPage({ ...resultPage({ ...v6Item, probability_ranking_artifact_digest: "0".repeat(64) }), production_ranking: v6Context }, 70),
+  /排名产物不一致/,
+);
+assert.throws(() => validateResultPage(resultPage(v6Item), 70), /v6 未启用/);
 assert.throws(
   () => validateResultPage(resultPage({ ...resultItem, updated_at: "2099-01-01 00:00:00" }), 70),
   /updated_at.*批次 updated_at/,

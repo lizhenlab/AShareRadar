@@ -44,6 +44,7 @@ EASTMONEY_NO_PROXY_HOSTS = (
 )
 EASTMONEY_QUOTE_HOSTS = ("82.push2.eastmoney.com", "23.push2.eastmoney.com", "53.push2.eastmoney.com")
 EASTMONEY_SCHEMES = ("https",)
+EASTMONEY_QUOTE_DEADLINE_SECONDS = 6.0
 EASTMONEY_HIST_HOST = "push2his.eastmoney.com"
 EASTMONEY_INDUSTRY_PLATE_URL = "https://17.push2.eastmoney.com/api/qt/clist/get"
 EASTMONEY_UT_PARAM = "bd1d9ddb04089700cf9c27f6f7426281"
@@ -355,11 +356,23 @@ def eastmoney_quotes(symbols) -> list[Quote]:
         return []
     params = eastmoney_quote_params(requested)
     errors: list[str] = []
+    failures: list[Exception] = []
     endpoint_responded = False
     covered_quotes: list[Quote] = []
+    deadline = time.monotonic() + EASTMONEY_QUOTE_DEADLINE_SECONDS
     for url in eastmoney_quote_urls():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.append(f"东方财富轻量行情超过 {EASTMONEY_QUOTE_DEADLINE_SECONDS:g} 秒总截止时间")
+            break
         error_count = len(errors)
-        quotes = eastmoney_quotes_from_url(url, params, errors)
+        quotes = eastmoney_quotes_from_url(
+            url,
+            params,
+            errors,
+            failures=failures,
+            timeout=min(remaining, EASTMONEY_QUOTE_DEADLINE_SECONDS),
+        )
         covered_quotes.extend(quotes)
         endpoint_responded = endpoint_responded or bool(quotes) or len(errors) == error_count
         ordered = ordered_eastmoney_quotes(quotes, requested)
@@ -372,7 +385,10 @@ def eastmoney_quotes(symbols) -> list[Quote]:
         missing = _missing_eastmoney_symbols(covered_quotes, requested)
         raise ProviderCoverageMiss("东方财富轻量行情未覆盖请求股票：" + ",".join(missing))
     if errors:
-        raise ProviderError("东方财富轻量行情不可用：" + "；".join(errors[:2]))
+        message = "东方财富轻量行情不可用：" + "；".join(errors[:2])
+        if failures and all(isinstance(exc, ProviderTransportError) for exc in failures):
+            raise ProviderTransportError(message)
+        raise ProviderError(message)
     return []
 
 
@@ -413,11 +429,20 @@ def eastmoney_quote_urls() -> list[str]:
     return [f"{scheme}://{host}/api/qt/ulist.np/get" for host in EASTMONEY_QUOTE_HOSTS for scheme in EASTMONEY_SCHEMES]
 
 
-def eastmoney_quotes_from_url(url: str, params: dict[str, str], errors: list[str]) -> list[Quote]:
+def eastmoney_quotes_from_url(
+    url: str,
+    params: dict[str, str],
+    errors: list[str],
+    *,
+    failures: list[Exception] | None = None,
+    timeout: float = 8,
+) -> list[Quote]:
     try:
-        data = eastmoney_get_json(url, params)
+        data = eastmoney_get_json(url, params, timeout=max(0.1, timeout))
         return eastmoney_quotes_from_rows(eastmoney_quote_rows(data), errors)
     except Exception as exc:
+        if failures is not None:
+            failures.append(exc)
         errors.append(sanitize_provider_error(exc))
         return []
 

@@ -32,6 +32,7 @@ from app.utils.provider_errors import (
     ProviderCoverageMiss,
     ProviderInstrumentDataError,
     ProviderProtocolError,
+    ProviderTransportError,
     sanitize_provider_error,
 )
 from app.services.provider_utils import ak_symbol, ensure_positive_limit, is_installed, pick, valid_ohlc
@@ -159,9 +160,11 @@ class AKShareProvider:
         self._ensure_installed()
 
         def load() -> list[Quote]:
-            direct_quotes, direct_error = _try_eastmoney_quotes(symbols)
+            direct_quotes, direct_error, allow_sdk_fallback = _try_eastmoney_quotes(symbols)
             if direct_quotes:
                 return direct_quotes
+            if not allow_sdk_fallback:
+                raise ProviderTransportError(f"东方财富轻量行情不可用：{direct_error}")
             return _akshare_spot_quotes(_import_akshare(), symbols, self.source_name, direct_error)
 
         return await run_provider_io(load)
@@ -295,12 +298,14 @@ def _minute_period(interval: str) -> str:
     return AKSHARE_MINUTE_PERIODS[normalized]
 
 
-def _try_eastmoney_quotes(symbols) -> tuple[list[Quote] | None, str]:
+def _try_eastmoney_quotes(symbols) -> tuple[list[Quote] | None, str, bool]:
     try:
         result = _eastmoney_quotes(symbols)
+    except ProviderTransportError as exc:
+        return None, sanitize_provider_error(exc), False
     except Exception as exc:
-        return None, sanitize_provider_error(exc)
-    return (result if result else None), ""
+        return None, sanitize_provider_error(exc), True
+    return (result if result else None), "", True
 
 
 def _akshare_minute_klines(symbol: str, period: str, interval: str, limit: int, source_name: str) -> list[MinuteKline]:

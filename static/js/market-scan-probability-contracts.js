@@ -4,6 +4,7 @@ import {
   probabilityBindingLimitations,
 } from "./market-scan-probability-binding.js";
 import { normalizedCalibrationIntervals } from "./market-scan-probability-interval.js";
+import { normalizeProbabilityRankingEvidence } from "./market-scan-ranking-contracts.js";
 
 export const MARKET_SCAN_PROBABILITY_HORIZONS = Object.freeze([1, 5, 20]);
 export const MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON = 5;
@@ -31,13 +32,22 @@ export function normalizeMarketScanProbabilityResearch(value, expectedRunId) {
   const runBinding = normalizeProbabilityRunBinding(
     payload.run_binding, expectedRunId, requireObject, probabilityContractError, requirePositiveInteger,
   );
+  const historicalContext = normalizeHistoricalProbabilityContext(payload.historical_context);
+  const officialExecutionEvidence = normalizeOfficialExecutionEvidence(payload.official_execution_evidence);
+  const jointExecutionEvidence = normalizeJointExecutionEvidence(payload.joint_execution_evidence);
   const horizons = Object.fromEntries(MARKET_SCAN_PROBABILITY_HORIZONS.map((horizon) => [
     String(horizon),
     normalizeArtifact(
       primaryTarget(rawHorizons[String(horizon)]),
       horizon,
       runBinding,
-      { availability, pipelineStage, limitations: topLimitations },
+      {
+        availability,
+        pipelineStage,
+        limitations: topLimitations,
+        officialExecutionEvidence,
+        jointExecutionEvidence,
+      },
     ),
   ]));
   return {
@@ -51,8 +61,132 @@ export function normalizeMarketScanProbabilityResearch(value, expectedRunId) {
     pipeline_stage: pipelineStage,
     limitations: topLimitations,
     run_binding: runBinding,
+    historical_context: historicalContext,
+    official_execution_evidence: officialExecutionEvidence,
+    joint_execution_evidence: jointExecutionEvidence,
     horizons,
   };
+}
+
+export function normalizeJointExecutionEvidence(value) {
+  if (value === null || value === undefined) return emptyJointExecutionEvidence();
+  const raw = requireObject(value, "probability_research.joint_execution_evidence");
+  if (raw.contract_version !== "market-scan-joint-execution-maintenance-v1") {
+    throw probabilityContractError("joint execution evidence contract_version 不受支持");
+  }
+  const status = String(raw.status || "").trim();
+  const statuses = new Set([
+    "maintenance_not_run",
+    "official_execution_unavailable",
+    "waiting_mature_official_h5",
+    "selection_evidence_accumulating",
+    "selection_passed_waiting_authorization",
+    "authorization_or_deployment_blocked",
+    "deployment_ready_waiting_new_official_batch",
+    "current_prediction_ready",
+    "store_unavailable",
+  ]);
+  if (!statuses.has(status)) throw probabilityContractError(`joint execution evidence status 无效：${status}`);
+  const filterReady = raw.filter_ready === true;
+  if (raw.filter_ready !== undefined && typeof raw.filter_ready !== "boolean") {
+    throw probabilityContractError("joint execution evidence filter_ready 必须是 boolean");
+  }
+  if (filterReady !== (status === "current_prediction_ready")) {
+    throw probabilityContractError("joint execution evidence filter_ready 与状态不一致");
+  }
+  const ranking = normalizeProbabilityRankingEvidence(raw, status);
+  return {
+    ...raw,
+    reported: true,
+    status,
+    filter_ready: filterReady,
+    ...ranking,
+    mature_h5_session_count: requireNonNegativeInteger(raw.mature_h5_session_count ?? 0, "joint_execution_evidence.mature_h5_session_count"),
+    selection_minimum_session_count: requireNonNegativeInteger(raw.selection_minimum_session_count ?? 0, "joint_execution_evidence.selection_minimum_session_count"),
+    blockers: stringList(raw.blockers, "joint_execution_evidence.blockers"),
+    failures: stringList(raw.failures, "joint_execution_evidence.failures"),
+  };
+}
+
+export function normalizeOfficialExecutionEvidence(value) {
+  if (value === null || value === undefined) return emptyOfficialExecutionEvidence();
+  const raw = requireObject(value, "probability_research.official_execution_evidence");
+  if (raw.contract_version !== "official-execution-store-status-v1") {
+    throw probabilityContractError("official execution evidence contract_version 不受支持");
+  }
+  const status = String(raw.status || "").trim();
+  if (!["unconfigured_pinned_registry", "verification_failed", "waiting_sessions", "ready", "store_unavailable"].includes(status)) {
+    throw probabilityContractError(`official execution evidence status 无效：${status}`);
+  }
+  if (typeof raw.configured !== "boolean" || typeof raw.formal_evidence_available !== "boolean") {
+    throw probabilityContractError("official execution evidence configured/available 必须是 boolean");
+  }
+  const count = requireNonNegativeInteger(raw.verified_session_count, "official_execution_evidence.verified_session_count");
+  const failures = stringList(raw.failures, "official_execution_evidence.failures");
+  if (raw.public_vendor_auto_upgrade_forbidden !== true) {
+    throw probabilityContractError("公开供应商数据不得自动升级为官方执行证据");
+  }
+  if (raw.formal_evidence_available !== (raw.configured && status === "ready" && count > 0)) {
+    throw probabilityContractError("official execution evidence availability 与状态不一致");
+  }
+  return {
+    ...raw,
+    reported: true,
+    status,
+    verified_session_count: count,
+    failures,
+  };
+}
+
+export function normalizeHistoricalProbabilityContext(value) {
+  if (value === null || value === undefined) return emptyHistoricalProbabilityContext();
+  const raw = requireObject(value, "probability_research.historical_context");
+  const status = String(raw.status || "not_generated").trim();
+  if (!["ready", "not_generated", "unavailable"].includes(status)) {
+    throw probabilityContractError(`probability_research.historical_context.status 无效：${status}`);
+  }
+  if (raw.filter_qualified !== false || raw.selection_qualified !== false || raw.production_ranking_effect !== "none") {
+    throw probabilityContractError("历史研究上下文不能获得筛选、选股或生产排名授权");
+  }
+  const schemaVersion = String(raw.schema_version || "market-scan-probability-historical-context-v1");
+  if (schemaVersion !== "market-scan-probability-historical-context-v1") {
+    throw probabilityContractError("历史研究上下文 schema_version 不受支持");
+  }
+  const base = {
+    ...raw,
+    schema_version: schemaVersion,
+    status,
+    availability: optionalText(raw.availability, "probability_research.historical_context.availability"),
+    generated_at: optionalText(raw.generated_at, "probability_research.historical_context.generated_at"),
+    target: String(raw.target || "net_return_positive"),
+    limitations: stringList(raw.limitations, "probability_research.historical_context.limitations"),
+    filter_qualified: false,
+    selection_qualified: false,
+    production_ranking_effect: "none",
+  };
+  if (status !== "ready") return { ...emptyHistoricalProbabilityContext(), ...base, horizons: {} };
+  if (base.target !== "net_return_positive") {
+    throw probabilityContractError("历史研究上下文仅支持绝对净收益为正目标");
+  }
+  if (!["historical_shadow_calibrated_reference_only", "historical_replay_no_verified_predictive_skill", "historical_replay_insufficient_evidence"].includes(base.availability)) {
+    throw probabilityContractError("历史研究上下文 availability 无效");
+  }
+  if (!base.generated_at) throw probabilityContractError("历史研究上下文 generated_at 缺失");
+  const cohort = requireObject(raw.cohort, "probability_research.historical_context.cohort");
+  if (cohort.mode !== "historical_replay_v1" || cohort.official !== false || cohort.live_cohort_compatible !== false) {
+    throw probabilityContractError("历史研究上下文 cohort 边界无效");
+  }
+  const sample = normalizeHistoricalSample(raw.sample);
+  const sourceArtifact = requireObject(raw.source_artifact, "probability_research.historical_context.source_artifact");
+  if (sourceArtifact.full_replay_verified !== true) {
+    throw probabilityContractError("历史研究上下文未绑定已验证完整重放");
+  }
+  const rawHorizons = requireObject(raw.horizons, "probability_research.historical_context.horizons");
+  const horizons = Object.fromEntries(MARKET_SCAN_PROBABILITY_HORIZONS.map((horizon) => [
+    String(horizon),
+    normalizeHistoricalHorizon(rawHorizons[String(horizon)], horizon),
+  ]));
+  return { ...base, cohort, sample, source_artifact: sourceArtifact, horizons };
 }
 
 export function isMarketScanProbabilitySourceCapturePending(research) {
@@ -85,7 +219,72 @@ export function emptyProbabilityResearch(runId) {
     pipeline_stage: null,
     limitations: [],
     run_binding: runBinding,
+    historical_context: emptyHistoricalProbabilityContext(),
+    official_execution_evidence: emptyOfficialExecutionEvidence(),
+    joint_execution_evidence: emptyJointExecutionEvidence(),
     horizons: Object.fromEntries(MARKET_SCAN_PROBABILITY_HORIZONS.map((horizon) => [String(horizon), { ...emptyArtifact(horizon), run_binding: runBinding }])),
+  };
+}
+
+export function emptyJointExecutionEvidence() {
+  return {
+    contract_version: "market-scan-joint-execution-maintenance-v1",
+    reported: false,
+    status: "store_unavailable",
+    mature_h5_session_count: 0,
+    selection_minimum_session_count: 292,
+    selection_qualified: false,
+    authorization_configured: false,
+    authorization_verified: false,
+    deployment_verified: false,
+    current_prediction_run_id: null,
+    current_prediction_count: 0,
+    filter_ready: false,
+    probability_ranking_status: "shadow_not_available",
+    probability_ranking_shadow_digest: null,
+    probability_ranking_shadow_qualified: false,
+    probability_ranking_control_configured: false,
+    probability_ranking_control_verified: false,
+    probability_ranking_run_id: null,
+    probability_ranking_count: 0,
+    probability_ranking_rule_version: "full-market-score-v6",
+    production_ranking_effect: "none_without_v6_manual_promotion",
+    blockers: ["joint_execution_store_unavailable"],
+    failures: [],
+  };
+}
+
+export function emptyOfficialExecutionEvidence() {
+  return {
+    contract_version: "official-execution-store-status-v1",
+    reported: false,
+    configured: false,
+    status: "store_unavailable",
+    registry_digest: null,
+    verified_session_count: 0,
+    first_session_date: null,
+    latest_session_date: null,
+    failures: ["official_execution_store_unavailable"],
+    formal_evidence_available: false,
+    public_vendor_auto_upgrade_forbidden: true,
+  };
+}
+
+export function emptyHistoricalProbabilityContext() {
+  return {
+    schema_version: "market-scan-probability-historical-context-v1",
+    status: "not_generated",
+    availability: "historical_context_not_generated",
+    generated_at: null,
+    target: "net_return_positive",
+    cohort: null,
+    sample: null,
+    horizons: {},
+    source_artifact: null,
+    production_ranking_effect: "none",
+    selection_qualified: false,
+    filter_qualified: false,
+    limitations: [],
   };
 }
 
@@ -128,6 +327,10 @@ function normalizeArtifact(
       limitations: inherited.limitations?.length
         ? [...inherited.limitations]
         : empty.limitations,
+      official_execution_evidence: inherited.officialExecutionEvidence
+        ?? emptyOfficialExecutionEvidence(),
+      joint_execution_evidence: inherited.jointExecutionEvidence
+        ?? emptyJointExecutionEvidence(),
     };
   }
   const raw = requireObject(value, `probability_research.horizons.${horizon}`);
@@ -165,6 +368,10 @@ function normalizeArtifact(
     pipeline_stage: optionalText(raw.pipeline_stage, `probability_research.horizons.${horizon}.pipeline_stage`)
       ?? inherited.pipelineStage ?? null,
     run_binding: runBinding,
+    official_execution_evidence: inherited.officialExecutionEvidence
+      ?? emptyOfficialExecutionEvidence(),
+    joint_execution_evidence: inherited.jointExecutionEvidence
+      ?? emptyJointExecutionEvidence(),
     limitations: probabilityBindingLimitations(
       [...new Set([...inheritedLimitations, ...localLimitations])],
       runBinding,
@@ -246,6 +453,50 @@ function emptyPrediction(artifact, horizon) {
   };
 }
 
+function normalizeHistoricalSample(value) {
+  const raw = requireObject(value, "probability_research.historical_context.sample");
+  return {
+    ...raw,
+    start_date: requireText(raw.start_date, "historical_context.sample.start_date"),
+    end_date: requireText(raw.end_date, "historical_context.sample.end_date"),
+    independent_session_count: requireNonNegativeInteger(raw.independent_session_count, "historical_context.sample.independent_session_count"),
+    record_count: requireNonNegativeInteger(raw.record_count, "historical_context.sample.record_count"),
+    symbol_count: requirePositiveInteger(raw.symbol_count, "historical_context.sample.symbol_count"),
+    label_coverage: requireProbability(raw.label_coverage, "historical_context.sample.label_coverage"),
+  };
+}
+
+function normalizeHistoricalHorizon(value, horizon) {
+  const raw = requireObject(value, `probability_research.historical_context.horizons.${horizon}`);
+  if (Number(raw.horizon) !== horizon || raw.probability !== null) {
+    throw probabilityContractError(`历史研究 H${horizon} 不能发布逐股概率或错配周期`);
+  }
+  const assessmentStatus = String(raw.assessment_status || "").trim();
+  if (!["insufficient_data", CALIBRATED_PROBABILITY_STATUS].includes(assessmentStatus)) {
+    throw probabilityContractError(`历史研究 H${horizon} 评估状态无效`);
+  }
+  return {
+    ...raw,
+    horizon,
+    assessment_status: assessmentStatus,
+    probability: null,
+    base_rate: optionalProbability(raw.base_rate, `historical_context.horizons.${horizon}.base_rate`),
+    available_independent_session_count: requireNonNegativeInteger(raw.available_independent_session_count, `historical_context.horizons.${horizon}.available_independent_session_count`),
+    minimum_required_independent_session_count: requirePositiveInteger(raw.minimum_required_independent_session_count, `historical_context.horizons.${horizon}.minimum_required_independent_session_count`),
+    out_of_sample_session_count: requireNonNegativeInteger(raw.out_of_sample_session_count, `historical_context.horizons.${horizon}.out_of_sample_session_count`),
+    evaluated_fold_count: requireNonNegativeInteger(raw.evaluated_fold_count, `historical_context.horizons.${horizon}.evaluated_fold_count`),
+    observation_count: requireNonNegativeInteger(raw.observation_count, `historical_context.horizons.${horizon}.observation_count`),
+    auc: optionalProbability(raw.auc, `historical_context.horizons.${horizon}.auc`),
+    brier_score: optionalFinite(raw.brier_score, `historical_context.horizons.${horizon}.brier_score`),
+    brier_skill_score: optionalFinite(raw.brier_skill_score, `historical_context.horizons.${horizon}.brier_skill_score`),
+    ece: optionalProbability(raw.ece, `historical_context.horizons.${horizon}.ece`),
+    bin_monotonic: optionalBoolean(raw.bin_monotonic, `historical_context.horizons.${horizon}.bin_monotonic`),
+    highest_bin_above_base_rate: optionalBoolean(raw.highest_bin_above_base_rate, `historical_context.horizons.${horizon}.highest_bin_above_base_rate`),
+    training_cutoff: optionalText(raw.training_cutoff, `historical_context.horizons.${horizon}.training_cutoff`),
+    limitations: stringList(raw.limitations, `historical_context.horizons.${horizon}.limitations`),
+  };
+}
+
 function normalizeStatus(value) {
   const status = String(value || "not_generated").trim();
   if (!ALLOWED_STATUSES.has(status)) throw probabilityContractError(`未知上涨概率状态：${status}`);
@@ -282,9 +533,33 @@ function optionalText(value, path) {
   return value.trim();
 }
 
+function requireText(value, path) {
+  const text = optionalText(value, path);
+  if (text === null) throw probabilityContractError(`${path} 必须是非空字符串`);
+  return text;
+}
+
+function requireProbability(value, path) {
+  const number = optionalProbability(value, path);
+  if (number === null) throw probabilityContractError(`${path} 必须是 0–1 的有限数值`);
+  return number;
+}
+
+function optionalBoolean(value, path) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "boolean") throw probabilityContractError(`${path} 必须是 boolean 或 null`);
+  return value;
+}
+
 function requirePositiveInteger(value, path) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 1) throw probabilityContractError(`${path} 必须是正整数`);
+  return number;
+}
+
+function requireNonNegativeInteger(value, path) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) throw probabilityContractError(`${path} 必须是非负整数`);
   return number;
 }
 

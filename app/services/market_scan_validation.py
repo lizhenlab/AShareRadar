@@ -25,6 +25,10 @@ from app.services.market_scan_scoring import (
     MarketScanSkipped,
     completed_market_scan_klines,
 )
+from app.services.market_scan_execution_quote import (
+    MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY,
+    build_market_scan_execution_quote_evidence,
+)
 from app.services.market_scan_skip_contract import MARKET_SCAN_SKIP_EVIDENCE_KEY
 from app.services.trading_calendar import (
     CALL_AUCTION_START_TIME,
@@ -242,13 +246,23 @@ def failed_scan_result_for_exception(
     exc: Exception,
     sensitive_values: tuple[object, ...],
     quote_observed_at: str | None = None,
+    mode: MarketScanMode | None = None,
+    quote_date: date | None = None,
 ) -> MarketScanResultWrite:
+    execution_details = _execution_quote_details(
+        item,
+        quote,
+        mode=mode,
+        quote_date=quote_date,
+        quote_observed_at=quote_observed_at,
+    )
     if isinstance(exc, MarketScanSkipped):
-        score_details = (
+        score_details: dict[str, object] = (
             {MARKET_SCAN_SKIP_EVIDENCE_KEY: exc.evidence}
             if exc.evidence is not None
             else {}
         )
+        score_details.update(execution_details)
         return failed_market_scan_result(
             item.symbol,
             "skipped",
@@ -269,8 +283,30 @@ def failed_scan_result_for_exception(
         rows,
         cutoff=cutoff,
         error=error,
+        score_details=execution_details,
         quote_observed_at=quote_observed_at,
     )
+
+
+def _execution_quote_details(
+    item: MarketScanResultItem,
+    quote: Quote | None,
+    *,
+    mode: MarketScanMode | None,
+    quote_date: date | None,
+    quote_observed_at: str | None,
+) -> dict[str, object]:
+    if quote is None or mode is None or quote_date is None:
+        return {}
+    return {
+        MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY: build_market_scan_execution_quote_evidence(
+            item,
+            quote,
+            mode=mode,
+            quote_date=quote_date,
+            captured_at=quote_observed_at or quote.timestamp,
+        )
+    }
 
 
 def raise_batch_outcome_error(

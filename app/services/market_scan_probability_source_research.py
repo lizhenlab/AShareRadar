@@ -8,6 +8,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import stat
 from threading import Lock, RLock
 from typing import cast
@@ -54,11 +55,21 @@ _HORIZONS = (1, 5, 20)
 _TARGETS = (PROBABILITY_PRIMARY_TARGET, PROBABILITY_ABSOLUTE_TARGET)
 _FileFingerprint = tuple[Path, int, int, int, int, int, int]
 _DirectorySnapshot = tuple[tuple[int, int, int, int] | None, tuple[_FileFingerprint, ...]]
+_ResearchSnapshot = tuple[
+    _DirectorySnapshot,
+    _DirectorySnapshot,
+    _DirectorySnapshot,
+    str,
+    tuple[tuple[int, str], ...] | None,
+]
 _SourceSummary = dict[str, object]
 _OutcomeSummary = dict[str, object]
 _FitSummary = dict[str, object]
 _SOURCE_CORPUS_CONTRACT_VERSION = "market-scan-probability-source-corpus-v1"
 _STABLE_SNAPSHOT_READ_ATTEMPTS = 3
+_OUTCOME_FILENAME = re.compile(r"market-scan-probability-outcomes-run-(\d+)-through-" r"(\d{4}-\d{2}-\d{2})-([0-9a-f]{64})\.json\.gz")
+_SOURCE_FILENAME = re.compile(r"market-scan-probability-source-run-(\d+)-([0-9a-f]{64})\.json\.gz")
+_FIT_FILENAME = re.compile(r"market-scan-probability-fit-through-run-(\d+)-([0-9a-f]{64})\.json\.gz")
 
 
 class MarketScanProbabilitySourceResearchStore:
@@ -73,18 +84,14 @@ class MarketScanProbabilitySourceResearchStore:
     ) -> None:
         self.directory = Path(directory).expanduser().absolute()
         self.outcome_directory = (
-            Path(outcome_directory).expanduser().absolute()
-            if outcome_directory is not None
-            else self.directory.parent / "market_scan_probability_outcomes"
+            Path(outcome_directory).expanduser().absolute() if outcome_directory is not None else self.directory.parent / "market_scan_probability_outcomes"
         )
-        self.fit_directory = (
-            Path(fit_directory).expanduser().absolute()
-            if fit_directory is not None
-            else self.directory.parent / "market_scan_probability_fit"
-        )
+        self.fit_directory = Path(fit_directory).expanduser().absolute() if fit_directory is not None else self.directory.parent / "market_scan_probability_fit"
         self._lock = RLock()
         self._refresh_lock = Lock()
-        self._snapshot: tuple[_DirectorySnapshot, _DirectorySnapshot, _DirectorySnapshot, str] | None = None
+        self._preload_pending = False
+        self._snapshot: _ResearchSnapshot | None = None
+        self._archive_bindings: dict[int, str] | None = None
         self._research_by_run: dict[int, dict[str, object]] = {}
         self._summary_by_fingerprint: dict[_FileFingerprint, _SourceSummary] = {}
         self._outcome_by_fingerprint: dict[_FileFingerprint, _OutcomeSummary] = {}
@@ -92,17 +99,63 @@ class MarketScanProbabilitySourceResearchStore:
         self._excluded_outcome_run_ids: frozenset[int] = frozenset()
 
     def research_projection(self, run_id: int) -> dict[str, object]:
-        self._refresh_if_changed(blocking=False)
+        if not self.refresh_pending():
+            self._refresh_if_changed(blocking=False)
         with self._lock:
-            return deepcopy(
-                self._research_by_run.get(run_id, not_generated_probability_research(run_id))
-            )
+            return deepcopy(self._research_by_run.get(run_id, not_generated_probability_research(run_id)))
 
-    def preload(self) -> int:
+    def preload(
+        self,
+        *,
+        archive_bindings: Mapping[int, str] | None = None,
+    ) -> int:
         """Verify archives and atomically publish the compact in-memory run index."""
-        self._refresh_if_changed(blocking=True)
+        normalized_bindings = _normalize_archive_bindings(archive_bindings)
         with self._lock:
-            return len(self._research_by_run)
+            previous_bindings = self._archive_bindings
+            self._archive_bindings = normalized_bindings
+        try:
+            self._refresh_if_changed(blocking=True)
+            with self._lock:
+                return len(self._research_by_run)
+        except Exception:
+            with self._lock:
+                self._archive_bindings = previous_bindings
+            raise
+        finally:
+            self.clear_preload_pending()
+
+    def mark_preload_pending(self) -> None:
+        """Prevent request threads from stealing a scheduled deep refresh."""
+        with self._lock:
+            self._preload_pending = True
+
+    def clear_preload_pending(self) -> None:
+        with self._lock:
+            self._preload_pending = False
+
+    def refresh_pending(self) -> bool:
+        with self._lock:
+            scheduled = self._preload_pending
+        return scheduled or self._refresh_lock.locked()
+
+    def verified_archive_digests(self) -> dict[int, str]:
+        """Return newest per-run digests from the already deep-verified index."""
+        with self._lock:
+            if self._snapshot is None:
+                raise ProbabilitySourceError("上涨概率 source 只读索引尚未完成校验")
+            summaries = tuple(deepcopy(self._summary_by_fingerprint).values())
+        newest: dict[int, tuple[float, str]] = {}
+        for summary in summaries:
+            run_id = _run_id(summary)
+            captured_at = _timestamp_order(summary["captured_at"], "captured_at")
+            digest = str(summary["integrity_digest"])
+            previous = newest.get(run_id)
+            if previous is None or captured_at > previous[0]:
+                newest[run_id] = captured_at, digest
+            elif captured_at == previous[0] and digest != previous[1]:
+                raise ProbabilitySourceError(f"run {run_id} 存在同 captured_at 的冲突 source archives")
+        return {run_id: value[1] for run_id, value in newest.items()}
 
     def _refresh_if_changed(self, *, blocking: bool) -> None:
         observed = self._observed_snapshot()
@@ -115,58 +168,84 @@ class MarketScanProbabilitySourceResearchStore:
             # while the sole refresher verifies/decompresses the next snapshot.
             return
         try:
-            with self._lock:
-                candidate_cache, candidate_outcomes, candidate_fits = self._candidate_caches()
-            for _attempt in range(_STABLE_SNAPSHOT_READ_ATTEMPTS):
-                source_snapshot = _directory_snapshot(
-                    self.directory, "market-scan-probability-source-run-*.json.gz"
-                )
-                outcome_snapshot = _directory_snapshot(
-                    self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz"
-                )
-                fit_snapshot = _directory_snapshot(
-                    self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz"
-                )
-                effective_as_of = latest_expected_daily_kline_date().isoformat()
-                snapshot = source_snapshot, outcome_snapshot, fit_snapshot, effective_as_of
-                with self._lock:
-                    if self._snapshot == snapshot:
-                        return
-                # Deep verification/decompression deliberately happens outside the
-                # projection-state lock. Readers only ever see the previous complete
-                # index or the new complete index, never a partially refreshed cache.
-                summaries = _snapshot_summaries(source_snapshot, candidate_cache)
-                outcomes, excluded_outcome_run_ids = _snapshot_outcomes(
-                    outcome_snapshot,
-                    candidate_outcomes,
-                )
-                fits = _snapshot_fits(fit_snapshot, candidate_fits)
-                candidate_cache.update(summaries)
-                candidate_outcomes.update(outcomes)
-                candidate_fits.update(fits)
-                if (
-                    _directory_snapshot(self.directory, "market-scan-probability-source-run-*.json.gz"),
-                    _directory_snapshot(self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz"),
-                    _directory_snapshot(self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz"),
-                    latest_expected_daily_kline_date().isoformat(),
-                ) != snapshot:
-                    continue
-                self._commit_refresh(
-                    snapshot,
-                    summaries,
-                    outcomes,
-                    fits,
-                    excluded_outcome_run_ids,
-                    effective_as_of,
-                )
-                return
-            raise ProbabilitySourceError("上涨概率 source archive 目录在多次读取期间持续变化，请重试")
+            self._refresh_stable_snapshot()
         finally:
             self._refresh_lock.release()
 
+    def _refresh_stable_snapshot(self) -> None:
+        with self._lock:
+            source_cache, outcome_cache, fit_cache = self._candidate_caches()
+        for _attempt in range(_STABLE_SNAPSHOT_READ_ATTEMPTS):
+            if self._refresh_snapshot_attempt(source_cache, outcome_cache, fit_cache):
+                return
+        raise ProbabilitySourceError("上涨概率 source archive 目录在多次读取期间持续变化，请重试")
+
+    def _refresh_snapshot_attempt(
+        self,
+        source_cache: dict[_FileFingerprint, _SourceSummary],
+        outcome_cache: dict[_FileFingerprint, _OutcomeSummary],
+        fit_cache: dict[_FileFingerprint, _FitSummary],
+    ) -> bool:
+        snapshot, bindings = self._candidate_snapshot()
+        with self._lock:
+            if self._snapshot == snapshot:
+                return True
+        source_snapshot, outcome_snapshot, fit_snapshot, effective_as_of, _token = snapshot
+        summaries = _snapshot_summaries(
+            source_snapshot,
+            source_cache,
+            archive_bindings=bindings,
+        )
+        allowed_run_ids = frozenset(_run_id(item) for item in summaries.values())
+        allowed = allowed_run_ids if bindings is not None else None
+        outcomes, excluded_run_ids = _snapshot_outcomes(
+            outcome_snapshot,
+            outcome_cache,
+            allowed_run_ids=allowed,
+        )
+        fits = _snapshot_fits(fit_snapshot, fit_cache, allowed_run_ids=allowed)
+        source_cache.update(summaries)
+        outcome_cache.update(outcomes)
+        fit_cache.update(fits)
+        if self._candidate_snapshot_with_token(_token) != snapshot:
+            return False
+        self._commit_refresh(
+            snapshot,
+            summaries,
+            outcomes,
+            fits,
+            excluded_run_ids,
+            effective_as_of,
+        )
+        return True
+
+    def _candidate_snapshot(
+        self,
+    ) -> tuple[_ResearchSnapshot, dict[int, str] | None]:
+        source = _directory_snapshot(self.directory, "market-scan-probability-source-run-*.json.gz")
+        outcomes = _directory_snapshot(self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz")
+        fits = _directory_snapshot(self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz")
+        effective_as_of = latest_expected_daily_kline_date().isoformat()
+        with self._lock:
+            bindings = None if self._archive_bindings is None else dict(self._archive_bindings)
+        token = _archive_binding_token(bindings)
+        return (source, outcomes, fits, effective_as_of, token), bindings
+
+    def _candidate_snapshot_with_token(
+        self,
+        token: tuple[tuple[int, str], ...] | None,
+    ) -> _ResearchSnapshot:
+        return (
+            _directory_snapshot(self.directory, "market-scan-probability-source-run-*.json.gz"),
+            _directory_snapshot(self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz"),
+            _directory_snapshot(self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz"),
+            latest_expected_daily_kline_date().isoformat(),
+            token,
+        )
+
     def _commit_refresh(
         self,
-        snapshot: tuple[_DirectorySnapshot, _DirectorySnapshot, _DirectorySnapshot, str],
+        snapshot: _ResearchSnapshot,
         summaries: dict[_FileFingerprint, _SourceSummary],
         outcomes: dict[_FileFingerprint, _OutcomeSummary],
         fits: dict[_FileFingerprint, _FitSummary],
@@ -203,24 +282,47 @@ class MarketScanProbabilitySourceResearchStore:
 
     def _observed_snapshot(
         self,
-    ) -> tuple[_DirectorySnapshot, _DirectorySnapshot, _DirectorySnapshot, str]:
+    ) -> _ResearchSnapshot:
+        with self._lock:
+            binding_token = _archive_binding_token(self._archive_bindings)
         return (
             _directory_snapshot(self.directory, "market-scan-probability-source-run-*.json.gz"),
             _directory_snapshot(
-                self.outcome_directory, "market-scan-probability-outcomes-run-*.json.gz",
+                self.outcome_directory,
+                "market-scan-probability-outcomes-run-*.json.gz",
             ),
             _directory_snapshot(
-                self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz",
+                self.fit_directory,
+                "market-scan-probability-fit-through-run-*.json.gz",
             ),
             latest_expected_daily_kline_date().isoformat(),
+            binding_token,
         )
 
 
 def _snapshot_summaries(
     snapshot: _DirectorySnapshot,
     cache: Mapping[_FileFingerprint, _SourceSummary],
+    *,
+    archive_bindings: Mapping[int, str] | None = None,
 ) -> dict[_FileFingerprint, _SourceSummary]:
-    return {fingerprint: _fingerprint_summary(fingerprint, cache) for fingerprint in snapshot[1]}
+    return {fingerprint: _fingerprint_summary(fingerprint, cache) for fingerprint in _bound_source_fingerprints(snapshot, archive_bindings)}
+
+
+def _bound_source_fingerprints(
+    snapshot: _DirectorySnapshot,
+    archive_bindings: Mapping[int, str] | None,
+) -> tuple[_FileFingerprint, ...]:
+    if archive_bindings is None:
+        return snapshot[1]
+    selected: list[_FileFingerprint] = []
+    for fingerprint in snapshot[1]:
+        match = _SOURCE_FILENAME.fullmatch(fingerprint[0].name)
+        if match is None:
+            raise ProbabilitySourceError(f"上涨概率 source archive 文件名无效：{fingerprint[0]}")
+        if archive_bindings.get(int(match.group(1))) == match.group(2):
+            selected.append(fingerprint)
+    return tuple(selected)
 
 
 def _fingerprint_summary(
@@ -236,10 +338,15 @@ def _fingerprint_summary(
 def _snapshot_outcomes(
     snapshot: _DirectorySnapshot,
     cache: Mapping[_FileFingerprint, _OutcomeSummary],
+    *,
+    allowed_run_ids: frozenset[int] | None = None,
 ) -> tuple[dict[_FileFingerprint, _OutcomeSummary], frozenset[int]]:
     outcomes: dict[_FileFingerprint, _OutcomeSummary] = {}
     excluded_run_ids: set[int] = set()
-    for fingerprint in snapshot[1]:
+    for fingerprint in _latest_outcome_fingerprints(
+        snapshot,
+        allowed_run_ids=allowed_run_ids,
+    ):
         try:
             outcomes[fingerprint] = _fingerprint_outcome(fingerprint, cache)
         except ProbabilityOutcomeSemanticDriftError as exc:
@@ -250,6 +357,30 @@ def _snapshot_outcomes(
             excluded_run_ids.add(exc.run_id)
             continue
     return outcomes, frozenset(excluded_run_ids)
+
+
+def _latest_outcome_fingerprints(
+    snapshot: _DirectorySnapshot,
+    *,
+    allowed_run_ids: frozenset[int] | None = None,
+) -> tuple[_FileFingerprint, ...]:
+    """Select only max-through-date candidates; older outcomes are superseded."""
+    newest_date_by_run: dict[int, str] = {}
+    parsed: list[tuple[_FileFingerprint, int, str]] = []
+    for fingerprint in snapshot[1]:
+        match = _OUTCOME_FILENAME.fullmatch(fingerprint[0].name)
+        if match is None:
+            raise ProbabilitySourceError(f"上涨概率 outcome archive 文件名无效：{fingerprint[0]}")
+        run_id = int(match.group(1))
+        through_date = match.group(2)
+        if allowed_run_ids is not None and run_id not in allowed_run_ids:
+            continue
+        parsed.append((fingerprint, run_id, through_date))
+        newest_date_by_run[run_id] = max(
+            through_date,
+            newest_date_by_run.get(run_id, through_date),
+        )
+    return tuple(fingerprint for fingerprint, run_id, through_date in parsed if through_date == newest_date_by_run[run_id])
 
 
 def _fingerprint_outcome(
@@ -270,8 +401,26 @@ def _fingerprint_outcome(
 def _snapshot_fits(
     snapshot: _DirectorySnapshot,
     cache: Mapping[_FileFingerprint, _FitSummary],
+    *,
+    allowed_run_ids: frozenset[int] | None = None,
 ) -> dict[_FileFingerprint, _FitSummary]:
-    return {fingerprint: _fingerprint_fit(fingerprint, cache) for fingerprint in snapshot[1]}
+    return {fingerprint: _fingerprint_fit(fingerprint, cache) for fingerprint in _bound_fit_fingerprints(snapshot, allowed_run_ids)}
+
+
+def _bound_fit_fingerprints(
+    snapshot: _DirectorySnapshot,
+    allowed_run_ids: frozenset[int] | None,
+) -> tuple[_FileFingerprint, ...]:
+    if allowed_run_ids is None:
+        return snapshot[1]
+    selected: list[_FileFingerprint] = []
+    for fingerprint in snapshot[1]:
+        match = _FIT_FILENAME.fullmatch(fingerprint[0].name)
+        if match is None:
+            raise ProbabilitySourceError(f"上涨概率 fit assessment 文件名无效：{fingerprint[0]}")
+        if int(match.group(1)) in allowed_run_ids:
+            selected.append(fingerprint)
+    return tuple(selected)
 
 
 def _fingerprint_fit(
@@ -340,9 +489,7 @@ def _fit_for_source(
         raise ProbabilitySourceError(f"run {_run_id(source)} fit/source cohort 不一致")
     if fit is not None and fit.get("through_source_digest") != source.get("integrity_digest"):
         raise ProbabilitySourceError(f"run {_run_id(source)} fit/source content digest 不一致")
-    if fit is not None and (
-        outcome is None or fit.get("through_outcome_digest") != outcome.get("integrity_digest")
-    ):
+    if fit is not None and (outcome is None or fit.get("through_outcome_digest") != outcome.get("integrity_digest")):
         raise ProbabilitySourceError(f"run {_run_id(source)} fit/outcome content digest 不一致")
     if fit is not None and fit.get("input_pair_digest") != _fit_input_pair_digest(
         source,
@@ -370,8 +517,7 @@ def _trusted_fits_by_run(
         dependent_ids = {
             _run_id(source)
             for source in sources
-            if _source_contract_key(source) == _source_contract_key(through)
-            and _source_progress_order(source) <= _source_progress_order(through)
+            if _source_contract_key(source) == _source_contract_key(through) and _source_progress_order(source) <= _source_progress_order(through)
         }
         if dependent_ids.isdisjoint(excluded_run_ids):
             trusted[run_id] = fit
@@ -387,8 +533,7 @@ def _fit_input_pair_digest(
         (
             source
             for source in sources
-            if _source_contract_key(source) == _source_contract_key(through)
-            and _source_progress_order(source) <= _source_progress_order(through)
+            if _source_contract_key(source) == _source_contract_key(through) and _source_progress_order(source) <= _source_progress_order(through)
         ),
         key=_source_progress_order,
     )[-PROBABILITY_FIT_MAX_SESSIONS:]
@@ -410,11 +555,7 @@ def _newest_capture_by_run(
     selected: dict[int, _SourceSummary] = {}
     for run_id, captures in grouped.items():
         newest_at = max(_timestamp_order(item["captured_at"], "captured_at") for item in captures)
-        newest = [
-            item
-            for item in captures
-            if _timestamp_order(item["captured_at"], "captured_at") == newest_at
-        ]
+        newest = [item for item in captures if _timestamp_order(item["captured_at"], "captured_at") == newest_at]
         if len(newest) != 1:
             raise ProbabilitySourceError(f"run {run_id} 存在同 captured_at 的冲突 source archives")
         selected[run_id] = newest[0]
@@ -479,11 +620,7 @@ def _source_research(
         "integrity_notice": "source_corpus_integrity_digest_not_probability_model_evidence",
         "production_ranking_effect": "none",
         "automatic_promotion": False,
-        "outcome_evidence_status": (
-            "legacy_semantic_drift_excluded"
-            if excluded_outcome_semantic_drift
-            else "current_replay_only"
-        ),
+        "outcome_evidence_status": ("legacy_semantic_drift_excluded" if excluded_outcome_semantic_drift else "current_replay_only"),
         "run_binding": _source_run_binding(summary),
     }
 
@@ -589,11 +726,7 @@ def _source_fit_projection(
     fit: Mapping[str, object] | None,
     default_stage: str,
 ) -> dict[str, object]:
-    sampled = bool(
-        fit is not None
-        and fit.get("fit_status") == "sampled_oos_assessment"
-        and fit.get("deterministic_replay_verified") is True
-    )
+    sampled = bool(fit is not None and fit.get("fit_status") == "sampled_oos_assessment" and fit.get("deterministic_replay_verified") is True)
     if sampled:
         assert fit is not None
         return {
@@ -641,12 +774,7 @@ def _progress_counts(
 
 
 def _required_session_count(config: ProbabilityConfig) -> int:
-    return (
-        config.minimum_train_sessions
-        + config.minimum_calibration_sessions
-        + config.minimum_test_sessions
-        + 2 * config.effective_gap_sessions
-    )
+    return config.minimum_train_sessions + config.minimum_calibration_sessions + config.minimum_test_sessions + 2 * config.effective_gap_sessions
 
 
 def _pipeline_stage(progress: Mapping[str, object], config: ProbabilityConfig) -> str:
@@ -721,12 +849,7 @@ def _fit_evidence(
     return {
         **raw,
         "fit_status": fit["fit_status"] if horizon_fitted else raw.get("fit_status", "not_fitted"),
-        "deterministic_replay_verified": (
-            horizon_fitted
-            and
-            fit["fit_replay_verified"] is True
-            and raw.get("deterministic_replay_verified") is True
-        ),
+        "deterministic_replay_verified": (horizon_fitted and fit["fit_replay_verified"] is True and raw.get("deterministic_replay_verified") is True),
         "training_cutoff": fit["training_cutoff"],
         "evidence_digest": fit["integrity_digest"],
         "selection_qualified": False,
@@ -796,9 +919,7 @@ def _compact_fit_summary(artifact: Mapping[str, object]) -> _FitSummary:
         "horizons": deepcopy(_mapping(payload["horizons"], "fit.horizons")),
         "fit_status": str(payload["fit_status"]),
         "fit_replay_verified": payload["fit_replay_verified"] is True,
-        "fit_selection_qualification": deepcopy(
-            _mapping(payload["fit_selection_qualification"], "fit.selection")
-        ),
+        "fit_selection_qualification": deepcopy(_mapping(payload["fit_selection_qualification"], "fit.selection")),
         "training_cutoff": str(payload["training_cutoff"]),
         "through_source_digest": str(members[-1]["source_content_digest"]),
         "through_outcome_digest": str(members[-1]["outcome_content_digest"]),
@@ -812,13 +933,13 @@ def _newest_fit_by_run(fits: Sequence[_FitSummary]) -> dict[int, _FitSummary]:
     for fit in fits:
         run_id = int(cast(int, fit["through_run_id"]))
         previous = selected.get(run_id)
-        if previous is None or _timestamp_order(fit["generated_at"], "fit.generated_at") > _timestamp_order(
-            previous["generated_at"], "fit.generated_at"
-        ):
+        if previous is None or _timestamp_order(fit["generated_at"], "fit.generated_at") > _timestamp_order(previous["generated_at"], "fit.generated_at"):
             selected[run_id] = fit
-        elif previous is not None and _timestamp_order(fit["generated_at"], "fit.generated_at") == _timestamp_order(
-            previous["generated_at"], "fit.generated_at"
-        ) and fit["integrity_digest"] != previous["integrity_digest"]:
+        elif (
+            previous is not None
+            and _timestamp_order(fit["generated_at"], "fit.generated_at") == _timestamp_order(previous["generated_at"], "fit.generated_at")
+            and fit["integrity_digest"] != previous["integrity_digest"]
+        ):
             raise ProbabilitySourceError(f"run {run_id} 同generated_at存在冲突 fit assessments")
     return selected
 
@@ -854,9 +975,7 @@ def _newest_outcome_by_run(
         previous = selected.get(run_id)
         if previous is None or _outcome_order(item) > _outcome_order(previous):
             selected[run_id] = item
-        elif _outcome_order(item) == _outcome_order(previous) and (
-            item["integrity_digest"] != previous["integrity_digest"]
-        ):
+        elif _outcome_order(item) == _outcome_order(previous) and (item["integrity_digest"] != previous["integrity_digest"]):
             raise ProbabilitySourceError(f"run {run_id} 存在冲突 outcome archives")
     return selected
 
@@ -997,10 +1116,7 @@ def _maturity_dates(
 ) -> dict[str, str | None]:
     if outcome is not None:
         horizons = _mapping(outcome["horizons"], "outcome.horizons")
-        return {
-            str(horizon): str(_mapping(horizons[str(horizon)], "horizon")["target_session_date"])
-            for horizon in _HORIZONS
-        }
+        return {str(horizon): str(_mapping(horizons[str(horizon)], "horizon")["target_session_date"]) for horizon in _HORIZONS}
     try:
         fixed = next_trade_dates(
             datetime.fromisoformat(str(source["quote_date"])).date(),
@@ -1086,9 +1202,7 @@ def _source_corpus(
         "previous_integrity_digest": previous_digest,
         "source": member,
     }
-    digest = hashlib.sha256(
-        json.dumps(digest_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    digest = hashlib.sha256(json.dumps(digest_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {**identity, "integrity_digest": digest}
 
 
@@ -1140,6 +1254,27 @@ def _timestamp_order(value: object, path: str) -> float:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ProbabilitySourceError(f"上涨概率 source research {path} 必须包含时区")
     return parsed.timestamp()
+
+
+def _normalize_archive_bindings(
+    value: Mapping[int, str] | None,
+) -> dict[int, str] | None:
+    if value is None:
+        return None
+    normalized: dict[int, str] = {}
+    for raw_run_id, raw_digest in value.items():
+        if isinstance(raw_run_id, bool) or not isinstance(raw_run_id, int) or raw_run_id < 1:
+            raise ProbabilitySourceError("上涨概率 source archive binding run_id 无效")
+        if not isinstance(raw_digest, str) or re.fullmatch(r"[0-9a-f]{64}", raw_digest) is None:
+            raise ProbabilitySourceError(f"run {raw_run_id} 上涨概率 source archive binding digest 无效")
+        normalized[raw_run_id] = raw_digest
+    return dict(sorted(normalized.items()))
+
+
+def _archive_binding_token(
+    value: Mapping[int, str] | None,
+) -> tuple[tuple[int, str], ...] | None:
+    return None if value is None else tuple(sorted(value.items()))
 
 
 def _mapping(value: object, path: str) -> Mapping[str, object]:

@@ -40,6 +40,7 @@ from app.services.market_scan_probability_outcomes import (
     publish_built_probability_outcome_artifact,
 )
 from app.services.market_scan_probability_source import (
+    PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION,
     ProbabilitySourceError,
     load_probability_source_snapshot,
 )
@@ -108,6 +109,7 @@ class _SourceManifest:
     captured_at: str
     cohort: tuple[str, str, str]
     digest: str
+    schema_version: str = PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -481,8 +483,13 @@ def _source_kline_rows(
 
 
 def _canonical_sources(manifests: Sequence[_SourceManifest]) -> tuple[_SourceManifest, ...]:
+    current_manifests = tuple(
+        item
+        for item in manifests
+        if item.schema_version == PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION
+    )
     newest_by_run: dict[int, _SourceManifest] = {}
-    for item in manifests:
+    for item in current_manifests:
         previous = newest_by_run.get(item.run_id)
         if previous is None or _timestamp(item.captured_at) > _timestamp(previous.captured_at):
             newest_by_run[item.run_id] = item
@@ -509,6 +516,7 @@ def _source_manifest(path: Path) -> _SourceManifest:
         captured_at=str(artifact["captured_at"]),
         cohort=(str(cohort["mode"]), str(cohort["scope"]), str(cohort["rule_version"])),
         digest=str(integrity["integrity_digest"]),
+        schema_version=str(artifact["schema_version"]),
     )
 
 

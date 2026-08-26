@@ -311,10 +311,7 @@ class SQLiteCache:
         with self._lock, self._connect() as conn:
             migration_pending = audit_timestamp_migration_pending(conn)
             if migration_pending and not settings_supplied:
-                raise ValueError(
-                    "旧数据库审计时间迁移需要显式 Settings；"
-                    "请使用 SQLiteCache(settings=settings) 指定 legacy_audit_timezone"
-                )
+                raise ValueError("旧数据库审计时间迁移需要显式 Settings；" "请使用 SQLiteCache(settings=settings) 指定 legacy_audit_timezone")
             migration_guard = _acquire_audit_migration_guard(self.path) if migration_pending else None
             started_at = performance_now()
             try:
@@ -586,6 +583,9 @@ class SQLiteCache:
     ) -> ProbabilitySourceCaptureState | None:
         return self.market_scan_repo.probability_source_capture_status(run_id)
 
+    def probability_source_capture_archive_bindings(self) -> dict[int, str]:
+        return self.market_scan_repo.probability_source_capture_archive_bindings()
+
     def market_scan_action_source_digest(self, run_id: int) -> str | None:
         return self.market_scan_repo.market_scan_action_source_digest(run_id)
 
@@ -642,6 +642,9 @@ class SQLiteCache:
 
     def provider_enabled(self, name: str) -> bool:
         return self.provider_status_repo.enabled(name)
+
+    def clear_interrupted_provider_call_errors(self) -> int:
+        return self.provider_status_repo.clear_interrupted_call_errors()
 
     def update_provider_success(self, name: str, priority: int, latency_ms: float) -> None:
         self.provider_status_repo.record_success(name, priority, latency_ms)
@@ -1088,7 +1091,4 @@ def _require_audit_migration_disk_space(path: Path) -> None:
     )
     available_free = shutil.disk_usage(path.parent).free
     if available_free < required_free:
-        raise RuntimeError(
-            "数据库迁移磁盘空间不足："
-            f"至少需要 {required_free} 字节可用空间，当前仅 {available_free} 字节"
-        )
+        raise RuntimeError("数据库迁移磁盘空间不足：" f"至少需要 {required_free} 字节可用空间，当前仅 {available_free} 字节")

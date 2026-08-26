@@ -47,6 +47,7 @@ from app.repositories.strategy_execution import FrozenMarketScan
 from app.repositories.market_scan_verified_read import verified_market_scan_read
 from app.services.cache import SQLiteCache
 from app.services.market_scan_executable_shadow import MarketScanExecutableShadowService
+from app.services.market_scan_export import MarketScanExportFilters
 from app.services.market_scan_manager import market_scan_rule_contract
 from app.services.market_scan_query_service import MarketScanQueryService
 from app.services.market_scan_research_stores import MarketScanResearchStores
@@ -57,6 +58,7 @@ from tests.test_market_scan_skip_contract import (
     QUOTE_OBSERVED_AT,
     _score,
     _settings_and_rule,
+    _valid_action_source_run,
     _varying_success_case,
 )
 from tests.market_scan_test_support import (
@@ -282,9 +284,7 @@ def test_history_navigation_identities_do_not_rehash_or_authorize_publications(
 
     monkeypatch.setattr(
         "app.repositories.market_scan_queries.verify_market_scan_snapshot",
-        lambda *_args, **_kwargs: pytest.fail(
-            "navigation identities must not perform publication verification"
-        ),
+        lambda *_args, **_kwargs: pytest.fail("navigation identities must not perform publication verification"),
     )
 
     page = cache.market_scan_run_identities(
@@ -323,15 +323,11 @@ def test_probability_facing_queries_verify_one_full_snapshot_per_request(
     monkeypatch.setattr(market_scan_integrity, "verify_market_scan_snapshot", tracked_verify)
     monkeypatch.setattr(
         "app.repositories.market_scan_verified_read.verify_market_scan_snapshot",
-        lambda *_args, **_kwargs: pytest.fail(
-            "publication session must not run a second repository verifier"
-        ),
+        lambda *_args, **_kwargs: pytest.fail("publication session must not run a second repository verifier"),
     )
     monkeypatch.setattr(
         "app.db.market_scan_action_source.require_market_scan_action_source",
-        lambda *_args, **_kwargs: pytest.fail(
-            "request read must consume canonical inspection, not re-run action verifier"
-        ),
+        lambda *_args, **_kwargs: pytest.fail("request read must consume canonical inspection, not re-run action verifier"),
     )
 
     assert _query_results(query, run_id).run.id == run_id
@@ -342,6 +338,13 @@ def test_probability_facing_queries_verify_one_full_snapshot_per_request(
     assert research["status"] == "not_generated"
     assert probabilities == {}
     assert calls == [run_id, run_id, run_id]
+    page, future_range = query.export_projection(
+        run_id,
+        filters=MarketScanExportFilters(status=None),
+    )
+    assert page.run.id == run_id
+    assert future_range["generation_status"] == "not_generated"
+    assert calls == [run_id, run_id, run_id, run_id]
 
 
 def test_verified_query_rejects_drop_tamper_recreate_receipt_bypass(tmp_path) -> None:
@@ -391,6 +394,26 @@ def test_verified_read_session_is_request_local_and_closes_on_error(tmp_path) ->
     with cache.verified_market_scan_read(run_id) as next_request:
         assert next_request is not captured
         assert next_request.run.id == run_id
+
+
+def test_verified_read_projects_one_digest_bound_complete_execution_session(tmp_path) -> None:
+    _repo, settings, run_id, _skip_symbol, _diagnostics = _valid_action_source_run(
+        tmp_path
+    )
+    cache = SQLiteCache(settings=settings)
+
+    with cache.verified_market_scan_read(run_id) as verified:
+        evidence = verified.execution_session_evidence()
+        assert evidence["run_id"] == run_id
+        assert evidence["source_snapshot_digest"] == verified.snapshot_digest
+        assert evidence["source_snapshot_binding"] == "verified_digest"
+        assert evidence["expected_result_count"] == verified.run.total_count
+        assert evidence["observed_result_count"] == verified.run.total_count
+        assert evidence["complete_result_set"] is True
+        assert evidence["formal_equivalent_pit"] is False
+        assert evidence["official_authority_evidence_count"] == 0
+        with pytest.raises(RuntimeError, match="只能投影一次"):
+            verified.execution_session_evidence()
 
 
 def test_verified_read_public_issuer_does_not_accept_caller_owned_connections(
@@ -544,9 +567,7 @@ def test_5382_row_results_request_stays_under_api_timeout_with_one_full_hash(
     )
     query = MarketScanQueryService(cache, _empty_research_stores())
     real_verify = market_scan_integrity.verify_market_scan_snapshot
-    real_replay = (
-        market_scan_action_source.replay_current_action_gate_receipt_from_verified_observations
-    )
+    real_replay = market_scan_action_source.replay_current_action_gate_receipt_from_verified_observations
     calls: list[int] = []
     replay_calls: list[int] = []
 
@@ -580,9 +601,7 @@ def test_5382_row_results_request_stays_under_api_timeout_with_one_full_hash(
     )
     monkeypatch.setattr(
         "app.repositories.market_scan_action_gate_replay.read_success_score_observations",
-        lambda *_args, **_kwargs: pytest.fail(
-            "verified action inspection must reuse fused score observations"
-        ),
+        lambda *_args, **_kwargs: pytest.fail("verified action inspection must reuse fused score observations"),
     )
     if Coverage.current() is not None:
         covered_page = _query_results(query, run_id)
@@ -1021,9 +1040,7 @@ def test_public_result_page_rejects_result_updated_after_run(tmp_path) -> None:
         data_date=None,
         mode="official",
     )
-    item = frozen.items[0].model_copy(
-        update={"updated_at": "2099-01-02T00:00:00Z"}
-    )
+    item = frozen.items[0].model_copy(update={"updated_at": "2099-01-02T00:00:00Z"})
 
     with pytest.raises(ValidationError, match="不能晚于"):
         MarketScanResultPage(
@@ -1143,9 +1160,7 @@ def _large_current_action_publication(
     *,
     result_count: int,
 ) -> tuple[SQLiteCache, int]:
-    settings, rule_version = _settings_and_rule(
-        cache_path=tmp_path / "large-current-action.sqlite3"
-    )
+    settings, rule_version = _settings_and_rule(cache_path=tmp_path / "large-current-action.sqlite3")
     cache = SQLiteCache(settings=settings)
     repo = cache.market_scan_repo
     contract = market_scan_rule_contract(settings)
@@ -1211,17 +1226,7 @@ def _large_current_action_publication(
     assert policy.assess(distribution).status == "pass"
     diagnostics = action_pass_publication_diagnostics()
     diagnostics = diagnostics.model_copy(
-        update={
-            "passed_gates": [
-                diagnostics.passed_gates[0].model_copy(
-                    update={
-                        "detail": distribution.audit_text().removeprefix(
-                            "评分分布门禁 "
-                        )
-                    }
-                )
-            ]
-        }
+        update={"passed_gates": [diagnostics.passed_gates[0].model_copy(update={"detail": distribution.audit_text().removeprefix("评分分布门禁 ")})]}
     )
     published = repo.finish_run(
         run.id,

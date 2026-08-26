@@ -75,7 +75,7 @@ def test_real_uvicorn_serves_app_static_assets_and_temporary_sqlite(tmp_path: Pa
         if stream_socket is not None:
             stream_socket.close()
 
-    assert process.returncode == 0
+    assert process.returncode == 0, stderr
     assert shutdown_elapsed < 8
     assert "Traceback" not in stderr
 

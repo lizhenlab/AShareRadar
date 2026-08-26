@@ -35,6 +35,8 @@ from app.utils.time import now_text
 
 
 TENCENT_QUOTE_MIN_FIELDS = 45
+TENCENT_QUOTE_BATCH_SIZE = 400
+TENCENT_QUOTE_MAX_CONCURRENCY = 4
 TENCENT_KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 TENCENT_MARKET_MAP = {"1": "SH", "0": "SZ", "2": "SZ", "51": "SZ", "52": "SZ", "62": "BJ"}
 TENCENT_AMOUNT_SCALE = 10000
@@ -112,20 +114,48 @@ class TencentMarketDataProvider:
         return (await self.quotes([symbol]))[0]
 
     async def quotes(self, symbols: Iterable[str]) -> list[Quote]:
-        url = _tencent_quote_url(symbols)
-        if not url:
+        requested = list(symbols)
+        if not requested:
             return []
-        text = await _fetch_tencent_quote_text(
-            url,
-            self.timeout,
-            client=self._http_client(),
+        batches = [
+            requested[index : index + TENCENT_QUOTE_BATCH_SIZE]
+            for index in range(0, len(requested), TENCENT_QUOTE_BATCH_SIZE)
+        ]
+        semaphore = asyncio.Semaphore(TENCENT_QUOTE_MAX_CONCURRENCY)
+        results = await asyncio.gather(
+            *(
+                self._quote_batch(batch, semaphore=semaphore)
+                for batch in batches
+            ),
+            return_exceptions=True,
         )
+        quotes = [quote for result in results if isinstance(result, list) for quote in result]
+        if quotes:
+            return quotes
+        first_error = next((result for result in results if isinstance(result, BaseException)), None)
+        if first_error is not None:
+            raise first_error
+        return []
+
+    async def _quote_batch(
+        self,
+        symbols: list[str],
+        *,
+        semaphore: asyncio.Semaphore,
+    ) -> list[Quote]:
+        url = _tencent_quote_url(symbols)
+        async with semaphore:
+            text = await _fetch_tencent_quote_text(
+                url,
+                self.timeout,
+                client=self._http_client(),
+            )
         quotes = _tencent_quotes_from_text(text, self.source_name)
-        if not quotes:
-            if _tencent_quote_response_is_coverage_miss(text):
-                raise MarketDataCoverageMiss("实时行情未覆盖请求股票")
-            raise MarketDataProtocolError("实时行情返回为空或格式异常")
-        return quotes
+        if quotes:
+            return quotes
+        if _tencent_quote_response_is_coverage_miss(text):
+            raise MarketDataCoverageMiss("实时行情未覆盖请求股票")
+        raise MarketDataProtocolError("实时行情返回为空或格式异常")
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
         ensure_positive_limit(limit)

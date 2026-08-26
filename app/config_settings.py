@@ -271,6 +271,15 @@ class Settings(BaseModel):
     quote_refresh_seconds: int = 3
     request_timeout_seconds: float = 8.0
     provider_call_timeout_seconds: float = 8.0
+    tencent_kline_max_in_flight: int = Field(
+        default_factory=lambda: _env_int(
+            "ASHARE_RADAR_TENCENT_KLINE_MAX_IN_FLIGHT",
+            5,
+            minimum=1,
+        ),
+        ge=1,
+        le=16,
+    )
     stock_pool_provider_timeout_seconds: float = Field(
         default_factory=lambda: _env_float(
             "ASHARE_RADAR_STOCK_POOL_PROVIDER_TIMEOUT_SECONDS",
@@ -458,6 +467,59 @@ class Settings(BaseModel):
         default_factory=lambda: _env_int("ASHARE_RADAR_MARKET_SCAN_NEW_STOCK_DAYS", 120, minimum=1),
         le=730,
     )
+    market_scan_official_execution_registry_path: Path = Field(
+        default_factory=lambda: _env_path(
+            "ASHARE_RADAR_MARKET_SCAN_OFFICIAL_EXECUTION_REGISTRY_PATH",
+            DEFAULT_CACHE_PATH.parent / "research" / "market_scan_official_execution" / "source-registry.json",
+        )
+    )
+    market_scan_official_execution_registry_digest: str | None = Field(
+        default_factory=lambda: _env_text(
+            "ASHARE_RADAR_MARKET_SCAN_OFFICIAL_EXECUTION_REGISTRY_DIGEST"
+        )
+    )
+    market_scan_official_execution_raw_root: Path = Field(
+        default_factory=lambda: _env_path(
+            "ASHARE_RADAR_MARKET_SCAN_OFFICIAL_EXECUTION_RAW_ROOT",
+            DEFAULT_CACHE_PATH.parent / "research" / "market_scan_official_execution_raw",
+        )
+    )
+    market_scan_official_execution_session_directory: Path = Field(
+        default_factory=lambda: _env_path(
+            "ASHARE_RADAR_MARKET_SCAN_OFFICIAL_EXECUTION_SESSION_DIRECTORY",
+            DEFAULT_CACHE_PATH.parent / "research" / "market_scan_official_execution" / "sessions",
+        )
+    )
+    market_scan_joint_execution_authorization_path: Path = Field(
+        default_factory=lambda: _env_path(
+            "ASHARE_RADAR_MARKET_SCAN_JOINT_EXECUTION_AUTHORIZATION_PATH",
+            DEFAULT_CACHE_PATH.parent
+            / "research"
+            / "market_scan_joint_execution"
+            / "authorization"
+            / "active.json",
+        )
+    )
+    market_scan_joint_execution_authorization_digest: str | None = Field(
+        default_factory=lambda: _env_text(
+            "ASHARE_RADAR_MARKET_SCAN_JOINT_EXECUTION_AUTHORIZATION_DIGEST"
+        )
+    )
+    market_scan_probability_ranking_control_path: Path = Field(
+        default_factory=lambda: _env_path(
+            "ASHARE_RADAR_MARKET_SCAN_PROBABILITY_RANKING_CONTROL_PATH",
+            DEFAULT_CACHE_PATH.parent
+            / "research"
+            / "market_scan_joint_execution"
+            / "ranking-control"
+            / "active.json",
+        )
+    )
+    market_scan_probability_ranking_control_digest: str | None = Field(
+        default_factory=lambda: _env_text(
+            "ASHARE_RADAR_MARKET_SCAN_PROBABILITY_RANKING_CONTROL_DIGEST"
+        )
+    )
     max_quote_history_rows: int = Field(
         default_factory=lambda: _env_int(
             "ASHARE_RADAR_MAX_QUOTE_HISTORY_ROWS",
@@ -559,10 +621,30 @@ class Settings(BaseModel):
         "002475",
     )
 
-    @field_validator("cache_path")
+    @field_validator(
+        "cache_path",
+        "market_scan_official_execution_registry_path",
+        "market_scan_official_execution_raw_root",
+        "market_scan_official_execution_session_directory",
+        "market_scan_joint_execution_authorization_path",
+        "market_scan_probability_ranking_control_path",
+    )
     @classmethod
     def _resolve_cache_path(cls, value: Path) -> Path:
         return resolve_project_path(value)
+
+    @field_validator(
+        "market_scan_official_execution_registry_digest",
+        "market_scan_joint_execution_authorization_digest",
+        "market_scan_probability_ranking_control_digest",
+    )
+    @classmethod
+    def _validate_pinned_research_digest(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("pinned research digest 必须是小写 SHA-256")
+        return value
 
     @field_validator("llm_base_url")
     @classmethod

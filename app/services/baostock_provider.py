@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 import threading
 from typing import TypeVar
 
@@ -12,6 +10,8 @@ from app.models.market import (
     StockInfo,
 )
 from app.runtime_environment import isolate_user_site_packages
+from app.services.daemon_executor import DaemonThreadPoolExecutor
+from app.services.datahub_runtime import await_provider_worker
 from app.services.provider_utils import bs_symbol, ensure_positive_limit, is_installed, valid_ohlc
 from app.services.provider_stock_mappers import (
     stock_industry_from_baostock_row,
@@ -32,7 +32,7 @@ class BaoStockProvider:
     source_name = "BaoStock"
 
     def __init__(self) -> None:
-        self._session_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="baostock-session")
+        self._session_executor = DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="baostock-session")
         self._closed = False
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
@@ -111,13 +111,9 @@ class BaoStockProvider:
             raise RuntimeError("未安装 baostock，请执行 python3 -m pip install baostock")
 
 
-async def _run_baostock_session(executor: ThreadPoolExecutor, call: Callable[[], _T]) -> _T:
+async def _run_baostock_session(executor: DaemonThreadPoolExecutor, call: Callable[[], _T]) -> _T:
     worker = executor.submit(_call_with_baostock_session_lock, call)
-    try:
-        return await asyncio.wrap_future(worker)
-    except asyncio.CancelledError:
-        worker.cancel()
-        raise
+    return await await_provider_worker(worker)
 
 
 def _call_with_baostock_session_lock(call: Callable[[], _T]) -> _T:

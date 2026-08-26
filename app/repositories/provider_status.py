@@ -61,6 +61,12 @@ PROVIDER_CAPABILITY_RUNTIME_COLUMNS = (
 )
 PROVIDER_STATUS_ORDER_BY = "priority ASC, name ASC"
 PROVIDER_CAPABILITY_STATUS_ORDER_BY = "priority ASC, name ASC, kind ASC"
+_INTERRUPTED_CALL_ERROR_MARKERS = (
+    "后台任务仍在收尾",
+    "上一次调用仍在后台执行",
+    "底层同步调用仍在受控收尾",
+    "已取消未完成的异步请求",
+)
 
 
 def _runtime_upsert_sql(*, table: str, columns: tuple[str, ...], conflict_target: str, enabled_assignment: str) -> str:
@@ -229,6 +235,27 @@ ON CONFLICT(name, kind) DO UPDATE SET
 
 
 class ProviderStatusRepository(SQLiteRepository):
+    def clear_interrupted_call_errors(self) -> int:
+        """Discard process-local in-flight diagnostics left by a previous process."""
+        timestamp = now_text()
+        predicate = " OR ".join("instr(last_error, ?) > 0" for _marker in _INTERRUPTED_CALL_ERROR_MARKERS)
+        changed = 0
+        with self._lock, self._connect() as conn:
+            for table in ("provider_capability_status", "provider_status"):
+                cursor = conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET last_error = NULL,
+                        healthy = CASE WHEN last_success IS NOT NULL THEN 1 ELSE 0 END,
+                        updated_at = ?
+                    WHERE last_error IS NOT NULL
+                      AND ({predicate})
+                    """,
+                    (timestamp, *_INTERRUPTED_CALL_ERROR_MARKERS),
+                )
+                changed += max(0, int(cursor.rowcount))
+        return changed
+
     def enabled(self, name: str) -> bool:
         with self._read_snapshot() as conn:
             row = conn.execute("SELECT enabled FROM provider_status WHERE name = ?", (name,)).fetchone()

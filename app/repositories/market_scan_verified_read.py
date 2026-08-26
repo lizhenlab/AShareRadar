@@ -42,14 +42,38 @@ from app.repositories.market_scan_results import required_run_row
 from app.repositories.market_scan_score_diagnostics import (
     read_production_score_contract,
 )
+from app.models.market_scan_execution_session import (
+    build_market_scan_execution_session_evidence,
+)
 
 
 MARKET_SCAN_VERIFIED_RESULT_READ_ARGUMENTS = (
-    "status", "market", "industry", "is_st", "is_new", "min_score", "max_score",
-    "min_trend_score", "max_trend_score", "min_change_pct", "max_change_pct",
-    "min_turnover_rate", "max_turnover_rate", "min_amount", "max_amount",
-    "min_data_quality_score", "max_data_quality_score", "min_confidence", "max_risk",
-    "min_tradability", "keyword", "sort", "order", "symbols", "page", "page_size",
+    "status",
+    "market",
+    "industry",
+    "is_st",
+    "is_new",
+    "min_score",
+    "max_score",
+    "min_trend_score",
+    "max_trend_score",
+    "min_change_pct",
+    "max_change_pct",
+    "min_turnover_rate",
+    "max_turnover_rate",
+    "min_amount",
+    "max_amount",
+    "min_data_quality_score",
+    "max_data_quality_score",
+    "min_confidence",
+    "max_risk",
+    "min_tradability",
+    "keyword",
+    "sort",
+    "order",
+    "symbols",
+    "page",
+    "page_size",
 )
 _SESSION_CLOSE_TOKEN = object()
 
@@ -72,6 +96,8 @@ class VerifiedMarketScanRead(Protocol):
     @property
     def success_score_contract(self) -> MarketScanProductionScoreContract | None: ...
 
+    def execution_session_evidence(self) -> Mapping[str, object]: ...
+
     def results_page(self, **query: object) -> MarketScanResultPage: ...
 
 
@@ -82,6 +108,8 @@ class _VerifiedMarketScanReadSession:
         "_action_source_digest",
         "_active",
         "_capture_state",
+        "_execution_read",
+        "_execution_reader",
         "_page_reader",
         "_page_read",
         "_release_guard",
@@ -102,23 +130,22 @@ class _VerifiedMarketScanReadSession:
         score_contract: MarketScanProductionScoreContract | None,
         state_validator: Callable[[], None],
         page_reader: Callable[[Mapping[str, object]], MarketScanResultPage],
+        execution_reader: Callable[[], Mapping[str, object]],
         release_guard: Callable[[], None],
     ) -> None:
         self._run = run
         self._snapshot_digest = snapshot_digest
         self._action_source_digest = action_source_digest
-        self._capture_state = (
-            MappingProxyType(dict(capture_state))
-            if capture_state is not None
-            else None
-        )
+        self._capture_state = MappingProxyType(dict(capture_state)) if capture_state is not None else None
         self._score_contract = score_contract
         self._thread_id = threading.get_ident()
         self._state_validator = state_validator
         self._page_reader = page_reader
+        self._execution_reader = execution_reader
         self._release_guard = release_guard
         self._active = True
         self._page_read = False
+        self._execution_read = False
 
     @property
     def run(self) -> MarketScanRun:
@@ -151,6 +178,13 @@ class _VerifiedMarketScanReadSession:
             raise RuntimeError("同一已验证榜单读取上下文只能读取一次分页")
         self._page_read = True
         return self._page_reader(query)
+
+    def execution_session_evidence(self) -> Mapping[str, object]:
+        self._require_active()
+        if self._execution_read:
+            raise RuntimeError("同一已验证榜单读取上下文只能投影一次执行会话证据")
+        self._execution_read = True
+        return MappingProxyType(dict(self._execution_reader()))
 
     def _require_active(self) -> None:
         if not self._active:
@@ -200,6 +234,9 @@ def _verified_market_scan_read_in_snapshot(
     def page_reader(query: Mapping[str, object]) -> MarketScanResultPage:
         return _verified_market_scan_result_page(conn, run_row, **query)
 
+    def execution_reader() -> Mapping[str, object]:
+        return _verified_market_scan_execution_session(conn, run_row)
+
     session = _VerifiedMarketScanReadSession(
         run_from_row(run_row),
         snapshot_digest=snapshot_digest,
@@ -208,6 +245,7 @@ def _verified_market_scan_read_in_snapshot(
         score_contract=score_contract,
         state_validator=state_validator,
         page_reader=page_reader,
+        execution_reader=execution_reader,
         release_guard=release_guard,
     )
     try:
@@ -261,9 +299,7 @@ def _connection_state_guard(
 
 def _statement_invalidates_snapshot(statement: str) -> bool:
     normalized = " ".join(statement.upper().split())
-    return normalized.startswith(("BEGIN", "COMMIT", "END", "ROLLBACK")) or (
-        normalized.startswith("PRAGMA QUERY_ONLY") and "=" in normalized
-    )
+    return normalized.startswith(("BEGIN", "COMMIT", "END", "ROLLBACK")) or (normalized.startswith("PRAGMA QUERY_ONLY") and "=" in normalized)
 
 
 def _validate_connection_state(
@@ -278,12 +314,7 @@ def _validate_connection_state(
         current_schema_version = _schema_version(conn)
     except sqlite3.Error as exc:
         raise RuntimeError("已验证榜单读取的 SQLite snapshot 已失效") from exc
-    if (
-        transaction_invalidated
-        or not conn.in_transaction
-        or query_only is None
-        or int(query_only[0]) != 1
-    ):
+    if transaction_invalidated or not conn.in_transaction or query_only is None or int(query_only[0]) != 1:
         raise RuntimeError("已验证榜单读取的 SQLite snapshot 已失效")
     if conn.total_changes != total_changes:
         raise RuntimeError("已验证榜单读取连接在验证后发生了写入")
@@ -303,9 +334,7 @@ def _verified_read_identity(
     inspection = inspect_market_scan_action_source(conn, run_id)
     expected = str(run_row["snapshot_digest"] or "")
     if inspection.snapshot_digest != expected:
-        raise MarketScanSnapshotSealError(
-            f"run {run_id} 已验证快照摘要与同事务批次行不一致"
-        )
+        raise MarketScanSnapshotSealError(f"run {run_id} 已验证快照摘要与同事务批次行不一致")
     return (
         inspection.snapshot_digest,
         inspection.snapshot_digest if inspection.eligible else None,
@@ -361,6 +390,39 @@ def _verified_market_scan_result_page(
     )
 
 
+def _verified_market_scan_execution_session(
+    conn: sqlite3.Connection,
+    run_row: sqlite3.Row,
+) -> Mapping[str, object]:
+    run = run_from_row(run_row)
+    if run.status not in {"success", "degraded"} or run.snapshot_seal_origin != "publication":
+        raise RuntimeError("执行会话证据只接受发布事务封印的终态批次")
+    rows = conn.execute(
+        """
+        SELECT * FROM market_scan_result
+        WHERE run_id = ?
+        ORDER BY symbol
+        """,
+        (run.id,),
+    ).fetchall()
+    if len(rows) != run.total_count:
+        raise MarketScanSnapshotSealError(f"run {run.id} 执行会话结果集不完整：{len(rows)}/{run.total_count}")
+    registered = conn.execute(
+        """
+        SELECT production_score_rule_version, production_score_spec_hash
+        FROM market_scan_rule_contract
+        WHERE rule_version = ?
+        """,
+        (run.rule_version,),
+    ).fetchone()
+    items = _verified_result_items(rows, run=run, registered=registered)
+    return build_market_scan_execution_session_evidence(
+        run,
+        items,
+        canonical_published=True,
+    )
+
+
 def _screen_spec(query: Mapping[str, object]) -> ScreenSpecV2:
     return screen_spec_from_market_scan_filters(
         status=cast(MarketScanResultStatus | None, query["status"]),
@@ -396,16 +458,8 @@ def _verified_result_items(
     registered: sqlite3.Row | None,
 ) -> list[MarketScanResultItem]:
     items = [result_from_row(row) for row in rows]
-    expected_rule = (
-        registered["production_score_rule_version"]
-        if registered is not None
-        else None
-    )
-    expected_hash = (
-        registered["production_score_spec_hash"]
-        if registered is not None
-        else None
-    )
+    expected_rule = registered["production_score_rule_version"] if registered is not None else None
+    expected_hash = registered["production_score_spec_hash"] if registered is not None else None
     for item in items:
         verify_persisted_market_scan_result(
             item,

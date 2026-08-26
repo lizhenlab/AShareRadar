@@ -36,6 +36,8 @@ from app.utils.symbols import standard_symbol
 
 
 CONSISTENCY_MAX_TIMESTAMP_SKEW_SECONDS = 15 * 60
+QUOTE_BATCH_SIZE = 400
+QUOTE_BATCH_CONCURRENCY = 4
 
 
 @dataclass(frozen=True)
@@ -117,11 +119,11 @@ class QuoteCoordinator:
         if len(collected) == len(symbol_list):
             return requested_symbols, symbol_list, collected, []
 
-        errors = await self._fill_realtime_quotes(symbol_list, collected, current)
+        errors = await self._fill_realtime_quotes(symbol_list, collected)
         if len(collected) == len(symbol_list):
             return requested_symbols, symbol_list, collected, errors
 
-        await self._fill_fallback_quotes(symbol_list, collected, current)
+        await self._fill_fallback_quotes(symbol_list, collected, self._now())
         if len(collected) == len(symbol_list):
             await _safe_log_quote_event(self.cache, "fallback", "部分或全部实时数据源失败或无覆盖，缺失个股使用最近有效交易时刻缓存报价")
         return requested_symbols, symbol_list, collected, errors
@@ -135,7 +137,6 @@ class QuoteCoordinator:
         self,
         symbol_list: list[str],
         collected: dict[str, Quote],
-        current: datetime,
     ) -> list[str]:
         errors: list[str] = []
         for attempt in self.runtime.attempts(self.priority("quote"), self.providers, "quote", errors):
@@ -147,7 +148,6 @@ class QuoteCoordinator:
                 remaining,
                 collected,
                 errors,
-                current,
                 fallback_attempt=bool(errors),
             )
         return errors
@@ -158,7 +158,6 @@ class QuoteCoordinator:
         remaining: list[str],
         collected: dict[str, Quote],
         errors: list[str],
-        current: datetime,
         *,
         fallback_attempt: bool,
     ) -> None:
@@ -169,6 +168,10 @@ class QuoteCoordinator:
                 "quote",
                 lambda: attempt.provider.quotes(remaining),
                 request_key=_quote_request_key(remaining),
+                timeout_seconds=_provider_quote_timeout_seconds(
+                    self.settings,
+                    len(remaining),
+                ),
             )
             raw_quotes = result.value
             if not isinstance(raw_quotes, list):
@@ -180,14 +183,18 @@ class QuoteCoordinator:
             matched, missing = _matched_quotes(quotes, remaining)
             if not matched:
                 raise ProviderProtocolError(f"{source} 行情缺失或字段无效：{','.join(missing)}")
-            valid_time_quotes, event_time_errors = _partition_quotes_by_event_time(matched, current)
+            validation_now = self._now()
+            valid_time_quotes, event_time_errors = _partition_quotes_by_event_time(matched, validation_now)
             if not valid_time_quotes:
-                raise ProviderProtocolError(_provider_event_time_error(source, matched, current) or f"{source} 行情事件时间异常")
+                raise ProviderProtocolError(
+                    _provider_event_time_error(source, matched, validation_now)
+                    or f"{source} 行情事件时间异常"
+                )
             if fallback_attempt:
                 valid_time_quotes = [quote.model_copy(update={"fallback_used": True}) for quote in valid_time_quotes]
             await self.runtime.record_attempt_success_async(attempt, "quote", result.latency_ms)
             collected.update(_quotes_by_symbol(valid_time_quotes))
-            await self._save_quotes_best_effort(valid_time_quotes, current)
+            await self._save_quotes_best_effort(valid_time_quotes, validation_now)
             for message in _quote_batch_degradation_messages(
                 source,
                 raw_quotes,
@@ -409,6 +416,15 @@ def _quotes_by_symbol(quotes: Iterable[Quote]) -> dict[str, Quote]:
 
 def _quote_request_key(symbols: Iterable[str]) -> tuple[str, tuple[str, ...]]:
     return "quotes", tuple(sorted(set(symbols)))
+
+
+def _provider_quote_timeout_seconds(settings, symbol_count: int) -> float:
+    base = max(0.0, float(settings.provider_call_timeout_seconds))
+    if symbol_count <= QUOTE_BATCH_SIZE:
+        return base
+    waves = math.ceil(symbol_count / (QUOTE_BATCH_SIZE * QUOTE_BATCH_CONCURRENCY))
+    scan_budget = max(base, float(getattr(settings, "market_scan_quote_batch_timeout_seconds", base)))
+    return min(scan_budget, base * waves + 1.0)
 
 
 def _ordered_quotes(by_symbol: dict[str, Quote], requested_symbols: list[str]) -> list[Quote]:

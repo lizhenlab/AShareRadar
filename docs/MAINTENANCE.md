@@ -55,8 +55,12 @@
 - Keep cross-module private dependencies below all three ratchets: total count, accesses by source module, and accesses against target module. When a private helper becomes cross-domain API, publish a narrow public contract; do not move the same private dependency to another module to satisfy only the total count.
 - Put browser-global `online`, `visibilitychange`, and `pagehide` ownership in disposable controllers with explicit dependencies. A controller that registers listeners must expose idempotent cleanup before it can be reused by a remountable surface.
 
-- Current v6 writes only `full-market-score-v5`; historical
-  `full-market-score-v4` is exact read/replay-only and must never be rewritten.
+- Base `full-market-scan-v6` publication writes only `full-market-score-v5`;
+  historical `full-market-score-v4` and every persisted v5 row are exact
+  read/replay-only and must never be rewritten. A separately verified and
+  manually promoted `full-market-score-v6` probability ranking is a derived
+  immutable projection for one exact newer official run, never an update of the
+  base table.
   Preserve the v5 formula exactly: continuous trend maps linearly to `[-4,+4]`,
   enters `base=clamp(leader-quality+adjustment,0,100)`, and `raw_score=base`;
   rounding is display-only. `score-layer-distribution-v4` remains the publication
@@ -95,6 +99,28 @@
   identical. Keep pending UI polling at 60 attempts including failed requests,
   and stop on terminal state or run change. Do not lower fixed-session, OOS,
   joint-estimand, long-sample or deployment gates.
+- Keep formal joint H5 evidence isolated from qfq and legacy executable-only
+  evidence. It requires an out-of-band digest-pinned licensed registry and raw
+  official sessions, exact D and D+1..D+6 source/outcome bindings, all original
+  decisions, the three conditional entry/exit/net-positive models, 292 mature
+  sessions, 95% labels and every preregistered OOS/proper-score/FDR/calibration/
+  drift/economics gate. Authorization and deployment are separate opaque tokens;
+  deployment freshness is at most 36 hours and cannot reuse the final OOS fold.
+- Preserve v6 ranking separation and fail closure. The bounded probability
+  adjustment is `clip((p-reference_base_rate)*20,-6,6)`. Shadow needs 60 complete
+  post-preregistration Top100 sessions plus the registered economics/risk/
+  capacity/exposure/PBO/DSR gates. Only an out-of-band pinned human `promote`
+  control may authorize later official runs. Store v6 publication/results in
+  their own immutable tables and content-addressed file; verify against unchanged
+  v5 rows on every replay. A pinned human rollback is durable across restart and
+  must restore v5 projection without deleting either publication.
+- Keep `historical_replay_v1` context strictly non-authorizing. Its offline
+  builder must deep-verify and hash the same complete replay bytes, publish the
+  compact context beside that immutable source, and bind filename, byte count,
+  file SHA-256 and internal replay digest. Runtime may expose only aggregate
+  H1/H5/H20 reference metrics with selection/filter false and production effect
+  none. A missing, changed or corrupt historical binding is locally unavailable;
+  it must neither block valid current PIT evidence nor open current filtering.
 - Preserve the source-v3 official-session time binding: quote/bar dates identify
   the source session, while `run.as_of` must resolve that exact latest completed
   session through `market_scan_temporal_contract(..., "official")`. Weekend and
@@ -377,6 +403,7 @@ For any functional change:
 | Full-market scan orchestration, scoring, exact rule/skip/publication contracts, and evaluation | `app/services/market_scan_manager.py`, `app/services/market_scan_execution.py`, `app/services/market_scan_stock_evaluation.py`, `app/services/market_scan_completion.py`, `app/services/market_scan_lifecycle.py`, `app/services/market_scan_scoring.py`, `app/services/market_scan_skip_contract.py`, `app/services/market_scan_skip_pit.py`, `app/services/market_scan_replay.py`, `app/services/market_scan_evaluation.py`, `app/repositories/market_scan_rule_contracts.py`, `app/repositories/market_scan_verified_read.py`, `app/db/market_scan_action_source.py`, `app/api/routes/market_scan.py`, `tools/evaluate_market_scan.py`, `tools/benchmark_market_scan.py` |
 | Full-market snapshot seal and startup migration | `app/db/market_scan_integrity.py` (byte-compatible cursor-streamed v2 SHA with largest-row memory bound), `app/db/schema.py`, `app/db/schema_migrations.py`, `app/db/strategy_lab_schema.py`, `app/models/market_scan_snapshot.py` |
 | Full-market scan persistence/filter/export | `app/market_scan_repository_contracts.py`, `app/repositories/market_scan.py`, `app/repositories/market_scan_lifecycle.py`, `app/repositories/market_scan_lifecycle_support.py`, `app/repositories/market_scan_results.py`, `app/repositories/market_scan_queries.py`, `app/repositories/market_scan_automatic_state.py`, `app/repositories/market_scan_filtering.py`, `app/repositories/market_scan_mapping.py`, `app/repositories/market_scan_context.py`, `app/repositories/market_scan_screening.py`, `app/repositories/market_scan_delta.py`, `app/repositories/market_scan_screen_alert.py`, `app/services/market_scan_export.py` |
+| Formal all-decisions H5 probability and probability-aware v6 ranking | `app/services/market_scan_official_execution.py`, `app/services/market_scan_official_execution_store.py`, `app/services/market_scan_execution_quote.py`, `app/services/market_scan_execution_session.py`, `app/services/market_scan_joint_execution_source.py`, `app/services/market_scan_joint_execution_outcomes.py`, `app/services/market_scan_joint_execution_probability.py`, `app/services/joint_execution_probability_v3.py`, `app/services/market_scan_joint_execution_maintenance.py`, `app/services/market_scan_probability_ranking.py`, `app/services/market_scan_probability_ranking_store.py`, `app/models/joint_execution_probability_v3.py`, `static/js/market-scan-ranking-contracts.js`, `static/js/market-scan-ranking-view.js` (licensed PIT intake, exact all-decisions labels, preregistered OOS/authorization/deployment, current prediction, Shadow, pinned human promotion/rollback, immutable v6 mirror/restart replay, API/UI/Excel audit) |
 | Full-market bounded graph retention | `app/repositories/maintenance.py`, `app/repositories/market_scan_retention.py`, `app/repositories/runtime_research_artifact_retention.py`, `app/db/market_scan_integrity.py`, `app/config_settings.py` (keep-window candidates; database/retry/file reachability; explicit-transaction whole-graph deletion; five-trigger restoration; fail-closed artifact fingerprints) |
 | Discovery presets and queue provenance | `app/api/routes/discovery.py`, `app/services/discovery.py`, `app/repositories/discovery.py`, `app/repositories/discovery_sql.py`, `app/db/discovery_schema.py`, `app/models/discovery.py`, `static/js/discovery.js`, `static/js/market-scan-filters.js` |
 | Analysis assembly | `app/services/analysis.py` (trend metrics, signal bundle, result composition), `app/services/strong_stocks.py`, `app/services/leader_scoring.py` |

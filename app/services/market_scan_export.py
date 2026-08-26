@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -19,13 +19,17 @@ from app.market_scan_screening import (
     screen_spec_from_market_scan_filters,
 )
 from app.models.market_scan import (
+    MarketScanMode,
     MarketScanResultItem,
     MarketScanResultPage,
     MarketScanResultStatus,
+    MarketScanRun,
     MarketScanSort,
     MarketScanSortOrder,
 )
 from app.models.market_scan_screening import ScreenSpecV2
+from app.services.market_scan_probability_store import ProbabilityResearchUnavailable
+from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.utils.time import datetime_to_text
 
 
@@ -63,65 +67,177 @@ _SORT_LABELS: Final = {
     "symbol": "股票代码",
 }
 _RESULT_COLUMNS: Final = (
-    ("排名", 9), ("股票代码", 12), ("交易所代码", 15), ("股票名称", 18),
-    ("市场", 9), ("上市板块", 18), ("行业", 18), ("上市日期", 13), ("ST", 8), ("新股", 8),
-    ("结果状态", 12), ("趋势强度", 14), ("原始得分", 14), ("基础趋势分", 11),
-    ("龙头分", 11), ("最新价", 12), ("涨跌幅(%)", 13), ("换手率(%)", 13),
-    ("量比", 10), ("成交额(元)", 18), ("数据质量", 12), ("标签", 28),
-    ("说明", 36), ("错误", 36), ("行情日期", 13), ("行情时间", 22),
-    ("行情来源", 15), ("日K来源", 15), ("复权方式", 12), ("降级原因", 28),
+    ("排名", 9),
+    ("股票代码", 12),
+    ("交易所代码", 15),
+    ("股票名称", 18),
+    ("市场", 9),
+    ("上市板块", 18),
+    ("行业", 18),
+    ("上市日期", 13),
+    ("ST", 8),
+    ("新股", 8),
+    ("结果状态", 12),
+    ("趋势强度", 14),
+    ("原始得分", 14),
+    ("基础趋势分", 11),
+    ("龙头分", 11),
+    ("最新价", 12),
+    ("涨跌幅(%)", 13),
+    ("换手率(%)", 13),
+    ("量比", 10),
+    ("成交额(元)", 18),
+    ("数据质量", 12),
+    ("标签", 28),
+    ("说明", 36),
+    ("错误", 36),
+    ("行情日期", 13),
+    ("行情时间", 22),
+    ("行情来源", 15),
+    ("日K来源", 15),
+    ("复权方式", 12),
+    ("降级原因", 28),
     ("更新时间", 22),
+    ("生产评分规则", 24),
+    ("v5基础排名", 12),
+    ("v5基础整数分", 14),
+    ("v5基础原始分", 16),
+    ("H5概率调整分", 16),
+    ("v6排名产物摘要", 66),
+    ("H5净正收益概率", 18),
+    ("H5参考基础胜率", 18),
 )
 _RESULT_LAST_COLUMN: Final = get_column_letter(len(_RESULT_COLUMNS))
 _DETAIL_COLUMNS: Final = (
-    ("批次 ID", 10), ("股票代码", 12), ("交易所代码", 15), ("最终分", 10),
-    ("原始排名分", 15), ("趋势分", 10), ("龙头分", 10), ("数据质量", 12),
-    ("龙头基础分", 14), ("趋势增减分", 14), ("规则增减分", 42), ("质量扣分", 12),
-    ("扣分前基础分", 16), ("连续趋势/旧精排值", 20),
+    ("批次 ID", 10),
+    ("股票代码", 12),
+    ("交易所代码", 15),
+    ("最终分", 10),
+    ("原始排名分", 15),
+    ("趋势分", 10),
+    ("龙头分", 10),
+    ("数据质量", 12),
+    ("龙头基础分", 14),
+    ("趋势增减分", 14),
+    ("规则增减分", 42),
+    ("质量扣分", 12),
+    ("扣分前基础分", 16),
+    ("连续趋势/旧精排值", 20),
     ("连续趋势/旧精排组成", 54),
     ("基础分调整（旧版为负精排扣分）", 30),
-    ("Tie-break 规则", 34), ("Tie-break 值", 34), ("规则版本", 34), ("规则哈希", 66),
-    ("1日Alpha", 12), ("5日Alpha", 12), ("20日Alpha", 12), ("置信度", 12),
-    ("风险分", 12), ("可交易性", 12), ("稳健效用", 12), ("均衡效用", 12), ("进取效用", 12),
-    ("时点证据状态", 28), ("时点证据摘要", 66),
+    ("Tie-break 规则", 34),
+    ("Tie-break 值", 34),
+    ("规则版本", 34),
+    ("规则哈希", 66),
+    ("1日Alpha", 12),
+    ("5日Alpha", 12),
+    ("20日Alpha", 12),
+    ("置信度", 12),
+    ("风险分", 12),
+    ("可交易性", 12),
+    ("稳健效用", 12),
+    ("均衡效用", 12),
+    ("进取效用", 12),
+    ("时点证据状态", 28),
+    ("时点证据摘要", 66),
 )
 _DETAIL_LAST_COLUMN: Final = get_column_letter(len(_DETAIL_COLUMNS))
 _PROBABILITY_HORIZONS: Final = (1, 5, 20)
 _PROBABILITY_TARGETS: Final = ("net_excess_positive", "absolute_net_positive")
 _PROBABILITY_COLUMNS: Final = (
-    ("批次 ID", 10), ("股票代码", 12), ("交易所代码", 15), ("股票名称", 18),
-    ("持有周期(交易日)", 18), ("目标退出日", 12), ("目标", 22), ("状态", 20),
-    ("概率", 12), ("有符号校准偏差下限", 22), ("有符号校准偏差上限", 22),
-    ("校准调整概率下限", 20), ("校准调整概率上限", 20), ("区间水平", 12),
-    ("区间口径", 58), ("基础胜率", 12), ("版本", 52), ("训练截止", 14),
-    ("Digests", 68), ("局限", 60),
+    ("批次 ID", 10),
+    ("股票代码", 12),
+    ("交易所代码", 15),
+    ("股票名称", 18),
+    ("持有周期(交易日)", 18),
+    ("目标退出日", 12),
+    ("目标", 22),
+    ("状态", 20),
+    ("概率", 12),
+    ("有符号校准偏差下限", 22),
+    ("有符号校准偏差上限", 22),
+    ("校准调整概率下限", 20),
+    ("校准调整概率上限", 20),
+    ("区间水平", 12),
+    ("区间口径", 58),
+    ("基础胜率", 12),
+    ("版本", 52),
+    ("训练截止", 14),
+    ("Digests", 68),
+    ("局限", 60),
 )
 _PROBABILITY_LAST_COLUMN: Final = get_column_letter(len(_PROBABILITY_COLUMNS))
 _FUTURE_RANGE_COLUMNS: Final = (
-    ("研究状态", 18), ("批次 ID", 10), ("股票代码", 15), ("股票名称", 18),
-    ("市场", 9), ("行业", 18), ("排名", 9), ("原始得分", 14), ("趋势分", 10),
-    ("未来交易日", 12), ("目标交易日", 14), ("固定交易日状态", 18), ("缺失原因", 30),
-    ("D日日期", 14), ("D日开盘", 12), ("D日最低", 12),
-    ("D日HLC3代理(非VWAP)", 22), ("D日最高", 12), ("D日收盘", 12),
-    ("目标日开盘", 12), ("目标日最低", 12), ("目标日HLC3代理(非VWAP)", 24),
-    ("目标日最高", 12), ("目标日收盘", 12),
-    ("同名最低变化", 14), ("同名HLC3代理变化", 20), ("同名最高变化", 14),
-    ("相对D收盘最低", 16), ("相对D收盘HLC3代理", 22),
-    ("相对D收盘最高", 16), ("相对D收盘收盘", 16),
-    ("D+1开盘入场日", 16), ("D+1开盘参考价", 16),
-    ("指定日最低收益", 16), ("指定日HLC3代理收益", 22),
-    ("指定日最高收益", 16), ("指定日收盘收益", 16),
-    ("累计MAE", 13), ("累计MFE", 13), ("终点收盘收益", 16),
-    ("标准化区间宽度", 17), ("区间宽度变化", 16), ("区间重叠率", 14),
-    ("更高高点", 12), ("更高低点", 12), ("完整向上缺口", 15), ("完整向下缺口", 15),
-    ("执行状态", 18), ("执行不可用原因", 32),
-    ("执行入场日", 14), ("执行入场价", 14), ("执行退出日", 14), ("执行退出价", 14),
-    ("执行毛收益", 13), ("执行净收益", 13), ("市场基准净收益", 18),
-    ("执行净超额收益", 17), ("执行成本拖累", 15),
-    ("成本模型版本", 28), ("成本档位", 18), ("执行名义金额", 16),
-    ("最大日参与率", 16), ("日线执行模型受限", 20),
-    ("概率状态", 18), ("上涨概率上下文", 58), ("时点证据", 58),
-    ("目标K线摘要", 66), ("复权方式", 12), ("数据版本", 28), ("K线契约版本", 28),
+    ("研究状态", 18),
+    ("批次 ID", 10),
+    ("股票代码", 15),
+    ("股票名称", 18),
+    ("市场", 9),
+    ("行业", 18),
+    ("排名", 9),
+    ("原始得分", 14),
+    ("趋势分", 10),
+    ("未来交易日", 12),
+    ("目标交易日", 14),
+    ("固定交易日状态", 18),
+    ("缺失原因", 30),
+    ("D日日期", 14),
+    ("D日开盘", 12),
+    ("D日最低", 12),
+    ("D日HLC3代理(非VWAP)", 22),
+    ("D日最高", 12),
+    ("D日收盘", 12),
+    ("目标日开盘", 12),
+    ("目标日最低", 12),
+    ("目标日HLC3代理(非VWAP)", 24),
+    ("目标日最高", 12),
+    ("目标日收盘", 12),
+    ("同名最低变化", 14),
+    ("同名HLC3代理变化", 20),
+    ("同名最高变化", 14),
+    ("相对D收盘最低", 16),
+    ("相对D收盘HLC3代理", 22),
+    ("相对D收盘最高", 16),
+    ("相对D收盘收盘", 16),
+    ("D+1开盘入场日", 16),
+    ("D+1开盘参考价", 16),
+    ("指定日最低收益", 16),
+    ("指定日HLC3代理收益", 22),
+    ("指定日最高收益", 16),
+    ("指定日收盘收益", 16),
+    ("累计MAE", 13),
+    ("累计MFE", 13),
+    ("终点收盘收益", 16),
+    ("标准化区间宽度", 17),
+    ("区间宽度变化", 16),
+    ("区间重叠率", 14),
+    ("更高高点", 12),
+    ("更高低点", 12),
+    ("完整向上缺口", 15),
+    ("完整向下缺口", 15),
+    ("执行状态", 18),
+    ("执行不可用原因", 32),
+    ("执行入场日", 14),
+    ("执行入场价", 14),
+    ("执行退出日", 14),
+    ("执行退出价", 14),
+    ("执行毛收益", 13),
+    ("执行净收益", 13),
+    ("市场基准净收益", 18),
+    ("执行净超额收益", 17),
+    ("执行成本拖累", 15),
+    ("成本模型版本", 28),
+    ("成本档位", 18),
+    ("执行名义金额", 16),
+    ("最大日参与率", 16),
+    ("日线执行模型受限", 20),
+    ("概率状态", 18),
+    ("上涨概率上下文", 58),
+    ("时点证据", 58),
+    ("目标K线摘要", 66),
+    ("复权方式", 12),
+    ("数据版本", 28),
+    ("K线契约版本", 28),
 )
 _FUTURE_RANGE_LAST_COLUMN: Final = get_column_letter(len(_FUTURE_RANGE_COLUMNS))
 
@@ -191,6 +307,16 @@ class MarketScanWorkbookExport:
     row_count: int
 
 
+def validate_market_scan_export_run(run: MarketScanRun) -> None:
+    """Fail closed before an export reads any optional research artifact."""
+    if run.status not in PUBLISHED_MARKET_SCAN_STATUSES:
+        raise ProbabilityResearchUnavailable("只有已发布的全市场榜单可以导出 Excel")
+    if run.mode not in {"official", "intraday"} or run.scope != FULL_MARKET_SCOPE:
+        raise ProbabilityResearchUnavailable("只有盘后正式或盘中临时全市场榜单可以导出 Excel")
+    if run.mode == "official" and run.quote_date != run.data_date:
+        raise ProbabilityResearchUnavailable("盘后正式榜单导出要求行情日期与完整日K截止日一致")
+
+
 def build_market_scan_workbook(
     page: MarketScanResultPage,
     filters: MarketScanExportFilters,
@@ -246,16 +372,47 @@ def _populate_results_sheet(sheet, items: list[MarketScanResultItem]) -> None:
 
 def _result_row(item: MarketScanResultItem) -> list[object]:
     return [
-        item.rank, _safe_text(item.code.zfill(6)), _safe_text(item.symbol), _safe_text(item.name),
-        _safe_text(item.market), _safe_text(market_scan_board_label(item.code, item.market)),
-        _safe_text(item.industry), _safe_text(item.list_date),
-        "是" if item.is_st else "否", "是" if item.is_new else "否", _STATUS_LABELS[item.status],
-        item.score, item.raw_score, item.trend_score, item.leader_score, item.price,
-        item.change_pct, item.turnover_rate, item.volume_ratio, item.amount,
-        item.data_quality_score, _safe_text("、".join(item.tags)), _safe_text(item.reason),
-        _safe_text(item.error), _safe_text(item.data_date), _safe_text(item.quote_timestamp),
-        _safe_text(item.quote_source), _safe_text(item.kline_source), _safe_text(item.adjustment_mode),
-        _safe_text("、".join(item.degradation_reasons)), _safe_text(item.updated_at),
+        item.rank,
+        _safe_text(item.code.zfill(6)),
+        _safe_text(item.symbol),
+        _safe_text(item.name),
+        _safe_text(item.market),
+        _safe_text(market_scan_board_label(item.code, item.market)),
+        _safe_text(item.industry),
+        _safe_text(item.list_date),
+        "是" if item.is_st else "否",
+        "是" if item.is_new else "否",
+        _STATUS_LABELS[item.status],
+        item.score,
+        item.raw_score,
+        item.trend_score,
+        item.leader_score,
+        item.price,
+        item.change_pct,
+        item.turnover_rate,
+        item.volume_ratio,
+        item.amount,
+        item.data_quality_score,
+        _safe_text("、".join(item.tags)),
+        _safe_text(item.reason),
+        _safe_text(item.error),
+        _safe_text(item.data_date),
+        _safe_text(item.quote_timestamp),
+        _safe_text(item.quote_source),
+        _safe_text(item.kline_source),
+        _safe_text(item.adjustment_mode),
+        _safe_text("、".join(item.degradation_reasons)),
+        _safe_text(item.updated_at),
+        _safe_text(item.production_score_rule_version),
+        item.base_production_rank,
+        item.base_production_score,
+        item.base_production_raw_score,
+        item.probability_ranking_adjustment,
+        _safe_text(item.probability_ranking_artifact_digest),
+        _probability_number(item.probability_ranking_details.get("probability")),
+        _probability_number(
+            item.probability_ranking_details.get("reference_base_rate")
+        ),
     ]
 
 
@@ -270,6 +427,13 @@ def _format_result_columns(sheet, item_count: int) -> None:
         sheet.cell(row, 20).number_format = "#,##0.00"
         for column in (22, 23, 24, 30):
             sheet.cell(row, column).alignment = Alignment(wrap_text=True, vertical="top")
+        for column in (33, 34):
+            sheet.cell(row, column).number_format = "0"
+        for column in (35, 36):
+            sheet.cell(row, column).number_format = "0.000000"
+        for column in (38, 39):
+            sheet.cell(row, column).number_format = "0.00%"
+        sheet.cell(row, 37).alignment = Alignment(wrap_text=True, vertical="top")
 
 
 def market_scan_board_label(code: str, market: str) -> str:
@@ -326,14 +490,26 @@ def _score_detail_row(item: MarketScanResultItem) -> list[object]:
     utilities = _mapping(dimension_scores.get("decision_utility"))
     evidence = _mapping(dimensions.get("point_in_time_evidence"))
     return [
-        item.run_id, _safe_text(item.code.zfill(6)), _safe_text(item.symbol), item.score,
-        item.raw_score, item.trend_score, item.leader_score, item.data_quality_score,
-        _finite_number(leader.get("base")), _finite_number(leader.get("trend_delta")),
-        _safe_json(leader.get("rule_deltas")), _finite_number(final_score.get("quality_penalty")),
-        _finite_number(final_score.get("base")), _finite_number(continuous_trend.get("score")),
-        _safe_json(continuous_trend.get("weighted_terms")), _finite_number(score_adjustment),
-        _safe_json(ranking.get("tie_break")), _safe_json(ranking.get("tie_break_values")),
-        _safe_text(details.get("run_rule_version")), _safe_text(details.get("score_spec_hash")),
+        item.run_id,
+        _safe_text(item.code.zfill(6)),
+        _safe_text(item.symbol),
+        item.score,
+        item.raw_score,
+        item.trend_score,
+        item.leader_score,
+        item.data_quality_score,
+        _finite_number(leader.get("base")),
+        _finite_number(leader.get("trend_delta")),
+        _safe_json(leader.get("rule_deltas")),
+        _finite_number(final_score.get("quality_penalty")),
+        _finite_number(final_score.get("base")),
+        _finite_number(continuous_trend.get("score")),
+        _safe_json(continuous_trend.get("weighted_terms")),
+        _finite_number(score_adjustment),
+        _safe_json(ranking.get("tie_break")),
+        _safe_json(ranking.get("tie_break_values")),
+        _safe_text(details.get("run_rule_version")),
+        _safe_text(details.get("score_spec_hash")),
         _finite_number(dimension_scores.get("alpha_1d")),
         _finite_number(dimension_scores.get("alpha_5d")),
         _finite_number(dimension_scores.get("alpha_20d")),
@@ -393,10 +569,7 @@ def _probability_rows(page: MarketScanResultPage) -> Iterator[list[object]]:
             studies = _mapping(research_horizons.get(str(horizon)))
             for target in _PROBABILITY_TARGETS:
                 record = _target_mapping(records, target)
-                if (
-                    record.get("status") != "calibrated_shadow"
-                    or _probability_number(record.get("probability")) is None
-                ):
+                if record.get("status") != "calibrated_shadow" or _probability_number(record.get("probability")) is None:
                     continue
                 study = _target_mapping(studies, target)
                 yield _probability_row(item, horizon, target, record, study)
@@ -412,10 +585,12 @@ def _probability_row(
     status = _safe_text(record.get("status") or "not_generated")
     probability = _probability_number(record.get("probability")) if status == "calibrated_shadow" else None
     bias_lower, bias_upper, level = _calibration_bias_interval(
-        record.get("calibration_bias_interval"), probability,
+        record.get("calibration_bias_interval"),
+        probability,
     )
     adjusted_lower, adjusted_upper, adjusted_level = _probability_interval(
-        record.get("calibration_adjusted_probability_interval"), probability,
+        record.get("calibration_adjusted_probability_interval"),
+        probability,
     )
     if level != adjusted_level:
         bias_lower = bias_upper = adjusted_lower = adjusted_upper = level = None
@@ -424,13 +599,26 @@ def _probability_row(
     digests = _probability_digests(record, study)
     limitations = record.get("limitations") if "limitations" in record else study.get("limitations")
     return [
-        item.run_id, _safe_text(item.code.zfill(6)), _safe_text(item.symbol), _safe_text(item.name),
-        horizon, f"D+{horizon + 1}", _safe_text(target), status, probability,
-        bias_lower, bias_upper, adjusted_lower, adjusted_upper, level,
+        item.run_id,
+        _safe_text(item.code.zfill(6)),
+        _safe_text(item.symbol),
+        _safe_text(item.name),
+        horizon,
+        f"D+{horizon + 1}",
+        _safe_text(target),
+        status,
+        probability,
+        bias_lower,
+        bias_upper,
+        adjusted_lower,
+        adjusted_upper,
+        level,
         "有符号偏差与群体校准调整概率区间；不是个股结果区间",
-        base_rate, _safe_json(versions) if versions else "",
+        base_rate,
+        _safe_json(versions) if versions else "",
         _safe_text(record.get("training_cutoff") or study.get("training_cutoff")),
-        _safe_json(digests) if digests else "", _safe_text("；".join(_string_values(limitations))),
+        _safe_json(digests) if digests else "",
+        _safe_text("；".join(_string_values(limitations))),
     ]
 
 
@@ -481,9 +669,7 @@ def _future_range_rows(
     generation_status = _safe_text(wrapper.get("generation_status") or "not_generated")
     record_page = _mapping(wrapper.get("record_page"))
     research = _mapping(wrapper.get("research"))
-    execution_contract = _mapping(
-        _mapping(research.get("config")).get("execution_label_contract")
-    )
+    execution_contract = _mapping(_mapping(research.get("config")).get("execution_label_contract"))
     records = record_page.get("items")
     if not isinstance(records, list) or not records:
         yield _empty_future_range_row(generation_status, run_id)
@@ -697,10 +883,10 @@ def _probability_interval(value: object, probability: float | None) -> tuple[flo
     if lower_number is None or upper_number is None or level_number is None:
         return None, None, None
     if (
-        lower_number > upper_number or level_number != 0.95
+        lower_number > upper_number
+        or level_number != 0.95
         or value.get("method") != "date_block_bootstrap_calibration_offset"
-        or value.get("semantics")
-        != "calibration_adjusted_probability_interval_not_individual_outcome_interval"
+        or value.get("semantics") != "calibration_adjusted_probability_interval_not_individual_outcome_interval"
     ):
         return None, None, None
     return lower_number, upper_number, level_number
@@ -715,7 +901,9 @@ def _calibration_bias_interval(
     lower, upper = _finite_number(value.get("lower")), _finite_number(value.get("upper"))
     level = _probability_number(value.get("level"))
     if (
-        lower is None or upper is None or level != 0.95
+        lower is None
+        or upper is None
+        or level != 0.95
         or not -1 <= lower <= upper <= 1
         or value.get("method") != "date_block_bootstrap_signed_calibration_bias"
         or value.get("semantics") != "signed_observed_rate_minus_probability_bias"
@@ -727,8 +915,12 @@ def _calibration_bias_interval(
 def _probability_versions(record: dict[str, object], study: dict[str, object]) -> dict[str, object]:
     versions = {**_mapping(study.get("versions")), **_mapping(record.get("versions"))}
     flat_keys = {
-        "model": "model_version", "calibrator": "calibrator_version", "feature": "feature_version",
-        "label": "label_version", "cost_model": "cost_model_version", "benchmark": "benchmark_version",
+        "model": "model_version",
+        "calibrator": "calibrator_version",
+        "feature": "feature_version",
+        "label": "label_version",
+        "cost_model": "cost_model_version",
+        "benchmark": "benchmark_version",
     }
     for name, key in flat_keys.items():
         value = record.get(key) or study.get(key)
@@ -740,8 +932,10 @@ def _probability_versions(record: dict[str, object], study: dict[str, object]) -
 def _probability_digests(record: dict[str, object], study: dict[str, object]) -> dict[str, object]:
     digests = {**_mapping(study.get("digests")), **_mapping(record.get("digests"))}
     flat_keys = {
-        "input": ("input_digest",), "model": ("model_digest",),
-        "calibrator": ("calibrator_digest",), "baseline": ("baseline_digest",),
+        "input": ("input_digest",),
+        "model": ("model_digest",),
+        "calibrator": ("calibrator_digest",),
+        "baseline": ("baseline_digest",),
         "evidence": ("artifact_id", "evidence_digest"),
     }
     for name, keys in flat_keys.items():
@@ -760,18 +954,103 @@ def _string_values(value: object) -> list[str]:
 
 
 def _populate_info_sheet(sheet, page: MarketScanResultPage, filters: MarketScanExportFilters, exported_at: datetime) -> None:
+    rows = _info_sheet_rows(page, filters, exported_at)
+    sheet.append(["字段", "内容"])
+    for key, value in rows:
+        sheet.append([key, _safe_text(value) if isinstance(value, str) else value])
+    _style_info_sheet(sheet)
+
+
+def _info_sheet_rows(
+    page: MarketScanResultPage,
+    filters: MarketScanExportFilters,
+    exported_at: datetime,
+) -> tuple[tuple[str, object], ...]:
     run = page.run
     screen_spec = _export_screen_spec(filters)
-    rows = (
-        ("项目", "AShareRadar"), ("导出类型", "全市场A股榜单"), ("批次 ID", run.id),
-        ("榜单类型", _MODE_LABELS[run.mode]), ("批次状态", run.status), ("触发方式", run.trigger),
-        ("批次基准时间", run.as_of), ("行情日期", run.quote_date),
-        ("日K截止日", run.data_date), ("扫描完成时间", _text_or(run.finished_at, "--")), ("规则版本", run.rule_version),
+    ranking = _mapping(page.production_ranking)
+    ranking_active = ranking.get("status") == "active"
+    return (
+        *_run_identity_info_rows(run),
+        *_ranking_info_rows(ranking, active=ranking_active),
+        *_run_scope_info_rows(run),
+        *_filter_info_rows(filters),
+        ("筛选合同", screen_spec.schema_version),
+        ("筛选摘要", screen_spec_digest(screen_spec)),
+        ("筛选合同 JSON", _safe_json(screen_spec.model_dump(mode="json"))),
+        ("导出条数", page.total),
+        ("导出时间", datetime_to_text(exported_at)),
+        ("数据说明", _info_data_note(run.mode)),
+    )
+
+
+def _run_identity_info_rows(run: MarketScanRun) -> tuple[tuple[str, object], ...]:
+    return (
+        ("项目", "AShareRadar"),
+        ("导出类型", "全市场A股榜单"),
+        ("批次 ID", run.id),
+        ("榜单类型", _MODE_LABELS[run.mode]),
+        ("批次状态", run.status),
+        ("触发方式", run.trigger),
+        ("批次基准时间", run.as_of),
+        ("行情日期", run.quote_date),
+        ("日K截止日", run.data_date),
+        ("扫描完成时间", _text_or(run.finished_at, "--")),
+        ("规则版本", run.rule_version),
         ("快照摘要", _text_or(run.snapshot_digest, "--")),
+    )
+
+
+def _ranking_info_rows(
+    ranking: Mapping[str, object],
+    *,
+    active: bool,
+) -> tuple[tuple[str, object], ...]:
+    return (
+        ("概率生产排名状态", "v6 已启用" if active else "未启用，使用原 v5"),
+        (
+            "当前生产评分规则",
+            _text_or(
+                _optional_text(ranking.get("score_rule_version"))
+                if active
+                else None,
+                "full-market-score-v5",
+            ),
+        ),
+        (
+            "v6 排名产物摘要",
+            _text_or(
+                _optional_text(ranking.get("artifact_digest"))
+                if active
+                else None,
+                "--",
+            ),
+        ),
+        (
+            "人工晋级控制摘要",
+            _text_or(
+                _optional_text(ranking.get("promotion_digest"))
+                if active
+                else None,
+                "--",
+            ),
+        ),
+        ("v5/历史排名改写", "否"),
+    )
+
+
+def _run_scope_info_rows(run: MarketScanRun) -> tuple[tuple[str, object], ...]:
+    return (
         ("封印来源", _text_or(run.snapshot_seal_origin, "--")),
         ("封印时间", _text_or(run.snapshot_sealed_at, "--")),
-        ("股票池范围", run.scope), ("股票池来源", _text_or(run.stock_pool_source, "--")),
+        ("股票池范围", run.scope),
+        ("股票池来源", _text_or(run.stock_pool_source, "--")),
         ("有效覆盖率", f"{run.coverage_pct:.2f}%"),
+    )
+
+
+def _filter_info_rows(filters: MarketScanExportFilters) -> tuple[tuple[str, object], ...]:
+    return (
         ("筛选状态", _status_filter_label(filters.status)),
         ("筛选市场", _filter_values_label(filters.market, "全部市场")),
         ("筛选行业", _filter_values_label(filters.industry, "不限")),
@@ -790,21 +1069,19 @@ def _populate_info_sheet(sheet, page: MarketScanResultPage, filters: MarketScanE
         ("最低上涨概率", _probability_filter_label(filters.min_upside_probability)),
         ("搜索关键词", _text_or(filters.keyword, "无")),
         ("排序", _sort_filter_label(filters.sort, filters.order)),
-        ("筛选合同", screen_spec.schema_version),
-        ("筛选摘要", screen_spec_digest(screen_spec)),
-        ("筛选合同 JSON", _safe_json(screen_spec.model_dump(mode="json"))),
-        ("导出条数", page.total), ("导出时间", datetime_to_text(exported_at)),
-        (
-            "数据说明",
+    )
+
+
+def _info_data_note(mode: MarketScanMode) -> str:
+    if mode == "intraday":
+        return (
             "仅导出已持久化的盘中临时榜单快照，不会重新获取行情或重新计算；"
             "上涨概率研究与未来区间验证未生成。"
-            if run.mode == "intraday"
-            else "仅导出已持久化榜单快照，不会重新获取行情或重新计算。",
-        ),
-    )
-    sheet.append(["字段", "内容"])
-    for key, value in rows:
-        sheet.append([key, _safe_text(value) if isinstance(value, str) else value])
+        )
+    return "仅导出已持久化榜单快照，不会重新获取行情或重新计算。"
+
+
+def _style_info_sheet(sheet) -> None:
     sheet.freeze_panes = "A2"
     sheet.column_dimensions["A"].width = 20
     sheet.column_dimensions["B"].width = 72
@@ -819,18 +1096,29 @@ def _populate_info_sheet(sheet, page: MarketScanResultPage, filters: MarketScanE
 
 def _export_screen_spec(filters: MarketScanExportFilters) -> ScreenSpecV2:
     return screen_spec_from_market_scan_filters(
-        status=filters.status, market=filters.market, industry=filters.industry,
-        is_st=filters.is_st, is_new=filters.is_new,
-        min_score=filters.min_score, max_score=filters.max_score,
-        min_trend_score=filters.min_trend_score, max_trend_score=filters.max_trend_score,
-        min_change_pct=filters.min_change_pct, max_change_pct=filters.max_change_pct,
-        min_turnover_rate=filters.min_turnover_rate, max_turnover_rate=filters.max_turnover_rate,
-        min_amount=filters.min_amount, max_amount=filters.max_amount,
+        status=filters.status,
+        market=filters.market,
+        industry=filters.industry,
+        is_st=filters.is_st,
+        is_new=filters.is_new,
+        min_score=filters.min_score,
+        max_score=filters.max_score,
+        min_trend_score=filters.min_trend_score,
+        max_trend_score=filters.max_trend_score,
+        min_change_pct=filters.min_change_pct,
+        max_change_pct=filters.max_change_pct,
+        min_turnover_rate=filters.min_turnover_rate,
+        max_turnover_rate=filters.max_turnover_rate,
+        min_amount=filters.min_amount,
+        max_amount=filters.max_amount,
         min_data_quality_score=filters.min_data_quality_score,
         max_data_quality_score=filters.max_data_quality_score,
-        min_confidence=filters.min_confidence, max_risk=filters.max_risk,
-        min_tradability=filters.min_tradability, keyword=filters.keyword,
-        sort=filters.sort, order=filters.order,
+        min_confidence=filters.min_confidence,
+        max_risk=filters.max_risk,
+        min_tradability=filters.min_tradability,
+        keyword=filters.keyword,
+        sort=filters.sort,
+        order=filters.order,
     )
 
 
@@ -855,6 +1143,10 @@ def _safe_json(value: object) -> str:
 
 def _mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
+
+
+def _optional_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _finite_number(value: object) -> int | float | None:
@@ -929,10 +1221,7 @@ def _sort_filter_label(
 ) -> str:
     sorts = (sort,) if isinstance(sort, str) else tuple(sort)
     orders = (order,) if isinstance(order, str) else tuple(order)
-    return " → ".join(
-        f"{_SORT_LABELS[field]}（{_sort_order_label(direction)}）"
-        for field, direction in zip(sorts, orders, strict=False)
-    )
+    return " → ".join(f"{_SORT_LABELS[field]}（{_sort_order_label(direction)}）" for field, direction in zip(sorts, orders, strict=False))
 
 
 def _sort_order_label(value: MarketScanSortOrder) -> str:
@@ -955,4 +1244,5 @@ __all__ = [
     "MarketScanWorkbookExport",
     "build_market_scan_workbook",
     "market_scan_board_label",
+    "validate_market_scan_export_run",
 ]

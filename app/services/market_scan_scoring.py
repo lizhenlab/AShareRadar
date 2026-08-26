@@ -57,6 +57,10 @@ from app.services.market_scan_score_dimensions import (
     build_market_scan_score_dimensions,
     verify_market_scan_point_in_time_evidence_context,
 )
+from app.services.market_scan_execution_quote import (
+    MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY,
+    build_market_scan_execution_quote_evidence,
+)
 from app.services.market_scan_session_coverage import build_market_scan_session_coverage
 from app.services.market_scan_skip_contract import (
     MarketScanSkipped,
@@ -418,9 +422,11 @@ def _score_market_scan_item(
         quote=quote,
         rows=completed_rows,
         latest_date=latest_date,
+        quote_date=expected_quote_date,
         calculated=calculated,
         mode=mode,
         rule_version=rule_version,
+        quote_observed_at=quote_observed_at,
     )
 
 
@@ -541,12 +547,93 @@ def _market_scan_result(
     item: MarketScanResultItem, quote: Quote,
     rows: list[Kline],
     latest_date: date,
+    quote_date: date,
     calculated: _MarketScanScore,
     mode: MarketScanMode,
     rule_version: str | None,
+    quote_observed_at: str | None,
 ) -> MarketScanResultWrite:
     provenance = _market_scan_provenance(item, quote, rows)
     tags = tuple(dict.fromkeys((*calculated.tags, *_metadata_tags_for_result(item, calculated.quality.score, provenance))))
+    score_details = _market_scan_score_details(
+        item=item,
+        quote=quote,
+        rows=rows,
+        quote_date=quote_date,
+        calculated=calculated,
+        mode=mode,
+        rule_version=rule_version,
+        quote_observed_at=quote_observed_at,
+    )
+    return _successful_market_scan_write(
+        item=item,
+        quote=quote,
+        rows=rows,
+        latest_date=latest_date,
+        calculated=calculated,
+        tags=tags,
+        provenance=provenance,
+        score_details=score_details,
+    )
+
+
+def _market_scan_score_details(
+    *,
+    item: MarketScanResultItem,
+    quote: Quote,
+    rows: list[Kline],
+    quote_date: date,
+    calculated: _MarketScanScore,
+    mode: MarketScanMode,
+    rule_version: str | None,
+    quote_observed_at: str | None,
+) -> dict[str, object]:
+    details = _score_details(
+        item=item,
+        inputs=calculated.leader_inputs,
+        leader_breakdown=calculated.leader_breakdown,
+        rank_refinement=calculated.rank_refinement,
+        quality_score=calculated.quality.score,
+        quality_penalty=calculated.quality_penalty,
+        continuous_trend_adjustment=calculated.continuous_trend_adjustment,
+        base_score=calculated.base_score,
+        score=calculated.score,
+        raw_score=calculated.raw_score,
+        rounded_score=calculated.rounded_score,
+        dimensions=build_market_scan_score_dimensions(
+            item,
+            quote,
+            rows,
+            data_quality_score=calculated.quality.score,
+            volume_ratio=calculated.volume_ratio,
+            mode=mode,
+        ),
+        score_spec=calculated.score_spec,
+        rule_version=rule_version,
+    )
+    details[MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY] = (
+        build_market_scan_execution_quote_evidence(
+            item,
+            quote,
+            mode=mode,
+            quote_date=quote_date,
+            captured_at=quote_observed_at or quote.timestamp,
+        )
+    )
+    return details
+
+
+def _successful_market_scan_write(
+    *,
+    item: MarketScanResultItem,
+    quote: Quote,
+    rows: list[Kline],
+    latest_date: date,
+    calculated: _MarketScanScore,
+    tags: tuple[str, ...],
+    provenance: _MarketScanProvenance,
+    score_details: dict[str, object],
+) -> MarketScanResultWrite:
     return MarketScanResultWrite(
         symbol=item.symbol,
         status="success",
@@ -562,29 +649,7 @@ def _market_scan_result(
         amount=quote.amount,
         tags=tags,
         metrics=_scan_metrics(rows, calculated.volume_ratio),
-        score_details=_score_details(
-            item=item,
-            inputs=calculated.leader_inputs,
-            leader_breakdown=calculated.leader_breakdown,
-            rank_refinement=calculated.rank_refinement,
-            quality_score=calculated.quality.score,
-            quality_penalty=calculated.quality_penalty,
-            continuous_trend_adjustment=calculated.continuous_trend_adjustment,
-            base_score=calculated.base_score,
-            score=calculated.score,
-            raw_score=calculated.raw_score,
-            rounded_score=calculated.rounded_score,
-            dimensions=build_market_scan_score_dimensions(
-                item,
-                quote,
-                rows,
-                data_quality_score=calculated.quality.score,
-                volume_ratio=calculated.volume_ratio,
-                mode=mode,
-            ),
-            score_spec=calculated.score_spec,
-            rule_version=rule_version,
-        ),
+        score_details=score_details,
         reason=_score_reason(calculated),
         data_date=latest_date.isoformat(),
         quote_timestamp=quote.timestamp,

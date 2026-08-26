@@ -122,16 +122,12 @@ def authorization_boundary() -> tuple[dict[str, object], dict[str, object]]:
 
 
 def _reseal_evidence(evidence: dict[str, object]) -> dict[str, object]:
-    evidence["evidence_digest"] = stable_probability_hash(
-        {key: value for key, value in evidence.items() if key != "evidence_digest"}
-    )
+    evidence["evidence_digest"] = stable_probability_hash({key: value for key, value in evidence.items() if key != "evidence_digest"})
     return evidence
 
 
 def _reseal_fold(fold: dict[str, object]) -> None:
-    fold["fold_digest"] = stable_probability_hash(
-        {key: value for key, value in fold.items() if key != "fold_digest"}
-    )
+    fold["fold_digest"] = stable_probability_hash({key: value for key, value in fold.items() if key != "fold_digest"})
 
 
 @pytest.mark.parametrize(
@@ -454,9 +450,7 @@ def test_public_probability_replay_rejects_isotonic_model_counterexamples(
     elif case == "probability_not_array":
         calibrator["probabilities"] = "not-an-array"
     else:
-        calibrator["probabilities"] = [2.0] * len(
-            cast(list[float], calibrator["probabilities"])
-        )
+        calibrator["probabilities"] = [2.0] * len(cast(list[float], calibrator["probabilities"]))
     fold["isotonic_calibrator_digest"] = stable_probability_hash(calibrator)
     _reseal_fold(fold)
     _reseal_evidence(evidence)
@@ -735,9 +729,7 @@ def test_public_probability_qualification_handles_future_joint_contract_and_bad_
     calibrated["brier_improvement_vs_reference_ci_95"] = [1.0, -1.0]
     calibrated["unhashable_contract_value"] = object()
     malformed_qualification = build_probability_filter_qualification(malformed)
-    assert cast(dict[str, object], malformed_qualification["proper_score_evidence"])[
-        "metrics_digest"
-    ] is None
+    assert cast(dict[str, object], malformed_qualification["proper_score_evidence"])["metrics_digest"] is None
 
 
 def test_public_probability_deployment_envelope_is_sealed_and_fails_closed_without_token(
@@ -858,10 +850,13 @@ def test_sqlite_probability_capture_outbox_rejects_public_lease_counterexamples(
         )
         expected = ValueError
     elif case == "lost_finish_lease":
-        assert cache.claim_probability_source_capture(
-            owner=owner,
-            lease_expires_at=future,
-        ) is not None
+        assert (
+            cache.claim_probability_source_capture(
+                owner=owner,
+                lease_expires_at=future,
+            )
+            is not None
+        )
         operation = partial(
             cache.finish_probability_source_capture,
             run_id,
@@ -899,9 +894,7 @@ def test_sqlite_probability_capture_outbox_rejects_public_lease_counterexamples(
         expected = ValueError
     elif case == "claim_race":
         with cache._connect() as conn:  # noqa: SLF001 - SQLite lease race boundary
-            conn.execute(
-                "UPDATE market_scan_probability_capture_outbox SET next_attempt_at = '2000-01-01T00:00:00Z'"
-            )
+            conn.execute("UPDATE market_scan_probability_capture_outbox SET next_attempt_at = '2000-01-01T00:00:00Z'")
             conn.execute(
                 """
                 CREATE TRIGGER release_gate_ignore_capture_claim
@@ -912,10 +905,13 @@ def test_sqlite_probability_capture_outbox_rejects_public_lease_counterexamples(
                 END
                 """
             )
-        assert cache.claim_probability_source_capture(
-            owner=owner,
-            lease_expires_at=future,
-        ) is None
+        assert (
+            cache.claim_probability_source_capture(
+                owner=owner,
+                lease_expires_at=future,
+            )
+            is None
+        )
         return
     else:
         operation = partial(
@@ -936,10 +932,13 @@ def test_sqlite_probability_capture_outbox_audits_persisted_terminal_claims(
     cache, _service, _strategy_id, run_id = _environment(tmp_path)
     owner = "release-boundary-owner"
     digest = "a" * 64
-    assert cache.claim_probability_source_capture(
-        owner=owner,
-        lease_expires_at="2099-01-01T00:00:00Z",
-    ) is not None
+    assert (
+        cache.claim_probability_source_capture(
+            owner=owner,
+            lease_expires_at="2099-01-01T00:00:00Z",
+        )
+        is not None
+    )
     cache.finish_probability_source_capture(
         run_id,
         owner=owner,
@@ -954,15 +953,39 @@ def test_sqlite_probability_capture_outbox_audits_persisted_terminal_claims(
                 (None if case == "null_digest" else "A" * 64, run_id),
             )
     archives = {run_id: digest} if case == "matching" else {}
-    assert cache.audit_probability_source_capture_archives(archives) == (
-        0 if case == "matching" else 1
-    )
+    assert cache.audit_probability_source_capture_archives(archives) == (0 if case == "matching" else 1)
     with cache._connect() as conn:  # noqa: SLF001 - persisted audit assertion
         status = conn.execute(
             "SELECT status FROM market_scan_probability_capture_outbox WHERE run_id = ?",
             (run_id,),
         ).fetchone()[0]
     assert status == ("succeeded" if case == "matching" else "pending")
+
+
+def test_sqlite_probability_capture_exposes_exact_succeeded_archive_bindings(
+    tmp_path: Path,
+) -> None:
+    cache, _service, _strategy_id, run_id = _environment(tmp_path)
+    owner = "archive-binding-reader"
+    digest = "a" * 64
+    assert cache.probability_source_capture_archive_bindings() == {}
+    assert (
+        cache.claim_probability_source_capture(
+            owner=owner,
+            lease_expires_at="2099-01-01T00:00:00Z",
+        )
+        is not None
+    )
+    cache.finish_probability_source_capture(
+        run_id,
+        owner=owner,
+        status="succeeded",
+        archive_digest=digest,
+    )
+
+    assert cache.probability_source_capture_archive_bindings() == {
+        run_id: digest,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1070,12 +1093,15 @@ def test_public_probability_source_capture_rejects_run_and_time_boundaries(
     monkeypatch.setattr(probability_capture, "capture_source_snapshot", persist)
 
     if case in {"invalid_as_of", "captured_at_none", "captured_at_datetime"}:
-        assert probability_capture.capture_market_scan_probability_source(
-            cache,
-            71,
-            directory=tmp_path / "archive",
-            captured_at=captured_at,
-        )["run_id"] == 71
+        assert (
+            probability_capture.capture_market_scan_probability_source(
+                cache,
+                71,
+                directory=tmp_path / "archive",
+                captured_at=captured_at,
+            )["run_id"]
+            == 71
+        )
     else:
         with pytest.raises(probability_capture.ProbabilitySourceCaptureError):
             probability_capture.capture_market_scan_probability_source(
@@ -1161,9 +1187,13 @@ def test_public_probability_source_best_effort_monitor_boundaries(
             if case == "writer_failure":
                 raise OSError("monitor unavailable")
 
-    cache: object = BoundaryCache() if case != "failure" else SimpleNamespace(
-        path=tmp_path / "runtime.sqlite3",
-        market_scan_run=lambda _run_id: (_ for _ in ()).throw(RuntimeError("archive unavailable")),
+    cache: object = (
+        BoundaryCache()
+        if case != "failure"
+        else SimpleNamespace(
+            path=tmp_path / "runtime.sqlite3",
+            market_scan_run=lambda _run_id: (_ for _ in ()).throw(RuntimeError("archive unavailable")),
+        )
     )
     if case == "success":
         monkeypatch.setattr(
@@ -1172,6 +1202,7 @@ def test_public_probability_source_best_effort_monitor_boundaries(
             lambda *_args, **_kwargs: capture_archive_info(71),
         )
     elif case == "cancelled":
+
         def cancelled(*_args, **_kwargs):
             raise asyncio.CancelledError
 
@@ -1183,13 +1214,9 @@ def test_public_probability_source_best_effort_monitor_boundaries(
 
     if case == "cancelled":
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(
-                probability_capture.capture_market_scan_probability_source_best_effort(cache, 71)
-            )
+            asyncio.run(probability_capture.capture_market_scan_probability_source_best_effort(cache, 71))
     else:
-        outcome = asyncio.run(
-            probability_capture.capture_market_scan_probability_source_best_effort(cache, 71)
-        )
+        outcome = asyncio.run(probability_capture.capture_market_scan_probability_source_best_effort(cache, 71))
         assert outcome["status"] == ("captured" if case == "success" else "failed")
 
 
@@ -1337,9 +1364,7 @@ def test_public_probability_source_projection_rejects_population_counterexamples
 
 def _reseal_source_artifact(artifact: dict[str, object]) -> None:
     payload = cast(dict[str, object], artifact["payload"])
-    cast(dict[str, object], artifact["integrity"])["integrity_digest"] = (
-        probability_source.probability_source_payload_digest(payload)
-    )
+    cast(dict[str, object], artifact["integrity"])["integrity_digest"] = probability_source.probability_source_payload_digest(payload)
 
 
 @pytest.mark.parametrize(
@@ -1545,9 +1570,7 @@ def test_frozen_snapshot_validator_rejects_every_boundary_counterexample(
         items[0] = _cleared_result(items[0], status="missing").model_copy(update={"rank": 4})
         for rank, index in enumerate(range(1, len(items)), start=1):
             items[index] = items[index].model_copy(update={"rank": rank})
-        run = run.model_copy(
-            update={"success_count": run.success_count - 1, "missing_count": run.missing_count + 1}
-        )
+        run = run.model_copy(update={"success_count": run.success_count - 1, "missing_count": run.missing_count + 1})
     elif case == "result_date":
         items[0] = items[0].model_copy(update={"data_date": "2026-08-10"})
     elif case == "missing_score":
@@ -1556,14 +1579,10 @@ def test_frozen_snapshot_validator_rejects_every_boundary_counterexample(
         items[0] = items[0].model_copy(update={"status": "missing", "rank": None})
         for rank, index in enumerate(range(1, len(items)), start=1):
             items[index] = items[index].model_copy(update={"rank": rank})
-        run = run.model_copy(
-            update={"success_count": run.success_count - 1, "missing_count": run.missing_count + 1}
-        )
+        run = run.model_copy(update={"success_count": run.success_count - 1, "missing_count": run.missing_count + 1})
     elif case == "no_success":
         items = [_cleared_result(item, status="skipped") for item in items]
-        run = run.model_copy(
-            update={"success_count": 0, "missing_count": 0, "skipped_count": len(items)}
-        )
+        run = run.model_copy(update={"success_count": 0, "missing_count": 0, "skipped_count": len(items)})
     else:
         details = deepcopy(items[0].score_details)
         if case == "run_rule":

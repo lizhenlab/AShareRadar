@@ -3,20 +3,26 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import gzip
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
 import app.services.market_scan_probability_source as probability_source_module
+import app.services.market_scan_joint_execution_probability as joint_probability_module
 import app.services.market_scan_score_dimensions as score_dimensions_module
 import app.services.market_scan_scoring as scoring_module
 from app.models.market import Kline, Quote
-from app.services.market_scan_probability import stable_probability_hash
+from app.services.market_scan_probability import (
+    probability_selection_qualified,
+    stable_probability_hash,
+    verify_shadow_probability_evidence,
+)
 from app.services.market_scan_probability_research import probability_feature_vector
 from app.services.market_scan_probability_source import (
     PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION,
@@ -36,6 +42,45 @@ from app.services.market_scan_probability_source import (
 from app.services.market_scan_probability_source_research import (
     MarketScanProbabilitySourceResearchStore,
 )
+from app.services.market_scan_execution_session import (
+    build_market_scan_execution_session_evidence,
+)
+from app.services.market_scan_joint_execution_source import (
+    JointExecutionSourceError,
+    VerifiedJointExecutionSourceCorpus,
+    build_joint_execution_source_artifact,
+    replay_and_verify_joint_execution_source_artifact,
+)
+from app.services.market_scan_joint_execution_outcomes import (
+    JointExecutionOutcomeError,
+    VerifiedJointExecutionOutcomeCorpus,
+    build_joint_execution_outcome_artifact,
+    replay_and_verify_joint_execution_outcome_artifact,
+)
+from app.services.market_scan_joint_execution_maintenance import (
+    MarketScanJointExecutionMaintenanceService,
+)
+from app.services.market_scan_joint_execution_probability import (
+    JointExecutionProbabilityError,
+    VerifiedJointExecutionLearningCorpus,
+    VerifiedJointExecutionProbabilityStudy,
+    build_joint_execution_learning_corpus,
+    build_joint_execution_probability_oos_corpus_v3,
+    fit_joint_execution_probability,
+    replay_and_verify_joint_execution_probability_evidence,
+)
+from app.services.market_scan_official_execution import (
+    OfficialExecutionIntakeError,
+    VerifiedOfficialExecutionSession,
+    load_verified_official_execution_session,
+    load_verified_official_execution_source_registry,
+    seal_official_execution_raw_file_receipt,
+    seal_official_execution_session_artifact,
+    seal_official_execution_source_registry,
+)
+from app.services.market_scan_official_execution_store import (
+    OfficialExecutionStoreStatus,
+)
 from app.services.market_scan_score_dimensions import (
     MARKET_SCAN_EVIDENCE_CONTRACT_VERSION,
     MARKET_SCAN_EVIDENCE_SCHEMA_VERSION,
@@ -48,7 +93,7 @@ from app.services.market_scan_scoring import (
     stable_score_spec_hash,
 )
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
-from app.services.trading_calendar import trading_dates_between
+from app.services.trading_calendar import next_trade_dates, trading_dates_between
 
 
 CAPTURED_AT = "2026-08-11T16:01:00+08:00"
@@ -1548,4 +1593,949 @@ def _evidence(
         "eligible_for_promotion_evidence": True,
         "payload": payload,
         "payload_digest": stable_probability_hash(payload),
+    }
+
+
+def test_joint_execution_source_includes_every_published_decision_and_replays_authority(
+    tmp_path: Path,
+) -> None:
+    source, execution_session, official_session = _joint_source_inputs(tmp_path)
+
+    artifact = build_joint_execution_source_artifact(
+        source,
+        execution_session,
+        official_session,
+        generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+    )
+    verified = replay_and_verify_joint_execution_source_artifact(
+        artifact,
+        source,
+        execution_session,
+        official_session,
+    )
+
+    assert isinstance(verified, VerifiedJointExecutionSourceCorpus)
+    assert verified.run_id == 70
+    assert verified.signal_session == QUOTE_DATE
+    assert len(verified) == 4
+    quality = cast(dict[str, object], artifact["quality"])
+    assert quality == {
+        "expected_decision_count": 4,
+        "record_count": 4,
+        "success_record_count": 2,
+        "missing_record_count": 1,
+        "skipped_record_count": 1,
+        "official_signal_row_count": 4,
+        "decision_coverage": 1.0,
+        "official_signal_coverage": 1.0,
+        "all_decisions_included": True,
+        "no_post_outcome_feature_selection": True,
+        "historical_replay": False,
+        "formal_forward_pit_signal_eligible": True,
+    }
+    records = cast(list[dict[str, object]], artifact["records"])
+    assert [item["symbol"] for item in records] == [
+        "300750.SZ",
+        "600000.SH",
+        "600519.SH",
+        "920001.BJ",
+    ]
+    missing = next(item for item in records if item["result_status"] == "missing")
+    skipped = next(item for item in records if item["result_status"] == "skipped")
+    success = next(item for item in records if item["result_status"] == "success")
+    schema = cast(dict[str, object], artifact["feature_schema"])
+    imputation = cast(dict[str, float], schema["imputation_values"])
+    assert cast(dict[str, float], missing["features"])["source_status_missing"] == 1.0
+    assert cast(dict[str, float], skipped["features"])["source_status_skipped"] == 1.0
+    assert cast(dict[str, float], success["features"])["source_score_available"] == 1.0
+    assert all(
+        cast(dict[str, float], missing["features"])[name] == value
+        for name, value in imputation.items()
+    )
+
+
+def test_joint_execution_source_rejects_partial_official_session_and_tamper(
+    tmp_path: Path,
+) -> None:
+    source, execution_session, official_session = _joint_source_inputs(tmp_path)
+    artifact = build_joint_execution_source_artifact(
+        source,
+        execution_session,
+        official_session,
+        generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+    )
+    tampered = deepcopy(artifact)
+    records = cast(list[dict[str, object]], tampered["records"])
+    features = cast(dict[str, float], records[0]["features"])
+    first_name = next(iter(features))
+    features[first_name] += 1.0
+    with pytest.raises(JointExecutionSourceError, match="failed verification"):
+        replay_and_verify_joint_execution_source_artifact(
+            tampered,
+            source,
+            execution_session,
+            official_session,
+        )
+
+    partial = _official_signal_session(
+        tmp_path / "partial",
+        symbols=("300750.SZ", "600000.SH", "600519.SH"),
+    )
+    with pytest.raises(OfficialExecutionIntakeError, match="does not cover"):
+        build_joint_execution_source_artifact(
+            source,
+            execution_session,
+            partial,
+            generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+        )
+
+
+def test_joint_execution_source_opaque_token_cannot_be_constructed() -> None:
+    with pytest.raises(TypeError, match="strict replay"):
+        VerifiedJointExecutionSourceCorpus(
+            "[]",
+            artifact_digest="a" * 64,
+            run_id=70,
+            signal_session=QUOTE_DATE,
+            source_snapshot_digest="b" * 64,
+            decision_identity_digest="c" * 64,
+            decision_membership_digest="d" * 64,
+            decision_frozen_at=f"{QUOTE_DATE}T16:00:00+08:00",
+            feature_schema_digest="e" * 64,
+        )
+
+
+def test_joint_execution_outcomes_cover_all_decisions_and_replay_official_path(
+    tmp_path: Path,
+) -> None:
+    source, execution_session, signal_official = _joint_source_inputs(tmp_path / "source")
+    source_artifact = build_joint_execution_source_artifact(
+        source,
+        execution_session,
+        signal_official,
+        generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+    )
+    source_token = replay_and_verify_joint_execution_source_artifact(
+        source_artifact,
+        source,
+        execution_session,
+        signal_official,
+    )
+    symbols = tuple(str(item["symbol"]) for item in source_token)
+    dates = next_trade_dates(date.fromisoformat(QUOTE_DATE), 21)
+    sessions: dict[str, VerifiedOfficialExecutionSession] = {}
+    for offset, session_date in enumerate(dates, start=1):
+        date_text = session_date.isoformat()
+        prices = {"600519.SH": 5.0 if offset >= 2 else 10.0}
+        sessions[date_text] = _official_signal_session(
+            tmp_path / "forward" / date_text,
+            symbols=symbols,
+            session_date=date_text,
+            prices=prices,
+            corporate_action_symbols={"600519.SH"} if offset == 2 else set(),
+            suspended_symbols=(
+                {"920001.BJ"} if offset == 1 else {"600000.SH"} if offset == 2 else set()
+            ),
+        )
+    generated_at = f"{dates[-1].isoformat()}T16:00:00+08:00"
+
+    artifact = build_joint_execution_outcome_artifact(
+        source_token,
+        sessions,
+        generated_at=generated_at,
+    )
+    verified = replay_and_verify_joint_execution_outcome_artifact(
+        artifact,
+        source_token,
+        sessions,
+    )
+
+    assert isinstance(verified, VerifiedJointExecutionOutcomeCorpus)
+    assert len(verified) == 4
+    assert cast(dict[str, object], artifact["quality"])["formal_forward_outcome_eligible"] is True
+    records = cast(list[dict[str, object]], artifact["records"])
+    suspended_entry = next(item for item in records if item["symbol"] == "920001.BJ")
+    entry_h1 = cast(list[dict[str, object]], suspended_entry["horizons"])[0]
+    entry_base = cast(list[dict[str, object]], entry_h1["scenarios"])[0]
+    entry_outcome = cast(dict[str, object], entry_base["observed_outcome"])
+    assert entry_outcome["entry_fill"] is False
+    assert entry_outcome["net_return"] == 0.0
+    suspended_exit = next(item for item in records if item["symbol"] == "600000.SH")
+    exit_h1 = cast(list[dict[str, object]], suspended_exit["horizons"])[0]
+    exit_outcome = cast(
+        dict[str, object],
+        cast(list[dict[str, object]], exit_h1["scenarios"])[0]["observed_outcome"],
+    )
+    assert exit_outcome["entry_fill"] is True
+    assert exit_outcome["exit_executable"] is False
+    assert exit_outcome["net_return"] is None
+    corporate = next(item for item in records if item["symbol"] == "600519.SH")
+    corporate_h1 = cast(list[dict[str, object]], corporate["horizons"])[0]
+    path = cast(dict[str, object], corporate_h1["holding_path"])
+    assert path["corporate_action_factor"] == pytest.approx(2.0)
+
+
+def test_joint_execution_outcomes_reject_missing_session_and_tamper(
+    tmp_path: Path,
+) -> None:
+    source, execution_session, signal_official = _joint_source_inputs(tmp_path / "source")
+    source_artifact = build_joint_execution_source_artifact(
+        source,
+        execution_session,
+        signal_official,
+        generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+    )
+    source_token = replay_and_verify_joint_execution_source_artifact(
+        source_artifact,
+        source,
+        execution_session,
+        signal_official,
+    )
+    symbols = tuple(str(item["symbol"]) for item in source_token)
+    dates = next_trade_dates(date.fromisoformat(QUOTE_DATE), 21)
+    sessions = {
+        item.isoformat(): _official_signal_session(
+            tmp_path / "forward" / item.isoformat(),
+            symbols=symbols,
+            session_date=item.isoformat(),
+        )
+        for item in dates
+    }
+    missing = dict(sessions)
+    missing.pop(dates[3].isoformat())
+    with pytest.raises(JointExecutionOutcomeError, match="session path mismatch"):
+        build_joint_execution_outcome_artifact(
+            source_token,
+            missing,
+            generated_at=f"{dates[-1].isoformat()}T16:00:00+08:00",
+        )
+
+    artifact = build_joint_execution_outcome_artifact(
+        source_token,
+        sessions,
+        generated_at=f"{dates[-1].isoformat()}T16:00:00+08:00",
+    )
+    tampered = deepcopy(artifact)
+    records = cast(list[dict[str, object]], tampered["records"])
+    horizon = cast(list[dict[str, object]], records[0]["horizons"])[0]
+    scenario = cast(list[dict[str, object]], horizon["scenarios"])[0]
+    cast(dict[str, object], scenario["observed_outcome"])["joint_action_positive"] = True
+    with pytest.raises(JointExecutionOutcomeError, match="failed verification"):
+        replay_and_verify_joint_execution_outcome_artifact(
+            tampered,
+            source_token,
+            sessions,
+        )
+
+
+def test_h5_outcome_is_released_after_six_sessions_without_waiting_for_h20(
+    tmp_path: Path,
+) -> None:
+    source, execution_session, signal_official = _joint_source_inputs(tmp_path / "source")
+    source_artifact = build_joint_execution_source_artifact(
+        source,
+        execution_session,
+        signal_official,
+        generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+    )
+    source_token = replay_and_verify_joint_execution_source_artifact(
+        source_artifact,
+        source,
+        execution_session,
+        signal_official,
+    )
+    symbols = tuple(str(item["symbol"]) for item in source_token)
+    dates = next_trade_dates(date.fromisoformat(QUOTE_DATE), 6)
+    sessions = {
+        item.isoformat(): _official_signal_session(
+            tmp_path / "forward" / item.isoformat(),
+            symbols=symbols,
+            session_date=item.isoformat(),
+        )
+        for item in dates
+    }
+    artifact = build_joint_execution_outcome_artifact(
+        source_token,
+        sessions,
+        generated_at=f"{dates[-1].isoformat()}T16:00:00+08:00",
+        horizons=(5,),
+    )
+    outcome_token = replay_and_verify_joint_execution_outcome_artifact(
+        artifact,
+        source_token,
+        sessions,
+    )
+
+    assert cast(dict[str, object], artifact["label_contract"])["horizons"] == [5]
+    assert len(cast(list[object], artifact["session_bindings"])) == 6
+    assert len(cast(list[object], artifact["benchmarks"])) == 3
+    assert all(
+        [item["horizon"] for item in cast(list[dict[str, object]], row["horizons"])]
+        == [5]
+        for row in outcome_token.records
+    )
+    learning = build_joint_execution_learning_corpus([source_token], [outcome_token])
+    assert len(learning) == len(source_token)
+
+
+def test_joint_execution_learning_corpus_and_h5_fit_progress_replay(
+    tmp_path: Path,
+) -> None:
+    source, execution_session, signal_official = _joint_source_inputs(tmp_path / "source")
+    source_artifact = build_joint_execution_source_artifact(
+        source,
+        execution_session,
+        signal_official,
+        generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+    )
+    source_token = replay_and_verify_joint_execution_source_artifact(
+        source_artifact,
+        source,
+        execution_session,
+        signal_official,
+    )
+    symbols = tuple(str(item["symbol"]) for item in source_token)
+    dates = next_trade_dates(date.fromisoformat(QUOTE_DATE), 21)
+    sessions = {
+        item.isoformat(): _official_signal_session(
+            tmp_path / "forward" / item.isoformat(),
+            symbols=symbols,
+            session_date=item.isoformat(),
+        )
+        for item in dates
+    }
+    outcome_artifact = build_joint_execution_outcome_artifact(
+        source_token,
+        sessions,
+        generated_at=f"{dates[-1].isoformat()}T16:00:00+08:00",
+    )
+    outcome_token = replay_and_verify_joint_execution_outcome_artifact(
+        outcome_artifact,
+        source_token,
+        sessions,
+    )
+
+    corpus = build_joint_execution_learning_corpus([source_token], [outcome_token])
+    evidence = fit_joint_execution_probability(
+        corpus,
+        generated_at=f"{dates[-1].isoformat()}T16:01:00+08:00",
+    )
+    verified = replay_and_verify_joint_execution_probability_evidence(evidence, corpus)
+
+    assert isinstance(corpus, VerifiedJointExecutionLearningCorpus)
+    assert isinstance(verified, VerifiedJointExecutionProbabilityStudy)
+    assert verify_shadow_probability_evidence(evidence)
+    assert probability_selection_qualified(evidence) is False
+    assert evidence["status"] == "insufficient_data"
+    assert evidence["selection_qualified"] is False
+    assert "minimum_independent_sessions" in cast(list[str], evidence["limitations"])
+    assert cast(dict[str, object], evidence["counts"])["observation_count"] == 4
+    with pytest.raises(JointExecutionProbabilityError, match="selected exact-corpus"):
+        build_joint_execution_probability_oos_corpus_v3(
+            verified,
+            corpus,
+            [source_token],
+            [outcome_token],
+        )
+
+
+def test_joint_execution_maintenance_persists_source_and_waits_for_full_h5_path(
+    tmp_path: Path,
+) -> None:
+    projection = _source_projection(
+        ("600519.SH", "SH", "SH_MAIN"),
+        ("300750.SZ", "SZ", "CHINEXT"),
+    )
+    source_directory = tmp_path / "probability-source"
+    _capture_current_source(source_directory, projection)
+    _source, execution_session, official_signal = _joint_source_inputs(
+        tmp_path / "official-input"
+    )
+
+    class _VerifiedRead:
+        def __enter__(self) -> object:
+            return SimpleNamespace(
+                execution_session_evidence=lambda: execution_session,
+            )
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class _Cache:
+        path = tmp_path / "data" / "cache.sqlite3"
+
+        @staticmethod
+        def verified_market_scan_read(run_id: int) -> _VerifiedRead:
+            assert run_id == 70
+            return _VerifiedRead()
+
+    class _OfficialStore:
+        @staticmethod
+        def status() -> OfficialExecutionStoreStatus:
+            return OfficialExecutionStoreStatus(
+                configured=True,
+                status="ready",
+                registry_digest="a" * 64,
+                verified_session_count=1,
+                first_session_date=QUOTE_DATE,
+                latest_session_date=QUOTE_DATE,
+            )
+
+        @staticmethod
+        def sessions() -> tuple[VerifiedOfficialExecutionSession, ...]:
+            return (official_signal,)
+
+    service = MarketScanJointExecutionMaintenanceService(
+        cast(object, _Cache()),
+        cast(object, _OfficialStore()),
+        source_directory=source_directory,
+        research_directory=tmp_path / "joint-research",
+    )
+    first = service.run(now=datetime.fromisoformat(f"{QUOTE_DATE}T16:05:00+08:00"))
+    second = service.run(now=datetime.fromisoformat(f"{QUOTE_DATE}T16:06:00+08:00"))
+
+    assert first.status == second.status == "waiting_mature_official_h5"
+    assert first.verified_source_count == second.verified_source_count == 1
+    assert first.mature_h5_session_count == 0
+    assert first.filter_ready is False
+    assert first.blockers == (f"official_h5_path_waiting:{QUOTE_DATE}",)
+    persisted = list((tmp_path / "joint-research" / "sources").glob("*.json.gz"))
+    assert len(persisted) == 1
+
+
+def test_joint_execution_maintenance_reuses_exact_corpus_study(
+    tmp_path: Path,
+) -> None:
+    projection = _source_projection(
+        ("600519.SH", "SH", "SH_MAIN"),
+        ("300750.SZ", "SZ", "CHINEXT"),
+    )
+    source_directory = tmp_path / "probability-source"
+    _capture_current_source(source_directory, projection)
+    _source, execution_session, official_signal = _joint_source_inputs(
+        tmp_path / "official-input"
+    )
+    symbols = ("300750.SZ", "600000.SH", "600519.SH", "920001.BJ")
+    forward_dates = next_trade_dates(date.fromisoformat(QUOTE_DATE), 6)
+    forward = tuple(
+        _official_signal_session(
+            tmp_path / "official-forward" / session.isoformat(),
+            symbols=symbols,
+            session_date=session.isoformat(),
+        )
+        for session in forward_dates
+    )
+    sessions = (official_signal, *forward)
+
+    class _VerifiedRead:
+        def __enter__(self) -> object:
+            return SimpleNamespace(
+                execution_session_evidence=lambda: execution_session,
+            )
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class _Cache:
+        path = tmp_path / "data" / "cache.sqlite3"
+
+        @staticmethod
+        def verified_market_scan_read(run_id: int) -> _VerifiedRead:
+            assert run_id == 70
+            return _VerifiedRead()
+
+    class _OfficialStore:
+        @staticmethod
+        def status() -> OfficialExecutionStoreStatus:
+            return OfficialExecutionStoreStatus(
+                configured=True,
+                status="ready",
+                registry_digest="a" * 64,
+                verified_session_count=len(sessions),
+                first_session_date=QUOTE_DATE,
+                latest_session_date=forward_dates[-1].isoformat(),
+            )
+
+        @staticmethod
+        def sessions() -> tuple[VerifiedOfficialExecutionSession, ...]:
+            return sessions
+
+    research_directory = tmp_path / "joint-research"
+    service = MarketScanJointExecutionMaintenanceService(
+        cast(object, _Cache()),
+        cast(object, _OfficialStore()),
+        source_directory=source_directory,
+        research_directory=research_directory,
+    )
+    generated_date = forward_dates[-1].isoformat()
+    first = service.run(
+        now=datetime.fromisoformat(f"{generated_date}T16:05:00+08:00")
+    )
+    second = service.run(
+        now=datetime.fromisoformat(f"{generated_date}T16:06:00+08:00")
+    )
+
+    assert first.status == second.status == "selection_evidence_accumulating"
+    assert first.mature_h5_session_count == second.mature_h5_session_count == 1
+    assert first.selection_minimum_session_count == 292
+    assert len(list((research_directory / "sources").glob("*.json.gz"))) == 1
+    assert len(list((research_directory / "outcomes-h5").glob("*.json.gz"))) == 1
+    assert len(list((research_directory / "studies").glob("*.json.gz"))) == 1
+
+
+def test_joint_current_prediction_covers_exact_new_official_decision_set(
+    tmp_path: Path,
+) -> None:
+    source, execution_session, signal_official = _joint_source_inputs(tmp_path / "source")
+    source_artifact = build_joint_execution_source_artifact(
+        source,
+        execution_session,
+        signal_official,
+        generated_at=f"{QUOTE_DATE}T16:02:00+08:00",
+    )
+    source_token = replay_and_verify_joint_execution_source_artifact(
+        source_artifact,
+        source,
+        execution_session,
+        signal_official,
+    )
+    study_payload = {"selection_qualified": True}
+    study_digest = stable_probability_hash(study_payload)
+    study = joint_probability_module.VerifiedJointExecutionProbabilityStudy(
+        json.dumps(study_payload, sort_keys=True, separators=(",", ":")),
+        evidence_digest=study_digest,
+        _seal=joint_probability_module._VERIFIED_STUDY_SEAL,  # noqa: SLF001
+    )
+    feature_contract = joint_probability_module._feature_contract(  # noqa: SLF001
+        source_token.feature_schema
+    )
+    feature_names = cast(list[str], feature_contract["names"])
+    component = {
+        "model": {
+            "feature_names": feature_names,
+            "means": [0.0] * len(feature_names),
+            "scales": [1.0] * len(feature_names),
+            "intercept": 0.0,
+            "coefficients": [0.0] * len(feature_names),
+        },
+        "calibrator": {"intercept": 0.0, "slope": 1.0},
+    }
+    deployment_payload = {
+        "contract_version": joint_probability_module.JOINT_EXECUTION_DEPLOYMENT_CONTRACT_VERSION,
+        "generated_at": f"{QUOTE_DATE}T15:30:00+08:00",
+        "study_evidence_digest": study_digest,
+        "authorization_digest": "a" * 64,
+        "corpus_digest": "b" * 64,
+        "feature_contract_digest": stable_probability_hash(feature_contract),
+        "feature_names": feature_names,
+        "components": {
+            name: deepcopy(component)
+            for name in joint_probability_module.JOINT_EXECUTION_COMPONENTS
+        },
+        "calibration_joint_base_rate": 0.5,
+        "calibration_offset_ci_95": [-0.05, 0.05],
+        "latest_outcome_observed_at": f"{QUOTE_DATE}T15:05:00+08:00",
+        "latest_signal_session": "2026-08-01",
+        "training_cutoff": "2026-07-01",
+        "calibration_cutoff": "2026-08-01",
+        "component_artifact_digest": "c" * 64,
+        "oos_final_fold_reuse_forbidden": True,
+    }
+    deployment = joint_probability_module.VerifiedJointExecutionDeploymentEstimator(
+        json.dumps(deployment_payload, sort_keys=True, separators=(",", ":")),
+        integrity_digest="d" * 64,
+        _seal=joint_probability_module._VERIFIED_DEPLOYMENT_SEAL,  # noqa: SLF001
+    )
+
+    artifact = joint_probability_module.build_joint_execution_current_prediction_artifact(
+        source_token,
+        study,
+        deployment,
+        generated_at=f"{QUOTE_DATE}T16:03:00+08:00",
+    )
+    verified = joint_probability_module.verify_joint_execution_current_prediction_artifact(
+        artifact,
+        source=source_token,
+        study=study,
+        deployment=deployment,
+        as_of=f"{QUOTE_DATE}T16:10:00+08:00",
+    )
+
+    assert len(verified) == len(source_token) == 4
+    assert verified.decision_identity_digest == source_token.decision_identity_digest
+    assert verified.decision_membership_digest == source_token.decision_membership_digest
+    assert [item["symbol"] for item in verified] == sorted(
+        str(item["symbol"]) for item in source_token
+    )
+    for row in verified:
+        components = cast(dict[str, float], row["component_probabilities"])
+        assert row["probability"] == pytest.approx(
+            components["entry_fill"]
+            * components["exit_executable"]
+            * components["net_positive"]
+        )
+
+    tampered = deepcopy(artifact)
+    records = cast(
+        list[dict[str, object]], cast(dict[str, object], tampered["payload"])["records"]
+    )
+    records.pop()
+    with pytest.raises(JointExecutionProbabilityError, match="failed strict verification"):
+        joint_probability_module.verify_joint_execution_current_prediction_artifact(
+            tampered,
+            source=source_token,
+            study=study,
+            deployment=deployment,
+        )
+
+
+def test_three_component_models_train_conditionally_but_score_every_test_row() -> None:
+    rows = [_synthetic_joint_learning_row(index) for index in range(240)]
+    partitions = {
+        "train": tuple(rows[:120]),
+        "calibration": tuple(rows[120:180]),
+        "test": tuple(rows[180:]),
+    }
+    probability_config = joint_probability_module._probability.ProbabilityConfig(  # noqa: SLF001
+        horizon=5,
+        minimum_train_sessions=10,
+        minimum_calibration_sessions=5,
+        minimum_test_sessions=5,
+        minimum_bin_sessions=1,
+        bootstrap_samples=100,
+    )
+    components = {
+        name: joint_probability_module._fit_component(  # noqa: SLF001
+            partitions,
+            ("signal", "status"),
+            component=cast(
+                Literal["entry_fill", "exit_executable", "net_positive"], name
+            ),
+            config=probability_config,
+        )
+        for name in joint_probability_module.JOINT_EXECUTION_COMPONENTS
+    }
+
+    predictions = [
+        joint_probability_module._held_out_prediction(  # noqa: SLF001
+            row,
+            components,
+            fold_id=1,
+            reference_base_rate=0.25,
+        )
+        for row in partitions["test"]
+    ]
+
+    assert len(predictions) == len(partitions["test"])
+    for prediction in predictions:
+        probabilities = cast(dict[str, float], prediction["component_probabilities"])
+        assert set(probabilities) == {
+            "entry_fill",
+            "exit_executable",
+            "net_positive",
+        }
+        assert prediction["probability"] == pytest.approx(
+            probabilities["entry_fill"]
+            * probabilities["exit_executable"]
+            * probabilities["net_positive"]
+        )
+
+
+def test_joint_deployment_corpus_preserves_selected_oos_and_only_appends_future_sessions() -> None:
+    selected = {
+        "run_id": 70,
+        "signal_session": "2026-08-01",
+        "source_artifact_digest": "a" * 64,
+    }
+    later = {
+        "run_id": 71,
+        "signal_session": "2026-08-02",
+        "source_artifact_digest": "b" * 64,
+    }
+    evidence = {
+        "feature_version": "joint-feature-v1",
+        "label_contract_digest": "c" * 64,
+        "model": {
+            "components": {
+                component: {"feature_names": ["signal", "status"]}
+                for component in joint_probability_module.JOINT_EXECUTION_COMPONENTS
+            }
+        },
+        "source_bindings": [selected],
+        "source_binding_digest": stable_probability_hash([selected]),
+        "input_digest": "d" * 64,
+    }
+
+    def corpus(bindings: list[dict[str, object]], *, digest: str) -> object:
+        return joint_probability_module.VerifiedJointExecutionLearningCorpus(
+            "[]",
+            json.dumps(bindings, sort_keys=True, separators=(",", ":")),
+            corpus_digest=digest,
+            feature_contract_digest="e" * 64,
+            feature_version="joint-feature-v1",
+            feature_names=("signal", "status"),
+            label_contract_digest="c" * 64,
+            _seal=joint_probability_module._LEARNING_CORPUS_SEAL,  # noqa: SLF001
+        )
+
+    exact = corpus([selected], digest="d" * 64)
+    extended = corpus([selected, later], digest="f" * 64)
+    earlier = corpus(
+        [
+            selected,
+            {
+                "run_id": 69,
+                "signal_session": "2026-07-31",
+                "source_artifact_digest": "9" * 64,
+            },
+        ],
+        digest="8" * 64,
+    )
+    replaced = corpus(
+        [{**selected, "source_artifact_digest": "0" * 64}, later],
+        digest="7" * 64,
+    )
+
+    assert joint_probability_module._deployment_corpus_extends_selected_study(  # noqa: SLF001
+        exact, evidence
+    )
+    assert joint_probability_module._deployment_corpus_extends_selected_study(  # noqa: SLF001
+        extended, evidence
+    )
+    assert not joint_probability_module._deployment_corpus_extends_selected_study(  # noqa: SLF001
+        earlier, evidence
+    )
+    assert not joint_probability_module._deployment_corpus_extends_selected_study(  # noqa: SLF001
+        replaced, evidence
+    )
+
+
+def _synthetic_joint_learning_row(index: int) -> object:
+    entry_fill = index % 4 != 0
+    exit_executable = (index % 3 != 0) if entry_fill else None
+    net_positive = (index % 2 == 0) if exit_executable is True else None
+    return joint_probability_module._LearningRow(  # noqa: SLF001
+        sample_id=f"{index // 8 + 1}:{index:06d}.SH:5:net_excess_positive",
+        run_id=index // 8 + 1,
+        session_date=(date(2025, 1, 1) + timedelta(days=index // 8)).isoformat(),
+        symbol=f"{index:06d}.SH",
+        features={"signal": float(index % 7), "status": float(index % 5)},
+        entry_fill=entry_fill,
+        exit_executable=exit_executable,
+        net_positive=net_positive,
+        joint_action_positive=bool(entry_fill and exit_executable and net_positive),
+        net_return=0.01 if entry_fill and exit_executable else None,
+        net_excess_return=0.005 if entry_fill and exit_executable else None,
+        observed_at="2026-09-01T15:05:00+08:00",
+        source_record_digest="a" * 64,
+        outcome_record_digest="b" * 64,
+        holding_path_digest="c" * 64,
+        benchmark_series_digest="d" * 64,
+    )
+
+
+def _joint_source_inputs(
+    tmp_path: Path,
+) -> tuple[dict[str, object], dict[str, object], VerifiedOfficialExecutionSession]:
+    projection = _source_projection(
+        ("600519.SH", "SH", "SH_MAIN"),
+        ("300750.SZ", "SZ", "CHINEXT"),
+    )
+    source = _build_current_source(projection)
+    results = [
+        _result_item("600519.SH", "SH", "SH_MAIN"),
+        _result_item("300750.SZ", "SZ", "CHINEXT"),
+        {
+            "run_id": 70,
+            "symbol": "600000.SH",
+            "code": "600000",
+            "market": "SH",
+            "status": "missing",
+            "updated_at": f"{QUOTE_DATE}T15:01:00+08:00",
+            "score_details": {},
+        },
+        {
+            "run_id": 70,
+            "symbol": "920001.BJ",
+            "code": "920001",
+            "market": "BJ",
+            "status": "skipped",
+            "updated_at": f"{QUOTE_DATE}T15:01:00+08:00",
+            "score_details": {},
+        },
+    ]
+    execution_session = build_market_scan_execution_session_evidence(
+        {
+            "id": 70,
+            "mode": "official",
+            "quote_date": QUOTE_DATE,
+            "data_date": QUOTE_DATE,
+            "as_of": f"{QUOTE_DATE}T16:00:00+08:00",
+            "total_count": 4,
+            "success_count": 2,
+            "missing_count": 1,
+            "skipped_count": 1,
+            "snapshot_digest": "d" * 64,
+        },
+        results,
+        canonical_published=True,
+    )
+    official_session = _official_signal_session(
+        tmp_path / "official",
+        symbols=("300750.SZ", "600000.SH", "600519.SH", "920001.BJ"),
+    )
+    return source, execution_session, official_session
+
+
+def _official_signal_session(
+    root: Path,
+    *,
+    symbols: tuple[str, ...],
+    session_date: str = QUOTE_DATE,
+    prices: Mapping[str, float] | None = None,
+    corporate_action_symbols: set[str] | None = None,
+    suspended_symbols: set[str] | None = None,
+) -> VerifiedOfficialExecutionSession:
+    raw_root = root / "raw"
+    registry = seal_official_execution_source_registry(
+        [
+            {
+                "source_id": "licensed-exchange-feed",
+                "dataset_id": "daily-ohlcv-state-v1",
+                "provider_legal_name": "Licensed Exchange Data Provider",
+                "markets": ["BJ", "SH", "SZ"],
+                "authority_basis": "exchange_direct_subscription",
+                "delivery_channel": "https",
+                "source_base_uri": "https://licensed.example.test/daily",
+                "license_reference": "LIC-RESEARCH-001",
+                "license_document_sha256": "a" * 64,
+                "valid_from": "2026-01-01",
+                "valid_through": "2026-12-31",
+                "research_use_authorized": True,
+            }
+        ],
+        registered_at="2026-08-01T09:00:00+08:00",
+    )
+    registry_path = root / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(registry, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    receipts: dict[str, dict[str, object]] = {}
+    for market in sorted({symbol[-2:] for symbol in symbols}):
+        raw = f"official {market} {session_date}\n".encode()
+        relative = f"{session_date}/{market.lower()}.raw"
+        raw_path = raw_root / relative
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_bytes(raw)
+        receipts[market] = seal_official_execution_raw_file_receipt(
+            {
+                "source_id": "licensed-exchange-feed",
+                "dataset_id": "daily-ohlcv-state-v1",
+                "market": market,
+                "session_date": session_date,
+                "relative_path": relative,
+                "byte_size": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "source_uri": (
+                    f"https://licensed.example.test/daily/{session_date}/{market.lower()}.raw"
+                ),
+                "available_at": f"{session_date}T15:05:00+08:00",
+                "acquired_at": f"{session_date}T15:06:00+08:00",
+                "parser_version": "official-normalizer-v1",
+                "license_reference": "LIC-RESEARCH-001",
+            }
+        )
+    rows = [
+        _official_signal_row(
+            symbol,
+            str(receipts[symbol[-2:]]["receipt_digest"]),
+            session_date=session_date,
+            price=(prices or {}).get(symbol, 10.0),
+            corporate_action=symbol in (corporate_action_symbols or set()),
+            suspended=symbol in (suspended_symbols or set()),
+        )
+        for symbol in symbols
+    ]
+    artifact = seal_official_execution_session_artifact(
+        session_date=session_date,
+        generated_at=f"{session_date}T15:07:00+08:00",
+        source_registry_digest=str(registry["registry_digest"]),
+        receipts=list(receipts.values()),
+        rows=rows,
+    )
+    artifact_path = root / "session.json"
+    artifact_path.write_text(
+        json.dumps(artifact, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    registry_token = load_verified_official_execution_source_registry(
+        registry_path,
+        expected_registry_digest=str(registry["registry_digest"]),
+    )
+    return load_verified_official_execution_session(
+        artifact_path,
+        registry=registry_token,
+        raw_file_root=raw_root,
+    )
+
+
+def _official_signal_row(
+    symbol: str,
+    receipt_digest: str,
+    *,
+    session_date: str = QUOTE_DATE,
+    price: float = 10.0,
+    corporate_action: bool = False,
+    suspended: bool = False,
+) -> dict[str, object]:
+    code, market = symbol.split(".")
+    board = "beijing" if market == "BJ" else "chinext" if code.startswith("30") else "main"
+    limit = 0.30 if market == "BJ" else 0.20 if board == "chinext" else 0.10
+    return {
+        "symbol": symbol,
+        "code": code,
+        "market": market,
+        "session_date": session_date,
+        "observed_at": f"{session_date}T15:05:30+08:00",
+        "source_id": "licensed-exchange-feed",
+        "dataset_id": "daily-ohlcv-state-v1",
+        "receipt_digest": receipt_digest,
+        "source_record_id": f"{market}:{session_date.replace('-', '')}:{code}",
+        "exchange_session_state": "suspended" if suspended else "trading",
+        "entry_execution_state": "suspended" if suspended else "executable",
+        "entry_reason_code": "official_suspension" if suspended else "official_open_executable",
+        "exit_execution_state": "suspended" if suspended else "executable",
+        "exit_reason_code": "official_suspension" if suspended else "official_close_executable",
+        "instrument_rules": {
+            "effective_date": session_date,
+            "board": board,
+            "is_st": False,
+            "listing_status": "listed",
+            "board_rule_id": f"{market.lower()}-{board}-{session_date}",
+            "st_rule_id": f"{market.lower()}-st-{session_date}",
+            "delisting_rule_id": f"{market.lower()}-listing-{session_date}",
+            "minimum_buy_quantity": 100,
+            "buy_quantity_step": 100,
+            "sell_quantity_step": 1,
+            "price_limit_pct": limit,
+            "ruleset_digest": "b" * 64,
+        },
+        "corporate_action": {
+            "status": "effective_event" if corporate_action else "none",
+            "event_id": f"event-{session_date}-{code}" if corporate_action else None,
+            "previous_close": price * 2 if corporate_action else price,
+            "reference_price": price,
+            "reference_price_rule_id": f"{market.lower()}-reference-{session_date}",
+        },
+        "bar": {
+            "adjustment_mode": "none",
+            "open": None if suspended else price,
+            "high": None if suspended else price * 1.03,
+            "low": None if suspended else price * 0.98,
+            "close": None if suspended else price * 1.01,
+            "volume": None if suspended else 1_000_000.0,
+            "amount": None if suspended else 10_000_000.0,
+        },
     }

@@ -91,6 +91,52 @@ def test_tencent_provider_quotes_raises_when_payloads_are_empty(monkeypatch: pyt
     asyncio.run(scenario())
 
 
+def test_tencent_provider_splits_large_quote_requests_into_bounded_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_urls: list[str] = []
+
+    async def fake_fetch(
+        url: str,
+        _: float,
+        *,
+        client: object | None = None,
+    ) -> str:
+        assert client is not None
+        requested_urls.append(url)
+        tokens = url.rsplit("=", 1)[-1].split(",")
+        rows: list[str] = []
+        for token in tokens:
+            prefix, code = token[:2], token[2:]
+            flag = {"sh": "1", "sz": "0", "bj": "62"}[prefix]
+            payload = "~".join(_quote_parts(flag=flag, code=code, name=code))
+            rows.append(f'v_{token}="{payload}";')
+        return "".join(rows)
+
+    monkeypatch.setattr("app.services.providers.TENCENT_QUOTE_BATCH_SIZE", 2)
+    monkeypatch.setattr("app.services.providers._fetch_tencent_quote_text", fake_fetch)
+
+    async def scenario() -> list[str]:
+        provider = TencentMarketDataProvider(timeout=8.0)
+        try:
+            quotes = await provider.quotes(
+                ["600519.SH", "000001.SZ", "300750.SZ", "920066.BJ", "688001.SH"]
+            )
+            return [f"{quote.code}.{quote.market}" for quote in quotes]
+        finally:
+            await provider.aclose()
+
+    assert asyncio.run(scenario()) == [
+        "600519.SH",
+        "000001.SZ",
+        "300750.SZ",
+        "920066.BJ",
+        "688001.SH",
+    ]
+    assert len(requested_urls) == 3
+    assert all(url.count(",") <= 1 for url in requested_urls)
+
+
 def test_tencent_quote_transport_ignores_environment_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResponse:
         encoding = "utf-8"

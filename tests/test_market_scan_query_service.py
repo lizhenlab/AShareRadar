@@ -15,16 +15,25 @@ from app.models.market_scan import (
     MarketScanRun,
     MarketScanRunPage,
 )
+from app.services.market_scan_export import MarketScanExportFilters
 from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
 from app.services.market_scan_probability import (
     PROBABILITY_FILTER_AUTHORIZATION_VERSION,
     stable_probability_hash,
 )
 from app.services.market_scan_probability_artifact import ProbabilityArtifactError
+from app.services.market_scan_probability_historical_context import (
+    HistoricalProbabilityContextError,
+)
 from app.services.market_scan_probability_store import (
     ProbabilityFilterUnavailable,
     ProbabilityResearchUnavailable,
 )
+from app.services.market_scan_probability_ranking import (
+    PROBABILITY_RANKING_SCORE_RULE_VERSION,
+    probability_ranking_score_spec_hash,
+)
+from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION
 from app.services.market_scan_query_service import MarketScanQueryService
 from app.services.market_scan_research_stores import MarketScanResearchStores
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
@@ -42,7 +51,9 @@ class _Cache:
         self.current_run = run
         self.result_queries: list[dict[str, object]] = []
         self.score_contract = score_contract or MarketScanProductionScoreContract(
-            "full-market-score-v4", "b" * 64, run.success_count,
+            "full-market-score-v4",
+            "b" * 64,
+            run.success_count,
         )
         self.capture_status = capture_status
         self.capture_status_calls: list[int] = []
@@ -220,11 +231,7 @@ class _ProbabilityStore:
         self.projection_symbols.append(symbols)
         if symbols is None:
             return self.research, self.probabilities
-        return self.research, {
-            symbol: self.probabilities[symbol]
-            for symbol in symbols
-            if symbol in self.probabilities
-        }
+        return self.research, {symbol: self.probabilities[symbol] for symbol in symbols if symbol in self.probabilities}
 
 
 class _ForbiddenProbabilityStore:
@@ -272,6 +279,7 @@ class _RacingResearchSource:
         self.after = after
         self.calls: list[int] = []
         self.preload_calls = 0
+        self.pending = False
 
     def research_projection(self, run_id: int) -> dict[str, object]:
         self.calls.append(run_id)
@@ -281,6 +289,32 @@ class _RacingResearchSource:
         self.preload_calls += 1
         self.projection = self.after
         return 1
+
+    def refresh_pending(self) -> bool:
+        return self.pending
+
+
+class _HistoricalProbabilityStore:
+    def __init__(
+        self,
+        projection: dict[str, object] | None = None,
+        *,
+        broken: bool = False,
+    ) -> None:
+        self.projection = projection or {
+            "schema_version": "market-scan-probability-historical-context-v1",
+            "status": "ready",
+            "availability": "historical_replay_no_verified_predictive_skill",
+            "production_ranking_effect": "none",
+            "selection_qualified": False,
+            "filter_qualified": False,
+        }
+        self.broken = broken
+
+    def research_projection(self) -> dict[str, object]:
+        if self.broken:
+            raise HistoricalProbabilityContextError("fixture integrity failure")
+        return self.projection
 
 
 def _run_binding(run: MarketScanRun | None = None, *, legacy: bool = False) -> dict[str, object]:
@@ -335,6 +369,24 @@ class _FutureRangeStore:
             "record_page": {"items": []},
         }
 
+    def export_projection(self, run_id: int) -> dict[str, object]:
+        self.calls.append((run_id, {"export": True}))
+        return {
+            "generation_status": "ready",
+            "research": {
+                "run": {
+                    "run_id": run_id,
+                    "mode": "official",
+                    "scope": FULL_MARKET_SCOPE,
+                    "rule_version": f"full-market-scan-v6:{'a' * 64}",
+                    "as_of": "2026-08-11 16:00:00",
+                    "quote_date": "2026-08-11",
+                    "data_date": "2026-08-11",
+                }
+            },
+            "record_page": {"items": []},
+        }
+
 
 def test_query_service_delegates_read_models_and_returns_explicit_missing_artifacts() -> None:
     run = _run()
@@ -344,13 +396,16 @@ def test_query_service_delegates_read_models_and_returns_explicit_missing_artifa
     assert service.run(29) == run
     assert service.latest_run() == run
     assert service.latest_published_run(mode="official") == run
-    assert service.runs(
-        page=2,
-        page_size=10,
-        mode="official",
-        status="published",
-        data_date="2026-08-11",
-    ).items == []
+    assert (
+        service.runs(
+            page=2,
+            page_size=10,
+            mode="official",
+            status="published",
+            data_date="2026-08-11",
+        ).items
+        == []
+    )
     assert service.run_identities(
         page=1,
         page_size=100,
@@ -360,34 +415,136 @@ def test_query_service_delegates_read_models_and_returns_explicit_missing_artifa
     research, probabilities = service.probability_projection(29)
     assert research["status"] == "not_generated"
     assert probabilities == {}
-    assert service.future_range_research(
-        29,
-        page=1,
-        page_size=20,
-        session_offset=None,
-        symbol=None,
-        include_research=False,
-    )["generation_status"] == "not_generated"
+    assert (
+        service.future_range_research(
+            29,
+            page=1,
+            page_size=20,
+            session_offset=None,
+            symbol=None,
+            include_research=False,
+        )["generation_status"]
+        == "not_generated"
+    )
+
+
+def test_export_projection_normalizes_every_filter_in_one_verified_snapshot() -> None:
+    run = _run()
+    cache = _Cache(run)
+    service = _service(cache)
+    filters = MarketScanExportFilters(
+        status=None,
+        market=("SZ", "SH"),
+        industry=("  银行   服务 ", "电力"),
+        is_st=False,
+        min_score=60,
+        max_score=98,
+        min_trend_score=50,
+        max_trend_score=95,
+        min_change_pct=-3,
+        max_change_pct=10,
+        min_turnover_rate=1,
+        max_turnover_rate=25,
+        min_amount=1_000_000,
+        max_amount=900_000_000,
+        min_data_quality_score=70,
+        max_data_quality_score=100,
+        min_confidence=75,
+        max_risk=35,
+        min_tradability=65,
+        keyword=" 000001   平安 ",
+        sort=("score", "amount", "symbol"),
+        order=("desc", "desc", "asc"),
+    )
+
+    page, future_range = service.export_projection(run.id, filters=filters)
+
+    assert page.run == run
+    assert future_range["generation_status"] == "not_generated"
+    assert cache.verified_read_calls == [run.id]
+    assert cache.result_queries == [
+        {
+            "page": 1,
+            "page_size": run.total_count,
+            "status": None,
+            "market": ("SZ", "SH"),
+            "industry": ("银行 服务", "电力"),
+            "is_st": False,
+            "is_new": None,
+            "min_score": 60,
+            "max_score": 98,
+            "min_trend_score": 50,
+            "max_trend_score": 95,
+            "min_change_pct": -3,
+            "max_change_pct": 10,
+            "min_turnover_rate": 1,
+            "max_turnover_rate": 25,
+            "min_amount": 1_000_000,
+            "max_amount": 900_000_000,
+            "min_data_quality_score": 70,
+            "max_data_quality_score": 100,
+            "min_confidence": 75,
+            "max_risk": 35,
+            "min_tradability": 65,
+            "keyword": "000001 平安",
+            "sort": ("score", "amount", "symbol"),
+            "order": ("desc", "desc", "asc"),
+            "symbols": None,
+        }
+    ]
+
+
+def test_export_projection_reads_future_artifact_only_after_run_eligibility() -> None:
+    run = _run()
+    calls: list[tuple[int, dict[str, object]]] = []
+    cache = _Cache(run)
+    service = _service(cache, future_range=_FutureRangeStore(calls))
+
+    _page, future_range = service.export_projection(
+        run.id,
+        filters=MarketScanExportFilters(),
+    )
+
+    assert future_range["generation_status"] == "ready"
+    assert calls == [(run.id, {"export": True})]
+    assert cache.verified_read_calls == [run.id]
+
+    calls.clear()
+    top100 = run.model_copy(update={"scope": "top100-refresh"})
+    with pytest.raises(ProbabilityResearchUnavailable, match="全市场"):
+        _service(
+            _Cache(top100),
+            future_range=_FutureRangeStore(calls),
+        ).export_projection(top100.id, filters=MarketScanExportFilters())
+    assert calls == []
 
 
 def test_probability_projection_uses_source_only_for_not_generated_model() -> None:
     run = _run(action_eligible=True)
-    source = _ResearchSource({
-        "status": "insufficient_data",
-        "origin": "source",
-        "run_binding": _run_binding(run),
-    })
+    source = _ResearchSource(
+        {
+            "status": "insufficient_data",
+            "origin": "source",
+            "run_binding": _run_binding(run),
+        }
+    )
     missing_store = _ProbabilityStore({"status": "not_generated"}, {})
     service = _service(_Cache(run, capture_status="succeeded"), probability=missing_store, source=source)
 
-    assert service.probability_research(29) == source.projection
-    assert service.probability_projection(29) == (source.projection, {})
+    research = service.probability_research(29)
+    assert _without_historical_context(research) == source.projection
+    assert research["historical_context"]["status"] == "not_generated"  # type: ignore[index]
+    projected, probabilities = service.probability_projection(29)
+    assert _without_historical_context(projected) == source.projection
+    assert probabilities == {}
     assert source.calls == [29, 29]
 
     calibrated = {"status": "calibrated_shadow", "run_binding": _run_binding(run)}
     calibrated_store = _ProbabilityStore(calibrated, {})
     service = _service(_Cache(run, capture_status="succeeded"), probability=calibrated_store, source=source)
-    assert service.probability_projection(29) == (calibrated, {})
+    projected, probabilities = service.probability_projection(29)
+    assert _without_historical_context(projected) == calibrated
+    assert probabilities == {}
     assert source.calls == [29, 29, 29]
 
 
@@ -449,13 +606,18 @@ def test_missing_action_source_receipt_cannot_consume_existing_calibrated_artifa
         capture_status=capture_status,
         action_source_digest=None,
     )
-    store = _ProbabilityStore(_calibrated_research(), {
-        "600519.SH": _probability_horizons(0.81),
-    })
-    source = _ResearchSource({
-        "status": "insufficient_data",
-        "run_binding": _run_binding(run),
-    })
+    store = _ProbabilityStore(
+        _calibrated_research(),
+        {
+            "600519.SH": _probability_horizons(0.81),
+        },
+    )
+    source = _ResearchSource(
+        {
+            "status": "insufficient_data",
+            "run_binding": _run_binding(run),
+        }
+    )
     service = _service(cache, probability=store, source=source)
 
     research, probabilities = service.probability_projection(run.id)
@@ -481,13 +643,18 @@ def test_terminal_capture_state_precedes_existing_calibrated_artifact(
 ) -> None:
     run = _run(action_eligible=True)
     cache = _Cache(run, capture_status=capture_status)
-    store = _ProbabilityStore(_calibrated_research(), {
-        "600519.SH": _probability_horizons(0.81),
-    })
-    source = _ResearchSource({
-        "status": "insufficient_data",
-        "run_binding": _run_binding(run),
-    })
+    store = _ProbabilityStore(
+        _calibrated_research(),
+        {
+            "600519.SH": _probability_horizons(0.81),
+        },
+    )
+    source = _ResearchSource(
+        {
+            "status": "insufficient_data",
+            "run_binding": _run_binding(run),
+        }
+    )
     service = _service(cache, probability=store, source=source)
 
     research, probabilities = service.probability_projection(run.id)
@@ -552,9 +719,7 @@ def test_action_and_capture_gate_precede_every_probability_artifact_read(
         _results(service, minimum=0.5)
     assert cache.verified_read_calls == [run.id] * 4
     assert cache.action_source_calls == [run.id] * 4
-    assert cache.capture_status_calls == (
-        [] if action_source_digest is None else [run.id] * 4
-    )
+    assert cache.capture_status_calls == ([] if action_source_digest is None else [run.id] * 4)
 
 
 def test_succeeded_capture_forces_one_blocking_preload_before_source_reread() -> None:
@@ -570,9 +735,66 @@ def test_succeeded_capture_forces_one_blocking_preload_before_source_reread() ->
     )
     service = _service(_Cache(run, capture_status="succeeded"), source=source)
 
-    assert service.probability_research(run.id) == archived
+    assert _without_historical_context(service.probability_research(run.id)) == archived
     assert source.preload_calls == 1
     assert source.calls == [run.id, run.id]
+
+
+def test_succeeded_capture_never_blocks_on_a_scheduled_source_preload() -> None:
+    run = _run(action_eligible=True)
+    archived = {
+        "status": "insufficient_data",
+        "origin": "source",
+        "run_binding": _run_binding(run),
+    }
+    source = _RacingResearchSource(
+        {"status": "not_generated"},
+        archived,
+    )
+    source.pending = True
+    service = _service(_Cache(run, capture_status="succeeded"), source=source)
+
+    research = service.probability_research(run.id)
+
+    assert research["status"] == "not_generated"
+    assert research["availability"] == "source_index_verification_pending"
+    assert research["pipeline_stage"] == "source_index_verification_pending"
+    summary = cast(
+        dict[str, object],
+        cast(dict[str, object], research["horizons"])["5"],
+    )
+    primary = cast(dict[str, object], summary["net_excess_positive"])
+    assert primary["probability"] is None
+    assert primary["filter_qualified"] is False
+    assert primary["pipeline_stage"] == "source_index_verification_pending"
+    assert source.preload_calls == 0
+    assert source.calls == [run.id]
+
+
+@pytest.mark.parametrize("broken", (False, True))
+def test_probability_research_attaches_non_authorizing_historical_context(
+    broken: bool,
+) -> None:
+    run = _run(action_eligible=True)
+    source = _ResearchSource(
+        {
+            "status": "insufficient_data",
+            "run_binding": _run_binding(run),
+        }
+    )
+    historical = _HistoricalProbabilityStore(broken=broken)
+    service = _service(
+        _Cache(run, capture_status="succeeded"),
+        source=source,
+        historical=historical,
+    )
+
+    context = service.probability_research(run.id)["historical_context"]
+
+    assert context["status"] == ("unavailable" if broken else "ready")  # type: ignore[index]
+    assert context["production_ranking_effect"] == "none"  # type: ignore[index]
+    assert context["selection_qualified"] is False  # type: ignore[index]
+    assert context["filter_qualified"] is False  # type: ignore[index]
 
 
 def test_succeeded_capture_without_source_artifact_fails_closed() -> None:
@@ -612,11 +834,13 @@ def test_oversized_legacy_projection_never_falls_back_or_enters_probability_filt
         "availability": "legacy_artifact_exceeds_interactive_budget",
         "horizons": {},
     }
-    source = _ResearchSource({
-        "status": "insufficient_data",
-        "origin": "source",
-        "run_binding": _run_binding(run),
-    })
+    source = _ResearchSource(
+        {
+            "status": "insufficient_data",
+            "origin": "source",
+            "run_binding": _run_binding(run),
+        }
+    )
     store = _ProbabilityStore(unavailable, {})
     service = _service(
         _Cache(run, capture_status="succeeded"),
@@ -668,6 +892,224 @@ def test_probability_filter_rejects_self_attested_mapping_even_when_all_checks_a
 
     assert cache.result_queries == []
     assert store.projection_symbols == [None]
+
+
+def test_joint_opaque_store_projection_is_preferred_and_really_filters_symbols() -> None:
+    run = _run()
+    summary = {
+        "status": "calibrated_shadow",
+        "selection_qualified": True,
+        "selection_qualification": {"passed": True},
+        "filter_qualified": True,
+        "probability": None,
+        "horizon": 5,
+    }
+    research = {
+        "schema_version": "market-scan-joint-execution-current-projection-v1",
+        "status": "calibrated_shadow",
+        "authority_backend": "joint_execution_opaque_v1",
+        "run_binding": _run_binding(run),
+        "horizons": {"1": {}, "5": {"net_excess_positive": summary}, "20": {}},
+    }
+    probabilities = {
+        "600519.SH": _probability_horizons(0.81),
+        "000001.SZ": _probability_horizons(0.69),
+    }
+
+    class _JointStore:
+        @staticmethod
+        def has_current_projection(run_id: int) -> bool:
+            return run_id == run.id
+
+        @staticmethod
+        def research_projection(run_id: int) -> dict[str, object]:
+            assert run_id == run.id
+            return research
+
+        @staticmethod
+        def run_projection(
+            run_id: int,
+            *,
+            symbols: tuple[str, ...] | None = None,
+        ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+            assert run_id == run.id
+            selected = set(symbols) if symbols is not None else None
+            return research, {
+                symbol: value
+                for symbol, value in probabilities.items()
+                if selected is None or symbol in selected
+            }
+
+        @staticmethod
+        def filter_qualified(run_id: int) -> bool:
+            return run_id == run.id
+
+        @staticmethod
+        def status_projection() -> dict[str, object]:
+            return {"status": "current_prediction_ready", "filter_ready": True}
+
+    cache = _Cache(run, capture_status="succeeded")
+    service = _service(cache, joint=_JointStore())
+    page = _results(service, minimum=0.70)
+
+    assert [item.symbol for item in page.items] == ["600519.SH"]
+    assert cache.result_queries[-1]["symbols"] == ("600519.SH",)
+    assert page.probability_research["authority_backend"] == "joint_execution_opaque_v1"
+
+
+def test_active_v6_ranking_reorders_filters_and_preserves_v5_fields() -> None:
+    run = _run()
+
+    class _RankingCache(_Cache):
+        def market_scan_results(
+            self,
+            run_id: int,
+            **query: object,
+        ) -> MarketScanResultPage:
+            assert run_id == run.id
+            self.result_queries.append(query)
+            items = [
+                _result(run_id, "600519.SH").model_copy(
+                    update={"rank": 1, "score": 80, "raw_score": 80.0}
+                ),
+                _result(run_id, "000001.SZ").model_copy(
+                    update={"rank": 2, "score": 79, "raw_score": 79.0}
+                ),
+            ]
+            requested = cast(tuple[str, ...] | None, query["symbols"])
+            if requested is not None:
+                selected = set(requested)
+                items = [item for item in items if item.symbol in selected]
+            return MarketScanResultPage(
+                run=run,
+                items=items,
+                total=len(items),
+                page=cast(int, query["page"]),
+                page_size=cast(int, query["page_size"]),
+                page_count=1,
+            )
+
+    records = {
+        "600519.SH": _ranking_record(
+            "600519.SH",
+            base_rank=1,
+            base_score=80,
+            base_raw_score=80.0,
+            rank=2,
+            score=74,
+            raw_score=74.0,
+            adjustment=-6.0,
+        ),
+        "000001.SZ": _ranking_record(
+            "000001.SZ",
+            base_rank=2,
+            base_score=79,
+            base_raw_score=79.0,
+            rank=1,
+            score=85,
+            raw_score=85.0,
+            adjustment=6.0,
+        ),
+    }
+
+    class _RankingStore:
+        @staticmethod
+        def has_current_projection(_run_id: int) -> bool:
+            return False
+
+        @staticmethod
+        def status_projection() -> dict[str, object]:
+            return {"status": "ranking_active", "filter_ready": False}
+
+        @staticmethod
+        def production_ranking_projection(
+            run_id: int,
+        ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+            assert run_id == run.id
+            return {
+                "contract_version": "market-scan-probability-ranking-projection-v1",
+                "status": "active",
+                "run_id": run_id,
+                "score_rule_version": PROBABILITY_RANKING_SCORE_RULE_VERSION,
+                "score_spec_hash": probability_ranking_score_spec_hash(),
+                "artifact_digest": "d" * 64,
+                "promotion_digest": "e" * 64,
+                "generated_at": "2026-08-11T16:11:00+08:00",
+                "record_count": 2,
+                "base_snapshot_digest": run.snapshot_digest,
+                "base_v5_mutated": False,
+                "historical_ranks_mutated": False,
+                "rollback_available": True,
+            }, records
+
+    cache = _RankingCache(
+        run,
+        score_contract=MarketScanProductionScoreContract(
+            FULL_MARKET_SCORE_RULE_VERSION,
+            "f" * 64,
+            run.success_count,
+        ),
+    )
+    page = _service(cache, joint=_RankingStore()).results(
+        run.id,
+        page=1,
+        page_size=1,
+        status="success",
+        market=None,
+        industry=None,
+        is_st=None,
+        is_new=None,
+        min_score=80,
+        min_data_quality_score=None,
+        keyword=None,
+        sort="rank",
+        order="asc",
+    )
+
+    assert [item.symbol for item in page.items] == ["000001.SZ"]
+    assert page.total == 1
+    assert page.production_ranking is not None
+    assert page.production_ranking["status"] == "active"
+    result = page.items[0]
+    assert (result.rank, result.score, result.raw_score) == (1, 85, 85.0)
+    assert (
+        result.base_production_rank,
+        result.base_production_score,
+        result.base_production_raw_score,
+    ) == (2, 79, 79.0)
+    assert result.production_score_rule_version == PROBABILITY_RANKING_SCORE_RULE_VERSION
+    assert result.probability_ranking_adjustment == 6.0
+    assert result.probability_ranking_artifact_digest == "d" * 64
+    assert cache.result_queries == [
+        {
+            "page": 1,
+            "page_size": run.total_count,
+            "status": "success",
+            "market": None,
+            "industry": None,
+            "is_st": None,
+            "is_new": None,
+            "min_score": None,
+            "max_score": None,
+            "min_trend_score": None,
+            "max_trend_score": None,
+            "min_change_pct": None,
+            "max_change_pct": None,
+            "min_turnover_rate": None,
+            "max_turnover_rate": None,
+            "min_amount": None,
+            "max_amount": None,
+            "min_data_quality_score": None,
+            "max_data_quality_score": None,
+            "min_confidence": None,
+            "max_risk": None,
+            "min_tradability": None,
+            "keyword": None,
+            "sort": "rank",
+            "order": "asc",
+            "symbols": None,
+        }
+    ]
 
 
 @pytest.mark.parametrize("minimum", [float("nan"), -0.01, 1.01])
@@ -790,10 +1232,12 @@ def test_built_artifact_store_and_query_preserve_source_archive_commit(
             "rule_version": _STORE_RULE_VERSION,
         },
     )
-    source = _ResearchSource({
-        "status": "insufficient_data",
-        "run_binding": _run_binding(run),
-    })
+    source = _ResearchSource(
+        {
+            "status": "insufficient_data",
+            "run_binding": _run_binding(run),
+        }
+    )
     service = _service(
         _Cache(run, capture_status="succeeded"),
         probability=MarketScanProbabilityStore(directory),
@@ -810,12 +1254,20 @@ def test_built_artifact_store_and_query_preserve_source_archive_commit(
 
 def test_ineligible_run_is_resolved_before_any_legacy_artifact_read() -> None:
     store = _ProbabilityStore(_calibrated_research(), {})
-    service = _service(_Cache(_run(mode="intraday")), probability=store)
+    historical = _HistoricalProbabilityStore()
+    service = _service(
+        _Cache(_run(mode="intraday")),
+        probability=store,
+        historical=historical,
+    )
 
     with pytest.raises(ProbabilityResearchUnavailable, match="盘后正式"):
         service.probability_research(29)
     page = _results(service, minimum=None)
     assert page.probability_research["availability"] == "ineligible_run_contract"
+    context = cast(dict[str, object], page.probability_research["historical_context"])
+    assert context["status"] == "ready"
+    assert context["filter_qualified"] is False
     assert store.projection_symbols == []
 
 
@@ -959,21 +1411,40 @@ def _service(
     probability: object | None = None,
     source: object | None = None,
     future_range: object | None = None,
+    historical: object | None = None,
+    joint: object | None = None,
 ) -> MarketScanQueryService:
     if probability is not None and source is None:
         # Existing probability artifacts in these fixtures represent a source
         # capture that completed and is still present in the read-only index.
         cache.capture_status = "succeeded"
-        source = _ResearchSource({
-            "status": "insufficient_data",
-            "run_binding": _run_binding(cache.current_run),
-        })
+        source = _ResearchSource(
+            {
+                "status": "insufficient_data",
+                "run_binding": _run_binding(cache.current_run),
+            }
+        )
     stores = MarketScanResearchStores(
         probability=cast(Any, probability),
         probability_source=cast(Any, source),
         future_range=cast(Any, future_range),
+        historical_probability=cast(Any, historical),
+        joint_probability=cast(Any, joint),
     )
     return MarketScanQueryService(cast(Any, cache), stores)
+
+
+def _without_historical_context(value: dict[str, object]) -> dict[str, object]:
+    return {
+        key: item
+        for key, item in value.items()
+        if key
+        not in {
+            "historical_context",
+            "official_execution_evidence",
+            "joint_execution_evidence",
+        }
+    }
 
 
 def _run(*, mode: str = "official", action_eligible: bool = True) -> MarketScanRun:
@@ -1062,17 +1533,44 @@ def _result(run_id: int, symbol: str) -> MarketScanResultItem:
     )
 
 
+def _ranking_record(
+    symbol: str,
+    *,
+    base_rank: int,
+    base_score: int,
+    base_raw_score: float,
+    rank: int,
+    score: int,
+    raw_score: float,
+    adjustment: float,
+) -> dict[str, object]:
+    return {
+        "run_id": 29,
+        "symbol": symbol,
+        "base_rank": base_rank,
+        "base_score": base_score,
+        "base_raw_score": base_raw_score,
+        "probability": 0.8 if adjustment > 0 else 0.2,
+        "reference_base_rate": 0.5,
+        "probability_adjustment": adjustment,
+        "rank": rank,
+        "score": score,
+        "raw_score": raw_score,
+        "score_rule_version": PROBABILITY_RANKING_SCORE_RULE_VERSION,
+        "score_spec_hash": probability_ranking_score_spec_hash(),
+        "source_record_digest": "1" * 64,
+        "prediction_record_digest": "2" * 64,
+        "record_digest": ("3" if adjustment > 0 else "4") * 64,
+    }
+
+
 def _calibrated_research() -> dict[str, object]:
     current = _current_selection_summary()
     current["filter_qualification"] = _filter_authorization(current)
     return {
         "status": "calibrated_shadow",
         "run_binding": _run_binding(),
-        "horizons": {
-            "5": {
-                "net_excess_positive": current
-            }
-        },
+        "horizons": {"5": {"net_excess_positive": current}},
     }
 
 
@@ -1118,49 +1616,84 @@ def _filter_authorization(evidence: dict[str, object]) -> dict[str, object]:
     metrics_digest = stable_probability_hash(evidence["calibration_metrics"])
     raw_sections = {
         "promotion_gates": {
-            "version": "gates-v1", "passed": True, "evidence_digest": digest,
-            "gates": {name: True for name in (
-                "calibrated_shadow", "selection_qualified", "label_coverage_at_least_95pct",
-                "point_in_time_evidence_at_least_95pct", "deterministic_replay_verified",
-            )},
+            "version": "gates-v1",
+            "passed": True,
+            "evidence_digest": digest,
+            "gates": {
+                name: True
+                for name in (
+                    "calibrated_shadow",
+                    "selection_qualified",
+                    "label_coverage_at_least_95pct",
+                    "point_in_time_evidence_at_least_95pct",
+                    "deterministic_replay_verified",
+                )
+            },
         },
         "multiple_testing": {
-            "version": "fdr-v1", "passed": True, "evidence_digest": digest,
-            "method": "benjamini_hochberg_fdr", "alpha": 0.05,
-            "adjusted_p_value": 0.01, "family_size": 6,
-            "checks": {name: True for name in (
-                "family_registered", "all_horizon_target_candidates_included",
-                "adjusted_significance_passed",
-            )},
+            "version": "fdr-v1",
+            "passed": True,
+            "evidence_digest": digest,
+            "method": "benjamini_hochberg_fdr",
+            "alpha": 0.05,
+            "adjusted_p_value": 0.01,
+            "family_size": 6,
+            "checks": {
+                name: True
+                for name in (
+                    "family_registered",
+                    "all_horizon_target_candidates_included",
+                    "adjusted_significance_passed",
+                )
+            },
         },
         "calibration": {
-            "version": "cal-v1", "passed": True, "evidence_digest": digest,
-            "metrics_digest": metrics_digest, "independent_session_count": 60,
-            "checks": {name: True for name in (
-                "proper_score_ci_passed", "ece_threshold_passed",
-                "calibration_slope_ci_contains_one", "calibration_intercept_ci_contains_zero",
-            )},
+            "version": "cal-v1",
+            "passed": True,
+            "evidence_digest": digest,
+            "metrics_digest": metrics_digest,
+            "independent_session_count": 60,
+            "checks": {
+                name: True
+                for name in (
+                    "proper_score_ci_passed",
+                    "ece_threshold_passed",
+                    "calibration_slope_ci_contains_one",
+                    "calibration_intercept_ci_contains_zero",
+                )
+            },
         },
         "drift": {
-            "version": "drift-v1", "passed": True, "evidence_digest": digest,
+            "version": "drift-v1",
+            "passed": True,
+            "evidence_digest": digest,
             "independent_session_count": 60,
-            "checks": {name: True for name in (
-                "feature_drift_passed", "probability_drift_passed", "performance_drift_passed",
-            )},
+            "checks": {
+                name: True
+                for name in (
+                    "feature_drift_passed",
+                    "probability_drift_passed",
+                    "performance_drift_passed",
+                )
+            },
         },
         "execution": {
-            "version": "exec-v1", "passed": True, "evidence_digest": digest,
+            "version": "exec-v1",
+            "passed": True,
+            "evidence_digest": digest,
             "independent_session_count": 60,
-            "checks": {name: True for name in (
-                "net_excess_return_positive", "turnover_within_limit",
-                "drawdown_within_limit", "capacity_coverage_passed",
-            )},
+            "checks": {
+                name: True
+                for name in (
+                    "net_excess_return_positive",
+                    "turnover_within_limit",
+                    "drawdown_within_limit",
+                    "capacity_coverage_passed",
+                )
+            },
         },
     }
-    sections = {
-        name: {**value, "integrity_digest": stable_probability_hash(value)}
-        for name, value in raw_sections.items()
-    }
+    sections = {name: {**value, "integrity_digest": stable_probability_hash(value)} for name, value in raw_sections.items()}
     authorization: dict[str, object] = {
         "version": PROBABILITY_FILTER_AUTHORIZATION_VERSION,
         "evidence_digest": digest,

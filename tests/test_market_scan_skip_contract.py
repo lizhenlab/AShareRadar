@@ -38,6 +38,9 @@ from app.models.market_scan import (
 )
 from app.services.cache import SQLiteCache
 from app.services.market_scan_execution import MarketScanExecutor
+from app.services.market_scan_execution_quote import (
+    MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY,
+)
 from app.services.market_scan_manager import market_scan_rule_contract
 from app.services.market_scan_score_contract import stable_score_spec_hash
 from app.services.market_scan_scoring import (
@@ -404,6 +407,31 @@ def test_current_write_accepts_a_fully_verified_new_listing_skip(
 
     assert updated.skipped_count == 1
     assert updated.missing_count == 0
+
+
+def test_current_write_rejects_quote_observed_skip_without_execution_quote_evidence(
+    tmp_path: Path,
+) -> None:
+    repo, run, item, settings, rule_version = _running_repository(tmp_path)
+    _case_item, quote, rows = _case(
+        "new_listing_insufficient_history",
+        item=item,
+    )
+    result = _skip_result(
+        item,
+        quote,
+        rows,
+        settings=settings,
+        rule_version=rule_version,
+    )
+    details = deepcopy(result.score_details)
+    details.pop(MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY)
+
+    with pytest.raises(ValueError, match="缺少未复权执行行情证据"):
+        repo.save_result_batch(
+            run.id,
+            [replace(result, score_details=details)],
+        )
 
 
 @pytest.mark.parametrize("mode", ["intraday", "preopen"])
@@ -1156,6 +1184,9 @@ def _skip_result(
         cutoff=data_date,
         exc=raised.value,
         sensitive_values=(),
+        quote_observed_at=quote_observed_at,
+        mode=mode,
+        quote_date=quote_date,
     )
     return replace(result, quote_observed_at=quote_observed_at)
 

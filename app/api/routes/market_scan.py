@@ -276,6 +276,36 @@ def _validated_probability_horizon(value: int) -> Literal[1, 5, 20]:
     return cast(Literal[1, 5, 20], value)
 
 
+@router.get("/api/market-scans/{run_id}/experimental-probability", response_model=dict[str, object])
+async def market_scan_experimental_probability(
+    run_id: int,
+    response: Response,
+    acknowledge_experimental: bool = Query(False),
+    min_probability: float | None = Query(None, ge=0, le=1),
+    market: MarketCode | None = Query(None),
+    keyword: str = Query("", max_length=80),
+    sort: Literal["probability", "base_rank"] = Query("probability"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
+) -> dict[str, object]:
+    from app.services.experimental_probability_model import ExperimentalProbabilityUnavailable
+
+    response.headers["Cache-Control"] = "no-store"
+    if not acknowledge_experimental:
+        raise HTTPException(status_code=422, detail="请明确确认个人实验模式：未通过正式生产验证，不改变正式排名")
+    def read() -> dict[str, object]:
+        try:
+            return scanner.experimental_probability_results(
+                run_id, minimum=min_probability, market=market, keyword=keyword, sort=sort, page=page, page_size=page_size,
+            )
+        except ExperimentalProbabilityUnavailable as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return await run_admitted_market_scan_read(admission, read)
+
+
 def _normalized_sort_query(
     sort: list[MarketScanSort] | None,
     order: list[MarketScanSortOrder] | None,
@@ -329,7 +359,7 @@ async def market_scan_results(
                 sort=filters.sort,
                 order=filters.order,
             )
-        )
+        ),
     )
 
 
@@ -340,9 +370,7 @@ async def market_scan_breadth(
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketBreadthV1:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(
-        lambda: _screening_guard(lambda: scanner.breadth(run_id))
-    )
+    return await run_sync_api_async(lambda: _screening_guard(lambda: scanner.breadth(run_id)))
 
 
 @router.post(
@@ -356,9 +384,7 @@ async def evaluate_market_scan_screen(
     scanner: MarketScanManager = Depends(get_market_scanner),
 ) -> MarketScanScreenEvaluationV1:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(
-        lambda: _screening_guard(lambda: scanner.evaluate_screen(run_id, payload))
-    )
+    return await run_sync_api_async(lambda: _screening_guard(lambda: scanner.evaluate_screen(run_id, payload)))
 
 
 @router.get("/api/market-scans/{run_id}/delta", response_model=MarketScanDeltaResponse)
@@ -390,11 +416,10 @@ async def market_scan_probability_research(
     run_id: int,
     response: Response,
     scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
-    return await run_sync_api_async(
-        lambda: _probability_research_guard(lambda: scanner.probability_research(run_id))
-    )
+    return await run_admitted_market_scan_read(admission, lambda: _probability_research_guard(lambda: scanner.probability_research(run_id)))
 
 
 def _probability_research_guard(call: Callable[[], T]) -> T:
@@ -457,15 +482,13 @@ async def export_market_scan_results(
     run_id: int,
     filters: MarketScanExportFilters = Depends(market_scan_filter_query),
     scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
 ) -> Response:
-    exported = await run_sync_api_async(
+    exported = await run_admitted_market_scan_read(
+        admission,
         lambda: _probability_filter_guard(
-            lambda: _probability_research_guard(
-                lambda: _future_range_artifact_guard(
-                    lambda: scanner.export_results(run_id, filters=filters)
-                )
-            )
-        )
+            lambda: _probability_research_guard(lambda: _future_range_artifact_guard(lambda: scanner.export_results(run_id, filters=filters)))
+        ),
     )
     return Response(
         content=exported.content,

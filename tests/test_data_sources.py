@@ -149,6 +149,20 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertNotIn("demo", quote_names)
         self.assertNotIn("demo", kline_names)
 
+    def test_datahub_startup_clears_previous_process_call_diagnostic(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.sqlite3"
+            settings = Settings(cache_path=path)
+            cache = SQLiteCache(settings=settings)
+            cache.update_provider_failure("legacy", 99, "调用超过 8 秒，后台任务仍在收尾")
+
+            DataHub(cache=cache, settings=settings)
+            status = next(item for item in cache.provider_statuses() if item.name == "legacy")
+
+        self.assertIsNone(status.last_error)
+        self.assertFalse(status.healthy)
+        self.assertEqual(status.failure_count, 1)
+
     def test_source_key_normalizes_cached_and_display_names(self) -> None:
         self.assertEqual(_provider_source_key("腾讯行情·缓存"), "tencent")
         self.assertEqual(_provider_source_key("AKShare"), "akshare")
@@ -653,7 +667,8 @@ class DataSourceReliabilityTests(unittest.TestCase):
             },
         }
 
-        def fake_get_json(url, params):
+        def fake_get_json(url, params, *, timeout=8):
+            self.assertLessEqual(timeout, 6.0)
             if url.startswith("https://82."):
                 raise RuntimeError("primary down")
             return payload
@@ -663,6 +678,20 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         self.assertEqual([f"{item.code}.{item.market}" for item in rows], ["600519.SH", "000001.SZ", "600519.SH"])
         self.assertTrue(all(item.source == "AKShare·东方财富直连" for item in rows))
+
+    def test_eastmoney_quote_retries_share_one_bounded_deadline(self) -> None:
+        observed_timeouts: list[float] = []
+
+        def unavailable(_url, _params, *, timeout=8):
+            observed_timeouts.append(float(timeout))
+            raise ProviderTransportError("upstream unavailable")
+
+        with patch("app.services.eastmoney_client.eastmoney_get_json", side_effect=unavailable):
+            with self.assertRaises(ProviderTransportError):
+                eastmoney_quotes(["600519.SH"])
+
+        self.assertEqual(len(observed_timeouts), 3)
+        self.assertTrue(all(0 < timeout <= 6.0 for timeout in observed_timeouts))
 
     def test_eastmoney_quotes_skips_non_dict_rows_before_ordering(self) -> None:
         payload = {
@@ -872,6 +901,18 @@ class DataSourceReliabilityTests(unittest.TestCase):
             rows = asyncio.run(provider.quotes(["600519.SH"]))
 
         self.assertEqual(rows, bridge_rows)
+        import_ak.assert_not_called()
+
+    def test_akshare_quotes_does_not_start_unbounded_sdk_fallback_after_transport_failure(self) -> None:
+        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+
+        with patch("app.services.akshare_provider.is_installed", return_value=True), patch(
+            "app.services.akshare_provider._eastmoney_quotes",
+            side_effect=ProviderTransportError("direct transport down"),
+        ), patch("app.services.akshare_provider._import_akshare") as import_ak:
+            with self.assertRaisesRegex(ProviderTransportError, "direct transport down"):
+                asyncio.run(provider.quotes(["600519.SH"]))
+
         import_ak.assert_not_called()
 
     def test_akshare_quotes_skips_malformed_rows_and_preserves_request_order(self) -> None:

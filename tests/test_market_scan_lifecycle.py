@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 
@@ -50,6 +51,65 @@ def test_market_scan_deduplicates_active_start_and_can_cancel_then_resume(tmp_pa
     assert final.status == "failed"
     assert final.processed_count == final.total_count
     assert original.status == "cancelled"
+
+
+def test_market_scan_start_does_not_wait_for_probability_runtime_warmup(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        hub = _MarketScanHub(tmp_path)
+        scanner = _scanner(hub)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        activated = False
+
+        async def refresh() -> int:
+            entered.set()
+            await release.wait()
+            return 0
+
+        async def activate() -> None:
+            nonlocal activated
+            activated = True
+
+        scanner.refresh_probability_research_cache = refresh  # type: ignore[method-assign]
+        scanner._activate_probability_capture_leader = activate  # type: ignore[method-assign]  # noqa: SLF001
+
+        assert await asyncio.wait_for(scanner.start(), timeout=0.5) == 0
+        await asyncio.wait_for(entered.wait(), timeout=0.5)
+        assert activated is False
+        assert scanner._probability_source_research_store.refresh_pending() is True  # noqa: SLF001
+        assert scanner._historical_probability_store.refresh_pending() is True  # noqa: SLF001
+        await asyncio.wait_for(scanner.stop(), timeout=0.5)
+        assert scanner._probability_runtime_warmup_task is None  # noqa: SLF001
+        assert scanner._probability_source_research_store.refresh_pending() is False  # noqa: SLF001
+        assert scanner._historical_probability_store.refresh_pending() is False  # noqa: SLF001
+
+    asyncio.run(scenario())
+
+
+def test_joint_probability_maintenance_normalizes_legacy_naive_market_time(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> datetime:
+        scanner = _scanner(_MarketScanHub(tmp_path))
+        observed: list[datetime] = []
+
+        class Store:
+            def run(self, *, now: datetime) -> object:
+                observed.append(now)
+                return object()
+
+        scanner._joint_probability_store = Store()  # type: ignore[assignment]  # noqa: SLF001
+        await scanner.maintain_joint_execution_probability(
+            now=datetime(2026, 8, 23, 1, 30),
+        )
+        return observed[0]
+
+    normalized = asyncio.run(scenario())
+
+    assert normalized.utcoffset() == timedelta(hours=8)
+    assert normalized.replace(tzinfo=None) == datetime(2026, 8, 23, 1, 30)
 
 
 def test_market_scan_cancellation_closes_atomically_linked_task_returned_late(tmp_path: Path) -> None:

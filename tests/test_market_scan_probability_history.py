@@ -17,6 +17,8 @@ from app.services.runtime_backup import create_runtime_backup
 import app.services.market_scan_probability_history as history_module
 from app.services.market_scan_probability_history import (
     PROBABILITY_HISTORY_BARS,
+    PROBABILITY_HISTORY_EXTENDED_BARS,
+    PROBABILITY_HISTORY_EXTENDED_MANIFEST_SCHEMA_VERSION,
     PROBABILITY_HISTORY_LEGACY_MANIFEST_SCHEMA_VERSION,
     PROBABILITY_HISTORY_MANIFEST_MAX_BYTES,
     PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION,
@@ -67,7 +69,7 @@ class FakeHistoryProvider:
         self.maximum_active = 0
 
     async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
-        assert limit == PROBABILITY_HISTORY_BARS
+        assert limit == len(self.dates)
         self.attempts[symbol] += 1
         self.active += 1
         self.maximum_active = max(self.maximum_active, self.active)
@@ -173,6 +175,57 @@ def test_history_backfill_is_balanced_bounded_replay_compatible_and_restart_veri
     assert int(cast(int, replay_quality["record_independent_session_count"])) >= 260
 
 
+def test_history_extended_window_reaches_fit_floor_and_uses_separate_v3_contract(
+    tmp_path: Path,
+) -> None:
+    symbols = ("600001.SH", "000001.SZ", "830001.BJ")
+    source = _source_database(tmp_path / "live.sqlite3", symbols)
+    dates = trusted_probability_history_dates(ANCHOR_DATE, PROBABILITY_HISTORY_EXTENDED_BARS)
+    result = asyncio.run(
+        backfill_market_scan_probability_history(
+            source,
+            tmp_path / "history-500.sqlite3",
+            tmp_path / "v3",
+            config=ProbabilityHistoryConfig(
+                symbol_limit=3,
+                symbols=symbols,
+                history_bars=PROBABILITY_HISTORY_EXTENDED_BARS,
+                retry_delay_seconds=0,
+                minimum_symbols_per_market=1,
+                minimum_symbols_total=3,
+            ),
+            provider=FakeHistoryProvider(dates),
+            generated_at="2026-08-11T09:00:00+00:00",
+        ),
+    )
+
+    assert result.manifest["schema_version"] == PROBABILITY_HISTORY_EXTENDED_MANIFEST_SCHEMA_VERSION
+    assert probability_history_manifest_assurance(result.manifest) == "attested_v3"
+    loaded = load_market_scan_probability_history_manifest(result.manifest_path)
+    payload = cast(dict[str, object], loaded["payload"])
+    cohort = cast(dict[str, object], payload["cohort"])
+    source_evidence = cast(dict[str, object], payload["source"])
+    database = cast(dict[str, object], payload["database"])
+    quality = cast(dict[str, object], payload["quality"])
+    replay_input = cast(dict[str, object], payload["replay_input"])
+    assert cohort["scope"] == "tencent_qfq_500_fixed_session_deterministic_sample"
+    assert cohort["rule_version"] == "historical-replay-history-source-v2-extended-window"
+    assert source_evidence["request_bars_per_symbol"] == PROBABILITY_HISTORY_EXTENDED_BARS
+    assert database["bars_per_symbol"] == PROBABILITY_HISTORY_EXTENDED_BARS
+    assert quality["bars_per_symbol"] == PROBABILITY_HISTORY_EXTENDED_BARS
+    assert replay_input["start_date"] == dates[60]
+    assert replay_input["end_date"] == dates[478]
+
+    wrong_schema = deepcopy(result.manifest)
+    wrong_schema["schema_version"] = PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION
+    _reseal_manifest(wrong_schema)
+    with pytest.raises(ProbabilityHistoryError, match="v2 与 360"):
+        verify_market_scan_probability_history_manifest(
+            wrong_schema,
+            database_path=result.database_path,
+        )
+
+
 def test_history_backfill_provider_failure_is_retried_sanitized_and_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -213,7 +266,11 @@ def test_history_validation_and_mechanical_error_boundaries_are_explicit(
 ) -> None:
     invalid_configs = (
         {"symbol_limit": True},
+        {"symbol_limit": 121},
+        {"history_bars": PROBABILITY_HISTORY_EXTENDED_BARS, "symbol_limit": 226},
         {"history_bars": 359},
+        {"history_bars": 501},
+        {"history_bars": True},
         {"concurrency": 0},
         {"max_retries": 3},
         {"retry_delay_seconds": float("nan")},
@@ -230,6 +287,10 @@ def test_history_validation_and_mechanical_error_boundaries_are_explicit(
     for values in invalid_configs:
         with pytest.raises(ValueError):
             ProbabilityHistoryConfig(**values)  # type: ignore[arg-type]
+    assert ProbabilityHistoryConfig(
+        history_bars=PROBABILITY_HISTORY_EXTENDED_BARS,
+        symbol_limit=225,
+    ).symbol_limit == 225
     for anchor, count in (("bad-date", 1), (ANCHOR_DATE, 0), (ANCHOR_DATE, True)):
         with pytest.raises(ValueError):
             trusted_probability_history_dates(anchor, count)  # type: ignore[arg-type]

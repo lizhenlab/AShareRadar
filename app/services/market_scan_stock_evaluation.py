@@ -97,6 +97,8 @@ class MarketScanStockEvaluator:
                 exc=exc,
                 sensitive_values=self._sensitive_values,
                 quote_observed_at=quote_observed_at,
+                mode=mode,
+                quote_date=expected_quote_date,
             )
 
     async def _timed_kline_fetch(

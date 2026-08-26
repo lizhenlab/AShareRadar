@@ -15,6 +15,8 @@ if str(ROOT) not in sys.path:
 
 
 from app.services.market_scan_probability_history import (  # noqa: E402
+    PROBABILITY_HISTORY_BARS,
+    PROBABILITY_HISTORY_SUPPORTED_BARS,
     ProbabilityHistoryBuildResult,
     ProbabilityHistoryConfig,
     ProbabilityHistoryError,
@@ -34,6 +36,7 @@ def main() -> int:
                 config=ProbabilityHistoryConfig(
                     symbol_limit=args.symbol_limit,
                     symbols=tuple(args.symbols or ()),
+                    history_bars=args.history_bars,
                 ),
                 provider_timeout_seconds=args.timeout,
             ),
@@ -69,7 +72,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--target-database", type=Path, required=True, help="全新的独立研究 SQLite")
     parser.add_argument("--output-dir", type=Path, required=True, help="内容寻址 manifest 目录")
-    parser.add_argument("--symbol-limit", type=int, default=90, help="均衡样本数，默认90、最大120")
+    parser.add_argument(
+        "--symbol-limit",
+        type=int,
+        default=90,
+        help="均衡候选数，默认90；360日最大120，500日最大225",
+    )
+    parser.add_argument(
+        "--history-bars",
+        type=int,
+        choices=PROBABILITY_HISTORY_SUPPORTED_BARS,
+        default=PROBABILITY_HISTORY_BARS,
+        help="每只股历史日K数；360为兼容合同，500用于跨过拟合门槛",
+    )
     parser.add_argument("--symbol", action="append", dest="symbols", help="可重复；仍须满足60/每市场20门槛")
     parser.add_argument("--timeout", type=float, default=15.0, help="Tencent 单次请求超时秒数")
     return parser

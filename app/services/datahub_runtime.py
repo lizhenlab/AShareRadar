@@ -31,6 +31,7 @@ __all__ = [
     "ProviderCoverageMiss",
     "ProviderRuntime",
     "TimedProviderCall",
+    "await_provider_worker",
     "provider_source_name",
     "run_cache_io",
     "run_cache_io_best_effort",
@@ -39,8 +40,10 @@ __all__ = [
 
 PROVIDER_IO_MAX_WORKERS = 4
 PROVIDER_CAPABILITY_MAX_IN_FLIGHT = 2
+TENCENT_KLINE_MAX_IN_FLIGHT = 5
 PROVIDER_BUSY_RETRY_AFTER_SECONDS = 0.25
 PROVIDER_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+PROVIDER_ASYNC_CANCEL_GRACE_SECONDS = 0.05
 _PROVIDER_IO_EXECUTOR: ContextVar[DaemonThreadPoolExecutor | None] = ContextVar(
     "ashare_radar_provider_io_executor",
     default=None,
@@ -80,6 +83,18 @@ async def run_provider_io(call: Callable[P, T], /, *args: P.args, **kwargs: P.kw
     if tracker is not None:
         tracker(worker)
     return await asyncio.wrap_future(worker)
+
+
+async def await_provider_worker(worker: ConcurrentFuture[T]) -> T:
+    """Await and register a provider-owned worker with the active runtime."""
+    tracker = _PROVIDER_IO_TRACKER.get()
+    if tracker is not None:
+        tracker(worker)
+    try:
+        return await asyncio.wrap_future(worker)
+    except asyncio.CancelledError:
+        worker.cancel()
+        raise
 
 
 @dataclass(frozen=True)
@@ -128,7 +143,7 @@ class ProviderCallBusyError(RuntimeError):
 
 
 class ProviderCallTimeoutError(TimeoutError):
-    """The caller timed out while the tracked provider task continues safely."""
+    """The provider call exceeded its caller deadline."""
 
 
 class ProviderRuntime:
@@ -251,7 +266,9 @@ class ProviderRuntime:
                     self._provider_calls.pop(full_key, None)
                 if self._provider_has_orphaned_call(capability_key):
                     raise ProviderCallBusyError(f"{capability_key[0]} {capability_key[1]} 上一次调用仍在后台执行")
-                if self._active_provider_call_count(capability_key) < PROVIDER_CAPABILITY_MAX_IN_FLIGHT:
+                if self._active_provider_call_count(capability_key) < self._capability_max_in_flight(
+                    capability_key
+                ):
                     state = self._start_provider_call(capability_key, full_key, start)
                     state.waiters = 1
                     return state
@@ -294,8 +311,8 @@ class ProviderRuntime:
     ) -> T:
         task = state.task
 
-        # Cancelling an executor waiter cannot stop its worker thread. asyncio.wait
-        # leaves the shared provider task alive until the real SDK call exits.
+        # Pure async transports can be cancelled at the deadline. Executor-backed
+        # SDK calls cannot, so those stay tracked until their worker really exits.
         try:
             done, _pending = await asyncio.wait(
                 {task},
@@ -303,8 +320,16 @@ class ProviderRuntime:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if task not in done:
-                raise ProviderCallTimeoutError(f"{label}超过 {timeout_label:g} 秒，后台任务仍在收尾")
+                stopped = await self._stop_unshared_async_call(
+                    capability_key,
+                    state,
+                )
+                detail = "已取消未完成的异步请求" if stopped else "底层同步调用仍在受控收尾"
+                raise ProviderCallTimeoutError(f"{label}超过 {timeout_label:g} 秒，{detail}")
             return task.result()
+        except asyncio.CancelledError:
+            await self._stop_unshared_async_call(capability_key, state)
+            raise
         finally:
             condition = self._provider_conditions[capability_key]
             async with condition:
@@ -314,6 +339,22 @@ class ProviderRuntime:
                 if task.done() and self._provider_calls.get(full_key) is state:
                     self._provider_calls.pop(full_key, None)
                 condition.notify_all()
+
+    async def _stop_unshared_async_call(
+        self,
+        capability_key: tuple[str, str],
+        state: _ProviderCallState,
+    ) -> bool:
+        """Cancel an unshared async request without losing track of blocking SDK work."""
+        task = state.task
+        if state.waiters != 1 or self._active_provider_workers(capability_key):
+            return False
+        task.cancel()
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=PROVIDER_ASYNC_CANCEL_GRACE_SECONDS,
+        )
+        return task in done
 
     async def timed_provider_call(
         self,
@@ -396,7 +437,10 @@ class ProviderRuntime:
                 retry_delays.append(PROVIDER_BUSY_RETRY_AFTER_SECONDS)
                 reasons.append(f"{name}: 上一次调用仍在后台执行")
                 continue
-            if self._active_provider_call_count((name, kind)) >= PROVIDER_CAPABILITY_MAX_IN_FLIGHT:
+            capability_key = (name, kind)
+            if self._active_provider_call_count(capability_key) >= self._capability_max_in_flight(
+                capability_key
+            ):
                 blocked.append(name)
                 retry_delays.append(PROVIDER_BUSY_RETRY_AFTER_SECONDS)
                 reasons.append(f"{name}: 当前并发槽位已满")
@@ -421,6 +465,20 @@ class ProviderRuntime:
         if self._active_provider_workers(key):
             return True
         return self._active_provider_call_count(key) > 0
+
+    def _capability_max_in_flight(self, key: tuple[str, str]) -> int:
+        if key != ("tencent", "kline"):
+            return PROVIDER_CAPABILITY_MAX_IN_FLIGHT
+        value = getattr(
+            self.settings,
+            "tencent_kline_max_in_flight",
+            TENCENT_KLINE_MAX_IN_FLIGHT,
+        )
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return TENCENT_KLINE_MAX_IN_FLIGHT
+        return min(16, max(1, parsed))
 
     def _active_provider_call_count(self, key: tuple[str, str]) -> int:
         return sum(not state.task.done() for (name, kind, _request_key), state in self._provider_calls.items() if (name, kind) == key)

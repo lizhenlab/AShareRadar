@@ -10,11 +10,17 @@ test("full-market Shadow probability stays auditable, gated, and rank preserving
   await page.locator("#marketScanModeOfficial").check({ force: true });
 
   await expect(page.locator("#marketScanProbabilityHorizon5d")).toBeChecked();
-  await expect(page.locator("#marketScanProbabilitySemantics")).toContainText("上涨概率是样本外校准估计，不参与生产评分或排名");
+  await expect(page.locator("#marketScanProbabilitySemantics")).toContainText("正式上涨概率与历史回放参考分层展示，均不改变生产评分或排名");
   await expect(page.locator("#marketScanProbabilityTarget")).toHaveText("未来所选周期净超额收益为正");
   await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("样本外已校准");
   await expect(page.locator("#marketScanProbabilityEffectiveness")).toHaveText("通过选股门禁");
   await expect(page.locator("#marketScanProbabilityBaseRate")).toHaveText("51.4%");
+  await expect(page.locator("#marketScanHistoricalProbabilityStatus")).toHaveText("样本已足·未证明预测效力");
+  await page.locator("#marketScanHistoricalProbability summary").click();
+  await expect(page.locator("#marketScanHistoricalProbabilitySample")).toHaveText("279 日 · 26784 条 · 96 只 · 覆盖 100.0%");
+  await expect(page.locator("#marketScanHistoricalProbabilityMetrics")).toHaveText("H5 AUC 0.494 · Brier Skill -0.010 · ECE 0.098 · OOS 60 日/1 折");
+  await expect(page.locator("#marketScanHistoricalProbabilityConclusion")).toHaveText("样本已达拟合门槛；未胜过基础胜率，不能输出当前逐股概率");
+  await expect(page.locator("#marketScanHistoricalProbabilityLimitations")).toContainText("不用于筛选或排名");
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("持有5日（D+6） 61.2%");
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("群体校准调整区间 56.0%–66.0%（非个股结果区间）");
   await expect(page.locator("#marketScanRows tr.market-scan-result-row > td").first()).toHaveText("7");
@@ -46,6 +52,7 @@ test("full-market Shadow probability stays auditable, gated, and rank preserving
   await page.locator("#marketScanProbabilityHorizonControl label").filter({ hasText: "持有1日（D+2）" }).click();
   await expect(page.locator("#marketScanProbabilityHorizon1d")).toBeChecked();
   await expect(page.locator("#marketScanProbabilityStatus")).toHaveText("研究已生成·样本不足");
+  await expect(page.locator("#marketScanHistoricalProbabilityMetrics")).toContainText("H1 AUC 0.499");
   await expect(page.locator("#marketScanProbabilityMin")).toBeDisabled();
   await expect(page.locator("#marketScanProbabilityMin")).toHaveValue("");
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).toHaveText("—");
@@ -59,6 +66,7 @@ test("full-market Shadow probability stays auditable, gated, and rank preserving
   await page.locator("#marketScanProbabilityHorizonControl label").filter({ hasText: "持有20日（D+21）" }).click();
   await expect(page.locator("#marketScanProbabilityHorizon20d")).toBeChecked();
   await expect(page.locator("#marketScanProbabilityBaseRate")).toHaveText("55.0%");
+  await expect(page.locator("#marketScanHistoricalProbabilityMetrics")).toContainText("H20 AUC 0.452");
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("持有20日（D+21） 70.0%");
   await expect(page.locator("#marketScanProbabilityMin")).toBeEnabled();
   expect(resultQueries).toHaveLength(3);
@@ -302,6 +310,7 @@ function probabilityResearch() {
   return {
     schema_version: "market-scan-probability-artifact-v1", run_id: 42,
     status: "calibrated_shadow", default_horizon: 5, primary_target: "net_excess_positive",
+    historical_context: historicalProbabilityContext(),
     run_binding: {
       binding_status: "verified", legacy: false, run_id: 42, mode: "official",
       scope: "SH/SZ/BJ listed A-shares", rule_version: `full-market-scan-v6:${"a".repeat(64)}`,
@@ -325,6 +334,36 @@ function probabilityResearch() {
         selection_qualified: true, selection_qualification: { passed: true }, filter_qualified: true,
       } },
     },
+  };
+}
+
+function historicalProbabilityContext() {
+  const horizon = (value, auc, skill, ece, minimum) => ({
+    horizon: value, assessment_status: "insufficient_data", probability: null,
+    base_rate: 0.55, available_independent_session_count: 279,
+    minimum_required_independent_session_count: minimum,
+    out_of_sample_session_count: 60, evaluated_fold_count: 1, observation_count: 26784,
+    auc, brier_score: 0.25, brier_skill_score: skill, ece,
+    bin_monotonic: false, highest_bin_above_base_rate: false,
+    training_cutoff: "2025-11-13", limitations: ["shadow_only_no_production_ranking_effect"],
+  });
+  return {
+    schema_version: "market-scan-probability-historical-context-v1",
+    status: "ready", availability: "historical_replay_no_verified_predictive_skill",
+    generated_at: "2026-08-11T15:58:07+00:00", target: "net_return_positive",
+    cohort: { mode: "historical_replay_v1", official: false, live_cohort_compatible: false },
+    sample: {
+      start_date: "2025-05-21", end_date: "2026-07-13",
+      independent_session_count: 279, record_count: 26784, symbol_count: 96, label_coverage: 1,
+    },
+    horizons: {
+      "1": horizon(1, 0.4992599258, -0.0007468351, 0.0130298848, 222),
+      "5": horizon(5, 0.4938355120, -0.0097820713, 0.0979727038, 230),
+      "20": horizon(20, 0.4519515853, -0.0050702669, 0.1591823191, 260),
+    },
+    source_artifact: { full_replay_verified: true },
+    production_ranking_effect: "none", selection_qualified: false, filter_qualified: false,
+    limitations: ["historical_replay_not_filter_authority"],
   };
 }
 

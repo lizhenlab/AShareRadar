@@ -139,6 +139,7 @@ class DataHub:
         self._order_book_coordinator = coordinators.order_book
         self._source_plan_builder = coordinators.source_plan
         self._status_service = coordinators.status
+        self._clear_interrupted_provider_call_errors()
         self._sync_provider_enabled_flags()
 
     async def quote(self, symbol: str, use_cache: bool = True) -> Quote:
@@ -422,6 +423,15 @@ class DataHub:
 
     def _sync_provider_enabled_flags(self) -> None:
         self._status_service.sync_provider_enabled_flags()
+
+    def _clear_interrupted_provider_call_errors(self) -> None:
+        clear = getattr(self.cache, "clear_interrupted_provider_call_errors", None)
+        if not callable(clear):
+            return
+        try:
+            clear()
+        except Exception:
+            pass
 
     async def _quote_consistency(self, quote: Quote, check_consistency: bool = True) -> tuple[str, list[str], int]:
         return await self._quote_coordinator.consistency(quote, check_consistency=check_consistency)

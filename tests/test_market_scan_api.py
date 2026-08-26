@@ -173,9 +173,7 @@ def test_latest_list_detail_cancel_and_retry_routes_expose_lifecycle() -> None:
     assert published.status_code == 200
     assert published.headers["cache-control"] == "no-store"
     assert published.json()["id"] == scanner.previous.id
-    assert published.json()["publication_diagnostics"]["blockers"][0]["code"] == (
-        "publication.snapshot.span_exceeded"
-    )
+    assert published.json()["publication_diagnostics"]["blockers"][0]["code"] == ("publication.snapshot.span_exceeded")
     assert history.status_code == 200
     assert history.headers["cache-control"] == "no-store"
     assert history.json() == {
@@ -273,10 +271,13 @@ def test_polling_identity_route_is_explicit_non_authorizing_and_no_store() -> No
         "fingerprint": "c" * 64,
     }
     assert scanner.polling_identity_calls == ["intraday"]
-    assert client.get(
-        "/api/market-scans/polling-identity",
-        params={"mode": "invalid"},
-    ).status_code == 422
+    assert (
+        client.get(
+            "/api/market-scans/polling-identity",
+            params={"mode": "invalid"},
+        ).status_code
+        == 422
+    )
 
 
 def test_polling_identity_contract_rejects_impossible_slot_ordering() -> None:
@@ -308,7 +309,9 @@ def test_polling_identity_contract_rejects_impossible_slot_ordering() -> None:
         )
 
 
-def test_four_snapshot_read_routes_share_one_nonblocking_admission_slot(tmp_path: Path) -> None:
+def test_six_snapshot_read_routes_share_one_nonblocking_admission_slot(
+    tmp_path: Path,
+) -> None:
     scanner = _ScannerStub()
     admission = MarketScanHeavyReadAdmission()
     started, release = Event(), Event()
@@ -331,6 +334,8 @@ def test_four_snapshot_read_routes_share_one_nonblocking_admission_slot(tmp_path
         client.get("/api/market-scans/latest-published", params={"mode": "official"}),
         client.get(f"/api/market-scans/{scanner.active.id}"),
         client.get(f"/api/market-scans/{scanner.active.id}/results"),
+        client.get(f"/api/market-scans/{scanner.active.id}/probability-research"),
+        client.get(f"/api/market-scans/{scanner.active.id}/export.xlsx"),
     ]
     identity = client.get("/api/market-scans/polling-identity", params={"mode": "official"})
     navigation = client.get(
@@ -338,13 +343,15 @@ def test_four_snapshot_read_routes_share_one_nonblocking_admission_slot(tmp_path
         params={"mode": "official", "status": "published", "authority": "navigation"},
     )
 
-    assert [response.status_code for response in busy] == [503, 503, 503]
+    assert [response.status_code for response in busy] == [503, 503, 503, 503, 503]
     assert all(response.headers["cache-control"] == "no-store" for response in busy)
     assert all(response.headers["retry-after"] == "2" for response in busy)
     assert all(response.json() == {"detail": MARKET_SCAN_BUSY_DETAIL} for response in busy)
     assert scanner.latest_calls == []
     assert scanner.detail_calls == []
     assert scanner.result_calls == []
+    assert scanner.probability_calls == []
+    assert scanner.export_calls == []
     assert identity.status_code == 200
     assert scanner.polling_identity_calls == ["official"]
     assert navigation.status_code == 200
@@ -530,10 +537,10 @@ def test_results_route_forwards_pagination_sorting_and_every_filter() -> None:
                 "max_data_quality_score": 99,
                 "min_confidence": 80.0,
                 "max_risk": 35.0,
-                    "min_tradability": 70.0,
-                    "probability_horizon": 5,
-                    "min_upside_probability": None,
-                    "keyword": "920066",
+                "min_tradability": 70.0,
+                "probability_horizon": 5,
+                "min_upside_probability": None,
+                "keyword": "920066",
                 "sort": ("amount", "score", "symbol"),
                 "order": ("desc", "desc", "asc"),
             },
@@ -567,18 +574,114 @@ def test_results_route_forwards_probability_filter_and_validates_query_range() -
     assert response.status_code == 200
     assert scanner.result_calls[0][1]["probability_horizon"] == 20
     assert scanner.result_calls[0][1]["min_upside_probability"] == pytest.approx(0.61)
-    assert client.get(
-        f"/api/market-scans/{scanner.active.id}/results",
-        params={"probability_horizon": 3},
-    ).status_code == 422
-    assert client.get(
-        f"/api/market-scans/{scanner.active.id}/results",
-        params={"min_upside_probability": 1.01},
-    ).status_code == 422
-    assert client.get(
-        f"/api/market-scans/{scanner.active.id}/results",
-        params={"sort": "upside_probability"},
-    ).status_code == 422
+    assert (
+        client.get(
+            f"/api/market-scans/{scanner.active.id}/results",
+            params={"probability_horizon": 3},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.get(
+            f"/api/market-scans/{scanner.active.id}/results",
+            params={"min_upside_probability": 1.01},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.get(
+            f"/api/market-scans/{scanner.active.id}/results",
+            params={"sort": "upside_probability"},
+        ).status_code
+        == 422
+    )
+
+
+def test_results_route_serializes_active_v6_and_preserves_v5_baseline() -> None:
+    scanner = _ScannerStub()
+    run = scanner.previous.model_copy(
+        update={
+            "total_count": 1,
+            "excluded_count": 0,
+            "processed_count": 1,
+            "success_count": 1,
+            "missing_count": 0,
+            "skipped_count": 0,
+            "coverage_pct": 100.0,
+        }
+    )
+    base = _valid_result_item(run.id)
+    details = {
+        "run_id": run.id,
+        "symbol": base.symbol,
+        "base_rank": 4,
+        "base_score": 90,
+        "base_raw_score": 90.1,
+        "probability": 0.8,
+        "reference_base_rate": 0.5,
+        "probability_adjustment": 6.0,
+        "rank": 1,
+        "score": 96,
+        "raw_score": 96.1,
+        "score_rule_version": "full-market-score-v6",
+        "score_spec_hash": "b" * 64,
+        "source_record_digest": "c" * 64,
+        "prediction_record_digest": "d" * 64,
+        "record_digest": "e" * 64,
+    }
+    item_payload = base.model_dump(mode="python")
+    item_payload.update(
+        {
+            "rank": 1,
+            "score": 96,
+            "raw_score": 96.1,
+            "base_production_rank": 4,
+            "base_production_score": 90,
+            "base_production_raw_score": 90.1,
+            "production_score_rule_version": "full-market-score-v6",
+            "probability_ranking_adjustment": 6.0,
+            "probability_ranking_artifact_digest": "f" * 64,
+            "probability_ranking_details": details,
+        }
+    )
+    item = MarketScanResultItem.model_validate(item_payload)
+
+    def v6_results(_run_id: int, **kwargs: object) -> MarketScanResultPage:
+        return MarketScanResultPage(
+            run=run,
+            items=[item],
+            total=1,
+            page=int(kwargs["page"]),
+            page_size=int(kwargs["page_size"]),
+            page_count=1,
+            production_ranking={
+                "contract_version": "market-scan-probability-ranking-projection-v1",
+                "status": "active",
+                "run_id": run.id,
+                "score_rule_version": "full-market-score-v6",
+                "score_spec_hash": "b" * 64,
+                "artifact_digest": "f" * 64,
+                "promotion_digest": "1" * 64,
+                "record_count": 1,
+                "base_snapshot_digest": run.snapshot_digest,
+                "base_v5_mutated": False,
+                "historical_ranks_mutated": False,
+                "rollback_available": True,
+            },
+        )
+
+    scanner.results = v6_results  # type: ignore[method-assign]
+    response = _client(scanner).get(f"/api/market-scans/{run.id}/results")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["production_ranking"]["status"] == "active"
+    assert payload["items"][0]["rank"] == 1
+    assert payload["items"][0]["score"] == 96
+    assert payload["items"][0]["base_production_rank"] == 4
+    assert payload["items"][0]["base_production_score"] == 90
+    assert payload["items"][0]["probability_ranking_adjustment"] == 6.0
+    assert payload["items"][0]["probability_ranking_artifact_digest"] == "f" * 64
 
 
 def test_results_route_returns_422_when_probability_evidence_is_not_calibrated() -> None:
@@ -698,9 +801,7 @@ def test_future_range_research_route_is_read_only_run_bound_and_paginated() -> N
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["generation_status"] == "not_generated"
     assert response.json()["research"] is None
-    assert scanner.future_range_calls == [
-        (scanner.previous.id, 2, 20, 2, "600519.SH", False)
-    ]
+    assert scanner.future_range_calls == [(scanner.previous.id, 2, 20, 2, "600519.SH", False)]
     invalid = _client(scanner).get(
         f"/api/market-scans/{scanner.previous.id}/future-range-research",
         params={"page_size": 201, "session_offset": 5},
@@ -736,9 +837,7 @@ def test_future_range_research_route_rejects_official_top100_refresh_scope() -> 
         raise FutureRangeResearchUnavailable("未来区间研究仅支持盘后正式全市场批次")
 
     scanner.future_range_research = top100  # type: ignore[method-assign]
-    response = _client(scanner).get(
-        f"/api/market-scans/{scanner.previous.id}/future-range-research"
-    )
+    response = _client(scanner).get(f"/api/market-scans/{scanner.previous.id}/future-range-research")
 
     assert response.status_code == 422
     assert response.json()["detail"] == "未来区间研究仅支持盘后正式全市场批次"
@@ -1015,6 +1114,7 @@ class _ScannerStub:
         self.identity_list_calls: list[tuple[int, int, str | None, str | None, str | None]] = []
         self.detail_calls: list[int] = []
         self.result_calls: list[tuple[int, dict[str, object]]] = []
+        self.probability_calls: list[int] = []
         self.export_calls: list[tuple[int, MarketScanExportFilters]] = []
         self.future_range_calls: list[tuple[int, int, int, int | None, str | None, bool]] = []
         self.cancel_calls: list[int] = []
@@ -1031,6 +1131,7 @@ class _ScannerStub:
             *self.identity_list_calls,
             *self.detail_calls,
             *self.result_calls,
+            *self.probability_calls,
             *self.export_calls,
             *self.future_range_calls,
             *self.cancel_calls,
@@ -1129,6 +1230,7 @@ class _ScannerStub:
         )
 
     def probability_research(self, run_id: int) -> dict[str, object]:
+        self.probability_calls.append(run_id)
         return {
             "schema_version": "test-probability-v1",
             "run_id": run_id,

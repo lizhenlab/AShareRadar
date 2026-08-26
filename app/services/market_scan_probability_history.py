@@ -49,13 +49,17 @@ from app.utils.provider_errors import (
 
 PROBABILITY_HISTORY_SCHEMA_VERSION = "market-scan-probability-history-v1"
 PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION = "market-scan-probability-history-manifest-v2"
+PROBABILITY_HISTORY_EXTENDED_MANIFEST_SCHEMA_VERSION = "market-scan-probability-history-manifest-v3"
 PROBABILITY_HISTORY_LEGACY_MANIFEST_SCHEMA_VERSION = "market-scan-probability-history-manifest-v1"
 PROBABILITY_HISTORY_COHORT_MODE = "historical_replay_v1"
 PROBABILITY_HISTORY_BARS = 360
+PROBABILITY_HISTORY_EXTENDED_BARS = 500
+PROBABILITY_HISTORY_SUPPORTED_BARS = (PROBABILITY_HISTORY_BARS, PROBABILITY_HISTORY_EXTENDED_BARS)
 PROBABILITY_HISTORY_MARKETS = ("SH", "SZ", "BJ")
 PROBABILITY_HISTORY_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 _DEFAULT_SYMBOL_LIMIT = 90
 _MAXIMUM_SYMBOL_LIMIT = 120
+_EXTENDED_MAXIMUM_SYMBOL_LIMIT = 225
 _DATABASE_USER_VERSION = 1
 _INTEGRITY_NOTICE = "SHA-256 detects accidental mutation; it is not an authenticity signature."
 _TABLE_COLUMNS = (
@@ -64,6 +68,7 @@ _TABLE_COLUMNS = (
 )
 
 ProbabilityHistoryManifestAssurance = Literal[
+    "attested_v3",
     "attested_v2",
     "legacy_attested_v1",
     "legacy_unattested",
@@ -92,21 +97,11 @@ class ProbabilityHistoryConfig:
     minimum_symbols_total: int = 60
 
     def __post_init__(self) -> None:
-        if isinstance(self.symbol_limit, bool) or not 1 <= self.symbol_limit <= _MAXIMUM_SYMBOL_LIMIT:
-            raise ValueError(f"symbol_limit 必须在 1 到 {_MAXIMUM_SYMBOL_LIMIT} 之间")
-        if self.history_bars != PROBABILITY_HISTORY_BARS:
-            raise ValueError(f"history_bars 固定为 {PROBABILITY_HISTORY_BARS}")
-        if isinstance(self.concurrency, bool) or not 1 <= self.concurrency <= 2:
-            raise ValueError("concurrency 必须在 1 到 2 之间")
-        if isinstance(self.max_retries, bool) or not 0 <= self.max_retries <= 2:
-            raise ValueError("max_retries 必须在 0 到 2 之间")
-        if not math.isfinite(self.retry_delay_seconds) or self.retry_delay_seconds < 0:
-            raise ValueError("retry_delay_seconds 必须是非负有限数")
+        _validate_history_bars(self.history_bars)
+        _validate_symbol_limit(self.symbol_limit, self.history_bars)
+        _validate_download_settings(self)
         _validate_minimums(self)
-        normalized = tuple(dict.fromkeys(value.strip().upper() for value in self.symbols if value.strip()))
-        if len(normalized) > self.symbol_limit:
-            raise ValueError("显式 symbols 数量不能超过 symbol_limit")
-        object.__setattr__(self, "symbols", normalized)
+        object.__setattr__(self, "symbols", _normalized_symbols(self.symbols, self.symbol_limit))
 
 
 @dataclass(frozen=True)
@@ -251,8 +246,8 @@ def verify_market_scan_probability_history_manifest(
         payload,
         manifest_schema_version=str(normalized["schema_version"]),
     )
-    if require_attested and assurance != "attested_v2":
-        raise ProbabilityHistoryError(f"研究历史 manifest 不是当前 attested v2：{assurance}")
+    if require_attested and assurance not in {"attested_v2", "attested_v3"}:
+        raise ProbabilityHistoryError(f"研究历史 manifest 不是当前 attested v2/v3：{assurance}")
     database = _manifest_database_path(payload, database_path)
     expected_dates = trusted_probability_history_dates(
         str(payload["anchor_date"]), int(cast(int, _mapping(payload["config"], "config")["history_bars"])),
@@ -303,9 +298,10 @@ def load_legacy_market_scan_probability_history_manifest(
         require_attested=False,
     )
     assurance = probability_history_manifest_assurance(verified)
-    if assurance == "attested_v2":
-        raise ProbabilityHistoryError("当前 attested v2 manifest 不得通过 legacy reader 加载")
-    return LegacyProbabilityHistoryManifestResult(verified, assurance)
+    if assurance in {"attested_v2", "attested_v3"}:
+        raise ProbabilityHistoryError("当前 attested v2/v3 manifest 不得通过 legacy reader 加载")
+    legacy_assurance = cast(Literal["legacy_attested_v1", "legacy_unattested"], assurance)
+    return LegacyProbabilityHistoryManifestResult(verified, legacy_assurance)
 
 
 def upgrade_legacy_attested_probability_history_manifest(
@@ -343,6 +339,34 @@ def canonical_probability_history_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _validate_history_bars(history_bars: int) -> None:
+    if isinstance(history_bars, bool) or history_bars not in PROBABILITY_HISTORY_SUPPORTED_BARS:
+        supported = " / ".join(str(value) for value in PROBABILITY_HISTORY_SUPPORTED_BARS)
+        raise ValueError(f"history_bars 只支持 {supported}")
+
+
+def _validate_symbol_limit(symbol_limit: int, history_bars: int) -> None:
+    maximum = _maximum_symbol_limit(history_bars)
+    if isinstance(symbol_limit, bool) or not 1 <= symbol_limit <= maximum:
+        raise ValueError(f"symbol_limit 必须在 1 到 {maximum} 之间")
+
+
+def _validate_download_settings(config: ProbabilityHistoryConfig) -> None:
+    if isinstance(config.concurrency, bool) or not 1 <= config.concurrency <= 2:
+        raise ValueError("concurrency 必须在 1 到 2 之间")
+    if isinstance(config.max_retries, bool) or not 0 <= config.max_retries <= 2:
+        raise ValueError("max_retries 必须在 0 到 2 之间")
+    if not math.isfinite(config.retry_delay_seconds) or config.retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds 必须是非负有限数")
+
+
+def _normalized_symbols(symbols: Sequence[str], symbol_limit: int) -> tuple[str, ...]:
+    normalized = tuple(dict.fromkeys(value.strip().upper() for value in symbols if value.strip()))
+    if len(normalized) > symbol_limit:
+        raise ValueError("显式 symbols 数量不能超过 symbol_limit")
+    return normalized
+
+
 def _validate_minimums(config: ProbabilityHistoryConfig) -> None:
     values = (config.minimum_symbols_per_market, config.minimum_symbols_total)
     if any(isinstance(value, bool) or value <= 0 for value in values):
@@ -351,6 +375,12 @@ def _validate_minimums(config: ProbabilityHistoryConfig) -> None:
         raise ValueError("minimum_symbols_total 不能低于三市场门槛之和")
     if config.symbol_limit < config.minimum_symbols_total:
         raise ValueError("symbol_limit 不能低于 minimum_symbols_total")
+
+
+def _maximum_symbol_limit(history_bars: int) -> int:
+    if history_bars == PROBABILITY_HISTORY_EXTENDED_BARS:
+        return _EXTENDED_MAXIMUM_SYMBOL_LIMIT
+    return _MAXIMUM_SYMBOL_LIMIT
 
 
 def _validated_paths(
@@ -691,13 +721,20 @@ def _require_coverage(
 ) -> None:
     counts = _market_counts(tuple(accepted))
     if len(accepted) < config.minimum_symbols_total:
-        raise ProbabilityHistoryError("固定360交易日覆盖的可用股票不足总量门槛")
+        raise ProbabilityHistoryError(
+            f"固定{config.history_bars}交易日覆盖的可用股票不足总量门槛："
+            f"{len(accepted)}/{config.minimum_symbols_total}，分市场={counts}",
+        )
     missing = [
         market for market in PROBABILITY_HISTORY_MARKETS
         if counts[market] < config.minimum_symbols_per_market
     ]
     if missing:
-        raise ProbabilityHistoryError("固定360交易日覆盖未满足市场门槛：" + ",".join(missing))
+        raise ProbabilityHistoryError(
+            f"固定{config.history_bars}交易日覆盖未满足市场门槛："
+            + ",".join(missing)
+            + f"，分市场={counts}",
+        )
 
 
 def _stage_and_publish(
@@ -898,17 +935,24 @@ def _build_manifest(
         "schema_version": PROBABILITY_HISTORY_SCHEMA_VERSION,
         "generated_at": generated_at,
         "status": "ready",
-        "cohort": _cohort_contract(),
+        "cohort": _cohort_contract(config.history_bars),
         "anchor_date": universe.anchor_date,
         "config": _config_payload(config),
-        "source": _source_payload(source, universe, provider_source),
+        "source": _source_payload(source, universe, provider_source, config.history_bars),
         "database": database,
-        "quality": _quality_payload(universe, exclusions, fetched, maximum_concurrency, database_facts),
+        "quality": _quality_payload(
+            universe,
+            exclusions,
+            fetched,
+            maximum_concurrency,
+            database_facts,
+            config.history_bars,
+        ),
         "replay_input": _replay_input(target, expected_dates),
         "limitations": _history_limitations(),
     }
     manifest: dict[str, object] = {
-        "schema_version": PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION,
+        "schema_version": _manifest_schema_version(config.history_bars),
         "generated_at": generated_at,
         "payload": payload,
     }
@@ -918,11 +962,27 @@ def _build_manifest(
     return manifest
 
 
-def _cohort_contract() -> dict[str, object]:
+def _manifest_schema_version(history_bars: int) -> str:
+    if history_bars == PROBABILITY_HISTORY_BARS:
+        return PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION
+    if history_bars == PROBABILITY_HISTORY_EXTENDED_BARS:
+        return PROBABILITY_HISTORY_EXTENDED_MANIFEST_SCHEMA_VERSION
+    raise ProbabilityHistoryError("研究历史 history_bars 没有可用的 manifest 合同")
+
+
+def _cohort_contract(history_bars: int = PROBABILITY_HISTORY_BARS) -> dict[str, object]:
+    if history_bars == PROBABILITY_HISTORY_BARS:
+        scope = "tencent_qfq_360_fixed_session_deterministic_sample"
+        rule_version = "historical-replay-history-source-v1"
+    elif history_bars == PROBABILITY_HISTORY_EXTENDED_BARS:
+        scope = "tencent_qfq_500_fixed_session_deterministic_sample"
+        rule_version = "historical-replay-history-source-v2-extended-window"
+    else:
+        raise ProbabilityHistoryError("研究历史 history_bars 合同不受支持")
     return {
         "mode": PROBABILITY_HISTORY_COHORT_MODE,
-        "scope": "tencent_qfq_360_fixed_session_deterministic_sample",
-        "rule_version": "historical-replay-history-source-v1",
+        "scope": scope,
+        "rule_version": rule_version,
         "official": False,
         "live_cohort_compatible": False,
         "production_ranking_effect": "none",
@@ -939,7 +999,12 @@ def _config_payload(config: ProbabilityHistoryConfig) -> dict[str, object]:
     }
 
 
-def _source_payload(source: Path, universe: _SourceUniverse, provider_source: str) -> dict[str, object]:
+def _source_payload(
+    source: Path,
+    universe: _SourceUniverse,
+    provider_source: str,
+    history_bars: int,
+) -> dict[str, object]:
     return {
         "database": source.name, "database_read_only": True, "database_query_only": True,
         "database_snapshot_transaction": True, "database_fingerprint": universe.fingerprint,
@@ -951,7 +1016,7 @@ def _source_payload(source: Path, universe: _SourceUniverse, provider_source: st
             "manifest": universe.backup.manifest,
         },
         "provider": "TencentMarketDataProvider", "provider_source": provider_source,
-        "request_adjustment_mode": "qfq", "request_bars_per_symbol": PROBABILITY_HISTORY_BARS,
+        "request_adjustment_mode": "qfq", "request_bars_per_symbol": history_bars,
         "universe_symbol_count": len(universe.universe_symbols),
         "universe_market_counts": universe.universe_market_counts,
         "selected_symbol_count": len(universe.selected_symbols),
@@ -966,6 +1031,7 @@ def _quality_payload(
     fetched: Sequence[_FetchResult],
     maximum_concurrency: int,
     database_facts: Mapping[str, object],
+    history_bars: int,
 ) -> dict[str, object]:
     accepted = int(cast(int, database_facts["symbol_count"]))
     return {
@@ -978,7 +1044,7 @@ def _quality_payload(
         "maximum_observed_concurrency": maximum_concurrency,
         "accepted_market_counts": database_facts["market_counts"],
         "selected_market_counts": universe.selected_market_counts,
-        "bar_coverage": 1.0, "bars_per_symbol": PROBABILITY_HISTORY_BARS,
+        "bar_coverage": 1.0, "bars_per_symbol": history_bars,
         "new_or_short_history_excluded": True,
     }
 
@@ -988,7 +1054,7 @@ def _replay_input(target: Path, dates: Sequence[str]) -> dict[str, object]:
     start_index = minimum_history_bars - 1
     end_index = len(dates) - maximum_horizon_plus_entry - 1
     if end_index < start_index:
-        raise ProbabilityHistoryError("360根历史无法形成 replay 日期范围")
+        raise ProbabilityHistoryError("历史窗口无法形成 replay 日期范围")
     return {
         "database": str(target), "start_date": dates[start_index], "end_date": dates[end_index],
         "minimum_history_bars": minimum_history_bars,
@@ -1015,6 +1081,7 @@ def _verified_manifest_identity(manifest: Mapping[str, object]) -> dict[str, obj
     if set(normalized) != {"schema_version", "generated_at", "payload", "integrity"}:
         raise ProbabilityHistoryError("研究历史 manifest 顶层字段无效")
     if normalized["schema_version"] not in {
+        PROBABILITY_HISTORY_EXTENDED_MANIFEST_SCHEMA_VERSION,
         PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION,
         PROBABILITY_HISTORY_LEGACY_MANIFEST_SCHEMA_VERSION,
     }:
@@ -1039,40 +1106,72 @@ def _validate_payload_contract(
     }
     if set(payload) != required or payload.get("schema_version") != PROBABILITY_HISTORY_SCHEMA_VERSION:
         raise ProbabilityHistoryError("研究历史 payload schema 无效")
-    if payload.get("status") != "ready" or payload.get("cohort") != _cohort_contract():
-        raise ProbabilityHistoryError("研究历史 payload cohort/status 冲突")
     config = _mapping(payload["config"], "config")
-    if config.get("history_bars") != PROBABILITY_HISTORY_BARS or config.get("concurrency") not in (1, 2):
+    history_bars = config.get("history_bars")
+    if (
+        isinstance(history_bars, bool)
+        or history_bars not in PROBABILITY_HISTORY_SUPPORTED_BARS
+        or config.get("concurrency") not in (1, 2)
+    ):
         raise ProbabilityHistoryError("研究历史 config 冲突")
+    history_bars = int(cast(int, history_bars))
+    symbol_limit = config.get("symbol_limit")
+    if (
+        isinstance(symbol_limit, bool)
+        or not isinstance(symbol_limit, int)
+        or not 1 <= symbol_limit <= _maximum_symbol_limit(history_bars)
+    ):
+        raise ProbabilityHistoryError("研究历史 config symbol_limit 冲突")
+    if payload.get("status") != "ready" or payload.get("cohort") != _cohort_contract(history_bars):
+        raise ProbabilityHistoryError("研究历史 payload cohort/status 冲突")
     replay = _mapping(payload["replay_input"], "replay_input")
     if replay.get("official") is not False or replay.get("cohort") != PROBABILITY_HISTORY_COHORT_MODE:
         raise ProbabilityHistoryError("研究历史 replay_input cohort 冲突")
     source = _mapping(payload["source"], "source")
+    return _validate_manifest_window_contract(manifest_schema_version, history_bars, source)
+
+
+def _validate_manifest_window_contract(
+    manifest_schema_version: str,
+    history_bars: int,
+    source: Mapping[str, object],
+) -> ProbabilityHistoryManifestAssurance:
+    if manifest_schema_version == PROBABILITY_HISTORY_EXTENDED_MANIFEST_SCHEMA_VERSION:
+        if history_bars != PROBABILITY_HISTORY_EXTENDED_BARS:
+            raise ProbabilityHistoryError("研究历史 v3 与扩展窗口冲突")
+        _validate_source_contract(source, history_bars)
+        return "attested_v3"
     if manifest_schema_version == PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION:
-        _validate_source_contract(source)
+        if history_bars != PROBABILITY_HISTORY_BARS:
+            raise ProbabilityHistoryError("研究历史 v2 与 360 日窗口冲突")
+        _validate_source_contract(source, history_bars)
         return "attested_v2"
     if manifest_schema_version != PROBABILITY_HISTORY_LEGACY_MANIFEST_SCHEMA_VERSION:
         raise ProbabilityHistoryError("研究历史 manifest schema_version 不受支持")
     if "runtime_backup" in source:
-        _validate_source_contract(source)
+        if history_bars != PROBABILITY_HISTORY_BARS:
+            raise ProbabilityHistoryError("研究历史 legacy v1 与 360 日窗口冲突")
+        _validate_source_contract(source, history_bars)
         return "legacy_attested_v1"
-    _validate_legacy_source_contract(source)
+    if history_bars != PROBABILITY_HISTORY_BARS:
+        raise ProbabilityHistoryError("研究历史 legacy v1 与 360 日窗口冲突")
+    _validate_legacy_source_contract(source, history_bars)
     return "legacy_unattested"
 
 
-def _validate_source_basics(source: Mapping[str, object]) -> None:
+def _validate_source_basics(source: Mapping[str, object], expected_bars: int) -> None:
     if (
         source.get("database_read_only") is not True
         or source.get("database_query_only") is not True
         or source.get("database_snapshot_transaction") is not True
         or source.get("provider") != "TencentMarketDataProvider"
         or source.get("request_adjustment_mode") != "qfq"
-        or source.get("request_bars_per_symbol") != PROBABILITY_HISTORY_BARS
+        or source.get("request_bars_per_symbol") != expected_bars
     ):
         raise ProbabilityHistoryError("研究历史 source 只读/provider 契约冲突")
 
 
-def _validate_legacy_source_contract(source: Mapping[str, object]) -> None:
+def _validate_legacy_source_contract(source: Mapping[str, object], expected_bars: int) -> None:
     required = {
         "database",
         "database_read_only",
@@ -1091,7 +1190,7 @@ def _validate_legacy_source_contract(source: Mapping[str, object]) -> None:
     }
     if set(source) != required:
         raise ProbabilityHistoryError("研究历史 legacy v1 source 字段无效")
-    _validate_source_basics(source)
+    _validate_source_basics(source, expected_bars)
     fingerprint = _mapping(source.get("database_fingerprint"), "source.database_fingerprint")
     if (
         set(fingerprint) != {"size_bytes", "mtime_ns"}
@@ -1100,7 +1199,7 @@ def _validate_legacy_source_contract(source: Mapping[str, object]) -> None:
         raise ProbabilityHistoryError("研究历史 legacy v1 source fingerprint 无效")
 
 
-def _validate_source_contract(source: Mapping[str, object]) -> None:
+def _validate_source_contract(source: Mapping[str, object], expected_bars: int) -> None:
     if set(source) != {
         "database",
         "database_read_only",
@@ -1119,7 +1218,7 @@ def _validate_source_contract(source: Mapping[str, object]) -> None:
         "sampling_strategy",
     }:
         raise ProbabilityHistoryError("研究历史 source 字段无效")
-    _validate_source_basics(source)
+    _validate_source_basics(source, expected_bars)
     runtime_backup = _mapping(source.get("runtime_backup"), "source.runtime_backup")
     if set(runtime_backup) != {
         "verified_before_and_after_fetch",
@@ -1163,6 +1262,9 @@ def _validate_quality(payload: Mapping[str, object], database: Mapping[str, obje
     if quality.get("accepted_market_counts") != database["market_counts"]:
         raise ProbabilityHistoryError("研究历史 accepted market 计数冲突")
     config = _mapping(payload["config"], "config")
+    history_bars = config.get("history_bars")
+    if quality.get("bars_per_symbol") != history_bars or database.get("bars_per_symbol") != history_bars:
+        raise ProbabilityHistoryError("研究历史 bars_per_symbol 冲突")
     counts = _mapping(database["market_counts"], "market_counts")
     if int(cast(int, database["symbol_count"])) < int(cast(int, config["minimum_symbols_total"])):
         raise ProbabilityHistoryError("研究历史不满足总量门槛")
@@ -1327,10 +1429,13 @@ _INSERT_KLINE_SQL = f"INSERT INTO kline_daily ({','.join(_TABLE_COLUMNS)}) VALUE
 __all__ = [
     "PROBABILITY_HISTORY_BARS",
     "PROBABILITY_HISTORY_COHORT_MODE",
+    "PROBABILITY_HISTORY_EXTENDED_BARS",
+    "PROBABILITY_HISTORY_EXTENDED_MANIFEST_SCHEMA_VERSION",
     "PROBABILITY_HISTORY_LEGACY_MANIFEST_SCHEMA_VERSION",
     "PROBABILITY_HISTORY_MANIFEST_MAX_BYTES",
     "PROBABILITY_HISTORY_MANIFEST_SCHEMA_VERSION",
     "PROBABILITY_HISTORY_SCHEMA_VERSION",
+    "PROBABILITY_HISTORY_SUPPORTED_BARS",
     "HistoryKlineProvider",
     "LegacyProbabilityHistoryManifestResult",
     "ProbabilityHistoryBuildResult",

@@ -11,6 +11,7 @@ import { renderMarketScanObservability } from "./market-scan-progress-view.js";
 import { marketScanResearchDimensionCell, marketScanSnapshotRow, marketScanSnapshotTargetId, toggleMarketScanSnapshot } from "./market-scan-snapshot-view.js";
 import { marketScanProbabilityCell, marketScanProbabilityElements, renderMarketScanProbabilityResearch, renderMarketScanReadWaiting, resetMarketScanProbabilityResearch, selectedMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
 import { marketScanPageSize } from "./layout-optimizations.js";
+import { marketScanScoreText, productionRankCell, productionScoreCell, productionScoreTitle } from "./market-scan-ranking-view.js";
 export { marketScanExportFilename } from "./market-scan-view-export.js";
 
 const PROGRESS_ANNOUNCEMENT_STEP = 10;
@@ -95,15 +96,15 @@ export function marketScanResultRow(item, options = {}) {
   const snapshotTarget = marketScanSnapshotTargetId(item);
   const run = options.run && typeof options.run === "object" ? options.run : {};
   return `<tr class="market-scan-result-row">
-    <td data-label="排名">${escapeHtml(view.rank)}</td>
+    <td data-label="排名" data-production-label="生产排名">${productionRankCell(view)}</td>
     <td data-label="股票"><div class="market-scan-stock"><strong>${escapeHtml(view.name)}</strong><div class="market-scan-stock-meta-row"><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span><div class="market-scan-stock-actions"><button type="button" class="mini-button" data-market-scan-snapshot-target="${escapeHtml(snapshotTarget)}" aria-controls="${escapeHtml(snapshotTarget)}" aria-expanded="false" aria-label="查看扫描快照" title="查看该次扫描保存的证据快照">快照</button><button type="button" class="mini-button" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" data-market-scan-mode="${escapeHtml(run.mode || "")}" data-market-scan-quote-date="${escapeHtml(run.quote_date || "")}" data-market-scan-data-date="${escapeHtml(run.data_date || item.data_date || "")}" aria-label="打开当前个股分析" title="使用当前可用数据打开个股分析，不代表历史扫描快照">分析</button></div></div></div></td>
     <td data-label="上市板块 / 行业"><div class="market-scan-market-industry"><strong class="market-scan-board">${escapeHtml(view.boardLabel)}</strong><span class="market-scan-meta">${escapeHtml(view.industry)}</span></div></td>
-    <td data-label="趋势强度" title="生产 v4 的序数趋势状态分，不代表上涨概率"><strong class="market-scan-score">${escapeHtml(scoreText(view.score))}</strong></td>
+    <td data-label="趋势强度" data-production-label="生产分" title="${escapeHtml(productionScoreTitle(view))}">${productionScoreCell(view)}</td>
     <td data-label="研究信号"><div class="market-scan-research-signal">${marketScanProbabilityCell(item, options.probabilityHorizon, options.probabilityResearch)}${marketScanResearchDimensionCell(item)}</div></td>
     <td data-label="涨跌幅" class="${escapeHtml(changeClass(view.changePct))}">${escapeHtml(signedPercentage(view.changePct))}</td>
     <td data-label="换手率">${escapeHtml(percentage(view.turnoverRate))}</td>
     <td data-label="成交额">${escapeHtml(formatAmount(view.amount))}</td>
-    <td data-label="质量">${escapeHtml(scoreText(view.qualityScore))}</td>
+    <td data-label="质量">${escapeHtml(marketScanScoreText(view.qualityScore))}</td>
     <td data-label="状态 / 标签"><span class="market-scan-status ${escapeHtml(view.status)}">${escapeHtml(marketScanResultStatusLabel(view.status))}</span><div class="market-scan-tags">${escapeHtml(view.detail)}</div>${discovery}</td>
   </tr>${marketScanSnapshotRow(item, options.probabilityResearch)}`;
 }
@@ -485,6 +486,7 @@ function marketScanResultView(value) {
   const symbol = item.symbol || "--";
   return {
     rank: item.rank ?? "--",
+    baseProductionRank: item.base_production_rank,
     dataSymbol: item.symbol || "",
     symbol,
     name: item.name || item.code || "--",
@@ -492,6 +494,9 @@ function marketScanResultView(value) {
     boardLabel: marketScanBoardLabel(item),
     industry: item.industry || "行业待确认",
     score: item.score,
+    baseProductionScore: item.base_production_score,
+    productionScoreRuleVersion: item.production_score_rule_version,
+    probabilityRankingAdjustment: item.probability_ranking_adjustment,
     changePct: item.change_pct,
     turnoverRate: item.turnover_rate,
     amount: item.amount,
@@ -642,11 +647,6 @@ function percentage(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   return `${formatNumber(number, 2)}%`;
-}
-
-function scoreText(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? String(Math.round(number)) : "--";
 }
 
 export function displayTimestamp(value) {

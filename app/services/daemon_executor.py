@@ -99,4 +99,41 @@ def _worker(queue: Queue[_WorkItem | None]) -> None:
             item.future.set_result(result)
 
 
-__all__ = ["DaemonThreadPoolExecutor"]
+@dataclass
+class DaemonLoopExecutorLease:
+    """Own a daemon default executor installed on one running event loop."""
+
+    loop: Any
+    executor: DaemonThreadPoolExecutor | None
+
+    def close(self) -> None:
+        executor = self.executor
+        if executor is None:
+            return
+        if getattr(self.loop, "_default_executor", None) is executor:
+            self.loop._default_executor = None
+        executor.shutdown(wait=False, cancel_futures=True)
+        self.executor = None
+
+
+def install_daemon_loop_executor(
+    loop: Any,
+    *,
+    max_workers: int = 8,
+) -> DaemonLoopExecutorLease:
+    """Keep uncancellable DNS/default-I/O workers from blocking process restart."""
+    if getattr(loop, "_default_executor", None) is not None:
+        return DaemonLoopExecutorLease(loop=loop, executor=None)
+    executor = DaemonThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="ashare-default-io",
+    )
+    loop._default_executor = executor
+    return DaemonLoopExecutorLease(loop=loop, executor=executor)
+
+
+__all__ = [
+    "DaemonLoopExecutorLease",
+    "DaemonThreadPoolExecutor",
+    "install_daemon_loop_executor",
+]

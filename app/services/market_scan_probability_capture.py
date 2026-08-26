@@ -62,7 +62,7 @@ def capture_market_scan_probability_source(
         _require_canonical_latest(cache, run)
         _require_run_unchanged(cache, run)
         return existing
-    results = _complete_success_results(cache, run)
+    results, execution_session = _verified_capture_inputs(cache, run)
     try:
         projection = project_probability_source_capture(
             run,
@@ -83,6 +83,13 @@ def capture_market_scan_probability_source(
         before_publish=lambda: None,
         database_path=Path(cast(Path, getattr(cache, "path"))),
     )
+    info["execution_session"] = {
+        "evidence_digest": execution_session["evidence_digest"],
+        "quote_evidence_count": execution_session["quote_evidence_count"],
+        "quote_evidence_coverage": execution_session["quote_evidence_coverage"],
+        "formal_equivalent_pit": execution_session["formal_equivalent_pit"],
+        "limitations": execution_session["limitations"],
+    }
     _require_canonical_latest(cache, run)
     _require_run_unchanged(cache, run)
     return info
@@ -434,11 +441,55 @@ def _canonical_order(run: MarketScanRun) -> tuple[float, int]:
     return (parsed.timestamp(), run.id)
 
 
-def _complete_success_results(cache: object, run: MarketScanRun) -> list[object]:
+def _verified_capture_inputs(
+    cache: object,
+    run: MarketScanRun,
+) -> tuple[list[object], dict[str, object]]:
+    issuer = getattr(cache, "verified_market_scan_read", None)
+    if not callable(issuer):
+        raise ProbabilitySourceCaptureError(
+            f"run {run.id} 缺少统一已验证快照读取能力"
+        )
+    with issuer(run.id) as verified:
+        try:
+            validate_market_scan_run_binding(run, verified.run)
+        except ValueError as exc:
+            raise ProbabilitySourceCaptureError(
+                f"run {run.id} 已验证读取与归档输入不一致"
+            ) from exc
+        session = dict(verified.execution_session_evidence())
+        _require_complete_execution_session(run, session)
+        results = _complete_success_results(verified, run)
+    return results, session
+
+
+def _require_complete_execution_session(
+    run: MarketScanRun,
+    session: dict[str, object],
+) -> None:
+    expected = {
+        "run_id": run.id,
+        "source_snapshot_digest": run.snapshot_digest,
+        "source_snapshot_binding": "verified_digest",
+        "expected_result_count": run.total_count,
+        "observed_result_count": run.total_count,
+        "complete_result_set": True,
+    }
+    if any(session.get(name) != value for name, value in expected.items()):
+        raise ProbabilitySourceCaptureError(
+            f"run {run.id} 执行会话证据未完整绑定发布快照"
+        )
+    digest = str(session.get("evidence_digest") or "")
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ProbabilitySourceCaptureError(
+            f"run {run.id} 执行会话证据摘要无效"
+        )
+
+
+def _complete_success_results(verified: object, run: MarketScanRun) -> list[object]:
     page = cast(
         MarketScanResultPage,
-        getattr(cache, "market_scan_results")(
-            run.id,
+        getattr(verified, "results_page")(
             page=1,
             page_size=max(1, run.success_count),
             status="success",
@@ -558,9 +609,16 @@ async def _save_monitor_event(cache: object, level: str, message: str) -> None:
 def _success_message(info: dict[str, object]) -> str:
     quality = info.get("quality")
     record_count = quality.get("record_count") if isinstance(quality, dict) else "--"
+    execution = info.get("execution_session")
+    execution_coverage = (
+        f"，执行行情证据覆盖 {float(execution['quote_evidence_coverage']):.2%}"
+        if isinstance(execution, dict)
+        and isinstance(execution.get("quote_evidence_coverage"), int | float)
+        else ""
+    )
     return (
         f"上涨概率PIT样本归档完成：run #{info.get('run_id')}，交易日 {info.get('quote_date')}，"
-        f"记录 {record_count}，digest {str(info.get('digest') or '')[:12]}"
+        f"记录 {record_count}{execution_coverage}，digest {str(info.get('digest') or '')[:12]}"
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from app.services.scheduler_contracts import (
     TASK_STATUS_DEGRADED,
@@ -25,9 +26,35 @@ from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_d
 from app.utils.clock import market_now_naive
 from app.utils.market_time import market_local_naive
 
+if TYPE_CHECKING:
+    from app.services.market_scan_joint_execution_maintenance import (
+        JointExecutionMaintenanceSummary,
+    )
+    from app.services.market_scan_probability_maintenance import ProbabilityMaintenanceSummary
+
 
 RESEARCH_QUEUE_REFRESH_BATCH_LIMIT = 20
 DUE_REVIEW_EVALUATION_BATCH_LIMIT = 20
+
+
+def _probability_maintenance_message(
+    summary: ProbabilityMaintenanceSummary,
+    joint_summary: JointExecutionMaintenanceSummary | None,
+) -> str:
+    parts = [summary.message()]
+    if joint_summary is not None:
+        parts.append(joint_summary.message())
+    parts.extend(summary.failures)
+    if joint_summary is not None:
+        parts.extend(joint_summary.failures)
+    return "；".join(parts)
+
+
+def _probability_maintenance_degraded(
+    summary: ProbabilityMaintenanceSummary,
+    joint_summary: JointExecutionMaintenanceSummary | None,
+) -> bool:
+    return summary.degraded or bool(joint_summary is not None and joint_summary.degraded)
 
 
 class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
@@ -206,9 +233,7 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             MarketScanProbabilityMaintenanceService,
         )
 
-        service: MarketScanProbabilityMaintenanceService | None = (
-            getattr(self, "_market_scan_probability_maintenance", None)
-        )
+        service: MarketScanProbabilityMaintenanceService | None = getattr(self, "_market_scan_probability_maintenance", None)
         if service is None:
             service = MarketScanProbabilityMaintenanceService(self.datahub.cache)
             self._market_scan_probability_maintenance = service
@@ -216,23 +241,55 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             service.run,
             now=now,
         )
+        joint_summary = await self._maintain_joint_execution_probability(now=now)
         scanner = self.market_scanner
         refresh = getattr(scanner, "refresh_probability_research_cache", None)
         if callable(refresh):
             await refresh()
-        message = summary.message()
-        if summary.failures:
-            message += "；" + "；".join(summary.failures)
+        message = _probability_maintenance_message(summary, joint_summary)
+        degraded = _probability_maintenance_degraded(summary, joint_summary)
         await self._save_monitor_event(
-            "warning" if summary.degraded else "info",
+            "warning" if degraded else "info",
             "market_scan_probability",
             message,
         )
         if summary.due_count and summary.failed_count == summary.due_count:
             raise RuntimeError(message)
-        if summary.degraded:
+        if degraded:
             return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
+
+    async def _maintain_joint_execution_probability(self, *, now: datetime | None) -> JointExecutionMaintenanceSummary | None:
+        scanner_maintenance = getattr(
+            self.market_scanner,
+            "maintain_joint_execution_probability",
+            None,
+        )
+        if callable(scanner_maintenance):
+            return await scanner_maintenance(now=now)
+        required_settings = (
+            "market_scan_official_execution_registry_path",
+            "market_scan_official_execution_raw_root",
+            "market_scan_official_execution_session_directory",
+        )
+        if not all(hasattr(self.settings, name) for name in required_settings):
+            return None
+        from app.services.market_scan_joint_execution_maintenance import (
+            MarketScanJointExecutionMaintenanceService,
+        )
+
+        service: MarketScanJointExecutionMaintenanceService | None = getattr(
+            self,
+            "_market_scan_joint_execution_maintenance",
+            None,
+        )
+        if service is None:
+            service = MarketScanJointExecutionMaintenanceService.from_settings(
+                self.datahub.cache,
+                self.settings,
+            )
+            self._market_scan_joint_execution_maintenance = service
+        return await _offload(service.run, now=now)
 
     async def _run_strategy_schedules(self) -> str:
         service = self._strategy_automation_service

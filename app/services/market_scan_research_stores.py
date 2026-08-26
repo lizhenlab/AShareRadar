@@ -5,13 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.services.market_scan_contracts import MarketScanSettingsProtocol
 from app.services.market_scan_future_range_store import MarketScanFutureRangeStore
+from app.services.market_scan_official_execution_store import (
+    MarketScanOfficialExecutionStore,
+)
+from app.services.market_scan_joint_execution_maintenance import (
+    MarketScanJointExecutionMaintenanceService,
+)
 from app.services.market_scan_probability_capture import PROBABILITY_SOURCE_ARCHIVE_RELATIVE_PATH
 from app.services.market_scan_probability_maintenance import (
     PROBABILITY_OUTCOME_ARCHIVE_RELATIVE_PATH,
 )
 from app.services.market_scan_probability_fit_assessment import (
     PROBABILITY_FIT_ASSESSMENT_RELATIVE_PATH,
+)
+from app.services.market_scan_probability_historical_context import (
+    HISTORICAL_CONTEXT_RELATIVE_PATH,
+    MarketScanHistoricalProbabilityContextStore,
 )
 from app.services.market_scan_probability_source_research import (
     MarketScanProbabilitySourceResearchStore,
@@ -24,6 +35,9 @@ class MarketScanResearchStores:
     probability: MarketScanProbabilityStore | None
     probability_source: MarketScanProbabilitySourceResearchStore | None
     future_range: MarketScanFutureRangeStore | None
+    historical_probability: MarketScanHistoricalProbabilityContextStore | None = None
+    official_execution: MarketScanOfficialExecutionStore | None = None
+    joint_probability: MarketScanJointExecutionMaintenanceService | None = None
 
     @classmethod
     def for_cache_path(cls, cache_path: object) -> MarketScanResearchStores:
@@ -40,6 +54,23 @@ class MarketScanResearchStores:
             future_range=MarketScanFutureRangeStore(
                 data_directory / "research" / "market_scan_future_range"
             ),
+            historical_probability=MarketScanHistoricalProbabilityContextStore(
+                data_directory / HISTORICAL_CONTEXT_RELATIVE_PATH
+            ),
+        )
+
+    @classmethod
+    def for_settings(
+        cls, settings: MarketScanSettingsProtocol, cache_path: object
+    ) -> MarketScanResearchStores:
+        stores = cls.for_cache_path(cache_path)
+        return cls(
+            probability=stores.probability,
+            probability_source=stores.probability_source,
+            future_range=stores.future_range,
+            historical_probability=stores.historical_probability,
+            official_execution=MarketScanOfficialExecutionStore.from_settings(settings),
+            joint_probability=None,
         )
 
 

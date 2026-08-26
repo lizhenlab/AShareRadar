@@ -11,7 +11,7 @@ import { bindMarketScanProbabilityHorizon } from "./market-scan-probability-view
 import { createMarketScanProbabilityHorizonController } from "./market-scan-probability-horizon-controller.js";
 import { createMarketScanProbabilityPolling } from "./market-scan-probability-polling.js";
 import { createMarketScanReadTransition } from "./market-scan-read-transition.js";
-import { createMarketScanFutureRangeController } from "./market-scan-future-range-controller.js";
+import { createMarketScanAuxiliaryResearch } from "./market-scan-auxiliary-research.js";
 import { inertMarketScanController } from "./market-scan-controller-inert.js";
 import { createMarketScanRowClickHandler } from "./market-scan-row-actions.js";
 import { createMarketScanTop100Refresh } from "./market-scan-top100-refresh.js";
@@ -129,7 +129,7 @@ export function createMarketScanController(options = {}) {
   });
   const handleRowClick = createMarketScanRowClickHandler({ onSelectStock, view });
   const top100Refresh = createMarketScanTop100Refresh({ applyRun, elements, mutate, polling, resultRun, state, view });
-  const futureRange = createMarketScanFutureRangeController({ root, request, getRun: resultRun });
+  const auxiliaryResearch = createMarketScanAuxiliaryResearch({ root, request, getRun: resultRun, onSelectStock });
   bindEvents();
   view.renderRun(null);
   view.resetProbabilityResearch(null);
@@ -142,7 +142,7 @@ export function createMarketScanController(options = {}) {
   }
   function deactivate() {
     state.activated = false;
-    futureRange.abort();
+    auxiliaryResearch.abort();
     clearControllerTimers();
     void readTransition.transition(() => null);
     history.abort();
@@ -158,7 +158,7 @@ export function createMarketScanController(options = {}) {
   function setVisible(visible) {
     state.visible = Boolean(visible);
     if (!state.visible) {
-      futureRange.abort();
+      auxiliaryResearch.abort();
       clearControllerTimers();
       void readTransition.transition(() => null, { preserveCache: true });
       history.abort();
@@ -490,7 +490,7 @@ export function createMarketScanController(options = {}) {
       state.selectedHistoryRunId !== null,
     );
     top100Refresh.sync();
-    futureRange.sync(resultRun());
+    auxiliaryResearch.sync(resultRun());
   }
   async function recoverLatest(error) {
     if (!state.activated || !state.visible || state.actionBusy) return null;

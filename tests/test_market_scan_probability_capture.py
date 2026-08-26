@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -604,6 +605,38 @@ class _FakeCache:
         assert run_id == self.run.id
         self.result_query = query
         return SimpleNamespace(run=self.run, total=len(self.items), items=self.items)
+
+    @contextmanager
+    def verified_market_scan_read(self, run_id: int):
+        assert run_id == self.run.id
+        cache = self
+
+        class Verified:
+            run = cache.run
+
+            @staticmethod
+            def execution_session_evidence():
+                return {
+                    "run_id": cache.run.id,
+                    "source_snapshot_digest": cache.run.snapshot_digest,
+                    "source_snapshot_binding": "verified_digest",
+                    "expected_result_count": cache.run.total_count,
+                    "observed_result_count": cache.run.total_count,
+                    "complete_result_set": True,
+                    "quote_evidence_count": cache.run.success_count,
+                    "quote_evidence_coverage": (
+                        cache.run.success_count / cache.run.total_count
+                    ),
+                    "formal_equivalent_pit": False,
+                    "limitations": ["vendor_quote_not_exchange_authoritative"],
+                    "evidence_digest": "e" * 64,
+                }
+
+            @staticmethod
+            def results_page(**query):
+                return cache.market_scan_results(cache.run.id, **query)
+
+        yield Verified()
 
     def market_scan_success_score_contract(
         self,

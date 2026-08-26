@@ -21,6 +21,10 @@ from app.models.market_scan import (
     MARKET_SCAN_TOP100_REFRESH_SCOPE,
     MarketScanResultWrite,
 )
+from app.repositories.market_scan_execution_validation import (
+    require_production_execution_quote_evidence,
+    required_run_score_contract,
+)
 from app.utils.market_time import market_datetime_epoch
 
 
@@ -63,9 +67,11 @@ def validate_production_result_write(
     if not _is_current_production_run(run, rule_version=rule_version):
         return
     if result.status == "skipped":
+        require_production_execution_quote_evidence(result, run, conn)
         _require_production_skip_evidence(result, run, conn)
         return
     if result.status != "success":
+        require_production_execution_quote_evidence(result, run, conn)
         return
     _require_production_outer_fields(result)
     _require_production_time_contract(result, run)
@@ -82,6 +88,7 @@ def validate_production_result_write(
     )
     _require_production_replay_identity(result, replay, rule_version=rule_version)
     _require_production_replay_inputs(result, replay)
+    require_production_execution_quote_evidence(result, run, conn)
 
 
 def validate_persisted_production_skips(
@@ -94,7 +101,8 @@ def validate_persisted_production_skips(
     rows = conn.execute(
         """
         SELECT symbol, reason, data_date, quote_timestamp, quote_observed_at,
-               quote_source, kline_source, adjustment_mode, metrics_json
+               quote_source, kline_source, adjustment_mode, quote_fallback_used,
+               metrics_json
         FROM market_scan_result
         WHERE run_id = ? AND status = 'skipped'
         ORDER BY symbol ASC
@@ -113,8 +121,10 @@ def validate_persisted_production_skips(
             quote_source=row["quote_source"],
             kline_source=row["kline_source"],
             adjustment_mode=row["adjustment_mode"],
+            quote_fallback_used=bool(row["quote_fallback_used"]),
             score_details=details,
         )
+        require_production_execution_quote_evidence(result, run, conn)
         _require_production_skip_evidence(result, run, conn)
     return len(rows)
 
@@ -137,33 +147,11 @@ def _require_run_score_contract(
     run: sqlite3.Row,
     conn: sqlite3.Connection,
 ) -> None:
-    contract = _required_run_score_contract(result, run, conn)
+    contract = required_run_score_contract(result, run, conn)
     score_spec = result.score_details.get("score_spec")
     score_rule = score_spec.get("rule_version") if isinstance(score_spec, dict) else None
-    if (
-        score_rule != contract["production_score_rule_version"]
-        or result.score_details.get("score_spec_hash")
-        != contract["production_score_spec_hash"]
-    ):
+    if score_rule != contract["production_score_rule_version"] or result.score_details.get("score_spec_hash") != contract["production_score_spec_hash"]:
         raise ValueError(f"生产扫描结果与批次评分合同不一致：{result.symbol}")
-
-
-def _required_run_score_contract(
-    result: MarketScanResultWrite,
-    run: sqlite3.Row,
-    conn: sqlite3.Connection,
-) -> sqlite3.Row:
-    contract = conn.execute(
-        """
-        SELECT contract_json, production_score_rule_version, production_score_spec_hash
-        FROM market_scan_rule_contract
-        WHERE rule_version = ?
-        """,
-        (run["rule_version"],),
-    ).fetchone()
-    if contract is None:
-        raise ValueError(f"生产扫描批次缺少封存的评分合同：{result.symbol}")
-    return contract
 
 
 def _require_production_skip_evidence(
@@ -171,7 +159,7 @@ def _require_production_skip_evidence(
     run: sqlite3.Row,
     conn: sqlite3.Connection,
 ) -> None:
-    _required_run_score_contract(result, run, conn)
+    required_run_score_contract(result, run, conn)
     if str(run["stock_pool_source"] or "") != "provider-full-pool":
         raise ValueError(f"生产扫描跳过结果缺少新鲜权威股票池：{result.symbol}")
     evidence = result.score_details.get(MARKET_SCAN_SKIP_EVIDENCE_KEY)
@@ -233,7 +221,7 @@ def _run_skip_thresholds(
     run: sqlite3.Row,
     conn: sqlite3.Connection,
 ) -> tuple[int, int]:
-    contract = _required_run_score_contract(result, run, conn)
+    contract = required_run_score_contract(result, run, conn)
     try:
         payload = json.loads(str(contract["contract_json"]))
         history = payload["history"]
@@ -259,11 +247,10 @@ def _is_current_production_run(
     *,
     rule_version: str,
 ) -> bool:
-    return (
-        re.fullmatch(r"full-market-scan-v6:[0-9a-f]{64}", rule_version) is not None
-        and str(run["scope"] or "")
-        in {MARKET_SCAN_FULL_MARKET_SCOPE, MARKET_SCAN_TOP100_REFRESH_SCOPE}
-    )
+    return re.fullmatch(r"full-market-scan-v6:[0-9a-f]{64}", rule_version) is not None and str(run["scope"] or "") in {
+        MARKET_SCAN_FULL_MARKET_SCOPE,
+        MARKET_SCAN_TOP100_REFRESH_SCOPE,
+    }
 
 
 def _require_production_replay_identity(
@@ -296,10 +283,7 @@ def _require_production_replay_inputs(
         "turnover_rate": result.turnover_rate,
         "data_quality_score": result.data_quality_score,
     }
-    if any(
-        value is None or not _same_numeric(replay.inputs.get(name), value)
-        for name, value in expected_inputs.items()
-    ):
+    if any(value is None or not _same_numeric(replay.inputs.get(name), value) for name, value in expected_inputs.items()):
         raise ValueError(f"扫描 outer fields 与评分输入不一致：{result.symbol}")
 
 
@@ -343,12 +327,7 @@ def _require_production_time_contract(
 
 
 def _same_numeric(left: object, right: object) -> bool:
-    if (
-        isinstance(left, bool)
-        or isinstance(right, bool)
-        or not isinstance(left, int | float)
-        or not isinstance(right, int | float)
-    ):
+    if isinstance(left, bool) or isinstance(right, bool) or not isinstance(left, int | float) or not isinstance(right, int | float):
         return False
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-8)
 

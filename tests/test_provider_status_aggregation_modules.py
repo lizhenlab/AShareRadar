@@ -244,6 +244,39 @@ def test_provider_status_repository_ensure_preserves_active_probe_timestamp() ->
     assert provider.updated_at == "2026-05-13 09:01:00"
 
 
+def test_provider_status_repository_clears_only_previous_process_call_diagnostics() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache = SQLiteCache(Path(tmpdir) / "cache.sqlite3")
+        cache.update_provider_capability_success("alpha", "quote", 1, 12.0)
+        cache.update_provider_capability_failure(
+            "alpha",
+            "quote",
+            1,
+            "alpha quote 调用超过 8 秒，底层同步调用仍在受控收尾",
+        )
+        cache.update_provider_failure("beta", 2, "上游网络不可用")
+        cache.update_provider_failure("gamma", 3, "上一次调用仍在后台执行")
+        cache.update_provider_failure("delta", 4, "调用超过 8 秒，已取消未完成的异步请求")
+
+        changed = cache.clear_interrupted_provider_call_errors()
+        capabilities = {item.name: item for item in cache.provider_capability_statuses()}
+        providers = {item.name: item for item in cache.provider_statuses()}
+
+    assert changed == 4
+    assert capabilities["alpha"].last_error is None
+    assert capabilities["alpha"].healthy is True
+    assert capabilities["alpha"].success_count == 1
+    assert capabilities["alpha"].failure_count == 1
+    assert providers["alpha"].last_error is None
+    assert providers["alpha"].healthy is True
+    assert providers["beta"].last_error == "上游网络不可用"
+    assert providers["beta"].healthy is False
+    assert providers["gamma"].last_error is None
+    assert providers["gamma"].healthy is False
+    assert providers["delta"].last_error is None
+    assert providers["delta"].healthy is False
+
+
 def _provider_status(
     *,
     enabled: bool,

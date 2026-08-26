@@ -91,7 +91,9 @@ class JointExecutionRuleEvidence(_StrictModel):
     effective_date: str | None = None
     board: Literal["main", "chinext", "star", "beijing", "other"] | None = None
     is_st: bool | None = None
-    listing_status: Literal["listed", "delisting_period", "delisted"] | None = None
+    listing_status: Literal[
+        "listed", "delisting_period", "not_listed", "delisted"
+    ] | None = None
     board_rule_id: str | None = Field(default=None, min_length=1)
     st_rule_id: str | None = Field(default=None, min_length=1)
     delisting_rule_id: str | None = Field(default=None, min_length=1)
@@ -318,6 +320,16 @@ def joint_execution_evidence_findings(
     return _evidence_findings(evidence, signal_session)
 
 
+def joint_execution_base_evidence_findings(
+    evidence: JointExecutionEvidenceBundle,
+    *,
+    signal_session: str,
+) -> tuple[JointExecutionGateFinding, ...]:
+    """Return reusable execution-evidence findings without v2 skeleton blockers."""
+    _iso_date(signal_session, "signal_session")
+    return _base_evidence_findings(evidence, signal_session)
+
+
 def joint_execution_probability_evidence_digest(
     value: BaseModel | Mapping[str, object],
 ) -> str:
@@ -338,6 +350,19 @@ def _evidence_findings(
     signal_session: str,
 ) -> tuple[JointExecutionGateFinding, ...]:
     findings = [
+        *_base_evidence_findings(evidence, signal_session),
+        _finding("observed_joint_outcome_components_unavailable", "unavailable"),
+        _finding("strict_joint_assessment_replay_not_verified", "unavailable"),
+    ]
+    unique = {(item.code, item.severity): item for item in findings}
+    return tuple(sorted(unique.values(), key=lambda item: (item.code, item.severity)))
+
+
+def _base_evidence_findings(
+    evidence: JointExecutionEvidenceBundle,
+    signal_session: str,
+) -> tuple[JointExecutionGateFinding, ...]:
+    findings = [
         *_bar_findings(evidence.entry_bar),
         *_bar_findings(evidence.exit_bar),
         *_rule_findings(evidence.entry_rules),
@@ -347,8 +372,6 @@ def _evidence_findings(
         *_participation_findings(evidence.participation),
         *_benchmark_findings(evidence.benchmark),
         *_calibration_findings(evidence.calibration, signal_session),
-        _finding("observed_joint_outcome_components_unavailable", "unavailable"),
-        _finding("strict_joint_assessment_replay_not_verified", "unavailable"),
     ]
     unique = {(item.code, item.severity): item for item in findings}
     return tuple(sorted(unique.values(), key=lambda item: (item.code, item.severity)))
@@ -654,5 +677,6 @@ __all__ = [
     "JointProbabilityStatus",
     "assess_joint_execution_probability_gate",
     "joint_execution_evidence_findings",
+    "joint_execution_base_evidence_findings",
     "joint_execution_probability_evidence_digest",
 ]

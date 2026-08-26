@@ -607,6 +607,45 @@ def test_future_provider_quote_is_protocol_failure_and_falls_back() -> None:
     assert "晚于抓取检查时间" in (last_error or "")
 
 
+def test_provider_quote_uses_fresh_validation_clock_after_slow_prework() -> None:
+    class DelayedProvider:
+        source_name = "延迟行情源"
+
+        async def quotes(self, symbols) -> list[Quote]:
+            return [
+                _quote_for(symbol, self.source_name).model_copy(
+                    update={"timestamp": "2026-05-13 10:06:00"}
+                )
+                for symbol in symbols
+            ]
+
+    clock_values = iter(
+        (
+            datetime(2026, 5, 13, 10, 5),
+            datetime(2026, 5, 13, 10, 7),
+        )
+    )
+
+    async def run_check(path: Path) -> list[Quote]:
+        settings = Settings()
+        cache = SQLiteCache(path)
+        coordinator = QuoteCoordinator(
+            settings=settings,
+            cache=cache,
+            providers={"delayed": DelayedProvider()},
+            runtime=ProviderRuntime(cache, settings),
+            priority=lambda kind: [(1, "delayed")],
+            now=lambda: next(clock_values, datetime(2026, 5, 13, 10, 7)),
+        )
+        return await coordinator.quotes(["600519.SH"], use_cache=False)
+
+    with TemporaryDirectory() as tmpdir:
+        rows = asyncio.run(run_check(Path(tmpdir) / "cache.sqlite3"))
+
+    assert rows[0].source == "延迟行情源"
+    assert rows[0].timestamp == "2026-05-13 10:06:00"
+
+
 def test_short_cache_rejects_old_quote_timestamp_even_with_fresh_fetched_at() -> None:
     requested: list[str] = []
 

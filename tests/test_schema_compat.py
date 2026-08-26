@@ -19,6 +19,7 @@ from app.db.schema_migrations import (
     AUDIT_TIMESTAMP_UTC_MIGRATION,
     MARKET_SCAN_PREOPEN_MODE_MIGRATION,
     MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION,
+    MARKET_SCAN_PROBABILITY_RANKING_V6_MIGRATION,
     MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION,
     QUOTE_HISTORY_CONTRACT_MIGRATION,
     QUOTE_HISTORY_UNIQUE_INDEX,
@@ -28,6 +29,42 @@ from app.db.schema_migrations import (
 
 
 class SchemaCompatibilityTests(unittest.TestCase):
+    def test_probability_ranking_v6_tables_are_separate_and_immutable(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        self.addCleanup(conn.close)
+
+        initialize_schema(conn)
+
+        for table in (
+            "market_scan_probability_ranking_publication",
+            "market_scan_probability_ranking_result",
+            "market_scan_probability_ranking_rollback",
+        ):
+            self.assertTrue(self._table_exists(conn, table))
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migration WHERE name = ?",
+                (MARKET_SCAN_PROBABILITY_RANKING_V6_MIGRATION,),
+            ).fetchone()[0],
+            1,
+        )
+        triggers = {
+            row["name"]
+            for row in conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'trigger' AND name LIKE 'trg_market_scan_probability_ranking_%'
+                """
+            )
+        }
+        self.assertEqual(len(triggers), 6)
+        self.assertNotIn(
+            "probability_rank",
+            self._column_names(conn, "market_scan_result"),
+        )
+
     def test_full_legacy_startup_orders_discovery_rebuild_before_snapshot_guards(
         self,
     ) -> None:
@@ -762,6 +799,12 @@ class SchemaCompatibilityTests(unittest.TestCase):
         initialize_schema(conn)
         second_columns = self._column_names(conn, "quote_history")
         second_indexes = self._index_names(conn, "quote_history")
+
+        with patch(
+            "app.db.schema_migrations._delete_quote_history_duplicates",
+            side_effect=AssertionError("完整唯一索引存在时不应再次全表去重"),
+        ):
+            initialize_schema(conn)
 
         self.assertIn("trade_date", first_columns)
         self.assertTrue(self._column_not_null(conn, "quote_history", "trade_date"))

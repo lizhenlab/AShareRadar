@@ -18,6 +18,10 @@ from app.services.market_scan_export import (
     MarketScanExportFilters,
     build_market_scan_workbook,
     market_scan_board_label,
+    validate_market_scan_export_run,
+)
+from app.services.market_scan_future_range_store import (
+    not_generated_future_range_research,
 )
 from app.services.market_scan_manager import MarketScanManager
 from app.services.market_scan_probability_store import ProbabilityResearchUnavailable
@@ -63,11 +67,11 @@ def test_workbook_contains_complete_ranked_snapshot_and_audit_metadata() -> None
     assert exported.filename == "AShareRadar-market-scan-2026-07-29-official-run-12.xlsx"
     assert exported.row_count == 1
     assert results.freeze_panes == "A2"
-    assert results.auto_filter.ref == "A1:AE2"
+    assert results.auto_filter.ref == "A1:AM2"
     assert results["A1"].value == "排名"
     assert results["B2"].value == "000001"
     assert results["B2"].number_format == "@"
-    assert results["D2"].value == "'=HYPERLINK(\"https://example.invalid\")"
+    assert results["D2"].value == '\'=HYPERLINK("https://example.invalid")'
     assert results["F2"].value == "深圳A股（主板）"
     assert results["G2"].value == "'+银行"
     assert results["W2"].value == "'@趋势和量价配合"
@@ -101,6 +105,9 @@ def test_workbook_contains_complete_ranked_snapshot_and_audit_metadata() -> None
     assert info["筛选合同"] == "screen-spec-v2"
     assert len(info["筛选摘要"]) == 64
     assert info["快照摘要"] == "a" * 64
+    assert info["概率生产排名状态"] == "未启用，使用原 v5"
+    assert info["当前生产评分规则"] == "full-market-score-v5"
+    assert info["v5/历史排名改写"] == "否"
     exported_spec = json.loads(info["筛选合同 JSON"])
     assert exported_spec["ranges"]["confidence"] == {"max": None, "min": 70.0}
     assert exported_spec["keyword"] == "000001"
@@ -111,6 +118,85 @@ def test_workbook_contains_complete_ranked_snapshot_and_audit_metadata() -> None
     ]
     assert info["导出条数"] == 1
     assert info["数据说明"] == "仅导出已持久化榜单快照，不会重新获取行情或重新计算。"
+
+
+def test_workbook_exports_active_v6_ranking_and_immutable_v5_baseline() -> None:
+    base = _item()
+    details = {
+        "run_id": base.run_id,
+        "symbol": base.symbol,
+        "base_rank": 3,
+        "base_score": 92,
+        "base_raw_score": 91.123456,
+        "probability": 0.8,
+        "reference_base_rate": 0.5,
+        "probability_adjustment": 6.0,
+        "rank": 1,
+        "score": 97,
+        "raw_score": 97.123456,
+        "score_rule_version": "full-market-score-v6",
+        "score_spec_hash": "b" * 64,
+        "source_record_digest": "c" * 64,
+        "prediction_record_digest": "d" * 64,
+        "record_digest": "e" * 64,
+    }
+    payload = base.model_dump(mode="python")
+    payload.update(
+        {
+            "rank": 1,
+            "score": 97,
+            "raw_score": 97.123456,
+            "base_production_rank": 3,
+            "base_production_score": 92,
+            "base_production_raw_score": 91.123456,
+            "production_score_rule_version": "full-market-score-v6",
+            "probability_ranking_adjustment": 6.0,
+            "probability_ranking_artifact_digest": "f" * 64,
+            "probability_ranking_details": details,
+        }
+    )
+    item = MarketScanResultItem.model_validate(payload)
+    ranking = {
+        "contract_version": "market-scan-probability-ranking-projection-v1",
+        "status": "active",
+        "run_id": 12,
+        "score_rule_version": "full-market-score-v6",
+        "score_spec_hash": "b" * 64,
+        "artifact_digest": "f" * 64,
+        "promotion_digest": "1" * 64,
+        "record_count": 1,
+        "base_snapshot_digest": "a" * 64,
+        "base_v5_mutated": False,
+        "historical_ranks_mutated": False,
+    }
+    workbook = load_workbook(
+        BytesIO(
+            build_market_scan_workbook(
+                _page([item], production_ranking=ranking),
+                MarketScanExportFilters(),
+                exported_at=EXPORTED_AT,
+            ).content
+        )
+    )
+    results = workbook["榜单"]
+    info = {
+        row[0].value: row[1].value
+        for row in workbook["导出信息"].iter_rows(min_row=2)
+    }
+
+    assert results["AF1"].value == "生产评分规则"
+    assert results["AF2"].value == "full-market-score-v6"
+    assert (results["AG2"].value, results["AH2"].value) == (3, 92)
+    assert results["AI2"].value == pytest.approx(91.123456)
+    assert results["AJ2"].value == pytest.approx(6.0)
+    assert results["AK2"].value == "f" * 64
+    assert results["AL2"].value == pytest.approx(0.8)
+    assert results["AM2"].value == pytest.approx(0.5)
+    assert info["概率生产排名状态"] == "v6 已启用"
+    assert info["当前生产评分规则"] == "full-market-score-v6"
+    assert info["v6 排名产物摘要"] == "f" * 64
+    assert info["人工晋级控制摘要"] == "1" * 64
+    assert info["v5/历史排名改写"] == "否"
 
 
 def test_score_detail_export_reads_v5_continuous_trend_without_losing_v4_columns() -> None:
@@ -147,7 +233,7 @@ def test_workbook_supports_an_empty_filtered_result_without_an_invalid_table() -
     assert exported.row_count == 0
     assert workbook["榜单"].max_row == 1
     assert workbook["榜单"].tables == {}
-    assert workbook["榜单"].auto_filter.ref == "A1:AE1"
+    assert workbook["榜单"].auto_filter.ref == "A1:AM1"
     assert workbook["上涨概率研究"].tables == {}
     assert workbook["上涨概率研究"].auto_filter.ref == "A1:T1"
 
@@ -156,24 +242,33 @@ def test_probability_research_sheet_exports_only_available_probabilities_with_ex
     probabilities = {
         "5": {
             "net_excess_positive": {
-                "status": "calibrated_shadow", "probability": 0.612,
+                "status": "calibrated_shadow",
+                "probability": 0.612,
                 "calibration_bias_interval": {
-                    "lower": -0.052, "upper": 0.048, "level": 0.95,
+                    "lower": -0.052,
+                    "upper": 0.048,
+                    "level": 0.95,
                     "method": "date_block_bootstrap_signed_calibration_bias",
                     "semantics": "signed_observed_rate_minus_probability_bias",
                 },
                 "calibration_adjusted_probability_interval": {
-                    "lower": 0.56, "upper": 0.66, "level": 0.95,
+                    "lower": 0.56,
+                    "upper": 0.66,
+                    "level": 0.95,
                     "method": "date_block_bootstrap_calibration_offset",
                     "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval",
                 },
-                "base_rate": 0.514, "model_version": "record-model-v1",
-                "input_digest": "record-input", "training_cutoff": "2026-07-15",
+                "base_rate": 0.514,
+                "model_version": "record-model-v1",
+                "input_digest": "record-input",
+                "training_cutoff": "2026-07-15",
                 "limitations": ["=shadow_only"],
             },
             "absolute_net_positive": {
-                "status": "insufficient_data", "probability": 0.5,
-                "confidence_interval": [0.4, 0.6], "base_rate": 0.48,
+                "status": "insufficient_data",
+                "probability": 0.5,
+                "confidence_interval": [0.4, 0.6],
+                "base_rate": 0.48,
                 "limitations": ["insufficient_independent_dates"],
             },
         },
@@ -184,10 +279,12 @@ def test_probability_research_sheet_exports_only_available_probabilities_with_ex
             "1": {"net_excess_positive": {"status": "calibrated_shadow", "base_rate": 0.51}},
             "5": {
                 "net_excess_positive": {
-                    "status": "calibrated_shadow", "base_rate": 0.514,
+                    "status": "calibrated_shadow",
+                    "base_rate": 0.514,
                     "versions": {"model": "study-model-v1", "feature": "feature-v1", "label": "label-v1", "cost_model": "cost-v1"},
                     "digests": {"input": "study-input", "model": "study-model-digest", "calibrator": "study-calibrator-digest"},
-                    "training_cutoff": "2026-07-14", "limitations": ["study_shadow_only"],
+                    "training_cutoff": "2026-07-14",
+                    "limitations": ["study_shadow_only"],
                 },
                 "absolute_net_positive": {"status": "insufficient_data", "base_rate": 0.48},
             },
@@ -211,11 +308,16 @@ def test_probability_research_sheet_exports_only_available_probabilities_with_ex
     assert calibrated[14] == "有符号偏差与群体校准调整概率区间；不是个股结果区间"
     assert calibrated[15] == pytest.approx(0.514)
     assert json.loads(calibrated[16]) == {
-        "cost_model": "cost-v1", "feature": "feature-v1", "label": "label-v1", "model": "record-model-v1",
+        "cost_model": "cost-v1",
+        "feature": "feature-v1",
+        "label": "label-v1",
+        "model": "record-model-v1",
     }
     assert calibrated[17] == "2026-07-15"
     assert json.loads(calibrated[18]) == {
-        "calibrator": "study-calibrator-digest", "input": "record-input", "model": "study-model-digest",
+        "calibrator": "study-calibrator-digest",
+        "input": "record-input",
+        "model": "study-model-digest",
     }
     assert calibrated[19] == "'=shadow_only"
     assert all(sheet.cell(2, column).number_format == "0.00%" for column in (9, 10, 11, 12, 13, 14, 16))
@@ -234,14 +336,38 @@ def test_probability_research_sheet_keeps_legacy_probabilities_blank() -> None:
     ("bias", "adjusted", "expected"),
     (
         (
-            {"lower": 0.10, "upper": 0.20, "level": 0.95, "method": "date_block_bootstrap_signed_calibration_bias", "semantics": "signed_observed_rate_minus_probability_bias"},
-            {"lower": 0.70, "upper": 0.80, "level": 0.95, "method": "date_block_bootstrap_calibration_offset", "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval"},
+            {
+                "lower": 0.10,
+                "upper": 0.20,
+                "level": 0.95,
+                "method": "date_block_bootstrap_signed_calibration_bias",
+                "semantics": "signed_observed_rate_minus_probability_bias",
+            },
+            {
+                "lower": 0.70,
+                "upper": 0.80,
+                "level": 0.95,
+                "method": "date_block_bootstrap_calibration_offset",
+                "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval",
+            },
             (0.10, 0.20, 0.70, 0.80, 0.95),
         ),
         (None, None, (None, None, None, None, None)),
         (
-            {"lower": "invalid", "upper": 0.1, "level": 0.95, "method": "date_block_bootstrap_signed_calibration_bias", "semantics": "signed_observed_rate_minus_probability_bias"},
-            {"lower": 0.5, "upper": 0.7, "level": 0.95, "method": "date_block_bootstrap_calibration_offset", "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval"},
+            {
+                "lower": "invalid",
+                "upper": 0.1,
+                "level": 0.95,
+                "method": "date_block_bootstrap_signed_calibration_bias",
+                "semantics": "signed_observed_rate_minus_probability_bias",
+            },
+            {
+                "lower": 0.5,
+                "upper": 0.7,
+                "level": 0.95,
+                "method": "date_block_bootstrap_calibration_offset",
+                "semantics": "calibration_adjusted_probability_interval_not_individual_outcome_interval",
+            },
             (None, None, None, None, None),
         ),
     ),
@@ -339,27 +465,45 @@ def test_future_range_sheet_exports_fixed_sessions_and_marks_hlc3_as_proxy() -> 
     assert len(rows) == 3
     available, modelled, unavailable = rows
     assert available[0:13] == (
-        "ready", 12, "000001.SZ", "平安银行", "SZ", "银行", 1, 91.123456,
-        88, 1, "2026-07-30", "available", None,
+        "ready",
+        12,
+        "000001.SZ",
+        "平安银行",
+        "SZ",
+        "银行",
+        1,
+        91.123456,
+        88,
+        1,
+        "2026-07-30",
+        "available",
+        None,
     )
-    assert available[14:24] == pytest.approx(
-        (10.0, 9.8, 10.0, 10.2, 10.1, 10.2, 10.0, 10.2, 10.4, 10.3)
-    )
+    assert available[14:24] == pytest.approx((10.0, 9.8, 10.0, 10.2, 10.1, 10.2, 10.0, 10.2, 10.4, 10.3))
     assert available[24:31] == pytest.approx((0.02, 0.02, 0.0196, -0.0099, 0.0099, 0.0297, 0.0198))
     assert available[31] == "2026-07-30"
     assert available[32] == pytest.approx(10.2)
     assert available[33:43] == pytest.approx((-0.0196, 0.0, 0.0196, 0.0098, -0.0196, 0.0196, 0.0098, 0.0385, 0.0, 0.5))
     assert available[43:47] == ("是", "是", "否", "否")
     assert available[47:53] == (
-        "data_unavailable", "A_share_T_plus_1_no_same_session_exit",
-        "2026-07-30", None, None, None,
+        "data_unavailable",
+        "A_share_T_plus_1_no_same_session_exit",
+        "2026-07-30",
+        None,
+        None,
+        None,
     )
     assert all(value is None for value in available[53:58])
     assert available[63] == "calibrated_shadow"
     assert json.loads(available[64]) == [{"horizon": 1, "probability": 0.61, "target": "net_excess_positive"}]
     assert available[67:70] == ("qfq", "daily-v1", "kline-v1")
     assert modelled[47:53] == (
-        "modelled", None, "2026-07-30", 10.2, "2026-07-31", 10.5,
+        "modelled",
+        None,
+        "2026-07-30",
+        10.2,
+        "2026-07-31",
+        10.5,
     )
     assert modelled[53:58] == pytest.approx((0.0294, 0.0278, 0.01, 0.0178, 0.0016))
     assert modelled[58:63] == ("ashare-cost-v1", "base", 100000, 0.01, "是")
@@ -422,60 +566,35 @@ def test_manager_exports_only_published_runs_and_forwards_every_filter() -> None
         order=("desc", "desc", "asc"),
     )
     manager = object.__new__(MarketScanManager)
-    calls: list[tuple[int, dict[str, object]]] = []
-    manager.run = lambda run_id: page.run  # type: ignore[method-assign]
-    manager.results = lambda run_id, **kwargs: calls.append((run_id, kwargs)) or page  # type: ignore[method-assign]
+    calls: list[tuple[int, MarketScanExportFilters]] = []
+
+    class _Queries:
+        def export_projection(
+            self,
+            run_id: int,
+            *,
+            filters: MarketScanExportFilters,
+        ) -> tuple[MarketScanResultPage, dict[str, object]]:
+            calls.append((run_id, filters))
+            return page, not_generated_future_range_research(run_id)
+
+    queries = _Queries()
+    manager._queries = lambda: queries  # type: ignore[method-assign]  # noqa: SLF001
     manager._now = lambda: EXPORTED_AT
 
     exported = manager.export_results(page.run.id, filters=filters)
 
     assert exported.row_count == 1
-    assert calls == [
-        (
-            page.run.id,
-            {
-                "page": 1,
-                "page_size": 1,
-                "status": None,
-                "market": ("SZ", "SH"),
-                "industry": ("银行 服务", "电力"),
-                "is_st": False,
-                "is_new": None,
-                "min_score": 60,
-                "max_score": 98,
-                "min_trend_score": 50,
-                "max_trend_score": 95,
-                "min_change_pct": -3,
-                "max_change_pct": 10,
-                "min_turnover_rate": 1,
-                "max_turnover_rate": 25,
-                "min_amount": 1_000_000,
-                "max_amount": 900_000_000,
-                "min_data_quality_score": 70,
-                    "max_data_quality_score": 100,
-                    "min_confidence": 75,
-                    "max_risk": 35,
-                        "min_tradability": 65,
-                    "probability_horizon": 5,
-                    "min_upside_probability": None,
-                    "keyword": "000001 平安",
-                "sort": ("score", "amount", "symbol"),
-                "order": ("desc", "desc", "asc"),
-            },
-        )
-    ]
+    assert calls == [(page.run.id, filters.normalized())]
 
-    manager.run = lambda run_id: page.run.model_copy(update={"status": "running"})  # type: ignore[method-assign]
     with pytest.raises(ValueError, match="只有已发布"):
-        manager.export_results(page.run.id, filters=filters)
+        validate_market_scan_export_run(page.run.model_copy(update={"status": "running"}))
 
-    manager.run = lambda run_id: page.run.model_copy(update={"mode": "preopen"})  # type: ignore[method-assign]
     with pytest.raises(ValueError, match="盘后正式或盘中临时"):
-        manager.export_results(page.run.id, filters=filters)
+        validate_market_scan_export_run(page.run.model_copy(update={"mode": "preopen"}))
 
-    manager.run = lambda run_id: page.run.model_copy(update={"quote_date": "2026-07-30"})  # type: ignore[method-assign]
     with pytest.raises(ValueError, match="行情日期与完整日K截止日一致"):
-        manager.export_results(page.run.id, filters=filters)
+        validate_market_scan_export_run(page.run.model_copy(update={"quote_date": "2026-07-30"}))
 
 
 def test_manager_exports_published_intraday_without_official_research_artifacts() -> None:
@@ -489,24 +608,24 @@ def test_manager_exports_published_intraday_without_official_research_artifacts(
     )
     intraday_page = page.model_copy(update={"run": intraday_run})
     manager = object.__new__(MarketScanManager)
-    future_range_calls: list[int] = []
 
-    class _FutureRangeStore:
-        def export_projection(self, run_id: int) -> dict[str, object]:
-            future_range_calls.append(run_id)
-            return _future_range_projection()
+    class _Queries:
+        def export_projection(
+            self,
+            run_id: int,
+            *,
+            filters: MarketScanExportFilters,
+        ) -> tuple[MarketScanResultPage, dict[str, object]]:
+            del filters
+            return intraday_page, not_generated_future_range_research(run_id)
 
-    manager.run = lambda _run_id: intraday_run  # type: ignore[method-assign]
-    manager.results = lambda _run_id, **_kwargs: intraday_page  # type: ignore[method-assign]
-    manager._future_range_store = _FutureRangeStore()  # type: ignore[assignment]
+    queries = _Queries()
+    manager._queries = lambda: queries  # type: ignore[method-assign]  # noqa: SLF001
     manager._now = lambda: EXPORTED_AT
 
     exported = manager.export_results(intraday_run.id, filters=MarketScanExportFilters())
     workbook = load_workbook(BytesIO(exported.content))
-    info = {
-        row[0].value: row[1].value
-        for row in workbook["导出信息"].iter_rows(min_row=2)
-    }
+    info = {row[0].value: row[1].value for row in workbook["导出信息"].iter_rows(min_row=2)}
 
     assert exported.filename == "AShareRadar-market-scan-2026-07-30-intraday-run-12.xlsx"
     assert exported.row_count == 1
@@ -516,34 +635,21 @@ def test_manager_exports_published_intraday_without_official_research_artifacts(
     assert "上涨概率研究与未来区间验证未生成" in info["数据说明"]
     assert workbook["上涨概率研究"].max_row == 1
     assert workbook["未来区间验证"]["A2"].value == "not_generated"
-    assert future_range_calls == []
 
 
 def test_top100_refresh_export_is_rejected_before_research_artifacts_are_read() -> None:
     page = _page([_item()])
-    manager = object.__new__(MarketScanManager)
-    future_range_calls: list[int] = []
-
-    class _FutureRangeStore:
-        def export_projection(self, run_id: int) -> dict[str, object]:
-            future_range_calls.append(run_id)
-            return _future_range_projection()
-
     top100 = page.run.model_copy(update={"scope": MARKET_SCAN_TOP100_REFRESH_SCOPE})
-    manager.run = lambda _run_id: top100  # type: ignore[method-assign]
-    manager.results = lambda _run_id, **_kwargs: page  # type: ignore[method-assign]
-    manager._future_range_store = _FutureRangeStore()  # type: ignore[assignment]
-    manager._now = lambda: EXPORTED_AT
 
     with pytest.raises(ProbabilityResearchUnavailable, match="盘后正式或盘中临时全市场"):
-        manager.export_results(top100.id, filters=MarketScanExportFilters())
-    assert future_range_calls == []
+        validate_market_scan_export_run(top100)
 
 
 def _page(
     items: list[MarketScanResultItem],
     *,
     probability_research: dict[str, object] | None = None,
+    production_ranking: dict[str, object] | None = None,
 ) -> MarketScanResultPage:
     return MarketScanResultPage(
         run=_run(),
@@ -553,14 +659,21 @@ def _page(
         page_size=max(1, len(items)),
         page_count=1 if items else 0,
         probability_research=probability_research,
+        production_ranking=production_ranking,
     )
 
 
 def _future_range_projection() -> dict[str, object]:
     d_bar = {
-        "date": "2026-07-29", "open": 10.0, "low": 9.8, "hlc3_proxy": 10.0,
-        "high": 10.2, "close": 10.1, "adjustment_mode": "qfq",
-        "data_version": "daily-v1", "contract_version": "kline-v1",
+        "date": "2026-07-29",
+        "open": 10.0,
+        "low": 9.8,
+        "hlc3_proxy": 10.0,
+        "high": 10.2,
+        "close": 10.1,
+        "adjustment_mode": "qfq",
+        "data_version": "daily-v1",
+        "contract_version": "kline-v1",
     }
     return {
         "schema_version": "market-scan-future-range-api-v1",
@@ -571,111 +684,174 @@ def _future_range_projection() -> dict[str, object]:
             "integrity_digest": "a" * 64,
         },
         "research": {
-            "status": "ok", "record_count": 1,
+            "status": "ok",
+            "record_count": 1,
             "config": {
                 "execution_label_contract": {
-                    "cost_model_version": "ashare-cost-v1", "cost_profile_id": "base",
-                    "execution_notional": 100_000, "max_daily_participation_rate": 0.01,
+                    "cost_model_version": "ashare-cost-v1",
+                    "cost_profile_id": "base",
+                    "execution_notional": 100_000,
+                    "max_daily_participation_rate": 0.01,
                 }
             },
         },
         "record_page": {
-            "page": 1, "page_size": 1, "total": 1, "page_count": 1,
-            "session_offset": None, "symbol": None,
-            "items": [{
-                "run_id": 12, "symbol": "000001.SZ", "name": "平安银行", "market": "SZ",
-                "industry": "银行", "rank": 1, "raw_score": 91.123456, "trend_score": 88,
-                "d_bar": d_bar,
-                "source_evidence": {"status": "verified", "payload_digest": "source-digest"},
-                "probability": {
-                    "status": "calibrated_shadow",
-                    "predictions": [{"target": "net_excess_positive", "horizon": 1, "probability": 0.61}],
-                },
-                "offsets": [
-                    {
-                        "session_offset": 1, "target_session_date": "2026-07-30",
-                        "fixed_session_status": "available", "reason": None,
-                        "target_bar": {
-                            "date": "2026-07-30", "open": 10.2, "low": 10.0,
-                            "hlc3_proxy": 10.2, "high": 10.4, "close": 10.3,
-                            "adjustment_mode": "qfq", "data_version": "daily-v1",
-                            "contract_version": "kline-v1",
-                        },
-                        "target_bar_digest": "target-digest",
-                        "level_shift": {"low": 0.02, "hlc3_proxy": 0.02, "high": 0.0196},
-                        "d_close_reference": {"low": -0.0099, "hlc3_proxy": 0.0099, "high": 0.0297, "close": 0.0198},
-                        "d1_open_reference": {
-                            "entry_date": "2026-07-30", "entry_price": 10.2,
-                            "specified_day": {"low": -0.0196, "hlc3_proxy": 0.0, "high": 0.0196, "close": 0.0098},
-                            "cumulative_path": {"mae": -0.0196, "mfe": 0.0196, "terminal_close_return": 0.0098},
-                        },
-                        "interval_structure": {
-                            "normalized_width": 0.0385, "width_change": 0.0,
-                            "overlap_ratio": 0.5, "higher_high": True, "higher_low": True,
-                            "full_gap_up": False, "full_gap_down": False,
-                        },
-                        "execution": {
-                            "status": "data_unavailable",
-                            "reason": "A_share_T_plus_1_no_same_session_exit",
-                            "entry_date": "2026-07-30", "entry_price": None,
-                            "exit_date": None, "exit_price": None,
-                            "gross_return": None, "net_return": None,
-                            "market_benchmark_net_return": None, "net_excess_return": None,
-                            "cost_drag": None, "daily_bar_model_limited": None,
-                            "cost_model_version": "ashare-cost-v1", "cost_profile_id": "base",
-                        },
+            "page": 1,
+            "page_size": 1,
+            "total": 1,
+            "page_count": 1,
+            "session_offset": None,
+            "symbol": None,
+            "items": [
+                {
+                    "run_id": 12,
+                    "symbol": "000001.SZ",
+                    "name": "平安银行",
+                    "market": "SZ",
+                    "industry": "银行",
+                    "rank": 1,
+                    "raw_score": 91.123456,
+                    "trend_score": 88,
+                    "d_bar": d_bar,
+                    "source_evidence": {"status": "verified", "payload_digest": "source-digest"},
+                    "probability": {
+                        "status": "calibrated_shadow",
+                        "predictions": [{"target": "net_excess_positive", "horizon": 1, "probability": 0.61}],
                     },
-                    {
-                        "session_offset": 2, "target_session_date": "2026-07-31",
-                        "fixed_session_status": "available", "reason": None,
-                        "target_bar": {
-                            "date": "2026-07-31", "open": 10.3, "low": 10.1,
-                            "hlc3_proxy": 10.4, "high": 10.6, "close": 10.5,
-                            "adjustment_mode": "qfq", "data_version": "daily-v1",
-                            "contract_version": "kline-v1",
+                    "offsets": [
+                        {
+                            "session_offset": 1,
+                            "target_session_date": "2026-07-30",
+                            "fixed_session_status": "available",
+                            "reason": None,
+                            "target_bar": {
+                                "date": "2026-07-30",
+                                "open": 10.2,
+                                "low": 10.0,
+                                "hlc3_proxy": 10.2,
+                                "high": 10.4,
+                                "close": 10.3,
+                                "adjustment_mode": "qfq",
+                                "data_version": "daily-v1",
+                                "contract_version": "kline-v1",
+                            },
+                            "target_bar_digest": "target-digest",
+                            "level_shift": {"low": 0.02, "hlc3_proxy": 0.02, "high": 0.0196},
+                            "d_close_reference": {"low": -0.0099, "hlc3_proxy": 0.0099, "high": 0.0297, "close": 0.0198},
+                            "d1_open_reference": {
+                                "entry_date": "2026-07-30",
+                                "entry_price": 10.2,
+                                "specified_day": {"low": -0.0196, "hlc3_proxy": 0.0, "high": 0.0196, "close": 0.0098},
+                                "cumulative_path": {"mae": -0.0196, "mfe": 0.0196, "terminal_close_return": 0.0098},
+                            },
+                            "interval_structure": {
+                                "normalized_width": 0.0385,
+                                "width_change": 0.0,
+                                "overlap_ratio": 0.5,
+                                "higher_high": True,
+                                "higher_low": True,
+                                "full_gap_up": False,
+                                "full_gap_down": False,
+                            },
+                            "execution": {
+                                "status": "data_unavailable",
+                                "reason": "A_share_T_plus_1_no_same_session_exit",
+                                "entry_date": "2026-07-30",
+                                "entry_price": None,
+                                "exit_date": None,
+                                "exit_price": None,
+                                "gross_return": None,
+                                "net_return": None,
+                                "market_benchmark_net_return": None,
+                                "net_excess_return": None,
+                                "cost_drag": None,
+                                "daily_bar_model_limited": None,
+                                "cost_model_version": "ashare-cost-v1",
+                                "cost_profile_id": "base",
+                            },
                         },
-                        "target_bar_digest": "target-digest-2",
-                        "level_shift": {"low": 0.0306, "hlc3_proxy": 0.04, "high": 0.0392},
-                        "d_close_reference": {"low": 0.0, "hlc3_proxy": 0.0297, "high": 0.0495, "close": 0.0396},
-                        "d1_open_reference": {
-                            "entry_date": "2026-07-30", "entry_price": 10.2,
-                            "specified_day": {"low": -0.0098, "hlc3_proxy": 0.0196, "high": 0.0392, "close": 0.0294},
-                            "cumulative_path": {"mae": -0.0196, "mfe": 0.0392, "terminal_close_return": 0.0294},
+                        {
+                            "session_offset": 2,
+                            "target_session_date": "2026-07-31",
+                            "fixed_session_status": "available",
+                            "reason": None,
+                            "target_bar": {
+                                "date": "2026-07-31",
+                                "open": 10.3,
+                                "low": 10.1,
+                                "hlc3_proxy": 10.4,
+                                "high": 10.6,
+                                "close": 10.5,
+                                "adjustment_mode": "qfq",
+                                "data_version": "daily-v1",
+                                "contract_version": "kline-v1",
+                            },
+                            "target_bar_digest": "target-digest-2",
+                            "level_shift": {"low": 0.0306, "hlc3_proxy": 0.04, "high": 0.0392},
+                            "d_close_reference": {"low": 0.0, "hlc3_proxy": 0.0297, "high": 0.0495, "close": 0.0396},
+                            "d1_open_reference": {
+                                "entry_date": "2026-07-30",
+                                "entry_price": 10.2,
+                                "specified_day": {"low": -0.0098, "hlc3_proxy": 0.0196, "high": 0.0392, "close": 0.0294},
+                                "cumulative_path": {"mae": -0.0196, "mfe": 0.0392, "terminal_close_return": 0.0294},
+                            },
+                            "interval_structure": {
+                                "normalized_width": 0.0481,
+                                "width_change": 0.0096,
+                                "overlap_ratio": 0.1667,
+                                "higher_high": True,
+                                "higher_low": True,
+                                "full_gap_up": False,
+                                "full_gap_down": False,
+                            },
+                            "execution": {
+                                "status": "modelled",
+                                "reason": None,
+                                "entry_date": "2026-07-30",
+                                "entry_price": 10.2,
+                                "exit_date": "2026-07-31",
+                                "exit_price": 10.5,
+                                "gross_return": 0.0294,
+                                "net_return": 0.0278,
+                                "market_benchmark_net_return": 0.01,
+                                "net_excess_return": 0.0178,
+                                "cost_drag": 0.0016,
+                                "daily_bar_model_limited": True,
+                                "cost_model_version": "ashare-cost-v1",
+                                "cost_profile_id": "base",
+                            },
                         },
-                        "interval_structure": {
-                            "normalized_width": 0.0481, "width_change": 0.0096,
-                            "overlap_ratio": 0.1667, "higher_high": True, "higher_low": True,
-                            "full_gap_up": False, "full_gap_down": False,
+                        {
+                            "session_offset": 3,
+                            "target_session_date": "2026-08-01",
+                            "fixed_session_status": "unavailable",
+                            "reason": "suspended_or_missing_bar",
+                            "target_bar": None,
+                            "target_bar_digest": None,
+                            "level_shift": None,
+                            "d_close_reference": None,
+                            "d1_open_reference": None,
+                            "interval_structure": None,
+                            "execution": {
+                                "status": "data_unavailable",
+                                "reason": "fixed_path_bar_missing_no_forward_shift",
+                                "entry_date": "2026-07-30",
+                                "entry_price": None,
+                                "exit_date": "2026-08-01",
+                                "exit_price": None,
+                                "gross_return": None,
+                                "net_return": None,
+                                "market_benchmark_net_return": None,
+                                "net_excess_return": None,
+                                "cost_drag": None,
+                                "daily_bar_model_limited": None,
+                                "cost_model_version": "ashare-cost-v1",
+                                "cost_profile_id": "base",
+                            },
                         },
-                        "execution": {
-                            "status": "modelled", "reason": None,
-                            "entry_date": "2026-07-30", "entry_price": 10.2,
-                            "exit_date": "2026-07-31", "exit_price": 10.5,
-                            "gross_return": 0.0294, "net_return": 0.0278,
-                            "market_benchmark_net_return": 0.01, "net_excess_return": 0.0178,
-                            "cost_drag": 0.0016, "daily_bar_model_limited": True,
-                            "cost_model_version": "ashare-cost-v1", "cost_profile_id": "base",
-                        },
-                    },
-                    {
-                        "session_offset": 3, "target_session_date": "2026-08-01",
-                        "fixed_session_status": "unavailable", "reason": "suspended_or_missing_bar",
-                        "target_bar": None, "target_bar_digest": None, "level_shift": None,
-                        "d_close_reference": None, "d1_open_reference": None,
-                        "interval_structure": None,
-                        "execution": {
-                            "status": "data_unavailable",
-                            "reason": "fixed_path_bar_missing_no_forward_shift",
-                            "entry_date": "2026-07-30", "entry_price": None,
-                            "exit_date": "2026-08-01", "exit_price": None,
-                            "gross_return": None, "net_return": None,
-                            "market_benchmark_net_return": None, "net_excess_return": None,
-                            "cost_drag": None, "daily_bar_model_limited": None,
-                            "cost_model_version": "ashare-cost-v1", "cost_profile_id": "base",
-                        },
-                    },
-                ],
-            }],
+                    ],
+                }
+            ],
         },
     }
 
