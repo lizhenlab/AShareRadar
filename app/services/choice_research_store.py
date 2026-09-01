@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from datetime import date, datetime
 import fcntl
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.utils.clock import market_now
 MAX_RAW_BYTES = 32 * 1024 * 1024
 SCHEMA_VERSION = "choice-research-dataset-v1"
 Record = tuple[str, str, str, dict[str, Any]]
+QUOTA_FUNCTIONS = {"EM_CSD", "EM_CSS", "EM_CTR", "EM_CFC"}
 
 
 def now_text() -> str:
@@ -39,6 +41,83 @@ def _connect(path: Path, *, version: int) -> sqlite3.Connection:
     db.execute(f"PRAGMA user_version={version}")
     db.execute("PRAGMA foreign_keys=ON")
     return db
+
+
+def quota_integer(row: dict[str, Any], field: str) -> int:
+    value = row.get(field)
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ChoiceError("Choice quota response failed strict value validation")
+    try:
+        result = int(value)
+    except ValueError as exc:
+        raise ChoiceError("Choice quota response failed strict value validation") from exc
+    if result < 0:
+        raise ChoiceError("Choice quota response failed strict value validation")
+    return result
+
+
+def quota_contract(row: dict[str, Any]) -> tuple[date, date, date]:
+    if row.get("PERIOD") != "W" or not isinstance(row.get("EFFECTIVEDATE"), str):
+        raise ChoiceError("Choice quota response failed strict value validation")
+    try:
+        start = date.fromisoformat(row["STARTDATE"])
+        end = date.fromisoformat(row["ENDDATE"])
+        effective = datetime.fromisoformat(row["EFFECTIVEDATE"]).date()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ChoiceError("Choice quota response failed strict value validation") from exc
+    if start.weekday() != 0 or end.weekday() != 6 or (end - start).days != 6:
+        raise ChoiceError("Choice weekly quota response has an invalid period")
+    threshold = quota_integer(row, "THRESHOLD")
+    used, remaining = quota_integer(row, "USEDDATA"), quota_integer(row, "AVAILABEDATA")
+    if used + remaining != threshold:
+        raise ChoiceError("Choice quota threshold does not reconcile with used and remaining units")
+    return start, end, effective
+
+
+def _select_quota(rows: list[dict[str, Any]], today: date) -> dict[str, Any]:
+    dated = [(row, *quota_contract(row)) for row in rows]
+    current = _unique_quota([item for item in dated if item[1] <= today <= item[2]])
+    if current is not None:
+        return current[0]
+    past = [item for item in dated if item[2] < today]
+    if past:
+        return _boundary_quota(past, latest=True)[0]
+    future = [item for item in dated if item[1] > today]
+    return _boundary_quota(future, latest=False)[0]
+
+
+def _unique_quota(rows: list[tuple[dict[str, Any], date, date, date]]) -> tuple[dict[str, Any], date, date, date] | None:
+    if len(rows) > 1:
+        raise ChoiceError("multiple current Choice quota packages require explicit accounting")
+    return rows[0] if rows else None
+
+
+def _boundary_quota(rows: list[tuple[dict[str, Any], date, date, date]],
+                    *, latest: bool) -> tuple[dict[str, Any], date, date, date]:
+    if not rows:
+        raise ChoiceError("Choice quota response has no selectable package")
+    values = [row[2] for row in rows] if latest else [row[1] for row in rows]
+    boundary = max(values) if latest else min(values)
+    selected = [row for row in rows if (row[2] if latest else row[1]) == boundary]
+    if len(selected) != 1:
+        raise ChoiceError("ambiguous non-current Choice quota packages require explicit accounting")
+    return selected[0]
+
+
+def _quota_row(columns: list[str], values: object) -> dict[str, Any] | None:
+    if not isinstance(values, list) or len(values) != len(columns):
+        raise ChoiceError("Choice quota response failed strict shape validation")
+    row = dict(zip(columns, values, strict=True))
+    function = row.get("FUNCENAME")
+    if not isinstance(function, str):
+        raise ChoiceError("Choice quota response failed strict shape validation")
+    if function not in QUOTA_FUNCTIONS:
+        return None
+    if not isinstance(row.get("SECUTYPE"), str):
+        raise ChoiceError("Choice quota response failed strict shape validation")
+    if function == "EM_CTR" and row["SECUTYPE"] != "分红送转":
+        return None
+    return row
 
 
 class ChoiceBudget(AbstractContextManager["ChoiceBudget"]):
@@ -78,18 +157,39 @@ class ChoiceBudget(AbstractContextManager["ChoiceBudget"]):
                 self.__exit__()
         return self
 
-    def update(self, response: dict[str, Any]) -> None:
-        columns = response["indicators"]
-        quotas: dict[str, dict[str, Any]] = {}
-        for values in response["data"].values():
-            row = dict(zip(columns, values, strict=True))
-            function = row["FUNCENAME"]
-            if function == "EM_CTR" and row["SECUTYPE"] != "分红送转":
+    def update(self, response: dict[str, Any], *, today: date | None = None) -> None:
+        columns, data = response.get("indicators"), response.get("data")
+        if (not isinstance(columns, list) or not all(isinstance(field, str) for field in columns)
+                or len(set(columns)) != len(columns) or not isinstance(data, dict)):
+            raise ChoiceError("Choice quota response failed strict shape validation")
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for values in data.values():
+            row = _quota_row(columns, values)
+            if row is None:
                 continue
-            if function in quotas:
-                raise ChoiceError("multiple quota packages need explicit accounting before collection")
-            quotas[function] = row
-        self.quotas = quotas
+            grouped.setdefault(row["FUNCENAME"], []).append(row)
+        instant = today or market_now().date()
+        self.quotas = {function: _select_quota(rows, instant) for function, rows in grouped.items()}
+
+    def require_current(self, functions: set[str], *, today: date | None = None) -> None:
+        """Fail before any uncached request when a required paid quota is not usable."""
+        assert self.db is not None
+        instant = today or market_now().date()
+        for function in sorted(functions):
+            quota = self.quotas.get(function)
+            if quota is None:
+                raise ChoiceError(f"missing confirmed current quota for {function}; collection stopped")
+            start, end, effective = quota_contract(quota)
+            if instant > effective:
+                raise ChoiceError(f"Choice package has expired for {function}")
+            if not start <= instant <= end:
+                raise ChoiceError(f"current Choice quota period is unreported for {function}; collection stopped")
+            period = f"{start.isoformat()}/{end.isoformat()}"
+            reserved = self.db.execute(
+                "SELECT COALESCE(SUM(units),0) FROM reservations WHERE period=? AND function=?", (period, function)
+            ).fetchone()[0]
+            if min(self.limits[function], quota_integer(quota, "AVAILABEDATA")) - reserved <= 0:
+                raise ChoiceError(f"budget pause: no safe units for required {function}")
 
     def reserve(self, method: str, units: int) -> None:
         assert self.db is not None
@@ -98,16 +198,17 @@ class ChoiceBudget(AbstractContextManager["ChoiceBudget"]):
         period = today.strftime("%G-W%V")
         quota = self.quotas.get(function)
         if quota:
-            if not str(quota["STARTDATE"]) <= today.isoformat() <= str(quota["ENDDATE"]):
+            start, end, effective = quota_contract(quota)
+            if not start <= today <= end:
                 raise ChoiceError("quota period is stale; refresh account statistics")
-            if str(quota.get("EFFECTIVEDATE", ""))[:10] < today.isoformat():
+            if effective < today:
                 raise ChoiceError("Choice package has expired")
-            period = f'{quota["STARTDATE"]}/{quota["ENDDATE"]}'
+            period = f"{start.isoformat()}/{end.isoformat()}"
         elif function not in {"sector", "tradedates"}:
             raise ChoiceError(f"missing confirmed quota for {function}; collection stopped")
         used = self.db.execute("SELECT COALESCE(SUM(units),0) FROM reservations WHERE period=? AND function=?", (period, function)).fetchone()[0]
         limit = self.limits[function]
-        remaining = min(limit, int(quota["AVAILABEDATA"])) if quota else limit
+        remaining = min(limit, quota_integer(quota, "AVAILABEDATA")) if quota else limit
         if units <= 0 or units + used > remaining:
             raise ChoiceError(f"budget pause: {function}, estimated_reserved={used}, next={units}, safe_limit={remaining}; completed requests are resumable")
         with self.db:
@@ -226,14 +327,20 @@ class ChoiceDataset(AbstractContextManager["ChoiceDataset"]):
         payload = {"request": descriptor, "captured_at": now_text(), "source": "Choice EMQuantAPI", "result": result}
         raw = canonical_json_bytes({"payload": payload, "sha256": sha256_hex(canonical_json_bytes(payload))})
         exclusive_atomic_publish(self.directory / "raw" / f"{self.key(descriptor)}.json", raw, max_bytes=MAX_RAW_BYTES)
-        return payload
+        # Project the exact canonical archive on the first call as well as on
+        # resume. Vendor mapping insertion order need not match sorted JSON keys.
+        archived = decode_json_bytes(raw)
+        assert isinstance(archived, dict) and isinstance(archived["payload"], dict)
+        return archived["payload"]
 
     def project(self, payload: dict[str, Any], records: list[Record]) -> None:
         descriptor = payload["request"]
         key = self.key(descriptor)
-        existing = self.db.execute("SELECT records_digest,record_count FROM requests WHERE request_key=?", (key,)).fetchone()
+        existing = self.db.execute("SELECT records_digest,record_count,captured_at FROM requests WHERE request_key=?", (key,)).fetchone()
         digest = sha256_hex(canonical_json_bytes([list(record) for record in records]))
         if existing:
+            if existing[2] != payload["captured_at"]:
+                raise ChoiceError("Choice request timestamp differs from its raw archive")
             rows = self.db.execute("SELECT kind,symbol,as_of,payload_json FROM records WHERE request_key=? ORDER BY ordinal", (key,)).fetchall()
             actual = [[kind, symbol, as_of, decode_json_bytes(value.encode())] for kind, symbol, as_of, value in rows]
             if existing[0] != digest or existing[1] != len(records) or sha256_hex(canonical_json_bytes(actual)) != digest:
@@ -250,10 +357,12 @@ class ChoiceDataset(AbstractContextManager["ChoiceDataset"]):
             ])
 
     def verify(self, normalize: Callable[[dict[str, Any]], list[Record]]) -> dict[str, Any]:
-        for (descriptor_json,) in self.db.execute("SELECT descriptor_json FROM requests ORDER BY request_key").fetchall():
+        for key, descriptor_json in self.db.execute("SELECT request_key,descriptor_json FROM requests ORDER BY request_key").fetchall():
             descriptor = decode_json_bytes(descriptor_json.encode())
             if not isinstance(descriptor, dict):
                 raise ChoiceError("invalid Choice request descriptor")
+            if key != self.key(descriptor):
+                raise ChoiceError("Choice request identity differs from its canonical descriptor")
             payload = self.cached(descriptor)
             assert payload is not None
             self.project(payload, normalize(payload))

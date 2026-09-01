@@ -97,7 +97,12 @@ The current test suite is split by domain:
 - `tests/test_cache_freshness_modules.py`
 - `tests/test_cache_stats_modules.py`
 - `tests/test_chart_marks_modules.py`
-- `tests/test_choice_research.py`: Choice quota reservations, research-only collection contracts, immutable bundles, universe coverage and no automatic formal probability authorization.
+- `tests/test_choice_experimental_history.py`: raw-replayed, source-bound Choice-only history conversion, immutable derived rows, offline guards, missing-cohort denominators and isolated candidate training.
+- `tests/test_choice_history_comparison.py`: independent adjustment reconstruction, deep Tencent manifest validation, fixed-calendar label/feature comparisons, scale invariance and read-only content-addressed diagnostics.
+- `tests/test_choice_research.py`: Choice quota reservations, weekly rollover selection, threshold reconciliation,
+  stale-period zero-probe preflight, sanitized account snapshots, arithmetic-only cohort budgets, research-only
+  collection contracts, immutable bundles, universe coverage and no automatic formal probability authorization.
+- `tests/test_choice_research_audit.py`: complete read-only archive replay, listing-window and halt-reference explanations, conservative quota reconciliation without reservation release and protected report destinations.
 - `tests/test_clock_modules.py`: Shanghai market time, UTC audit serialization/parsing, monotonic/performance adapters, mixed timestamp compatibility, and legacy audit-column migration without market-field rewriting.
 - `tests/test_config_modules.py`: environment parsing/validation and exact `ASHARE_RADAR_*` operations-document coverage.
 - `tests/test_container_settings_lifecycle.py`
@@ -122,6 +127,7 @@ The current test suite is split by domain:
 - `tests/test_exception_safety.py`: reviewed `BaseException` ownership boundaries, including fail-closed maintenance authority revocation; immediate and explicitly reviewed deferred cancellation propagation/terminal observers; provider sanitizer convergence; and static secret-output checks.
 - `tests/test_exchange_calendar_contract.py`: bundled exchange-calendar manifest parsing, exact count/order/uniqueness/min/max consistency, attested-session lookup, and unreadable/inconsistent fail-closed behavior used by public probability signal/cutoff validation.
 - `tests/test_experimental_direction_probability.py`: fixed D+1/D+2/D+5 close-to-close labels versus old H5, horizon-specific purging, strict evidence types/counts/dates, missing-day exclusions, attested read-only history, independent model identity and target-aware filtering.
+- `tests/test_experimental_direction_validation.py`: common fixed historical holdout, horizon-purged fitting/calibration, date-balanced proper scores, baseline and market coverage reporting, runtime rejection parity and no online model promotion.
 - `tests/test_experimental_probability.py`: independently calibrated personal model, immutable model validation, fresh full-snapshot seal verification, read-only input cutoffs, isolated probability filters and ranks.
 - `tests/test_experimental_probability_frontend.py`: explicit opt-in, D+1/D+2/D+5/H5 isolation, applied-filter and model/input-version paging, draft cancellation, navigation-only batch location without formal promotion, strict response identity and cancellable deadline-bounded retries.
 - `tests/test_experimental_probability_process.py`: bounded read-only process isolation, separate experimental admission under a busy formal verifier, draining both lanes on shutdown, strict request transport, error mapping, query forwarding and fresh snapshot tamper rejection in a real child process.

@@ -8,9 +8,9 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 433 | 1137 | 6675 | 1701 | 155183 |
-| `tests/` | 244 | 207 | 3918 | 912 | 131167 |
-| `tools/` | 19 | 7 | 170 | 6 | 3767 |
+| `app/` | 438 | 1144 | 6790 | 1703 | 157270 |
+| `tests/` | 248 | 208 | 4019 | 913 | 132893 |
+| `tools/` | 23 | 7 | 181 | 6 | 4025 |
 
 ## Python Function Health
 
@@ -3898,6 +3898,84 @@ Lines: 189
 | function | `_positive_price` | 175 | `def _positive_price(value: object) -> float \| None` |
 | function | `_clean_text` | 185 | `def _clean_text(value: object) -> str \| None` |
 
+#### `app/services/choice_experimental_history.py`
+
+Lines: 324
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `ChoiceExperimentalHistory` | 68 | `class ChoiceExperimentalHistory` |
+| class | `ChoiceExperimentalHistoryBuild` | 75 | `class ChoiceExperimentalHistoryBuild` |
+| function | `require_offline_choice_calendar` | 81 | `def require_offline_choice_calendar() -> None` |
+| function | `_guard` | 87 | `def _guard(path: Path, *, database: bool=False) -> Path` |
+| function | `_source_contract` | 102 | `def _source_contract(source: ChoiceDataset) -> tuple[tuple[str, ...], list[str]]` |
+| function | `_source_calendar` | 122 | `def _source_calendar(source: ChoiceDataset) -> tuple[str, ...]` |
+| function | `_validate_source_requests` | 134 | `def _validate_source_requests(source: ChoiceDataset, sessions: tuple[str, ...], symbols: list[str]) -> None` |
+| function | `_positive` | 149 | `def _positive(value: Any) -> bool` |
+| function | `_rejection` | 153 | `def _rejection(row: dict[str, Any]) -> str \| None` |
+| function | `_convert` | 164 | `def _convert(source: ChoiceDataset, sessions: tuple[str, ...], symbols: list[str], receipts: str) -> tuple[dict[str, list[Kline]], dict[str, Any]]` |
+| function | `_adjusted_bar` | 204 | `def _adjusted_bar(day: str, raw: dict[str, Any], captured_at: str, *, anchor_day: str, anchor: float, receipts: str) -> Kline` |
+| function | `_source_snapshot` | 215 | `def _source_snapshot(directory: Path) -> tuple[dict[str, list[Kline]], tuple[str, ...], dict[str, Any]]` |
+| function | `_rows` | 240 | `def _rows(series: dict[str, list[Kline]]) -> list[tuple[Any, ...]]` |
+| function | `_database_bytes` | 246 | `def _database_bytes(rows: list[tuple[Any, ...]]) -> bytes` |
+| function | `build_choice_experimental_history` | 258 | `def build_choice_experimental_history(source_directory: Path, output_directory: Path) -> ChoiceExperimentalHistoryBuild` |
+| function | `_manifest_payload` | 283 | `def _manifest_payload(manifest_path: Path) -> tuple[dict[str, Any], str]` |
+| function | `load_choice_experimental_history` | 295 | `def load_choice_experimental_history(manifest_path: Path, database: Path) -> ChoiceExperimentalHistory` |
+
+#### `app/services/choice_history_comparison.py`
+
+Lines: 407
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `_Bar` | 50 | `class _Bar` |
+| function | `_safe_path` | 62 | `def _safe_path(path: Path) -> Path` |
+| function | `_file_digest` | 69 | `def _file_digest(path: Path, *, database: bool=False) -> str` |
+| function | `_choice_plan` | 80 | `def _choice_plan(plan: dict[str, Any]) -> None` |
+| function | `_daily_descriptor` | 88 | `def _daily_descriptor(descriptor: dict[str, Any]) -> tuple[list[str], list[str]]` |
+| function | `_verify_daily_receipt` | 101 | `def _verify_daily_receipt(source: ChoiceDataset, receipt: tuple[Any, ...], fingerprints: dict[Path, str]) -> list[Any]` |
+| function | `_read_choice` | 121 | `def _read_choice(directory: Path, fingerprints: dict[Path, str]) -> tuple[RawSeries, tuple[str, ...], dict[str, Any]]` |
+| function | `_read_tencent` | 150 | `def _read_tencent(database: Path, manifest_path: Path, symbols: Sequence[str]) -> tuple[dict[str, dict[str, _Bar]], dict[str, Any]]` |
+| function | `_positive` | 170 | `def _positive(value: Any) -> bool` |
+| function | `_traded` | 174 | `def _traded(row: Mapping[str, Any]) -> bool` |
+| function | `_adjusted` | 179 | `def _adjusted(row: Mapping[str, Any], day: str, anchor: float) -> _Bar` |
+| function | `_distribution` | 187 | `def _distribution(values: Sequence[float]) -> dict[str, float \| int \| None]` |
+| function | `_factor_pair` | 197 | `def _factor_pair(symbol: str, day: str, previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any] \| None` |
+| function | `factor_reference_comparison` | 211 | `def factor_reference_comparison(series: RawSeries, sessions: Sequence[str]) -> dict[str, Any]` |
+| function | `_price_volume_comparison` | 227 | `def _price_volume_comparison(raw: dict[str, dict[str, Any]], adjusted: dict[str, _Bar], tencent: dict[str, _Bar], dates: Sequence[str], scale: float) -> dict[str, Any]` |
+| function | `_offset_segments` | 256 | `def _offset_segments(raw: dict[str, dict[str, Any]], adjusted: dict[str, _Bar], tencent: dict[str, _Bar], scale: float) -> list[dict[str, Any]]` |
+| function | `_vector` | 268 | `def _vector(rows: Sequence[_Bar]) -> tuple[float, ...]` |
+| function | `_feature_comparison` | 272 | `def _feature_comparison(symbol: str, choice: dict[str, _Bar], tencent: dict[str, _Bar], dates: Sequence[str], differences: dict[str, list[float]], worst: dict[str, dict[str, Any]]) -> dict[str, Any]` |
+| function | `_direction_comparison` | 289 | `def _direction_comparison(choice: dict[str, _Bar], tencent: dict[str, _Bar], dates: Sequence[str]) -> dict[str, Any]` |
+| function | `_shared_comparison` | 313 | `def _shared_comparison(choice: RawSeries, tencent: dict[str, dict[str, _Bar]], sessions: Sequence[str]) -> dict[str, Any]` |
+| function | `_sample_anchor_window` | 340 | `def _sample_anchor_window(index: int, total: int, rows: Mapping[str, dict[str, Any]], window: Sequence[str]) -> bool` |
+| function | `_anchor_window_error` | 344 | `def _anchor_window_error(rows: Mapping[str, dict[str, Any]], window: Sequence[str], last_factor: float, maxima: dict[str, float]) -> float` |
+| function | `scale_invariance_comparison` | 357 | `def scale_invariance_comparison(series: RawSeries, sessions: Sequence[str]) -> dict[str, Any]` |
+| function | `compare_choice_tencent_history` | 384 | `def compare_choice_tencent_history(choice_directory: Path, tencent_database: Path, tencent_manifest: Path) -> dict[str, Any]` |
+
+#### `app/services/choice_quota.py`
+
+Lines: 278
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `quota_query_window` | 23 | `def quota_query_window(today: date \| None=None) -> tuple[date, date]` |
+| function | `quota_query_args` | 29 | `def quota_query_args(today: date \| None=None) -> list[str]` |
+| function | `_nonnegative` | 35 | `def _nonnegative(value: object, label: str) -> int` |
+| function | `_public_quota` | 47 | `def _public_quota(function: str, row: dict[str, Any]) -> dict[str, Any]` |
+| function | `public_quotas` | 67 | `def public_quotas(quotas: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]` |
+| function | `sanitized_quota_response` | 71 | `def sanitized_quota_response(quotas: dict[str, dict[str, Any]]) -> dict[str, Any]` |
+| function | `_reservations` | 79 | `def _reservations(budget: ChoiceBudget) -> list[dict[str, Any]]` |
+| function | `_weekly_period` | 91 | `def _weekly_period(today: date) -> str` |
+| function | `_function_capacity` | 96 | `def _function_capacity(function: str, quota: dict[str, Any] \| None, limit: int, totals: dict[tuple[str, str], int], today: date) -> dict[str, Any]` |
+| function | `_local_capacity` | 124 | `def _local_capacity(function: str, limit: int, totals: dict[tuple[str, str], int], today: date) -> dict[str, Any]` |
+| function | `_scenario` | 135 | `def _scenario(symbols: int, sessions: int, csd_safe: int, css_safe: int) -> dict[str, Any]` |
+| function | `_cohort_scenario` | 141 | `def _cohort_scenario(symbols: int, sessions: int, snapshots: int, reports: int, csd_safe: int, css_safe: int) -> dict[str, Any]` |
+| function | `_capacity_planning` | 156 | `def _capacity_planning(functions: dict[str, dict[str, Any]], *, symbols: int, sessions: int, snapshots: int, reports: int) -> dict[str, Any]` |
+| function | `_action_plan` | 203 | `def _action_plan(functions: dict[str, dict[str, Any]], capacity: dict[str, Any]) -> dict[str, Any]` |
+| function | `_cfc_report` | 243 | `def _cfc_report(quota: dict[str, Any] \| None, today: date) -> dict[str, Any]` |
+| function | `build_quota_report` | 258 | `def build_quota_report(budget: ChoiceBudget, *, queried_at: str, today: date, planning_symbols: int, planning_sessions: int, planning_snapshot_dates: int=26, planning_report_dates: int=11) -> dict[str, Any]` |
+
 #### `app/services/choice_research.py`
 
 Lines: 311
@@ -3926,85 +4004,134 @@ Lines: 311
 | function | `_execution_section` | 281 | `def _execution_section(descriptor: dict[str, Any], result: dict[str, Any]) -> list[Record]` |
 | function | `report_dates` | 304 | `def report_dates(start: str, end: str) -> list[str]` |
 
-#### `app/services/choice_research_collect.py`
+#### `app/services/choice_research_audit.py`
 
-Lines: 131
+Lines: 517
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `ResearchClient` | 18 | `class ResearchClient(Protocol)` |
-| method | `ResearchClient.request` | 19 | `def request(self, method: str, args: list[str]) -> dict[str, Any]` |
-| class | `ChoiceCollector` | 22 | `class ChoiceCollector` |
-| method | `ChoiceCollector.__init__` | 23 | `def __init__(self, dataset: ChoiceDataset, client: ResearchClient, budget: ChoiceBudget, *, max_requests: int=100, progress: Callable[[dict[str, Any]], None] \| None=None) -> None` |
-| method | `ChoiceCollector.refresh_quota` | 34 | `def refresh_quota(self) -> None` |
-| method | `ChoiceCollector.fetch` | 46 | `def fetch(self, descriptor: dict[str, Any], units: int) -> list[Record]` |
-| method | `ChoiceCollector.run` | 67 | `def run(self) -> dict[str, Any]` |
-| method | `ChoiceCollector._metadata` | 99 | `def _metadata(self, symbols: list[str], dates: list[str]) -> None` |
-| method | `ChoiceCollector._dividends` | 105 | `def _dividends(self, symbols: list[str], plan: dict[str, Any]) -> None` |
-| method | `ChoiceCollector._daily` | 111 | `def _daily(self, symbols: list[str], sessions: list[str]) -> None` |
-| method | `ChoiceCollector._events` | 118 | `def _events(self, plan: dict[str, Any]) -> None` |
-| function | `failure_summary` | 125 | `def failure_summary(dataset: ChoiceDataset, collector: ChoiceCollector, error: str) -> dict[str, Any]` |
+| function | `_safe_path` | 37 | `def _safe_path(path: Path) -> Path` |
+| function | `_hashed_document` | 43 | `def _hashed_document(path: Path) -> dict[str, Any]` |
+| function | `_archive_files` | 53 | `def _archive_files(directory: Path, prefix: str='') -> list[Path]` |
+| function | `_open_dataset` | 63 | `def _open_dataset(stack: ExitStack, directory: Path) -> ChoiceDataset` |
+| function | `_require_quiescent_database` | 73 | `def _require_quiescent_database(path: Path) -> None` |
+| function | `_check_source_bindings` | 85 | `def _check_source_bindings(base: ChoiceDataset, supplement: ChoiceDataset, universe: ChoiceDataset) -> None` |
+| function | `_receipts` | 102 | `def _receipts(dataset: ChoiceDataset) -> dict[str, dict[str, Any]]` |
+| function | `_timestamp` | 109 | `def _timestamp(value: str) -> datetime` |
+| function | `_verify_dataset` | 116 | `def _verify_dataset(dataset: ChoiceDataset) -> tuple[dict, dict]` |
+| function | `_records` | 130 | `def _records(dataset: ChoiceDataset, kind: str, receipts: dict[str, dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]` |
+| function | `_positive` | 140 | `def _positive(value: Any) -> bool` |
+| function | `_positive_references` | 144 | `def _positive_references(evidence: dict[str, Any] \| None) -> bool` |
+| function | `_has_trades` | 148 | `def _has_trades(row: dict[str, Any]) -> bool` |
+| function | `_listing_context` | 152 | `def _listing_context(metadata: dict, daily: dict, references: dict, sessions: list[str]) -> dict[str, dict[str, Any]]` |
+| function | `_initial_gap_window` | 171 | `def _initial_gap_window(symbol: str, listing_date: str, sessions: list[str], daily: dict, references: dict) -> list[str]` |
+| function | `_css_request` | 188 | `def _css_request(kind: str, symbol: str, day: str) -> dict[str, Any]` |
+| function | `_anomaly` | 195 | `def _anomaly(symbol: str, day: str, bar: dict, reference: dict \| None, status: dict \| None, listing: dict) -> dict[str, Any]` |
+| function | `_reference_audit` | 216 | `def _reference_audit(base: ChoiceDataset, supplement: ChoiceDataset, receipts: list[dict]) -> dict[str, Any]` |
+| function | `_estimated_units` | 246 | `def _estimated_units(descriptor: dict[str, Any]) -> int` |
+| function | `_orphan_receipts` | 254 | `def _orphan_receipts(dataset: ChoiceDataset, known: dict[str, dict]) -> list[dict[str, Any]]` |
+| function | `_collection_failures` | 278 | `def _collection_failures(datasets: list[ChoiceDataset]) -> list[dict[str, Any]]` |
+| function | `_quota_rows` | 296 | `def _quota_rows(data: dict[str, Any]) -> dict[str, dict[str, Any]]` |
+| function | `_account_snapshots` | 321 | `def _account_snapshots(directories: list[Path]) -> list[dict[str, Any]]` |
+| function | `_ledger` | 331 | `def _ledger(control: Path) -> list[dict[str, Any]]` |
+| function | `_database_identity` | 352 | `def _database_identity(path: Path) -> tuple[int, ...]` |
+| function | `_validated_reservations` | 357 | `def _validated_reservations(rows: list[tuple]) -> list[dict[str, Any]]` |
+| function | `_receipt_calls` | 370 | `def _receipt_calls(receipts: list[dict], orphans: list[dict]) -> list[dict[str, Any]]` |
+| function | `_reservation_candidates` | 382 | `def _reservation_candidates(rows: list[dict], calls: list[dict], failures: list[dict]) -> list[dict[str, Any]]` |
+| function | `_period_usage` | 397 | `def _period_usage(function: str, rows: list[dict], calls: list[dict], quota: dict) -> dict[str, Any]` |
+| function | `_function_quota` | 409 | `def _function_quota(function: str, rows: list[dict], calls: list[dict], snapshots: list[dict], audited_at: datetime) -> dict[str, Any]` |
+| function | `_quota_audit` | 427 | `def _quota_audit(control: Path, datasets: list[ChoiceDataset], receipts: list[dict], audited_at: datetime) -> dict[str, Any]` |
+| function | `_ledger_totals` | 448 | `def _ledger_totals(rows: list[dict]) -> dict[str, Any]` |
+| function | `_minimal_rechecks` | 457 | `def _minimal_rechecks(evidence: dict, quota: dict) -> dict[str, Any]` |
+| function | `audit_choice_research` | 478 | `def audit_choice_research(history_dir: Path, supplement_dir: Path, universe_dir: Path, control_dir: Path, *, audited_at: datetime \| None=None) -> dict[str, Any]` |
+| function | `publish_choice_audit` | 505 | `def publish_choice_audit(report: dict[str, Any], output_dir: Path, source_directories: list[Path]) -> Path` |
+
+#### `app/services/choice_research_collect.py`
+
+Lines: 147
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `ResearchClient` | 19 | `class ResearchClient(Protocol)` |
+| method | `ResearchClient.request` | 20 | `def request(self, method: str, args: list[str]) -> dict[str, Any]` |
+| class | `ChoiceCollector` | 23 | `class ChoiceCollector` |
+| method | `ChoiceCollector.__init__` | 24 | `def __init__(self, dataset: ChoiceDataset, client: ResearchClient, budget: ChoiceBudget, *, max_requests: int=100, progress: Callable[[dict[str, Any]], None] \| None=None) -> None` |
+| method | `ChoiceCollector.refresh_quota` | 37 | `def refresh_quota(self) -> None` |
+| method | `ChoiceCollector.fetch` | 48 | `def fetch(self, descriptor: dict[str, Any], units: int) -> list[Record]` |
+| method | `ChoiceCollector.run` | 75 | `def run(self) -> dict[str, Any]` |
+| method | `ChoiceCollector._metadata` | 115 | `def _metadata(self, symbols: list[str], dates: list[str]) -> list[tuple[dict[str, Any], int]]` |
+| method | `ChoiceCollector._dividends` | 120 | `def _dividends(self, symbols: list[str], plan: dict[str, Any]) -> list[tuple[dict[str, Any], int]]` |
+| method | `ChoiceCollector._daily` | 125 | `def _daily(self, symbols: list[str], sessions: list[str]) -> list[tuple[dict[str, Any], int]]` |
+| method | `ChoiceCollector._events` | 134 | `def _events(self, plan: dict[str, Any]) -> list[tuple[dict[str, Any], int]]` |
+| function | `failure_summary` | 141 | `def failure_summary(dataset: ChoiceDataset, collector: ChoiceCollector, error: str) -> dict[str, Any]` |
 
 #### `app/services/choice_research_store.py`
 
-Lines: 279
+Lines: 388
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `now_text` | 22 | `def now_text() -> str` |
-| function | `encoded_text` | 26 | `def encoded_text(value: object) -> str` |
-| function | `_connect` | 30 | `def _connect(path: Path, *, version: int) -> sqlite3.Connection` |
-| class | `ChoiceBudget` | 44 | `class ChoiceBudget(AbstractContextManager['ChoiceBudget'])` |
-| method | `ChoiceBudget.__init__` | 53 | `def __init__(self, directory: Path, *, csd_limit: int=450000, css_limit: int=200000, ctr_limit: int=3, sector_limit: int=60) -> None` |
-| method | `ChoiceBudget.__enter__` | 65 | `def __enter__(self) -> ChoiceBudget` |
-| method | `ChoiceBudget.update` | 81 | `def update(self, response: dict[str, Any]) -> None` |
-| method | `ChoiceBudget.reserve` | 94 | `def reserve(self, method: str, units: int) -> None` |
-| method | `ChoiceBudget.__exit__` | 116 | `def __exit__(self, *_: object) -> None` |
-| class | `ChoiceDataset` | 125 | `class ChoiceDataset(AbstractContextManager['ChoiceDataset'])` |
-| method | `ChoiceDataset.open_readonly` | 127 | `def open_readonly(cls, directory: Path) -> ChoiceDataset` |
-| method | `ChoiceDataset.__init__` | 144 | `def __init__(self, directory: Path, plan: dict[str, Any]) -> None` |
-| method | `ChoiceDataset.__enter__` | 201 | `def __enter__(self) -> ChoiceDataset` |
-| method | `ChoiceDataset.key` | 205 | `def key(descriptor: dict[str, Any]) -> str` |
-| method | `ChoiceDataset.cached` | 208 | `def cached(self, descriptor: dict[str, Any]) -> dict[str, Any] \| None` |
-| method | `ChoiceDataset.archive` | 225 | `def archive(self, descriptor: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]` |
-| method | `ChoiceDataset.project` | 231 | `def project(self, payload: dict[str, Any], records: list[Record]) -> None` |
-| method | `ChoiceDataset.verify` | 252 | `def verify(self, normalize: Callable[[dict[str, Any]], list[Record]]) -> dict[str, Any]` |
-| method | `ChoiceDataset.summary` | 266 | `def summary(self) -> dict[str, Any]` |
-| method | `ChoiceDataset.__exit__` | 278 | `def __exit__(self, *_: object) -> None` |
+| function | `now_text` | 24 | `def now_text() -> str` |
+| function | `encoded_text` | 28 | `def encoded_text(value: object) -> str` |
+| function | `_connect` | 32 | `def _connect(path: Path, *, version: int) -> sqlite3.Connection` |
+| function | `quota_integer` | 46 | `def quota_integer(row: dict[str, Any], field: str) -> int` |
+| function | `quota_contract` | 59 | `def quota_contract(row: dict[str, Any]) -> tuple[date, date, date]` |
+| function | `_select_quota` | 77 | `def _select_quota(rows: list[dict[str, Any]], today: date) -> dict[str, Any]` |
+| function | `_unique_quota` | 89 | `def _unique_quota(rows: list[tuple[dict[str, Any], date, date, date]]) -> tuple[dict[str, Any], date, date, date] \| None` |
+| function | `_boundary_quota` | 95 | `def _boundary_quota(rows: list[tuple[dict[str, Any], date, date, date]], *, latest: bool) -> tuple[dict[str, Any], date, date, date]` |
+| function | `_quota_row` | 107 | `def _quota_row(columns: list[str], values: object) -> dict[str, Any] \| None` |
+| class | `ChoiceBudget` | 123 | `class ChoiceBudget(AbstractContextManager['ChoiceBudget'])` |
+| method | `ChoiceBudget.__init__` | 132 | `def __init__(self, directory: Path, *, csd_limit: int=450000, css_limit: int=200000, ctr_limit: int=3, sector_limit: int=60) -> None` |
+| method | `ChoiceBudget.__enter__` | 144 | `def __enter__(self) -> ChoiceBudget` |
+| method | `ChoiceBudget.update` | 160 | `def update(self, response: dict[str, Any], *, today: date \| None=None) -> None` |
+| method | `ChoiceBudget.require_current` | 174 | `def require_current(self, functions: set[str], *, today: date \| None=None) -> None` |
+| method | `ChoiceBudget.reserve` | 194 | `def reserve(self, method: str, units: int) -> None` |
+| method | `ChoiceBudget.__exit__` | 217 | `def __exit__(self, *_: object) -> None` |
+| class | `ChoiceDataset` | 226 | `class ChoiceDataset(AbstractContextManager['ChoiceDataset'])` |
+| method | `ChoiceDataset.open_readonly` | 228 | `def open_readonly(cls, directory: Path) -> ChoiceDataset` |
+| method | `ChoiceDataset.__init__` | 245 | `def __init__(self, directory: Path, plan: dict[str, Any]) -> None` |
+| method | `ChoiceDataset.__enter__` | 302 | `def __enter__(self) -> ChoiceDataset` |
+| method | `ChoiceDataset.key` | 306 | `def key(descriptor: dict[str, Any]) -> str` |
+| method | `ChoiceDataset.cached` | 309 | `def cached(self, descriptor: dict[str, Any]) -> dict[str, Any] \| None` |
+| method | `ChoiceDataset.archive` | 326 | `def archive(self, descriptor: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]` |
+| method | `ChoiceDataset.project` | 336 | `def project(self, payload: dict[str, Any], records: list[Record]) -> None` |
+| method | `ChoiceDataset.verify` | 359 | `def verify(self, normalize: Callable[[dict[str, Any]], list[Record]]) -> dict[str, Any]` |
+| method | `ChoiceDataset.summary` | 375 | `def summary(self) -> dict[str, Any]` |
+| method | `ChoiceDataset.__exit__` | 387 | `def __exit__(self, *_: object) -> None` |
 
 #### `app/services/choice_research_supplement.py`
 
-Lines: 188
+Lines: 196
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `_pairs` | 20 | `def _pairs(source: ChoiceDataset, kinds: list[str]) -> set[tuple[str, str]]` |
-| function | `_event_symbols` | 25 | `def _event_symbols(source: ChoiceDataset) -> set[str]` |
-| function | `source_receipts_digest` | 34 | `def source_receipts_digest(source: ChoiceDataset) -> str` |
-| function | `_restricted_pairs` | 40 | `def _restricted_pairs(source: ChoiceDataset) -> set[tuple[str, str]]` |
-| function | `make_supplement_plan` | 45 | `def make_supplement_plan(source: ChoiceDataset, *, recent_sessions: int=30, event_limit: int=3) -> dict[str, Any]` |
-| function | `_rank_event_candidates` | 83 | `def _rank_event_candidates(source: ChoiceDataset) -> tuple[list[tuple[str, int]], list[str]]` |
-| function | `supplement_requests` | 101 | `def supplement_requests(source: ChoiceDataset, plan: dict[str, Any]) -> list[tuple[dict[str, Any], int]]` |
-| function | `_section` | 125 | `def _section(kind: str, symbols: list[str], day: str, fields: list[str]) -> dict[str, Any]` |
-| function | `supplement_coverage` | 130 | `def supplement_coverage(source: ChoiceDataset, supplement: ChoiceDataset) -> dict[str, Any]` |
-| class | `ChoiceSupplementCollector` | 163 | `class ChoiceSupplementCollector(ChoiceCollector)` |
-| method | `ChoiceSupplementCollector.run` | 164 | `def run(self) -> dict[str, Any]` |
+| function | `_pairs` | 21 | `def _pairs(source: ChoiceDataset, kinds: list[str]) -> set[tuple[str, str]]` |
+| function | `_event_symbols` | 26 | `def _event_symbols(source: ChoiceDataset) -> set[str]` |
+| function | `source_receipts_digest` | 35 | `def source_receipts_digest(source: ChoiceDataset) -> str` |
+| function | `_restricted_pairs` | 41 | `def _restricted_pairs(source: ChoiceDataset) -> set[tuple[str, str]]` |
+| function | `make_supplement_plan` | 46 | `def make_supplement_plan(source: ChoiceDataset, *, recent_sessions: int=30, event_limit: int=3) -> dict[str, Any]` |
+| function | `_rank_event_candidates` | 84 | `def _rank_event_candidates(source: ChoiceDataset) -> tuple[list[tuple[str, int]], list[str]]` |
+| function | `supplement_requests` | 102 | `def supplement_requests(source: ChoiceDataset, plan: dict[str, Any]) -> list[tuple[dict[str, Any], int]]` |
+| function | `_section` | 126 | `def _section(kind: str, symbols: list[str], day: str, fields: list[str]) -> dict[str, Any]` |
+| function | `supplement_coverage` | 131 | `def supplement_coverage(source: ChoiceDataset, supplement: ChoiceDataset) -> dict[str, Any]` |
+| class | `ChoiceSupplementCollector` | 164 | `class ChoiceSupplementCollector(ChoiceCollector)` |
+| method | `ChoiceSupplementCollector.run` | 165 | `def run(self) -> dict[str, Any]` |
 
 #### `app/services/choice_research_universe.py`
 
-Lines: 148
+Lines: 150
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `_fingerprint` | 22 | `def _fingerprint(source: ChoiceDataset) -> dict[str, str]` |
-| function | `_memberships` | 29 | `def _memberships(sources: list[ChoiceDataset]) -> dict[str, dict[str, Any]]` |
-| function | `make_universe_plan` | 46 | `def make_universe_plan(base: ChoiceDataset, reused: list[ChoiceDataset]) -> dict[str, Any]` |
-| function | `rebuild_universe_plan` | 75 | `def rebuild_universe_plan(plan: dict[str, Any]) -> dict[str, Any]` |
-| function | `_check_continuity` | 84 | `def _check_continuity(dates: dict[str, dict[str, Any]], plan: dict[str, Any]) -> None` |
-| function | `universe_coverage` | 101 | `def universe_coverage(plan: dict[str, Any], datasets: list[ChoiceDataset]) -> dict[str, Any]` |
-| function | `verify_universe_bundle` | 116 | `def verify_universe_bundle(dataset: ChoiceDataset) -> dict[str, Any]` |
-| class | `ChoiceUniverseCollector` | 125 | `class ChoiceUniverseCollector(ChoiceCollector)` |
-| method | `ChoiceUniverseCollector.run` | 126 | `def run(self) -> dict[str, Any]` |
+| function | `_fingerprint` | 23 | `def _fingerprint(source: ChoiceDataset) -> dict[str, str]` |
+| function | `_memberships` | 30 | `def _memberships(sources: list[ChoiceDataset]) -> dict[str, dict[str, Any]]` |
+| function | `make_universe_plan` | 47 | `def make_universe_plan(base: ChoiceDataset, reused: list[ChoiceDataset]) -> dict[str, Any]` |
+| function | `rebuild_universe_plan` | 76 | `def rebuild_universe_plan(plan: dict[str, Any]) -> dict[str, Any]` |
+| function | `_check_continuity` | 85 | `def _check_continuity(dates: dict[str, dict[str, Any]], plan: dict[str, Any]) -> None` |
+| function | `universe_coverage` | 102 | `def universe_coverage(plan: dict[str, Any], datasets: list[ChoiceDataset]) -> dict[str, Any]` |
+| function | `verify_universe_bundle` | 117 | `def verify_universe_bundle(dataset: ChoiceDataset) -> dict[str, Any]` |
+| class | `ChoiceUniverseCollector` | 126 | `class ChoiceUniverseCollector(ChoiceCollector)` |
+| method | `ChoiceUniverseCollector.run` | 127 | `def run(self) -> dict[str, Any]` |
 
 #### `app/services/choice_sdk.py`
 
@@ -4790,7 +4917,7 @@ Lines: 784
 
 #### `app/services/experimental_direction_model.py`
 
-Lines: 142
+Lines: 174
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -4799,6 +4926,38 @@ Lines: 142
 | function | `_direction_observation` | 52 | `def _direction_observation(window: Sequence[Kline], future: Kline \| None) -> tuple[tuple[float, ...] \| None, str]` |
 | function | `direction_samples` | 72 | `def direction_samples(series: Mapping[str, Sequence[Kline]], sessions: Sequence[str], *, offset: int) -> tuple[list[ProbabilitySample], dict[str, str], list[str], dict[str, Any]]` |
 | function | `build_direction_model` | 111 | `def build_direction_model(manifest_path: Path, database: Path, directory: Path, *, offset: Literal[1, 2, 5]) -> Path` |
+| function | `_choice_candidate_directory` | 128 | `def _choice_candidate_directory(directory: Path) -> Path` |
+| function | `build_choice_direction_model` | 138 | `def build_choice_direction_model(manifest_path: Path, database: Path, directory: Path, *, offset: Literal[1, 2, 5]) -> Path` |
+| function | `_publish_direction_model` | 152 | `def _publish_direction_model(series: Mapping[str, Sequence[Kline]], sessions: Sequence[str], directory: Path, *, offset: Literal[1, 2, 5], source_filename: str, source_sha256: str, manifest_digest: str, limitations: list[str]) -> Path` |
+
+#### `app/services/experimental_direction_validation.py`
+
+Lines: 394
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `_Split` | 64 | `class _Split` |
+| method | `_Split.payload` | 71 | `def payload(self) -> dict[str, object]` |
+| class | `_Fit` | 78 | `class _Fit` |
+| class | `_Prediction` | 86 | `class _Prediction` |
+| class | `_FitUnavailable` | 91 | `class _FitUnavailable(ValueError)` |
+| function | `validate_experimental_direction_history` | 95 | `def validate_experimental_direction_history(series: Mapping[str, Sequence[Kline]], sessions: Sequence[str], provenance: Mapping[str, Any], *, generated_at: str) -> dict[str, Any]` |
+| function | `_protocol` | 122 | `def _protocol() -> dict[str, Any]` |
+| function | `_validate_input` | 145 | `def _validate_input(series: Mapping[str, Sequence[Kline]], sessions: Sequence[str], provenance: Mapping[str, Any], generated_at: str) -> dict[str, Any]` |
+| function | `_bound_provenance` | 170 | `def _bound_provenance(value: Mapping[str, Any]) -> dict[str, Any]` |
+| function | `_series_digest` | 179 | `def _series_digest(series: Mapping[str, Sequence[Kline]], sessions: set[str]) -> str` |
+| function | `_split_dates` | 194 | `def _split_dates(sessions: tuple[str, ...], offset: int) -> _Split \| None` |
+| function | `_evaluate_horizon` | 210 | `def _evaluate_horizon(series: Mapping[str, Sequence[Kline]], sessions: tuple[str, ...], offset: int) -> dict[str, Any]` |
+| function | `_partition_samples` | 244 | `def _partition_samples(samples: Sequence[ProbabilitySample], targets: Mapping[str, str], split: _Split) -> tuple[list[ProbabilitySample], list[ProbabilitySample], list[ProbabilitySample]]` |
+| function | `_fit_fixed_partitions` | 258 | `def _fit_fixed_partitions(train: list[ProbabilitySample], calibration: list[ProbabilitySample], targets: Mapping[str, str], split: _Split, offset: int) -> _Fit` |
+| function | `_sample_digest` | 289 | `def _sample_digest(samples: Sequence[ProbabilitySample], targets: Mapping[str, str]) -> str` |
+| function | `_predict_test` | 295 | `def _predict_test(fitted: _Fit, samples: Sequence[ProbabilitySample]) -> tuple[list[_Prediction], Counter[str]]` |
+| function | `_symbol` | 311 | `def _symbol(sample: ProbabilitySample) -> str` |
+| function | `_group_report` | 315 | `def _group_report(samples: Sequence[ProbabilitySample], predictions: Sequence[_Prediction], rejected: Counter[str], split: _Split, symbols: tuple[str, ...], base_rate: float \| None, offset: int) -> dict[str, Any]` |
+| function | `_daily_reports` | 339 | `def _daily_reports(samples: Sequence[ProbabilitySample], predictions: Sequence[_Prediction], test_dates: tuple[str, ...], symbol_count: int, base_rate: float \| None) -> list[dict[str, Any]]` |
+| function | `_metrics` | 355 | `def _metrics(predictions: Sequence[_Prediction], base_rate: float) -> dict[str, Any]` |
+| function | `_date_balanced_metrics` | 368 | `def _date_balanced_metrics(daily: Sequence[Mapping[str, Any]], offset: int) -> dict[str, Any] \| None` |
+| function | `_improvement_intervals` | 386 | `def _improvement_intervals(daily: Sequence[Mapping[str, Any]], offset: int) -> dict[str, Any]` |
 
 #### `app/services/experimental_probability_model.py`
 
@@ -13300,68 +13459,169 @@ Lines: 211
 | function | `_bundle` | 181 | `def _bundle(*, abnormal_events: list[AbnormalEventItem] \| None=None, events: list[StockEventItem] \| None=None)` |
 | function | `_datahub` | 210 | `def _datahub(notes=None)` |
 
-#### `tests/test_choice_research.py`
+#### `tests/test_choice_experimental_history.py`
 
-Lines: 877
+Lines: 287
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `quotas` | 27 | `def quotas()` |
-| class | `FakeClient` | 39 | `class FakeClient` |
-| method | `FakeClient.__init__` | 40 | `def __init__(self)` |
-| method | `FakeClient.request` | 43 | `def request(self, method, args)` |
-| function | `daily_response` | 70 | `def daily_response(symbols=SYMBOLS)` |
-| function | `daily_payload` | 76 | `def daily_payload()` |
-| function | `plan` | 81 | `def plan()` |
-| function | `test_full_collection_is_replay_verified_and_resume_skips_paid_requests` | 85 | `def test_full_collection_is_replay_verified_and_resume_skips_paid_requests(tmp_path)` |
-| function | `test_request_limit_pause_resumes_from_checkpoint` | 106 | `def test_request_limit_pause_resumes_from_checkpoint(tmp_path)` |
-| function | `test_non_executable_and_unknown_states_never_synthesized` | 122 | `def test_non_executable_and_unknown_states_never_synthesized(state, quality)` |
-| function | `test_single_price_limits_are_not_proof_of_fill` | 134 | `def test_single_price_limits_are_not_proof_of_fill(flag, quality)` |
-| function | `test_bad_daily_responses_rejected` | 144 | `def test_bad_daily_responses_rejected(mutation)` |
-| function | `test_raw_tamper_and_derived_tamper_fail_closed` | 165 | `def test_raw_tamper_and_derived_tamper_fail_closed(tmp_path)` |
-| function | `test_orphan_raw_response_recovers_without_network` | 180 | `def test_orphan_raw_response_recovers_without_network(tmp_path)` |
-| function | `test_budget_reservation_is_durable_and_permission_missing_fails` | 190 | `def test_budget_reservation_is_durable_and_permission_missing_fails(tmp_path)` |
-| function | `test_shared_session_lock_prevents_concurrent_login` | 202 | `def test_shared_session_lock_prevents_concurrent_login(tmp_path)` |
-| function | `test_budget_start_interruption_propagates_and_releases_lease` | 210 | `def test_budget_start_interruption_propagates_and_releases_lease(tmp_path, monkeypatch, interruption)` |
-| function | `test_sdk_start_interruption_propagates_and_reaps_partial_worker` | 231 | `def test_sdk_start_interruption_propagates_and_reaps_partial_worker(monkeypatch, interruption)` |
-| function | `test_choice_quota_uses_shanghai_day_at_utc_week_boundary` | 276 | `def test_choice_quota_uses_shanghai_day_at_utc_week_boundary(tmp_path, monkeypatch)` |
-| function | `test_failed_response_is_raw_only_not_completed` | 290 | `def test_failed_response_is_raw_only_not_completed(tmp_path)` |
-| function | `test_plan_change_and_foreign_database_never_overwritten` | 301 | `def test_plan_change_and_foreign_database_never_overwritten(tmp_path)` |
-| function | `test_symlink_and_write_sdk_methods_rejected` | 320 | `def test_symlink_and_write_sdk_methods_rejected(tmp_path)` |
-| function | `test_snapshot_dates_and_explicit_scope` | 331 | `def test_snapshot_dates_and_explicit_scope()` |
-| function | `test_stale_or_expired_quota_cannot_start_new_requests` | 338 | `def test_stale_or_expired_quota_cannot_start_new_requests(tmp_path)` |
-| function | `test_native_timeout_closes_pipe_and_terminates_process` | 352 | `def test_native_timeout_closes_pipe_and_terminates_process()` |
-| function | `test_wrong_historical_metadata_date_rejected` | 393 | `def test_wrong_historical_metadata_date_rejected()` |
-| function | `test_checkpoint_record_count_tamper_rejected` | 402 | `def test_checkpoint_record_count_tamper_rejected(tmp_path)` |
-| class | `SupplementClient` | 411 | `class SupplementClient(FakeClient)` |
-| method | `SupplementClient.request` | 412 | `def request(self, method, args)` |
-| function | `test_supplement_reuses_base_and_resumes_without_recharging` | 423 | `def test_supplement_reuses_base_and_resumes_without_recharging(tmp_path)` |
-| function | `test_supplement_changed_plan_or_source_stops_before_network` | 456 | `def test_supplement_changed_plan_or_source_stops_before_network(tmp_path)` |
-| function | `test_execution_reference_invalid_response_rejected` | 478 | `def test_execution_reference_invalid_response_rejected(mutation)` |
-| function | `test_null_reference_and_retrospective_suspension_do_not_prove_execution` | 496 | `def test_null_reference_and_retrospective_suspension_do_not_prove_execution()` |
-| function | `test_delayed_server_quota_does_not_refund_local_reservations` | 513 | `def test_delayed_server_quota_does_not_refund_local_reservations(tmp_path)` |
-| function | `test_quota_cli_does_not_require_output_but_other_operations_do` | 527 | `def test_quota_cli_does_not_require_output_but_other_operations_do()` |
-| function | `test_quota_refresh_is_throttled_but_expired_snapshot_is_queried` | 534 | `def test_quota_refresh_is_throttled_but_expired_snapshot_is_queried(tmp_path, monkeypatch)` |
-| function | `test_quota_failure_does_not_start_next_data_request` | 552 | `def test_quota_failure_does_not_start_next_data_request(tmp_path)` |
-| function | `test_daily_universe_only_requests_missing_dates_and_reuses_multiple_bundles` | 567 | `def test_daily_universe_only_requests_missing_dates_and_reuses_multiple_bundles(tmp_path)` |
-| function | `test_universe_continuity_checks_only_adjacent_sessions_and_each_market` | 598 | `def test_universe_continuity_checks_only_adjacent_sessions_and_each_market()` |
-| function | `test_universe_explicit_budget_does_not_discard_existing_reservations` | 613 | `def test_universe_explicit_budget_does_not_discard_existing_reservations(tmp_path)` |
-| function | `test_wrong_universe_date_or_sector_is_rejected` | 627 | `def test_wrong_universe_date_or_sector_is_rejected(mutation)` |
-| function | `test_universe_conflicting_reuse_and_changed_source_fail_closed` | 640 | `def test_universe_conflicting_reuse_and_changed_source_fail_closed(tmp_path)` |
-| function | `_choice_cli_environment` | 665 | `def _choice_cli_environment(tmp_path, monkeypatch)` |
-| function | `_run_choice_cli` | 674 | `def _run_choice_cli(cli, monkeypatch, capsys, arguments)` |
-| function | `test_choice_cli_plan_collect_pause_resume_and_readonly_status` | 680 | `def test_choice_cli_plan_collect_pause_resume_and_readonly_status(tmp_path, monkeypatch, capsys)` |
-| function | `test_choice_cli_derived_plans_collect_and_resume` | 703 | `def test_choice_cli_derived_plans_collect_and_resume(tmp_path, monkeypatch, capsys, operation)` |
-| function | `test_choice_cli_invalid_scope_never_logs_in` | 730 | `def test_choice_cli_invalid_scope_never_logs_in(tmp_path, monkeypatch, capsys, operation, extra, error)` |
-| function | `test_choice_cli_refuses_source_overwrite` | 741 | `def test_choice_cli_refuses_source_overwrite(tmp_path, monkeypatch, capsys, operation)` |
-| function | `test_choice_cli_missing_output_and_invalid_resume_fail_closed` | 750 | `def test_choice_cli_missing_output_and_invalid_resume_fail_closed(tmp_path, monkeypatch, capsys)` |
-| function | `test_choice_cli_quota_reports_existing_reservations_without_market_requests` | 760 | `def test_choice_cli_quota_reports_existing_reservations_without_market_requests(tmp_path, monkeypatch, capsys)` |
-| function | `test_sdk_worker_serializes_read_results_sanitizes_errors_and_logs_out` | 775 | `def test_sdk_worker_serializes_read_results_sanitizes_errors_and_logs_out(monkeypatch, operation)` |
-| function | `test_sdk_worker_broken_pipe_still_closes_and_logs_out` | 804 | `def test_sdk_worker_broken_pipe_still_closes_and_logs_out(monkeypatch)` |
-| function | `test_sdk_client_successful_start_rate_limit_read_and_close` | 815 | `def test_sdk_client_successful_start_rate_limit_read_and_close(monkeypatch)` |
-| function | `test_sdk_client_lost_worker_releases_session` | 840 | `def test_sdk_client_lost_worker_releases_session(monkeypatch, failure, expected)` |
-| function | `test_sdk_force_kills_unresponsive_worker_and_tolerates_closed_pipe` | 852 | `def test_sdk_force_kills_unresponsive_worker_and_tolerates_closed_pipe()` |
-| function | `test_sdk_invalid_limits_inactive_session_and_serialization` | 865 | `def test_sdk_invalid_limits_inactive_session_and_serialization(monkeypatch)` |
+| function | `choice_source` | 25 | `def choice_source(tmp_path, monkeypatch, request)` |
+| function | `test_conversion_and_reload_replay_raw_without_source_or_budget_writes` | 65 | `def test_conversion_and_reload_replay_raw_without_source_or_budget_writes(choice_source, tmp_path)` |
+| function | `test_restricted_or_missing_factor_sessions_are_never_synthesized_or_shifted` | 89 | `def test_restricted_or_missing_factor_sessions_are_never_synthesized_or_shifted(choice_source, tmp_path)` |
+| function | `test_positive_anchor_scaling_does_not_change_direction_features` | 100 | `def test_positive_anchor_scaling_does_not_change_direction_features(choice_source, tmp_path)` |
+| function | `test_fully_excluded_symbol_remains_in_research_coverage_denominator` | 110 | `def test_fully_excluded_symbol_remains_in_research_coverage_denominator(choice_source, tmp_path)` |
+| function | `test_choice_history_cannot_masquerade_as_tencent_manifest` | 118 | `def test_choice_history_cannot_masquerade_as_tencent_manifest(choice_source, tmp_path)` |
+| function | `test_derived_database_tampering_fails_even_when_manifest_is_rehashed` | 124 | `def test_derived_database_tampering_fails_even_when_manifest_is_rehashed(choice_source, tmp_path)` |
+| function | `test_manifest_authority_and_source_mutation_rejected` | 139 | `def test_manifest_authority_and_source_mutation_rejected(choice_source, tmp_path)` |
+| function | `test_first_build_rejects_receipt_timestamp_tampering` | 155 | `def test_first_build_rejects_receipt_timestamp_tampering(choice_source, tmp_path)` |
+| function | `test_changed_raw_request_options_and_incomplete_grid_fail_closed` | 164 | `def test_changed_raw_request_options_and_incomplete_grid_fail_closed(choice_source, tmp_path)` |
+| function | `test_static_and_protected_paths_rejected_before_read_or_publish` | 179 | `def test_static_and_protected_paths_rejected_before_read_or_publish(choice_source, tmp_path)` |
+| function | `test_output_cannot_be_original_archive_or_symlink` | 190 | `def test_output_cannot_be_original_archive_or_symlink(choice_source, tmp_path)` |
+| function | `test_wal_format_without_sidecars_is_rejected_without_creating_them` | 200 | `def test_wal_format_without_sidecars_is_rejected_without_creating_them(choice_source, tmp_path)` |
+| function | `test_offline_conversion_refuses_implicit_calendar_network_fetch` | 213 | `def test_offline_conversion_refuses_implicit_calendar_network_fetch(tmp_path, monkeypatch, setting)` |
+| function | `test_candidate_models_build_all_three_horizons_without_changing_runtime` | 223 | `def test_candidate_models_build_all_three_horizons_without_changing_runtime(choice_source, tmp_path)` |
+| function | `test_candidate_protected_output_rejected_before_source_read` | 239 | `def test_candidate_protected_output_rejected_before_source_read(tmp_path, monkeypatch, directory)` |
+| function | `test_candidate_output_alias_rejected_before_source_read` | 247 | `def test_candidate_output_alias_rejected_before_source_read(tmp_path, monkeypatch)` |
+| function | `test_candidate_output_cannot_write_into_history_archives` | 259 | `def test_candidate_output_cannot_write_into_history_archives(choice_source, tmp_path, monkeypatch, target)` |
+| function | `test_cli_choice_requires_explicit_separate_candidate_directory` | 270 | `def test_cli_choice_requires_explicit_separate_candidate_directory(monkeypatch, tmp_path, capsys)` |
+
+#### `tests/test_choice_history_comparison.py`
+
+Lines: 335
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `no_implicit_provider_calls` | 27 | `def no_implicit_provider_calls(monkeypatch)` |
+| function | `_synthetic_series` | 33 | `def _synthetic_series(count=100, *, action=75)` |
+| function | `archived_choice` | 51 | `def archived_choice(tmp_path, monkeypatch)` |
+| function | `archives` | 65 | `def archives(archived_choice, tmp_path)` |
+| function | `test_forward_factor_ratio_matches_preclose_and_inverse_does_not` | 78 | `def test_forward_factor_ratio_matches_preclose_and_inverse_does_not()` |
+| function | `test_factor_comparison_does_not_bridge_missing_reference_days` | 89 | `def test_factor_comparison_does_not_bridge_missing_reference_days()` |
+| function | `test_all_eleven_features_cancel_positive_anchor_scale_and_ignore_future` | 97 | `def test_all_eleven_features_cancel_positive_anchor_scale_and_ignore_future()` |
+| function | `test_additive_prices_change_features_even_when_all_direction_labels_agree` | 109 | `def test_additive_prices_change_features_even_when_all_direction_labels_agree()` |
+| function | `test_volume_unit_conversion_reports_real_scope_difference_without_fixing_it` | 123 | `def test_volume_unit_conversion_reports_real_scope_difference_without_fixing_it()` |
+| function | `test_fixed_windows_and_horizon_targets_never_shift_over_a_missing_day` | 138 | `def test_fixed_windows_and_horizon_targets_never_shift_over_a_missing_day(missing_side)` |
+| function | `test_unlisted_suspended_and_invalid_rows_are_not_filled_for_scale_windows` | 152 | `def test_unlisted_suspended_and_invalid_rows_are_not_filled_for_scale_windows(quality)` |
+| function | `test_readonly_comparison_verifies_real_raw_replay_and_deep_manifest` | 159 | `def test_readonly_comparison_verifies_real_raw_replay_and_deep_manifest(archives)` |
+| function | `test_changed_choice_receipts_fail_closed` | 176 | `def test_changed_choice_receipts_fail_closed(archived_choice, target)` |
+| function | `test_changed_request_contract_or_duplicate_daily_observations_fail` | 198 | `def test_changed_request_contract_or_duplicate_daily_observations_fail(archived_choice, change)` |
+| function | `test_tencent_manifest_mutation_and_changes_during_comparison_are_rejected` | 219 | `def test_tencent_manifest_mutation_and_changes_during_comparison_are_rejected(archives, monkeypatch)` |
+| function | `test_comparison_refuses_database_sidecars` | 242 | `def test_comparison_refuses_database_sidecars(archived_choice, suffix)` |
+| function | `test_comparison_refuses_wal_header_aliases_and_protected_paths` | 249 | `def test_comparison_refuses_wal_header_aliases_and_protected_paths(archived_choice, tmp_path)` |
+| function | `test_offline_calendar_guard_runs_before_inputs_are_read` | 265 | `def test_offline_calendar_guard_runs_before_inputs_are_read(monkeypatch, tmp_path, variable)` |
+| function | `_arguments` | 274 | `def _arguments(tmp_path)` |
+| function | `test_output_is_content_addressed_exclusive_and_identical_repeat_is_idempotent` | 279 | `def test_output_is_content_addressed_exclusive_and_identical_repeat_is_idempotent(tmp_path)` |
+| function | `test_report_cannot_be_written_into_source_archives_or_protected_paths` | 293 | `def test_report_cannot_be_written_into_source_archives_or_protected_paths(tmp_path, target)` |
+| function | `test_cli_optional_output_flag_and_default_stdout` | 307 | `def test_cli_optional_output_flag_and_default_stdout(monkeypatch, tmp_path, capsys, output)` |
+| function | `test_cli_verification_failure_does_not_publish_or_expose_payload` | 324 | `def test_cli_verification_failure_does_not_publish_or_expose_payload(monkeypatch, tmp_path, capsys)` |
+
+#### `tests/test_choice_research.py`
+
+Lines: 1233
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `quotas` | 28 | `def quotas()` |
+| class | `FakeClient` | 42 | `class FakeClient` |
+| method | `FakeClient.__init__` | 43 | `def __init__(self)` |
+| method | `FakeClient.request` | 46 | `def request(self, method, args)` |
+| function | `daily_response` | 73 | `def daily_response(symbols=SYMBOLS)` |
+| function | `daily_payload` | 79 | `def daily_payload()` |
+| function | `plan` | 84 | `def plan()` |
+| function | `test_full_collection_is_replay_verified_and_resume_skips_paid_requests` | 88 | `def test_full_collection_is_replay_verified_and_resume_skips_paid_requests(tmp_path)` |
+| function | `test_request_limit_pause_resumes_from_checkpoint` | 109 | `def test_request_limit_pause_resumes_from_checkpoint(tmp_path)` |
+| function | `test_non_executable_and_unknown_states_never_synthesized` | 125 | `def test_non_executable_and_unknown_states_never_synthesized(state, quality)` |
+| function | `test_single_price_limits_are_not_proof_of_fill` | 137 | `def test_single_price_limits_are_not_proof_of_fill(flag, quality)` |
+| function | `test_bad_daily_responses_rejected` | 147 | `def test_bad_daily_responses_rejected(mutation)` |
+| function | `test_raw_tamper_and_derived_tamper_fail_closed` | 168 | `def test_raw_tamper_and_derived_tamper_fail_closed(tmp_path)` |
+| function | `test_orphan_raw_response_recovers_without_network` | 183 | `def test_orphan_raw_response_recovers_without_network(tmp_path)` |
+| function | `test_first_projection_uses_canonical_archive_order_like_resume` | 193 | `def test_first_projection_uses_canonical_archive_order_like_resume(tmp_path)` |
+| function | `test_request_timestamp_must_match_the_sealed_raw_receipt` | 203 | `def test_request_timestamp_must_match_the_sealed_raw_receipt(tmp_path)` |
+| function | `test_duplicate_descriptor_cannot_skip_another_requests_raw_replay` | 214 | `def test_duplicate_descriptor_cannot_skip_another_requests_raw_replay(tmp_path)` |
+| function | `test_budget_reservation_is_durable_and_permission_missing_fails` | 229 | `def test_budget_reservation_is_durable_and_permission_missing_fails(tmp_path)` |
+| function | `test_shared_session_lock_prevents_concurrent_login` | 241 | `def test_shared_session_lock_prevents_concurrent_login(tmp_path)` |
+| function | `test_budget_start_interruption_propagates_and_releases_lease` | 249 | `def test_budget_start_interruption_propagates_and_releases_lease(tmp_path, monkeypatch, interruption)` |
+| function | `test_sdk_start_interruption_propagates_and_reaps_partial_worker` | 270 | `def test_sdk_start_interruption_propagates_and_reaps_partial_worker(monkeypatch, interruption)` |
+| function | `test_choice_quota_uses_shanghai_day_at_utc_week_boundary` | 315 | `def test_choice_quota_uses_shanghai_day_at_utc_week_boundary(tmp_path, monkeypatch)` |
+| function | `test_failed_response_is_raw_only_not_completed` | 331 | `def test_failed_response_is_raw_only_not_completed(tmp_path)` |
+| function | `test_plan_change_and_foreign_database_never_overwritten` | 342 | `def test_plan_change_and_foreign_database_never_overwritten(tmp_path)` |
+| function | `test_symlink_and_write_sdk_methods_rejected` | 361 | `def test_symlink_and_write_sdk_methods_rejected(tmp_path)` |
+| function | `test_snapshot_dates_and_explicit_scope` | 372 | `def test_snapshot_dates_and_explicit_scope()` |
+| function | `test_stale_or_expired_quota_cannot_start_new_requests` | 379 | `def test_stale_or_expired_quota_cannot_start_new_requests(tmp_path)` |
+| function | `test_native_timeout_closes_pipe_and_terminates_process` | 393 | `def test_native_timeout_closes_pipe_and_terminates_process()` |
+| function | `test_wrong_historical_metadata_date_rejected` | 434 | `def test_wrong_historical_metadata_date_rejected()` |
+| function | `test_checkpoint_record_count_tamper_rejected` | 443 | `def test_checkpoint_record_count_tamper_rejected(tmp_path)` |
+| class | `SupplementClient` | 452 | `class SupplementClient(FakeClient)` |
+| method | `SupplementClient.request` | 453 | `def request(self, method, args)` |
+| function | `test_supplement_reuses_base_and_resumes_without_recharging` | 464 | `def test_supplement_reuses_base_and_resumes_without_recharging(tmp_path)` |
+| function | `test_supplement_changed_plan_or_source_stops_before_network` | 497 | `def test_supplement_changed_plan_or_source_stops_before_network(tmp_path)` |
+| function | `test_execution_reference_invalid_response_rejected` | 519 | `def test_execution_reference_invalid_response_rejected(mutation)` |
+| function | `test_null_reference_and_retrospective_suspension_do_not_prove_execution` | 537 | `def test_null_reference_and_retrospective_suspension_do_not_prove_execution()` |
+| function | `test_delayed_server_quota_does_not_refund_local_reservations` | 554 | `def test_delayed_server_quota_does_not_refund_local_reservations(tmp_path)` |
+| function | `test_quota_cli_does_not_require_output_but_other_operations_do` | 568 | `def test_quota_cli_does_not_require_output_but_other_operations_do()` |
+| function | `test_quota_refresh_is_throttled_but_expired_snapshot_is_queried` | 575 | `def test_quota_refresh_is_throttled_but_expired_snapshot_is_queried(tmp_path, monkeypatch)` |
+| function | `_stale_week_quotas` | 593 | `def _stale_week_quotas()` |
+| function | `test_stale_week_blocks_before_any_uncached_market_or_discovery_request` | 600 | `def test_stale_week_blocks_before_any_uncached_market_or_discovery_request(tmp_path, monkeypatch)` |
+| function | `test_complete_cached_replay_does_not_need_current_week_market_quota` | 618 | `def test_complete_cached_replay_does_not_need_current_week_market_quota(tmp_path, monkeypatch)` |
+| function | `test_event_only_resume_ignores_exhausted_cached_csd_and_css` | 638 | `def test_event_only_resume_ignores_exhausted_cached_csd_and_css(tmp_path)` |
+| function | `test_collector_quota_archives_and_summary_drop_unrequested_provider_fields` | 673 | `def test_collector_quota_archives_and_summary_drop_unrequested_provider_fields(tmp_path)` |
+| function | `test_quota_failure_does_not_start_next_data_request` | 697 | `def test_quota_failure_does_not_start_next_data_request(tmp_path)` |
+| function | `test_daily_universe_only_requests_missing_dates_and_reuses_multiple_bundles` | 712 | `def test_daily_universe_only_requests_missing_dates_and_reuses_multiple_bundles(tmp_path)` |
+| function | `test_universe_continuity_checks_only_adjacent_sessions_and_each_market` | 743 | `def test_universe_continuity_checks_only_adjacent_sessions_and_each_market()` |
+| function | `test_universe_explicit_budget_does_not_discard_existing_reservations` | 758 | `def test_universe_explicit_budget_does_not_discard_existing_reservations(tmp_path)` |
+| function | `test_wrong_universe_date_or_sector_is_rejected` | 772 | `def test_wrong_universe_date_or_sector_is_rejected(mutation)` |
+| function | `test_universe_conflicting_reuse_and_changed_source_fail_closed` | 785 | `def test_universe_conflicting_reuse_and_changed_source_fail_closed(tmp_path)` |
+| function | `_choice_cli_environment` | 810 | `def _choice_cli_environment(tmp_path, monkeypatch)` |
+| function | `_run_choice_cli` | 819 | `def _run_choice_cli(cli, monkeypatch, capsys, arguments)` |
+| function | `test_choice_cli_plan_collect_pause_resume_and_readonly_status` | 825 | `def test_choice_cli_plan_collect_pause_resume_and_readonly_status(tmp_path, monkeypatch, capsys)` |
+| function | `test_choice_cli_derived_plans_collect_and_resume` | 848 | `def test_choice_cli_derived_plans_collect_and_resume(tmp_path, monkeypatch, capsys, operation)` |
+| function | `test_choice_cli_invalid_scope_never_logs_in` | 880 | `def test_choice_cli_invalid_scope_never_logs_in(tmp_path, monkeypatch, capsys, operation, extra, error)` |
+| function | `test_choice_cli_refuses_source_overwrite` | 891 | `def test_choice_cli_refuses_source_overwrite(tmp_path, monkeypatch, capsys, operation)` |
+| function | `test_choice_cli_missing_output_and_invalid_resume_fail_closed` | 900 | `def test_choice_cli_missing_output_and_invalid_resume_fail_closed(tmp_path, monkeypatch, capsys)` |
+| function | `test_choice_cli_quota_reports_existing_reservations_without_market_requests` | 910 | `def test_choice_cli_quota_reports_existing_reservations_without_market_requests(tmp_path, monkeypatch, capsys)` |
+| function | `test_choice_cli_reports_unconfirmed_weekly_rollover_without_using_old_remaining` | 934 | `def test_choice_cli_reports_unconfirmed_weekly_rollover_without_using_old_remaining(tmp_path, monkeypatch, capsys)` |
+| function | `test_choice_quota_keeps_paired_history_action_independent_from_optional_ctr` | 965 | `def test_choice_quota_keeps_paired_history_action_independent_from_optional_ctr(tmp_path, monkeypatch, capsys, ctr_state, expected_status)` |
+| function | `test_choice_quota_requires_enough_units_for_one_balanced_complete_cohort` | 989 | `def test_choice_quota_requires_enough_units_for_one_balanced_complete_cohort(tmp_path, monkeypatch, capsys)` |
+| function | `test_quota_update_selects_unique_current_week_from_thirty_day_rows` | 1009 | `def test_quota_update_selects_unique_current_week_from_thirty_day_rows(tmp_path, reverse)` |
+| function | `test_quota_update_rejects_ambiguous_current_rows_and_threshold_mismatch` | 1022 | `def test_quota_update_rejects_ambiguous_current_rows_and_threshold_mismatch(tmp_path)` |
+| function | `test_choice_cli_threshold_mismatch_fails_without_account_archive` | 1035 | `def test_choice_cli_threshold_mismatch_fails_without_account_archive(tmp_path, monkeypatch, capsys)` |
+| function | `test_choice_cli_quota_reports_realistic_safe_capacity_without_leaking_provider_fields` | 1046 | `def test_choice_cli_quota_reports_realistic_safe_capacity_without_leaking_provider_fields(tmp_path, monkeypatch, capsys)` |
+| function | `test_choice_cli_invalid_quota_planning_scope_never_logs_in` | 1109 | `def test_choice_cli_invalid_quota_planning_scope_never_logs_in(tmp_path, monkeypatch, capsys, arguments)` |
+| function | `test_choice_cli_malformed_quota_response_fails_without_success_archive` | 1121 | `def test_choice_cli_malformed_quota_response_fails_without_success_archive(tmp_path, monkeypatch, capsys, response)` |
+| function | `test_sdk_worker_serializes_read_results_sanitizes_errors_and_logs_out` | 1131 | `def test_sdk_worker_serializes_read_results_sanitizes_errors_and_logs_out(monkeypatch, operation)` |
+| function | `test_sdk_worker_broken_pipe_still_closes_and_logs_out` | 1160 | `def test_sdk_worker_broken_pipe_still_closes_and_logs_out(monkeypatch)` |
+| function | `test_sdk_client_successful_start_rate_limit_read_and_close` | 1171 | `def test_sdk_client_successful_start_rate_limit_read_and_close(monkeypatch)` |
+| function | `test_sdk_client_lost_worker_releases_session` | 1196 | `def test_sdk_client_lost_worker_releases_session(monkeypatch, failure, expected)` |
+| function | `test_sdk_force_kills_unresponsive_worker_and_tolerates_closed_pipe` | 1208 | `def test_sdk_force_kills_unresponsive_worker_and_tolerates_closed_pipe()` |
+| function | `test_sdk_invalid_limits_inactive_session_and_serialization` | 1221 | `def test_sdk_invalid_limits_inactive_session_and_serialization(monkeypatch)` |
+
+#### `tests/test_choice_research_audit.py`
+
+Lines: 348
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `_quota_response` | 28 | `def _quota_response(csd=500000, css=500000, ctr=10)` |
+| function | `_row` | 41 | `def _row(symbol, day)` |
+| class | `ArchivedFixtureClient` | 62 | `class ArchivedFixtureClient` |
+| method | `ArchivedFixtureClient.request` | 65 | `def request(self, method, args)` |
+| function | `archives` | 89 | `def archives(tmp_path, monkeypatch)` |
+| function | `_tree_snapshot` | 104 | `def _tree_snapshot(paths)` |
+| function | `_audit` | 109 | `def _audit(paths)` |
+| function | `_snapshot_file` | 113 | `def _snapshot_file(directory, value, prefix='')` |
+| function | `test_audit_explains_listing_and_halt_observations_without_mutation_or_sdk` | 120 | `def test_audit_explains_listing_and_halt_observations_without_mutation_or_sdk(archives, monkeypatch)` |
+| function | `test_audit_preserves_uncertain_units_and_never_claims_settlement` | 150 | `def test_audit_preserves_uncertain_units_and_never_claims_settlement(archives)` |
+| function | `test_known_units_and_server_statistics_never_release_local_reservations` | 166 | `def test_known_units_and_server_statistics_never_release_local_reservations()` |
+| function | `test_missing_latest_quota_does_not_fall_back_to_an_older_package` | 185 | `def test_missing_latest_quota_does_not_fall_back_to_an_older_package(archives)` |
+| function | `test_listing_window_does_not_explain_unknown_or_contradictory_trading_state` | 194 | `def test_listing_window_does_not_explain_unknown_or_contradictory_trading_state(status)` |
+| function | `test_tampered_evidence_fails_closed_before_claiming_a_verified_audit` | 202 | `def test_tampered_evidence_fails_closed_before_claiming_a_verified_audit(archives, target)` |
+| function | `test_orphan_valid_response_is_reported_without_projection_or_releasing_budget` | 228 | `def test_orphan_valid_response_is_reported_without_projection_or_releasing_budget(archives)` |
+| function | `test_unexplained_reference_gap_requires_only_a_minimal_css_check` | 243 | `def test_unexplained_reference_gap_requires_only_a_minimal_css_check(archives)` |
+| function | `test_audit_refuses_wal_archives_symlinks_and_missing_directories` | 273 | `def test_audit_refuses_wal_archives_symlinks_and_missing_directories(archives, tmp_path)` |
+| function | `test_audit_does_not_open_non_content_addressed_account_files` | 288 | `def test_audit_does_not_open_non_content_addressed_account_files(archives, monkeypatch)` |
+| function | `test_report_publication_is_explicit_immutable_and_outside_inputs` | 302 | `def test_report_publication_is_explicit_immutable_and_outside_inputs(archives, tmp_path)` |
+| function | `test_cli_default_stdout_only_and_optional_full_report` | 324 | `def test_cli_default_stdout_only_and_optional_full_report(archives, tmp_path, monkeypatch, capsys)` |
+| function | `test_cli_failure_never_echoes_untrusted_response_or_credentials` | 343 | `def test_cli_failure_never_echoes_untrusted_response_or_credentials(monkeypatch, capsys)` |
 
 #### `tests/test_clock_modules.py`
 
@@ -14074,6 +14334,36 @@ Lines: 279
 | function | `test_builder_rejects_changed_source_without_creating_models` | 244 | `def test_builder_rejects_changed_source_without_creating_models(attested_history, tmp_path)` |
 | function | `test_builder_rejects_active_database_sidecars` | 253 | `def test_builder_rejects_active_database_sidecars(tmp_path)` |
 | function | `test_direction_cli_requires_manifest_database_and_binds_selected_target` | 261 | `def test_direction_cli_requires_manifest_database_and_binds_selected_target(tmp_path, monkeypatch, capsys, kind, offset)` |
+
+#### `tests/test_experimental_direction_validation.py`
+
+Lines: 400
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `history` | 33 | `def history()` |
+| function | `report` | 57 | `def report(history)` |
+| function | `test_fixed_calendar_final_period_is_common_and_each_horizon_is_purged` | 62 | `def test_fixed_calendar_final_period_is_common_and_each_horizon_is_purged(report, history)` |
+| function | `test_final_test_targets_cannot_affect_training_calibration_or_predictions` | 80 | `def test_final_test_targets_cannot_affect_training_calibration_or_predictions(history, report)` |
+| function | `test_missing_final_targets_keep_fixed_dates_and_disable_gap_compressed_bootstrap` | 99 | `def test_missing_final_targets_keep_fixed_dates_and_disable_gap_compressed_bootstrap(history, report)` |
+| function | `test_market_with_zero_test_coverage_remains_in_report` | 115 | `def test_market_with_zero_test_coverage_remains_in_report(history, report)` |
+| function | `test_market_absent_from_source_is_not_reported_as_fully_covered` | 132 | `def test_market_absent_from_source_is_not_reported_as_fully_covered(history)` |
+| function | `test_missing_calibration_dates_do_not_move_calibration_or_holdout_backward` | 143 | `def test_missing_calibration_dates_do_not_move_calibration_or_holdout_backward(history, report)` |
+| function | `test_numeric_fit_and_calibration_only_receive_pretest_partitions` | 156 | `def test_numeric_fit_and_calibration_only_receive_pretest_partitions(history, monkeypatch)` |
+| function | `test_bootstrap_clusters_calendar_dates_and_uses_horizon_blocks` | 183 | `def test_bootstrap_clusters_calendar_dates_and_uses_horizon_blocks(history, monkeypatch)` |
+| function | `_sample` | 199 | `def _sample(sample_id, day, label, first_value=0.0)` |
+| function | `test_date_balanced_proper_scores_do_not_overweight_larger_cross_sections` | 205 | `def test_date_balanced_proper_scores_do_not_overweight_larger_cross_sections()` |
+| function | `test_prediction_guard_matches_runtime_eight_sigma_boundary` | 222 | `def test_prediction_guard_matches_runtime_eight_sigma_boundary()` |
+| function | `test_empty_test_coverage_never_becomes_fabricated_zero_probability` | 238 | `def test_empty_test_coverage_never_becomes_fabricated_zero_probability(history)` |
+| function | `test_fit_nonconvergence_is_reported_without_guessing_or_skipping_to_another_model` | 251 | `def test_fit_nonconvergence_is_reported_without_guessing_or_skipping_to_another_model(history, monkeypatch)` |
+| function | `test_insufficient_history_does_not_shorten_final_test_or_calibration` | 263 | `def test_insufficient_history_does_not_shorten_final_test_or_calibration(history)` |
+| function | `test_invalid_source_contracts_fail_before_fitting` | 275 | `def test_invalid_source_contracts_fail_before_fitting(history, monkeypatch, mutation)` |
+| function | `test_repeated_replay_never_claims_new_independent_or_live_authority` | 302 | `def test_repeated_replay_never_claims_new_independent_or_live_authority(history, report)` |
+| function | `test_cli_publishes_only_new_research_report_and_does_not_modify_inputs` | 317 | `def test_cli_publishes_only_new_research_report_and_does_not_modify_inputs(tmp_path, monkeypatch, capsys, history, report)` |
+| function | `test_cli_source_validation_failure_creates_no_output` | 350 | `def test_cli_source_validation_failure_creates_no_output(tmp_path, monkeypatch, capsys)` |
+| function | `test_cli_rejects_symlink_output_before_loading_any_history` | 361 | `def test_cli_rejects_symlink_output_before_loading_any_history(tmp_path, monkeypatch)` |
+| function | `test_cli_rejects_protected_output_before_loading_history` | 372 | `def test_cli_rejects_protected_output_before_loading_history(tmp_path, monkeypatch, directory)` |
+| function | `test_cli_rejects_report_in_original_or_derived_choice_archive` | 384 | `def test_cli_rejects_report_in_original_or_derived_choice_archive(tmp_path, monkeypatch, archive, child)` |
 
 #### `tests/test_experimental_probability.py`
 
@@ -19292,20 +19582,30 @@ Lines: 334
 | function | `function_signature` | 322 | `def function_signature(node: ast.FunctionDef \| ast.AsyncFunctionDef) -> str` |
 | function | `escape_table` | 329 | `def escape_table(value: str) -> str` |
 
-#### `tools/backfill_choice_research.py`
+#### `tools/audit_choice_research.py`
 
-Lines: 170
+Lines: 56
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `parser` | 28 | `def parser() -> argparse.ArgumentParser` |
-| function | `_read_existing` | 51 | `def _read_existing(directory: Path, *, verify: bool) -> dict` |
-| function | `_new_supplement_plan` | 68 | `def _new_supplement_plan(args: argparse.Namespace) -> dict` |
-| function | `_selected_plan` | 77 | `def _selected_plan(args: argparse.Namespace) -> dict` |
-| function | `_resume_plan` | 91 | `def _resume_plan(directory: Path) -> dict` |
-| function | `_new_universe_plan` | 107 | `def _new_universe_plan(args: argparse.Namespace) -> dict` |
-| function | `main` | 118 | `def main() -> int` |
-| function | `_progress` | 163 | `def _progress(value: dict) -> None` |
+| function | `parser` | 22 | `def parser() -> argparse.ArgumentParser` |
+| function | `main` | 34 | `def main() -> int` |
+
+#### `tools/backfill_choice_research.py`
+
+Lines: 186
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `parser` | 30 | `def parser() -> argparse.ArgumentParser` |
+| function | `_read_existing` | 57 | `def _read_existing(directory: Path, *, verify: bool) -> dict` |
+| function | `_new_supplement_plan` | 74 | `def _new_supplement_plan(args: argparse.Namespace) -> dict` |
+| function | `_selected_plan` | 83 | `def _selected_plan(args: argparse.Namespace) -> dict` |
+| function | `_resume_plan` | 97 | `def _resume_plan(directory: Path) -> dict` |
+| function | `_new_universe_plan` | 113 | `def _new_universe_plan(args: argparse.Namespace) -> dict` |
+| function | `_run_quota` | 124 | `def _run_quota(args: argparse.Namespace) -> dict[str, Any]` |
+| function | `main` | 146 | `def main() -> int` |
+| function | `_progress` | 179 | `def _progress(value: dict) -> None` |
 
 #### `tools/backfill_market_scan_probability_history.py`
 
@@ -19353,9 +19653,17 @@ Lines: 357
 | function | `_cold_comparison` | 316 | `def _cold_comparison(symbols: Sequence[str], limit: int, batch_size: int, iterations: int) -> dict[str, Any]` |
 | function | `main` | 333 | `def main() -> int` |
 
+#### `tools/build_choice_experimental_history.py`
+
+Lines: 41
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `main` | 18 | `def main() -> int` |
+
 #### `tools/build_experimental_probability.py`
 
-Lines: 44
+Lines: 52
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -19369,6 +19677,16 @@ Lines: 65
 | --- | --- | ---: | --- |
 | function | `main` | 20 | `def main() -> int` |
 | function | `_parser` | 55 | `def _parser() -> argparse.ArgumentParser` |
+
+#### `tools/compare_choice_tencent_history.py`
+
+Lines: 62
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `parser` | 22 | `def parser() -> argparse.ArgumentParser` |
+| function | `_publish_report` | 31 | `def _publish_report(report: dict, args: argparse.Namespace) -> Path` |
+| function | `main` | 44 | `def main() -> int` |
 
 #### `tools/evaluate_individual_probability.py`
 
@@ -19542,6 +19860,17 @@ Lines: 88
 | function | `main` | 25 | `def main(argv: Sequence[str] \| None=None) -> int` |
 | function | `parse_args` | 36 | `def parse_args(argv: Sequence[str] \| None=None) -> argparse.Namespace` |
 | function | `_run_command` | 68 | `def _run_command(args: argparse.Namespace)` |
+
+#### `tools/validate_experimental_direction.py`
+
+Lines: 75
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `_load_history` | 23 | `def _load_history(manifest: Path, database: Path) -> Any` |
+| function | `_output_directory` | 29 | `def _output_directory(directory: Path) -> Path` |
+| function | `_require_separate_source` | 37 | `def _require_separate_source(output: Path, history: Any, manifest: Path, database: Path) -> None` |
+| function | `main` | 46 | `def main(argv: list[str] \| None=None) -> int` |
 
 ## Review Notes
 

@@ -11,6 +11,7 @@ from app.artifacts.io import canonical_json_bytes, exclusive_atomic_publish, sha
 from app.services.choice_research import EVENT_FIELDS, OPTIONS, REFERENCE_FIELDS, SUSPENSION_FIELDS, normalize, request
 from app.services.choice_research_collect import ChoiceCollector
 from app.services.choice_research_store import ChoiceDataset, now_text
+from app.services.choice_quota import public_quotas
 from app.services.choice_sdk import ChoiceError
 
 
@@ -167,8 +168,14 @@ class ChoiceSupplementCollector(ChoiceCollector):
             rebuilt = make_supplement_plan(source, recent_sessions=plan["recent_universe_sessions"], event_limit=plan["event_limit"])
             if rebuilt != plan:
                 raise ChoiceError("supplement source/plan changed; refusing mismatched resume")
+            work = supplement_requests(source, plan)
+            paid = {"csd": "EM_CSD", "css": "EM_CSS", "ctr": "EM_CTR"}
+            self.required_paid_functions = {
+                paid[descriptor["method"]] for descriptor, _ in work
+                if descriptor["method"] in paid and self.dataset.cached(descriptor) is None
+            }
             self.refresh_quota()
-            for descriptor, units in supplement_requests(source, plan):
+            for descriptor, units in work:
                 self.fetch(descriptor, units)
             self.refresh_quota()
             summary = self.dataset.verify(normalize)
@@ -180,7 +187,8 @@ class ChoiceSupplementCollector(ChoiceCollector):
                 raise ChoiceError("supplement completed requests but declared coverage is incomplete")
             summary.update({"status": "complete_for_declared_research_scope", "generated_at": now_text(),
                             "requests_this_run": self.calls, "cached_requests": self.cached, "raw_replay_verified": True,
-                            "coverage": coverage, "limitations": plan["limitations"], "quota_snapshot": self.budget.quotas})
+                            "coverage": coverage, "limitations": plan["limitations"],
+                            "quota_snapshot": public_quotas(self.budget.quotas)})
         encoded = canonical_json_bytes(summary)
         output = self.dataset.directory / f"summary-{sha256_hex(encoded)}.json"
         exclusive_atomic_publish(output, encoded, max_bytes=1024 * 1024)

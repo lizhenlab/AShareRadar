@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import json
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,7 +15,7 @@ import pytest
 from app.artifacts.io import ArtifactContentConflictError
 from app.services.choice_research import DAILY_FIELDS, make_plan, normalize, request, snapshot_dates
 from app.services.choice_research_collect import ChoiceCollector
-from app.services.choice_research_store import ChoiceBudget, ChoiceDataset
+from app.services.choice_research_store import ChoiceBudget, ChoiceDataset, now_text
 from app.services.choice_sdk import ChoiceError, ChoiceSDKClient, safe_directory
 from tools.backfill_choice_research import _read_existing
 from app.utils.clock import market_now
@@ -27,9 +28,11 @@ SESSIONS = ["2024-01-31", "2024-02-01", "2024-02-29"]
 def quotas():
     today = market_now().date()
     first = today - timedelta(days=today.weekday())
-    fields = ["FUNCENAME", "SECUTYPE", "STARTDATE", "ENDDATE", "AVAILABEDATA", "EFFECTIVEDATE"]
+    fields = ["FUNCENAME", "SECUTYPE", "PERIOD", "STARTDATE", "ENDDATE", "THRESHOLD",
+              "USEDDATA", "AVAILABEDATA", "EFFECTIVEDATE"]
     return {"error_code": 0, "indicators": fields, "data": {
-        str(i): [function, category, first.isoformat(), (first + timedelta(days=6)).isoformat(), str(remaining), "2099-12-31 23:59:59"]
+        str(i): [function, category, "W", first.isoformat(), (first + timedelta(days=6)).isoformat(),
+                 str(remaining), "0", str(remaining), "2099-12-31 23:59:59"]
         for i, (function, category, remaining) in enumerate([
             ("EM_CSD", "全品种", 500000), ("EM_CSS", "全品种", 500000), ("EM_CTR", "分红送转", 10),
         ])
@@ -187,6 +190,42 @@ def test_orphan_raw_response_recovers_without_network(tmp_path):
         assert dataset.summary()["requests_completed"] == 1
 
 
+def test_first_projection_uses_canonical_archive_order_like_resume(tmp_path):
+    with ChoiceDataset(tmp_path / "dataset", plan()) as dataset:
+        raw = daily_payload()
+        assert list(raw["result"]["data"]) != sorted(raw["result"]["data"])
+        payload = dataset.archive(raw["request"], raw["result"])
+        dataset.project(payload, normalize(payload))
+        assert dataset.verify(normalize)["record_counts"]["daily"] == 9
+        assert payload == dataset.cached(raw["request"])
+
+
+def test_request_timestamp_must_match_the_sealed_raw_receipt(tmp_path):
+    with ChoiceDataset(tmp_path / "dataset", plan()) as dataset:
+        raw = daily_payload()
+        payload = dataset.archive(raw["request"], raw["result"])
+        dataset.project(payload, normalize(payload))
+        with dataset.db:
+            dataset.db.execute("UPDATE requests SET captured_at='2000-01-01T00:00:00+08:00'")
+        with pytest.raises(ChoiceError, match="timestamp differs"):
+            dataset.verify(normalize)
+
+
+def test_duplicate_descriptor_cannot_skip_another_requests_raw_replay(tmp_path):
+    with ChoiceDataset(tmp_path / "dataset", plan()) as dataset:
+        first, second = daily_payload(), daily_payload()
+        second["request"]["args"] = ["different-request"]
+        for raw in (first, second):
+            payload = dataset.archive(raw["request"], raw["result"])
+            dataset.project(payload, normalize(payload))
+        key = dataset.key(first["request"])
+        with dataset.db:
+            dataset.db.execute("UPDATE requests SET descriptor_json=? WHERE request_key=?", (json.dumps(second["request"]), key))
+        (dataset.directory / "raw" / f"{key}.json").write_bytes(b"corrupt first receipt")
+        with pytest.raises(ChoiceError, match="request identity"):
+            dataset.verify(normalize)
+
+
 def test_budget_reservation_is_durable_and_permission_missing_fails(tmp_path):
     with ChoiceBudget(tmp_path / "control", csd_limit=100) as budget:
         with pytest.raises(ChoiceError, match="missing confirmed quota"):
@@ -280,7 +319,9 @@ def test_choice_quota_uses_shanghai_day_at_utc_week_boundary(tmp_path, monkeypat
     client = FakeClient()
     with ChoiceBudget(tmp_path / "control") as budget, ChoiceDataset(tmp_path / "dataset", plan()) as dataset:
         ChoiceCollector(dataset, client, budget).refresh_quota()
-        assert "StartDate=2026-08-24,EndDate=2026-08-24" in client.calls[0][1][2]
+        assert client.calls[0][1][0] == ""
+        assert "FUNCENAME" in client.calls[0][1][1] and "AVAILABEDATA" in client.calls[0][1][1]
+        assert "StartDate=2026-07-26,EndDate=2026-08-24" in client.calls[0][1][2]
         budget.reserve("csd", 1)
         period, stamp = budget.db.execute("SELECT period,created_at FROM reservations").fetchone()
         assert period == "2026-08-24/2026-08-30"
@@ -338,12 +379,12 @@ def test_snapshot_dates_and_explicit_scope():
 def test_stale_or_expired_quota_cannot_start_new_requests(tmp_path):
     with ChoiceBudget(tmp_path / "control") as budget:
         response = quotas()
-        response["data"]["0"][3] = "2000-01-01"
+        response["data"]["0"][3:5] = ["2000-01-03", "2000-01-09"]
         budget.update(response)
         with pytest.raises(ChoiceError, match="quota period is stale"):
             budget.reserve("csd", 1)
         response = quotas()
-        response["data"]["0"][5] = "2000-01-01 00:00:00"
+        response["data"]["0"][8] = "2000-01-01 00:00:00"
         budget.update(response)
         with pytest.raises(ChoiceError, match="expired"):
             budget.reserve("csd", 1)
@@ -518,7 +559,7 @@ def test_delayed_server_quota_does_not_refund_local_reservations(tmp_path):
         with pytest.raises(ChoiceError, match="budget pause"):
             budget.reserve("css", 110001)
         response = quotas()
-        response["data"]["1"][4] = "95000"
+        response["data"]["1"][6:8] = ["405000", "95000"]
         budget.update(response)
         with pytest.raises(ChoiceError, match="budget pause"):
             budget.reserve("css", 5001)
@@ -547,6 +588,110 @@ def test_quota_refresh_is_throttled_but_expired_snapshot_is_queried(tmp_path, mo
         collector.refresh_quota()
         assert len(client.calls) == 2
         assert budget.db.execute("SELECT SUM(units) FROM reservations").fetchone()[0] == 10
+
+
+def _stale_week_quotas():
+    response = quotas()
+    for values in response["data"].values():
+        values[3:5] = ["2026-08-24", "2026-08-30"]
+    return response
+
+
+def test_stale_week_blocks_before_any_uncached_market_or_discovery_request(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.clock.utc_now", lambda: datetime(2026, 9, 1, 3, 0, tzinfo=UTC))
+
+    class StaleWeek(FakeClient):
+        def request(self, method, args):
+            if method == "datastatistics":
+                self.calls.append((method, args))
+                return _stale_week_quotas()
+            return super().request(method, args)
+
+    client = StaleWeek()
+    with ChoiceBudget(tmp_path / "control") as budget, ChoiceDataset(tmp_path / "dataset", plan()) as dataset:
+        with pytest.raises(ChoiceError, match="current Choice quota period is unreported"):
+            ChoiceCollector(dataset, client, budget).run()
+        assert [method for method, _ in client.calls] == ["datastatistics"]
+        assert budget.db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 0
+
+
+def test_complete_cached_replay_does_not_need_current_week_market_quota(tmp_path, monkeypatch):
+    output, client = tmp_path / "dataset", FakeClient()
+    with ChoiceBudget(tmp_path / "control") as budget, ChoiceDataset(output, plan()) as dataset:
+        ChoiceCollector(dataset, client, budget).run()
+    monkeypatch.setattr("app.utils.clock.utc_now", lambda: datetime(2026, 9, 1, 3, 0, tzinfo=UTC))
+
+    class StaleWeek(FakeClient):
+        def request(self, method, args):
+            if method == "datastatistics":
+                self.calls.append((method, args))
+                return _stale_week_quotas()
+            return super().request(method, args)
+
+    stale = StaleWeek()
+    with ChoiceBudget(tmp_path / "control") as budget, ChoiceDataset(output, plan()) as dataset:
+        summary = ChoiceCollector(dataset, stale, budget).run()
+        assert summary["requests_this_run"] == 0
+        assert [method for method, _ in stale.calls] == ["datastatistics"]
+
+
+def test_event_only_resume_ignores_exhausted_cached_csd_and_css(tmp_path):
+    output, control = tmp_path / "dataset", tmp_path / "control"
+    with ChoiceBudget(control) as budget, ChoiceDataset(output, plan()) as dataset:
+        with pytest.raises(ChoiceError, match="request-count pause"):
+            ChoiceCollector(dataset, FakeClient(), budget, max_requests=7).run()
+        assert dataset.summary()["requests_completed"] == 7
+        before = dict(budget.db.execute(
+            "SELECT function,SUM(units) FROM reservations GROUP BY function ORDER BY function"
+        ))
+        assert "EM_CTR" not in before
+
+        class EventOnlyCapacity(FakeClient):
+            def request(self, method, args):
+                if method != "datastatistics":
+                    return super().request(method, args)
+                self.calls.append((method, args))
+                response = quotas()
+                for index in ("0", "1"):
+                    response["data"][index][6] = response["data"][index][5]
+                    response["data"][index][7] = "0"
+                return response
+
+        client = EventOnlyCapacity()
+        summary = ChoiceCollector(dataset, client, budget).run()
+        after = dict(budget.db.execute(
+            "SELECT function,SUM(units) FROM reservations GROUP BY function ORDER BY function"
+        ))
+        assert summary["requests_this_run"] == 1 and summary["cached_requests"] == 7
+        assert [method for method, _ in client.calls] == ["datastatistics", "ctr"]
+        assert {name: after[name] for name in ("EM_CSD", "EM_CSS")} == {
+            name: before[name] for name in ("EM_CSD", "EM_CSS")
+        }
+        assert after["EM_CTR"] == 1
+
+
+def test_collector_quota_archives_and_summary_drop_unrequested_provider_fields(tmp_path):
+    class ExtraFields(FakeClient):
+        def request(self, method, args):
+            response = super().request(method, args)
+            if method == "datastatistics":
+                response["indicators"].append("SECRET_TOKEN")
+                for values in response["data"].values():
+                    values.append("must-not-leak")
+            return response
+
+    output, client = tmp_path / "dataset", ExtraFields()
+    with ChoiceBudget(tmp_path / "control") as budget, ChoiceDataset(output, plan()) as dataset:
+        summary = ChoiceCollector(dataset, client, budget).run()
+    assert "must-not-leak" not in json.dumps(summary)
+    assert set(summary["quota_snapshot"]["EM_CSD"]) == {
+        "FUNCENAME", "SECUTYPE", "PERIOD", "STARTDATE", "ENDDATE", "THRESHOLD",
+        "EFFECTIVEDATE", "USEDDATA", "AVAILABEDATA",
+    }
+    account_files = list((output / "account").glob("*.json"))
+    assert account_files and all("must-not-leak" not in path.read_text() for path in account_files)
+    saved_summary = json.loads((output / Path(summary["summary_path"]).name).read_text())
+    assert "must-not-leak" not in json.dumps(saved_summary)
 
 
 def test_quota_failure_does_not_start_next_data_request(tmp_path):
@@ -714,7 +859,12 @@ def test_choice_cli_derived_plans_collect_and_resume(tmp_path, monkeypatch, caps
     assert code == 0 and json.loads(captured.out)["formal_equivalent_pit"] is False
     assert len(client.calls) == before and not output.exists()
     code, captured = _run_choice_cli(cli, monkeypatch, capsys, [operation, *scope])
-    assert code == 0 and json.loads(captured.out.splitlines()[-1])["production_ranking_effect"] == "none"
+    result = json.loads(captured.out.splitlines()[-1])
+    assert code == 0 and result["production_ranking_effect"] == "none"
+    assert set(result["quota_snapshot"]["EM_CSD"]) == {
+        "FUNCENAME", "SECUTYPE", "PERIOD", "STARTDATE", "ENDDATE", "THRESHOLD",
+        "EFFECTIVEDATE", "USEDDATA", "AVAILABEDATA",
+    }
     code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["resume", "--output-dir", output])
     assert code == 0 and json.loads(captured.out.splitlines()[-1])["requests_this_run"] == 0
     code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["verify", "--output-dir", output])
@@ -766,9 +916,215 @@ def test_choice_cli_quota_reports_existing_reservations_without_market_requests(
     code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota"])
     report = json.loads(captured.out)
     assert code == 0 and report["local_reservations"][0]["estimated_units"] == 7
+    assert report["query_window"]["calendar_days"] == 30
+    assert report["functions"]["EM_CSS"]["safe_units"] == 199993
+    assert report["functions"]["EM_CFC"]["status"] == "unsupported_not_wired"
+    assert report["action_plan"]["status"] == "arithmetic_candidates_require_gap_review"
+    assert report["action_plan"]["execute_automatically"] is False
+    assert report["market_data_requests"] == report["reservations_released"] == 0
     assert [method for method, _ in client.calls] == ["datastatistics"]
+    today = market_now().date()
+    assert client.calls[0][1][2] == (
+        f"StartDate={(today - timedelta(days=29)).isoformat()},EndDate={today.isoformat()},Ispandas=0"
+    )
     receipts = list((control / "account").glob("*.json"))
     assert len(receipts) == 1 and json.loads(receipts[0].read_text()) == report
+
+
+def test_choice_cli_reports_unconfirmed_weekly_rollover_without_using_old_remaining(tmp_path, monkeypatch, capsys):
+    cli, client = _choice_cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setattr("app.utils.clock.utc_now", lambda: datetime(2026, 9, 1, 3, 0, tzinfo=UTC))
+
+    def request(method, args):
+        client.calls.append((method, args))
+        assert method == "datastatistics"
+        return _stale_week_quotas()
+
+    client.request = request
+    code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota"])
+    report = json.loads(captured.out)
+    assert code == 0 and report["schema_version"] == "choice-quota-report-v3"
+    for function in ("EM_CSD", "EM_CSS", "EM_CTR"):
+        item = report["functions"][function]
+        assert item["status"] == "paused_rollover_unconfirmed"
+        assert item["reported_for_current_period"] is False and item["safe_units"] == 0
+        assert item["expected_current_period"] == "2026-08-31/2026-09-06"
+    assert report["action_plan"]["status"] == "blocked_current_period_unreported"
+    assert report["action_plan"]["market_data_probe_permitted"] is False
+    assert report["capacity_planning"]["status"] == "unavailable_without_current_period_quota"
+    assert all(not item["feasible_under_current_safe_units"]
+               for item in report["capacity_planning"]["complete_research_cohort_examples"])
+    assert report["market_data_requests"] == report["reservations_released"] == 0
+    assert "PERIOD" in client.calls[0][1][1] and "THRESHOLD" in client.calls[0][1][1]
+
+
+@pytest.mark.parametrize("ctr_state,expected_status", [
+    ("missing", "blocked_current_period_unreported"),
+    ("expired", "blocked_function_unavailable"),
+])
+def test_choice_quota_keeps_paired_history_action_independent_from_optional_ctr(
+    tmp_path, monkeypatch, capsys, ctr_state, expected_status,
+):
+    cli, client = _choice_cli_environment(tmp_path, monkeypatch)
+    response = quotas()
+    if ctr_state == "missing":
+        response["data"].pop("2")
+    else:
+        response["data"]["2"][8] = "2020-01-01 00:00:00"
+    client.request = lambda method, args: response
+
+    code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota"])
+    report = json.loads(captured.out)
+    paired = report["action_plan"]["workflows"]["paired_history"]
+    events = report["action_plan"]["workflows"]["event_queries"]
+    assert code == 0
+    assert report["capacity_planning"]["status"] == "arithmetic_candidates_require_gap_review"
+    assert report["action_plan"]["status"] == paired["status"] == "arithmetic_candidates_require_gap_review"
+    assert paired["minimum_balanced_cohort_feasible"] is True
+    assert events["status"] == expected_status and events["safe_requests"] == 0
+    assert events["functions_unavailable"] == ["EM_CTR"]
+    assert report["market_data_requests"] == report["reservations_released"] == 0
+
+
+def test_choice_quota_requires_enough_units_for_one_balanced_complete_cohort(tmp_path, monkeypatch, capsys):
+    cli, client = _choice_cli_environment(tmp_path, monkeypatch)
+    response = quotas()
+    for key in ("0", "1"):
+        response["data"][key][5:8] = ["1", "0", "1"]
+    client.request = lambda method, args: response
+
+    code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota"])
+    report = json.loads(captured.out)
+    minimum = report["capacity_planning"]["minimum_balanced_research_cohort"]
+    paired = report["action_plan"]["workflows"]["paired_history"]
+    assert code == 0 and minimum["symbols"] == 3
+    assert minimum["feasible_under_current_safe_units"] is False
+    assert report["capacity_planning"]["status"] == "insufficient_safe_units_for_minimum_balanced_cohort"
+    assert report["action_plan"]["status"] == paired["status"] == "blocked_no_paired_capacity"
+    assert paired["minimum_balanced_cohort_feasible"] is False
+    assert report["market_data_requests"] == report["reservations_released"] == 0
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_quota_update_selects_unique_current_week_from_thirty_day_rows(tmp_path, reverse):
+    response = quotas()
+    rows = list(response["data"].values())
+    stale = deepcopy(rows[0])
+    stale[3:5] = ["2026-08-24", "2026-08-30"]
+    response["data"] = {"old": stale, "current": rows[0]}
+    if reverse:
+        response["data"] = dict(reversed(response["data"].items()))
+    with ChoiceBudget(tmp_path / "control") as budget:
+        budget.update(response, today=date(2026, 9, 1))
+        assert budget.quotas["EM_CSD"]["STARTDATE"] == "2026-08-31"
+
+
+def test_quota_update_rejects_ambiguous_current_rows_and_threshold_mismatch(tmp_path):
+    duplicate = quotas()
+    duplicate["data"]["duplicate"] = deepcopy(duplicate["data"]["0"])
+    with ChoiceBudget(tmp_path / "control") as budget:
+        with pytest.raises(ChoiceError, match="multiple current"):
+            budget.update(duplicate, today=market_now().date())
+    mismatch = quotas()
+    mismatch["data"]["0"][5] = "500001"
+    with ChoiceBudget(tmp_path / "control-2") as budget:
+        with pytest.raises(ChoiceError, match="does not reconcile"):
+            budget.update(mismatch)
+
+
+def test_choice_cli_threshold_mismatch_fails_without_account_archive(tmp_path, monkeypatch, capsys):
+    cli, client = _choice_cli_environment(tmp_path, monkeypatch)
+    mismatch = quotas()
+    mismatch["data"]["1"][5] = "500001"
+    client.request = lambda method, args: mismatch
+    code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota"])
+    assert code == 2 and "does not reconcile" in json.loads(captured.err)["error"]
+    account = tmp_path / "data" / "research" / "choice_ingestion_control" / "account"
+    assert not account.exists() or not list(account.iterdir())
+
+
+def test_choice_cli_quota_reports_realistic_safe_capacity_without_leaking_provider_fields(tmp_path, monkeypatch, capsys):
+    cli, client = _choice_cli_environment(tmp_path, monkeypatch)
+    today = market_now().date()
+    first = today - timedelta(days=today.weekday())
+    period = f"{first.isoformat()}/{(first + timedelta(days=6)).isoformat()}"
+    fields = ["FUNCENAME", "SECUTYPE", "PERIOD", "STARTDATE", "ENDDATE", "THRESHOLD",
+              "EFFECTIVEDATE", "USEDDATA", "AVAILABEDATA", "SECRET_TOKEN"]
+    values = [
+        ("EM_CSD", "全品种", 140918, 359082), ("EM_CSS", "全品种", 107217, 392783),
+        ("EM_CTR", "分红送转", 6, 4), ("EM_CFC", "函数校验接口", 1, 19999),
+    ]
+    response = {"error_code": 0, "indicators": fields, "data": {
+        str(index): [function, security, "W", first.isoformat(), (first + timedelta(days=6)).isoformat(),
+                     used + remaining, "2099-12-31 23:59:59", used, remaining, "must-not-leak"]
+        for index, (function, security, used, remaining) in enumerate(values)
+    }}
+
+    def request(method, args):
+        client.calls.append((method, args))
+        assert method == "datastatistics"
+        return response
+
+    client.request = request
+    control = tmp_path / "data" / "research" / "choice_ingestion_control"
+    with ChoiceBudget(control) as budget:
+        assert budget.db is not None
+        budget.db.executemany("INSERT INTO reservations VALUES (?,?,?,?)", [
+            (period, "EM_CSD", 421680, now_text()), (period, "EM_CSS", 107216, now_text()),
+            (period, "EM_CTR", 6, now_text()),
+        ])
+        budget.db.commit()
+        before = budget.db.execute("SELECT * FROM reservations ORDER BY function").fetchall()
+    code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota"])
+    report = json.loads(captured.out)
+    assert code == 0 and "must-not-leak" not in captured.out
+    assert {name: report["functions"][name]["safe_units"] for name in ("EM_CSD", "EM_CSS", "EM_CTR")} == {
+        "EM_CSD": 0, "EM_CSS": 92784, "EM_CTR": 0,
+    }
+    assert report["functions"]["EM_CFC"]["reported_remaining"] == 19999
+    assert report["capacity_planning"]["paired_capacity"]["additional_symbols_for_assumed_sessions"] == 0
+    assert report["capacity_planning"]["reference_only_css_capacity"] == {
+        "additional_symbols_for_assumed_sessions": 61,
+        "additional_sessions_for_assumed_symbols": 515,
+        "not_usable_as_paired_history_without_csd": True,
+    }
+    assert all(not scenario["feasible_under_current_safe_units"] for scenario in report["capacity_planning"]["examples"])
+    cohorts = report["capacity_planning"]["complete_research_cohort_examples"]
+    assert [(item["symbols"], item["estimated_units"]) for item in cohorts] == [
+        (30, {"EM_CSD": 210840, "EM_CSS": 53280}),
+        (60, {"EM_CSD": 421680, "EM_CSS": 106560}),
+    ]
+    with ChoiceBudget(control) as budget:
+        assert budget.db is not None
+        assert budget.db.execute("SELECT * FROM reservations ORDER BY function").fetchall() == before
+    saved = list((control / "account").glob("*.json"))
+    assert len(saved) == 1 and "must-not-leak" not in saved[0].read_text()
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--planning-symbols", 0], ["--planning-sessions", 0], ["--planning-symbols", 226],
+    ["--planning-sessions", 801], ["--planning-snapshot-dates", 0],
+    ["--planning-snapshot-dates", 503], ["--planning-report-dates", 21],
+])
+def test_choice_cli_invalid_quota_planning_scope_never_logs_in(tmp_path, monkeypatch, capsys, arguments):
+    cli, client = _choice_cli_environment(tmp_path, monkeypatch)
+    code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota", *arguments])
+    assert code == 2 and "planning scope" in json.loads(captured.err)["error"]
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("response", [
+    {"error_code": 0, "indicators": [], "data": []},
+    {"error_code": 0, "indicators": ["FUNCENAME", "FUNCENAME"], "data": {"0": ["EM_CSS", "EM_CSS"]}},
+    {"error_code": 0, "indicators": ["FUNCENAME"], "data": {"0": []}},
+])
+def test_choice_cli_malformed_quota_response_fails_without_success_archive(tmp_path, monkeypatch, capsys, response):
+    cli, client = _choice_cli_environment(tmp_path, monkeypatch)
+    client.request = lambda method, args: response
+    code, captured = _run_choice_cli(cli, monkeypatch, capsys, ["quota"])
+    assert code == 2 and "strict shape validation" in json.loads(captured.err)["error"]
+    account = tmp_path / "data" / "research" / "choice_ingestion_control" / "account"
+    assert not account.exists() or not list(account.iterdir())
 
 
 @pytest.mark.parametrize("operation", ["read", "rejected_login", "write", "sdk_error", "disconnected"])

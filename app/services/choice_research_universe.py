@@ -12,6 +12,7 @@ from app.artifacts.io import canonical_json_bytes, decode_json_bytes, exclusive_
 from app.services.choice_research import OPTIONS, normalize, request
 from app.services.choice_research_collect import ChoiceCollector
 from app.services.choice_research_store import ChoiceDataset, now_text
+from app.services.choice_quota import public_quotas
 from app.services.choice_research_supplement import source_receipts_digest
 from app.services.choice_sdk import ChoiceError
 
@@ -140,7 +141,8 @@ class ChoiceUniverseCollector(ChoiceCollector):
             raise ChoiceError("daily universe plan is incomplete")
         summary.update({"status": "complete_for_declared_research_scope", "generated_at": now_text(),
                         "requests_this_run": self.calls, "cached_requests": self.cached, "raw_replay_verified": True,
-                        "coverage": coverage, "limitations": plan["limitations"], "quota_snapshot": self.budget.quotas})
+                        "coverage": coverage, "limitations": plan["limitations"],
+                        "quota_snapshot": public_quotas(self.budget.quotas)})
         encoded = canonical_json_bytes(summary)
         output = self.dataset.directory / f"summary-{sha256_hex(encoded)}.json"
         exclusive_atomic_publish(output, encoded, max_bytes=1024 * 1024)

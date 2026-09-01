@@ -18,7 +18,7 @@ from app.artifacts.io import canonical_json_bytes, exclusive_atomic_publish, pat
 from app.db.market_mappers import row_to_kline
 from app.models.market import Kline
 from app.services.experimental_probability_model import (
-    DIRECTION_SCHEMA, MODEL_MAX_BYTES, DirectionEvidence, ExperimentalEstimator, ExperimentalProbabilityUnavailable,
+    DIRECTION_SCHEMA, MODEL_DIRECTORY, MODEL_MAX_BYTES, DirectionEvidence, ExperimentalEstimator, ExperimentalProbabilityUnavailable,
     fit_experimental_sample_parameters,
 )
 from app.services.market_scan_probability import ProbabilitySample
@@ -118,20 +118,52 @@ def build_direction_model(manifest_path: Path, database: Path, directory: Path, 
         raise ExperimentalProbabilityUnavailable("方向模型历史库与 manifest 摘要不一致")
     sessions = trusted_probability_history_dates(payload["anchor_date"], payload["config"]["history_bars"])
     series = _read_history(database)
-    samples, targets, symbols, receipt = direction_samples(series, sessions, offset=offset)
     if _static_database_digest(database) != before:
         raise ExperimentalProbabilityUnavailable("方向模型构建期间历史库发生变化")
     manifest_digest = cast(dict[str, Any], manifest["integrity"])["integrity_digest"]
+    return _publish_direction_model(series, sessions, directory, offset=offset, source_filename=database.name,
+        source_sha256=before, manifest_digest=manifest_digest, limitations=payload["limitations"])
+
+
+def _choice_candidate_directory(directory: Path) -> Path:
+    output = directory.expanduser().absolute()
+    protected = {".workbuddy-ai", ".git", ".codex", ".agents", ".venv"}
+    if protected.intersection(output.parts) or not path_has_only_trusted_aliases(output):
+        raise ExperimentalProbabilityUnavailable("Choice 候选模型输出目录受保护或包含路径别名")
+    if tuple(output.parts[-len(MODEL_DIRECTORY.parts):]) == MODEL_DIRECTORY.parts:
+        raise ExperimentalProbabilityUnavailable("Choice 候选模型必须使用独立研究目录，不能自动替换在线模型")
+    return output
+
+
+def build_choice_direction_model(manifest_path: Path, database: Path, directory: Path, *, offset: Literal[1, 2, 5]) -> Path:
+    """Fit isolated candidates without replacing the runtime Tencent models."""
+    from app.services.choice_experimental_history import load_choice_experimental_history
+
+    output = _choice_candidate_directory(directory)
+    history = load_choice_experimental_history(manifest_path, database)
+    sources = (Path(history.provenance["source"]["directory"]), manifest_path.parent, database.parent)
+    if any(output.resolve().is_relative_to(source.expanduser().resolve()) for source in sources):
+        raise ExperimentalProbabilityUnavailable("Choice 候选模型必须写入原始及派生历史档案之外的独立目录")
+    return _publish_direction_model(history.series, history.sessions, output, offset=offset,
+        source_filename=database.name, source_sha256=history.provenance["source_sha256"],
+        manifest_digest=history.provenance["manifest_digest"], limitations=history.provenance["limitations"])
+
+
+def _publish_direction_model(series: Mapping[str, Sequence[Kline]], sessions: Sequence[str], directory: Path, *,
+    offset: Literal[1, 2, 5], source_filename: str, source_sha256: str, manifest_digest: str,
+    limitations: list[str],
+) -> Path:
+    samples, targets, symbols, receipt = direction_samples(series, sessions, offset=offset)
     parameters = fit_experimental_sample_parameters(samples, targets, horizon=offset, purge_sessions=offset)
     estimator = ExperimentalEstimator(
         **parameters, schema_version=DIRECTION_SCHEMA, horizon=offset, target="close_return_positive",
-        source_filename=database.name, source_sha256=before, source_integrity_digest=manifest_digest,
+        source_filename=source_filename, source_sha256=source_sha256, source_integrity_digest=manifest_digest,
         training_symbols=symbols, cost_contract={},
         historical_recipe_evaluation={"status": "not_evaluated", "target": "close_return_positive", "horizon": offset},
         direction_evidence=DirectionEvidence(target_session_offset=offset, history_manifest_digest=manifest_digest,
             calendar_digest=sha256_hex(canonical_json_bytes(list(sessions))), samples_digest=receipt["samples_digest"],
             source_start=sessions[0], source_end=sessions[-1], sample_count=len(samples), excluded=receipt["excluded"]),
-        limitations=[*payload["limitations"], "close_direction_not_costed_profit_or_execution",
+        limitations=[*limitations, "close_direction_not_costed_profit_or_execution",
                      "independent_oos_not_evaluated", "personal_experimental_not_formal_authority",
                      "current_predictions_use_reconstructed_cache_not_original_pit", "new_universe_generalization_unverified"],
     )

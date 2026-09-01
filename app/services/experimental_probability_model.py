@@ -39,7 +39,7 @@ WARNING = (
 )
 ExperimentalPredictionKind = Literal["net_h5", "close_d1", "close_d2", "close_d5"]
 DIRECTION_OFFSETS: dict[str, Literal[1, 2, 5]] = {"close_d1": 1, "close_d2": 2, "close_d5": 5}
-DIRECTION_SCHEMA = "personal-experimental-close-direction-model-v1"
+DIRECTION_SCHEMA: Literal["personal-experimental-close-direction-model-v1"] = "personal-experimental-close-direction-model-v1"
 DIRECTION_WARNING = (
     "个人实验，未经过独立样本外验证；预测固定交易日收盘价相对D日收盘价上涨，"
     "不是买入后扣费盈利或可成交概率。历史抽样、复权版本与全市场泛化局限仍存在，不改变正式排名。"

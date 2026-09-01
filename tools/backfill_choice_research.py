@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+from typing import Any
 from zoneinfo import ZoneInfo
 
 
@@ -17,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.artifacts.io import ArtifactIOError, canonical_json_bytes, decode_json_bytes, exclusive_atomic_publish, read_regular_file, sha256_hex  # noqa: E402
+from app.services.choice_quota import build_quota_report, quota_query_args, quota_query_window  # noqa: E402
 from app.services.choice_research import make_plan, normalize  # noqa: E402
 from app.services.choice_research_collect import ChoiceCollector, failure_summary  # noqa: E402
 from app.services.choice_research_store import ChoiceBudget, ChoiceDataset, now_text  # noqa: E402
@@ -43,6 +45,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-css-cells", type=int, default=200000)
     result.add_argument("--max-dividend-event-calls", type=int, default=3)
     result.add_argument("--max-universe-calls", type=int, default=60)
+    result.add_argument("--planning-symbols", type=int, default=60, help="quota-only arithmetic capacity assumption")
+    result.add_argument("--planning-sessions", type=int, default=502, help="quota-only arithmetic capacity assumption")
+    result.add_argument("--planning-snapshot-dates", type=int, default=26, help="quota-only metadata snapshot assumption")
+    result.add_argument("--planning-report-dates", type=int, default=11, help="quota-only dividend snapshot assumption")
     result.add_argument("--timeout", type=float, default=45)
     result.add_argument("--request-interval", type=float, default=1.0)
     return result
@@ -115,24 +121,34 @@ def _new_universe_plan(args: argparse.Namespace) -> dict:
         return make_universe_plan(sources[0], sources[1:])
 
 
+def _run_quota(args: argparse.Namespace) -> dict[str, Any]:
+    if (not 1 <= args.planning_symbols <= 225 or not 1 <= args.planning_sessions <= 800
+            or not 1 <= args.planning_snapshot_dates <= args.planning_sessions
+            or not 0 <= args.planning_report_dates <= 20):
+        raise ChoiceError("quota planning scope is outside the bounded research range")
+    control = ROOT / "data" / "research" / "choice_ingestion_control"
+    today = quota_query_window()[1]
+    with ChoiceBudget(control, csd_limit=args.max_csd_cells, css_limit=args.max_css_cells,
+                      ctr_limit=args.max_dividend_event_calls, sector_limit=args.max_universe_calls) as budget:
+        with ChoiceSDKClient(timeout=args.timeout, interval=args.request_interval) as client:
+            response = client.request("datastatistics", quota_query_args(today))
+        budget.update(response)
+        report = build_quota_report(budget, queried_at=now_text(), today=today,
+            planning_symbols=args.planning_symbols, planning_sessions=args.planning_sessions,
+            planning_snapshot_dates=args.planning_snapshot_dates,
+            planning_report_dates=args.planning_report_dates)
+        encoded = canonical_json_bytes(report)
+        target = control / "account" / f"{sha256_hex(encoded)}.json"
+        exclusive_atomic_publish(target, encoded, max_bytes=1024 * 1024)
+        return report
+
+
 def main() -> int:
     args = parser().parse_args()
     try:
         if args.operation == "quota":
-            control = ROOT / "data" / "research" / "choice_ingestion_control"
-            with ChoiceBudget(control) as budget, ChoiceSDKClient(timeout=args.timeout, interval=args.request_interval) as client:
-                today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-                result = client.request("datastatistics", ["", "", f"StartDate={today},EndDate={today},Ispandas=0"])
-                budget.update(result)
-                assert budget.db is not None
-                report = {"queried_at": now_text(), "quota": budget.quotas,
-                          "local_reservations": [dict(zip(["period", "function", "estimated_units"], row, strict=True))
-                              for row in budget.db.execute("SELECT period,function,SUM(units) FROM reservations GROUP BY period,function")],
-                          "warning": "server usage may lag; local reservations include settled and uncertain calls"}
-                encoded = canonical_json_bytes(report)
-                exclusive_atomic_publish(control / "account" / f"{sha256_hex(encoded)}.json", encoded, max_bytes=1024 * 1024)
-                print(json.dumps(report, ensure_ascii=False))
-                return 0
+            print(json.dumps(_run_quota(args), ensure_ascii=False))
+            return 0
         if args.output_dir is None:
             raise ChoiceError("--output-dir is required except for quota")
         if args.operation in {"status", "verify"}:

@@ -24,6 +24,29 @@ Choice 接入目前用于独立、可续传的历史研究数据集，不参与�
 
 账户统计可能延迟，显示余额不能直接理解为还可以再下载同样数量的数据。
 本命令使用相同会话锁，并在控制目录的 `account/` 中保留查询结果。
+查询窗口固定为截至上海当日的最近 30 个自然日，避免当天尚无统计行时把“无数据”误报为
+额度耗尽。输出只保留额度白名单字段，并同时列出：供应商显示余额、当前套餐周期的本地
+累计预留、配置的本地上限、保守安全可用量，以及 CSD+CSS 成对扩样的算术容量示例。
+白名单包含官方 `PERIOD` 和 `THRESHOLD`，但不保存套餐名、使用率或供应商返回的其他账户字段。
+项目只接受完整的周周期（`W`、周一至周日），并要求阈值严格等于已用量加剩余量；不一致、
+重叠的当前周期或畸形日期均在归档和行情请求前关闭。
+
+30 天窗口可能只返回已经结束的旧周，也可能同时返回旧周和当前周。唯一当前周记录会按
+日期选择，不依赖供应商返回顺序；只有旧周时状态为 `paused_rollover_unconfirmed`，旧余额和
+阈值仅用于诊断，安全量及配对容量保持 0。这不是“额度耗尽”，而是当前周统计尚未确认。
+采集器不会用一条 CSD/CSS 行情请求试探重置，也不会在此前先下载日历或股票池；下一步仅是
+稍后重查 `datastatistics` 或向 Choice 确认。完全命中本地回执的离线重放不受此限制。
+
+容量示例默认按 60 只股票、502 个交易日、14 个 CSD 日线字段和 3 个 CSS 参考字段计算；
+完整研究样本预算还默认纳入 26 个元数据快照和 11 个分红报告期，可用
+`--planning-symbols`、`--planning-sessions`、`--planning-snapshot-dates`、
+`--planning-report-dates` 改变假设。默认 30 股完整样本估算为 CSD 210,840 / CSS 53,280，
+60 股为 CSD 421,680 / CSS 106,560，另须按实际受限股票日补状态字段。示例只是需要先锁定
+不重叠样本并复核缺口的算术候选，不是调用授权、PIT 证据或生产晋级依据；命令不会自动取数、
+释放历史预留或提高保护上限。CFC 只报告供应商余额，明确标记为尚未接入采集器。
+行动建议分别报告 CSD+CSS 配对历史与可选 CTR 事件查询：CTR 周记录缺失或套餐暂停不会误阻断
+仍有完整配对预算的历史样本，反之亦然。即使 CSD/CSS 都有非零余额，也必须足以覆盖最小的
+SH/SZ/BJ 各一只、共 3 只股票的完整均衡样本，才会显示为可复核的算术候选。
 
 以下在项目根目录执行。先查看计划，不取数、不写库：
 
@@ -220,10 +243,100 @@ ORDER BY session_date;
 真实有效的来源授权登记、当时可见特征、同规则成熟样本及样本外模型检验。
 本工具不降低这些门槛，也不自动将新数据适配成旧 Tencent 研究或正式执行凭据。
 
+## 复用已有日线做独立方向研究
+
+现有完整首批包可离线转换为专用的 Choice 实验历史，不需要再次登录或下载。
+转换器先重放原始响应、核对固定请求参数及完整交易日历，再发布新的静态 SQLite 和
+`choice-experimental-history-v1` 清单；它不是 Tencent 的历史清单。
+每次加载还会重放原包并逐行比较派生库，不能只重签一个修改过的清单绕过校验。
+
+```sh
+ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH=0 TRADE_CALENDAR_AUTO_FETCH=0 \
+  .venv/bin/python tools/build_choice_experimental_history.py build \
+  --source-dir data/research/choice_history_20260825 \
+  --output-dir data/research/choice_experimental_history_20260826
+```
+
+只对确有成交、OHLC 和后复权因子均有效的记录重建价格：
+`研究前复权价 = 未复权价 × TAFACTOR(当日) / TAFACTOR(该股最后有效成交日)`。
+成交量保持原始股数。非交易、停牌、盘中受限和无效因子分别排除，不插值、不填零、
+不补成连续行情；完全没有有效行情的样本股票也保留在覆盖率分母中。
+所用 11 个方向特征对同股价格的共同正比例缩放不变，但这不是原始历史版本或 PIT 证明，
+也不能推广到最低佣金、整手买卖和容量等成本/执行模型。
+Choice 的乘法复权与腾讯数据不保证一致，禁止直接混池或复用对方校准器。
+
+命令输出真实 manifest 和 database 路径。使用这两个路径，可分别做只读重放校验、
+三周期隔离回放，以及独立候选模型训练：
+
+```sh
+.venv/bin/python tools/build_choice_experimental_history.py verify \
+  --manifest '<CHOICE_MANIFEST>' --database '<CHOICE_STATIC_DATABASE>'
+.venv/bin/python tools/validate_experimental_direction.py \
+  --choice-history-manifest '<CHOICE_MANIFEST>' \
+  --choice-history-database '<CHOICE_STATIC_DATABASE>' \
+  --output-dir data/research/choice_direction_validation_20260826
+.venv/bin/python tools/build_experimental_probability.py --prediction-kind close_d1 \
+  --choice-history-manifest '<CHOICE_MANIFEST>' --database '<CHOICE_STATIC_DATABASE>' \
+  --output-dir data/research/choice_experimental_candidates_20260826
+```
+
+候选训练目标另可指定 `close_d2`、`close_d5`。方向验证报告与候选模型都必须使用原始及派生历史档案
+之外的独立输出目录，不能写入这些档案目录或自动写入线上
+`research/personal_experimental_probability` 模型目录；原 H5 和腾讯模型保持不变。
+离线入口拒绝开启交易日历自动联网的环境，执行这些命令时应确保上述两个自动抓取开关为 0。
+
+验证固定使用三个周期共同的最后 60 个已成熟信号日作为测试区间，各周期各自保留 40 个
+校准日、至少 120 个训练日，并在训练/校准/测试之间隔离相应目标周期。
+目标缺失不改变日期边界；超过训练范围 8 个标准差的记录与线上相同地拒绝预测。
+报告同时提供全部周期和 SH/SZ/BJ 分组的覆盖率、逐日等权评分、校准期比例基线、
+0.5 基线及按目标周期分块的置信区间，不根据最终测试结果挑周期或自动发布模型。
+
+报告 `completed/evaluated` 只表示计算完成，不是模型有效性通过。
+数据可能已被旧研究看过，结果恒标注 `historical_isolated_replay_not_prospective`；
+不能把重新切分同一历史叫作新前瞻证据，也不能把本次重新拟合的验证结果移植到
+使用全部历史训练的候选模型或既有线上模型。正式授权门槛不变。
+
+## 只读审计与跨来源核验
+
+三个数据包可一起做原始回执重放、异常解释和额度对账；不调用 SDK、不释放预留，
+也不把账户显示余额直接变成可花费额度。下面的输出目录只存新的内容寻址报告，
+必须位于输入数据包和额度控制目录之外：
+
+```sh
+.venv/bin/python tools/audit_choice_research.py \
+  --history-dir data/research/choice_history_20260825 \
+  --supplement-dir data/research/choice_supplement_20260825 \
+  --universe-dir data/research/choice_daily_universe_20260825 \
+  --control-dir data/research/choice_ingestion_control \
+  --output-dir data/research/choice_research_audit_20260826 --compact
+```
+
+报告会区分必须补查与不推荐的重复抽查。上市窗口内参考价为零、已有停牌日期记录等
+解释，不会升级成已证明的无涨跌停规则或分钟级可成交证据。没有逐请求结算标识时，
+账户流量变化与本地估算不一致也不能成为自动释放预留的理由。
+
+另一条离线命令独立重建 Choice 价格，深校验腾讯历史清单，在相同交易日网格上比较
+复权价、成交量、全部 11 项特征和 D+1/D+2/D+5 标签；缺失日不压缩成下一个可用日。
+同时验证改变复权锚点及追加未来行情是否影响已有信号特征：
+
+```sh
+ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH=0 TRADE_CALENDAR_AUTO_FETCH=0 \
+  .venv/bin/python tools/compare_choice_tencent_history.py \
+  --choice-dir data/research/choice_history_20260825 \
+  --tencent-database '<TENCENT_STATIC_DATABASE>' \
+  --tencent-manifest '<TENCENT_MANIFEST>' \
+  --output-dir data/research/choice_tencent_comparison_20260826
+```
+
+比较器只重放 Choice 日线请求，完整三包审计由前一条命令负责。两个命令均只读校验输入，
+比较器还核对读取前后哈希不变；拒绝符号链接、活跃 SQLite 旁文件和受保护路径，不替换既有模型。
+标签一致不代表特征或校准器可互换；少量交集也不能证明全市场数据源等价。
+
 ## 验证代码
 
 ```sh
 .venv/bin/python -m pytest -q tests/test_choice_research.py
+.venv/bin/python -m pytest -q tests/test_choice_experimental_history.py tests/test_experimental_direction_validation.py tests/test_choice_research_audit.py tests/test_choice_history_comparison.py
 .venv/bin/python -m ruff check app/services/choice_*.py tools/backfill_choice_research.py tests/test_choice_research.py
 ```
 

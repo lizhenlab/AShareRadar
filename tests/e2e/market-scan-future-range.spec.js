@@ -25,13 +25,13 @@ test("future-range research stays independent, auditable, paged, and mobile safe
   await expect(page.locator("#marketScanFutureRangeDetails")).toContainText("贵州茅台 · 600519.SH");
   expect(queries.at(-1)).toMatchObject({ page: "1", page_size: "20", session_offset: "1", include_research: "true" });
 
-  await page.locator('input[name="marketScanFutureRangePath"][value="cumulative_path"]').check({ force: true });
+  await selectFutureRangeRadio(page, "marketScanFutureRangePath", "cumulative_path");
   await expect(page.locator("#marketScanFutureRangeMetrics")).toContainText("累计 MAE");
   await page.locator("#marketScanFutureRangeDetails details").first().click();
   await expect(page.locator("#marketScanFutureRangeDetails")).toContainText("终值收盘");
   await expect(page.locator("#marketScanFutureRangeDetails")).toContainText("D+1 仅区间诊断，不作为可实现收益");
 
-  await page.locator('input[name="marketScanFutureRangeOffset"][value="2"]').check({ force: true });
+  await selectFutureRangeRadio(page, "marketScanFutureRangeOffset", "2");
   await expect.poll(() => queries.at(-1)).toMatchObject({ page: "1", session_offset: "2", include_research: "false" });
   await expect(page.locator("#marketScanFutureRangeDetailsHelp")).toContainText("目标 D+2");
   await expect(page.locator("#marketScanFutureRangeMetrics")).toContainText("可执行净收益");
@@ -43,7 +43,7 @@ test("future-range research stays independent, auditable, paged, and mobile safe
   await expect.poll(() => queries.at(-1)).toMatchObject({ page: "2", session_offset: "2" });
   await expect(page.locator("#marketScanFutureRangePageText")).toContainText("第 2/2 页");
 
-  await page.locator('input[name="marketScanFutureRangeOffset"][value="3"]').check({ force: true });
+  await selectFutureRangeRadio(page, "marketScanFutureRangeOffset", "3");
   await expect.poll(() => queries.at(-1)).toMatchObject({ page: "1", session_offset: "3", include_research: "false" });
   await expect(page.locator("#marketScanFutureRangeDetailsHelp")).toContainText("目标 D+3");
   await expect(page.locator("#marketScanFutureRangeMetrics")).toContainText("可执行净超额");
@@ -67,6 +67,13 @@ test("future-range research stays independent, auditable, paged, and mobile safe
     expect(Math.min(...layout.controls)).toBeGreaterThanOrEqual(44);
   }
 });
+
+async function selectFutureRangeRadio(page, name, value) {
+  const selector = `input[name="${name}"][value="${value}"]`;
+  const input = page.locator(selector);
+  await page.locator(`${selector} + span`).click();
+  await expect(input).toBeChecked();
+}
 
 test("legacy runs degrade to not-generated without fabricated evidence", async ({ page }) => {
   await routeFutureRangeFixture(page, [], "not_generated");
