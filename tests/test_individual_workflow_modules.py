@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.models.schemas import ChartMarkSummary
+from app.models.user_data import ChartMarkSummary
 from app.services import alerts as alert_service
 from app.services import chart_marks as chart_marks_service
 from app.workflows.individual import (

@@ -418,6 +418,3 @@ def provider_error_text(exc: Exception) -> str:
     if isinstance(exc, socket.timeout):
         return "TimeoutError: 网络请求超时"
     return exc.__class__.__name__
-
-
-_provider_error_text = provider_error_text

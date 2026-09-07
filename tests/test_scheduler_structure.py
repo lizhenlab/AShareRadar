@@ -3,38 +3,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from app.services import scheduler
-from app.services.scheduler import LocalDataScheduler
+from app.services.scheduler_service import LocalDataScheduler
 
 
 SERVICE_DIR = Path(__file__).parents[1] / "app" / "services"
 SCHEDULER_MODULES = tuple(sorted(SERVICE_DIR.glob("scheduler*.py")))
 
 
-def test_scheduler_facade_preserves_public_contract_and_delegates_by_mro() -> None:
-    assert scheduler.__all__ == [
-        "FileSchedulerInstanceGuard",
-        "HealthEvent",
-        "INSTANCE_GUARD_BUSY_MESSAGE",
-        "KLINE_FAILURE_DETAIL_LIMIT",
-        "KlineRefreshSummary",
-        "LocalDataScheduler",
-        "LocalTask",
-        "NoopSchedulerInstanceGuard",
-        "PROVIDER_FAILURE_DETAIL_LIMIT",
-        "QuoteRefreshSummary",
-        "SchedulerInstanceGuard",
-        "TASK_ERROR_MAX_LENGTH",
-        "TASK_STATUS_CANCELLED",
-        "TASK_STATUS_DEGRADED",
-        "TASK_STATUS_FAILED",
-        "TASK_STATUS_RUNNING",
-        "TASK_STATUS_SUCCESS",
-        "TaskDefinition",
-        "TaskExecutionResult",
-        "TaskSpec",
-    ]
-    assert LocalDataScheduler.__module__.endswith("scheduler_service")
+def test_scheduler_delegates_runtime_responsibilities_by_mro() -> None:
     assert LocalDataScheduler.start.__module__.endswith("scheduler_lifecycle")
     assert LocalDataScheduler.run_once.__module__.endswith("scheduler_execution")
     assert LocalDataScheduler._refresh_watch_quotes.__module__.endswith("scheduler_tasks")

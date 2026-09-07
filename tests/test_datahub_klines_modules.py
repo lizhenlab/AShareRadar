@@ -13,7 +13,7 @@ import time
 import pytest
 
 from app.config import Settings
-from app.models.schemas import Kline, MinuteKline
+from app.models.market import Kline, MinuteKline
 from app.services.cache import SQLiteCache
 from app.services.datahub_klines import (
     DEFAULT_MAX_MINUTE_KLINE_LIMIT,
@@ -25,12 +25,7 @@ from app.services.datahub_klines import (
     _prepare_daily_klines,
 )
 from app.services.datahub_runtime import ProviderRuntime
-from app.services.provider_errors import (
-    ProviderChainUnavailable,
-    ProviderInstrumentDataError,
-    ProviderProtocolError,
-    ProviderTransportError,
-)
+from app.utils.provider_errors import ProviderChainUnavailable, ProviderInstrumentDataError, ProviderProtocolError, ProviderTransportError
 from app.utils.market_time import market_now_naive
 from app.utils.time import now_text
 from tests.factories import make_kline

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from app.models.schemas import Kline
+from app.models.market import Kline
 from tests.market_scan_test_support import (
     SCAN_AS_OF,
     _MarketScanHub,

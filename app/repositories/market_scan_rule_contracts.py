@@ -8,6 +8,7 @@ import sqlite3
 
 from app.market_scan_repository_contracts import (
     is_current_market_scan_score_spec,
+    market_scan_input_admission_spec,
     stable_score_spec_hash,
 )
 from app.repositories.market_scan_action_gate_replay import (
@@ -31,7 +32,7 @@ def register_market_scan_rule_contract(
     score_spec_hash = stable_score_spec_hash(score_spec)
     if not is_current_market_scan_score_spec(score_spec, score_spec_hash):
         raise ValueError("新生产扫描规则合同必须使用当前可写 v5 评分规范")
-    validate_current_rule_contract_policy(contract)
+    _require_writable_rule_policy(contract)
     score_rule_version = score_spec.get("rule_version")
     if not isinstance(score_rule_version, str):
         raise ValueError("扫描规则合同缺少生产评分规则版本")
@@ -75,6 +76,12 @@ def register_market_scan_rule_contract(
         score_spec_hash,
     ):
         raise ValueError("扫描规则版本已绑定不同的不可变规则合同")
+
+
+def _require_writable_rule_policy(contract: Mapping[str, object]) -> None:
+    if contract.get("input_admission") != market_scan_input_admission_spec():
+        raise ValueError("新生产扫描规则合同必须使用当前输入准入规范")
+    validate_current_rule_contract_policy(contract)
 
 
 __all__ = ["register_market_scan_rule_contract"]

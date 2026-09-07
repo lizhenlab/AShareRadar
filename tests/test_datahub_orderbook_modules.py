@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import threading
 
 from app.config import Settings
-from app.models.schemas import OrderBook, OrderBookLevel, ProviderCapability
+from app.models.market import OrderBook, OrderBookLevel, ProviderCapability
 from app.services.cache import SQLiteCache
 from app.services.datahub_orderbook import OrderBookCoordinator
 from app.services.datahub_runtime import ProviderRuntime

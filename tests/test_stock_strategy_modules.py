@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models.schemas import ActionAdvice, AnalysisResult, DataQuality, SignalItem, SignalSnapshot
+from app.models.analysis import ActionAdvice, AnalysisResult, DataQuality, SignalItem, SignalSnapshot
 from app.services.stock_insights import build_stock_insight_bundle
 from app.services.stock_strategy import _quality_signal_level, _quality_strategy_status, build_strategy_cards
 from tests.factories import make_kline, make_quote

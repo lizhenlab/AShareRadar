@@ -350,10 +350,6 @@ export function validateScreenSpec(value, context = "ScreenSpecV2") {
   return spec;
 }
 
-export function screeningContractError(message) {
-  return contractError(message);
-}
-
 function mapRanges(ranges, research) {
   const mapped = Object.fromEntries(Object.entries(ranges || {}).map(([field, value]) => [RANGE_FIELD_MAP[field] || field, { ...value }]));
   if (research.confidenceMin !== null) mapped.confidence = { min: research.confidenceMin };

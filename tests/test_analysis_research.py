@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import get_datahub
 from app.api.routes import stock as stock_routes
-from app.models.schemas import AlertRuleInput, MinuteKline, Quote, StockConceptItem
+from app.models.market import MinuteKline, Quote, StockConceptItem
+from app.models.user_data import AlertRuleInput
 from app.services.cache import SQLiteCache
 from app.services.alerts import evaluate_alert_rules
 from app.services.analysis import build_analysis
@@ -23,29 +24,26 @@ from app.services.indicators import max_drawdown, recent_volume_ratio, support_r
 from app.services.indicator_trend import trend_score_from_impact
 from app.services.market_sampling import fetch_quotes_with_single_fallback, market_breadth_quotes, market_breadth_symbols
 from app.services.minute_analysis import build_minute_analysis_report
-from app.services.research import (
-    answer_stock_question,
-    build_alpha_evidence_report,
-    build_chip_analysis,
-    build_event_digest_report,
-    build_evidence_chain_report,
-    build_factor_lab_report,
-    build_feature_snapshot,
-    build_leadership_report,
-    build_market_breadth_snapshot,
-    build_market_regime_report,
-    build_peer_comparison_report,
-    build_replay_analysis,
-    build_risk_reward_report,
-    build_risk_radar_report,
-    build_signal_validation_report,
-    build_stock_diagnosis,
-    build_stock_qa_report,
-    build_theme_context_report,
-    build_t_strategy_assistant_report,
-    build_timeframe_alignment_report,
-)
-from app.services.stock_finance import _valuation_percentile_from_history
+from app.services.research_alpha import build_alpha_evidence_report
+from app.services.research_breadth import build_market_breadth_snapshot
+from app.services.research_chip import build_chip_analysis
+from app.services.research_diagnosis import build_stock_diagnosis
+from app.services.research_events import build_event_digest_report
+from app.services.research_evidence import build_evidence_chain_report
+from app.services.research_factors import build_factor_lab_report
+from app.services.research_features import build_feature_snapshot, build_leadership_report
+from app.services.research_peer import build_peer_comparison_report
+from app.services.research_qa_answer_report import answer_stock_question
+from app.services.research_qa_report import build_stock_qa_report
+from app.services.research_regime import build_market_regime_report
+from app.services.research_replay import build_replay_analysis
+from app.services.research_risk import build_risk_radar_report
+from app.services.research_risk_reward_report import build_risk_reward_report
+from app.services.research_t_strategy import build_t_strategy_assistant_report
+from app.services.research_theme import build_theme_context_report
+from app.services.research_timeframe import build_timeframe_alignment_report
+from app.services.research_validation import build_signal_validation_report
+from app.services.valuation_analysis import valuation_percentile_from_history
 from app.services.stock_insights import build_stock_insight_bundle
 from app.config import Settings
 from app.utils.errors import NotFoundError
@@ -835,7 +833,7 @@ class MinuteAnalysisTests(unittest.TestCase):
         quality = build_data_quality(quote, klines, now=datetime(2026, 5, 13, 16, 0, 0))
         analysis = build_analysis(quote, klines, data_quality=quality, quote_history=history)
 
-        self.assertIsNone(_valuation_percentile_from_history(analysis, "pe"))
+        self.assertIsNone(valuation_percentile_from_history(analysis, "pe"))
 
     def test_valuation_uses_peer_percentiles_when_peer_quotes_exist(self) -> None:
         klines = [

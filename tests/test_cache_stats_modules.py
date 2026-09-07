@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from app.models.schemas import Kline, MinuteKline, Quote
+from app.models.market import Kline, MinuteKline, Quote
 from app.repositories import cache_stats as cache_stats_module
 from app.repositories.cache_stats import (
     SQLITE_MARKET_DATETIME_FUNCTION,

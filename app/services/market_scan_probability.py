@@ -692,15 +692,6 @@ def verify_shadow_probability_evidence(
     return True
 
 
-def replay_shadow_probability(
-    evidence: Mapping[str, object],
-    samples: Sequence[ProbabilitySample],
-) -> dict[str, object]:
-    """Deterministically refit from full inputs and return the verified evidence."""
-    verify_shadow_probability_evidence(evidence, samples)
-    return dict(evidence)
-
-
 def stable_probability_hash(value: object) -> str:
     """Hash a finite canonical JSON representation with stable key ordering."""
     canonical = _canonical_json_value(value)
@@ -3811,7 +3802,6 @@ __all__ = [
     "probability_platt_probability",
     "probability_prediction_metrics",
     "predict_shadow_probability",
-    "replay_shadow_probability",
     "seal_probability_filter_authorization_artifact",
     "seal_probability_deployment_artifact",
     "stable_probability_hash",

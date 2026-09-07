@@ -3,11 +3,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Protocol
 
 from app.models.strategy_automation import StrategyAutomationRunSummary
-from app.services.instance_guard import FileInstanceGuard
 from app.utils.time import datetime_to_text
 
 
@@ -53,13 +51,6 @@ class NoopSchedulerInstanceGuard:
 
     def held_by_other(self) -> bool:
         return False
-
-
-class FileSchedulerInstanceGuard(FileInstanceGuard):
-    """Backward-compatible scheduler name for the shared file guard."""
-
-    def __init__(self, path: Path) -> None:
-        super().__init__(path)
 
 
 def _text_at(value: datetime | None) -> str | None:

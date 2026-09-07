@@ -44,7 +44,7 @@ def test_market_scan_evaluation_calibration_split_stays_bounded() -> None:
     facade_source = facade.read_text(encoding="utf-8")
     metrics_source = metrics.read_text(encoding="utf-8")
 
-    assert len(facade_source.splitlines()) < 3_600
+    assert len(facade_source.splitlines()) < 3_530
     assert len(metrics_source.splitlines()) < 160
     metrics_tree = ast.parse(metrics_source)
     forbidden_imports = {
@@ -55,9 +55,13 @@ def test_market_scan_evaluation_calibration_split_stays_bounded() -> None:
         and node.module.startswith("app.services.market_scan_evaluation")
     }
     assert forbidden_imports == set()
-    for compatibility_name in (
-        "calibration_bucket as _calibration_bucket",
-        "calibration_metrics as _calibration_metrics",
-        "calibration_record as _calibration_record",
-    ):
-        assert compatibility_name in facade_source
+    assert "calibration_metrics as _calibration_metrics" in facade_source
+
+
+def test_evaluation_config_stays_independent_and_bounded() -> None:
+    root = Path(__file__).resolve().parents[1]
+    path = root / "app/services/market_scan_evaluation_config.py"
+    source = path.read_text(encoding="utf-8")
+    assert len(source.splitlines()) < 110
+    imports = [node.module for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)]
+    assert not any(module and module.startswith("app.services") for module in imports)

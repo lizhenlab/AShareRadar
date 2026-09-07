@@ -80,6 +80,7 @@ from app.services.market_scan_automation import MarketScanAutomaticAction
 from app.services.market_scan_automation_runner import MarketScanAutomationCoordinator
 from app.services.market_scan_scoring import (
     MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS,
+    market_scan_input_admission_spec,
     market_scan_score_spec,
     stable_score_spec_hash,
 )
@@ -1282,6 +1283,7 @@ def market_scan_rule_contract(
             min_data_quality_score=int(getattr(settings, "market_scan_min_data_quality_score")),
         ),
         "production_score_semantics": MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS,
+        "input_admission": market_scan_input_admission_spec(),
         "history": {
             "adjustment_mode": "qfq",
             "kline_limit": int(getattr(settings, "market_scan_kline_limit")),

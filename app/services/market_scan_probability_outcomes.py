@@ -15,7 +15,7 @@ snapshot and the caller's trusted daily-bar acquisition boundary.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import date, datetime
@@ -54,7 +54,8 @@ from app.db.market_scan_artifact_lease import (
 
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
 from app.models.paper_trading import CostProfileName
-from app.services.market_scan_probability import ProbabilitySample, stable_probability_hash
+from app.services.data_quality_kline import is_demo_kline_source
+from app.services.market_scan_probability import stable_probability_hash
 from app.services.market_scan_probability_labels import (
     LEGACY_PROBABILITY_LABEL_VERSION,
     PROBABILITY_DEFAULT_HORIZONS,
@@ -75,10 +76,8 @@ from app.services.trading_calendar import (
     TradingCalendarCoverageError,
     calendar_status,
     is_trading_day,
-    latest_expected_daily_kline_date,
     next_trade_dates,
 )
-from app.utils.clock import market_now
 
 exclusive_atomic_publish = publish_market_scan_artifact
 
@@ -95,8 +94,6 @@ PROBABILITY_OUTCOME_MINIMUM_LABEL_COVERAGE = 0.95
 PROBABILITY_OUTCOME_MAX_COMPRESSED_BYTES = 128 * 1024 * 1024
 PROBABILITY_OUTCOME_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 
-ProbabilityOutcomeTarget = Literal["net_excess_positive", "absolute_net_positive"]
-ProbabilityKlineLoader = Callable[[str, tuple[str, ...]], Sequence[Kline]]
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "generated_at", "payload", "integrity"})
 _INTEGRITY_KEYS = frozenset({"algorithm", "scope", "integrity_digest", "notice", "compression"})
@@ -422,52 +419,6 @@ def probability_outcome_required_dates(
     return _requested_dates(calendar, effective_as_of)
 
 
-def mature_probability_source_snapshot(
-    source_path: str | Path,
-    outcome_directory: str | Path,
-    kline_loader: ProbabilityKlineLoader,
-    *,
-    now: datetime | None = None,
-    generated_at: str | None = None,
-    as_of_date: str | None = None,
-    config: ProbabilityLabelConfig | None = None,
-    database_path: str | Path | None = None,
-) -> dict[str, object]:
-    """Synchronously load bars, mature one source, and publish its artifact.
-
-    ``kline_loader`` receives ``(symbol, exact_requested_dates)``.  It may return
-    fewer rows; missing fixed sessions are sealed as unavailable and never
-    shifted.  In normal operation ``as_of_date`` is omitted and derived from
-    the latest expected published daily K line at ``now``.  The explicit date
-    exists for deterministic replay and tests.
-    """
-    source = load_probability_source_snapshot(source_path)
-    settings = config or ProbabilityLabelConfig()
-    effective_as_of = _date_text(as_of_date, "as_of_date") if as_of_date is not None else latest_expected_daily_kline_date(now).isoformat()
-    effective_generated_at = _generated_at(generated_at, now)
-    source_payload = _mapping(source["payload"], "source.payload")
-    quote_date = _date_text(_mapping(source_payload["run"], "source.run")["quote_date"], "quote_date")
-    calendar = _trusted_calendar_contract(quote_date, settings.horizons)
-    requested_dates = _requested_dates(calendar, effective_as_of)
-    rows_by_symbol: dict[str, Sequence[Kline]] = {}
-    if requested_dates:
-        for raw in _sequence(source_payload["records"], "source.records"):
-            symbol = _symbol(_mapping(raw, "source.records[]")["symbol"])
-            try:
-                rows_by_symbol[symbol] = tuple(kline_loader(symbol, requested_dates))
-            except Exception as exc:
-                raise ProbabilityOutcomeError(f"{symbol} outcome K线加载失败") from exc
-    return publish_probability_outcome_artifact(
-        outcome_directory,
-        source,
-        rows_by_symbol,
-        generated_at=effective_generated_at,
-        as_of_date=effective_as_of,
-        config=settings,
-        database_path=database_path,
-    )
-
-
 def verify_probability_outcome_artifact(artifact: Mapping[str, object]) -> dict[str, object]:
     """Fail closed on structure, digests, fixed dates, and semantic replay."""
     normalized = _json_mapping(artifact, "artifact")
@@ -643,96 +594,6 @@ def probability_research_rows_from_outcome_artifacts(
     return tuple(sorted(rows, key=lambda row: (row.session_date, row.run_id, row.symbol)))
 
 
-def probability_samples_from_outcome_artifacts(
-    source_snapshots: Sequence[Mapping[str, object] | str | Path],
-    outcome_artifacts: Sequence[Mapping[str, object] | str | Path],
-    *,
-    horizon: int,
-    target: ProbabilityOutcomeTarget,
-) -> tuple[ProbabilitySample, ...]:
-    """Project complete outcome artifacts into model-ready samples."""
-    if horizon not in PROBABILITY_DEFAULT_HORIZONS:
-        raise ProbabilityOutcomeError("probability sample horizon 必须是 1/5/20")
-    if target not in {"net_excess_positive", "absolute_net_positive"}:
-        raise ProbabilityOutcomeError("probability sample target 不受支持")
-    rows = probability_research_rows_from_outcome_artifacts(source_snapshots, outcome_artifacts)
-    benchmarks = _sample_market_benchmarks(rows, horizon)
-    return tuple(_probability_sample(row, horizon, target, benchmarks.get(row.run_id)) for row in rows)
-
-
-def _sample_market_benchmarks(
-    rows: Sequence[ProbabilityResearchRow],
-    horizon: int,
-) -> dict[int, float]:
-    benchmark_values: dict[int, list[float]] = defaultdict(list)
-    for row in rows:
-        outcome = row.labels.get(horizon)
-        if outcome is not None and _modelled_outcome(outcome):
-            benchmark_values[row.run_id].append(cast(float, outcome.net_return))
-    return {run_id: sum(values) / len(values) for run_id, values in benchmark_values.items() if values}
-
-
-def _probability_sample(
-    row: ProbabilityResearchRow,
-    horizon: int,
-    target: ProbabilityOutcomeTarget,
-    benchmark: float | None,
-) -> ProbabilitySample:
-    outcome = row.labels.get(horizon)
-    executable = _modelled_outcome(outcome) and row.source_evidence_digest is not None
-    net_return = outcome.net_return if executable and outcome is not None else None
-    net_excess = net_return - benchmark if net_return is not None and benchmark is not None else None
-    target_return = net_excess if target == "net_excess_positive" else net_return
-    return ProbabilitySample(
-        sample_id=f"{row.run_id}:{row.symbol}:{horizon}:{target}",
-        session_date=row.session_date,
-        features=row.features,
-        target=int(target_return > 0) if target_return is not None else None,
-        executable=bool(executable),
-        net_return=net_return,
-        net_excess_return=net_excess,
-    )
-
-
-def probability_outcome_corpus_progress(
-    artifacts: Sequence[Mapping[str, object] | str | Path],
-) -> dict[str, object]:
-    """Aggregate archived/mature/available counts for source-research progress."""
-    selected = _selected_artifacts(artifacts)
-    _require_compatible_corpus(selected)
-    output: dict[str, object] = {}
-    for horizon in PROBABILITY_DEFAULT_HORIZONS:
-        archived_sessions = len(selected)
-        observations = 0
-        mature_sessions = 0
-        available_sessions = 0
-        mature_observations = 0
-        eligible_observations = 0
-        for artifact in selected:
-            payload = _mapping(artifact["payload"], "payload")
-            source = _mapping(payload["source"], "payload.source")
-            quality = _mapping(_mapping(payload["quality"], "payload.quality")["horizons"], "quality.horizons")
-            horizon_quality = _mapping(quality[str(horizon)], f"quality.horizons.{horizon}")
-            observations += int(cast(int, source["record_count"]))
-            if horizon_quality["mature"] is True:
-                mature_sessions += 1
-                mature_observations += int(cast(int, horizon_quality["mature_record_count"]))
-                eligible_observations += int(cast(int, horizon_quality["eligible_observation_count"]))
-                if horizon_quality["available_for_study"] is True:
-                    available_sessions += 1
-        output[str(horizon)] = {
-            "archived_independent_session_count": archived_sessions,
-            "mature_label_session_count": mature_sessions,
-            "available_independent_session_count": available_sessions,
-            "observation_count": observations,
-            "mature_observation_count": mature_observations,
-            "eligible_observation_count": eligible_observations,
-            "label_coverage": eligible_observations / mature_observations if mature_observations else 0.0,
-            "minimum_label_coverage": PROBABILITY_OUTCOME_MINIMUM_LABEL_COVERAGE,
-        }
-    return output
-
-
 def _build_record(
     raw: object,
     *,
@@ -893,7 +754,14 @@ def _bar_evidence(
     return evidence
 
 
+def _validated_bar_source(row: Kline, symbol: str) -> str:
+    if is_demo_kline_source(row.source):
+        raise ProbabilityOutcomeError(f"{symbol} outcome 不接受演示K线")
+    return _text(row.source, f"{symbol}.{row.date}.source")
+
+
 def _normalized_bar(row: Kline, symbol: str, as_of_date: str) -> dict[str, object]:
+    source = _validated_bar_source(row, symbol)
     row_date = _date_text(row.date, f"{symbol}.bar.date")
     if row_date > as_of_date:
         raise ProbabilityOutcomeError(f"{symbol} outcome K线晚于 as_of_date")
@@ -920,7 +788,7 @@ def _normalized_bar(row: Kline, symbol: str, as_of_date: str) -> dict[str, objec
         "as_of": _optional_text(row.as_of),
         "data_version": data_version,
         "contract_version": DAILY_KLINE_CONTRACT_VERSION,
-        "source": _text(row.source, f"{symbol}.{row_date}.source"),
+        "source": source,
         "fallback_used": bool(row.fallback_used),
     }
 
@@ -1611,10 +1479,6 @@ def _require_compatible_corpus(artifacts: Sequence[Mapping[str, object]]) -> Non
         raise ProbabilityOutcomeError("outcome corpus 混合了不兼容的 label/feature contracts")
 
 
-def _modelled_outcome(outcome: ProbabilityLabelOutcome | None) -> bool:
-    return bool(outcome is not None and outcome.status == "modelled" and outcome.rule_profile_verified and outcome.net_return is not None)
-
-
 def _source_artifact(value: Mapping[str, object] | str | Path) -> dict[str, object]:
     return load_probability_source_snapshot(value) if isinstance(value, str | Path) else verify_probability_source_snapshot(value)
 
@@ -1748,15 +1612,6 @@ def _limitations() -> list[str]:
         "missing_fixed_session_bar_is_unavailable_and_never_shifted",
         "integrity_digest_is_not_an_authenticity_signature",
     ]
-
-
-def _generated_at(value: str | None, now: datetime | None) -> str:
-    if value is not None:
-        return _timestamp(value, "generated_at")
-    current = now or market_now()
-    if current.tzinfo is None or current.utcoffset() is None:
-        current = current.replace(tzinfo=ASHARE_TIMEZONE)
-    return current.astimezone(ASHARE_TIMEZONE).isoformat()
 
 
 def _fixed_future_sessions(signal_date: date, horizons: Sequence[int]) -> tuple[date, ...]:
@@ -1900,29 +1755,19 @@ def _boolean(value: object, path: str) -> bool:
     return value
 
 
-def _finite_number_mapping(value: object, path: str) -> dict[str, float]:
-    mapping = _mapping(value, path)
-    return {name: _finite_number(item, f"{path}.{name}") for name, item in sorted(mapping.items())}
-
-
 __all__ = [
     "PROBABILITY_OUTCOME_ARTIFACT_SCHEMA_VERSION",
     "PROBABILITY_OUTCOME_MINIMUM_LABEL_COVERAGE",
     "PROBABILITY_OUTCOME_PAYLOAD_CONTRACT_VERSION",
-    "ProbabilityKlineLoader",
     "ProbabilityOutcomeError",
-    "ProbabilityOutcomeTarget",
     "build_probability_outcome_artifact",
     "list_probability_outcome_artifacts",
     "load_probability_outcome_artifact",
     "load_probability_outcome_artifact_for_run",
-    "mature_probability_source_snapshot",
     "probability_outcome_artifact_filename",
-    "probability_outcome_corpus_progress",
     "probability_outcome_payload_digest",
     "probability_outcome_required_dates",
     "probability_research_rows_from_outcome_artifacts",
-    "probability_samples_from_outcome_artifacts",
     "publish_built_probability_outcome_artifact",
     "publish_probability_outcome_artifact",
     "verify_probability_outcome_artifact",

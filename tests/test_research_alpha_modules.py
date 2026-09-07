@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime
 from types import SimpleNamespace
 
-from app.models.schemas import AlphaEvidencePoint, FactorCalibration, FactorLabReport, StandardFactor
+from app.models.research import AlphaEvidencePoint, FactorCalibration, FactorLabReport, StandardFactor
 from app.services.research_alpha import (
     ALPHA_VERDICT_RULES,
     MAX_MISSING_DATA_ITEMS,

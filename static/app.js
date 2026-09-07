@@ -1,3 +1,5 @@
+import { bindAdviceReviewEvents } from "./js/advice-review-events.js";
+import { bindStockNoteAlertEvents } from "./js/stock-note-alert-events.js";
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   GLOBAL_DATA_TTL_MS,
@@ -8,14 +10,8 @@ import {
   isAbortError,
 } from "./js/api.js";
 import {
-  addAlertRule,
-  alertRuleUpdatesFromForm,
-  evaluateAlerts,
-  removeAlertRule,
   renderAlertEvents,
   renderAlerts,
-  toggleAlertRuleEditor,
-  updateAlertRule,
 } from "./js/alerts.js";
 import {
   renderAdviceTimeline,
@@ -23,21 +19,9 @@ import {
   renderAdviceTimelineUnavailable,
 } from "./js/advice-timeline.js";
 import {
-  beginAdviceReviewEdit,
-  cancelAdviceReviewEdit,
-  deleteAdviceReviewPlan,
-  evaluateAdviceReviewPlan,
-  evaluateDueAdviceReviews,
   loadAdviceReviewDashboard,
   loadAdviceReviews,
-  loadMoreAdviceReviews,
-  retryAdviceReviewHistory,
-  selectAdviceReviewSnapshot,
-  setAdviceReviewEvaluationAsOf,
-  submitAdviceReviewPlan,
   syncAdviceReviewSnapshots,
-  toggleAdviceReviewHistory,
-  updateAdviceReviewDashboardFilters,
 } from "./js/advice-reviews.js";
 import { drawKlineChart } from "./js/chart.js";
 import { createChartInspector } from "./js/chart-inspector.js";
@@ -65,18 +49,12 @@ import {
   loadPaperTradingDashboard,
   runPaperTradingSimulation,
   selectPaperTradingRun,
-  selectPaperTradingPlan,
   syncPaperTradingPlans,
   updatePaperTradingAccount,
 } from "./js/paper-trading.js";
 import { createPrimaryNavigation } from "./js/primary-navigation.js";
 import {
-  addStockNote,
-  removeStockNote,
   renderNotes,
-  stockNoteUpdatesFromForm,
-  toggleStockNoteEditor,
-  updateStockNote,
 } from "./js/notes.js";
 import { disableAlertNotifications, enableAlertNotifications, initializeAlertNotifications } from "./js/notifications.js";
 import {
@@ -2363,6 +2341,16 @@ workspaceTabs.addEventListener("click", (event) => {
 });
 workspaceTabs.addEventListener("keydown", handleWorkspaceTabKeydown);
 
+bindAdviceReviewEvents({
+  state, currentWorkbenchMutationOptions, runButtonTask, setInlineFeedback,
+  setActiveSymbol, loadAll, runSubmitTask, setWorkspaceView,
+});
+bindStockNoteAlertEvents({
+  state, currentWorkbenchMutationOptions, clearInlineFeedback, runSubmitTask,
+  setMutationStatus, renderResearchActivityPanel, setInlineFeedback, revealMobileFeedback,
+  loadChartMarks, clearRowActionError, runButtonTask, showRowActionError, setInlineEditError,
+});
+
 $("researchActivityFilters").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-activity-filter]");
   if (!button) return;
@@ -2370,134 +2358,6 @@ $("researchActivityFilters").addEventListener("click", (event) => {
   if (!ACTIVITY_FILTERS.some((item) => item.value === filter)) return;
   state.researchActivityFilter = filter;
   renderResearchActivityPanel();
-});
-
-$("reviewAdviceId").addEventListener("change", () => {
-  selectAdviceReviewSnapshot(state);
-});
-
-for (const id of ["reviewDashboardStatus", "reviewDashboardSymbol", "reviewDashboardFrom", "reviewDashboardHorizon"]) {
-  $(id).addEventListener(id === "reviewDashboardSymbol" ? "input" : "change", () => {
-    updateAdviceReviewDashboardFilters(state);
-  });
-}
-
-$("evaluateDueReviews").addEventListener("click", async (event) => {
-  await runButtonTask(
-    event.currentTarget,
-    async () => {
-      const result = await evaluateDueAdviceReviews(state);
-      const options = currentWorkbenchMutationOptions();
-      if (options) await loadAdviceReviews(state, options);
-      return result;
-    },
-    { onError: (error) => setInlineFeedback("reviewDashboardFeedback", error) }
-  );
-});
-
-$("reviewDashboardQueue").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-review-open-symbol]");
-  if (!button) return;
-  setActiveSymbol(button.dataset.reviewOpenSymbol);
-  void loadAll({ reveal: true });
-});
-
-$("reviewPlanCancel").addEventListener("click", () => {
-  cancelAdviceReviewEdit(state);
-});
-
-$("reviewPlanLoadMore").addEventListener("click", async (event) => {
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  await runButtonTask(
-    event.currentTarget,
-    () => loadMoreAdviceReviews(state, options),
-    { isCurrent: options.isCurrent, onError: (error) => setInlineFeedback("reviewPlanFeedback", error) }
-  );
-});
-
-$("reviewPlanForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  const feedback = $("reviewPlanFeedback");
-  if (feedback) feedback.hidden = true;
-  try {
-    await runSubmitTask(event.currentTarget, state.adviceReviewEditingPlanId ? "更新中" : "建立中", async () => {
-      const saved = await submitAdviceReviewPlan(state, options);
-      await loadAdviceReviewDashboard(state, options);
-      syncPaperTradingPlans(state);
-      return saved;
-    });
-  } catch (error) {
-    if (!isAbortError(error) && options.isCurrent()) setInlineFeedback("reviewPlanFeedback", error);
-  }
-});
-
-$("reviewPlanList").addEventListener("click", async (event) => {
-  const paperButton = event.target.closest("button[data-paper-from-review]");
-  if (paperButton) {
-    setWorkspaceView("paper");
-    selectPaperTradingPlan(state, paperButton.dataset.paperFromReview);
-    return;
-  }
-  const editButton = event.target.closest("button[data-review-edit]");
-  if (editButton) {
-    beginAdviceReviewEdit(state, editButton.dataset.reviewEdit);
-    return;
-  }
-  const deleteButton = event.target.closest("button[data-review-delete]");
-  if (deleteButton) {
-    const options = currentWorkbenchMutationOptions();
-    if (!options) return;
-    await runButtonTask(
-      deleteButton,
-      async () => {
-        const removed = await deleteAdviceReviewPlan(state, deleteButton.dataset.reviewDelete, {
-          ...options,
-          confirm: (message) => window.confirm(message),
-        });
-        if (removed) {
-          await loadAdviceReviewDashboard(state, options);
-          syncPaperTradingPlans(state);
-        }
-        return removed;
-      },
-      { isCurrent: options.isCurrent, onError: (error) => setInlineFeedback("reviewPlanFeedback", error) }
-    );
-    return;
-  }
-  const historyRetryButton = event.target.closest("button[data-review-history-retry]");
-  if (historyRetryButton) {
-    const options = currentWorkbenchMutationOptions();
-    if (options) await retryAdviceReviewHistory(state, historyRetryButton.dataset.reviewHistoryRetry, options);
-    return;
-  }
-  const historyButton = event.target.closest("button[data-review-history]");
-  if (historyButton) {
-    const options = currentWorkbenchMutationOptions();
-    if (options) await toggleAdviceReviewHistory(state, historyButton.dataset.reviewHistory, options);
-    return;
-  }
-  const evaluateButton = event.target.closest("button[data-review-evaluate]");
-  if (!evaluateButton) return;
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  await runButtonTask(
-    evaluateButton,
-    async () => {
-      const evaluated = await evaluateAdviceReviewPlan(state, evaluateButton.dataset.reviewEvaluate, options);
-      if (evaluated) await loadAdviceReviewDashboard(state, options);
-      return evaluated;
-    },
-    { isCurrent: options.isCurrent, onError: (error) => setInlineFeedback("reviewPlanFeedback", error) }
-  );
-});
-
-$("reviewPlanList").addEventListener("change", (event) => {
-  const input = event.target.closest("input[data-review-as-of]");
-  if (!input) return;
-  setAdviceReviewEvaluationAsOf(state, input.dataset.reviewAsOf, input.value);
 });
 
 $("savePaperAccount").addEventListener("click", async (event) => {
@@ -2783,38 +2643,6 @@ $("watchList").addEventListener("submit", async (event) => {
   }
 });
 
-$("alertForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  clearInlineFeedback("alertFormFeedback");
-  try {
-    await runSubmitTask(event.currentTarget, "添加中", () => addAlertRule(state, options));
-    setMutationStatus("idle");
-    renderResearchActivityPanel();
-  } catch (error) {
-    if (!isAbortError(error) && options.isCurrent()) {
-      setInlineFeedback("alertFormFeedback", error);
-      setMutationStatus("error", "提醒写入失败，原列表和草稿已保留", "warn");
-      revealMobileFeedback($("alertForm"));
-    }
-  }
-});
-
-$("evaluateAlerts").addEventListener("click", async () => {
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  try {
-    await evaluateAlerts(state, options);
-    renderResearchActivityPanel();
-  } catch (error) {
-    if (!isAbortError(error) && options.isCurrent()) {
-      $("alertEvents").innerHTML = `<div class="alert-event"><strong>检查失败</strong><p>${escapeHtml(error.message)}</p></div>`;
-      revealMobileFeedback($("alertEvents"));
-    }
-  }
-});
-
 $("enableAlertNotifications").addEventListener("click", async () => {
   if (state.alertNotificationsEnabled) {
     disableAlertNotifications(state);
@@ -2866,142 +2694,6 @@ $("runRuntimeCleanup").addEventListener("click", async () => {
     () => runRuntimeCleanup(preview, { confirm: (message) => window.confirm(message) }),
     { onError: (error) => setInlineFeedback("localDataFeedback", error) }
   );
-});
-
-$("alertList").addEventListener("click", async (event) => {
-  const editButton = event.target.closest("button[data-alert-edit]");
-  if (editButton) {
-    toggleAlertRuleEditor(editButton, true);
-    return;
-  }
-  const cancelButton = event.target.closest("button[data-alert-cancel]");
-  if (cancelButton) {
-    const row = cancelButton.closest?.(".alert-row");
-    toggleAlertRuleEditor(row?.querySelector?.("[data-alert-edit]") || cancelButton, false);
-    return;
-  }
-  const toggleButton = event.target.closest("button[data-alert-toggle]");
-  if (toggleButton) {
-    const options = currentWorkbenchMutationOptions();
-    if (!options) return;
-    clearRowActionError(toggleButton);
-    const completed = await runButtonTask(
-      toggleButton,
-      () => updateAlertRule(state, toggleButton.dataset.alertToggle, { enabled: toggleButton.dataset.alertEnabled === "true" }, options),
-      { isCurrent: options.isCurrent, onError: (error) => showRowActionError(toggleButton, error) }
-    );
-    if (completed) renderResearchActivityPanel();
-    return;
-  }
-  const button = event.target.closest("button[data-alert-remove]");
-  if (!button) return;
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  clearRowActionError(button);
-  const completed = await runButtonTask(
-    button,
-    () => removeAlertRule(state, button.dataset.alertRemove, options),
-    { isCurrent: options.isCurrent, onError: (error) => showRowActionError(button, error) }
-  );
-  if (completed) renderResearchActivityPanel();
-});
-
-$("alertList").addEventListener("submit", async (event) => {
-  const form = event.target.closest("form[data-alert-edit-form]");
-  if (!form) return;
-  event.preventDefault();
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  const feedback = form.querySelector(".inline-edit-feedback");
-  if (feedback) feedback.hidden = true;
-  try {
-    await runSubmitTask(form, "保存中", () =>
-      updateAlertRule(state, form.dataset.alertId, alertRuleUpdatesFromForm(form), options)
-    );
-    renderResearchActivityPanel();
-  } catch (error) {
-    if (!isAbortError(error) && options.isCurrent()) setInlineEditError(form, error);
-  }
-});
-
-$("noteForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  clearInlineFeedback("noteFormFeedback");
-  try {
-    await runSubmitTask(event.currentTarget, "保存中", () => addStockNote(state, loadChartMarks, options));
-    setMutationStatus("idle");
-    renderResearchActivityPanel();
-  } catch (error) {
-    if (!isAbortError(error) && options.isCurrent()) {
-      setInlineFeedback("noteFormFeedback", error);
-      setMutationStatus("error", "笔记写入失败，原列表和草稿已保留", "warn");
-      revealMobileFeedback($("noteForm"));
-    }
-  }
-});
-
-$("noteList").addEventListener("click", async (event) => {
-  const editButton = event.target.closest("button[data-note-edit]");
-  if (editButton) {
-    toggleStockNoteEditor(editButton, true);
-    return;
-  }
-  const cancelButton = event.target.closest("button[data-note-cancel]");
-  if (cancelButton) {
-    const row = cancelButton.closest?.(".note-row");
-    toggleStockNoteEditor(row?.querySelector?.("[data-note-edit]") || cancelButton, false);
-    return;
-  }
-  const toggleButton = event.target.closest("button[data-note-toggle]");
-  if (toggleButton) {
-    const options = currentWorkbenchMutationOptions();
-    if (!options) return;
-    clearRowActionError(toggleButton);
-    const completed = await runButtonTask(
-      toggleButton,
-      () => updateStockNote(state, toggleButton.dataset.noteToggle, { visible: toggleButton.dataset.noteVisible === "true" }, loadChartMarks, options),
-      { isCurrent: options.isCurrent, onError: (error) => showRowActionError(toggleButton, error) }
-    );
-    if (completed) renderResearchActivityPanel();
-    return;
-  }
-  const button = event.target.closest("button[data-note-remove]");
-  if (!button) return;
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  clearRowActionError(button);
-  const completed = await runButtonTask(
-    button,
-    () => removeStockNote(state, button.dataset.noteRemove, loadChartMarks, options),
-    { isCurrent: options.isCurrent, onError: (error) => showRowActionError(button, error) }
-  );
-  if (completed) renderResearchActivityPanel();
-});
-
-$("noteList").addEventListener("submit", async (event) => {
-  const form = event.target.closest("form[data-note-edit-form]");
-  if (!form) return;
-  event.preventDefault();
-  const options = currentWorkbenchMutationOptions();
-  if (!options) return;
-  const feedback = form.querySelector(".inline-edit-feedback");
-  if (feedback) feedback.hidden = true;
-  try {
-    await runSubmitTask(form, "保存中", () =>
-      updateStockNote(
-        state,
-        form.dataset.noteId,
-        stockNoteUpdatesFromForm(form),
-        loadChartMarks,
-        options
-      )
-    );
-    renderResearchActivityPanel();
-  } catch (error) {
-    if (!isAbortError(error) && options.isCurrent()) setInlineEditError(form, error);
-  }
 });
 
 $("markFilters").addEventListener("click", (event) => {

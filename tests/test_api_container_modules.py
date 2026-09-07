@@ -12,7 +12,7 @@ from app.config import Settings
 from app.services.cache import SQLiteCache
 from app.services.datahub import DataHub
 from app.services.domain_service_bundle import DomainServiceBundle
-from app.services.scheduler import LocalDataScheduler
+from app.services.scheduler_service import LocalDataScheduler
 from app.repositories.paper_trading import PaperTradingRepository
 from tests.factories import make_quote
 
@@ -85,9 +85,7 @@ def test_cache_composes_bundles_without_domain_repository_reads(monkeypatch, tmp
     cache = SQLiteCache(tmp_path / "composed.sqlite3")
 
     assert cache.market_scan_repo is cache.repositories.market_scan
-    assert cache.discovery_service is cache.domain_services.discovery
-    assert cache.market_scan_screen_alert_service is cache.domain_services.market_scan_screen_alert
-    assert cache.discovery_service._screen_alerts is cache.market_scan_screen_alert_service
+    assert cache.domain_services.discovery._screen_alerts is cache.domain_services.market_scan_screen_alert
     assert cache.table_counts()["paper_trading_account"] == 1
 
 

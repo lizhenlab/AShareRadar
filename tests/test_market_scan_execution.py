@@ -17,7 +17,7 @@ from app.models.market_scan import (
     MarketScanResultWrite,
     MarketScanSeed,
 )
-from app.models.schemas import Kline, Quote, StockInfo
+from app.models.market import Kline, Quote, StockInfo
 import app.services.market_scan_completion as market_scan_completion
 from app.services.market_scan_execution import MarketScanExecutor
 import app.services.market_scan_manager as market_scan_manager
@@ -27,7 +27,7 @@ from app.services.market_scan_quote_provenance import normalized_quote_batch
 from app.services.cache import SQLiteCache
 from app.services.market_scan_recovery import ProviderWaitBudget
 from app.services.market_scan_stock_evaluation import MarketScanStockEvaluator
-from app.services.provider_errors import ProviderChainUnavailable
+from app.utils.provider_errors import ProviderChainUnavailable
 from app.utils.audit_time import parse_audit_time
 from app.utils.market_time import market_local_naive
 from tests.factories import make_stock_info

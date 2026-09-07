@@ -13,8 +13,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.db.schema_migrations import apply_compat_schema, ensure_column, run_once, table_exists
-from app.models.schemas import AlertRuleInput, AlertRuleUpdate, MinuteKline, Quote, StockConceptItem, StockNoteInput, StockNoteItem, StockNoteUpdate
-from app.services import research
+from app.models.market import MinuteKline, Quote, StockConceptItem
+from app.models.user_data import AlertRuleInput, AlertRuleUpdate, StockNoteInput, StockNoteItem, StockNoteUpdate
+from app.services.research_replay import _replay_pattern_note
 from app.services.cache import SQLiteCache
 from app.services.chart_marks import _note_marks
 from app.services.analysis import build_analysis
@@ -22,11 +23,9 @@ from app.services.data_quality import build_data_quality
 from app.services.datahub import DataHub
 from app.services.market_sampling import unique_standard_symbols
 from app.repositories.alerts import AlertStateDecision
-from app.services.research import (
-    build_feature_snapshot,
-    build_theme_context_report,
-)
-from app.services.scheduler import LocalDataScheduler
+from app.services.research_features import build_feature_snapshot
+from app.services.research_theme import build_theme_context_report
+from app.services.scheduler_service import LocalDataScheduler
 from app.services.stock_insights import build_stock_insight_bundle
 from app.services.workbench_context import WorkbenchContextCache
 from app.config import Settings
@@ -1929,6 +1928,6 @@ class _FailingRuntimeEventRepo:
 
 class ReplayConfidenceTests(unittest.TestCase):
     def test_replay_pattern_note_warns_when_sample_is_small(self) -> None:
-        note = research._replay_pattern_note("放量突破", 3, 80.0, 3.2)
+        note = _replay_pattern_note("放量突破", 3, 80.0, 3.2)
         self.assertIn("样本只有 3 次", note)
         self.assertIn("不宜提高权重", note)

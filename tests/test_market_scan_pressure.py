@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.models.schemas import Kline, StockInfo
+from app.models.market import Kline, StockInfo
 from app.services.datahub_runtime import ProviderCallBusyError, ProviderCallTimeoutError
 from app.services.market_scan_execution import MarketScanExecutor
 from app.services.market_scan_pressure import MarketScanPressureController

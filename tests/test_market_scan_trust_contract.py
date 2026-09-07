@@ -27,7 +27,7 @@ from app.models.market_scan import (
     MarketScanScoreLayerDiagnostic,
     MarketScanSeed,
 )
-from app.models.schemas import Kline
+from app.models.market import Kline
 from app.services.cache import SQLiteCache
 from app.services.market_scan_completion import (
     MARKET_SCAN_SCORE_DISTRIBUTION_POLICY,
@@ -44,10 +44,10 @@ from app.services.market_scan_contracts import (
 from app.services.market_scan_execution import MarketScanExecutor
 from app.services.market_scan_manager import market_scan_rule_contract, market_scan_rule_version
 from app.services import market_scan_manager
+from app.services.market_scan_replay import rank_score_details
 from app.services.market_scan_scoring import (
     MarketScanReplayError,
     market_scan_score_spec,
-    rank_score_details,
     replay_score_details,
     score_market_scan_item,
     stable_score_spec_hash,

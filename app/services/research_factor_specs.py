@@ -501,10 +501,6 @@ def _recent_valid_flow_rows(rows: list[Kline], index: int) -> list[Kline]:
     return [item for item in _window_rows(rows, index, FLOW_LOOKBACK_WINDOW) if _valid_positive_volume_row(item)]
 
 
-def _flow_amounts(rows: list[Kline]) -> tuple[float, float]:
-    metrics = _flow_metrics(rows)
-    return metrics.up_amount, metrics.down_amount
-
 
 def _flow_metrics(rows: list[Kline]) -> FlowMetrics:
     up_amount = 0.0

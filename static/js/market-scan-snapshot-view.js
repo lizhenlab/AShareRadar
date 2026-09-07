@@ -147,11 +147,12 @@ function scoreBreakdown(leader, finalScore, refinement, ruleDeltas, weightedTerm
       ${definition("趋势增减分", leader.trend_delta, 4, true)}
       ${termDefinitions(ruleDeltas, true)}
       ${definition("质量扣分", finalScore.quality_penalty, 4, true, -1)}
-      ${definition("扣分前基础分", finalScore.base, 4)}
-      ${adjustment}
+      ${isContinuousTrend ? adjustment : ""}
+      ${definition(isContinuousTrend ? "调整后基础分" : "质量扣分后基础分", finalScore.base, 4)}
+      ${isContinuousTrend ? "" : adjustment}
       ${definition("原始排名分", finalScore.raw, 6)}
       ${definition("趋势强度取整分", finalScore.score)}
-    </dl></section>
+    </dl>${isContinuousTrend ? '<p class="market-scan-snapshot-rule">本批次龙头分等于基础趋势分；质量扣分和连续趋势调整在此基础上计算。</p>' : ""}</section>
     <section><h4>${componentTitle}</h4><dl>
       ${definition(componentLabel, refinement.score, 6)}
       ${termDefinitions(weightedTerms, false)}

@@ -11,7 +11,7 @@ import time
 import pytest
 
 from app.config import Settings
-from app.models.schemas import Quote
+from app.models.market import Quote
 from app.services import trading_calendar
 from app.services.cache import SQLiteCache
 from app.services.data_quality_time import (

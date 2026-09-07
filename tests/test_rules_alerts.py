@@ -12,8 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
-from app.models.schemas import AlertRuleInput, AlertRuleItem, AlertRuleUpdate, DataQuality, FactorCalibration, StandardFactor, StockNoteItem
+from app.models.analysis import DataQuality
+from app.models.research import FactorCalibration, StandardFactor
+from app.models.user_data import AlertRuleInput, AlertRuleItem, AlertRuleUpdate, StockNoteItem
 from app.services.cache import SQLiteCache
+from app.repositories.alerts import AlertStateUpdateResult
 from app.services.alerts import (
     AlertRuleEvaluator,
     _evaluate_rule,
@@ -24,7 +27,8 @@ from app.services.alerts import (
 )
 from app.services.chart_marks import _note_marks
 from app.services.research_factors import _factor_calibration_impact, _factor_score_impact, _factor_specs
-from app.services.stock_insights import RULE_VERSION, rule_definitions
+from app.models.rule_versions import RULE_VERSION
+from app.services.stock_rule_registry import rule_definitions
 from tests.factories import make_quote as _quote
 
 
@@ -153,9 +157,9 @@ def test_alert_cache_reads_and_state_write_run_off_event_loop_thread() -> None:
             self.io_threads.append(threading.get_ident())
             return [rule]
 
-        def update_alert_rule_state(self, *_args, **_kwargs):
+        def update_alert_rule_state_checked(self, *_args, **_kwargs):
             self.io_threads.append(threading.get_ident())
-            return None
+            return AlertStateUpdateResult(applied=True)
 
         def alert_rule(self, _rule_id: int):
             self.io_threads.append(threading.get_ident())
@@ -197,8 +201,8 @@ def test_alert_evaluation_loads_every_enabled_rule_without_default_limit() -> No
             self.rule_query = kwargs
             return rules
 
-        def update_alert_rule_state(self, *_args, **_kwargs):
-            return None
+        def update_alert_rule_state_checked(self, *_args, **_kwargs):
+            return AlertStateUpdateResult(applied=True)
 
         def alert_rule(self, rule_id: int):
             return rules[rule_id - 1]
@@ -264,7 +268,7 @@ def test_alert_state_write_failure_keeps_per_rule_degradation() -> None:
         def alert_rules(self, **_kwargs):
             return [rule]
 
-        def update_alert_rule_state(self, *_args, **_kwargs):
+        def update_alert_rule_state_checked(self, *_args, **_kwargs):
             raise RuntimeError("persist failed")
 
         def alert_rule(self, _rule_id: int):
@@ -303,8 +307,8 @@ def test_alert_batch_continues_after_sqlite_os_and_unknown_rule_failures() -> No
         def alert_rules(self, **_kwargs):
             return rules
 
-        def update_alert_rule_state(self, *_args, **_kwargs):
-            return None
+        def update_alert_rule_state_checked(self, *_args, **_kwargs):
+            return AlertStateUpdateResult(applied=True)
 
         def alert_rule(self, rule_id: int):
             self.readback_ids.append(rule_id)
@@ -688,9 +692,9 @@ class _AlertCacheStub:
     def alert_rule(self, _rule_id: int):
         return None
 
-    def update_alert_rule_state(self, rule: AlertRuleItem, *, quote, **_kwargs):
+    def update_alert_rule_state_checked(self, rule: AlertRuleItem, *, quote, **_kwargs):
         self.persisted_quotes[rule.condition_type] = quote
-        return None
+        return AlertStateUpdateResult(applied=True)
 
 
 class _AlertDataHubStub:

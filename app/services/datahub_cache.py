@@ -19,7 +19,6 @@ from app.services.data_quality_time import (
     market_local_datetime,
 )
 from app.utils.symbols import standard_symbol
-from app.utils.time import non_negative_seconds_since_text
 
 
 MINUTE_INTERVAL_ALIASES = {
@@ -71,14 +70,6 @@ def _normalize_symbols(symbols: Iterable[str]) -> list[str]:
     return normalized
 
 
-def _ordered_complete_quotes(quotes: list[Quote], requested_symbols: list[str], source_name: str) -> list[Quote]:
-    by_symbol = {standard_symbol(f"{quote.code}.{quote.market}"): quote for quote in quotes}
-    missing = [symbol for symbol in requested_symbols if symbol not in by_symbol]
-    if missing:
-        raise RuntimeError(f"{source_name} 行情缺失：{','.join(missing)}")
-    return [by_symbol[symbol] for symbol in requested_symbols]
-
-
 def _matched_quotes(quotes: list[Quote], requested_symbols: list[str]) -> tuple[list[Quote], list[str]]:
     by_symbol = {standard_symbol(f"{quote.code}.{quote.market}"): quote for quote in quotes}
     matched = [by_symbol[symbol] for symbol in requested_symbols if symbol in by_symbol]
@@ -103,23 +94,6 @@ def _quote_with_cache_label(quote: Quote, label: str) -> Quote:
 
 def _stock_pool_rows_are_authoritative(rows: list[StockInfo], min_count: int) -> bool:
     return len(rows) >= max(1, min_count)
-
-
-def _stock_pool_cache_is_authoritative(
-    cache,
-    max_age_seconds: int,
-    min_count: int,
-    fresh_count: int | None = None,
-) -> bool:
-    stock_count = cache.stock_count if fresh_count is None else fresh_count
-    return _stock_pool_cache_is_fresh(cache, max_age_seconds) and stock_count >= max(1, min_count)
-
-
-def _stock_pool_cache_is_fresh(cache, max_age_seconds: int) -> bool:
-    if max_age_seconds <= 0 or not cache.latest_stock_at or cache.stock_count <= 0:
-        return False
-    age = non_negative_seconds_since_text(cache.latest_stock_at)
-    return age is not None and age <= max_age_seconds
 
 
 def _kline_cache_is_fresh(klines: list[Kline], now: datetime | None = None) -> bool:
@@ -353,6 +327,3 @@ def normalize_minute_interval(interval: str) -> str:
     if normalized in MINUTE_INTERVAL_ALIASES:
         return MINUTE_INTERVAL_ALIASES[normalized]
     raise ValueError(f"分钟周期只支持 {SUPPORTED_MINUTE_INTERVAL_TEXT}")
-
-
-_normalize_minute_interval = normalize_minute_interval

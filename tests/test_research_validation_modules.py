@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.models.schemas import FactorCalibration, SignalValidationItem, StandardFactor
+from app.models.research import FactorCalibration, SignalValidationItem, StandardFactor
 from app.services.research_validation import (
     VALIDATION_CONFIDENCE_TIMEFRAME_RULES,
     VALIDATION_OVERALL_RULES,

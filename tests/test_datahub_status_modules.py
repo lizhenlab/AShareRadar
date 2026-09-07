@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.models.schemas import ProviderCapabilityStatus, ProviderStatus
+from app.models.system import ProviderCapabilityStatus, ProviderStatus
 from app.services.datahub_status import (
     DEFAULT_PROVIDER_RECOVERY_ACTION,
     PROVIDER_RECOVERY_ACTION_RULES,
     _capability_status_map,
     _first_healthy_provider,
-    _provider_error_text,
+    provider_error_text,
     _provider_recovery_action,
     _provider_source_key,
     _provider_success_rate,
@@ -73,8 +73,8 @@ def test_provider_recovery_action_cleans_provider_name_and_error_text() -> None:
 
 
 def test_provider_error_text_collapses_whitespace_and_falls_back_for_blank_messages() -> None:
-    assert _provider_error_text(ValueError("  bad\n  thing\t")) == "bad thing"
-    assert _provider_error_text(RuntimeError(" \n\t ")) == "RuntimeError"
+    assert provider_error_text(ValueError("  bad\n  thing\t")) == "bad thing"
+    assert provider_error_text(RuntimeError(" \n\t ")) == "RuntimeError"
 
 
 def test_provider_success_rate_ignores_non_finite_and_negative_counts() -> None:

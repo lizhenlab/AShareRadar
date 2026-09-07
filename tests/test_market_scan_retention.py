@@ -323,7 +323,7 @@ def test_individual_probability_assessment_recursively_pins_source_run(
     assert cache.cleanup_runtime_rows()["market_scan_run"] == 0
 
 
-def test_individual_probability_docs_fallback_pins_when_primary_missing(
+def test_individual_probability_documentation_sample_does_not_pin_runtime_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -331,11 +331,12 @@ def test_individual_probability_docs_fallback_pins_when_primary_missing(
     fallback = project_root / "docs" / "research" / "artifacts"
     fallback.mkdir(parents=True)
     _write_individual_assessment(fallback, run_ids=(71, 77))
-    monkeypatch.setattr(artifact_retention, "_PROJECT_ROOT", project_root)
+    monkeypatch.setattr(artifact_retention, "_PROJECT_ROOT", project_root, raising=False)
 
     protection = market_scan_artifact_protection(project_root / "data" / "ashare_radar.sqlite3")
 
-    assert {71, 77}.issubset(protection.run_ids)
+    assert protection.run_ids == frozenset()
+    assert all(snapshot.rule.relative_path.parts[0] != "docs" for snapshot in protection.snapshots)
 
 
 @pytest.mark.parametrize("scope", ["payload", "generated_at+payload"])
@@ -460,7 +461,7 @@ def test_individual_probability_primary_ignores_broken_docs_fallback(
     primary = tmp_path / "research" / "individual_probability"
     primary.mkdir(parents=True)
     _write_individual_assessment(primary, run_ids=(10,))
-    monkeypatch.setattr(artifact_retention, "_PROJECT_ROOT", project_root)
+    monkeypatch.setattr(artifact_retention, "_PROJECT_ROOT", project_root, raising=False)
 
     protection = market_scan_artifact_protection(tmp_path / "runtime.sqlite3")
 

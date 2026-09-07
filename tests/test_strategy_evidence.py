@@ -40,6 +40,7 @@ def test_retained_v55_artifact_is_compact_and_projects_real_shadow_evidence() ->
     projection = report.get("artifact_projection")
     assert isinstance(projection, dict)
     assert projection["schema_version"] == "market-scan-shadow-comparison-compact-v1"
+    assert _OFFLINE_REPORT == ROOT / "app" / "resources" / "strategy_shadow_baseline.json"
     assert _OFFLINE_REPORT.stat().st_size < 10_000_000
     assert "probability_research" not in report["production"]
     assert all("probability_research" not in candidate for candidate in report["candidates"].values())
@@ -67,7 +68,7 @@ def test_evidence_center_reuses_offline_report_and_verifies_execution_digest(
         lambda: _evaluation_report("official"),
     )
 
-    evidence = cache.strategy_evidence_service.refresh(
+    evidence = cache.domain_services.strategy_evidence.refresh(
         strategy_id,
         revision=1,
         mode=StrategyEvidenceRefreshRequest().mode,
@@ -102,7 +103,7 @@ def test_evidence_center_reuses_offline_report_and_verifies_execution_digest(
     assert evidence.baseline_generated_at == "2026-07-30T13:16:29Z"
     assert evidence.baseline_projection_schema_version is None
     assert len(evidence.baseline_report_digest or "") == 64
-    assert cache.strategy_evidence_service.latest(strategy_id, revision=1, mode="official") == evidence
+    assert cache.domain_services.strategy_evidence.latest(strategy_id, revision=1, mode="official") == evidence
 
 
 @pytest.mark.parametrize("mutation", ("tampered", "legacy_backfill"))
@@ -139,7 +140,7 @@ def test_evidence_refresh_rejects_untrusted_execution_source_snapshot(
             )
 
     with pytest.raises(StrategyEvidenceIntegrityError, match="来源榜单"):
-        cache.strategy_evidence_service.refresh(
+        cache.domain_services.strategy_evidence.refresh(
             strategy_id,
             revision=1,
             mode="official",
@@ -186,7 +187,7 @@ def test_evidence_refresh_rejects_distribution_degraded_execution_source(
         )
 
     with pytest.raises(StrategyEvidenceIntegrityError, match="来源榜单"):
-        cache.strategy_evidence_service.refresh(
+        cache.domain_services.strategy_evidence.refresh(
             strategy_id,
             revision=1,
             mode="official",
@@ -205,7 +206,7 @@ def test_evidence_center_does_not_claim_custom_strategy_effectiveness_without_ex
         lambda: _evaluation_report("official"),
     )
 
-    evidence = cache.strategy_evidence_service.refresh(
+    evidence = cache.domain_services.strategy_evidence.refresh(
         strategy_id,
         revision=1,
         mode="official",
@@ -255,8 +256,8 @@ def test_latest_evidence_rejects_payload_tamper_without_falling_back(
         "app.services.strategy_evidence._load_offline_evaluation_report",
         lambda: _evaluation_report("official"),
     )
-    cache.strategy_evidence_service.refresh(strategy_id, revision=1, mode="official")
-    cache.strategy_evidence_service.refresh(strategy_id, revision=1, mode="official")
+    cache.domain_services.strategy_evidence.refresh(strategy_id, revision=1, mode="official")
+    cache.domain_services.strategy_evidence.refresh(strategy_id, revision=1, mode="official")
     with cache._connect() as conn:  # noqa: SLF001 - integrity boundary mutation
         row = conn.execute("SELECT id, evidence_json FROM strategy_evidence_snapshot ORDER BY id DESC LIMIT 1").fetchone()
         payload = json.loads(str(row["evidence_json"]))
@@ -267,7 +268,7 @@ def test_latest_evidence_rejects_payload_tamper_without_falling_back(
         )
 
     with pytest.raises(StrategyEvidenceIntegrityError, match="摘要不一致"):
-        cache.strategy_evidence_service.latest(strategy_id, revision=1, mode="official")
+        cache.domain_services.strategy_evidence.latest(strategy_id, revision=1, mode="official")
 
 
 def test_latest_evidence_rejects_resealed_row_identity_mismatch(
@@ -279,7 +280,7 @@ def test_latest_evidence_rejects_resealed_row_identity_mismatch(
         "app.services.strategy_evidence._load_offline_evaluation_report",
         lambda: _evaluation_report("official"),
     )
-    cache.strategy_evidence_service.refresh(strategy_id, revision=1, mode="official")
+    cache.domain_services.strategy_evidence.refresh(strategy_id, revision=1, mode="official")
     with cache._connect() as conn:  # noqa: SLF001 - integrity boundary mutation
         row = conn.execute("SELECT id, evidence_json FROM strategy_evidence_snapshot ORDER BY id DESC LIMIT 1").fetchone()
         payload = json.loads(str(row["evidence_json"]))
@@ -298,7 +299,7 @@ def test_latest_evidence_rejects_resealed_row_identity_mismatch(
         )
 
     with pytest.raises(StrategyEvidenceIntegrityError, match="数据库身份"):
-        cache.strategy_evidence_service.latest(strategy_id, revision=1, mode="official")
+        cache.domain_services.strategy_evidence.latest(strategy_id, revision=1, mode="official")
 
 
 def test_refresh_rejects_tampered_execution_before_saving_evidence(
@@ -328,7 +329,7 @@ def test_refresh_rejects_tampered_execution_before_saving_evidence(
         )
 
     with pytest.raises(StrategyEvidenceIntegrityError, match="执行结果摘要"):
-        cache.strategy_evidence_service.refresh(strategy_id, revision=1, mode="official")
+        cache.domain_services.strategy_evidence.refresh(strategy_id, revision=1, mode="official")
     with cache._connect() as conn:  # noqa: SLF001 - zero-write assertion
         assert conn.execute("SELECT COUNT(*) FROM strategy_evidence_snapshot").fetchone()[0] == 0
 
@@ -444,7 +445,7 @@ def test_evidence_center_projects_typed_shadow_candidate_artifact_without_mutati
         lambda: report,
     )
 
-    evidence = cache.strategy_evidence_service.refresh(
+    evidence = cache.domain_services.strategy_evidence.refresh(
         strategy_id,
         revision=1,
         mode="official",

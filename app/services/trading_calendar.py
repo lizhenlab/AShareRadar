@@ -261,10 +261,6 @@ def calendar_source(value: date | None = None) -> str:
     return calendar_status(value).source.value
 
 
-def refresh_trade_calendar() -> int:
-    return refresh_trade_calendar_result().trade_date_count
-
-
 def refresh_trade_calendar_result() -> TradeCalendarRefreshResult:
     result = _fetch_akshare_trade_dates_result()
     if not result.days:
@@ -593,10 +589,6 @@ def _save_days(days: Iterable[date]) -> None:
         except BaseException:
             temporary_path.unlink(missing_ok=True)
             raise
-
-
-def _fetch_akshare_trade_dates() -> set[date]:
-    return _fetch_akshare_trade_dates_result().days
 
 
 def _fetch_akshare_trade_dates_result() -> TradeDateFetchResult:

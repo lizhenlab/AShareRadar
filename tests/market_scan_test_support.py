@@ -10,9 +10,9 @@ from app.models.market_scan import (
     MarketScanPublicationDiagnostic,
     MarketScanPublicationDiagnostics,
 )
-from app.models.schemas import Kline, Quote, StockInfo
+from app.models.market import Kline, Quote, StockInfo
 from app.services.cache import SQLiteCache
-from app.services.datahub_metadata import StockPoolResolution
+from app.services.datahub_metadata_stock_pool import StockPoolResolution
 from app.services.market_scan_manager import MarketScanManager, market_scan_rule_version
 from tests.factories import make_kline, make_quote, make_stock_info
 

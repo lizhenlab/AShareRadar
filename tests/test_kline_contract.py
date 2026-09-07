@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 
 from app.config import Settings
-from app.models.schemas import Kline
+from app.models.market import Kline
 from app.services.cache import SQLiteCache
 from app.services.providers import stamp_daily_kline_contract
 from app.utils.time import now_text

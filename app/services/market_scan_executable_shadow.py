@@ -6,7 +6,6 @@ from collections import defaultdict
 from typing import Literal, Protocol, cast
 
 from app.models.market_scan import (
-    MARKET_SCAN_FULL_MARKET_SCOPE,
     MarketScanRun,
 )
 from app.models.market_scan_executable_shadow import (
@@ -218,15 +217,6 @@ def _shadow_portfolio_constraints() -> StrategyPortfolioConstraints:
         min_position_amount_cny=10_000.0,
         max_notional_share_of_daily_amount=EXECUTABLE_SHADOW_MAXIMUM_AMOUNT_SHARE,
     )
-
-
-def _require_frozen_official_full_market(run: MarketScanRun) -> None:
-    if run.status not in {"success", "degraded"}:
-        raise ValueError("可执行候选 Shadow 只接受已发布的冻结批次")
-    if run.mode != "official":
-        raise ValueError("可执行候选 Shadow 只接受盘后正式批次")
-    if run.scope != MARKET_SCAN_FULL_MARKET_SCOPE:
-        raise ValueError("可执行候选 Shadow 只接受完整全市场批次")
 
 
 def _virtual_strategy(

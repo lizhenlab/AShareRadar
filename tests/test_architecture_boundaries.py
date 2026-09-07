@@ -7,12 +7,14 @@ from functools import lru_cache
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
 LOWER_LAYER_DIRS = ("artifacts", "db", "repositories", "models", "utils")
 FORBIDDEN_LOWER_PREFIXES = ("app.api", "app.services", "app.workflows")
-MAX_CROSS_MODULE_PRIVATE_IMPORTS = 298
+MAX_CROSS_MODULE_PRIVATE_IMPORTS = 269
 PRIVATE_IMPORT_BASELINE = ROOT / "tests" / "fixtures" / "cross_module_private_imports_v1.json"
 
 
@@ -239,27 +241,83 @@ def _internal_dependencies(
     return dependencies
 
 
-def test_lower_layers_do_not_depend_on_services_workflows_or_api() -> None:
-    offenders = [
+def _lower_layer_import_offenders() -> list[str]:
+    known_modules = set(_python_modules())
+    return [
         f"{path.relative_to(ROOT)} -> {module}"
         for directory in LOWER_LAYER_DIRS
-        for path in sorted((APP / directory).glob("*.py"))
-        for module in sorted(_imported_modules(path, "", set(_python_modules())))
+        for path in sorted((APP / directory).rglob("*.py"))
+        for module in sorted(_imported_modules(path, _module_name(path), known_modules))
         if module.startswith(FORBIDDEN_LOWER_PREFIXES)
     ]
 
+
+def test_lower_layers_do_not_depend_on_services_workflows_or_api() -> None:
+    offenders = _lower_layer_import_offenders()
+
     assert offenders == []
+
+
+def _schema_facade_import_offenders() -> list[str]:
+    known_modules = set(_python_modules())
+    facade = APP / "models" / "schemas.py"
+    return [
+        str(path.relative_to(ROOT))
+        for path in sorted(APP.rglob("*.py"))
+        if path != facade and "app.models.schemas" in _imported_modules(path, _module_name(path), known_modules)
+    ]
 
 
 def test_production_code_uses_domain_models_instead_of_schema_facade() -> None:
-    facade = APP / "models" / "schemas.py"
-    offenders = [
-        str(path.relative_to(ROOT))
-        for path in sorted(APP.rglob("*.py"))
-        if path != facade and "app.models.schemas" in _imported_modules(path, "", set(_python_modules()))
-    ]
+    offenders = _schema_facade_import_offenders()
 
     assert offenders == []
+    assert not (APP / "models" / "schemas.py").exists()
+
+
+@pytest.mark.parametrize(
+    ("module_path", "source", "forbidden_module"),
+    [
+        ("repositories/example.py", "from ..services import scoring\n", "app.services"),
+        ("repositories/nested/example.py", "from ...services import scoring\n", "app.services"),
+        ("repositories/nested/example.py", "import app.services.scoring\n", "app.services.scoring"),
+        ("repositories/nested/__init__.py", "from ...services import scoring\n", "app.services"),
+    ],
+)
+def test_lower_layer_guard_rejects_relative_and_nested_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module_path: str, source: str, forbidden_module: str,
+) -> None:
+    app = tmp_path / "app"
+    path = app / module_path
+    path.parent.mkdir(parents=True)
+    path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(f"{__name__}.ROOT", tmp_path)
+    monkeypatch.setattr(f"{__name__}.APP", app)
+
+    offenders = _lower_layer_import_offenders()
+
+    assert offenders == [f"app/{module_path} -> {forbidden_module}"]
+
+
+@pytest.mark.parametrize(
+    ("module_path", "source"),
+    [
+        ("services/example.py", "from ..models.schemas import Quote\n"),
+        ("services/nested/example.py", "from ...models.schemas import Quote\n"),
+        ("services/nested/__init__.py", "from ...models.schemas import Quote\n"),
+    ],
+)
+def test_schema_facade_guard_rejects_relative_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module_path: str, source: str,
+) -> None:
+    app = tmp_path / "app"
+    path = app / module_path
+    path.parent.mkdir(parents=True)
+    path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(f"{__name__}.ROOT", tmp_path)
+    monkeypatch.setattr(f"{__name__}.APP", app)
+
+    assert _schema_facade_import_offenders() == [f"app/{module_path}"]
 
 
 def test_api_routes_do_not_resolve_domain_services_through_cache() -> None:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from app.models.schemas import MinuteAnalysisReport, MinuteKline, MinuteSupportResistance
-from app.services.datahub_cache import _normalize_minute_interval
+from app.models.market import MinuteKline
+from app.models.research import MinuteAnalysisReport, MinuteSupportResistance
+from app.services.datahub_cache import normalize_minute_interval
 from app.services.minute_analysis import (
     MINUTE_WARNING_RULES,
     MOMENTUM_RULES,
@@ -20,7 +21,7 @@ from app.services.minute_analysis import (
 def test_datahub_supports_documented_minute_intervals() -> None:
     supported = ["1m", "5m", "15m", "30m", "60m"]
 
-    assert [_normalize_minute_interval(interval) for interval in supported] == supported
+    assert [normalize_minute_interval(interval) for interval in supported] == supported
 
 
 def test_minute_t_plan_defensive_rule_wins_on_volume_selloff() -> None:

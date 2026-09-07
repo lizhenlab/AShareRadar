@@ -12,7 +12,7 @@ import pytest
 from app.services.instance_guard import FileInstanceGuard
 from app.services.market_scan_manager import MarketScanManager
 from app.services.runtime_coordinator import RuntimeCoordinator, RuntimeLeadership
-from app.services.scheduler import LocalDataScheduler
+from app.services.scheduler_service import LocalDataScheduler
 
 
 PROCESS_HANDSHAKE_TIMEOUT_SECONDS = 20

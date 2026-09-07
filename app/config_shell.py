@@ -150,7 +150,4 @@ def _shell_command_continues(line: str, control_text: str) -> bool:
     return control_text.rstrip().endswith(("&&", "||", "|", "|&"))
 
 
-_load_shell_env = load_shell_env
-
-
 __all__ = ["LLM_SHELL_SECRET_ENV_NAMES", "load_shell_env"]

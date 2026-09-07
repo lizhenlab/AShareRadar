@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.research import ReplayPatternStat, StockReplayAnalysis
-from app.models.schemas import ReplayCase
+from app.models.research import ReplayCase
 from app.services.research_replay import (
     MIN_REPLAY_KLINES,
     _detect_replay_pattern,

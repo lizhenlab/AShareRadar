@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 
-from app.models.schemas import StockConceptItem
+from app.models.market import StockConceptItem
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.research_features import build_feature_snapshot

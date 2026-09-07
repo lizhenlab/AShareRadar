@@ -19,7 +19,7 @@ from app.models.analysis import (
 from app.models.market import (
     Quote,
 )
-from app.repositories.alerts import AlertStateDecision, AlertStateUpdateResult
+from app.repositories.alerts import AlertStateDecision
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.utils.audit_time import audit_now_text as now_text
@@ -91,6 +91,9 @@ class AlertRuleEvaluator:
         analysis = await self._analysis_for_rule(rule)
         quote = await self._quote_for_rule(rule, analysis)
         triggered, current_value, message = _evaluate_rule(rule, quote, analysis)
+        if current_value is None:
+            # Missing evidence cannot establish a recovery or advance persisted state.
+            raise ValueError(message)
         quality = await self._quality_for_rule(rule, quote, analysis)
         message = _message_with_quality_gate(message, triggered, quality)
         event = await self._persist_state(rule, quote, triggered, message, quality.score)
@@ -140,7 +143,7 @@ class AlertRuleEvaluator:
     ) -> AlertEventItem | None:
         decision = decide_alert_transition(rule, triggered, self.checked_at, quality_score)
         update = await run_cache_io(
-            getattr(self.datahub.cache, "update_alert_rule_state_checked", self._legacy_state_update),
+            self.datahub.cache.update_alert_rule_state_checked,
             rule,
             checked_at=self.checked_at,
             state="触发" if triggered else "未触发",
@@ -151,19 +154,12 @@ class AlertRuleEvaluator:
             force_event=decision.should_create_event,
             decision=decision,
         )
-        if isinstance(update, AlertStateUpdateResult):
-            if not update.applied:
-                raise RuntimeError("预警规则在评估期间已修改或删除，请重新评估")
-            event = update.event
-        else:
-            event = update
+        if not update.applied:
+            raise RuntimeError("预警规则在评估期间已修改或删除，请重新评估")
+        event = update.event
         if event:
             self.new_event_count += 1
         return event
-
-    def _legacy_state_update(self, *args, **kwargs):
-        return self.datahub.cache.update_alert_rule_state(*args, **kwargs)
-
 
 def _failed_evaluation(rule: AlertRuleItem, exc: Exception) -> AlertEvaluationItem:
     detail = " ".join(sanitize_provider_error(exc).split()).strip() or exc.__class__.__name__
@@ -196,10 +192,6 @@ def _should_emit_event(rule: AlertRuleItem, triggered: bool, checked_at: str) ->
     if not triggered:
         return False
     return _should_emit_trigger_event(rule, checked_at, suppress_repeated_low_quality=False)
-
-
-def _force_alert_event(rule: AlertRuleItem, triggered: bool, checked_at: str, quality_score: int) -> bool:
-    return decide_alert_transition(rule, triggered, checked_at, quality_score).should_create_event
 
 
 def decide_alert_transition(

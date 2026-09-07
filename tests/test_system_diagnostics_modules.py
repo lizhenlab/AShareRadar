@@ -8,7 +8,8 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.models.schemas import CacheStats, ProviderCapability, ProviderCapabilityStatus, ProviderStatus, SchedulerStatus, StorageDiagnostics
+from app.models.market import ProviderCapability
+from app.models.system import CacheStats, ProviderCapabilityStatus, ProviderStatus, SchedulerStatus, StorageDiagnostics
 from app.services.cache import SQLiteCache
 from app.services.runtime_backup import create_runtime_backup, runtime_backup_storage
 from app.services.trading_calendar import TradeCalendarSource, TradeCalendarStatus

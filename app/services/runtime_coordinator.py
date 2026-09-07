@@ -6,6 +6,7 @@ import sys
 import threading
 
 from app.services.instance_guard import FileInstanceGuard, InstanceGuard
+from app.services.lifecycle_cleanup import await_cleanup
 from app.utils.provider_errors import sanitize_provider_error
 
 
@@ -34,6 +35,7 @@ class RuntimeLeadership:
         self._guard = guard
         self._state_lock = threading.Lock()
         self._is_leader = False
+        self._release_pending = False
 
     @classmethod
     def for_cache_path(cls, cache_path: Path) -> RuntimeLeadership:
@@ -44,6 +46,11 @@ class RuntimeLeadership:
         with self._state_lock:
             return self._is_leader
 
+    @property
+    def needs_release(self) -> bool:
+        with self._state_lock:
+            return self._is_leader or self._release_pending
+
     def service_guard(self) -> RuntimeLeadershipGuard:
         return RuntimeLeadershipGuard(self)
 
@@ -51,6 +58,9 @@ class RuntimeLeadership:
         with self._state_lock:
             if self._is_leader:
                 return True
+            if self._release_pending:
+                self._guard.release()
+                self._release_pending = False
             acquired = self._guard.acquire()
             if acquired:
                 self._is_leader = True
@@ -58,10 +68,12 @@ class RuntimeLeadership:
 
     def release(self) -> None:
         with self._state_lock:
-            if not self._is_leader:
+            if not self._is_leader and not self._release_pending:
                 return
             self._is_leader = False
+            self._release_pending = True
             self._guard.release()
+            self._release_pending = False
 
     def held_by_other(self) -> bool:
         with self._state_lock:
@@ -112,13 +124,23 @@ class RuntimeCoordinator:
             return active
 
     async def stop(self) -> None:
+        cleanup = asyncio.create_task(self._stop(), name="runtime-coordinator-stop")
+        cleanup.add_done_callback(_consume_future_exception)
+        await await_cleanup(cleanup)
+
+    async def _stop(self) -> None:
         self._stop_event.set()
-        self._set_scheduler_standby(False)
         runner = self._runner
         if runner is not None and runner is not asyncio.current_task():
             runner.cancel()
-            await asyncio.gather(runner, return_exceptions=True)
         async with self._lifecycle_lock:
+            # A concurrent start may have replaced the runner while stop waited.
+            self._stop_event.set()
+            self._set_scheduler_standby(False)
+            runner = self._runner
+            if runner is not None and runner is not asyncio.current_task():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
             self._runner = None
             await self._deactivate()
 
@@ -140,7 +162,7 @@ class RuntimeCoordinator:
                     await self._report_activation_failure(exc)
 
     async def _try_activate(self) -> bool:
-        acquired = await asyncio.to_thread(self.leadership.try_acquire)
+        acquired = await self._acquire_leadership()
         if not acquired:
             self._set_scheduler_standby(True)
             return False
@@ -151,17 +173,38 @@ class RuntimeCoordinator:
             await self.scheduler.start()
         except BaseException:
             self._active = False
-            try:
-                await self._stop_services(final=False)
-            finally:
-                await self._release_or_defer_leadership()
+            cleanup = asyncio.create_task(self._rollback_activation(), name="runtime-activation-rollback")
+            await await_cleanup(cleanup)
             raise
         self._active = True
         return True
 
+    async def _acquire_leadership(self) -> bool:
+        acquire = asyncio.create_task(
+            asyncio.to_thread(self.leadership.try_acquire), name="runtime-leadership-acquire"
+        )
+        try:
+            return await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            cleanup = asyncio.create_task(
+                self._release_cancelled_acquisition(acquire), name="runtime-cancelled-acquisition"
+            )
+            await await_cleanup(cleanup)
+            raise
+
+    async def _release_cancelled_acquisition(self, acquire: asyncio.Task[bool]) -> None:
+        if await acquire:
+            await self._release_leadership()
+
+    async def _rollback_activation(self) -> None:
+        try:
+            await self._stop_services(final=False)
+        finally:
+            await self._release_or_defer_leadership()
+
     async def _deactivate(self) -> None:
         self._active = False
-        if not self.leadership.is_leader:
+        if not self.leadership.needs_release:
             self._set_scheduler_standby(False)
             return
         try:

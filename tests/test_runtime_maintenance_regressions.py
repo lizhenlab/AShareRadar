@@ -97,7 +97,7 @@ def test_runtime_compaction_does_not_hold_shared_repository_lock(
     cleanup.start()
     assert compaction_started.wait(timeout=1)
 
-    presets = cache.discovery_service.list_presets(page=1, page_size=20)
+    presets = cache.domain_services.discovery.list_presets(page=1, page_size=20)
 
     release_compaction.set()
     cleanup.join(timeout=2)

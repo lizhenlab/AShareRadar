@@ -55,9 +55,9 @@ from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
 from app.services.data_quality_time import quote_event_time_error
 from app.services.llm_explainer import enhance_stock_answer
-from app.services.research import answer_stock_question
+from app.services.research_qa_answer_report import answer_stock_question
 from app.services.trading_calendar import is_trading_day
-from app.services.stock_insights import rule_definitions
+from app.services.stock_rule_registry import rule_definitions
 from app.services.workbench_context import WorkbenchContext, WorkbenchContextCache
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.clock import performance_now

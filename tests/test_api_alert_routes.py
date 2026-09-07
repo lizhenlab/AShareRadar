@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_datahub
 from app.api.errors import validation_exception_handler
 from app.api.routes import alerts
-from app.models.schemas import AlertEventItem, AlertRuleInput
+from app.models.user_data import AlertEventItem, AlertRuleInput
 from app.services.cache import SQLiteCache
 from tests.factories import make_quote
 

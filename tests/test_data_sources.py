@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from app.services.akshare_provider import AKShareProvider
+from app.services.tushare_provider import TushareProvider
+from app.services.baostock_provider import BaoStockProvider
+from app.services.futu_provider import FutuProvider
+
 import asyncio
 from contextlib import redirect_stderr
 from datetime import date, datetime, timedelta
@@ -15,17 +20,17 @@ from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.models.schemas import Kline, MinuteKline, OrderBook, OrderBookLevel, ProviderCapability, Quote
+from app.models.market import Kline, MinuteKline, OrderBook, OrderBookLevel, ProviderCapability, Quote
 from app.services import trading_calendar
 from app.services.cache import SQLiteCache
-from app.services.datahub import DataHub, _provider_error_text as _compat_provider_error_text, _provider_source_key as _compat_provider_source_key
-from app.services.datahub_cache import _normalize_minute_interval
+from app.services.datahub import DataHub
+from app.services.datahub_cache import normalize_minute_interval
 from app.services.datahub_klines import KlineCoordinator
-from app.services.datahub_metadata import MetadataCoordinator
+from app.services.datahub_metadata_coordinator import MetadataCoordinator
 from app.services.datahub_quotes import QuoteCoordinator
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.datahub_source_plan import SourcePlanBuilder
-from app.services.datahub_status import _provider_error_text, _provider_source_key
+from app.services.datahub_status import provider_error_text, _provider_source_key
 from app.utils.clock import market_now_naive
 from app.services.akshare_provider import (
     AKShareFetchError,
@@ -57,18 +62,12 @@ from app.services.eastmoney_client import (
     eastmoney_history_json,
     merge_no_proxy,
 )
-from app.services.provider_errors import (
-    ProviderCoverageMiss,
-    ProviderError,
-    ProviderInstrumentDataError,
-    ProviderProtocolError,
-    ProviderTransportError,
-)
+from app.utils.provider_errors import ProviderCoverageMiss, ProviderError, ProviderInstrumentDataError, ProviderProtocolError, ProviderTransportError
 from app.services.provider_registry import provider_priority
 from app.services.providers import stamp_daily_kline_contract
 from app.services.provider_stock_mappers import stock_info_from_baostock_row
 from app.services.local_metadata_provider import LocalIndividualStockProvider
-from app.services.optional_providers import _import_akshare
+from app.services.akshare_provider import _import_akshare
 from app.services.sina_client import sina_bj_stock_pool_rows
 from app.config import Settings
 from app.utils.errors import NotFoundError
@@ -167,7 +166,6 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(_provider_source_key("腾讯行情·缓存"), "tencent")
         self.assertEqual(_provider_source_key("AKShare"), "akshare")
         self.assertEqual(_provider_source_key("本地演示数据"), "demo")
-        self.assertIs(_compat_provider_source_key, _provider_source_key)
 
     def test_single_source_consistency_does_not_self_compare(self) -> None:
         async def run_check(path: Path) -> tuple[str, list[str], int]:
@@ -260,14 +258,13 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(rows[1].source, "补齐测试源")
 
     def test_provider_failure_records_timeout_class_when_message_is_empty(self) -> None:
-        self.assertEqual(_provider_error_text(TimeoutError()), "TimeoutError: 数据源响应超时")
-        self.assertIs(_compat_provider_error_text, _provider_error_text)
+        self.assertEqual(provider_error_text(TimeoutError()), "TimeoutError: 数据源响应超时")
 
     def test_minute_interval_normalization_accepts_common_aliases(self) -> None:
-        self.assertEqual(_normalize_minute_interval("5min"), "5m")
-        self.assertEqual(_normalize_minute_interval("1h"), "60m")
+        self.assertEqual(normalize_minute_interval("5min"), "5m")
+        self.assertEqual(normalize_minute_interval("1h"), "60m")
         with self.assertRaises(ValueError):
-            _normalize_minute_interval("2h")
+            normalize_minute_interval("2h")
 
     def test_akshare_eastmoney_requests_bypass_system_proxy(self) -> None:
         merged = merge_no_proxy("localhost,example.com")
@@ -501,7 +498,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 eastmoney_industry_plate_rank()
 
     def test_akshare_plate_rank_does_not_enter_akshare_sdk_pagination(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         direct = _plate_item().model_copy(update={"source": "AKShare·东方财富直连"})
 
         with patch("app.services.akshare_provider._import_akshare", side_effect=AssertionError("SDK must not run")), patch(
@@ -838,7 +835,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(rows[0].source, "AKShare·东方财富直连")
 
     def test_akshare_quotes_falls_back_to_original_loader_after_direct_failure(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         raw_rows = [
             {
                 "代码": "600519",
@@ -892,7 +889,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(rows[0].price, 1303.0)
 
     def test_akshare_quotes_prefers_light_eastmoney_bridge(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         bridge_rows = [_quote(source="AKShare·东方财富直连")]
 
         with patch("app.services.akshare_provider.is_installed", return_value=True), patch(
@@ -904,7 +901,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         import_ak.assert_not_called()
 
     def test_akshare_quotes_does_not_start_unbounded_sdk_fallback_after_transport_failure(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
 
         with patch("app.services.akshare_provider.is_installed", return_value=True), patch(
             "app.services.akshare_provider._eastmoney_quotes",
@@ -916,7 +913,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         import_ak.assert_not_called()
 
     def test_akshare_quotes_skips_malformed_rows_and_preserves_request_order(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         raw_rows = [
             {"代码": "", "名称": "缺代码", "最新价": 99.0},
             {"代码": "000001", "名称": "平安银行", "最新价": 11.2, "昨收": 11.0, "更新时间": "2026-05-13 10:00:00"},
@@ -1073,7 +1070,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertTrue(_concept_constituents_contain(FakeFrame(), "600519"))
 
     def test_akshare_minute_kline_maps_interval_to_eastmoney_period(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         calls = {}
 
         class FakeFrame:
@@ -1250,7 +1247,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             )
 
     def test_akshare_minute_kline_uses_light_fallback_when_import_fails(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         fallback_rows = [
             MinuteKline(
                 timestamp="2026-05-15 10:00:00",
@@ -1274,7 +1271,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(rows, fallback_rows)
 
     def test_akshare_daily_kline_uses_light_fallback_when_import_fails(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         fallback_rows = [Kline(date="2026-05-15", open=100, close=101, high=102, low=99, volume=1234)]
 
         with patch("app.services.akshare_provider.is_installed", return_value=True), patch(
@@ -1293,7 +1290,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         )
 
     def test_akshare_daily_kline_uses_sina_when_eastmoney_fallback_fails(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         fallback_rows = [
             Kline(
                 date="2026-05-15",
@@ -1324,7 +1321,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(rows[0].adjustment_mode, "qfq")
 
     def test_akshare_daily_kline_schema_error_does_not_use_light_fallback(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
 
         class FakeFrame:
             def tail(self, _limit):
@@ -1347,7 +1344,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         fallback.assert_not_called()
 
     def test_akshare_empty_daily_frame_uses_sina_before_reporting_coverage_miss(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
 
         class EmptyFrame:
             def tail(self, _limit):
@@ -1397,7 +1394,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             )
 
     def test_akshare_minute_schema_error_does_not_use_light_fallback(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
 
         class FakeFrame:
             def tail(self, _limit):
@@ -1434,7 +1431,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
 
     def test_akshare_stock_pool_skips_rows_without_valid_code(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         raw_rows = [
             {"code": "", "name": "缺代码"},
             {"code": "000000", "name": "非法零代码"},
@@ -1463,7 +1460,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual([(item.code, item.market) for item in rows], [("600519", "SH"), ("920066", "BJ")])
 
     def test_akshare_stock_pool_preserves_exchange_list_dates_and_industries(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         calls: list[tuple[str, str | None]] = []
 
         class FakeFrame:
@@ -1531,7 +1528,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         )
 
     def test_akshare_stock_pool_uses_bj_spot_list_when_bse_endpoint_fails(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
         calls: list[str] = []
 
         class FakeFrame:
@@ -1579,7 +1576,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         )
 
     def test_akshare_stock_pool_uses_sina_bj_list_after_bse_and_eastmoney_fail(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["AKShareProvider"]).AKShareProvider()
+        provider = AKShareProvider()
 
         class FakeFrame:
             def __init__(self, rows):
@@ -1655,7 +1652,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
                 sina_bj_stock_pool_rows()
 
     def test_tushare_stock_pool_skips_rows_without_valid_code(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["TushareProvider"]).TushareProvider(token="test-token")
+        provider = TushareProvider(token="test-token")
         raw_rows = [
             {"ts_code": "", "name": "缺代码", "industry": "未知", "list_date": ""},
             {"ts_code": "000000.SZ", "name": "非法零代码", "industry": "未知", "list_date": "20200101"},
@@ -1694,7 +1691,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(rows[1].list_date, "2024-07-03")
 
     def test_baostock_stock_pool_skips_rows_without_valid_code(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["BaoStockProvider"]).BaoStockProvider()
+        provider = BaoStockProvider()
         raw_rows = [
             ["bj.430001", "北交所样本", "2020-01-01"],
             ["sh.000000", "非法零代码", "2020-01-01"],
@@ -1950,7 +1947,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
             self.assertIsNone(capability.last_error)
 
     def test_futu_quotes_skip_non_a_share_rows_and_preserve_request_order(self) -> None:
-        provider = __import__("app.services.optional_providers", fromlist=["FutuProvider"]).FutuProvider(enabled=True)
+        provider = FutuProvider(enabled=True)
 
         class FakeFrame:
             def __init__(self, rows):

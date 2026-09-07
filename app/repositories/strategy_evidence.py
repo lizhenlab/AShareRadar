@@ -16,7 +16,6 @@ from app.models.market_scan import MarketScanProductionScoreContract
 from app.repositories.market_scan_score_diagnostics import read_production_score_contract
 from app.models.strategy_execution import PortfolioCandidate, PortfolioDraftSummary
 from app.repositories.base import SQLiteRepository
-from app.utils.errors import NotFoundError
 
 
 class StrategyEvidenceIntegrityError(RuntimeError):
@@ -171,19 +170,6 @@ class StrategyEvidenceRepository(SQLiteRepository):
                 "evidence_digest": str(row["evidence_digest"]),
             }
         )
-
-    def require_latest(
-        self,
-        strategy_id: int,
-        *,
-        revision: int | None,
-        mode: str,
-    ) -> StrategyEvidenceCenter:
-        evidence = self.latest(strategy_id, revision=revision, mode=mode)
-        if evidence is None:
-            raise NotFoundError("策略证据中心尚未生成，请先显式刷新")
-        return evidence
-
 
 def _verify_execution_source_snapshot(
     conn: sqlite3.Connection,

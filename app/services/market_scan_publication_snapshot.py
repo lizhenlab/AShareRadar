@@ -6,20 +6,6 @@ from app.models.market_scan import (
 )
 
 
-def snapshot_publication_blockers(
-    summary: MarketScanPublicationSummary,
-    *,
-    max_span_seconds: float,
-) -> tuple[str, ...]:
-    return tuple(
-        diagnostic.detail
-        for diagnostic in snapshot_publication_diagnostics(
-            summary,
-            max_span_seconds=max_span_seconds,
-        )
-    )
-
-
 def snapshot_publication_diagnostics(
     summary: MarketScanPublicationSummary,
     *,
@@ -161,4 +147,4 @@ def _blocker(code: str, label: str, detail: str) -> MarketScanPublicationDiagnos
     )
 
 
-__all__ = ["snapshot_publication_blockers", "snapshot_publication_diagnostics"]
+__all__ = ["snapshot_publication_diagnostics"]

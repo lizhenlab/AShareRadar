@@ -93,14 +93,8 @@ from app.repositories.watchlist import WatchlistSymbolSelection
 from app.models.advice_change import build_conclusion_timeline
 from app.services.runtime_backup import destructive_local_data_lease
 from app.services.domain_service_bundle import DomainServiceBundle
-from app.services.discovery import DiscoveryService
 from app.services.instance_guard import FileInstanceGuard
-from app.services.market_scan_screen_alert import MarketScanScreenAlertService
 from app.services.runtime_coordinator import RUNTIME_LEADER_LOCK_SUFFIX
-from app.services.strategy_automation import StrategyAutomationService
-from app.services.strategy_evidence import StrategyEvidenceService
-from app.services.strategy_execution import StrategyExecutionService
-from app.services.strategy_lab import StrategyLabService
 from app.utils.clock import performance_now
 from app.utils.fallback_logging import report_persistence_failure
 
@@ -248,30 +242,6 @@ class SQLiteCache:
         return services
 
     @property
-    def discovery_service(self) -> DiscoveryService:
-        return self.domain_services.discovery
-
-    @property
-    def market_scan_screen_alert_service(self) -> MarketScanScreenAlertService:
-        return self.domain_services.market_scan_screen_alert
-
-    @property
-    def strategy_lab_service(self) -> StrategyLabService:
-        return self.domain_services.strategy_lab
-
-    @property
-    def strategy_execution_service(self) -> StrategyExecutionService:
-        return self.domain_services.strategy_execution
-
-    @property
-    def strategy_evidence_service(self) -> StrategyEvidenceService:
-        return self.domain_services.strategy_evidence
-
-    @property
-    def strategy_automation_service(self) -> StrategyAutomationService:
-        return self.domain_services.strategy_automation
-
-    @property
     def settings(self) -> Settings | None:
         return self._settings
 
@@ -284,8 +254,10 @@ class SQLiteCache:
 
     @contextmanager
     def exclusive_local_data_operation(self) -> Iterator[ExclusiveLocalDataOperation]:
-        # Lock order: process RLock -> destructive file lease -> backup leases -> SQLite transaction.
-        with self._lock:
+        # Serialize maintenance before taking the shared cache lock. Background
+        # artifact verification must be able to finish before this operation
+        # borrows the maintenance repository's transaction connection.
+        with self.maintenance_repo.exclusive_operation(), self._lock:
             with destructive_local_data_lease(self.path):
                 yield ExclusiveLocalDataOperation(self)
 
@@ -641,9 +613,6 @@ class SQLiteCache:
             excluded_source=excluded_source,
         )
 
-    def provider_enabled(self, name: str) -> bool:
-        return self.provider_status_repo.enabled(name)
-
     def clear_interrupted_provider_call_errors(self) -> int:
         return self.provider_status_repo.clear_interrupted_call_errors()
 
@@ -700,29 +669,6 @@ class SQLiteCache:
 
     def recent_monitor_events(self, limit: int = 30) -> list[MonitorEvent]:
         return self.runtime_event_repo.monitor_events(limit=limit)
-
-    def record_reliability(
-        self,
-        metric: str,
-        *,
-        subject: str = "",
-        capability: str = "",
-        good: bool,
-        degraded: bool = False,
-        failed: bool = False,
-        fallback: bool = False,
-        duration_ms: float | int | None = None,
-    ) -> None:
-        self.reliability_repo.record(
-            metric,
-            subject=subject,
-            capability=capability,
-            good=good,
-            degraded=degraded,
-            failed=failed,
-            fallback=fallback,
-            duration_ms=duration_ms,
-        )
 
     def record_workbench_reliability(
         self,
@@ -817,9 +763,6 @@ class SQLiteCache:
             analysis,
             snapshot_market_time=snapshot_market_time,
         )
-
-    def advice_history_by_id(self, row_id: int) -> AdviceHistoryItem | None:
-        return self.advice_repo.by_id(row_id)
 
     def advice_history(self, symbol: str, limit: int = 30) -> list[AdviceHistoryItem]:
         return self.advice_repo.items(symbol, limit=limit)

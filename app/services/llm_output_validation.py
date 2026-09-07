@@ -40,8 +40,8 @@ _PRICE_SEMANTICS = frozenset(
         "generic_price",
     }
 )
-_PERCENT_SEMANTICS = frozenset({"change_pct", "turnover_rate", "confidence"})
-_SCORE_SEMANTICS = frozenset({"trend_score", "data_quality_score"})
+_PERCENT_SEMANTICS = frozenset({"change_pct", "turnover_rate"})
+_SCORE_SEMANTICS = frozenset({"trend_score", "data_quality_score", "confidence"})
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
 _CHINESE_NUMBER_WITH_UNIT_RE = re.compile(
     r"(?:百分之[零〇一二两三四五六七八九十百点]+|"
@@ -378,7 +378,7 @@ def _number_semantic(text: str, match: re.Match[str]) -> str | None:
         (r"(?:仓位|持仓比例)(?:约|在|为|是|：|:|=)?$", "position_pct"),
         (r"(?:支撑|支撑位|下方支撑)(?:约|在|为|是|：|:|=)?$", "support"),
         (r"(?:压力|压力位|阻力|阻力位)(?:约|在|为|是|：|:|=)?$", "resistance"),
-        (r"(?:规则)?置信度(?:约|在|为|是|：|:|=)?$", "confidence"),
+        (r"(?:规则建议强度(?:评分|分数)?|(?:规则)?置信度)(?:约|在|为|是|：|:|=)?$", "confidence"),
         (r"(?:现价|当前价|最新价|最新价格)(?:约|在|为|是|：|:|=)?$", "current_price"),
         (r"(?:昨收|前收盘)(?:约|在|为|是|：|:|=)?$", "previous_close"),
         (r"(?:开盘价|开盘)(?:约|在|为|是|：|:|=)?$", "open_price"),
@@ -403,7 +403,7 @@ def _number_semantic(text: str, match: re.Match[str]) -> str | None:
     after_patterns: tuple[tuple[str, str], ...] = (
         (r"^(?:元|块)?(?:附近|左右|一带)?(?:的)?(?:支撑|支撑位)", "support"),
         (r"^(?:元|块)?(?:附近|左右|一带)?(?:的)?(?:压力|压力位|阻力|阻力位)", "resistance"),
-        (r"^(?:%|％|个百分点)?(?:的)?(?:置信度)", "confidence"),
+        (r"^(?:%|％|个百分点|分)?(?:的)?(?:规则建议强度|(?:规则)?置信度)", "confidence"),
         (r"^(?:元|块)?(?:的)?(?:现价|当前价|最新价)", "current_price"),
     )
     for pattern, semantic in after_patterns:
@@ -519,7 +519,7 @@ def _semantic_label(semantic: str) -> str:
         "generic_price": "价格",
         "change_pct": "涨跌幅",
         "turnover_rate": "换手率",
-        "confidence": "置信度",
+        "confidence": "规则建议强度评分",
         "trend_score": "趋势评分",
         "data_quality_score": "数据质量评分",
         "risk_reward_ratio": "收益风险比",

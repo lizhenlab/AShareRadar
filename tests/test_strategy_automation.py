@@ -28,9 +28,9 @@ from tests.test_strategy_execution import (
 
 def test_schedule_is_version_pinned_runs_once_and_emits_fingerprinted_events(tmp_path) -> None:
     cache, _execution_service, strategy_id, run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
-    original = cache.strategy_lab_service.get(strategy_id)
-    cache.strategy_lab_service.update(
+    schedule = cache.domain_services.strategy_automation.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
+    original = cache.domain_services.strategy_lab.get(strategy_id)
+    cache.domain_services.strategy_lab.update(
         strategy_id,
         StrategySpecUpdate(
             spec=original.spec.model_copy(update={"description": "新修订"}),
@@ -39,15 +39,15 @@ def test_schedule_is_version_pinned_runs_once_and_emits_fingerprinted_events(tmp
         ),
     )
 
-    first = cache.strategy_automation_service.run_due()
-    second = cache.strategy_automation_service.run_due()
-    stored = cache.strategy_automation_service.schedules(
+    first = cache.domain_services.strategy_automation.run_due()
+    second = cache.domain_services.strategy_automation.run_due()
+    stored = cache.domain_services.strategy_automation.schedules(
         strategy_id=strategy_id,
         include_disabled=True,
         page=1,
         page_size=20,
     ).items[0]
-    events = cache.strategy_automation_service.events(
+    events = cache.domain_services.strategy_automation.events(
         strategy_id=strategy_id,
         schedule_id=schedule.schedule_id,
         page=1,
@@ -69,12 +69,12 @@ def test_schedule_is_version_pinned_runs_once_and_emits_fingerprinted_events(tmp
 
 def test_stale_latest_schedule_fails_before_execution_event_or_order_writes(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
-    cache.strategy_automation_service.create_schedule(
+    cache.domain_services.strategy_automation.create_schedule(
         StrategyScheduleCreate(strategy_id=strategy_id)
     )
     execution_service._market_clock = lambda: datetime(2026, 8, 13, 16, 0)  # noqa: SLF001
 
-    summary = cache.strategy_automation_service.run_due()
+    summary = cache.domain_services.strategy_automation.run_due()
 
     assert summary.executed_count == 0
     assert summary.failed_count == 1
@@ -89,9 +89,9 @@ def test_simulation_plan_preserves_lifecycle_fingerprints_and_never_submits_orde
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
     draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
 
-    plan = cache.strategy_automation_service.create_simulation_plan(draft.context.execution_id)
-    repeated = cache.strategy_automation_service.create_simulation_plan(draft.context.execution_id)
-    loaded = cache.strategy_automation_service.simulation_plan(draft.context.execution_id)
+    plan = cache.domain_services.strategy_automation.create_simulation_plan(draft.context.execution_id)
+    repeated = cache.domain_services.strategy_automation.create_simulation_plan(draft.context.execution_id)
+    loaded = cache.domain_services.strategy_automation.simulation_plan(draft.context.execution_id)
 
     assert plan == repeated
     assert loaded == plan
@@ -112,18 +112,18 @@ def test_simulation_plan_rejects_legacy_backfill_execution_source(
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
     draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
     if action == "read":
-        cache.strategy_automation_service.create_simulation_plan(
+        cache.domain_services.strategy_automation.create_simulation_plan(
             draft.context.execution_id
         )
     _reseal_execution_source_as_legacy(cache, draft)
 
     with pytest.raises(StrategyAutomationIntegrityError, match="原发布时快照"):
         if action == "create":
-            cache.strategy_automation_service.create_simulation_plan(
+            cache.domain_services.strategy_automation.create_simulation_plan(
                 draft.context.execution_id
             )
         else:
-            cache.strategy_automation_service.simulation_plan(
+            cache.domain_services.strategy_automation.simulation_plan(
                 draft.context.execution_id
             )
 
@@ -132,7 +132,7 @@ def test_schedule_rejects_legacy_previous_execution_before_alert_actions(
     tmp_path,
 ) -> None:
     cache, execution_service, strategy_id, run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(
+    schedule = cache.domain_services.strategy_automation.create_schedule(
         StrategyScheduleCreate(strategy_id=strategy_id)
     )
     draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
@@ -145,7 +145,7 @@ def test_schedule_rejects_legacy_previous_execution_before_alert_actions(
         patch.object(execution_service, "execute") as execute,
         pytest.raises(StrategyAutomationIntegrityError, match="原发布时快照"),
     ):
-        cache.strategy_automation_service._execute_claimed_schedule(schedule, run_id)
+        cache.domain_services.strategy_automation._execute_claimed_schedule(schedule, run_id)
     execute.assert_not_called()
 
 
@@ -157,18 +157,18 @@ def test_simulation_plan_rejects_distribution_degraded_execution_source(
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
     draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
     if action == "read":
-        cache.strategy_automation_service.create_simulation_plan(
+        cache.domain_services.strategy_automation.create_simulation_plan(
             draft.context.execution_id
         )
     _reseal_execution_source_as_distribution_degraded(cache, draft)
 
     with pytest.raises(StrategyAutomationIntegrityError, match="发布门禁"):
         if action == "create":
-            cache.strategy_automation_service.create_simulation_plan(
+            cache.domain_services.strategy_automation.create_simulation_plan(
                 draft.context.execution_id
             )
         else:
-            cache.strategy_automation_service.simulation_plan(
+            cache.domain_services.strategy_automation.simulation_plan(
                 draft.context.execution_id
             )
 
@@ -176,7 +176,7 @@ def test_simulation_plan_rejects_distribution_degraded_execution_source(
 def test_simulation_plan_rejects_payload_tamper(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
     draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
-    cache.strategy_automation_service.create_simulation_plan(draft.context.execution_id)
+    cache.domain_services.strategy_automation.create_simulation_plan(draft.context.execution_id)
     with cache._connect() as conn:  # noqa: SLF001 - integrity boundary mutation
         row = conn.execute(
             "SELECT id, plan_json FROM strategy_simulation_plan WHERE execution_id = ?",
@@ -190,13 +190,13 @@ def test_simulation_plan_rejects_payload_tamper(tmp_path) -> None:
         )
 
     with pytest.raises(StrategyAutomationIntegrityError, match="摘要不一致"):
-        cache.strategy_automation_service.simulation_plan(draft.context.execution_id)
+        cache.domain_services.strategy_automation.simulation_plan(draft.context.execution_id)
 
 
 def test_simulation_plan_rejects_resealed_execution_binding_drift(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
     draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
-    cache.strategy_automation_service.create_simulation_plan(draft.context.execution_id)
+    cache.domain_services.strategy_automation.create_simulation_plan(draft.context.execution_id)
     with cache._connect() as conn:  # noqa: SLF001 - integrity boundary mutation
         row = conn.execute(
             "SELECT id, plan_json FROM strategy_simulation_plan WHERE execution_id = ?",
@@ -221,7 +221,7 @@ def test_simulation_plan_rejects_resealed_execution_binding_drift(tmp_path) -> N
         )
 
     with pytest.raises(StrategyAutomationIntegrityError, match="原始策略执行"):
-        cache.strategy_automation_service.simulation_plan(draft.context.execution_id)
+        cache.domain_services.strategy_automation.simulation_plan(draft.context.execution_id)
 
 
 def test_latest_automation_run_ignores_newer_custom_scope(tmp_path) -> None:
@@ -253,16 +253,16 @@ def test_latest_distribution_degraded_run_fails_closed_without_old_run_fallback(
     tmp_path,
 ) -> None:
     cache, _execution_service, strategy_id, trusted_run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(
+    schedule = cache.domain_services.strategy_automation.create_schedule(
         StrategyScheduleCreate(strategy_id=strategy_id)
     )
     degraded_run_id = _seed_scan(cache, action_eligible=False)
     assert degraded_run_id > trusted_run_id
 
     with pytest.raises(MarketScanActionSourceError, match="评分分布门禁"):
-        cache.strategy_automation_service.run_due()
+        cache.domain_services.strategy_automation.run_due()
 
-    stored = cache.strategy_automation_service.schedules(
+    stored = cache.domain_services.strategy_automation.schedules(
         strategy_id=strategy_id,
         include_disabled=True,
         page=1,
@@ -330,14 +330,14 @@ def test_latest_automation_run_rejects_newer_untrusted_published_snapshot(
 
 def test_archived_strategy_cannot_execute_or_reenable_automation(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
-    cache.strategy_lab_service.archive(
+    schedule = cache.domain_services.strategy_automation.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
+    cache.domain_services.strategy_lab.archive(
         strategy_id,
         StrategySpecArchiveRequest(expected_revision=1, archived=True),
     )
 
-    summary = cache.strategy_automation_service.run_due()
-    stored = cache.strategy_automation_service.schedules(
+    summary = cache.domain_services.strategy_automation.run_due()
+    stored = cache.domain_services.strategy_automation.schedules(
         strategy_id=strategy_id,
         include_disabled=True,
         page=1,
@@ -349,20 +349,20 @@ def test_archived_strategy_cannot_execute_or_reenable_automation(tmp_path) -> No
     with pytest.raises(ValueError, match="已归档策略"):
         execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
     with pytest.raises(ValueError, match="不能重新启用"):
-        cache.strategy_automation_service.set_enabled(schedule.schedule_id, enabled=True)
+        cache.domain_services.strategy_automation.set_enabled(schedule.schedule_id, enabled=True)
 
 
 def test_archived_strategy_cannot_create_schedule_and_listing_accepts_no_filter(tmp_path) -> None:
     cache, _execution_service, strategy_id, _run_id = _environment(tmp_path)
-    cache.strategy_lab_service.archive(
+    cache.domain_services.strategy_lab.archive(
         strategy_id,
         StrategySpecArchiveRequest(expected_revision=1, archived=True),
     )
 
     with pytest.raises(ValueError, match="已归档策略不能创建定时任务"):
-        cache.strategy_automation_service.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
+        cache.domain_services.strategy_automation.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
 
-    page = cache.strategy_automation_service.schedules(
+    page = cache.domain_services.strategy_automation.schedules(
         strategy_id=None,
         include_disabled=False,
         page=1,
@@ -373,24 +373,24 @@ def test_archived_strategy_cannot_create_schedule_and_listing_accepts_no_filter(
 
 def test_schedule_can_be_disabled_without_loading_strategy_revision(tmp_path) -> None:
     cache, _execution_service, strategy_id, _run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
+    schedule = cache.domain_services.strategy_automation.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
 
-    with patch.object(cache.strategy_lab_service, "get", side_effect=AssertionError("disable must not resolve strategy")):
-        disabled = cache.strategy_automation_service.set_enabled(schedule.schedule_id, enabled=False)
+    with patch.object(cache.domain_services.strategy_lab, "get", side_effect=AssertionError("disable must not resolve strategy")):
+        disabled = cache.domain_services.strategy_automation.set_enabled(schedule.schedule_id, enabled=False)
 
     assert disabled.enabled is False
 
 
 def test_blank_execution_failure_is_recorded_with_exception_type(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
-    cache.strategy_automation_service.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
+    cache.domain_services.strategy_automation.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
 
     with patch.object(execution_service, "execute", side_effect=RuntimeError()):
-        summary = cache.strategy_automation_service.run_due()
+        summary = cache.domain_services.strategy_automation.run_due()
 
     assert summary.failed_count == 1
     assert summary.errors == ["定时任务#1: RuntimeError"]
-    stored = cache.strategy_automation_service.schedules(
+    stored = cache.domain_services.strategy_automation.schedules(
         strategy_id=None,
         include_disabled=True,
         page=1,
@@ -401,10 +401,10 @@ def test_blank_execution_failure_is_recorded_with_exception_type(tmp_path) -> No
 
 def test_claimed_schedule_rejects_market_scan_batch_drift(tmp_path) -> None:
     cache, _execution_service, strategy_id, run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
+    schedule = cache.domain_services.strategy_automation.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
 
     with pytest.raises(RuntimeError, match="最新扫描批次发生变化"):
-        cache.strategy_automation_service._execute_claimed_schedule(schedule, run_id + 1)
+        cache.domain_services.strategy_automation._execute_claimed_schedule(schedule, run_id + 1)
 
 
 def test_simulation_plan_marks_empty_draft_as_no_trade(tmp_path) -> None:
@@ -425,7 +425,7 @@ def test_simulation_plan_marks_empty_draft_as_no_trade(tmp_path) -> None:
     )
 
     with patch.object(execution_service, "draft", return_value=empty):
-        plan = cache.strategy_automation_service.create_simulation_plan(draft.context.execution_id)
+        plan = cache.domain_services.strategy_automation.create_simulation_plan(draft.context.execution_id)
 
     assert plan.status == "no_trade"
     assert plan.orders == []
@@ -433,7 +433,7 @@ def test_simulation_plan_marks_empty_draft_as_no_trade(tmp_path) -> None:
 
 def test_utility_and_policy_events_ignore_null_or_non_crossing_values(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(
+    schedule = cache.domain_services.strategy_automation.create_schedule(
         StrategyScheduleCreate(
             strategy_id=strategy_id,
             alert_conditions=[
@@ -460,14 +460,14 @@ def test_utility_and_policy_events_ignore_null_or_non_crossing_values(tmp_path) 
         }
     )
 
-    emitted = cache.strategy_automation_service._emit_utility_events(
+    emitted = cache.domain_services.strategy_automation._emit_utility_events(
         schedule,
         previous,
         current,
         {candidate.symbol: previous.selected[0]},
         {candidate.symbol: current.selected[0]},
     )
-    policy_emitted = cache.strategy_automation_service._emit_policy_events(schedule, current)
+    policy_emitted = cache.domain_services.strategy_automation._emit_policy_events(schedule, current)
 
     assert emitted == 0
     assert policy_emitted == 0
@@ -475,7 +475,7 @@ def test_utility_and_policy_events_ignore_null_or_non_crossing_values(tmp_path) 
 
 def test_policy_events_report_stale_data_and_invalid_evidence(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(
+    schedule = cache.domain_services.strategy_automation.create_schedule(
         StrategyScheduleCreate(
             strategy_id=strategy_id,
             alert_conditions=[
@@ -502,9 +502,9 @@ def test_policy_events_report_stale_data_and_invalid_evidence(tmp_path) -> None:
         "app.services.strategy_automation.market_now_naive",
         return_value=datetime(2026, 5, 13, 16, 0),
     ):
-        emitted = cache.strategy_automation_service._emit_policy_events(schedule, current)
+        emitted = cache.domain_services.strategy_automation._emit_policy_events(schedule, current)
 
-    events = cache.strategy_automation_service.events(
+    events = cache.domain_services.strategy_automation.events(
         strategy_id=strategy_id,
         schedule_id=schedule.schedule_id,
         page=1,
@@ -590,7 +590,7 @@ def _reseal_execution_source_as_distribution_degraded(
 
 def test_utility_cross_emits_one_fingerprinted_event(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
-    schedule = cache.strategy_automation_service.create_schedule(
+    schedule = cache.domain_services.strategy_automation.create_schedule(
         StrategyScheduleCreate(
             strategy_id=strategy_id,
             alert_conditions=[StrategyAlertCondition(event_type="utility_cross", utility_threshold=60)],
@@ -601,7 +601,7 @@ def test_utility_cross_emits_one_fingerprinted_event(tmp_path) -> None:
     previous = draft.model_copy(update={"selected": [candidate.model_copy(update={"utility_score": 59.0})]})
     current = draft.model_copy(update={"selected": [candidate.model_copy(update={"utility_score": 60.0})]})
 
-    emitted = cache.strategy_automation_service._emit_utility_events(
+    emitted = cache.domain_services.strategy_automation._emit_utility_events(
         schedule,
         previous,
         current,
@@ -610,7 +610,7 @@ def test_utility_cross_emits_one_fingerprinted_event(tmp_path) -> None:
     )
 
     assert emitted == 1
-    events = cache.strategy_automation_service.events(
+    events = cache.domain_services.strategy_automation.events(
         strategy_id=strategy_id,
         schedule_id=schedule.schedule_id,
         page=1,

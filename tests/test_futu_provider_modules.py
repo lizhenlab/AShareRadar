@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from app.services.provider_errors import ProviderCoverageMiss, ProviderProtocolError
+from app.utils.provider_errors import ProviderCoverageMiss, ProviderProtocolError
 from app.services.futu_provider import (
     FutuProvider,
     _futu_kltype,

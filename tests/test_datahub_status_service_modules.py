@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from app.models.schemas import CacheStats, ProviderCapability, ProviderCapabilityStatus, ProviderStatus
+from app.models.market import ProviderCapability
+from app.models.system import CacheStats, ProviderCapabilityStatus, ProviderStatus
 from app.config import Settings
 from app.services.provider_registry import all_provider_names
 from app.services.datahub_source_plan import SourcePlanBuilder

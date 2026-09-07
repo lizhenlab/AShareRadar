@@ -34,7 +34,7 @@ from app.repositories.market_scan_screening import (
     MarketScanBreadthRow,
     MarketScanScreeningRow,
 )
-from app.services.datahub_metadata import StockPoolResolution
+from app.services.datahub_metadata_stock_pool import StockPoolResolution
 from app.services.datahub_runtime import ProviderChainState
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from app.models.schemas import Quote
+from app.models.market import Quote
 from app.services.analysis import build_analysis
 from app.services.stock_abnormal_context import build_abnormal_context
 from app.services.stock_abnormal_events import build_abnormal_events

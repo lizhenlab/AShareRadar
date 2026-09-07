@@ -1,7 +1,6 @@
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   GLOBAL_DATA_TTL_MS,
-  cancelCachedJsonRequest,
   createRequestScope,
   fetchCachedJson,
   fetchJson,
@@ -517,11 +516,6 @@ function notifyReadbackError(options, error, detail) {
 
 export function invalidateWatchlistCache() {
   invalidateCachedJson(WATCHLIST_ENDPOINT);
-}
-
-export function cancelWatchlistRefresh(state) {
-  if (state.watchlistRequest) state.watchlistRequest.abort();
-  cancelCachedJsonRequest(WATCHLIST_ENDPOINT);
 }
 
 function finishWatchlistReadRequest(state, request) {

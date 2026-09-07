@@ -1192,10 +1192,6 @@ def _status_filter_label(value: MarketScanResultStatus | None) -> str:
     return "全部状态" if value is None else _STATUS_LABELS[value]
 
 
-def _quality_filter_label(value: int | None) -> int | str:
-    return value if value is not None else "不限"
-
-
 def _filter_values_label(value: str | Sequence[str] | None, fallback: str) -> str:
     normalized = _normalized_filter_values(value, maximum=20)
     return "、".join(normalized) if normalized else fallback

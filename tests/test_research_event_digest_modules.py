@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 
-from app.models.schemas import AbnormalEventItem, AbnormalEventSummary, StockEventItem, StockEventSummary
+from app.models.analysis import AbnormalEventItem, AbnormalEventSummary, StockEventItem, StockEventSummary
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.research_events import DEFAULT_WATCH_EVENT, build_event_digest_report

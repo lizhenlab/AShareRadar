@@ -11,7 +11,7 @@ from app.services.data_quality_components import (
     apply_quote_field_quality,
     data_quality_level,
 )
-from app.models.schemas import KlineQuality
+from app.models.analysis import KlineQuality
 from app.services.data_quality_kline import KLINE_LEVEL_RULES, KLINE_PENALTY_RULES, assess_kline_quality, kline_quality_penalty
 from app.services.data_quality_time import quote_delay_seconds, quote_freshness_penalty
 from tests.factories import make_kline

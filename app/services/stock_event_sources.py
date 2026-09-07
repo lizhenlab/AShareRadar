@@ -137,11 +137,6 @@ def data_quality_events(analysis: AnalysisResult) -> list[StockEventItem]:
     ]
 
 
-def external_event_placeholders(analysis: AnalysisResult, lhb: LhbSummary | None) -> list[StockEventItem]:
-    """Backward-compatible hook that never fabricates events for unavailable sources."""
-    return []
-
-
 def external_source_capabilities(lhb: LhbSummary | None) -> list[EventSourceCapability]:
     lhb_available = bool(lhb and lhb.available and lhb.capability_status == "available")
     return [
@@ -231,7 +226,6 @@ __all__ = [
     "default_observation_event",
     "event_next_steps",
     "EXTERNAL_EVENT_RULES",
-    "external_event_placeholders",
     "external_source_capabilities",
     "industry_events",
     "lhb_events",

@@ -11,7 +11,7 @@ from app.services.domain_service_bundle import DomainServiceBundle
 from app.services.local_data_import_guard import LocalDataImportPreviewRegistry
 from app.services.market_scan_manager import MarketScanManager
 from app.services.runtime_coordinator import RuntimeCoordinator, RuntimeLeadership
-from app.services.scheduler import LocalDataScheduler
+from app.services.scheduler_service import LocalDataScheduler
 from app.services.workbench_context import WorkbenchContextCache
 from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission
 

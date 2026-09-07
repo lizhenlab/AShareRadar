@@ -9,6 +9,7 @@ from typing import Literal, Mapping, Sequence
 
 from app.models.market import Kline
 from app.models.paper_trading import CostProfileName, PaperCostProfile, PaperInstrumentMetadata, PaperTradeRuleProfile
+from app.services.data_quality_kline import is_demo_kline_source
 from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.paper_trading_rules import assess_daily_tradeability, resolve_trade_rule_profile
 
@@ -134,6 +135,8 @@ def probability_label_contract(
 def _validated_bars(rows: Sequence[Kline]) -> dict[str, Kline]:
     bars: dict[str, Kline] = {}
     for row in sorted(rows, key=lambda item: item.date):
+        if is_demo_kline_source(row.source):
+            raise ValueError(f"demo probability label bar: {row.date}")
         values = (row.open, row.close, row.high, row.low, row.volume)
         if any(not math.isfinite(float(value)) for value in values) or row.open <= 0 or row.close <= 0:
             continue
@@ -161,7 +164,8 @@ def _prepare_entry(
     if not dates:
         return ProbabilityLabelOutcome(0, "data_unavailable", "entry_date_missing")
     entry_date = dates[0]
-    entry_bar, previous = bars.get(entry_date), _previous_bar(bars, entry_date)
+    # D+1 must use the frozen signal session's close, never an older cached row.
+    entry_bar, previous = bars.get(entry_date), bars.get(quote_date)
     if entry_bar is None or previous is None:
         return ProbabilityLabelOutcome(0, "data_unavailable", "entry_or_previous_bar_missing", entry_date=entry_date)
     if amount <= 0 or config.execution_notional / amount > config.max_daily_participation_rate:
@@ -233,7 +237,8 @@ def _horizon_outcome(
     if horizon >= len(dates):
         return ProbabilityLabelOutcome(horizon, "data_unavailable", "target_date_missing", entry_date=entry.entry_date)
     exit_date = dates[horizon]
-    exit_bar, previous = bars.get(exit_date), _previous_bar(bars, exit_date)
+    # Missing sessions retain their calendar slot; do not borrow a stale limit reference.
+    exit_bar, previous = bars.get(exit_date), bars.get(dates[horizon - 1])
     if exit_bar is None or previous is None:
         return ProbabilityLabelOutcome(horizon, "data_unavailable", "exit_or_previous_bar_missing", entry_date=entry.entry_date, exit_date=exit_date)
     profile = _safe_profile(symbol, exit_date, entry.metadata)
@@ -314,11 +319,6 @@ def _safe_profile(
         return resolve_trade_rule_profile(symbol, date.fromisoformat(row_date), metadata)
     except (KeyError, ValueError):
         return None
-
-
-def _previous_bar(bars: Mapping[str, Kline], row_date: str) -> Kline | None:
-    prior_dates = [value for value in bars if value < row_date]
-    return bars[max(prior_dates)] if prior_dates else None
 
 
 def _model_quantity(notional: float, price: float, minimum: int, step: int) -> int:

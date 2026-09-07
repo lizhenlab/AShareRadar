@@ -668,9 +668,3 @@ def _score_text(value: object, *, default: int = DEFAULT_SCORE, with_unit: bool 
         return "待确认"
     text = str(_score(value, default=default))
     return f"{text} 分" if with_unit else text
-
-
-def _percent_text(value: object) -> str:
-    if _finite_float(value) is None:
-        return "待确认"
-    return f"{_score(value, default=0)}%"

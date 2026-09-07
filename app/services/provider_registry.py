@@ -1,20 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol, cast
+from typing import Protocol
 
 from app.config import Settings
 from app.config_settings import REGISTERED_PROVIDER_NAMES
-from app.models.market import (
-    Kline,
-    MinuteKline,
-    OrderBook,
-    PlateItem,
-    ProviderCapability,
-    Quote,
-    StockConceptItem,
-    StockInfo,
-)
+from app.models.market import ProviderCapability
 from app.runtime_environment import isolate_user_site_packages
 
 isolate_user_site_packages()
@@ -53,57 +44,14 @@ FALLBACK_PROVIDER_NOTES = {
 
 
 class MarketProvider(Protocol):
+    """Registry identity; supported operations are selected through capabilities."""
+
     source_name: str
-
-    async def quote(self, symbol: str) -> Quote:
-        ...
-
-    async def quotes(self, symbols: Iterable[str]) -> list[Quote]:
-        ...
-
-    async def kline(self, symbol: str, limit: int = 120) -> list[Kline]:
-        ...
-
-    async def minute_kline(self, symbol: str, interval: str = "5m", limit: int = 120) -> list[MinuteKline]:
-        ...
-
-
-class StockPoolProvider(Protocol):
-    source_name: str
-
-    async def stock_pool(self) -> list[StockInfo]:
-        ...
-
-
-class PlateProvider(Protocol):
-    source_name: str
-
-    async def plate_rank(self, limit: int = 20) -> list[PlateItem]:
-        ...
-
-
-class ConceptProvider(Protocol):
-    source_name: str
-
-    async def stock_concepts(self, symbol: str, limit: int = 8) -> list[StockConceptItem]:
-        ...
-
-
-class OrderBookProvider(Protocol):
-    source_name: str
-
-    async def order_book(self, symbol: str) -> OrderBook:
-        ...
-
-
-class CapabilityProvider(Protocol):
-    def capability(self) -> ProviderCapability:
-        ...
 
 
 def build_providers(settings: Settings) -> dict[str, MarketProvider]:
     return {
-        "tencent": cast(MarketProvider, TencentMarketDataProvider(timeout=settings.request_timeout_seconds)),
+        "tencent": TencentMarketDataProvider(timeout=settings.request_timeout_seconds),
         "akshare": AKShareProvider(),
         "baostock": BaoStockProvider(),
         "tushare": TushareProvider(token=settings.tushare_token),
@@ -113,7 +61,7 @@ def build_providers(settings: Settings) -> dict[str, MarketProvider]:
             enabled=settings.futu_enabled,
         ),
         "local": LocalIndividualStockProvider(),
-        "demo": cast(MarketProvider, DemoMarketDataProvider(enabled=settings.demo_provider_enabled)),
+        "demo": DemoMarketDataProvider(enabled=settings.demo_provider_enabled),
     }
 
 

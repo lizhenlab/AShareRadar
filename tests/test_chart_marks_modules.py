@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.models.schemas import AbnormalEventItem, AbnormalEventSummary, StockEventItem, StockEventSummary
+from app.models.analysis import AbnormalEventItem, AbnormalEventSummary, StockEventItem, StockEventSummary
 from app.services.analysis import build_analysis
 from app.services.chart_marks import build_chart_marks, build_chart_marks_from_context
 from app.services.data_quality import build_data_quality

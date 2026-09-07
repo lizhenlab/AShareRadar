@@ -4,18 +4,15 @@ from datetime import date, datetime, timedelta
 
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
-from app.services.research import (
-    build_alpha_evidence_report,
-    build_chip_analysis,
-    build_factor_lab_report,
-    build_feature_snapshot,
-    build_leadership_report,
-    build_market_regime_report,
-    build_risk_reward_report,
-    build_signal_validation_report,
-    build_stock_diagnosis,
-    build_timeframe_alignment_report,
-)
+from app.services.research_alpha import build_alpha_evidence_report
+from app.services.research_chip import build_chip_analysis
+from app.services.research_diagnosis import build_stock_diagnosis
+from app.services.research_factors import build_factor_lab_report
+from app.services.research_features import build_feature_snapshot, build_leadership_report
+from app.services.research_regime import build_market_regime_report
+from app.services.research_risk_reward_report import build_risk_reward_report
+from app.services.research_timeframe import build_timeframe_alignment_report
+from app.services.research_validation import build_signal_validation_report
 from app.services.stock_insights import build_stock_insight_bundle
 from app.services.research_diagnosis_decisions import final_diagnosis_action, diagnosis_headline
 from app.services.research_diagnosis_sections import build_confirmation_signals, build_hard_risks, build_watch_focus, main_conflict_sentence

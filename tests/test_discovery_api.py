@@ -143,9 +143,9 @@ def test_route_reuses_composed_discovery_service_and_shared_lock(tmp_path) -> No
     first = discovery.get_discovery_service(services)
     second = discovery.get_discovery_service(services)
 
-    assert first is cache.discovery_service
+    assert first is cache.domain_services.discovery
     assert second is first
-    assert cache.discovery_service.repository is cache.discovery_repo
+    assert cache.domain_services.discovery.repository is cache.discovery_repo
     assert cache.discovery_repo._lock is cache._lock
 
 
@@ -176,7 +176,7 @@ def test_exclusive_local_data_operation_blocks_discovery_database_access(tmp_pat
     def read_presets() -> None:
         started.set()
         try:
-            cache.discovery_service.list_presets(page=1, page_size=20)
+            cache.domain_services.discovery.list_presets(page=1, page_size=20)
         except BaseException as exc:
             errors.append(exc)
         finally:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.models.schemas import ProviderCapability
+from app.models.market import ProviderCapability
 from app.models.workbench import (
     _validate_workbench_child_symbols,
     _validate_workbench_child_times,

@@ -1,7 +1,7 @@
 """Auditable, non-probabilistic score dimensions for full-market scan snapshots.
 
-The production rank remains governed by ``full-market-score-v4``.  These
-dimensions separate expected strength, confidence, risk and tradability so a
+The production rank follows its separately frozen score contract. These
+dimensions separate ordinal strength, confidence, risk and tradability so a
 consumer does not have to interpret one ordinal rank as all four concepts.
 They are persisted with the scan result and are therefore safe to use as
 point-in-time research evidence later.
@@ -17,17 +17,19 @@ import math
 from statistics import fmean, pstdev
 from typing import Mapping, Sequence, cast
 
-from app.models.market import Kline, Quote
+from app.models.market import Kline, KlineAdjustmentMode, Quote
 from app.models.market_scan import (
     MARKET_SCAN_MIN_HISTORY_ROWS,
     MarketScanMode,
     MarketScanResultItem,
 )
+from app.services.data_quality_time import parse_quote_time
 from app.services.market_scan_feature_windows import (
     MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION,
     snapshot_return_pct,
     snapshot_skip_return_pct,
 )
+from app.services.market_scan_production_replay import verify_market_scan_production_inputs
 from app.services.market_scan_session_coverage import (
     MARKET_SCAN_SESSION_COVERAGE_CONTRACT_VERSION,
     MarketScanSessionCoverage,
@@ -500,7 +502,7 @@ def verify_market_scan_point_in_time_evidence_context(
         return False
     if dict(derived_scores) != outer_scores:
         return False
-    replayed = _replay_evidence_scores(payload)
+    replayed = _replay_evidence_scores(payload, item=item)
     return replayed is not None and replayed == outer_scores
 
 
@@ -838,9 +840,14 @@ def _outer_dimension_scores(item: MarketScanResultItem) -> dict[str, object] | N
     return {name: scores[name] for name in _DIMENSION_SCORE_NAMES}
 
 
-def _replay_evidence_scores(payload: Mapping[str, object]) -> dict[str, object] | None:
+def _replay_evidence_scores(
+    payload: Mapping[str, object], *, item: MarketScanResultItem | None = None,
+) -> dict[str, object] | None:
     try:
-        features, raw_features = _replay_evidence_features(payload)
+        bars = _evidence_bars(payload.get("bar_contract_61"))
+        if item is not None and not verify_market_scan_production_inputs(payload, bars, item=item):
+            return None
+        features, raw_features = _replay_evidence_features(payload, bars)
         if payload.get("features") != raw_features:
             return None
         coverage = payload["session_coverage"]
@@ -877,8 +884,10 @@ def _replay_evidence_scores(payload: Mapping[str, object]) -> dict[str, object] 
 
 def _replay_evidence_features(
     payload: Mapping[str, object],
+    bars: Sequence[Kline] | None = None,
 ) -> tuple[_DimensionFeatures, dict[str, float]]:
-    bars = _evidence_bars(payload.get("bar_contract_61"))
+    if bars is None:
+        bars = _evidence_bars(payload.get("bar_contract_61"))
     mode = payload.get("mode")
     if mode not in {"official", "intraday", "preopen"}:
         raise ValueError("证据模式无效")
@@ -917,7 +926,7 @@ def _evidence_bars(value: object) -> tuple[Kline, ...]:
                 high=_finite_number(row[3]),
                 low=_finite_number(row[4]),
                 volume=_finite_number(row[5]),
-                adjustment_mode=str(row[6]),
+                adjustment_mode=cast(KlineAdjustmentMode, str(row[6])),
                 data_version=str(row[7]),
                 contract_version=str(row[8]),
                 as_of=str(row[9]),
@@ -1036,7 +1045,7 @@ def _evidence_identity_payload(
         "name": item.name,
         "industry": item.industry,
         "metadata_source": item.metadata_source,
-        "quote_date": str(quote.timestamp or "")[:10],
+        "quote_date": _quote_market_date(quote.timestamp),
         "data_date": rows[-1].date,
         "quote_timestamp": quote.timestamp,
         "quote_source": quote.source,
@@ -1061,6 +1070,13 @@ def _evidence_identity_payload(
         "features": dict(raw_features),
         "bar_contract_61": _evidence_bar_contract(rows),
     }
+
+
+def _quote_market_date(timestamp: str) -> str:
+    event = parse_quote_time(timestamp)
+    if event is None:
+        raise ValueError("报价时间无法解析，不能构造交易日证据")
+    return event.date().isoformat()
 
 
 def _confidence_score(

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 import math
 import re
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from app.models.market_scan import (
     MARKET_SCAN_FULL_MARKET_SCOPE,
@@ -27,6 +27,8 @@ from app.models.market import (
     UNKNOWN_KLINE_DATA_VERSION,
 )
 from app.services.data_quality import build_data_quality
+from app.services.data_quality_components import is_demo_quote_source
+from app.services.data_quality_kline import is_demo_kline_source
 from app.services.data_quality_time import parse_quote_time
 from app.services.indicators import recent_volume_ratio, trend_score
 from app.services.leader_scoring import (
@@ -99,6 +101,13 @@ FULL_MARKET_VOLUME_RATIO_BASE_WINDOW = 20
 FULL_MARKET_VOLUME_RATIO_MIN_COUNT = FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW + 1
 FULL_MARKET_VOLUME_RATIO_PRECISION = 2
 FULL_MARKET_SCORE_TIE_BREAK = MARKET_SCAN_RANK_TIE_BREAK
+MARKET_SCAN_INPUT_ADMISSION_CONTRACT_VERSION = "market-scan-input-admission-v3"
+_RANKING_BAR_SIGNATURE_FIELDS = (
+    "open", "close", "high", "low", "volume", "adjustment_mode",
+    "source", "from_cache", "fallback_used", "as_of", "fetched_at",
+    "data_version", "contract_version", "session_status", "open_execution_status",
+    "corporate_action_status", "adjustment_factor", "point_in_time", "execution_metadata_version",
+)
 MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS = {
     "kind": "ordinal-cross-sectional-ranking",
     "expected_return": False,
@@ -272,22 +281,6 @@ def _same_contract_number(left: object, right: object) -> bool:
     ):
         return False
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-8)
-
-
-def rank_score_details(
-    rows: Iterable[tuple[str, Mapping[str, object]]],
-) -> dict[str, int]:
-    from app.services.market_scan_replay import rank_score_details as rank
-
-    return rank(rows)
-
-
-def __getattr__(name: str) -> Any:
-    if name == "MarketScanScoreReplay":
-        from app.services.market_scan_replay import MarketScanScoreReplay
-
-        return MarketScanScoreReplay
-    raise AttributeError(name)
 
 
 @dataclass(frozen=True)
@@ -782,11 +775,16 @@ def completed_market_scan_klines(rows: list[Kline], cutoff: date) -> list[Kline]
     by_date: dict[date, Kline] = {}
     for row in rows:
         row_date = _strict_date(row.date)
-        if row_date is not None and row_date <= cutoff and is_trading_day(row_date) and valid_kline(row):
-            existing = by_date.get(row_date)
-            if existing is not None and _ranking_bar_signature(existing) != _ranking_bar_signature(row):
-                raise MarketScanDataMissing(f"同一交易日 {row_date.isoformat()} 存在冲突日K")
-            by_date[row_date] = row
+        if row_date is None or row_date > cutoff or not is_trading_day(row_date):
+            continue
+        if not valid_kline(row):
+            raise MarketScanDataMissing(f"已完成交易日 {row_date.isoformat()} 的日K OHLC或成交量无效")
+        if is_demo_kline_source(row.source):
+            raise MarketScanDataMissing("演示日K不能用于全市场生产评分")
+        existing = by_date.get(row_date)
+        if existing is not None and _ranking_bar_signature(existing) != _ranking_bar_signature(row):
+            raise MarketScanDataMissing(f"同一交易日 {row_date.isoformat()} 存在冲突日K")
+        by_date[row_date] = row
     return [row for _row_date, row in sorted(by_date.items(), key=lambda entry: entry[0])]
 
 
@@ -882,6 +880,8 @@ def _require_justified_skip_liquidity(quote: Quote, rows: list[Kline]) -> None:
 
 
 def _require_rankable_quote_fields(quote: Quote) -> None:
+    if is_demo_quote_source(quote.source or ""):
+        raise MarketScanDataMissing("演示行情不能用于全市场生产评分")
     if not valid_quote(quote):
         raise MarketScanDataMissing("报价 OHLC、昨收价或成交字段不满足排名准入条件")
 
@@ -976,6 +976,30 @@ def _scan_metrics(rows: list[Kline], volume_ratio: float) -> dict[str, float]:
         "high20": round(max(row.high for row in recent_20), FULL_MARKET_METRIC_DECIMALS),
         "low20": round(min(row.low for row in recent_20), FULL_MARKET_METRIC_DECIMALS),
         "volume_ratio": round(volume_ratio, FULL_MARKET_METRIC_DECIMALS),
+    }
+
+
+def market_scan_input_admission_spec() -> dict[str, object]:
+    """Version new input acceptance in the run contract, outside frozen v5 math."""
+    return {
+        "contract_version": MARKET_SCAN_INPUT_ADMISSION_CONTRACT_VERSION,
+        "modes": ["official", "preopen", "intraday"],
+        "demo_sources": {
+            "quote": "rejected",
+            "completed_daily_bars": "reject-any-demo-source",
+            "classification": "shared-quality-demo-source-v1",
+        },
+        "duplicate_daily_bars": {
+            "identity": "trading-date",
+            "accept_when": "all-market-and-provenance-fields-identical",
+            "comparison_fields": list(_RANKING_BAR_SIGNATURE_FIELDS),
+        },
+        "invalid_completed_daily_bars": {
+            "scope": "recognized-trading-date-on-or-before-completed-cutoff",
+            "validation": "finite-positive-consistent-ohlc-and-nonnegative-volume",
+            "handling": "reject-as-missing-before-session-gap-classification",
+        },
+        "historical_score_replay": "preserve-frozen-contract-without-readmission",
     }
 
 
@@ -1231,8 +1255,8 @@ def _score_reason(calculated: _MarketScanScore) -> str:
     )
 
 
-def _ranking_bar_signature(row: Kline) -> tuple[float, float, float, float, float, str | None]:
-    return (row.open, row.close, row.high, row.low, row.volume, row.adjustment_mode)
+def _ranking_bar_signature(row: Kline) -> tuple[object, ...]:
+    return tuple(getattr(row, field) for field in _RANKING_BAR_SIGNATURE_FIELDS)
 
 
 def _is_single_price_session(quote: Quote) -> bool:
@@ -1257,16 +1281,16 @@ __all__ = [
     "FULL_MARKET_SCORE_RULE_VERSION",
     "FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION",
     "FULL_MARKET_SCORE_TIE_BREAK",
+    "MARKET_SCAN_INPUT_ADMISSION_CONTRACT_VERSION",
     "MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS",
     "MarketScanDataMissing",
     "MarketScanReplayError",
-    "MarketScanScoreReplay",
     "MarketScanSkipped",
     "completed_market_scan_klines",
     "is_current_market_scan_score_spec",
+    "market_scan_input_admission_spec",
     "market_scan_score_spec",
     "market_scan_score_spec_v4",
-    "rank_score_details",
     "replay_score_details",
     "score_market_scan_item",
     "stable_score_spec_hash",

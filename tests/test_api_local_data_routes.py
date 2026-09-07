@@ -14,7 +14,7 @@ import app.services.runtime_backup as runtime_backup_module
 from app.api.deps import get_datahub, get_local_data_import_previews
 from app.api.routes import local_data
 from app.config import Settings
-from app.models.schemas import AlertRuleInput
+from app.models.user_data import AlertRuleInput
 from app.services.cache import SQLiteCache
 from app.services.local_data_import_guard import LocalDataImportPreviewRegistry
 from app.services.runtime_backup import create_runtime_backup, verify_runtime_backup
@@ -616,11 +616,18 @@ def test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotati
             client.post,
             "/api/local-data/cleanup?confirm=retention-cleanup",
         )
-        assert cleanup_applied.wait(timeout=10)
-        rotation.start()
         try:
-            assert rotation_attempting.wait(timeout=20)
-            assert rotation_finished.wait(timeout=0.3) is False
+            cleanup_ready = cleanup_applied.wait(timeout=10)
+            if not cleanup_ready and request.done():
+                early_response = request.result()
+                raise AssertionError(
+                    "cleanup request completed before reaching transactional cleanup; "
+                    f"HTTP status={early_response.status_code}"
+                )
+            assert cleanup_ready, "cleanup request did not reach transactional cleanup within 10 seconds"
+            rotation.start()
+            assert rotation_attempting.wait(timeout=20), "backup rotation process did not reach its acquisition attempt"
+            assert rotation_finished.wait(timeout=0.3) is False, "backup rotation completed before cleanup transaction was released"
             release_cleanup.set()
             response = request.result(timeout=20)
             rotation.join(timeout=20)

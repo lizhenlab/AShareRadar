@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Callable, Iterable, TypeVar
 
 from app.utils.provider_errors import sanitize_provider_error
+from app.services.instance_guard import FileInstanceGuard
 from app.services.scheduler_contracts import (
     KLINE_FAILURE_DETAIL_LIMIT,
     PROVIDER_FAILURE_DETAIL_LIMIT,
     TASK_ERROR_MAX_LENGTH,
-    FileSchedulerInstanceGuard,
     KlineRefreshSummary,
     NoopSchedulerInstanceGuard,
     QuoteRefreshSummary,
@@ -64,7 +64,7 @@ def _default_instance_guard(datahub) -> SchedulerInstanceGuard:
     cache_path = getattr(getattr(datahub, "cache", None), "path", None)
     if cache_path is None:
         return NoopSchedulerInstanceGuard()
-    return FileSchedulerInstanceGuard(Path(f"{cache_path}.scheduler.lock"))
+    return FileInstanceGuard(Path(f"{cache_path}.scheduler.lock"))
 
 
 def _scheduler_cache_symbols(

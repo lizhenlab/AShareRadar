@@ -20,7 +20,7 @@ from app.services.datahub_runtime import (
     run_provider_io,
 )
 from app.services.daemon_executor import DaemonThreadPoolExecutor
-from app.services.provider_errors import ProviderCoverageMiss
+from app.utils.provider_errors import ProviderCoverageMiss
 
 
 def test_provider_runtime_attempts_are_lazy_and_skip_unavailable_sources() -> None:

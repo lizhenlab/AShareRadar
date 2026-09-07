@@ -8,6 +8,7 @@ from app.models.system import (
     ScheduledTaskState,
     SchedulerStatus,
 )
+from app.services.lifecycle_cleanup import await_cleanup
 from app.services.market_scan_manager import MARKET_SCAN_TASK_LABEL, MARKET_SCAN_TASK_NAME
 from app.services.scheduler_contracts import (
     INSTANCE_GUARD_BUSY_MESSAGE,
@@ -80,6 +81,10 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             return True
 
     async def _end_manual_guard_use(self) -> None:
+        cleanup = asyncio.create_task(self._complete_manual_guard_use(), name="scheduler-manual-guard-cleanup")
+        await await_cleanup(cleanup)
+
+    async def _complete_manual_guard_use(self) -> None:
         async with self._lifecycle_lock:
             self._manual_guard_users -= 1
             await self._release_instance_guard()

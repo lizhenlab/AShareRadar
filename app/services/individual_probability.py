@@ -10,7 +10,6 @@ from threading import RLock
 from typing import cast
 
 from app.artifacts.io import ArtifactIOError, read_regular_file, sha256_hex
-from app.config import PROJECT_ROOT
 from app.models.individual_probability import (
     IndividualProbabilityCounts,
     IndividualProbabilityEvidence,
@@ -35,7 +34,6 @@ from app.utils.symbols import standard_symbol
 
 _AssessmentFileFingerprint = tuple[str, int, int, int, int, int, int, str]
 _AssessmentSnapshot = tuple[_AssessmentFileFingerprint, ...]
-_StoreFingerprint = tuple[str, _AssessmentSnapshot]
 _MAX_SNAPSHOT_RETRIES = 3
 _LEGACY_SOURCE_LIMITATION = "legacy_official_pit_sources_audit_only_not_current_evidence"
 _COMPACT_METRICS_LIMITATION = "compact_horizon_metrics_not_independently_replayable"
@@ -45,48 +43,25 @@ _RUNTIME_SOURCE_REPLAY_LIMITATION = "official_pit_source_artifacts_not_runtime_r
 class IndividualProbabilityStore:
     """Load the newest immutable assessment; malformed state degrades closed."""
 
-    def __init__(
-        self,
-        directory: str | Path,
-        *,
-        fallback_directory: str | Path | None = None,
-    ) -> None:
+    def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory).expanduser().absolute()
-        self.fallback_directory = Path(fallback_directory).expanduser().absolute() if fallback_directory is not None else None
         self._lock = RLock()
-        self._fingerprint: _StoreFingerprint | None = None
+        self._fingerprint: _AssessmentSnapshot | None = None
         self._assessment: dict[str, object] | None = None
 
     def latest(self) -> dict[str, object] | None:
         with self._lock:
             for _attempt in range(_MAX_SNAPSHOT_RETRIES):
-                directory, scope, snapshot = self._effective_snapshot()
-                fingerprint = scope, snapshot
-                if fingerprint == self._fingerprint:
+                snapshot = self._directory_fingerprint(self.directory)
+                if snapshot == self._fingerprint:
                     return deepcopy(self._assessment) if self._assessment is not None else None
-                assessment = self._load_latest(directory, snapshot)
-                observed_directory, observed_scope, observed_snapshot = self._effective_snapshot()
-                if (
-                    observed_directory,
-                    observed_scope,
-                    observed_snapshot,
-                ) != (directory, scope, snapshot):
+                assessment = self._load_latest(self.directory, snapshot)
+                if self._directory_fingerprint(self.directory) != snapshot:
                     continue
                 self._assessment = assessment
-                self._fingerprint = fingerprint
+                self._fingerprint = snapshot
                 return deepcopy(assessment) if assessment is not None else None
             raise IndividualProbabilityArtifactError("个股上涨概率 assessment 目录在读取期间持续变化")
-
-    def _effective_snapshot(
-        self,
-    ) -> tuple[Path, str, _AssessmentSnapshot]:
-        primary = self._directory_fingerprint(self.directory)
-        if primary:
-            return self.directory, "primary", primary
-        if self.fallback_directory is None:
-            return self.directory, "primary", ()
-        fallback = self._directory_fingerprint(self.fallback_directory)
-        return self.fallback_directory, "fallback", fallback
 
     def _directory_fingerprint(
         self,
@@ -156,13 +131,8 @@ class IndividualProbabilityStore:
 
 
 def individual_probability_store_for_cache_path(cache_path: str | Path) -> IndividualProbabilityStore:
-    cache = Path(cache_path).expanduser().absolute()
-    root = cache.parent
-    fallback = PROJECT_ROOT / "docs" / "research" / "artifacts" if cache == PROJECT_ROOT / "data" / "ashare_radar.sqlite3" else None
-    return IndividualProbabilityStore(
-        root / "research" / "individual_probability",
-        fallback_directory=fallback,
-    )
+    root = Path(cache_path).expanduser().absolute().parent
+    return IndividualProbabilityStore(root / "research" / "individual_probability")
 
 
 def project_individual_upside_probability(

@@ -4,7 +4,7 @@ from app.models.analysis import (
     AnalysisResult,
     FinancialHealth,
 )
-from app.services.financial_health_components import build_financial_health_state, liquidity_metric_value
+from app.services.financial_health_components import build_financial_health_state
 from app.services.financial_metrics import financial_summary
 
 
@@ -29,9 +29,6 @@ def build_financial_health(analysis: AnalysisResult) -> FinancialHealth:
         source=f"{quote.source}·市场估值与交易体征",
     )
 
-
-def _liquidity_metric_value(amount: float, turnover_rate: float | None) -> str:
-    return liquidity_metric_value(amount, turnover_rate)
 
 
 __all__ = ["build_financial_health"]

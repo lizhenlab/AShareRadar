@@ -53,8 +53,18 @@ function requirePaperStrategy(value, expectedPlan = null) {
 }
 
 export async function loadPaperTradingDashboard(state, options = {}) {
+  if (options.signal?.aborted) return false;
+  return loadPaperDashboard(state, options, beginPaperDashboardOperation(state));
+}
+
+function beginPaperDashboardOperation(state) {
   const sequence = Number(state.paperTradingSeq || 0) + 1;
   state.paperTradingSeq = sequence;
+  return () => state.paperTradingSeq === sequence;
+}
+
+async function loadPaperDashboard(state, options, isCurrent) {
+  if (!isCurrent() || options.signal?.aborted) return false;
   renderPaperLoading();
   try {
     const runId = Number(options.runId || 0);
@@ -63,14 +73,14 @@ export async function loadPaperTradingDashboard(state, options = {}) {
       signal: options.signal,
       timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     });
-    if (state.paperTradingSeq !== sequence) return false;
+    if (!isCurrent() || options.signal?.aborted) return false;
     requireDashboard(dashboard);
     state.paperTradingDashboard = dashboard;
     renderPaperTradingDashboard(state);
     setPaperFeedback("");
     return true;
   } catch (error) {
-    if (isAbortError(error) || state.paperTradingSeq !== sequence) return false;
+    if (isAbortError(error) || !isCurrent() || options.signal?.aborted) return false;
     renderPaperUnavailable(error);
     return false;
   }
@@ -88,29 +98,32 @@ export async function createPaperStrategy(state) {
   if (!SHA256_HEX.test(String(expectedPlan.plan_payload_digest || ""))) {
     throw new TypeError("冻结复盘计划摘要无效，请刷新后重试");
   }
-  const strategy = requirePaperStrategy(await mutatePaper("/api/paper-trading/strategies", "POST", {
+  const payload = {
     plan_id: planId,
     expected_plan_revision: Number(expectedPlan.revision),
     expected_plan_payload_digest: expectedPlan.plan_payload_digest,
     allocation_pct: allocationPct,
     priority,
     entry_expiry_sessions: entryExpirySessions,
-  }), expectedPlan);
-  await loadPaperTradingDashboard(state);
-  setPaperFeedback(`已将 ${strategy.symbol || "策略"} 加入模拟，请运行撮合`, "ok");
-  return strategy;
+  };
+  return runPaperDashboardMutation(state, async () => requirePaperStrategy(
+    await mutatePaper("/api/paper-trading/strategies", "POST", payload), expectedPlan
+  ), (strategy, isCurrent) => refreshPaperAfterMutation(
+    state, isCurrent, `已将 ${strategy.symbol || "策略"} 加入模拟，请运行撮合`
+  ));
 }
 
 export async function updatePaperTradingAccount(state) {
   const initialCash = positiveNumber($("paperInitialCash")?.value, "初始资金无效");
   const defaultCostProfile = String($("paperDefaultCostProfile")?.value || "base");
-  const account = await mutatePaper("/api/paper-trading/account", "PATCH", {
+  const payload = {
     initial_cash: initialCash,
     default_cost_profile: defaultCostProfile,
-  });
-  await loadPaperTradingDashboard(state);
-  setPaperFeedback("初始资金已保存", "ok");
-  return account;
+  };
+  return runPaperDashboardMutation(
+    state, () => mutatePaper("/api/paper-trading/account", "PATCH", payload),
+    (_, isCurrent) => refreshPaperAfterMutation(state, isCurrent, "初始资金已保存")
+  );
 }
 
 export async function runPaperTradingSimulation(state) {
@@ -120,22 +133,26 @@ export async function runPaperTradingSimulation(state) {
     cost_profile: String($("paperCostProfile")?.value || "base"),
     benchmark_symbol: String($("paperBenchmarkSymbol")?.value || "").trim() || null,
   };
-  const summary = await mutatePaper("/api/paper-trading/run", "POST", payload, PAPER_RUN_TIMEOUT_MS);
-  if (!summary || typeof summary !== "object") throw new TypeError("模拟运行结果格式异常");
-  requireDashboard(summary.dashboard);
-  if (Number(summary.run_id || 0) !== Number(summary.dashboard.selected_run_id || 0)) {
-    throw new TypeError("模拟运行与仪表盘身份不一致");
-  }
-  state.paperTradingDashboard = summary.dashboard;
-  renderPaperTradingDashboard(state);
-  setPaperFeedback(summary.dashboard?.latest_run?.message || "模拟撮合完成", "ok");
-  return summary;
+  return runPaperDashboardMutation(
+    state, () => mutatePaper("/api/paper-trading/run", "POST", payload, PAPER_RUN_TIMEOUT_MS),
+    (summary) => {
+      if (!summary || typeof summary !== "object") throw new TypeError("模拟运行结果格式异常");
+      requireDashboard(summary.dashboard);
+      if (Number(summary.run_id || 0) !== Number(summary.dashboard.selected_run_id || 0)) {
+        throw new TypeError("模拟运行与仪表盘身份不一致");
+      }
+      state.paperTradingDashboard = summary.dashboard;
+      renderPaperTradingDashboard(state);
+      setPaperFeedback(summary.dashboard?.latest_run?.message || "模拟撮合完成", "ok");
+    }
+  );
 }
 
 export async function selectPaperTradingRun(state, runId) {
   const selected = positiveNumber(runId, "请选择历史运行");
-  const loaded = await loadPaperTradingDashboard(state, { runId: selected });
-  if (loaded) setPaperFeedback(`已切换到运行 #${selected}`, "ok");
+  const isCurrent = beginPaperDashboardOperation(state);
+  const loaded = await loadPaperDashboard(state, { runId: selected }, isCurrent);
+  if (loaded && isCurrent()) setPaperFeedback(`已切换到运行 #${selected}`, "ok");
   return loaded;
 }
 
@@ -156,13 +173,35 @@ export async function comparePaperTradingRuns(state) {
 
 export async function deletePaperStrategy(state, strategyId, options = {}) {
   if (options.confirm && !options.confirm("删除这条尚未形成持仓的模拟策略？")) return false;
-  await fetchJson(`/api/paper-trading/strategies/${encodeURIComponent(strategyId)}`, {
-    method: "DELETE",
-    timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-  });
-  await loadPaperTradingDashboard(state);
-  setPaperFeedback("模拟策略已删除", "ok");
-  return true;
+  return runPaperDashboardMutation(state, async () => {
+    await fetchJson(`/api/paper-trading/strategies/${encodeURIComponent(strategyId)}`, {
+      method: "DELETE",
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
+    return true;
+  }, (_, isCurrent) => refreshPaperAfterMutation(state, isCurrent, "模拟策略已删除"));
+}
+
+async function runPaperDashboardMutation(state, mutate, onSuccess) {
+  // Writes must finish independently; only the newest operation owns the UI tail.
+  const isCurrent = beginPaperDashboardOperation(state);
+  try {
+    const result = await mutate();
+    if (isCurrent()) await onSuccess(result, isCurrent);
+    return result;
+  } catch (error) {
+    if (!isCurrent()) return false;
+    throw error;
+  }
+}
+
+async function refreshPaperAfterMutation(state, isCurrent, successMessage) {
+  const loaded = await loadPaperDashboard(state, {}, isCurrent);
+  if (!isCurrent()) return;
+  setPaperFeedback(
+    loaded ? successMessage : `${successMessage}；账户视图同步未完成，请刷新后查看`,
+    loaded ? "ok" : "error"
+  );
 }
 
 export function syncPaperTradingPlans(state) {

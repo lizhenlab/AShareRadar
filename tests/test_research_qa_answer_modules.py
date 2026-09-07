@@ -4,96 +4,22 @@ from pathlib import Path
 
 import pytest
 
-import app.services.research_qa_answer as answer_facade
-from app.models.schemas import (
-    ActionAdvice,
-    AnalysisResult,
-    DataQuality,
-    EventDigestReport,
-    EvidenceChainReport,
-    Kline,
-    MarketRegimeReport,
-    PeerComparisonReport,
-    Quote,
-    RiskRadarItem,
-    RiskRadarReport,
-    RiskRewardReport,
-    ScenarioPlan,
-    SignalItem,
-    SignalSnapshot,
-    SignalValidationItem,
-    SignalValidationReport,
-    StockConceptItem,
-    StockDiagnosis,
-    TStrategyAssistantReport,
-    ThemeContextReport,
-    TimeframeAlignmentReport,
-)
-from app.services.research_qa_answer import (
-    QUESTION_CONFIDENCE_PENALTIES,
-    TOPIC_ANSWER_STRATEGIES,
-    ConfidenceContext,
-    TopicAnswerStrategy,
-    answer_stock_question,
-    question_actions,
-    question_answer_text,
-    question_conclusion,
-    question_confidence,
-    question_evidence,
-    question_invalidations,
-)
+from app.models.analysis import ActionAdvice, AnalysisResult, DataQuality, SignalItem, SignalSnapshot
+from app.models.market import Kline, Quote, StockConceptItem
+from app.models.research import EventDigestReport, EvidenceChainReport, MarketRegimeReport, PeerComparisonReport, RiskRadarItem, RiskRadarReport, RiskRewardReport, ScenarioPlan, SignalValidationItem, SignalValidationReport, StockDiagnosis, TStrategyAssistantReport, ThemeContextReport, TimeframeAlignmentReport
+from app.services.research_qa_answer_confidence import question_confidence
+from app.services.research_qa_answer_report import answer_stock_question
+from app.services.research_qa_answer_selectors import question_actions, question_answer_text, question_conclusion, question_evidence, question_invalidations
+from app.services.research_qa_answer_strategies import TOPIC_ANSWER_STRATEGIES
 from app.services.research_qa_topics import QUESTION_TOPIC_KEYWORDS, RELATED_QUESTIONS
-from app.services.research_qa_answer_confidence import (
-    QUESTION_CONFIDENCE_PENALTIES as implementation_confidence_penalties,
-    question_confidence as implementation_question_confidence,
-)
-from app.services.research_qa_answer_contracts import (
-    ConfidenceContext as implementation_confidence_context,
-    TopicAnswerStrategy as implementation_topic_answer_strategy,
-)
-from app.services.research_qa_answer_report import answer_stock_question as implementation_answer_stock_question
-from app.services.research_qa_answer_selectors import question_actions as implementation_question_actions
-from app.services.research_qa_answer_strategies import TOPIC_ANSWER_STRATEGIES as implementation_topic_answer_strategies
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_question_answer_facade_reexports_split_implementations() -> None:
-    assert answer_facade.answer_stock_question is implementation_answer_stock_question
-    assert answer_facade.question_confidence is implementation_question_confidence
-    assert answer_facade.question_actions is implementation_question_actions
-
-
-def test_question_answer_facade_restores_legacy_strategy_constant_and_type_exports() -> None:
-    assert TOPIC_ANSWER_STRATEGIES is implementation_topic_answer_strategies
-    assert QUESTION_CONFIDENCE_PENALTIES is implementation_confidence_penalties
-    assert ConfidenceContext is implementation_confidence_context
-    assert TopicAnswerStrategy is implementation_topic_answer_strategy
-    assert {
-        "ActionBuilder",
-        "ActionContext",
-        "AnswerPrefixBuilder",
-        "ConfidenceContext",
-        "ConfidencePenaltyRule",
-        "ConclusionBuilder",
-        "ConclusionContext",
-        "EvidenceBuilder",
-        "EvidenceContext",
-        "InvalidationBuilder",
-        "InvalidationContext",
-        "QUESTION_CONFIDENCE_PENALTIES",
-        "StockQuestionContext",
-        "TOPIC_ANSWER_STRATEGIES",
-        "TopicAnswerStrategy",
-    } <= set(answer_facade.__all__)
-
-
 def test_question_answer_split_modules_stay_bounded() -> None:
-    facade = ROOT / "app/services/research_qa_answer.py"
     components = sorted((ROOT / "app/services").glob("research_qa_answer_*.py"))
 
-    assert len(facade.read_text(encoding="utf-8").splitlines()) <= 70
     assert components
     assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 220 for path in components)
 

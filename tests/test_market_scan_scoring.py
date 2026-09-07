@@ -8,7 +8,8 @@ import pytest
 
 from app.artifacts.io import canonical_json_text, sha256_hex
 from app.models.market_scan import MarketScanResultItem, MarketScanResultWrite, MarketScanRun
-from app.models.schemas import Kline, StockInfo
+from app.models.market import Kline, StockInfo
+from app.services.market_scan_replay import rank_score_details
 from app.services.market_scan_scoring import (
     FULL_MARKET_SCORE_TIE_BREAK,
     MarketScanDataMissing,
@@ -17,7 +18,6 @@ from app.services.market_scan_scoring import (
     completed_market_scan_klines,
     market_scan_score_spec,
     market_scan_score_spec_v4,
-    rank_score_details,
     replay_score_details,
     score_market_scan_item,
     stable_score_spec_hash,
@@ -727,7 +727,7 @@ def test_market_scan_replay_uses_continuous_medium_term_structure_before_symbol(
 
 def test_completed_market_scan_klines_excludes_future_invalid_and_identical_duplicates() -> None:
     earlier = make_kline(date="2026-07-16", close=10)
-    replacement = earlier.model_copy(update={"source": "另一个来源"})
+    replacement = earlier.model_copy()
     current = make_kline(date="2026-07-17", close=12)
     future = make_kline(date="2026-07-18", close=13)
     invalid_date = make_kline(date="2026/07/17", close=14)

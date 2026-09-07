@@ -7,25 +7,12 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-import app.services.research_risk_reward as risk_reward
-from app.models.schemas import FactorLabReport, RiskRewardReport, ScenarioPlan
-from app.services.research_risk_reward import (
-    DOWNSIDE_STOP_ADJUSTMENT_RULES,
-    RISK_REWARD_RATING_RULES,
-    build_risk_reward_report,
-    _downside_distance_pct,
-    _downside_stop,
-    _normalize_scenario_probabilities,
-    _reward_risk_ratio,
-    _risk_reward_metrics,
-    _risk_reward_rating,
-    _risk_reward_summary,
-    _scenario_plans,
-    _scenario_probabilities,
-    _upside_distance_pct,
-)
-from app.services.research_risk_reward_metrics import _risk_reward_metrics as implementation_risk_reward_metrics
-from app.services.research_risk_reward_report import build_risk_reward_report as implementation_build_risk_reward_report
+from app.models.research import FactorLabReport, RiskRewardReport, ScenarioPlan
+from app.services.research_risk_reward_contracts import ScenarioProbabilities
+from app.services.research_risk_reward_metrics import DOWNSIDE_STOP_ADJUSTMENT_RULES, _downside_distance_pct, _downside_stop, _reward_risk_ratio, _risk_reward_metrics, _upside_distance_pct
+from app.services.research_risk_reward_rating import RISK_REWARD_RATING_RULES, _risk_reward_rating, _risk_reward_summary
+from app.services.research_risk_reward_report import build_risk_reward_report
+from app.services.research_risk_reward_scenarios import _normalize_scenario_probabilities, _scenario_plans, _scenario_probabilities
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,20 +76,9 @@ def test_factor_lab_legacy_confidence_is_exposed_as_non_statistical_evidence_suf
     assert report.notes == ["样本较少，只作为证据充分度较低的参考。"]
 
 
-def test_risk_reward_facade_preserves_builder_and_metric_results() -> None:
-    feature = _feature(price=100, support=95, resistance=108, atr14=2, atr_pct=2, volatility_pct=3)
-    factor_lab = _factor_lab(total_score=68, positive_factor_count=3, negative_factor_count=1)
-    regime = _market_regime(risk_multiplier=1.0)
-
-    assert build_risk_reward_report is implementation_build_risk_reward_report
-    assert _risk_reward_metrics(feature, factor_lab, regime) == implementation_risk_reward_metrics(feature, factor_lab, regime)
-
-
 def test_risk_reward_split_modules_stay_bounded() -> None:
-    facade = ROOT / "app/services/research_risk_reward.py"
     components = sorted((ROOT / "app/services").glob("research_risk_reward_*.py"))
 
-    assert len(facade.read_text(encoding="utf-8").splitlines()) <= 130
     assert components
     assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 420 for path in components)
 
@@ -306,11 +282,14 @@ def test_distance_pct_requires_target_and_stop_on_expected_side() -> None:
     assert _downside_distance_pct(105, 100) == 0
 
 
-def test_metrics_drop_target_and_stop_on_wrong_side_of_current_price(monkeypatch) -> None:
-    monkeypatch.setattr(risk_reward, "_upside_target", lambda feature, factor_lab: 98)
-    monkeypatch.setattr(risk_reward, "_downside_stop", lambda feature, market_regime: 102)
-
-    metrics = _risk_reward_metrics(_feature(price=100), _factor_lab(), _market_regime())
+def test_metrics_drop_target_and_stop_on_wrong_side_of_current_price() -> None:
+    metrics = _risk_reward_metrics(
+        _feature(price=100),
+        _factor_lab(),
+        _market_regime(),
+        upside_target_builder=lambda feature, factor_lab: 98,
+        downside_stop_builder=lambda feature, market_regime: 102,
+    )
 
     assert metrics.upside_target == 0
     assert metrics.downside_stop == 0
@@ -403,7 +382,7 @@ def test_scenario_probability_normalization_clamps_malformed_inputs() -> None:
         assert probabilities.risk >= 0
     assert malformed.positive == 0
     assert crowded.neutral >= 10
-    assert fractional == risk_reward.ScenarioProbabilities(positive=34, neutral=33, risk=33)
+    assert fractional == ScenarioProbabilities(positive=34, neutral=33, risk=33)
 
 
 def test_scenario_plans_use_waiting_text_for_missing_price_levels() -> None:

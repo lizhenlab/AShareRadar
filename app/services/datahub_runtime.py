@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Hashable, Iterable, Iterator, Mapping
 from concurrent.futures import Future as ConcurrentFuture
 from contextvars import ContextVar, copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 import threading
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
@@ -127,6 +127,8 @@ class _ProviderCallState:
     task: asyncio.Future[Any]
     waiters: int = 0
     orphaned: bool = False
+    stopping: bool = False
+    workers: set[ConcurrentFuture[Any]] = field(default_factory=set)
 
 
 class ProviderCallBusyError(RuntimeError):
@@ -257,19 +259,15 @@ class ProviderRuntime:
             while True:
                 if self._closed:
                     raise RuntimeError("ProviderRuntime 已关闭")
-                existing = self._provider_calls.get(full_key)
-                if existing is not None and not existing.task.done():
-                    existing.waiters += 1
-                    existing.orphaned = False
-                    return existing
+                existing = self._join_existing_provider_call(full_key)
                 if existing is not None:
-                    self._provider_calls.pop(full_key, None)
+                    return existing
                 if self._provider_has_orphaned_call(capability_key):
                     raise ProviderCallBusyError(f"{capability_key[0]} {capability_key[1]} 上一次调用仍在后台执行")
                 if self._active_provider_call_count(capability_key) < self._capability_max_in_flight(
                     capability_key
                 ):
-                    state = self._start_provider_call(capability_key, full_key, start)
+                    state = self._start_provider_call(full_key, start)
                     state.waiters = 1
                     return state
 
@@ -281,20 +279,35 @@ class ProviderRuntime:
                 except TimeoutError as exc:
                     raise ProviderCallBusyError(f"{capability_key[0]} {capability_key[1]} 当前并发请求较多") from exc
 
+    def _join_existing_provider_call(self, full_key: tuple[str, str, Hashable]) -> _ProviderCallState | None:
+        existing = self._provider_calls.get(full_key)
+        if existing is None:
+            return None
+        if existing.stopping and self._provider_call_is_active(existing):
+            raise ProviderCallBusyError(f"{full_key[0]} {full_key[1]} 上一次调用正在取消收尾")
+        if not existing.task.done():
+            existing.waiters += 1
+            existing.orphaned = False
+            return existing
+        if self._provider_call_is_active(existing):
+            raise ProviderCallBusyError(f"{full_key[0]} {full_key[1]} 上一次调用仍在后台执行")
+        self._provider_calls.pop(full_key, None)
+        return None
+
     def _start_provider_call(
         self,
-        capability_key: tuple[str, str],
         full_key: tuple[str, str, Hashable],
         start: Callable[[], Awaitable[T]],
     ) -> _ProviderCallState:
+        workers: set[ConcurrentFuture[Any]] = set()
         executor_token = _PROVIDER_IO_EXECUTOR.set(self._executor)
-        tracker_token = _PROVIDER_IO_TRACKER.set(partial(self._track_provider_worker, capability_key))
+        tracker_token = _PROVIDER_IO_TRACKER.set(partial(self._track_provider_worker, full_key, workers))
         try:
             task = asyncio.ensure_future(start())
         finally:
             _PROVIDER_IO_TRACKER.reset(tracker_token)
             _PROVIDER_IO_EXECUTOR.reset(executor_token)
-        state = _ProviderCallState(task=task)
+        state = _ProviderCallState(task=task, workers=workers)
         self._provider_calls[full_key] = state
         task.add_done_callback(partial(self._finish_provider_call, full_key, state))
         return state
@@ -320,41 +333,56 @@ class ProviderRuntime:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if task not in done:
-                stopped = await self._stop_unshared_async_call(
-                    capability_key,
-                    state,
-                )
+                stopped = await self._stop_unshared_async_call(state)
                 detail = "已取消未完成的异步请求" if stopped else "底层同步调用仍在受控收尾"
                 raise ProviderCallTimeoutError(f"{label}超过 {timeout_label:g} 秒，{detail}")
             return task.result()
         except asyncio.CancelledError:
-            await self._stop_unshared_async_call(capability_key, state)
+            await self._stop_unshared_async_call(state)
             raise
         finally:
             condition = self._provider_conditions[capability_key]
             async with condition:
                 state.waiters = max(0, state.waiters - 1)
-                if state.waiters == 0 and not task.done():
+                if state.waiters == 0 and self._provider_call_is_active(state):
                     state.orphaned = True
-                if task.done() and self._provider_calls.get(full_key) is state:
-                    self._provider_calls.pop(full_key, None)
+                self._discard_finished_provider_call(full_key, state.workers)
                 condition.notify_all()
 
     async def _stop_unshared_async_call(
         self,
-        capability_key: tuple[str, str],
         state: _ProviderCallState,
     ) -> bool:
-        """Cancel an unshared async request without losing track of blocking SDK work."""
+        """Cancel unshared async or queued work; retain running SDK ownership."""
         task = state.task
-        if state.waiters != 1 or self._active_provider_workers(capability_key):
+        if state.waiters != 1 or state.stopping:
             return False
-        task.cancel()
+        cancelled, running = self._cancel_pending_call_workers(state)
+        if running and not cancelled:
+            return False
+        state.stopping = True
+        if not running:
+            task.cancel()
         done, _pending = await asyncio.wait(
             {task},
             timeout=PROVIDER_ASYNC_CANCEL_GRACE_SECONDS,
         )
-        return task in done
+        return task in done and not self._provider_call_is_active(state)
+
+    def _cancel_pending_call_workers(self, state: _ProviderCallState) -> tuple[bool, bool]:
+        with self._worker_lock:
+            workers = tuple(state.workers)
+        cancelled = running = False
+        # Future.cancel() arbitrates the queued-to-running race atomically;
+        # invoke it outside our lock because completion callbacks run inline.
+        for worker in workers:
+            if worker.done():
+                continue
+            if worker.cancel():
+                cancelled = True
+            elif not worker.done():
+                running = True
+        return cancelled, running
 
     async def timed_provider_call(
         self,
@@ -481,10 +509,15 @@ class ProviderRuntime:
         return min(16, max(1, parsed))
 
     def _active_provider_call_count(self, key: tuple[str, str]) -> int:
-        return sum(not state.task.done() for (name, kind, _request_key), state in self._provider_calls.items() if (name, kind) == key)
+        return sum(self._provider_call_is_active(state) for (name, kind, _request_key), state in self._provider_calls.items() if (name, kind) == key)
 
     def _provider_has_orphaned_call(self, key: tuple[str, str]) -> bool:
-        return any(state.orphaned and not state.task.done() for (name, kind, _request_key), state in self._provider_calls.items() if (name, kind) == key)
+        return any(state.orphaned and self._provider_call_is_active(state)
+                   for (name, kind, _request_key), state in self._provider_calls.items() if (name, kind) == key)
+
+    def _provider_call_is_active(self, state: _ProviderCallState) -> bool:
+        with self._worker_lock:
+            return not state.task.done() or any(not worker.done() for worker in state.workers)
 
     def _finish_provider_call(
         self,
@@ -492,8 +525,7 @@ class ProviderRuntime:
         state: _ProviderCallState,
         task: asyncio.Future[Any],
     ) -> None:
-        if self._provider_calls.get(full_key) is state:
-            self._provider_calls.pop(full_key, None)
+        self._discard_finished_provider_call(full_key, state.workers)
         if task.cancelled():
             return
         try:
@@ -503,25 +535,40 @@ class ProviderRuntime:
 
     def _track_provider_worker(
         self,
-        key: tuple[str, str],
+        full_key: tuple[str, str, Hashable],
+        call_workers: set[ConcurrentFuture[Any]],
         worker: ConcurrentFuture[Any],
     ) -> None:
+        key = full_key[:2]
         with self._worker_lock:
             self._provider_workers.setdefault(key, set()).add(worker)
-        worker.add_done_callback(partial(self._finish_provider_worker, key))
+            call_workers.add(worker)
+        worker.add_done_callback(partial(self._finish_provider_worker, full_key, call_workers, asyncio.get_running_loop()))
 
     def _finish_provider_worker(
         self,
-        key: tuple[str, str],
+        full_key: tuple[str, str, Hashable],
+        call_workers: set[ConcurrentFuture[Any]],
+        loop: asyncio.AbstractEventLoop,
         worker: ConcurrentFuture[Any],
     ) -> None:
+        key = full_key[:2]
         with self._worker_lock:
+            call_workers.discard(worker)
             workers = self._provider_workers.get(key)
-            if workers is None:
-                return
-            workers.discard(worker)
-            if not workers:
-                self._provider_workers.pop(key, None)
+            if workers is not None:
+                workers.discard(worker)
+                if not workers:
+                    self._provider_workers.pop(key, None)
+        try:
+            loop.call_soon_threadsafe(self._discard_finished_provider_call, full_key, call_workers)
+        except RuntimeError:
+            pass  # A closed event loop cannot admit any further provider calls.
+
+    def _discard_finished_provider_call(self, full_key: tuple[str, str, Hashable], call_workers: set[ConcurrentFuture[Any]]) -> None:
+        state = self._provider_calls.get(full_key)
+        if state is not None and state.workers is call_workers and not self._provider_call_is_active(state):
+            self._provider_calls.pop(full_key, None)
 
     def _active_provider_tasks(self) -> list[asyncio.Future[Any]]:
         return [state.task for state in self._provider_calls.values() if not state.task.done()]
@@ -541,9 +588,6 @@ class ProviderRuntime:
         except Exception:
             pass
         self.clear_cooldown(name, kind)
-
-    def record_attempt_success(self, attempt: ProviderAttempt, kind: str, latency_ms: float) -> None:
-        self.record_success(attempt.name, attempt.index, latency_ms, kind)
 
     async def record_success_async(self, name: str, index: int, latency_ms: float, kind: str) -> None:
         await run_cache_io_best_effort(

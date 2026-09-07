@@ -116,10 +116,6 @@ export function evidenceStatusLabel(status) {
   }[status] || "暂不可用";
 }
 
-export function individualProbabilityContractError(message) {
-  return contractError(message);
-}
-
 function validateHorizon(value, index, reportStatus, selectionQualified) {
   const horizon = objectValue(value, `horizons[${index}]`);
   assertExactFields(horizon, HORIZON_FIELDS, `horizons[${index}]`);
@@ -504,5 +500,3 @@ function isRegisteredExchangeSession(value) {
   const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
   return weekday >= 1 && weekday <= 5;
 }
-
-export const INDIVIDUAL_PROBABILITY_HORIZONS = HORIZON_DAYS;

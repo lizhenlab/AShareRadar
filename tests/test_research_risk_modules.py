@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.models.schemas import RiskRadarItem
+from app.models.research import RiskRadarItem
 from app.services.research_risk import (
     RISK_RADAR_RULES,
     _risk_radar_overall_level,

@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from app.models.schemas import AnalysisResult, OrderBook, OrderBookLevel, Quote
+from app.models.analysis import AnalysisResult
+from app.models.market import OrderBook, OrderBookLevel, Quote
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.stock_activity import build_fund_flow_analysis, build_order_pressure

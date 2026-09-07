@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from app.models.schemas import ProviderCapability, ProviderCapabilityStatus, ProviderStatus
+from app.models.market import ProviderCapability
+from app.models.system import ProviderCapabilityStatus, ProviderStatus
 from app.services.datahub_source_plan import PROVIDER_DECISION_RULES, SOURCE_HEALTH_WARNING_RULES, SourcePlanBuilder
 
 

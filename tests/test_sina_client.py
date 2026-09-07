@@ -10,11 +10,7 @@ import pytest
 import requests
 
 import app.services.sina_client as sina
-from app.services.provider_errors import (
-    ProviderCoverageMiss,
-    ProviderProtocolError,
-    ProviderTransportError,
-)
+from app.utils.provider_errors import ProviderCoverageMiss, ProviderProtocolError, ProviderTransportError
 
 
 def _raw_row(**overrides: object) -> dict[str, object]:

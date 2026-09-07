@@ -67,6 +67,7 @@ jobs:
 
       - name: Generated documentation drift
         run: |
+          python tools/check_repository.py
           python tools/api_inventory.py --check
           python tools/architecture_inventory.py --check
 

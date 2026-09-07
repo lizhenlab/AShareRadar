@@ -10,7 +10,6 @@ from app.services.stock_event_sources import (
     collect_event_items,
     default_observation_event,
     event_next_steps,
-    external_event_placeholders,
     external_source_capabilities,
 )
 def build_event_summary(
@@ -38,4 +37,4 @@ def build_event_summary(
     )
 
 
-__all__ = ["build_event_summary", "event_next_steps", "external_event_placeholders"]
+__all__ = ["build_event_summary", "event_next_steps"]

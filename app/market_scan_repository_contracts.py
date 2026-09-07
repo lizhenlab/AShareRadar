@@ -18,6 +18,7 @@ from app.services.market_scan_scoring import (
     FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION,
     MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS,
     is_current_market_scan_score_spec,
+    market_scan_input_admission_spec,
     verify_persisted_market_scan_result,
 )
 from app.services.market_scan_score_contract import stable_score_spec_hash
@@ -56,6 +57,7 @@ __all__ = [
     "MarketScanScoreReplay",
     "MarketScanTemporalContract",
     "is_current_market_scan_score_spec",
+    "market_scan_input_admission_spec",
     "market_scan_temporal_contract",
     "snapshot_publication_diagnostics",
     "stable_score_spec_hash",

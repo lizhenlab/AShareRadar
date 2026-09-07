@@ -3,6 +3,8 @@
 The expensive cross-date evaluator intentionally stays out of the request path. Its
 report is generated explicitly by ``tools/evaluate_market_scan_shadow.py`` and this
 service only compacts that immutable baseline together with one strategy execution.
+The bundled resource is a static v4 research baseline, not current v5 evidence;
+its content digest and explicit execution-compatibility gates remain binding.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ _BOARD_LABELS = {
     "beijing": "北交所",
 }
 _DIMENSIONS = ("alpha_1d", "alpha_5d", "alpha_20d", "confidence", "risk", "tradability")
-_OFFLINE_REPORT = Path(__file__).resolve().parents[2] / "docs" / "research" / "FULL_MARKET_SELECTION_SHADOW_V55_2026.json"
+_OFFLINE_REPORT = Path(__file__).resolve().parents[1] / "resources" / "strategy_shadow_baseline.json"
 _OFFLINE_REPORT_DIGEST = "b3c5301e201bd3faaa3abadfb819d1e132b7051ae7ec181752b9cb5b68587183"
 _OFFLINE_REPORT_MAX_BYTES = 10_000_000
 _BASELINE_PRODUCTION_SCORE_RULE_VERSION = "full-market-score-v4"

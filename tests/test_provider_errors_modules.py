@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.provider_errors import REDACTED, sanitize_provider_error
+from app.utils.provider_errors import REDACTED, sanitize_provider_error
 
 
 @pytest.mark.parametrize(

@@ -220,8 +220,10 @@ def failed_market_scan_result(
     score_details: dict[str, object] | None = None,
     quote_observed_at: str | None = None,
 ) -> MarketScanResultWrite:
-    completed = completed_market_scan_klines(rows, cutoff)
+    completed = _failure_report_klines(rows, cutoff)
     latest = completed[-1] if completed else None
+    quote_fallback = quote.fallback_used if quote is not None else False
+    kline_fallback = any(row.fallback_used for row in completed)
     return MarketScanResultWrite(
         symbol=symbol,
         status=status,
@@ -234,7 +236,22 @@ def failed_market_scan_result(
         quote_source=quote.source if quote is not None else None,
         kline_source=latest.source if latest is not None else None,
         adjustment_mode=latest.adjustment_mode if latest is not None else None,
+        quote_fallback_used=quote_fallback,
+        kline_fallback_used=kline_fallback,
+        degradation_reasons=tuple(
+            reason for reason, present in (
+                ("quote_fallback", quote_fallback), ("kline_fallback", kline_fallback),
+            ) if present
+        ),
     )
+
+
+def _failure_report_klines(rows: list[Kline], cutoff: date) -> list[Kline]:
+    try:
+        return completed_market_scan_klines(rows, cutoff)
+    except MarketScanDataMissing:
+        # Rejected or ambiguous bars cannot supply metadata for a failure report.
+        return []
 
 
 def failed_scan_result_for_exception(
@@ -256,6 +273,8 @@ def failed_scan_result_for_exception(
         quote_date=quote_date,
         quote_observed_at=quote_observed_at,
     )
+    if mode is not None and quote_date is not None and not execution_details:
+        quote = None
     if isinstance(exc, MarketScanSkipped):
         score_details: dict[str, object] = (
             {MARKET_SCAN_SKIP_EVIDENCE_KEY: exc.evidence}
@@ -298,15 +317,18 @@ def _execution_quote_details(
 ) -> dict[str, object]:
     if quote is None or mode is None or quote_date is None:
         return {}
-    return {
-        MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY: build_market_scan_execution_quote_evidence(
+    try:
+        evidence = build_market_scan_execution_quote_evidence(
             item,
             quote,
             mode=mode,
             quote_date=quote_date,
             captured_at=quote_observed_at or quote.timestamp,
         )
-    }
+    except (TypeError, ValueError):
+        # Invalid quote input must not raise again while reporting its original error.
+        return {}
+    return {MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY: evidence}
 
 
 def raise_batch_outcome_error(

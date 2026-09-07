@@ -85,10 +85,10 @@ def test_strategy_specs_and_immutable_versions_port_across_id_collisions_idempot
     target = tmp_path / "target.sqlite3"
     source_cache = SQLiteCache(source)
     target_cache = SQLiteCache(target)
-    created = source_cache.strategy_lab_service.create(
+    created = source_cache.domain_services.strategy_lab.create(
         StrategySpecCreate(spec=StrategySpecInput(name="可携带策略"), confirmed=True)
     )
-    source_cache.strategy_lab_service.update(
+    source_cache.domain_services.strategy_lab.update(
         created.strategy_id,
         StrategySpecUpdate(
             spec=created.spec.model_copy(
@@ -106,7 +106,7 @@ def test_strategy_specs_and_immutable_versions_port_across_id_collisions_idempot
             confirmed=True,
         ),
     )
-    target_cache.strategy_lab_service.create(
+    target_cache.domain_services.strategy_lab.create(
         StrategySpecCreate(spec=StrategySpecInput(name="目标已有策略"), confirmed=True)
     )
     bundle = export_user_data(source)

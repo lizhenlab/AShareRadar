@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from app.models.schemas import ProviderCapabilityStatus, ProviderStatus
+from app.models.system import ProviderCapabilityStatus, ProviderStatus
 from app.repositories.provider_status_aggregation import aggregate_provider_status
 from app.services.cache import SQLiteCache
 

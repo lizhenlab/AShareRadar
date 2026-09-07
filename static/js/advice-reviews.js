@@ -66,8 +66,7 @@ export async function loadAdviceReviews(state, options = {}) {
     state.adviceReviewDetails = append ? mergeReviewDetails(state.adviceReviewDetails, details) : details;
     state.adviceReviewHasMore = details.length === REVIEW_PAGE_SIZE;
     renderAdviceReviewDetails(state.adviceReviewDetails, state);
-    renderSnapshotOptions(state);
-    if (!state.adviceReviewEditingPlanId) applySelectedSnapshotDefaults(state, { preserveText: false });
+    refreshReviewSnapshotForm(state);
     return true;
   } catch (error) {
     if (isAbortError(error) || !reviewReadIsCurrent(state, sequence, symbol, options)) return false;
@@ -190,12 +189,12 @@ export function updateAdviceReviewDashboardFilters(state) {
 }
 
 export function syncAdviceReviewSnapshots(state, items, analysis) {
+  const previousIdentity = reviewSnapshotFormIdentity(state);
   state.adviceReviewSnapshots = Array.isArray(items)
     ? items.filter((item) => validAdviceSnapshot(item, state.symbol))
     : [];
   state.adviceReviewAnalysis = analysis || null;
-  renderSnapshotOptions(state);
-  if (!state.adviceReviewEditingPlanId) applySelectedSnapshotDefaults(state, { preserveText: false });
+  refreshReviewSnapshotForm(state, { previousIdentity });
 }
 
 export function selectAdviceReviewSnapshot(state) {
@@ -224,6 +223,7 @@ export async function submitAdviceReviewPlan(state, options = {}) {
   }
   state.adviceReviewEditingPlanId = null;
   setReviewFormMode(null);
+  refreshReviewSnapshotForm(state, { reset: true });
   setReviewFeedback(plan ? "复盘计划已更新" : "复盘计划已建立", "ok");
   await loadAdviceReviews(state, { ...options, symbol });
   return saved;
@@ -247,8 +247,7 @@ export async function deleteAdviceReviewPlan(state, planId, options = {}) {
 
   discardAdviceReviewPlanState(state, plan.id);
   renderAdviceReviewDetails(state.adviceReviewDetails, state);
-  renderSnapshotOptions(state);
-  if (!state.adviceReviewEditingPlanId) applySelectedSnapshotDefaults(state, { preserveText: false });
+  refreshReviewSnapshotForm(state);
   setReviewFeedback("复盘计划已归档", "ok");
   return true;
 }
@@ -683,6 +682,22 @@ function renderSnapshotOptions(state) {
   select.disabled = Boolean(state.adviceReviewEditingPlanId) || !available;
   const submit = $("reviewPlanSubmit");
   if (submit && !state.adviceReviewEditingPlanId) submit.disabled = !available;
+}
+
+function refreshReviewSnapshotForm(state, { previousIdentity = reviewSnapshotFormIdentity(state), reset = false } = {}) {
+  renderSnapshotOptions(state);
+  if (state.adviceReviewEditingPlanId) return;
+  // Read the current form at response time: typing during a request must survive.
+  if (reset || previousIdentity !== reviewSnapshotFormIdentity(state)) {
+    applySelectedSnapshotDefaults(state, { preserveText: false });
+  }
+}
+
+function reviewSnapshotFormIdentity(state) {
+  const snapshot = selectedSnapshot(state);
+  if (!snapshot) return "";
+  const symbol = normalizedSymbol(snapshot.symbol || state.adviceReviewHistorySymbol || state.symbol);
+  return `${symbol}:${Number(snapshot.id)}`;
 }
 
 function snapshotOption(item, planned) {

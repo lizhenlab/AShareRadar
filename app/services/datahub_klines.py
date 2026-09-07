@@ -635,12 +635,6 @@ async def _run_provider_fetch(
     return await awaitable
 
 
-def _non_empty_rows(rows: list[T], error: str) -> list[T]:
-    if not rows:
-        raise RuntimeError(error)
-    return rows
-
-
 def _bounded_daily_limit(limit: int, configured_max: object) -> int:
     ensure_positive_limit(limit)
     return _bounded_limit(limit, configured_max, MAX_DAILY_KLINE_LIMIT)

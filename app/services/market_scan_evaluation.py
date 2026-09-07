@@ -10,14 +10,13 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import random
 import sqlite3
 from statistics import fmean, median, pstdev
 from typing import Literal, cast
 
 from app.models.market import Kline, KlineAdjustmentMode
 from app.db.market_scan_integrity import verify_market_scan_snapshot
-from app.models.market_scan import MarketScanMode
+from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE, MarketScanMode
 from app.models.paper_trading import (
     CostProfileName,
     PaperCostProfile,
@@ -26,6 +25,24 @@ from app.models.paper_trading import (
 )
 from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.paper_trading_rules import assess_daily_tradeability, resolve_trade_rule_profile
+from app.services.market_scan_evaluation_config import (
+    DEFAULT_TOP_SIZES as DEFAULT_TOP_SIZES,
+    DEFAULT_HORIZONS as DEFAULT_HORIZONS,
+    DEFAULT_MINIMUM_SESSION_COUNT as DEFAULT_MINIMUM_SESSION_COUNT,
+    DEFAULT_MINIMUM_MULTIPLE_TEST_SESSION_COUNT as DEFAULT_MINIMUM_MULTIPLE_TEST_SESSION_COUNT,
+    DEFAULT_BOOTSTRAP_SAMPLES as DEFAULT_BOOTSTRAP_SAMPLES,
+    DEFAULT_EXECUTION_NOTIONAL as DEFAULT_EXECUTION_NOTIONAL,
+    DEFAULT_MAX_EXIT_DELAY_SESSIONS as DEFAULT_MAX_EXIT_DELAY_SESSIONS,
+    DEFAULT_MAX_DAILY_PARTICIPATION_RATE as DEFAULT_MAX_DAILY_PARTICIPATION_RATE,
+    EvaluationConfig as EvaluationConfig,
+)
+from app.services.market_scan_evaluation_execution import (
+    ExecutionOutcome as _ExecutionOutcome,
+    affordable_execution_purchase,
+    execution_cost_diagnostics,
+    execution_scenario_value as _execution_scenario_value,
+    frozen_slot_summary,
+)
 from app.services.market_scan_evaluation_exposure import (
     ExposureItem as _ExposureItem,
     board as _board,
@@ -39,12 +56,20 @@ from app.services.market_scan_evaluation_exposure import (
     scan_time_bucket as _scan_time_bucket,
 )
 from app.services.market_scan_evaluation_metrics import (
-    calibration_bucket as _calibration_bucket,  # noqa: F401 - compatibility re-export
     calibration_metrics as _calibration_metrics,
-    calibration_record as _calibration_record,  # noqa: F401 - compatibility re-export
 )
+from app.services.market_scan_evaluation_price_basis import (
+    forward_price_basis_status,
+    valid_forward_price_bar,
+)
+from app.services.market_scan_factor_inference import factor_inference_metrics
 from app.services.market_scan_evaluation_statistics import (
     benjamini_hochberg,
+    complete_session_count,
+    gross_date_confidence_intervals,
+    horizon_return_drawdown_diagnostics,
+    inference_contract as _inference_contract,
+    moving_block_bootstrap_confidence_interval,
     moving_block_bootstrap_p_value,
 )
 from app.services.market_scan_shadow_scoring import (
@@ -75,23 +100,9 @@ from app.repositories.market_scan_mapping import decode_result_payload
 from app.utils.clock import utc_now
 
 
-_CALIBRATION_COMPATIBILITY_EXPORTS = (
-    _calibration_bucket,
-    _calibration_record,
-)
-
-
-EVALUATION_SCHEMA_VERSION = "market-scan-forward-evaluation-v2"
+EVALUATION_SCHEMA_VERSION = "market-scan-forward-evaluation-v3"
 SHADOW_RECONSTRUCTION_INTEGRITY = "unverified-overwrite-cache-reconstruction"
-DEFAULT_TOP_SIZES = (20, 50, 100)
-DEFAULT_HORIZONS = (1, 3, 5, 10, 20)
-DEFAULT_MINIMUM_SESSION_COUNT = 20
-DEFAULT_MINIMUM_MULTIPLE_TEST_SESSION_COUNT = 40
-DEFAULT_BOOTSTRAP_SAMPLES = 1_000
-DEFAULT_EXECUTION_NOTIONAL = 100_000.0
-DEFAULT_MAX_EXIT_DELAY_SESSIONS = 5
-DEFAULT_MAX_DAILY_PARTICIPATION_RATE = 0.01
-PROMOTION_GATE_VERSION = "full-market-shadow-promotion-gate-v2"
+PROMOTION_GATE_VERSION = "full-market-shadow-promotion-gate-v3"
 PROMOTION_PRIMARY_HORIZON = 5
 PROMOTION_PRIMARY_TOP_N = 100
 PROMOTION_MINIMUM_MEAN_RANK_IC = 0.02
@@ -107,69 +118,6 @@ ExecutionStatus = Literal["modelled", "unfilled", "data_unavailable"]
 
 
 @dataclass(frozen=True)
-class EvaluationConfig:
-    top_sizes: tuple[int, ...] = DEFAULT_TOP_SIZES
-    horizons: tuple[int, ...] = DEFAULT_HORIZONS
-    minimum_sample_size: int = 30
-    minimum_session_count: int = DEFAULT_MINIMUM_SESSION_COUNT
-    complete_day_coverage: float = 0.95
-    bootstrap_samples: int = DEFAULT_BOOTSTRAP_SAMPLES
-    cost_profile: CostProfileName = "base"
-    execution_notional: float = DEFAULT_EXECUTION_NOTIONAL
-    max_exit_delay_sessions: int = DEFAULT_MAX_EXIT_DELAY_SESSIONS
-    max_daily_participation_rate: float = DEFAULT_MAX_DAILY_PARTICIPATION_RATE
-    hysteresis_buffer_ratio: float = 0.20
-
-    def __post_init__(self) -> None:
-        _require_positive_sequence(self.top_sizes, "top_sizes")
-        _require_positive_sequence(self.horizons, "horizons")
-        _require_positive(self.minimum_sample_size, "minimum_sample_size")
-        _require_positive(self.minimum_session_count, "minimum_session_count")
-        _require_unit_interval(self.complete_day_coverage, "complete_day_coverage")
-        _require_minimum(self.bootstrap_samples, 100, "bootstrap_samples")
-        _require_positive(self.execution_notional, "execution_notional")
-        _require_minimum(self.max_exit_delay_sessions, 0, "max_exit_delay_sessions")
-        _require_unit_interval(self.max_daily_participation_rate, "max_daily_participation_rate")
-        if not 0 <= self.hysteresis_buffer_ratio <= 1:
-            raise ValueError("hysteresis_buffer_ratio 必须在 [0, 1] 范围内")
-
-
-def _require_positive_sequence(values: Sequence[int], label: str) -> None:
-    if not values or any(value <= 0 for value in values):
-        raise ValueError(f"{label} 必须是正整数")
-
-
-def _require_positive(value: float, label: str) -> None:
-    if value <= 0:
-        raise ValueError(f"{label} 必须大于 0")
-
-
-def _require_unit_interval(value: float, label: str) -> None:
-    if not 0 < value <= 1:
-        raise ValueError(f"{label} 必须在 (0, 1] 范围内")
-
-
-def _require_minimum(value: int, minimum: int, label: str) -> None:
-    if value < minimum:
-        raise ValueError(f"{label} 不能小于 {minimum}")
-
-
-@dataclass(frozen=True)
-class _ExecutionOutcome:
-    status: ExecutionStatus
-    reason: str
-    gross_return: float | None = None
-    net_return: float | None = None
-    cost_drag: float | None = None
-    entry_date: str | None = None
-    exit_date: str | None = None
-    exit_delay_sessions: int = 0
-    model_limited: bool = False
-    buy_amount: float | None = None
-    sell_amount: float | None = None
-
-
-@dataclass(frozen=True)
 class _ExecutionEntry:
     by_date: dict[str, sqlite3.Row]
     metadata: PaperInstrumentMetadata
@@ -180,6 +128,7 @@ class _ExecutionEntry:
     buy_cost: float
     entry_model_limited: bool
     cost_profile: PaperCostProfile
+    allocated_capital: float
 
 
 @dataclass(frozen=True)
@@ -507,7 +456,7 @@ def evaluate_market_scan_shadow_comparison(
         candidate_count=len(candidates),
     )
     return {
-        "schema_version": "market-scan-shadow-comparison-v2",
+        "schema_version": "market-scan-shadow-comparison-v3",
         "generated_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
         "status": status,
         "production": production,
@@ -658,15 +607,17 @@ def _candidate_test_record(
     minimum_sessions: int,
 ) -> tuple[dict[str, object], float | None]:
     candidate_values = _promotion_session_values(report, "net_excess_return")
-    shared_sessions = sorted(production_values.keys() & candidate_values.keys())
+    target_sessions = sorted(production_values.keys() | candidate_values.keys())
     deltas = [
-        candidate_values[session] - production_values[session]
-        for session in shared_sessions
+        candidate_values.get(session, math.nan) - production_values.get(session, math.nan)
+        for session in target_sessions
     ]
+    valid_count = sum(math.isfinite(value) for value in deltas)
+    missing_count = len(target_sessions) - valid_count
     raw_p_value = moving_block_bootstrap_p_value(
         deltas,
         samples=_candidate_bootstrap_samples(report),
-        block_length=PROMOTION_PRIMARY_HORIZON,
+        block_length=PROMOTION_PRIMARY_HORIZON + 1,
         seed_text=f"candidate-vs-production:{variant}:top100:5d-net-excess",
         minimum_count=minimum_sessions,
     )
@@ -675,15 +626,17 @@ def _candidate_test_record(
             "status": "ok" if raw_p_value is not None else "insufficient_data",
             "null_hypothesis": "candidate mean paired 5d top100 net-excess improvement <= 0",
             "alternative": "greater",
-            "paired_independent_session_count": len(shared_sessions),
+            "paired_independent_session_count": valid_count,
+            "expected_paired_session_count": len(target_sessions),
+            "missing_paired_session_count": missing_count,
             "minimum_paired_independent_session_count": minimum_sessions,
-            "mean_paired_net_excess_delta": fmean(deltas) if deltas else None,
+            "mean_paired_net_excess_delta": fmean(deltas) if deltas and not missing_count else None,
             "raw_p_value_one_sided": raw_p_value,
             "adjusted_p_value": None,
             "rejected_at_alpha": None,
             "insufficient_reasons": _candidate_test_reasons(
-                len(shared_sessions), minimum_sessions, raw_p_value,
-            ),
+                valid_count, minimum_sessions, raw_p_value,
+            ) + (["incomplete_paired_target_dates"] if missing_count else []),
         },
         raw_p_value,
     )
@@ -734,14 +687,19 @@ def _candidate_multiple_testing_payload(
         "ready": status == "ok",
         "method": "benjamini-hochberg-fdr",
         "alpha": MULTIPLE_TESTING_ALPHA,
-        "family": "preregistered-shadow-candidate-paired-5d-top100-net-excess-vs-production",
+        "family": "requested-shadow-candidate-paired-5d-top100-net-excess-vs-production",
+        "trial_registration": {
+            "status": "unverified",
+            "eligible_for_promotion": False,
+            "reason": "requested variants do not prove a timestamped frozen registry of all attempted trials",
+        },
         "candidate_count": candidate_count,
         "tested_hypothesis_count": available_count,
         "minimum_paired_independent_session_count": minimum_sessions,
         "session_resampling": {
             "method": "deterministic-circular-moving-block-bootstrap-under-null",
-            "block_length_sessions": PROMOTION_PRIMARY_HORIZON,
-            "reason": "5日远期标签重叠，不能把相邻扫描日当作完全独立观测",
+            "block_length_sessions": PROMOTION_PRIMARY_HORIZON + 1,
+            "reason": "信号后第1日开盘入场、第H+1日收盘固定退出，按完整信号至退出跨度保留相邻日期依赖",
         },
         "candidate_results": candidate_records,
         "pbo": {
@@ -773,8 +731,8 @@ def _promotion_session_values(
             continue
         quote_date = item.get("quote_date")
         parsed = _optional_float(item.get(metric))
-        if isinstance(quote_date, str) and parsed is not None:
-            values[quote_date] = parsed
+        if isinstance(quote_date, str):
+            values[quote_date] = parsed if parsed is not None else math.nan
     return values
 
 
@@ -796,7 +754,7 @@ def _shadow_promotion_blockers(
     if not multiple_testing_ready:
         blockers.append("候选相对生产评分的配对交易日证据不足，BH-FDR未形成可用拒绝结论")
     if not has_eligible_candidate:
-        blockers.append("没有候选同时通过预注册的IC、净超额、单调性、回撤、换手与暴露门槛")
+        blockers.append("没有候选同时通过试验登记、IC、净超额、单调性、回撤、换手与暴露门槛")
     return blockers
 
 
@@ -827,6 +785,9 @@ def _base_promotion_criteria(report: Mapping[str, object]) -> dict[str, dict[str
         else 0.0
     )
     return {
+        "preregistered_trial_family": _promotion_criterion(
+            "unverified", False, "frozen timestamped full trial registry required",
+        ),
         "report_status": _promotion_criterion(report.get("status"), report.get("status") == "ok", "ok"),
         "point_in_time_integrity": _promotion_criterion(integrity, integrity, True),
         "item_coverage": _promotion_criterion(
@@ -934,7 +895,7 @@ def _contract_promotion_criteria(
         ),
         "mean_rank_ic_5d": _promotion_criterion(
             mean_ic,
-            mean_ic is not None and mean_ic >= PROMOTION_MINIMUM_MEAN_RANK_IC,
+            mean_ic is not None and mean_ic >= PROMOTION_MINIMUM_MEAN_RANK_IC and rank_ic is not None and rank_ic.get("status") == "ok",
             {"minimum": PROMOTION_MINIMUM_MEAN_RANK_IC},
         ),
         "top100_net_excess_5d": _promotion_criterion(
@@ -1000,7 +961,7 @@ def _primary_promotion_contract(report: Mapping[str, object]) -> dict[str, objec
             continue
         if (
             dimensions.get("mode") == "official"
-            and dimensions.get("scope") != "TOP100快速更新评分"
+            and dimensions.get("scope") == MARKET_SCAN_FULL_MARKET_SCOPE
         ):
             candidates.append(value)
     if not candidates:
@@ -1270,7 +1231,7 @@ def _primary_observation_contract(
 ) -> tuple[dict[str, str], tuple[_Observation, ...]] | None:
     grouped: dict[tuple[str, str, str], list[_Observation]] = defaultdict(list)
     for item in observations:
-        if item.mode == "official" and item.scope != "TOP100快速更新评分":
+        if item.mode == "official" and item.scope == MARKET_SCAN_FULL_MARKET_SCOPE:
             grouped[(item.mode, item.scope, item.rule_version)].append(item)
     if not grouped:
         return None
@@ -1304,6 +1265,7 @@ def _primary_session_evidence(
         rows,
         top_n=PROMOTION_PRIMARY_TOP_N,
         horizon=PROMOTION_PRIMARY_HORIZON,
+        minimum_coverage=config.complete_day_coverage,
     )
     complete = [
         item
@@ -1315,17 +1277,21 @@ def _primary_session_evidence(
         reasons.append("primary_horizon_not_requested")
     if len(complete) < config.minimum_session_count:
         reasons.append("minimum_session_count")
+    if len(complete) != len(sessions):
+        reasons.append("incomplete_target_sessions")
     return {
         "status": "ok" if not reasons else "insufficient_data",
         "dimensions": dimensions,
         "top_n": PROMOTION_PRIMARY_TOP_N,
         "horizon_trading_days": PROMOTION_PRIMARY_HORIZON,
         "independent_session_count": len(complete),
+        "expected_session_count": len(sessions),
+        "missing_session_count": len(sessions) - len(complete),
         "sessions": sessions,
         "insufficient_reasons": reasons,
         "semantics": (
             "one-record-per-scan-session; rank IC uses the session cross-section; "
-            "net excess uses next-complete-session-open,T+1,next-sellable-open"
+            "net excess uses signal-D,next-session-open,target-D+H+1-close,T+1,no-delayed-exit"
         ),
     }
 
@@ -1336,6 +1302,7 @@ def _session_research_records(
     top_n: int,
     horizon: int,
     cost_profile: CostProfileName | None = None,
+    minimum_coverage: float = 0.95,
 ) -> list[dict[str, object]]:
     grouped: dict[str, list[_Observation]] = defaultdict(list)
     for item in rows:
@@ -1347,6 +1314,7 @@ def _session_research_records(
             top_n=top_n,
             horizon=horizon,
             cost_profile=cost_profile,
+            minimum_coverage=minimum_coverage,
         )
         for quote_date, session_rows in sorted(grouped.items())
     ]
@@ -1359,74 +1327,31 @@ def _session_research_record(
     top_n: int,
     horizon: int,
     cost_profile: CostProfileName | None,
+    minimum_coverage: float = 0.95,
 ) -> dict[str, object]:
-    forward_rows = [item for item in session_rows if horizon in item.returns]
-    benchmark = fmean(item.returns[horizon] for item in forward_rows) if forward_rows else None
-    rank_ic = _spearman(
-        [(item.raw_score, item.returns[horizon]) for item in forward_rows]
+    selected = [item.execution.get(horizon) for item in session_rows if item.rank <= top_n]
+    candidate = frozen_slot_summary(selected, cost_profile=cost_profile, minimum_coverage=minimum_coverage)
+    benchmark = frozen_slot_summary(
+        [item.execution.get(horizon) for item in session_rows],
+        cost_profile=cost_profile, minimum_coverage=minimum_coverage,
     )
-    modelled = _session_modelled_returns(
-        session_rows,
-        top_n=top_n,
-        horizon=horizon,
-        cost_profile=cost_profile,
-    )
-    net_return = fmean(modelled) if modelled else None
+    pairs = [(item.raw_score, value) for item in session_rows
+             if (value := _execution_scenario_value(item.execution.get(horizon), cost_profile)) is not None]
+    net_return = _optional_float(candidate["net_return"])
+    benchmark_return = _optional_float(benchmark["net_return"])
+    coverage = len(pairs) / len(session_rows) if session_rows else 0.0
     return {
         "quote_date": quote_date,
-        "rank_ic": rank_ic,
+        "rank_ic": _spearman(pairs) if coverage >= minimum_coverage else None,
+        "rank_ic_target": "fixed-horizon-executable-net-slot-return",
         "net_return": net_return,
-        "net_excess_return": (
-            net_return - benchmark
-            if net_return is not None and benchmark is not None
-            else None
-        ),
-        "modelled_top_n_count": len(modelled),
-        "cross_section_count": len(forward_rows),
+        "net_benchmark_return": benchmark_return,
+        "net_excess_return": net_return - benchmark_return if net_return is not None and benchmark_return is not None else None,
+        "modelled_top_n_count": sum(item is not None and item.status == "modelled" for item in selected),
+        "cross_section_count": len(pairs),
+        "candidate_outcomes": candidate,
+        "benchmark_outcomes": benchmark,
     }
-
-
-def _session_modelled_returns(
-    session_rows: Sequence[_Observation],
-    *,
-    top_n: int,
-    horizon: int,
-    cost_profile: CostProfileName | None,
-) -> list[float]:
-    modelled: list[float] = []
-    for item in session_rows:
-        if item.rank > top_n:
-            continue
-        outcome = item.execution.get(horizon)
-        if outcome is None or outcome.status != "modelled":
-            continue
-        value = _execution_scenario_value(outcome, cost_profile)
-        if value is not None:
-            modelled.append(value)
-    return modelled
-
-
-def _execution_scenario_value(
-    outcome: _ExecutionOutcome,
-    cost_profile: CostProfileName | None,
-) -> float | None:
-    if cost_profile is None:
-        return outcome.net_return
-    return _scenario_net_return(outcome, cost_profile)
-
-
-def _scenario_net_return(
-    outcome: _ExecutionOutcome,
-    cost_profile: CostProfileName,
-) -> float | None:
-    if outcome.buy_amount is None or outcome.sell_amount is None:
-        return None
-    profile = resolve_cost_profile(cost_profile)
-    buy_cost = trade_costs(profile, side="buy", gross_amount=outcome.buy_amount).total
-    sell_cost = trade_costs(profile, side="sell", gross_amount=outcome.sell_amount).total
-    return (
-        outcome.sell_amount - sell_cost - outcome.buy_amount - buy_cost
-    ) / (outcome.buy_amount + buy_cost)
 
 
 def _robustness_summary(
@@ -1510,7 +1435,7 @@ def _robustness_payload(
             "point_in_time": True,
             "fixed_session": True,
             "entry": "next-complete-session-open",
-            "exit": "T+1-next-sellable-open",
+            "exit": "T+1-fixed-D+H+1-close",
             "capacity_semantics": "scan-day-amount-screen-only; no order-book queue reconstruction",
         },
     }
@@ -1526,6 +1451,7 @@ def _regime_robustness_slice(
         selected,
         top_n=PROMOTION_PRIMARY_TOP_N,
         horizon=PROMOTION_PRIMARY_HORIZON,
+        minimum_coverage=config.complete_day_coverage,
     )
     rank_ics = [
         parsed
@@ -1537,17 +1463,21 @@ def _regime_robustness_slice(
         for item in sessions
         if (parsed := _optional_float(item.get("net_excess_return"))) is not None
     ]
-    independent = len({item.quote_date for item in selected})
+    independent = len(sessions)
+    valid_count = complete_session_count(sessions, ("rank_ic", "net_excess_return"))
+    enough = all((independent >= config.minimum_session_count, len(net_excess) == independent, len(rank_ics) == independent))
     return {
         "regime": regime,
-        "status": "ok" if independent >= config.minimum_session_count else "insufficient_data",
+        "status": "ok" if enough else "insufficient_data",
         "observation_count": len(selected),
-        "independent_session_count": independent,
-        "mean_rank_ic": fmean(rank_ics) if rank_ics else None,
-        "mean_net_excess_return": fmean(net_excess) if net_excess else None,
+        "independent_session_count": valid_count,
+        "expected_session_count": independent,
+        "missing_session_count": independent - valid_count,
+        "mean_rank_ic": fmean(rank_ics) if rank_ics and len(rank_ics) == independent else None,
+        "mean_net_excess_return": fmean(net_excess) if net_excess and len(net_excess) == independent else None,
         "positive_net_excess_session_rate": (
             sum(value > 0 for value in net_excess) / len(net_excess)
-            if net_excess
+            if net_excess and len(net_excess) == independent
             else None
         ),
     }
@@ -1563,6 +1493,7 @@ def _cost_robustness_scenario(
         top_n=PROMOTION_PRIMARY_TOP_N,
         horizon=PROMOTION_PRIMARY_HORIZON,
         cost_profile=profile,
+        minimum_coverage=config.complete_day_coverage,
     )
     values = [
         parsed
@@ -1572,11 +1503,13 @@ def _cost_robustness_scenario(
     return {
         "profile": profile,
         "profile_contract": resolve_cost_profile(profile).model_dump(mode="json"),
-        "status": "ok" if len(values) >= config.minimum_session_count else "insufficient_data",
+        "status": "ok" if len(values) >= config.minimum_session_count and len(values) == len(sessions) else "insufficient_data",
         "independent_session_count": len(values),
-        "mean_net_excess_return": fmean(values) if values else None,
+        "expected_session_count": len(sessions),
+        "missing_session_count": len(sessions) - len(values),
+        "mean_net_excess_return": fmean(values) if values and len(values) == len(sessions) else None,
         "positive_session_rate": (
-            sum(value > 0 for value in values) / len(values) if values else None
+            sum(value > 0 for value in values) / len(values) if values and len(values) == len(sessions) else None
         ),
     }
 
@@ -1670,7 +1603,8 @@ def _report_config(settings: EvaluationConfig) -> dict[str, object]:
         "complete_day_coverage": settings.complete_day_coverage,
         "bootstrap_samples": settings.bootstrap_samples,
         "execution_notional": settings.execution_notional,
-        "max_exit_delay_sessions": settings.max_exit_delay_sessions,
+        "max_exit_delay_sessions": 0,
+        "legacy_max_exit_delay_sessions_ignored": settings.max_exit_delay_sessions,
         "max_daily_participation_rate": settings.max_daily_participation_rate,
         "hysteresis_buffer_ratio": settings.hysteresis_buffer_ratio,
         "cost_profile": resolve_cost_profile(settings.cost_profile).model_dump(mode="json"),
@@ -1694,7 +1628,7 @@ def _report_source(
         "read_only": True,
         "ranking_source": ranking_source,
         "forward_price_source": "persisted_qfq_kline_daily",
-        "execution_model": "next-complete-session-open,T+1,next-sellable-open",
+        "execution_model": "signal-D,next-session-open,target-D+H+1-close,T+1,no-delayed-exit",
     }
 
 
@@ -1704,8 +1638,9 @@ def _report_limitations() -> list[str]:
         "收益、IC与单调性 cohort 按 mode、scope、rule_version 隔离，不跨规则版本汇总。",
         "同一 mode、scope、rule_version、quote_date 只保留最后发布的快照，避免重复扫描放大样本。",
         "充分性同时要求股票观察数和独立交易日数；同一天的多只股票不视为独立时间样本。",
-        "置信区间先按扫描交易日聚合，再以交易日为区块进行确定性 bootstrap。",
-        "净收益是固定名义本金、下一完整交易日开盘入场、T+1后目标日或下一可卖日开盘退出的日K情景。",
+        "置信区间先按扫描交易日聚合、排序，再以持有期长度作循环移动日期区块 bootstrap；至少20日及两个完整区块，不足时区间为空。",
+        "逐信号日的持有期收益链乘仅是诊断；缺少共享现金、持仓和逐日估值账本时，组合回撤为空且不得用于晋级。",
+        "净收益是固定名义本金、下一完整交易日开盘入场、D+H+1收盘退出，不延期；未成交现金保留权重，未估值持仓使净收益为空的日K情景。",
         "日K无法复原盘口排队与盘中先后顺序，model_limited 与 unfilled 状态必须保留。",
         "市场环境由扫描快照当日全市场涨跌幅均值分层，不使用未来信息。",
         "生产排名的板块、行业和流动性暴露只做审计；v5.4仅对质量可接受的具体行业组做收缩残差化。",
@@ -1993,7 +1928,7 @@ def _verified_point_in_time_payload(details: Mapping[str, object]) -> dict[str, 
 
 
 def _kline_from_evidence_contract(value: object) -> Kline:
-    if not isinstance(value, list) or len(value) != 9:
+    if not isinstance(value, list) or len(value) not in {9, 10}:
         raise ValueError("invalid persisted bar contract")
     return Kline(
         date=str(value[0]),
@@ -2005,6 +1940,7 @@ def _kline_from_evidence_contract(value: object) -> Kline:
         adjustment_mode=cast(KlineAdjustmentMode, str(value[6])),
         data_version=str(value[7]),
         contract_version=str(value[8]),
+        as_of=str(value[9]) if len(value) == 10 else None,
         source="persisted-market-scan-point-in-time-evidence",
         from_cache=True,
     )
@@ -2266,6 +2202,8 @@ def _observation_from_rows(
     regime: str,
     config: EvaluationConfig,
 ) -> _Observation | None:
+    price_basis_status = forward_price_basis_status(run, result, bars)
+    bars = tuple(row for row in bars if valid_forward_price_bar(row)) if price_basis_status == "verified" else ()
     entry = float(result["price"])
     returns, adverse = _forward_performance(bars, eligible_dates, entry, config.horizons)
     quote_date = str(run["quote_date"] or run["data_date"])
@@ -2277,6 +2215,11 @@ def _observation_from_rows(
     execution, probability_labels = _observation_outcomes(
         result, symbol, market, is_st, is_new, quote_date, amount, bars, eligible_dates, config,
     )
+    if price_basis_status != "verified":
+        execution = {h: _ExecutionOutcome("data_unavailable", price_basis_status) for h in config.horizons}
+        probability_labels = {
+            h: ProbabilityLabelOutcome(h, "data_unavailable", price_basis_status) for h in PROBABILITY_DEFAULT_HORIZONS
+        }
     return _Observation(
         run_id=int(run["id"]),
         quote_date=quote_date,
@@ -2353,7 +2296,8 @@ def _forward_performance(
         lows.append(float(row["low"]))
         if index in horizons:
             returns[index] = float(row["close"]) / entry - 1
-            adverse[index] = min(lows) / entry - 1
+            if len(lows) == index:
+                adverse[index] = min(lows) / entry - 1
     return returns, adverse
 
 
@@ -2454,7 +2398,7 @@ def _prepare_execution_entry(
     by_date = {str(row["date"]): row for row in bars}
     entry_date = eligible_dates[0]
     entry_row = by_date.get(entry_date)
-    previous = _previous_row(bars, entry_date)
+    previous = by_date.get(quote_date)
     if entry_row is None or previous is None:
         return _ExecutionOutcome("data_unavailable", "entry_or_previous_bar_missing")
     if amount <= 0 or config.execution_notional / amount > config.max_daily_participation_rate:
@@ -2480,17 +2424,18 @@ def _prepare_execution_entry(
     if not entry_tradeability.can_buy:
         return _ExecutionOutcome("unfilled", entry_tradeability.code, entry_date=entry_date)
     entry_price = float(entry_row["open"])
-    quantity = _model_quantity(config.execution_notional, entry_price, entry_profile.min_buy_quantity, entry_profile.buy_quantity_step)
-    if quantity <= 0:
-        return _ExecutionOutcome("unfilled", "minimum_quantity_unaffordable", entry_date=entry_date)
     cost_profile = resolve_cost_profile(config.cost_profile)
-    buy_amount = entry_price * quantity
-    buy_cost = trade_costs(cost_profile, side="buy", gross_amount=buy_amount).total
+    quantity, buy_amount, buy_cost = affordable_execution_purchase(
+        config.execution_notional, entry_price, entry_profile.min_buy_quantity,
+        entry_profile.buy_quantity_step, cost_profile,
+    )
+    if quantity <= 0:
+        return _ExecutionOutcome("unfilled", "minimum_quantity_with_cost_unaffordable", entry_date=entry_date)
     return _ExecutionEntry(
         by_date=by_date, metadata=metadata, entry_date=entry_date, entry_price=entry_price,
         quantity=quantity, buy_amount=buy_amount, buy_cost=buy_cost,
         entry_model_limited=entry_tradeability.model_limited or entry_profile.quality != "ok",
-        cost_profile=cost_profile,
+        cost_profile=cost_profile, allocated_capital=config.execution_notional,
     )
 
 
@@ -2526,20 +2471,16 @@ def _execution_horizon(
     eligible_dates: Sequence[str],
     config: EvaluationConfig,
 ) -> _ExecutionOutcome:
-    for delay in range(config.max_exit_delay_sessions + 1):
-        exit_index = horizon + delay
-        if exit_index >= len(eligible_dates):
-            break
-        exit_date = eligible_dates[exit_index]
-        sellable = _sellable_exit(entry, symbol, market, is_st, is_new, bars, exit_date)
-        if sellable is None:
-            continue
-        exit_price, exit_model_limited = sellable
-        return _modelled_execution(entry, exit_date, exit_price, delay, exit_model_limited)
-    return _ExecutionOutcome(
-        "unfilled", "exit_not_sellable_within_delay", entry_date=entry.entry_date,
-        exit_delay_sessions=config.max_exit_delay_sessions,
-    )
+    exit_date = eligible_dates[horizon]
+    if exit_date not in entry.by_date:
+        return _ExecutionOutcome("data_unavailable", "target_bar_missing", entry_date=entry.entry_date, exit_date=exit_date, position_open=True)
+    if any(day not in entry.by_date for day in eligible_dates[:horizon]):
+        return _ExecutionOutcome("data_unavailable", "holding_path_bar_missing", entry_date=entry.entry_date, exit_date=exit_date, position_open=True)
+    sellable = _sellable_exit(entry, symbol, market, is_st, is_new, eligible_dates[horizon - 1], exit_date)
+    if sellable is None:
+        return _ExecutionOutcome("unfilled", "exit_not_sellable_on_target", entry_date=entry.entry_date, exit_date=exit_date, position_open=True)
+    exit_price, exit_model_limited = sellable
+    return _modelled_execution(entry, exit_date, exit_price, 0, exit_model_limited)
 
 
 def _sellable_exit(
@@ -2548,11 +2489,11 @@ def _sellable_exit(
     market: str,
     is_st: bool,
     is_new: bool,
-    bars: Sequence[sqlite3.Row],
+    previous_date: str,
     exit_date: str,
 ) -> tuple[float, bool] | None:
     exit_row = entry.by_date.get(exit_date)
-    previous = _previous_row(bars, exit_date)
+    previous = entry.by_date.get(previous_date)
     if exit_row is None or previous is None:
         return None
     try:
@@ -2567,7 +2508,7 @@ def _sellable_exit(
     if not tradeability.can_sell:
         return None
     model_limited = tradeability.model_limited or profile.quality != "ok"
-    return float(exit_row["open"]), model_limited
+    return float(exit_row["close"]), model_limited
 
 
 def _modelled_execution(
@@ -2579,21 +2520,18 @@ def _modelled_execution(
 ) -> _ExecutionOutcome:
     sell_amount = exit_price * entry.quantity
     sell_cost = trade_costs(entry.cost_profile, side="sell", gross_amount=sell_amount).total
-    gross_return = exit_price / entry.entry_price - 1
-    net_return = (sell_amount - sell_cost - entry.buy_amount - entry.buy_cost) / (entry.buy_amount + entry.buy_cost)
+    gross_return = (sell_amount - entry.buy_amount) / entry.allocated_capital
+    net_return = (sell_amount - sell_cost - entry.buy_amount - entry.buy_cost) / entry.allocated_capital
     return _ExecutionOutcome(
-        status="modelled", reason="exit_delayed" if delay else "next_open_t1",
+        status="modelled", reason="fixed_horizon_close_t1",
         gross_return=gross_return, net_return=net_return, cost_drag=gross_return - net_return,
         entry_date=entry.entry_date, exit_date=exit_date, exit_delay_sessions=delay,
         model_limited=entry.entry_model_limited or exit_model_limited,
         buy_amount=entry.buy_amount,
         sell_amount=sell_amount,
+        allocated_capital=entry.allocated_capital,
+        price_return=exit_price / entry.entry_price - 1,
     )
-
-
-def _previous_row(rows: Sequence[sqlite3.Row], row_date: str) -> sqlite3.Row | None:
-    candidates = [row for row in rows if str(row["date"]) < row_date]
-    return candidates[-1] if candidates else None
 
 
 def _to_kline(row: sqlite3.Row) -> Kline:
@@ -2612,14 +2550,6 @@ def _to_kline(row: sqlite3.Row) -> Kline:
         fetched_at=row["fetched_at"],
         fallback_used=bool(row["fallback_used"]),
     )
-
-
-def _model_quantity(notional: float, price: float, minimum: int, step: int) -> int:
-    if price <= 0 or step <= 0:
-        return 0
-    affordable = math.floor(notional / price)
-    quantity = (affordable // step) * step
-    return quantity if quantity >= minimum else 0
 
 
 def _evaluation_trade_profile(
@@ -2755,7 +2685,7 @@ def _metric_record(
         "insufficient_reasons": _insufficient_reasons(enough_samples, enough_sessions),
     }
     if not values:
-        record["execution"] = _execution_summary(selected, horizon)
+        record["execution"] = _execution_summary(selected, horizon, config.complete_day_coverage)
         return record
     record.update(_return_statistics(dimensions, selected, benchmark_rows, values, top_n, horizon, config))
     return record
@@ -2780,19 +2710,11 @@ def _return_statistics(
         for run_id, value in daily_returns.items()
         if run_id in benchmark_by_run
     }
-    daily_values = list(daily_returns.values())
-    daily_excess_values = list(daily_excess.values())
-    execution = _execution_summary(selected, horizon)
-    daily_net = _execution_net_returns_by_run(selected, horizon)
-    daily_net_excess = {
-        run_id: value - benchmark_by_run[run_id]
-        for run_id, value in daily_net.items()
-        if run_id in benchmark_by_run
-    }
-    execution["average_net_excess_return"] = (
-        fmean(daily_net_excess.values()) if daily_net_excess else None
-    )
-    execution["net_excess_independent_session_count"] = len(daily_net_excess)
+    run_dates = {item.run_id: item.quote_date for item in (*selected, *benchmark_rows)}
+    ordered_runs = sorted(daily_returns, key=lambda run_id: (run_dates[run_id], run_id))
+    daily_values = [daily_returns[run_id] for run_id in ordered_runs]
+    daily_excess_values = [daily_excess[run_id] for run_id in ordered_runs if run_id in daily_excess]
+    execution = _net_execution_statistics(selected, benchmark_rows, horizon, config.complete_day_coverage)
     seed = json.dumps({"dimensions": dimensions, "top_n": top_n, "horizon": horizon}, sort_keys=True)
     return {
         "average_return": fmean(returns),
@@ -2801,79 +2723,69 @@ def _return_statistics(
         "session_average_return": fmean(daily_values),
         "session_median_return": median(daily_values),
         "session_positive_rate": sum(value > 0 for value in daily_values) / len(daily_values),
-        "session_return_confidence_interval_95": _cluster_bootstrap_ci(
-            daily_values, seed + ":return", config.bootstrap_samples,
+        **gross_date_confidence_intervals(
+            run_dates, daily_returns, daily_excess,
+            horizon=horizon, minimum_count=config.minimum_session_count, samples=config.bootstrap_samples, seed_text=seed,
         ),
         "equal_weight_market_return": fmean(benchmark_by_run.values()) if benchmark_by_run else None,
         "equal_weight_market_excess_return": fmean(daily_excess_values) if daily_excess_values else None,
-        "session_excess_confidence_interval_95": _cluster_bootstrap_ci(
-            daily_excess_values, seed + ":excess", config.bootstrap_samples,
-        ),
-        "session_maximum_drawdown": _compounded_maximum_drawdown(daily_values),
+        **horizon_return_drawdown_diagnostics(daily_values),
         "maximum_adverse_excursion": min(adverse) if adverse else None,
         "execution": execution,
     }
 
 
-def _compounded_maximum_drawdown(returns: Sequence[float]) -> float | None:
-    if not returns:
-        return None
-    wealth = 1.0
-    peak = 1.0
-    worst = 0.0
-    for value in returns:
-        wealth *= 1 + value
-        peak = max(peak, wealth)
-        worst = min(worst, wealth / peak - 1)
-    return worst
+def _net_execution_statistics(
+    selected: Sequence[_Observation], benchmark_rows: Sequence[_Observation],
+    horizon: int, minimum_coverage: float,
+) -> dict[str, object]:
+    execution = _execution_summary(selected, horizon, minimum_coverage)
+    net_benchmark_by_run = _execution_net_returns_by_run(benchmark_rows, horizon)
+    daily_net = _execution_net_returns_by_run(selected, horizon)
+    daily_net_excess = {
+        run_id: value - net_benchmark_by_run[run_id]
+        for run_id, value in daily_net.items()
+        if run_id in net_benchmark_by_run
+    }
+    execution["average_net_excess_return"] = (
+        fmean(daily_net_excess.values())
+        if daily_net_excess and len(daily_net_excess) == len({item.run_id for item in benchmark_rows}) else None
+    )
+    execution["net_excess_independent_session_count"] = len(daily_net_excess)
+    execution["benchmark_semantics"] = "same-frozen-universe,same-entry-exit-and-cost-profile"
+    return execution
 
 
-def _execution_summary(rows: Iterable[_Observation], horizon: int) -> dict[str, object]:
+def _execution_summary(
+    rows: Iterable[_Observation], horizon: int, minimum_coverage: float = 0.95,
+) -> dict[str, object]:
     materialized = tuple(rows)
-    outcomes = [item.execution[horizon] for item in materialized if horizon in item.execution]
-    statuses = Counter(item.status for item in outcomes)
-    modelled = [item for item in outcomes if item.status == "modelled" and item.net_return is not None]
-    by_run, cost_drag, delayed, model_limited = _execution_aggregates(materialized, horizon)
-    daily_net = [fmean(values) for values in by_run.values() if values]
+    outcomes = [item.execution.get(horizon) for item in materialized]
+    summary = frozen_slot_summary(outcomes, minimum_coverage=minimum_coverage)
+    by_run = _execution_net_returns_by_run(materialized, horizon)
+    complete = len(by_run) == len({item.run_id for item in materialized})
+    daily_net = list(by_run.values())
     return {
-        "status_counts": dict(sorted(statuses.items())),
-        "modelled_sample_size": len(modelled),
+        **summary,
+        **execution_cost_diagnostics(outcomes),
         "independent_session_count": len(daily_net),
-        "average_net_return": fmean(daily_net) if daily_net else None,
-        "median_net_return": median(daily_net) if daily_net else None,
-        "average_cost_drag": fmean(cost_drag) if cost_drag else None,
-        "delayed_exit_count": delayed,
-        "model_limited_count": model_limited,
+        "expected_session_count": len({item.run_id for item in materialized}),
+        "average_net_return": fmean(daily_net) if daily_net and complete else None,
+        "median_net_return": median(daily_net) if daily_net and complete else None,
+        "conditional_complete_session_average": fmean(daily_net) if daily_net else None,
     }
 
 
-def _execution_aggregates(
-    rows: Sequence[_Observation],
-    horizon: int,
-) -> tuple[dict[int, list[float]], list[float], int, int]:
-    by_run: dict[int, list[float]] = defaultdict(list)
-    cost_drag: list[float] = []
-    delayed = 0
-    model_limited = 0
-    for observation in rows:
-        outcome = observation.execution.get(horizon)
-        if outcome is None:
-            continue
-        if outcome.status == "modelled" and outcome.net_return is not None:
-            by_run[observation.run_id].append(outcome.net_return)
-        if outcome.cost_drag is not None:
-            cost_drag.append(outcome.cost_drag)
-        delayed += outcome.exit_delay_sessions > 0
-        model_limited += outcome.model_limited
-    return by_run, cost_drag, delayed, model_limited
-
-
 def _execution_net_returns_by_run(
-    rows: Sequence[_Observation],
-    horizon: int,
+    rows: Sequence[_Observation], horizon: int,
 ) -> dict[int, float]:
-    by_run, _cost_drag, _delayed, _model_limited = _execution_aggregates(rows, horizon)
-    return {run_id: fmean(values) for run_id, values in by_run.items() if values}
+    grouped: dict[int, list[_ExecutionOutcome | None]] = defaultdict(list)
+    for item in rows:
+        grouped[item.run_id].append(item.execution.get(horizon))
+    return {
+        run_id: value for run_id, outcomes in grouped.items()
+        if (value := _optional_float(frozen_slot_summary(outcomes)["net_return"])) is not None
+    }
 
 
 def _returns_by_run(values: Iterable[tuple[_Observation, float]]) -> dict[int, list[float]]:
@@ -2900,18 +2812,14 @@ def _benchmark_returns(rows: Iterable[_Observation], horizon: int) -> dict[int, 
     return {run_id: fmean(values) for run_id, values in grouped.items() if values}
 
 
-def _cluster_bootstrap_ci(values: Sequence[float], seed_text: str, samples: int) -> list[float] | None:
-    if not values:
-        return None
-    if len(values) == 1:
-        return [values[0], values[0]]
-    seed = int.from_bytes(hashlib.sha256(seed_text.encode("utf-8")).digest()[:8], "big")
-    generator = random.Random(seed)
-    means = sorted(
-        fmean(values[generator.randrange(len(values))] for _index in range(len(values)))
-        for _sample in range(samples)
+def _cluster_bootstrap_ci(
+    values: Sequence[float], seed_text: str, samples: int,
+    *, block_length: int = 1, minimum_count: int = DEFAULT_MINIMUM_SESSION_COUNT,
+) -> list[float] | None:
+    return moving_block_bootstrap_confidence_interval(
+        values, seed_text=seed_text, samples=samples, block_length=block_length,
+        minimum_count=max(minimum_count, DEFAULT_MINIMUM_SESSION_COUNT),
     )
-    return [_percentile(means, 0.025), _percentile(means, 0.975)]
 
 
 def _monotonicity_metrics(
@@ -3057,39 +2965,53 @@ def _rank_ic_metrics(
     observations: tuple[_Observation, ...],
     config: EvaluationConfig,
 ) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    for mode, scope, rule_version, rows in _contract_rows(observations):
-        for horizon in config.horizons:
-            grouped: dict[int, list[_Observation]] = defaultdict(list)
-            for item in rows:
-                if horizon in item.returns:
-                    grouped[item.run_id].append(item)
-            daily_ic = [
-                value
-                for run_rows in grouped.values()
-                if (value := _spearman([(item.raw_score, item.returns[horizon]) for item in run_rows])) is not None
-            ]
-            enough = len(daily_ic) >= config.minimum_session_count
-            mean_ic = fmean(daily_ic) if daily_ic else None
-            deviation = pstdev(daily_ic) if len(daily_ic) >= 2 else None
-            records.append(
-                {
-                    "mode": mode,
-                    "scope": scope,
-                    "rule_version": rule_version,
-                    "horizon_trading_days": horizon,
-                    "status": "ok" if enough else "insufficient_data",
-                    "independent_session_count": len(daily_ic),
-                    "mean_rank_ic": mean_ic,
-                    "icir": mean_ic / deviation if mean_ic is not None and deviation and deviation > 0 else None,
-                    "confidence_interval_95": _cluster_bootstrap_ci(
-                        daily_ic,
-                        f"{mode}:{scope}:{rule_version}:{horizon}:ic",
-                        config.bootstrap_samples,
-                    ),
-                }
-            )
-    return records
+    return [
+        _rank_ic_record(mode, scope, rule_version, rows, horizon, config)
+        for mode, scope, rule_version, rows in _contract_rows(observations)
+        for horizon in config.horizons
+    ]
+
+
+def _rank_ic_record(
+    mode: str, scope: str, rule_version: str,
+    rows: Sequence[_Observation], horizon: int, config: EvaluationConfig,
+) -> dict[str, object]:
+    sessions = _session_research_records(
+        rows, top_n=max(config.top_sizes), horizon=horizon,
+        minimum_coverage=config.complete_day_coverage,
+    )
+    daily_ic = [
+        value if (value := _optional_float(session.get("rank_ic"))) is not None else math.nan
+        for session in sessions
+    ]
+    valid_ic = [value for value in daily_ic if math.isfinite(value)]
+    missing_count = len(sessions) - len(valid_ic)
+    enough = len(valid_ic) >= config.minimum_session_count and not missing_count
+    mean_ic = fmean(valid_ic) if valid_ic else None
+    deviation = pstdev(valid_ic) if len(valid_ic) >= 2 else None
+    return {
+        "mode": mode,
+        "scope": scope,
+        "rule_version": rule_version,
+        "horizon_trading_days": horizon,
+        "status": "ok" if enough else "insufficient_data",
+        "independent_session_count": len(valid_ic),
+        "expected_session_count": len(sessions),
+        "missing_session_count": missing_count,
+        "insufficient_reasons": (
+            (["minimum_session_count"] if len(valid_ic) < config.minimum_session_count else [])
+            + (["incomplete_rank_ic_target_dates"] if missing_count else [])
+        ),
+        "mean_rank_ic": mean_ic,
+        "rank_ic_target": "fixed-horizon-executable-net-slot-return",
+        "minimum_outcome_coverage": config.complete_day_coverage,
+        "icir": mean_ic / deviation if mean_ic is not None and deviation and deviation > 0 else None,
+        "confidence_interval_95": _cluster_bootstrap_ci(
+            daily_ic, f"{mode}:{scope}:{rule_version}:{horizon}:ic", config.bootstrap_samples,
+            block_length=horizon + 1, minimum_count=config.minimum_session_count,
+        ),
+        "confidence_interval_inference": _inference_contract(horizon + 1, config.minimum_session_count),
+    }
 
 
 def _contract_rows(
@@ -3282,14 +3204,8 @@ def _factor_diagnostic_record(
     horizon: int,
     config: EvaluationConfig,
 ) -> dict[str, object]:
-    daily_ic, daily_partial_ic = _daily_factor_ics(rows, factor, horizon)
-    inference_minimum = max(config.minimum_session_count, DEFAULT_MINIMUM_SESSION_COUNT)
-    raw_p_value = moving_block_bootstrap_p_value(
-        daily_ic,
-        samples=config.bootstrap_samples,
-        block_length=max(1, horizon),
-        seed_text=f"factor:{mode}:{scope}:{rule_version}:{factor}:{horizon}",
-        minimum_count=inference_minimum,
+    daily_ic, daily_partial_ic = _daily_factor_ics(
+        rows, factor, horizon, minimum_coverage=config.complete_day_coverage,
     )
     return {
         "mode": mode,
@@ -3297,24 +3213,10 @@ def _factor_diagnostic_record(
         "rule_version": rule_version,
         "factor": factor,
         "horizon_trading_days": horizon,
-        "status": "ok" if len(daily_ic) >= config.minimum_session_count else "insufficient_data",
-        "independent_session_count": len(daily_ic),
-        "mean_rank_ic": fmean(daily_ic) if daily_ic else None,
-        "mean_partial_rank_ic_controlling_raw_score": (
-            fmean(daily_partial_ic) if daily_partial_ic else None
+        **factor_inference_metrics(
+            daily_ic, daily_partial_ic, horizon=horizon, config=config,
+            seed_text=f"factor:{mode}:{scope}:{rule_version}:{factor}:{horizon}",
         ),
-        "partial_ic_session_count": len(daily_partial_ic),
-        "hypothesis": "H0: mean session rank IC <= 0",
-        "raw_p_value_one_sided": raw_p_value,
-        "multiple_testing": {
-            "method": "benjamini-hochberg-fdr",
-            "family": "same-contract-and-horizon-factor-diagnostics",
-            "alpha": MULTIPLE_TESTING_ALPHA,
-            "status": "pending_family_adjustment" if raw_p_value is not None else "insufficient_data",
-            "adjusted_p_value": None,
-            "rejected": None,
-            "minimum_independent_session_count": inference_minimum,
-        },
     }
 
 
@@ -3354,23 +3256,39 @@ def _daily_factor_ics(
     rows: Sequence[_Observation],
     factor: str,
     horizon: int,
+    *, minimum_coverage: float = 0.95,
 ) -> tuple[list[float], list[float]]:
     by_session: dict[str, list[_Observation]] = defaultdict(list)
     for item in rows:
-        if horizon in item.returns and factor in item.factor_values:
-            by_session[item.quote_date].append(item)
+        by_session[item.quote_date].append(item)
     daily_ic: list[float] = []
     daily_partial_ic: list[float] = []
-    for session_rows in by_session.values():
-        factor_ic = _spearman(
-            [(item.factor_values[factor], item.returns[horizon]) for item in session_rows]
-        )
-        if factor_ic is not None:
-            daily_ic.append(factor_ic)
-        partial = None if factor == "raw_score" else _partial_rank_ic(session_rows, factor, horizon)
-        if partial is not None:
-            daily_partial_ic.append(partial)
+    for session in sorted(by_session):
+        factor_ic, partial = _factor_session_ics(by_session[session], factor, horizon, minimum_coverage)
+        daily_ic.append(factor_ic if factor_ic is not None else math.nan)
+        daily_partial_ic.append(partial if partial is not None else math.nan)
     return daily_ic, daily_partial_ic
+
+
+def _factor_session_ics(
+    rows: Sequence[_Observation], factor: str, horizon: int, minimum_coverage: float,
+) -> tuple[float | None, float | None]:
+    available = [
+        item for item in rows
+        if math.isfinite(item.returns.get(horizon, math.nan))
+        and math.isfinite(item.factor_values.get(factor, math.nan))
+    ]
+    if len(available) / len(rows) < minimum_coverage:
+        return None, None
+    factor_ic = _spearman([(item.factor_values[factor], item.returns[horizon]) for item in available])
+    controlled = [
+        item for item in available
+        if math.isfinite(item.factor_values.get("raw_score", math.nan))
+    ]
+    partial = None
+    if factor != "raw_score" and len(controlled) / len(rows) >= minimum_coverage:
+        partial = _partial_rank_ic(controlled, factor, horizon)
+    return factor_ic, partial
 
 
 def _partial_rank_ic(
@@ -3576,7 +3494,10 @@ def _run_summary(snapshot: _RunSnapshot, config: EvaluationConfig) -> dict[str, 
 
 
 __all__ = [
+    "DEFAULT_EXECUTION_NOTIONAL",
     "DEFAULT_HORIZONS",
+    "DEFAULT_MAX_DAILY_PARTICIPATION_RATE",
+    "DEFAULT_MAX_EXIT_DELAY_SESSIONS",
     "DEFAULT_MINIMUM_SESSION_COUNT",
     "DEFAULT_TOP_SIZES",
     "EVALUATION_SCHEMA_VERSION",

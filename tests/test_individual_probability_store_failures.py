@@ -22,13 +22,13 @@ def test_store_rejects_directory_that_never_stabilizes(
     store = IndividualProbabilityStore(tmp_path)
     call_count = 0
 
-    def changing_snapshot():
+    def changing_snapshot(_directory: Path):
         nonlocal call_count
         call_count += 1
         marker = (f"candidate-{call_count}.json", 0, 0, 0, 0, 0, 0, "digest")
-        return tmp_path, "primary", (marker,)
+        return (marker,)
 
-    monkeypatch.setattr(store, "_effective_snapshot", changing_snapshot)
+    monkeypatch.setattr(store, "_directory_fingerprint", changing_snapshot)
     monkeypatch.setattr(store, "_load_latest", lambda _directory, _snapshot: {"stable": False})
 
     with pytest.raises(IndividualProbabilityArtifactError, match="读取期间持续变化"):

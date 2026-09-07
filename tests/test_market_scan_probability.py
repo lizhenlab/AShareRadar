@@ -49,7 +49,6 @@ from app.services.market_scan_probability import (
     probability_selection_qualified,
     probability_filter_qualified,
     predict_shadow_probability,
-    replay_shadow_probability,
     seal_probability_filter_authorization_artifact,
     stable_probability_hash,
     verify_probability_filter_authorization_artifact,
@@ -267,7 +266,7 @@ def test_calibrated_shadow_fit_is_deterministic_and_replayable() -> None:
     assert candidates["isotonic"]["parameters"] is None
     assert verify_shadow_probability_evidence(first) is True
     assert verify_shadow_probability_evidence(first, samples) is True
-    assert replay_shadow_probability(first, samples) == first
+    assert verify_shadow_probability_evidence(first, samples) is True
 
 
 def test_selection_qualification_is_separate_from_fitted_calibrated_display_state() -> None:

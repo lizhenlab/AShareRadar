@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from app.config import Settings
 from app.services.cache import SQLiteCache
-from app.services.scheduler import LocalDataScheduler
+from app.services.scheduler_service import LocalDataScheduler
 from app.utils.fallback_logging import report_persistence_failure
 
 

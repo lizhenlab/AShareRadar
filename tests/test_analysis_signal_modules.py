@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import math
 
-from app.models.schemas import DataQuality
-from app.models.schemas import SignalContribution
-from app.models.schemas import SignalItem
-from app.services import analysis_signals
-from app.services.analysis_signal_advice import action_advice, beginner_summary
+from app.models.analysis import DataQuality
+from app.models.analysis import SignalContribution
+from app.models.analysis import SignalItem
+from app.services.analysis_signal_advice import action_advice
 from app.services.analysis_signal_points import (
     BUY_POINT_RULES,
     RISK_LEVEL_RULES,
@@ -25,8 +24,6 @@ from app.services.analysis_signal_points import (
 from app.services.analysis_signal_quality import (
     QUALITY_BLOCK_RULES,
     gate_signal_items,
-    quality_blocks_active_signals,
-    quality_reason,
 )
 from app.services.analysis_signal_snapshot import (
     signal_confidence,
@@ -35,23 +32,6 @@ from app.services.analysis_signal_snapshot import (
 )
 from tests.factories import make_quote
 
-
-def test_analysis_signals_facade_preserves_legacy_imports() -> None:
-    assert analysis_signals._action_advice is action_advice
-    assert analysis_signals._beginner_summary is beginner_summary
-    assert analysis_signals._buy_points is buy_points
-    assert analysis_signals._risk_level is risk_level
-    assert analysis_signals._sell_points is sell_points
-    assert analysis_signals._strength_tags is strength_tags
-    assert analysis_signals._t_plan is t_plan
-    assert analysis_signals._gate_signal_items is gate_signal_items
-    assert (
-        analysis_signals._quality_blocks_active_signals is quality_blocks_active_signals
-    )
-    assert analysis_signals._quality_reason is quality_reason
-    assert analysis_signals._signal_confidence is signal_confidence
-    assert analysis_signals._signal_snapshot is signal_snapshot
-    assert analysis_signals._signal_summary is signal_summary
 
 
 def test_signal_snapshot_sanitizes_non_finite_contributions_and_notes() -> None:

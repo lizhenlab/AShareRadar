@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Iterable
 
+from app.services.lifecycle_cleanup import await_cleanup
 from app.services.scheduler_contracts import SchedulerRuntimeContext
 from app.services.scheduler_helpers import (
     _consume_future_exception,
@@ -15,6 +16,8 @@ from app.utils.fallback_logging import report_persistence_failure
 
 
 class SchedulerLifecycleMixin(SchedulerRuntimeContext):
+    _guard_release_pending: bool = False
+
     @property
     def is_quiescent(self) -> bool:
         """Whether no scheduler work can outlive release of its instance guard."""
@@ -25,6 +28,7 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
             and not self._shutdown_tasks
             and self._guard_release_task is None
             and not self._guard_acquired
+            and not self._guard_release_pending
             and not self._scheduler_guard_active
             and self._manual_guard_users == 0
         )
@@ -71,7 +75,8 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
                 self._runner.add_done_callback(_consume_future_exception)
                 await self._save_monitor_event("info", "scheduler", "本地数据刷新与健康监控已启动")
             except BaseException:
-                await self._abort_start()
+                cleanup = asyncio.create_task(self._abort_start(), name="scheduler-start-rollback")
+                await await_cleanup(cleanup)
                 raise
             return True
 
@@ -88,14 +93,22 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
             )
 
     async def _acquire_instance_guard(self) -> bool:
+        if self._guard_release_pending:
+            await self._release_instance_guard()
         acquire = asyncio.create_task(_offload(self._instance_guard.acquire), name="scheduler-instance-guard-acquire")
         try:
             return await asyncio.shield(acquire)
         except asyncio.CancelledError:
-            acquired = await asyncio.shield(acquire)
-            if acquired:
-                await _offload(self._instance_guard.release)
+            cleanup = asyncio.create_task(
+                self._release_cancelled_acquisition(acquire), name="scheduler-cancelled-acquisition"
+            )
+            await await_cleanup(cleanup)
             raise
+
+    async def _release_cancelled_acquisition(self, acquire: asyncio.Task[bool]) -> None:
+        if await acquire:
+            self._guard_acquired = True
+            await self._release_instance_guard()
 
     async def _abort_start(self) -> None:
         self._stop_event.set()
@@ -114,18 +127,14 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
     async def stop(self) -> bool:
         cleanup = asyncio.create_task(self._stop(), name="local-data-scheduler-stop")
         cleanup.add_done_callback(_consume_future_exception)
-        try:
-            return await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await asyncio.shield(cleanup)
-            raise
+        return await await_cleanup(cleanup)
 
     async def _stop(self) -> bool:
         async with self._lifecycle_lock:
             if self._shutdown_tasks or self._guard_release_task is not None:
                 return False
             runner = self._runner
-            if runner is None and not self._scheduler_guard_active and not self._active_tasks:
+            if runner is None and not self._scheduler_guard_active and not self._active_tasks and not self._guard_release_pending:
                 self._mark_quiescent_if_idle()
                 return False
             self._stop_event.set()
@@ -161,22 +170,22 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
         return await _wait_for_tasks_bounded(tasks, timeout=timeout, cancel_first=cancel_first)
 
     async def _release_instance_guard(self) -> None:
-        if not self._guard_acquired or self._scheduler_guard_active or self._manual_guard_users or self._shutdown_tasks:
+        if self._scheduler_guard_active or self._manual_guard_users or self._shutdown_tasks:
             return
-        self._guard_acquired = False
-        release = asyncio.create_task(_offload(self._instance_guard.release), name="scheduler-instance-guard-release")
+        if not self._guard_acquired and not self._guard_release_pending:
+            return
+        release = asyncio.create_task(self._complete_instance_guard_release(), name="scheduler-instance-guard-release")
         try:
-            await asyncio.shield(release)
-        except asyncio.CancelledError:
-            try:
-                await asyncio.shield(release)
-            except BaseException:
-                self._guard_acquired = True
-                raise
-            raise
-        except BaseException:
-            self._guard_acquired = True
-            raise
+            await await_cleanup(release)
+        finally:
+            self._mark_quiescent_if_idle()
+
+    async def _complete_instance_guard_release(self) -> None:
+        self._guard_acquired = False
+        self._guard_release_pending = True
+        self._quiescent_event.clear()
+        await _offload(self._instance_guard.release)
+        self._guard_release_pending = False
 
     def _mark_quiescent_if_idle(self) -> None:
         if self.is_quiescent:

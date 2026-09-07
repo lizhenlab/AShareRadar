@@ -13,11 +13,7 @@ from app.models.analysis import (
     DataQuality,
 )
 from app.models.system import (
-    DataSourcePlan,
     DataStatus,
-    ProviderCapabilityStatus,
-    ProviderDecision,
-    ProviderStatus,
 )
 from app.models.market import (
     Kline,
@@ -28,13 +24,10 @@ from app.models.market import (
     StockInfo,
 )
 from app.services.cache import SQLiteCache, resolve_cache_settings
-from app.services.datahub_metadata import MetadataCoordinator, StockPoolResolution
+from app.services.datahub_metadata_coordinator import MetadataCoordinator
+from app.services.datahub_metadata_stock_pool import StockPoolResolution
 from app.services.datahub_klines import KlineCoordinator
 from app.services.datahub_orderbook import OrderBookCoordinator
-from app.services.datahub_status import (
-    _provider_source_key,
-    provider_error_text,
-)
 from app.services.datahub_source_plan import SourcePlanBuilder
 from app.services.datahub_quotes import QuoteCoordinator
 from app.services.datahub_runtime import PROVIDER_SHUTDOWN_TIMEOUT_SECONDS, ProviderRuntime
@@ -50,10 +43,7 @@ from app.services.provider_registry import (
 from app.utils.clock import monotonic_now
 
 
-_provider_error_text = provider_error_text
-
-
-__all__ = ["DataHub", "_provider_error_text", "_provider_source_key", "provider_error_text"]
+__all__ = ["DataHub"]
 
 
 logger = logging.getLogger(__name__)
@@ -372,34 +362,6 @@ class DataHub:
     def capabilities(self) -> list[ProviderCapability]:
         return self._status_service.capabilities()
 
-    def _source_plan(
-        self,
-        providers: list[ProviderStatus],
-        capabilities: list[ProviderCapability],
-        capability_statuses: list[ProviderCapabilityStatus] | None = None,
-    ) -> DataSourcePlan:
-        return self._status_service.source_plan(providers, capabilities, capability_statuses)
-
-    def _provider_decision(
-        self,
-        name: str,
-        status: ProviderStatus | None,
-        capability: ProviderCapability | None,
-        quote_names: list[str],
-        kline_names: list[str],
-        minute_names: list[str],
-        capability_statuses: dict[tuple[str, str], ProviderCapabilityStatus],
-    ) -> ProviderDecision:
-        return self._status_service.provider_decision(
-            name,
-            status,
-            capability,
-            quote_names,
-            kline_names,
-            minute_names,
-            capability_statuses,
-        )
-
     def _priority(self, kind: str) -> list[tuple[int, str]]:
         return provider_priority(self.settings, self.providers, kind)
 
@@ -411,9 +373,6 @@ class DataHub:
 
     def _record_provider_failure(self, name: str, index: int, exc: Exception, kind: str) -> None:
         self._provider_runtime.record_failure(name, index, exc, kind)
-
-    def _clear_provider_cooldown(self, name: str, kind: str = "general") -> None:
-        self._provider_runtime.clear_cooldown(name, kind)
 
     def _all_provider_names(self) -> list[str]:
         return all_provider_names(self.settings, self.providers)
@@ -435,10 +394,6 @@ class DataHub:
 
     async def _quote_consistency(self, quote: Quote, check_consistency: bool = True) -> tuple[str, list[str], int]:
         return await self._quote_coordinator.consistency(quote, check_consistency=check_consistency)
-
-    async def _quote_consistency_probe(self, index: int, name: str, provider, target_symbol: str) -> dict[str, object]:
-        return await self._quote_coordinator.consistency_probe(index, name, provider, target_symbol)
-
 
 async def _close_provider(provider: object) -> bool:
     close = getattr(provider, "aclose", None)

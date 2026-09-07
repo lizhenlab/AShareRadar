@@ -10,13 +10,10 @@ from unittest.mock import patch
 
 import pytest
 
-from app.models.schemas import CacheStats, ProviderCapabilityStatus, ProviderStatus
+from app.models.system import CacheStats, ProviderCapabilityStatus, ProviderStatus
 from app.services.instance_guard import FileInstanceGuard
-from app.services.scheduler import (
-    FileSchedulerInstanceGuard,
-    LocalDataScheduler,
-    LocalTask,
-)
+from app.services.scheduler_contracts import LocalTask
+from app.services.scheduler_service import LocalDataScheduler
 from app.services.scheduler_contracts import NoopSchedulerInstanceGuard, TaskExecutionResult
 from app.services.scheduler_execution import (
     _next_market_scan_run_at,
@@ -94,8 +91,8 @@ def test_direct_scheduler_does_not_implicitly_compose_strategy_automation() -> N
 
 def test_file_scheduler_guard_allows_only_one_holder(tmp_path) -> None:
     path = tmp_path / "scheduler.lock"
-    first = FileSchedulerInstanceGuard(path)
-    second = FileSchedulerInstanceGuard(path)
+    first = FileInstanceGuard(path)
+    second = FileInstanceGuard(path)
 
     assert first.acquire() is True
     assert second.acquire() is False
@@ -104,10 +101,6 @@ def test_file_scheduler_guard_allows_only_one_holder(tmp_path) -> None:
 
     assert second.acquire() is True
     second.release()
-
-
-def test_file_scheduler_guard_keeps_shared_guard_compatibility() -> None:
-    assert issubclass(FileSchedulerInstanceGuard, FileInstanceGuard)
 
 
 def test_scheduler_single_instance_strategy_can_be_injected() -> None:
@@ -166,8 +159,8 @@ def test_file_scheduler_standby_status_clears_after_other_holder_releases(tmp_pa
     standby_hub = _SchedulerHub()
     holder_hub.settings.scheduler_enabled = True
     standby_hub.settings.scheduler_enabled = True
-    holder = LocalDataScheduler(holder_hub, instance_guard=FileSchedulerInstanceGuard(lock_path))
-    standby = LocalDataScheduler(standby_hub, instance_guard=FileSchedulerInstanceGuard(lock_path))
+    holder = LocalDataScheduler(holder_hub, instance_guard=FileInstanceGuard(lock_path))
+    standby = LocalDataScheduler(standby_hub, instance_guard=FileInstanceGuard(lock_path))
 
     async def run_check():
         assert await holder.start() is True
@@ -1724,7 +1717,7 @@ def test_scheduler_helpers_cover_empty_cancelled_and_guard_fallbacks(tmp_path) -
 
     assert isinstance(_default_instance_guard(SimpleNamespace(cache=SimpleNamespace())), NoopSchedulerInstanceGuard)
     guard = _default_instance_guard(SimpleNamespace(cache=SimpleNamespace(path=tmp_path / "cache.sqlite3")))
-    assert isinstance(guard, FileSchedulerInstanceGuard)
+    assert isinstance(guard, FileInstanceGuard)
     assert _positive_int_or_none(True) == 1
     assert _positive_float_or_default(object(), 2.5) == 2.5
     assert NoopSchedulerInstanceGuard().held_by_other() is False

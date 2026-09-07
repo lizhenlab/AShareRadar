@@ -103,9 +103,6 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ("app/services/scheduler_lifecycle.py", "SchedulerLifecycleMixin.start"): _BoundaryPolicy(
         "propagate", "Abort partial scheduler startup and preserve cancellation or fatal failure."
     ),
-    ("app/services/scheduler_lifecycle.py", "SchedulerLifecycleMixin._release_instance_guard"): _BoundaryPolicy(
-        "propagate", "Restore scheduler ownership state when asynchronous lock release fails."
-    ),
     ("app/services/task_run_lifecycle.py", "_TaskRunStartHandoff.run"): _BoundaryPolicy(
         "future", "Transfer database start failure across the thread-to-async Future hand-off."
     ),
@@ -502,17 +499,7 @@ def test_provider_error_sanitizer_has_one_canonical_production_entry_point() -> 
     assert wrong_imports == []
     assert legacy_imports == []
 
-    facade = ast.parse(
-        (ROOT / "app/services/provider_errors.py").read_text(encoding="utf-8"),
-        filename="app/services/provider_errors.py",
-    )
-    assert not any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) for node in ast.walk(facade))
-    assert any(
-        isinstance(node, ast.ImportFrom)
-        and node.module == _PROVIDER_SANITIZER
-        and "sanitize_provider_error" in {alias.name for alias in node.names}
-        for node in facade.body
-    )
+    assert not (ROOT / "app/services/provider_errors.py").exists()
 
 
 def test_provider_errors_are_sanitized_at_external_and_persistence_boundaries() -> None:

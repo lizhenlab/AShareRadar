@@ -420,10 +420,6 @@ def unique_standard_symbols(symbols: Iterable[str]) -> list[str]:
     return standard_symbol_list(symbols, skip_invalid=True).symbols
 
 
-async def _stock_pool_or_empty(datahub, *, failure_message: str) -> list[StockInfo]:
-    return list((await _stock_pool_sample(datahub, failure_message=failure_message)).rows)
-
-
 @dataclass(frozen=True)
 class StockPoolSampleResult:
     rows: tuple[StockInfo, ...]

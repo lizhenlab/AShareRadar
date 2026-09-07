@@ -8,7 +8,7 @@ from app.services.data_quality import build_data_quality
 from app.services.financial_health import build_financial_health
 from app.services.financial_health_components import FORMAL_FINANCIAL_FIELDS, liquidity_metric_value
 from app.services.research_features import _financial_health_score
-from app.models.schemas import FinancialHealth
+from app.models.analysis import FinancialHealth
 from tests.factories import make_kline as _kline
 from tests.factories import make_quote as _quote
 from tests.factories import make_stock_info as _stock_info

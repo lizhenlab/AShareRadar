@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_datahub
 from app.api.errors import validation_exception_handler
 from app.api.routes import notes
-from app.models.schemas import StockNoteInput
+from app.models.user_data import StockNoteInput
 from app.services.cache import SQLiteCache
 from tests.factories import make_quote
 

@@ -8,7 +8,7 @@ import pytest
 
 from app.api.deps import get_datahub
 from app.api.routes import watchlist
-from app.models.schemas import WatchlistItem
+from app.models.user_data import WatchlistItem
 from tests.factories import make_quote
 
 

@@ -91,8 +91,9 @@ def _aggregate_healthy(context: ProviderAggregationContext) -> bool:
 
 def _latest_success(statuses: list[ProviderCapabilityStatus], history: ProviderStatus | None) -> str | None:
     candidates = [item.last_success for item in statuses if item.last_success]
-    default = history.last_success if history else None
-    return max(candidates, key=_timestamp_key, default=default)
+    if not candidates:
+        return history.last_success if history else None
+    return max(candidates, key=_timestamp_key)
 
 
 def _latest_error(statuses: list[ProviderCapabilityStatus], history: ProviderStatus | None) -> str | None:

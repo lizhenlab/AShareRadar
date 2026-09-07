@@ -25,8 +25,8 @@ SYMBOLS = ["600519.SH", "000001.SZ", "920006.BJ"]
 SESSIONS = ["2024-01-31", "2024-02-01", "2024-02-29"]
 
 
-def quotas():
-    today = market_now().date()
+def quotas(today: date | None = None):
+    today = today if today is not None else market_now().date()
     first = today - timedelta(days=today.weekday())
     fields = ["FUNCENAME", "SECUTYPE", "PERIOD", "STARTDATE", "ENDDATE", "THRESHOLD",
               "USEDDATA", "AVAILABEDATA", "EFFECTIVEDATE"]
@@ -1006,8 +1006,11 @@ def test_choice_quota_requires_enough_units_for_one_balanced_complete_cohort(tmp
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_quota_update_selects_unique_current_week_from_thirty_day_rows(tmp_path, reverse):
-    response = quotas()
+@pytest.mark.parametrize("clock_day", [date(2026, 9, 1), date(2026, 9, 7), date(2026, 9, 14)])
+def test_quota_update_selects_unique_current_week_from_thirty_day_rows(tmp_path, monkeypatch, reverse, clock_day):
+    monkeypatch.setattr("app.utils.clock.utc_now", lambda: datetime.combine(clock_day, datetime.min.time(), tzinfo=UTC))
+    today = date(2026, 9, 1)
+    response = quotas(today)
     rows = list(response["data"].values())
     stale = deepcopy(rows[0])
     stale[3:5] = ["2026-08-24", "2026-08-30"]
@@ -1015,7 +1018,7 @@ def test_quota_update_selects_unique_current_week_from_thirty_day_rows(tmp_path,
     if reverse:
         response["data"] = dict(reversed(response["data"].items()))
     with ChoiceBudget(tmp_path / "control") as budget:
-        budget.update(response, today=date(2026, 9, 1))
+        budget.update(response, today=today)
         assert budget.quotas["EM_CSD"]["STARTDATE"] == "2026-08-31"
 
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import sqlite3
 
 from app.db.user_mappers import row_to_advice, row_to_advice_timeline
-from app.models.schemas import AdviceTimelineItem
-from app.services.research_conclusion_change import (
+from app.models.user_data import AdviceTimelineItem
+from app.models.advice_change import (
     CONCLUSION_BASIS,
     MODEL_VERSION,
     SNAPSHOT_CONTRACT_VERSION,

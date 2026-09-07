@@ -5,12 +5,63 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MINIMUM_TYPED_APP_FILE_COUNT = 223
+MINIMUM_TYPED_APP_FILE_COUNT = 323
 
 # This is a review-visible floor, not a target. New files may be added freely;
 # removing any protected file requires an explicit contract change.
 MINIMUM_MYPY_FILES = frozenset(
     {
+        "app/models/market_scan_polling.py",
+        "app/services/financial_health.py",
+        "app/services/financial_health_components.py",
+        "app/services/instance_guard.py",
+        "app/services/stock_event_summary.py",
+        "app/services/stock_insights.py",
+        "app/services/valuation_analysis.py",
+        "tools/check_repository.py",
+        "app/services/alerts.py",
+        "app/services/market_scan_allocation.py",
+        "app/services/market_scan_allocation_budget.py",
+        "app/services/market_scan_allocation_contracts.py",
+        "app/services/market_scan_allocation_validation.py",
+        "app/services/market_scan_cohort_feedback.py",
+        "app/services/market_scan_cohort_feedback_calendar.py",
+        "app/services/market_scan_cohort_feedback_contracts.py",
+        "app/services/market_scan_cohort_feedback_state.py",
+        "app/services/market_scan_research_sensitivity.py",
+        "app/services/market_scan_research_sensitivity_contract.py",
+        "app/services/market_scan_research_sensitivity_statistics.py",
+        "tools/manage_market_scan_cohort_feedback.py",
+        "tools/plan_market_scan_allocation.py",
+        "tools/run_market_scan_sensitivity.py",
+        "app/services/market_scan_delayed_feedback.py",
+        "app/services/market_scan_delayed_feedback_contracts.py",
+        "app/services/market_scan_delayed_feedback_report.py",
+        "app/services/market_scan_delayed_feedback_state.py",
+        "app/services/market_scan_probability_coherence.py",
+        "app/services/market_scan_prospective.py",
+        "app/services/market_scan_prospective_contract.py",
+        "app/services/market_scan_prospective_store.py",
+        "app/services/market_scan_prospective_validation.py",
+        "app/services/market_scan_research_availability.py",
+        "app/services/market_scan_research_availability_contract.py",
+        "app/services/market_scan_research_availability_statistics.py",
+        "app/services/market_scan_research_execution_audit.py",
+        "app/services/market_scan_research_holdings.py",
+        "app/services/market_scan_research_holdings_contracts.py",
+        "app/services/market_scan_research_holdings_validation.py",
+        "tools/audit_market_scan_availability.py",
+        "tools/audit_market_scan_frontier.py",
+        "tools/manage_market_scan_feedback.py",
+        "tools/manage_market_scan_prospective.py",
+
+        "app/services/lifecycle_cleanup.py",
+        "app/services/market_scan_evaluation_config.py",
+        "app/services/market_scan_factor_inference.py",
+        "app/repositories/provider_status_aggregation.py",
+        "app/repositories/market_metadata.py",
+        "app/repositories/market_data.py",
+        "app/db/market_mappers.py",
         "app/api/container.py",
         "app/api/deps.py",
         "app/api/errors.py",
@@ -61,7 +112,6 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/services/cache.py",
         "app/services/daemon_executor.py",
         "app/services/datahub.py",
-        "app/services/datahub_metadata.py",
         "app/services/datahub_metadata_coordinator.py",
         "app/services/datahub_metadata_mapping.py",
         "app/services/datahub_metadata_provider.py",
@@ -89,9 +139,7 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/services/market_scan_terminal_recovery.py",
         "app/services/market_scan_scoring.py",
         "app/services/market_scan_universe.py",
-        "app/services/optional_providers.py",
         "app/services/paper_trading.py",
-        "app/services/provider_errors.py",
         "app/services/provider_failure_status.py",
         "app/services/provider_registry.py",
         "app/services/provider_stock_mappers.py",
@@ -100,7 +148,6 @@ MINIMUM_MYPY_FILES = frozenset(
         "app/services/research_artifact_catalog.py",
         "app/services/runtime_backup.py",
         "app/services/runtime_coordinator.py",
-        "app/services/scheduler.py",
         "app/services/scheduler_contracts.py",
         "app/services/scheduler_execution.py",
         "app/services/scheduler_health.py",
@@ -168,7 +215,7 @@ def test_mypy_scope_covers_a_meaningful_share_of_application_modules() -> None:
     typed_app_files = {path for path in configured_files if isinstance(path, str) and path.startswith("app/")}
 
     assert len(typed_app_files) >= MINIMUM_TYPED_APP_FILE_COUNT
-    assert len(typed_app_files) / len(app_files) >= 0.5
+    assert len(typed_app_files) / len(app_files) >= 0.64
 
 
 def test_mypy_scope_does_not_hide_errors() -> None:

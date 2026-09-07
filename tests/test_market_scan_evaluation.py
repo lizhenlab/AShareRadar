@@ -15,6 +15,9 @@ import pytest
 
 from app.db.schema import initialize_schema
 from app.db.market_scan_integrity import market_scan_snapshot_digest, seal_market_scan_snapshot
+from app.models.market import Kline, Quote
+from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE, MarketScanMode, MarketScanResultItem
+from app.repositories.market_scan_mapping import encode_result_payload
 from app.services import market_scan_evaluation as evaluation
 from app.services import market_scan_evaluation_metrics as evaluation_metrics
 from app.services.market_scan_evaluation import (
@@ -36,6 +39,8 @@ from app.services.market_scan_probability_artifact import (
     replay_probability_artifact_set,
 )
 from app.services.market_scan_probability_store import MarketScanProbabilityStore
+from app.services.market_scan_score_dimensions import build_market_scan_score_dimensions
+from app.services.trading_calendar import trading_dates_between
 from app.services.market_scan_evaluation_exposure import (
     ExposureItem,
     board,
@@ -124,7 +129,7 @@ def test_shadow_promotion_primary_contract_never_selects_preopen_research() -> N
         return {
             "dimensions": {
                 "mode": mode,
-                "scope": "SH/SZ/BJ listed A-shares",
+                "scope": MARKET_SCAN_FULL_MARKET_SCOPE,
                 "rule_version": "v1",
             },
             "top_n": 100,
@@ -139,7 +144,7 @@ def test_shadow_promotion_primary_contract_never_selects_preopen_research() -> N
     assert selected is not None
     assert selected["dimensions"] == {
         "mode": "official",
-        "scope": "SH/SZ/BJ listed A-shares",
+        "scope": MARKET_SCAN_FULL_MARKET_SCOPE,
         "rule_version": "v1",
     }
 
@@ -188,8 +193,6 @@ def test_session_block_bootstrap_is_deterministic_and_null_when_insufficient() -
 
 def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(tmp_path: Path) -> None:
     assert evaluation._calibration_metrics is evaluation_metrics.calibration_metrics  # noqa: SLF001
-    assert evaluation._calibration_record is evaluation_metrics.calibration_record  # noqa: SLF001
-    assert evaluation._calibration_bucket is evaluation_metrics.calibration_bucket  # noqa: SLF001
     path = tmp_path / "evaluation.sqlite3"
     _initialize(path)
     run_id = _seed_run(
@@ -247,7 +250,8 @@ def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    assert normalized_digest == "5c30f5a2c4006d9110375fcf34b1b7120649729c161ce036acc460cc6eca102a"
+    # Factor diagnostics v2 retain missing dates and declare their inference floor.
+    assert normalized_digest == "2434fc4889488cf6edd81161a66d592d0cf29a7f3a2afa162b17b4531cff9968"
     assert calibration_digest == "8f36b6d7a1035c20d245135b234cc2896e9b20d8750c7787b829e1cdf9519bb2"
 
     assert report["status"] == "ok"
@@ -270,7 +274,7 @@ def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(
     assert metric["positive_return_rate"] == 1
     assert metric["equal_weight_market_return"] == pytest.approx(0.05)
     assert metric["equal_weight_market_excess_return"] == pytest.approx(0.175)
-    assert metric["session_maximum_drawdown"] == 0
+    assert metric["session_maximum_drawdown"] is None
     assert metric["maximum_adverse_excursion"] == pytest.approx(-0.05)
     runs = cast(list[dict[str, Any]], report["runs"])
     cohorts = cast(list[dict[str, Any]], report["cohorts"])
@@ -758,11 +762,14 @@ def test_rank_ic_deciles_and_clustered_metrics_use_sessions(tmp_path: Path) -> N
             quote_date=quote_date,
             ranks=symbols,
         )
-        _seed_forward_prices(
-            path,
-            dates=(forward_date,),
-            closes={symbol: (120 - index * 2,) for index, symbol in enumerate(symbols)},
-        )
+        target_date = (date.fromisoformat(forward_date) + timedelta(days=1)).isoformat()
+        for index, symbol in enumerate(symbols):
+            close = 120 - index * 2
+            _seed_bars(path, symbol, (
+                (forward_date, 100, close + 1, 99, close, 1000),
+                (target_date, 100, close + 1, 99, close, 1000),
+            ))
+
 
     report = evaluate_market_scan_rankings(
         path,
@@ -779,7 +786,7 @@ def test_rank_ic_deciles_and_clustered_metrics_use_sessions(tmp_path: Path) -> N
     metric = _cohort(report, dimensions=contract, top_n=2, horizon=1)
     assert metric["status"] == "ok"
     assert metric["independent_session_count"] == 2
-    assert len(metric["session_return_confidence_interval_95"]) == 2  # type: ignore[arg-type]
+    assert metric["session_return_confidence_interval_95"] is None
     rank_ic = cast(list[dict[str, Any]], report["rank_ic"])[0]
     assert rank_ic["status"] == "ok"
     assert rank_ic["independent_session_count"] == 2
@@ -915,6 +922,7 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
         rule_version="production-v4",
         quote_date="2026-01-05",
         ranks=symbols,
+        point_in_time=False,
     )
     for index, symbol in enumerate(symbols):
         _seed_shadow_history(path, symbol, end=date(2026, 1, 5), slope=(index + 1) * 0.001)
@@ -954,7 +962,7 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
     assert comparison["status"] == "insufficient_data"
     assert comparison["promotion"]["automatic_promotion"] is False  # type: ignore[index]
     assert comparison["promotion"]["point_in_time_input_integrity_verified"] is False  # type: ignore[index]
-    assert comparison["promotion"]["gate_version"] == "full-market-shadow-promotion-gate-v2"  # type: ignore[index]
+    assert comparison["promotion"]["gate_version"] == "full-market-shadow-promotion-gate-v3"  # type: ignore[index]
     assert comparison["promotion"]["eligible_candidates"] == []  # type: ignore[index]
     multiple_testing = comparison["promotion"]["multiple_testing_control"]  # type: ignore[index]
     assert multiple_testing["method"] == "benjamini-hochberg-fdr"
@@ -995,7 +1003,7 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
         text=True,
     )
     cli_payload = json.loads(completed.stdout)
-    assert cli_payload["schema_version"] == "market-scan-shadow-comparison-v2"
+    assert cli_payload["schema_version"] == "market-scan-shadow-comparison-v3"
     assert cli_payload["artifact_projection"]["schema_version"] == (  # type: ignore[index]
         "market-scan-shadow-comparison-compact-v1"
     )
@@ -1087,6 +1095,7 @@ def test_shadow_evaluation_excludes_one_invalid_symbol_without_losing_the_run(tm
         rule_version="production-v4",
         quote_date="2026-01-05",
         ranks=symbols,
+        point_in_time=False,
     )
     for index, symbol in enumerate(symbols):
         _seed_shadow_history(path, symbol, end=date(2026, 1, 5), slope=(index + 1) * 0.001)
@@ -1157,6 +1166,7 @@ def _seed_run(
     quote_date: str,
     ranks: tuple[str, ...],
     changes: tuple[float, ...] | None = None,
+    point_in_time: bool = True,
 ) -> int:
     timestamp = f"{quote_date}T08:00:00.000000Z"
     with closing(sqlite3.connect(path)) as conn, conn:
@@ -1185,14 +1195,20 @@ def _seed_run(
         assert run_id is not None
         for index, symbol in enumerate(ranks, start=1):
             code, market = symbol.split(".")
+            quality = 95 if index == 1 else 85 if index == 2 else 75
+            change = changes[index - 1] if changes else 0
+            details = _seed_point_in_time_details(
+                symbol, quote_date=quote_date, mode=cast(MarketScanMode, mode),
+                quality=quality, change=change,
+            ) if point_in_time else {}
             conn.execute(
                 """
                 INSERT INTO market_scan_result (
                     run_id, symbol, code, market, name, status, rank, score, raw_score,
                     price, change_pct, data_quality_score, amount, turnover_rate,
-                    list_date, is_st, is_new, adjustment_mode, updated_at
+                    list_date, is_st, is_new, adjustment_mode, updated_at, metrics_json
                 ) VALUES (?, ?, ?, ?, ?, 'success', ?, ?, ?, 100, ?, ?, 1000000000, 4,
-                          '2020-01-02', 0, 0, 'qfq', ?)
+                          '2020-01-02', 0, 0, 'qfq', ?, ?)
                 """,
                 (
                     run_id,
@@ -1203,13 +1219,58 @@ def _seed_run(
                     index,
                     100 - index,
                     100 - index / 10,
-                    changes[index - 1] if changes else 0,
-                    95 if index == 1 else 85 if index == 2 else 75,
+                    change,
+                    quality,
                     timestamp,
+                    encode_result_payload({}, details),
                 ),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO kline_daily (
+                    symbol, adjustment_mode, date, open, close, high, low, volume,
+                    as_of, data_version, contract_version, fallback_used, source, fetched_at
+                ) VALUES (?, 'qfq', ?, 100, 100, 101, 99, 1000,
+                          ?, 'test-v1', 'daily-kline.v1', 0, 'test', ?)
+                """,
+                (symbol, quote_date, quote_date, timestamp),
             )
         seal_market_scan_snapshot(conn, int(run_id))
     return int(run_id)
+
+
+def _seed_point_in_time_details(
+    symbol: str, *, quote_date: str, mode: MarketScanMode, quality: int, change: float,
+) -> dict[str, object]:
+    """Generate real PIT v4 data without deriving this fixture's deliberately frozen ranks."""
+    cutoff = date.fromisoformat(quote_date)
+    sessions = list(trading_dates_between(cutoff - timedelta(days=200), cutoff))
+    if not sessions or sessions[-1] != cutoff:
+        # Ranking-only historical fixtures do not acquire fabricated session evidence.
+        return {}
+    rows = [
+        Kline(
+            date=session.isoformat(), open=100, close=100, high=101, low=99, volume=1000,
+            adjustment_mode="qfq", as_of=quote_date, data_version="test-v1", source="test",
+        )
+        for session in sessions[-61:]
+    ]
+    code, market = symbol.split(".")
+    item = MarketScanResultItem(
+        run_id=1, symbol=symbol, code=code, market=market, name=f"样本{code}",
+        status="success", list_date="2020-01-02", updated_at=f"{quote_date}T08:00:00Z",
+    )
+    previous_close = 100 / (1 + change / 100)
+    quote = Quote(
+        code=code, market=market, name=item.name, price=100, prev_close=previous_close,
+        open=100, high=101, low=99, volume=1000, amount=1_000_000_000,
+        change=100 - previous_close, change_pct=change, turnover_rate=4,
+        timestamp=f"{quote_date} 15:00:00", source="test",
+    )
+    dimensions = build_market_scan_score_dimensions(
+        item, quote, rows, data_quality_score=quality, volume_ratio=1, mode=mode,
+    )
+    return {"components": {"score_dimensions": dimensions.details()}}
 
 
 def _disable_market_scan_immutability(conn: sqlite3.Connection) -> None:
@@ -1246,7 +1307,7 @@ def _seed_forward_prices(
                     INSERT OR REPLACE INTO kline_daily (
                         symbol, adjustment_mode, date, open, close, high, low, volume,
                         as_of, data_version, contract_version, fallback_used, source, fetched_at
-                    ) VALUES (?, 'qfq', ?, ?, ?, ?, ?, 1000, ?, 'test-v1', 'test-v1', 0, 'test', ?)
+                    ) VALUES (?, 'qfq', ?, ?, ?, ?, ?, 1000, ?, 'test-v1', 'daily-kline.v1', 0, 'test', ?)
                     """,
                     (
                         symbol,
@@ -1273,7 +1334,7 @@ def _seed_bars(
                 INSERT OR REPLACE INTO kline_daily (
                     symbol, adjustment_mode, date, open, close, high, low, volume,
                     as_of, data_version, contract_version, fallback_used, source, fetched_at
-                ) VALUES (?, 'qfq', ?, ?, ?, ?, ?, ?, ?, 'test-v1', 'test-v1', 0, 'test', ?)
+                ) VALUES (?, 'qfq', ?, ?, ?, ?, ?, ?, ?, 'test-v1', 'daily-kline.v1', 0, 'test', ?)
                 """,
                 (
                     symbol,

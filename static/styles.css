@@ -1,5 +1,0 @@
-.alert-form button:disabled,
-.note-form button:disabled {
-  cursor: wait;
-  opacity: 0.72;
-}

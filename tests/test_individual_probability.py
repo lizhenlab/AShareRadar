@@ -56,7 +56,7 @@ from tests import test_market_scan_probability_source as probability_source_test
 
 
 ASSESSMENT = Path(
-    "docs/research/artifacts/" "individual-upside-probability-assessment-" "517691b101dcb2142693a74f6e5ac9ef10f386c545572b6bacfe161f186ba677.json"
+    "tests/fixtures/research/" "individual-upside-probability-assessment-" "517691b101dcb2142693a74f6e5ac9ef10f386c545572b6bacfe161f186ba677.json"
 )
 VALID_REPORT_TIME = "2026-08-12T18:00:00+08:00"
 PRODUCTION_SCORE_SPEC_HASH = stable_score_spec_hash(market_scan_score_spec(min_data_quality_score=50))
@@ -564,7 +564,7 @@ def test_store_rejects_broken_symlink_directory_without_fallback(tmp_path: Path)
     link.symlink_to(tmp_path / "missing", target_is_directory=True)
 
     with pytest.raises(IndividualProbabilityArtifactError, match="符号链接"):
-        IndividualProbabilityStore(link, fallback_directory=ASSESSMENT.parent).latest()
+        IndividualProbabilityStore(link).latest()
 
 
 def test_store_selects_semantic_generated_at_not_mutable_mtime(tmp_path: Path) -> None:
@@ -576,13 +576,17 @@ def test_store_selects_semantic_generated_at_not_mutable_mtime(tmp_path: Path) -
     assert store.latest() == original
 
 
-def test_store_uses_tracked_baseline_only_when_primary_has_no_candidate(tmp_path: Path) -> None:
-    store = IndividualProbabilityStore(
-        tmp_path / "primary",
-        fallback_directory=ASSESSMENT.parent,
-    )
+def test_store_factory_ignores_documentation_sample_when_managed_directory_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample = tmp_path / "docs" / "research" / "artifacts" / ASSESSMENT.name
+    sample.parent.mkdir(parents=True)
+    sample.write_bytes(ASSESSMENT.read_bytes())
+    monkeypatch.setattr(service_module, "PROJECT_ROOT", tmp_path, raising=False)
+    store = service_module.individual_probability_store_for_cache_path(tmp_path / "data" / "ashare_radar.sqlite3")
 
-    assert store.latest() == json.loads(ASSESSMENT.read_text(encoding="utf-8"))
+    assert store.latest() is None
+    assert sample.read_bytes() == ASSESSMENT.read_bytes()
 
 
 def test_store_empty_primary_without_fallback_is_cached_as_none(tmp_path: Path) -> None:
@@ -693,11 +697,10 @@ def test_store_defensively_rejects_unparseable_loaded_timestamp(
         IndividualProbabilityStore(tmp_path).latest()
 
 
-def test_store_factory_binds_primary_and_tracked_fallback(tmp_path: Path) -> None:
+def test_store_factory_binds_only_managed_data_directory(tmp_path: Path) -> None:
     store = service_module.individual_probability_store_for_cache_path(tmp_path / "cache.sqlite3")
 
     assert store.directory == tmp_path / "research" / "individual_probability"
-    assert store.fallback_directory is None
 
 
 def test_projection_guard_withholds_probability_even_after_future_gates_pass() -> None:

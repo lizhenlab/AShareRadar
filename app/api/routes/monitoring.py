@@ -13,7 +13,7 @@ from app.models.system import (
 )
 from app.models.reliability import ReliabilityReport
 from app.services.datahub import DataHub
-from app.services.scheduler import LocalDataScheduler
+from app.services.scheduler_service import LocalDataScheduler
 from app.services.reliability import build_reliability_report
 from app.services.system_diagnostics import build_system_diagnostics
 

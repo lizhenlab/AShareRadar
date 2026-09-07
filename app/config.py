@@ -21,10 +21,7 @@ from app.config_settings import (
     get_settings,
     resolve_project_path,
 )
-from app.config_shell import LLM_SHELL_SECRET_ENV_NAMES, load_shell_env
-
-
-_load_shell_env = load_shell_env
+from app.config_shell import LLM_SHELL_SECRET_ENV_NAMES
 
 
 __all__ = [

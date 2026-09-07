@@ -89,14 +89,20 @@ def _worker(queue: Queue[_WorkItem | None]) -> None:
         item = queue.get()
         if item is None:
             return
-        if not item.future.set_running_or_notify_cancel():
-            continue
+        result: Any = None
         try:
-            result = item.call()
-        except BaseException as exc:
-            item.future.set_exception(exc)
-        else:
-            item.future.set_result(result)
+            if not item.future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = item.call()
+            except BaseException as exc:
+                item.future.set_exception(exc)
+            else:
+                item.future.set_result(result)
+        finally:
+            # An idle worker must not retain a completed provider payload or
+            # exception traceback while it blocks waiting for another job.
+            del item, result
 
 
 @dataclass

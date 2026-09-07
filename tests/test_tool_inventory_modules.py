@@ -207,6 +207,7 @@ def test_ci_keeps_the_incremental_quality_gates() -> None:
         "python -m ruff check app tests tools",
         "python -m mypy",
         "npm run check:js",
+        "tools/check_repository.py",
         "tools/api_inventory.py --check",
         "tools/architecture_inventory.py --check",
         "--cov=app --cov=tools",
@@ -233,16 +234,19 @@ def test_test_report_keeps_auditable_latest_verification_table() -> None:
     test_plan = (ROOT / "docs" / "TEST_PLAN.md").read_text(encoding="utf-8")
 
     assert "| Date | Worktree State | Environment | Command | Scope | Result | Notes |" in test_plan
-    assert re.search(r"`npm run check` \| Python compile, pyflakes, JS syntax, full pytest suite \| \d+ passed", test_plan)
-    assert "Recent targeted checks kept for traceability" in test_plan
+    assert "## 6. 当前验收结果" in test_plan
+    assert "--cov=app --cov=tools" in test_plan
+    assert "90%" in test_plan
+    assert "npm run test:e2e" in test_plan
 
 
-def test_operations_documents_backup_before_runtime_data_deletion() -> None:
+def test_operations_documents_safe_backup_and_restore_boundary() -> None:
     operations = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
 
-    backup_index = operations.index("Before deleting or replacing local data")
-    delete_index = operations.index("rm -f data/ashare_radar.sqlite3")
-    assert backup_index < delete_index
+    assert "Before deleting or replacing local data" in operations
+    assert "Settings" in operations
+    assert "rm -f data/" not in operations
+    assert "--confirm-service-stopped" in operations
     assert "$PYTHON tools/runtime_data.py backup" in operations
     assert "$PYTHON tools/runtime_data.py verify" in operations
     assert "cp -p data/ashare_radar.sqlite3*" not in operations

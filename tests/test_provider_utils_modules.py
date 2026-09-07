@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from app.services.provider_errors import ProviderCoverageMiss
+from app.utils.provider_errors import ProviderCoverageMiss
 from app.services.provider_utils import ak_symbol, bs_symbol, ensure_positive_limit, pick, ts_symbol, valid_ohlc
 
 

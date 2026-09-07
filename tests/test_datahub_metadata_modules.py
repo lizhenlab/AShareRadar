@@ -12,16 +12,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Settings
-from app.models.schemas import PlateItem, StockConceptItem, StockInfo
+from app.models.market import PlateItem, StockConceptItem, StockInfo
 from app.services.cache import SQLiteCache
 from app.services.datahub import DataHub
-from app.services.datahub_metadata import (
-    MetadataCoordinator,
-    StockPoolRequest,
-    StockPoolResolver,
-    _profile_with_local_industry,
-    _stock_pool_markets,
-)
+from app.services.datahub_metadata_coordinator import MetadataCoordinator
+from app.services.datahub_metadata_stock_pool import StockPoolRequest, StockPoolResolver, _stock_pool_markets
+from app.services.datahub_metadata_mapping import _profile_with_local_industry
 from app.services.datahub_runtime import ProviderRuntime
 from app.services.local_metadata_provider import LocalIndividualStockProvider
 from app.utils.clock import market_now_naive

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.config import Settings
-from app.models.schemas import ProviderCapability
+from app.models.market import ProviderCapability
 from app.services.provider_registry import (
     build_providers,
     provider_capabilities,

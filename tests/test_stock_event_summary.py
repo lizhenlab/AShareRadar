@@ -3,9 +3,9 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from app.models.schemas import AbnormalEventItem, AbnormalEventSummary
+from app.models.analysis import AbnormalEventItem, AbnormalEventSummary
 from app.services.analysis import build_analysis
-from app.services.stock_event_sources import EXTERNAL_EVENT_RULES, external_event_placeholders
+from app.services.stock_event_sources import EXTERNAL_EVENT_RULES
 from app.services.data_quality import build_data_quality
 from app.services.stock_event_summary import build_event_summary
 from app.services.stock_lhb import build_lhb_summary
@@ -48,7 +48,6 @@ class StockEventSummaryTests(unittest.TestCase):
         self.assertTrue(all(item.status == "unavailable" for item in summary.source_capabilities))
         self.assertTrue(any("异动核查建议" in step and "正式龙虎榜" in step for step in summary.next_steps))
         self.assertTrue(any("异动核查建议" in step and "融资融券" in step for step in summary.next_steps))
-        self.assertEqual(external_event_placeholders(analysis, lhb), [])
 
     def test_external_event_rule_order_is_explicit(self) -> None:
         self.assertEqual(

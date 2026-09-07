@@ -10,8 +10,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.config import Settings, _load_shell_env
-from app.models.schemas import StockQuestionAnswer
+from app.config import Settings
+from app.config_shell import load_shell_env
+from app.models.research import StockQuestionAnswer
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.llm_explainer import _allowed_numbers, _call_llm, enhance_stock_answer
@@ -37,7 +38,7 @@ class LlmExplainerTests(unittest.TestCase):
             )
             path.chmod(0o600)
 
-            values = _load_shell_env(
+            values = load_shell_env(
                 path,
                 {
                     "ASHARE_RADAR_LLM_API_KEY",
@@ -83,7 +84,7 @@ class LlmExplainerTests(unittest.TestCase):
             )
             path.chmod(0o600)
 
-            values = _load_shell_env(
+            values = load_shell_env(
                 path,
                 {"ASHARE_RADAR_LLM_API_KEY", "ASHARE_RADAR_LLM_MODEL"},
             )
@@ -103,7 +104,7 @@ class LlmExplainerTests(unittest.TestCase):
             path.chmod(0o644)
 
             with self.assertRaisesRegex(ValueError, "chmod 600"):
-                _load_shell_env(path, {"ASHARE_RADAR_LLM_API_KEY"})
+                load_shell_env(path, {"ASHARE_RADAR_LLM_API_KEY"})
 
     def test_llm_shell_env_allows_non_secret_settings_in_group_readable_file(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -111,7 +112,7 @@ class LlmExplainerTests(unittest.TestCase):
             path.write_text("export ASHARE_RADAR_LLM_MODEL='test-model'\n", encoding="utf-8")
             path.chmod(0o644)
 
-            values = _load_shell_env(path, {"ASHARE_RADAR_LLM_MODEL"})
+            values = load_shell_env(path, {"ASHARE_RADAR_LLM_MODEL"})
 
         self.assertEqual(values, {"ASHARE_RADAR_LLM_MODEL": "test-model"})
 

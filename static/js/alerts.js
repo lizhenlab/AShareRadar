@@ -1,8 +1,11 @@
-import { DEFAULT_REQUEST_TIMEOUT_MS, createRequestScope, fetchJson, isAbortError } from "./api.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { toggleInlineEditor } from "./inline-editor.js";
+import { createStockPanelRequestOwner } from "./stock-panel-requests.js";
+
+const requests = createStockPanelRequestOwner({ readPrefix: "alertsRead", mutationPrefix: "alertMutation" });
 
 const ALERT_ACTIVITY_READ_ERROR = "\u63d0\u9192\u8bb0\u5f55\u8bfb\u53d6\u5931\u8d25";
 const ALERT_ACTIVITY_FORMAT_ERROR = "\u63d0\u9192\u8bb0\u5f55\u683c\u5f0f\u5f02\u5e38";
@@ -29,7 +32,7 @@ async function loadAlertsOutcome(state, options = {}) {
   try {
     return await refreshAlerts(state, request);
   } finally {
-    finishAlertsReadRequest(state, request);
+    requests.finishRead(state, request);
   }
 }
 
@@ -41,7 +44,7 @@ export async function addAlertRule(state, options = {}) {
   if (!rawThreshold && !allowsDynamicLevel) throw new Error("请输入有效阈值");
   const threshold = rawThreshold ? Number(rawThreshold) : 0;
   if (!Number.isFinite(threshold)) throw new Error("请输入有效阈值");
-  const request = beginAlertMutation(state, options, symbol);
+  const request = requests.beginMutation(state, options, symbol);
   try {
     await fetchJson("/api/alerts", requestOptions(request, {
       method: "POST",
@@ -60,7 +63,7 @@ export async function addAlertRule(state, options = {}) {
     if (isAbortError(error) || !request.isCurrent()) return false;
     throw error;
   } finally {
-    finishAlertMutationRequest(state, request);
+    requests.finishMutation(state, request);
   }
 }
 
@@ -73,7 +76,7 @@ export async function evaluateAlerts(state, options = {}) {
     releaseAlertEvaluationRequest(state, activeRequest);
   }
   if (button.disabled) return false;
-  const request = beginAlertMutation(state, options, symbol);
+  const request = requests.beginMutation(state, options, symbol);
   request.button = button;
   request.previousButtonText = button.textContent;
   state.alertEvaluationOwner = request;
@@ -97,12 +100,12 @@ export async function evaluateAlerts(state, options = {}) {
     throw error;
   } finally {
     releaseAlertEvaluationRequest(state, request);
-    finishAlertMutationRequest(state, request);
+    requests.finishMutation(state, request);
   }
 }
 
 export async function removeAlertRule(state, ruleId, options = {}) {
-  const request = beginAlertMutation(state, options);
+  const request = requests.beginMutation(state, options);
   try {
     await fetchJson(`/api/alerts/${encodeURIComponent(ruleId)}`, requestOptions(request, { method: "DELETE" }));
     if (!request.isCurrent()) return false;
@@ -112,12 +115,12 @@ export async function removeAlertRule(state, ruleId, options = {}) {
     if (isAbortError(error) || !request.isCurrent()) return false;
     throw error;
   } finally {
-    finishAlertMutationRequest(state, request);
+    requests.finishMutation(state, request);
   }
 }
 
 export async function updateAlertRule(state, ruleId, payload, options = {}) {
-  const request = beginAlertMutation(state, options);
+  const request = requests.beginMutation(state, options);
   try {
     const responseItem = await fetchJson(`/api/alerts/${encodeURIComponent(ruleId)}`, requestOptions(request, {
       method: "PATCH",
@@ -134,13 +137,13 @@ export async function updateAlertRule(state, ruleId, payload, options = {}) {
     if (isAbortError(error) || !request.isCurrent()) return false;
     throw error;
   } finally {
-    finishAlertMutationRequest(state, request);
+    requests.finishMutation(state, request);
   }
 }
 
 async function finishAlertMutation(state, request, mutation = null) {
   if (!request.isCurrent()) return false;
-  const refresh = beginAlertMutationRefresh(state, request);
+  const refresh = requests.beginRefresh(state, request);
   try {
     const outcome = await loadAlertsOutcome(state, {
       symbol: request.symbol,
@@ -153,7 +156,7 @@ async function finishAlertMutation(state, request, mutation = null) {
     }
     return request.isCurrent();
   } finally {
-    finishAlertMutationRefresh(state, refresh);
+    requests.finishRefresh(state, refresh);
   }
 }
 
@@ -255,69 +258,10 @@ function syncResearchActivityAlerts(state, symbol, events, phase, message) {
 }
 
 function beginAlertsReadRequest(state, options, symbol = options.symbol || state.symbol) {
-  const requestId = Number(state.alertsReadSeq || 0) + 1;
-  const stateSymbol = state.symbol;
-  state.alertsReadSeq = requestId;
-  const scope = createRequestScope(state.alertsReadRequest, options.signal);
-  const request = {
-    id: requestId,
-    scope,
-    signal: scope.signal,
-    symbol,
-    preserveOnError: Boolean(options.preserveOnError),
-    isCurrent: () =>
-      state.alertsReadSeq === requestId &&
-      state.alertsReadRequest === scope &&
-      !scope.signal.aborted &&
-      (options.isCurrent ? options.isCurrent() : state.symbol === stateSymbol),
-  };
-  state.alertsReadRequest = scope;
+  const request = requests.beginRead(state, options, symbol);
+  request.preserveOnError = Boolean(options.preserveOnError);
   if (request.isCurrent()) syncAlertEvaluationSymbol(state, symbol);
   return request;
-}
-
-function beginAlertMutation(state, options, symbol = options.symbol || state.symbol) {
-  const requestId = Number(state.alertMutationSeq || 0) + 1;
-  const stateSymbol = state.symbol;
-  // Keep persistence independent from the stock load that owns the UI tail.
-  const scope = createRequestScope();
-  const requests = mutationRequests(state);
-  state.alertMutationSeq = requestId;
-  requests.set(requestId, scope);
-  return {
-    id: requestId,
-    scope,
-    signal: scope.signal,
-    contextSignal: options.signal,
-    symbol,
-    isCurrent: () =>
-      requests.get(requestId) === scope &&
-      !scope.signal.aborted &&
-      (!options.signal || !options.signal.aborted) &&
-      (options.isCurrent ? options.isCurrent() : state.symbol === stateSymbol),
-  };
-}
-
-function beginAlertMutationRefresh(state, mutation) {
-  const requestId = Number(state.alertMutationRefreshSeq || 0) + 1;
-  const scope = createRequestScope(state.alertMutationRefreshRequest, mutation.contextSignal);
-  state.alertMutationRefreshSeq = requestId;
-  state.alertMutationRefreshRequest = scope;
-  return {
-    scope,
-    signal: scope.signal,
-    symbol: mutation.symbol,
-    isCurrent: () =>
-      mutation.isCurrent() &&
-      state.alertMutationRefreshSeq === requestId &&
-      state.alertMutationRefreshRequest === scope &&
-      !scope.signal.aborted,
-  };
-}
-
-function mutationRequests(state) {
-  if (!(state.alertMutationRequests instanceof Map)) state.alertMutationRequests = new Map();
-  return state.alertMutationRequests;
 }
 
 function requestOptions(request, options = {}) {
@@ -330,22 +274,6 @@ function requestOptions(request, options = {}) {
 
 function hasAbortError(...results) {
   return results.some((result) => result.status === "rejected" && isAbortError(result.reason));
-}
-
-function finishAlertsReadRequest(state, request) {
-  if (state.alertsReadRequest === request.scope) state.alertsReadRequest = null;
-  request.scope.dispose();
-}
-
-function finishAlertMutationRequest(state, request) {
-  const requests = mutationRequests(state);
-  if (requests.get(request.id) === request.scope) requests.delete(request.id);
-  request.scope.dispose();
-}
-
-function finishAlertMutationRefresh(state, request) {
-  if (state.alertMutationRefreshRequest === request.scope) state.alertMutationRefreshRequest = null;
-  request.scope.dispose();
 }
 
 function claimAlertEvaluationView(state, request) {

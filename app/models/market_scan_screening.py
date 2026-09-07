@@ -318,9 +318,6 @@ def _require_iso_date(value: str, field: str) -> None:
         raise ValueError(f"{field} 必须是规范 YYYY-MM-DD 日期")
 
 
-def _require_timestamp(value: str, field: str) -> None:
-    _parsed_timestamp(value, field)
-
 
 def _parsed_timestamp(value: str, field: str) -> datetime:
     if len(value) < 19 or value[10] not in {"T", " "}:

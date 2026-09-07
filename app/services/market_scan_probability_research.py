@@ -714,18 +714,6 @@ def _record_calibration_summary(evidence: Mapping[str, object]) -> dict[str, obj
     }
 
 
-def _target_evidence(
-    horizons: Mapping[str, object],
-    horizon: int,
-    target: str,
-) -> Mapping[str, object]:
-    targets = horizons.get(str(horizon))
-    evidence = targets.get(target) if isinstance(targets, Mapping) else None
-    if not isinstance(evidence, Mapping):
-        raise ValueError(f"probability research evidence missing: {horizon}/{target}")
-    return evidence
-
-
 def _artifact_versions(evidence: Mapping[str, object]) -> dict[str, object]:
     return {
         "model": str(evidence.get("model_version") or PROBABILITY_MODEL_VERSION),

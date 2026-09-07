@@ -31,7 +31,6 @@ from app.models.strategy_lab import (
     StrategySpecUpdate,
 )
 from app.services.cache import SQLiteCache
-from app.services import market_scan_executable_shadow as executable_shadow
 from app.services.market_scan_scoring import score_market_scan_item
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.strategy_execution import StrategyExecutionService
@@ -130,7 +129,7 @@ def test_strategy_execution_uses_frozen_dimensions_preserves_rank_and_paginates(
     assert first_page.page_count == 2
     assert len(first_page.items) == len(second_page.items) == 2
     assert {item.symbol for item in first_page.items}.isdisjoint(item.symbol for item in second_page.items)
-    assert cache.strategy_execution_service is service
+    assert cache.domain_services.strategy_execution is service
 
 
 def test_distribution_degraded_snapshot_is_readable_but_cannot_create_execution(
@@ -484,9 +483,9 @@ def test_executable_shadow_digest_rejects_non_model_non_mapping() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     (
-        ("status", "running", "只接受已发布"),
-        ("mode", "intraday", "只接受盘后正式"),
-        ("scope", "top100-refresh", "只接受完整全市场"),
+        ("status", "running", "尚未发布"),
+        ("mode", "intraday", "扫描模式不匹配"),
+        ("scope", "top100-refresh", "不是完整全市场"),
     ),
 )
 def test_executable_shadow_requires_published_official_full_market_run(
@@ -496,10 +495,12 @@ def test_executable_shadow_requires_published_official_full_market_run(
     message: str,
 ) -> None:
     cache, _service, _strategy_id, run_id = _environment(tmp_path)
-    run = cache.market_scan_run(run_id).model_copy(update={field: value})
+    with cache._connect() as connection:
+        _disable_market_scan_immutability(connection)
+        connection.execute(f"UPDATE market_scan_run SET {field} = ? WHERE id = ?", (value, run_id))
 
     with pytest.raises(ValueError, match=message):
-        executable_shadow._require_frozen_official_full_market(run)  # noqa: SLF001
+        cache.domain_services.market_scan_executable_shadow.project(run_id)
 
 
 @pytest.mark.parametrize(
@@ -704,7 +705,7 @@ def test_execution_fingerprint_uses_resolved_semantics_not_optional_selector_spe
 
 def test_portfolio_draft_returns_no_trade_when_constraints_make_every_order_unfillable(tmp_path) -> None:
     cache, service, strategy_id, _run_id = _environment(tmp_path)
-    current = cache.strategy_lab_service.get(strategy_id)
+    current = cache.domain_services.strategy_lab.get(strategy_id)
     impossible = current.spec.model_copy(
         update={
             "portfolio_constraints": StrategyPortfolioConstraints(
@@ -718,7 +719,7 @@ def test_portfolio_draft_returns_no_trade_when_constraints_make_every_order_unfi
             )
         }
     )
-    cache.strategy_lab_service.update(
+    cache.domain_services.strategy_lab.update(
         strategy_id,
         StrategySpecUpdate(spec=impossible, expected_revision=1, confirmed=True),
     )
@@ -741,9 +742,9 @@ def test_portfolio_draft_returns_no_trade_when_constraints_make_every_order_unfi
 
 def test_hard_filter_failures_explain_minimum_change_without_mutating_original_rank(tmp_path) -> None:
     cache, service, strategy_id, _run_id = _environment(tmp_path)
-    current = cache.strategy_lab_service.get(strategy_id)
+    current = cache.domain_services.strategy_lab.get(strategy_id)
     filtered = current.spec.model_copy(update={"hard_filters": [StrategyHardFilter(field="amount", operator="gte", value=10_000_000_000.0)]})
-    updated = cache.strategy_lab_service.update(
+    updated = cache.domain_services.strategy_lab.update(
         strategy_id,
         StrategySpecUpdate(spec=filtered, expected_revision=1, confirmed=True),
     )
@@ -760,7 +761,7 @@ def test_hard_filter_failures_explain_minimum_change_without_mutating_original_r
 
 def test_custom_and_risk_adjusted_weighting_are_executed_not_only_serialized(tmp_path) -> None:
     cache, service, strategy_id, _run_id = _environment(tmp_path)
-    current = cache.strategy_lab_service.get(strategy_id)
+    current = cache.domain_services.strategy_lab.get(strategy_id)
     custom = current.spec.model_copy(
         update={
             "portfolio_constraints": StrategyPortfolioConstraints(
@@ -774,7 +775,7 @@ def test_custom_and_risk_adjusted_weighting_are_executed_not_only_serialized(tmp
             )
         }
     )
-    custom_version = cache.strategy_lab_service.update(
+    custom_version = cache.domain_services.strategy_lab.update(
         strategy_id,
         StrategySpecUpdate(spec=custom, expected_revision=1, confirmed=True),
     )
@@ -812,7 +813,7 @@ def test_custom_and_risk_adjusted_weighting_are_executed_not_only_serialized(tmp
             )
         }
     )
-    risk_version = cache.strategy_lab_service.update(
+    risk_version = cache.domain_services.strategy_lab.update(
         strategy_id,
         StrategySpecUpdate(spec=risk_spec, expected_revision=2, confirmed=True),
     )
@@ -828,7 +829,7 @@ def test_custom_and_risk_adjusted_weighting_are_executed_not_only_serialized(tmp
 
 def test_hysteresis_and_source_whitelist_are_deterministic_admission_gates(tmp_path) -> None:
     cache, service, strategy_id, _run_id = _environment(tmp_path)
-    current = cache.strategy_lab_service.get(strategy_id)
+    current = cache.domain_services.strategy_lab.get(strategy_id)
     hysteresis = current.spec.model_copy(
         update={
             "rebalance_policy": StrategyRebalancePolicy(
@@ -839,7 +840,7 @@ def test_hysteresis_and_source_whitelist_are_deterministic_admission_gates(tmp_p
             )
         }
     )
-    version = cache.strategy_lab_service.update(
+    version = cache.domain_services.strategy_lab.update(
         strategy_id,
         StrategySpecUpdate(spec=hysteresis, expected_revision=1, confirmed=True),
     )
@@ -869,7 +870,7 @@ def test_hysteresis_and_source_whitelist_are_deterministic_admission_gates(tmp_p
             "evidence_policy": StrategyEvidencePolicy(allowed_sources=allowed_sources),
         }
     )
-    source_version = cache.strategy_lab_service.update(
+    source_version = cache.domain_services.strategy_lab.update(
         strategy_id,
         StrategySpecUpdate(spec=source_spec, expected_revision=2, confirmed=True),
     )
@@ -946,7 +947,7 @@ def _environment(
 ) -> tuple[SQLiteCache, StrategyExecutionService, int, int]:
     cache = SQLiteCache(tmp_path / "strategy-execution.sqlite3")
     run_id = _seed_scan(cache, action_eligible=action_eligible)
-    strategy = cache.strategy_lab_service.create(
+    strategy = cache.domain_services.strategy_lab.create(
         StrategySpecCreate(
             spec=StrategySpecInput(
                 name="执行测试策略",
@@ -961,7 +962,7 @@ def _environment(
             confirmed=True,
         )
     )
-    service = cache.strategy_execution_service
+    service = cache.domain_services.strategy_execution
     service._market_clock = lambda: SCAN_AS_OF  # noqa: SLF001 - deterministic latest-session fixture
     return cache, service, strategy.strategy_id, run_id
 

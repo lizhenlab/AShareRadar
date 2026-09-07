@@ -183,9 +183,6 @@ def _risk_reward_notes(metrics: RiskRewardMetrics) -> list[str]:
     return notes
 
 
-def _metric_levels_are_valid(metrics: RiskRewardMetrics) -> bool:
-    return metrics.price > 0 and metrics.upside_target > metrics.price and 0 < metrics.downside_stop < metrics.price
-
 
 def _timeframe_summary_text(timeframe: TimeframeAlignmentReport | None) -> str:
     if not timeframe:

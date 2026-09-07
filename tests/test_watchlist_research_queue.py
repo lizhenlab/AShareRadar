@@ -6,7 +6,7 @@ import sqlite3
 
 from app.config import Settings
 from app.db.schema_migrations import COMPAT_COLUMNS
-from app.models.schemas import WatchlistUpdate
+from app.models.user_data import WatchlistUpdate
 from app.services.cache import SQLiteCache
 from tests.factories import make_quote
 

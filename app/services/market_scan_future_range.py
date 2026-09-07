@@ -27,6 +27,7 @@ from app.db.market_scan_integrity import MarketScanSnapshotSealError
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
 from app.models.paper_trading import CostProfileName
 from app.repositories.market_scan_mapping import decode_result_payload
+from app.services.data_quality_kline import is_demo_kline_source
 from app.services.market_scan_probability_artifact import load_probability_artifact
 from app.services.market_scan_probability_labels import (
     ProbabilityLabelConfig,
@@ -793,6 +794,13 @@ def _matched_probability(
     )
 
 
+def _target_source_error(row: sqlite3.Row) -> str | None:
+    source = row["source"] if "source" in row.keys() else None
+    if source is not None and not isinstance(source, str):
+        return "target_bar_source_invalid"
+    return "target_bar_demo_source" if is_demo_kline_source(source) else None
+
+
 def _verified_target_bar(
     row: sqlite3.Row,
     *,
@@ -801,6 +809,8 @@ def _verified_target_bar(
 ) -> tuple[_EvidenceBar | None, str | None]:
     if str(row["date"]) != expected_date:
         return None, "target_bar_date_conflict"
+    if source_error := _target_source_error(row):
+        return None, source_error
     try:
         bar = _EvidenceBar(
             date=str(row["date"]),

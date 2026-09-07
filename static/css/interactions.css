@@ -483,7 +483,8 @@
   border: 1px solid #c7d7fe;
 }
 
-.alert-form button:disabled {
+.alert-form button:disabled,
+.note-form button:disabled {
   cursor: wait;
   opacity: 0.72;
 }

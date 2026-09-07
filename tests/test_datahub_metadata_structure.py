@@ -7,15 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from app.models.schemas import StockInfo
-from app.services import datahub_metadata as facade
-from app.services.datahub_metadata_coordinator import MetadataCoordinator, PlateRankResult
-from app.services.datahub_metadata_mapping import _profile_with_local_industry
+from app.models.market import StockInfo
 from app.services.datahub_metadata_stock_pool import (
     StockPoolRequest,
     StockPoolResolution,
     StockPoolResolver,
-    _stock_pool_markets,
 )
 from app.services.datahub_runtime import ProviderAttempt, TimedProviderCall
 from tests.factories import make_stock_info
@@ -24,29 +20,6 @@ from tests.factories import make_stock_info
 SERVICES_DIR = Path(__file__).parents[1] / "app" / "services"
 METADATA_MODULES = tuple(sorted(SERVICES_DIR.glob("datahub_metadata*.py")))
 
-
-def test_datahub_metadata_facade_preserves_public_contract() -> None:
-    assert facade.__all__ == [
-        "MetadataCoordinator",
-        "PlateRankResult",
-        "STOCK_POOL_BASELINE_COMPARISON_MIN_COUNT",
-        "STOCK_POOL_FALLBACK_SECONDS",
-        "STOCK_POOL_MARKETS",
-        "STOCK_POOL_MIN_BASELINE_RETAIN_RATIO",
-        "StockConceptResult",
-        "StockPoolRequest",
-        "StockPoolResolution",
-        "StockPoolResolver",
-    ]
-    assert facade.MetadataCoordinator is MetadataCoordinator
-    assert facade.PlateRankResult is PlateRankResult
-    assert facade.StockPoolRequest is StockPoolRequest
-    assert facade.StockPoolResolution is StockPoolResolution
-    assert facade.StockPoolResolver is StockPoolResolver
-    assert facade._profile_with_local_industry is _profile_with_local_industry
-    assert facade._stock_pool_markets is _stock_pool_markets
-    assert MetadataCoordinator.plate_rank_result.__module__.endswith("datahub_metadata_coordinator")
-    assert StockPoolResolver.stock_pool_resolution.__module__.endswith("datahub_metadata_stock_pool")
 
 
 def test_datahub_metadata_modules_have_an_acyclic_dependency_graph() -> None:

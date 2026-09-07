@@ -8,8 +8,7 @@ from app.services.datahub import DataHub
 from app.services.domain_service_bundle import DomainServiceBundle
 from app.services.local_data_import_guard import LocalDataImportPreviewRegistry
 from app.services.market_scan_manager import MarketScanManager
-from app.services.scheduler import LocalDataScheduler
-from app.services.workbench_context import WorkbenchContextCache
+from app.services.scheduler_service import LocalDataScheduler
 from app.api.market_scan_read_admission import MarketScanHeavyReadAdmission
 
 
@@ -53,10 +52,6 @@ def get_market_scan_heavy_read_admission(request: Request) -> MarketScanHeavyRea
 def get_market_scan_experimental_read_admission(request: Request) -> MarketScanHeavyReadAdmission:
     """Separate single-worker lane; only the isolated read-only experiment uses it."""
     return get_container(request).market_scan_experimental_read_admission
-
-
-def get_workbench_context_cache(request: Request) -> WorkbenchContextCache:
-    return get_container(request).workbench_contexts
 
 
 def get_local_data_import_previews(request: Request) -> LocalDataImportPreviewRegistry:

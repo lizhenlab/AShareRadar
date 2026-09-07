@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from math import isfinite
+import sqlite3
+import threading
+from typing import TYPE_CHECKING
 
 from app.db.market_mappers import row_to_plate_item, row_to_stock_concept_item, row_to_stock_info
 from app.models.market import (
@@ -90,6 +94,13 @@ _STOCK_CONCEPT_UPSERT_SQL = _upsert_sql("stock_concept", STOCK_CONCEPT_COLUMNS, 
 
 
 class MarketMetadataRepositoryMixin:
+    if TYPE_CHECKING:
+        _lock: threading.RLock
+
+        def _connect(self) -> AbstractContextManager[sqlite3.Connection]: ...
+
+        def _time_window(self, max_age_seconds: int) -> tuple[str, str] | None: ...
+
     def save_stock_pool(self, rows: list[StockInfo]) -> None:
         if not rows:
             return

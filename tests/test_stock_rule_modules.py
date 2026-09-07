@@ -3,52 +3,26 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-import app.services.stock_rules as stock_rules_facade
-from app.models.schemas import AbnormalEventItem, AbnormalEventSummary
+from app.models.analysis import AbnormalEventItem, AbnormalEventSummary
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.stock_insights import build_stock_insight_bundle
-from app.services.stock_rules import (
-    RULE_CONFIG,
-    RULE_SPECS,
-    RULE_SORT_INDEX,
-    RULE_VERSION,
-    SCORE_VERSION,
-    _apply_quality_gate,
-    _raw_rule_matches,
-    _rule_abnormal_risk,
-    _rule_break_ma20,
-    _rule_confidence,
-    _rule_fund_tech_divergence,
-    _rule_high_valuation_chase,
-    _rule_match_context,
-    _rule_support_rebound,
-    _rule_volume_breakout,
-    _sorted_rule_matches,
-    rule_definitions,
-)
-from app.services.stock_rule_flow import _rule_fund_tech_divergence as implementation_fund_tech_divergence
-from app.services.stock_rule_price import _rule_volume_breakout as implementation_volume_breakout
-from app.services.stock_rule_registry import build_rule_match_summary as implementation_build_rule_match_summary
-from app.services.stock_rule_risk import _rule_abnormal_risk as implementation_abnormal_risk
+from app.models.rule_versions import RULE_VERSION, SCORE_VERSION
+from app.services.stock_rule_flow import _rule_fund_tech_divergence, _rule_support_rebound
+from app.services.stock_rule_price import _rule_break_ma20, _rule_volume_breakout
+from app.services.stock_rule_quality import _apply_quality_gate
+from app.services.stock_rule_registry import RULE_CONFIG, RULE_SPECS, RULE_SORT_INDEX, _raw_rule_matches, _rule_match_context, _sorted_rule_matches, rule_definitions
+from app.services.stock_rule_risk import _rule_abnormal_risk, _rule_high_valuation_chase
+from app.services.stock_rule_values import _rule_confidence
 from tests.factories import make_kline, make_quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_stock_rules_facade_reexports_rule_family_implementations() -> None:
-    assert stock_rules_facade.build_rule_match_summary is implementation_build_rule_match_summary
-    assert _rule_volume_breakout is implementation_volume_breakout
-    assert _rule_fund_tech_divergence is implementation_fund_tech_divergence
-    assert _rule_abnormal_risk is implementation_abnormal_risk
-
-
 def test_stock_rule_split_modules_stay_bounded() -> None:
-    facade = ROOT / "app/services/stock_rules.py"
     components = sorted((ROOT / "app/services").glob("stock_rule_*.py"))
 
-    assert len(facade.read_text(encoding="utf-8").splitlines()) <= 130
     assert components
     assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 220 for path in components)
 

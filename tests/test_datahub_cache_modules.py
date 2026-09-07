@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pytest
 
-from app.models.schemas import MinuteKline
+from app.models.market import MinuteKline
 from app.models.system import CacheStats
+from app.services.cache import SQLiteCache
 from app.services.cache_freshness import assess_cache_freshness
 from app.services.data_quality_kline import assess_kline_quality
 from app.services.data_quality_time import expected_quote_date, latest_expected_daily_kline_date
@@ -14,11 +14,10 @@ from app.services.datahub_cache import (
     MINUTE_INTERVAL_ALIASES,
     _kline_cache_is_fresh,
     _minute_kline_cache_is_fresh,
-    _normalize_minute_interval,
-    _stock_pool_cache_is_fresh,
+    normalize_minute_interval,
 )
 from app.utils.clock import market_now_naive
-from tests.factories import make_kline
+from tests.factories import make_kline, make_stock_info
 
 
 def test_minute_interval_alias_table_is_complete_and_explicit() -> None:
@@ -50,32 +49,31 @@ def test_minute_interval_alias_table_is_complete_and_explicit() -> None:
 
 def test_minute_interval_normalization_accepts_aliases_case_and_empty_default() -> None:
     for raw, normalized in MINUTE_INTERVAL_ALIASES.items():
-        assert _normalize_minute_interval(raw) == normalized
+        assert normalize_minute_interval(raw) == normalized
 
-    assert _normalize_minute_interval(" 5MIN ") == "5m"
-    assert _normalize_minute_interval("") == "5m"
-    assert _normalize_minute_interval(None) == "5m"  # type: ignore[arg-type]
+    assert normalize_minute_interval(" 5MIN ") == "5m"
+    assert normalize_minute_interval("") == "5m"
+    assert normalize_minute_interval(None) == "5m"  # type: ignore[arg-type]
 
 
 def test_minute_interval_normalization_rejects_unsupported_interval() -> None:
     with pytest.raises(ValueError, match="1m、3m、5m、10m、15m、30m、60m"):
-        _normalize_minute_interval("2h")
+        normalize_minute_interval("2h")
 
 
-def test_stock_pool_cache_freshness_rejects_invalid_windows_and_future_timestamps() -> None:
-    fresh_cache = SimpleNamespace(
-        latest_stock_at=market_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
-        stock_count=10,
-    )
-    future_cache = SimpleNamespace(
-        latest_stock_at=(market_now_naive() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
-        stock_count=10,
-    )
+def test_stock_pool_cache_freshness_rejects_invalid_windows_and_future_timestamps(tmp_path) -> None:
+    cache = SQLiteCache(tmp_path / "stock-pool.sqlite3")
+    current = market_now_naive()
+    row = make_stock_info().model_copy(update={"updated_at": current.isoformat()})
+    cache.save_stock_pool([row])
 
-    assert _stock_pool_cache_is_fresh(fresh_cache, max_age_seconds=60)
-    assert not _stock_pool_cache_is_fresh(fresh_cache, max_age_seconds=0)
-    assert not _stock_pool_cache_is_fresh(fresh_cache, max_age_seconds=-1)
-    assert not _stock_pool_cache_is_fresh(future_cache, max_age_seconds=60 * 60 * 24 * 7)
+    assert [item.symbol for item in cache.get_stock_pool(max_age_seconds=60)] == [row.symbol]
+    assert cache.get_stock_pool(max_age_seconds=0) == []
+    assert cache.get_stock_pool(max_age_seconds=-1) == []
+
+    future = row.model_copy(update={"updated_at": (current + timedelta(days=1)).isoformat()})
+    cache.save_stock_pool([future])
+    assert cache.get_stock_pool(max_age_seconds=60 * 60 * 24 * 7) == []
 
 
 @pytest.mark.parametrize(

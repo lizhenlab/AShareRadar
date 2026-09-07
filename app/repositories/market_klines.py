@@ -635,10 +635,6 @@ def _required_contract_datetime(value: object, field: str) -> datetime:
     return parsed
 
 
-def _datetime_text(value: datetime) -> str:
-    return value.isoformat(sep=" ", timespec="microseconds")
-
-
 def _one_contract_value(values: Iterable[object], field: str):
     unique = set(values)
     if len(unique) != 1:

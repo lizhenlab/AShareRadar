@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.models.schemas import PeerSampleInfo, Quote
+from app.models.analysis import PeerSampleInfo
+from app.models.market import Quote
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.research_features import build_feature_snapshot

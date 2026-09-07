@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
-from app.models.schemas import RiskRewardReport, ScenarioPlan, StockQaItem
+from app.models.research import RiskRewardReport, ScenarioPlan, StockQaItem
 from app.services.research_qa_report import (
     _direct_buy_item,
     _next_session_focus_item,

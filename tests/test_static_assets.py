@@ -21,10 +21,11 @@ JS_BRANCH_RE = re.compile(r"\b(if|for|while|catch|switch|case)\b|\?|&&|\|\|")
 JS_STRING_RE = re.compile(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)')
 
 
-def test_index_links_css_entrypoint() -> None:
+def test_index_links_css_modules_without_legacy_entrypoint() -> None:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-    assert re.search(r'<link rel="stylesheet" href="/static/styles\.css\?v=[^"]+" />', html)
+    assert "/static/styles.css" not in html
+    assert not (STATIC_DIR / "styles.css").exists()
 
 
 def test_static_assets_always_revalidate_nested_modules() -> None:
@@ -32,7 +33,7 @@ def test_static_assets_always_revalidate_nested_modules() -> None:
     app.mount("/static", RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
     client = TestClient(app)
 
-    entrypoint = client.get("/static/styles.css?v=test")
+    entrypoint = client.get("/static/css/interactions.css?v=test")
     nested = client.get("/static/css/base.css")
     module = client.get("/static/js/api.js")
 
@@ -59,7 +60,7 @@ def test_index_loads_css_modules_in_parallel_and_in_order() -> None:
         "primary-navigation.css",
         "layout-optimizations.css",
     ]
-    assert "@import" not in (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    assert "@import" not in "\n".join((STATIC_DIR / "css" / filename).read_text(encoding="utf-8") for filename in modules)
     for filename in modules:
         path = STATIC_DIR / "css" / filename
         assert path.exists(), f"missing CSS module: {filename}"

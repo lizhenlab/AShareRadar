@@ -63,7 +63,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     html = (ROOT / "static/index.html").read_text(encoding="utf-8")
     app = (ROOT / "static/app.js").read_text(encoding="utf-8")
     preferences = (ROOT / "static/js/workspace-preferences.js").read_text(encoding="utf-8")
-    styles = (ROOT / "static/styles.css").read_text(encoding="utf-8")
+    styles = (ROOT / "static/css/interactions.css").read_text(encoding="utf-8")
 
     assert 'data-view="market-scan"' in html
     assert 'id="marketScanStart"' in html
@@ -150,8 +150,9 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "interactions.css", "side-footer.css", "responsive.css", "primary-navigation.css", "layout-optimizations.css",
     ]
     versions = [version for _, version in css_modules]
-    versions.extend(re.findall(r'(?:href|src)="/static/(?:styles\.css|app\.js)\?v=([^"]+)"', html))
-    assert len(versions) == 14
+    entry_versions = re.findall(r'src="/static/app\.js\?v=([^"]+)"', html)
+    assert len(entry_versions) == 1
+    versions.extend(entry_versions)
     import_map_match = re.search(r'<script type="importmap">\s*(\{.*?\})\s*</script>', html, re.DOTALL)
     assert import_map_match is not None
     imports = json.loads(import_map_match.group(1))["imports"]
@@ -1049,6 +1050,8 @@ assert.match(html, /查看扫描快照/);
 assert.match(html, /打开当前个股分析/);
 assert.match(html, /只读持久化证据/);
 assert.match(html, /质量扣分/);
+assert.match(html, /质量扣分后基础分/);
+assert.equal(html.includes("扣分前基础分"), false);
 assert.match(html, /raw_score 降序 → symbol 升序/);
 assert.match(html, /行情使用兜底源/);
 assert.match(html, /盘中缺少同一时刻量能证据，量能生命周期已置零/);
@@ -1064,6 +1067,9 @@ v5Item.score_details.components.final_score.continuous_trend_adjustment = 1.3033
 const v5Html = marketScanSnapshotContent(v5Item);
 assert.match(v5Html, /连续趋势调整/);
 assert.match(v5Html, /连续中期趋势/);
+assert.match(v5Html, /调整后基础分/);
+assert.match(v5Html, /龙头分等于基础趋势分/);
+assert.equal(v5Html.includes("扣分前基础分"), false);
 assert.equal(v5Html.includes("精排扣分"), false);
 
 const target = { hidden: true };

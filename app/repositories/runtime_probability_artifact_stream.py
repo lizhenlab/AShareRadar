@@ -7,7 +7,8 @@ from pathlib import Path
 import re
 from typing import Any
 
-from app.artifacts.io import canonical_json_text, decode_json_bytes
+from app.artifacts.io import ArtifactIOError, canonical_json_text, decode_json_bytes
+from app.repositories.runtime_artifact_fingerprint import iter_regular_artifact_chunks
 
 
 class RuntimeCleanupIntegrityError(RuntimeError):
@@ -36,21 +37,31 @@ def stream_probability_run_ids(
 ) -> set[int]:
     """Verify a canonical large probability artifact without materializing JSON."""
 
+    run_ids, _digest = stream_probability_artifact_references(path, filename_run_id, filename_digest, expected_size)
+    return run_ids
+
+
+def stream_probability_artifact_references(
+    path: Path,
+    filename_run_id: int,
+    filename_digest: str,
+    expected_size: int,
+) -> tuple[set[int], str]:
+    """Bind verified references to the exact raw bytes consumed by the verifier."""
+
     suffix = b',"schema_version":"market-scan-probability-artifact-v1"}'
     state = _ProbabilityStreamState()
-    total = 0
+    content_digest = hashlib.sha256()
     try:
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                total += len(chunk)
-                state.buffer += chunk
-                _start_probability_payload(state, suffix, filename_digest)
-                _drain_probability_payload(state, suffix)
-    except OSError as exc:
+        for chunk in iter_regular_artifact_chunks(path, expected_size=expected_size):
+            content_digest.update(chunk)
+            state.buffer += chunk
+            _start_probability_payload(state, suffix, filename_digest)
+            _drain_probability_payload(state, suffix)
+    except (ArtifactIOError, OSError) as exc:
         raise RuntimeCleanupIntegrityError("超大 probability artifact 无法流式读取") from exc
-    if total != expected_size:
-        raise RuntimeCleanupIntegrityError("超大 probability artifact 文件大小在读取期间变化")
-    return _finish_probability_payload(state, suffix, filename_run_id, filename_digest)
+    run_ids = _finish_probability_payload(state, suffix, filename_run_id, filename_digest)
+    return run_ids, content_digest.hexdigest()
 
 
 def _start_probability_payload(state: _ProbabilityStreamState, suffix: bytes, filename_digest: str) -> None:
@@ -177,4 +188,4 @@ def _scan_probability_manifest(
     return expected
 
 
-__all__ = ["RuntimeCleanupIntegrityError", "stream_probability_run_ids"]
+__all__ = ["RuntimeCleanupIntegrityError", "stream_probability_artifact_references", "stream_probability_run_ids"]

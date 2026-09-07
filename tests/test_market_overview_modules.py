@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from app.config import Settings
-from app.models.schemas import Quote
+from app.models.market import Quote
 from app.utils.symbols import standard_symbol
 from app.workflows.market_overview import market_overview, strong_stock_watch
 from tests.factories import make_kline

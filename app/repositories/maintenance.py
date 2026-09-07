@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
@@ -186,18 +187,25 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
     def __init__(self, path: Path, lock: threading.RLock, *, settings: Settings) -> None:
         super().__init__(path, lock)
         self.settings = settings
+        self._maintenance_lock = threading.RLock()
         self._last_regenerable_cleanup_at: float | None = None
 
+    @contextmanager
+    def exclusive_operation(self) -> Iterator[None]:
+        """Serialize maintenance before taking cache locks or borrowing connections."""
+        with self._maintenance_lock:
+            yield
+
     def cleanup_runtime_rows(self) -> dict[str, int]:
-        with self._lock:
+        with self.exclusive_operation():
             with market_scan_artifact_retention_lease(self._path):
                 removed = self._cleanup_specs(RUNTIME_CLEANUP_SPECS)
                 self._last_regenerable_cleanup_at = monotonic_now()
-        self._compact_after_cleanup(removed)
+            self._compact_after_cleanup(removed)
         return removed
 
     def cleanup_regenerable_runtime_rows(self) -> dict[str, int]:
-        with self._lock:
+        with self.exclusive_operation():
             now = monotonic_now()
             interval = int(self.settings.runtime_maintenance_interval_seconds)
             if self._last_regenerable_cleanup_at is not None and now - self._last_regenerable_cleanup_at < interval:
@@ -205,7 +213,7 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             with market_scan_artifact_retention_lease(self._path):
                 removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
                 self._last_regenerable_cleanup_at = monotonic_now()
-        self._compact_after_cleanup(removed)
+            self._compact_after_cleanup(removed)
         return removed
 
     def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]:
@@ -262,9 +270,9 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             return False
 
     def preview_runtime_cleanup(self) -> dict[str, int]:
-        with self._lock:
+        with self.exclusive_operation(), market_scan_artifact_retention_lease(self._path):
             artifact_protection = market_scan_artifact_protection(self._path)
-            with self._connect() as conn:
+            with self._lock, self._connect() as conn:
                 preview = {
                     spec.table: _cleanup_candidate_count(
                         conn,

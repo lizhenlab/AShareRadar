@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from app.models.schemas import FactorCalibration, StandardFactor
+from app.models.research import FactorCalibration, StandardFactor
 from app.services import research_factors
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality

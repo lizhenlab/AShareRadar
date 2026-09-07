@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.models.market import KlineAdjustmentMode
-from app.models.schemas import Kline, PlateItem, Quote, StockInfo
+from app.models.market import Kline, PlateItem, Quote, StockInfo
 
 
 def make_quote(

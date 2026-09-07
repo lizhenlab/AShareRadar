@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from app.models.schemas import Quote
+from app.models.market import Quote
 from app.utils.errors import NotFoundError
 from app.workflows.stock_lookup import confirmed_stock_profile
 from tests.factories import make_quote

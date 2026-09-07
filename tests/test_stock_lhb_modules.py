@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.models.schemas import AbnormalEventItem, AbnormalEventSummary
+from app.models.analysis import AbnormalEventItem, AbnormalEventSummary
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.stock_lhb import build_lhb_summary

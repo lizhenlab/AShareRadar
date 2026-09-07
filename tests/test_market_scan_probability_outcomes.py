@@ -10,6 +10,9 @@ import pytest
 from app.models.market import Kline
 from app.services.market_scan_probability import stable_probability_hash
 import app.services.market_scan_probability_outcomes as outcomes_module
+from app.services.market_scan_probability_research import build_probability_research
+from app.services import market_scan_probability_maintenance as maintenance
+from tests import test_market_scan_probability_maintenance as maintenance_support
 from app.services.market_scan_probability_outcomes import (
     ProbabilityOutcomeError,
     ProbabilityOutcomeSemanticDriftError,
@@ -17,11 +20,9 @@ from app.services.market_scan_probability_outcomes import (
     list_probability_outcome_artifacts,
     load_probability_outcome_artifact,
     load_probability_outcome_artifact_for_run,
-    probability_outcome_corpus_progress,
     probability_outcome_payload_digest,
     probability_outcome_required_dates,
     probability_research_rows_from_outcome_artifacts,
-    probability_samples_from_outcome_artifacts,
     publish_built_probability_outcome_artifact,
     publish_probability_outcome_artifact,
     verify_probability_outcome_artifact,
@@ -144,8 +145,12 @@ def test_not_mature_horizons_do_not_request_bars_or_fabricate_labels(
     for state in cast(dict[str, dict[str, object]], record["horizons"]).values():
         assert state["maturity"] == "not_mature"
         assert state["outcome"] is None
-    progress = probability_outcome_corpus_progress([artifact])
-    assert all(cast(dict[str, object], value)["mature_label_session_count"] == 0 for value in progress.values())
+    rows = probability_research_rows_from_outcome_artifacts([source], [artifact])
+    report = build_probability_research(rows, generated_at=GENERATED_AT, bootstrap_samples=100)
+    for targets in report["horizons"].values():
+        for study in targets.values():
+            assert study["counts"]["available_independent_session_count"] == 0
+            assert study["counts"]["eligible_observation_count"] == 0
 
 
 def test_outcome_verification_replays_labels_and_join_restores_source_features(
@@ -164,13 +169,10 @@ def test_outcome_verification_replays_labels_and_join_restores_source_features(
     assert len(research_rows) == 1
     assert research_rows[0].features == _features()
     assert research_rows[0].mature_horizons == frozenset({1})
-    samples = probability_samples_from_outcome_artifacts(
-        [source],
-        [artifact],
-        horizon=1,
-        target="absolute_net_positive",
-    )
-    assert len(samples) == 1 and samples[0].executable is True and samples[0].target == 1
+    report = build_probability_research(research_rows, generated_at=GENERATED_AT, bootstrap_samples=100)
+    record = next(item for item in report["records"] if item["horizon"] == 1 and item["target"] == "absolute_net_positive")
+    assert record["label_status"] == "modelled" and record["observed_label"] == 1
+    assert report["horizons"]["1"]["absolute_net_positive"]["counts"]["eligible_observation_count"] == 1
 
     tampered = deepcopy(artifact)
     payload = cast(dict[str, object], tampered["payload"])
@@ -333,53 +335,39 @@ def test_legacy_drift_never_hides_invalid_sibling_record(
     assert not isinstance(error.value, ProbabilityOutcomeSemanticDriftError)
 
 
-def test_mature_source_requests_only_fixed_sessions_and_maps_loader_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("loader_fails", [False, True])
+def test_maintenance_requests_fixed_sessions_and_reports_loader_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, loader_fails: bool,
 ) -> None:
-    source = _source()
-    monkeypatch.setattr(outcomes_module, "load_probability_source_snapshot", lambda _path: source)
-    published: dict[str, object] = {}
+    source = maintenance_support._source(71, "2026-08-11")
+    service, cache, published = maintenance_support._service(tmp_path, monkeypatch, [source])
+    monkeypatch.setattr(outcomes_module, "_source_artifact", lambda _value: _source())
+    requests: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    observed_rows = {}
+    original_build = maintenance.build_probability_outcome_artifact
 
-    def publish(directory, snapshot, rows, **kwargs):
-        published.update(
-            directory=directory,
-            snapshot=snapshot,
-            rows=rows,
-            kwargs=kwargs,
-        )
-        return {"path": "published"}
+    def load(symbols, dates, adjustment_mode="qfq"):
+        requests.append((tuple(symbols), tuple(dates)))
+        assert adjustment_mode == "qfq"
+        if loader_fails:
+            raise OSError("provider unavailable")
+        return {"000001.SZ": _complete_h1_rows()}
 
-    monkeypatch.setattr(outcomes_module, "publish_probability_outcome_artifact", publish)
-    requests: list[tuple[str, tuple[str, ...]]] = []
+    def build(snapshot, rows, **kwargs):
+        observed_rows.update(rows)
+        return original_build(snapshot, rows, **kwargs)
 
-    def load(symbol: str, dates: tuple[str, ...]):
-        requests.append((symbol, dates))
-        return _complete_h1_rows()
+    monkeypatch.setattr(cache, "get_klines_by_dates_many", load)
+    monkeypatch.setattr(maintenance, "build_probability_outcome_artifact", build)
+    summary = service.run(now=maintenance_support._at("2026-08-13"), as_of_date="2026-08-13")
 
-    result = outcomes_module.mature_probability_source_snapshot(
-        tmp_path / "source.json.gz",
-        tmp_path / "outcomes",
-        load,
-        generated_at=GENERATED_AT,
-        as_of_date="2026-08-13",
-    )
-
-    assert result == {"path": "published"}
-    assert requests == [("600001.SH", ("2026-08-11", "2026-08-12", "2026-08-13"))]
-    assert published["rows"] == {"600001.SH": tuple(_complete_h1_rows())}
-
-    def fail(_symbol: str, _dates: tuple[str, ...]):
-        raise OSError("provider unavailable")
-
-    with pytest.raises(ProbabilityOutcomeError, match="600001.SH outcome K线加载失败"):
-        outcomes_module.mature_probability_source_snapshot(
-            tmp_path / "source.json.gz",
-            tmp_path / "outcomes",
-            fail,
-            generated_at=GENERATED_AT,
-            as_of_date="2026-08-13",
-        )
+    assert requests == [(("000001.SZ",), ("2026-08-11", "2026-08-12", "2026-08-13"))]
+    assert summary.published_count == len(published) == (0 if loader_fails else 1)
+    assert summary.failed_count == int(loader_fails)
+    if loader_fails:
+        assert summary.failures == ("run 71: provider unavailable",)
+    else:
+        assert observed_rows == {"000001.SZ": _complete_h1_rows()}
 
 
 def test_outcome_public_artifact_boundary_translates_storage_failures(

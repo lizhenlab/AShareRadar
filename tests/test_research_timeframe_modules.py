@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.models.schemas import TimeframeTrend
+from app.models.research import TimeframeTrend
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.research_features import build_feature_snapshot

@@ -1,18 +1,21 @@
-import { DEFAULT_REQUEST_TIMEOUT_MS, createRequestScope, fetchJson, isAbortError } from "./api.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { toggleInlineEditor } from "./inline-editor.js";
+import { createStockPanelRequestOwner } from "./stock-panel-requests.js";
+
+const requests = createStockPanelRequestOwner({ readPrefix: "notesRead", mutationPrefix: "noteMutation" });
 
 const NOTES_ACTIVITY_READ_ERROR = "\u7b14\u8bb0\u8bfb\u53d6\u5931\u8d25";
 const NOTES_ACTIVITY_FORMAT_ERROR = "\u7b14\u8bb0\u6570\u636e\u683c\u5f0f\u5f02\u5e38";
 
 export async function loadNotes(state, options = {}) {
-  const request = beginNotesReadRequest(state, options);
+  const request = requests.beginRead(state, options);
   try {
     return await refreshNotes(state, request);
   } finally {
-    finishNotesReadRequest(state, request);
+    requests.finishRead(state, request);
   }
 }
 
@@ -21,7 +24,7 @@ export async function addStockNote(state, refreshChartMarks, options = {}) {
   const content = $("noteContent").value.trim();
   if (!content) throw new Error("请输入笔记内容");
   const quote = state.lastAnalysis && state.lastAnalysis.quote;
-  const request = beginNoteMutation(state, options, symbol);
+  const request = requests.beginMutation(state, options, symbol);
   try {
     await fetchJson("/api/stock/notes", requestOptions(request, {
       method: "POST",
@@ -41,12 +44,12 @@ export async function addStockNote(state, refreshChartMarks, options = {}) {
     if (isAbortError(error) || !request.isCurrent()) return false;
     throw error;
   } finally {
-    finishNoteMutationRequest(state, request);
+    requests.finishMutation(state, request);
   }
 }
 
 export async function removeStockNote(state, noteId, refreshChartMarks, options = {}) {
-  const request = beginNoteMutation(state, options);
+  const request = requests.beginMutation(state, options);
   try {
     await fetchJson(`/api/stock/notes/${encodeURIComponent(noteId)}`, requestOptions(request, { method: "DELETE" }));
     return await finishNoteMutation(state, request, refreshChartMarks, options.context);
@@ -54,12 +57,12 @@ export async function removeStockNote(state, noteId, refreshChartMarks, options 
     if (isAbortError(error) || !request.isCurrent()) return false;
     throw error;
   } finally {
-    finishNoteMutationRequest(state, request);
+    requests.finishMutation(state, request);
   }
 }
 
 export async function updateStockNote(state, noteId, payload, refreshChartMarks, options = {}) {
-  const request = beginNoteMutation(state, options);
+  const request = requests.beginMutation(state, options);
   try {
     await fetchJson(`/api/stock/notes/${encodeURIComponent(noteId)}`, requestOptions(request, {
       method: "PATCH",
@@ -71,13 +74,13 @@ export async function updateStockNote(state, noteId, payload, refreshChartMarks,
     if (isAbortError(error) || !request.isCurrent()) return false;
     throw error;
   } finally {
-    finishNoteMutationRequest(state, request);
+    requests.finishMutation(state, request);
   }
 }
 
 async function finishNoteMutation(state, request, refreshChartMarks, context) {
   if (!request.isCurrent()) return false;
-  const refresh = beginNoteMutationRefresh(state, request);
+  const refresh = requests.beginRefresh(state, request);
   try {
     await loadNotes(state, {
       symbol: request.symbol,
@@ -91,7 +94,7 @@ async function finishNoteMutation(state, request, refreshChartMarks, context) {
     if (isAbortError(error) || !refresh.isCurrent()) return request.isCurrent();
     throw error;
   } finally {
-    finishNoteMutationRefresh(state, refresh);
+    requests.finishRefresh(state, refresh);
   }
 }
 
@@ -127,92 +130,12 @@ function syncResearchActivityNotes(state, symbol, notes, phase, message) {
   state.researchActivityNoteSource = { symbol, phase, message };
 }
 
-function beginNotesReadRequest(state, options, symbol = options.symbol || state.symbol) {
-  const requestId = Number(state.notesReadSeq || 0) + 1;
-  const stateSymbol = state.symbol;
-  state.notesReadSeq = requestId;
-  const scope = createRequestScope(state.notesReadRequest, options.signal);
-  const request = {
-    id: requestId,
-    scope,
-    signal: scope.signal,
-    symbol,
-    isCurrent: () =>
-      state.notesReadSeq === requestId &&
-      state.notesReadRequest === scope &&
-      !scope.signal.aborted &&
-      (options.isCurrent ? options.isCurrent() : state.symbol === stateSymbol),
-  };
-  state.notesReadRequest = scope;
-  return request;
-}
-
-function beginNoteMutation(state, options, symbol = options.symbol || state.symbol) {
-  const requestId = Number(state.noteMutationSeq || 0) + 1;
-  const stateSymbol = state.symbol;
-  // Keep persistence independent from the stock load that owns the UI tail.
-  const scope = createRequestScope();
-  const requests = mutationRequests(state);
-  state.noteMutationSeq = requestId;
-  requests.set(requestId, scope);
-  return {
-    id: requestId,
-    scope,
-    signal: scope.signal,
-    contextSignal: options.signal,
-    symbol,
-    isCurrent: () =>
-      requests.get(requestId) === scope &&
-      !scope.signal.aborted &&
-      (!options.signal || !options.signal.aborted) &&
-      (options.isCurrent ? options.isCurrent() : state.symbol === stateSymbol),
-  };
-}
-
-function beginNoteMutationRefresh(state, mutation) {
-  const requestId = Number(state.noteMutationRefreshSeq || 0) + 1;
-  const scope = createRequestScope(state.noteMutationRefreshRequest, mutation.contextSignal);
-  state.noteMutationRefreshSeq = requestId;
-  state.noteMutationRefreshRequest = scope;
-  return {
-    signal: scope.signal,
-    scope,
-    symbol: mutation.symbol,
-    isCurrent: () =>
-      mutation.isCurrent() &&
-      state.noteMutationRefreshSeq === requestId &&
-      state.noteMutationRefreshRequest === scope &&
-      !scope.signal.aborted,
-  };
-}
-
-function mutationRequests(state) {
-  if (!(state.noteMutationRequests instanceof Map)) state.noteMutationRequests = new Map();
-  return state.noteMutationRequests;
-}
-
 function requestOptions(request, options = {}) {
   return {
     ...options,
     signal: request.signal,
     timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   };
-}
-
-function finishNotesReadRequest(state, request) {
-  if (state.notesReadRequest === request.scope) state.notesReadRequest = null;
-  request.scope.dispose();
-}
-
-function finishNoteMutationRequest(state, request) {
-  const requests = mutationRequests(state);
-  if (requests.get(request.id) === request.scope) requests.delete(request.id);
-  request.scope.dispose();
-}
-
-function finishNoteMutationRefresh(state, request) {
-  if (state.noteMutationRefreshRequest === request.scope) state.noteMutationRefreshRequest = null;
-  request.scope.dispose();
 }
 
 export function renderNotes(items) {

@@ -26,10 +26,6 @@ async function stageLatestSnapshot(context, identity, baseline, sequence, syncOp
   const publishedTokenChanged = baseline === null
     || marketScanPollingTokenChanged(baseline?.latest_published, identity.latest_published);
   const latest = await requestNullableLatest(context, "latest", "最近扫描响应", sequence);
-  const published = await requestNullableLatest(
-    context, "latest-published", "最近已发布扫描响应", sequence
-  );
-  requireTrustedSelectorPair(latest, published, options.state.browseMode);
   if (options.state.selectedHistoryRunId !== null) {
     return {
       publishedLoaded: false,
@@ -39,6 +35,10 @@ async function stageLatestSnapshot(context, identity, baseline, sequence, syncOp
       run: latest,
     };
   }
+  const published = await requestNullableLatest(
+    context, "latest-published", "最近已发布扫描响应", sequence
+  );
+  requireTrustedSelectorPair(latest, published, options.state.browseMode);
   const publishedChanged = publishedTokenChanged
     || !samePublishedMarketScanRun(options.state.publishedRun, published);
   const shouldReadResults = published && options.state.surfaceActive
