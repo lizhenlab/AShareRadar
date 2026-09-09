@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Final, Literal, Self
+from typing import Annotated, Final, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from app.models.market_scan import MarketScanMode, MarketScanRunStatus
+from app.utils.audit_time import parse_audit_time
+from app.utils.symbols import standard_symbol
 
 
 MARKET_SCAN_SCREEN_ALERT_SCHEMA_VERSION: Final[
@@ -85,6 +87,95 @@ class MarketScanScreenAlertResponse(_FrozenAlertModel):
         return self
 
 
+MarketScanScreenAlertChangeKind = Literal["entered", "exited", "unrankable"]
+MarketScanScreenAlertHistoryKind = Literal["all", "entered", "exited", "unrankable"]
+ScreenAlertSymbol = Annotated[str, StringConstraints(strict=True, strip_whitespace=False, pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")]
+
+
+class MarketScanScreenAlertEventSummary(_FrozenAlertModel):
+    """Stored event identity; historical name/spec were not persisted."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, str_strip_whitespace=False)
+    id: int = Field(ge=1)
+    preset_id: int = Field(ge=1)
+    preset_revision: int = Field(ge=1)
+    current_run_id: int = Field(ge=1)
+    previous_run_id: int = Field(ge=1)
+    event_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: str
+    entered_count: int = Field(ge=0)
+    exited_count: int = Field(ge=0)
+    suppressed_unrankable_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> Self:
+        if self.current_run_id == self.previous_run_id:
+            raise ValueError("筛选变化前后批次不能相同")
+        if len(self.created_at) < 19 or self.created_at[10] not in {"T", " "}:
+            raise ValueError("筛选变化事件时间无效")
+        parse_audit_time(self.created_at)
+        return self
+
+
+class MarketScanScreenAlertHistoryItem(_FrozenAlertModel):
+    symbol: ScreenAlertSymbol
+    change: MarketScanScreenAlertChangeKind
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, value: str) -> str:
+        if standard_symbol(value) != value:
+            raise ValueError("筛选变化股票代码不是规范格式")
+        return value
+
+
+class MarketScanScreenAlertHistoryPage(_FrozenAlertModel):
+    preset_id: int = Field(ge=1)
+    items: list[MarketScanScreenAlertEventSummary]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    page_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_page(self) -> Self:
+        _require_history_page(len(self.items), self.total, self.page, self.page_size, self.page_count)
+        identifiers = [item.id for item in self.items]
+        if identifiers != sorted(set(identifiers), reverse=True) or any(item.preset_id != self.preset_id for item in self.items):
+            raise ValueError("筛选变化历史分页身份或排序不一致")
+        return self
+
+
+class MarketScanScreenAlertDetailPage(_FrozenAlertModel):
+    event: MarketScanScreenAlertEventSummary
+    items: list[MarketScanScreenAlertHistoryItem]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    page_count: int = Field(ge=0)
+    kind: MarketScanScreenAlertHistoryKind
+
+    @model_validator(mode="after")
+    def validate_page(self) -> Self:
+        counts = {"entered": self.event.entered_count, "exited": self.event.exited_count, "unrankable": self.event.suppressed_unrankable_count}
+        expected = sum(counts.values()) if self.kind == "all" else counts[self.kind]
+        _require_history_page(len(self.items), expected, self.page, self.page_size, self.page_count)
+        if self.total != expected or any(self.kind != "all" and item.change != self.kind for item in self.items):
+            raise ValueError("筛选变化明细类型或数量不一致")
+        if any(sum(item.change == kind for item in self.items) > count for kind, count in counts.items()):
+            raise ValueError("筛选变化明细成员数量超过事件记录")
+        keys = [(tuple(counts).index(item.change), item.symbol) for item in self.items]
+        if len({item.symbol for item in self.items}) != len(self.items) or keys != sorted(keys):
+            raise ValueError("筛选变化明细重复或排序不一致")
+        return self
+
+
+def _require_history_page(length: int, total: int, page: int, page_size: int, page_count: int) -> None:
+    expected_length = min(page_size, max(0, total - (page - 1) * page_size))
+    if length != expected_length or page_count != (total + page_size - 1) // page_size:
+        raise ValueError("筛选变化历史分页数量不一致")
+
+
 __all__ = [
     "MARKET_SCAN_SCREEN_ALERT_SCHEMA_VERSION",
     "MarketScanScreenAlertPresetRef",
@@ -93,4 +184,10 @@ __all__ = [
     "MarketScanScreenAlertRunRef",
     "MarketScanScreenAlertStatus",
     "MarketScanScreenAlertUnavailableReason",
+    "MarketScanScreenAlertChangeKind",
+    "MarketScanScreenAlertHistoryKind",
+    "MarketScanScreenAlertEventSummary",
+    "MarketScanScreenAlertHistoryItem",
+    "MarketScanScreenAlertHistoryPage",
+    "MarketScanScreenAlertDetailPage",
 ]

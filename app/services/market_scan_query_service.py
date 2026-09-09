@@ -237,8 +237,9 @@ class MarketScanQueryService:
         ranking_context, ranking_records = self._production_ranking_projection(run.id)
         if minimum is not None and ranking_context.get("reason") in _JOINT_MAINTENANCE_UNAVAILABLE:
             raise ProbabilityFilterUnavailable("正式概率证据维护尚未完成，暂不能使用概率筛选")
+        base_page = None
         if ranking_context.get("status") == "active":
-            page_result = _results_page_with_production_ranking(
+            base_page, page_result = _production_ranking_pages(
                 verified,
                 query=query,
                 symbols=symbols,
@@ -256,10 +257,13 @@ class MarketScanQueryService:
             )
         else:
             probabilities = {symbol: all_probabilities[symbol] for symbol in page_symbols if symbol in all_probabilities}
-        if _maintenance_projection_unavailable(research) and ranking_context.get("status") == "active":
-            page_result = verified.results_page(**query, symbols=symbols)
-            _validate_result_page_binding(run, page_result)
+        if _maintenance_projection_unavailable(research) and base_page is not None:
             ranking_context = _inactive_ranking_context(run.id, str(research["availability"]))
+            # The retained base rows already have the SQL filters and base ordering.
+            page_result = _ranked_result_page(
+                base_page, _score_filtered_items(base_page.items, query), ranking_context,
+                page=page_result.page, page_size=page_result.page_size,
+            )
         return _attach_probability_projection(
             page_result,
             research,
@@ -989,14 +993,14 @@ def _meets_probability_minimum(
     )
 
 
-def _results_page_with_production_ranking(
+def _production_ranking_pages(
     verified: MarketScanVerifiedReadProtocol,
     *,
     query: Mapping[str, object],
     symbols: Sequence[str] | None,
     context: Mapping[str, object],
     records: Mapping[str, Mapping[str, object]],
-) -> MarketScanResultPage:
+) -> tuple[MarketScanResultPage, MarketScanResultPage]:
     run = verified.run
     _validate_production_ranking_context(run, context, records)
     _require_v5_score_contract(verified)
@@ -1010,7 +1014,7 @@ def _results_page_with_production_ranking(
         "production_ranking.artifact_digest",
     )
     ordered = _production_ranked_items(base_page, records, artifact_digest, query)
-    return _production_ranking_page(
+    return base_page, _ranked_result_page(
         base_page,
         ordered,
         context,
@@ -1050,14 +1054,7 @@ def _production_ranked_items(
         _production_ranking_item(item, records, artifact_digest=artifact_digest)
         for item in base_page.items
     ]
-    minimum = _optional_query_score(query.get("min_score"), "min_score")
-    maximum = _optional_query_score(query.get("max_score"), "max_score")
-    filtered = [
-        item
-        for item in overlaid
-        if (minimum is None or item.score is not None and item.score >= minimum)
-        and (maximum is None or item.score is not None and item.score <= maximum)
-    ]
+    filtered = _score_filtered_items(overlaid, query)
     def compare(left: MarketScanResultItem, right: MarketScanResultItem) -> int:
         return _compare_production_ranking_items(
             left,
@@ -1069,7 +1066,19 @@ def _production_ranked_items(
     return sorted(filtered, key=cmp_to_key(compare))
 
 
-def _production_ranking_page(
+def _score_filtered_items(
+    items: Sequence[MarketScanResultItem], query: Mapping[str, object],
+) -> list[MarketScanResultItem]:
+    minimum = _optional_query_score(query.get("min_score"), "min_score")
+    maximum = _optional_query_score(query.get("max_score"), "max_score")
+    return [
+        item for item in items
+        if (minimum is None or item.score is not None and item.score >= minimum)
+        and (maximum is None or item.score is not None and item.score <= maximum)
+    ]
+
+
+def _ranked_result_page(
     base_page: MarketScanResultPage,
     ordered: Sequence[MarketScanResultItem],
     context: Mapping[str, object],
@@ -1080,7 +1089,9 @@ def _production_ranking_page(
     total = len(ordered)
     start = (page - 1) * page_size
     items = ordered[start : start + page_size]
-    payload = base_page.model_dump(mode="python")
+    # The complete cohort remains available for ranking and maintenance fallback;
+    # only the selected page needs serialization in the public response.
+    payload = base_page.model_dump(mode="python", exclude={"items"})
     payload.update(
         {
             "items": items,

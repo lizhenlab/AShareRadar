@@ -27,19 +27,20 @@ from app.services.market_scan_feature_windows import (
     snapshot_skip_return_pct,
 )
 from app.services.paper_trading_rules import resolve_trade_rule_profile
+from app.services.return_risk import downside_deviation_pct, downside_deviation_spec
 from app.services.trading_calendar import is_trading_day
 from app.utils.symbols import standard_symbol
 
 
 SHADOW_SCORE_SCHEMA_VERSION = 4
 SHADOW_SCORE_CANDIDATE_VERSION = "full-market-shadow-score-v5.3"
-SHADOW_SCORE_ALGORITHM_VERSION = "residual-momentum-volume-lifecycle-v4"
+SHADOW_SCORE_ALGORITHM_VERSION = "residual-momentum-volume-lifecycle-v5-target-semideviation"
 SHADOW_SCORE_V54_SCHEMA_VERSION = 5
 SHADOW_SCORE_V54_CANDIDATE_VERSION = "full-market-shadow-score-v5.4"
-SHADOW_SCORE_V54_ALGORITHM_VERSION = "multilevel-residual-time-aligned-volume-risk-v1"
+SHADOW_SCORE_V54_ALGORITHM_VERSION = "multilevel-residual-time-aligned-volume-risk-v2-target-semideviation"
 SHADOW_SCORE_V55_SCHEMA_VERSION = 6
 SHADOW_SCORE_V55_CANDIDATE_VERSION = "full-market-shadow-score-v5.5"
-SHADOW_SCORE_V55_ALGORITHM_VERSION = "bounded-gated-residual-stability-v1"
+SHADOW_SCORE_V55_ALGORITHM_VERSION = "bounded-gated-residual-stability-v2-target-semideviation"
 SHADOW_SCORE_RAW_DECIMALS = 6
 SHADOW_SCORE_NOTIONAL = 100_000.0
 SHADOW_SCORE_MIN_HISTORY_ROWS = MARKET_SCAN_MIN_HISTORY_ROWS
@@ -758,6 +759,7 @@ def _base_shadow_components(enabled: Mapping[str, bool]) -> dict[str, object]:
             "enabled": enabled["risk"],
             "bounds": [0, 15],
             "inputs": ["atr20_pct", "downside_volatility20", "max_drawdown60", "gap_frequency60"],
+            "downside_deviation": downside_deviation_spec(),
             "role": "penalty-only",
         },
         "confidence_penalty": {"bounds": [0, 20], "quality_policy": "penalty-only", "role": "penalty-only"},
@@ -1017,9 +1019,7 @@ def _risk_penalty(
     closes: Sequence[float],
     atr_pct: float,
 ) -> tuple[float, float, float, float]:
-    returns = [_return(closes[index], closes[index - 1]) for index in range(1, len(closes))]
-    downside = [value for value in returns[-20:] if value < 0]
-    downside_vol = pstdev(downside) * 100 if len(downside) >= 2 else 0.0
+    downside_vol = downside_deviation_pct(closes[-21:])
     drawdown = abs(min(0.0, _max_drawdown(closes[-60:]))) * 100
     gap_rows = rows[-SHADOW_SCORE_MIN_HISTORY_ROWS:]
     gaps = [abs(_return(float(row.open), float(previous.close))) for previous, row in zip(gap_rows[:-1], gap_rows[1:], strict=True)]

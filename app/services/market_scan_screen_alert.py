@@ -10,6 +10,9 @@ from app.market_scan_screening import screen_spec_digest, screen_spec_from_disco
 from app.models.market_scan import MarketScanRun
 from app.models.market_scan_screen_alert import (
     MARKET_SCAN_SCREEN_ALERT_SCHEMA_VERSION,
+    MarketScanScreenAlertDetailPage,
+    MarketScanScreenAlertHistoryKind,
+    MarketScanScreenAlertHistoryPage,
     MarketScanScreenAlertPresetRef,
     MarketScanScreenAlertResponse,
     MarketScanScreenAlertRunRef,
@@ -29,6 +32,13 @@ _PUBLISHED = frozenset({"success", "degraded"})
 
 
 class MarketScanScreenAlertRepositoryProtocol(Protocol):
+    def event_history(self, preset_id: int, *, page: int, page_size: int) -> MarketScanScreenAlertHistoryPage: ...
+
+    def event_detail(
+        self, preset_id: int, event_id: int, *, page: int, page_size: int,
+        kind: MarketScanScreenAlertHistoryKind,
+    ) -> MarketScanScreenAlertDetailPage: ...
+
     def preset_snapshot(self, preset_id: int) -> MarketScanScreenAlertPresetSnapshot: ...
 
     def comparison_snapshot(
@@ -66,6 +76,15 @@ class MarketScanScreenAlertService:
     ) -> None:
         self._repository = repository
         self._now = now
+
+    def history(self, preset_id: int, *, page: int, page_size: int) -> MarketScanScreenAlertHistoryPage:
+        return self._repository.event_history(preset_id, page=page, page_size=page_size)
+
+    def detail(
+        self, preset_id: int, event_id: int, *, page: int, page_size: int,
+        kind: MarketScanScreenAlertHistoryKind,
+    ) -> MarketScanScreenAlertDetailPage:
+        return self._repository.event_detail(preset_id, event_id, page=page, page_size=page_size, kind=kind)
 
     def record(
         self,

@@ -721,6 +721,18 @@ def build_joint_execution_outcome_artifact(
     generated = _timestamp(generated_at, "generated_at")
     registered_horizons = _registered_horizons(horizons)
     calendar = _calendar_contract(source.signal_session, registered_horizons)
+    return _build_outcome_with_calendar(
+        source, official_sessions, generated, registered_horizons, calendar,
+    )
+
+
+def _build_outcome_with_calendar(
+    source: VerifiedJointExecutionSourceCorpus,
+    official_sessions: Mapping[str, VerifiedOfficialExecutionSession],
+    generated: datetime,
+    registered_horizons: Sequence[int],
+    calendar: Mapping[str, object],
+) -> dict[str, object]:
     source_records, symbols = _outcome_source_population(source)
     population = _build_outcome_population(
         source,
@@ -878,13 +890,17 @@ def replay_and_verify_joint_execution_outcome_artifact(
     """Replay source, calendar, official rows, costs, labels, and benchmarks."""
 
     verified = verify_joint_execution_outcome_artifact(artifact)
-    rebuilt = build_joint_execution_outcome_artifact(
+    if not isinstance(source, VerifiedJointExecutionSourceCorpus):
+        raise JointExecutionOutcomeError("joint outcome replay requires a verified source token")
+    calendar = _verified_replay_calendar(verified, source.signal_session)
+    rebuilt = _build_outcome_with_calendar(
         source,
         official_sessions,
-        generated_at=str(verified["generated_at"]),
-        horizons=cast(
+        _timestamp(str(verified["generated_at"]), "generated_at"),
+        cast(
             list[int], cast(dict[str, object], verified["label_contract"])["horizons"]
         ),
+        calendar,
     )
     if rebuilt != verified:
         raise JointExecutionOutcomeError("joint execution outcome artifact does not replay")
@@ -903,6 +919,21 @@ def replay_and_verify_joint_execution_outcome_artifact(
         benchmark_set_digest=str(verified["benchmark_set_digest"]),
         _seal=_VERIFIED_OUTCOME_SEAL,
     )
+
+
+def _verified_replay_calendar(
+    artifact: Mapping[str, object], signal_session: str,
+) -> Mapping[str, object]:
+    frozen = _mapping(artifact["calendar"], "calendar")
+    exits = _mapping(frozen["horizon_exit_sessions"], "calendar.horizon_exit_sessions")
+    current = _calendar_contract(signal_session, _registered_horizons(exits))
+    path_fields = (
+        "version", "signal_session", "forward_sessions", "entry_session", "horizon_exit_sessions",
+    )
+    if any(frozen[field] != current[field] for field in path_fields):
+        raise JointExecutionOutcomeError("joint outcome frozen calendar path conflicts with trusted sessions")
+    # Metadata belongs to the original observation; current trusted sessions still authorize every slot.
+    return frozen
 
 
 def _calendar_contract(

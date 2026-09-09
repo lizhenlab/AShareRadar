@@ -439,25 +439,17 @@ def _enqueue_symbol(
     timestamp: str,
 ) -> DiscoveryResearchQueueItem:
     symbol = str(result["symbol"])
-    _upsert_research_watchlist(conn, result, timestamp=timestamp)
-    added = _insert_research_provenance(
-        conn,
-        symbol=symbol,
-        preset=preset,
-        run_id=run_id,
-        snapshot=snapshot,
-        timestamp=timestamp,
+    enqueued_at = _research_enqueue_time(
+        conn, symbol=symbol, preset=preset, run_id=run_id,
     )
-    enqueued_at = (
-        timestamp
-        if added
-        else _existing_research_enqueue_time(
-            conn,
-            symbol=symbol,
-            preset=preset,
-            run_id=run_id,
+    added = enqueued_at is None
+    if added:
+        _upsert_research_watchlist(conn, result, timestamp=timestamp)
+        _insert_research_provenance(
+            conn, symbol=symbol, preset=preset, run_id=run_id,
+            snapshot=snapshot, timestamp=timestamp,
         )
-    )
+        enqueued_at = timestamp
     return DiscoveryResearchQueueItem(
         symbol=symbol,
         source_run_id=run_id,
@@ -511,10 +503,10 @@ def _insert_research_provenance(
     run_id: int,
     snapshot: str,
     timestamp: str,
-) -> bool:
-    cursor = conn.execute(
+) -> None:
+    conn.execute(
         """
-        INSERT OR IGNORE INTO discovery_research_queue_source (
+        INSERT INTO discovery_research_queue_source (
             symbol, source_run_id, source_preset_id, source_preset_revision,
             source_preset_name, preset_schema_version, preset_snapshot_json,
             enqueued_at
@@ -531,16 +523,15 @@ def _insert_research_provenance(
             timestamp,
         ),
     )
-    return cursor.rowcount == 1
 
 
-def _existing_research_enqueue_time(
+def _research_enqueue_time(
     conn: sqlite3.Connection,
     *,
     symbol: str,
     preset: DiscoveryPreset,
     run_id: int,
-) -> str:
+) -> str | None:
     existing = conn.execute(
         """
         SELECT enqueued_at
@@ -550,9 +541,7 @@ def _existing_research_enqueue_time(
         """,
         (symbol, run_id, preset.id, preset.revision),
     ).fetchone()
-    if existing is None:
-        raise RuntimeError(f"研究队列来源读取失败：{symbol}")
-    return str(existing["enqueued_at"])
+    return None if existing is None else str(existing["enqueued_at"])
 
 
 def _rank_change_item(row: sqlite3.Row) -> DiscoveryRankChangeItem:

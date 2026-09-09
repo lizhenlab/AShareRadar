@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import TypedDict, cast
 
 from app.models.market import (
     Kline,
+    KlineCorporateActionStatus,
+    KlineOpenExecutionStatus,
+    KlineSessionStatus,
     MinuteKline,
     PlateItem,
     Quote,
     StockConceptItem,
     StockInfo,
 )
+from app.utils.market_data import finite_float
+
+
+class KlineExecutionMetadata(TypedDict):
+    session_status: KlineSessionStatus
+    open_execution_status: KlineOpenExecutionStatus
+    corporate_action_status: KlineCorporateActionStatus
+    adjustment_factor: float | None
+    point_in_time: bool
+    execution_metadata_version: str | None
 
 
 def row_to_quote(row: sqlite3.Row) -> Quote:
@@ -45,6 +59,7 @@ def row_to_kline(row: sqlite3.Row) -> Kline:
         high=row["high"],
         low=row["low"],
         volume=row["volume"],
+        **kline_execution_metadata_from_row(row),
         adjustment_mode=row["adjustment_mode"],
         as_of=row["as_of"],
         data_version=row["data_version"],
@@ -54,6 +69,39 @@ def row_to_kline(row: sqlite3.Row) -> Kline:
         from_cache=True,
         fallback_used=bool(row["fallback_used"]),
     )
+
+
+def kline_execution_metadata_from_row(row: sqlite3.Row) -> KlineExecutionMetadata:
+    """Preserve raw evidence; missing legacy columns never establish authority."""
+    defaults: dict[str, object] = {
+        "session_status": "unknown", "open_execution_status": "unknown", "corporate_action_status": "unknown",
+        "adjustment_factor": None, "point_in_time": 0, "execution_metadata_version": None,
+    }
+    columns = set(row.keys())
+    values = {name: row[name] if name in columns else default for name, default in defaults.items()}
+    _validate_kline_execution_metadata(values)
+    values["point_in_time"] = values["point_in_time"] == 1
+    values["adjustment_factor"] = finite_float(values["adjustment_factor"])
+    return cast(KlineExecutionMetadata, values)
+
+
+def _validate_kline_execution_metadata(values: dict[str, object]) -> None:
+    choices = {
+        "session_status": ("trading", "suspended", "unknown"),
+        "open_execution_status": ("tradable", "locked_limit_up", "locked_limit_down", "unavailable", "unknown"),
+        "corporate_action_status": ("none", "effective_event", "unknown"),
+    }
+    for name, allowed in choices.items():
+        if type(values[name]) is not str or values[name] not in allowed:
+            raise ValueError(f"日K {name} 原始类型或取值无效")
+    if type(values["point_in_time"]) is not int or values["point_in_time"] not in (0, 1):
+        raise ValueError("日K point_in_time 必须是 SQLite 0/1")
+    factor = values["adjustment_factor"]
+    if factor is not None and (type(factor) not in (int, float) or finite_float(factor) is None):
+        raise ValueError("日K adjustment_factor 必须是有限数值或空值")
+    version = values["execution_metadata_version"]
+    if version is not None and type(version) is not str:
+        raise ValueError("日K execution_metadata_version 必须是字符串或空值")
 
 
 def row_to_minute_kline(row: sqlite3.Row) -> MinuteKline:
@@ -118,6 +166,8 @@ def row_to_stock_concept_item(row: sqlite3.Row) -> StockConceptItem:
 
 
 __all__ = [
+    "KlineExecutionMetadata",
+    "kline_execution_metadata_from_row",
     "row_to_quote",
     "row_to_kline",
     "row_to_minute_kline",

@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 import sqlite3
 import threading
+from typing import cast
 
 from app.config import Settings
 from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
@@ -19,7 +20,7 @@ from app.models.user_data import (
     WatchlistUpdate,
 )
 from app.repositories.base import SQLiteRepository
-from app.repositories.update_fields import present_updates, update_sql_parts
+from app.repositories.update_fields import FieldCleaner, present_updates, update_sql_parts
 from app.models.advice_change import compare_conclusions
 from app.utils.audit_time import (
     audit_now_text as now_text,
@@ -140,6 +141,7 @@ class WatchlistRepository(SQLiteRepository):
         symbol = standard_symbol(f"{quote.market}{quote.code}")
         timestamp = now_text()
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             existing = _watchlist_row(conn, symbol)
             values = _watchlist_save_values(
                 quote,
@@ -154,30 +156,15 @@ class WatchlistRepository(SQLiteRepository):
                 next_review_date,
             )
             _upsert_watchlist_row(conn, values)
-        item = self.item(symbol)
-        if item is None:
-            raise RuntimeError(f"自选股保存失败：{symbol}")
+            item = _watchlist_item(conn, symbol, self.settings.quote_cache_seconds)
+            if item is None:
+                raise RuntimeError(f"自选股保存失败：{symbol}")
         return item
 
     def item(self, symbol: str) -> WatchlistItem | None:
         normalized = standard_symbol(symbol)
-        quote_join_sql, quote_params = _quote_snapshot_join(self.settings.quote_cache_seconds)
         with self._lock, self._connect() as conn:
-            row = conn.execute(
-                f"""
-                SELECT
-                    w.*,
-                    q.price AS latest_price,
-                    q.change_pct AS latest_change_pct,
-                    q.source AS latest_source,
-                    q.quote_timestamp AS latest_at
-                FROM watchlist w
-                {quote_join_sql}
-                WHERE w.symbol = ?
-                """,
-                (*quote_params, normalized),
-            ).fetchone()
-        return _watchlist_item_from_row(row) if row else None
+            return _watchlist_item(conn, normalized, self.settings.quote_cache_seconds)
 
     def items(self) -> list[WatchlistItem]:
         quote_join_sql, quote_params = _quote_snapshot_join(self.settings.quote_cache_seconds)
@@ -215,7 +202,7 @@ class WatchlistRepository(SQLiteRepository):
             )
             if cursor.rowcount <= 0:
                 return None
-        return self.item(normalized)
+            return _watchlist_item(conn, normalized, self.settings.quote_cache_seconds)
 
     def mark_viewed(
         self,
@@ -252,7 +239,7 @@ class WatchlistRepository(SQLiteRepository):
                 SET
                     last_viewed_at = ?,
                     unread_change_count = CASE
-                        WHEN ? = 1 THEN ?
+                        WHEN ? = 1 THEN MIN(({_NORMALIZED_UNREAD_COUNT_SQL}), ?)
                         ELSE {_NORMALIZED_UNREAD_COUNT_SQL}
                     END,
                     updated_at = ?
@@ -268,7 +255,7 @@ class WatchlistRepository(SQLiteRepository):
             )
             if cursor.rowcount <= 0:
                 return None
-        return self.item(normalized)
+            return _watchlist_item(conn, normalized, self.settings.quote_cache_seconds)
 
     def adjust_unread_change_count(self, symbol: str, delta: int) -> WatchlistItem | None:
         if isinstance(delta, bool) or not isinstance(delta, int):
@@ -278,7 +265,7 @@ class WatchlistRepository(SQLiteRepository):
         with self._lock, self._connect() as conn:
             if not _adjust_watchlist_unread_change_count(conn, normalized, delta, timestamp):
                 return None
-        return self.item(normalized)
+            return _watchlist_item(conn, normalized, self.settings.quote_cache_seconds)
 
     def increment_unread_change_count(self, symbol: str, amount: int = 1) -> WatchlistItem | None:
         if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
@@ -316,6 +303,25 @@ class WatchlistRepository(SQLiteRepository):
             excluded_symbols=tuple(row["symbol"] for row in rows if row["is_excluded"]),
             has_entries=bool(rows),
         )
+
+
+def _watchlist_item(conn: sqlite3.Connection, symbol: str, quote_cache_seconds: int) -> WatchlistItem | None:
+    quote_join_sql, quote_params = _quote_snapshot_join(quote_cache_seconds)
+    row = conn.execute(
+        f"""
+        SELECT
+            w.*,
+            q.price AS latest_price,
+            q.change_pct AS latest_change_pct,
+            q.source AS latest_source,
+            q.quote_timestamp AS latest_at
+        FROM watchlist w
+        {quote_join_sql}
+        WHERE w.symbol = ?
+        """,
+        (*quote_params, symbol),
+    ).fetchone()
+    return _watchlist_item_from_row(row) if row else None
 
 
 def _watchlist_row(conn: sqlite3.Connection, symbol: str) -> sqlite3.Row | None:
@@ -567,10 +573,10 @@ def _clean_unread_change_count(value: object) -> int:
     return value
 
 
-_WATCHLIST_UPDATE_CLEANERS = {
+_WATCHLIST_UPDATE_CLEANERS: dict[str, FieldCleaner] = {
     "note": lambda value: _clean_optional_text(value, 80),
     "group_name": _clean_group_name,
-    "pinned": lambda value: int(value),
+    "pinned": lambda value: int(cast(bool, value)),
     "research_status": lambda value: _required_watchlist_choice(
         value,
         allowed=_RESEARCH_STATUSES,

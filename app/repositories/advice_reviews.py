@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, time
 import hashlib
@@ -18,6 +19,8 @@ from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.reviews import (
     AdviceEvidenceRef,
     AdviceReviewDetail,
+    AdviceReviewDueItem,
+    AdviceReviewDuePage,
     AdviceReviewEvaluation,
     AdviceReviewEvaluationDraft,
     AdviceReviewPlan,
@@ -205,6 +208,10 @@ class _EvaluationResultValues:
 
 class AdviceReviewRevisionConflictError(ValueError):
     """Raised when a plan mutation is based on a stale revision."""
+
+
+class AdviceReviewQueueConflictError(ValueError):
+    """Raised when a due page no longer belongs to the caller's queue snapshot."""
 
 
 class AdviceReviewIntegrityError(ValueError):
@@ -415,19 +422,7 @@ class AdviceReviewRepository(SQLiteRepository):
             return []
         cutoff = _strict_iso_date(as_of_date)
         with self._lock, self._connect() as conn:
-            plan_rows = conn.execute(
-                f"""
-                SELECT {_PLAN_SELECT_COLUMNS}
-                FROM advice_review_plan AS plan
-                LEFT JOIN advice_review_plan_revision AS ledger
-                  ON ledger.plan_id = plan.id AND ledger.revision = plan.revision
-                WHERE deleted_at IS NULL
-                ORDER BY snapshot_market_time ASC, id ASC
-                """
-            ).fetchall()
-            plans = [_plan_from_row(row) for row in plan_rows]
-            result_rows = _latest_result_rows(conn, plans)
-        details = _review_details(plans, result_rows)
+            details = _evaluation_candidate_details(conn)
         due = [
             detail
             for detail in details
@@ -436,6 +431,26 @@ class AdviceReviewRepository(SQLiteRepository):
         ]
         due.sort(key=lambda detail: (_bundled_due_date(detail.plan), detail.plan.id))
         return due[:limit]
+
+    def due_page(
+        self, *, as_of: datetime, page: int, page_size: int, snapshot_token: str | None,
+        symbol: str | None, from_date: date | None, horizon_days: int | None,
+    ) -> AdviceReviewDuePage:
+        with self._lock, self._read_snapshot() as conn:
+            details = _evaluation_candidate_details(conn)
+        items = _due_queue_items(details, as_of.date(), symbol, from_date, horizon_days)
+        as_of_text = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        token = _due_queue_token(items, as_of_text, page_size, symbol, from_date, horizon_days)
+        if snapshot_token is not None and snapshot_token != token:
+            raise AdviceReviewQueueConflictError("到期复盘队列已变化，请重新读取第一页")
+        page_count = (len(items) + page_size - 1) // page_size
+        if page > max(1, page_count):
+            raise ValueError("到期复盘页码超出范围")
+        start = (page - 1) * page_size
+        return AdviceReviewDuePage(
+            items=items[start:start + page_size], total=len(items), page=page,
+            page_size=page_size, page_count=page_count, as_of=as_of_text, snapshot_token=token,
+        )
 
     def update_plan(self, plan_id: int, payload: AdviceReviewPlanUpdate) -> AdviceReviewPlan | None:
         requested = {field for field in payload.model_fields_set if field in _PLAN_MUTABLE_FIELDS}
@@ -849,6 +864,21 @@ def _latest_result_row(conn: sqlite3.Connection, plan_id: int, revision: int) ->
         """,
         (plan_id, revision),
     ).fetchone()
+
+
+def _evaluation_candidate_details(conn: sqlite3.Connection) -> list[AdviceReviewDetail]:
+    plan_rows = conn.execute(
+        f"""
+        SELECT {_PLAN_SELECT_COLUMNS}
+        FROM advice_review_plan AS plan
+        LEFT JOIN advice_review_plan_revision AS ledger
+          ON ledger.plan_id = plan.id AND ledger.revision = plan.revision
+        WHERE deleted_at IS NULL
+        ORDER BY snapshot_market_time ASC, id ASC
+        """
+    ).fetchall()
+    plans = [_plan_from_row(row) for row in plan_rows]
+    return _review_details(plans, _latest_result_rows(conn, plans))
 
 
 def _latest_result_rows(
@@ -1442,6 +1472,54 @@ def _strict_iso_date(value: object) -> str:
     if parsed.isoformat() != text:
         raise ValueError("as_of_date 必须是 YYYY-MM-DD")
     return text
+
+
+def _due_queue_items(
+    details: list[AdviceReviewDetail], cutoff: date, symbol: str | None,
+    from_date: date | None, horizon_days: int | None,
+) -> list[AdviceReviewDueItem]:
+    sessions = sorted(bundled_exchange_sessions())
+    if cutoff not in sessions:
+        raise ValueError("交易日历覆盖不足，无法确定到期复盘队列")
+    cutoff_index = bisect_right(sessions, cutoff) - 1
+    items: list[AdviceReviewDueItem] = []
+    for detail in details:
+        if not _due_queue_matches(detail, symbol, from_date, horizon_days):
+            continue
+        snapshot = date.fromisoformat(detail.plan.snapshot_market_time[:10])
+        due_index = bisect_right(sessions, snapshot) + detail.plan.horizon_days - 1
+        if due_index > cutoff_index:
+            continue
+        items.append(AdviceReviewDueItem(
+            plan=detail.plan, latest_evaluation=detail.latest_evaluation,
+            due_date=sessions[due_index].isoformat(), overdue_trading_days=cutoff_index - due_index,
+        ))
+    items.sort(key=lambda item: (item.due_date, item.plan.id))
+    return items
+
+
+def _due_queue_matches(
+    detail: AdviceReviewDetail, symbol: str | None, from_date: date | None, horizon_days: int | None,
+) -> bool:
+    plan = detail.plan
+    return not (detail.latest_evaluation is not None and detail.latest_evaluation.status == "evaluated") \
+        and (symbol is None or symbol in plan.symbol) \
+        and (from_date is None or plan.snapshot_market_time[:10] >= from_date.isoformat()) \
+        and (horizon_days is None or plan.horizon_days == horizon_days)
+
+
+def _due_queue_token(
+    items: list[AdviceReviewDueItem], as_of: str, page_size: int, symbol: str | None,
+    from_date: date | None, horizon_days: int | None,
+) -> str:
+    payload = {
+        "contract": "advice-review-due-page.v1", "as_of": as_of, "page_size": page_size,
+        "filters": {"symbol": symbol, "from_date": from_date.isoformat() if from_date else None,
+                    "horizon_days": horizon_days},
+        "items": [item.model_dump(mode="json") for item in items],
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False,
+                                    separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _bundled_due_date(plan: AdviceReviewPlan) -> date:

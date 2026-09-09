@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.deps import get_datahub
 from app.api.errors import run_api, run_sync_api_async
 from app.models.user_data import (
     AlertEvaluationSummary,
     AlertEventItem,
+    AlertNotificationPage,
     AlertRuleInput,
     AlertRuleItem,
     AlertRuleUpdate,
@@ -95,6 +96,22 @@ async def evaluate_alerts(
         return await evaluate_alert_rules(datahub, symbol=symbol)
 
     return await run_api(evaluate)
+
+
+@router.get("/api/alerts/notification-events", response_model=AlertNotificationPage)
+async def alert_notification_events(
+    response: Response,
+    stream_id: str | None = Query(default=None, pattern=r"^[0-9a-f]{32}$"),
+    after_id: int | None = Query(default=None, ge=0, le=9_007_199_254_740_991),
+    limit: int = Query(50, ge=1, le=MAX_ALERT_EVENT_PAGE_SIZE),
+    datahub: DataHub = Depends(get_datahub),
+) -> AlertNotificationPage:
+    response.headers["Cache-Control"] = "no-store"
+    if (stream_id is None) != (after_id is None):
+        raise HTTPException(status_code=422, detail="通知 stream_id 与 after_id 必须同时提供")
+    return await run_sync_api_async(
+        lambda: datahub.cache.alert_notification_events(stream_id=stream_id, after_id=after_id, limit=limit),
+    )
 
 
 @router.get("/api/alerts/events", response_model=list[AlertEventItem])

@@ -30,6 +30,7 @@ from app.services.market_scan_feature_windows import (
     snapshot_skip_return_pct,
 )
 from app.services.market_scan_production_replay import verify_market_scan_production_inputs
+from app.services.return_risk import downside_deviation_pct, downside_deviation_spec
 from app.services.market_scan_session_coverage import (
     MARKET_SCAN_SESSION_COVERAGE_CONTRACT_VERSION,
     MarketScanSessionCoverage,
@@ -40,7 +41,8 @@ from app.utils.market_time import market_datetime_epoch
 
 
 MARKET_SCAN_DIMENSION_SCHEMA_VERSION = 1
-MARKET_SCAN_DIMENSION_ALGORITHM_VERSION = "full-market-dimensions-v4-session-coverage"
+MARKET_SCAN_DIMENSION_ALGORITHM_VERSION = "full-market-dimensions-v5-target-semideviation"
+MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION = "full-market-dimensions-v4-session-coverage"
 MARKET_SCAN_EVIDENCE_SCHEMA_VERSION = 1
 MARKET_SCAN_EVIDENCE_CONTRACT_VERSION = (
     "market-scan-point-in-time-feature-evidence-v4-bar-as-of-bound"
@@ -506,11 +508,17 @@ def verify_market_scan_point_in_time_evidence_context(
     return replayed is not None and replayed == outer_scores
 
 
-def market_scan_dimension_spec() -> dict[str, object]:
+def market_scan_dimension_spec(
+    *, algorithm_version: str = MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
+) -> dict[str, object]:
     """Canonical, hash-bound formula contract for all six research dimensions."""
-    return {
+    if algorithm_version not in {
+        MARKET_SCAN_DIMENSION_ALGORITHM_VERSION, MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION,
+    }:
+        raise ValueError("多维评分算法未注册")
+    spec: dict[str, object] = {
         "schema_version": MARKET_SCAN_DIMENSION_SCHEMA_VERSION,
-        "algorithm": MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
+        "algorithm": algorithm_version,
         "evidence_contract": MARKET_SCAN_EVIDENCE_CONTRACT_VERSION,
         "feature_window_contract": MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION,
         "session_coverage_contract": MARKET_SCAN_SESSION_COVERAGE_CONTRACT_VERSION,
@@ -536,6 +544,32 @@ def market_scan_dimension_spec() -> dict[str, object]:
             "actionable": False,
         },
     }
+    if algorithm_version == MARKET_SCAN_DIMENSION_ALGORITHM_VERSION:
+        spec["downside_deviation"] = downside_deviation_spec()
+    return spec
+
+
+def _evidence_dimension_contract_matches(payload: Mapping[str, object], item: MarketScanResultItem) -> bool:
+    dimension_spec = payload.get("dimension_spec")
+    components = item.score_details.get("components")
+    score_spec = item.score_details.get("score_spec")
+    if not all(isinstance(value, Mapping) for value in (dimension_spec, components, score_spec)):
+        return False
+    dimensions = cast(Mapping[str, object], components).get("score_dimensions")
+    registered = cast(Mapping[str, object], score_spec).get("research_dimensions")
+    return (
+        isinstance(dimensions, Mapping)
+        and isinstance(registered, Mapping)
+        and dimensions.get("algorithm") == registered.get("algorithm")
+        == cast(Mapping[str, object], dimension_spec).get("algorithm")
+    )
+
+
+def _registered_dimension_spec(spec: Mapping[str, object]) -> bool:
+    try:
+        return dict(spec) == market_scan_dimension_spec(algorithm_version=str(spec.get("algorithm")))
+    except ValueError:
+        return False
 
 
 def _valid_evidence_envelope(value: Mapping[str, object]) -> bool:
@@ -660,7 +694,7 @@ def _verify_current_evidence_payload(
     coverage = payload.get("session_coverage")
     if (
         not isinstance(spec, Mapping)
-        or dict(spec) != market_scan_dimension_spec()
+        or not _registered_dimension_spec(spec)
         or payload.get("dimension_spec_hash") != _stable_digest(spec)
         or not _valid_dimension_scores(scores)
         or not verify_market_scan_session_coverage(
@@ -739,6 +773,8 @@ def _evidence_identity_matches(
     expected_data_date: str,
     expected_quote_date: str,
 ) -> bool:
+    if not _evidence_dimension_contract_matches(payload, item):
+        return False
     exact = {
         "symbol": item.symbol,
         "code": item.code,
@@ -902,6 +938,7 @@ def _replay_evidence_features(
         volume_ratio,
         mode=cast(MarketScanMode, mode),
         apply_volume_lifecycle=context.get("lifecycle_applied") is True,
+        algorithm_version=str(cast(Mapping[str, object], payload["dimension_spec"])["algorithm"]),
     )
     raw = _raw_feature_values(
         features,
@@ -944,6 +981,7 @@ def _dimension_features_from_values(
     *,
     mode: MarketScanMode,
     apply_volume_lifecycle: bool,
+    algorithm_version: str = MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
 ) -> _DimensionFeatures:
     closes = [float(row.close) for row in rows]
     ma5, ma20, ma60 = fmean(closes[-5:]), fmean(closes[-20:]), fmean(closes[-60:])
@@ -959,7 +997,7 @@ def _dimension_features_from_values(
         ma20_slope_10d=_pct_change(ma20, fmean(closes[-30:-10])),
         ma_alignment=_ma_alignment(current, ma5, ma20, ma60),
         atr20_pct=_atr(rows[-21:]) / current * 100 if current > 0 else 100.0,
-        downside_volatility=_downside_volatility(closes[-21:]),
+        downside_volatility=_downside_volatility(closes[-21:], algorithm_version=algorithm_version),
         max_drawdown_60d=abs(min(0.0, _maximum_drawdown(closes[-60:]))) * 100,
         range_position_20d=range20,
         volume_ratio=volume_ratio,
@@ -1207,7 +1245,14 @@ def _atr(rows: Sequence[Kline]) -> float:
     return fmean(values) if values else 0.0
 
 
-def _downside_volatility(closes: Sequence[float]) -> float:
+def _downside_volatility(
+    closes: Sequence[float], *, algorithm_version: str = MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
+) -> float:
+    if algorithm_version == MARKET_SCAN_DIMENSION_ALGORITHM_VERSION:
+        return downside_deviation_pct(closes)
+    if algorithm_version != MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION:
+        raise ValueError("多维评分算法未注册")
+    # Frozen v4 reads must retain their original conditional standard deviation.
     returns = [current / previous - 1 for previous, current in zip(closes[:-1], closes[1:], strict=True) if previous > 0]
     downside = [value for value in returns if value < 0]
     return pstdev(downside) * 100 if len(downside) >= 2 else 0.0
@@ -1248,6 +1293,7 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 __all__ = [
     "MARKET_SCAN_DIMENSION_ALGORITHM_VERSION",
+    "MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION",
     "MARKET_SCAN_EVIDENCE_CONTRACT_VERSION",
     "MARKET_SCAN_EVIDENCE_LEGACY_CONTRACT_VERSION",
     "MARKET_SCAN_EVIDENCE_LEGACY_V2_CONTRACT_VERSION",

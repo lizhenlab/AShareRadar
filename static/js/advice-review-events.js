@@ -1,9 +1,10 @@
 import { isAbortError } from "./api.js";
 import {
   beginAdviceReviewEdit, cancelAdviceReviewEdit, deleteAdviceReviewPlan, evaluateAdviceReviewPlan,
-  evaluateDueAdviceReviews, loadAdviceReviewDashboard, loadAdviceReviews, loadMoreAdviceReviews,
+  evaluateDueAdviceReviews, loadAdviceReviewDashboard, loadAdviceReviewPlan, loadAdviceReviews, loadMoreAdviceReviews,
   retryAdviceReviewHistory, selectAdviceReviewSnapshot, setAdviceReviewEvaluationAsOf,
-  submitAdviceReviewPlan, toggleAdviceReviewHistory, updateAdviceReviewDashboardFilters,
+  submitAdviceReviewPlan, syncAdviceReviewFormControls, toggleAdviceReviewHistory, updateAdviceReviewDashboardFilters,
+  changeAdviceReviewDuePage, refreshAdviceReviewDue, retryAdviceReviewDue,
 } from "./advice-reviews.js";
 import { selectPaperTradingPlan, syncPaperTradingPlans } from "./paper-trading.js";
 
@@ -26,6 +27,10 @@ export function bindAdviceReviewEvents(options) {
     ["reviewDashboardSymbol", "input", handleDashboardFilter],
     ["reviewDashboardFrom", "change", handleDashboardFilter],
     ["reviewDashboardHorizon", "change", handleDashboardFilter],
+    ["reviewDueRefresh", "click", context => refreshAdviceReviewDue(context.state)],
+    ["reviewDuePrev", "click", context => changeAdviceReviewDuePage(context.state, -1)],
+    ["reviewDueNext", "click", context => changeAdviceReviewDuePage(context.state, 1)],
+    ["reviewDueRetry", "click", context => retryAdviceReviewDue(context.state)],
   ];
   const removers = bindings.map(([id, type, handle]) => {
     const target = root.getElementById(id);
@@ -61,12 +66,31 @@ async function handleEvaluateDueReviewsClick(context, event) {
   );
 }
 
-function handleReviewDashboardQueueClick(context, event) {
-  const { setActiveSymbol, loadAll } = context;
-  const button = event.target.closest("button[data-review-open-symbol]");
+async function handleReviewDashboardQueueClick(context, event) {
+  const { state, setActiveSymbol, setWorkspaceView, loadAll, runButtonTask, setInlineFeedback } = context;
+  const button = event.target.closest("button[data-review-open-plan]");
   if (!button) return;
-  setActiveSymbol(button.dataset.reviewOpenSymbol);
-  void loadAll({ reveal: true });
+  const sequence = Number(state.adviceReviewNavigationSeq || 0) + 1;
+  state.adviceReviewNavigationSeq = sequence;
+  await runButtonTask(button, async () => {
+    setWorkspaceView("replay");
+    setActiveSymbol(button.dataset.reviewOpenSymbol);
+    const loading = loadAll({ reveal: false });
+    const loadSequence = state.loadSeq;
+    const signal = state.loadRequest?.signal;
+    const loaded = await loading;
+    const requestedSymbol = button.dataset.reviewOpenSymbol;
+    const failedFallback = !loaded && state.failedLoadSymbol === requestedSymbol;
+    if (state.adviceReviewNavigationSeq !== sequence || state.loadSeq !== loadSequence
+      || (state.symbol !== requestedSymbol && !failedFallback)) return false;
+    const displayedSymbol = state.symbol;
+    return loadAdviceReviewPlan(state, button.dataset.reviewOpenPlan, {
+      symbol: requestedSymbol, signal, loadSeq: loadSequence, contextAvailable: Boolean(loaded),
+      isCurrent: () => state.adviceReviewNavigationSeq === sequence && state.loadSeq === loadSequence
+        && state.symbol === displayedSymbol && !signal?.aborted,
+    });
+  }, { isCurrent: () => state.adviceReviewNavigationSeq === sequence,
+    onError: (error) => setInlineFeedback("reviewDashboardFeedback", error) });
 }
 
 function handleReviewPlanCancelClick(context, event) {
@@ -90,6 +114,9 @@ async function handleReviewPlanFormSubmit(context, event) {
   event.preventDefault();
   const options = currentWorkbenchMutationOptions();
   if (!options) return;
+  if (state.adviceReviewSubmitOwner?.isCurrent()) return;
+  const owner = { isCurrent: options.isCurrent };
+  state.adviceReviewSubmitOwner = owner;
   const feedback = $("reviewPlanFeedback");
   if (feedback) feedback.hidden = true;
   try {
@@ -101,6 +128,9 @@ async function handleReviewPlanFormSubmit(context, event) {
     });
   } catch (error) {
     if (!isAbortError(error) && options.isCurrent()) setInlineFeedback("reviewPlanFeedback", error);
+  } finally {
+    if (state.adviceReviewSubmitOwner === owner) state.adviceReviewSubmitOwner = null;
+    syncAdviceReviewFormControls(state);
   }
 }
 
@@ -174,6 +204,6 @@ function handleReviewPlanListChange(context, event) {
   setAdviceReviewEvaluationAsOf(state, input.dataset.reviewAsOf, input.value);
 }
 
-function handleDashboardFilter(context) {
-  updateAdviceReviewDashboardFilters(context.state);
+function handleDashboardFilter(context, event) {
+  return updateAdviceReviewDashboardFilters(context.state, { debounce: event?.type === "input" });
 }

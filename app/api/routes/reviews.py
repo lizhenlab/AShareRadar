@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
@@ -9,7 +9,7 @@ from app.api.errors import run_api, run_sync_api_async
 from app.models.reviews import (
     AdviceReviewDetail,
     AdviceReviewBatchSummary,
-    AdviceReviewDueItem,
+    AdviceReviewDuePage,
     AdviceReviewEvaluation,
     AdviceReviewBatchEvaluationRequest,
     AdviceReviewEvaluationRequest,
@@ -62,15 +62,23 @@ async def review_summary(
     return await run_sync_api_async(lambda: get_advice_review_summary(datahub.cache))
 
 
-@router.get("/api/reviews/due", response_model=list[AdviceReviewDueItem])
+@router.get("/api/reviews/due", response_model=AdviceReviewDuePage)
 async def due_reviews(
     response: Response,
     as_of: datetime | None = Query(default=None),
-    limit: int = Query(100, ge=1, le=200),
+    page: int = Query(1, ge=1, le=100_000),
+    page_size: int = Query(100, ge=1, le=200),
+    snapshot_token: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+    symbol: str | None = Query(default=None, max_length=32, description="标准股票代码子串，不区分大小写"),
+    from_date: date | None = Query(default=None),
+    horizon_days: int | None = Query(default=None, ge=1, le=60),
     datahub: DataHub = Depends(get_datahub),
-) -> list[AdviceReviewDueItem]:
+) -> AdviceReviewDuePage:
     response.headers["Cache-Control"] = "no-store"
-    return await run_api(lambda: list_due_advice_reviews(datahub, as_of=as_of, limit=limit))
+    return await run_api(lambda: list_due_advice_reviews(
+        datahub, as_of=as_of, page=page, page_size=page_size, snapshot_token=snapshot_token,
+        symbol=symbol, from_date=from_date, horizon_days=horizon_days,
+    ))
 
 
 @router.post("/api/reviews/evaluate-due", response_model=AdviceReviewBatchSummary)

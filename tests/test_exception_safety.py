@@ -31,6 +31,9 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ("app/db/advice_review_schema.py", "apply_advice_review_compat_schema"): _BoundaryPolicy(
         "propagate", "Roll back the compatibility-schema transaction before preserving the original failure."
     ),
+    ("app/db/connection.py", "SQLiteConnectionFactory.connect"): _BoundaryPolicy(
+        "propagate", "Roll back and close an owned SQLite connection after setup/body cancellation or fatal failure, then re-raise."
+    ),
     ("app/db/market_scan_artifact_lease.py", "market_scan_artifact_retention_lease"): _BoundaryPolicy(
         "propagate", "Release every artifact lease resource before preserving cancellation or fatal validation failure."
     ),
@@ -102,6 +105,9 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ),
     ("app/services/scheduler_lifecycle.py", "SchedulerLifecycleMixin.start"): _BoundaryPolicy(
         "propagate", "Abort partial scheduler startup and preserve cancellation or fatal failure."
+    ),
+    ("app/services/scheduler_tasks.py", "SchedulerTaskHandlersMixin._check_data_health"): _BoundaryPolicy(
+        "propagate", "Drain all parallel health-read workers before propagating cancellation or failure and releasing scheduler ownership."
     ),
     ("app/services/task_run_lifecycle.py", "_TaskRunStartHandoff.run"): _BoundaryPolicy(
         "future", "Transfer database start failure across the thread-to-async Future hand-off."

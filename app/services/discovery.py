@@ -20,6 +20,9 @@ from app.models.discovery import (
     DiscoveryResearchQueueResponse,
 )
 from app.models.market_scan_screen_alert import (
+    MarketScanScreenAlertDetailPage,
+    MarketScanScreenAlertHistoryKind,
+    MarketScanScreenAlertHistoryPage,
     MarketScanScreenAlertRequest,
     MarketScanScreenAlertResponse,
 )
@@ -201,6 +204,19 @@ class DiscoveryService:
             )
         except MarketScanScreenAlertPresetRevisionError as exc:
             raise DiscoveryConflictError(str(exc)) from exc
+
+    def screen_alert_history(self, preset_id: int, *, page: int, page_size: int) -> MarketScanScreenAlertHistoryPage:
+        if self._screen_alerts is None:
+            raise RuntimeError("筛选变化提醒服务尚未绑定")
+        return self._screen_alerts.history(preset_id, page=page, page_size=page_size)
+
+    def screen_alert_detail(
+        self, preset_id: int, event_id: int, *, page: int, page_size: int,
+        kind: MarketScanScreenAlertHistoryKind,
+    ) -> MarketScanScreenAlertDetailPage:
+        if self._screen_alerts is None:
+            raise RuntimeError("筛选变化提醒服务尚未绑定")
+        return self._screen_alerts.detail(preset_id, event_id, page=page, page_size=page_size, kind=kind)
 
     def rank_changes(self, run_id: int, *, page: int, page_size: int) -> DiscoveryRankChangePage:
         current = self.repository.run_reference(run_id)

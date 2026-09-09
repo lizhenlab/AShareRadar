@@ -15,7 +15,7 @@
     "clean:caches": "find app tests tools -type d -name __pycache__ -prune -exec rm -rf {} + && rm -rf .pytest_cache",
     "sbom": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/generate_sbom.py",
     "test": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m pytest -q -p no:cacheprovider",
-    "test:e2e": "playwright test",
+    "test:e2e": "node tools/run_playwright.mjs",
     "check:repo": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/check_repository.py"
   },
   "devDependencies": {

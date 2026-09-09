@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 157
+Total endpoints: 161
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -17,6 +17,7 @@ Total endpoints: 157
 | POST | `/api/alerts` | body `payload: AlertRuleInput` | `create_alert_rule` | `AlertRuleItem` | `app/api/routes/alerts.py` |
 | POST | `/api/alerts/evaluate` | query `symbol: str \| None = None` (description=可选，6位A股代码) | `evaluate_alerts` | `AlertEvaluationSummary` | `app/api/routes/alerts.py` |
 | GET | `/api/alerts/events` | query `symbol: str \| None = None` (description=可选，6位A股代码)<br>query `limit: int = 100` (ge=1; le=MAX_ALERT_EVENT_PAGE_SIZE)<br>query `after_created_at: str \| None = None` (max_length=64)<br>query `after_id: int \| None = None` (ge=0) | `alert_events` | `list[AlertEventItem]` | `app/api/routes/alerts.py` |
+| GET | `/api/alerts/notification-events` | query `stream_id: str \| None = None` (pattern=^[0-9a-f]{32}$)<br>query `after_id: int \| None = None` (ge=0; le=9007199254740991)<br>query `limit: int = 50` (ge=1; le=MAX_ALERT_EVENT_PAGE_SIZE) | `alert_notification_events` | `AlertNotificationPage` | `app/api/routes/alerts.py` |
 | DELETE | `/api/alerts/{rule_id}` | path `rule_id: int` | `delete_alert_rule` | `MutationResult` | `app/api/routes/alerts.py` |
 | PATCH | `/api/alerts/{rule_id}` | path `rule_id: int`<br>body `payload: AlertRuleUpdate` | `update_alert_rule` | `AlertRuleItem` | `app/api/routes/alerts.py` |
 | GET | `/api/analyze` | query `symbol: str = '600519'` (description=6位A股代码) | `analyze` | `AnalysisResult` | `app/api/routes/analysis.py` |
@@ -32,7 +33,9 @@ Total endpoints: 157
 | POST | `/api/discovery/presets/{preset_id}/apply` | body `payload: DiscoveryPresetApplyRequest`<br>path `preset_id: int` (ge=1) | `apply_discovery_preset` | `DiscoveryLeaderboardPage` | `app/api/routes/discovery.py` |
 | GET | `/api/discovery/presets/{preset_id}/export` | path `preset_id: int` (ge=1) | `export_discovery_preset` | `DiscoveryPresetArchive` | `app/api/routes/discovery.py` |
 | POST | `/api/discovery/presets/{preset_id}/research-queue` | body `payload: DiscoveryResearchQueueRequest`<br>path `preset_id: int` (ge=1) | `enqueue_discovery_research` | `DiscoveryResearchQueueResponse` | `app/api/routes/discovery.py` |
+| GET | `/api/discovery/presets/{preset_id}/screen-alerts` | path `preset_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 20` (ge=1; le=100) | `discovery_screen_alert_history` | `MarketScanScreenAlertHistoryPage` | `app/api/routes/discovery.py` |
 | POST | `/api/discovery/presets/{preset_id}/screen-alerts` | body `payload: MarketScanScreenAlertRequest`<br>path `preset_id: int` (ge=1) | `record_discovery_screen_alert` | `MarketScanScreenAlertResponse` | `app/api/routes/discovery.py` |
+| GET | `/api/discovery/presets/{preset_id}/screen-alerts/{event_id}` | path `preset_id: int` (ge=1)<br>path `event_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=100)<br>query `kind: MarketScanScreenAlertHistoryKind = 'all'` | `discovery_screen_alert_detail` | `MarketScanScreenAlertDetailPage` | `app/api/routes/discovery.py` |
 | GET | `/api/discovery/runs/{run_id}/rank-changes` | path `run_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200) | `discovery_rank_changes` | `DiscoveryRankChangePage` | `app/api/routes/discovery.py` |
 | GET | `/api/futu/status` | - | `futu_status` | `FutuStatusResponse` | `app/api/routes/data.py` |
 | GET | `/api/health` | - | `health` | `-` | `app/api/routes/health.py` |
@@ -54,11 +57,11 @@ Total endpoints: 157
 | POST | `/api/market-scans/{run_id}/cancel` | path `run_id: int` | `cancel_market_scan` | `MarketScanRun` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/delta` | path `run_id: int` | `market_scan_delta` | `MarketScanDeltaResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/experimental-probability` | path `run_id: int`<br>query `acknowledge_experimental: bool = False`<br>query `prediction_kind: Literal['net_h5', 'close_d1', 'close_d2', 'close_d5'] = 'net_h5'`<br>query `min_probability: float \| None = None` (ge=0; le=1)<br>query `market: MarketCode \| None = None`<br>query `keyword: str = ''` (max_length=80)<br>query `sort: Literal['probability', 'base_rank'] = 'probability'`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200) | `market_scan_experimental_probability` | `dict[str, object]` | `app/api/routes/market_scan.py` |
-| GET | `/api/market-scans/{run_id}/export.xlsx` | path `run_id: int` | `export_market_scan_results` | `-` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/{run_id}/export.xlsx` | path `run_id: int`<br>query `status: MarketScanStatusFilter = 'success'`<br>query `market: list[MarketCode] \| None = None`<br>query `industry: list[str] \| None = None`<br>query `is_st: bool \| None = None`<br>query `is_new: bool \| None = None`<br>query `min_score: int \| None = None` (ge=0; le=100)<br>query `max_score: int \| None = None` (ge=0; le=100)<br>query `min_trend_score: int \| None = None` (ge=0; le=100)<br>query `max_trend_score: int \| None = None` (ge=0; le=100)<br>query `min_change_pct: float \| None = None` (ge=-1000; le=1000)<br>query `max_change_pct: float \| None = None` (ge=-1000; le=1000)<br>query `min_turnover_rate: float \| None = None` (ge=0; le=10000)<br>query `max_turnover_rate: float \| None = None` (ge=0; le=10000)<br>query `min_amount: float \| None = None` (ge=0; le=1000000000000000)<br>query `max_amount: float \| None = None` (ge=0; le=1000000000000000)<br>query `min_data_quality_score: int \| None = None` (ge=0; le=100)<br>query `max_data_quality_score: int \| None = None` (ge=0; le=100)<br>query `min_confidence: float \| None = None` (ge=0; le=100)<br>query `max_risk: float \| None = None` (ge=0; le=100)<br>query `min_tradability: float \| None = None` (ge=0; le=100)<br>query `probability_horizon: int = 5`<br>query `min_upside_probability: float \| None = None` (ge=0; le=1)<br>query `keyword: str \| None = None` (max_length=80)<br>query `sort: list[MarketScanSort] \| None = None`<br>query `order: list[MarketScanSortOrder] \| None = None` | `export_market_scan_results` | `-` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/future-range-research` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200)<br>query `session_offset: int \| None = None` (ge=1; le=3)<br>query `symbol: str \| None = None` (max_length=20)<br>query `include_research: bool = True` | `market_scan_future_range_research` | `MarketScanFutureRangeResearchResponse` | `app/api/routes/market_scan.py` |
 | GET | `/api/market-scans/{run_id}/probability-research` | path `run_id: int` | `market_scan_probability_research` | `dict[str, object]` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans/{run_id}/refresh-top100` | path `run_id: int` | `refresh_market_scan_top100` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
-| GET | `/api/market-scans/{run_id}/results` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200) | `market_scan_results` | `MarketScanResultPage` | `app/api/routes/market_scan.py` |
+| GET | `/api/market-scans/{run_id}/results` | path `run_id: int`<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 100` (ge=1; le=200)<br>query `status: MarketScanStatusFilter = 'success'`<br>query `market: list[MarketCode] \| None = None`<br>query `industry: list[str] \| None = None`<br>query `is_st: bool \| None = None`<br>query `is_new: bool \| None = None`<br>query `min_score: int \| None = None` (ge=0; le=100)<br>query `max_score: int \| None = None` (ge=0; le=100)<br>query `min_trend_score: int \| None = None` (ge=0; le=100)<br>query `max_trend_score: int \| None = None` (ge=0; le=100)<br>query `min_change_pct: float \| None = None` (ge=-1000; le=1000)<br>query `max_change_pct: float \| None = None` (ge=-1000; le=1000)<br>query `min_turnover_rate: float \| None = None` (ge=0; le=10000)<br>query `max_turnover_rate: float \| None = None` (ge=0; le=10000)<br>query `min_amount: float \| None = None` (ge=0; le=1000000000000000)<br>query `max_amount: float \| None = None` (ge=0; le=1000000000000000)<br>query `min_data_quality_score: int \| None = None` (ge=0; le=100)<br>query `max_data_quality_score: int \| None = None` (ge=0; le=100)<br>query `min_confidence: float \| None = None` (ge=0; le=100)<br>query `max_risk: float \| None = None` (ge=0; le=100)<br>query `min_tradability: float \| None = None` (ge=0; le=100)<br>query `probability_horizon: int = 5`<br>query `min_upside_probability: float \| None = None` (ge=0; le=1)<br>query `keyword: str \| None = None` (max_length=80)<br>query `sort: list[MarketScanSort] \| None = None`<br>query `order: list[MarketScanSortOrder] \| None = None` | `market_scan_results` | `MarketScanResultPage` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans/{run_id}/retry` | path `run_id: int` | `retry_market_scan` | `MarketScanStartResponse` | `app/api/routes/market_scan.py` |
 | POST | `/api/market-scans/{run_id}/screen/evaluate` | path `run_id: int`<br>body `payload: MarketScanScreenEvaluateRequest` | `evaluate_market_scan_screen` | `MarketScanScreenEvaluationV1` | `app/api/routes/market_scan.py` |
 | GET | `/api/monitor/events` | query `limit: int = 30` (ge=1; le=200) | `monitor_events` | `list[MonitorEvent]` | `app/api/routes/monitoring.py` |
@@ -78,7 +81,7 @@ Total endpoints: 157
 | GET | `/api/quotes` | query `symbols: str = '600519,000001,300750'` | `quotes` | `list[Quote]` | `app/api/routes/quotes.py` |
 | GET | `/api/review` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `period_days: int = 60` (ge=20; le=240) | `review` | `IndividualReview` | `app/api/routes/analysis.py` |
 | GET | `/api/reviews` | query `symbol: str \| None = None` (description=可选，A股代码)<br>query `limit: int = 20` (ge=1; le=100)<br>query `offset: int = 0` (ge=0; le=100000) | `review_details` | `list[AdviceReviewDetail]` | `app/api/routes/reviews.py` |
-| GET | `/api/reviews/due` | query `as_of: datetime \| None = None`<br>query `limit: int = 100` (ge=1; le=200) | `due_reviews` | `list[AdviceReviewDueItem]` | `app/api/routes/reviews.py` |
+| GET | `/api/reviews/due` | query `as_of: datetime \| None = None`<br>query `page: int = 1` (ge=1; le=100000)<br>query `page_size: int = 100` (ge=1; le=200)<br>query `snapshot_token: str \| None = None` (pattern=^[0-9a-f]{64}$)<br>query `symbol: str \| None = None` (max_length=32; description=标准股票代码子串，不区分大小写)<br>query `from_date: date \| None = None`<br>query `horizon_days: int \| None = None` (ge=1; le=60) | `due_reviews` | `AdviceReviewDuePage` | `app/api/routes/reviews.py` |
 | POST | `/api/reviews/evaluate-due` | body `payload: AdviceReviewBatchEvaluationRequest`<br>query `limit: int = 20` (ge=1; le=100) | `evaluate_due_reviews` | `AdviceReviewBatchSummary` | `app/api/routes/reviews.py` |
 | GET | `/api/reviews/plans` | query `symbol: str \| None = None` (description=可选，A股代码)<br>query `limit: int = 100` (ge=1; le=200)<br>query `offset: int = 0` (ge=0; le=100000) | `review_plans` | `list[AdviceReviewPlan]` | `app/api/routes/reviews.py` |
 | POST | `/api/reviews/plans` | body `payload: AdviceReviewPlanInput` | `create_review_plan` | `AdviceReviewPlan` | `app/api/routes/reviews.py` |
@@ -110,7 +113,8 @@ Total endpoints: 157
 | GET | `/api/stock/minute-analysis` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `interval: Literal['1m', '5m', '15m', '30m', '60m'] = '5m'` (description=分钟周期：1m/5m/15m/30m/60m)<br>query `limit: int = 120` (ge=20; le=500) | `minute_analysis` | `MinuteAnalysisReport` | `app/api/routes/stock.py` |
 | GET | `/api/stock/notes` | query `symbol: str = '600519'` (description=6位A股代码)<br>query `limit: int = 100` (ge=1; le=500) | `stock_notes` | `list[StockNoteItem]` | `app/api/routes/notes.py` |
 | POST | `/api/stock/notes` | body `payload: StockNoteInput` | `create_stock_note` | `StockNoteItem` | `app/api/routes/notes.py` |
-| DELETE | `/api/stock/notes/{note_id}` | path `note_id: int` | `delete_stock_note` | `MutationResult` | `app/api/routes/notes.py` |
+| DELETE | `/api/stock/notes/{note_id}` | path `note_id: int`<br>query `expected_revision: str = ...` (pattern=^[0-9a-f]{64}$) | `delete_stock_note` | `MutationResult` | `app/api/routes/notes.py` |
+| GET | `/api/stock/notes/{note_id}` | path `note_id: int` | `stock_note` | `StockNoteItem` | `app/api/routes/notes.py` |
 | PATCH | `/api/stock/notes/{note_id}` | path `note_id: int`<br>body `payload: StockNoteUpdate` | `update_stock_note` | `StockNoteItem` | `app/api/routes/notes.py` |
 | GET | `/api/stock/order-pressure` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_order_pressure` | `OrderPressure` | `app/api/routes/stock.py` |
 | GET | `/api/stock/overview` | query `symbol: str = '600519'` (description=6位A股代码) | `stock_overview` | `StockOverview` | `app/api/routes/stock.py` |
@@ -172,13 +176,16 @@ Total endpoints: 157
 ## Error Contract
 
 - `400`: domain validation errors from routes or workflows, including malformed stock symbols or unsupported intervals.
+- `403`: untrusted API hosts or browser origins rejected by the same-origin middleware, including cross-site mutations.
 - `404`: not-found responses for local user-state records or confirmed missing stocks.
-- `422`: FastAPI/Pydantic request-shape validation before route logic runs.
+- `409`: revision conflicts or failed integrity checks for frozen snapshots, research artifacts, or immutable ledgers; refresh or verify the source before retrying.
+- `422`: invalid request shapes, query constraints, or explicit domain admission checks, including unsupported experimental-probability requests.
 - `503`: provider, runtime, scheduler, or SQLite failures mapped through `app/api/errors.py`.
 - `GET /api/stream/quotes` returns `text/event-stream`; normal frames contain JSON quote arrays and `quote-error` frames contain `{ "message": "..." }`.
 
 ## API Design Notes
 
+- This static inventory expands Query/Path and scalar parameters in named, same-module Depends declarations; external service objects are not exposed. Dynamic or complex dependencies are not fully reflected, and actual API request validation remains authoritative.
 - Route handlers should stay thin: validate parameters, call workflow/service functions, and return response models.
 - All user-facing failures should pass through `app/api/errors.py` or explicit `HTTPException` with Chinese messages.
 - New endpoints should be added to the relevant route module and this file should be regenerated.

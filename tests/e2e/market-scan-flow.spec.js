@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { filterMarketScanRange, filterMarketScanResearchRange, marketScanResultCompare } from "./market-scan-fixture-filters.mjs";
 import { delay, mockApi, selectPrimaryView } from "./frontend-flow-api-fixtures.mjs";
+import { discoveryArchive, discoveryPreset, discoveryLeaderboard, discoveryRankChanges } from "./discovery-api-fixtures.mjs";
 
 test("full-market scan runs in background and renders a bounded responsive snapshot", async ({ page }, testInfo) => {
   testInfo.setTimeout(45000);
@@ -75,7 +76,9 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-label", "全市场扫描进度");
   await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "false");
   await expect(page.locator("#marketScanHistory")).toBeHidden();
-  await expect(page.locator("#workspace-panel-market-scan [aria-live=polite]")).toHaveCount(2);
+  await expect(page.locator("#workspace-panel-market-scan [aria-live=polite]")).toHaveCount(5);
+  await expect(page.locator("#strategyScheduleStatus")).toHaveAttribute("role", "status");
+  await expect(page.locator("#marketScanHistoryPageInfo")).toHaveAttribute("role", "status");
   expect(latestCalls).toBe(1);
   await selectPrimaryView(page, "market");
   expect(latestCalls).toBe(1);
@@ -647,7 +650,8 @@ for (const viewport of [
     });
 
     await page.locator("#marketScanScoreMax").fill("98");
-    await page.locator("#discoveryPresetSave").click();
+    await page.locator("#discoveryPresetMore > summary").click();
+    await page.locator("#discoveryPresetUpdate").click();
     await expect(page.locator("#discoveryPresetFeedback")).toContainText("已更新");
     expect(discovery.calls.update).toHaveLength(1);
     expect(discovery.calls.update[0].expected_revision).toBe(1);
@@ -673,7 +677,9 @@ for (const viewport of [
     expect(discovery.calls.enqueue.at(-1).symbols).toEqual(["600519.SH", "600809.SH"]);
 
     if (viewport.name === "desktop") {
-      await page.locator("#discoveryPresetMore summary").click();
+      if (await page.locator("#discoveryPresetExport").isHidden()) {
+        await page.locator("#discoveryPresetMore > summary").click();
+      }
       const downloadPromise = page.waitForEvent("download");
       await page.locator("#discoveryPresetExport").click();
       const download = await downloadPromise;
@@ -938,78 +944,6 @@ function discoveryApiHarness() {
       }
       return null;
     },
-  };
-}
-
-function discoveryArchive(definition) {
-  return {
-    format: "ashare-radar.discovery-preset",
-    schema_version: 2,
-    checksum_algorithm: "sha256",
-    checksum: "a".repeat(64),
-    exported_at: "2026-07-28T12:00:00Z",
-    preset: {
-      name: definition.name,
-      criteria: definition.criteria,
-      sort: definition.sort,
-      column_view: definition.column_view || "overview",
-    },
-  };
-}
-
-function discoveryPreset(payload, revision) {
-  return {
-    ...payload,
-    id: 7,
-    schema_version: 2,
-    column_view: payload.column_view || "overview",
-    revision,
-    created_at: "2026-07-28T10:00:00Z",
-    updated_at: "2026-07-28T10:00:00Z",
-  };
-}
-
-function discoveryLeaderboard(preset, payload) {
-  return {
-    preset,
-    run_id: payload.run_id,
-    rule_version: "leader-v2",
-    items: [
-      {
-        position: 1, source_rank: 1, symbol: "600519.SH", code: "600519", market: "SH",
-        name: "贵州茅台", industry: "白酒", is_st: false, is_new: false,
-        quality: 96, trend: 91, change: 2.4, turnover: 1.2, amount: 1800000000, score: 95, raw_score: 94.8,
-      },
-      {
-        position: 2, source_rank: 4, symbol: "600809.SH", code: "600809", market: "SH",
-        name: "山西汾酒", industry: "白酒", is_st: false, is_new: false,
-        quality: 93, trend: 89, change: 1.8, turnover: 0.9, amount: 920000000, score: 92, raw_score: 91.8,
-      },
-    ],
-    total: 2,
-    page: payload.page,
-    page_size: payload.page_size,
-    page_count: 1,
-  };
-}
-
-function discoveryRankChanges() {
-  return {
-    current_run_id: 42,
-    previous_run_id: 41,
-    current_rule_version: "leader-v2",
-    previous_rule_version: "leader-v2",
-    comparable: true,
-    reason: null,
-    items: [
-      { symbol: "600519.SH", code: "600519", market: "SH", name: "贵州茅台", previous_rank: 2, current_rank: 1, rank_delta: 1, movement: "up" },
-      { symbol: "600809.SH", code: "600809", market: "SH", name: "山西汾酒", previous_rank: null, current_rank: 4, rank_delta: null, movement: "new" },
-      { symbol: "000001.SZ", code: "000001", market: "SZ", name: "平安银行", previous_rank: 3, current_rank: null, rank_delta: null, movement: "exit" },
-    ],
-    total: 3,
-    page: 1,
-    page_size: 200,
-    page_count: 1,
   };
 }
 

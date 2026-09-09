@@ -36,6 +36,7 @@ from app.db.market_scan_artifact_lease import (
 
 from app.models.paper_trading import PaperCostProfile
 from app.services.market_scan_probability import (
+    PREVIOUS_PROBABILITY_FEATURE_VERSION,
     PROBABILITY_BASELINE_VERSION,
     PROBABILITY_CALIBRATOR_VERSION,
     PROBABILITY_COST_MODEL_VERSION,
@@ -95,6 +96,7 @@ SUPERSEDED_INDIVIDUAL_PROBABILITY_ASSESSMENT_SCHEMA_VERSIONS = (
     "individual-upside-probability-assessment-v3-source-contract-bound",
 )
 INDIVIDUAL_PROBABILITY_TARGET_VERSION = "individual-upside-net-return-label-v1"
+_LEGACY_ESTIMATOR_LABEL_VERSION = "market-scan-upside-label-v3-explicit-target-offset"
 INDIVIDUAL_PROBABILITY_HOLDING_SESSIONS = (1, 2, 3)
 INDIVIDUAL_PROBABILITY_DISPLAY_DAYS = (2, 3, 4)
 INDIVIDUAL_PROBABILITY_ASSESSMENT_PREFIX = "individual-upside-probability-assessment"
@@ -229,8 +231,10 @@ def individual_probability_estimator_contract() -> dict[str, object]:
     The individual assessment reuses the market-scan estimator.  Persisting
     only its output version is insufficient: a core split/config change could
     otherwise reinterpret an old artifact under the same assessment schema.
-    Exact verification below deliberately makes such drift fail closed and
-    requires a new assessment schema plus a rebuilt content-addressed artifact.
+    Model/split changes fail closed. The registered v3/v4 estimator label stamp
+    transition changes no individual target: _net_label owns its fixed daily
+    price proxy and does not use full-market execution labels. Old assessments
+    retain their exact stamp/digests; new fits bind the actual estimator stamp.
     """
     representative = ProbabilityConfig(
         horizon=max(INDIVIDUAL_PROBABILITY_HOLDING_SESSIONS),
@@ -263,6 +267,17 @@ def individual_probability_estimator_contract() -> dict[str, object]:
             str(holding): _individual_probability_horizon_split_contract(holding) for holding in INDIVIDUAL_PROBABILITY_HOLDING_SESSIONS
         },
     }
+
+
+def _validate_estimator_contract(value: object, *, legacy_source_binding: bool) -> None:
+    current = individual_probability_estimator_contract()
+    previous = {**current, "estimator_label_version": _LEGACY_ESTIMATOR_LABEL_VERSION}
+    # Assessment v2 predates the new estimator stamp. Its frozen metadata must
+    # not be re-labelled; current assessment v4 can carry either registered fit.
+    legacy = {**previous, "estimator_feature_version": PREVIOUS_PROBABILITY_FEATURE_VERSION}
+    registered = (legacy,) if legacy_source_binding else (previous, current)
+    if value not in registered:
+        raise IndividualProbabilityArtifactError("个股上涨概率 estimator contract 冲突")
 
 
 def _individual_probability_horizon_split_contract(holding: int) -> dict[str, object]:
@@ -938,8 +953,7 @@ def _validate_payload(
         raise IndividualProbabilityArtifactError("个股上涨概率 assessment payload 字段无效")
     if payload.get("target_contract") != individual_probability_target_contract():
         raise IndividualProbabilityArtifactError("个股上涨概率 target contract 冲突")
-    if payload.get("estimator_contract") != individual_probability_estimator_contract():
-        raise IndividualProbabilityArtifactError("个股上涨概率 estimator contract 冲突")
+    _validate_estimator_contract(payload.get("estimator_contract"), legacy_source_binding=legacy_source_binding)
     source = _validate_source(_mapping(payload["source"], "payload.source"))
     official = _validate_official_pit(
         _mapping(payload["official_pit"], "payload.official_pit"),
@@ -1204,12 +1218,10 @@ def _validated_source_identity(
         value.get("production_score_spec_hash"),
         "official PIT production score spec hash",
     )
-    score_validator = (
-        is_registered_production_score_contract
-        if previous
-        else is_current_writable_production_score_contract
-    )
-    if not score_validator(production_rule, production_hash):
+    if (
+        (not previous and production_rule != "full-market-score-v5")
+        or not is_registered_production_score_contract(production_rule, production_hash)
+    ):
         raise IndividualProbabilityArtifactError("official PIT production score rule/spec 未注册")
     return as_of, captured_at, run_rule, production_rule, production_hash
 
@@ -1469,7 +1481,7 @@ def _validate_horizon_evidence_fields(
     legacy_source_binding: bool,
 ) -> date | None:
     _validate_optional_rate(value.get("base_rate"), "base_rate")
-    _validate_horizon_versions(value)
+    _validate_horizon_versions(value, legacy_source_binding=legacy_source_binding)
     _validate_evidence_digest(value.get("evidence_digest"))
     metrics = value.get("calibration_metrics")
     if metrics is not None:
@@ -1487,11 +1499,13 @@ def _validate_optional_rate(value: object, label: str) -> None:
         raise IndividualProbabilityArtifactError(f"个股上涨概率 {label} 无效")
 
 
-def _validate_horizon_versions(value: Mapping[str, object]) -> None:
+def _validate_horizon_versions(value: Mapping[str, object], *, legacy_source_binding: bool = False) -> None:
     expected = {
         "model_version": PROBABILITY_MODEL_VERSION,
         "feature_version": HISTORICAL_REPLAY_FEATURE_VERSION,
-        "estimator_feature_version": PROBABILITY_FEATURE_VERSION,
+        "estimator_feature_version": (
+            PREVIOUS_PROBABILITY_FEATURE_VERSION if legacy_source_binding else PROBABILITY_FEATURE_VERSION
+        ),
     }
     if any(value.get(name) != registered for name, registered in expected.items()):
         raise IndividualProbabilityArtifactError("个股上涨概率 horizon 版本与 estimator contract 冲突")

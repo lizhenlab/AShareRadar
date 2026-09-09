@@ -14,7 +14,7 @@
 
 .primary-navigation-inner {
   display: grid;
-  grid-template-columns: repeat(4, minmax(104px, 1fr));
+  grid-template-columns: repeat(5, minmax(104px, 1fr));
   gap: 8px;
   max-width: 920px;
   min-width: 0;
@@ -55,7 +55,9 @@ body[data-primary-view="review"] .layout {
   grid-template-areas: "query workspace";
 }
 
-body[data-primary-view="market"] .layout {
+body[data-primary-view="market"] .layout,
+body[data-primary-view="system"] .layout,
+body[data-primary-view="review"][data-workspace-view="paper"] .layout {
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas: "workspace";
 }
@@ -123,8 +125,8 @@ body.market-scan-global-active:not(.market-scan-view-active) .workspace-tabs {
   }
 
   .primary-navigation-inner {
-    grid-template-columns: repeat(4, minmax(78px, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(5, minmax(66px, 1fr));
+    gap: 4px;
     max-width: none;
     padding: 6px 12px;
     overflow-x: auto;
@@ -132,12 +134,13 @@ body.market-scan-global-active:not(.market-scan-view-active) .workspace-tabs {
 
   .primary-navigation button {
     min-height: 40px;
-    padding: 0 8px;
-    font-size: 13px;
+    padding: 0 3px;
+    font-size: 12px;
   }
 
   body[data-primary-view="research"] .layout,
   body[data-primary-view="market"] .layout,
+  body[data-primary-view="system"] .layout,
   body[data-primary-view="review"] .layout,
   body[data-primary-view="monitor"] .layout {
     display: flex;
@@ -167,6 +170,11 @@ body.market-scan-global-active:not(.market-scan-view-active) .workspace-tabs {
 
 @media (max-width: 390px) {
   .primary-navigation-inner {
-    grid-template-columns: repeat(4, minmax(76px, 1fr));
+    grid-template-columns: repeat(5, minmax(66px, 1fr));
   }
+}
+
+#adviceTimeline { scroll-margin-top: calc(var(--topbar-sticky-height) + var(--primary-navigation-height) + 12px); }
+@media (max-width: 820px) {
+  #adviceTimeline { scroll-margin-top: calc(var(--primary-navigation-height) + 12px); }
 }

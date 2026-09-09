@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from math import isclose
+from typing import Literal
 
 from app.models.market import Kline
 from app.models.paper_trading_config import PAPER_TRADING_RULE_VERSION
@@ -239,8 +240,9 @@ def assess_daily_tradeability(
     *,
     previous_close: float | None,
     profile: PaperTradeRuleProfile,
+    execution_phase: Literal["open", "close"] = "open",
 ) -> DailyTradeability:
-    explicit = _explicit_execution_status(row)
+    explicit = _explicit_execution_status(row, execution_phase)
     if explicit is not None:
         return explicit
     if row.volume <= 0:
@@ -294,14 +296,20 @@ def assess_daily_tradeability(
     )
 
 
-def _explicit_execution_status(row: Kline) -> DailyTradeability | None:
-    if row.session_status == "suspended" or row.open_execution_status == "unavailable":
+def _explicit_execution_status(row: Kline, execution_phase: Literal["open", "close"]) -> DailyTradeability | None:
+    if execution_phase not in {"open", "close"}:
+        raise ValueError("unsupported daily tradeability execution phase")
+    if row.session_status == "suspended" or (execution_phase == "open" and row.open_execution_status == "unavailable"):
         return DailyTradeability(
             can_buy=False,
             can_sell=False,
             code="execution_metadata_unavailable",
             message="执行元数据显示停牌或开盘不可成交，买卖均不撮合",
         )
+    # Opening evidence cannot establish execution at the close. Keep the daily
+    # volume/one-price tests below and their model uncertainty for closing exits.
+    if execution_phase == "close":
+        return None
     if row.open_execution_status == "locked_limit_up":
         return DailyTradeability(
             can_buy=False,

@@ -173,6 +173,7 @@ function bindSearchEvents(settings, input, list, controller, currentView) {
 }
 
 function handleSearchKeydown(event, controller, view) {
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     controller.move(event.key === "ArrowDown" ? 1 : -1);

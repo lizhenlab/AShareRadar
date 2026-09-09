@@ -384,7 +384,8 @@ def test_v5_continuous_trend_observations_reach_distribution_pass(tmp_path: Path
         rows = [
             make_kline(
                 date=session.isoformat(),
-                close=first_close + position * step,
+                # Each quote uses the same 5% completed-session return.
+                close=10.0 if position == len(days) - 2 else first_close + position * step,
                 volume=1_000_000 + position * 20_000,
                 source="test-qfq",
                 as_of=data_date.isoformat(),

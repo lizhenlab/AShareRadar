@@ -28,6 +28,7 @@ from app.models.market_scan_screening import (
     MarketBreadthV1,
     MarketScanScreenEvaluateRequest,
     MarketScanScreenEvaluationV1,
+    normalize_screen_keyword,
 )
 from app.services.market_scan_manager import MarketScanManager
 from app.services.market_scan_future_range_store import FutureRangeResearchUnavailable
@@ -193,12 +194,19 @@ def market_scan_filter_query(
         min_tradability=min_tradability,
         probability_horizon=probability_horizon,
         min_upside_probability=min_upside_probability,
-        keyword=keyword,
+        keyword=_validated_screen_keyword(keyword),
         sort=sorts,
         order=orders,
     )
     _validate_filter_values(filters)
     return filters.normalized()
+
+
+def _validated_screen_keyword(keyword: str | None) -> str | None:
+    try:
+        return normalize_screen_keyword(keyword)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _validate_filter_values(filters: MarketScanExportFilters) -> None:

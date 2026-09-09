@@ -87,6 +87,15 @@ def _default_sort() -> list[ScreenSortV2]:
     return [ScreenSortV2(field="rank", order="asc")]
 
 
+def normalize_screen_keyword(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.split()).strip()
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise ValueError("股票搜索关键词不能包含控制字符")
+    return normalized or None
+
+
 class ScreenSpecV2(_StrictScreenModel):
     """Canonical executable screen; unsupported fields are rejected, never ignored."""
 
@@ -115,10 +124,7 @@ class ScreenSpecV2(_StrictScreenModel):
     @field_validator("keyword")
     @classmethod
     def normalize_keyword(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = " ".join(value.split()).strip()
-        return normalized or None
+        return normalize_screen_keyword(value)
 
     @field_validator("sort")
     @classmethod
@@ -516,4 +522,5 @@ __all__ = [
     "ScreenSortField",
     "ScreenSortV2",
     "ScreenSpecV2",
+    "normalize_screen_keyword",
 ]

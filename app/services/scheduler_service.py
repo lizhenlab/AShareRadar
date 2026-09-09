@@ -38,7 +38,8 @@ class LocalDataScheduler(
         self.started_at: datetime | None = None
         self._stop_event = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
-        self._active_tasks: set[asyncio.Task[str]] = set()
+        self._active_tasks: set[asyncio.Task[object]] = set()
+        self._automatic_tick_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._manual_run_lock = asyncio.Lock()
         self._instance_guard = instance_guard if instance_guard is not None else _default_instance_guard(datahub)
@@ -55,6 +56,12 @@ class LocalDataScheduler(
         self._quiescent_event = asyncio.Event()
         self._quiescent_event.set()
         self.tasks = _build_local_tasks(self.settings, market_now_naive(), self._task_handlers())
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the scheduler loop is currently running, without reading scan data."""
+
+        return bool(self._runner is not None and not self._runner.done())
 
     def bind_instance_guard(self, instance_guard: SchedulerInstanceGuard) -> None:
         if self._guard_acquired or self._runner is not None or self._active_tasks:

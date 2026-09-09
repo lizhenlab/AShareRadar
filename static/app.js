@@ -36,6 +36,7 @@ import {
 } from "./js/diagnostics.js";
 import { $, escapeHtml, setMetricTone } from "./js/dom.js";
 import { createDiscoveryController } from "./js/discovery.js";
+import { createDiscoveryScreenAlertsController } from "./js/discovery-screen-alerts.js";
 import { createIndividualProbabilityController } from "./js/individual-probability-controller.js";
 import { createMarketScanExecutableShadowController } from "./js/market-scan-executable-shadow-controller.js";
 import { compactErrorMessage } from "./js/errors.js";
@@ -57,6 +58,7 @@ import {
   renderNotes,
 } from "./js/notes.js";
 import { disableAlertNotifications, enableAlertNotifications, initializeAlertNotifications } from "./js/notifications.js";
+import { createNotificationNavigation } from "./js/notification-navigation.js";
 import {
   commitLocalDataImport,
   exportLocalUserData,
@@ -65,6 +67,7 @@ import {
   previewLocalDataImport,
   readLocalDataFile,
   runRuntimeCleanup,
+  syncImportCommitButton,
 } from "./js/local-data.js";
 import { renderResearch } from "./js/research-panels.js";
 import { syncAiQuestionCapabilityFromAvailability } from "./js/research-qa-reports.js";
@@ -72,15 +75,15 @@ import { ACTIVITY_FILTERS, mergeResearchActivity, renderResearchActivity } from 
 import { createStockSearchController } from "./js/stock-search.js";
 import { createStockSearchHistory } from "./js/stock-search-history.js";
 import { createStockSearchSurface } from "./js/stock-search-surface.js";
+import { navigateWatchlistResearch } from "./js/watchlist-navigation.js";
+import { bindWatchlistQueueFilters } from "./js/watchlist-queue-view.js";
 import { normalizeUiSymbol, validateUiSymbol } from "./js/symbols.js";
 import { validateStockWorkbenchResponse } from "./js/workbench-contracts.js";
 import {
   addWatchlistItem,
-  appendWatchlistMessage,
   invalidateWatchlistCache,
   isExcludedWatchlistItem,
   loadWatchlist,
-  markWatchlistItemViewed,
   removeWatchlistItem,
   renderWatchlist,
   toggleWatchlistEditor,
@@ -132,6 +135,7 @@ const state = {
   minuteChartInspection: null,
   primaryView: DEFAULT_WORKSPACE_PREFERENCES.primaryView,
   workspaceView: DEFAULT_WORKSPACE_PREFERENCES.workspaceView,
+  workspaceByPrimary: { ...DEFAULT_WORKSPACE_VIEW_BY_PRIMARY },
   dailyChartRange: DEFAULT_WORKSPACE_PREFERENCES.dailyChartRange,
   dailyChartMa5: DEFAULT_WORKSPACE_PREFERENCES.dailyChartMa5,
   dailyChartMa20: DEFAULT_WORKSPACE_PREFERENCES.dailyChartMa20,
@@ -171,8 +175,11 @@ const state = {
   sseStatus: { phase: "idle", text: "", kind: "", hasValidFrame: false },
   visibilityRefreshSources: new Set(),
   adviceReviewDetails: [],
+  adviceReviewPinnedDetail: null,
+  adviceReviewPinnedReadOnly: false,
   adviceReviewSnapshots: [],
   adviceReviewEditingPlanId: null,
+  adviceReviewEditingPlanSnapshot: null,
   adviceReviewHistories: {},
   adviceReviewAsOfByPlan: {},
   adviceReviewEvaluationSeqByPlan: {},
@@ -182,7 +189,6 @@ const state = {
   adviceReviewDashboardSeq: 0,
   adviceReviewDashboardSummary: null,
   adviceReviewDashboardDetails: [],
-  adviceReviewDueItems: [],
   paperTradingSeq: 0,
   paperTradingDashboard: null,
   watchlistScanHistory: [],
@@ -193,6 +199,7 @@ const state = {
 
 let restoringWorkspacePreferences = false;
 let primaryNavigation = null;
+let notificationNavigation = null;
 
 export const GLOBAL_REFRESH_TTL_MS = GLOBAL_DATA_TTL_MS;
 export const GLOBAL_ENDPOINTS = Object.freeze([
@@ -255,7 +262,8 @@ const WORKBENCH_PANEL_IDS = [
 
 function applyPrimaryView(view) {
   const target = PRIMARY_VIEW_OPTIONS.includes(view) ? view : DEFAULT_WORKSPACE_PREFERENCES.primaryView;
-  state.primaryView = primaryNavigation?.render(target) || target;
+  if (target !== "research") notificationNavigation?.cancel();
+  state.primaryView = primaryNavigation?.render(target, state.workspaceView) || target;
   document.body?.classList?.toggle("market-scan-view-active", state.primaryView === "market");
   return state.primaryView;
 }
@@ -269,13 +277,14 @@ function setPrimaryView(view, options = {}) {
     && supportedWorkspaceViews.length > 0
     && !supportedWorkspaceViews.includes(state.workspaceView)
   ) {
-    setWorkspaceView(DEFAULT_WORKSPACE_VIEW_BY_PRIMARY[target], {
+    setWorkspaceView(state.workspaceByPrimary[target] || DEFAULT_WORKSPACE_VIEW_BY_PRIMARY[target], {
       refreshMarketScan: options.refreshMarketScan,
       syncPrimary: false,
     });
   } else {
     const surfaceActive = target === "market" && state.workspaceView === "market-scan";
     marketScanController.setSurfaceActive(surfaceActive);
+    discoveryScreenAlertsController.setSurfaceActive(surfaceActive);
     if (surfaceActive && !marketScanController.state.activated) void marketScanController.activate();
     if (surfaceActive && !strategyLabController.state.activated) void strategyLabController.activate();
     persistWorkspacePreferences();
@@ -300,8 +309,12 @@ function setWorkspaceView(view, options = {}) {
     ? requested
     : fallback?.dataset.view || DEFAULT_WORKSPACE_PREFERENCES.workspaceView;
   const previousView = state.workspaceView;
+  if (target !== "tools") notificationNavigation?.cancel();
   state.workspaceView = target;
+  if (document.body?.dataset) document.body.dataset.workspaceView = target;
+  state.workspaceByPrimary[primaryViewForWorkspace(target)] = target;
   if (options.syncPrimary !== false) applyPrimaryView(primaryViewForWorkspace(target));
+  else primaryNavigation?.render(state.primaryView, target);
   buttons.forEach((button) => {
     const active = button.dataset.view === target;
     button.classList.toggle("active", active);
@@ -316,6 +329,7 @@ function setWorkspaceView(view, options = {}) {
   document.body?.classList?.toggle("market-scan-view-active", state.primaryView === "market");
   const surfaceActive = state.primaryView === "market" && target === "market-scan";
   const surfaceChanged = marketScanController.setSurfaceActive(surfaceActive);
+  discoveryScreenAlertsController.setSurfaceActive(surfaceActive);
   persistWorkspacePreferences();
   if (surfaceActive && previousView !== target) {
     if (!marketScanController.state.activated) void marketScanController.activate();
@@ -581,6 +595,7 @@ function isStaleLoad(request) {
 }
 
 function setActiveSymbol(symbol) {
+  notificationNavigation?.cancel();
   state.symbol = normalizeUiSymbol(symbol);
   renderCurrentAnalysisContext(null);
   stockSearchSurface.closeSuggestions();
@@ -645,7 +660,7 @@ function renderWorkbench(workbench) {
   renderResearch(workbench, state);
   renderAlerts(workbench.alert_rules || []);
   renderAlertEvents(workbench.alert_events || []);
-  renderNotes(workbench.notes || []);
+  renderNotes(workbench.notes || [], state.symbol);
   syncToolsStockContext(analysis);
   state.lastAnalysis = analysis;
   state.lastInsights = workbench.insights;
@@ -722,8 +737,11 @@ function resetWorkbenchState() {
   state.chartMarks = [];
   state.activeMarkCategories.clear();
   state.adviceReviewDetails = [];
+  state.adviceReviewPinnedDetail = null;
+  state.adviceReviewPinnedReadOnly = false;
   state.adviceReviewSnapshots = [];
   state.adviceReviewEditingPlanId = null;
+  state.adviceReviewEditingPlanSnapshot = null;
   state.adviceReviewHasMore = false;
   syncToolsStockContext(null);
   resetResearchActivityState();
@@ -2105,6 +2123,7 @@ function currentWorkspacePreferences() {
   return {
     primaryView: state.primaryView,
     workspaceView: state.workspaceView,
+    workspaceByPrimary: { ...state.workspaceByPrimary },
     dailyChartRange: state.dailyChartRange,
     dailyChartMa5: state.dailyChartMa5,
     dailyChartMa20: state.dailyChartMa20,
@@ -2122,6 +2141,7 @@ function restoreWorkspacePreferences() {
   const preferences = loadWorkspacePreferences();
   restoringWorkspacePreferences = true;
   try {
+    state.workspaceByPrimary = { ...preferences.workspaceByPrimary };
     setWorkspaceView(preferences.workspaceView, { syncPrimary: false });
     setPrimaryView(preferences.primaryView);
     selectDailyChartRange(preferences.dailyChartRange);
@@ -2324,14 +2344,19 @@ const marketScanExecutableShadowController = createMarketScanExecutableShadowCon
 });
 const individualProbabilityController = createIndividualProbabilityController();
 
+const discoveryScreenAlertsController = createDiscoveryScreenAlertsController();
 const discoveryController = createDiscoveryController({
   getRun: () => marketScanController.state.run,
   loadStandardResults: () => marketScanController.loadResults(),
+  onPresetChange: (preset) => discoveryScreenAlertsController.selectionChanged(preset),
+  onScreenAlertRecorded: (payload) => discoveryScreenAlertsController.recorded(payload),
 });
 
 primaryNavigation = createPrimaryNavigation({
   onSelect: (view) => setPrimaryView(view),
 });
+notificationNavigation = createNotificationNavigation({ state, setActiveSymbol, setWorkspaceView, loadAll });
+const notificationOptions = { onNotificationClick: (target) => notificationNavigation.open(target) };
 
 const workspaceTabs = document.querySelector(".workspace-tabs");
 workspaceTabs.addEventListener("click", (event) => {
@@ -2506,6 +2531,8 @@ $("dailyMa20Toggle").addEventListener("change", (event) => {
   setDailyChartOverlay("ma20", event.currentTarget.checked);
 });
 
+bindWatchlistQueueFilters(() => state.watchlist);
+
 $("watchForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = $("watchSymbolInput");
@@ -2542,41 +2569,11 @@ $("watchList").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
   const symbol = button.dataset.symbol;
-  if (button.dataset.action === "open") {
-    clearWatchlistFeedback();
-    setActiveSymbol(symbol);
-    setWorkspaceView("overview");
-    const workbenchLoad = loadAll({ reveal: true, waitForAdviceTimeline: true });
-    const loadContext = { symbol: state.symbol, loadSeq: state.loadSeq };
-    void Promise.resolve(workbenchLoad)
-      .then(async (loaded) => {
-        if (!loaded || loadContext.symbol !== state.symbol || loadContext.loadSeq !== state.loadSeq) return;
-        const options = currentWatchlistMutationOptions("标记已读");
-        const watermark = state.adviceTimelineWatermark;
-        if (
-          !watermark ||
-          watermark.symbol !== loadContext.symbol ||
-          watermark.loadSeq !== loadContext.loadSeq
-        ) {
-          appendWatchlistMessage("主工作台已打开，未读状态保持", "建议变化尚未完整展示，请稍后重试。");
-          setWatchlistFeedback("主工作台已打开；建议变化尚未完整展示，未读状态保持。", "warn");
-          setMutationStatus("degraded", "建议变化未完整展示，未读状态保持", "warn");
-          return;
-        }
-        try {
-          await markWatchlistItemViewed(state, symbol, {
-            ...options,
-            viewedThroughAdviceId: watermark.adviceId,
-          });
-        } catch (error) {
-          if (isAbortError(error) || !options.isCurrent()) return;
-          const detail = compactErrorMessage(error.message);
-          appendWatchlistMessage("主工作台已打开，未读状态同步失败", detail);
-          setWatchlistFeedback(`主工作台已打开；未读状态未清除：${detail}`, "warn");
-          setMutationStatus("degraded", "自选股未读状态同步失败", "warn");
-        }
-      })
-      .catch(() => {});
+  if (["open", "changes"].includes(button.dataset.action)) {
+    void navigateWatchlistResearch({
+      state, root: document, clearWatchlistFeedback, setActiveSymbol, setWorkspaceView,
+      loadAll, currentWatchlistMutationOptions, setWatchlistFeedback, setMutationStatus,
+    }, symbol, { changes: button.dataset.action === "changes" });
     return;
   }
   if (button.dataset.action === "edit") {
@@ -2648,7 +2645,7 @@ $("enableAlertNotifications").addEventListener("click", async () => {
     disableAlertNotifications(state);
     return;
   }
-  await enableAlertNotifications(state);
+  await enableAlertNotifications(state, notificationOptions);
 });
 
 $("exportLocalData").addEventListener("click", async () => {
@@ -2669,6 +2666,10 @@ $("localDataImportMode").addEventListener("change", () => {
   invalidateLocalDataImportPreview(state);
 });
 
+$("localDataLegacyTimezone").addEventListener("input", () => {
+  invalidateLocalDataImportPreview(state, "旧文件来源时区已变化，请重新预览");
+});
+
 $("previewLocalDataImport").addEventListener("click", async () => {
   await runButtonTask($("previewLocalDataImport"), () => previewLocalDataImport(state), {
     onError: (error) => setInlineFeedback("localDataFeedback", error),
@@ -2679,6 +2680,7 @@ $("commitLocalDataImport").addEventListener("click", async () => {
   await runButtonTask($("commitLocalDataImport"), () => commitLocalDataAndRefresh(), {
     onError: (error) => setInlineFeedback("localDataFeedback", error),
   });
+  syncImportCommitButton(state);
 });
 
 $("runRuntimeCleanup").addEventListener("click", async () => {
@@ -2739,7 +2741,7 @@ function handleStockSearchPageHide(event) { appLifecycleController.handlePageHid
 function handleVisibilityChange() { appLifecycleController.handleVisibilityChange(); }
 
 initializeChartInspectors();
-initializeAlertNotifications(state);
+initializeAlertNotifications(state, notificationOptions);
 restoreWorkspacePreferences();
 
 export const __appTest = {

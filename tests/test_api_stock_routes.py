@@ -21,8 +21,15 @@ from app.services.individual_probability import individual_probability_store_for
 from tests.factories import make_kline, make_quote
 
 
-def test_upside_probability_route_is_artifact_only_and_typed() -> None:
-    datahub = _ProbabilityRouteHub(Path("data/ashare_radar.sqlite3"))
+def test_upside_probability_route_is_artifact_only_and_typed(tmp_path: Path) -> None:
+    fixture = Path(
+        "tests/fixtures/research/individual-upside-probability-assessment-"
+        "517691b101dcb2142693a74f6e5ac9ef10f386c545572b6bacfe161f186ba677.json"
+    )
+    directory = tmp_path / "research" / "individual_probability"
+    directory.mkdir(parents=True)
+    (directory / fixture.name).write_bytes(fixture.read_bytes())
+    datahub = _ProbabilityRouteHub(tmp_path / "runtime.sqlite3")
     app = FastAPI()
     app.include_router(stock.router)
     app.dependency_overrides[get_datahub] = lambda: datahub

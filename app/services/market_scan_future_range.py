@@ -22,6 +22,7 @@ import sqlite3
 from statistics import fmean, median
 from typing import Final, Literal, cast
 
+from app.db.market_mappers import KlineExecutionMetadata, kline_execution_metadata_from_row
 from app.db.market_scan_action_source import require_market_scan_action_source
 from app.db.market_scan_integrity import MarketScanSnapshotSealError
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
@@ -47,7 +48,7 @@ from app.utils.market_time import market_datetime_epoch
 
 FUTURE_RANGE_EVALUATION_SCHEMA_VERSION: Final[str] = "market-scan-future-range-evaluation-v1"
 FUTURE_RANGE_REPORT_CONTRACT_VERSION: Final[str] = "market-scan-future-range-report-v1"
-FUTURE_RANGE_RESEARCH_VERSION: Final[str] = "fixed-session-future-range-v1"
+FUTURE_RANGE_RESEARCH_VERSION: Final[str] = "fixed-session-future-range-v3-execution-phase-separated"
 FUTURE_RANGE_CENTER_PROXY: Final[str] = "HLC3_proxy_not_VWAP"
 FUTURE_RANGE_SESSION_OFFSETS: Final[tuple[int, ...]] = (1, 2, 3)
 FUTURE_RANGE_TOP_SIZES: Final[tuple[int, ...]] = (20, 50, 100)
@@ -391,9 +392,7 @@ def _target_rows(
     placeholders = ",".join("?" for _ in target_dates)
     rows = conn.execute(
         f"""
-        SELECT k.symbol, k.date, k.open, k.close, k.high, k.low, k.volume,
-               k.adjustment_mode, k.as_of, k.data_version, k.contract_version,
-               k.source, k.fetched_at, k.fallback_used
+        SELECT k.*
         FROM kline_daily AS k
         JOIN market_scan_result AS r ON r.run_id = ? AND r.symbol = k.symbol
         WHERE r.status = 'success' AND k.adjustment_mode = 'qfq'
@@ -663,15 +662,15 @@ def _execution_outcomes(
         return _with_execution_contract(
             _unavailable_execution_set(context.target_dates, overlap_status), label_config
         )
-    rows = [_to_label_kline(d_bar)]
-    for target_date in context.target_dates:
-        raw = context.target_rows.get(target_date)
-        if raw is None:
-            continue
-        parsed, _error = _verified_target_bar(raw, expected_date=target_date, allow_zero_volume=True)
-        if parsed is not None:
-            rows.append(_to_label_kline(parsed))
     try:
+        rows = [_to_label_kline(d_bar)]
+        for target_date in context.target_dates:
+            raw = context.target_rows.get(target_date)
+            if raw is None:
+                continue
+            parsed, _error = _verified_target_bar(raw, expected_date=target_date, allow_zero_volume=True)
+            if parsed is not None:
+                rows.append(_to_label_kline(parsed, raw))
         outcomes = build_probability_label_outcomes(
             symbol=str(row["symbol"]), market=str(row["market"]),
             list_date=str(row["list_date"]) if row["list_date"] else None,
@@ -687,12 +686,14 @@ def _execution_outcomes(
         1: _same_session_unexecutable(context.target_dates),
         2: _execution_payload(outcomes[1]),
         3: _execution_payload(outcomes[2]),
-    }, label_config)
+    }, label_config, rows=rows)
 
 
 def _with_execution_contract(
     outcomes: dict[int, dict[str, object]],
     config: ProbabilityLabelConfig,
+    *,
+    rows: Sequence[Kline] = (),
 ) -> dict[int, dict[str, object]]:
     contract = probability_label_contract(config)
     fields = {
@@ -700,19 +701,36 @@ def _with_execution_contract(
         "execution_model": contract["execution_model"],
         "cost_model_version": contract["cost_model_version"],
         "cost_profile_id": contract["cost_profile_id"],
+        "execution_bar_evidence": [_execution_bar_evidence(bar) for bar in rows],
     }
     for outcome in outcomes.values():
         outcome.update(fields)
     return outcomes
 
 
-def _to_label_kline(bar: _EvidenceBar) -> Kline:
+def _to_label_kline(bar: _EvidenceBar, raw: sqlite3.Row | None = None) -> Kline:
+    metadata: KlineExecutionMetadata = {
+        "session_status": "unknown", "open_execution_status": "unknown", "corporate_action_status": "unknown",
+        "adjustment_factor": None, "point_in_time": False, "execution_metadata_version": None,
+    }
+    if raw is not None:
+        metadata = kline_execution_metadata_from_row(raw)
     return Kline(
         date=bar.date, open=bar.open, close=bar.close, high=bar.high, low=bar.low,
-        volume=bar.volume, adjustment_mode="qfq", as_of=bar.date,
+        volume=bar.volume, adjustment_mode="qfq", as_of=bar.as_of,
         data_version=bar.data_version, contract_version=bar.contract_version,
         source="future-range-fixed-session-evidence", from_cache=True,
+        **metadata,
     )
+
+
+def _execution_bar_evidence(bar: Kline) -> dict[str, object]:
+    return {
+        "date": bar.date, "as_of": bar.as_of,
+        "session_status": bar.session_status, "open_execution_status": bar.open_execution_status,
+        "corporate_action_status": bar.corporate_action_status, "adjustment_factor": bar.adjustment_factor,
+        "point_in_time": bar.point_in_time, "execution_metadata_version": bar.execution_metadata_version,
+    }
 
 
 def _execution_payload(outcome: ProbabilityLabelOutcome) -> dict[str, object]:
@@ -1074,6 +1092,7 @@ def _config_payload(config: FutureRangeConfig) -> dict[str, object]:
             )
         ),
         "execution_capacity_basis": "frozen_signal_day_amount_proxy",
+        "execution_evidence_policy": "explicit_cached_metadata_preserved;missing_legacy_and_signal_metadata_remain_unknown",
     }
 
 

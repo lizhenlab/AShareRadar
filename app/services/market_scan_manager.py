@@ -24,7 +24,6 @@ from app.models.market_scan import (
     MarketScanSortValues,
     MarketScanStartResponse,
     MarketScanTrigger,
-    is_market_scan_top100_refresh_scope,
 )
 from app.models.market_scan_delta import MarketScanDeltaResponse
 from app.models.market_scan_polling import MarketScanPollingIdentity
@@ -911,13 +910,9 @@ class MarketScanManager:
                 self.cache.market_scan_degraded_result_count,
                 run_id,
             )
-            publication_summary = (
-                await run_cache_io(
-                    self.cache.market_scan_repo.publication_summary,
-                    run_id,
-                )
-                if not is_market_scan_top100_refresh_scope(current.scope)
-                else None
+            publication_summary = await run_cache_io(
+                self.cache.market_scan_repo.publication_summary,
+                run_id,
             )
             persisted = await self._finalizer.finish_completed(
                 current,

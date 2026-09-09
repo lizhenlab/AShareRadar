@@ -31,6 +31,7 @@ JOURNAL_MODE_RETRY_COUNT = 5
 QUOTE_HISTORY_UNIQUE_INDEX = "uq_quote_history_symbol_trade_date"
 QUOTE_HISTORY_CONTRACT_MIGRATION = "20260715_quote_history_not_null_contract"
 KLINE_DAILY_CONTRACT_MIGRATION = "20260716_kline_daily_adjustment_contract"
+KLINE_DAILY_EXECUTION_MIGRATION = "20260908_kline_daily_execution_evidence_v1"
 MARKET_SCAN_PREOPEN_MODE_MIGRATION = "20260812_market_scan_preopen_mode_v2"
 MARKET_SCAN_PROBABILITY_CAPTURE_OUTBOX_MIGRATION = "20260812_market_scan_probability_capture_outbox_v1"
 MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION = "20260813_market_scan_snapshot_digest_v3"
@@ -91,6 +92,14 @@ _KLINE_DAILY_CONTRACT_COLUMNS = (
     "data_version",
     "contract_version",
 )
+_KLINE_EXECUTION_DEFAULTS = {
+    "session_status": "'unknown'",
+    "open_execution_status": "'unknown'",
+    "corporate_action_status": "'unknown'",
+    "adjustment_factor": "NULL",
+    "point_in_time": "0",
+    "execution_metadata_version": "NULL",
+}
 _KLINE_DAILY_COLUMNS = (
     "symbol",
     "adjustment_mode",
@@ -100,6 +109,7 @@ _KLINE_DAILY_COLUMNS = (
     "high",
     "low",
     "volume",
+    *_KLINE_EXECUTION_DEFAULTS,
     "as_of",
     "data_version",
     "contract_version",
@@ -798,12 +808,32 @@ def _copy_table_rows(conn: sqlite3.Connection, source: str, target: str) -> None
 def _apply_kline_daily_migration(conn: sqlite3.Connection) -> None:
     if not table_has_columns(conn, "kline_daily", *_KLINE_DAILY_BASE_COLUMNS):
         return
+    _validate_stored_kline_execution_metadata(conn)
     if _kline_daily_requires_rebuild(conn):
         _rebuild_kline_daily(conn)
-    conn.execute(
+    conn.executemany(
         "INSERT OR IGNORE INTO schema_migration (name) VALUES (?)",
-        (KLINE_DAILY_CONTRACT_MIGRATION,),
+        ((KLINE_DAILY_CONTRACT_MIGRATION,), (KLINE_DAILY_EXECUTION_MIGRATION,)),
     )
+
+
+def _validate_stored_kline_execution_metadata(conn: sqlite3.Connection) -> None:
+    existing = {_pragma_column_name(row) for row in conn.execute("PRAGMA table_info(kline_daily)").fetchall()}
+    valid = {
+        "session_status": "typeof(session_status)='text' AND session_status IN ('trading','suspended','unknown')",
+        "open_execution_status": "typeof(open_execution_status)='text' AND open_execution_status IN "
+        "('tradable','locked_limit_up','locked_limit_down','unavailable','unknown')",
+        "corporate_action_status": "typeof(corporate_action_status)='text' AND corporate_action_status IN ('none','effective_event','unknown')",
+        "point_in_time": "typeof(point_in_time)='integer' AND point_in_time IN (0,1)",
+        "adjustment_factor": "adjustment_factor IS NULL OR (typeof(adjustment_factor) IN ('real','integer') AND "
+        "adjustment_factor BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308)",
+        "execution_metadata_version": "execution_metadata_version IS NULL OR typeof(execution_metadata_version)='text'",
+    }
+    invalid = [f"NOT ({predicate})" for column, predicate in valid.items() if column in existing]
+    if invalid:
+        row = conn.execute(f"SELECT symbol,date FROM kline_daily WHERE {' OR '.join(invalid)} LIMIT 1").fetchone()
+        if row is not None:
+            raise sqlite3.IntegrityError(f"日K执行元数据原始类型或取值无效：{row[0]} {row[1]}")
 
 
 def _kline_daily_requires_rebuild(conn: sqlite3.Connection) -> bool:
@@ -825,6 +855,7 @@ def _rebuild_kline_daily(conn: sqlite3.Connection) -> None:
         "data_version": ("COALESCE(NULLIF(trim(data_version), ''), 'legacy')" if "data_version" in existing else "'legacy'"),
         "contract_version": ("COALESCE(NULLIF(trim(contract_version), ''), 'legacy')" if "contract_version" in existing else "'legacy'"),
         "fallback_used": _fallback_used_expression(existing),
+        **{column: column if column in existing else default for column, default in _KLINE_EXECUTION_DEFAULTS.items()},
     }
     select_columns = ", ".join(contract_expressions.get(column, column) for column in _KLINE_DAILY_COLUMNS)
     insert_columns = ", ".join(_KLINE_DAILY_COLUMNS)
@@ -1284,6 +1315,7 @@ __all__ = [
     "COMPAT_COLUMNS",
     "JOURNAL_MODE_RETRY_COUNT",
     "KLINE_DAILY_CONTRACT_MIGRATION",
+    "KLINE_DAILY_EXECUTION_MIGRATION",
     "MIGRATION_BUSY_TIMEOUT_MS",
     "MARKET_SCAN_SNAPSHOT_DIGEST_MIGRATION",
     "MARKET_SCAN_PROBABILITY_RANKING_V6_MIGRATION",

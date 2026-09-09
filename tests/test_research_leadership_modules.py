@@ -36,6 +36,24 @@ def test_leadership_evidence_keeps_hot_concepts_sorted_and_limited() -> None:
     assert "概念归属" not in report.missing_data
 
 
+def test_feature_leader_distinguishes_observed_zero_from_unavailable_fund_score() -> None:
+    analysis, insights, _feature = _leadership_inputs()
+
+    def snapshot(score: int, nature: str):
+        changed = insights.model_copy(update={
+            "fund_flow": insights.fund_flow.model_copy(update={"overall_score": score, "data_nature": nature}),
+        })
+        return build_feature_snapshot(analysis, changed)
+
+    zero, one = snapshot(0, "derived"), snapshot(1, "derived")
+    missing, neutral = snapshot(0, "unavailable"), snapshot(50, "derived")
+    assert zero.leader_score <= one.leader_score
+    assert zero.leader_score < neutral.leader_score
+    assert missing.leader_score == neutral.leader_score
+    assert zero.fund_flow_data_nature == "derived"
+    assert missing.fund_flow_data_nature == "unavailable"
+
+
 def test_feature_snapshot_sanitizes_leader_score_inputs_like_display_fields() -> None:
     dirty_quote = make_quote(change_pct=0.0, turnover_rate=0.0).model_copy(
         update={"change_pct": math.inf, "turnover_rate": math.inf, "amount": math.inf}

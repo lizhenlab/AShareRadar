@@ -848,7 +848,7 @@ def test_alert_and_note_row_actions_surface_failures_on_the_owning_row() -> None
       const alertRow = { querySelector(selector) { return selector === ".row-action-feedback" ? alertFeedback : null; } };
       const noteRow = { querySelector(selector) { return selector === ".row-action-feedback" ? noteFeedback : null; } };
       const alertButton = actionButton({ alertToggle: "rule-1", alertEnabled: "false" }, alertRow, "暂停");
-      const noteButton = actionButton({ noteRemove: "note-1" }, noteRow, "删除");
+      const noteButton = actionButton({ noteRemove: "note-1", noteRevision: "a".repeat(64) }, noteRow, "删除");
 
       globalThis.fetch = async (url) => ({
         ok: false,
@@ -2346,11 +2346,17 @@ def test_excluded_watchlist_symbols_leave_observation_pool_but_active_symbol_sta
     _run_node_script(script)
 
 
-def test_watchlist_open_marks_viewed_only_after_current_workbench_success() -> None:
+def test_watchlist_changes_mark_viewed_only_after_current_visible_timeline_success() -> None:
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
 
       const { __appTest, element, jsonResponse, legacyWorkbenchFixture, legacyWorkbenchResponse, waitFor } = await createAppHarness({ canvasContext: null });
+      element("workspace-tab-tools").dataset.view = "tools";
+      element("workspace-tab-overview").dataset.view = "overview";
+      globalThis.document.querySelectorAll = selector => selector === ".workspace-tabs button[data-view]"
+        ? [element("workspace-tab-overview"), element("workspace-tab-tools")] : [];
+      element("adviceTimeline").getClientRects = () => __appTest.state.workspaceView === "tools" ? [{}] : [];
+      globalThis.document.hidden = false;
       const firstWorkbench = deferred();
       const markUrls = [];
       const markBodies = [];
@@ -2469,7 +2475,7 @@ def test_watchlist_open_marks_viewed_only_after_current_workbench_success() -> N
       }
 
       function openButton(symbol) {
-        return { dataset: { action: "open", symbol } };
+        return { dataset: { action: "changes", symbol } };
       }
 
       function queueItem(symbol, name, unread) {
@@ -2548,6 +2554,7 @@ def test_committed_local_data_import_refreshes_all_runtime_owned_browser_state()
       __appTest.state.localDataImportSelectionGeneration = 1;
       __appTest.state.localDataImportPreviewRequestGeneration = 1;
       __appTest.state.localDataImportPreviewMode = "replace";
+      __appTest.state.localDataImportPreviewTimezone = "";
       __appTest.state.localDataImportPreviewFileKey = "replace.json:10:1";
       __appTest.state.localDataImportPreviewSelectionGeneration = 1;
       __appTest.state.localDataImportPreviewGeneration = 1;

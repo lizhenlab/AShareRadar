@@ -124,7 +124,7 @@ async function handleAiQuestionSubmit(event, state, requestContext) {
     if (!isCurrentAiQuestionRequest(request, state, requestContext)) return;
     replaceAiAnswer(form, renderAiQuestionError(error));
   } finally {
-    if (isCurrentAiQuestionRequest(request, state, requestContext)) {
+    if (ownsAiQuestionForm(request, state, requestContext)) {
       setAiQuestionBusy(form, button, false);
     }
     finishAiQuestionRequest(request, state, requestContext);
@@ -167,14 +167,17 @@ function beginAiQuestionRequest(state, form, requestContext) {
 
 function isCurrentAiQuestionRequest(request, state, requestContext) {
   return (
-    requestContext.current === request &&
-    state.aiQuestionRequest === request.scope &&
+    ownsAiQuestionForm(request, state, requestContext) &&
     !request.signal.aborted &&
     request.symbol === state.symbol &&
     isCurrentAiLoad(request, state) &&
-    (!request.isCurrent || request.isCurrent()) &&
-    isConnectedAiQuestionForm(request.form)
+    (!request.isCurrent || request.isCurrent())
   );
+}
+
+function ownsAiQuestionForm(request, state, requestContext) {
+  return requestContext.current === request && state.aiQuestionRequest === request.scope
+    && isConnectedAiQuestionForm(request.form);
 }
 
 function isCurrentAiLoad(request, state) {

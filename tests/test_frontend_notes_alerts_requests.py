@@ -164,8 +164,8 @@ def test_independent_note_mutations_do_not_abort_each_other() -> None:
       };
       const refreshChartMarks = async () => { markRefreshes += 1; };
 
-      const update = updateStockNote(state, "note-a", { visible: false }, refreshChartMarks);
-      const removal = removeStockNote(state, "note-b", refreshChartMarks);
+      const update = updateStockNote(state, "note-a", { visible: false, expected_revision: "a".repeat(64) }, refreshChartMarks);
+      const removal = removeStockNote(state, "note-b", refreshChartMarks, { expectedRevision: "b".repeat(64) });
       await Promise.resolve();
       const writes = calls.filter((call) => call.options.method === "PATCH" || call.options.method === "DELETE");
       assert(writes.length === 2, `expected two independent writes, got ${writes.length}`);
@@ -585,6 +585,11 @@ function installNotesAlertsDom() {
         id,
         value: "",
         innerHTML: "",
+        insertAdjacentHTML(position, html) {
+          if (position === "afterbegin") this.innerHTML = html + this.innerHTML;
+          else if (position === "beforeend") this.innerHTML += html;
+          else throw new Error("unsupported fixture insertion");
+        },
         dataset: {},
         disabled: false,
         hidden: false,
@@ -606,6 +611,7 @@ function installNotesAlertsDom() {
 function note(content) {
   return {
     id: content,
+    revision: "a".repeat(64),
     note_type: "观察",
     content,
     price: 10,

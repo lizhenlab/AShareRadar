@@ -1,14 +1,15 @@
-import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson } from "./api.js";
 import { $ } from "./dom.js";
+import { createRequestScope } from "./api.js";
+import { loadAlertNotificationBatch, sameNotificationStream, validNotificationCursor } from "./notification-feed.js";
+export { ALERT_NOTIFICATION_PAGE_SIZE, ALERT_NOTIFICATION_MAX_PAGES } from "./notification-feed.js";
 
 export const ALERT_NOTIFICATION_POLL_MS = 30000;
-export const ALERT_NOTIFICATION_CURSOR_KEY = "ashare-radar.alert-notification-cursor.v1";
+export const ALERT_NOTIFICATION_CURSOR_KEY = "ashare-radar.alert-notification-cursor.v2";
 export const ALERT_NOTIFICATION_ENABLED_KEY = "ashare-radar.alert-notifications-enabled.v1";
 export const ALERT_NOTIFICATION_LOCK_NAME = "ashare-radar.alert-notification-delivery.v1";
 export const ALERT_NOTIFICATION_FALLBACK_LOCK_KEY = "ashare-radar.alert-notification-lock.v1";
 export const ALERT_NOTIFICATION_COORDINATION_DB_NAME = "ashare-radar-notification-coordination-v1";
-export const ALERT_NOTIFICATION_PAGE_SIZE = 50;
-export const ALERT_NOTIFICATION_MAX_PAGES = 200;
+const LEGACY_ALERT_NOTIFICATION_CURSOR_KEY = "ashare-radar.alert-notification-cursor.v1";
 const MAX_INDIVIDUAL_NOTIFICATIONS = 3;
 const ALERT_NOTIFICATION_COORDINATION_STORE = "delivery-locks";
 const ALERT_NOTIFICATION_STORAGE_PROBE_KEY = "ashare-radar.alert-notification-storage-probe.v1";
@@ -47,6 +48,7 @@ export async function enableAlertNotifications(state, options = {}) {
     return false;
   }
   const wasDisabled = readEnabledPreference(options.storage) === false;
+  state.alertNotificationUpgradeNotice = false;
   state.alertNotificationsEnabled = true;
   if (wasDisabled) clearCursor(state, options.storage);
   writeEnabledPreference(true, options.storage);
@@ -84,6 +86,7 @@ export function stopAlertNotificationPolling(state) {
 function deactivateAlertNotifications(state) {
   state.alertNotificationsEnabled = false;
   state.alertNotificationEpoch = Number(state.alertNotificationEpoch || 0) + 1;
+  state.alertNotificationPollToken?.scope.abort();
   state.alertNotificationPollToken = null;
   state.alertNotificationPolling = false;
   stopAlertNotificationPolling(state);
@@ -94,17 +97,18 @@ export async function pollAlertNotifications(state, options = {}) {
   if (!NotificationApi || NotificationApi.permission !== "granted" || state.alertNotificationsEnabled === false) return false;
   if (state.alertNotificationPolling) return false;
   const epoch = Number(state.alertNotificationEpoch || 0);
-  const pollToken = {};
+  const pollToken = { scope: createRequestScope(null, options.signal) };
   state.alertNotificationPollToken = pollToken;
   state.alertNotificationPolling = true;
   try {
+    const upgrading = legacyCursorPresent(options.storage) && !readStoredCursor(options.storage);
     const cursor = readCursor(state, options.storage);
-    const events = await loadAlertEventBatch(cursor, options);
+    const batch = await loadAlertNotificationBatch(cursor, { ...options, signal: pollToken.scope.signal });
     if (!notificationPollIsCurrent(state, pollToken, epoch)) return false;
     const delivered = await deliverAlertNotificationsOnce(
       state,
-      events,
-      { ...options, NotificationApi },
+      batch,
+      { ...options, NotificationApi, upgrading },
       pollToken,
       epoch
     );
@@ -113,7 +117,7 @@ export async function pollAlertNotifications(state, options = {}) {
       renderAlertNotificationState("delivery-error");
       return false;
     }
-    renderAlertNotificationState("granted");
+    renderAlertNotificationState(state.alertNotificationUpgradeNotice ? "upgraded" : "granted");
     return true;
   } catch (error) {
     if (notificationPollIsCurrent(state, pollToken, epoch)) {
@@ -123,6 +127,7 @@ export async function pollAlertNotifications(state, options = {}) {
     }
     return false;
   } finally {
+    pollToken.scope.dispose();
     if (state.alertNotificationPollToken === pollToken) {
       state.alertNotificationPollToken = null;
       state.alertNotificationPolling = false;
@@ -130,11 +135,15 @@ export async function pollAlertNotifications(state, options = {}) {
   }
 }
 
-async function deliverAlertNotificationsOnce(state, events, options, pollToken, epoch) {
+async function deliverAlertNotificationsOnce(state, batch, options, pollToken, epoch) {
   return withAlertNotificationLock(options, () => {
     if (!notificationPollIsCurrent(state, pollToken, epoch)) return false;
-    deliverAlertNotifications(state, events, options);
-    return true;
+    if (readEnabledPreference(options.storage) === false) {
+      deactivateAlertNotifications(state);
+      renderAlertNotificationState("disabled");
+      return false;
+    }
+    return deliverAlertNotifications(state, batch, options) !== null;
   });
 }
 
@@ -287,71 +296,41 @@ function notificationCoordinationError(message, cause) {
   return error;
 }
 
-export function deliverAlertNotifications(state, events, options = {}) {
+export function deliverAlertNotifications(state, batch, options = {}) {
   const cursor = readCursor(state, options.storage);
-  const nextCursor = latestCursor(events);
   state.alertNotificationDeliveryFailed = false;
-  if (!cursor) {
-    writeCursor(state, nextCursor || emptyCursor(), options.storage);
+  if (!batchMatchesSharedCursor(batch, cursor)) return null;
+  if (!batch.requestedCursor) {
+    writeCursor(state, { streamId: batch.streamId, id: batch.cursorId }, options.storage);
+    if (options.upgrading) state.alertNotificationUpgradeNotice = true;
+    clearLegacyCursor(options.storage);
     return 0;
   }
-  const pendingEvents = uniqueEventsAfter(events, cursor);
-  const result = notifyPendingEvents(pendingEvents, notificationApi(options.NotificationApi));
+  const base = cursor?.streamId === batch.streamId
+    ? cursor : { streamId: batch.streamId, id: batch.baselineId };
+  if (!sameNotificationStream(cursor, base)) writeCursor(state, base, options.storage);
+  const pendingEvents = uniqueEventsAfter(batch.events, base);
+  const result = notifyPendingEvents(pendingEvents, notificationApi(options.NotificationApi), batch.streamId, options.onNotificationClick);
   state.alertNotificationDeliveryFailed = result.failed;
-  if (result.cursor && cursorAfter(result.cursor, cursor)) {
-    writeCursor(state, result.cursor, options.storage);
+  if (result.cursor && cursorAfter(result.cursor, base)) {
+    writeCursor(state, { streamId: batch.streamId, id: result.cursor.id }, options.storage);
   }
+  if (result.delivered > 0) state.alertNotificationUpgradeNotice = false;
   return result.delivered;
 }
 
-async function loadAlertEventBatch(cursor, options) {
-  if (!cursor) return requestAlertEventPage(null, options);
-  const events = [];
-  let pageCursor = cursor;
-  const requestedMaxPages = positiveInteger(options.maxPages);
-  const maxPages = Math.min(requestedMaxPages || ALERT_NOTIFICATION_MAX_PAGES, ALERT_NOTIFICATION_MAX_PAGES);
-  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
-    const page = await requestAlertEventPage(pageCursor, options);
-    if (!page.length) return events;
-    const nextCursor = latestCursor(page);
-    if (!nextCursor || !cursorAfter(nextCursor, pageCursor)) {
-      throw new TypeError("预警事件游标未向前推进");
-    }
-    events.push(...page);
-    if (page.length < ALERT_NOTIFICATION_PAGE_SIZE) return events;
-    pageCursor = nextCursor;
-  }
-  // Commit the bounded batch so the next poll can continue from its last id.
-  // Throwing here would keep the old cursor forever when the backlog is large.
-  return events;
+function batchMatchesSharedCursor(batch, cursor) {
+  if (!batch.requestedCursor) return !cursor;
+  return Boolean(cursor && (cursor.streamId === batch.requestedCursor.streamId || cursor.streamId === batch.streamId));
 }
 
-async function requestAlertEventPage(cursor, options) {
-  const events = await fetchJson(alertEventPageUrl(cursor), {
-    timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    signal: options.signal,
-  });
-  if (!Array.isArray(events) || events.length > ALERT_NOTIFICATION_PAGE_SIZE) {
-    throw new TypeError("预警事件格式异常");
-  }
-  return events;
-}
-
-function alertEventPageUrl(cursor) {
-  const params = new URLSearchParams({ limit: String(ALERT_NOTIFICATION_PAGE_SIZE) });
-  if (cursor) {
-    params.set("after_id", String(cursor.id));
-  }
-  return `/api/alerts/events?${params}`;
-}
-
-function notifyPendingEvents(events, NotificationApi) {
+function notifyPendingEvents(events, NotificationApi, streamId, onNotificationClick) {
   const triggers = events.filter((event) => event?.event_type === "触发");
   if (triggers.length > MAX_INDIVIDUAL_NOTIFICATIONS) {
     const delivered = createNotification(NotificationApi, `AShareRadar · ${triggers.length} 条新预警`, {
       body: "打开研究工作台查看最新触发记录。",
-      tag: "ashare-radar-alert-summary",
-    });
+      tag: `ashare-radar-alert-${streamId}-summary`,
+    }, { callback: onNotificationClick, target: Object.freeze({ kind: "summary", streamId, count: triggers.length }) });
     return {
       cursor: delivered ? latestCursor(events) : null,
       delivered: delivered ? triggers.length : 0,
@@ -368,8 +347,8 @@ function notifyPendingEvents(events, NotificationApi) {
     }
     const succeeded = createNotification(NotificationApi, `AShareRadar · ${event.stock_name || event.name || event.symbol || "预警"}`, {
       body: String(event.message || "预警条件已触发").slice(0, 180),
-      tag: `ashare-radar-alert-${event.id}`,
-    });
+      tag: `ashare-radar-alert-${streamId}-${event.id}`,
+    }, { callback: onNotificationClick, target: capturedEventTarget(event, streamId) });
     if (!succeeded) return { cursor, delivered, failed: true };
     cursor = eventCursor(event);
     delivered += 1;
@@ -377,7 +356,13 @@ function notifyPendingEvents(events, NotificationApi) {
   return { cursor, delivered, failed: false };
 }
 
-function createNotification(NotificationApi, title, options) {
+function capturedEventTarget(event, streamId) {
+  const fields = ["id", "symbol", "stock_name", "name", "event_type", "message", "price", "change_pct", "threshold", "created_at"];
+  const snapshot = Object.fromEntries(fields.map((field) => [field, event[field]]));
+  return Object.freeze({ kind: "event", streamId, event: Object.freeze(snapshot) });
+}
+
+function createNotification(NotificationApi, title, options, activation) {
   if (!NotificationApi) return false;
   let notification;
   try {
@@ -386,14 +371,21 @@ function createNotification(NotificationApi, title, options) {
     return false;
   }
   try {
-    notification.onclick = () => {
-      globalThis.focus?.();
-      notification.close?.();
-    };
+    notification.onclick = () => activateNotification(notification, activation);
   } catch (error) {
     // The notification was created; a missing click handler must not duplicate it.
   }
   return true;
+}
+
+function activateNotification(notification, activation) {
+  try { globalThis.focus?.(); } catch { /* Navigation remains available if window focus is denied. */ }
+  try { notification.close?.(); } catch { /* Closing the OS card is independent of opening its details. */ }
+  try {
+    Promise.resolve(activation?.callback?.(activation.target)).catch(() => {});
+  } catch {
+    // A constructed notification is already delivered; navigation cannot turn it into a retry.
+  }
 }
 
 function latestCursor(events) {
@@ -442,14 +434,10 @@ function validEventCursor(cursor) {
   return cursor.id > 0;
 }
 
-function emptyCursor() {
-  return { createdAt: "", id: 0 };
-}
-
 function readCursor(state, storage) {
-  const memory = validCursor(state.alertNotificationCursor) ? state.alertNotificationCursor : null;
+  const memory = validNotificationCursor(state.alertNotificationCursor) ? state.alertNotificationCursor : null;
   const shared = readStoredCursor(storage);
-  const cursor = newestCursor(memory, shared);
+  const cursor = storageApi(storage) ? shared : memory;
   state.alertNotificationCursor = cursor;
   return cursor;
 }
@@ -459,7 +447,7 @@ function readStoredCursor(storage) {
   if (!store) return null;
   try {
     const parsed = JSON.parse(store.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
-    return validCursor(parsed) ? parsed : null;
+    return validNotificationCursor(parsed) ? parsed : null;
   } catch (error) {
     return null;
   }
@@ -467,25 +455,20 @@ function readStoredCursor(storage) {
 
 function writeCursor(state, cursor, storage) {
   const shared = readStoredCursor(storage);
-  const nextCursor = newestCursor(cursor, newestCursor(state.alertNotificationCursor, shared));
-  state.alertNotificationCursor = nextCursor;
+  const nextCursor = sameNotificationStream(cursor, shared) && shared.id > cursor.id ? shared : cursor;
   const store = storageApi(storage);
-  if (!store) return;
+  if (!store) {
+    state.alertNotificationCursor = nextCursor;
+    return;
+  }
   try {
-    if (!shared || cursorAfter(nextCursor, shared)) {
+    if (!sameNotificationStream(nextCursor, shared) || nextCursor.id !== shared.id) {
       store.setItem(ALERT_NOTIFICATION_CURSOR_KEY, JSON.stringify(nextCursor));
     }
   } catch (error) {
-    // In-memory state is only page-local; coordinated delivery fails closed before this path.
+    throw notificationCoordinationError("共享通知游标保存失败", error);
   }
-}
-
-function newestCursor(left, right) {
-  const validLeft = validCursor(left) ? left : null;
-  const validRight = validCursor(right) ? right : null;
-  if (!validLeft) return validRight;
-  if (!validRight) return validLeft;
-  return cursorAfter(validRight, validLeft) ? validRight : validLeft;
+  state.alertNotificationCursor = nextCursor;
 }
 
 function clearCursor(state, storage) {
@@ -495,18 +478,25 @@ function clearCursor(state, storage) {
   try {
     if (typeof store.removeItem === "function") store.removeItem(ALERT_NOTIFICATION_CURSOR_KEY);
     else store.setItem(ALERT_NOTIFICATION_CURSOR_KEY, "");
+    clearLegacyCursor(storage);
   } catch (error) {
     // The in-memory cursor is still cleared when storage is unavailable.
   }
 }
 
-function validCursor(value) {
-  return Boolean(
-    value &&
-    typeof value.createdAt === "string" &&
-    Number.isSafeInteger(value.id) &&
-    value.id >= 0
-  );
+function legacyCursorPresent(storage) {
+  try {
+    return Boolean(storageApi(storage)?.getItem(LEGACY_ALERT_NOTIFICATION_CURSOR_KEY));
+  } catch (error) {
+    return false;
+  }
+}
+
+function clearLegacyCursor(storage) {
+  const store = storageApi(storage);
+  if (!store) return;
+  if (typeof store.removeItem === "function") store.removeItem(LEGACY_ALERT_NOTIFICATION_CURSOR_KEY);
+  else store.setItem(LEGACY_ALERT_NOTIFICATION_CURSOR_KEY, "");
 }
 
 function notificationApi(candidate) {
@@ -563,19 +553,18 @@ function bindAlertNotificationStorage(state, options) {
 
 function handleAlertNotificationStorageEvent(state, options, event) {
   if (event?.key === ALERT_NOTIFICATION_CURSOR_KEY) {
-    const cursor = cursorFromStorageValue(event.newValue);
-    if (cursor) state.alertNotificationCursor = newestCursor(state.alertNotificationCursor, cursor);
-    else if (event.newValue == null || event.newValue === "") state.alertNotificationCursor = null;
+    readCursor(state, options.storage);
     return;
   }
   if (event?.key !== ALERT_NOTIFICATION_ENABLED_KEY) return;
-  if (String(event.newValue) === "0") {
+  const enabled = readEnabledPreference(options.storage);
+  if (enabled === false) {
     deactivateAlertNotifications(state);
     state.alertNotificationCursor = null;
     renderAlertNotificationState("disabled");
     return;
   }
-  if (String(event.newValue) !== "1" || notificationPermission(options.NotificationApi) !== "granted") return;
+  if (enabled !== true || notificationPermission(options.NotificationApi) !== "granted") return;
   if (state.alertNotificationsEnabled !== true) {
     state.alertNotificationsEnabled = true;
     state.alertNotificationEpoch = Number(state.alertNotificationEpoch || 0) + 1;
@@ -585,18 +574,10 @@ function handleAlertNotificationStorageEvent(state, options, event) {
   startAlertNotificationPolling(state, options);
 }
 
-function cursorFromStorageValue(value) {
-  try {
-    const cursor = JSON.parse(value);
-    return validCursor(cursor) ? cursor : null;
-  } catch (error) {
-    return null;
-  }
-}
-
 function notificationPollIsCurrent(state, token, epoch) {
   return (
     state.alertNotificationPollToken === token
+    && !token.scope.signal.aborted
     && Number(state.alertNotificationEpoch || 0) === epoch
     && state.alertNotificationsEnabled !== false
   );
@@ -623,6 +604,7 @@ function renderAlertNotificationState(permission) {
 }
 
 function notificationView(permission) {
+  if (permission === "upgraded") return { button: "停用桌面提醒", status: "提醒协议已升级，已建立当前基线，不补发历史提醒；请刷新其他页面", tone: "", disabled: false };
   if (permission === "granted") return { button: "停用桌面提醒", status: "等待新触发", tone: "ok", disabled: false };
   if (permission === "disabled") return { button: "启用桌面提醒", status: "应用内已停用", tone: "", disabled: false };
   if (permission === "permission-error") return { button: "启用桌面提醒", status: "权限请求失败，请重试", tone: "warn", disabled: false };

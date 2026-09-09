@@ -83,7 +83,7 @@ def test_review_due_services_reject_non_positive_or_non_integer_limits(limit: ob
     with pytest.raises(ValueError, match="上限必须是正整数"):
         asyncio.run(evaluate_due_advice_reviews(datahub, limit=limit))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="上限必须是正整数"):
-        asyncio.run(list_due_advice_reviews(datahub, limit=limit))  # type: ignore[arg-type]
+        asyncio.run(list_due_advice_reviews(datahub, page_size=limit))  # type: ignore[arg-type]
 
 
 def test_review_plan_and_evidence_models_enforce_boundary_contracts() -> None:

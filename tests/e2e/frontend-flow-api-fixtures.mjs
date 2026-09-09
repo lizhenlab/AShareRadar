@@ -143,7 +143,7 @@ export async function expectPrimaryView(page, view) {
       view: button.dataset.primaryView,
       current: button.getAttribute("aria-current"),
     }))
-  )).toEqual(["research", "market", "review", "monitor"].map((candidate) => ({
+  )).toEqual(["research", "market", "review", "monitor", "system"].map((candidate) => ({
     view: candidate,
     current: candidate === view ? "page" : "false",
   })));

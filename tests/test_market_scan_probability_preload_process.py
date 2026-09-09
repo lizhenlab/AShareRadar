@@ -44,11 +44,15 @@ def _source_archive(directory: Path, run_id: int = 71) -> Path:
 def _archive_files(tmp_path: Path):
     source = _source_archive(tmp_path / "source")
     source_artifact = sources.load_probability_source_snapshot(source)
-    outcome = outcomes.publish_probability_outcome_artifact(
-        tmp_path / "outcomes", source_artifact, {}, generated_at="2026-08-12T18:00:00+08:00", as_of_date="2026-08-12",
-    )
+    frozen_outcome = json.loads((Path(__file__).parent / "fixtures" / "market_scan_probability_feature_v2_preload_outcome.json").read_text())
+    assert frozen_outcome["payload"]["source"]["integrity_digest"] == source_artifact["integrity"]["integrity_digest"]
+    outcome = outcomes.publish_built_probability_outcome_artifact(tmp_path / "outcomes", frozen_outcome)
     outcome_path = Path(outcome["path"])
-    assessment = fits.build_bounded_probability_fit_assessment([source], [outcome_path], generated_at="2026-08-12T18:00:00+08:00", bootstrap_samples=100)
+    # This test reads frozen historical archives; old features must no longer
+    # be passed through the current estimator merely to produce test input.
+    assessment = json.loads((Path(__file__).parent / "fixtures" / "market_scan_probability_feature_v2_preload_fit.json").read_text())
+    assert assessment["payload"]["members"][0]["source_filename"] == source.name
+    assert assessment["payload"]["members"][0]["outcome_filename"] == outcome_path.name
     fit_path = Path(fits.publish_probability_fit_assessment(tmp_path / "fits", assessment)["path"])
     return [(kind, research._file_fingerprint(path)) for kind, path in (("source", source), ("outcome", outcome_path), ("fit", fit_path))]
 

@@ -284,6 +284,18 @@ body.market-scan-view-active .market-scan-global-progress {
   min-height: 36px;
 }
 
+.market-scan-history-pagination {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.market-scan-history-pagination[hidden] { display: none; }
+
 #marketScanHistoryFeedback {
   grid-column: 1 / -1;
   margin: 0;
@@ -678,6 +690,66 @@ body.market-scan-view-active .market-scan-global-progress {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.discovery-preset-pagination,
+.discovery-screen-alerts-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.discovery-preset-pagination,
+#discoveryPresetSelectionInfo {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.discovery-screen-alerts {
+  min-width: 0;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.discovery-screen-alerts [hidden] { display: none; }
+
+.discovery-screen-alerts p,
+.discovery-screen-alerts code,
+#discoveryPresetSelectionInfo {
+  overflow-wrap: anywhere;
+}
+
+.discovery-screen-alerts summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-weight: 600;
+}
+
+.discovery-screen-alerts select {
+  max-width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: white;
+}
+
+.discovery-screen-alert-row {
+  min-width: 0;
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: white;
+}
+
+.discovery-screen-alert-change {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 0;
 }
 
 .discovery-preset-controls label > span {
@@ -2648,6 +2720,21 @@ body.market-scan-view-active .market-scan-global-progress {
 .strategy-lifecycle-actions { align-items: center; }
 .strategy-lifecycle-content { margin-top: 10px; overflow-wrap: anywhere; }
 .strategy-lifecycle-content code { white-space: normal; word-break: break-all; }
+.strategy-schedule-manager {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.strategy-schedule-manager > summary { cursor: pointer; font-weight: 700; padding-block: 8px; }
+.strategy-schedule-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.strategy-schedule-toolbar p { flex: 1 1 180px; }
+.strategy-schedule-manager p { color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.strategy-schedule-list { display: grid; gap: 10px; max-height: min(560px, 70vh); overflow: auto; scrollbar-gutter: stable; }
+.strategy-schedule-row { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; min-width: 0; overflow-wrap: anywhere; }
+.strategy-schedule-row button { justify-self: start; min-height: 44px; }
+.strategy-schedule-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 12px; }
+.strategy-schedule-manager .strategy-pagination { flex-wrap: wrap; gap: 10px; }
 .strategy-history-controls label { flex: 1 1 170px; }
 
 .strategy-sort-tabs { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 10px; }
@@ -2908,3 +2995,10 @@ body.market-scan-view-active .market-scan-global-progress {
 .market-scan-experimental-evidence { opacity: .8; }
 .market-scan-experimental-pagination { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; font-size: 12px; }
 .market-scan-experimental-pagination button { min-height: 44px; }
+
+.strategy-draft-status { margin: 8px 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.strategy-draft-status[data-state="draft"],
+.strategy-draft-status[data-state="invalid"] { color: #9a3412; }
+.strategy-simulation-orders { max-height: 480px; overflow: auto; margin-top: 12px; }
+.strategy-simulation-orders table { width: 100%; min-width: 620px; border-collapse: collapse; }
+.strategy-simulation-orders th, .strategy-simulation-orders td { padding: 8px; text-align: left; border-bottom: 1px solid var(--line); }

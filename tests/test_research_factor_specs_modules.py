@@ -96,14 +96,15 @@ def test_volume_proxy_score_uses_positive_volume_confirmation_rule() -> None:
     rows = _rows([100 + index for index in range(40)])
     rows[30] = make_kline(date="2026-06-01", close=132, high=133, low=131, volume=4000)
 
-    assert _volume_proxy_score_at(rows, 30) == 70
+    assert _volume_proxy_score_at(rows, 30) == 72
 
 
-def test_volume_proxy_score_returns_neutral_when_current_volume_is_missing() -> None:
+def test_volume_proxy_score_rejects_current_volume_missing_from_history() -> None:
     rows = _rows([100 + index for index in range(40)])
     rows[30] = make_kline(date="2026-06-01", close=130, high=131, low=129, volume=0)
 
-    assert _volume_proxy_score_at(rows, 30) == 50
+    with pytest.raises(ValueError, match="20日正成交量窗口"):
+        _volume_proxy_score_at(rows, 30)
     assert _volume_ratio_at(rows, 30) == 1.0
 
 
@@ -234,7 +235,8 @@ def test_score_context_requires_full_metric_windows() -> None:
     ).model_copy(update={"close": math.inf})
     assert _moving_averages(invalid_average_window, 30) is None
     assert _trend_proxy_score_at(invalid_average_window, 30) == 50
-    assert _volume_proxy_score_at(invalid_average_window, 30) == 50
+    with pytest.raises(ValueError, match="20日正成交量窗口"):
+        _volume_proxy_score_at(invalid_average_window, 30)
     assert _risk_proxy_score_at(invalid_average_window, 30) == 58
 
     invalid_range_window = list(rows)

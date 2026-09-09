@@ -436,7 +436,7 @@ def test_ranking_maintenance_requires_shadow_and_explicit_control(
     service.ranking_control_digest = "c" * 64
     state = _state(ranking_control=True)
     monkeypatch.setattr(maintenance, "_load_pinned_authorization", lambda *_args: {"payload": {}, "integrity": {"integrity_digest": "c" * 64}})
-    control = SimpleNamespace(action="rollback", integrity_digest="c" * 64)
+    control = SimpleNamespace(action="rollback", integrity_digest="c" * 64, promotion_eligible=True)
     monkeypatch.setattr(maintenance, "verify_probability_ranking_manual_control_artifact", lambda *_args, **_kwargs: control)
     monkeypatch.setattr(service, "_publish_envelope", lambda *_args, **_kwargs: tmp_path / "control.json.gz")
     result = service._ranking_maintenance(state, authorized)
@@ -761,8 +761,9 @@ def test_shadow_evaluation_reuses_exact_corpus_or_builds_new(
     study = SimpleNamespace(evidence_digest="b" * 64)
     token = SimpleNamespace(integrity_digest="c" * 64, qualified=True)
     artifact = {
-        "generated_at": "2026-08-23T15:00:00+08:00",
+        "generated_at": "2026-09-10T02:00:00+08:00",
         "payload": {
+            "contract_version": maintenance.RANKING_SHADOW_CONTRACT_VERSION,
             "oos_corpus_digest": oos.integrity_digest,
             "study_evidence_digest": study.evidence_digest,
         },
@@ -779,7 +780,7 @@ def test_shadow_evaluation_reuses_exact_corpus_or_builds_new(
         cast(maintenance.VerifiedJointExecutionProbabilityCorpusV3, oos),
         [],
         cast(maintenance.VerifiedJointExecutionProbabilityStudy, study),
-        generated_at="2026-08-23T16:00:00+08:00",
+        generated_at="2026-09-10T03:00:00+08:00",
     ) is token
 
     artifact["payload"]["oos_corpus_digest"] = "other"
@@ -796,7 +797,7 @@ def test_shadow_evaluation_reuses_exact_corpus_or_builds_new(
         cast(maintenance.VerifiedJointExecutionProbabilityCorpusV3, oos),
         [],
         cast(maintenance.VerifiedJointExecutionProbabilityStudy, study),
-        generated_at="2026-08-23T16:00:00+08:00",
+        generated_at="2026-09-10T03:00:00+08:00",
     ) is built_token
 
 

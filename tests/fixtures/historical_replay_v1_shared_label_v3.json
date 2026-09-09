@@ -1,0 +1,416 @@
+{
+  "schema_version": "market-scan-probability-historical-replay-artifact-v1",
+  "generated_at": "2026-08-11T12:00:00Z",
+  "payload": {
+    "cohort": {
+      "live_cohort_compatible": false,
+      "mode": "historical_replay_v1",
+      "official": false,
+      "rule_version": "historical-replay-common-ohlcv-v1",
+      "scope": "qfq_kline_daily_deterministic_market_sample"
+    },
+    "config": {
+      "cost_profile": "base",
+      "end_date": "2026-03-03",
+      "execution_notional": 100000.0,
+      "horizons": [
+        1,
+        5,
+        20
+      ],
+      "minimum_history_bars": 61,
+      "start_date": "2026-03-03",
+      "symbol_limit": 1,
+      "symbols": [
+        "600001.SH"
+      ]
+    },
+    "cost_contract": {
+      "components": [
+        "commission",
+        "stamp_tax",
+        "transfer_fee",
+        "slippage"
+      ],
+      "cost_profile": "基础成本",
+      "execution_notional": 100000.0,
+      "profile_id": "base-a0441d84df44",
+      "quantity_rule": "floor(notional/entry_open/100)*100",
+      "version": "cn-a-share-cost-model.v2"
+    },
+    "feature_contract": {
+      "availability_cutoff": "date_lte_signal_date",
+      "feature_names": [
+        "atr14_pct",
+        "close_location_value",
+        "close_return_1d",
+        "close_return_5d",
+        "close_return_20d",
+        "close_to_sma5",
+        "close_to_sma20",
+        "drawdown_20d",
+        "intraday_range_pct",
+        "close_return_volatility_20d",
+        "volume_ratio_5_to_20"
+      ],
+      "minimum_feature_bars": 21,
+      "shared_with_official_pit_ohlcv": true,
+      "version": "historical-replay-common-ohlcv-v1"
+    },
+    "generated_at": "2026-08-11T12:00:00Z",
+    "limitations": [
+      "survivorship_bias_current_qfq_cache_universe",
+      "historical_listing_and_delisting_membership_unavailable",
+      "historical_st_status_unavailable",
+      "historical_amount_unavailable_capacity_not_modelled",
+      "historical_turnover_rate_unavailable",
+      "historical_price_limit_tradeability_not_modelled",
+      "qfq_history_may_have_been_rebased_after_signal_date",
+      "original_provider_vintage_unavailable_date_cutoff_only",
+      "deterministic_market_sample_not_full_historical_universe",
+      "research_only_never_official_or_production_ranking_input"
+    ],
+    "metadata_contract": {
+      "capacity_modelled": false,
+      "historical_amount": null,
+      "historical_st_status": null,
+      "historical_turnover_rate": null,
+      "universe_membership": "unknown_current_qfq_cache_survivors"
+    },
+    "probability_fit": {
+      "automatic_promotion": false,
+      "cohort": {
+        "live_cohort_compatible": false,
+        "mode": "historical_replay_v1",
+        "official": false,
+        "rule_version": "historical-replay-common-ohlcv-v1",
+        "scope": "qfq_kline_daily_deterministic_market_sample"
+      },
+      "horizons": {
+        "1": {
+          "base_rate": null,
+          "calibration_metrics": null,
+          "calibrator_digest": null,
+          "counts": {
+            "available_independent_session_count": 1,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 1,
+            "evaluated_fold_count": 0,
+            "label_coverage": 1.0,
+            "observation_count": 1,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 1,
+            "walk_forward_fold_count": 0
+          },
+          "evidence_digest": "82b0540798e80cf5d08b2dd3b490bb179dd51bab54633605ffd6606a91b69298",
+          "horizon": 1,
+          "input_digest": "cac98c607d4394123b9e08365e1ae485fc8987b4d5b9c785433e3ce34a39cb38",
+          "limitations": [
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "minimum_required_independent_session_count": 224,
+          "model_digest": null,
+          "probability": null,
+          "status": "insufficient_data",
+          "target": "net_return_positive",
+          "training_cutoff": null
+        },
+        "20": {
+          "base_rate": null,
+          "calibration_metrics": null,
+          "calibrator_digest": null,
+          "counts": {
+            "available_independent_session_count": 1,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 1,
+            "evaluated_fold_count": 0,
+            "label_coverage": 1.0,
+            "observation_count": 1,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 1,
+            "walk_forward_fold_count": 0
+          },
+          "evidence_digest": "4d7ab97f68b6bcc2ef8d65152200d0ee748a6975313783bace673d472d05cac3",
+          "horizon": 20,
+          "input_digest": "58fb976a7f27c25c120780a9d8c54b0421b6253da79f0fbad8334200a0424234",
+          "limitations": [
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "minimum_required_independent_session_count": 262,
+          "model_digest": null,
+          "probability": null,
+          "status": "insufficient_data",
+          "target": "net_return_positive",
+          "training_cutoff": null
+        },
+        "5": {
+          "base_rate": null,
+          "calibration_metrics": null,
+          "calibrator_digest": null,
+          "counts": {
+            "available_independent_session_count": 1,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 1,
+            "evaluated_fold_count": 0,
+            "label_coverage": 1.0,
+            "observation_count": 1,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 1,
+            "walk_forward_fold_count": 0
+          },
+          "evidence_digest": "431493383fa8f9f6a8c5081a5d2b571290de032ade19e8b5876cfae47e1a3c5a",
+          "horizon": 5,
+          "input_digest": "b705f18453757cbece15237ba2a2be99380984b92398b69a429bd0e0707a5a84",
+          "limitations": [
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "minimum_required_independent_session_count": 232,
+          "model_digest": null,
+          "probability": null,
+          "status": "insufficient_data",
+          "target": "net_return_positive",
+          "training_cutoff": null
+        }
+      },
+      "probability": null,
+      "production_ranking_effect": "none",
+      "target": "net_return_positive"
+    },
+    "quality": {
+      "excluded_candidate_count": 0,
+      "exclusion_reason_counts": {},
+      "horizons": {
+        "1": {
+          "label_coverage": 1.0,
+          "mature_record_count": 1,
+          "minimum_required_independent_session_count": 224,
+          "modelled_independent_session_count": 1,
+          "modelled_record_count": 1,
+          "registered_split_status": "insufficient_data",
+          "requested_record_count": 1
+        },
+        "20": {
+          "label_coverage": 1.0,
+          "mature_record_count": 1,
+          "minimum_required_independent_session_count": 262,
+          "modelled_independent_session_count": 1,
+          "modelled_record_count": 1,
+          "registered_split_status": "insufficient_data",
+          "requested_record_count": 1
+        },
+        "5": {
+          "label_coverage": 1.0,
+          "mature_record_count": 1,
+          "minimum_required_independent_session_count": 232,
+          "modelled_independent_session_count": 1,
+          "modelled_record_count": 1,
+          "registered_split_status": "insufficient_data",
+          "requested_record_count": 1
+        }
+      },
+      "minimum_history_bars": 61,
+      "record_count": 1,
+      "record_independent_session_count": 1,
+      "registered_probability_split_defaults": {
+        "1": {
+          "gap_sessions": 2,
+          "minimum_calibration_sessions": 40,
+          "minimum_required_independent_session_count": 224,
+          "minimum_test_sessions": 60,
+          "minimum_train_sessions": 120
+        },
+        "20": {
+          "gap_sessions": 21,
+          "minimum_calibration_sessions": 40,
+          "minimum_required_independent_session_count": 262,
+          "minimum_test_sessions": 60,
+          "minimum_train_sessions": 120
+        },
+        "5": {
+          "gap_sessions": 6,
+          "minimum_calibration_sessions": 40,
+          "minimum_required_independent_session_count": 232,
+          "minimum_test_sessions": 60,
+          "minimum_train_sessions": 120
+        }
+      },
+      "requested_signal_dates": [
+        "2026-03-03"
+      ],
+      "requested_signal_session_count": 1,
+      "sampling_strategy": "explicit_symbol_list_available_qfq_only",
+      "selected_market_counts": {
+        "BJ": 0,
+        "OTHER": 0,
+        "SH": 1,
+        "SZ": 0
+      },
+      "selected_symbol_count": 1,
+      "source_row_count": 83,
+      "source_symbol_count": 1,
+      "universe_market_counts": {
+        "BJ": 0,
+        "OTHER": 0,
+        "SH": 1,
+        "SZ": 0
+      },
+      "universe_symbol_count": 1
+    },
+    "records": [
+      {
+        "entry": {
+          "bar_digest": "dfb136485fb676354695cf8b3d92fa94bdb5182f06bac0a210c22c4b46dab6fc",
+          "contract_version": "daily-kline.v1",
+          "data_version": "qfq-test-v1",
+          "open": 26.15,
+          "reason": "fixed_entry_bar",
+          "session_date": "2026-03-04",
+          "status": "available",
+          "volume": 749679.0
+        },
+        "feature_source": {
+          "adjustment_mode": "qfq",
+          "available_history_bar_count": 62,
+          "contains_fallback_bar": false,
+          "contract_version": "daily-kline.v1",
+          "data_version": "qfq-test-v1",
+          "feature_bar_count": 21,
+          "history_end": "2026-03-03",
+          "history_start": "2026-02-11",
+          "ohlcv_window_digest": "09372ebf9d90b051242f3639a2ff296bc1d886328706d6b8786d565975771785",
+          "point_in_time_policy": "bar_date_lte_signal_date_no_future_rows"
+        },
+        "feature_values": [
+          0.015325670498084237,
+          0.5,
+          0.0038461538461538325,
+          0.01953125,
+          0.08298755186721984,
+          0.007722007722007929,
+          0.037773359840954424,
+          0.0,
+          0.015325670498084237,
+          9.199938403092755e-05,
+          1.0000100044219544
+        ],
+        "feature_vector_digest": "ff4f4f3861ba69bdceced46176bdf4aa28a2e49a61564341a1e9789bfd1af20a",
+        "outcomes": [
+          {
+            "buy_cost": 45.7,
+            "cost_drag": 0.0014273614880890555,
+            "exit_bar_digest": "a6ea8dc2691a5596ad4aa6b0776040ff059310ea797e2864fed358b0cbb47994",
+            "exit_close": 26.3,
+            "exit_volume": 749680.0,
+            "gross_positive": true,
+            "gross_return": 0.005736137667304186,
+            "horizon": 1,
+            "net_positive": true,
+            "net_return": 0.004308776179215131,
+            "quantity": 3800,
+            "reason": "fixed_session_close",
+            "sell_cost": 95.94,
+            "status": "modelled",
+            "target_session_date": "2026-03-05"
+          },
+          {
+            "buy_cost": 45.7,
+            "cost_drag": 0.001448978234508777,
+            "exit_bar_digest": "307502e18bfa62e214a407c2a56393593fbafd0101bbc9c6b24cea3f35cb65bc",
+            "exit_close": 26.7,
+            "exit_volume": 749684.0,
+            "gross_positive": true,
+            "gross_return": 0.021032504780114758,
+            "horizon": 5,
+            "net_positive": true,
+            "net_return": 0.01958352654560598,
+            "quantity": 3800,
+            "reason": "fixed_session_close",
+            "sell_cost": 97.39,
+            "status": "modelled",
+            "target_session_date": "2026-03-09"
+          },
+          {
+            "buy_cost": 45.7,
+            "cost_drag": 0.0015304685314533745,
+            "exit_bar_digest": "f0b3d8ffddd4fc2d12331edf5451c832c77338e667168ca791e7115a3985d523",
+            "exit_close": 28.200000000000003,
+            "exit_volume": 749699.0,
+            "gross_positive": true,
+            "gross_return": 0.07839388145315507,
+            "horizon": 20,
+            "net_positive": true,
+            "net_return": 0.0768634129217017,
+            "quantity": 3800,
+            "reason": "fixed_session_close",
+            "sell_cost": 102.87,
+            "status": "modelled",
+            "target_session_date": "2026-03-24"
+          }
+        ],
+        "record_digest": "c44a30dbd3f48df33bdc56a53f625bd26289003b30df6ccd72dbf0e6338633ed",
+        "record_limitations": [
+          "explicit_symbol_subset_replay"
+        ],
+        "sample_id": "historical_replay_v1:2026-03-03:600001.SH",
+        "signal_date": "2026-03-03",
+        "symbol": "600001.SH"
+      }
+    ],
+    "schema_version": "market-scan-probability-historical-replay-v1",
+    "source": {
+      "adjustment_mode": "qfq",
+      "database": "before.sqlite3",
+      "database_concurrent_external_change_detected": false,
+      "database_file_fingerprint_after": {
+        "mtime_ns": 1788865399263247344,
+        "size": 647168
+      },
+      "database_file_fingerprint_before": {
+        "mtime_ns": 1788865399263247344,
+        "size": 647168
+      },
+      "maximum_qfq_date": "2026-03-31",
+      "minimum_qfq_date": "2026-01-01",
+      "query_only": true,
+      "sampling_strategy": "explicit_symbol_list_available_qfq_only",
+      "selected_market_counts": {
+        "BJ": 0,
+        "OTHER": 0,
+        "SH": 1,
+        "SZ": 0
+      },
+      "selected_symbol_count": 1,
+      "snapshot_transaction": true,
+      "source_row_count": 83,
+      "source_symbol_count": 1,
+      "sqlite_immutable": true,
+      "sqlite_mode": "ro",
+      "sqlite_sidecar_policy": "reject_db_wal_shm_journal_v1",
+      "universe_market_counts": {
+        "BJ": 0,
+        "OTHER": 0,
+        "SH": 1,
+        "SZ": 0
+      },
+      "universe_symbol_count": 1
+    },
+    "status": "ready"
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "integrity_digest": "311ba16f849ddf8d2864d9f56484d350e9df34ed224cddf9a216a28bdaf0532e",
+    "notice": "sha256_integrity_not_signature_or_official_snapshot_attestation"
+  }
+}

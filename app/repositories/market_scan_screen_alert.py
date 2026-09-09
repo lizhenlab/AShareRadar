@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 import sqlite3
 import threading
@@ -16,11 +17,18 @@ from app.db.market_scan_integrity import require_publication_market_scan_snapsho
 from app.market_scan_screening import screen_spec_digest, screen_spec_from_discovery
 from app.models.discovery import DiscoveryCriteria, DiscoverySort
 from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE, MarketScanRun
-from app.models.market_scan_screen_alert import MARKET_SCAN_SCREEN_ALERT_SCHEMA_VERSION
+from app.models.market_scan_screen_alert import (
+    MARKET_SCAN_SCREEN_ALERT_SCHEMA_VERSION,
+    MarketScanScreenAlertDetailPage,
+    MarketScanScreenAlertHistoryKind,
+    MarketScanScreenAlertHistoryItem,
+    MarketScanScreenAlertHistoryPage,
+)
 from app.models.market_scan_screening import ScreenSpecV2
 from app.repositories.base import SQLiteRepository
 from app.repositories.market_scan_mapping import run_from_row
 from app.repositories.market_scan_results import required_run_row
+from app.repositories.market_scan_screen_alert_history import stored_screen_alert_event
 from app.repositories.market_scan_screening_sql import screen_spec_filter_sql
 from app.utils.errors import NotFoundError
 
@@ -59,6 +67,49 @@ class MarketScanScreenAlertRepository(SQLiteRepository):
         with self._read_snapshot() as conn:
             row = _preset_row(conn, preset_id)
         return _preset_snapshot(row)
+
+    def event_history(self, preset_id: int, *, page: int, page_size: int) -> MarketScanScreenAlertHistoryPage:
+        _history_pagination(preset_id, page, page_size)
+        with self._read_snapshot() as conn:
+            _preset_row(conn, preset_id)
+            total = int(conn.execute(
+                "SELECT COUNT(*) FROM discovery_screen_alert_event WHERE preset_id = ?", (preset_id,),
+            ).fetchone()[0])
+            rows = conn.execute(
+                "SELECT * FROM discovery_screen_alert_event WHERE preset_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (preset_id, page_size, (page - 1) * page_size),
+            ).fetchall()
+        return MarketScanScreenAlertHistoryPage(
+            preset_id=preset_id, items=[stored_screen_alert_event(row).summary for row in rows],
+            total=total, page=page, page_size=page_size, page_count=(total + page_size - 1) // page_size,
+        )
+
+    def event_detail(
+        self, preset_id: int, event_id: int, *, page: int, page_size: int,
+        kind: MarketScanScreenAlertHistoryKind,
+    ) -> MarketScanScreenAlertDetailPage:
+        _history_pagination(preset_id, page, page_size)
+        if isinstance(event_id, bool) or not isinstance(event_id, int) or not 1 <= event_id <= 2**63 - 1:
+            raise ValueError("event_id 必须是正整数")
+        if kind not in {"all", "entered", "exited", "unrankable"}:
+            raise ValueError("筛选变化类型无效")
+        with self._read_snapshot() as conn:
+            _preset_row(conn, preset_id)
+            row = conn.execute(
+                "SELECT * FROM discovery_screen_alert_event WHERE preset_id = ? AND id = ?", (preset_id, event_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("筛选变化事件不存在")
+        event = stored_screen_alert_event(row)
+        groups = [(change, symbols) for change, symbols in event.memberships if kind == "all" or change == kind]
+        total = sum(len(symbols) for _, symbols in groups)
+        offset = (page - 1) * page_size
+        members = ((change, symbol) for change, symbols in groups for symbol in symbols)
+        items = [MarketScanScreenAlertHistoryItem(symbol=symbol, change=change) for change, symbol in islice(members, min(offset, total), min(offset + page_size, total))]
+        return MarketScanScreenAlertDetailPage(
+            event=event.summary, items=items, total=total,
+            page=page, page_size=page_size, page_count=(total + page_size - 1) // page_size, kind=kind,
+        )
 
     def comparison_snapshot(
         self,
@@ -152,6 +203,14 @@ class MarketScanScreenAlertRepository(SQLiteRepository):
             ):
                 raise RuntimeError("筛选变化事件未写入且不存在幂等记录")
         return False
+
+
+def _history_pagination(preset_id: int, page: int, page_size: int) -> None:
+    for value in (preset_id, page, page_size):
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2**63 - 1:
+            raise ValueError("筛选变化历史身份和分页必须是正整数")
+    if page_size > 100 or (page - 1) * page_size > 2**63 - 1:
+        raise ValueError("筛选变化历史分页超出范围")
 
 
 def _validate_event_evidence(

@@ -235,7 +235,7 @@ def terminal_diagnostic(
 ) -> str | None:
     details = list(warnings[:3])
     if publication_summary is not None:
-        details.extend(publication_blockers(publication_summary))
+        details.extend(publication_blockers(publication_summary, scope=run.scope))
     if score_distribution is not None:
         assessment = assess_market_scan_score_distribution(score_distribution)
         if assessment.status in {"failed", "degraded"}:

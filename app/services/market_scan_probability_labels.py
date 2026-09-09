@@ -14,12 +14,15 @@ from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.paper_trading_rules import assess_daily_tradeability, resolve_trade_rule_profile
 
 
-PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v3-explicit-target-offset"
+PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v4-execution-phase-separated"
 PROBABILITY_EXECUTION_MODEL = (
-    "signal-D,next-session-open,holding-H-session-close,target-offset-H+1,T+1,no-delayed-exit"
+    "signal-D,next-session-open,holding-H-session-close,target-offset-H+1,T+1,no-delayed-exit,open-status-entry-only"
 )
 LEGACY_PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v2"
 LEGACY_PROBABILITY_EXECUTION_MODEL = "next-session-open,H-holding-session-close,T+1,no-delayed-exit"
+PREVIOUS_PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v3-explicit-target-offset"
+_PREVIOUS_EXECUTION_MODEL = "signal-D,next-session-open,holding-H-session-close,target-offset-H+1,T+1,no-delayed-exit"
+SUPERSEDED_PROBABILITY_LABEL_VERSIONS = (LEGACY_PROBABILITY_LABEL_VERSION, PREVIOUS_PROBABILITY_LABEL_VERSION)
 PROBABILITY_DEFAULT_HORIZONS = (1, 5, 20)
 ProbabilityLabelStatus = Literal["modelled", "unfilled", "data_unavailable"]
 
@@ -84,15 +87,21 @@ def build_probability_label_outcomes(
     rows: Sequence[Kline],
     eligible_dates: Sequence[str],
     config: ProbabilityLabelConfig | None = None,
+    label_version: str = PROBABILITY_LABEL_VERSION,
 ) -> dict[int, ProbabilityLabelOutcome]:
+    if label_version not in {PROBABILITY_LABEL_VERSION, *SUPERSEDED_PROBABILITY_LABEL_VERSIONS}:
+        raise ValueError("unsupported probability label contract version")
     settings = config or ProbabilityLabelConfig()
     bars = _validated_bars(rows)
-    dates = tuple(dict.fromkeys(value for value in eligible_dates if value > quote_date))
+    dates = _validated_dates(quote_date, eligible_dates)
     entry = _prepare_entry(symbol, market, list_date, is_st, quote_date, amount, bars, dates, settings)
     if isinstance(entry, ProbabilityLabelOutcome):
         return {horizon: _outcome_for_horizon(entry, horizon) for horizon in settings.horizons}
     return {
-        horizon: _horizon_outcome(entry, symbol, dates, horizon)
+        horizon: _horizon_outcome(
+            entry, symbol, dates, horizon,
+            execution_phase="close" if label_version == PROBABILITY_LABEL_VERSION else "open",
+        )
         for horizon in settings.horizons
     }
 
@@ -104,15 +113,16 @@ def probability_label_contract(
 ) -> dict[str, object]:
     settings = config or ProbabilityLabelConfig()
     cost = resolve_cost_profile(settings.cost_profile)
-    if label_version not in {PROBABILITY_LABEL_VERSION, LEGACY_PROBABILITY_LABEL_VERSION}:
+    execution_models = {
+        PROBABILITY_LABEL_VERSION: PROBABILITY_EXECUTION_MODEL,
+        PREVIOUS_PROBABILITY_LABEL_VERSION: _PREVIOUS_EXECUTION_MODEL,
+        LEGACY_PROBABILITY_LABEL_VERSION: LEGACY_PROBABILITY_EXECUTION_MODEL,
+    }
+    if label_version not in execution_models:
         raise ValueError("unsupported probability label contract version")
     contract: dict[str, object] = {
         "label_version": label_version,
-        "execution_model": (
-            PROBABILITY_EXECUTION_MODEL
-            if label_version == PROBABILITY_LABEL_VERSION
-            else LEGACY_PROBABILITY_EXECUTION_MODEL
-        ),
+        "execution_model": execution_models[label_version],
         "horizons": list(settings.horizons),
         "target_definitions": ["absolute_net_return_positive", "equal_weight_market_net_excess_positive"],
         "cost_model_version": cost.version,
@@ -120,7 +130,7 @@ def probability_label_contract(
         "execution_notional": settings.execution_notional,
         "max_daily_participation_rate": settings.max_daily_participation_rate,
     }
-    if label_version == PROBABILITY_LABEL_VERSION:
+    if label_version != LEGACY_PROBABILITY_LABEL_VERSION:
         contract.update(
             {
                 "entry_session_offset": 1,
@@ -141,13 +151,21 @@ def _validated_bars(rows: Sequence[Kline]) -> dict[str, Kline]:
         if any(not math.isfinite(float(value)) for value in values) or row.open <= 0 or row.close <= 0:
             continue
         existing = bars.get(row.date)
-        signature = (row.open, row.close, row.high, row.low, row.volume, row.adjustment_mode)
-        if existing is not None and signature != (
-            existing.open, existing.close, existing.high, existing.low, existing.volume, existing.adjustment_mode,
-        ):
+        if existing is not None and existing != row:
             raise ValueError(f"conflicting probability label bar: {row.date}")
         bars[row.date] = row
     return bars
+
+
+def _validated_dates(quote_date: str, eligible_dates: Sequence[str]) -> tuple[str, ...]:
+    dates = tuple(eligible_dates)
+    try:
+        canonical = all(date.fromisoformat(value).isoformat() == value for value in (quote_date, *dates))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("probability label dates must be canonical ISO dates") from exc
+    if not canonical or list(dates) != sorted(set(dates)):
+        raise ValueError("probability label dates must be canonical, ordered and unique")
+    return tuple(value for value in dates if value > quote_date)
 
 
 def _prepare_entry(
@@ -230,6 +248,8 @@ def _horizon_outcome(
     symbol: str,
     dates: Sequence[str],
     horizon: int,
+    *,
+    execution_phase: Literal["open", "close"],
 ) -> ProbabilityLabelOutcome:
     bars = entry.bars
     if not bars:
@@ -260,7 +280,9 @@ def _horizon_outcome(
             exit_date=exit_date,
             rule_profile_verified=False,
         )
-    tradeability = assess_daily_tradeability(exit_bar, previous_close=previous.close, profile=profile)
+    tradeability = assess_daily_tradeability(
+        exit_bar, previous_close=previous.close, profile=profile, execution_phase=execution_phase,
+    )
     if not tradeability.can_sell:
         return ProbabilityLabelOutcome(
             horizon,

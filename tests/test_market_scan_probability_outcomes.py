@@ -9,6 +9,7 @@ import pytest
 
 from app.models.market import Kline
 from app.services.market_scan_probability import stable_probability_hash
+from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION, market_scan_score_spec, stable_score_spec_hash
 import app.services.market_scan_probability_outcomes as outcomes_module
 from app.services.market_scan_probability_research import build_probability_research
 from app.services import market_scan_probability_maintenance as maintenance
@@ -629,15 +630,18 @@ def _source() -> dict[str, object]:
         },
     }
     return {
-        "schema_version": "market-scan-probability-source-artifact-v1",
+        "schema_version": "market-scan-probability-source-artifact-v3",
         "captured_at": "2026-08-11T16:30:00+08:00",
         "payload": {
-            "contract_version": "market-scan-probability-source-snapshot-v1",
+            "contract_version": "market-scan-probability-source-snapshot-v3",
+            "feature_schema": {"version": outcomes_module.PROBABILITY_FEATURE_VERSION},
             "run": {
                 "run_id": 71,
                 "quote_date": "2026-08-11",
                 "data_date": "2026-08-11",
                 "as_of": "2026-08-11T16:00:00+08:00",
+                "production_score_rule_version": FULL_MARKET_SCORE_RULE_VERSION,
+                "production_score_spec_hash": stable_score_spec_hash(market_scan_score_spec(min_data_quality_score=50)),
             },
             "cohort": {
                 "mode": "official",

@@ -16,6 +16,9 @@ QUOTE_OPTIONAL_FINITE_FIELDS = ("pe", "pb", "market_cap")
 
 
 def finite_float(value: object) -> float | None:
+    if type(value) is float or type(value) is int:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     if not isinstance(value, (str, Buffer, SupportsFloat, SupportsIndex)):
         return None
     try:

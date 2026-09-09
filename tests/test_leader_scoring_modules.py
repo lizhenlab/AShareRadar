@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from app.services.leader_scoring import (
     FEATURE_LEADER_PROFILE,
     FEATURE_TAG_RULES,
@@ -8,9 +10,24 @@ from app.services.leader_scoring import (
     STRONG_STOCK_TAG_RULES,
     LeaderScoreInput,
     leader_score,
+    leader_score_breakdown,
     leader_profile_spec,
     leader_tags,
 )
+
+
+def test_observed_fund_score_is_monotone_including_zero() -> None:
+    inputs = LeaderScoreInput(
+        trend_score=70, change_pct=5, volume_ratio=1.5,
+        amount=100_000_000, industry_change_pct=1.2, data_quality_score=85,
+    )
+    scores = [leader_score(replace(inputs, fund_flow_score=value), FEATURE_LEADER_PROFILE) for value in range(101)]
+
+    assert scores == sorted(scores)
+    assert scores[0] < scores[50] < scores[100]
+    missing = leader_score(inputs, FEATURE_LEADER_PROFILE)
+    assert missing == scores[50]
+    assert dict(leader_score_breakdown(replace(inputs, fund_flow_score=0), FEATURE_LEADER_PROFILE).rule_deltas)["fund_flow"] == -10
 
 
 def test_feature_leader_profile_preserves_full_context_score() -> None:

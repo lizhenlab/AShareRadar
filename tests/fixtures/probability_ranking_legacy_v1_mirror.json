@@ -1,0 +1,45 @@
+{
+  "publication": {
+    "artifact_digest": "1f50ba8089197739be63ff6ccdde13564e51558dd11d54e86934354afac561ef",
+    "artifact_path": "/var/folders/97/cwfzr0_x1098w4dndx12v83h0000gn/T/tmpa00322xm/joint-research/production-rankings-v6/probability-ranking-v6-run-101-1f50ba8089197739be63ff6ccdde13564e51558dd11d54e86934354afac561ef.json.gz",
+    "base_snapshot_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "generated_at": "2026-08-24T16:03:00+08:00",
+    "prediction_artifact_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "promotion_digest": "226135784aa85f0a6f1a439d478041c2ac18d00f326a1cb10bfbf7311c3ef56f",
+    "record_count": 2,
+    "run_id": 101,
+    "schema_version": "market-scan-probability-ranking-publication-artifact-v1",
+    "score_rule_version": "full-market-score-v6",
+    "score_spec_hash": "df617b8524c0a4c58c86ca252d028e7e3813d40b5336295e301a5d4122951c6e"
+  },
+  "results": [
+    {
+      "base_rank": 2,
+      "base_raw_score": 79.0,
+      "base_score": 79,
+      "probability": 0.8,
+      "probability_adjustment": 6.0,
+      "rank": 1,
+      "raw_score": 85.0,
+      "record_digest": "5e11bb44830e5a61562f3d8a4b01a12630e3efad464d81dcc3a722af04b91858",
+      "reference_base_rate": 0.5,
+      "run_id": 101,
+      "score": 85,
+      "symbol": "300750.SZ"
+    },
+    {
+      "base_rank": 1,
+      "base_raw_score": 80.0,
+      "base_score": 80,
+      "probability": 0.2,
+      "probability_adjustment": -6.0,
+      "rank": 2,
+      "raw_score": 74.0,
+      "record_digest": "c15689c9c767487dedadae76c23e6cd75e20c315c629d81b7cacfce395b26764",
+      "reference_base_rate": 0.5,
+      "run_id": 101,
+      "score": 74,
+      "symbol": "600519.SH"
+    }
+  ]
+}

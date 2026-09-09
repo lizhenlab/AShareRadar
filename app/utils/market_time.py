@@ -7,8 +7,31 @@ MARKET_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def normalize_market_datetime(value: Any, *, event_date: Any = None) -> str | None:
+    parsed = _parse_market_datetime(value, event_date=event_date)
+    return _format_market_datetime(parsed) if parsed is not None else None
+
+
+def market_datetime_epoch(value: Any) -> float | None:
+    parsed = _parse_market_datetime(value, event_date=None)
+    if parsed is None:
+        return None
+    if type(parsed) is datetime and parsed.year >= 1000:
+        # The previous string round trip truncated fractions and discarded fold.
+        return parsed.replace(microsecond=0, fold=0, tzinfo=ASHARE_TIMEZONE).timestamp()
+    normalized = _format_market_datetime(parsed)
+    return datetime.strptime(normalized, MARKET_DATETIME_FORMAT).replace(tzinfo=ASHARE_TIMEZONE).timestamp()
+
+
+def _format_market_datetime(value: datetime) -> str:
+    if type(value) is datetime and value.year >= 1000:
+        return value.isoformat(sep=" ", timespec="seconds")
+    # Preserve platform-specific early-year formatting and subclass overrides.
+    return value.strftime(MARKET_DATETIME_FORMAT)
+
+
+def _parse_market_datetime(value: Any, *, event_date: Any) -> datetime | None:
     if isinstance(value, datetime):
-        return market_local_naive(value).strftime(MARKET_DATETIME_FORMAT)
+        return market_local_naive(value)
 
     text = str(value or "").strip()
     if not text or text.lower() in {"nan", "nat", "none", "null", "n/a", "--"}:
@@ -18,20 +41,12 @@ def normalize_market_datetime(value: Any, *, event_date: Any = None) -> str | No
     parsed = _parse_compact_datetime(compact)
     compact_digits = compact.split(".", 1)[0]
     if compact_digits.isdigit() and len(compact_digits) in {12, 14}:
-        return market_local_naive(parsed).strftime(MARKET_DATETIME_FORMAT) if parsed is not None else None
+        return market_local_naive(parsed) if parsed is not None else None
     if parsed is None and ":" in compact:
         parsed = _parse_iso_datetime(compact, event_date)
     if parsed is None:
         parsed = _parse_epoch_datetime(compact)
-    return market_local_naive(parsed).strftime(MARKET_DATETIME_FORMAT) if parsed is not None else None
-
-
-def market_datetime_epoch(value: Any) -> float | None:
-    normalized = normalize_market_datetime(value)
-    if normalized is None:
-        return None
-    parsed = datetime.strptime(normalized, MARKET_DATETIME_FORMAT).replace(tzinfo=ASHARE_TIMEZONE)
-    return parsed.timestamp()
+    return market_local_naive(parsed) if parsed is not None else None
 
 
 def market_local_naive(value: datetime) -> datetime:

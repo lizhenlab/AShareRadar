@@ -162,7 +162,7 @@ export function validateSchedule(value) {
   return schedule;
 }
 
-export function validateSimulationPlan(value) {
+export function validateSimulationPlan(value, execution = null) {
   const plan = objectValue(value, "模拟交易计划");
   positiveInteger(plan.plan_id, "plan_id");
   if (!Array.isArray(plan.orders) || !Array.isArray(plan.disclaimers)) {
@@ -171,7 +171,35 @@ export function validateSimulationPlan(value) {
   fingerprint(plan.plan_digest, "plan_digest");
   fingerprint(plan.strategy_fingerprint, "plan strategy_fingerprint");
   fingerprint(plan.execution_fingerprint, "plan execution_fingerprint");
+  validateSimulationSource(plan, execution);
+  if (!["draft", "no_trade"].includes(plan.status) || plan.orders.length > 100) throw new Error("纸面委托草案状态或数量无效");
+  if ((plan.status === "no_trade") !== (plan.orders.length === 0)) throw new Error("纸面委托草案状态与委托不一致");
+  plan.orders.forEach(validateSimulationOrder);
+  if (new Set(plan.orders.map(item => item.symbol)).size !== plan.orders.length) throw new Error("纸面委托包含重复股票");
   return plan;
+}
+
+function validateSimulationSource(plan, execution) {
+  for (const field of ["execution_id", "strategy_id", "strategy_version"]) positiveInteger(plan[field], `委托来源 ${field}`);
+  fingerprint(plan.cost_rule_fingerprint, "委托成本规则");
+  if (typeof plan.data_as_of !== "string" || !plan.data_as_of || typeof plan.rule_version !== "string" || !plan.rule_version) {
+    throw new Error("纸面委托缺少数据时点或规则来源");
+  }
+  const fields = ["execution_id", "strategy_id", "strategy_version", "strategy_fingerprint", "execution_fingerprint", "cost_rule_fingerprint", "rule_version", "data_as_of"];
+  if (execution && fields.some(field => plan[field] !== execution[field])) throw new Error("纸面委托来源与当前执行不一致");
+}
+
+function validateSimulationOrder(value) {
+  const order = objectValue(value, "纸面委托");
+  if (!/^\d{6}\.(SH|SZ|BJ)$/.test(order.symbol || "") || order.research_side !== "paper_buy") throw new Error("纸面委托股票或方向无效");
+  if (!Number.isSafeInteger(order.target_quantity) || order.target_quantity < 0) throw new Error("纸面委托数量无效");
+  for (const field of ["target_weight", "estimated_gross_amount_cny", "estimated_round_trip_cost_cny"]) {
+    if (!Number.isFinite(order[field]) || order[field] < 0) throw new Error("纸面委托权重或估算金额无效");
+  }
+  if (order.target_weight > 1 || !Array.isArray(order.constraint_notes)) throw new Error("纸面委托权重或约束无效");
+  for (const field of ["name", "board_label", "earliest_exit_policy"]) {
+    if (typeof order[field] !== "string") throw new Error("纸面委托说明格式无效");
+  }
 }
 
 export function strategySpecFromEditor(root, base = null) {

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Buffer
 from dataclasses import dataclass
 import math
 import sqlite3
+from typing import SupportsFloat, SupportsIndex, cast
 
 from app.db.user_mappers import row_to_alert_event, row_to_alert_rule
+from app.db.alert_stream import alert_event_high_water, read_alert_stream_state
 from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.user_data import (
     AlertEventItem,
+    AlertNotificationPage,
     AlertRuleInput,
     AlertRuleItem,
     AlertRuleUpdate,
@@ -15,6 +19,7 @@ from app.models.user_data import (
 from app.models.market import (
     Quote,
 )
+from app.models.alert_conditions import validate_alert_condition
 from app.repositories.base import SQLiteRepository
 from app.repositories.update_fields import FieldUpdate, present_updates, update_sql_parts
 from app.utils.audit_time import audit_now_text as now_text
@@ -138,12 +143,44 @@ class AlertStateUpdateResult:
 
 
 class AlertRepository(SQLiteRepository):
+    def notification_events(
+        self, *, stream_id: str | None = None, after_id: int | None = None, limit: int = 50,
+    ) -> AlertNotificationPage:
+        if (stream_id is None) != (after_id is None):
+            raise ValueError("通知 stream_id 与 after_id 必须同时提供")
+        if not 1 <= limit <= MAX_ALERT_EVENT_PAGE_SIZE:
+            raise ValueError("通知分页条数超出范围")
+        with self._lock, self._read_snapshot() as conn:
+            state = read_alert_stream_state(conn)
+            high_water = alert_event_high_water(conn)
+            if stream_id is None:
+                return AlertNotificationPage(
+                    stream_id=state.stream_id, baseline_id=state.baseline_event_id,
+                    cursor_id=high_water, reset=True, has_more=False, events=[],
+                )
+            reset = stream_id != state.stream_id
+            cursor = state.baseline_event_id if reset else after_id
+            if cursor is None or not state.baseline_event_id <= cursor <= high_water:
+                raise ValueError("通知游标不在当前事件流范围内，请重新建立通知基线")
+            rows = conn.execute(
+                f"SELECT {_ALERT_EVENT_SELECT_SQL} FROM alert_event WHERE id > ? ORDER BY id ASC LIMIT ?",
+                (cursor, limit + 1),
+            ).fetchall()
+            events = [row_to_alert_event(row) for row in rows[:limit]]
+            return AlertNotificationPage(
+                stream_id=state.stream_id, baseline_id=state.baseline_event_id,
+                cursor_id=events[-1].id if events else cursor,
+                reset=reset, has_more=len(rows) > limit, events=events,
+            )
+
     def create_rule(self, quote: Quote, payload: AlertRuleInput) -> AlertRuleItem:
         timestamp = now_text()
         params = _alert_rule_insert_values(quote, payload, timestamp)
         with self._lock, self._connect() as conn:
             cursor = conn.execute(_ALERT_RULE_INSERT_SQL, params)
-            row_id = int(cursor.lastrowid)
+            if cursor.lastrowid is None:
+                raise RuntimeError("预警规则保存失败")
+            row_id = cursor.lastrowid
         item = self.rule(row_id)
         if item is None:
             raise RuntimeError("预警规则保存失败")
@@ -184,44 +221,18 @@ class AlertRepository(SQLiteRepository):
             return cursor.rowcount > 0
 
     def update_rule(self, row_id: int, payload: AlertRuleUpdate) -> AlertRuleItem | None:
-        updates = self._normalized_rule_updates(row_id, payload)
-        if updates is None:
-            return None
-        if not updates:
-            return self.rule(row_id)
-        return self._apply_rule_updates(row_id, updates)
-
-    def _normalized_rule_updates(self, row_id: int, payload: AlertRuleUpdate) -> list[FieldUpdate] | None:
-        raw_updates = payload.model_dump(exclude_unset=True)
-        updates = _alert_rule_updates(payload)
-        if _empty_name_update_requested(raw_updates, updates):
-            current = self.rule(row_id)
-            if current is None:
-                return None
-            return _with_default_rule_name(updates, current)
-        return updates
-
-    def _apply_rule_updates(self, row_id: int, updates: list[FieldUpdate]) -> AlertRuleItem | None:
-        assignments, params = update_sql_parts(updates)
-        if _rule_semantics_changed(updates):
-            assignments.extend(
-                [
-                    "last_checked_at = NULL",
-                    "last_triggered_at = NULL",
-                    "last_state = '等待'",
-                ]
-            )
-        assignments.append("updated_at = ?")
-        params.append(now_text())
-        params.append(row_id)
         with self._lock, self._connect() as conn:
-            cursor = conn.execute(
-                f"UPDATE alert_rule SET {', '.join(assignments)} WHERE id = ?",
-                params,
-            )
-            if cursor.rowcount <= 0:
+            conn.execute("BEGIN IMMEDIATE")
+            row = _alert_rule_row(conn, row_id)
+            if row is None:
                 return None
-        return self.rule(row_id)
+            current = row_to_alert_rule(row)
+            updates = _normalized_rule_updates(payload, current, row)
+            if not updates:
+                return current
+            _apply_rule_updates(conn, row_id, updates)
+            updated = _alert_rule_row(conn, row_id)
+            return row_to_alert_rule(updated) if updated is not None else None
 
     def update_rule_state(
         self,
@@ -328,6 +339,7 @@ def _default_rule_name(condition_type: str, threshold: float) -> str:
 
 def _alert_rule_insert_values(quote: Quote, payload: AlertRuleInput, timestamp: str) -> dict[str, object | None]:
     threshold = _clean_alert_threshold(payload.threshold)
+    validate_alert_condition(payload.condition_type, threshold)
     return {
         "symbol": standard_symbol(f"{quote.market}{quote.code}"),
         "code": quote.code,
@@ -392,6 +404,39 @@ def _alert_rule_updates(payload: AlertRuleUpdate) -> list[FieldUpdate]:
             "cooldown_seconds": _clean_alert_cooldown_seconds,
         },
     )
+
+
+def _alert_rule_row(conn: sqlite3.Connection, row_id: int) -> sqlite3.Row | None:
+    return conn.execute(f"SELECT {_ALERT_RULE_SELECT_SQL} FROM alert_rule WHERE id = ?", (row_id,)).fetchone()
+
+
+def _normalized_rule_updates(payload: AlertRuleUpdate, current: AlertRuleItem, row: sqlite3.Row) -> list[FieldUpdate]:
+    updates = _alert_rule_updates(payload)
+    if _rule_semantics_changed(updates):
+        _validate_merged_rule_condition(updates, row)
+    if _empty_name_update_requested(payload.model_dump(exclude_unset=True), updates):
+        return _with_default_rule_name(updates, current)
+    return updates
+
+
+def _validate_merged_rule_condition(updates: list[FieldUpdate], row: sqlite3.Row) -> None:
+    condition_type = _field_value(updates, "condition_type")
+    threshold = _field_value(updates, "threshold")
+    validate_alert_condition(
+        row["condition_type"] if condition_type is None else condition_type,
+        _clean_alert_threshold(row["threshold"] if threshold is None else threshold),
+    )
+
+
+def _apply_rule_updates(conn: sqlite3.Connection, row_id: int, updates: list[FieldUpdate]) -> None:
+    assignments, params = update_sql_parts(updates)
+    if _rule_semantics_changed(updates):
+        assignments.extend([
+            "last_checked_at = NULL", "last_triggered_at = NULL", "last_state = '等待'",
+        ])
+    assignments.append("updated_at = ?")
+    params.extend((now_text(), row_id))
+    conn.execute(f"UPDATE alert_rule SET {', '.join(assignments)} WHERE id = ?", params)
 
 
 def _required_value(value, message: str):
@@ -538,12 +583,14 @@ def _insert_alert_event_row(
             "created_at": checked_at,
         },
     )
-    return int(cursor.lastrowid)
+    if cursor.lastrowid is None:
+        raise RuntimeError("预警事件保存失败")
+    return cursor.lastrowid
 
 
 def _finite_float_or_default(value: object, default: float = 0.0) -> float:
     try:
-        parsed = float(value)
+        parsed = float(cast(str | Buffer | SupportsFloat | SupportsIndex, value))
     except (TypeError, ValueError):
         return default
     return parsed if math.isfinite(parsed) else default

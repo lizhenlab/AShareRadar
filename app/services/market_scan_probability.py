@@ -39,8 +39,9 @@ PROBABILITY_MODEL_VERSION = "shadow-up-probability-logit-l2-v2-convergence-requi
 PROBABILITY_CALIBRATOR_VERSION = "shadow-up-probability-platt-v2-convergence-required"
 PROBABILITY_ISOTONIC_CALIBRATOR_VERSION = "shadow-up-probability-isotonic-pav-v1"
 PROBABILITY_BASELINE_VERSION = probability_metrics.PROBABILITY_BASELINE_VERSION
-PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v3-liquidity-medium"
-PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v3-explicit-target-offset"
+PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v4-target-semideviation"
+PREVIOUS_PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v3-liquidity-medium"
+PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v4-execution-phase-separated"
 PROBABILITY_COST_MODEL_VERSION = "ashare-executable-round-trip-cost-v1"
 PROBABILITY_SPLIT_VERSION = "grouped-date-multifold-target-offset-purge-v3"
 PROBABILITY_FILTER_QUALIFICATION_VERSION = "market-scan-probability-filter-qualification-v1"
@@ -51,8 +52,12 @@ PROBABILITY_DEPLOYMENT_ARTIFACT_SCHEMA_VERSION = "market-scan-probability-deploy
 PROBABILITY_DEPLOYMENT_CONTRACT_VERSION = "market-scan-probability-deployment-refit-v1"
 PROBABILITY_DEPLOYMENT_MAXIMUM_AGE_HOURS = 36
 SUPERSEDED_PROBABILITY_SCHEMA_VERSIONS = ("market-scan-shadow-probability-v3",)
-SUPERSEDED_PROBABILITY_FEATURE_VERSIONS = ("full-market-point-in-time-features-v2",)
-SUPERSEDED_PROBABILITY_LABEL_VERSIONS = ("market-scan-upside-label-v2",)
+SUPERSEDED_PROBABILITY_FEATURE_VERSIONS = (
+    "full-market-point-in-time-features-v2", PREVIOUS_PROBABILITY_FEATURE_VERSION,
+)
+SUPERSEDED_PROBABILITY_LABEL_VERSIONS = (
+    "market-scan-upside-label-v2", "market-scan-upside-label-v3-explicit-target-offset",
+)
 SUPERSEDED_PROBABILITY_SPLIT_VERSIONS = ("grouped-date-multifold-train-gap-calibration-gap-test-v2",)
 LEGACY_PROBABILITY_FEATURE_VERSION = SUPERSEDED_PROBABILITY_FEATURE_VERSIONS[0]
 ProbabilityStatus = Literal["insufficient_data", "calibrated_shadow"]
@@ -3771,6 +3776,7 @@ __all__ = [
     "PROBABILITY_DEPLOYMENT_ARTIFACT_SCHEMA_VERSION",
     "PROBABILITY_DEPLOYMENT_CONTRACT_VERSION",
     "PROBABILITY_FEATURE_VERSION",
+    "PREVIOUS_PROBABILITY_FEATURE_VERSION",
     "PROBABILITY_FILTER_AUTHORIZATION_VERSION",
     "PROBABILITY_FILTER_AUTHORIZATION_SCHEMA_VERSION",
     "PROBABILITY_FILTER_QUALIFICATION_VERSION",

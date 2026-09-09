@@ -14,7 +14,6 @@ from app.models.research import (
 )
 from app.services.llm_output_validation import (
     LlmOutputValidationError,
-    _allowed_numbers as _allowed_numbers,
     authority_binding_issue,
     validate_and_render_answer,
 )
@@ -22,7 +21,7 @@ from app.services.llm_prompt import build_chat_messages
 from app.utils.provider_errors import sanitize_provider_error
 
 
-__all__ = ["_allowed_numbers", "_call_llm", "enhance_stock_answer", "llm_available"]
+__all__ = ["_call_llm", "enhance_stock_answer", "llm_available"]
 
 
 def llm_available(settings: Settings) -> bool:
@@ -40,6 +39,8 @@ async def enhance_stock_answer(
     rule_answer: StockQuestionAnswer,
     analysis: AnalysisResult,
 ) -> StockQuestionAnswer:
+    if rule_answer.answerability != "answerable":
+        return _fallback(rule_answer, "当前问题缺少可回答证据，未调用大模型")
     if not llm_available(settings):
         return _fallback(rule_answer, "未配置大模型API")
 
@@ -61,12 +62,12 @@ async def enhance_stock_answer(
     return rule_answer.model_copy(
         update={
             "answer": answer,
-            "answer_source": f"大模型解释增强·{settings.llm_model}",
+            "answer_source": f"大模型证据选读·{settings.llm_model}",
             "llm_used": True,
             "llm_status": (
-                "结构化字段已绑定规则引擎，经一次格式纠错后仅增强解释"
+                "经一次格式纠错后仅选择当前证据，原文由服务端呈现"
                 if repaired
-                else "结构化字段已绑定规则引擎，仅增强解释"
+                else "仅选择当前证据，原文由服务端呈现"
             ),
         }
     )

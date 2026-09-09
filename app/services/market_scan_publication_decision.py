@@ -6,6 +6,7 @@ from app.market_scan_repository_contracts import (
     MARKET_SCAN_PUBLISH_MIN_ELIGIBLE_RATIO,
 )
 from app.models.market_scan import (
+    MARKET_SCAN_FULL_MARKET_SCOPE,
     MarketScanCoverageScope,
     MarketScanPublicationDiagnostic,
     MarketScanPublicationDiagnostics,
@@ -50,7 +51,7 @@ def completion_status(
         return "failed", f"{scan_label}尚有 {pending_count} 只待处理，不能发布"
     assessment = _distribution_assessment(score_distribution)
     blockers = list(
-        publication_blockers(publication_summary)
+        publication_blockers(publication_summary, scope=run.scope)
         if publication_summary is not None
         else ()
     )
@@ -170,7 +171,7 @@ def _completion_blocker_diagnostics(
             ),
         )
     blockers = list(
-        publication_diagnostics(publication_summary)
+        publication_diagnostics(publication_summary, scope=run.scope)
         if publication_summary is not None
         else ()
     )
@@ -212,12 +213,16 @@ def _passed_gate_diagnostics(
     )
 
 
-def publication_blockers(summary: MarketScanPublicationSummary) -> tuple[str, ...]:
-    return tuple(item.detail for item in publication_diagnostics(summary))
+def publication_blockers(
+    summary: MarketScanPublicationSummary, *, scope: str = MARKET_SCAN_FULL_MARKET_SCOPE,
+) -> tuple[str, ...]:
+    return tuple(item.detail for item in publication_diagnostics(summary, scope=scope))
 
 
 def publication_diagnostics(
     summary: MarketScanPublicationSummary,
+    *,
+    scope: str = MARKET_SCAN_FULL_MARKET_SCOPE,
 ) -> tuple[MarketScanPublicationDiagnostic, ...]:
     blockers = list(
         snapshot_publication_diagnostics(
@@ -225,8 +230,11 @@ def publication_diagnostics(
             max_span_seconds=MARKET_SCAN_MAX_SNAPSHOT_SPAN_SECONDS,
         )
     )
-    for scope in MARKET_SCAN_PUBLICATION_SCOPES:
-        blockers.extend(_scope_publication_diagnostics(summary, scope))
+    # A refreshed leader subset has no market-wide coverage denominator, but
+    # its new quote snapshot still has to satisfy the same temporal contract.
+    if not is_market_scan_top100_refresh_scope(scope):
+        for market_scope in MARKET_SCAN_PUBLICATION_SCOPES:
+            blockers.extend(_scope_publication_diagnostics(summary, market_scope))
     return tuple(blockers)
 
 

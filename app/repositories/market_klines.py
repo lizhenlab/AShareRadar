@@ -29,6 +29,7 @@ from app.utils.market_data import (
 )
 from app.utils.audit_time import audit_datetime_to_text, audit_now_text, audit_time_window, parse_audit_time
 from app.utils.market_time import market_local_naive
+from app.utils.daily_kline_identity import deduplicate_daily_klines
 from app.utils.symbols import standard_symbol
 
 
@@ -75,6 +76,12 @@ DAILY_KLINE_COLUMNS = (
     "high",
     "low",
     "volume",
+    "session_status",
+    "open_execution_status",
+    "corporate_action_status",
+    "adjustment_factor",
+    "point_in_time",
+    "execution_metadata_version",
     "as_of",
     "data_version",
     "contract_version",
@@ -126,7 +133,7 @@ class MarketKlineRepositoryMixin:
         def _time_window(self, max_age_seconds: int) -> tuple[str, str] | None: ...
 
     def save_klines(self, symbol: str, klines: list[Kline], source: str) -> None:
-        valid_klines = filter_valid_klines(klines)
+        valid_klines = filter_valid_klines(deduplicate_daily_klines(klines))
         if not valid_klines:
             return
         normalized_klines = _normalized_daily_klines(valid_klines, source)
@@ -143,6 +150,7 @@ class MarketKlineRepositoryMixin:
                 item.high,
                 item.low,
                 item.volume,
+                *_daily_execution_metadata_values(item),
                 item.as_of,
                 item.data_version,
                 item.contract_version,
@@ -621,11 +629,29 @@ def _daily_content_revision(rows: list[Kline]) -> str:
             str(item.as_of or ""),
             item.contract_version,
             bool(item.fallback_used),
+            *_daily_execution_metadata_values(item),
         ]
         for item in sorted(rows, key=lambda row: row.date)
     ]
     encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _daily_execution_metadata_values(item: Kline) -> tuple[str, str, str, float | None, int, str | None]:
+    if (item.session_status not in ("trading", "suspended", "unknown")
+            or item.open_execution_status not in ("tradable", "locked_limit_up", "locked_limit_down", "unavailable", "unknown")
+            or item.corporate_action_status not in ("none", "effective_event", "unknown")):
+        raise ValueError("日K执行状态无效")
+    if type(item.point_in_time) is not bool:
+        raise ValueError("日K point_in_time 必须是布尔值")
+    if item.adjustment_factor is not None and (
+        type(item.adjustment_factor) not in (float, int) or finite_float(item.adjustment_factor) is None
+    ):
+        raise ValueError("日K adjustment_factor 必须是有限数值或空值")
+    if item.execution_metadata_version is not None and not isinstance(item.execution_metadata_version, str):
+        raise ValueError("日K execution_metadata_version 必须是字符串或空值")
+    return (item.session_status, item.open_execution_status, item.corporate_action_status,
+            finite_float(item.adjustment_factor), int(item.point_in_time), item.execution_metadata_version)
 
 
 def _required_contract_datetime(value: object, field: str) -> datetime:

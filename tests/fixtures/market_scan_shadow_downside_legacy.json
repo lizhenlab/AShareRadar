@@ -1,0 +1,418 @@
+{
+  "provenance": "Produced by pre-change source baseline; read-only historical shadow evidence",
+  "spec_hash": "da47ac3215d36b3f27efc9886b22cd4fd8baf1b7ad96cab145a4ba3d52e35612",
+  "candidate_id": "full-market-shadow-score-v5.5:v5_5_bounded_nonlinear_stability:da47ac3215d36b3f27efc9886b22cd4fd8baf1b7ad96cab145a4ba3d52e35612",
+  "details": {
+    "schema_version": 6,
+    "candidate_id": "full-market-shadow-score-v5.5:v5_5_bounded_nonlinear_stability:da47ac3215d36b3f27efc9886b22cd4fd8baf1b7ad96cab145a4ba3d52e35612",
+    "score_spec_hash": "da47ac3215d36b3f27efc9886b22cd4fd8baf1b7ad96cab145a4ba3d52e35612",
+    "score_spec": {
+      "schema_version": 6,
+      "candidate_version": "full-market-shadow-score-v5.5",
+      "algorithm": "bounded-gated-residual-stability-v1",
+      "variant": "v5_5_bounded_nonlinear_stability",
+      "purpose": "read-only-shadow-research-not-production",
+      "inputs": {
+        "price_history": "qfq_daily_rows_not_after_data_date",
+        "snapshot_quote": "persisted_market_scan_result",
+        "minimum_history_rows": 61,
+        "price_window_contract": "market-scan-feature-windows-v1",
+        "return60_reference": "close_60_completed_sessions_before_snapshot_price",
+        "change_pct_source": "derived_from_snapshot_price_and_previous_completed_close",
+        "volume_ratio_source": "derived_from_validated-qfq-history",
+        "intraday_volume_policy": "neutralize-without-time-aligned-intraday-volume",
+        "volume_ratio_windows": {
+          "recent": 5,
+          "base": 20
+        },
+        "duplicate_bar_policy": "reject_conflicting-same-date-bars",
+        "notional": 100000.0,
+        "scan_mode": "persisted-run-mode",
+        "industry": "persisted-point-in-time-metadata-with-quality-gate",
+        "challenger_inputs": "normalized_skip5_multilevel_residual_rank; skip5_return20/55; ma20_slope10; completed-volume-ratio; range_position20; turnover; notional_to_amount; frozen-confidence-penalty",
+        "challenger_limitations": [
+          "industry_breadth_not_available_in_v55",
+          "industry_effect_limited_to_existing_multilevel_residualization",
+          "no_peer_network_or_holdings_inputs"
+        ]
+      },
+      "normalization": {
+        "factor": "skip5_momentum",
+        "method": "sequential-shrunk-market-board-industry-liquidity-residual-midrank-percentile",
+        "group": "market-then-board-then-industry-then-liquidity",
+        "output_range": [
+          5.0,
+          95.0
+        ],
+        "prior_count": 30,
+        "maximum_group_weight": 0.5,
+        "industry_quality_policy": "unknown-or-broad-taxonomy-groups-are-not-neutralized",
+        "blend": "subtract-shrunk-group-median-at-each-declared-step,then-global-midrank"
+      },
+      "components": {
+        "trend_continuation": {
+          "formula": "45% return20 + 35% return60 + 20% ma20_slope10",
+          "raw_bounds": {
+            "return20": [
+              -15,
+              25
+            ],
+            "return60": [
+              -25,
+              50
+            ],
+            "ma20_slope10": [
+              -8,
+              12
+            ]
+          },
+          "role": "alpha"
+        },
+        "skip5_momentum": {
+          "formula": "55% return20_excluding_latest5 + 35% return60_excluding_latest5 + 10% ma20_slope10",
+          "role": "alpha-candidate"
+        },
+        "volume_confirmation_delta": {
+          "bounds": [
+            -6,
+            6
+          ],
+          "volume_ratio_source": "validated-history-5d-vs-20d",
+          "role": "signed-alpha-confirmation"
+        },
+        "volume_lifecycle_delta": {
+          "bounds": [
+            -12,
+            8
+          ],
+          "inputs": [
+            "derived_volume_ratio",
+            "derived_change_pct",
+            "return5_pct",
+            "range_position20"
+          ],
+          "role": "signed-alpha-confirmation-with-exhaustion"
+        },
+        "overextension_penalty": {
+          "enabled": true,
+          "bounds": [
+            0,
+            20
+          ],
+          "inputs": [
+            "positive_change_vs_limit",
+            "price_vs_ma5_atr",
+            "price_vs_ma20_atr",
+            "range_position20"
+          ],
+          "role": "penalty-only"
+        },
+        "liquidity_penalty": {
+          "enabled": false,
+          "bounds": [
+            0,
+            15
+          ],
+          "inputs": [
+            "amount",
+            "turnover_rate",
+            "notional_to_amount"
+          ],
+          "role": "penalty-only"
+        },
+        "risk_penalty": {
+          "enabled": true,
+          "bounds": [
+            0,
+            15
+          ],
+          "inputs": [
+            "atr20_pct",
+            "downside_volatility20",
+            "max_drawdown60",
+            "gap_frequency60"
+          ],
+          "role": "penalty-only"
+        },
+        "confidence_penalty": {
+          "bounds": [
+            0,
+            20
+          ],
+          "quality_policy": "penalty-only",
+          "role": "penalty-only"
+        },
+        "special_status_penalty": {
+          "st": 5,
+          "new_stock": 3,
+          "role": "explicit-segment-risk-penalty"
+        },
+        "tradability_penalty": {
+          "enabled": true,
+          "bounds": [
+            0,
+            20
+          ],
+          "inputs": [
+            "amount",
+            "turnover_rate",
+            "notional_to_amount",
+            "positive_or_negative_price_limit_progress",
+            "price_limit_quality"
+          ],
+          "role": "execution-and-capacity-penalty-only"
+        },
+        "explicit_constraints": {
+          "inputs": [
+            "is_st",
+            "is_new",
+            "atr20_pct",
+            "max_drawdown60_pct",
+            "price_limit_progress",
+            "notional_to_amount"
+          ],
+          "role": "auditable-risk-flags-not-alpha"
+        },
+        "bounded_nonlinear_interaction": {
+          "role": "bounded-shadow-alpha-delta",
+          "bounds": [
+            -6.0,
+            6.0
+          ],
+          "cross_sectional_residual_strength": "clamp((normalized_alpha-50)/45,-1,1)",
+          "stability_gate": "0.60*clamp(1-pstdev(short,medium,slope)/0.75,0,1)+0.40*abs(mean(short,medium,slope))",
+          "implementability_gate": "clamp(1-0.55*crowding_risk-0.45*capacity_risk,0,1)",
+          "formula": "clamp(6*tanh(1.5*cross_sectional_residual_strength)*(0.35+0.65*stability_gate)*quality_gate*(implementability_gate if cross_sectional_residual_strength>0 else 1),-6,6)",
+          "negative_residual_policy": "implementability-gate-not-applied-to-negative-delta; conservative-downside-penalty",
+          "limitations": [
+            "industry_breadth_not_available_in_v55",
+            "industry_effect_limited_to_existing_multilevel_residualization",
+            "no_peer_network_or_holdings_inputs"
+          ],
+          "training_claim": "none-deterministic-paper-inspired-interaction"
+        },
+        "crowding_risk": {
+          "bounds": [
+            0.0,
+            1.0
+          ],
+          "formula": "0.45*turnover_extreme+0.35*completed_volume_surge+0.20*range_crowding",
+          "role": "positive-alpha-gate-only"
+        },
+        "capacity_risk": {
+          "bounds": [
+            0.0,
+            1.0
+          ],
+          "formula": "unit(notional_to_amount,0.2%,1.0%)",
+          "role": "positive-alpha-gate-only"
+        }
+      },
+      "final_score": {
+        "formula": "normalized_alpha + bounded_nonlinear_delta - overextension-risk-confidence-special_status-tradability_penalties",
+        "bounded_nonlinear_delta": [
+          -6.0,
+          6.0
+        ],
+        "volume_policy": "not-used-direct-v5.4-base",
+        "training_claim": "none-deterministic-preregistered-shadow-challenger",
+        "clamp": [
+          0,
+          100
+        ],
+        "raw_decimals": 6,
+        "tie_break": [
+          [
+            "raw_score",
+            "desc"
+          ],
+          [
+            "symbol",
+            "asc"
+          ]
+        ]
+      },
+      "promotion": "forbidden-without-independent-session-evidence"
+    },
+    "normalization": {
+      "context": {
+        "market": "SH",
+        "board": "SH_MAIN",
+        "industry": "UNKNOWN",
+        "liquidity": "medium"
+      },
+      "context_summaries": {
+        "market": {
+          "sample_count": 1,
+          "eligible": true,
+          "weight": 0.03225806,
+          "residual_center": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "input_digest": "28877a3b8ba6ec014b00060f956433b1058db3843df4d8cb097624fcdb8f353c"
+        },
+        "board": {
+          "sample_count": 1,
+          "eligible": true,
+          "weight": 0.03225806,
+          "residual_center": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "input_digest": "28877a3b8ba6ec014b00060f956433b1058db3843df4d8cb097624fcdb8f353c"
+        },
+        "industry": {
+          "sample_count": 1,
+          "eligible": false,
+          "weight": 0.0,
+          "residual_center": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "input_digest": "28877a3b8ba6ec014b00060f956433b1058db3843df4d8cb097624fcdb8f353c"
+        },
+        "liquidity": {
+          "sample_count": 1,
+          "eligible": true,
+          "weight": 0.03225806,
+          "residual_center": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "input_digest": "28877a3b8ba6ec014b00060f956433b1058db3843df4d8cb097624fcdb8f353c"
+        }
+      },
+      "batch_input_digest": "1e48a3109f53ab6b9106010f85061554a7948191424c52198bf5bd5a34cd107e",
+      "residual_digest": "28877a3b8ba6ec014b00060f956433b1058db3843df4d8cb097624fcdb8f353c"
+    },
+    "inputs": {
+      "return20_pct": 0.45194126,
+      "return60_pct": 6.24390244,
+      "skip5_return20_pct": 3.51286063,
+      "skip5_return55_pct": 7.35041059,
+      "return5_pct": -1.03074422,
+      "ma20_slope10_pct": 0.98187646,
+      "ma5": 10.88087,
+      "ma20": 10.82195,
+      "ma60": 10.61079667,
+      "atr20_pct": 7.73988399,
+      "price_vs_ma5_atr": 0.0,
+      "price_vs_ma20_atr": 0.01621636,
+      "range_position20": 0.77094583,
+      "downside_volatility20_pct": 0.00048612,
+      "max_drawdown60_pct": 1.39460178,
+      "gap_frequency60": 1.0,
+      "reported_change_pct": 1.5,
+      "derived_change_pct": -1.39460178,
+      "price_limit_pct": 10.0,
+      "price_limit_profile_id": "sse-main-2026",
+      "price_limit_quality": "ok",
+      "price_limit_degradation": "",
+      "amount": 200000000,
+      "turnover_rate": 4,
+      "reported_volume_ratio": 1.2,
+      "derived_volume_ratio": 1.01,
+      "volume_ratio_absolute_gap": 0.19,
+      "mode": "official",
+      "price_window_contract": "market-scan-feature-windows-v1",
+      "market": "SH",
+      "industry": "UNKNOWN",
+      "liquidity_bucket": "medium",
+      "notional_to_amount": 0.0005,
+      "volume_data_date": "2026-07-17",
+      "volume_price_alignment": "same-completed-session",
+      "data_quality_score": 100,
+      "history_rows": 85,
+      "is_st": false,
+      "is_new": false,
+      "board": "SH_MAIN",
+      "quote_fallback_used": false,
+      "kline_fallback_used": false,
+      "metadata_degraded": false
+    },
+    "components": {
+      "raw_trend_continuation": 40.94579818,
+      "raw_skip5_momentum": 45.04297988,
+      "raw_normalization_factor": 45.04297988,
+      "normalized_trend": 50.0,
+      "normalized_alpha": 50.0,
+      "volume_confirmation_delta": 0.0,
+      "base_volume_confirmation_delta": -0.02775258,
+      "volume_lifecycle_delta": -0.00820473,
+      "penalties": {
+        "overextension": 0,
+        "liquidity": 0,
+        "risk": 5.5874275,
+        "confidence": 1.16666667,
+        "special_status": 0.0,
+        "tradability": 2.0
+      },
+      "applied_penalties": {
+        "overextension": true,
+        "liquidity": false,
+        "risk": true,
+        "tradability": true
+      },
+      "total_penalty": 8.75409417,
+      "raw_score": 41.245906,
+      "score": 41,
+      "bounded_nonlinear_delta": 0.0,
+      "challenger_evidence": {
+        "formula_version": "bounded-gated-residual-stability-v1",
+        "input_digest": "a7a1f857755e3bee1cac02f2df3e1523c5ec2ad35138e68f5b2561b69f6e4651",
+        "cross_sectional_residual_strength": 0.0,
+        "residual_interpretation": "rank-after-market-board-industry-liquidity-residualization-not-industry-breadth",
+        "stability": {
+          "short_skip5_strength": 0.14051443,
+          "medium_skip5_strength": 0.14700821,
+          "slope_strength": 0.08182304,
+          "coherence": 0.96090921,
+          "directional_strength": 0.12311523,
+          "gate": 0.62579162
+        },
+        "crowding": {
+          "turnover_heat": 0,
+          "completed_volume_surge": 0,
+          "range_crowding": 0,
+          "risk": 0.0
+        },
+        "capacity": {
+          "notional_to_amount": 0.0005,
+          "risk": 0
+        },
+        "quality_gate": 0.94166667,
+        "implementability_gate": 1.0,
+        "positive_residual_gate_applied": false,
+        "negative_residual_policy": "implementability-gate-not-applied-to-negative-delta; conservative-downside-penalty",
+        "bounded_nonlinear_delta": 0.0,
+        "bounds": [
+          -6.0,
+          6.0
+        ],
+        "training_claim": "none-deterministic-paper-inspired-interaction"
+      },
+      "explicit_constraints": {
+        "flags": [],
+        "clear": true,
+        "ranking_role": "risk-and-tradability-penalties-only-not-alpha"
+      },
+      "volume_context": {
+        "mode": "official",
+        "basis": "completed-daily-bars-5d-vs-20d",
+        "volume_data_date": "2026-07-17",
+        "alignment": "same-completed-session",
+        "applied_delta": 0.0
+      }
+    },
+    "ranking": {
+      "tie_break": [
+        [
+          "raw_score",
+          "desc"
+        ],
+        [
+          "symbol",
+          "asc"
+        ]
+      ]
+    }
+  },
+  "raw_score": 41.245906
+}

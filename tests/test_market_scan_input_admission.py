@@ -55,7 +55,7 @@ def test_exact_duplicate_is_order_independent_and_preserves_legal_score():
     baseline = _score(rows=rows)
     assert _score(rows=[*rows, rows[-5]]) == baseline
     assert _score(rows=[rows[-5], *reversed(rows)]) == baseline
-    assert baseline.raw_score == 89.3033
+    assert baseline.raw_score == 88.3484
     assert baseline.data_quality_score == 100
 
 
@@ -91,16 +91,27 @@ def _rule_contract():
     return market_scan_rule_contract(settings)
 
 
-def test_new_admission_identity_changes_run_hash_without_rewriting_score_hash():
+def _assert_current_score_contract_and_frozen_dimension_v4(spec):
+    assert spec["research_dimensions"]["algorithm"] == "full-market-dimensions-v5-target-semideviation"
+    assert scoring.stable_score_spec_hash(spec) == "2fca8cd2e3a6dbefbb2c424dd7fb07d7ed8e1b88c35334e8e1256d9d5e1d7f88"
+    frozen = scoring.market_scan_score_spec_dimension_v4(min_data_quality_score=50)
+    assert frozen["research_dimensions"]["algorithm"] == "full-market-dimensions-v4-session-coverage"
+    assert scoring.stable_score_spec_hash(frozen) == "17c0e6b9ed6de9b39cad0d9f9d1fe14c8638749dd08796bed827869d3554e2c7"
+    # The research risk generation changes; trend and ranking math stay exact.
+    expected = deepcopy(frozen)
+    expected["research_dimensions"]["algorithm"] = "full-market-dimensions-v5-target-semideviation"
+    assert spec == expected
+
+
+def test_new_admission_identity_changes_run_hash_with_registered_score_hash():
     current = _rule_contract()
     legacy = deepcopy(current)
     admission = legacy.pop("input_admission", None)
     assert isinstance(admission, dict)
-    assert admission["contract_version"] == "market-scan-input-admission-v3"
+    assert admission["contract_version"] == "market-scan-input-admission-v5"
     assert scoring.stable_score_spec_hash(current) != scoring.stable_score_spec_hash(legacy)
-    assert scoring.stable_score_spec_hash(current["score_spec"]) == (
-        "62176a5cffa6d248da3841617fda2f7aad40c9042d8a77c10955682d53e1c486"
-    )
+    assert current["score_spec"] == legacy["score_spec"]
+    _assert_current_score_contract_and_frozen_dimension_v4(current["score_spec"])
     assert scoring.stable_score_spec_hash(scoring.market_scan_score_spec_v4(min_data_quality_score=50)) == (
         "30c5abb10b676fc71b5fa6c621cce809a6c2d054113fa578d77eccf28fb5955a"
     )

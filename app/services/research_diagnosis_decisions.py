@@ -106,9 +106,9 @@ def diagnosis_confidence(
     if market_regime:
         confidence = _clamp(confidence + market_regime.confidence_adjustment)
     if timeframe and timeframe.conflict_level in {"高冲突", "中冲突", "多周期偏弱"}:
-        confidence = max(30, confidence - 10)
+        confidence = _clamp(confidence - 10)
     if _risk_reward_rating_in(risk_reward, RISK_REWARD_CONTROL_RATINGS):
-        confidence = max(28, confidence - 8)
+        confidence = _clamp(confidence - 8)
     return confidence
 
 

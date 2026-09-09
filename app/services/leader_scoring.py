@@ -168,11 +168,12 @@ def _turnover_delta(active: int, overheated: int = 0) -> LeaderScoreRule:
 def _fund_flow_delta(weight: float) -> LeaderScoreRule:
     return LeaderScoreRule(
         "fund_flow",
-        lambda row: round(((row.fund_flow_score or 50) - 50) * weight),
+        lambda row: round(((50 if row.fund_flow_score is None else row.fund_flow_score) - 50) * weight),
         {
             "kind": "centered-weight",
             "input": "fund_flow_score",
             "default": 50,
+            "missing": "none-only",
             "center": 50,
             "weight": weight,
         },
@@ -256,7 +257,7 @@ def _turnover_score_delta(turnover_rate: float | None, active: int, overheated: 
 
 
 FEATURE_LEADER_PROFILE = LeaderScoreProfile(
-    profile_id="feature-leader-v1",
+    profile_id="feature-leader-v2",
     base=40,
     trend_weight=0.45,
     rules=(

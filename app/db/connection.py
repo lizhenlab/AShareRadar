@@ -21,14 +21,14 @@ class SQLiteConnectionFactory:
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=15)
-        conn.row_factory = sqlite3.Row
-        conn.create_function(SQLITE_MARKET_EPOCH_FUNCTION, 1, market_datetime_epoch, deterministic=True)
-        conn.create_function(SQLITE_AUDIT_EPOCH_FUNCTION, 1, audit_time_epoch, deterministic=True)
-        conn.execute("PRAGMA busy_timeout = 15000")
-        conn.execute("PRAGMA foreign_keys = ON")
         try:
+            conn.row_factory = sqlite3.Row
+            conn.create_function(SQLITE_MARKET_EPOCH_FUNCTION, 1, market_datetime_epoch, deterministic=True)
+            conn.create_function(SQLITE_AUDIT_EPOCH_FUNCTION, 1, audit_time_epoch, deterministic=True)
+            conn.execute("PRAGMA busy_timeout = 15000")
+            conn.execute("PRAGMA foreign_keys = ON")
             yield conn
-        except Exception:
+        except BaseException:
             if _connection_is_open(conn):
                 try:
                     conn.rollback()

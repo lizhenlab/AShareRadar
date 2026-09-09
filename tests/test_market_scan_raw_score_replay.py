@@ -38,8 +38,8 @@ def _snapshot(monkeypatch: pytest.MonkeyPatch, *, mutation: str, mode: MarketSca
     original_volume = scoring.recent_volume_ratio
     with monkeypatch.context() as patch:
         if mutation == "trend":
-            def altered_trend(quote, rows, *, mode):
-                score, label = original_trend(quote, rows, mode=mode)
+            def altered_trend(quote, rows, *, mode, algorithm_version):
+                score, label = original_trend(quote, rows, mode=mode, algorithm_version=algorithm_version)
                 return score + 1, label
 
             patch.setattr(scoring, "trend_score", altered_trend)

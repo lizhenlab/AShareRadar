@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from app.db.alert_stream import ensure_alert_stream_state
 from app.db.advice_review_schema import apply_advice_review_schema
 from app.db.discovery_schema import apply_discovery_schema
 from app.db.paper_trading_schema import apply_paper_trading_schema
@@ -37,6 +38,7 @@ def initialize_schema(
     )
     apply_paper_trading_schema(conn)
     apply_strategy_lab_schema(conn)
+    ensure_alert_stream_state(conn)
 
 
 __all__ = [

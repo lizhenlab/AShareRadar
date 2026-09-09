@@ -45,6 +45,10 @@ def test_review_list_read_preserves_latest_draft_at_response_time(append: bool) 
       state.adviceReviewDetails = Array.from({ length: 20 }, (_, index) => ({
         plan: completeReviewPlan({ id: index + 10, advice_id: index + 100 }), latest_evaluation: null,
       }));
+      // This fixture represents a first page already read from the server.
+      state.adviceReviewHistorySymbol = state.symbol;
+      state.adviceReviewNextOffset = 20;
+      state.adviceReviewPagePlanIds = state.adviceReviewDetails.map(detail => detail.plan.id);
       let resolveResponse;
       let requestUrl;
       globalThis.fetch = url => {
@@ -127,7 +131,8 @@ def test_review_submit_has_explicit_draft_reset_boundary(success: bool) -> None:
       releaseWrite(success ? jsonResponse(completeReviewPlan()) : jsonResponse({ detail: "拒绝保存" }, 409));
       for (let index = 0; index < 20 && success && !releaseRead; index += 1) await new Promise(resolve => setTimeout(resolve, 0));
       if (success) {
-        assert(elements.get("reviewHypothesis").value === "默认假设3", "successful write did not reset before readback");
+        // Confirmed snapshot 3 already owns a plan, so reset to the next unplanned snapshot.
+        assert(elements.get("reviewHypothesis").value === "默认假设4", "successful write did not reset before readback");
         draft("保存后继续输入的新草稿");
         releaseRead(jsonResponse([]));
       }

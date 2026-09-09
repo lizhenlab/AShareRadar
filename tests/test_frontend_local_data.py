@@ -658,3 +658,53 @@ def _run_node(script: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def test_import_click_restores_commit_button_from_current_preview_authority() -> None:
+    _run_node(r'''
+      import assert from "node:assert/strict";
+      import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
+      const { element, __appTest } = await createAppHarness();
+      const local = await import("./static/js/local-data.js");
+      const state = __appTest.state;
+      let commitSucceeds = false;
+      let pendingCommit = null;
+      let commitCalls = 0;
+      globalThis.fetch = async url => {
+        if (String(url).includes("dry_run=true")) return response({ dry_run: true, preview_token: "token-with-at-least-thirty-two-characters", totals: { inserted: 1 } });
+        if (String(url).includes("dry_run=false")) {
+          commitCalls += 1;
+          if (pendingCommit) return pendingCommit.promise;
+          return commitSucceeds ? response({ committed: true, dry_run: false, totals: { inserted: 1 } }) : response({ detail: "synthetic rejection" }, 409);
+        }
+        return response({});
+      };
+      for (commitSucceeds of [false, true]) {
+        await selectAndPreview(`file-${commitSucceeds}`);
+        assert.equal(element("commitLocalDataImport").disabled, false);
+        await element("commitLocalDataImport").listeners.click();
+        assert.equal(state.localDataImportPreview, null);
+        assert.equal(element("commitLocalDataImport").disabled, true, "finished mutation re-enabled an invalid preview");
+      }
+      await selectAndPreview("old");
+      pendingCommit = deferred();
+      const commit = element("commitLocalDataImport").listeners.click();
+      await selectAndPreview("new");
+      const newer = state.localDataImportPreview;
+      assert.equal(element("commitLocalDataImport").disabled, true, "new preview unlocked the pending commit");
+      const beforeRepeatedClick = commitCalls;
+      await element("commitLocalDataImport").listeners.click();
+      assert.equal(await local.commitLocalDataImport(state), null, "domain allowed a second concurrent commit");
+      assert.equal(commitCalls, beforeRepeatedClick, "pending mutation was submitted twice");
+      pendingCommit.resolve(response({ detail: "old selection rejected" }, 409));
+      await commit;
+      assert.equal(state.localDataImportPreview, newer);
+      assert.equal(element("commitLocalDataImport").disabled, false, "older commit completion disabled the new valid preview");
+      __appTest.destroyStockSearchBindings();
+      async function selectAndPreview(name) {
+        await local.readLocalDataFile(state, { name, size: 20, text: async () => JSON.stringify({ kind: "ashare-radar-user-data", version: 1, tables: {} }) });
+        await local.previewLocalDataImport(state);
+      }
+      function response(value, status=200) { return new Response(JSON.stringify(value), { status }); }
+      function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
+    ''')

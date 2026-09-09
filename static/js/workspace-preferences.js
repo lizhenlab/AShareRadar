@@ -1,22 +1,24 @@
-export const WORKSPACE_PREFERENCES_VERSION = 1;
+export const WORKSPACE_PREFERENCES_VERSION = 2;
 export const WORKSPACE_PREFERENCES_STORAGE_KEY = "ashare-radar.workspace-preferences";
 
-export const PRIMARY_VIEW_OPTIONS = Object.freeze(["research", "market", "review", "monitor"]);
+export const PRIMARY_VIEW_OPTIONS = Object.freeze(["research", "market", "review", "monitor", "system"]);
 export const PRIMARY_WORKSPACE_VIEWS = Object.freeze({
-  research: Object.freeze(["overview", "qa", "strategy", "finance", "theme"]),
+  research: Object.freeze(["overview", "qa", "strategy", "finance", "theme", "tools"]),
   market: Object.freeze(["market-scan"]),
-  review: Object.freeze(["replay", "paper", "tools", "data"]),
+  review: Object.freeze(["replay", "paper"]),
   monitor: Object.freeze([]),
+  system: Object.freeze(["diagnostics", "data"]),
 });
 export const DEFAULT_WORKSPACE_VIEW_BY_PRIMARY = Object.freeze({
   research: "overview",
   market: "market-scan",
   review: "replay",
   monitor: null,
+  system: "diagnostics",
 });
 
 export const WORKSPACE_PREFERENCE_OPTIONS = Object.freeze({
-  workspaceView: Object.freeze(["overview", "market-scan", "qa", "strategy", "finance", "theme", "replay", "paper", "tools", "data"]),
+  workspaceView: Object.freeze(["overview", "market-scan", "qa", "strategy", "finance", "theme", "replay", "paper", "tools", "diagnostics", "data"]),
   dailyChartRange: Object.freeze([20, 60, 120, 240]),
   minuteChartInterval: Object.freeze(["5m", "15m", "30m", "60m"]),
   mobileChartView: Object.freeze(["daily", "minute"]),
@@ -25,6 +27,7 @@ export const WORKSPACE_PREFERENCE_OPTIONS = Object.freeze({
 export const DEFAULT_WORKSPACE_PREFERENCES = Object.freeze({
   primaryView: "research",
   workspaceView: "overview",
+  workspaceByPrimary: DEFAULT_WORKSPACE_VIEW_BY_PRIMARY,
   dailyChartRange: 60,
   dailyChartMa5: true,
   dailyChartMa20: true,
@@ -36,11 +39,16 @@ export function loadWorkspacePreferences(storage = browserStorage()) {
   if (!storage || typeof storage.getItem !== "function") return defaultPreferences();
   try {
     const payload = JSON.parse(storage.getItem(WORKSPACE_PREFERENCES_STORAGE_KEY));
-    if (!isRecord(payload) || payload.version !== WORKSPACE_PREFERENCES_VERSION) {
+    if (!isRecord(payload) || ![1, WORKSPACE_PREFERENCES_VERSION].includes(payload.version)) {
       return defaultPreferences();
     }
     if (!isRecord(payload.preferences)) return defaultPreferences();
-    return sanitizeWorkspacePreferences(payload.preferences);
+    const preferences = { ...payload.preferences };
+    if (payload.version === 1 && preferences.primaryView === "review"
+      && ["tools", "data"].includes(preferences.workspaceView)) {
+      preferences.primaryView = primaryViewForWorkspace(preferences.workspaceView);
+    }
+    return sanitizeWorkspacePreferences(preferences);
   } catch (error) {
     return defaultPreferences();
   }
@@ -62,14 +70,18 @@ export function saveWorkspacePreferences(preferences, storage = browserStorage()
 
 export function sanitizeWorkspacePreferences(candidate) {
   const value = isRecord(candidate) ? candidate : {};
-  const workspaceView = allowed("workspaceView", value.workspaceView)
+  const previousWorkspace = allowed("workspaceView", value.workspaceView)
     ? value.workspaceView
     : DEFAULT_WORKSPACE_PREFERENCES.workspaceView;
+  const primaryView = PRIMARY_VIEW_OPTIONS.includes(value.primaryView)
+    ? value.primaryView : primaryViewForWorkspace(previousWorkspace);
+  const workspaceByPrimary = sanitizeWorkspaceMemory(value.workspaceByPrimary);
+  workspaceByPrimary[primaryViewForWorkspace(previousWorkspace)] = previousWorkspace;
+  const workspaceView = primaryView === "monitor" ? previousWorkspace : workspaceByPrimary[primaryView];
   return {
-    primaryView: PRIMARY_VIEW_OPTIONS.includes(value.primaryView)
-      ? value.primaryView
-      : primaryViewForWorkspace(workspaceView),
+    primaryView,
     workspaceView,
+    workspaceByPrimary,
     dailyChartRange: allowed("dailyChartRange", value.dailyChartRange)
       ? value.dailyChartRange
       : DEFAULT_WORKSPACE_PREFERENCES.dailyChartRange,
@@ -98,7 +110,16 @@ function allowed(name, value) {
 }
 
 function defaultPreferences() {
-  return { ...DEFAULT_WORKSPACE_PREFERENCES };
+  return { ...DEFAULT_WORKSPACE_PREFERENCES, workspaceByPrimary: { ...DEFAULT_WORKSPACE_VIEW_BY_PRIMARY } };
+}
+
+function sanitizeWorkspaceMemory(value) {
+  const memory = isRecord(value) ? value : {};
+  return Object.fromEntries(PRIMARY_VIEW_OPTIONS.map((primaryView) => [
+    primaryView,
+    PRIMARY_WORKSPACE_VIEWS[primaryView].includes(memory[primaryView])
+      ? memory[primaryView] : DEFAULT_WORKSPACE_VIEW_BY_PRIMARY[primaryView],
+  ]));
 }
 
 function browserStorage() {

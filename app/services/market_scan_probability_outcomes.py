@@ -52,14 +52,14 @@ from app.db.market_scan_artifact_lease import (
     verified_market_scan_artifact_publication,
 )
 
-from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline
+from app.models.market import DAILY_KLINE_CONTRACT_VERSION, Kline, KlineOpenExecutionStatus, KlineSessionStatus
 from app.models.paper_trading import CostProfileName
 from app.services.data_quality_kline import is_demo_kline_source
-from app.services.market_scan_probability import stable_probability_hash
+from app.services.market_scan_probability import PROBABILITY_FEATURE_VERSION, stable_probability_hash
 from app.services.market_scan_probability_labels import (
-    LEGACY_PROBABILITY_LABEL_VERSION,
     PROBABILITY_DEFAULT_HORIZONS,
     PROBABILITY_LABEL_VERSION,
+    SUPERSEDED_PROBABILITY_LABEL_VERSIONS,
     ProbabilityLabelConfig,
     ProbabilityLabelOutcome,
     build_probability_label_outcomes,
@@ -67,6 +67,7 @@ from app.services.market_scan_probability_labels import (
 )
 from app.services.market_scan_probability_research import ProbabilityResearchRow
 from app.services.market_scan_probability_source import (
+    is_current_writable_production_score_contract,
     load_probability_source_snapshot,
     verify_probability_source_snapshot,
 )
@@ -85,7 +86,8 @@ exclusive_atomic_publish = publish_market_scan_artifact
 PROBABILITY_OUTCOME_ARTIFACT_SCHEMA_VERSION = "market-scan-probability-outcome-artifact-v1"
 PROBABILITY_OUTCOME_PAYLOAD_CONTRACT_VERSION = "market-scan-probability-outcomes-v1"
 PROBABILITY_OUTCOME_CALENDAR_CONTRACT_VERSION = "trusted-fixed-exchange-session-grid-v1"
-PROBABILITY_OUTCOME_BAR_EVIDENCE_VERSION = "qfq-daily-fixed-session-bar-evidence-v1"
+PROBABILITY_OUTCOME_BAR_EVIDENCE_VERSION = "qfq-daily-fixed-session-bar-evidence-v2"
+_LEGACY_BAR_EVIDENCE_VERSION = "qfq-daily-fixed-session-bar-evidence-v1"
 PROBABILITY_OUTCOME_DIGEST_ALGORITHM = "sha256"
 PROBABILITY_OUTCOME_DIGEST_SCOPE = "payload"
 PROBABILITY_OUTCOME_INTEGRITY_NOTICE = "integrity_digest_not_a_signature"
@@ -152,7 +154,7 @@ _RECORD_KEYS = frozenset(
 )
 _INSTRUMENT_KEYS = frozenset({"market", "list_date", "is_st", "quote_amount", "adjustment_mode"})
 _BAR_EVIDENCE_KEYS = frozenset({"version", "requested_dates", "observed_dates", "missing_dates", "bars", "bar_set_digest"})
-_BAR_KEYS = frozenset(
+_LEGACY_BAR_KEYS = frozenset(
     {
         "date",
         "open",
@@ -168,6 +170,7 @@ _BAR_KEYS = frozenset(
         "fallback_used",
     }
 )
+_BAR_KEYS = _LEGACY_BAR_KEYS | {"session_status", "open_execution_status"}
 _HORIZON_STATE_KEYS = frozenset({"horizon", "target_session_date", "maturity", "outcome"})
 _OUTCOME_KEYS = frozenset(
     {
@@ -426,7 +429,7 @@ def verify_probability_outcome_artifact(artifact: Mapping[str, object]) -> dict[
     if normalized["schema_version"] != PROBABILITY_OUTCOME_ARTIFACT_SCHEMA_VERSION:
         raise ProbabilityOutcomeError("outcome artifact schema_version 不受支持")
     generated_at = _timestamp(normalized["generated_at"], "artifact.generated_at")
-    payload = _validate_payload(_mapping(normalized["payload"], "artifact.payload"), generated_at)
+    raw_payload = _mapping(normalized["payload"], "artifact.payload")
     integrity = _mapping(normalized["integrity"], "artifact.integrity")
     _exact_keys(integrity, _INTEGRITY_KEYS, "artifact.integrity")
     expected = {
@@ -438,6 +441,10 @@ def verify_probability_outcome_artifact(artifact: Mapping[str, object]) -> dict[
     if any(integrity.get(name) != value for name, value in expected.items()):
         raise ProbabilityOutcomeError("outcome artifact integrity contract 冲突")
     digest = _sha256(integrity.get("integrity_digest"), "integrity.integrity_digest")
+    if digest != probability_outcome_payload_digest(raw_payload):
+        raise ProbabilityOutcomeError("outcome artifact payload digest 不一致")
+    # Mechanical integrity must precede any typed legacy-semantic classification.
+    payload = _validate_payload(raw_payload, generated_at)
     if digest != probability_outcome_payload_digest(payload):
         raise ProbabilityOutcomeError("outcome artifact payload digest 不一致")
     return {
@@ -646,6 +653,7 @@ def _build_horizon_states(
     as_of_date: str,
     rows: Sequence[Kline],
     config: ProbabilityLabelConfig,
+    label_version: str = PROBABILITY_LABEL_VERSION,
 ) -> dict[str, object]:
     future_dates = tuple(str(value) for value in _sequence(calendar["future_sessions"], "calendar.future_sessions"))
     exits = _mapping(calendar["horizon_exit_sessions"], "calendar.horizon_exit_sessions")
@@ -660,6 +668,7 @@ def _build_horizon_states(
         rows=rows,
         eligible_dates=future_dates,
         config=config,
+        label_version=label_version,
     )
     states: dict[str, object] = {}
     for horizon in config.horizons:
@@ -790,7 +799,16 @@ def _normalized_bar(row: Kline, symbol: str, as_of_date: str) -> dict[str, objec
         "contract_version": DAILY_KLINE_CONTRACT_VERSION,
         "source": source,
         "fallback_used": bool(row.fallback_used),
+        **_execution_bar_fields(row, symbol),
     }
+
+
+def _execution_bar_fields(row: Kline, symbol: str) -> dict[str, object]:
+    if row.session_status not in ("trading", "suspended", "unknown"):
+        raise ProbabilityOutcomeError(f"{symbol} {row.date} session_status 无效")
+    if row.open_execution_status not in ("tradable", "locked_limit_up", "locked_limit_down", "unavailable", "unknown"):
+        raise ProbabilityOutcomeError(f"{symbol} {row.date} open_execution_status 无效")
+    return {"session_status": row.session_status, "open_execution_status": row.open_execution_status}
 
 
 def _trusted_calendar_contract(quote_date: str, horizons: Sequence[int]) -> dict[str, object]:
@@ -913,10 +931,10 @@ def _validate_payload(payload: Mapping[str, object], generated_at: str) -> dict[
     as_of_date = _date_text(normalized["as_of_date"], "payload.as_of_date")
     source = _validate_source(_mapping(normalized["source"], "payload.source"), as_of_date)
     cohort = _validate_cohort(_mapping(normalized["cohort"], "payload.cohort"))
-    label_contract, config = _validate_label_contract(_mapping(normalized["label_contract"], "payload.label_contract"))
     label_digest = _sha256(normalized["label_contract_digest"], "payload.label_contract_digest")
-    if label_digest != stable_probability_hash(label_contract):
-        raise ProbabilityOutcomeError("outcome label_contract_digest 不一致")
+    label_contract, config = _validate_label_contract(
+        _mapping(normalized["label_contract"], "payload.label_contract"), digest=label_digest,
+    )
     calendar = _validate_calendar(
         _mapping(normalized["calendar_contract"], "payload.calendar_contract"),
         quote_date=str(source["quote_date"]),
@@ -928,6 +946,7 @@ def _validate_payload(payload: Mapping[str, object], generated_at: str) -> dict[
         calendar=calendar,
         as_of_date=as_of_date,
         config=config,
+        label_version=str(label_contract["label_version"]),
     )
     if [record["symbol"] for record in records] != sorted(str(record["symbol"]) for record in records):
         raise ProbabilityOutcomeError("outcome records 必须按 symbol 排序")
@@ -941,9 +960,9 @@ def _validate_payload(payload: Mapping[str, object], generated_at: str) -> dict[
     limitations = [_text(value, "payload.limitations[]") for value in _sequence(normalized["limitations"], "payload.limitations")]
     if limitations != _limitations():
         raise ProbabilityOutcomeError("outcome limitations contract 冲突")
-    if drifted_symbols:
+    if drifted_symbols or label_contract["label_version"] != PROBABILITY_LABEL_VERSION:
         raise ProbabilityOutcomeSemanticDriftError(
-            f"{','.join(drifted_symbols)} outcome 使用旧规则画像语义，不能授权当前重放",
+            f"{','.join(drifted_symbols)} outcome 使用旧规则画像语义、旧执行时点契约或缺失执行状态，不能授权当前重放",
             run_id=int(cast(int, source["run_id"])),
         )
     return {
@@ -968,6 +987,7 @@ def _validate_records(
     calendar: Mapping[str, object],
     as_of_date: str,
     config: ProbabilityLabelConfig,
+    label_version: str,
 ) -> tuple[list[dict[str, object]], list[str]]:
     records: list[dict[str, object]] = []
     drifted_symbols: list[str] = []
@@ -979,6 +999,7 @@ def _validate_records(
                 calendar=calendar,
                 as_of_date=as_of_date,
                 config=config,
+                label_version=label_version,
             )
         except _RecordSemanticDriftError as exc:
             record = exc.record
@@ -1015,7 +1036,9 @@ def _validate_cohort(cohort: Mapping[str, object]) -> dict[str, object]:
     return output
 
 
-def _validate_label_contract(contract: Mapping[str, object]) -> tuple[dict[str, object], ProbabilityLabelConfig]:
+def _validate_label_contract(
+    contract: Mapping[str, object], *, digest: str,
+) -> tuple[dict[str, object], ProbabilityLabelConfig]:
     normalized = _json_mapping(contract, "payload.label_contract")
     horizons = tuple(_positive_integer(value, "label_contract.horizons[]") for value in _sequence(normalized.get("horizons"), "label_contract.horizons"))
     if horizons != tuple(sorted(set(horizons))) or any(value not in PROBABILITY_DEFAULT_HORIZONS for value in horizons):
@@ -1039,11 +1062,13 @@ def _validate_label_contract(contract: Mapping[str, object]) -> tuple[dict[str, 
         ),
     )
     label_version = _text(normalized.get("label_version"), "label_contract.label_version")
-    if label_version not in {PROBABILITY_LABEL_VERSION, LEGACY_PROBABILITY_LABEL_VERSION}:
+    if label_version not in {PROBABILITY_LABEL_VERSION, *SUPERSEDED_PROBABILITY_LABEL_VERSIONS}:
         raise ProbabilityOutcomeError("outcome label contract version 不受支持")
     expected = probability_label_contract(config, label_version=label_version)
     if normalized != expected:
         raise ProbabilityOutcomeError("outcome label contract 与当前可执行标签契约冲突")
+    if digest != stable_probability_hash(expected):
+        raise ProbabilityOutcomeError("outcome label_contract_digest 不一致")
     return expected, config
 
 
@@ -1104,6 +1129,7 @@ def _validate_record(
     calendar: Mapping[str, object],
     as_of_date: str,
     config: ProbabilityLabelConfig,
+    label_version: str,
 ) -> dict[str, object]:
     normalized = _json_mapping(record, "payload.records[]")
     _exact_keys(normalized, _RECORD_KEYS, "payload.records[]")
@@ -1117,7 +1143,8 @@ def _validate_record(
         requested_dates=_requested_dates(calendar, as_of_date),
         as_of_date=as_of_date,
     )
-    rows = [_kline_from_mapping(_mapping(value, "bar")) for value in cast(list[object], bar_evidence["bars"])]
+    legacy = bar_evidence["version"] == _LEGACY_BAR_EVIDENCE_VERSION
+    rows = [_kline_from_mapping(_mapping(value, "bar"), legacy=legacy) for value in cast(list[object], bar_evidence["bars"])]
     expected_horizons = _build_horizon_states(
         symbol=symbol,
         quote_date=str(source["quote_date"]),
@@ -1126,6 +1153,7 @@ def _validate_record(
         as_of_date=as_of_date,
         rows=rows,
         config=config,
+        label_version=label_version,
     )
     horizons = _json_mapping(_mapping(normalized["horizons"], f"{symbol}.horizons"), f"{symbol}.horizons")
     if horizons != expected_horizons:
@@ -1142,7 +1170,7 @@ def _validate_record(
                 },
             )
         raise ProbabilityOutcomeError(f"{symbol} outcome horizons 不能由固定会话K线重放")
-    return {
+    verified: dict[str, object] = {
         "symbol": symbol,
         "feature_vector_digest": feature_digest,
         "source_evidence_digest": source_digest,
@@ -1150,6 +1178,9 @@ def _validate_record(
         "bar_evidence": bar_evidence,
         "horizons": horizons,
     }
+    if legacy:
+        raise _RecordSemanticDriftError(f"{symbol} 旧日K证据缺失执行状态", verified)
+    return verified
 
 
 def _legacy_rule_profile_semantic_drift(
@@ -1239,15 +1270,15 @@ def _validate_bar_evidence(
 ) -> dict[str, object]:
     normalized = _json_mapping(evidence, f"{symbol}.bar_evidence")
     _exact_keys(normalized, _BAR_EVIDENCE_KEYS, f"{symbol}.bar_evidence")
-    if normalized["version"] != PROBABILITY_OUTCOME_BAR_EVIDENCE_VERSION:
+    version = normalized["version"]
+    if version not in {PROBABILITY_OUTCOME_BAR_EVIDENCE_VERSION, _LEGACY_BAR_EVIDENCE_VERSION}:
         raise ProbabilityOutcomeError(f"{symbol} bar evidence version 不受支持")
     requested = tuple(_date_text(value, "bar_evidence.requested_dates[]") for value in _sequence(normalized["requested_dates"], "requested dates"))
     if requested != requested_dates:
         raise ProbabilityOutcomeError(f"{symbol} bar requested_dates 与固定日历/as_of 冲突")
-    bars = [
-        _normalized_bar(_kline_from_mapping(_mapping(value, "bar_evidence.bars[]")), symbol, as_of_date)
-        for value in _sequence(normalized["bars"], "bar_evidence.bars")
-    ]
+    bars = _normalized_bar_evidence_rows(
+        normalized["bars"], symbol, as_of_date, legacy=version == _LEGACY_BAR_EVIDENCE_VERSION,
+    )
     observed = [str(bar["date"]) for bar in bars]
     if observed != sorted(set(observed)) or any(value not in requested for value in observed):
         raise ProbabilityOutcomeError(f"{symbol} bar evidence 日期无序、重复或越界")
@@ -1257,7 +1288,7 @@ def _validate_bar_evidence(
     if normalized["bar_set_digest"] != stable_probability_hash(bars):
         raise ProbabilityOutcomeError(f"{symbol} bar_set_digest 不一致")
     return {
-        "version": PROBABILITY_OUTCOME_BAR_EVIDENCE_VERSION,
+        "version": version,
         "requested_dates": list(requested),
         "observed_dates": observed,
         "missing_dates": missing,
@@ -1266,8 +1297,22 @@ def _validate_bar_evidence(
     }
 
 
-def _kline_from_mapping(value: Mapping[str, object]) -> Kline:
-    _exact_keys(value, _BAR_KEYS, "bar")
+def _normalized_bar_evidence_rows(
+    values: object, symbol: str, as_of_date: str, *, legacy: bool,
+) -> list[dict[str, object]]:
+    bars = [
+        _normalized_bar(_kline_from_mapping(_mapping(value, "bar_evidence.bars[]"), legacy=legacy), symbol, as_of_date)
+        for value in _sequence(values, "bar_evidence.bars")
+    ]
+    if not legacy:
+        return bars
+    # Preserve the original fields and digest shape solely for drift diagnosis.
+    # Missing restrictions never become current evidence with invented defaults.
+    return [{key: value for key, value in bar.items() if key in _LEGACY_BAR_KEYS} for bar in bars]
+
+
+def _kline_from_mapping(value: Mapping[str, object], *, legacy: bool = False) -> Kline:
+    _exact_keys(value, _LEGACY_BAR_KEYS if legacy else _BAR_KEYS, "bar")
     return Kline(
         date=str(value["date"]),
         open=float(cast(float, value["open"])),
@@ -1281,6 +1326,8 @@ def _kline_from_mapping(value: Mapping[str, object]) -> Kline:
         contract_version=str(value["contract_version"]),
         source=cast(str | None, value["source"]),
         fallback_used=bool(value["fallback_used"]),
+        session_status=cast(KlineSessionStatus, "unknown" if legacy else value["session_status"]),
+        open_execution_status=cast(KlineOpenExecutionStatus, "unknown" if legacy else value["open_execution_status"]),
     )
 
 
@@ -1401,6 +1448,12 @@ def _joined_source_payload(
         raise ProbabilityOutcomeError(f"outcome run {run_id} 与 source payload digest 冲突")
     if archived_run["run_id"] != run_id or archived_cohort != outcome_cohort:
         raise ProbabilityOutcomeError(f"outcome run {run_id} 与 source run/cohort 冲突")
+    if _mapping(payload["feature_schema"], "source.feature_schema").get("version") != PROBABILITY_FEATURE_VERSION:
+        raise ProbabilityOutcomeError("历史 feature contract 仅供审计，不能进入当前概率拟合")
+    if not is_current_writable_production_score_contract(
+        archived_run.get("production_score_rule_version"), archived_run.get("production_score_spec_hash"),
+    ):
+        raise ProbabilityOutcomeError("当前概率拟合需要当前可写的完整评分身份")
     return payload
 
 

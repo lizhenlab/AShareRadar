@@ -42,7 +42,7 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
         async with self._lifecycle_lock:
             if not self.enabled:
                 return False
-            if self._shutdown_tasks or self._guard_release_task is not None:
+            if self._manual_guard_users or self._shutdown_tasks or self._guard_release_task is not None:
                 return False
             if self._runner is not None and not self._runner.done():
                 return False

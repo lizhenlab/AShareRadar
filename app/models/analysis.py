@@ -305,6 +305,7 @@ class OrderPressure(BaseModel):
 
 
 class StockEventItem(BaseModel):
+    evidence_kind: Literal["event", "availability_notice"] = "event"
     date: str
     title: str
     category: str

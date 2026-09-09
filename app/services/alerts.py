@@ -4,8 +4,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from importlib import import_module
-import math
 
+from app.models.alert_conditions import validate_alert_condition as _validate_alert_condition
 from app.models.user_data import (
     AlertEvaluationItem,
     AlertEvaluationSummary,
@@ -29,8 +29,8 @@ from app.utils.time import parse_text_time
 
 AlertEvaluationResult = tuple[bool, float | None, str]
 AlertEvaluator = Callable[[AlertRuleItem, Quote, AnalysisResult | None], AlertEvaluationResult]
-ThresholdValidator = Callable[[float], None]
 AlertAnalysisLoader = Callable[[DataHub, str], Awaitable[AnalysisResult]]
+validate_alert_condition = _validate_alert_condition
 
 
 async def _load_default_alert_analysis(datahub: DataHub, symbol: str) -> AnalysisResult:
@@ -41,7 +41,6 @@ async def _load_default_alert_analysis(datahub: DataHub, symbol: str) -> Analysi
 @dataclass(frozen=True)
 class AlertConditionSpec:
     evaluator: AlertEvaluator
-    validator: ThresholdValidator | None = None
     needs_analysis: bool = False
 
 
@@ -169,18 +168,6 @@ def _failed_evaluation(rule: AlertRuleItem, exc: Exception) -> AlertEvaluationIt
         message=f"{rule.stock_name} 检查失败：{detail[:120]}",
         status="failed",
     )
-
-
-def validate_alert_condition(condition_type: str, threshold: float | None = None) -> None:
-    spec = ALERT_CONDITION_SPECS.get(condition_type)
-    if spec is None:
-        allowed = "、".join(sorted(ALERT_CONDITION_SPECS))
-        raise ValueError(f"不支持的预警条件：{condition_type}。可用条件：{allowed}")
-    if threshold is not None:
-        if not math.isfinite(threshold):
-            raise ValueError("预警阈值必须是有效数字")
-        if spec.validator:
-            spec.validator(threshold)
 
 
 def _needs_analysis(rule: AlertRuleItem) -> bool:
@@ -327,35 +314,15 @@ def _analysis_unavailable_result(quote: Quote) -> AlertEvaluationResult:
     return False, None, f"{quote.name} 当前条件暂不能评估。"
 
 
-def _validate_positive_price(threshold: float) -> None:
-    if threshold <= 0:
-        raise ValueError("价格预警阈值必须大于0。")
-
-
-def _validate_trend_score(threshold: float) -> None:
-    if not 0 <= threshold <= 100:
-        raise ValueError("趋势评分预警阈值应在0到100之间。")
-
-
-def _validate_change_pct(threshold: float) -> None:
-    if not -100 <= threshold <= 100:
-        raise ValueError("涨跌幅预警阈值应在-100%到100%之间。")
-
-
-def _validate_dynamic_level(threshold: float) -> None:
-    if threshold < 0:
-        raise ValueError("支撑/压力预警阈值不能小于0；填0表示使用系统动态支撑/压力。")
-
-
 ALERT_CONDITION_SPECS = {
-    "price_above": AlertConditionSpec(_eval_price_above, _validate_positive_price),
-    "price_below": AlertConditionSpec(_eval_price_below, _validate_positive_price),
-    "change_pct_above": AlertConditionSpec(_eval_change_pct_above, _validate_change_pct),
-    "change_pct_below": AlertConditionSpec(_eval_change_pct_below, _validate_change_pct),
-    "trend_score_above": AlertConditionSpec(_eval_trend_score_above, _validate_trend_score, needs_analysis=True),
-    "trend_score_below": AlertConditionSpec(_eval_trend_score_below, _validate_trend_score, needs_analysis=True),
-    "break_support": AlertConditionSpec(_eval_break_support, _validate_dynamic_level, needs_analysis=True),
-    "break_resistance": AlertConditionSpec(_eval_break_resistance, _validate_dynamic_level, needs_analysis=True),
+    "price_above": AlertConditionSpec(_eval_price_above),
+    "price_below": AlertConditionSpec(_eval_price_below),
+    "change_pct_above": AlertConditionSpec(_eval_change_pct_above),
+    "change_pct_below": AlertConditionSpec(_eval_change_pct_below),
+    "trend_score_above": AlertConditionSpec(_eval_trend_score_above, needs_analysis=True),
+    "trend_score_below": AlertConditionSpec(_eval_trend_score_below, needs_analysis=True),
+    "break_support": AlertConditionSpec(_eval_break_support, needs_analysis=True),
+    "break_resistance": AlertConditionSpec(_eval_break_resistance, needs_analysis=True),
 }
 
 

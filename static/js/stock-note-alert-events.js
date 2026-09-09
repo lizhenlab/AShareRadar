@@ -1,7 +1,8 @@
 import { isAbortError } from "./api.js";
 import { escapeHtml } from "./dom.js";
 import { addAlertRule, alertRuleUpdatesFromForm, evaluateAlerts, removeAlertRule, toggleAlertRuleEditor, updateAlertRule } from "./alerts.js";
-import { addStockNote, removeStockNote, stockNoteUpdatesFromForm, toggleStockNoteEditor, updateStockNote } from "./notes.js";
+import { addStockNote, readLatestStockNote, removeStockNote, stockNoteUpdatesFromForm, toggleStockNoteEditor, updateStockNote } from "./notes.js";
+import { resolveNoteConflict } from "./note-editor-state.js";
 
 const boundRoots = new WeakMap();
 
@@ -146,6 +147,7 @@ async function handleNoteFormSubmit(context, event) {
 
 async function handleNoteListClick(context, event) {
   const { state, currentWorkbenchMutationOptions, renderResearchActivityPanel, loadChartMarks, clearRowActionError, runButtonTask, showRowActionError } = context;
+  if (await handleNoteConflictClick(context, event)) return;
   const editButton = event.target.closest("button[data-note-edit]");
   if (editButton) {
     toggleStockNoteEditor(editButton, true);
@@ -164,7 +166,9 @@ async function handleNoteListClick(context, event) {
     clearRowActionError(toggleButton);
     const completed = await runButtonTask(
       toggleButton,
-      () => updateStockNote(state, toggleButton.dataset.noteToggle, { visible: toggleButton.dataset.noteVisible === "true" }, loadChartMarks, options),
+      () => updateStockNote(state, toggleButton.dataset.noteToggle, {
+        visible: toggleButton.dataset.noteVisible === "true", expected_revision: toggleButton.dataset.noteRevision,
+      }, loadChartMarks, { ...options, conflictForm: toggleButton.closest(".note-row")?.querySelector("[data-note-edit-form]") }),
       { isCurrent: options.isCurrent, onError: (error) => showRowActionError(toggleButton, error) }
     );
     if (completed) renderResearchActivityPanel();
@@ -177,10 +181,27 @@ async function handleNoteListClick(context, event) {
   clearRowActionError(button);
   const completed = await runButtonTask(
     button,
-    () => removeStockNote(state, button.dataset.noteRemove, loadChartMarks, options),
+    () => removeStockNote(state, button.dataset.noteRemove, loadChartMarks, {
+      ...options, expectedRevision: button.dataset.noteRevision,
+      conflictForm: button.closest(".note-row")?.querySelector("[data-note-edit-form]"),
+    }),
     { isCurrent: options.isCurrent, onError: (error) => showRowActionError(button, error) }
   );
   if (completed) renderResearchActivityPanel();
+}
+
+async function handleNoteConflictClick(context, event) {
+  const rebase = event.target.closest("[data-note-rebase]");
+  if (rebase) return resolveNoteConflict(rebase);
+  const latest = event.target.closest("[data-note-latest]");
+  if (!latest) return false;
+  const form = latest.closest("[data-note-edit-form]");
+  const options = context.currentWorkbenchMutationOptions();
+  if (!options || !form) return true;
+  await context.runButtonTask(latest,
+    () => readLatestStockNote(context.state, form.dataset.noteId, form, options),
+    { isCurrent: options.isCurrent, onError: error => context.setInlineEditError(form, error) });
+  return true;
 }
 
 async function handleNoteListSubmit(context, event) {
@@ -199,7 +220,7 @@ async function handleNoteListSubmit(context, event) {
         form.dataset.noteId,
         stockNoteUpdatesFromForm(form),
         loadChartMarks,
-        options
+        { ...options, noteForm: form }
       )
     );
     renderResearchActivityPanel();

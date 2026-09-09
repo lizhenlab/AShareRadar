@@ -21,11 +21,11 @@ class QualityBlockRule:
 
 
 def gate_signal_items(items: list[SignalItem], quality: DataQuality, kind: str) -> list[SignalItem]:
+    if quality_blocks_active_signals(quality):
+        return _blocked_signal_items(kind, quality, quality_reason(quality))
     if not _quality_requires_gate(quality):
         return items
     reason = quality_reason(quality)
-    if quality_blocks_active_signals(quality):
-        return _blocked_signal_items(kind, quality, reason)
     return [_low_confidence_signal_item(item, quality, reason) for item in items]
 
 

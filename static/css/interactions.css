@@ -1395,7 +1395,7 @@
 
 .local-data-actions {
   display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) 110px auto auto;
+  grid-template-columns: auto minmax(180px, 1fr) 90px minmax(180px, 1fr) auto auto;
   gap: 8px;
   padding: 12px 14px;
 }

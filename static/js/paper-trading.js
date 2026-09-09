@@ -114,15 +114,13 @@ export async function createPaperStrategy(state) {
 }
 
 export async function updatePaperTradingAccount(state) {
-  const initialCash = positiveNumber($("paperInitialCash")?.value, "初始资金无效");
+  const locked = paperAccountCashLocked(state.paperTradingDashboard);
   const defaultCostProfile = String($("paperDefaultCostProfile")?.value || "base");
-  const payload = {
-    initial_cash: initialCash,
-    default_cost_profile: defaultCostProfile,
-  };
+  const payload = { default_cost_profile: defaultCostProfile };
+  if (!locked) payload.initial_cash = positiveNumber($("paperInitialCash")?.value, "初始资金无效");
   return runPaperDashboardMutation(
     state, () => mutatePaper("/api/paper-trading/account", "PATCH", payload),
-    (_, isCurrent) => refreshPaperAfterMutation(state, isCurrent, "初始资金已保存")
+    (_, isCurrent) => refreshPaperAfterMutation(state, isCurrent, locked ? "默认成本已保存" : "账户配置已保存")
   );
 }
 
@@ -172,7 +170,12 @@ export async function comparePaperTradingRuns(state) {
 }
 
 export async function deletePaperStrategy(state, strategyId, options = {}) {
-  if (options.confirm && !options.confirm("删除这条尚未形成持仓的模拟策略？")) return false;
+  const dashboard = state.paperTradingDashboard;
+  if (paperHasRunHistory(dashboard)
+    && dashboard.strategies.some((item) => Number(item.id) === Number(strategyId))) {
+    throw new Error("策略已进入不可变历史运行，不能删除");
+  }
+  if (options.confirm && !options.confirm("删除这条尚未进入历史运行的模拟策略？")) return false;
   return runPaperDashboardMutation(state, async () => {
     await fetchJson(`/api/paper-trading/strategies/${encodeURIComponent(strategyId)}`, {
       method: "DELETE",
@@ -230,11 +233,11 @@ export function selectPaperTradingPlan(state, planId) {
 
 export function renderPaperTradingDashboard(state) {
   const dashboard = state.paperTradingDashboard || {};
-  renderAccount(dashboard.account, dashboard.strategies);
+  renderAccount(dashboard);
   renderPerformance(dashboard.performance);
   renderRunControls(dashboard);
   renderRunMetadata(dashboard);
-  renderStrategies(dashboard.strategies);
+  renderStrategies(dashboard);
   renderPositions(dashboard.positions);
   renderTrades(dashboard.trades);
   renderEvents(dashboard.events);
@@ -341,15 +344,27 @@ function requireRunComparison(value, leftRunId, rightRunId) {
   return value;
 }
 
-function renderAccount(account, strategies) {
+function paperHasRunHistory(dashboard) {
+  return Boolean(dashboard?.selected_run_id != null || dashboard?.latest_run || dashboard?.runs?.length);
+}
+
+function paperAccountCashLocked(dashboard) {
+  return paperHasRunHistory(dashboard) || Boolean(dashboard?.strategies?.length);
+}
+
+function renderAccount(dashboard) {
+  const account = dashboard.account;
   const input = $("paperInitialCash");
   const button = $("savePaperAccount");
   const defaultCost = $("paperDefaultCostProfile");
   if (input && account) input.value = String(account.initial_cash ?? "");
   if (defaultCost && account?.default_cost_profile) defaultCost.value = account.default_cost_profile;
-  const locked = Array.isArray(strategies) && strategies.length > 0;
+  const locked = paperAccountCashLocked(dashboard);
   if (input) input.disabled = locked;
-  if (button) button.disabled = false;
+  if (button) {
+    button.disabled = false;
+    button.textContent = locked ? "保存默认成本" : "保存账户配置";
+  }
 }
 
 function renderPerformance(performance = {}) {
@@ -377,21 +392,24 @@ function renderPerformance(performance = {}) {
     <span><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></span>`).join("");
 }
 
-function renderStrategies(strategies) {
+function renderStrategies(dashboard) {
   const target = $("paperStrategyList");
   if (!target) return;
-  const rows = Array.isArray(strategies) ? strategies : [];
-  target.innerHTML = rows.length ? rows.map(strategyHtml).join("") : emptyState("尚未加入策略", "先建立复盘计划，再冻结到模拟账户。");
+  const rows = Array.isArray(dashboard.strategies) ? dashboard.strategies : [];
+  const recorded = paperHasRunHistory(dashboard);
+  target.innerHTML = rows.length ? rows.map((item) => strategyHtml(item, recorded)).join("")
+    : emptyState("尚未加入策略", "先建立复盘计划，再冻结到模拟账户。");
 }
 
-function strategyHtml(item) {
-  const removable = !item.allocation_order && ["pending", "skipped", "expired", "data_unavailable"].includes(item.status);
+function strategyHtml(item, recorded) {
+  const removable = !recorded;
   const result = item.realized_pnl == null ? "--" : `${money(item.realized_pnl)} / ${percent(item.return_pct)}`;
   return `<article class="paper-strategy-item" data-paper-strategy="${escapeHtml(item.id)}">
     <div><strong>${escapeHtml(item.symbol || "--")}</strong><span>计划 #${escapeHtml(item.plan_id)} · v${escapeHtml(item.plan_revision)} · 仓位 ${escapeHtml(percent(item.allocation_pct))} · 优先级 ${escapeHtml(item.priority ?? 0)}</span></div>
     <div><b>${escapeHtml(STATUS_LABELS[item.status] || item.status)}</b><span>${escapeHtml(strategyDates(item))}</span></div>
     <div><b>${escapeHtml(result)}</b><span>目标 ${escapeHtml(numberText(item.normalized_target_price ?? item.target_price))} · 止损 ${escapeHtml(numberText(item.normalized_stop_price ?? item.stop_price))} · 分配顺序 ${escapeHtml(item.allocation_order ?? "--")}</span></div>
     ${removable ? `<button type="button" class="icon-button" title="删除模拟策略" aria-label="删除模拟策略" data-paper-delete="${escapeHtml(item.id)}">×</button>` : ""}
+    ${recorded ? "<p>已进入不可变历史运行，不能删除</p>" : ""}
     ${item.pending_exit_reason ? `<p>待执行：${escapeHtml(REASON_LABELS[item.pending_exit_reason] || item.pending_exit_reason)}</p>` : ""}
     ${item.rule_data_degraded ? `<p>规则元数据降级：历史 ST / 上市状态不完整</p>` : ""}
     ${item.error_message ? `<p>${escapeHtml(item.error_message)}</p>` : ""}

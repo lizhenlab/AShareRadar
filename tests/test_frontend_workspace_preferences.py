@@ -27,6 +27,7 @@ const storage = {
 const expected = {
   primaryView: "research",
   workspaceView: "strategy",
+  workspaceByPrimary: {research:"strategy",market:"market-scan",review:"replay",monitor:null,system:"diagnostics"},
   dailyChartRange: 120,
   dailyChartMa5: false,
   dailyChartMa20: true,
@@ -99,6 +100,7 @@ assert.deepEqual(loadWorkspacePreferences({
 }), {
   primaryView: "research",
   workspaceView: "finance",
+  workspaceByPrimary: {research:"finance",market:"market-scan",review:"replay",monitor:null,system:"diagnostics"},
   dailyChartRange: 60,
   dailyChartMa5: false,
   dailyChartMa20: true,
@@ -144,10 +146,11 @@ const migrated = loadWorkspacePreferences({
 assert.deepEqual(migrated, {
   primaryView: "market",
   ...legacyMarketPreferences,
+  workspaceByPrimary: {research:"overview",market:"market-scan",review:"replay",monitor:null,system:"diagnostics"},
 });
 
-assert.equal(sanitizeWorkspacePreferences({ workspaceView: "tools" }).primaryView, "review");
-assert.equal(sanitizeWorkspacePreferences({ workspaceView: "data" }).primaryView, "review");
+assert.equal(sanitizeWorkspacePreferences({ workspaceView: "tools" }).primaryView, "research");
+assert.equal(sanitizeWorkspacePreferences({ workspaceView: "data" }).primaryView, "system");
 assert.equal(sanitizeWorkspacePreferences({ workspaceView: "qa" }).primaryView, "research");
 assert.equal(sanitizeWorkspacePreferences({ primaryView: "market", workspaceView: "overview" }).primaryView, "market");
 for (const invalid of ["", "MARKET", "market ", "admin", null, 1, {}, []]) {
@@ -160,7 +163,7 @@ for (const invalid of ["", "MARKET", "market ", "admin", null, 1, {}, []]) {
     )
 
 
-def test_primary_navigation_static_contract_exposes_exactly_four_functional_areas() -> None:
+def test_primary_navigation_static_contract_exposes_five_functional_areas() -> None:
     html = (ROOT / "static/index.html").read_text(encoding="utf-8")
     app = (ROOT / "static/app.js").read_text(encoding="utf-8")
 
@@ -172,14 +175,15 @@ def test_primary_navigation_static_contract_exposes_exactly_four_functional_area
         "market",
         "review",
         "monitor",
+        "system",
     ]
     assert 'id="stockWorkbench"' in html and 'data-primary-regions="research"' in html
     assert 'class="panel query-panel" data-primary-regions="research review"' in html
     assert 'id="workspace-tab-market-scan" data-view="market-scan" data-primary-regions="market"' in html
     assert 'id="workspace-tab-replay" data-view="replay" data-primary-regions="review"' in html
     assert 'id="workspace-tab-paper" data-view="paper" data-primary-regions="review"' in html
-    assert 'id="workspace-tab-tools" data-view="tools" data-primary-regions="review"' in html
-    assert 'id="workspace-tab-data" data-view="data" data-primary-regions="review"' in html
+    assert 'id="workspace-tab-tools" data-view="tools" data-primary-regions="research"' in html
+    assert 'id="workspace-tab-data" data-view="data" data-primary-regions="system"' in html
     assert "createPrimaryNavigation" in app
     assert "setPrimaryView" in app
 
@@ -198,7 +202,7 @@ const { element } = installAppDom({ canvasContext: null });
 const views = ["overview", "qa", "strategy", "finance", "theme", "replay", "paper", "tools", "data"];
 const tabs = views.map((view) => control(`workspace-tab-${view}`, "view", view));
 const panels = views.map((view) => control(`workspace-panel-${view}`, "viewPanel", view));
-const primaryViews = ["research", "market", "review", "monitor"];
+const primaryViews = ["research", "market", "review", "monitor", "system"];
 const primaryButtons = primaryViews.map((view) => control(`primary-${view}`, "primaryView", view));
 const primaryRegions = primaryViews.map((view) => control(`primary-region-${view}`, "primaryRegions", view));
 const dailyRanges = [20, 60, 120, 240].map((range) => control(`daily-${range}`, "dailyRange", String(range)));
@@ -219,6 +223,7 @@ globalThis.document.querySelectorAll = (selector) => selectorResults.get(selecto
 const restored = {
   primaryView: "research",
   workspaceView: "strategy",
+  workspaceByPrimary: {research:"strategy",market:"market-scan",review:"replay",monitor:null,system:"diagnostics"},
   dailyChartRange: 120,
   dailyChartMa5: false,
   dailyChartMa20: true,
@@ -291,8 +296,9 @@ const payload = JSON.parse(values.get(WORKSPACE_PREFERENCES_STORAGE_KEY));
 assert.deepEqual(payload, {
   version: WORKSPACE_PREFERENCES_VERSION,
   preferences: {
-    primaryView: "review",
+    primaryView: "system",
     workspaceView: "data",
+    workspaceByPrimary: {research:"strategy",market:"market-scan",review:"replay",monitor:null,system:"data"},
     dailyChartRange: 240,
     dailyChartMa5: true,
     dailyChartMa20: false,
@@ -309,6 +315,74 @@ function control(id, dataName, dataValue) {
   item.dataset[dataName] = dataValue;
   return item;
 }
+'''
+    )
+
+
+def test_workspace_memory_migrates_owned_pages_and_rejects_cross_area_values() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { loadWorkspacePreferences, sanitizeWorkspacePreferences } from "./static/js/workspace-preferences.js";
+const loadLegacy = (preferences) => loadWorkspacePreferences({ getItem: () => JSON.stringify({version:1,preferences}) });
+for (const [workspaceView, owner] of [["tools","research"],["data","system"]]) {
+  const moved = loadLegacy({primaryView:"review", workspaceView, dailyChartRange:120});
+  assert.equal(moved.primaryView, owner);
+  assert.equal(moved.workspaceView, workspaceView);
+  assert.equal(moved.workspaceByPrimary[owner], workspaceView);
+  assert.equal(moved.dailyChartRange, 120);
+}
+const monitoring = loadLegacy({primaryView:"monitor",workspaceView:"data"});
+assert.equal(monitoring.primaryView,"monitor");
+assert.equal(monitoring.workspaceByPrimary.system,"data");
+const sanitized = sanitizeWorkspacePreferences({primaryView:"system",workspaceView:"tools",workspaceByPrimary:{
+  research:"paper",review:"data",market:"tools",monitor:"data",system:"data",credentials:"private"
+}});
+assert.equal(sanitized.workspaceView,"data");
+assert.deepEqual(sanitized.workspaceByPrimary,{research:"tools",market:"market-scan",review:"replay",monitor:null,system:"data"});
+assert.equal(JSON.stringify(sanitized).includes("private"),false);
+'''
+    )
+
+
+def test_primary_switches_restore_each_area_and_never_save_user_records() -> None:
+    _run_node_script(
+        r'''
+import assert from "node:assert/strict";
+import { installAppDom } from "./tests/frontend_app_flow_helpers.mjs";
+import { PRIMARY_WORKSPACE_VIEWS,WORKSPACE_PREFERENCES_STORAGE_KEY,loadWorkspacePreferences } from "./static/js/workspace-preferences.js";
+const { element } = installAppDom({canvasContext:null});
+const controls = Object.values(PRIMARY_WORKSPACE_VIEWS).flat().map(view => {
+ const tab=element(`workspace-tab-${view}`);tab.dataset.view=view;return tab;
+});
+document.querySelectorAll = (selector) => selector === ".workspace-tabs button[data-view]" ? controls : [];
+const stored=new Map();
+globalThis.localStorage={getItem:key=>stored.get(key)||null,setItem:(key,value)=>stored.set(key,value)};
+const calls=[];
+globalThis.fetch=async (url,options={})=>{calls.push({url:String(url),method:options.method||"GET"});return {ok:true,json:async()=>({})};};
+const { __appTest:app }=await import("./static/app.js");
+app.setWorkspaceView("finance");
+app.setPrimaryView("review");
+app.setWorkspaceView("paper");
+app.setPrimaryView("system");
+app.setWorkspaceView("data");
+app.setPrimaryView("monitor");
+app.setPrimaryView("research");
+assert.equal(app.state.workspaceView,"finance");
+app.setPrimaryView("review");
+assert.equal(app.state.workspaceView,"paper");
+app.setPrimaryView("system");
+assert.equal(app.state.workspaceView,"data");
+const restored=loadWorkspacePreferences(localStorage);
+assert.deepEqual(restored.workspaceByPrimary,{research:"finance",market:"market-scan",review:"paper",monitor:null,system:"data"});
+assert.equal(restored.primaryView,"system");
+assert.ok(stored.get(WORKSPACE_PREFERENCES_STORAGE_KEY));
+assert.ok(calls.every(call=>call.method==="GET"));
+const before=calls.length;
+app.setWorkspaceView("tools");
+await Promise.resolve();
+assert.equal(app.state.primaryView,"research");
+assert.equal(calls.length,before,"opening notes should not start unrelated review queries");
 '''
     )
 

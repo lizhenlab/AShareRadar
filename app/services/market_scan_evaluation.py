@@ -15,6 +15,7 @@ from statistics import fmean, median, pstdev
 from typing import Literal, cast
 
 from app.models.market import Kline, KlineAdjustmentMode
+from app.db.market_mappers import kline_execution_metadata_from_row
 from app.db.market_scan_integrity import verify_market_scan_snapshot
 from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE, MarketScanMode
 from app.models.paper_trading import (
@@ -95,12 +96,17 @@ from app.services.market_scan_probability_research import (
     build_probability_research,
     probability_feature_vector,
 )
+from app.services.market_scan_probability_source import (
+    is_current_writable_production_score_contract,
+    is_registered_production_score_contract,
+)
+from app.services.market_scan_score_contract import stable_score_spec_hash
 from app.services.trading_calendar import next_trade_dates
 from app.repositories.market_scan_mapping import decode_result_payload
 from app.utils.clock import utc_now
 
 
-EVALUATION_SCHEMA_VERSION = "market-scan-forward-evaluation-v3"
+EVALUATION_SCHEMA_VERSION = "market-scan-forward-evaluation-v4"
 SHADOW_RECONSTRUCTION_INTEGRITY = "unverified-overwrite-cache-reconstruction"
 PROMOTION_GATE_VERSION = "full-market-shadow-promotion-gate-v3"
 PROMOTION_PRIMARY_HORIZON = 5
@@ -157,6 +163,7 @@ class _Observation:
     probability_labels: dict[int, ProbabilityLabelOutcome]
     factor_values: dict[str, float]
     source_evidence_digest: str | None
+    production_score_contract: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -456,7 +463,7 @@ def evaluate_market_scan_shadow_comparison(
         candidate_count=len(candidates),
     )
     return {
-        "schema_version": "market-scan-shadow-comparison-v3",
+        "schema_version": "market-scan-shadow-comparison-v4",
         "generated_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
         "status": status,
         "production": production,
@@ -1154,9 +1161,7 @@ def _probability_research_rows(
     for snapshot in snapshots:
         market_strength, board_strength, industry_strength = _probability_strength_context(snapshot.observations)
         mature = frozenset(
-            horizon
-            for horizon in PROBABILITY_DEFAULT_HORIZONS
-            if horizon < len(snapshot.eligible_dates)
+            horizon for horizon in PROBABILITY_DEFAULT_HORIZONS if horizon < len(snapshot.eligible_dates)
         )
         rows.extend(
             ProbabilityResearchRow(
@@ -1182,6 +1187,11 @@ def _probability_research_rows(
                 mode=item.mode,
                 scope=item.scope,
                 rule_version=item.rule_version,
+                production_score_rule_version=(item.production_score_contract[0] if item.production_score_contract else None),
+                production_score_spec_hash=(item.production_score_contract[1] if item.production_score_contract else None),
+                source_feature_contract_current=is_current_writable_production_score_contract(
+                    *(item.production_score_contract or (None, None)),
+                ),
             )
             for item in snapshot.observations
         )
@@ -1628,7 +1638,7 @@ def _report_source(
         "read_only": True,
         "ranking_source": ranking_source,
         "forward_price_source": "persisted_qfq_kline_daily",
-        "execution_model": "signal-D,next-session-open,target-D+H+1-close,T+1,no-delayed-exit",
+        "execution_model": "signal-D,next-session-open,target-D+H+1-close,T+1,no-delayed-exit,open-status-entry-only",
     }
 
 
@@ -2066,9 +2076,7 @@ def _shadow_history_bars(
 ) -> dict[str, tuple[Kline, ...]]:
     rows = conn.execute(
         """
-        SELECT k.symbol, k.date, k.open, k.close, k.high, k.low, k.volume,
-               k.adjustment_mode, k.as_of, k.data_version, k.contract_version,
-               k.source, k.fetched_at, k.fallback_used
+        SELECT k.*
         FROM kline_daily AS k
         JOIN market_scan_result AS r
           ON r.run_id = ? AND r.symbol = k.symbol AND r.status = 'success'
@@ -2155,9 +2163,7 @@ def _forward_bars(
 ) -> dict[str, tuple[sqlite3.Row, ...]]:
     rows = conn.execute(
         """
-        SELECT k.symbol, k.date, k.open, k.close, k.high, k.low, k.volume,
-               k.adjustment_mode, k.as_of, k.data_version, k.contract_version,
-               k.source, k.fetched_at, k.fallback_used
+        SELECT k.*
         FROM kline_daily AS k
         JOIN market_scan_result AS r
           ON r.run_id = ? AND r.symbol = k.symbol AND r.status = 'success'
@@ -2252,6 +2258,7 @@ def _observation_from_rows(
             is_new=is_new,
         ),
         source_evidence_digest=_source_evidence_digest(result),
+        production_score_contract=_probability_score_contract(result),
     )
 
 
@@ -2501,7 +2508,7 @@ def _sellable_exit(
             symbol, market, date.fromisoformat(exit_date), entry.metadata, is_st=is_st, is_new=is_new,
         )
         tradeability = assess_daily_tradeability(
-            _to_kline(exit_row), previous_close=float(previous["close"]), profile=profile,
+            _to_kline(exit_row), previous_close=float(previous["close"]), profile=profile, execution_phase="close",
         )
     except (KeyError, ValueError):
         return None
@@ -2549,6 +2556,7 @@ def _to_kline(row: sqlite3.Row) -> Kline:
         source=row["source"],
         fetched_at=row["fetched_at"],
         fallback_used=bool(row["fallback_used"]),
+        **kline_execution_metadata_from_row(row),
     )
 
 
@@ -3148,6 +3156,19 @@ def _source_evidence_digest(result: sqlite3.Row) -> str | None:
         return None
     digest = evidence.get("payload_digest") if isinstance(evidence, dict) else None
     return digest if isinstance(digest, str) and len(digest) == 64 else None
+
+
+def _probability_score_contract(result: sqlite3.Row) -> tuple[str, str] | None:
+    if "metrics_json" not in result.keys():
+        return None
+    _metrics, details = decode_result_payload(result["metrics_json"])
+    spec, digest = details.get("score_spec"), details.get("score_spec_hash")
+    if not isinstance(spec, Mapping) or not isinstance(digest, str):
+        return None
+    rule = spec.get("rule_version")
+    if not isinstance(rule, str) or not is_registered_production_score_contract(rule, digest):
+        return None
+    return (rule, digest) if stable_score_spec_hash(spec) == digest else None
 
 
 def _finite_row_values(row: sqlite3.Row, names: Sequence[str]) -> dict[str, float]:

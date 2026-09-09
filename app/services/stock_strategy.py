@@ -7,6 +7,7 @@ from app.models.analysis import (
     SignalItem,
     StrategyCard,
 )
+from app.services.analysis_signal_quality import quality_blocks_active_signals
 from app.utils.market_data import finite_float
 
 
@@ -209,7 +210,7 @@ def _strategy_from_signal(
 
 def _quality_strategy_status(status: str, analysis: AnalysisResult) -> str:
     score = analysis.data_quality.score
-    if score < 50:
+    if quality_blocks_active_signals(analysis.data_quality):
         return SEVERE_QUALITY_STRATEGY_STATUS.get(status, "暂停")
     if score < 70:
         return WEAK_QUALITY_STRATEGY_STATUS.get(status, status)
@@ -218,7 +219,7 @@ def _quality_strategy_status(status: str, analysis: AnalysisResult) -> str:
 
 def _quality_signal_level(level: str, analysis: AnalysisResult) -> str:
     score = analysis.data_quality.score
-    if score < 50:
+    if quality_blocks_active_signals(analysis.data_quality):
         return "风险" if level != "风险" else level
     if score < 70 and level in {"积极", "观察"}:
         return "谨慎"

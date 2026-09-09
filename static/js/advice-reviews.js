@@ -4,7 +4,10 @@ import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { normalizeUiSymbol } from "./symbols.js";
 import {
-  assertDueItem,
+  cancelDueReviewQueue, dueReviewMode, navigateDueReviewQueue, refreshDueReviewQueue,
+  renderDueReviewQueue, retryDueReviewQueue,
+} from "./advice-review-due.js";
+import {
   assertEvaluation,
   assertReviewBatch,
   assertReviewDetail,
@@ -49,8 +52,9 @@ export async function loadAdviceReviews(state, options = {}) {
   state.adviceReviewReadSeq = sequence;
   prepareReviewSymbolState(state, symbol);
   const append = Boolean(options.append);
-  const offset = append ? (state.adviceReviewDetails || []).length : 0;
+  const offset = append ? Number(state.adviceReviewNextOffset || 0) : 0;
   if (!append) {
+    setReviewPageFeedback();
     resetReviewHistories(state);
     renderReviewLoading();
   }
@@ -63,16 +67,40 @@ export async function loadAdviceReviews(state, options = {}) {
     if (!reviewReadIsCurrent(state, sequence, symbol, options)) return false;
     if (!Array.isArray(details)) throw new TypeError("复盘计划格式异常");
     details.forEach((detail) => assertReviewDetail(detail, symbol));
-    state.adviceReviewDetails = append ? mergeReviewDetails(state.adviceReviewDetails, details) : details;
+    refreshPinnedReviewDetail(state, details);
+    updateReviewPageCursor(state, details, offset, append);
+    const confirmedDetails = mergeConfirmedReviewPlan(details, options.confirmedPlan, pinnedReviewDetail(state)?.plan.id);
+    state.adviceReviewDetails = append ? mergeReviewDetails(state.adviceReviewDetails, confirmedDetails) : confirmedDetails;
     state.adviceReviewHasMore = details.length === REVIEW_PAGE_SIZE;
+    setReviewPageFeedback();
     renderAdviceReviewDetails(state.adviceReviewDetails, state);
     refreshReviewSnapshotForm(state);
     return true;
   } catch (error) {
     if (isAbortError(error) || !reviewReadIsCurrent(state, sequence, symbol, options)) return false;
-    renderReviewUnavailable(error);
+    if (append && hasReviewPageForSymbol(state, symbol)) {
+      setReviewPageFeedback(`加载更早计划失败，已保留当前列表；请再次点击“加载更早计划”重试。${reviewErrorMessage(error, "")}`);
+      return false;
+    }
+    if (pinnedReviewDetail(state)) {
+      renderAdviceReviewDetails(state.adviceReviewDetails || [], state);
+      setReviewFeedback("普通计划列表暂不可用，已保留定位计划；请刷新页面重试列表", "error");
+    } else renderReviewUnavailable(error);
     return false;
   }
+}
+
+function hasReviewPageForSymbol(state, symbol) {
+  const details = state.adviceReviewDetails;
+  return Array.isArray(details) && details.length > 0
+    && details.every((detail) => sameSymbol(detail?.plan?.symbol, symbol));
+}
+
+function setReviewPageFeedback(message = "") {
+  const target = $("reviewPlanPageFeedback");
+  if (!target) return;
+  target.textContent = message;
+  target.hidden = !message;
 }
 
 export async function loadMoreAdviceReviews(state, options = {}) {
@@ -80,47 +108,124 @@ export async function loadMoreAdviceReviews(state, options = {}) {
   return loadAdviceReviews(state, { ...options, append: true });
 }
 
+export async function loadAdviceReviewPlan(state, planId, options = {}) {
+  const key = planKey(planId);
+  const symbol = reviewOwnerSymbol(state, options);
+  if (!key || !symbol || !reviewOwnerIsCurrent(state, symbol, options)) return false;
+  const sequence = Number(state.adviceReviewPlanReadSeq || 0) + 1;
+  state.adviceReviewPlanReadSeq = sequence;
+  state.adviceReviewPlanReadId = key;
+  prepareReviewSymbolState(state, symbol);
+  setReviewFeedback(`正在定位计划 #${key}`, "");
+  setDashboardFeedback(`正在定位计划 #${key}`, "");
+  const isCurrent = () => state.adviceReviewPlanReadSeq === sequence
+    && reviewOwnerIsCurrent(state, symbol, options);
+  try {
+    const detail = await fetchJson(`/api/reviews/plans/${encodeURIComponent(key)}`, {
+      signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
+    if (!isCurrent()) return false;
+    assertReviewDetail(detail, symbol);
+    if (planKey(detail.plan.id) !== key) throw new TypeError("定位计划身份与请求不一致");
+    const existing = reviewDetail(state, key);
+    if (Number(existing?.plan.revision || 0) > Number(detail.plan.revision)) throw new Error("计划版本已更新，请重试读取");
+    if (existing && Number(existing.plan.revision) === Number(detail.plan.revision)
+      && !sameReviewIdentity(existing.plan, detail.plan)) throw new Error("定位计划同版本摘要或参数不一致");
+    state.adviceReviewPinnedDetail = detail;
+    state.adviceReviewPinnedReadOnly = options.contextAvailable === false;
+    syncPinnedReviewForm(state, key);
+    renderAdviceReviewDetails(state.adviceReviewDetails || [], state);
+    const contextNote = options.contextAvailable === false ? "；行情暂不可用，仅查看本地冻结计划；重新点击“查看计划”可重试行情" : "";
+    const message = `已定位计划 #${key} · 当前版本 ${detail.plan.revision}${contextNote}`;
+    setReviewFeedback(message, "ok");
+    setDashboardFeedback(message, "ok");
+    revealReviewPlan(key);
+    return true;
+  } catch (error) {
+    if (isAbortError(error) || !isCurrent()) return false;
+    const message = Number(error?.status) === 404 ? "计划不存在或已归档" : reviewErrorMessage(error, "计划读取暂不可用");
+    setReviewFeedback(`计划 #${key}：${message}；请重新点击“查看计划”重试`, "error");
+    setDashboardFeedback(`计划 #${key}：${message}；请重新点击“查看计划”重试`, "error");
+    return false;
+  }
+}
+
+function pinnedReviewDetail(state) {
+  const detail = state?.adviceReviewPinnedDetail;
+  const symbol = state?.adviceReviewHistorySymbol || state?.symbol;
+  return detail?.plan && sameSymbol(detail.plan.symbol, symbol) ? detail : null;
+}
+
+function pinnedReviewIsReadOnly(state, planId) {
+  return state?.adviceReviewPinnedReadOnly === true
+    && planKey(state.adviceReviewPinnedDetail?.plan.id) === planKey(planId);
+}
+
+function invalidatePlanLookup(state, planId) {
+  if (state.adviceReviewPlanReadId !== planKey(planId)) return;
+  state.adviceReviewPlanReadSeq = Number(state.adviceReviewPlanReadSeq || 0) + 1;
+}
+
+function syncPinnedReviewForm(state, planId) {
+  if (state.adviceReviewPinnedReadOnly && Number(state.adviceReviewEditingPlanId) === Number(planId)) {
+    cancelAdviceReviewEdit(state);
+  }
+  refreshReviewSnapshotForm(state);
+  if (state.adviceReviewPinnedReadOnly && $("reviewPlanSubmit")) $("reviewPlanSubmit").disabled = true;
+}
+
+function refreshPinnedReviewDetail(state, details) {
+  const pinned = pinnedReviewDetail(state);
+  if (!pinned) return;
+  const latest = details.find((detail) => planKey(detail.plan.id) === planKey(pinned.plan.id));
+  if (!latest || Number(latest.plan.revision) < Number(pinned.plan.revision)) return;
+  if (Number(latest.plan.revision) === Number(pinned.plan.revision) && !sameReviewIdentity(latest.plan, pinned.plan)) {
+    throw new TypeError("定位计划同版本摘要不一致");
+  }
+  state.adviceReviewPinnedDetail = latest;
+}
+
+function revealReviewPlan(key) {
+  const item = $("reviewPlanList")?.querySelector?.(`[data-review-plan="${key}"]`);
+  if (!item) return;
+  const toggle = item.closest?.(".advice-review-panel")?.querySelector?.(".layout-collapse-toggle");
+  if (toggle?.getAttribute?.("aria-expanded") === "false") toggle.click();
+  item.setAttribute("tabindex", "-1");
+  item.focus?.({ preventScroll: true });
+  item.scrollIntoView?.({ block: "start", behavior: "smooth" });
+}
+
 export async function loadAdviceReviewDashboard(state, options = {}) {
   const sequence = Number(state.adviceReviewDashboardSeq || 0) + 1;
   state.adviceReviewDashboardSeq = sequence;
   renderAdviceReviewDashboardLoading();
+  const dueRead = dueReviewMode() ? refreshAdviceReviewDue(state, options) : Promise.resolve(false);
   const results = await Promise.allSettled([
       fetchJson("/api/reviews/summary", { signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }),
-      fetchJson("/api/reviews/due?limit=200", { signal: options.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }),
       loadAllAdviceReviewDetails(options),
   ]);
-  if (state.adviceReviewDashboardSeq !== sequence || options.signal?.aborted) return false;
+  if (state.adviceReviewDashboardSeq !== sequence || options.signal?.aborted || options.isCurrent?.() === false) return false;
   const dashboard = dashboardSettledResults(results);
   state.adviceReviewDashboardSummary = dashboard.summary;
-  state.adviceReviewDueItems = dashboard.dueItems;
   state.adviceReviewDashboardDetails = dashboard.details;
   state.adviceReviewDashboardFailures = dashboard.failures;
-  renderAdviceReviewDashboard(state);
   renderDashboardFailures(dashboard.failures);
-  return dashboard.availableCount > 0;
+  renderAdviceReviewDashboard(state);
+  const dueAvailable = await dueRead;
+  return state.adviceReviewDashboardSeq === sequence && !options.signal?.aborted && options.isCurrent?.() !== false
+    && (dashboard.availableCount > 0 || dueAvailable);
 }
 
 function dashboardSettledResults(results) {
   const failures = {};
   const summary = settledDashboardValue(results[0], assertReviewSummary, "统计", failures);
-  const dueItems = settledDashboardArray(results[1], assertDueItem, "到期队列", failures);
-  const details = settledDashboardValue(results[2], (value) => value, "计划列表", failures);
-  const reconciledDue = reconcileDueItems(dueItems, details, failures);
+  const details = settledDashboardValue(results[1], (value) => value, "计划列表", failures);
   return {
     summary,
-    dueItems: reconciledDue,
     details,
     failures,
-    availableCount: [summary, dueItems, details].filter((value) => value !== null).length,
+    availableCount: [summary, details].filter((value) => value !== null).length,
   };
-}
-
-function settledDashboardArray(result, validator, label, failures) {
-  return settledDashboardValue(result, (value) => {
-    if (!Array.isArray(value)) throw new TypeError(`${label}格式异常`);
-    value.forEach(validator);
-    return value;
-  }, label, failures);
 }
 
 function settledDashboardValue(result, validator, label, failures) {
@@ -134,14 +239,6 @@ function settledDashboardValue(result, validator, label, failures) {
     failures[label] = reviewErrorMessage(error, `${label}格式异常`);
     return null;
   }
-}
-
-function reconcileDueItems(dueItems, details, failures) {
-  if (!Array.isArray(dueItems) || !Array.isArray(details)) return dueItems;
-  const plans = new Map(details.map((detail) => [Number(detail.plan.id), detail.plan]));
-  const reconciled = dueItems.filter((item) => sameReviewIdentity(item.plan, plans.get(Number(item.plan.id))));
-  if (reconciled.length !== dueItems.length) failures["到期版本"] = "已忽略与当前计划版本不一致的到期记录";
-  return reconciled;
 }
 
 async function loadAllAdviceReviewDetails(options) {
@@ -166,26 +263,58 @@ async function loadAllAdviceReviewDetails(options) {
 }
 
 export async function evaluateDueAdviceReviews(state, options = {}) {
+  const view = reviewBatchViewKey(state);
+  const isCurrent = () => !options.signal?.aborted && options.isCurrent?.() !== false && reviewBatchViewKey(state) === view;
+  const before = reviewDashboardReadIdentity(state);
   const result = assertReviewBatch(await fetchJson("/api/reviews/evaluate-due?limit=100", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-    timeoutMs: REVIEW_BATCH_TIMEOUT_MS,
-    signal: options.signal,
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    timeoutMs: REVIEW_BATCH_TIMEOUT_MS, signal: options.signal,
   }));
-  const attempted = result.attempted_count;
-  const failed = result.failed_count;
-  const unavailable = Number(result.insufficient_count || 0) + Number(result.pending_count || 0);
-  setDashboardFeedback(
-    attempted ? `已处理 ${attempted} 条到期计划，正式完成 ${result.evaluated_count} 条，证据不足或待成熟 ${unavailable} 条，失败 ${failed} 条` : "当前没有到期计划",
-    failed || unavailable ? "error" : "ok"
-  );
-  await loadAdviceReviewDashboard(state, options);
+  if (!isCurrent() || reviewDashboardReadIdentity(state) !== before) return result;
+  const readback = loadAdviceReviewDashboard(state, { ...options, isCurrent });
+  const reading = reviewDashboardReadIdentity(state);
+  await readback;
+  if (isCurrent() && reviewDashboardReadIdentity(state) === reading) renderReviewBatchReceipt(state, result);
   return result;
 }
 
-export function updateAdviceReviewDashboardFilters(state) {
+function reviewBatchViewKey(state) {
+  return JSON.stringify([state.symbol, state.loadSeq, state.primaryView, state.workspaceView,
+    ...["reviewDashboardStatus", "reviewDashboardSymbol", "reviewDashboardFrom", "reviewDashboardHorizon"].map(valueOf)]);
+}
+
+function reviewDashboardReadIdentity(state) {
+  return `${state.adviceReviewDashboardSeq || 0}:${state.adviceReviewDue?.sequence || 0}`;
+}
+
+function renderReviewBatchReceipt(state, result) {
+  const unavailable = result.insufficient_count + result.pending_count;
+  const receipt = result.attempted_count
+    ? `全局本次已处理 ${result.attempted_count} 条到期计划，正式完成 ${result.evaluated_count} 条，证据不足或待成熟 ${unavailable} 条，失败 ${result.failed_count} 条`
+    : "全局本次没有到期计划";
+  const failures = Object.entries(state.adviceReviewDashboardFailures || {}).map(([label, message]) => `${label}：${message}`);
+  setDashboardFeedback([receipt, ...failures].join("；"), result.failed_count || unavailable || failures.length ? "error" : "ok");
+}
+
+export function updateAdviceReviewDashboardFilters(state, options = {}) {
+  if (dueReviewMode()) return refreshAdviceReviewDue(state, options);
+  cancelDueReviewQueue(state);
   renderAdviceReviewDashboard(state);
+  return Promise.resolve(true);
+}
+
+export function refreshAdviceReviewDue(state, options = {}) {
+  return refreshDueReviewQueue(state, () => {
+    if (options.isCurrent?.() !== false) renderAdviceReviewDashboard(state);
+  }, options);
+}
+
+export function changeAdviceReviewDuePage(state, direction) {
+  return navigateDueReviewQueue(state, direction, () => renderAdviceReviewDashboard(state));
+}
+
+export function retryAdviceReviewDue(state) {
+  return retryDueReviewQueue(state, () => renderAdviceReviewDashboard(state));
 }
 
 export function syncAdviceReviewSnapshots(state, items, analysis) {
@@ -199,15 +328,22 @@ export function syncAdviceReviewSnapshots(state, items, analysis) {
 
 export function selectAdviceReviewSnapshot(state) {
   if (state.adviceReviewEditingPlanId) return false;
+  state.adviceReviewFormEpoch = Number(state.adviceReviewFormEpoch || 0) + 1;
   return applySelectedSnapshotDefaults(state, { preserveText: false });
 }
 
 export async function submitAdviceReviewPlan(state, options = {}) {
+  if (pinnedReviewDetail(state) && state.adviceReviewPinnedReadOnly
+    && (!state.adviceReviewEditingPlanId || pinnedReviewIsReadOnly(state, state.adviceReviewEditingPlanId))) {
+    throw new Error("定位计划当前仅供查看，请重新加载行情后编辑");
+  }
   const plan = editingPlan(state);
+  if (state.adviceReviewEditingPlanId && !plan) throw new Error("编辑计划已不可用，请重新查看计划后编辑");
   const symbol = reviewOwnerSymbol(state, options, plan?.symbol);
   if (!symbol) throw new Error("当前复盘股票无效");
   if (plan && !sameSymbol(plan.symbol, symbol)) throw new Error("复盘计划不存在或已切换股票");
   const payload = reviewPlanPayload(state, plan, symbol);
+  const submittedDraft = reviewFormDraft(state);
   const url = plan ? `/api/reviews/plans/${encodeURIComponent(plan.id)}` : "/api/reviews/plans";
   const method = plan ? "PATCH" : "POST";
   const saved = await fetchJson(url, {
@@ -221,11 +357,15 @@ export async function submitAdviceReviewPlan(state, options = {}) {
   if (plan && (Number(saved.id) !== Number(plan.id) || Number(saved.revision) <= Number(plan.revision))) {
     throw new TypeError("复盘计划更新响应版本异常");
   }
-  state.adviceReviewEditingPlanId = null;
-  setReviewFormMode(null);
-  refreshReviewSnapshotForm(state, { reset: true });
-  setReviewFeedback(plan ? "复盘计划已更新" : "复盘计划已建立", "ok");
-  await loadAdviceReviews(state, { ...options, symbol });
+  invalidatePlanLookup(state, saved.id);
+  if (Number(pinnedReviewDetail(state)?.plan.id) === Number(saved.id)) {
+    state.adviceReviewPinnedDetail = { plan: saved, latest_evaluation: null };
+  }
+  state.adviceReviewDetails = mergeConfirmedReviewPlan(state.adviceReviewDetails || [], saved, pinnedReviewDetail(state)?.plan.id);
+  const reset = reconcileSavedReviewDraft(state, submittedDraft, saved);
+  setReviewFeedback(reset ? (plan ? "复盘计划已更新" : "复盘计划已建立")
+    : `复盘计划 #${saved.id} ${plan ? "已更新" : "已建立"}；当前草稿已保留，尚未提交`, "ok");
+  await loadAdviceReviews(state, { ...options, symbol, confirmedPlan: saved });
   return saved;
 }
 
@@ -278,6 +418,9 @@ export async function evaluateAdviceReviewPlan(state, planId, options = {}) {
   state.adviceReviewDetails = (state.adviceReviewDetails || []).map((detail) =>
     Number(detail?.plan?.id) === Number(plan.id) ? { ...detail, latest_evaluation: evaluation } : detail
   );
+  if (Number(pinnedReviewDetail(state)?.plan.id) === Number(plan.id)) {
+    state.adviceReviewPinnedDetail = { ...detail, latest_evaluation: evaluation };
+  }
   mergeEvaluationIntoLoadedHistory(state, plan.id, evaluation);
   renderAdviceReviewDetails(state.adviceReviewDetails, state);
   setReviewFeedback("复盘评估已更新", "ok");
@@ -359,10 +502,12 @@ export async function loadAdviceReviewHistory(state, planId, options = {}) {
 }
 
 export function beginAdviceReviewEdit(state, planId) {
-  const detail = (state.adviceReviewDetails || []).find((item) => Number(item?.plan?.id) === Number(planId));
+  const detail = reviewDetail(state, planId);
   if (!detail?.plan) return false;
   const plan = detail.plan;
+  state.adviceReviewFormEpoch = Number(state.adviceReviewFormEpoch || 0) + 1;
   state.adviceReviewEditingPlanId = plan.id;
+  state.adviceReviewEditingPlanSnapshot = structuredClone(plan);
   setValue("reviewAdviceId", String(plan.advice_id));
   setValue("reviewHypothesis", plan.hypothesis);
   setValue("reviewTrigger", plan.trigger_condition);
@@ -370,34 +515,115 @@ export function beginAdviceReviewEdit(state, planId) {
   setValue("reviewTarget", plan.target_price);
   setValue("reviewStop", plan.stop_price);
   setValue("reviewHorizon", plan.horizon_days);
-  setReviewFormMode(plan);
+  syncAdviceReviewFormControls(state);
   setReviewFeedback("");
   $("reviewHypothesis")?.focus?.({ preventScroll: true });
   return true;
 }
 
 export function cancelAdviceReviewEdit(state) {
+  state.adviceReviewFormEpoch = Number(state.adviceReviewFormEpoch || 0) + 1;
   state.adviceReviewEditingPlanId = null;
-  setReviewFormMode(null);
-  renderSnapshotOptions(state);
+  state.adviceReviewEditingPlanSnapshot = null;
+  syncAdviceReviewFormControls(state);
   applySelectedSnapshotDefaults(state, { preserveText: false });
   setReviewFeedback("");
+}
+
+export function syncAdviceReviewFormControls(state) {
+  setReviewFormMode(editingPlan(state));
+  renderSnapshotOptions(state);
+  const busy = Boolean(state.adviceReviewSubmitOwner?.isCurrent());
+  $("reviewPlanForm")?.setAttribute("aria-busy", String(busy));
+  if (busy) {
+    const submit = $("reviewPlanSubmit");
+    if (submit) {
+      submit.disabled = true;
+      submit.textContent = "保存中";
+    }
+  }
+}
+
+function reviewFormDraft(state) {
+  const plan = editingPlan(state);
+  return {
+    epoch: Number(state.adviceReviewFormEpoch || 0),
+    planId: plan ? Number(plan.id) : null,
+    adviceId: Number(plan?.advice_id || valueOf("reviewAdviceId")),
+    values: ["reviewHypothesis", "reviewTrigger", "reviewInvalidation", "reviewTarget", "reviewStop", "reviewHorizon"]
+      .map((id) => String($(id)?.value ?? "")),
+  };
+}
+
+function reconcileSavedReviewDraft(state, submitted, saved) {
+  const current = reviewFormDraft(state);
+  if (JSON.stringify(current) === JSON.stringify(submitted)) {
+    state.adviceReviewEditingPlanId = null;
+    state.adviceReviewEditingPlanSnapshot = null;
+    setReviewFormMode(null);
+    refreshReviewSnapshotForm(state, { reset: true });
+    return true;
+  }
+  const samePlan = current.planId === Number(saved.id);
+  const continuedCreate = submitted.planId === null && current.planId === null
+    && current.epoch === submitted.epoch && current.adviceId === submitted.adviceId;
+  if ((samePlan && Number(editingPlan(state)?.revision) <= Number(saved.revision)) || continuedCreate) {
+    // The acknowledged revision is the next PATCH baseline; input fields remain the user's draft.
+    state.adviceReviewEditingPlanId = saved.id;
+    state.adviceReviewEditingPlanSnapshot = structuredClone(saved);
+    syncAdviceReviewFormControls(state);
+  }
+  return false;
 }
 
 export function renderAdviceReviewDetails(details, state = null) {
   const target = $("reviewPlanList");
   if (!target) return;
-  target.innerHTML = details.length
-    ? details.map((detail) => reviewDetailHtml(detail, state)).join("")
+  const focusedPlan = focusedReviewPlanKey(target);
+  const pinned = pinnedReviewDetail(state);
+  const symbol = state?.adviceReviewHistorySymbol;
+  const scoped = symbol ? details.filter((detail) => sameSymbol(detail?.plan?.symbol, symbol)) : details;
+  const rows = pinned ? [pinned, ...scoped.filter((detail) => Number(detail?.plan?.id) !== Number(pinned.plan.id))] : scoped;
+  const boundary = state?.adviceReviewPinnedReadOnly ? "行情未完成，仅查看冻结计划；请从全局看板重新点击查看计划重试。" : "置顶展示，不改变普通列表分页顺序。";
+  const selected = pinned ? `<div class="review-plan-state" role="status"><strong>定位计划 #${escapeHtml(pinned.plan.id)} · ${escapeHtml(pinned.plan.symbol)}</strong><span>${boundary}</span></div>` : "";
+  target.innerHTML = rows.length
+    ? selected + rows.map((detail) => reviewDetailHtml(detail, state)).join("")
     : `<div class="review-plan-state"><strong>暂无复盘计划</strong><span>可从当前股票的保留建议快照建立计划。</span></div>`;
+  restoreReviewPlanFocus(target, focusedPlan);
   const loadMore = $("reviewPlanLoadMore");
-  if (loadMore) loadMore.hidden = !state?.adviceReviewHasMore;
+  if (loadMore) loadMore.hidden = !state?.adviceReviewHasMore || Boolean(pinned && state.adviceReviewPinnedReadOnly);
+}
+
+function focusedReviewPlanKey(target) {
+  const active = document.activeElement;
+  return target.contains?.(active) ? planKey(active?.dataset?.reviewPlan) : null;
+}
+
+function restoreReviewPlanFocus(target, key) {
+  const item = key ? target.querySelector?.(`[data-review-plan="${key}"]`) : null;
+  if (!item) return;
+  item.setAttribute("tabindex", "-1");
+  item.focus?.({ preventScroll: true });
 }
 
 function mergeReviewDetails(existing, incoming) {
   const merged = new Map((Array.isArray(existing) ? existing : []).map((item) => [Number(item?.plan?.id), item]));
   for (const item of incoming) merged.set(Number(item?.plan?.id), item);
   return Array.from(merged.values());
+}
+
+function mergeConfirmedReviewPlan(details, plan, pinnedPlanId = null) {
+  if (!plan) return details;
+  const existing = details.find((detail) => Number(detail.plan.id) === Number(plan.id));
+  if (!existing && Number(plan.id) === Number(pinnedPlanId)) return details;
+  if (existing && Number(existing.plan.revision) >= Number(plan.revision)) return details;
+  return mergeReviewDetails(details, [{ plan, latest_evaluation: null }]);
+}
+
+function updateReviewPageCursor(state, details, offset, append) {
+  const previous = append ? (state.adviceReviewPagePlanIds || []) : [];
+  state.adviceReviewPagePlanIds = [...new Set([...previous, ...details.map((detail) => Number(detail.plan.id))])];
+  state.adviceReviewNextOffset = offset + details.length;
 }
 
 function renderAdviceReviewDashboard(state) {
@@ -418,14 +644,13 @@ function renderAdviceReviewDashboard(state) {
     ["平均MAE", dashboardPercent(summary.average_mae_pct)],
   ].map(([label, value]) => `<span><small>${escapeHtml(label)}</small><strong>${escapeHtml(value ?? "--")}</strong></span>`).join("")
     : dashboardUnavailableHtml("统计暂不可用");
-  const dueIds = new Set((state.adviceReviewDueItems || []).map((item) => Number(item?.plan?.id)));
-  const dueById = new Map((state.adviceReviewDueItems || []).map((item) => [Number(item?.plan?.id), item]));
+  if (renderDueReviewQueue(state, item => dashboardDetailHtml(item, item))) return;
   const detailsAvailable = Array.isArray(state.adviceReviewDashboardDetails);
-  const rows = detailsAvailable ? filteredDashboardDetails(state, dueIds) : [];
+  const rows = detailsAvailable ? filteredDashboardDetails(state) : [];
   queueTarget.innerHTML = !detailsAvailable
     ? dashboardUnavailableHtml("计划列表暂不可用")
     : rows.length
-    ? rows.map((detail) => dashboardDetailHtml(detail, dueById.get(Number(detail?.plan?.id)))).join("")
+    ? rows.map((detail) => dashboardDetailHtml(detail)).join("")
     : `<div class="review-plan-state"><strong>没有符合筛选条件的计划</strong><span>可调整状态、股票、日期或周期。</span></div>`;
 }
 
@@ -438,41 +663,39 @@ function renderDashboardFailures(failures) {
   setDashboardFeedback(messages.join("；"), messages.length ? "error" : "");
 }
 
-function filteredDashboardDetails(state, dueIds) {
+function filteredDashboardDetails(state) {
   const filters = {
     status: valueOf("reviewDashboardStatus") || "all",
     symbol: valueOf("reviewDashboardSymbol").toUpperCase(),
     from: valueOf("reviewDashboardFrom"),
     horizon: valueOf("reviewDashboardHorizon"),
   };
-  return (state.adviceReviewDashboardDetails || []).filter((detail) => dashboardDetailMatches(detail, dueIds, filters));
+  return (state.adviceReviewDashboardDetails || []).filter((detail) => dashboardDetailMatches(detail, filters));
 }
 
-function dashboardDetailMatches(detail, dueIds, filters) {
+function dashboardDetailMatches(detail, filters) {
   const plan = detail?.plan || {};
-  if (!dashboardStatusMatches(detail, dueIds, filters.status)) return false;
+  if (!dashboardStatusMatches(detail, filters.status)) return false;
   if (filters.symbol && !String(plan.symbol || "").toUpperCase().includes(filters.symbol)) return false;
   if (filters.from && String(plan.snapshot_market_time || "").slice(0, 10) < filters.from) return false;
   return filters.horizon === "all" || String(plan.horizon_days) === filters.horizon;
 }
 
-function dashboardStatusMatches(detail, dueIds, status) {
+function dashboardStatusMatches(detail, status) {
   if (status === "all") return true;
-  if (status === "due") return dueIds.has(Number(detail?.plan?.id));
   return (detail?.latest_evaluation?.status || "pending") === status;
 }
 
 function dashboardDetailHtml(detail, due) {
   const plan = detail?.plan || {};
   const evaluation = detail?.latest_evaluation;
-  const status = evaluation?.status || "pending";
   const conclusion = CONCLUSION_LABELS[evaluation?.conclusion] || "等待后续行情";
   const dueText = due ? `到期 ${due.due_date}${due.overdue_trading_days ? ` · 逾期 ${due.overdue_trading_days} 个交易日` : ""}` : `周期 ${plan.horizon_days || "--"} 日`;
   return `
     <article class="review-dashboard-item" data-review-dashboard-plan="${escapeHtml(plan.id)}">
       <span><strong>${escapeHtml(plan.symbol || "--")}</strong><small>${escapeHtml(plan.snapshot_market_time || "--")} · 版本 ${escapeHtml(plan.revision || 1)}</small></span>
       <span><b>${escapeHtml(conclusion)}</b><small>${escapeHtml(dueText)}</small></span>
-      <button type="button" class="mini-button" data-review-open-symbol="${escapeHtml(plan.symbol || "")}">查看计划</button>
+      <button type="button" class="mini-button" data-review-open-plan="${escapeHtml(plan.id)}" data-review-open-symbol="${escapeHtml(plan.symbol || "")}">查看计划</button>
     </article>`;
 }
 
@@ -484,16 +707,9 @@ function renderAdviceReviewDashboardLoading() {
   const summary = $("reviewDashboardSummary");
   const queue = $("reviewDashboardQueue");
   if (summary) summary.innerHTML = `<div class="review-plan-state"><strong>正在读取全局复盘统计</strong></div>`;
-  if (queue) queue.innerHTML = "";
+  if (queue && !dueReviewMode()) queue.innerHTML = "";
   summary?.setAttribute?.("aria-busy", "true");
   queue?.setAttribute?.("aria-busy", "true");
-}
-
-function renderAdviceReviewDashboardUnavailable(error) {
-  const summary = $("reviewDashboardSummary");
-  const queue = $("reviewDashboardQueue");
-  if (summary) summary.innerHTML = `<div class="review-plan-state is-unavailable"><strong>全局复盘统计暂不可用</strong><span>${escapeHtml(Number(error?.status) >= 500 ? "请稍后重试" : error?.message || "请稍后重试")}</span></div>`;
-  if (queue) queue.innerHTML = "";
 }
 
 function setDashboardFeedback(message, tone = "") {
@@ -511,6 +727,7 @@ function reviewDetailHtml(detail, state) {
   const evaluation = detail.latest_evaluation;
   const key = planKey(plan.id);
   const history = key && state?.adviceReviewHistories?.[key];
+  const disabled = pinnedReviewIsReadOnly(state, plan.id) ? " disabled" : "";
   const historyExpanded = Boolean(history?.expanded);
   const asOfValue = key ? state?.adviceReviewAsOfByPlan?.[key] || "" : "";
   return `
@@ -521,10 +738,10 @@ function reviewDetailHtml(detail, state) {
           <span>快照 ${escapeHtml(plan.snapshot_market_time || "--")} · 版本 ${escapeHtml(plan.revision || 1)}</span>
         </div>
         <div class="row-actions">
-          <button type="button" class="mini-button primary" data-paper-from-review="${escapeHtml(plan.id)}">加入模拟</button>
-          <button type="button" class="mini-button" data-review-edit="${escapeHtml(plan.id)}">编辑</button>
-          <button type="button" class="mini-button" data-review-history="${escapeHtml(plan.id)}" aria-expanded="${historyExpanded}" aria-controls="review-history-${escapeHtml(plan.id)}">${historyExpanded ? "收起历史" : "评估历史"}</button>
-          <button type="button" class="icon-button" title="归档复盘计划" aria-label="归档复盘计划" data-review-delete="${escapeHtml(plan.id)}">×</button>
+          <button type="button" class="mini-button primary" data-paper-from-review="${escapeHtml(plan.id)}"${disabled}>加入模拟</button>
+          <button type="button" class="mini-button" data-review-edit="${escapeHtml(plan.id)}"${disabled}>编辑</button>
+          <button type="button" class="mini-button" data-review-history="${escapeHtml(plan.id)}" aria-expanded="${historyExpanded}" aria-controls="review-history-${escapeHtml(plan.id)}"${disabled}>${historyExpanded ? "收起历史" : "评估历史"}</button>
+          <button type="button" class="icon-button" title="归档复盘计划" aria-label="归档复盘计划" data-review-delete="${escapeHtml(plan.id)}"${disabled}>×</button>
         </div>
       </div>
       <p class="review-shadow-boundary"><b>研究属性</b>本地 Research Shadow · 价格路径观察，不代表真实成交或收益 · production_effect=none</p>
@@ -541,7 +758,7 @@ function reviewDetailHtml(detail, state) {
       ${evaluationHtml(evaluation)}
       <div class="review-evaluate-row">
         <label for="review-as-of-${escapeHtml(plan.id)}"><span>评估截至日</span><input id="review-as-of-${escapeHtml(plan.id)}" type="date" value="${escapeHtml(asOfValue)}" max="${escapeHtml(shanghaiDateText())}" data-review-as-of="${escapeHtml(plan.id)}" /></label>
-        <button type="button" class="mini-button primary" data-review-evaluate="${escapeHtml(plan.id)}">评估</button>
+        <button type="button" class="mini-button primary" data-review-evaluate="${escapeHtml(plan.id)}"${disabled}>评估</button>
       </div>
       ${historyHtml(plan, history)}
     </article>`;
@@ -672,23 +889,35 @@ function renderSnapshotOptions(state) {
   if (!select) return;
   const snapshots = state.adviceReviewSnapshots || [];
   const planned = new Set((state.adviceReviewDetails || []).map((item) => Number(item?.plan?.advice_id)));
+  const pinned = pinnedReviewDetail(state);
+  if (pinned) planned.add(Number(pinned.plan.advice_id));
   const previous = Number(select.value);
   select.innerHTML = snapshots.length
     ? snapshots.map((item) => snapshotOption(item, planned.has(Number(item.id)))).join("")
     : `<option value="">暂无可用建议快照</option>`;
+  const plan = editingPlan(state);
+  if (plan) {
+    if (!snapshots.some((item) => Number(item.id) === Number(plan.advice_id))) {
+      select.innerHTML += snapshotOption({ id: plan.advice_id, market_time: plan.snapshot_market_time }, true);
+    }
+    select.value = String(plan.advice_id);
+    select.disabled = true;
+    return;
+  }
   const available = snapshots.find((item) => !planned.has(Number(item.id)) && Number(item.id) === previous)
     || snapshots.find((item) => !planned.has(Number(item.id)));
   select.value = available ? String(available.id) : "";
   select.disabled = Boolean(state.adviceReviewEditingPlanId) || !available;
   const submit = $("reviewPlanSubmit");
-  if (submit && !state.adviceReviewEditingPlanId) submit.disabled = !available;
+  if (submit && !state.adviceReviewEditingPlanId) submit.disabled = !available || Boolean(pinned && state.adviceReviewPinnedReadOnly);
 }
 
 function refreshReviewSnapshotForm(state, { previousIdentity = reviewSnapshotFormIdentity(state), reset = false } = {}) {
-  renderSnapshotOptions(state);
+  syncAdviceReviewFormControls(state);
   if (state.adviceReviewEditingPlanId) return;
   // Read the current form at response time: typing during a request must survive.
   if (reset || previousIdentity !== reviewSnapshotFormIdentity(state)) {
+    state.adviceReviewFormEpoch = Number(state.adviceReviewFormEpoch || 0) + 1;
     applySelectedSnapshotDefaults(state, { preserveText: false });
   }
 }
@@ -732,20 +961,34 @@ function selectedSnapshot(state) {
 
 function editingPlan(state) {
   const planId = Number(state.adviceReviewEditingPlanId);
-  const detail = (state.adviceReviewDetails || []).find((item) => Number(item?.plan?.id) === planId);
+  const snapshot = state.adviceReviewEditingPlanSnapshot;
+  if (snapshot && Number(snapshot.id) === planId) return snapshot;
+  const detail = reviewDetail(state, planId);
   return detail?.plan || null;
 }
 
 function reviewDetail(state, planId) {
   const key = planKey(planId);
   if (!key) return null;
+  const pinned = pinnedReviewDetail(state);
+  if (planKey(pinned?.plan.id) === key) return pinnedReviewIsReadOnly(state, key) ? null : pinned;
   return (state.adviceReviewDetails || []).find((item) => planKey(item?.plan?.id) === key) || null;
 }
 
 function discardAdviceReviewPlanState(state, planId) {
   const key = planKey(planId);
   if (!key) return;
+  invalidatePlanLookup(state, key);
+  state.adviceReviewReadSeq = Number(state.adviceReviewReadSeq || 0) + 1;
+  if (planKey(state.adviceReviewPinnedDetail?.plan?.id) === key) {
+    state.adviceReviewPinnedDetail = null;
+    state.adviceReviewPinnedReadOnly = false;
+  }
   nextPlanSequence(state, "adviceReviewEvaluationSeqByPlan", planId);
+  if (state.adviceReviewPagePlanIds?.includes(Number(planId))) {
+    state.adviceReviewNextOffset = Math.max(0, Number(state.adviceReviewNextOffset || 0) - 1);
+    state.adviceReviewPagePlanIds = state.adviceReviewPagePlanIds.filter((id) => id !== Number(planId));
+  }
   state.adviceReviewDetails = (state.adviceReviewDetails || []).filter(
     (item) => planKey(item?.plan?.id) !== key
   );
@@ -757,6 +1000,7 @@ function discardAdviceReviewPlanState(state, planId) {
   }
   if (Number(state.adviceReviewEditingPlanId) === Number(planId)) {
     state.adviceReviewEditingPlanId = null;
+    state.adviceReviewEditingPlanSnapshot = null;
     setReviewFormMode(null);
   }
 }
@@ -764,7 +1008,18 @@ function discardAdviceReviewPlanState(state, planId) {
 function prepareReviewSymbolState(state, symbol) {
   const owner = normalizedSymbol(symbol);
   if (state.adviceReviewHistorySymbol === owner) return;
+  if (state.adviceReviewEditingPlanSnapshot && !sameSymbol(state.adviceReviewEditingPlanSnapshot.symbol, owner)) {
+    state.adviceReviewEditingPlanId = null;
+    state.adviceReviewEditingPlanSnapshot = null;
+    setReviewFormMode(null);
+  }
+  if (state.adviceReviewPinnedDetail && !sameSymbol(state.adviceReviewPinnedDetail.plan.symbol, owner)) {
+    state.adviceReviewPinnedDetail = null;
+    state.adviceReviewPinnedReadOnly = false;
+  }
   state.adviceReviewHistorySymbol = owner;
+  state.adviceReviewNextOffset = null;
+  state.adviceReviewPagePlanIds = null;
   state.adviceReviewHistories = {};
   state.adviceReviewAsOfByPlan = {};
   state.adviceReviewEvaluationSeqByPlan = {};

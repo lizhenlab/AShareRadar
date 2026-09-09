@@ -6,6 +6,7 @@ from threading import Lock
 from typing import TypeVar
 
 from app.api.errors import MarketScanHeavyReadBusy, run_sync_api_async
+from app.services.lifecycle_cleanup import await_cleanup
 
 
 T = TypeVar("T")
@@ -49,19 +50,17 @@ class MarketScanHeavyReadAdmission:
         with self._worker_guard:
             self._closing = True
         drain = asyncio.create_task(self._drain())
-        try:
-            await asyncio.shield(drain)
-        except asyncio.CancelledError:
-            await asyncio.shield(drain)
-            raise
+        await await_cleanup(drain)
 
     async def _drain(self) -> None:
-        while True:
-            with self._worker_guard:
-                workers = tuple(self._workers)
-            if not workers:
-                return
+        # Admission is closed, so this snapshot owns every remaining worker.
+        with self._worker_guard:
+            workers = tuple(self._workers)
+        if workers:
             await asyncio.gather(*(asyncio.shield(worker) for worker in workers), return_exceptions=True)
+            # Completed workers can still have their done callbacks queued.
+            for worker in workers:
+                self._finish_worker(worker)
 
     def _release(self) -> None:
         self._slot.release()

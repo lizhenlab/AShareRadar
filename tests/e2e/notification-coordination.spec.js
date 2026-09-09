@@ -6,16 +6,17 @@ test("IndexedDB fallback delivers a shared alert at most once across two pages",
   const pendingAlertRoutes = [];
   await context.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
-    if (url.pathname === "/api/alerts/events") {
+    if (url.pathname === "/api/alerts/notification-events") {
       pendingAlertRoutes.push(route);
       if (pendingAlertRoutes.length === 2) {
-        await Promise.all(pendingAlertRoutes.splice(0).map((pending) => fulfillJson(pending, [{
+        await Promise.all(pendingAlertRoutes.splice(0).map((pending) => fulfillJson(pending, {
+          stream_id: "a".repeat(32), baseline_id: 0, cursor_id: 2, reset: false, has_more: false, events: [{
           id: 2,
           created_at: "2026-07-19 10:01:00",
           event_type: "触发",
           stock_name: "并发测试",
           message: "只能投递一次",
-        }])));
+        }] })));
       }
       return;
     }
@@ -29,7 +30,7 @@ test("IndexedDB fallback delivers a shared alert at most once across two pages",
       "/static/js/notifications.js?notification-race-setup=1"
     );
     localStorage.clear();
-    localStorage.setItem(ALERT_NOTIFICATION_CURSOR_KEY, JSON.stringify({ createdAt: "", id: 1 }));
+    localStorage.setItem(ALERT_NOTIFICATION_CURSOR_KEY, JSON.stringify({ streamId: "a".repeat(32), id: 1 }));
     await new Promise((resolve, reject) => {
       const request = indexedDB.deleteDatabase(ALERT_NOTIFICATION_COORDINATION_DB_NAME);
       request.onsuccess = () => resolve();
@@ -53,11 +54,11 @@ test("IndexedDB fallback delivers a shared alert at most once across two pages",
   });
 
   const outcomes = await Promise.all([poll(page), poll(secondPage)]);
-  expect(outcomes.flatMap((outcome) => outcome.tags)).toEqual(["ashare-radar-alert-2"]);
+  expect(outcomes.flatMap((outcome) => outcome.tags)).toEqual([`ashare-radar-alert-${"a".repeat(32)}-2`]);
   expect(outcomes.every((outcome) => outcome.completed)).toBe(true);
   await expect.poll(() => pendingAlertRoutes.length).toBe(0);
   const cursor = await secondPage.evaluate(() => JSON.parse(
-    localStorage.getItem("ashare-radar.alert-notification-cursor.v1")
+    localStorage.getItem("ashare-radar.alert-notification-cursor.v2")
   ));
   expect(cursor.id).toBe(2);
 });

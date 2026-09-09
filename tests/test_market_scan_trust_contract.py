@@ -1024,7 +1024,8 @@ def _rows(latest: date, count: int = 80) -> list[Kline]:
     return [
         make_kline(
             date=day.isoformat(),
-            close=first_close + index * 0.03,
+            # Match the completed quote's 3% final-session return.
+            close=10.0 if index == count - 2 else first_close + index * 0.03,
             volume=1_000_000 + index * 10_000,
             source="测试前复权日K",
             as_of=latest.isoformat(),

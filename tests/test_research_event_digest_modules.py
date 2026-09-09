@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from app.models.analysis import AbnormalEventItem, AbnormalEventSummary, StockEventItem, StockEventSummary
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
-from app.services.research_events import DEFAULT_WATCH_EVENT, build_event_digest_report
+from app.services.research_events import build_event_digest_report
 from app.services.stock_insights import build_stock_insight_bundle
 from tests.factories import make_kline, make_quote
 
@@ -42,11 +42,11 @@ def test_event_digest_positive_label_requires_no_negative_events() -> None:
     assert len(report.positive_events) == 2
 
 
-def test_event_digest_uses_default_watch_text_when_no_event_changes_conclusion() -> None:
+def test_event_digest_keeps_watch_evidence_empty_when_no_events_exist() -> None:
     report = build_event_digest_report(_analysis(), _insights_with_events())  # type: ignore[arg-type]
 
     assert report.impact_label == "事件待确认"
-    assert report.watch_events == [DEFAULT_WATCH_EVENT]
+    assert report.watch_events == []
 
 
 def test_event_digest_missing_data_is_deduped_and_capped() -> None:

@@ -522,7 +522,7 @@ def test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision
     )
     original_cleanup = cache.cleanup_runtime_rows
 
-    def cleanup_with_late_writer() -> dict[str, int]:
+    def cleanup_with_late_writer(*, compact: bool = True) -> dict[str, int]:
         start.set()
         assert attempting.wait(timeout=PROCESS_START_TIMEOUT_SECONDS), (
             "alert writer did not reach SQLite; "
@@ -530,7 +530,7 @@ def test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision
         )
         time.sleep(0.1)
         assert finished.is_set() is False
-        return original_cleanup()
+        return original_cleanup(compact=compact)
 
     monkeypatch.setattr(cache, "cleanup_runtime_rows", cleanup_with_late_writer)
     app = FastAPI()
@@ -590,8 +590,8 @@ def test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotati
     release_cleanup = multiprocessing.Event()
     original_cleanup = cache.cleanup_runtime_rows
 
-    def blocked_cleanup() -> dict[str, int]:
-        removed = original_cleanup()
+    def blocked_cleanup(*, compact: bool = True) -> dict[str, int]:
+        removed = original_cleanup(compact=compact)
         cleanup_applied.set()
         if not release_cleanup.wait(timeout=20):
             raise RuntimeError("cleanup release timed out")

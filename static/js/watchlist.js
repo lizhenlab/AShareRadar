@@ -10,6 +10,7 @@ import {
 } from "./api.js";
 import { $, escapeHtml } from "./dom.js";
 import { changeClass, formatNumber } from "./format.js";
+import { applyWatchlistQueueView, watchlistMarketDate, watchlistReviewDate as normalizedDate, watchlistReviewMeta } from "./watchlist-queue-view.js";
 
 export const WATCHLIST_ENDPOINT = "/api/watchlist";
 
@@ -64,6 +65,7 @@ export async function loadWatchlist(state, options = {}) {
       const list = $("watchList");
       if (list) {
         list.innerHTML = `<div class="watch-row watch-row-message watch-row-error"><strong>自选股读取失败</strong><span>${escapeHtml(error.message)}</span></div>`;
+        applyWatchlistQueueView([], { sourceReady: false });
       }
     }
     throw error;
@@ -112,10 +114,11 @@ export function renderWatchlist(items, options = {}) {
   const list = $("watchList");
   if (!list) return;
   const rows = Array.isArray(items) ? items : [];
-  const today = normalizedDate(options.today) || localToday(options.now);
+  const today = normalizedDate(options.today) || watchlistMarketDate(options.now);
   list.innerHTML = rows.length
     ? rows.map((item, index) => renderWatchlistRow(item || {}, index, today)).join("")
     : `<div class="watch-row watch-row-message"><strong>暂无自选</strong><span>输入代码后加入研究队列。</span></div>`;
+  applyWatchlistQueueView(rows, { today, sourceReady: true });
 }
 
 function renderWatchlistRow(item, index, today) {
@@ -129,7 +132,7 @@ function renderWatchlistRow(item, index, today) {
   const unread = normalizedUnreadCount(item.unread_change_count);
   const groupName = String(item.group_name || "默认").trim() || "默认";
   const note = String(item.note || "").trim();
-  const review = reviewDateMeta(item.next_review_date, today);
+  const review = watchlistReviewMeta(item.next_review_date, today);
   const price = formatNumber(item.latest_price);
   const change = formatNumber(item.latest_change_pct);
   const changeText = change === "--" ? "--" : `${change}%`;
@@ -147,7 +150,6 @@ function renderWatchlistRow(item, index, today) {
             <span class="watch-badge watch-status status-${escapeHtml(status)}">${escapeHtml(RESEARCH_STATUS_LABELS[status])}</span>
             <span class="watch-badge watch-priority priority-${escapeHtml(priority)}">${escapeHtml(PRIORITY_LABELS[priority])}优先级</span>
             <span class="watch-badge watch-review ${escapeHtml(review.className)}">${escapeHtml(review.label)}</span>
-            ${unread ? `<span class="watch-badge watch-unread">${escapeHtml(unreadLabel(unread))}</span>` : ""}
           </span>
           <span class="watch-context">
             <span class="watch-group">分组 · ${escapeHtml(groupName)}</span>
@@ -157,6 +159,7 @@ function renderWatchlistRow(item, index, today) {
         <div class="watch-side">
           <span class="watch-quote"><strong>${escapeHtml(price)}</strong><span class="${changeClass(item.latest_change_pct)}">${escapeHtml(changeText)}</span></span>
           <span class="watch-row-actions">
+            ${unread ? `<button type="button" class="watch-action-button watch-unread" aria-label="查看 ${escapeHtml(name)} 的 ${escapeHtml(unreadLabel(unread))}" data-action="changes" data-symbol="${escapeHtml(symbol)}">查看 ${escapeHtml(unreadLabel(unread))}</button>` : ""}
             <button type="button" class="watch-action-button" title="编辑研究队列" aria-label="编辑 ${escapeHtml(name)}" aria-expanded="false" aria-controls="${editorId}" data-action="edit" data-symbol="${escapeHtml(symbol)}">编辑</button>
             <button type="button" class="watch-action-button watch-remove" title="移出自选" aria-label="移出自选" data-action="remove" data-symbol="${escapeHtml(symbol)}">移除</button>
           </span>
@@ -548,37 +551,4 @@ function normalizedUnreadCount(value) {
 
 function unreadLabel(count) {
   return `${count > 99 ? "99+" : count} 条新变化`;
-}
-
-function reviewDateMeta(value, today) {
-  const date = normalizedDate(value);
-  if (!date) return { className: "review-unset", label: "未设复核", value: "" };
-  const difference = dateDifference(date, today);
-  if (difference < 0) return { className: "review-overdue", label: `逾期复核 · ${date}`, value: date };
-  if (difference === 0) return { className: "review-due", label: `今日复核 · ${date}`, value: date };
-  return { className: "review-upcoming", label: `复核 · ${date}`, value: date };
-}
-
-function normalizedDate(value) {
-  const text = String(value || "").trim().slice(0, 10);
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
-  if (!match) return "";
-  const timestamp = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  const parsed = new Date(timestamp);
-  const canonical = `${parsed.getUTCFullYear().toString().padStart(4, "0")}-${String(parsed.getUTCMonth() + 1).padStart(2, "0")}-${String(parsed.getUTCDate()).padStart(2, "0")}`;
-  return canonical === text ? text : "";
-}
-
-function localToday(now) {
-  const date = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
-  return `${date.getFullYear().toString().padStart(4, "0")}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function dateDifference(left, right) {
-  return (dateTimestamp(left) - dateTimestamp(right)) / 86400000;
-}
-
-function dateTimestamp(value) {
-  const [year, month, day] = value.split("-").map(Number);
-  return Date.UTC(year, month - 1, day);
 }

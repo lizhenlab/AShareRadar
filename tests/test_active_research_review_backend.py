@@ -559,9 +559,8 @@ def test_due_review_batch_is_bounded_and_isolates_plan_failures(monkeypatch) -> 
     assert [item.plan_id for item in summary.items] == [1, 2]
 
 
-def test_weekend_due_review_uses_the_latest_mature_trading_session() -> None:
-    detail = AdviceReviewDetail(plan=_review_plan(horizon_days=1))
-    cache = _DueReviewCache([detail], expected_as_of_date="2026-07-17")
+def test_weekend_due_review_uses_the_latest_mature_trading_session(tmp_path: Path) -> None:
+    cache = _cache_with_one_day_review(tmp_path)
 
     due = asyncio.run(
         list_due_advice_reviews(
@@ -571,8 +570,9 @@ def test_weekend_due_review_uses_the_latest_mature_trading_session() -> None:
         )
     )
 
-    assert len(due) == 1
-    assert due[0].due_date == "2026-07-17"
+    assert due.total == 1
+    assert due.as_of == "2026-07-17 15:15:00"
+    assert due.items[0].due_date == "2026-07-17"
 
 
 def test_due_batch_does_not_count_insufficient_evidence_as_evaluated(monkeypatch) -> None:
@@ -654,24 +654,30 @@ def test_public_review_evaluation_rejects_stale_revision_before_market_io() -> N
     assert calls == []
 
 
-def test_due_review_list_exposes_due_date_and_overdue_trading_days() -> None:
-    detail = AdviceReviewDetail(
-        plan=_review_plan(plan_id=1, advice_id=11, symbol="600001.SH", horizon_days=1)
-    )
-    cache = _DueReviewCache([detail], expected_as_of_date="2026-07-21")
+def test_due_review_list_exposes_due_date_and_overdue_trading_days(tmp_path: Path) -> None:
+    cache = _cache_with_one_day_review(tmp_path)
 
     items = asyncio.run(
         list_due_advice_reviews(
             SimpleNamespace(cache=cache),
             as_of=datetime(2026, 7, 21, 16),
-            limit=10,
+            page_size=10,
         )
     )
 
-    assert len(items) == 1
-    assert items[0].plan.id == 1
-    assert items[0].due_date == "2026-07-17"
-    assert items[0].overdue_trading_days == 2
+    assert items.total == 1
+    assert items.items[0].plan.id == 1
+    assert items.items[0].due_date == "2026-07-17"
+    assert items.items[0].overdue_trading_days == 2
+
+
+def _cache_with_one_day_review(tmp_path: Path) -> SQLiteCache:
+    cache = SQLiteCache(tmp_path / "due-review.sqlite3")
+    advice = cache.save_advice_snapshot(
+        _valid_analysis_on_date("600001", "2026-07-16"), snapshot_market_time="2026-07-16 15:15:00",
+    )
+    cache.create_advice_review_plan(_plan_input(advice.id, "600001.SH").model_copy(update={"horizon_days": 1}))
+    return cache
 
 
 def test_due_review_repository_prioritizes_old_unfinished_plan_over_many_recent_not_due(

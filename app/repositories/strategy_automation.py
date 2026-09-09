@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import sqlite3
 import threading
@@ -13,6 +14,7 @@ from app.db.market_scan_action_source import require_market_scan_action_source
 from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE
 from app.models.strategy_automation import (
     StrategyAlertCondition,
+    StrategyAlertType,
     StrategyAlertEvent,
     StrategyAlertEventPage,
     StrategySchedule,
@@ -20,12 +22,21 @@ from app.models.strategy_automation import (
     StrategySchedulePage,
     StrategySimulationPlan,
 )
+from app.models.strategy_execution import StrategyExecutionContext
 from app.repositories.base import SQLiteRepository
 from app.utils.errors import NotFoundError
 
 
 class StrategyAutomationIntegrityError(RuntimeError):
     """Stored automation evidence no longer matches its execution seal."""
+
+
+@dataclass(frozen=True)
+class StrategyAlertWrite:
+    event_type: StrategyAlertType
+    symbol: str | None
+    message: str
+    trigger: dict[str, object]
 
 
 class StrategyAutomationRepository(SQLiteRepository):
@@ -41,6 +52,11 @@ class StrategyAutomationRepository(SQLiteRepository):
         timestamp: str,
     ) -> StrategySchedule:
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_schedule_strategy(
+                conn, payload.strategy_id, revision, fingerprint,
+                archived_message="已归档策略不能创建定时任务",
+            )
             cursor = conn.execute(
                 """
                 INSERT INTO strategy_schedule (
@@ -68,7 +84,7 @@ class StrategyAutomationRepository(SQLiteRepository):
             )
             schedule_id = cursor.lastrowid
             row = _schedule_row(conn, int(schedule_id or 0))
-        return _schedule_from_row(row)
+            return _schedule_from_row(row)
 
     def schedule(self, schedule_id: int) -> StrategySchedule:
         with self._lock, self._read_snapshot() as conn:
@@ -127,6 +143,14 @@ class StrategyAutomationRepository(SQLiteRepository):
 
     def set_enabled(self, schedule_id: int, *, enabled: bool, timestamp: str) -> StrategySchedule:
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = _schedule_row(conn, schedule_id)
+            if enabled:
+                _require_schedule_strategy(
+                    conn, int(current["strategy_id"]), int(current["strategy_revision"]),
+                    str(current["strategy_fingerprint"]),
+                    archived_message="已归档策略的定时任务不能重新启用",
+                )
             cursor = conn.execute(
                 "UPDATE strategy_schedule SET enabled = ?, updated_at = ? WHERE id = ?",
                 (int(enabled), timestamp, schedule_id),
@@ -134,7 +158,7 @@ class StrategyAutomationRepository(SQLiteRepository):
             if cursor.rowcount != 1:
                 raise NotFoundError(f"策略定时任务不存在：{schedule_id}")
             row = _schedule_row(conn, schedule_id)
-        return _schedule_from_row(row)
+            return _schedule_from_row(row)
 
     def latest_published_run_id(self, mode: str) -> int | None:
         with self._lock, self._read_snapshot() as conn:
@@ -157,6 +181,19 @@ class StrategyAutomationRepository(SQLiteRepository):
     def claim_run(self, schedule_id: int, run_id: int, *, timestamp: str) -> bool:
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            schedule = _schedule_row(conn, schedule_id)
+            if not bool(schedule["enabled"]):
+                return False
+            strategy = conn.execute(
+                "SELECT archived FROM strategy_spec WHERE id = ?", (schedule["strategy_id"],),
+            ).fetchone()
+            if strategy is not None and bool(strategy["archived"]):
+                return False
+            _require_schedule_strategy(
+                conn, int(schedule["strategy_id"]), int(schedule["strategy_revision"]),
+                str(schedule["strategy_fingerprint"]),
+                archived_message="已归档策略不能取得新的定时执行权",
+            )
             existing = conn.execute(
                 "SELECT status FROM strategy_schedule_run WHERE schedule_id = ? AND market_scan_run_id = ?",
                 (schedule_id, run_id),
@@ -184,79 +221,55 @@ class StrategyAutomationRepository(SQLiteRepository):
                 )
         return True
 
-    def finish_run(
+    def fail_run(
         self,
         schedule_id: int,
         run_id: int,
         *,
-        execution_id: int | None,
-        error: str | None,
+        error: str,
         timestamp: str,
     ) -> None:
-        status = "completed" if execution_id is not None else "failed"
         with self._lock, self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 UPDATE strategy_schedule_run
-                SET status = ?, execution_id = ?, error = ?, finished_at = ?
-                WHERE schedule_id = ? AND market_scan_run_id = ?
+                SET status = 'failed', execution_id = NULL, error = ?, finished_at = ?
+                WHERE schedule_id = ? AND market_scan_run_id = ? AND status = 'running'
                 """,
-                (status, execution_id, error, timestamp, schedule_id, run_id),
+                (error, timestamp, schedule_id, run_id),
             )
-            if execution_id is not None:
-                conn.execute(
-                    """
-                    UPDATE strategy_schedule
-                    SET last_execution_id = ?, last_market_scan_run_id = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (execution_id, run_id, timestamp, schedule_id),
-                )
 
-    def add_event(
+    def complete_run(
         self,
         schedule: StrategySchedule,
+        run_id: int,
+        context: StrategyExecutionContext,
+        events: list[StrategyAlertWrite],
         *,
-        execution_id: int,
-        execution_fingerprint: str,
-        data_as_of: str,
-        event_type: str,
-        symbol: str | None,
-        message: str,
-        trigger: dict[str, object],
         timestamp: str,
-    ) -> StrategyAlertEvent:
-        rendered = json.dumps(trigger, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    ) -> None:
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for event in events:
+                _insert_event(conn, schedule, context, event, timestamp)
             cursor = conn.execute(
                 """
-                INSERT INTO strategy_alert_event (
-                    schedule_id, strategy_id, strategy_revision, strategy_fingerprint,
-                    execution_id, execution_fingerprint, data_as_of, event_type,
-                    symbol, message, trigger_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                UPDATE strategy_schedule_run
+                SET status = 'completed', execution_id = ?, error = NULL, finished_at = ?
+                WHERE schedule_id = ? AND market_scan_run_id = ? AND status = 'running'
                 """,
-                (
-                    schedule.schedule_id,
-                    schedule.strategy_id,
-                    schedule.strategy_version,
-                    schedule.strategy_fingerprint,
-                    execution_id,
-                    execution_fingerprint,
-                    data_as_of,
-                    event_type,
-                    symbol,
-                    message,
-                    rendered,
-                    timestamp,
-                ),
+                (context.execution_id, timestamp, schedule.schedule_id, run_id),
             )
-            row = conn.execute(
-                "SELECT * FROM strategy_alert_event WHERE id = ?",
-                (int(cursor.lastrowid or 0),),
-            ).fetchone()
-        return _event_from_row(row)
+            if cursor.rowcount != 1:
+                raise StrategyAutomationIntegrityError("策略任务已结束或未取得执行权")
+            conn.execute(
+                """
+                UPDATE strategy_schedule
+                SET last_execution_id = ?, last_market_scan_run_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (context.execution_id, run_id, timestamp, schedule.schedule_id),
+            )
 
     def events(
         self,
@@ -341,6 +354,58 @@ class StrategyAutomationRepository(SQLiteRepository):
         with self._lock, self._read_snapshot() as conn:
             row = _simulation_plan_row(conn, execution_id)
         return _simulation_plan_from_row(row) if row is not None else None
+
+
+def _insert_event(
+    conn: sqlite3.Connection,
+    schedule: StrategySchedule,
+    context: StrategyExecutionContext,
+    event: StrategyAlertWrite,
+    timestamp: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO strategy_alert_event (
+            schedule_id, strategy_id, strategy_revision, strategy_fingerprint,
+            execution_id, execution_fingerprint, data_as_of, event_type,
+            symbol, message, trigger_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            schedule.schedule_id, schedule.strategy_id, schedule.strategy_version,
+            schedule.strategy_fingerprint, context.execution_id,
+            context.execution_fingerprint, context.data_as_of, event.event_type,
+            event.symbol, event.message, canonical_json_text(event.trigger), timestamp,
+        ),
+    )
+
+
+def _require_schedule_strategy(
+    conn: sqlite3.Connection,
+    strategy_id: int,
+    revision: int,
+    fingerprint: str,
+    *,
+    archived_message: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT s.archived, v.fingerprint
+        FROM strategy_spec AS s
+        LEFT JOIN strategy_spec_version AS v
+          ON v.strategy_id = s.id AND v.revision = ?
+        WHERE s.id = ?
+        """,
+        (revision, strategy_id),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError(f"策略不存在：{strategy_id}")
+    if row["fingerprint"] is None:
+        raise NotFoundError(f"策略版本不存在：{strategy_id}@{revision}")
+    if bool(row["archived"]):
+        raise ValueError(archived_message)
+    if str(row["fingerprint"]) != fingerprint:
+        raise StrategyAutomationIntegrityError("策略定时任务来源指纹与固定版本不一致")
 
 
 def _schedule_row(conn: sqlite3.Connection, schedule_id: int) -> sqlite3.Row:

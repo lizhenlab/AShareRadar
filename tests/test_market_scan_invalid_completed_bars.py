@@ -18,7 +18,7 @@ from app.services.market_scan_scoring import (
 from app.services.market_scan_skip_contract import MARKET_SCAN_SKIP_EVIDENCE_KEY
 from app.services.market_scan_validation import raise_batch_outcome_error
 from tests.test_market_scan_failure_isolation import _Hub, _evaluator, _scan_one
-from tests.test_market_scan_input_admission import _rule_contract, _score
+from tests.test_market_scan_input_admission import _assert_current_score_contract_and_frozen_dimension_v4, _rule_contract, _score
 from tests.test_market_scan_scoring import AS_OF, DATA_DATE, _quote, _rows
 from tests.test_market_scan_skip_contract import _running_repository
 
@@ -132,10 +132,10 @@ def test_invalid_completed_bar_policy_changes_run_admission_without_changing_sco
     old["input_admission"]["contract_version"] = "market-scan-input-admission-v2"
     old["input_admission"].pop("invalid_completed_daily_bars", None)
 
-    assert market_scan_input_admission_spec()["contract_version"] == "market-scan-input-admission-v3"
+    assert market_scan_input_admission_spec()["contract_version"] == "market-scan-input-admission-v5"
     assert stable_score_spec_hash(current) != stable_score_spec_hash(old)
     assert stable_score_spec_hash(current["score_spec"]) == stable_score_spec_hash(old["score_spec"])
-    assert stable_score_spec_hash(current["score_spec"]) == "62176a5cffa6d248da3841617fda2f7aad40c9042d8a77c10955682d53e1c486"
+    _assert_current_score_contract_and_frozen_dimension_v4(current["score_spec"])
     with sqlite3.connect(":memory:") as conn:
         with pytest.raises(ValueError, match="准入"):
             register_market_scan_rule_contract(

@@ -216,6 +216,7 @@ def test_adaptive_concurrency_changes_later_batch_inflight_limits(tmp_path: Path
                     SCAN_DATA_DATE,
                     80,
                     last_close=self.quotes_by_symbol[row.symbol].price,
+                    previous_close=self.quotes_by_symbol[row.symbol].prev_close,
                 )
                 for row in self.rows
             }

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -17,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import JsonValue
 
 from app.db.paper_trading_schema import paper_run_output_digest
+from app.db.alert_stream import rotate_alert_stream_state
 from app.models.local_data import (
     AuditTimestampMetadata,
     CORE_USER_DATA_TABLES,
@@ -442,6 +444,8 @@ def import_user_data(
                 _apply_prepared_bundle(conn, prepared, table_names, mode)
                 _foreign_key_check(conn)
                 _validate_imported_relationships(conn, prepared)
+                if mode == "replace":
+                    rotate_alert_stream_state(conn)
                 conn.commit()
         except BaseException:
             conn.rollback()
@@ -1998,12 +2002,17 @@ def _sum_previews(previews) -> LocalDataTableImportPreview:
     )
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+@contextmanager
+def _connect(path: Path) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
-    conn.row_factory = sqlite3.Row
-    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA foreign_keys = ON")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _require_database(path: Path) -> Path:

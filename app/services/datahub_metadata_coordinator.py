@@ -11,6 +11,7 @@ from app.models.market import (
     StockInfo,
 )
 from app.services.datahub_metadata_mapping import _prepare_concept_rows, _prepare_plate_rows
+from app.services.datahub_cache_coverage import ShortResponseCoverage, provider_cache_chain
 from app.services.datahub_metadata_provider import (
     _metadata_error_detail,
     _no_provider_message,
@@ -73,6 +74,7 @@ class MetadataCoordinator:
         self.providers = providers
         self.runtime = runtime
         self.priority = priority
+        self._plate_coverage = ShortResponseCoverage()
         self.stock_pool_resolver = StockPoolResolver(
             settings=settings,
             cache=cache,
@@ -125,15 +127,11 @@ class MetadataCoordinator:
     async def plate_rank_result(self, limit: int = 20, refresh: bool = False) -> PlateRankResult:
         ensure_positive_limit(limit)
         if not refresh:
-            cached = await run_cache_io(
-                self.cache.get_plate_rank,
-                self.settings.plate_rank_cache_seconds,
-                limit=limit,
-            )
-            cached = _without_static_local_metadata(cached)
+            cached = await self._covered_plate_cache(limit)
             if cached:
                 return PlateRankResult(rows=cached)
 
+        chain = provider_cache_chain(self.priority("plate"), self.providers)
         errors: list[str] = []
         fetched = await self._metadata_provider_result(
             kind="plate",
@@ -146,6 +144,9 @@ class MetadataCoordinator:
             request_key=("plate_rank", limit),
         )
         if fetched is not None:
+            self._plate_coverage.remember(
+                "plate_rank", fetched, limit, chain, ttl_seconds=self.settings.plate_rank_cache_seconds,
+            )
             return PlateRankResult(rows=fetched)
 
         fallback = await run_cache_io(
@@ -165,6 +166,16 @@ class MetadataCoordinator:
                 used_fallback_cache=True,
             )
         raise RuntimeError("所有板块数据源均不可用：" + "；".join(errors))
+
+    async def _covered_plate_cache(self, limit: int) -> list[PlateItem]:
+        cached = await run_cache_io(
+            self.cache.get_plate_rank,
+            self.settings.plate_rank_cache_seconds,
+            limit=limit,
+        )
+        cached = _without_static_local_metadata(cached)
+        chain = provider_cache_chain(self.priority("plate"), self.providers)
+        return cached if self._plate_coverage.covers("plate_rank", cached, limit, chain) else []
 
     async def stock_concepts(
         self,

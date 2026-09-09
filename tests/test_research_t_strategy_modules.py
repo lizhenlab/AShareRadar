@@ -109,7 +109,7 @@ def test_unavailable_t_strategy_inputs_never_generate_actions_or_price_zones() -
 def _analysis(data_quality_score: int):
     return SimpleNamespace(
         quote=SimpleNamespace(code="600519", market="SH", timestamp="2026-05-13 10:00:00"),
-        data_quality=SimpleNamespace(score=data_quality_score),
+        data_quality=SimpleNamespace(score=data_quality_score, anomalies=[]),
     )
 
 

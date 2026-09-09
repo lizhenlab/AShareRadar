@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -30,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import get_settings  # noqa: E402
+from app.models.market import Kline  # noqa: E402
 from app.repositories.market_data import MarketDataRepository  # noqa: E402
 from app.services.cache import SQLiteCache  # noqa: E402
 
@@ -147,7 +149,7 @@ def _legacy_read(
     symbols: Sequence[str],
     *,
     limit: int,
-) -> tuple[int, tuple[tuple[str, str | None, str | None], ...]]:
+) -> dict[str, list[Kline]]:
     rows_by_symbol = {
         symbol: repository.get_klines(
             symbol,
@@ -156,7 +158,7 @@ def _legacy_read(
         )
         for symbol in symbols
     }
-    return _cache_signature(rows_by_symbol)
+    return rows_by_symbol
 
 
 def _prefetched_read(
@@ -165,7 +167,7 @@ def _prefetched_read(
     *,
     limit: int,
     batch_size: int,
-) -> tuple[int, tuple[tuple[str, str | None, str | None], ...]]:
+) -> dict[str, list[Kline]]:
     rows_by_symbol = {}
     for offset in range(0, len(symbols), batch_size):
         rows_by_symbol.update(
@@ -175,36 +177,36 @@ def _prefetched_read(
                 PRESERVATION_MAX_AGE_SECONDS,
             )
         )
-    return _cache_signature(rows_by_symbol)
+    return rows_by_symbol
 
 
 def _cache_signature(
-    rows_by_symbol: dict[str, list[Any]],
-) -> tuple[int, tuple[tuple[str, str | None, str | None], ...]]:
+    rows_by_symbol: dict[str, list[Kline]],
+) -> tuple[int, str]:
     row_count = sum(len(rows) for rows in rows_by_symbol.values())
-    boundaries = tuple(
-        (
-            symbol,
-            rows[0].date if rows else None,
-            rows[-1].date if rows else None,
-        )
-        for symbol, rows in sorted(rows_by_symbol.items())
-    )
-    return row_count, boundaries
+    digest = hashlib.sha256()
+    for symbol, rows in sorted(rows_by_symbol.items()):
+        digest.update(json.dumps([symbol, len(rows)], ensure_ascii=False).encode("utf-8"))
+        for row in rows:
+            payload = json.dumps(row.model_dump(mode="json"), sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            digest.update(payload.encode("utf-8"))
+            digest.update(b"\n")
+    return row_count, digest.hexdigest()
 
 
 def _measure(
-    operation: Callable[[], tuple[int, tuple[tuple[str, str | None, str | None], ...]]],
+    operation: Callable[[], dict[str, list[Kline]]],
     iterations: int,
-) -> tuple[list[float], tuple[int, tuple[tuple[str, str | None, str | None], ...]]]:
+) -> tuple[list[float], tuple[int, str]]:
     samples: list[float] = []
-    signature = operation()
+    signature = _cache_signature(operation())
     for _index in range(iterations):
         started = perf_counter()
         current = operation()
         samples.append(perf_counter() - started)
-        if current != signature:
+        if _cache_signature(current) != signature:
             raise RuntimeError("基准期间缓存读取结果不稳定")
+        del current
     return samples, signature
 
 

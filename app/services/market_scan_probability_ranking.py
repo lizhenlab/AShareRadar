@@ -36,6 +36,12 @@ from app.services.market_scan_joint_execution_source import (
     VerifiedJointExecutionSourceCorpus,
 )
 from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION
+from app.services.market_scan_probability_ranking_inference import (
+    RANKING_INFERENCE_REGISTERED_AT,
+    RANKING_SHADOW_CONTRACT_VERSION,
+    current_ranking_shadow_analysis,
+    ranking_inference_contract,
+)
 
 
 PROBABILITY_RANKING_SCORE_RULE_VERSION = "full-market-score-v6"
@@ -50,8 +56,11 @@ PROBABILITY_RANKING_TOP_N = 100
 PROBABILITY_RANKING_MINIMUM_SHADOW_SESSIONS = 60
 PROBABILITY_RANKING_DRIFT_WINDOW_SESSIONS = 30
 PROBABILITY_RANKING_BOOTSTRAP_SAMPLES = 1_000
-PROBABILITY_RANKING_SHADOW_SCHEMA_VERSION = (
+PROBABILITY_RANKING_LEGACY_SHADOW_SCHEMA_VERSION = (
     "market-scan-probability-ranking-shadow-artifact-v1"
+)
+PROBABILITY_RANKING_SHADOW_SCHEMA_VERSION = (
+    "market-scan-probability-ranking-shadow-artifact-v2"
 )
 PROBABILITY_RANKING_MANUAL_CONTROL_SCHEMA_VERSION = (
     "market-scan-probability-ranking-manual-control-artifact-v1"
@@ -132,6 +141,17 @@ class VerifiedProbabilityRankingManualControl:
             raise TypeError("verified ranking control payload is invalid")
         return cast(dict[str, object], value)
 
+    @property
+    def promotion_eligible(self) -> bool:
+        return (
+            self.action == "promote"
+            and ranking_inference_contract().get("promotion_eligible") is True
+            and self.payload.get("contract_version")
+            == "probability-ranking-explicit-human-control-v2"
+            and self.payload.get("inference_contract_digest")
+            == _digest(ranking_inference_contract())
+        )
+
 
 class VerifiedProbabilityRankingPublication(Sequence[Mapping[str, object]]):
     """Opaque immutable v6 publication for one new official base run."""
@@ -140,6 +160,7 @@ class VerifiedProbabilityRankingPublication(Sequence[Mapping[str, object]]):
         "_encoded_payload",
         "artifact_digest",
         "base_snapshot_digest",
+        "current_write_eligible",
         "generated_at",
         "promotion_digest",
         "run_id",
@@ -156,6 +177,7 @@ class VerifiedProbabilityRankingPublication(Sequence[Mapping[str, object]]):
         promotion_digest: str,
         run_id: int,
         score_spec_hash: str,
+        current_write_eligible: bool = False,
         _seal: object | None = None,
     ) -> None:
         if _seal is not _PUBLICATION_SEAL:
@@ -163,6 +185,7 @@ class VerifiedProbabilityRankingPublication(Sequence[Mapping[str, object]]):
         self._encoded_payload = encoded_payload
         self.artifact_digest = artifact_digest
         self.base_snapshot_digest = base_snapshot_digest
+        self.current_write_eligible = current_write_eligible
         self.generated_at = generated_at
         self.promotion_digest = promotion_digest
         self.run_id = run_id
@@ -383,18 +406,32 @@ def build_probability_ranking_shadow_artifact(
     *,
     generated_at: str,
 ) -> dict[str, object]:
-    """Build the compact preregistered v5-versus-v6 OOS comparison."""
+    """Build the current diagnostic-only v5-versus-v6 OOS comparison."""
 
+    return _build_ranking_shadow_artifact(
+        oos_corpus, sources, study, generated_at=generated_at, legacy=False,
+    )
+
+
+def _build_ranking_shadow_artifact(
+    oos_corpus: VerifiedJointExecutionProbabilityCorpusV3,
+    sources: Sequence[VerifiedJointExecutionSourceCorpus],
+    study: VerifiedJointExecutionProbabilityStudy,
+    *, generated_at: str, legacy: bool,
+) -> dict[str, object]:
     _require_shadow_tokens(oos_corpus, sources, study)
     generated = _timestamp(generated_at, "shadow.generated_at")
     evidence = study.payload
     if generated < _timestamp(str(evidence["generated_at"]), "study.generated_at"):
         raise ProbabilityRankingError("ranking shadow predates selected probability study")
     decisions = _shadow_decisions(oos_corpus, sources, study)
-    analysis = _shadow_analysis(decisions)
+    if not legacy and generated < _timestamp(RANKING_INFERENCE_REGISTERED_AT, "inference.registered_at"):
+        raise ProbabilityRankingError("ranking shadow predates current inference contract")
+    analysis = _shadow_analysis(decisions, legacy=legacy)
     source_run_ids = sorted({item.run_id for item in decisions})
     payload: dict[str, object] = {
-        "contract_version": "probability-ranking-preregistered-shadow-v1",
+        "contract_version": ("probability-ranking-preregistered-shadow-v1"
+                             if legacy else RANKING_SHADOW_CONTRACT_VERSION),
         "generated_at": generated.isoformat(),
         "score_rule_version": PROBABILITY_RANKING_SCORE_RULE_VERSION,
         "score_spec_hash": probability_ranking_score_spec_hash(),
@@ -417,10 +454,12 @@ def build_probability_ranking_shadow_artifact(
         "decision_count": len(decisions),
         **analysis,
         "automatic_promotion": False,
-        "production_effect": "none_until_manual_promotion",
+        "production_effect": ("none_until_manual_promotion" if legacy
+                              else "audit_only_inference_unavailable"),
     }
     return _seal_envelope(
-        PROBABILITY_RANKING_SHADOW_SCHEMA_VERSION,
+        (PROBABILITY_RANKING_LEGACY_SHADOW_SCHEMA_VERSION
+         if legacy else PROBABILITY_RANKING_SHADOW_SCHEMA_VERSION),
         payload,
         generated_at=generated.isoformat(),
     )
@@ -433,19 +472,20 @@ def verify_probability_ranking_shadow_artifact(
     sources: Sequence[VerifiedJointExecutionSourceCorpus],
     study: VerifiedJointExecutionProbabilityStudy,
 ) -> VerifiedProbabilityRankingShadowEvaluation:
+    legacy = artifact.get("schema_version") == PROBABILITY_RANKING_LEGACY_SHADOW_SCHEMA_VERSION
     payload, digest = _verify_envelope(
-        artifact,
-        schema_version=PROBABILITY_RANKING_SHADOW_SCHEMA_VERSION,
+        artifact, schema_version=(PROBABILITY_RANKING_LEGACY_SHADOW_SCHEMA_VERSION
+                                 if legacy else PROBABILITY_RANKING_SHADOW_SCHEMA_VERSION),
     )
-    rebuilt = build_probability_ranking_shadow_artifact(
+    rebuilt = _build_ranking_shadow_artifact(
         oos_corpus,
         sources,
         study,
-        generated_at=str(artifact["generated_at"]),
+        generated_at=str(artifact["generated_at"]), legacy=legacy,
     )
     if rebuilt != dict(artifact):
         raise ProbabilityRankingError("v6 ranking shadow does not replay")
-    qualified = payload.get("qualified") is True
+    qualified = not legacy and payload.get("qualified") is True
     return VerifiedProbabilityRankingShadowEvaluation(
         canonical_json_bytes(payload).decode("utf-8"),
         integrity_digest=digest,
@@ -535,6 +575,8 @@ def _validate_manual_control_schema(
         if action == "promote"
         else common | {"promotion_digest", "publication_artifact_digest"}
     )
+    if action == "promote" and payload.get("contract_version") == "probability-ranking-explicit-human-control-v2":
+        expected.add("inference_contract_digest")
     if set(payload) != expected:
         raise ProbabilityRankingError("manual ranking control exact schema mismatch")
 
@@ -545,7 +587,8 @@ def _validate_manual_control_common(
 ) -> tuple[int, datetime]:
     if (
         payload.get("contract_version")
-        != "probability-ranking-explicit-human-control-v1"
+        not in {"probability-ranking-explicit-human-control-v1",
+                "probability-ranking-explicit-human-control-v2"}
         or payload.get("automatic") is not False
         or payload.get("rollback_acknowledged") is not True
     ):
@@ -565,8 +608,8 @@ def _validate_manual_promotion(
     effective: int,
     generated: datetime,
 ) -> None:
-    if shadow is None or not shadow.qualified:
-        raise ProbabilityRankingError("manual promotion requires a qualified shadow token")
+    _require_promotion_inference(payload, shadow, generated)
+    assert shadow is not None  # checked by inference authority boundary
     shadow_payload = shadow.payload
     if (
         payload.get("shadow_artifact_digest") != shadow.integrity_digest
@@ -577,6 +620,26 @@ def _validate_manual_promotion(
         or effective < max(cast(list[int], shadow_payload["source_run_ids"]))
     ):
         raise ProbabilityRankingError("manual promotion does not bind qualified shadow evidence")
+
+
+def _require_promotion_inference(
+    payload: Mapping[str, object],
+    shadow: VerifiedProbabilityRankingShadowEvaluation | None,
+    generated: datetime,
+) -> None:
+    if shadow is None:
+        raise ProbabilityRankingError("manual promotion requires a qualified shadow token")
+    if payload.get("contract_version") == "probability-ranking-explicit-human-control-v1":
+        historical = shadow.payload
+        if (historical.get("contract_version") != "probability-ranking-preregistered-shadow-v1"
+                or historical.get("qualified") is not True
+                or generated >= _timestamp(RANKING_INFERENCE_REGISTERED_AT, "inference.registered_at")):
+            raise ProbabilityRankingError("legacy promotion requires qualified historical shadow; audit only")
+    elif (not shadow.qualified
+          or shadow.payload.get("contract_version") != RANKING_SHADOW_CONTRACT_VERSION
+          or shadow.payload.get("inference_contract") != ranking_inference_contract()
+          or payload.get("inference_contract_digest") != _digest(ranking_inference_contract())):
+        raise ProbabilityRankingError("manual promotion requires qualified current inference evidence")
 
 
 def _validate_manual_rollback(payload: Mapping[str, object]) -> None:
@@ -595,11 +658,30 @@ def build_probability_ranking_publication_artifact(
     *,
     generated_at: str,
 ) -> dict[str, object]:
-    """Build v6 rows without mutating their v5 source publication."""
+    """Build new v6 rows only from current inference-qualified promotion."""
 
+    _require_publication_tokens(source, predictions, study, deployment, promotion)
+    if not promotion.promotion_eligible:
+        raise ProbabilityRankingError("new v6 publication requires current inference-qualified promotion")
+    return _rebuild_ranking_publication_artifact(
+        source, predictions, study, deployment, promotion, generated_at=generated_at,
+    )
+
+
+def _rebuild_ranking_publication_artifact(
+    source: VerifiedJointExecutionSourceCorpus,
+    predictions: VerifiedJointExecutionCurrentPredictionCorpus,
+    study: VerifiedJointExecutionProbabilityStudy,
+    deployment: VerifiedJointExecutionDeploymentEstimator,
+    promotion: VerifiedProbabilityRankingManualControl,
+    *, generated_at: str,
+) -> dict[str, object]:
     _require_publication_tokens(source, predictions, study, deployment, promotion)
     generated = _timestamp(generated_at, "ranking_publication.generated_at")
     _validate_publication_timing(source, predictions, promotion, generated)
+    if (not promotion.promotion_eligible
+            and generated >= _timestamp(RANKING_INFERENCE_REGISTERED_AT, "inference.registered_at")):
+        raise ProbabilityRankingError("legacy v6 publication is historical audit only")
     candidates = _publication_candidates(source, predictions)
     records = _rank_publication_candidates(candidates, source.run_id)
     payload = _ranking_publication_payload(
@@ -763,7 +845,7 @@ def verify_probability_ranking_publication_artifact(
         artifact,
         schema_version=PROBABILITY_RANKING_PUBLICATION_SCHEMA_VERSION,
     )
-    rebuilt = build_probability_ranking_publication_artifact(
+    rebuilt = _rebuild_ranking_publication_artifact(
         source,
         predictions,
         study,
@@ -781,6 +863,7 @@ def verify_probability_ranking_publication_artifact(
         promotion_digest=str(payload["promotion_digest"]),
         run_id=int(cast(int, payload["run_id"])),
         score_spec_hash=str(payload["score_spec_hash"]),
+        current_write_eligible=promotion.promotion_eligible,
         _seal=_PUBLICATION_SEAL,
     )
 
@@ -917,7 +1000,9 @@ def _shadow_outcome(report: Mapping[str, object]) -> tuple[float, bool]:
     return net_excess, unresolved
 
 
-def _shadow_analysis(decisions: Sequence[_ShadowDecision]) -> dict[str, object]:
+def _shadow_analysis(
+    decisions: Sequence[_ShadowDecision], *, legacy: bool = False,
+) -> dict[str, object]:
     grouped: dict[str, list[_ShadowDecision]] = defaultdict(list)
     for item in decisions:
         grouped[item.session].append(item)
@@ -925,9 +1010,9 @@ def _shadow_analysis(decisions: Sequence[_ShadowDecision]) -> dict[str, object]:
     state = _ShadowAnalysisState()
     for session in sessions:
         state.add(_shadow_session_evaluation(session, grouped[session]))
-    statistics = _shadow_statistics(state, sessions, decisions)
+    statistics = _shadow_statistics(state, sessions, decisions, legacy=legacy)
     gates = _shadow_gates(state, statistics, sessions)
-    return {
+    analysis = {
         "qualified": all(gates.values()),
         "gates": gates,
         "failed_gates": sorted(name for name, passed in gates.items() if not passed),
@@ -935,6 +1020,7 @@ def _shadow_analysis(decisions: Sequence[_ShadowDecision]) -> dict[str, object]:
         "session_summaries": state.summaries,
         "session_summary_digest": _digest(state.summaries),
     }
+    return analysis if legacy else current_ranking_shadow_analysis(analysis)
 
 
 def _shadow_session_evaluation(
@@ -986,6 +1072,7 @@ def _shadow_statistics(
     state: _ShadowAnalysisState,
     sessions: Sequence[str],
     decisions: Sequence[_ShadowDecision],
+    *, legacy: bool = False,
 ) -> _ShadowStatistics:
     deltas = [
         v6 - v5 for v5, v6 in zip(state.v5_returns, state.v6_returns, strict=True)
@@ -998,12 +1085,13 @@ def _shadow_statistics(
     return _ShadowStatistics(
         deltas=deltas,
         delta_ci=delta_ci,
-        pbo=_probability_of_backtest_overfitting(state.v5_returns, state.v6_returns),
-        dsr=_deflated_sharpe_probability(deltas),
+        pbo=(_legacy_interleaved_pair_failure_rate(state.v5_returns, state.v6_returns)
+             if legacy else None),
+        dsr=_iid_zero_benchmark_probabilistic_sharpe(deltas),
         first=deltas[:PROBABILITY_RANKING_DRIFT_WINDOW_SESSIONS],
         last=deltas[-PROBABILITY_RANKING_DRIFT_WINDOW_SESSIONS:],
-        v5_drawdown=_maximum_drawdown(state.v5_returns),
-        v6_drawdown=_maximum_drawdown(state.v6_returns),
+        v5_drawdown=_synthetic_horizon_excess_drawdown(state.v5_returns),
+        v6_drawdown=_synthetic_horizon_excess_drawdown(state.v6_returns),
         average_v5_turnover=mean(state.v5_turnover) if state.v5_turnover else 1.0,
         average_v6_turnover=mean(state.v6_turnover) if state.v6_turnover else 1.0,
         capacity_coverage=(
@@ -1178,7 +1266,7 @@ def _block_bootstrap_mean_ci(
     return lower, upper
 
 
-def _probability_of_backtest_overfitting(
+def _legacy_interleaved_pair_failure_rate(
     v5: Sequence[float],
     v6: Sequence[float],
 ) -> float | None:
@@ -1189,7 +1277,7 @@ def _probability_of_backtest_overfitting(
     selected_cases = 0
     overfit_cases = 0
     for chosen in combinations(range(block_count), block_count // 2):
-        overfit = _pbo_case_overfits(chosen, blocks, v5, v6)
+        overfit = _legacy_pair_case_failed(chosen, blocks, v5, v6)
         if overfit is None:
             continue
         selected_cases += 1
@@ -1198,7 +1286,7 @@ def _probability_of_backtest_overfitting(
     return 1.0 if not selected_cases else overfit_cases / selected_cases
 
 
-def _pbo_case_overfits(
+def _legacy_pair_case_failed(
     chosen: Sequence[int],
     blocks: Sequence[Sequence[int]],
     v5: Sequence[float],
@@ -1218,7 +1306,7 @@ def _pbo_case_overfits(
     return mean(v6[index] - v5[index] for index in test_indexes) <= 0
 
 
-def _deflated_sharpe_probability(values: Sequence[float]) -> float | None:
+def _iid_zero_benchmark_probabilistic_sharpe(values: Sequence[float]) -> float | None:
     if len(values) < PROBABILITY_RANKING_MINIMUM_SHADOW_SESSIONS:
         return None
     sigma = pstdev(values)
@@ -1240,7 +1328,7 @@ def _deflated_sharpe_probability(values: Sequence[float]) -> float | None:
     return 0.5 * (1 + erf(z / sqrt(2)))
 
 
-def _maximum_drawdown(values: Sequence[float]) -> float:
+def _synthetic_horizon_excess_drawdown(values: Sequence[float]) -> float:
     wealth = 1.0
     peak = 1.0
     maximum = 0.0

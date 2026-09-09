@@ -2037,7 +2037,7 @@ def test_all_short_daily_providers_choose_longest_and_larger_request_retries() -
     assert statuses == {"primary": (2, 0), "backup": (2, 0)}
 
 
-def test_insufficient_daily_history_refreshes_while_early_minute_cache_skips_provider() -> None:
+def test_insufficient_daily_history_and_unproven_short_minute_cache_attempt_refresh() -> None:
     class TrackingKlineProvider:
         source_name = "实时K线源"
 
@@ -2091,7 +2091,7 @@ def test_insufficient_daily_history_refreshes_while_early_minute_cache_skips_pro
     assert daily_len == 40
     assert minute_len == 12
     assert daily_limits == [40]
-    assert minute_limits == []
+    assert minute_limits == [20]
     assert daily_source == "实时K线源"
     assert minute_source == "半量分钟缓存"
 

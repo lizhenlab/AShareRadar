@@ -210,6 +210,47 @@ export function assertDueItem(value) {
   return detail;
 }
 
+export function assertDuePage(value, request) {
+  if (!plainObject(value) || !Array.isArray(value.items)) fail("到期队列分页格式异常");
+  validateDuePageCounts(value, request);
+  validateDuePageOrigin(value, request);
+  value.items.forEach(item => validateDuePageItem(item, value.as_of, request.filters));
+  if (new Set(value.items.map(item => item.plan.id)).size !== value.items.length) fail("到期队列包含重复计划");
+  return value;
+}
+
+function validateDuePageCounts(page, request) {
+  if (!Number.isSafeInteger(page.total) || page.total < 0 || page.page !== request.page
+    || page.page_size !== request.page_size || page.page_count !== Math.ceil(page.total / page.page_size)) {
+    fail("到期队列分页身份或总数不一致");
+  }
+  if (page.page < 1 || page.page > Math.max(1, page.page_count)
+    || page.items.length !== Math.min(page.page_size, Math.max(0, page.total - (page.page - 1) * page.page_size))) {
+    fail("到期队列分页条目数不一致");
+  }
+}
+
+function validateDuePageOrigin(page, request) {
+  if (typeof page.as_of !== "string" || !/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(page.as_of)
+    || !strictIsoDate(page.as_of.slice(0, 10)) || typeof page.snapshot_token !== "string" || !SHA256_HEX.test(page.snapshot_token)) {
+    fail("到期队列缺少有效时点或快照身份");
+  }
+  if (request.snapshot_token && (page.snapshot_token !== request.snapshot_token || page.as_of !== request.as_of)) {
+    fail("到期队列续页快照身份不一致");
+  }
+}
+
+function validateDuePageItem(item, asOf, filters) {
+  assertDueItem(item);
+  if (item.latest_evaluation?.status === "evaluated" || item.due_date > asOf.slice(0, 10)) fail("到期队列包含未到期或已评估计划");
+  const plan = item.plan;
+  if ((filters.symbol && !plan.symbol.toUpperCase().includes(filters.symbol))
+    || (filters.from_date && plan.snapshot_market_time.slice(0, 10) < filters.from_date)
+    || (filters.horizon_days !== null && plan.horizon_days !== filters.horizon_days)) {
+    fail("到期队列条目与请求筛选不一致");
+  }
+}
+
 export function assertReviewBatch(value) {
   if (!plainObject(value) || !Array.isArray(value.items)) fail("批量复盘结果格式异常");
   const candidate = nonNegativeInteger(value.candidate_count, "候选数");
@@ -254,6 +295,9 @@ export function sameReviewIdentity(left, right) {
     && Number(left.advice_id) === Number(right.advice_id)
     && Number(left.revision) === Number(right.revision)
     && normalizedSymbol(left.symbol) === normalizedSymbol(right.symbol)
+    && left.plan_payload_digest === right.plan_payload_digest
+    && ["snapshot_price", "target_price", "stop_price", "horizon_days"]
+      .every((field) => left[field] === right[field])
   );
 }
 

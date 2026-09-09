@@ -663,3 +663,34 @@ async function searchFor(controller, currentState, query) {
   );
 }
 '''
+
+
+def test_stock_search_surface_leaves_composition_keys_to_the_input_method() -> None:
+    _run_node_script(r'''
+      import assert from "node:assert/strict";
+      import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
+      const { element, __appTest } = await createAppHarness();
+      globalThis.fetch = async url => jsonResponse(String(url).startsWith("/api/stocks?")
+        ? [stock("600519.SH", "贵州茅台"), stock("000001.SZ", "平安银行")] : {});
+      for (const [inputId, listId] of [["symbolInput", "symbolSuggestions"], ["watchSymbolInput", "watchSymbolSuggestions"]]) {
+        const input = element(inputId);
+        input.value = "茅";
+        input.listeners.input({ currentTarget: input });
+        await waitFor(() => element(listId).innerHTML.includes("贵州茅台"), "composition suggestions");
+        const before = element(listId).innerHTML;
+        for (const composition of [{ isComposing: true }, { isComposing: false, keyCode: 229 }]) {
+          for (const key of ["ArrowDown", "ArrowUp", "Enter", "Escape"]) {
+            let prevented = false;
+            input.listeners.keydown({ key, ...composition, preventDefault() { prevented = true; } });
+            assert.equal(prevented, false, `${inputId}: consumed composition ${key}`);
+            assert.equal(input.value, "茅", `${inputId}: composition selected a stock`);
+            assert.equal(element(listId).innerHTML, before, `${inputId}: composition changed suggestions`);
+          }
+        }
+        input.listeners.keydown({ key: "ArrowDown", preventDefault() {} });
+        assert.match(element(listId).innerHTML, /aria-selected="true"/);
+        input.listeners.keydown({ key: "Enter", preventDefault() {} });
+        assert.equal(input.value, "600519", "ordinary Enter stopped selecting results");
+      }
+      __appTest.destroyStockSearchBindings();
+    ''')

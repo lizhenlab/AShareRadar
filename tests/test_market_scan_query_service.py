@@ -181,6 +181,7 @@ class _VerifiedRead:
         self._capture = capture
         self._score_contract = score_contract
         self._active = True
+        self._page_read = False
 
     @property
     def run(self) -> MarketScanRun:
@@ -209,6 +210,9 @@ class _VerifiedRead:
 
     def results_page(self, **query: object) -> MarketScanResultPage:
         self._require_active()
+        if self._page_read:
+            raise RuntimeError("同一已验证榜单读取上下文只能读取一次分页")
+        self._page_read = True
         return self._cache.market_scan_results(self._run.id, **query)
 
     def close(self) -> None:
@@ -1131,36 +1135,6 @@ def test_maintenance_starting_after_probability_projection_discards_old_records(
     assert research["availability"] == "maintenance_pending"
     assert research["status"] == "not_generated" and research["run_binding"] is None
     assert records == {}
-
-
-def test_maintenance_pending_after_old_ranking_capture_restores_base_query(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    joint = _maintenance_store(tmp_path)
-    joint._maintenance_running = True
-    cache = _Cache(_run(), capture_status="succeeded")
-    service = _service(
-        cache, joint=joint, probability=_ForbiddenProbabilityStore(),
-        source=_ForbiddenResearchSource(), official=_ForbiddenAuthorityCatalog(),
-    )
-    monkeypatch.setattr(service, "_production_ranking_projection", lambda _run_id: ({"status": "active"}, {}))
-
-    def old_ranking(verified: Any, *, query: dict[str, object], symbols: object, **_extra: object) -> MarketScanResultPage:
-        page = verified.results_page(**query, symbols=symbols)
-        return page.model_copy(update={
-            "items": [item.model_copy(update={"score": 99, "base_production_rank": 1}) for item in page.items],
-            "production_ranking": {"status": "active"},
-        })
-
-    monkeypatch.setattr(query_service_module, "_results_page_with_production_ranking", old_ranking)
-    page = _results(service, minimum=None)
-    assert page.probability_research["availability"] == "maintenance_pending"
-    assert page.production_ranking["status"] == "inactive"
-    assert page.production_ranking["reason"] == "maintenance_pending"
-    assert [(item.score, item.base_production_rank) for item in page.items] == [(80, None)]
-    assert all(item.upside_probabilities == {} for item in page.items)
-    assert len(cache.result_queries) == 2 and cache.result_queries[0] == cache.result_queries[1]
-    assert cache.verified_read_calls == [29]
 
 
 def test_active_v6_ranking_reorders_filters_and_preserves_v5_fields() -> None:

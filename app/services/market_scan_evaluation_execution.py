@@ -67,19 +67,32 @@ def affordable_execution_purchase(
     notional: float, price: float, minimum: int, step: int, profile: PaperCostProfile,
     *, gross_limit: float | None = None,
 ) -> tuple[int, float, float]:
-    """Fit settled currency amounts to separate cash and gross-trade limits."""
+    """Find the largest legal lot count under settled cash and gross limits.
+
+    Registered nonnegative costs make the settled debit monotone in quantity.
+    Probe the top two lots first for ordinary fee adjustments, then bisect.
+    Currency rounding and the original gross-based upper bound stay unchanged.
+    """
     cash = Decimal(str(notional))
     capacity = cash if gross_limit is None else Decimal(str(gross_limit))
     unit_price = Decimal(str(price))
-    quantity = math.floor(min(cash, capacity) / unit_price / step) * step
-    while quantity >= minimum:
+    lower = (minimum + step - 1) // step
+    upper = math.floor(min(cash, capacity) / unit_price / step)
+    best = (0, 0.0, 0.0)
+    probes = 0
+    while lower <= upper:
+        lots = upper if probes < 2 else (lower + upper) // 2
+        quantity = lots * step
         gross = round(float(unit_price * quantity), 2)
         cost = trade_costs(profile, side="buy", gross_amount=gross).total
         settled_gross = Decimal(str(gross))
         if settled_gross <= capacity and settled_gross + Decimal(str(cost)) <= cash:
-            return quantity, gross, cost
-        quantity -= step
-    return 0, 0.0, 0.0
+            best = (quantity, gross, cost)
+            lower = lots + 1
+        else:
+            upper = lots - 1
+        probes += 1
+    return best
 
 
 def frozen_slot_summary(

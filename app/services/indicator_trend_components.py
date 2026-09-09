@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from statistics import mean
 from typing import Callable
 
 from app.models.market import (
@@ -12,7 +13,6 @@ from app.models.analysis import (
     SignalContribution,
 )
 from app.models.market_scan import MarketScanMode
-from app.services.indicator_math import moving_average
 from app.services.indicator_volume import recent_volume_ratio
 from app.utils.market_data import filter_valid_klines
 
@@ -31,6 +31,7 @@ class TrendContext:
     volume_ratio: float
     volume_confirmation_enabled: bool = True
     volume_price_alignment: str = "same-completed-session"
+    legacy_precision: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,10 @@ class VolumeSignalRule:
 
 RELATIVE_NEUTRAL_BAND_PCT = 0.10
 RELATIVE_FULL_EFFECT_PCT = 2.00
+TREND_SCORE_LEGACY_ALGORITHM_VERSION = "trend-score-v2-continuous-soft-clip"
+TREND_SCORE_ALGORITHM_VERSION = "trend-score-v3-scale-invariant"
+TREND_RELATIVE_PCT_DECIMALS = 12
+TREND_SCALED_IMPACT_DECIMALS = 10
 
 
 def build_trend_context(
@@ -64,26 +69,32 @@ def build_trend_context(
     klines: list[Kline],
     *,
     mode: MarketScanMode = "official",
+    algorithm_version: str = TREND_SCORE_ALGORITHM_VERSION,
 ) -> TrendContext:
     if mode not in {"official", "intraday", "preopen"}:
         raise ValueError(f"未知趋势评分模式：{mode!r}")
+    if algorithm_version not in (TREND_SCORE_ALGORITHM_VERSION, TREND_SCORE_LEGACY_ALGORITHM_VERSION):
+        raise ValueError(f"未知趋势评分算法：{algorithm_version!r}")
+    legacy_rounding = algorithm_version == TREND_SCORE_LEGACY_ALGORITHM_VERSION
     valid_klines = filter_valid_klines(klines)
+    closes = [item.close for item in valid_klines]
     recent_rows = valid_klines[-20:]
-    ma5 = moving_average(valid_klines, 5)
-    ma10 = moving_average(valid_klines, 10)
-    ma20 = moving_average(valid_klines, 20)
+    ma5 = _context_moving_average(closes, 5, legacy_rounding=legacy_rounding)
+    ma10 = _context_moving_average(closes, 10, legacy_rounding=legacy_rounding)
+    ma20 = _context_moving_average(closes, 20, legacy_rounding=legacy_rounding)
     return TrendContext(
         quote=quote,
         klines=valid_klines,
         ma5=ma5,
         ma10=ma10,
         ma20=ma20,
-        prev_ma5=moving_average(valid_klines[:-5], 5) if len(valid_klines) >= 10 else ma5,
-        prev_ma20=moving_average(valid_klines[:-5], 20) if len(valid_klines) >= 25 else ma20,
+        prev_ma5=_context_moving_average(closes, 5, offset=5, legacy_rounding=legacy_rounding) if len(valid_klines) >= 10 else ma5,
+        prev_ma20=_context_moving_average(closes, 20, offset=5, legacy_rounding=legacy_rounding) if len(valid_klines) >= 25 else ma20,
         recent_high=max((item.high for item in recent_rows), default=0),
         recent_low=min((item.low for item in recent_rows), default=0),
         volume_ratio=recent_volume_ratio(valid_klines),
         volume_confirmation_enabled=mode == "official",
+        legacy_precision=legacy_rounding,
         volume_price_alignment=(
             "intraday-time-aligned-volume-unavailable-neutralized"
             if mode == "intraday"
@@ -94,6 +105,16 @@ def build_trend_context(
             )
         ),
     )
+
+
+def _context_moving_average(
+    closes: list[float], window: int, *, offset: int = 0, legacy_rounding: bool = False,
+) -> float:
+    """Keep calculation precision; only frozen v2 scores round prices to cents."""
+    end = len(closes) - offset
+    values = closes[max(0, end - window):end]
+    value = mean(values) if values else 0
+    return round(value, 2) if legacy_rounding else value
 
 
 def insufficient_sample_contributions() -> list[SignalContribution]:
@@ -131,6 +152,7 @@ def _moving_average_contribution(rule: MovingAverageRule, context: TrendContext)
         right,
         positive_impact=rule.positive_impact,
         negative_impact=rule.negative_impact,
+        legacy_precision=context.legacy_precision,
     )
     word = relative_direction_word(
         relative_pct,
@@ -148,12 +170,14 @@ def slope_contributions(context: TrendContext) -> list[SignalContribution]:
         context.prev_ma5,
         positive_impact=7,
         negative_impact=-5,
+        legacy_precision=context.legacy_precision,
     )
     wave_impact, wave_relative_pct = continuous_relative_impact(
         context.ma20,
         context.prev_ma20,
         positive_impact=6,
         negative_impact=-6,
+        legacy_precision=context.legacy_precision,
     )
     return [
         contribution(
@@ -183,6 +207,7 @@ def continuous_relative_impact(
     negative_impact: int,
     neutral_band_pct: float = RELATIVE_NEUTRAL_BAND_PCT,
     full_effect_pct: float = RELATIVE_FULL_EFFECT_PCT,
+    legacy_precision: bool = False,
 ) -> tuple[int, float | None]:
     """Map a relative distance to a bounded integer impact without an equality cliff."""
     if not math.isfinite(neutral_band_pct) or not math.isfinite(full_effect_pct) or neutral_band_pct < 0 or full_effect_pct <= neutral_band_pct:
@@ -191,12 +216,18 @@ def continuous_relative_impact(
         raise ValueError("relative impact bounds must satisfy negative <= 0 <= positive")
 
     relative_pct = relative_change_pct(value, reference)
+    if relative_pct is not None and not legacy_precision:
+        relative_pct = round(relative_pct, TREND_RELATIVE_PCT_DECIMALS)
     if relative_pct is None or abs(relative_pct) <= neutral_band_pct:
         return 0, relative_pct
 
     progress = min(1.0, (abs(relative_pct) - neutral_band_pct) / (full_effect_pct - neutral_band_pct))
     cap = positive_impact if relative_pct > 0 else abs(negative_impact)
-    magnitude = min(cap, int(math.floor(cap * progress + 0.5)))
+    scaled_impact = cap * progress
+    if not legacy_precision:
+        # Leave room for percentage rounding propagated through caps up to 12.
+        scaled_impact = round(scaled_impact, TREND_SCALED_IMPACT_DECIMALS)
+    magnitude = min(cap, int(math.floor(scaled_impact + 0.5)))
     return (magnitude if relative_pct > 0 else -magnitude), relative_pct
 
 

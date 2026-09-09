@@ -6,13 +6,13 @@ from app.services.research_factor_scoring import (
     CHIP_DISTANCE_RULES,
     CHIP_FALLBACK_RULES,
     RISK_PRESSURE_RULES,
-    VOLUME_CONFIRMATION_RULES,
     _chip_concentration_adjustment,
     _chip_distance_adjustment,
     _chip_position_score_current,
     _risk_pressure_score,
     _volume_confirmation_score,
 )
+from app.services.research_volume_scoring import VOLUME_CONFIRMATION_RULES
 
 
 def test_volume_confirmation_rules_keep_priority_and_boundaries() -> None:

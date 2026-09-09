@@ -17,6 +17,7 @@ from app.models.research import (
     TStrategyAssistantReport,
     TimeframeAlignmentReport,
 )
+from app.services.research_qa_answerability import unavailable_question_answer
 from app.services.research_qa_answer_confidence import question_confidence
 from app.services.research_qa_answer_contracts import StockQuestionContext
 from app.services.research_qa_answer_selectors import (
@@ -45,7 +46,7 @@ def answer_stock_question(
     theme_context: ThemeContextReport | None = None,
 ) -> StockQuestionAnswer:
     clean_question = " ".join(str(question or "").strip().split())
-    topic = stock_question_topic(clean_question)
+    topic = stock_question_topic(clean_question, stock_name=analysis.quote.name, stock_code=analysis.quote.code)
     context = StockQuestionContext(
         analysis=analysis,
         diagnosis=diagnosis,
@@ -60,7 +61,8 @@ def answer_stock_question(
         timeframe=timeframe,
         theme_context=theme_context,
     )
-    return _stock_question_answer(clean_question, topic, context)
+    unavailable = unavailable_question_answer(clean_question, topic, context)
+    return unavailable if unavailable is not None else _stock_question_answer(clean_question, topic, context)
 
 
 def _stock_question_answer(question: str, topic: str, context: StockQuestionContext) -> StockQuestionAnswer:

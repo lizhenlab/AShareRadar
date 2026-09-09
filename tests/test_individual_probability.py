@@ -138,7 +138,10 @@ def test_assessment_v2_binds_h1_purged_estimator_and_split_contract() -> None:
     assert isinstance(payload, dict)
     contract = payload["estimator_contract"]
 
-    assert contract == individual_probability_estimator_contract()
+    expected = individual_probability_estimator_contract()
+    expected["estimator_label_version"] = "market-scan-upside-label-v3-explicit-target-offset"
+    expected["estimator_feature_version"] = "full-market-point-in-time-features-v3-liquidity-medium"
+    assert contract == expected
     assert contract["split_version"] == "grouped-date-multifold-target-offset-purge-v3"
     assert contract["model_version"] == ("shadow-up-probability-logit-l2-v2-convergence-required")
     assert contract["estimator_feature_version"] == ("full-market-point-in-time-features-v3-liquidity-medium")
@@ -148,6 +151,151 @@ def test_assessment_v2_binds_h1_purged_estimator_and_split_contract() -> None:
     assert longest["target_session_offset"] == 4
     assert longest["gap_sessions"] == 4
     assert longest["minimum_selection_independent_sessions"] == 288
+
+
+def test_legacy_estimator_label_identity_is_read_without_upgrading_frozen_evidence() -> None:
+    frozen = ASSESSMENT.read_bytes()
+    assessment = load_individual_probability_assessment(ASSESSMENT)
+    assert assessment["payload"]["estimator_contract"]["estimator_label_version"] == "market-scan-upside-label-v3-explicit-target-offset"
+    assert ASSESSMENT.read_bytes() == frozen
+    assert assessment["integrity"]["integrity_digest"] == "517691b101dcb2142693a74f6e5ac9ef10f386c545572b6bacfe161f186ba677"
+    assessment["payload"]["estimator_contract"] = individual_probability_estimator_contract()
+    _reseal(assessment)
+    with pytest.raises(IndividualProbabilityArtifactError, match="estimator contract"):
+        verify_individual_probability_assessment(assessment)
+
+
+@pytest.mark.parametrize("change", [
+    {"split_version": "unregistered-split"},
+    {"minimum_label_coverage": 0.5},
+    {"estimator_label_version": "unregistered-label"},
+    {"unexpected_field": "must-not-be-ignored"},
+])
+def test_legacy_estimator_registration_preserves_exact_contract_checks(change) -> None:
+    assessment = json.loads(ASSESSMENT.read_bytes())
+    assessment["payload"]["estimator_contract"].update(change)
+    _reseal(assessment)
+    with pytest.raises(IndividualProbabilityArtifactError, match="estimator contract"):
+        verify_individual_probability_assessment(assessment)
+
+
+def test_individual_target_stays_independent_while_new_fits_bind_actual_estimator_stamp(monkeypatch) -> None:
+    from app.services import market_scan_probability as shared_estimator
+    from app.services import market_scan_probability_labels as full_market_labels
+
+    def forbidden_full_market_label(**_kwargs):
+        raise AssertionError("individual target must not use full-market execution labels")
+
+    monkeypatch.setattr(full_market_labels, "build_probability_label_outcomes", forbidden_full_market_label)
+    _, samples = artifact_module._probability_samples({"600000.SH": _synthetic_history_bars()})
+    captured = []
+
+    def fit(samples, *, config, generated_at):
+        assert config.label_contract is None
+        evidence = shared_estimator.fit_shadow_probability(samples, config=config, generated_at=generated_at)
+        captured.append(evidence)
+        return evidence
+
+    monkeypatch.setattr(artifact_module, "fit_shadow_probability", fit)
+    horizons = artifact_module._fit_assessment_horizons(samples, (), "2026-08-13T01:02:03+00:00")
+    contract = individual_probability_estimator_contract()
+    for holding, evidence in zip((1, 2, 3), captured, strict=True):
+        assert evidence["label_version"] == contract["estimator_label_version"] == shared_estimator.PROBABILITY_LABEL_VERSION
+        assert horizons[str(holding)]["evidence_digest"] == evidence["evidence_digest"]
+        assert horizons[str(holding)]["selection_qualified"] is False
+    assert individual_probability_target_contract()["version"] == "individual-upside-net-return-label-v1"
+    assert individual_probability_target_contract()["entry"] == "D_plus_1_official_daily_open_proxy_no_shift"
+
+
+def _assessment_with_frozen_source(snapshot):
+    artifact = json.loads(ASSESSMENT.read_bytes())
+    artifact["schema_version"] = INDIVIDUAL_PROBABILITY_ASSESSMENT_SCHEMA_VERSION
+    payload = artifact["payload"]
+    payload["limitations"] = list(artifact_module._LIMITATIONS)
+    # This is a synthetic current-contract envelope, not a migrated real fit.
+    payload["estimator_contract"] = individual_probability_estimator_contract()
+    for horizon in payload["horizons"].values():
+        horizon["estimator_feature_version"] = artifact_module.PROBABILITY_FEATURE_VERSION
+        horizon["calibration_metrics"].update(
+            selection_gate_version=None, calibration_bin_count=None,
+            minimum_calibration_bin_session_count=None, all_folds_positive_brier_skill=None,
+        )
+    source_payload, run = snapshot["payload"], snapshot["payload"]["run"]
+    identity = {
+        "data_date": run["data_date"], "run_id": run["run_id"],
+        "integrity_digest": snapshot["integrity"]["integrity_digest"],
+        "source_schema_version": snapshot["schema_version"], "source_contract_version": source_payload["contract_version"],
+        "feature_version": source_payload["feature_schema"]["version"],
+        "source_evidence_contract_version": source_payload["records"][0]["source_evidence_contract_version"],
+        "as_of": run["as_of"], "captured_at": snapshot["captured_at"], "run_rule_version": run["rule_version"],
+        "production_score_rule_version": run["production_score_rule_version"],
+        "production_score_spec_hash": run["production_score_spec_hash"],
+        "total_count": run["total_count"], "success_count": run["success_count"],
+        "record_count": len(source_payload["records"]), "success_to_total_coverage": run["success_count"] / run["total_count"],
+        "full_market_coverage": deepcopy(run["full_market_coverage"]),
+    }
+    payload["official_pit"].update(session_dates=[identity["data_date"]], session_count=1, ready=False, sources=[identity])
+    _reseal(artifact)
+    return artifact
+
+
+def test_current_assessment_rejects_frozen_old_feature_source_while_archive_stays_readable(monkeypatch) -> None:
+    from tests.test_market_scan_completed_snapshot_trend import _legacy_source
+
+    # The pre-change scorer/source producer created this exact compact fixture.
+    snapshot = _legacy_source(monkeypatch)
+    original = canonical_json_bytes(snapshot)
+    assert source_module.verify_probability_source_snapshot(snapshot) == snapshot
+    # Its synthetic population has 3/4 successes; only the coverage floor is
+    # adapted here, while source identity, score hashes and records stay strict.
+    monkeypatch.setattr(artifact_module, "INDIVIDUAL_PROBABILITY_MIN_OFFICIAL_SOURCE_COVERAGE", 0.75)
+    assessment = _assessment_with_frozen_source(snapshot)
+    identity = assessment["payload"]["official_pit"]["sources"][0]
+    with pytest.raises(IndividualProbabilityArtifactError, match="版本绑定不是当前合同"):
+        artifact_module._validated_official_source(identity, legacy_source_binding=False)
+    with pytest.raises(IndividualProbabilityArtifactError, match="版本绑定不是当前合同"):
+        verify_individual_probability_assessment(assessment)
+    assert canonical_json_bytes(snapshot) == original
+    report = project_individual_upside_probability("600519", assessment)
+    assert report.status == "not_generated"
+    assert all(horizon.probability is None for horizon in report.horizons)
+    with pytest.raises(IndividualProbabilityArtifactError, match="feature contract 不是当前版本"):
+        artifact_module._official_pit_source(snapshot, snapshot["payload"], snapshot["payload"]["run"])
+
+
+@pytest.mark.parametrize("estimator_version", [
+    "market-scan-upside-label-v3-explicit-target-offset", "market-scan-upside-label-v4-execution-phase-separated",
+])
+def test_current_assessment_accepts_only_registered_complete_estimator_contracts(estimator_version) -> None:
+    assessment = _assessment_with_frozen_source(_official_source_snapshot("2026-08-11", 11))
+    assessment["payload"]["estimator_contract"]["estimator_label_version"] = estimator_version
+    _reseal(assessment)
+    assert verify_individual_probability_assessment(assessment) == assessment
+    assert all(item.probability is None for item in project_individual_upside_probability("600519", assessment).horizons)
+
+
+def test_real_individual_builder_preserves_target_and_current_estimator_through_publication(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "attested-synthetic-history.sqlite3"
+    _write_synthetic_history_database(database)
+    encoded = database.read_bytes()
+    monkeypatch.setattr(artifact_module, "load_market_scan_probability_history_manifest", lambda _path: {
+        "payload": {"database": {"path": str(database), "sha256": sha256_hex(encoded), "size_bytes": len(encoded)}},
+        "integrity": {"integrity_digest": "a" * 64},
+    })
+    monkeypatch.setattr(artifact_module, "utc_now", lambda: datetime(2026, 8, 13, 1, 2, 3, tzinfo=timezone.utc))
+    # Run the actual shared fitter over the independently built sample labels.
+    assessment = artifact_module.build_individual_probability_assessment(tmp_path / "synthetic.manifest.json")
+    payload = assessment["payload"]
+    assert payload["target_contract"] == individual_probability_target_contract()
+    assert payload["target_contract"]["version"] == "individual-upside-net-return-label-v1"
+    assert payload["estimator_contract"] == individual_probability_estimator_contract()
+    assert payload["estimator_contract"]["estimator_label_version"] == "market-scan-upside-label-v4-execution-phase-separated"
+    assert all(item["selection_qualified"] is False for item in payload["horizons"].values())
+    assert verify_individual_probability_assessment(assessment) == assessment
+    path = write_individual_probability_assessment(tmp_path / "output", assessment)
+    frozen = path.read_bytes()
+    assert load_individual_probability_assessment(path) == assessment
+    assert path.read_bytes() == frozen and database.read_bytes() == encoded
 
 
 def test_superseded_assessment_v1_is_explicitly_replay_only_not_runtime() -> None:
@@ -1396,8 +1544,10 @@ def test_run87_weekend_source_roundtrips_current_assessment_store(
     assessment_payload = deepcopy(
         cast(dict[str, object], json.loads(ASSESSMENT.read_text(encoding="utf-8"))["payload"])
     )
+    assessment_payload["estimator_contract"] = individual_probability_estimator_contract()
     horizons = cast(dict[str, dict[str, object]], assessment_payload["horizons"])
     for horizon in horizons.values():
+        horizon["estimator_feature_version"] = artifact_module.PROBABILITY_FEATURE_VERSION
         metrics = cast(dict[str, object], horizon["calibration_metrics"])
         metrics.update(
             selection_gate_version=None,

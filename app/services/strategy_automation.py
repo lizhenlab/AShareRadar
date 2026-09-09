@@ -17,8 +17,11 @@ from app.models.strategy_automation import (
     StrategySimulationPlan,
 )
 from app.models.strategy_execution import PortfolioCandidate, PortfolioDraft, StrategyExecutionRequest
-from app.repositories.strategy_automation import StrategyAutomationRepository
-from app.repositories.strategy_automation import StrategyAutomationIntegrityError
+from app.repositories.strategy_automation import (
+    StrategyAlertWrite,
+    StrategyAutomationIntegrityError,
+    StrategyAutomationRepository,
+)
 from app.services.strategy_execution import StrategyExecutionService
 from app.services.strategy_lab import StrategyLabService
 from app.utils.audit_time import audit_now_text
@@ -139,31 +142,26 @@ class StrategyAutomationService:
         ):
             return "skipped", 0, None
         try:
-            event_count, execution_id = self._execute_claimed_schedule(schedule, run_id)
+            events, current = self._execute_claimed_schedule(schedule, run_id)
+            self.repository.complete_run(
+                schedule, run_id, current.context, events, timestamp=audit_now_text(),
+            )
         except Exception as exc:
             message = " ".join(str(exc).split())[:300] or type(exc).__name__
-            self.repository.finish_run(
+            self.repository.fail_run(
                 schedule.schedule_id,
                 run_id,
-                execution_id=None,
                 error=message,
                 timestamp=audit_now_text(),
             )
             return "failed", 0, message
-        self.repository.finish_run(
-            schedule.schedule_id,
-            run_id,
-            execution_id=execution_id,
-            error=None,
-            timestamp=audit_now_text(),
-        )
-        return "executed", event_count, None
+        return "executed", len(events), None
 
     def _execute_claimed_schedule(
         self,
         schedule: StrategySchedule,
         run_id: int,
-    ) -> tuple[int, int]:
+    ) -> tuple[list[StrategyAlertWrite], PortfolioDraft]:
         previous = (
             self.executions.draft(schedule.last_execution_id)
             if schedule.last_execution_id is not None
@@ -182,7 +180,7 @@ class StrategyAutomationService:
         )
         if current.context.market_scan_run_id != run_id:
             raise RuntimeError("定时执行期间最新扫描批次发生变化，请重试")
-        return self._emit_events(schedule, previous, current), current.context.execution_id
+        return self._build_events(schedule, previous, current), current
 
     def _require_action_source(self, draft: PortfolioDraft) -> None:
         _require_publication_action_source(draft)
@@ -249,117 +247,85 @@ class StrategyAutomationService:
         self._require_action_source(self.executions.draft(execution_id))
         return self.repository.simulation_plan(execution_id)
 
-    def _emit_events(
+    def _build_events(
         self,
         schedule: StrategySchedule,
         previous: PortfolioDraft | None,
         current: PortfolioDraft,
-    ) -> int:
-        conditions = {item.event_type: item for item in schedule.alert_conditions}
+    ) -> list[StrategyAlertWrite]:
+        conditions = {item.event_type for item in schedule.alert_conditions}
         previous_by_symbol = _selected_by_symbol(previous)
         current_by_symbol = _selected_by_symbol(current)
-        emitted = 0
+        events = []
         if "new_entry" in conditions:
             for symbol in sorted(current_by_symbol.keys() - previous_by_symbol.keys()):
-                emitted += self._event(
-                    schedule, current, "new_entry", symbol,
-                    f"{symbol} 新进入策略组合草案",
+                events.append(StrategyAlertWrite(
+                    "new_entry", symbol, f"{symbol} 新进入策略组合草案",
                     {"previous_execution_id": previous.context.execution_id if previous else None},
-                )
+                ))
         if "removed" in conditions:
             for symbol in sorted(previous_by_symbol.keys() - current_by_symbol.keys()):
-                emitted += self._event(
-                    schedule, current, "removed", symbol,
-                    f"{symbol} 已从策略组合草案移除",
+                events.append(StrategyAlertWrite(
+                    "removed", symbol, f"{symbol} 已从策略组合草案移除",
                     {"previous_execution_id": previous.context.execution_id if previous else None},
-                )
-        emitted += self._emit_utility_events(
-            schedule,
-            previous,
-            current,
-            previous_by_symbol,
-            current_by_symbol,
-        )
-        emitted += self._emit_policy_events(schedule, current)
-        return emitted
+                ))
+        events.extend(self._build_utility_events(schedule, previous_by_symbol, current_by_symbol))
+        events.extend(self._build_policy_events(schedule, current))
+        return events
 
-    def _emit_utility_events(
+    def _build_utility_events(
         self,
         schedule: StrategySchedule,
-        previous: PortfolioDraft | None,
-        current: PortfolioDraft,
         previous_by_symbol: dict[str, PortfolioCandidate],
         current_by_symbol: dict[str, PortfolioCandidate],
-    ) -> int:
+    ) -> list[StrategyAlertWrite]:
         condition = next(
             (item for item in schedule.alert_conditions if item.event_type == "utility_cross"),
             None,
         )
-        if condition is None or previous is None:
-            return 0
+        if condition is None:
+            return []
         threshold = float(condition.utility_threshold or 0)
-        emitted = 0
+        events = []
         for symbol in sorted(previous_by_symbol.keys() & current_by_symbol.keys()):
             old = previous_by_symbol[symbol].utility_score
             new = current_by_symbol[symbol].utility_score
             if old is not None and new is not None and old < threshold <= new:
-                emitted += self._event(
-                    schedule, current, "utility_cross", symbol,
+                events.append(StrategyAlertWrite(
+                    "utility_cross", symbol,
                     f"{symbol} 策略效用分由 {old:.2f} 上穿 {threshold:.2f}",
                     {"previous": old, "current": new, "threshold": threshold},
-                )
-        return emitted
+                ))
+        return events
 
-    def _emit_policy_events(self, schedule: StrategySchedule, current: PortfolioDraft) -> int:
+    def _build_policy_events(self, schedule: StrategySchedule, current: PortfolioDraft) -> list[StrategyAlertWrite]:
         event_types = {item.event_type for item in schedule.alert_conditions}
         strategy = self.strategies.get(schedule.strategy_id, revision=schedule.strategy_version)
-        emitted = 0
+        events = []
         if "data_stale" in event_types:
             age_days = (market_now_naive().date() - date.fromisoformat(current.context.data_date)).days
             maximum = strategy.spec.evidence_policy.maximum_market_data_age_days
             if age_days > maximum:
-                emitted += self._event(
-                    schedule, current, "data_stale", None,
+                events.append(StrategyAlertWrite(
+                    "data_stale", None,
                     f"策略数据已过期：{age_days} 天，策略上限 {maximum} 天",
                     {"age_days": age_days, "maximum_age_days": maximum},
-                )
+                ))
         evidence_invalid = (
             current.summary.selected_count > current.summary.evidence_verified_count
             or current.summary.no_trade
         )
         if "evidence_invalid" in event_types and evidence_invalid:
-            emitted += self._event(
-                schedule, current, "evidence_invalid", None,
+            events.append(StrategyAlertWrite(
+                "evidence_invalid", None,
                 "策略证据校验失效或当前输出为 no_trade",
                 {
                     "selected_count": current.summary.selected_count,
                     "verified_count": current.summary.evidence_verified_count,
                     "no_trade": current.summary.no_trade,
                 },
-            )
-        return emitted
-
-    def _event(
-        self,
-        schedule: StrategySchedule,
-        current: PortfolioDraft,
-        event_type: str,
-        symbol: str | None,
-        message: str,
-        trigger: dict[str, object],
-    ) -> int:
-        self.repository.add_event(
-            schedule,
-            execution_id=current.context.execution_id,
-            execution_fingerprint=current.context.execution_fingerprint,
-            data_as_of=current.context.data_as_of,
-            event_type=event_type,
-            symbol=symbol,
-            message=message,
-            trigger=trigger,
-            timestamp=audit_now_text(),
-        )
-        return 1
+            ))
+        return events
 
 
 def _selected_by_symbol(draft: PortfolioDraft | None) -> dict[str, PortfolioCandidate]:

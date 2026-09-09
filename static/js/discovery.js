@@ -15,6 +15,10 @@ import { applyDiscoveryPresetFields, marketScanFilterElements } from "./market-s
 import { marketScanPageSize } from "./layout-optimizations.js";
 import { marketScanResultRow } from "./market-scan-view.js";
 import { validateMarketScanScreenAlert } from "./market-scan-screening-contracts.js";
+import {
+  discoveryDefinitionKey, discoveryEditorKey, discoveryPresetPageText,
+  discoveryPresetSelectionText, unknownDiscoveryWriteResult, validateDiscoveryDeleteReceipt, validateDiscoveryWriteReceipt,
+} from "./discovery-preset-state.js";
 export {
   buildDiscoveryPresetDefinition,
   isDiscoveryPresetUiRepresentable,
@@ -39,6 +43,13 @@ export function createDiscoveryController(options = {}) {
     busy: false,
     presets: [],
     selectedId: null,
+    selected: null,
+    selectionEpoch: 0,
+    page: 1,
+    pageCount: 0,
+    total: 0,
+    orderStale: false,
+    writeUnconfirmed: false,
     applied: null,
     sequence: 0,
     appliedRequest: null,
@@ -54,22 +65,53 @@ export function createDiscoveryController(options = {}) {
     return loadPresets();
   }
 
-  async function loadPresets() {
+  async function loadPresets(page = state.page) {
+    if (!Number.isInteger(page) || page < 1) return null;
+    if (page !== state.page && (state.orderStale || page > state.pageCount)) return null;
     return runOperation("正在读取筛选方案...", async () => {
-      const payload = validateDiscoveryPresetPage(await request(
-        "/api/discovery/presets?page=1&page_size=100",
-        requestOptions()
-      ));
-      state.presets = payload.items;
-      if (!presetById(state.selectedId)) state.selectedId = null;
-      renderPresetOptions();
-      setFeedback(payload.total ? `已读取 ${payload.total} 个筛选方案` : "暂无已保存筛选方案");
+      await readPresetPage(page);
+      setFeedback(state.total ? discoveryPresetPageText(state) : "暂无已保存筛选方案");
       return state.presets;
     }, "筛选方案读取");
   }
 
-  async function savePreset() {
-    const existing = selectedPreset();
+  async function readPresetPage(page, clamp = true) {
+    const payload = validateDiscoveryPresetPage(await request(
+      `/api/discovery/presets?page=${page}&page_size=100`, requestOptions()
+    ));
+    if (payload.page !== page || payload.page_size !== 100) throw new Error("方案分页响应与请求页不一致");
+    if (page > Math.max(1, payload.page_count)) {
+      if (!clamp) throw new Error("方案页数再次变化，请刷新列表");
+      return readPresetPage(Math.max(1, payload.page_count), false);
+    }
+    state.presets = payload.items;
+    state.page = page;
+    state.pageCount = payload.page_count;
+    state.total = payload.total;
+    state.orderStale = false;
+    renderPresetOptions();
+  }
+
+  function savePreset() {
+    if (selectedPreset() && !isDiscoveryPresetUiRepresentable(selectedPreset())) {
+      setFeedback("兼容方案不能通过当前表单完整复制；请先取消方案选择后自建条件，或导出保留原定义。", "warn");
+      return null;
+    }
+    return writePreset(null);
+  }
+
+  function updatePreset() {
+    const preset = selectedPreset();
+    if (!preset) return requirePreset();
+    if (!isDiscoveryPresetUiRepresentable(preset)) {
+      setFeedback("兼容方案无法在当前表单完整表达，不能覆盖原定义；可导出原方案。", "error");
+      return null;
+    }
+    return writePreset(preset);
+  }
+
+  async function writePreset(existing) {
+    if (state.writeUnconfirmed) return requireWriteConfirmation();
     let definition;
     try {
       definition = buildDiscoveryPresetDefinition(elements.name.value, elements);
@@ -79,28 +121,88 @@ export function createDiscoveryController(options = {}) {
       return null;
     }
     return runOperation("正在保存筛选方案...", async () => {
-      const preset = validateDiscoveryPreset(await request(
-        existing ? `/api/discovery/presets/${encodeURIComponent(existing.id)}` : "/api/discovery/presets",
-        requestOptions({
-          method: existing ? "PUT" : "POST",
-          body: JSON.stringify(existing
-            ? { ...definition, expected_revision: existing.revision }
-            : definition),
-        })
-      ));
+      const owner = { epoch: state.selectionEpoch, key: discoveryDefinitionKey(definition) };
+      const preset = await submitPresetWrite(definition, existing);
       const hadAppliedPreset = Boolean(state.applied);
-      upsertPreset(preset);
-      state.selectedId = preset.id;
-      clearApplied();
-      renderPresetOptions();
-      elements.name.value = preset.name;
-      setFeedback(`${existing ? "已更新" : "已保存"}筛选方案“${preset.name}”`, "success");
-      if (hadAppliedPreset) void loadStandardResults();
+      const changed = discoveryEditorKey(elements) !== owner.key;
+      if (state.selectionEpoch === owner.epoch) {
+        selectSavedPreset(preset);
+        clearApplied();
+        if (!changed) elements.name.value = preset.name;
+      }
+      const message = `${existing ? "已更新" : "已保存新"}筛选方案“${preset.name}”${changed ? "；保存期间的新输入已保留，尚未保存" : ""}`;
+      await synchronizePresetWrite(message);
+      if (hadAppliedPreset && state.selectionEpoch === owner.epoch) void loadStandardResults();
       return preset;
     }, "筛选方案保存");
   }
 
+  function submitPresetWrite(definition, existing) {
+    return requestPresetReceipt(
+      existing ? `/api/discovery/presets/${encodeURIComponent(existing.id)}` : "/api/discovery/presets",
+      requestOptions({
+        method: existing ? "PUT" : "POST",
+        body: JSON.stringify(existing ? { ...definition, expected_revision: existing.revision } : definition),
+      }), definition, existing
+    );
+  }
+
+  function requestPresetReceipt(url, requestConfig, definition, existing) {
+    const knownIds = [...state.presets.map(item => item.id), state.selectedId];
+    return requestConfirmedPresetMutation(url, requestConfig, payload => (
+      validateDiscoveryWriteReceipt(payload, definition, existing, knownIds)
+    ));
+  }
+
+  async function requestConfirmedPresetMutation(url, requestConfig, validate) {
+    try {
+      const payload = await requestOrderedPresetMutation(url, requestConfig);
+      return validate(payload);
+    } catch (error) {
+      if (unknownDiscoveryWriteResult(error)) {
+        state.writeUnconfirmed = true;
+        throw new Error(`保存结果待核对：${compactErrorMessage(error?.message)}。请刷新方案列表并重新选择具体方案核对。`);
+      }
+      throw error;
+    }
+  }
+
+  async function requestOrderedPresetMutation(url, requestConfig) {
+    const wasStale = state.orderStale;
+    state.orderStale = true;
+    try {
+      return await request(url, requestConfig);
+    } catch (error) {
+      if (!unknownDiscoveryWriteResult(error)) state.orderStale = wasStale;
+      throw error;
+    }
+  }
+
+  async function synchronizePresetWrite(message) {
+    try {
+      await readPresetPage(state.page);
+      setFeedback(message, "success");
+    } catch (error) {
+      state.orderStale = true;
+      renderPresetOptions();
+      setFeedback(`${message}；列表同步未完成：${compactErrorMessage(error?.message)}，请刷新后翻页。`, "warn");
+    }
+  }
+
+  function selectSavedPreset(preset) {
+    state.selected = preset;
+    state.selectedId = preset?.id || null;
+    options.onPresetChange?.(preset);
+    renderPresetOptions();
+  }
+
+  function requireWriteConfirmation() {
+    setFeedback("保存结果待核对，请刷新方案列表并重新选择具体方案核对后再保存。", "warn");
+    return null;
+  }
+
   async function renamePreset() {
+    if (state.writeUnconfirmed) return requireWriteConfirmation();
     const preset = selectedPreset();
     if (!preset) return requirePreset();
     const name = normalizedName(elements.name.value);
@@ -110,24 +212,24 @@ export function createDiscoveryController(options = {}) {
       return null;
     }
     return runOperation("正在重命名筛选方案...", async () => {
-      const renamed = validateDiscoveryPreset(await request(
+      const editorKey = discoveryEditorKey(elements);
+      const renamed = await requestPresetReceipt(
         `/api/discovery/presets/${encodeURIComponent(preset.id)}`,
         requestOptions({
           method: "PATCH",
           body: JSON.stringify({ name, expected_revision: preset.revision }),
-        })
-      ));
-      upsertPreset(renamed);
-      state.selectedId = renamed.id;
+        }), { ...preset, name }, preset
+      );
+      selectSavedPreset(renamed);
       if (state.applied?.preset.id === renamed.id) state.applied.preset = renamed;
-      renderPresetOptions();
-      elements.name.value = renamed.name;
-      setFeedback(`已重命名为“${renamed.name}”`, "success");
+      if (discoveryEditorKey(elements) === editorKey) elements.name.value = renamed.name;
+      await synchronizePresetWrite(`已重命名为“${renamed.name}”`);
       return renamed;
     }, "筛选方案重命名");
   }
 
   async function exportPreset() {
+    if (state.writeUnconfirmed) return requireWriteConfirmation();
     const preset = selectedPreset();
     if (!preset) return requirePreset();
     return runOperation("正在导出筛选方案...", async () => {
@@ -142,6 +244,7 @@ export function createDiscoveryController(options = {}) {
   }
 
   async function recordScreenAlert() {
+    if (state.writeUnconfirmed) return requireWriteConfirmation();
     const preset = selectedPreset();
     if (!preset) return requirePreset();
     const run = leaderboardRun();
@@ -160,55 +263,58 @@ export function createDiscoveryController(options = {}) {
           }),
         })
       ), preset.id, run.id);
+      if (payload.preset.preset_revision !== preset.revision) throw new Error("筛选变化回执的方案修订与请求不一致");
       setFeedback(screenAlertFeedback(payload), payload.status === "ready" ? "success" : "warn");
+      options.onScreenAlertRecorded?.(payload);
       return payload;
     }, "筛选变化提醒");
   }
 
   async function importPreset(file = elements.importFile.files?.[0]) {
+    if (state.writeUnconfirmed) return requireWriteConfirmation();
     if (!file) {
       setFeedback("请选择筛选方案 JSON 文件", "error");
       return null;
     }
     return runOperation("正在导入筛选方案...", async () => {
       const archive = JSON.parse(await file.text());
-      const preset = validateDiscoveryPreset(await request(
+      const preset = await requestPresetReceipt(
         "/api/discovery/presets/import",
-        requestOptions({ method: "POST", body: JSON.stringify(archive) })
-      ));
-      upsertPreset(preset);
-      state.selectedId = preset.id;
-      renderPresetOptions();
+        requestOptions({ method: "POST", body: JSON.stringify(archive) }), archive.preset, null
+      );
+      selectSavedPreset(preset);
       elements.name.value = preset.name;
       if (isDiscoveryPresetUiRepresentable(preset)) applyDiscoveryPresetFields(preset, elements);
-      setFeedback(`已导入筛选方案“${preset.name}”`, "success");
+      await synchronizePresetWrite(`已导入筛选方案“${preset.name}”`);
       return preset;
     }, "筛选方案导入");
   }
 
   async function deletePreset() {
+    if (state.writeUnconfirmed) return requireWriteConfirmation();
     const preset = selectedPreset();
     if (!preset) return requirePreset();
     const confirmDelete = root.defaultView?.confirm || globalThis.confirm;
     if (typeof confirmDelete === "function" && !confirmDelete(`删除筛选方案“${preset.name}”？`)) return null;
     return runOperation("正在删除筛选方案...", async () => {
-      await request(
+      await requestConfirmedPresetMutation(
         `/api/discovery/presets/${encodeURIComponent(preset.id)}?expected_revision=${encodeURIComponent(preset.revision)}`,
-        requestOptions({ method: "DELETE" })
+        requestOptions({ method: "DELETE" }), payload => validateDiscoveryDeleteReceipt(payload, preset.id)
       );
       state.presets = state.presets.filter((item) => item.id !== preset.id);
-      state.selectedId = null;
+      selectSavedPreset(null);
       const restoreResults = state.applied?.preset.id === preset.id;
       clearApplied();
       elements.name.value = "";
       renderPresetOptions();
-      setFeedback(`已删除筛选方案“${preset.name}”`, "success");
+      await synchronizePresetWrite(`已删除筛选方案“${preset.name}”`);
       if (restoreResults) void loadStandardResults();
       return true;
     }, "筛选方案删除");
   }
 
   async function applyPreset(page = 1) {
+    if (state.writeUnconfirmed) return requireWriteConfirmation();
     if (state.busy) return null;
     const context = preparePresetApplication();
     if (!context) return null;
@@ -301,9 +407,7 @@ export function createDiscoveryController(options = {}) {
         ? previous.selected
         : new Set(),
     };
-    upsertPreset(payload.preset);
-    state.selectedId = payload.preset.id;
-    renderPresetOptions();
+    selectSavedPreset(payload.preset);
   }
 
   function reportPresetApplication(payload, rankOutcome, editable) {
@@ -461,7 +565,8 @@ export function createDiscoveryController(options = {}) {
       return await operation();
     } catch (error) {
       if (!isAbortError(error) && sequence === state.sequence) {
-        setFeedback(`${failureLabel}失败：${compactErrorMessage(error?.message)}`, "error");
+        setFeedback(state.writeUnconfirmed ? compactErrorMessage(error?.message)
+          : `${failureLabel}失败：${compactErrorMessage(error?.message)}`, state.writeUnconfirmed ? "warn" : "error");
       }
       return null;
     } finally {
@@ -530,25 +635,45 @@ export function createDiscoveryController(options = {}) {
 
   function renderPresetOptions() {
     const selected = String(state.selectedId || "");
-    elements.select.innerHTML = `<option value="">选择已保存方案</option>${state.presets.map((preset) => (
+    const pageItems = state.presets.map(preset => preset.id === state.selectedId ? state.selected : preset);
+    const pinned = state.selected && !pageItems.some(preset => preset.id === state.selectedId) ? [state.selected] : [];
+    elements.select.innerHTML = `<option value="">${state.writeUnconfirmed ? "请选择具体方案核对保存结果" : "选择已保存方案"}</option>${[...pinned, ...pageItems].map((preset) => (
       `<option value="${preset.id}">${escapeHtml(preset.name)}${isDiscoveryPresetUiRepresentable(preset) ? "" : "（兼容模式）"}</option>`
     )).join("")}`;
-    elements.select.value = state.presets.some((preset) => String(preset.id) === selected) ? selected : "";
+    elements.select.value = state.writeUnconfirmed ? "" : selected;
+    elements.presetPageInfo.textContent = discoveryPresetPageText(state);
+    elements.selectionInfo.textContent = discoveryPresetSelectionText(state);
     renderControls();
   }
 
   function renderControls() {
     const preset = selectedPreset();
     const selected = Boolean(preset);
+    const blocked = state.busy || state.writeUnconfirmed;
     elements.select.disabled = state.busy;
     elements.name.disabled = state.busy;
-    elements.save.disabled = state.busy;
-    elements.apply.disabled = state.busy || !selected;
-    elements.rename.disabled = state.busy || !selected;
-    elements.screenAlert.disabled = state.busy || !selected;
-    elements.exportButton.disabled = state.busy || !selected;
-    elements.importButton.disabled = state.busy;
-    elements.remove.disabled = state.busy || !selected;
+    elements.apply.disabled = blocked || !selected;
+    elements.screenAlert.disabled = blocked || !selected;
+    elements.exportButton.disabled = blocked || !selected;
+    renderPresetWriteControls(preset);
+    renderPresetPagination();
+  }
+
+  function renderPresetWriteControls(preset) {
+    const blocked = state.busy || state.writeUnconfirmed;
+    const incompatible = Boolean(preset && !isDiscoveryPresetUiRepresentable(preset));
+    elements.save.disabled = blocked || incompatible;
+    elements.update.disabled = blocked || !preset || incompatible;
+    elements.rename.disabled = blocked || !preset;
+    elements.importButton.disabled = blocked;
+    elements.remove.disabled = blocked || !preset;
+  }
+
+  function renderPresetPagination() {
+    elements.presetPrev.disabled = state.busy || state.orderStale || state.page <= 1;
+    elements.presetNext.disabled = state.busy || state.orderStale || state.page >= state.pageCount;
+    elements.presetRefresh.disabled = state.busy;
+    elements.selectionInfo.textContent = discoveryPresetSelectionText(state);
   }
 
   function setBusy(busy) {
@@ -565,18 +690,11 @@ export function createDiscoveryController(options = {}) {
   }
 
   function selectedPreset() {
-    return presetById(state.selectedId);
+    return state.selected;
   }
 
   function presetById(id) {
     return state.presets.find((preset) => preset.id === Number(id)) || null;
-  }
-
-  function upsertPreset(preset) {
-    const index = state.presets.findIndex((item) => item.id === preset.id);
-    if (index < 0) state.presets.push(preset);
-    else state.presets.splice(index, 1, preset);
-    state.presets.sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
   }
 
   function requirePreset() {
@@ -599,9 +717,12 @@ export function createDiscoveryController(options = {}) {
   }
 
   function handlePresetSelection() {
+    const id = elements.select.value ? Number(elements.select.value) : null;
+    if (state.writeUnconfirmed && id) return void confirmPresetSelection(id);
+    state.selectionEpoch += 1;
     const previousApplied = Boolean(state.applied);
-    state.selectedId = elements.select.value ? Number(elements.select.value) : null;
-    const preset = selectedPreset();
+    const preset = presetById(id) || (state.selected?.id === id ? state.selected : null);
+    selectSavedPreset(preset);
     elements.name.value = preset?.name || "";
     if (preset && isDiscoveryPresetUiRepresentable(preset)) applyDiscoveryPresetFields(preset, elements);
     clearApplied();
@@ -612,6 +733,22 @@ export function createDiscoveryController(options = {}) {
         : `已选择兼容方案“${preset.name}”：将按保存时的原定义应用`
       : "");
     if (previousApplied) void loadStandardResults();
+  }
+
+  async function confirmPresetSelection(id) {
+    return runOperation("正在核对已保存筛选方案...", async () => {
+      const preset = validateDiscoveryPreset(await request(`/api/discovery/presets/${encodeURIComponent(id)}`, requestOptions()));
+      if (preset.id !== id) throw new Error("方案核对响应身份不一致");
+      state.writeUnconfirmed = false;
+      state.selectionEpoch += 1;
+      const hadApplied = Boolean(state.applied);
+      clearApplied();
+      selectSavedPreset(preset);
+      elements.name.value = preset.name;
+      if (isDiscoveryPresetUiRepresentable(preset)) applyDiscoveryPresetFields(preset, elements);
+      setFeedback(`已核对并选择方案“${preset.name}”修订 ${preset.revision}`, "success");
+      if (hadApplied) void loadStandardResults();
+    }, "筛选方案核对");
   }
 
   function handlePresetPagination(event, direction) {
@@ -630,6 +767,10 @@ export function createDiscoveryController(options = {}) {
   function bindEvents() {
     elements.select.addEventListener("change", handlePresetSelection);
     elements.save.addEventListener("click", () => void savePreset());
+    elements.update.addEventListener("click", () => void updatePreset());
+    elements.presetPrev.addEventListener("click", () => void loadPresets(state.page - 1));
+    elements.presetNext.addEventListener("click", () => void loadPresets(state.page + 1));
+    elements.presetRefresh.addEventListener("click", () => void loadPresets());
     elements.apply.addEventListener("click", () => void applyPreset(1));
     elements.rename.addEventListener("click", () => void renamePreset());
     elements.screenAlert.addEventListener("click", () => void recordScreenAlert());
@@ -738,6 +879,8 @@ export function createDiscoveryController(options = {}) {
     renamePreset,
     recordScreenAlert,
     savePreset,
+    updatePreset,
+    selectedPreset,
     state,
   };
 }
@@ -762,6 +905,12 @@ function discoveryElements(root) {
     select: byId("discoveryPresetSelect"),
     name: byId("discoveryPresetName"),
     save: byId("discoveryPresetSave"),
+    update: byId("discoveryPresetUpdate"),
+    presetPrev: byId("discoveryPresetPrev"),
+    presetNext: byId("discoveryPresetNext"),
+    presetRefresh: byId("discoveryPresetRefresh"),
+    presetPageInfo: byId("discoveryPresetPageInfo"),
+    selectionInfo: byId("discoveryPresetSelectionInfo"),
     apply: byId("discoveryPresetApply"),
     rename: byId("discoveryPresetRename"),
     screenAlert: byId("discoveryPresetScreenAlert"),
@@ -844,6 +993,8 @@ function inertDiscoveryController() {
     renamePreset: noOp,
     recordScreenAlert: noOp,
     savePreset: noOp,
+    updatePreset: noOp,
+    selectedPreset: () => null,
     state: { activated: false, applied: null, presets: [] },
   };
 }

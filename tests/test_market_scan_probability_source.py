@@ -568,6 +568,9 @@ def test_legacy_v1_source_remains_readable_but_has_no_current_score_contract() -
     legacy["schema_version"] = probability_source_module.LEGACY_PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION
     payload = cast(dict[str, object], legacy["payload"])
     payload["contract_version"] = probability_source_module.LEGACY_PROBABILITY_SOURCE_PAYLOAD_CONTRACT_VERSION
+    payload["feature_schema"] = probability_source_module._feature_schema(
+        probability_source_module.PREVIOUS_PROBABILITY_FEATURE_VERSION,
+    )
     for record in cast(list[dict[str, object]], payload["records"]):
         record["source_evidence_contract_version"] = (
             probability_source_module.MARKET_SCAN_EVIDENCE_LEGACY_V2_CONTRACT_VERSION
@@ -1355,6 +1358,7 @@ def _result_item(
     evidence["payload_digest"] = stable_probability_hash(evidence_payload)
     dimensions = SimpleNamespace(
         details=lambda: {
+            "algorithm": score_dimensions_module.MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
             "scores": scores,
             "raw_features": evidence["payload"]["features"],
             "point_in_time_evidence": evidence,

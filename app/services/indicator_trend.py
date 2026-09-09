@@ -11,6 +11,8 @@ from app.models.analysis import (
 )
 from app.models.market_scan import MarketScanMode
 from app.services.indicator_trend_components import (
+    TREND_SCORE_ALGORITHM_VERSION,
+    TREND_SCORE_LEGACY_ALGORITHM_VERSION,
     build_trend_context,
     change_impact as _change_impact,
     contribution as _contribution,
@@ -21,7 +23,6 @@ from app.services.indicator_trend_components import (
     turnover_signal as _turnover_signal,
     volume_signal as _volume_signal,
 )
-from app.utils.market_data import filter_valid_klines
 
 
 TREND_SCORE_CENTER = 50
@@ -33,8 +34,9 @@ def trend_score(
     klines: list[Kline],
     *,
     mode: MarketScanMode = "official",
+    algorithm_version: str = TREND_SCORE_ALGORITHM_VERSION,
 ) -> tuple[int, str]:
-    score, label, _ = trend_score_snapshot(quote, klines, mode=mode)
+    score, label, _ = trend_score_snapshot(quote, klines, mode=mode, algorithm_version=algorithm_version)
     return score, label
 
 
@@ -43,11 +45,12 @@ def trend_score_snapshot(
     klines: list[Kline],
     *,
     mode: MarketScanMode = "official",
+    algorithm_version: str = TREND_SCORE_ALGORITHM_VERSION,
 ) -> tuple[int, str, list[SignalContribution]]:
-    valid_klines = filter_valid_klines(klines)
-    if len(valid_klines) < 20:
+    context = build_trend_context(quote, klines, mode=mode, algorithm_version=algorithm_version)
+    if len(context.klines) < 20:
         return 50, "数据不足", insufficient_sample_contributions()
-    contributions = trend_contributions(build_trend_context(quote, valid_klines, mode=mode))
+    contributions = trend_contributions(context)
     score = trend_score_from_impact(sum(item.impact for item in contributions))
     return score, _trend_label(score), contributions
 
@@ -71,6 +74,8 @@ def _add_contribution(
 
 
 __all__ = [
+    "TREND_SCORE_ALGORITHM_VERSION",
+    "TREND_SCORE_LEGACY_ALGORITHM_VERSION",
     "_add_contribution",
     "_change_impact",
     "_impact_level",

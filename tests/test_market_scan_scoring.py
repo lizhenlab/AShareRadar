@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 
 import pytest
+import app.services.market_scan_score_dimensions as dimension_module
 
 from app.artifacts.io import canonical_json_text, sha256_hex
 from app.models.market_scan import MarketScanResultItem, MarketScanResultWrite, MarketScanRun
@@ -234,7 +235,7 @@ def test_market_scan_persists_separate_score_dimensions_and_verifiable_point_in_
     assert {bar[9] for bar in evidence["payload"]["bar_contract_61"]} == {
         DATA_DATE.isoformat()
     }
-    assert dimensions["algorithm"] == "full-market-dimensions-v4-session-coverage"
+    assert dimensions["algorithm"] == "full-market-dimensions-v5-target-semideviation"
     assert dimensions["volume_context"]["snapshot_bar_position"] == "snapshot-session"
     coverage = evidence["payload"]["session_coverage"]
     assert coverage["status"] == "verified"
@@ -1066,7 +1067,28 @@ def _as_v4_score_details(details: dict[str, object]) -> dict[str, object]:
     updated["score_spec"] = spec
     updated["score_spec_hash"] = stable_score_spec_hash(spec)
     updated["ranking"]["tie_break_values"]["raw_score"] = raw_score
+    _freeze_legacy_dimension_fixture(components["score_dimensions"])
     return updated
+
+
+def _freeze_legacy_dimension_fixture(dimensions):
+    """Synthetic old-score fixtures must use old features, not relabel new math."""
+    algorithm = dimension_module.MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION
+    dimensions["algorithm"] = algorithm
+    evidence = dimensions["point_in_time_evidence"]
+    payload = evidence["payload"]
+    payload["dimension_spec"] = dimension_module.market_scan_dimension_spec(algorithm_version=algorithm)
+    payload["dimension_spec_hash"] = dimension_module._stable_digest(payload["dimension_spec"])
+    _, raw = dimension_module._replay_evidence_features(payload)
+    payload["features"] = raw
+    dimensions["raw_features"] = raw
+    scores = dimension_module._replay_evidence_scores(payload)
+    assert scores is not None
+    payload["derived_scores"] = scores
+    dimensions["scores"] = {
+        **scores, "decision_utility": dimension_module._profile_utilities(**scores),
+    }
+    evidence["payload_digest"] = dimension_module._stable_digest(payload)
 
 
 def _as_v3_score_details(details: dict[str, object]) -> dict[str, object]:
@@ -1229,7 +1251,8 @@ def _trend_rows(latest: date, count: int, *, first_close: float, last_close: flo
     return [
         make_kline(
             date=day.isoformat(),
-            close=first_close + index * step,
+            # The shared completed quote reports a 5% final-session return.
+            close=last_close / 1.05 if index == count - 2 else first_close + index * step,
             volume=1_000_000 + index * 20_000,
             source="test-qfq",
             as_of=latest.isoformat(),

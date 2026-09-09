@@ -12,6 +12,7 @@ from typing import Literal, cast
 
 from app.services.market_scan_probability import (
     LEGACY_PROBABILITY_FEATURE_VERSION,
+    PREVIOUS_PROBABILITY_FEATURE_VERSION,
     PROBABILITY_CALIBRATOR_VERSION,
     PROBABILITY_COST_MODEL_VERSION,
     PROBABILITY_FEATURE_VERSION,
@@ -64,6 +65,7 @@ class ProbabilityResearchRow:
     rule_version: str = "unspecified"
     production_score_rule_version: str | None = None
     production_score_spec_hash: str | None = None
+    source_feature_contract_current: bool = True
 
 
 def probability_feature_vector(
@@ -621,6 +623,7 @@ def _self_contained_record_evidence(
     source_digest = _verified_artifact_digest(value.get("source_evidence_digest"))
     executable = (
         mature
+        and "source_feature_contract_not_current_audit_only" not in local_limitations
         and value.get("label_status") == "modelled"
         and value.get("label_rule_profile_verified") is True
         and source_digest is not None
@@ -1014,7 +1017,9 @@ def _record_limitations(
         values.append("daily_bar_execution_model_limited")
     if estimate.get("status") != "calibrated_shadow" and evidence.get("status") == "calibrated_shadow":
         values.append("not_out_of_sample_prediction")
-    if not _has_verified_source_evidence(row):
+    if not row.source_feature_contract_current:
+        values.append("source_feature_contract_not_current_audit_only")
+    elif not _has_verified_source_evidence(row):
         values.append("point_in_time_source_digest_unavailable")
     return list(dict.fromkeys(values))
 
@@ -1541,7 +1546,7 @@ def _mapping_float(values: Mapping[str, object], name: str, *, default: float = 
 
 def _has_verified_source_evidence(row: ProbabilityResearchRow) -> bool:
     digest = row.source_evidence_digest
-    return isinstance(digest, str) and len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+    return row.source_feature_contract_current and isinstance(digest, str) and len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
 
 
 def _feature(values: Mapping[str, float], name: str, default: float) -> float:
@@ -1630,9 +1635,12 @@ def _categorical_features(
     *,
     feature_version: str,
 ) -> dict[str, float]:
-    if feature_version not in {PROBABILITY_FEATURE_VERSION, LEGACY_PROBABILITY_FEATURE_VERSION}:
+    if feature_version not in {
+        PROBABILITY_FEATURE_VERSION, PREVIOUS_PROBABILITY_FEATURE_VERSION,
+        LEGACY_PROBABILITY_FEATURE_VERSION,
+    }:
         raise ValueError("unsupported probability feature schema version")
-    medium_bucket = "medium" if feature_version == PROBABILITY_FEATURE_VERSION else "mid"
+    medium_bucket = "mid" if feature_version == LEGACY_PROBABILITY_FEATURE_VERSION else "medium"
     features = {
         "market_sh": float(market == "SH"),
         "market_sz": float(market == "SZ"),

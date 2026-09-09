@@ -190,13 +190,15 @@ async def cleanup_local_data(
                     backup_path = (
                         _create_verified_backup(backups) if pending.requires_user_backup else None
                     )
-                    removed = datahub.cache.cleanup_runtime_rows()
+                    removed = datahub.cache.cleanup_runtime_rows(compact=False)
                     preview = _cleanup_preview(removed)
-                    return RuntimeCleanupResult(
+                    result = RuntimeCleanupResult(
                         **preview.model_dump(),
                         committed=True,
                         rollback_backup_path=backup_path,
                     )
+        datahub.cache.maintenance_repo.compact_after_cleanup(removed)
+        return result
 
     return await run_sync_api_async(cleanup)
 

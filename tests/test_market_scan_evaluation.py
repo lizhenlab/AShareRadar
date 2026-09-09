@@ -250,8 +250,8 @@ def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    # Factor diagnostics v2 retain missing dates and declare their inference floor.
-    assert normalized_digest == "2434fc4889488cf6edd81161a66d592d0cf29a7f3a2afa162b17b4531cff9968"
+    # V4 binds execution phases; this fixture changes only schema/execution identity.
+    assert normalized_digest == "0eba820de35a38508640767c1186f0ec5817d3642a6624d00ac86dbcad6c93be"
     assert calibration_digest == "8f36b6d7a1035c20d245135b234cc2896e9b20d8750c7787b829e1cdf9519bb2"
 
     assert report["status"] == "ok"
@@ -1003,7 +1003,7 @@ def test_shadow_evaluation_is_read_only_replayable_and_never_auto_promotes(tmp_p
         text=True,
     )
     cli_payload = json.loads(completed.stdout)
-    assert cli_payload["schema_version"] == "market-scan-shadow-comparison-v3"
+    assert cli_payload["schema_version"] == "market-scan-shadow-comparison-v4"
     assert cli_payload["artifact_projection"]["schema_version"] == (  # type: ignore[index]
         "market-scan-shadow-comparison-compact-v1"
     )

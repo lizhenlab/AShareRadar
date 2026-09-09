@@ -33,6 +33,14 @@ KLINE_DAILY_COLUMN_DEFINITIONS = """
     high REAL NOT NULL,
     low REAL NOT NULL,
     volume REAL NOT NULL,
+    session_status TEXT NOT NULL DEFAULT 'unknown' CHECK (session_status IN ('trading', 'suspended', 'unknown')),
+    open_execution_status TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (open_execution_status IN ('tradable', 'locked_limit_up', 'locked_limit_down', 'unavailable', 'unknown')),
+    corporate_action_status TEXT NOT NULL DEFAULT 'unknown' CHECK (corporate_action_status IN ('none', 'effective_event', 'unknown')),
+    adjustment_factor REAL CHECK (adjustment_factor IS NULL OR
+        (typeof(adjustment_factor) IN ('real', 'integer') AND adjustment_factor BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308)),
+    point_in_time INTEGER NOT NULL DEFAULT 0 CHECK (point_in_time IN (0, 1)),
+    execution_metadata_version TEXT,
     as_of TEXT,
     data_version TEXT NOT NULL DEFAULT 'legacy' CHECK (length(trim(data_version)) > 0),
     contract_version TEXT NOT NULL DEFAULT 'legacy' CHECK (length(trim(contract_version)) > 0),

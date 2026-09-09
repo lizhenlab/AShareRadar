@@ -10,11 +10,13 @@ import re
 from pydantic import TypeAdapter
 
 from app.artifacts.io import sha256_hex
+from app.models.paper_trading import PaperCostProfile
 from app.services.market_scan_research_holdings_contracts import finite_json_bytes, require_date, require_digest
 from app.services.market_scan_research_portfolio_models import (
-    RESEARCH_CAPITAL_POLICY, RESEARCH_PORTFOLIO_VERSION, ResearchPortfolioDay,
+    RESEARCH_CAPITAL_POLICY, RESEARCH_PORTFOLIO_VERSION, ResearchPortfolioConfig, ResearchPortfolioDay,
     ResearchPortfolioPosition, ResearchPortfolioResult, ResearchPortfolioTrade,
 )
+from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.trading_calendar import next_trade_dates, trading_dates_between
 
 
@@ -72,16 +74,35 @@ def validate_holdings_account(result: ResearchPortfolioResult) -> None:
     _validate_calendar(result)
     _validate_exit_policy(result)
     trades = _trades_by_day(result)
+    if len(result.days[0].sleeve_cash) != result.config.horizon + 1:
+        raise ValueError("initial sleeve count differs from fixed capital policy")
     inventory: dict[str, ResearchPortfolioTrade] = {}
-    cash, fees = result.config.initial_cash, 0.0
+    cash, fees = _initial_cash_sleeves(result.config), 0.0
     for day in result.days:
-        cash, fees = _advance_inventory(inventory, trades.get(day.session_date, []), cash, fees)
-        require_equal_money(day.cash, cash, "daily cash")
+        daily_trades = trades.get(day.session_date, [])
+        fees = _advance_inventory(inventory, daily_trades, cash, fees)
+        require_equal_money(day.cash, round(sum(cash), 2), "daily cash")
         require_equal_money(day.cumulative_fees, fees, "cumulative fees")
+        _validate_daily_cash(day, daily_trades, cash)
         _validate_day(day, inventory)
     if result.final_positions != result.days[-1].positions:
         raise ValueError("final positions mismatch")
     require_equal_money(result.total_fees, fees, "total fees")
+
+
+def _initial_cash_sleeves(config: ResearchPortfolioConfig) -> list[float]:
+    count = config.horizon + 1
+    cents, remainder = divmod(round(config.initial_cash * 100), count)
+    return [(cents + int(index < remainder)) / 100 for index in range(count)]
+
+
+def _validate_daily_cash(day: ResearchPortfolioDay, trades: list[ResearchPortfolioTrade], cash: list[float]) -> None:
+    if len(day.sleeve_cash) != len(cash):
+        raise ValueError("daily sleeve count differs from fixed capital policy")
+    for actual, expected in zip(day.sleeve_cash, cash, strict=True):
+        require_equal_money(actual, expected, "daily sleeve cash")
+    require_equal_money(day.fees, round(sum(trade.fees for trade in trades), 2), "daily fees")
+    require_equal_money(day.gross_traded, round(sum(trade.gross_amount for trade in trades), 2), "daily gross traded")
 
 
 def _validate_calendar(result: ResearchPortfolioResult) -> None:
@@ -128,16 +149,19 @@ def _trades_by_day(result: ResearchPortfolioResult) -> dict[str, list[ResearchPo
     grouped: dict[str, list[ResearchPortfolioTrade]] = {}
     dates = {day.session_date for day in result.days}
     previous = ""
+    cost = resolve_cost_profile(result.config.cost_profile)
+    if result.days[0].session_date < cost.effective_from:
+        raise ValueError("portfolio predates its declared cost profile")
     for trade in result.trades:
         if trade.session_date not in dates or trade.session_date < previous:
             raise ValueError("trade date outside ordered account calendar")
         previous = trade.session_date
-        _validate_trade(trade, result.config.horizon + 1)
+        _validate_trade(trade, result.config.horizon + 1, cost)
         grouped.setdefault(trade.session_date, []).append(trade)
     return grouped
 
 
-def _validate_trade(trade: ResearchPortfolioTrade, sleeves: int) -> None:
+def _validate_trade(trade: ResearchPortfolioTrade, sleeves: int, cost: PaperCostProfile) -> None:
     if trade.quantity <= 0 or not 0 <= trade.sleeve < sleeves or trade.frozen_rank <= 0:
         raise ValueError("invalid trade quantity, sleeve or rank")
     if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", trade.symbol) is None or not trade.batch_id:
@@ -147,29 +171,31 @@ def _validate_trade(trade: ResearchPortfolioTrade, sleeves: int) -> None:
     if not math.isfinite(trade.price) or trade.price <= 0 or trade.exit_delay_sessions < 0:
         raise ValueError("invalid trade price or exit delay")
     require_equal_money(trade.gross_amount, round(trade.quantity * trade.price, 2), "trade gross")
-    money(trade.fees, "trade fees")
+    expected_fees = trade_costs(cost, side=trade.side, gross_amount=trade.gross_amount).total
+    require_equal_money(trade.fees, expected_fees, "trade fees for cost profile")
     money(trade.sleeve_cash_after, "trade sleeve cash")
 
 
 def _advance_inventory(
-    inventory: dict[str, ResearchPortfolioTrade], trades: list[ResearchPortfolioTrade], cash: float, fees: float,
-) -> tuple[float, float]:
+    inventory: dict[str, ResearchPortfolioTrade], trades: list[ResearchPortfolioTrade], cash: list[float], fees: float,
+) -> float:
     for trade in trades:
         if trade.side == "buy":
             if trade.symbol in inventory:
                 raise ValueError("duplicate held symbol")
             inventory[trade.symbol] = trade
-            cash = round(cash - trade.gross_amount - trade.fees, 2)
+            cash[trade.sleeve] = round(cash[trade.sleeve] - trade.gross_amount - trade.fees, 2)
         else:
             entry = inventory.pop(trade.symbol, None)
             if entry is None or (entry.batch_id, entry.sleeve, entry.quantity) != (trade.batch_id, trade.sleeve, trade.quantity):
                 raise ValueError("sell does not match held inventory")
             if trade.session_date <= entry.session_date:
                 raise ValueError("same-session sell violates account T+1")
-            cash = round(cash + trade.gross_amount - trade.fees, 2)
-        money(cash, "running cash")
+            cash[trade.sleeve] = round(cash[trade.sleeve] + trade.gross_amount - trade.fees, 2)
+        money(cash[trade.sleeve], "running sleeve cash")
+        require_equal_money(trade.sleeve_cash_after, cash[trade.sleeve], "trade sleeve cash")
         fees = round(fees + trade.fees, 2)
-    return cash, fees
+    return fees
 
 
 def _validate_day(day: ResearchPortfolioDay, inventory: dict[str, ResearchPortfolioTrade]) -> None:

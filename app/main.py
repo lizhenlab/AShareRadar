@@ -48,6 +48,7 @@ from app.api.security import SameOriginMutationMiddleware
 from app.api.static_assets import RevalidatingStaticFiles
 from app.config import PROJECT_ROOT, Settings, get_settings, resolve_project_path
 from app.services.daemon_executor import install_daemon_loop_executor
+from app.services.lifecycle_cleanup import await_cleanup
 from app.utils.clock import monotonic_now
 
 
@@ -130,7 +131,8 @@ async def _close_container_resources_safely(container: AppContainer) -> None:
 async def _shutdown_container(container: AppContainer) -> None:
     errors: list[BaseException] = []
     try:
-        await _close_market_scan_read_admissions(container)
+        cleanup = asyncio.create_task(_close_market_scan_read_admissions(container), name="market-scan-read-shutdown")
+        await await_cleanup(cleanup)
     except BaseException as exc:
         errors.append(exc)
     try:

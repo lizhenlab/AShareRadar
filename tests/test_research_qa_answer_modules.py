@@ -11,7 +11,7 @@ from app.services.research_qa_answer_confidence import question_confidence
 from app.services.research_qa_answer_report import answer_stock_question
 from app.services.research_qa_answer_selectors import question_actions, question_answer_text, question_conclusion, question_evidence, question_invalidations
 from app.services.research_qa_answer_strategies import TOPIC_ANSWER_STRATEGIES
-from app.services.research_qa_topics import QUESTION_TOPIC_KEYWORDS, RELATED_QUESTIONS
+from app.services.research_qa_topics import QUESTION_TOPIC_PATTERNS, RELATED_QUESTIONS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,7 +54,7 @@ def test_stock_question_topics_have_complete_strategy_outputs(question: str, top
 
 
 def test_question_topic_tables_have_registered_answer_strategies() -> None:
-    configured_topics = {topic for topic, _keywords in QUESTION_TOPIC_KEYWORDS} | set(RELATED_QUESTIONS) | {"综合判断"}
+    configured_topics = {topic for topic, _pattern in QUESTION_TOPIC_PATTERNS} | set(RELATED_QUESTIONS) | {"综合判断"}
 
     assert configured_topics <= set(TOPIC_ANSWER_STRATEGIES)
 
@@ -255,8 +255,11 @@ def test_theme_question_without_context_stays_conservative() -> None:
 
     assert result.topic == "主题概念"
     assert "待确认" in result.conclusion
-    assert result.actions[0] == "主题概念数据未确认前，不把题材当作买入理由。"
-    assert any("暂不可用" in item for item in result.evidence)
+    assert result.answerability == "insufficient_evidence"
+    assert result.confidence == 0
+    assert result.actions == []
+    assert result.evidence == []
+    assert "概念资料" in "；".join(result.missing_evidence)
 
 
 def test_question_confidence_caps_theme_missing_data_penalty() -> None:

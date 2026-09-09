@@ -6,6 +6,8 @@ from app.services.research_qa_utils import bounded_int, dedupe
 
 
 def _t_strategy_actions(context: ActionContext) -> list[str]:
+    if context.t_strategy.suitability != "仅底仓可做T":
+        return dedupe(context.t_strategy.execution_steps)
     return dedupe([
         f"只在已有可卖底仓前提下执行，低吸参考 {_display_text(context.t_strategy.low_zone)}，高抛参考 {_display_text(context.t_strategy.high_zone)}。",
         *context.t_strategy.execution_steps,

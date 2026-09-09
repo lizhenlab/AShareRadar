@@ -114,6 +114,8 @@ def test_probability_ranking_publication_requires_pinned_human_promotion_and_rep
         _seal=probability_module._VERIFIED_CURRENT_PREDICTION_SEAL,  # noqa: SLF001
     )
     shadow_payload = {
+        "contract_version": "probability-ranking-preregistered-shadow-v1",
+        "qualified": True,
         "generated_at": "2026-08-23T16:00:00+08:00",
         "study_evidence_digest": study_digest,
         "source_run_ids": [100],
@@ -153,14 +155,14 @@ def test_probability_ranking_publication_requires_pinned_human_promotion_and_rep
         shadow=shadow,
     )
 
-    artifact = build_probability_ranking_publication_artifact(
-        source,
-        predictions,
-        study,
-        deployment,
-        promotion,
-        generated_at="2026-08-24T16:03:00+08:00",
-    )
+    assert promotion.promotion_eligible is False
+    for generated_at in ("2026-08-24T16:03:00+08:00", "2026-09-11T16:03:00+08:00"):
+        with pytest.raises(ProbabilityRankingError, match="current inference-qualified"):
+            build_probability_ranking_publication_artifact(
+                source, predictions, study, deployment, promotion,
+                generated_at=generated_at,
+            )
+    artifact = _legacy_ranking_artifacts()["build_probability_ranking_publication_artifact"][0]
     publication = verify_probability_ranking_publication_artifact(
         artifact,
         source=source,
@@ -250,6 +252,13 @@ def test_probability_ranking_publication_requires_pinned_human_promotion_and_rep
         gzip.compress(canonical_json_bytes(artifact), compresslevel=9, mtime=0)
     )
     store = MarketScanProbabilityRankingStore(database_path)
+    assert publication.current_write_eligible is False
+    with pytest.raises(ProbabilityRankingError, match="historical v6 audit token"):
+        store.publish(publication, artifact_path=artifact_path)
+    with sqlite3.connect(database_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM market_scan_probability_ranking_publication").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_scan_probability_ranking_result").fetchone()[0] == 0
+        _restore_preexisting_baseline_mirror(conn, artifact_path)
     store.publish(publication, artifact_path=artifact_path)
     store.publish(publication, artifact_path=artifact_path)
     assert store.verify_mirror(publication) is True
@@ -487,7 +496,7 @@ def test_probability_ranking_shadow_is_preregistered_replayable_and_fail_closed(
         corpus,
         [source],
         study,
-        generated_at="2026-08-25T17:00:00+08:00",
+        generated_at="2026-09-10T02:00:00+08:00",
     )
     verified = verify_probability_ranking_shadow_artifact(
         artifact,
@@ -498,10 +507,21 @@ def test_probability_ranking_shadow_is_preregistered_replayable_and_fail_closed(
 
     assert verified.qualified is False
     assert verified.payload["decision_count"] == 2
-    assert "minimum_60_independent_shadow_sessions" in cast(
+    assert "minimum_60_distinct_shadow_sessions" in cast(
         list[str], verified.payload["failed_gates"]
     )
     assert verified.payload["automatic_promotion"] is False
+    assert verified.payload["inference_contract"]["promotion_eligible"] is False
+    legacy_artifact = _legacy_ranking_artifacts()["build_probability_ranking_shadow_artifact"][0]
+    legacy = verify_probability_ranking_shadow_artifact(
+        legacy_artifact, oos_corpus=corpus, sources=[source], study=study,
+    )
+    assert legacy.qualified is False
+    assert legacy.payload == legacy_artifact["payload"]
+    with pytest.raises(ProbabilityRankingError, match="predates current inference"):
+        build_probability_ranking_shadow_artifact(
+            corpus, [source], study, generated_at="2026-08-25T17:00:00+08:00",
+        )
 
     tampered = deepcopy(artifact)
     cast(dict[str, object], tampered["payload"])["qualified"] = True
@@ -561,7 +581,7 @@ def test_probability_ranking_tokens_statistics_and_scalar_guards_fail_closed() -
         "liquidity": 0.0,
         "industry_bucket": 0.0,
     }
-    assert ranking_module._maximum_drawdown([0.1, -0.2, 0.05]) > 0  # noqa: SLF001
+    assert ranking_module._synthetic_horizon_excess_drawdown([0.1, -0.2, 0.05]) > 0  # noqa: SLF001
     with pytest.raises(ProbabilityRankingError, match="bootstrap"):
         ranking_module._block_bootstrap_mean_ci([], [], seed="a" * 64)  # noqa: SLF001
     assert ranking_module._block_bootstrap_mean_ci(  # noqa: SLF001
@@ -569,25 +589,25 @@ def test_probability_ranking_tokens_statistics_and_scalar_guards_fail_closed() -
         [0.01],
         seed="a" * 64,
     ) == (0.01, 0.01)
-    assert ranking_module._probability_of_backtest_overfitting(  # noqa: SLF001
+    assert ranking_module._legacy_interleaved_pair_failure_rate(  # noqa: SLF001
         [0.0] * 15,
         [0.01] * 15,
     ) is None
-    pbo = ranking_module._probability_of_backtest_overfitting(  # noqa: SLF001
+    pbo = ranking_module._legacy_interleaved_pair_failure_rate(  # noqa: SLF001
         [0.0] * 16,
         [0.02, -0.01] * 8,
     )
     assert pbo is not None and 0 <= pbo <= 1
-    assert ranking_module._pbo_case_overfits(  # noqa: SLF001
+    assert ranking_module._legacy_pair_case_failed(  # noqa: SLF001
         [0, 1, 2, 3],
         [[item] for item in range(8)],
         [0.0] * 8,
         [-0.01] * 8,
     ) is None
-    assert ranking_module._deflated_sharpe_probability([0.01] * 59) is None  # noqa: SLF001
-    assert ranking_module._deflated_sharpe_probability([0.01] * 60) is None  # noqa: SLF001
+    assert ranking_module._iid_zero_benchmark_probabilistic_sharpe([0.01] * 59) is None  # noqa: SLF001
+    assert ranking_module._iid_zero_benchmark_probabilistic_sharpe([0.01] * 60) is None  # noqa: SLF001
     varied = [0.01 + (index % 5) * 0.001 for index in range(60)]
-    assert ranking_module._deflated_sharpe_probability(varied) is not None  # noqa: SLF001
+    assert ranking_module._iid_zero_benchmark_probabilistic_sharpe(varied) is not None  # noqa: SLF001
 
     invalid_calls = (
         (ranking_module._mapping, ([], "mapping")),  # noqa: SLF001
@@ -906,3 +926,25 @@ def _digest(value: object) -> str:
     from app.artifacts.io import canonical_json_bytes, sha256_hex
 
     return sha256_hex(canonical_json_bytes(value))
+
+
+def _legacy_ranking_artifacts() -> dict[str, list[dict[str, object]]]:
+    return json.loads(
+        (Path(__file__).parent / "fixtures" / "probability_ranking_legacy_v1_artifacts.json").read_text()
+    )
+
+
+def _restore_preexisting_baseline_mirror(conn: sqlite3.Connection, artifact_path: Path) -> None:
+    mirror = json.loads(
+        (Path(__file__).parent / "fixtures" / "probability_ranking_legacy_v1_mirror.json").read_text()
+    )
+    publication = mirror["publication"]
+    publication["artifact_path"] = str(artifact_path)
+    for table, rows in (("market_scan_probability_ranking_publication", [publication]),
+                        ("market_scan_probability_ranking_result", mirror["results"])):
+        for row in rows:
+            names = list(row)
+            conn.execute(
+                f"INSERT INTO {table} ({','.join(names)}) VALUES ({','.join('?' for _ in names)})",
+                tuple(row[name] for name in names),
+            )

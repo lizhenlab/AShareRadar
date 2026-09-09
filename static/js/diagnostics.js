@@ -62,6 +62,10 @@ function renderSchedulerStatusResult(statusResult, runsResult) {
   if (status.found) {
     try {
       renderSchedulerStatus(status.value, runs.found ? runs.value : null);
+      if (statusResult.status !== "fulfilled") {
+        $("schedulerState").textContent = `上次：${$("schedulerState").textContent}`;
+        renderRefreshFailure("taskCards", "task-card", statusResult.reason);
+      }
       return statusResult.status === "fulfilled";
     } catch (error) {
       renderSchedulerError(error);
@@ -88,6 +92,7 @@ function renderMonitorEventsResult(eventsResult) {
   if (events.found) {
     try {
       renderMonitorEvents(events.value);
+      if (eventsResult.status !== "fulfilled") renderRefreshFailure("monitorEvents", "monitor-event warn", eventsResult.reason);
       return eventsResult.status === "fulfilled";
     } catch (error) {
       renderMonitorEventsError(error);
@@ -100,6 +105,12 @@ function renderMonitorEventsResult(eventsResult) {
 
 function renderMonitorEventsError(error) {
   $("monitorEvents").innerHTML = `<div class="monitor-event warn"><strong>事件读取失败</strong><p>${escapeHtml(errorMessage(error))}</p></div>`;
+}
+
+function renderRefreshFailure(targetId, className, error) {
+  const target = $(targetId);
+  if (!target) return;
+  target.innerHTML += `<div class="${className}" data-refresh-warning="true"><strong>刷新失败，显示上次成功结果</strong><span>${escapeHtml(errorMessage(error))}；请稍后刷新重试。</span></div>`;
 }
 
 function maintainMonitorTimer(state) {
@@ -186,7 +197,8 @@ export async function loadDataStatus(state = standaloneDataStatusState, options 
     if (isAbortError(error) || !isCurrent()) return false;
     const cached = getCachedJsonSnapshot(DATA_STATUS_ENDPOINT);
     if (cached.found) {
-      renderDataStatus(cached.value);
+      renderDataStatus(cached.value, { stale: true });
+      renderRefreshFailure("providerStatus", "provider-item", error);
       syncDataStatusResponse(state, cached.value, options);
     }
     else {
@@ -377,7 +389,7 @@ function eventCategory(category) {
   return names[category] || category;
 }
 
-function renderDataStatus(status) {
+function renderDataStatus(status, options = {}) {
   const safeStatus = asObject(status);
   $("cachePath").textContent = "本地缓存";
   renderSourcePlan(safeStatus.source_plan);
@@ -392,7 +404,7 @@ function renderDataStatus(status) {
   $("providerStatus").innerHTML = providers.length
     ? providers
     .map((item) => {
-      const stateInfo = providerState(item);
+      const stateInfo = providerState(item, options.stale);
       return `
       <div class="provider-item ${stateInfo.tone}">
         <div>
@@ -465,10 +477,10 @@ function nonNegativePercent(value) {
   return Math.round(number * 100) / 100;
 }
 
-function providerState(item) {
+function providerState(item, stale = false) {
   if (!item.enabled) return { text: "未启用", tone: "idle" };
-  if (item.healthy) return { text: "当前正常", tone: "ok" };
-  return { text: "最近失败", tone: "bad" };
+  if (item.healthy) return { text: stale ? "上次正常" : "当前正常", tone: "ok" };
+  return { text: stale ? "上次失败" : "最近失败", tone: "bad" };
 }
 
 function providerDetail(item) {

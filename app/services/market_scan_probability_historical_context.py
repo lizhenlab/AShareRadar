@@ -31,9 +31,11 @@ from app.artifacts.io import (
 )
 from app.services.market_scan_probability_replay import (
     HISTORICAL_REPLAY_ARTIFACT_SCHEMA_VERSION,
+    HISTORICAL_REPLAY_SUPERSEDED_ARTIFACT_SCHEMA_VERSION,
     HISTORICAL_REPLAY_COHORT_MODE,
     HISTORICAL_REPLAY_HORIZONS,
     HistoricalReplayError,
+    HistoricalReplayFitContractSupersededError,
     verify_historical_replay_artifact,
 )
 
@@ -155,6 +157,8 @@ def build_historical_probability_context(
         if not isinstance(decoded, Mapping):
             raise HistoricalProbabilityContextError("历史概率完整重放产物必须是 object")
         replay = verify_historical_replay_artifact(decoded)
+    except HistoricalReplayFitContractSupersededError as exc:
+        raise HistoricalProbabilityContextError(str(exc)) from exc
     except (ArtifactIOError, HistoricalReplayError) as exc:
         raise HistoricalProbabilityContextError("历史概率完整重放产物校验失败") from exc
     return _build_context_from_verified_replay(
@@ -580,6 +584,8 @@ def _validate_context_source(value: object) -> None:
         "full_replay_verified",
     }:
         raise HistoricalProbabilityContextError("历史概率源摘要字段无效")
+    if source.get("schema_version") == HISTORICAL_REPLAY_SUPERSEDED_ARTIFACT_SCHEMA_VERSION:
+        raise HistoricalProbabilityContextError(str(HistoricalReplayFitContractSupersededError()))
     if source.get("schema_version") != HISTORICAL_REPLAY_ARTIFACT_SCHEMA_VERSION or source.get("full_replay_verified") is not True:
         raise HistoricalProbabilityContextError("历史概率完整重放验证状态无效")
     _positive_int(source.get("bytes"), "source bytes")

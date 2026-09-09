@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import json
-import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -15,7 +14,8 @@ from app.config_shell import load_shell_env
 from app.models.research import StockQuestionAnswer
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
-from app.services.llm_explainer import _allowed_numbers, _call_llm, enhance_stock_answer
+from app.services.llm_explainer import _call_llm, enhance_stock_answer
+from app.services.llm_evidence import evidence_selection_contract
 from tests.factories import make_kline as _kline, make_quote as _quote
 
 
@@ -133,32 +133,6 @@ class LlmExplainerTests(unittest.TestCase):
                 _assert_rule_fallback(self, result, rule_answer)
                 self.assertEqual(result.llm_status, "未配置大模型API")
 
-    def test_llm_explainer_renders_only_explanation_from_model(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        explanation = (
-            f"代码 {analysis.quote.code}.SH 的现价 {analysis.quote.price:.2f} 元位于"
-            f"支撑 {analysis.support:.2f} 元和压力 {analysis.resistance:.2f} 元之间，"
-            f"涨跌幅 {analysis.quote.change_pct:.2f}%，MA20仍用于确认趋势。"
-        )
-
-        result = _enhance_with_output(analysis, rule_answer, _structured_json(analysis, rule_answer, explanation))
-
-        self.assertTrue(result.llm_used)
-        self.assertEqual(result.conclusion, rule_answer.conclusion)
-        self.assertEqual(result.confidence, rule_answer.confidence)
-        self.assertEqual(result.actions, rule_answer.actions)
-        self.assertEqual(result.invalidations, rule_answer.invalidations)
-        self.assertIn(f"规则结论：{rule_answer.conclusion}", result.answer)
-        self.assertIn(f"规则建议强度 {rule_answer.confidence}/100", result.answer)
-        self.assertNotIn(f"置信度 {rule_answer.confidence}%", result.answer)
-        self.assertIn(f"涨跌幅 {analysis.quote.change_pct:.2f}%", result.answer)
-        self.assertIn(f"大模型解释：{explanation}", result.answer)
-        self.assertIn(rule_answer.actions[0], result.answer)
-        self.assertIn(f"支撑 {analysis.support:.2f} 元", result.answer)
-        self.assertIn(f"压力 {analysis.resistance:.2f} 元", result.answer)
-        self.assertIn(rule_answer.invalidations[0], result.answer)
-        self.assertIn("test-model", result.answer_source)
-        self.assertIn("仅增强解释", result.llm_status or "")
 
     def test_llm_explainer_never_exposes_unavailable_level_placeholders(self) -> None:
         analysis, rule_answer = _llm_test_case()
@@ -172,7 +146,7 @@ class LlmExplainerTests(unittest.TestCase):
                 "ma20_available": False,
             }
         )
-        output = _structured_output(unavailable, rule_answer, "关键结构证据仍待确认。")
+        output = _structured_output(unavailable, rule_answer)
 
         result = _enhance_with_output(
             unavailable,
@@ -187,7 +161,7 @@ class LlmExplainerTests(unittest.TestCase):
 
     def test_llm_explainer_repairs_one_invalid_output_then_succeeds(self) -> None:
         analysis, rule_answer = _llm_test_case()
-        valid = _structured_json(analysis, rule_answer, "趋势与风险仍支持规则保持等待。")
+        valid = _structured_json(analysis, rule_answer)
 
         with patch("app.services.llm_explainer._call_llm", side_effect=["not-json", valid]) as call:
             result = asyncio.run(
@@ -232,7 +206,7 @@ class LlmExplainerTests(unittest.TestCase):
 
         for field, replacement, diagnostic in mutations:
             with self.subTest(field=field):
-                output = _structured_output(analysis, rule_answer, "价格仍处于等待确认区域。")
+                output = _structured_output(analysis, rule_answer)
                 output[field] = replacement
                 result = _enhance_with_output(analysis, rule_answer, json.dumps(output, ensure_ascii=False))
 
@@ -249,162 +223,10 @@ class LlmExplainerTests(unittest.TestCase):
                 _assert_rule_fallback(self, result, rule_answer)
                 self.assertIn("结构化输出", result.llm_status or "")
 
-    def test_llm_explainer_rejects_numberless_trading_instruction(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        explanations = ("依据已经充分，务必清仓。", "依据已经充分，继续持有。")
-
-        for explanation in explanations:
-            with self.subTest(explanation=explanation):
-                result = _enhance_with_output(
-                    analysis,
-                    rule_answer,
-                    _structured_json(analysis, rule_answer, explanation),
-                )
-
-                _assert_rule_fallback(self, result, rule_answer)
-                self.assertIn("越权", result.llm_status or "")
-
-    def test_llm_explainer_allows_negated_action_signal_explanation(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        explanation = "买入信号尚未确认，因此规则保持等待。"
-
-        result = _enhance_with_output(
-            analysis,
-            rule_answer,
-            _structured_json(analysis, rule_answer, explanation),
-        )
-
-        self.assertTrue(result.llm_used)
-        self.assertIn(explanation, result.answer)
-
-    def test_llm_explainer_allows_clause_scoped_long_negated_action(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        explanation = "趋势仍弱，因此避免在确认不足时提前判定止跌或追涨。"
-
-        result = _enhance_with_output(
-            analysis,
-            rule_answer,
-            _structured_json(analysis, rule_answer, explanation),
-        )
-
-        self.assertTrue(result.llm_used)
-        self.assertIn(explanation, result.answer)
-
-    def test_llm_explainer_does_not_carry_negation_across_clause_boundary(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        explanation = "避免忽视风险，但建议持有。"
-
-        result = _enhance_with_output(
-            analysis,
-            rule_answer,
-            _structured_json(analysis, rule_answer, explanation),
-        )
-
-        _assert_rule_fallback(self, result, rule_answer)
-        self.assertIn("越权", result.llm_status or "")
-
-    def test_llm_explainer_accepts_grounded_rule_ratio_and_risk_multiplier(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        rule_answer = rule_answer.model_copy(
-            update={"evidence": [*rule_answer.evidence, "收益风险比 1.17，环境风险倍率 0.97。"]}
-        )
-        explanation = "收益风险比仅 1.17，环境风险倍率 0.97，说明规则仍需等待确认。"
-
-        result = _enhance_with_output(
-            analysis,
-            rule_answer,
-            _structured_json(analysis, rule_answer, explanation),
-        )
-
-        self.assertTrue(result.llm_used)
-        self.assertIn(explanation, result.answer)
-
-    def test_llm_explainer_rejects_unbound_rule_ratio_or_multiplier(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        rule_answer = rule_answer.model_copy(
-            update={"evidence": [*rule_answer.evidence, "收益风险比 1.17，环境风险倍率 0.97。"]}
-        )
-
-        for explanation in ("收益风险比 1.18 仍偏低。", "环境风险倍率 0.98 仍需观察。"):
-            with self.subTest(explanation=explanation):
-                result = _enhance_with_output(
-                    analysis,
-                    rule_answer,
-                    _structured_json(analysis, rule_answer, explanation),
-                )
-
-                _assert_rule_fallback(self, result, rule_answer)
-                self.assertIn("数字语义错配", result.llm_status or "")
-
-    def test_llm_explainer_rejects_conclusion_conflict_inside_explanation(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        raw = _structured_json(analysis, rule_answer, "现阶段已经适合买入，无需等待确认。")
-
-        result = _enhance_with_output(analysis, rule_answer, raw)
-
-        _assert_rule_fallback(self, result, rule_answer)
-        self.assertIn("矛盾", result.llm_status or "")
-
-    def test_llm_explainer_rejects_ungrounded_number(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        raw = _structured_json(analysis, rule_answer, "关键数字是 1888，仍需观察。")
-
-        result = _enhance_with_output(analysis, rule_answer, raw)
-
-        _assert_rule_fallback(self, result, rule_answer)
-        self.assertIn("上下文外数字", result.llm_status or "")
-
-    def test_llm_explainer_rejects_numeric_semantic_mismatch(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        explanations = (
-            f"支撑 {analysis.resistance:.2f} 元尚未确认。",
-            f"支撑 {rule_answer.confidence} 元尚未确认。",
-            f"涨跌幅 {rule_answer.confidence}% 说明波动存在。",
-        )
-
-        for explanation in explanations:
-            with self.subTest(explanation=explanation):
-                result = _enhance_with_output(
-                    analysis,
-                    rule_answer,
-                    _structured_json(analysis, rule_answer, explanation),
-                )
-
-                _assert_rule_fallback(self, result, rule_answer)
-                self.assertIn("数字语义错配", result.llm_status or "")
-
-    def test_llm_explainer_rejects_unit_and_percentage_abuse(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        explanations = (
-            f"支撑 {analysis.support:.2f}% 尚未确认。",
-            f"规则置信度 {rule_answer.confidence} 元，仍需核验。",
-            f"涨跌幅 {analysis.quote.change_pct:.2f}，波动有限。",
-            f"现价 {analysis.quote.price:.2f} 万元，仍在区间内。",
-        )
-
-        for explanation in explanations:
-            with self.subTest(explanation=explanation):
-                result = _enhance_with_output(
-                    analysis,
-                    rule_answer,
-                    _structured_json(analysis, rule_answer, explanation),
-                )
-
-                _assert_rule_fallback(self, result, rule_answer)
-                self.assertIn("单位/百分比", result.llm_status or "")
-
-    def test_llm_explainer_rejects_target_price_even_when_number_is_known(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        raw = _structured_json(analysis, rule_answer, f"目标价 {analysis.quote.price:.2f} 元已经明确。")
-
-        result = _enhance_with_output(analysis, rule_answer, raw)
-
-        _assert_rule_fallback(self, result, rule_answer)
-        self.assertIn("目标价或仓位", result.llm_status or "")
 
     def test_llm_explainer_rejects_unknown_structured_fields(self) -> None:
         analysis, rule_answer = _llm_test_case()
-        output = _structured_output(analysis, rule_answer, "区间尚未完成确认。")
+        output = _structured_output(analysis, rule_answer)
         output["recommendation"] = "满仓"
 
         result = _enhance_with_output(analysis, rule_answer, json.dumps(output, ensure_ascii=False))
@@ -440,7 +262,7 @@ class LlmExplainerTests(unittest.TestCase):
             calls.append(repair)
             await asyncio.sleep(0.20 if repair else 0.15)
             if repair:
-                return _structured_json(analysis, rule_answer, "趋势仍需等待规则确认。")
+                return _structured_json(analysis, rule_answer)
             return "not-json"
 
         # The total 0.30-second budget can finish either stage in isolation,
@@ -491,12 +313,12 @@ class LlmExplainerTests(unittest.TestCase):
         serialized_messages = json.dumps(request["messages"], ensure_ascii=False)
         self.assertNotIn("ark-secret-key", serialized_messages)
         self.assertIn("expected_output", serialized_messages)
-        self.assertIn("规则建议强度（兼容字段 confidence）", serialized_messages)
+        self.assertIn("confidence为0-100回答可靠度", serialized_messages)
         self.assertIn("不是概率、命中率或统计置信度", serialized_messages)
         self.assertIn("不得用百分号表达", serialized_messages)
         client.close.assert_awaited_once_with()
 
-    def test_llm_repair_prompt_requires_numberless_non_action_explanation(self) -> None:
+    def test_llm_repair_prompt_requires_closed_evidence_selection(self) -> None:
         analysis, rule_answer = _llm_test_case()
         completion = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))]
@@ -512,8 +334,8 @@ class LlmExplainerTests(unittest.TestCase):
 
         serialized_messages = json.dumps(create.await_args.kwargs["messages"], ensure_ascii=False)
         self.assertIn("上一次输出未通过本地校验", serialized_messages)
-        self.assertIn("不得出现数字", serialized_messages)
-        self.assertIn("任何买卖动作词", serialized_messages)
+        self.assertIn("选择已有证据ID", serialized_messages)
+        self.assertIn("不得输出explanation或自行撰写句子", serialized_messages)
 
     def test_llm_client_closes_when_completion_fails(self) -> None:
         analysis, rule_answer = _llm_test_case()
@@ -591,7 +413,7 @@ class LlmExplainerTests(unittest.TestCase):
 
     def test_llm_validation_errors_use_the_same_sensitive_value_sanitizer(self) -> None:
         analysis, rule_answer = _llm_test_case()
-        output = _structured_output(analysis, rule_answer, "价格区间仍需确认。")
+        output = _structured_output(analysis, rule_answer)
         output[rule_answer.question] = "unexpected"
 
         result = _enhance_with_output(analysis, rule_answer, json.dumps(output, ensure_ascii=False))
@@ -609,20 +431,6 @@ class LlmExplainerTests(unittest.TestCase):
         _assert_rule_fallback(self, result, rule_answer)
         self.assertNotIn(secret, result.llm_status or "")
 
-    def test_llm_allowed_numbers_drop_non_finite_values(self) -> None:
-        analysis, rule_answer = _llm_test_case()
-        dirty_analysis = analysis.model_copy(
-            update={
-                "quote": analysis.quote.model_copy(update={"price": math.inf, "pe": math.nan}),
-                "support": math.inf,
-            }
-        )
-
-        allowed = _allowed_numbers(rule_answer, dirty_analysis)
-
-        self.assertTrue(allowed)
-        self.assertTrue(all(math.isfinite(item) for item in allowed))
-
 
 def _enhance_with_output(analysis, rule_answer, output: str) -> StockQuestionAnswer:
     with patch("app.services.llm_explainer._call_llm", return_value=output):
@@ -635,11 +443,11 @@ def _enhance_with_output(analysis, rule_answer, output: str) -> StockQuestionAns
         )
 
 
-def _structured_json(analysis, rule_answer, explanation: str) -> str:
-    return json.dumps(_structured_output(analysis, rule_answer, explanation), ensure_ascii=False)
+def _structured_json(analysis, rule_answer, evidence_ids: list[str] | None = None) -> str:
+    return json.dumps(_structured_output(analysis, rule_answer, evidence_ids), ensure_ascii=False)
 
 
-def _structured_output(analysis, rule_answer, explanation: str) -> dict:
+def _structured_output(analysis, rule_answer, evidence_ids: list[str] | None = None) -> dict:
     return {
         "conclusion": rule_answer.conclusion,
         "confidence": rule_answer.confidence,
@@ -647,7 +455,8 @@ def _structured_output(analysis, rule_answer, explanation: str) -> dict:
         "resistance": analysis.resistance if analysis.resistance_available else None,
         "actions": list(rule_answer.actions),
         "invalidations": list(rule_answer.invalidations),
-        "explanation": explanation,
+        **evidence_selection_contract(rule_answer, analysis),
+        "evidence_ids": ["rule-0"] if evidence_ids is None else evidence_ids,
     }
 
 

@@ -46,7 +46,7 @@ from app.services.market_scan_probability_source import (
 JOINT_EXECUTION_SOURCE_SCHEMA_VERSION = "market-scan-joint-execution-source-artifact-v1"
 JOINT_EXECUTION_SOURCE_CONTRACT_VERSION = "fixed-published-all-decisions-signal-corpus-v1"
 JOINT_EXECUTION_SOURCE_FEATURE_VERSION = (
-    "full-market-point-in-time-features-v4-all-decisions-median-imputed"
+    "full-market-point-in-time-features-v5-target-semideviation-all-decisions"
 )
 JOINT_EXECUTION_SOURCE_IMPUTATION_POLICY = "signal_success_cohort_median_plus_status_flags_v1"
 JOINT_EXECUTION_SOURCE_STATUS_FEATURES = (
@@ -117,10 +117,10 @@ class JointExecutionSourceRunBinding(_StrictModel):
 
 class JointExecutionSourceFeatureSchema(_StrictModel):
     version: Literal[
-        "full-market-point-in-time-features-v4-all-decisions-median-imputed"
-    ] = "full-market-point-in-time-features-v4-all-decisions-median-imputed"
-    base_version: Literal["full-market-point-in-time-features-v3-liquidity-medium"] = (
-        "full-market-point-in-time-features-v3-liquidity-medium"
+        "full-market-point-in-time-features-v5-target-semideviation-all-decisions"
+    ] = "full-market-point-in-time-features-v5-target-semideviation-all-decisions"
+    base_version: Literal["full-market-point-in-time-features-v4-target-semideviation"] = (
+        "full-market-point-in-time-features-v4-target-semideviation"
     )
     imputation_policy: Literal[
         "signal_success_cohort_median_plus_status_flags_v1"

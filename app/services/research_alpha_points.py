@@ -168,6 +168,8 @@ def risk_reward_points(risk_reward: RiskRewardReport | None) -> list[AlphaEviden
     if not risk_reward:
         return []
     impact = risk_reward_impact(risk_reward.rating)
+    if impact > 0 and risk_reward.ratio_available is not True:
+        impact = 0
     return [
         AlphaEvidencePoint(
             source="风险收益",
@@ -184,7 +186,7 @@ def rule_match_impact(status: str, level: str) -> int:
         return 16
     if status == "命中" and level == "风险":
         return -18
-    if status == "接近":
+    if status == "接近" and level == "积极":
         return 6
     return 0
 
@@ -194,7 +196,7 @@ def event_impact(level: str) -> int:
         return -14
     if level == "积极":
         return 10
-    return 3
+    return 0
 
 
 def timeframe_impact(timeframe: TimeframeAlignmentReport) -> int:
@@ -210,7 +212,9 @@ def risk_reward_impact(rating: str) -> int:
         return 10
     if rating in {"风险优先", "周期冲突", "性价比不足"}:
         return -12
-    return 2
+    if rating == "性价比一般":
+        return 2
+    return 0
 
 
 def impact_level(impact: int, positive_threshold: int = 0, negative_threshold: int = 0) -> str:

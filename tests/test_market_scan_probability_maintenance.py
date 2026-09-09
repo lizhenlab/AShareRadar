@@ -649,6 +649,7 @@ def _source(run_id: int, quote_date: str, *, as_of: str | None = None):
         "digest": f"{run_id:064x}",
         "payload": {
             "run": {"run_id": run_id, "quote_date": quote_date, "as_of": timestamp},
+            "feature_schema": {"version": maintenance.PROBABILITY_FEATURE_VERSION},
             "cohort": {"mode": "official", "scope": "全市场A股", "rule_version": "v1"},
             "records": [{"symbol": "000001.SZ"}],
         },

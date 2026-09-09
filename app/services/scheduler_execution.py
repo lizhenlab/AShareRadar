@@ -91,7 +91,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             self._mark_quiescent_if_idle()
 
     def status(self) -> SchedulerStatus:
-        running = bool(self._runner and not self._runner.done())
+        running = self.is_running
         standby = bool(self.enabled and not running and self._standby and self._standby_lock_is_held())
         task_states = [_task_state(task) for task in _ordered_tasks(self.tasks)]
         if self.market_scanner is not None:
@@ -149,7 +149,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
     async def _loop(self) -> None:
         while not self._stop_event.is_set():
             now = market_now_naive()
-            await self._tick_market_scan()
+            self._schedule_market_scan_tick()
             due_tasks = [task for task in _ordered_tasks(self.tasks) if not task.running and task.next_run_at <= now]
             for task in due_tasks:
                 active_task = asyncio.create_task(self._execute(task), name=f"local-data-task-{task.name}")
@@ -159,6 +159,16 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
             except TimeoutError:
                 continue
+
+    def _schedule_market_scan_tick(self) -> None:
+        if self.market_scanner is None:
+            return
+        if self._automatic_tick_task is not None and not self._automatic_tick_task.done():
+            return
+        task = asyncio.create_task(self._tick_market_scan(), name="local-data-market-scan-tick")
+        self._automatic_tick_task = task
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_task_done)
 
     async def _tick_market_scan(self, now: datetime | None = None) -> None:
         if self.market_scanner is None:
@@ -174,8 +184,10 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
                 f"全市场自动扫描调度失败：{_short_task_error(exc)}",
             )
 
-    def _active_task_done(self, task: asyncio.Task[str]) -> None:
+    def _active_task_done(self, task: asyncio.Task[object]) -> None:
         self._active_tasks.discard(task)
+        if self._automatic_tick_task is task:
+            self._automatic_tick_task = None
         _consume_future_exception(task)
 
     async def _execute(self, task: LocalTask, manual: bool = False) -> str:

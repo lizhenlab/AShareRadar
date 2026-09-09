@@ -102,8 +102,8 @@ def test_update_stock_note_route_rejects_invalid_trade_date_and_normalizes_slash
         created = cache.create_stock_note(quote, StockNoteInput(symbol="600519", content="观察"))
         client = _client(_DataHubStub(cache=cache, quote=quote))
 
-        invalid = client.patch(f"/api/stock/notes/{created.id}", json={"trade_date": "bad-date"})
-        normalized = client.patch(f"/api/stock/notes/{created.id}", json={"trade_date": "2026/05/13"})
+        invalid = client.patch(f"/api/stock/notes/{created.id}", json={"expected_revision": created.revision, "trade_date": "bad-date"})
+        normalized = client.patch(f"/api/stock/notes/{created.id}", json={"expected_revision": created.revision, "trade_date": "2026/05/13"})
 
     assert invalid.status_code == 400
     assert invalid.json() == {"detail": "笔记交易日期格式不合法"}
@@ -121,7 +121,7 @@ def test_update_stock_note_route_clears_blank_trade_date() -> None:
         )
         client = _client(_DataHubStub(cache=cache, quote=quote))
 
-        response = client.patch(f"/api/stock/notes/{created.id}", json={"trade_date": "   "})
+        response = client.patch(f"/api/stock/notes/{created.id}", json={"expected_revision": created.revision, "trade_date": "   "})
 
     assert response.status_code == 200
     assert response.json()["trade_date"] is None
@@ -139,7 +139,7 @@ def test_stock_notes_route_maps_sqlite_errors_to_api_detail() -> None:
 def test_delete_stock_note_returns_404_when_note_is_missing() -> None:
     client = _client(_DataHubStub(cache=_DeleteCache(removed=False), quote=make_quote()))
 
-    response = client.delete("/api/stock/notes/999")
+    response = client.delete("/api/stock/notes/999", params={"expected_revision": "a" * 64})
 
     assert response.status_code == 404
     assert response.json() == {"detail": "个股笔记不存在"}
@@ -148,7 +148,7 @@ def test_delete_stock_note_returns_404_when_note_is_missing() -> None:
 def test_delete_stock_note_returns_mutation_result_when_removed() -> None:
     client = _client(_DataHubStub(cache=_DeleteCache(removed=True), quote=make_quote()))
 
-    response = client.delete("/api/stock/notes/9")
+    response = client.delete("/api/stock/notes/9", params={"expected_revision": "a" * 64})
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "removed": True}
@@ -194,5 +194,5 @@ class _DeleteCache:
     def __init__(self, *, removed: bool) -> None:
         self._removed = removed
 
-    def delete_stock_note(self, note_id: int) -> bool:
+    def delete_stock_note(self, note_id: int, *, expected_revision: str) -> bool:
         return self._removed

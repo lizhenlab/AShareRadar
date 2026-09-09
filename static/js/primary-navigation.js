@@ -8,7 +8,7 @@ export function createPrimaryNavigation({ root = document, onSelect = () => {} }
   const buttons = Array.from(root.querySelectorAll?.(BUTTON_SELECTOR) || []);
   const regions = Array.from(root.querySelectorAll?.(REGION_SELECTOR) || []);
 
-  function render(view) {
+  function render(view, workspaceView) {
     const target = normalizePrimaryView(view);
     if (root.body?.dataset) root.body.dataset.primaryView = target;
     buttons.forEach((button) => {
@@ -17,7 +17,8 @@ export function createPrimaryNavigation({ root = document, onSelect = () => {} }
       button.setAttribute?.("aria-current", active ? "page" : "false");
     });
     regions.forEach((region) => {
-      region.hidden = !region.dataset.primaryRegions?.split(/\s+/).includes(target);
+      region.hidden = !region.dataset.primaryRegions?.split(/\s+/).includes(target)
+        || Boolean(region.dataset.workspaceExclude?.split(/\s+/).includes(workspaceView));
     });
     return target;
   }

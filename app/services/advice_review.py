@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta
+import re
 
 from app.models.reviews import (
     AdviceEvidenceRef,
     AdviceReviewBatchItem,
     AdviceReviewBatchSummary,
     AdviceReviewDetail,
-    AdviceReviewDueItem,
+    AdviceReviewDuePage,
     AdviceReviewEvaluation,
     AdviceReviewPlan,
     AdviceReviewPlanInput,
@@ -179,19 +180,44 @@ async def list_due_advice_reviews(
     *,
     as_of: datetime | None = None,
     now: datetime | None = None,
-    limit: int = 100,
-) -> list[AdviceReviewDueItem]:
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-        raise ValueError("到期复盘列表上限必须是正整数")
+    page: int = 1,
+    page_size: int = 100,
+    snapshot_token: str | None = None,
+    symbol: str | None = None,
+    from_date: date | None = None,
+    horizon_days: int | None = None,
+) -> AdviceReviewDuePage:
+    _validate_due_page_request(page, page_size, snapshot_token, as_of, horizon_days)
     current = normalize_review_as_of(as_of, now=now)
     stable_as_of = _stable_review_as_of(current)
-    details = await run_cache_io(
-        datahub.cache.advice_review_evaluation_candidates,
-        as_of_date=stable_as_of.date().isoformat(),
-        limit=min(MAX_DUE_REVIEW_CANDIDATE_SCAN, max(limit * 10, limit)),
+    if snapshot_token is not None and current != stable_as_of:
+        raise ValueError("续页 as_of 必须使用首段回执的成熟市场时间")
+    normalized_symbol = symbol.strip().upper() or None if symbol is not None else None
+    return await run_cache_io(
+        datahub.cache.advice_review_due_page,
+        as_of=stable_as_of, page=page, page_size=page_size, snapshot_token=snapshot_token,
+        symbol=normalized_symbol, from_date=from_date, horizon_days=horizon_days,
     )
-    due = [detail for detail in details if _review_detail_is_due(detail, stable_as_of)]
-    return [_due_review_item(detail, stable_as_of) for detail in due[: min(limit, 200)]]
+
+
+def _validate_due_page_request(
+    page: int, page_size: int, snapshot_token: str | None, as_of: datetime | None, horizon_days: int | None,
+) -> None:
+    _validate_due_page_dimensions(page, page_size, horizon_days)
+    if snapshot_token is not None and re.fullmatch(r"[0-9a-f]{64}", snapshot_token) is None:
+        raise ValueError("到期复盘队列身份格式无效")
+    if (page > 1 or snapshot_token is not None) and (as_of is None or snapshot_token is None):
+        raise ValueError("到期复盘续页必须同时携带 as_of 和 snapshot_token")
+
+
+def _validate_due_page_dimensions(page: int, page_size: int, horizon_days: int | None) -> None:
+    for value, maximum in ((page, 100_000), (page_size, 200)):
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            raise ValueError("到期复盘页码和每页上限必须是正整数且在允许范围内")
+    if horizon_days is not None and (
+        isinstance(horizon_days, bool) or not isinstance(horizon_days, int) or not 1 <= horizon_days <= 60
+    ):
+        raise ValueError("复盘周期必须在 1 到 60 日之间")
 
 
 async def _evaluate_due_review(
@@ -287,33 +313,6 @@ def _review_detail_is_due(detail: AdviceReviewDetail, as_of: datetime) -> bool:
         if is_trading_day(current):
             observed += 1
     return observed >= plan.horizon_days
-
-
-def _due_review_item(detail: AdviceReviewDetail, as_of: datetime) -> AdviceReviewDueItem:
-    due_date = _review_due_date(detail.plan)
-    cutoff = completed_daily_bar_cutoff(as_of)
-    overdue = 0
-    current = due_date
-    while current < cutoff:
-        current += timedelta(days=1)
-        if is_trading_day(current):
-            overdue += 1
-    return AdviceReviewDueItem(
-        plan=detail.plan,
-        latest_evaluation=detail.latest_evaluation,
-        due_date=due_date.isoformat(),
-        overdue_trading_days=overdue,
-    )
-
-
-def _review_due_date(plan: AdviceReviewPlan) -> date:
-    current = _snapshot_datetime(plan.snapshot_market_time).date()
-    observed = 0
-    while observed < plan.horizon_days:
-        current += timedelta(days=1)
-        if is_trading_day(current):
-            observed += 1
-    return current
 
 
 def _short_review_error(

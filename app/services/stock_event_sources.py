@@ -172,6 +172,7 @@ def default_observation_event(analysis: AnalysisResult) -> StockEventItem:
     return StockEventItem(
         date=quote.timestamp,
         title="暂无高强度事件",
+        evidence_kind="availability_notice",
         category="观察",
         level="观察",
         description="当前未从K线、行业和数据质量中识别出明显事件；未接入的外部源不会生成占位记录。",

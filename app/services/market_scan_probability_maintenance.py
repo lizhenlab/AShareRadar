@@ -22,7 +22,7 @@ from app.models.market import (
     Kline,
     KlineAdjustmentMode,
 )
-from app.services.market_scan_probability import stable_probability_hash
+from app.services.market_scan_probability import PROBABILITY_FEATURE_VERSION, stable_probability_hash
 from app.services.market_scan_probability_fit_assessment import (
     PROBABILITY_FIT_ASSESSMENT_RELATIVE_PATH,
     PROBABILITY_FIT_MAX_SESSIONS,
@@ -110,6 +110,7 @@ class _SourceManifest:
     cohort: tuple[str, str, str]
     digest: str
     schema_version: str = PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION
+    feature_version: str = PROBABILITY_FEATURE_VERSION
 
 
 @dataclass(frozen=True)
@@ -317,7 +318,7 @@ def _ready_fit_cohorts(
     cohorts: dict[tuple[str, str, str], list[tuple[_SourceManifest, _OutcomeManifest]]] = {}
     for source in sources:
         outcome = outcomes.get(source.run_id)
-        if outcome is not None:
+        if outcome is not None and source.feature_version == PROBABILITY_FEATURE_VERSION:
             cohorts.setdefault(source.cohort, []).append((source, outcome))
     return [
         pairs
@@ -517,6 +518,7 @@ def _source_manifest(path: Path) -> _SourceManifest:
         cohort=(str(cohort["mode"]), str(cohort["scope"]), str(cohort["rule_version"])),
         digest=str(integrity["integrity_digest"]),
         schema_version=str(artifact["schema_version"]),
+        feature_version=str(_mapping(payload["feature_schema"], "source.feature_schema")["version"]),
     )
 
 

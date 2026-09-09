@@ -57,12 +57,13 @@ export async function previewLocalDataImport(state) {
     bundle,
     fileKey: state.localDataImportFileKey,
     mode,
+    legacyTimezone: legacyImportTimezone(bundle),
     selectionGeneration: localDataSelectionGeneration(state),
     requestGeneration: supersedeImportPreview(state),
   };
   let result;
   try {
-    result = await importRequest(bundle, mode, true);
+    result = await importRequest(bundle, mode, true, "", ownership.legacyTimezone);
   } catch (error) {
     if (!ownsImportPreviewRequest(state, ownership)) return null;
     throw error;
@@ -70,6 +71,7 @@ export async function previewLocalDataImport(state) {
   if (!ownsImportPreviewRequest(state, ownership)) return null;
   state.localDataImportPreview = result;
   state.localDataImportPreviewMode = mode;
+  state.localDataImportPreviewTimezone = ownership.legacyTimezone;
   state.localDataImportPreviewFileKey = ownership.fileKey;
   state.localDataImportPreviewSelectionGeneration = ownership.selectionGeneration;
   state.localDataImportPreviewGeneration = ownership.requestGeneration;
@@ -80,20 +82,33 @@ export async function previewLocalDataImport(state) {
 }
 
 export async function commitLocalDataImport(state) {
+  if (state.localDataImportCommitRequest) return null;
   requireMatchingPreview(state);
   const mode = importMode();
   const ownership = {
     bundle: state.localDataImportBundle,
     fileKey: state.localDataImportFileKey,
     mode,
+    legacyTimezone: state.localDataImportPreviewTimezone,
     preview: state.localDataImportPreview,
     selectionGeneration: localDataSelectionGeneration(state),
     requestGeneration: state.localDataImportPreviewRequestGeneration,
   };
+  state.localDataImportCommitRequest = ownership;
+  syncImportCommitButton(state);
+  try {
+    return await finishImportCommit(state, ownership);
+  } finally {
+    if (state.localDataImportCommitRequest === ownership) state.localDataImportCommitRequest = null;
+    syncImportCommitButton(state);
+  }
+}
+
+async function finishImportCommit(state, ownership) {
   const token = ownership.preview.preview_token;
   let result;
   try {
-    result = await importRequest(ownership.bundle, mode, false, token);
+    result = await importRequest(ownership.bundle, ownership.mode, false, token, ownership.legacyTimezone);
   } catch (error) {
     const ownsCurrentSelection = ownsImportCommit(state, ownership);
     if (ownsCurrentSelection) {
@@ -114,9 +129,9 @@ export async function commitLocalDataImport(state) {
   return result;
 }
 
-export function invalidateLocalDataImportPreview(state) {
+export function invalidateLocalDataImportPreview(state, reason = "导入模式已变化，请重新预览") {
   supersedeImportPreview(state);
-  setLocalDataFeedback("导入模式已变化，请重新预览");
+  setLocalDataFeedback(reason);
 }
 
 export async function loadRuntimeCleanupPreview() {
@@ -183,14 +198,22 @@ export function renderCleanupPreviewUnavailable(error) {
   if (button) button.disabled = true;
 }
 
-function importRequest(bundle, mode, dryRun, previewToken = "") {
+async function importRequest(bundle, mode, dryRun, previewToken = "", legacyTimezone = "") {
   const tokenQuery = previewToken ? `&preview_token=${encodeURIComponent(previewToken)}` : "";
-  return fetchJson(`/api/local-data/import?mode=${encodeURIComponent(mode)}&dry_run=${dryRun ? "true" : "false"}${tokenQuery}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(bundle),
-    timeoutMs: dryRun ? LOCAL_DATA_PREVIEW_TIMEOUT_MS : 0,
-  });
+  const timezoneQuery = legacyTimezone ? `&legacy_audit_timezone=${encodeURIComponent(legacyTimezone)}` : "";
+  try {
+    return await fetchJson(`/api/local-data/import?mode=${encodeURIComponent(mode)}&dry_run=${dryRun ? "true" : "false"}${tokenQuery}${timezoneQuery}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bundle),
+      timeoutMs: dryRun ? LOCAL_DATA_PREVIEW_TIMEOUT_MS : 0,
+    });
+  } catch (error) {
+    if (error?.message?.includes("legacy naive audit timestamp requires an explicit timezone")) {
+      throw new Error("旧文件时间没有时区信息，请填写“旧文件来源时区”后重新预览；按原导出设备的时间基准选择。");
+    }
+    throw error;
+  }
 }
 
 function requireMatchingPreview(state) {
@@ -199,6 +222,7 @@ function requireMatchingPreview(state) {
     !state.localDataImportPreview ||
     !state.localDataImportPreview.preview_token ||
     state.localDataImportPreviewMode !== importMode() ||
+    state.localDataImportPreviewTimezone !== legacyImportTimezone(state.localDataImportBundle) ||
     state.localDataImportPreviewFileKey !== state.localDataImportFileKey ||
     state.localDataImportPreviewSelectionGeneration !== localDataSelectionGeneration(state) ||
     state.localDataImportPreviewGeneration !== state.localDataImportPreviewRequestGeneration ||
@@ -215,6 +239,11 @@ function requiredImportBundle(state) {
 
 function importMode() {
   return $("localDataImportMode")?.value === "replace" ? "replace" : "merge";
+}
+
+function legacyImportTimezone(bundle) {
+  if (bundle?.audit_timestamps != null) return "";
+  return String($("localDataLegacyTimezone")?.value || "").trim();
 }
 
 function beginLocalDataFileSelection(state) {
@@ -253,6 +282,7 @@ function ownsImportPreviewRequest(state, ownership) {
     localDataSelectionGeneration(state) === ownership.selectionGeneration &&
     state.localDataImportBundle === ownership.bundle &&
     state.localDataImportFileKey === ownership.fileKey &&
+    legacyImportTimezone(state.localDataImportBundle) === ownership.legacyTimezone &&
     importMode() === ownership.mode
   );
 }
@@ -272,6 +302,7 @@ function clearImportPreview(state) {
   }
   state.localDataImportPreview = null;
   state.localDataImportPreviewMode = "";
+  state.localDataImportPreviewTimezone = "";
   state.localDataImportPreviewFileKey = "";
   state.localDataImportPreviewSelectionGeneration = -1;
   state.localDataImportPreviewGeneration = -1;
@@ -280,14 +311,16 @@ function clearImportPreview(state) {
   syncImportCommitButton(state);
 }
 
-function syncImportCommitButton(state) {
+export function syncImportCommitButton(state) {
   const button = $("commitLocalDataImport");
   if (!button) return;
   button.disabled = !(
+    !state.localDataImportCommitRequest &&
     state.localDataImportPreview &&
     state.localDataImportPreview.preview_token &&
     !previewExpired(state.localDataImportPreview) &&
     state.localDataImportPreviewMode === importMode() &&
+    state.localDataImportPreviewTimezone === legacyImportTimezone(state.localDataImportBundle) &&
     state.localDataImportPreviewFileKey === state.localDataImportFileKey &&
     state.localDataImportPreviewSelectionGeneration === localDataSelectionGeneration(state) &&
     state.localDataImportPreviewGeneration === state.localDataImportPreviewRequestGeneration

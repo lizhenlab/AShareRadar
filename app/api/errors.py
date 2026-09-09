@@ -17,7 +17,12 @@ from starlette.requests import Request
 from app.db.market_scan_integrity import MarketScanSnapshotSealError
 from app.models.market_scan_snapshot import MarketScanSnapshotIntegrityError
 from app.repositories.strategy_evidence import StrategyEvidenceIntegrityError
-from app.repositories.advice_reviews import AdviceReviewIntegrityError, AdviceReviewRevisionConflictError
+from app.repositories.notes import StockNoteRevisionConflictError
+from app.repositories.advice_reviews import (
+    AdviceReviewIntegrityError,
+    AdviceReviewQueueConflictError,
+    AdviceReviewRevisionConflictError,
+)
 from app.repositories.strategy_automation import StrategyAutomationIntegrityError
 from app.repositories.strategy_execution import StrategyExecutionIntegrityError
 from app.services.market_scan_future_range_artifact import FutureRangeArtifactError
@@ -161,10 +166,10 @@ def _api_exception(exc: Exception) -> HTTPException:
             detail=MARKET_SCAN_INTEGRITY_DETAIL,
             headers=NO_STORE_HEADER,
         )
-    if isinstance(exc, AdviceReviewRevisionConflictError):
-        return HTTPException(status_code=409, detail="复盘计划已更新，请刷新后重试")
-    if isinstance(exc, AdviceReviewIntegrityError):
-        return HTTPException(status_code=409, detail=ADVICE_REVIEW_INTEGRITY_DETAIL)
+    if isinstance(exc, StockNoteRevisionConflictError):
+        return HTTPException(status_code=409, detail="笔记已更新，请读取最新记录后重试", headers=NO_STORE_HEADER)
+    if isinstance(exc, (AdviceReviewRevisionConflictError, AdviceReviewQueueConflictError, AdviceReviewIntegrityError)):
+        return _review_api_exception(exc)
     if isinstance(exc, StrategyExecutionIntegrityError):
         return HTTPException(status_code=409, detail=STRATEGY_EXECUTION_INTEGRITY_DETAIL)
     if isinstance(exc, WorkbenchContextIntegrityError):
@@ -179,6 +184,14 @@ def _api_exception(exc: Exception) -> HTTPException:
     if isinstance(exc, sqlite3.DatabaseError):
         return HTTPException(status_code=503, detail=f"本地数据库暂不可用：{sanitize_provider_error(exc)}")
     return HTTPException(status_code=503, detail=sanitize_provider_error(exc))
+
+
+def _review_api_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, AdviceReviewQueueConflictError):
+        return HTTPException(status_code=409, detail="到期复盘队列已变化，请重新读取第一页", headers=NO_STORE_HEADER)
+    if isinstance(exc, AdviceReviewRevisionConflictError):
+        return HTTPException(status_code=409, detail="复盘计划已更新，请刷新后重试")
+    return HTTPException(status_code=409, detail=ADVICE_REVIEW_INTEGRITY_DETAIL)
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

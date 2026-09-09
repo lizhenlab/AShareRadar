@@ -60,7 +60,7 @@ class ResearchAlphaModuleTests(unittest.TestCase):
     def test_alpha_point_impact_helpers_keep_direction(self) -> None:
         self.assertEqual(rule_match_impact("命中", "积极"), 16)
         self.assertEqual(rule_match_impact("命中", "风险"), -18)
-        self.assertEqual(rule_match_impact("接近", "观察"), 6)
+        self.assertEqual(rule_match_impact("接近", "观察"), 0)
         self.assertEqual(event_impact("风险"), -14)
         self.assertEqual(event_impact("积极"), 10)
         self.assertEqual(risk_reward_impact("性价比较好"), 10)

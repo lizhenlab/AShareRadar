@@ -18,6 +18,10 @@ def moving_average(klines: list[Kline], window: int) -> float:
 
 
 def average_true_range(klines: list[Kline], window: int = 14) -> float:
+    """Trailing simple mean of true ranges, including observed zero ranges.
+
+    This local indicator uses a fixed window, not Wilder's recursive smoothing.
+    """
     if len(klines) < 2:
         return 0
     valid_rows = filter_valid_klines(klines)
@@ -31,8 +35,7 @@ def average_true_range(klines: list[Kline], window: int = 14) -> float:
             abs(current.high - previous.close),
             abs(current.low - previous.close),
         )
-        if true_range > 0:
-            ranges.append(true_range)
+        ranges.append(true_range)
     if not ranges:
         return 0
     return round(mean(ranges), 2)

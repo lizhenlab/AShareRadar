@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ROUTES_DIR = ROOT / "app" / "api" / "routes"
 OUTPUT = ROOT / "docs" / "API_REFERENCE.md"
 METHODS = {"get", "post", "patch", "delete", "put"}
+FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ def collect_endpoints() -> list[Endpoint]:
 def route_decorator_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]:
     endpoints: list[Endpoint] = []
     prefix = module_router_prefix(tree)
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -88,7 +91,7 @@ def route_decorator_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]:
             method, path, response_model = parsed
             if prefix:
                 path = f"{prefix}{path}"
-            endpoints.append(Endpoint(method, path, node.name, response_model, rel, endpoint_inputs(node, path)))
+            endpoints.append(Endpoint(method, path, node.name, response_model, rel, endpoint_inputs(node, path, functions)))
     return endpoints
 
 
@@ -151,19 +154,59 @@ def stock_registry_endpoints(tree: ast.Module, rel: str) -> list[Endpoint]:
     return endpoints
 
 
-def endpoint_inputs(node: ast.FunctionDef | ast.AsyncFunctionDef, path: str) -> tuple[str, ...]:
-    inputs: list[str] = []
+def endpoint_inputs(node: FunctionNode, path: str, functions: dict[str, FunctionNode]) -> tuple[str, ...]:
+    """Read local dependency declarations without importing or executing a route module."""
+
+    inputs: dict[tuple[str, str], str] = {}
+    pending = deque([node])
+    visited: set[str] = set()
+    while pending:
+        current = pending.popleft()
+        if current.name in visited:
+            continue
+        visited.add(current.name)
+        for arg, default in function_parameters(current):
+            dependency = local_dependency(default, functions)
+            if dependency is not None:
+                pending.append(dependency)
+                continue
+            if current is not node and not dependency_client_input(arg, default, path):
+                continue
+            formatted = endpoint_input(arg, default, path)
+            if formatted:
+                key = (input_location(arg.arg, annotation_text(arg), default, path), arg.arg)
+                inputs.setdefault(key, formatted)
+    return tuple(inputs.values())
+
+
+def function_parameters(node: FunctionNode) -> list[tuple[ast.arg, ast.expr | object]]:
     args = list(node.args.posonlyargs) + list(node.args.args)
     defaults: list[ast.expr | object] = [MISSING_DEFAULT] * (len(args) - len(node.args.defaults)) + list(node.args.defaults)
-    for arg, default in zip(args, defaults, strict=True):
-        formatted = endpoint_input(arg, default, path)
-        if formatted:
-            inputs.append(formatted)
-    for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True):
-        formatted = endpoint_input(arg, default if default is not None else MISSING_DEFAULT, path)
-        if formatted:
-            inputs.append(formatted)
-    return tuple(inputs)
+    parameters = list(zip(args, defaults, strict=True))
+    parameters.extend(
+        (arg, default if default is not None else MISSING_DEFAULT)
+        for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True)
+    )
+    return parameters
+
+
+def local_dependency(default: ast.expr | object, functions: dict[str, FunctionNode]) -> FunctionNode | None:
+    if not isinstance(default, ast.Call) or not is_fastapi_call(default, "Depends"):
+        return None
+    target: ast.expr | None = default.args[0] if default.args else None
+    if target is None:
+        for keyword in default.keywords:
+            if keyword.arg == "dependency":
+                target = keyword.value
+                break
+    return functions.get(target.id) if isinstance(target, ast.Name) else None
+
+
+def dependency_client_input(arg: ast.arg, default: ast.expr | object, path: str) -> bool:
+    annotation = annotation_text(arg)
+    location = input_location(arg.arg, annotation, default, path)
+    explicit = isinstance(default, ast.Call) and fastapi_parameter_factory(default) in {"Query", "Path"}
+    return location in {"query", "path"} and (explicit or primitive_annotation(annotation))
 
 
 def endpoint_input(arg: ast.arg, default: ast.expr | object, path: str) -> str | None:
@@ -291,13 +334,16 @@ def render(endpoints: list[Endpoint]) -> str:
             "## Error Contract",
             "",
             "- `400`: domain validation errors from routes or workflows, including malformed stock symbols or unsupported intervals.",
+            "- `403`: untrusted API hosts or browser origins rejected by the same-origin middleware, including cross-site mutations.",
             "- `404`: not-found responses for local user-state records or confirmed missing stocks.",
-            "- `422`: FastAPI/Pydantic request-shape validation before route logic runs.",
+            "- `409`: revision conflicts or failed integrity checks for frozen snapshots, research artifacts, or immutable ledgers; refresh or verify the source before retrying.",
+            "- `422`: invalid request shapes, query constraints, or explicit domain admission checks, including unsupported experimental-probability requests.",
             "- `503`: provider, runtime, scheduler, or SQLite failures mapped through `app/api/errors.py`.",
             "- `GET /api/stream/quotes` returns `text/event-stream`; normal frames contain JSON quote arrays and `quote-error` frames contain `{ \"message\": \"...\" }`.",
             "",
             "## API Design Notes",
             "",
+            "- This static inventory expands Query/Path and scalar parameters in named, same-module Depends declarations; external service objects are not exposed. Dynamic or complex dependencies are not fully reflected, and actual API request validation remains authoritative.",
             "- Route handlers should stay thin: validate parameters, call workflow/service functions, and return response models.",
             "- All user-facing failures should pass through `app/api/errors.py` or explicit `HTTPException` with Chinese messages.",
             "- New endpoints should be added to the relevant route module and this file should be regenerated.",

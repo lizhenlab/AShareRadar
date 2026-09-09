@@ -89,6 +89,7 @@ from app.services.market_scan_probability_ranking import (
     verify_probability_ranking_publication_artifact,
     verify_probability_ranking_shadow_artifact,
 )
+from app.services.market_scan_probability_ranking_inference import RANKING_SHADOW_CONTRACT_VERSION
 from app.services.market_scan_probability_ranking_store import (
     MarketScanProbabilityRankingStore,
 )
@@ -697,6 +698,9 @@ class MarketScanJointExecutionMaintenanceService:
         control: VerifiedProbabilityRankingManualControl | None = None
         status = "shadow_evaluation_unavailable"
         try:
+            rollback = self._configured_ranking_rollback(state)
+            if rollback is not None:
+                return _RankingMaintenance(shadow=None, control=rollback, status="rollback_active")
             shadow = self._ranking_shadow_for_oos(
                 authorized.oos_v3,
                 [item.source for item in authorized.selected_pairs],
@@ -721,18 +725,7 @@ class MarketScanJointExecutionMaintenanceService:
                     expected_digest=cast(str, self.ranking_control_digest),
                     shadow=shadow,
                 )
-                self._publish_envelope(
-                    "ranking-controls",
-                    f"probability-ranking-control-{control.action}",
-                    control_artifact,
-                )
-                self._active_ranking_control = control
-                if control.action == "rollback":
-                    self.ranking_store.record_rollback(control)
-                    status = "rollback_active"
-                    state.blockers.append("probability_ranking_manual_rollback_active")
-                else:
-                    status = "promotion_verified_waiting_new_official_batch"
+                status = self._activate_ranking_control(state, control, control_artifact)
         except Exception as exc:
             state.failures.append(
                 f"probability ranking shadow/control: {_short_error(exc)}"
@@ -740,6 +733,38 @@ class MarketScanJointExecutionMaintenanceService:
             status = "shadow_or_control_verification_failed"
             self._active_ranking_control = None
         return _RankingMaintenance(shadow=shadow, control=control, status=status)
+
+    def _configured_ranking_rollback(
+        self, state: _MaintenanceRunState,
+    ) -> VerifiedProbabilityRankingManualControl | None:
+        if not state.ranking_control_configured:
+            return None
+        artifact = _load_pinned_authorization(
+            self.ranking_control_path, cast(str, self.ranking_control_digest),
+        )
+        if _mapping(artifact.get("payload"), "ranking control.payload").get("action") != "rollback":
+            return None
+        control = verify_probability_ranking_manual_control_artifact(
+            artifact, expected_digest=cast(str, self.ranking_control_digest), shadow=None,
+        )
+        self._activate_ranking_control(state, control, artifact)
+        return control
+
+    def _activate_ranking_control(
+        self, state: _MaintenanceRunState,
+        control: VerifiedProbabilityRankingManualControl, artifact: Mapping[str, object],
+    ) -> str:
+        if control.action == "promote" and not control.promotion_eligible:
+            raise ProbabilityRankingError("legacy ranking promotion is audit only")
+        self._publish_envelope(
+            "ranking-controls", f"probability-ranking-control-{control.action}", artifact,
+        )
+        self._active_ranking_control = control
+        if control.action == "rollback":
+            self.ranking_store.record_rollback(control)
+            state.blockers.append("probability_ranking_manual_rollback_active")
+            return "rollback_active"
+        return "promotion_verified_waiting_new_official_batch"
 
     def _current_maintenance_summary(
         self,
@@ -1165,6 +1190,7 @@ class MarketScanJointExecutionMaintenanceService:
             if (
                 payload.get("oos_corpus_digest") != oos_corpus.integrity_digest
                 or payload.get("study_evidence_digest") != study.evidence_digest
+                or payload.get("contract_version") != RANKING_SHADOW_CONTRACT_VERSION
             ):
                 continue
             token = verify_probability_ranking_shadow_artifact(
@@ -1177,13 +1203,9 @@ class MarketScanJointExecutionMaintenanceService:
                 raise ProbabilityRankingError(
                     "ranking shadow filename/content digest mismatch"
                 )
-            matches.append(
-                (
-                    _timestamp(str(artifact["generated_at"])),
-                    token.integrity_digest,
-                    token,
-                )
-            )
+            matches.append((
+                _timestamp(str(artifact["generated_at"])), token.integrity_digest, token,
+            ))
         if matches:
             return min(matches, key=lambda item: (item[0], item[1]))[2]
         artifact = build_probability_ranking_shadow_artifact(

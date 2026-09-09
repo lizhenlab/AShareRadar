@@ -11,7 +11,7 @@ from app.models.market import (
     Quote,
     StockInfo,
 )
-from app.services.analysis_signal_quality import quality_reason
+from app.services.analysis_signal_quality import quality_blocks_active_signals, quality_reason
 
 
 WEAK_RISK_LEVELS = {"中等风险", "高风险"}
@@ -95,7 +95,7 @@ def _first_matching_advice(context: AdviceContext, rules) -> ActionAdvice | None
 
 def _low_quality_blocks_advice(context: AdviceContext) -> ActionAdvice | None:
     quality = context.quality
-    if not quality or quality.score >= 50:
+    if not quality or not quality_blocks_active_signals(quality):
         return None
     return ActionAdvice(
         action="控制风险",

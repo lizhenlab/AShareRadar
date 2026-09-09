@@ -112,7 +112,7 @@ def test_manual_transaction_waits_before_cache_lock_and_connection_borrowing(cac
     repository = cache.maintenance_repo
     original_guard = repository.exclusive_operation
     target = maintenance if paused_phase == "validation" else repository
-    method = "market_scan_artifact_protection" if paused_phase == "validation" else "_compact_after_cleanup"
+    method = "market_scan_artifact_protection" if paused_phase == "validation" else "compact_after_cleanup"
     original_phase = getattr(target, method)
 
     def pause_phase(value):

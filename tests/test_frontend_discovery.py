@@ -317,7 +317,7 @@ def test_discovery_invalidates_stale_requests_and_fully_edits_complex_presets() 
           element("marketScanMarket").value = "BJ";
           element("marketScanSort").value = "symbol";
           element("marketScanSort2").value = "";
-          const updated = await controller.savePreset();
+          const updated = await controller.updatePreset();
           assert.equal(updated.revision, 4);
           assert.equal(updateBodies.length, 1);
           assert.equal(updateBodies[0].expected_revision, 3);
@@ -459,7 +459,7 @@ def test_discovery_bulk_queue_and_preset_import_export_preserve_provenance() -> 
               }
               if (target === "/api/discovery/presets/7/export") return archive;
               if (target === "/api/discovery/presets/import") {
-                return { ...preset, id: 8, name: "导入方案", revision: 1 };
+                return { ...preset, ...JSON.parse(options.body).preset, id: 8, revision: 1 };
               }
               if (target.includes("/rank-changes")) return rankChanges();
               if (target.endsWith("/apply")) {

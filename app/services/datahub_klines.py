@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from functools import partial
 import math
 from typing import TypeVar
@@ -25,6 +25,7 @@ from app.services.datahub_cache import (
     _tag_klines,
     _tag_minute_klines,
 )
+from app.services.datahub_cache_coverage import ShortResponseCoverage, provider_cache_chain
 from app.services.datahub_runtime import (
     ProviderAttempt,
     ProviderCallBusyError,
@@ -40,7 +41,10 @@ from app.utils.provider_errors import (
     ProviderProtocolError,
 )
 from app.services.provider_utils import ensure_positive_limit
-from app.utils.market_data import filter_valid_klines, filter_valid_minute_klines
+from app.services.data_quality_time import expected_quote_date, latest_expected_daily_kline_date
+from app.services.trading_calendar import is_trading_day
+from app.utils.market_data import filter_valid_klines, filter_valid_minute_klines, valid_kline
+from app.utils.daily_kline_identity import deduplicate_daily_klines
 from app.utils.market_time import market_local_naive, market_now_naive
 from app.utils.symbols import normalize_symbol
 
@@ -116,6 +120,7 @@ class KlineCoordinator:
         self.priority = priority
         self._now = now or _kline_now
         self._daily_provider_exhaustion: dict[str, _DailyProviderExhaustion] = {}
+        self._minute_coverage = ShortResponseCoverage()
 
     async def kline(
         self,
@@ -535,16 +540,11 @@ class KlineCoordinator:
         normalized_interval = normalize_minute_interval(interval)
         current = self._now()
         if use_cache:
-            cached = await run_cache_io(
-                self.cache.get_minute_klines,
-                symbol,
-                normalized_interval,
-                limit,
-                self.settings.minute_kline_cache_seconds,
-            )
-            if cached and _minute_kline_cache_is_fresh(cached, normalized_interval, now=current):
-                return cached[-limit:]
+            cached = await self._covered_minute_cache(normalized_symbol, normalized_interval, limit, current)
+            if cached:
+                return cached
 
+        chain = provider_cache_chain(self.priority("minute"), self.providers)
         errors: list[str] = []
         fetched = await self._fetch_from_priority(
             kind="minute",
@@ -569,6 +569,10 @@ class KlineCoordinator:
             request_key=(normalized_symbol, normalized_interval, limit),
         )
         if fetched is not None:
+            self._minute_coverage.remember(
+                (normalized_symbol, normalized_interval), fetched, limit, chain,
+                ttl_seconds=self.settings.minute_kline_cache_seconds,
+            )
             return fetched
 
         fallback = await run_cache_io(
@@ -582,6 +586,15 @@ class KlineCoordinator:
             await _safe_log_kline_event(self.cache, "fallback", f"分钟K线数据源失败或无覆盖，使用缓存分钟K线：{symbol}")
             return _tag_minute_klines(fallback, None, normalized_interval, from_cache=True, fallback_used=True)
         raise RuntimeError("所有分钟K线数据源均不可用：" + "；".join(errors))
+
+    async def _covered_minute_cache(self, symbol: str, interval: str, limit: int, current: datetime) -> list[MinuteKline]:
+        cached = await run_cache_io(
+            self.cache.get_minute_klines, symbol, interval, limit, self.settings.minute_kline_cache_seconds,
+        )
+        if not cached or not _minute_kline_cache_is_fresh(cached, interval, now=current):
+            return []
+        chain = provider_cache_chain(self.priority("minute"), self.providers)
+        return cached if self._minute_coverage.covers((symbol, interval), cached, limit, chain) else []
 
     async def _fetch_from_priority(
         self,
@@ -651,7 +664,11 @@ def _prepare_daily_klines(
         raise ProviderProtocolError(f"{source} 日K返回结构异常")
     if not rows:
         raise ProviderCoverageMiss(f"{source} 日K未覆盖请求股票：{symbol}")
-    cleaned = _latest_daily_klines(rows, limit)
+    _require_valid_completed_daily_rows(rows, source, symbol, limit, current)
+    try:
+        cleaned = _latest_daily_klines(rows, limit)
+    except ValueError as exc:
+        raise ProviderInstrumentDataError(f"{source} 日K证据冲突：{symbol}；{exc}") from exc
     if not cleaned:
         raise ProviderInstrumentDataError(f"{source} 日K没有有效记录：{symbol}")
     tagged = _tag_klines(cleaned, source, from_cache=False)
@@ -665,6 +682,35 @@ def _prepare_daily_klines(
             tagged,
         )
     return tagged
+
+
+def _require_valid_completed_daily_rows(
+    rows: list[Kline], source: str, symbol: str, limit: int, current: datetime,
+) -> None:
+    # Select independent exchange sessions before inspecting every original row;
+    # duplicates and non-session noise must not displace evidence of a bad bar.
+    latest_allowed = expected_quote_date(current)
+    candidates = [
+        (day, row) for row in rows
+        if (day := _canonical_daily_date(row.date)) is not None
+        and day <= latest_allowed and is_trading_day(day)
+    ]
+    selected_sessions = set(sorted({day for day, _row in candidates})[-limit:])
+    completed_cutoff = latest_expected_daily_kline_date(current)
+    for day, row in candidates:
+        if day in selected_sessions and day <= completed_cutoff and not valid_kline(row):
+            raise ProviderInstrumentDataError(
+                f"{source} 已完成交易日 {day.isoformat()} 的日K OHLC或成交量无效：{symbol}"
+            )
+
+
+def _canonical_daily_date(value: object) -> date | None:
+    text = str(value or "").strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.isoformat() == text else None
 
 
 def _most_current_daily_rows(primary: list[Kline], fallback: list[Kline] | None) -> list[Kline]:
@@ -747,7 +793,9 @@ def _minute_kline_call(provider: object, symbol: str, interval: str, limit: int)
 
 
 def _latest_daily_klines(rows: list[Kline], limit: int) -> list[Kline]:
-    return _latest_rows(filter_valid_klines(rows or []), limit, key=lambda row: row.date)
+    valid_rows = filter_valid_klines(rows or [])
+    ordered = _latest_rows(valid_rows, len(valid_rows), key=lambda row: row.date)
+    return deduplicate_daily_klines(ordered, limit=limit)
 
 
 def _compatible_daily_klines(

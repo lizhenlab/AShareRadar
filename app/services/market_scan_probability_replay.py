@@ -35,10 +35,14 @@ from app.artifacts.io import (
 )
 from app.models.paper_trading import CostProfileName, PaperCostProfile
 from app.services.market_scan_probability import (
+    PROBABILITY_LABEL_VERSION,
+    PROBABILITY_SCHEMA_VERSION,
     ProbabilityConfig,
     ProbabilitySample,
+    build_probability_contract,
     fit_shadow_probability,
     predict_shadow_probability,
+    stable_probability_hash,
 )
 from app.services.paper_trading_costs import resolve_cost_profile, trade_costs
 from app.services.trading_calendar import is_trading_day, next_trade_dates
@@ -47,8 +51,9 @@ from app.utils.clock import utc_now
 
 HISTORICAL_REPLAY_SCHEMA_VERSION = "market-scan-probability-historical-replay-v1"
 HISTORICAL_REPLAY_ARTIFACT_SCHEMA_VERSION = (
-    "market-scan-probability-historical-replay-artifact-v1"
+    "market-scan-probability-historical-replay-artifact-v2"
 )
+HISTORICAL_REPLAY_SUPERSEDED_ARTIFACT_SCHEMA_VERSION = "market-scan-probability-historical-replay-artifact-v1"
 HISTORICAL_REPLAY_COHORT_MODE = "historical_replay_v1"
 HISTORICAL_REPLAY_SCOPE = "qfq_kline_daily_deterministic_market_sample"
 HISTORICAL_REPLAY_FEATURE_VERSION = "historical-replay-common-ohlcv-v1"
@@ -91,6 +96,15 @@ _GLOBAL_LIMITATIONS = (
 
 class HistoricalReplayError(ValueError):
     """Raised when a replay source or immutable artifact fails closed."""
+
+
+class HistoricalReplayFitContractSupersededError(HistoricalReplayError):
+    """The archive predates the registered estimator provenance boundary."""
+
+    code = "superseded-fit-contract"
+
+    def __init__(self) -> None:
+        super().__init__("superseded-fit-contract：历史重放使用旧拟合合同，请从原始日线重新生成；旧文件未修改")
 
 
 class OHLCVBar(Protocol):
@@ -272,10 +286,9 @@ def verify_historical_replay_artifact(
     normalized = _json_copy(artifact)
     if set(normalized) != {"schema_version", "generated_at", "payload", "integrity"}:
         raise HistoricalReplayError("historical replay artifact 顶层字段无效")
-    if normalized["schema_version"] != HISTORICAL_REPLAY_ARTIFACT_SCHEMA_VERSION:
-        raise HistoricalReplayError("historical replay artifact schema_version 不受支持")
     integrity = _mapping(normalized["integrity"], "integrity")
     _validate_integrity(integrity, normalized)
+    _require_current_artifact_version(normalized)
     payload = _mapping(normalized["payload"], "payload")
     _validate_report(payload)
     if normalized["generated_at"] != payload["generated_at"]:
@@ -287,13 +300,19 @@ def _verified_artifact_identity(artifact: Mapping[str, object]) -> dict[str, obj
     normalized = _json_copy(artifact)
     if set(normalized) != {"schema_version", "generated_at", "payload", "integrity"}:
         raise HistoricalReplayError("historical replay artifact 顶层字段无效")
-    if normalized["schema_version"] != HISTORICAL_REPLAY_ARTIFACT_SCHEMA_VERSION:
-        raise HistoricalReplayError("historical replay artifact schema_version 不受支持")
     _validate_integrity(_mapping(normalized["integrity"], "integrity"), normalized)
+    _require_current_artifact_version(normalized)
     payload = _mapping(normalized["payload"], "payload")
     if payload.get("generated_at") != normalized["generated_at"]:
         raise HistoricalReplayError("artifact 与 payload generated_at 冲突")
     return normalized
+
+
+def _require_current_artifact_version(artifact: Mapping[str, object]) -> None:
+    if artifact["schema_version"] == HISTORICAL_REPLAY_SUPERSEDED_ARTIFACT_SCHEMA_VERSION:
+        raise HistoricalReplayFitContractSupersededError()
+    if artifact["schema_version"] != HISTORICAL_REPLAY_ARTIFACT_SCHEMA_VERSION:
+        raise HistoricalReplayError("historical replay artifact schema_version 不受支持")
 
 
 def load_historical_replay_artifact(path: str | Path) -> dict[str, object]:
@@ -653,6 +672,7 @@ def _probability_fit_payload(
 ) -> dict[str, object]:
     return {
         "cohort": _cohort_payload(),
+        "estimator_binding": _probability_estimator_binding(),
         "target": "net_return_positive",
         "probability": None,
         "horizons": {
@@ -664,6 +684,22 @@ def _probability_fit_payload(
         },
         "production_ranking_effect": "none",
         "automatic_promotion": False,
+    }
+
+
+def _probability_estimator_binding() -> dict[str, object]:
+    return {
+        "version": "historical-replay-estimator-binding-v1",
+        "label_source": HISTORICAL_REPLAY_LABEL_VERSION,
+        "label_execution_evidence": "fixed-session-cost-only-not-phase-tradeability",
+        "estimator_schema_version": PROBABILITY_SCHEMA_VERSION,
+        "shared_estimator_label_version": PROBABILITY_LABEL_VERSION,
+        "registered_config_digests": {
+            str(horizon): stable_probability_hash(build_probability_contract(
+                ProbabilityConfig(horizon=horizon, target="net_return_positive"),
+            ))
+            for horizon in HISTORICAL_REPLAY_HORIZONS
+        },
     }
 
 
@@ -781,7 +817,6 @@ def _validate_report(
     records = _records(report)
     _validate_records(records, names, config)
     quality = _mapping(report["quality"], "quality")
-    legacy_split = _uses_superseded_probability_split(quality)
     _validate_quality(quality, records, parsed_config, source)
     _validate_cost_contract(_mapping(report["cost_contract"], "cost_contract"), config)
     if report["metadata_contract"] != _metadata_contract():
@@ -791,7 +826,7 @@ def _validate_report(
     _validate_probability_fit(
         report,
         _mapping(report["probability_fit"], "probability_fit"),
-        replay=replay_probability_fit and not legacy_split,
+        replay=replay_probability_fit,
     )
     if report["status"] != _report_status(_mapping(report["quality"], "quality")):
         raise HistoricalReplayError("historical replay status 与质量摘要冲突")
@@ -916,9 +951,11 @@ def _validate_probability_fit(
 
 
 def _validate_probability_fit_header(value: Mapping[str, object]) -> None:
+    if value.get("estimator_binding") != _probability_estimator_binding():
+        raise HistoricalReplayFitContractSupersededError()
     if set(value) != {
         "cohort", "target", "probability", "horizons", "production_ranking_effect",
-        "automatic_promotion",
+        "automatic_promotion", "estimator_binding",
     }:
         raise HistoricalReplayError("historical replay probability fit 字段无效")
     if value.get("cohort") != _cohort_payload() or value.get("target") != "net_return_positive":
@@ -1002,13 +1039,11 @@ def _validated_registered_split_defaults(quality: Mapping[str, object]) -> Mappi
         quality.get("registered_probability_split_defaults"),
         "quality.registered_probability_split_defaults",
     )
-    if value != _registered_split_defaults() and value != _superseded_registered_split_defaults():
+    if value == _superseded_registered_split_defaults():
+        raise HistoricalReplayFitContractSupersededError()
+    if value != _registered_split_defaults():
         raise HistoricalReplayError("historical replay probability split defaults 不受支持")
     return value
-
-
-def _uses_superseded_probability_split(quality: Mapping[str, object]) -> bool:
-    return quality.get("registered_probability_split_defaults") == _superseded_registered_split_defaults()
 
 
 def _validate_quality_exclusions(
@@ -1688,8 +1723,10 @@ __all__ = [
     "HISTORICAL_REPLAY_FEATURE_NAMES",
     "HISTORICAL_REPLAY_HORIZONS",
     "HISTORICAL_REPLAY_SCHEMA_VERSION",
+    "HISTORICAL_REPLAY_SUPERSEDED_ARTIFACT_SCHEMA_VERSION",
     "HistoricalReplayConfig",
     "HistoricalReplayError",
+    "HistoricalReplayFitContractSupersededError",
     "build_historical_replay_artifact",
     "canonical_historical_replay_json",
     "evaluate_market_scan_probability_replay",

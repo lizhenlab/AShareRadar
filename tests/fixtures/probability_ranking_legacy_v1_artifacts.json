@@ -1,0 +1,352 @@
+{
+  "build_probability_ranking_publication_artifact": [
+    {
+      "generated_at": "2026-08-24T16:03:00+08:00",
+      "integrity": {
+        "algorithm": "sha256",
+        "integrity_digest": "1f50ba8089197739be63ff6ccdde13564e51558dd11d54e86934354afac561ef",
+        "notice": "content_address_only_strict_replay_required",
+        "scope": "generated_at+payload"
+      },
+      "payload": {
+        "base_score_rule_version": "full-market-score-v5",
+        "base_snapshot_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "base_v5_mutated": false,
+        "contract_version": "derived-immutable-v6-production-ranking-v1",
+        "current_prediction_artifact_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "deployment_artifact_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "effective_after_run_id": 100,
+        "generated_at": "2026-08-24T16:03:00+08:00",
+        "historical_ranks_mutated": false,
+        "joint_source_artifact_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "promotion_digest": "226135784aa85f0a6f1a439d478041c2ac18d00f326a1cb10bfbf7311c3ef56f",
+        "record_count": 2,
+        "record_set_digest": "91c6d953152fbc805db1be4eedda1dbed63a0cdb38a87736e10d9f198f1b9da2",
+        "records": [
+          {
+            "base_rank": 2,
+            "base_raw_score": 79.0,
+            "base_score": 79,
+            "prediction_record_digest": "97356b208b36417518660769410633995cd661e563ca7b2e84c5ee003c234cff",
+            "probability": 0.8,
+            "probability_adjustment": 6.0,
+            "rank": 1,
+            "raw_score": 85.0,
+            "record_digest": "5e11bb44830e5a61562f3d8a4b01a12630e3efad464d81dcc3a722af04b91858",
+            "reference_base_rate": 0.5,
+            "run_id": 101,
+            "score": 85,
+            "score_rule_version": "full-market-score-v6",
+            "score_spec_hash": "df617b8524c0a4c58c86ca252d028e7e3813d40b5336295e301a5d4122951c6e",
+            "source_record_digest": "5c50dabbb8dcca162df5e21a4013956fa6ac83173fe274b58ae83690ec665304",
+            "symbol": "300750.SZ"
+          },
+          {
+            "base_rank": 1,
+            "base_raw_score": 80.0,
+            "base_score": 80,
+            "prediction_record_digest": "42c75becb6ea567b232961b6b5619689388b43f867cbc1578d4d45c42a666a97",
+            "probability": 0.2,
+            "probability_adjustment": -6.0,
+            "rank": 2,
+            "raw_score": 74.0,
+            "record_digest": "c15689c9c767487dedadae76c23e6cd75e20c315c629d81b7cacfce395b26764",
+            "reference_base_rate": 0.5,
+            "run_id": 101,
+            "score": 74,
+            "score_rule_version": "full-market-score-v6",
+            "score_spec_hash": "df617b8524c0a4c58c86ca252d028e7e3813d40b5336295e301a5d4122951c6e",
+            "source_record_digest": "7ae8b7937595dc190a8ea269e46ee791b00d65ae8925b983a9f11dcf94acff52",
+            "symbol": "600519.SH"
+          }
+        ],
+        "rollback_control_required_to_disable": true,
+        "run_id": 101,
+        "score_rule_version": "full-market-score-v6",
+        "score_spec": {
+          "algorithm_version": "v5-plus-bounded-centered-joint-h5-probability-v1",
+          "base_score_contract": {
+            "historical_rewrite": "forbidden",
+            "immutability": "read_only_source_publication",
+            "rule_version": "full-market-score-v5"
+          },
+          "final_score": {
+            "clamp": [
+              0,
+              100
+            ],
+            "integer_formula": "python_round_half_even(v6_raw_score)",
+            "raw_decimals": 6,
+            "raw_formula": "clip(v5_raw_score+probability_adjustment,0,100)"
+          },
+          "preregistered_at": "2026-08-22T22:32:47+08:00",
+          "probability_input": {
+            "authority": "verified_current_all_decisions_probability_token",
+            "decision_time_only": true,
+            "horizon": 5,
+            "missing_success_probability_policy": "fail_entire_v6_publication",
+            "target": "joint_execution_action_positive_net_excess"
+          },
+          "promotion": {
+            "automatic_promotion": false,
+            "explicit_human_control_required": true,
+            "only_runs_strictly_after_effective_after_run_id": true,
+            "rollback_control_supported": true,
+            "shadow_required": true
+          },
+          "ranking": {
+            "population": "v5_success_rows_only_exactly_once",
+            "tie_break": [
+              [
+                "raw_score",
+                "desc"
+              ],
+              [
+                "symbol",
+                "asc"
+              ]
+            ]
+          },
+          "rule_version": "full-market-score-v6",
+          "schema_version": 6,
+          "transform": {
+            "formula": "clip((probability-reference_base_rate)*20,-6,6)",
+            "maximum_adjustment": 6.0,
+            "minimum_adjustment": -6.0,
+            "scale": 20.0
+          }
+        },
+        "score_spec_hash": "df617b8524c0a4c58c86ca252d028e7e3813d40b5336295e301a5d4122951c6e",
+        "signal_session": "2026-08-24",
+        "study_evidence_digest": "7d8b14ae62a168618de9868849c416db79ea713413608d675655897e33033046"
+      },
+      "schema_version": "market-scan-probability-ranking-publication-artifact-v1"
+    }
+  ],
+  "build_probability_ranking_shadow_artifact": [
+    {
+      "generated_at": "2026-08-25T17:00:00+08:00",
+      "integrity": {
+        "algorithm": "sha256",
+        "integrity_digest": "7947ee9c69457c1f2a9ad725364acfe1985280713faf97c026c84f49558c593e",
+        "notice": "content_address_only_strict_replay_required",
+        "scope": "generated_at+payload"
+      },
+      "payload": {
+        "automatic_promotion": false,
+        "contract_version": "probability-ranking-preregistered-shadow-v1",
+        "decision_count": 2,
+        "failed_gates": [
+          "complete_top100_each_session",
+          "costed_net_excess_delta_ci95_lower_positive",
+          "deflated_sharpe_probability_at_least_95pct",
+          "first_30_session_drift_window_positive",
+          "industry_bucket_exposure_within_35pct",
+          "last_30_session_drift_window_positive",
+          "liquidity_exposure_within_35pct",
+          "market_exposure_within_70pct",
+          "mean_costed_net_excess_delta_positive",
+          "minimum_60_independent_shadow_sessions",
+          "pbo_at_most_20pct",
+          "turnover_within_preregistered_budget"
+        ],
+        "gates": {
+          "average_top100_overlap_at_least_70pct": true,
+          "capacity_coverage_at_least_95pct": true,
+          "complete_top100_each_session": false,
+          "costed_net_excess_delta_ci95_lower_positive": false,
+          "deflated_sharpe_probability_at_least_95pct": false,
+          "exposure_lift_within_10pct": true,
+          "first_30_session_drift_window_positive": false,
+          "industry_bucket_exposure_within_35pct": false,
+          "last_30_session_drift_window_positive": false,
+          "liquidity_exposure_within_35pct": false,
+          "market_exposure_within_70pct": false,
+          "maximum_drawdown_not_materially_worse": true,
+          "mean_costed_net_excess_delta_positive": false,
+          "minimum_60_independent_shadow_sessions": false,
+          "no_unresolved_filled_exit_in_v6_top100": true,
+          "pbo_at_most_20pct": false,
+          "preregistration_predates_every_shadow_session": true,
+          "turnover_within_preregistered_budget": false
+        },
+        "generated_at": "2026-08-25T17:00:00+08:00",
+        "metrics": {
+          "average_top_overlap": 1.0,
+          "capacity_coverage": 1.0,
+          "costed_net_excess_delta_ci95": [
+            0.0,
+            0.0
+          ],
+          "decision_count": 2,
+          "deflated_sharpe_probability": null,
+          "first_30_mean_delta": 0.0,
+          "independent_session_count": 1,
+          "last_30_mean_delta": 0.0,
+          "maximum_exposure": {
+            "industry_bucket": 1.0,
+            "liquidity": 1.0,
+            "market": 1.0
+          },
+          "maximum_exposure_lift": {
+            "industry_bucket": 0.0,
+            "liquidity": 0.0,
+            "market": 0.0
+          },
+          "mean_costed_net_excess_delta": 0.0,
+          "mean_v5_costed_net_excess_return": 0.015,
+          "mean_v6_costed_net_excess_return": 0.015,
+          "probability_of_backtest_overfitting": null,
+          "top_n": 100,
+          "unresolved_filled_exit_count": 0,
+          "v5_average_turnover": 1.0,
+          "v5_maximum_drawdown": 0.0,
+          "v6_average_turnover": 1.0,
+          "v6_maximum_drawdown": 0.0
+        },
+        "oos_corpus_digest": "56d27c97390672e775883b3e0f616ab6f92b1c1dadb1e2044c8ba5733ee3e6c7",
+        "production_effect": "none_until_manual_promotion",
+        "qualified": false,
+        "score_rule_version": "full-market-score-v6",
+        "score_spec": {
+          "algorithm_version": "v5-plus-bounded-centered-joint-h5-probability-v1",
+          "base_score_contract": {
+            "historical_rewrite": "forbidden",
+            "immutability": "read_only_source_publication",
+            "rule_version": "full-market-score-v5"
+          },
+          "final_score": {
+            "clamp": [
+              0,
+              100
+            ],
+            "integer_formula": "python_round_half_even(v6_raw_score)",
+            "raw_decimals": 6,
+            "raw_formula": "clip(v5_raw_score+probability_adjustment,0,100)"
+          },
+          "preregistered_at": "2026-08-22T22:32:47+08:00",
+          "probability_input": {
+            "authority": "verified_current_all_decisions_probability_token",
+            "decision_time_only": true,
+            "horizon": 5,
+            "missing_success_probability_policy": "fail_entire_v6_publication",
+            "target": "joint_execution_action_positive_net_excess"
+          },
+          "promotion": {
+            "automatic_promotion": false,
+            "explicit_human_control_required": true,
+            "only_runs_strictly_after_effective_after_run_id": true,
+            "rollback_control_supported": true,
+            "shadow_required": true
+          },
+          "ranking": {
+            "population": "v5_success_rows_only_exactly_once",
+            "tie_break": [
+              [
+                "raw_score",
+                "desc"
+              ],
+              [
+                "symbol",
+                "asc"
+              ]
+            ]
+          },
+          "rule_version": "full-market-score-v6",
+          "schema_version": 6,
+          "transform": {
+            "formula": "clip((probability-reference_base_rate)*20,-6,6)",
+            "maximum_adjustment": 6.0,
+            "minimum_adjustment": -6.0,
+            "scale": 20.0
+          }
+        },
+        "score_spec_hash": "df617b8524c0a4c58c86ca252d028e7e3813d40b5336295e301a5d4122951c6e",
+        "session_summaries": [
+          {
+            "net_excess_delta": 0.0,
+            "signal_session": "2026-08-25",
+            "success_decision_count": 2,
+            "top_n": 2,
+            "top_overlap": 1.0,
+            "v5_exposure": {
+              "industry_bucket": 1.0,
+              "liquidity": 1.0,
+              "market": 1.0
+            },
+            "v5_net_excess_return": 0.015,
+            "v5_top_symbol_digest": "447b562bae0aa5c513aa918d3014f264d8ff2fe802c7f3c3b3503d2742a16670",
+            "v6_capacity_exceeded_count": 0,
+            "v6_exposure": {
+              "industry_bucket": 1.0,
+              "liquidity": 1.0,
+              "market": 1.0
+            },
+            "v6_net_excess_return": 0.015,
+            "v6_top_symbol_digest": "447b562bae0aa5c513aa918d3014f264d8ff2fe802c7f3c3b3503d2742a16670",
+            "v6_unresolved_exit_count": 0
+          }
+        ],
+        "session_summary_digest": "7962c2050d38c905ad7c84997535e6ac4913d5ad5f42026d119145b5c408835a",
+        "source_binding_digest": "b2a5136ae6c71a930f5d6163c1e50aadda91ef6e8b7d1a018292a48ca423b3eb",
+        "source_run_ids": [
+          102
+        ],
+        "study_evidence_digest": "e679a90db3aa10ba16ade1bd06addd3825f4310b03d9fcb695ec0f259f8b27af"
+      },
+      "schema_version": "market-scan-probability-ranking-shadow-artifact-v1"
+    }
+  ],
+  "seal_probability_ranking_manual_control_artifact": [
+    {
+      "generated_at": "2026-08-23T17:00:00+08:00",
+      "integrity": {
+        "algorithm": "sha256",
+        "integrity_digest": "226135784aa85f0a6f1a439d478041c2ac18d00f326a1cb10bfbf7311c3ef56f",
+        "notice": "content_address_only_strict_replay_required",
+        "scope": "generated_at+payload"
+      },
+      "payload": {
+        "action": "promote",
+        "automatic": false,
+        "change_ticket": "ASR-RANK-V6-001",
+        "contract_version": "probability-ranking-explicit-human-control-v1",
+        "effective_after_run_id": 100,
+        "generated_at": "2026-08-23T17:00:00+08:00",
+        "reason": "all preregistered shadow gates reviewed and accepted",
+        "reviewer_id": "risk-committee-01",
+        "reviewer_role": "production-risk-owner",
+        "rollback_acknowledged": true,
+        "score_rule_version": "full-market-score-v6",
+        "score_spec_hash": "df617b8524c0a4c58c86ca252d028e7e3813d40b5336295e301a5d4122951c6e",
+        "shadow_artifact_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "study_evidence_digest": "7d8b14ae62a168618de9868849c416db79ea713413608d675655897e33033046"
+      },
+      "schema_version": "market-scan-probability-ranking-manual-control-artifact-v1"
+    },
+    {
+      "generated_at": "2026-08-24T17:00:00+08:00",
+      "integrity": {
+        "algorithm": "sha256",
+        "integrity_digest": "27f7b37b9e32f37b9c9b81ff941361cd3f16a41c9401adc2978be47caab902ef",
+        "notice": "content_address_only_strict_replay_required",
+        "scope": "generated_at+payload"
+      },
+      "payload": {
+        "action": "rollback",
+        "automatic": false,
+        "change_ticket": "ASR-RANK-V6-ROLLBACK-001",
+        "contract_version": "probability-ranking-explicit-human-control-v1",
+        "effective_after_run_id": 101,
+        "generated_at": "2026-08-24T17:00:00+08:00",
+        "promotion_digest": "226135784aa85f0a6f1a439d478041c2ac18d00f326a1cb10bfbf7311c3ef56f",
+        "publication_artifact_digest": "1f50ba8089197739be63ff6ccdde13564e51558dd11d54e86934354afac561ef",
+        "reason": "production rollback drill",
+        "reviewer_id": "risk-committee-01",
+        "reviewer_role": "production-risk-owner",
+        "rollback_acknowledged": true
+      },
+      "schema_version": "market-scan-probability-ranking-manual-control-artifact-v1"
+    }
+  ]
+}

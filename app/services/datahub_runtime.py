@@ -414,9 +414,8 @@ class ProviderRuntime:
             if self.is_cooling(name, kind):
                 errors.append(f"{name}: 最近失败，短暂冷却中")
                 continue
-            if self._provider_has_orphaned_call((name, kind)):
-                errors.append(f"{name}: 上一次调用仍在后台执行")
-                continue
+            # Admission needs the request key: a matching caller can rejoin a
+            # running SDK worker; unrelated work remains blocked in call_provider.
             provider = providers.get(name)
             if provider is None:
                 errors.append(f"{name}: 数据源未注册")

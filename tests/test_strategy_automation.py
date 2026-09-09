@@ -460,17 +460,15 @@ def test_utility_and_policy_events_ignore_null_or_non_crossing_values(tmp_path) 
         }
     )
 
-    emitted = cache.domain_services.strategy_automation._emit_utility_events(
+    emitted = cache.domain_services.strategy_automation._build_utility_events(
         schedule,
-        previous,
-        current,
         {candidate.symbol: previous.selected[0]},
         {candidate.symbol: current.selected[0]},
     )
-    policy_emitted = cache.domain_services.strategy_automation._emit_policy_events(schedule, current)
+    policy_emitted = cache.domain_services.strategy_automation._build_policy_events(schedule, current)
 
-    assert emitted == 0
-    assert policy_emitted == 0
+    assert emitted == []
+    assert policy_emitted == []
 
 
 def test_policy_events_report_stale_data_and_invalid_evidence(tmp_path) -> None:
@@ -502,16 +500,10 @@ def test_policy_events_report_stale_data_and_invalid_evidence(tmp_path) -> None:
         "app.services.strategy_automation.market_now_naive",
         return_value=datetime(2026, 5, 13, 16, 0),
     ):
-        emitted = cache.domain_services.strategy_automation._emit_policy_events(schedule, current)
+        emitted = cache.domain_services.strategy_automation._build_policy_events(schedule, current)
 
-    events = cache.domain_services.strategy_automation.events(
-        strategy_id=strategy_id,
-        schedule_id=schedule.schedule_id,
-        page=1,
-        page_size=20,
-    )
-    assert emitted == 2
-    assert {item.event_type for item in events.items} == {
+    assert len(emitted) == 2
+    assert {item.event_type for item in emitted} == {
         "data_stale",
         "evidence_invalid",
     }
@@ -588,7 +580,7 @@ def _reseal_execution_source_as_distribution_degraded(
         )
 
 
-def test_utility_cross_emits_one_fingerprinted_event(tmp_path) -> None:
+def test_utility_cross_builds_one_event_with_threshold_evidence(tmp_path) -> None:
     cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
     schedule = cache.domain_services.strategy_automation.create_schedule(
         StrategyScheduleCreate(
@@ -601,19 +593,12 @@ def test_utility_cross_emits_one_fingerprinted_event(tmp_path) -> None:
     previous = draft.model_copy(update={"selected": [candidate.model_copy(update={"utility_score": 59.0})]})
     current = draft.model_copy(update={"selected": [candidate.model_copy(update={"utility_score": 60.0})]})
 
-    emitted = cache.domain_services.strategy_automation._emit_utility_events(
+    emitted = cache.domain_services.strategy_automation._build_utility_events(
         schedule,
-        previous,
-        current,
         {candidate.symbol: previous.selected[0]},
         {candidate.symbol: current.selected[0]},
     )
 
-    assert emitted == 1
-    events = cache.domain_services.strategy_automation.events(
-        strategy_id=strategy_id,
-        schedule_id=schedule.schedule_id,
-        page=1,
-        page_size=20,
-    )
-    assert events.items[0].event_type == "utility_cross"
+    assert len(emitted) == 1
+    assert emitted[0].event_type == "utility_cross"
+    assert emitted[0].trigger == {"previous": 59.0, "current": 60.0, "threshold": 60.0}

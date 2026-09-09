@@ -273,9 +273,13 @@ def _order_book_pressure(analysis: AnalysisResult, order_book: OrderBook) -> Ord
 
 def _range_estimated_pressure(analysis: AnalysisResult, *, order_book_error: str | None) -> OrderPressure:
     metrics = _range_pressure_metrics(analysis)
-    range_available = _range_pressure_available(analysis)
-    level = _quality_adjusted_level(_range_pressure_level(analysis, metrics), analysis) if range_available else "订单压力不可用"
-    summary = f"{level}，日内振幅约 {metrics.intraday_range_pct:.2f}%。" if range_available else "缺少有效实时盘口和日内价格区间，订单压力不可用。"
+    if metrics is None:
+        level = "订单压力不可用"
+        summary = "缺少有效实时盘口和日内价格区间，订单压力不可用。"
+    else:
+        level = _quality_adjusted_level(_range_pressure_level(analysis, metrics), analysis)
+        summary = f"{level}，日内振幅约 {metrics.intraday_range_pct:.2f}%。"
+    range_available = metrics is not None
     return OrderPressure(
         symbol=_analysis_symbol(analysis),
         available=False,
@@ -354,13 +358,15 @@ def _order_book_notes(analysis: AnalysisResult) -> list[str]:
     return notes
 
 
-def _range_pressure_metrics(analysis: AnalysisResult) -> RangePressureMetrics:
+def _range_pressure_metrics(analysis: AnalysisResult) -> RangePressureMetrics | None:
     quote = analysis.quote
     price = finite_float(quote.price)
     high = finite_float(quote.high)
     low = finite_float(quote.low)
-    if price is None or price <= 0 or high is None or low is None or high < low:
-        return RangePressureMetrics(intraday_range_pct=0, distance_to_high=0, distance_to_low=0)
+    if price is None or high is None or low is None:
+        return None
+    if price <= 0 or low <= 0 or high < low:
+        return None
     return RangePressureMetrics(
         intraday_range_pct=(high - low) / price * 100,
         distance_to_high=(high - price) / price * 100,
@@ -393,14 +399,6 @@ def _fund_flow_data_nature(analysis: AnalysisResult, context: FundFlowScoreConte
     has_change = finite_float(quote.change_pct) is not None
     has_history = len(analysis.klines) >= 2
     return "derived" if context.amount > 0 or has_turnover or has_change or has_history else "unavailable"
-
-
-def _range_pressure_available(analysis: AnalysisResult) -> bool:
-    quote = analysis.quote
-    price = finite_float(quote.price)
-    high = finite_float(quote.high)
-    low = finite_float(quote.low)
-    return price is not None and price > 0 and high is not None and low is not None and high >= low
 
 
 def _quality_adjusted_level(level: str, analysis: AnalysisResult) -> str:

@@ -525,8 +525,8 @@ def test_provider_runtime_timeout_keeps_one_background_sdk_call_per_capability()
 
             errors: list[str] = []
             attempts = list(runtime.attempts([(1, "slow")], {"slow": object()}, "quote", errors))
-            assert attempts == []
-            assert errors == ["slow: 上一次调用仍在后台执行"]
+            assert [attempt.name for attempt in attempts] == ["slow"]
+            assert errors == []  # Request-key admission below owns orphan backpressure.
 
             for _ in range(20):
                 with pytest.raises(ProviderCallBusyError, match="仍在后台执行"):

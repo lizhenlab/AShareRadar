@@ -57,7 +57,9 @@ export async function addAlertRule(state, options = {}) {
       }),
     }));
     if (!request.isCurrent()) return false;
-    if ($("alertThreshold").value.trim() === rawThreshold) $("alertThreshold").value = "";
+    if ($("alertType").value === conditionType && $("alertThreshold").value.trim() === rawThreshold) {
+      $("alertThreshold").value = "";
+    }
     return await finishAlertMutation(state, request, { actionLabel: "添加", locallyReconciled: false });
   } catch (error) {
     if (isAbortError(error) || !request.isCurrent()) return false;

@@ -332,6 +332,8 @@ class StockQuestionAnswer(BaseModel):
     confidence: int = Field(description="兼容字段：0-100 的回答可靠度评分，不代表统计正确率或概率")
     confidence_semantics: Literal["non_statistical_answer_reliability"] = "non_statistical_answer_reliability"
     confidence_note: str = "该值由规则问诊、诊断证据和数据质量综合形成，是启发式回答可靠度，不是统计正确率或概率。"
+    answerability: Literal["answerable", "insufficient_evidence", "out_of_scope"] = "answerable"
+    missing_evidence: list[str] = Field(default_factory=list)
     answer_source: str = "规则问诊"
     llm_used: bool = False
     llm_status: str | None = None

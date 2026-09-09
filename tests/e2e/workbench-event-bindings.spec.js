@@ -17,7 +17,7 @@ test("repeated feature binding retains one write and disabled styling without th
   });
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await selectPrimaryView(page, "review");
+  await selectPrimaryView(page, "research");
   await page.locator("#workspace-tab-tools").click();
   await page.evaluate(async () => {
     const { bindAdviceReviewEvents } = await import("/static/js/advice-review-events.js");

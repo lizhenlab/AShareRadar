@@ -304,17 +304,18 @@ def test_strategy_execution_rejects_cross_symbol_point_in_time_evidence_swap(tmp
 
 def test_constraint_rejection_refills_from_lower_utility_candidates(tmp_path) -> None:
     cache, service, strategy_id, _run_id = _environment(tmp_path)
-    _set_frozen_industry(cache, "688001.SH", "银行")
+    # The consistent completed histories rank BJ first, then SZ, then STAR.
+    _set_frozen_industry(cache, "300001.SZ", "工业")
 
     draft = service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
 
-    assert [item.symbol for item in draft.selected] == ["600001.SH", "300001.SZ"]
+    assert [item.symbol for item in draft.selected] == ["920001.BJ", "688001.SH"]
     assert draft.summary.selected_count == 2
     assert draft.summary.replacement_attempt_count == 1
     assert draft.summary.pool_exhausted is False
-    rejected = next(item for item in draft.candidate_preview if item.symbol == "688001.SH")
+    rejected = next(item for item in draft.candidate_preview if item.symbol == "300001.SZ")
     assert rejected.status == "rejected"
-    assert any("行业 银行 已达到" in reason for reason in rejected.reasons)
+    assert any("行业 工业 已达到" in reason for reason in rejected.reasons)
 
 
 def test_constraint_refill_reports_exhausted_pool_and_is_deterministic(tmp_path) -> None:
@@ -325,7 +326,7 @@ def test_constraint_refill_reports_exhausted_pool_and_is_deterministic(tmp_path)
     first = service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
     second = service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
 
-    assert [item.symbol for item in first.selected] == ["600001.SH"]
+    assert [item.symbol for item in first.selected] == ["920001.BJ"]
     assert first.summary.replacement_attempt_count == 3
     assert first.summary.pool_exhausted is True
     assert first.summary.underinvested_reason == "候选池在约束后耗尽，仅入选 1/2 只"
@@ -1000,7 +1001,10 @@ def _seed_scan(cache: SQLiteCache, *, action_eligible: bool = True) -> int:
     results = []
     for code, market, name, industry, list_date, change in rows:
         quote = _quote_for(code, market, name, change_pct=change)
-        klines = _daily_rows(SCAN_DATA_DATE, 80, last_close=quote.price)
+        # Preserve each fixture's quoted return in its completed daily history.
+        klines = _daily_rows(
+            SCAN_DATA_DATE, 80, last_close=quote.price, previous_close=quote.prev_close,
+        )
         item = MarketScanResultItem(
             run_id=run.id,
             symbol=f"{code}.{market}",

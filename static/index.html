@@ -4,73 +4,99 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AShareRadar</title>
-    <link rel="stylesheet" href="/static/css/base.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/sidebar.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/workspace-core.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/research-panels.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/individual-probability.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/market-scan-research.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/interactions.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/side-footer.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/responsive.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/primary-navigation.css?v=20260826-market-scan-audit-3" />
-    <link rel="stylesheet" href="/static/css/layout-optimizations.css?v=20260826-market-scan-audit-3" />
+    <link rel="stylesheet" href="/static/css/base.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/sidebar.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/workspace-core.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/research-panels.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/individual-probability.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/market-scan.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/market-scan-research.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/interactions.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/side-footer.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/responsive.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/primary-navigation.css?v=20260909-note-integrity-1" />
+    <link rel="stylesheet" href="/static/css/layout-optimizations.css?v=20260909-note-integrity-1" />
     <script type="importmap">
       {
-        "imports": {
-          "/static/js/api.js": "/static/js/api.js?v=20260826-market-scan-audit-3",
-          "/static/js/discovery.js": "/static/js/discovery.js?v=20260826-market-scan-audit-3",
-          "/static/js/individual-probability-contracts.js": "/static/js/individual-probability-contracts.js?v=20260826-market-scan-audit-3",
-          "/static/js/individual-probability-controller.js": "/static/js/individual-probability-controller.js?v=20260826-market-scan-audit-3",
-          "/static/js/individual-probability-view.js": "/static/js/individual-probability-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/workbench-contracts.js": "/static/js/workbench-contracts.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-experimental.js": "/static/js/market-scan-experimental.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-experimental-context.js": "/static/js/market-scan-experimental-context.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-auxiliary-research.js": "/static/js/market-scan-auxiliary-research.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-controller-inert.js": "/static/js/market-scan-controller-inert.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-export-client.js": "/static/js/market-scan-export-client.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-export-action.js": "/static/js/market-scan-export-action.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-executable-shadow-contracts.js": "/static/js/market-scan-executable-shadow-contracts.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-executable-shadow-controller.js": "/static/js/market-scan-executable-shadow-controller.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-executable-shadow-view.js": "/static/js/market-scan-executable-shadow-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-filters.js": "/static/js/market-scan-filters.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-future-range-controller.js": "/static/js/market-scan-future-range-controller.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-future-range-view.js": "/static/js/market-scan-future-range-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-history.js": "/static/js/market-scan-history.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-history-view.js": "/static/js/market-scan-history-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/layout-optimizations.js": "/static/js/layout-optimizations.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-message-view.js": "/static/js/market-scan-message-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-latest-sync.js": "/static/js/market-scan-latest-sync.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-probability-binding.js": "/static/js/market-scan-probability-binding.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-probability-contracts.js": "/static/js/market-scan-probability-contracts.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-probability-copy.js": "/static/js/market-scan-probability-copy.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-probability-interval.js": "/static/js/market-scan-probability-interval.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-probability-horizon-controller.js": "/static/js/market-scan-probability-horizon-controller.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-probability-polling.js": "/static/js/market-scan-probability-polling.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-probability-view.js": "/static/js/market-scan-probability-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-read-transition.js": "/static/js/market-scan-read-transition.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-read-client.js": "/static/js/market-scan-read-client.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-result-query.js": "/static/js/market-scan-result-query.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-progress-view.js": "/static/js/market-scan-progress-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-row-actions.js": "/static/js/market-scan-row-actions.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-run-context-view.js": "/static/js/market-scan-run-context-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-snapshot-view.js": "/static/js/market-scan-snapshot-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-surface.js": "/static/js/market-scan-surface.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-top100-refresh.js": "/static/js/market-scan-top100-refresh.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/market-scan-view-export.js": "/static/js/market-scan-view-export.js?v=20260826-market-scan-audit-3",
-          "/static/js/strategy-lab.js": "/static/js/strategy-lab.js?v=20260826-market-scan-audit-3",
-          "/static/js/strategy-lab-contracts.js": "/static/js/strategy-lab-contracts.js?v=20260826-market-scan-audit-3",
-          "/static/js/strategy-lab-controller.js": "/static/js/strategy-lab-controller.js?v=20260826-market-scan-audit-3",
-          "/static/js/strategy-lab-view.js": "/static/js/strategy-lab-view.js?v=20260826-market-scan-audit-3",
-          "/static/js/strategy-template-catalog.js": "/static/js/strategy-template-catalog.js?v=20260826-market-scan-audit-3"
+          "imports": {
+            "/static/js/notification-navigation.js": "/static/js/notification-navigation.js?v=20260909-note-integrity-1",
+            "/static/js/notifications.js": "/static/js/notifications.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-history.js": "/static/js/strategy-history.js?v=20260909-note-integrity-1",
+            "/static/js/api.js": "/static/js/api.js?v=20260909-note-integrity-1",
+            "/static/js/discovery-preset-state.js": "/static/js/discovery-preset-state.js?v=20260909-note-integrity-1",
+            "/static/js/discovery-screen-alerts.js": "/static/js/discovery-screen-alerts.js?v=20260909-note-integrity-1",
+            "/static/js/discovery-screen-alerts-contracts.js": "/static/js/discovery-screen-alerts-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/discovery-screen-alerts-view.js": "/static/js/discovery-screen-alerts-view.js?v=20260909-note-integrity-1",
+            "/static/js/discovery.js": "/static/js/discovery.js?v=20260909-note-integrity-1",
+            "/static/js/individual-probability-contracts.js": "/static/js/individual-probability-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/individual-probability-controller.js": "/static/js/individual-probability-controller.js?v=20260909-note-integrity-1",
+            "/static/js/individual-probability-view.js": "/static/js/individual-probability-view.js?v=20260909-note-integrity-1",
+            "/static/js/workbench-contracts.js": "/static/js/workbench-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan.js": "/static/js/market-scan.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-controller.js": "/static/js/market-scan-controller.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-experimental.js": "/static/js/market-scan-experimental.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-experimental-context.js": "/static/js/market-scan-experimental-context.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-auxiliary-research.js": "/static/js/market-scan-auxiliary-research.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-controller-inert.js": "/static/js/market-scan-controller-inert.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-contracts.js": "/static/js/market-scan-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-export-client.js": "/static/js/market-scan-export-client.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-export-action.js": "/static/js/market-scan-export-action.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-executable-shadow-contracts.js": "/static/js/market-scan-executable-shadow-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-executable-shadow-controller.js": "/static/js/market-scan-executable-shadow-controller.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-executable-shadow-view.js": "/static/js/market-scan-executable-shadow-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-filters.js": "/static/js/market-scan-filters.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-future-range-controller.js": "/static/js/market-scan-future-range-controller.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-future-range-view.js": "/static/js/market-scan-future-range-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-history.js": "/static/js/market-scan-history.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-history-view.js": "/static/js/market-scan-history-view.js?v=20260909-note-integrity-1",
+            "/static/js/layout-optimizations.js": "/static/js/layout-optimizations.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-message-view.js": "/static/js/market-scan-message-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-latest-sync.js": "/static/js/market-scan-latest-sync.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-polling.js": "/static/js/market-scan-polling.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-probability-binding.js": "/static/js/market-scan-probability-binding.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-probability-contracts.js": "/static/js/market-scan-probability-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-probability-copy.js": "/static/js/market-scan-probability-copy.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-probability-interval.js": "/static/js/market-scan-probability-interval.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-probability-horizon-controller.js": "/static/js/market-scan-probability-horizon-controller.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-probability-polling.js": "/static/js/market-scan-probability-polling.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-probability-view.js": "/static/js/market-scan-probability-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-read-transition.js": "/static/js/market-scan-read-transition.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-read-client.js": "/static/js/market-scan-read-client.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-result-query.js": "/static/js/market-scan-result-query.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-progress-view.js": "/static/js/market-scan-progress-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-row-actions.js": "/static/js/market-scan-row-actions.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-run-context-view.js": "/static/js/market-scan-run-context-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-snapshot-view.js": "/static/js/market-scan-snapshot-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-surface.js": "/static/js/market-scan-surface.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-top100-refresh.js": "/static/js/market-scan-top100-refresh.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-view.js": "/static/js/market-scan-view.js?v=20260909-note-integrity-1",
+            "/static/js/market-scan-view-export.js": "/static/js/market-scan-view-export.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-lab.js": "/static/js/strategy-lab.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-lab-contracts.js": "/static/js/strategy-lab-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-lab-controller.js": "/static/js/strategy-lab-controller.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-lab-view.js": "/static/js/strategy-lab-view.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-template-catalog.js": "/static/js/strategy-template-catalog.js?v=20260909-note-integrity-1",
+            "/static/js/diagnostics.js": "/static/js/diagnostics.js?v=20260909-note-integrity-1",
+            "/static/js/local-data.js": "/static/js/local-data.js?v=20260909-note-integrity-1",
+            "/static/js/stock-note-alert-events.js": "/static/js/stock-note-alert-events.js?v=20260909-note-integrity-1",
+            "/static/js/note-editor-state.js": "/static/js/note-editor-state.js?v=20260909-note-integrity-1",
+            "/static/js/notes.js": "/static/js/notes.js?v=20260909-note-integrity-1",
+            "/static/js/watchlist.js": "/static/js/watchlist.js?v=20260909-note-integrity-1",
+            "/static/js/watchlist-queue-view.js": "/static/js/watchlist-queue-view.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-schedule-manager.js": "/static/js/strategy-schedule-manager.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-schedule-view.js": "/static/js/strategy-schedule-view.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-schedule-contracts.js": "/static/js/strategy-schedule-contracts.js?v=20260909-note-integrity-1",
+            "/static/js/advice-reviews.js": "/static/js/advice-reviews.js?v=20260909-note-integrity-1",
+            "/static/js/advice-review-events.js": "/static/js/advice-review-events.js?v=20260909-note-integrity-1",
+            "/static/js/advice-review-due.js": "/static/js/advice-review-due.js?v=20260909-note-integrity-1",
+            "/static/js/workspace-preferences.js": "/static/js/workspace-preferences.js?v=20260909-note-integrity-1",
+            "/static/js/primary-navigation.js": "/static/js/primary-navigation.js?v=20260909-note-integrity-1",
+            "/static/js/watchlist-navigation.js": "/static/js/watchlist-navigation.js?v=20260909-note-integrity-1",
+            "/static/js/paper-trading.js": "/static/js/paper-trading.js?v=20260909-note-integrity-1",
+            "/static/js/strategy-draft-state.js": "/static/js/strategy-draft-state.js?v=20260909-note-integrity-1",
+            "/static/js/advice-review-contracts.js": "/static/js/advice-review-contracts.js?v=20260909-note-integrity-1"
+          }
         }
-      }
     </script>
   </head>
   <body data-primary-view="research">
@@ -89,8 +115,9 @@
       <div class="primary-navigation-inner">
         <button type="button" class="active" id="primary-nav-research" data-primary-view="research" aria-current="page">个股研究</button>
         <button type="button" id="primary-nav-market" data-primary-view="market" aria-current="false" aria-controls="workspace-panel-market-scan">全市场选股</button>
-        <button type="button" id="primary-nav-review" data-primary-view="review" aria-current="false">复盘工具</button>
+        <button type="button" id="primary-nav-review" data-primary-view="review" aria-current="false">复盘模拟</button>
         <button type="button" id="primary-nav-monitor" data-primary-view="monitor" aria-current="false">自选监控</button>
+        <button type="button" id="primary-nav-system" data-primary-view="system" aria-current="false">系统维护</button>
       </div>
     </nav>
 
@@ -107,7 +134,7 @@
     </section>
 
     <main class="layout">
-      <section class="panel query-panel" data-primary-regions="research review">
+      <section class="panel query-panel" data-primary-regions="research review" data-workspace-exclude="paper">
         <div class="panel-title">
           <span>个股查询</span>
           <small>代码或名称</small>
@@ -143,10 +170,10 @@
         </div>
       </section>
 
-      <section class="workspace" data-primary-regions="research market review">
-        <section class="market-strip" id="marketStrip" data-primary-regions="research"></section>
+      <section class="workspace" data-primary-regions="research market review system">
+        <section class="market-strip" id="marketStrip" data-primary-regions="research" data-workspace-exclude="tools"></section>
 
-        <section class="panel main-card market-scan-focus-target" id="stockWorkbench" tabindex="-1" aria-labelledby="stockName" data-primary-regions="research">
+        <section class="panel main-card market-scan-focus-target" id="stockWorkbench" tabindex="-1" aria-labelledby="stockName" data-primary-regions="research" data-workspace-exclude="tools">
           <p class="current-analysis-context" id="currentAnalysisContext" role="status" hidden></p>
           <div class="stock-head">
             <div>
@@ -235,7 +262,7 @@
           </section>
         </section>
 
-        <section class="workspace-tabs" aria-label="当前功能分区" role="tablist" data-primary-regions="research review">
+        <section class="workspace-tabs" aria-label="当前功能分区" role="tablist" data-primary-regions="research review system">
           <button type="button" class="active" id="workspace-tab-overview" data-view="overview" data-primary-regions="research" role="tab" aria-selected="true" aria-controls="workspace-panel-overview" tabindex="0">总览</button>
           <button type="button" id="workspace-tab-market-scan" data-view="market-scan" data-primary-regions="market" role="tab" aria-selected="false" aria-controls="workspace-panel-market-scan" tabindex="-1" hidden>全市场榜单</button>
           <button type="button" id="workspace-tab-qa" data-view="qa" data-primary-regions="research" role="tab" aria-selected="false" aria-controls="workspace-panel-qa" tabindex="-1">个股问诊</button>
@@ -244,8 +271,9 @@
           <button type="button" id="workspace-tab-theme" data-view="theme" data-primary-regions="research" role="tab" aria-selected="false" aria-controls="workspace-panel-theme" tabindex="-1">题材强弱</button>
           <button type="button" id="workspace-tab-replay" data-view="replay" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-replay" tabindex="-1" hidden>复盘验证</button>
           <button type="button" id="workspace-tab-paper" data-view="paper" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-paper" tabindex="-1" hidden>模拟交易</button>
-          <button type="button" id="workspace-tab-tools" data-view="tools" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-tools" tabindex="-1" hidden>工具记录</button>
-          <button type="button" id="workspace-tab-data" data-view="data" data-primary-regions="review" role="tab" aria-selected="false" aria-controls="workspace-panel-data" tabindex="-1" hidden>数据管理</button>
+          <button type="button" id="workspace-tab-tools" data-view="tools" data-primary-regions="research" role="tab" aria-selected="false" aria-controls="workspace-panel-tools" tabindex="-1">笔记预警</button>
+          <button type="button" id="workspace-tab-diagnostics" data-view="diagnostics" data-primary-regions="system" role="tab" aria-selected="false" aria-controls="workspace-panel-diagnostics" tabindex="-1" hidden>运行状态</button>
+          <button type="button" id="workspace-tab-data" data-view="data" data-primary-regions="system" role="tab" aria-selected="false" aria-controls="workspace-panel-data" tabindex="-1" hidden>数据管理</button>
         </section>
 
         <section class="workspace-view active" id="workspace-panel-overview" data-view-panel="overview" role="tabpanel" aria-labelledby="workspace-tab-overview">
@@ -358,6 +386,11 @@
                 <input id="marketScanHistoryDate" type="date" />
               </label>
               <button type="button" class="mini-button" id="marketScanHistoryRefresh">查询批次</button>
+              <nav class="market-scan-history-pagination" id="marketScanHistoryPagination" aria-label="历史批次分页" hidden>
+                <button type="button" class="mini-button" id="marketScanHistoryPrev" disabled>上一页批次</button>
+                <span id="marketScanHistoryPageInfo" role="status" aria-live="polite">历史第 0 / 0 页</span>
+                <button type="button" class="mini-button" id="marketScanHistoryNext" disabled>下一页批次</button>
+              </nav>
               <p id="marketScanHistoryFeedback">按当前模式读取最近已发布榜单。</p>
             </section>
 
@@ -378,6 +411,7 @@
                 <details class="discovery-preset-more" id="discoveryPresetMore">
                   <summary>更多管理</summary>
                   <div class="discovery-preset-more-actions">
+                    <button type="button" id="discoveryPresetUpdate" class="mini-button" disabled>更新所选方案</button>
                     <button type="button" id="discoveryPresetRename" class="mini-button" disabled>重命名</button>
                     <button type="button" id="discoveryPresetScreenAlert" class="mini-button" disabled>记录变化提醒</button>
                     <button type="button" id="discoveryPresetExport" class="mini-button" disabled>导出方案</button>
@@ -387,8 +421,48 @@
                   </div>
                 </details>
               </div>
+              <nav class="discovery-preset-pagination" aria-label="筛选方案分页">
+                <button type="button" class="mini-button" id="discoveryPresetPrev" disabled>上一页方案</button>
+                <span id="discoveryPresetPageInfo" role="status">方案第 0 / 0 页</span>
+                <button type="button" class="mini-button" id="discoveryPresetNext" disabled>下一页方案</button>
+                <button type="button" class="mini-button" id="discoveryPresetRefresh">刷新方案</button>
+              </nav>
+              <p id="discoveryPresetSelectionInfo"></p>
               <p id="discoveryPresetFeedback"></p>
               <p id="discoveryRankSummary" hidden></p>
+            </section>
+
+            <section id="discoveryScreenAlerts" class="discovery-screen-alerts" aria-label="筛选变化记录">
+              <p id="discoveryScreenAlertsContext">选择方案后查看变化记录。</p>
+              <div id="discoveryScreenAlertsDetail" hidden>
+                <h4>变化明细</h4>
+                <p id="discoveryScreenAlertsDetailContext"></p>
+                <label>变化分类
+                  <select id="discoveryScreenAlertsKind">
+                    <option value="all">全部</option><option value="entered">新进入</option>
+                    <option value="exited">退出</option><option value="unrankable">当前不可排名</option>
+                  </select>
+                </label>
+                <p id="discoveryScreenAlertsDetailStatus" role="status"></p>
+                <div id="discoveryScreenAlertsDetailRows"></div>
+                <div class="discovery-screen-alerts-toolbar">
+                  <button type="button" class="mini-button" id="discoveryScreenAlertsDetailPrev">上一页明细</button>
+                  <span id="discoveryScreenAlertsDetailPage"></span>
+                  <button type="button" class="mini-button" id="discoveryScreenAlertsDetailNext">下一页明细</button>
+                  <button type="button" class="mini-button" id="discoveryScreenAlertsDetailRefresh">刷新明细</button>
+                </div>
+              </div>
+              <details id="discoveryScreenAlertsHistory">
+                <summary>查看已记录变化</summary>
+                <p id="discoveryScreenAlertsHistoryStatus" role="status"></p>
+                <button type="button" class="mini-button" id="discoveryScreenAlertsHistoryRefresh">刷新记录</button>
+                <div id="discoveryScreenAlertsHistoryRows"></div>
+                <div class="discovery-screen-alerts-toolbar">
+                  <button type="button" class="mini-button" id="discoveryScreenAlertsHistoryPrev">上一页记录</button>
+                  <span id="discoveryScreenAlertsHistoryPage"></span>
+                  <button type="button" class="mini-button" id="discoveryScreenAlertsHistoryNext">下一页记录</button>
+                </div>
+              </details>
             </section>
 
             <section class="market-scan-experimental" id="marketScanExperimentalPanel" aria-labelledby="marketScanExperimentalTitle" aria-busy="false">
@@ -600,11 +674,17 @@
                       <button type="button" id="strategySave" disabled>确认并保存</button>
                     </span>
                   </div>
+                  <div class="strategy-editor-actions" role="group" aria-label="已保存策略分页">
+                    <button type="button" class="mini-button" id="strategyListPrev" disabled>上一页</button>
+                    <span id="strategyListPage" role="status">尚未读取策略</span>
+                    <button type="button" class="mini-button" id="strategyListNext" disabled>下一页</button>
+                  </div>
                 </section>
 
                 <section class="strategy-lab-card strategy-plan" id="strategyPlan" aria-labelledby="strategyPlanTitle">
                   <div class="strategy-lab-card-head"><div><span class="eyebrow">02 · Deterministic compile</span><h4 id="strategyPlanTitle">执行计划预览</h4></div><span class="strategy-state-pill" id="strategyPlanState">未编译</span></div>
-                  <div id="strategyPlanContent" class="strategy-plan-content"><p>解析草案后显示预计股票池、白名单过滤、依赖数据、目标顺序、组合约束与成本规则。预览不会启动扫描。</p></div>
+                  <p id="strategyDraftStatus" class="strategy-draft-status" role="status" aria-live="polite">载入或创建草案后显示保存与执行版本。</p>
+              <div id="strategyPlanContent" class="strategy-plan-content"><p>解析草案后显示预计股票池、白名单过滤、依赖数据、目标顺序、组合约束与成本规则。预览不会启动扫描。</p></div>
                   <div class="strategy-execution-toolbar">
                     <label><span>名义资金</span><input id="strategyNotional" type="number" min="10000" max="1000000000" step="10000" value="1000000" /></label>
                     <button type="button" id="strategyExecuteLatest" disabled>执行最近冻结榜单</button>
@@ -612,11 +692,24 @@
                     <button type="button" class="mini-button" id="strategyExecuteReplay" disabled>时点回放</button>
                   </div>
                   <div class="strategy-lifecycle-actions">
-                    <button type="button" class="mini-button" id="strategyCreateSimulation" disabled>生成模拟交易计划</button>
+                    <button type="button" class="mini-button" id="strategyCreateSimulation" disabled>生成纸面委托草案</button>
                     <button type="button" class="mini-button" id="strategyCreateSchedule" disabled>保存盘后定时执行</button>
                     <button type="button" class="mini-button danger" id="strategyArchive" disabled>归档策略</button>
                   </div>
                   <div id="strategyLifecycleContent" class="strategy-lifecycle-content"><p>模拟计划和定时任务会固定绑定当前策略版本与全部证据指纹。</p></div>
+                  <details id="strategyScheduleManager" class="strategy-schedule-manager" aria-busy="false">
+                    <summary>管理已保存的定时任务</summary>
+                    <div class="strategy-schedule-toolbar">
+                      <p id="strategyScheduleContext">载入已保存策略后查看定时任务。</p>
+                      <button type="button" class="mini-button" id="strategyScheduleRefresh" disabled>刷新任务</button>
+                    </div>
+                    <p id="strategyScheduleStatus" role="status" aria-live="polite">展开后读取；不会自动执行策略。</p>
+                    <div id="strategyScheduleRows" class="strategy-schedule-list" role="region" aria-label="当前策略定时任务列表" tabindex="0"></div>
+                    <nav class="strategy-pagination" aria-label="策略定时任务分页">
+                      <span id="strategySchedulePage">尚未读取</span>
+                      <span><button type="button" class="mini-button" id="strategySchedulePrev" disabled>上一页</button><button type="button" class="mini-button" id="strategyScheduleNext" disabled>下一页</button></span>
+                    </nav>
+                  </details>
                 </section>
               </div>
 
@@ -671,6 +764,16 @@
 
               <section class="strategy-lab-card" id="strategyHistory" aria-labelledby="strategyHistoryTitle">
                 <div class="strategy-lab-card-head"><div><span class="eyebrow">06 · Reproducible history</span><h4 id="strategyHistoryTitle">历史执行与版本对比</h4></div><button type="button" class="mini-button" id="strategyHistoryRefresh" disabled>刷新历史</button></div>
+                <p>查看已保存的候选、组合与纸面委托，不会重新执行，也不会替换当前编辑草案。</p>
+                <div class="strategy-history-controls">
+                  <label><span>已保存执行</span><select id="strategyExecutionSelect"><option value="">暂无历史执行</option></select></label>
+                  <button type="button" class="mini-button" id="strategyExecutionLoad" disabled>查看已保存执行</button>
+                </div>
+                <div class="strategy-editor-actions" role="group" aria-label="历史执行分页">
+                  <button type="button" class="mini-button" id="strategyHistoryPrev" disabled>上一页</button>
+                  <span id="strategyHistoryPage" role="status">尚未读取历史</span>
+                  <button type="button" class="mini-button" id="strategyHistoryNext" disabled>下一页</button>
+                </div>
                 <div class="strategy-history-controls">
                   <label><span>左侧执行</span><select id="strategyCompareLeft"><option value="">请选择</option></select></label>
                   <label><span>右侧执行</span><select id="strategyCompareRight"><option value="">请选择</option></select></label>
@@ -908,12 +1011,23 @@
               <label><span>股票</span><input id="reviewDashboardSymbol" placeholder="代码筛选" maxlength="20" /></label>
               <label><span>快照起始日</span><input id="reviewDashboardFrom" type="date" /></label>
               <label><span>周期</span><select id="reviewDashboardHorizon"><option value="all">全部</option><option value="5">5日</option><option value="10">10日</option><option value="20">20日</option><option value="30">30日</option><option value="60">60日</option></select></label>
-              <button type="button" class="mini-button primary" id="evaluateDueReviews">批量评估到期计划</button>
+              <button type="button" class="mini-button primary" id="evaluateDueReviews" aria-describedby="reviewBatchScope">批量评估全局到期计划（最多100个）</button>
             </div>
+            <p id="reviewBatchScope" class="review-shadow-boundary">每次最多评估100个全局到期计划，不限当前筛选或当前页。</p>
             <p id="reviewDashboardFeedback" role="status" aria-live="polite" hidden></p>
-            <p class="review-shadow-boundary">统计来自本地冻结计划的价格路径观察，不代表真实成交、可执行收益或正式投资建议；有利比例只使用有利/不利已决样本为分母。</p>
+            <p class="review-shadow-boundary">以下为全局统计，不随队列筛选改变。统计来自本地冻结计划的价格路径观察，不代表真实成交、可执行收益或正式投资建议；有利比例只使用有利/不利已决样本为分母。</p>
             <div id="reviewDashboardSummary" class="review-dashboard-summary" role="region" aria-label="全局复盘统计" aria-live="polite" aria-busy="true"><div class="review-plan-state"><strong>正在读取全局复盘统计</strong></div></div>
-            <div id="reviewDashboardQueue" class="review-dashboard-queue" role="region" aria-label="复盘到期队列" aria-live="polite" aria-busy="true"></div>
+            <div id="reviewDueControls" hidden>
+              <div class="review-plan-pagination">
+                <button type="button" class="mini-button" id="reviewDueRefresh">刷新队列</button>
+                <button type="button" class="mini-button" id="reviewDuePrev" disabled>上一页</button>
+                <button type="button" class="mini-button" id="reviewDueNext" disabled>下一页</button>
+                <button type="button" class="mini-button" id="reviewDueRetry" hidden>重试读取</button>
+                <p id="reviewDuePageStatus" role="status" aria-live="polite"></p>
+              </div>
+              <p id="reviewDueFeedback" role="status" aria-live="polite" hidden></p>
+            </div>
+            <div id="reviewDashboardQueue" class="review-dashboard-queue" role="region" aria-label="复盘计划队列" aria-live="polite" aria-busy="true"></div>
           </section>
           <section class="panel advice-review-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>建议复盘计划</span><small>快照绑定 / 无前视评估</small></div>
@@ -936,7 +1050,10 @@
               </div>
             </form>
             <div id="reviewPlanList" class="review-plan-list"></div>
-            <div class="review-plan-pagination"><button type="button" class="mini-button" id="reviewPlanLoadMore" hidden>加载更早计划</button></div>
+            <div class="review-plan-pagination">
+              <button type="button" class="mini-button" id="reviewPlanLoadMore" hidden>加载更早计划</button>
+              <p id="reviewPlanPageFeedback" role="status" aria-live="polite" hidden></p>
+            </div>
           </section>
           <section class="panel watchlist-scan-panel" data-layout-collapsible data-layout-default-mobile="closed">
             <div class="panel-title"><span>观察池条件扫描</span><small>固定规则 / 完整日K</small></div>
@@ -1081,6 +1198,7 @@
           <section class="insight-grid">
             <section class="panel">
               <div class="panel-title"><span>本地预警</span><small>价格 / 涨跌幅 / 趋势</small></div>
+              <div id="notificationDetail" class="alert-events" role="region" aria-label="通知触发时记录" tabindex="-1" hidden></div>
               <form class="alert-form" id="alertForm" aria-busy="false" aria-describedby="alertFormFeedback">
                 <select id="alertType" aria-label="预警类型">
                   <option value="price_above">价格高于</option>
@@ -1146,6 +1264,31 @@
           </section>
         </section>
 
+        <section class="workspace-view" id="workspace-panel-diagnostics" data-view-panel="diagnostics" role="tabpanel" aria-labelledby="workspace-tab-diagnostics">
+          <p class="local-data-intro">全局运行状态与后台任务；此处操作不依赖当前查询股票。</p>
+        <div class="data-health" data-layout-collapsible data-layout-default-mobile="closed">
+          <div class="panel-title compact"><span>数据源状态</span><small id="cachePath">--</small></div>
+          <div id="sourcePlan" class="source-plan"></div>
+          <div id="providerStatus" class="provider-status"></div>
+          <div id="cacheStats" class="cache-stats"></div>
+          <div id="storageDiagnostics" class="storage-diagnostics"></div>
+          <div id="diagnosticMessages" class="diagnostic-messages"></div>
+        </div>
+        <div class="data-monitor" data-layout-collapsible data-layout-default-mobile="closed">
+          <div class="panel-title compact"><span>本地监控</span><small id="schedulerState">待连接</small></div>
+          <div id="taskCards" class="task-cards"></div>
+          <div class="monitor-actions">
+            <button type="button" data-task="refresh_watch_quotes">刷新报价</button>
+            <button type="button" data-task="refresh_key_klines">刷新日K</button>
+            <button type="button" data-task="refresh_plate_rank">刷新行业</button>
+            <button type="button" data-task="check_data_health">检查健康</button>
+            <button type="button" data-task="evaluate_alerts">评估预警</button>
+          </div>
+          <div class="panel-title compact"><span>监控事件</span><small>最近记录</small></div>
+          <div id="monitorEvents" class="monitor-events"></div>
+        </div>
+        </section>
+
         <section class="workspace-view" id="workspace-panel-data" data-view-panel="data" role="tabpanel" aria-labelledby="workspace-tab-data">
           <section class="panel local-data-panel">
             <div class="panel-title"><span>本地数据管理</span><small>用户数据 / 保留策略</small></div>
@@ -1158,9 +1301,12 @@
                 <small id="localDataImportFileName" aria-live="polite">尚未选择文件</small>
               </label>
               <select id="localDataImportMode" aria-label="导入模式"><option value="merge">合并</option><option value="replace">完整替换</option></select>
+              <input id="localDataLegacyTimezone" type="text" list="localDataTimezoneOptions" placeholder="旧文件来源时区（可选）" aria-label="旧文件来源时区" aria-describedby="localDataTimezoneHelp" autocomplete="off" spellcheck="false" />
+              <datalist id="localDataTimezoneOptions"><option value="Asia/Shanghai"></option><option value="America/Los_Angeles"></option><option value="UTC"></option></datalist>
               <button type="button" id="previewLocalDataImport">预览导入</button>
               <button type="button" id="commitLocalDataImport" disabled>确认导入</button>
             </div>
+            <p id="localDataTimezoneHelp" class="local-data-intro">新备份自带时间基准，无需填写。旧文件若提示缺少时区，请填写原导出设备使用的 IANA 时区，例如 Asia/Shanghai；留空不会自动推断。</p>
             <div id="localDataImportPreview" class="local-data-preview"></div>
             <div class="runtime-cleanup-row">
               <div id="runtimeCleanupPreview" class="local-data-preview"><strong>尚未读取清理预览</strong></div>
@@ -1207,33 +1353,24 @@
             <input id="watchNoteInput" placeholder="关注原因（可选）" maxlength="80" autocomplete="off" aria-label="关注原因" />
             <button type="submit">加入队列</button>
           </form>
+          <div class="watch-queue-filters" aria-label="自选队列筛选">
+            <label class="watch-queue-search"><span>搜索队列</span><input id="watchQueueSearch" type="search" maxlength="120" placeholder="代码、名称、分组或关注原因" /></label>
+            <label><span>研究状态</span><select id="watchQueueStatus"><option value="all">全部状态</option><option value="to_research">待研究</option><option value="watching">持续观察</option><option value="holding_research">持仓研究</option><option value="excluded">已排除</option></select></label>
+            <div class="watch-queue-toggles">
+              <label><input id="watchQueueDue" type="checkbox" /><span>到期复核</span></label>
+              <label><input id="watchQueueUnread" type="checkbox" /><span>有新变化</span></label>
+              <button id="watchQueueReset" type="button" class="mini-button">清空筛选</button>
+            </div>
+          </div>
+          <p class="watch-queue-count" id="watchQueueCount" role="status" aria-live="polite">正在读取队列</p>
+          <p class="watch-queue-help">到期复核按上海日期判断，包含今日及逾期；筛选仅改变当前显示。</p>
+          <p id="watchQueueNoMatch" class="watch-queue-empty" hidden>没有符合当前条件的自选；可调整或清空筛选。</p>
           <p class="watchlist-feedback" id="watchlistFeedback" role="status" aria-live="polite" aria-atomic="true" hidden></p>
           <div class="watch-list" id="watchList"></div>
         </div>
         <div class="notice">
           <strong>新手提示</strong>
           <p>平台只做研究分析和风险提示，不替代你的交易决策。实盘前请确认行情授权、交易规则和自己的仓位计划。</p>
-        </div>
-        <div class="data-health" data-layout-collapsible data-layout-default-mobile="closed">
-          <div class="panel-title compact"><span>数据源状态</span><small id="cachePath">--</small></div>
-          <div id="sourcePlan" class="source-plan"></div>
-          <div id="providerStatus" class="provider-status"></div>
-          <div id="cacheStats" class="cache-stats"></div>
-          <div id="storageDiagnostics" class="storage-diagnostics"></div>
-          <div id="diagnosticMessages" class="diagnostic-messages"></div>
-        </div>
-        <div class="data-monitor" data-layout-collapsible data-layout-default-mobile="closed">
-          <div class="panel-title compact"><span>本地监控</span><small id="schedulerState">待连接</small></div>
-          <div id="taskCards" class="task-cards"></div>
-          <div class="monitor-actions">
-            <button type="button" data-task="refresh_watch_quotes">刷新报价</button>
-            <button type="button" data-task="refresh_key_klines">刷新日K</button>
-            <button type="button" data-task="refresh_plate_rank">刷新行业</button>
-            <button type="button" data-task="check_data_health">检查健康</button>
-            <button type="button" data-task="evaluate_alerts">评估预警</button>
-          </div>
-          <div class="panel-title compact"><span>监控事件</span><small>最近记录</small></div>
-          <div id="monitorEvents" class="monitor-events"></div>
         </div>
       </section>
 
@@ -1258,8 +1395,8 @@
       <span>研究辅助工具，不构成投资建议</span>
     </footer>
 
-    <script type="module" src="/static/js/layout-optimizations.js?v=20260826-market-scan-audit-3"></script>
-    <script type="module" src="/static/js/market-scan-screening.js?v=20260826-market-scan-audit-3"></script>
-    <script type="module" src="/static/app.js?v=20260826-market-scan-audit-3"></script>
+    <script type="module" src="/static/js/layout-optimizations.js?v=20260909-note-integrity-1"></script>
+    <script type="module" src="/static/js/market-scan-screening.js?v=20260909-note-integrity-1"></script>
+    <script type="module" src="/static/app.js?v=20260909-note-integrity-1"></script>
   </body>
 </html>

@@ -429,7 +429,7 @@ class LocalLifecycleTests(unittest.TestCase):
 
             updated = cache.update_stock_note(
                 created.id,
-                StockNoteUpdate(content="改为只保留复盘，不上图。", note_type="复盘", price=None, visible=False),
+                StockNoteUpdate(expected_revision=created.revision, content="改为只保留复盘，不上图。", note_type="复盘", price=None, visible=False),
             )
 
             self.assertIsNotNone(updated)
@@ -455,7 +455,7 @@ class LocalLifecycleTests(unittest.TestCase):
             )
 
             ordered_before_clear = cache.stock_notes("600519", limit=10)
-            cleared = cache.update_stock_note(first.id, StockNoteUpdate(trade_date="   "))
+            cleared = cache.update_stock_note(first.id, StockNoteUpdate(expected_revision=first.revision, trade_date="   "))
 
         self.assertIsNotNone(cleared)
         assert cleared is not None
@@ -489,10 +489,10 @@ class LocalLifecycleTests(unittest.TestCase):
             created = cache.create_stock_note(_quote(), StockNoteInput(symbol="600519", content="观察", price=1288.0))
 
             with self.assertRaisesRegex(ValueError, "笔记价格必须大于0"):
-                cache.update_stock_note(created.id, StockNoteUpdate(price=-1))
+                cache.update_stock_note(created.id, StockNoteUpdate(expected_revision=created.revision, price=-1))
 
             with self.assertRaisesRegex(ValueError, "笔记价格必须是有效数字"):
-                cache.update_stock_note(created.id, StockNoteUpdate.model_construct(price=math.inf))
+                cache.update_stock_note(created.id, StockNoteUpdate.model_construct(expected_revision=created.revision, price=math.inf))
 
     def test_dirty_legacy_stock_note_row_remains_displayable(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -535,7 +535,7 @@ class LocalLifecycleTests(unittest.TestCase):
         marks = _note_marks(
             [
                 StockNoteItem(
-                    id=1,
+                    id=1, revision="a" * 64,
                     symbol="600519.SH",
                     code="600519",
                     market="SH",

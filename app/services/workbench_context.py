@@ -46,6 +46,10 @@ class WorkbenchContextIntegrityError(RuntimeError):
     """Raised when a composite workbench is not bound to its requested stock."""
 
 
+class WorkbenchContextBusyError(RuntimeError):
+    """Distinct workbench builds have exhausted the local construction budget."""
+
+
 class _ContextResearchChild(Protocol):
     symbol: str
     updated_at: str
@@ -93,13 +97,19 @@ class WorkbenchContextCache:
         ttl_seconds: float = 8.0,
         max_size: int = 32,
         shutdown_timeout_seconds: float = 5.0,
+        max_inflight: int = 4,
     ) -> None:
+        if type(max_inflight) is not int or max_inflight <= 0:
+            raise ValueError("max_inflight 必须是正整数")
         self.ttl_seconds = ttl_seconds
         self.max_size = max_size
+        self.max_inflight = max_inflight
         self.shutdown_timeout_seconds = _positive_timeout(shutdown_timeout_seconds, default=5.0)
         self._entries: dict[str, CacheEntry] = {}
         self._inflight: dict[str, asyncio.Task[WorkbenchContext]] = {}
+        self._owned_tasks: set[asyncio.Task[WorkbenchContext]] = set()
         self._lock = asyncio.Lock()
+        self._closed = False
 
     @property
     def entries(self) -> dict[str, CacheEntry]:
@@ -111,7 +121,8 @@ class WorkbenchContextCache:
 
     async def aclose(self) -> None:
         async with self._lock:
-            tasks = tuple(set(self._inflight.values()))
+            self._closed = True
+            tasks = tuple(self._owned_tasks | set(self._inflight.values()))
             self._inflight.clear()
             self._entries.clear()
         for task in tasks:
@@ -130,6 +141,7 @@ class WorkbenchContextCache:
         self._trim_entries()
 
     async def get(self, symbol: str, build: BuildWorkbenchContext, *, use_cache: bool = True) -> WorkbenchContext:
+        self._require_open()
         normalized = _normalize_context_symbol(symbol)
         if use_cache:
             cached = self._fresh_entry(normalized)
@@ -149,6 +161,7 @@ class WorkbenchContextCache:
             raise
 
         self._finalize_task(normalized, task)
+        self._require_open()
         _require_context_binding(context, normalized)
         if isinstance(context, WorkbenchContext) and not _context_cache_cohort_is_current(context):
             raise WorkbenchContextIntegrityError("个股工作台研究时段已切换，请重新生成")
@@ -174,6 +187,7 @@ class WorkbenchContextCache:
 
     async def _task_for(self, normalized: str, build: BuildWorkbenchContext, *, use_cache: bool) -> asyncio.Task[WorkbenchContext]:
         async with self._lock:
+            self._require_open()
             if use_cache:
                 cached = self._fresh_entry(normalized)
                 if cached is not None:
@@ -184,10 +198,17 @@ class WorkbenchContextCache:
                     cached = self._fresh_entry(normalized)
                     if cached is not None:
                         return _completed_context_task(cached, normalized)
+                if sum(not owned.done() for owned in self._owned_tasks) >= self.max_inflight:
+                    raise WorkbenchContextBusyError("个股工作台并发计算已满，请稍后重试")
                 task = asyncio.create_task(build(normalized), name=f"stock-workbench-{normalized}")
                 self._inflight[normalized] = task
+                self._owned_tasks.add(task)
                 task.add_done_callback(partial(self._finalize_task, normalized))
             return task
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("个股工作台缓存已关闭")
 
     def _active_task(self, normalized: str) -> asyncio.Task[WorkbenchContext] | None:
         task = self._inflight.get(normalized)
@@ -197,6 +218,7 @@ class WorkbenchContextCache:
         return task
 
     def _finalize_task(self, normalized: str, task: asyncio.Task[WorkbenchContext]) -> None:
+        self._owned_tasks.discard(task)
         owns_task = self._inflight.get(normalized) is task
         if owns_task:
             self._inflight.pop(normalized, None)

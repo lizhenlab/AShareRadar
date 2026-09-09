@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 import math
+import sqlite3
 
-from app.db.user_mappers import row_to_stock_note
+from app.db.user_mappers import STOCK_NOTE_COLUMNS, row_to_stock_note, stock_note_revision_from_row
 from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION
 from app.models.market import (
     Quote,
+    StockInfo,
 )
 from app.models.user_data import (
     StockNoteInput,
@@ -14,7 +16,7 @@ from app.models.user_data import (
     StockNoteUpdate,
 )
 from app.repositories.base import SQLiteRepository
-from app.repositories.update_fields import present_updates, update_sql_parts
+from app.repositories.update_fields import FieldCleaner, present_updates, update_sql_parts
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.symbols import standard_symbol
 
@@ -27,24 +29,8 @@ def _named_placeholders_sql(columns: tuple[str, ...]) -> str:
     return ", ".join(f":{column}" for column in columns)
 
 
-_STOCK_NOTE_COLUMNS = (
-    "id",
-    "symbol",
-    "code",
-    "market",
-    "name",
-    "note_type",
-    "content",
-    "price",
-    "trade_date",
-    "color",
-    "visible",
-    "created_at",
-    "updated_at",
-)
-
-_STOCK_NOTE_INSERT_COLUMNS = _STOCK_NOTE_COLUMNS[1:]
-_STOCK_NOTE_SELECT_SQL = _columns_sql(_STOCK_NOTE_COLUMNS)
+_STOCK_NOTE_INSERT_COLUMNS = STOCK_NOTE_COLUMNS[1:]
+_STOCK_NOTE_SELECT_SQL = _columns_sql(STOCK_NOTE_COLUMNS)
 
 _STOCK_NOTE_INSERT_SQL = f"""
     INSERT INTO stock_note (
@@ -107,7 +93,7 @@ def _clean_note_color(value: str | None) -> str | None:
     return (value.strip()[:20] or None) if value else None
 
 
-NOTE_UPDATE_CLEANERS = {
+NOTE_UPDATE_CLEANERS: dict[str, FieldCleaner] = {
     "content": _clean_note_content,
     "note_type": _clean_note_type,
     "price": _clean_note_price,
@@ -117,16 +103,23 @@ NOTE_UPDATE_CLEANERS = {
 }
 
 
+class StockNoteRevisionConflictError(ValueError):
+    """A mutation was based on a different complete persisted note state."""
+
+
 class StockNoteRepository(SQLiteRepository):
-    def create(self, quote: Quote, payload: StockNoteInput) -> StockNoteItem:
+    def create(self, quote: Quote | StockInfo, payload: StockNoteInput) -> StockNoteItem:
         timestamp = now_text()
         params = _stock_note_insert_values(quote, payload, timestamp)
         with self._lock, self._connect() as conn:
             cursor = conn.execute(_STOCK_NOTE_INSERT_SQL, params)
-            row_id = int(cursor.lastrowid)
-        item = self.item(row_id)
-        if item is None:
-            raise RuntimeError("个股笔记保存失败")
+            row_id = cursor.lastrowid
+            if row_id is None:
+                raise RuntimeError("个股笔记保存失败：未返回记录 ID")
+            row = conn.execute(f"SELECT {_STOCK_NOTE_SELECT_SQL} FROM stock_note WHERE id = ?", (row_id,)).fetchone()
+            if row is None:
+                raise RuntimeError("个股笔记保存失败")
+            item = row_to_stock_note(row)
         return item
 
     def item(self, row_id: int) -> StockNoteItem | None:
@@ -160,31 +153,48 @@ class StockNoteRepository(SQLiteRepository):
             ).fetchall()
         return [row_to_stock_note(row) for row in rows]
 
-    def delete(self, row_id: int) -> bool:
+    def delete(self, row_id: int, *, expected_revision: str) -> bool:
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if _note_for_revision(conn, row_id, expected_revision) is None:
+                return False
             cursor = conn.execute("DELETE FROM stock_note WHERE id = ?", (row_id,))
             return cursor.rowcount > 0
 
     def update(self, row_id: int, payload: StockNoteUpdate) -> StockNoteItem | None:
         updates = present_updates(payload, NOTE_UPDATE_CLEANERS)
-        if not updates:
-            return self.item(row_id)
-
         assignments, params = update_sql_parts(updates)
         assignments.append("updated_at = ?")
         params.append(now_text())
         params.append(row_id)
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = _note_for_revision(conn, row_id, payload.expected_revision)
+            if current is None:
+                return None
+            if not updates:
+                return row_to_stock_note(current)
             cursor = conn.execute(
                 f"UPDATE stock_note SET {', '.join(assignments)} WHERE id = ?",
                 params,
             )
             if cursor.rowcount <= 0:
                 return None
-        return self.item(row_id)
+            row = conn.execute(f"SELECT {_STOCK_NOTE_SELECT_SQL} FROM stock_note WHERE id = ?", (row_id,)).fetchone()
+            if row is None:
+                raise RuntimeError("个股笔记保存失败")
+            item = row_to_stock_note(row)
+        return item
 
 
-def _stock_note_insert_values(quote: Quote, payload: StockNoteInput, timestamp: str) -> dict[str, object | None]:
+def _note_for_revision(conn: sqlite3.Connection, row_id: int, expected_revision: str) -> sqlite3.Row | None:
+    row = conn.execute(f"SELECT {_STOCK_NOTE_SELECT_SQL} FROM stock_note WHERE id = ?", (row_id,)).fetchone()
+    if row is not None and stock_note_revision_from_row(row) != expected_revision:
+        raise StockNoteRevisionConflictError("笔记已更新，请读取最新记录后重试")
+    return row
+
+
+def _stock_note_insert_values(quote: Quote | StockInfo, payload: StockNoteInput, timestamp: str) -> dict[str, object | None]:
     return {
         "symbol": standard_symbol(f"{quote.market}{quote.code}"),
         "code": quote.code,

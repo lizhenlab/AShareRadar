@@ -98,6 +98,17 @@ class AlertEventItem(BaseModel):
     created_at: str
 
 
+class AlertNotificationPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stream_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    baseline_id: int = Field(ge=0, le=9_007_199_254_740_991)
+    cursor_id: int = Field(ge=0, le=9_007_199_254_740_991)
+    reset: bool
+    has_more: bool
+    events: list[AlertEventItem]
+
+
 class AlertEvaluationItem(BaseModel):
     rule: AlertRuleItem
     current_value: float | None = None
@@ -127,6 +138,7 @@ class StockNoteInput(UserInputModel):
 
 
 class StockNoteUpdate(UserInputModel):
+    expected_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
     content: str | None = Field(default=None, min_length=1, max_length=500)
     note_type: str | None = Field(default=None, max_length=20)
     price: FiniteFloat | None = None
@@ -137,6 +149,7 @@ class StockNoteUpdate(UserInputModel):
 
 class StockNoteItem(BaseModel):
     id: int
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
     symbol: str
     code: str
     market: str

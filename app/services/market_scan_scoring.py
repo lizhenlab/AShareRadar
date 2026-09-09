@@ -43,7 +43,16 @@ from app.services.leader_scoring import (
     leader_tag_rules_spec,
     leader_tags,
 )
-from app.services.market_scan_score_contract import MarketScanReplayError, stable_score_spec_hash
+from app.services.market_scan_score_contract import (
+    MARKET_SCAN_LEGACY_TREND_ALGORITHM_VERSION,
+    MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION,
+    MARKET_SCAN_TREND_ALGORITHM_VERSION,
+    MarketScanReplayError,
+    market_scan_trend_context_mode,
+    market_scan_shared_trend_algorithm,
+    market_scan_trend_calculation_spec,
+    stable_score_spec_hash,
+)
 from app.services.market_scan_rank_refinement import (
     MARKET_SCAN_CONTINUOUS_TREND_ALGORITHM_VERSION,
     MARKET_SCAN_CONTINUOUS_TREND_MAX_ADJUSTMENT,
@@ -55,6 +64,7 @@ from app.services.market_scan_rank_refinement import (
 )
 from app.services.market_scan_score_dimensions import (
     MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
+    MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION,
     MarketScanScoreDimensions,
     build_market_scan_score_dimensions,
     verify_market_scan_point_in_time_evidence_context,
@@ -71,8 +81,9 @@ from app.services.market_scan_skip_contract import (
 )
 from app.services.market_scan_skip_pit import build_market_scan_skip_pit
 from app.services.scoring import clamp_score
-from app.services.trading_calendar import is_trading_day
+from app.services.trading_calendar import MARKET_CLOSE_TIME, is_trading_day
 from app.utils.market_data import valid_kline, valid_quote
+from app.utils.daily_kline_identity import DAILY_KLINE_ADMISSION_FIELDS, daily_kline_signature
 from app.utils.market_time import market_datetime_epoch, market_local_naive
 from app.utils.symbols import standard_symbol
 
@@ -87,7 +98,7 @@ FULL_MARKET_SCORE_ALGORITHM_VERSION = "trend-quality-continuous-component-v4"
 FULL_MARKET_LEGACY_V4_SCORE_SPEC_SCHEMA_VERSION = 4
 FULL_MARKET_LEGACY_V4_SCORE_RULE_VERSION = "full-market-score-v4"
 FULL_MARKET_LEGACY_V4_SCORE_ALGORITHM_VERSION = "trend-quality-penalty-v3"
-FULL_MARKET_TREND_ALGORITHM_VERSION = "trend-score-v2-continuous-soft-clip"
+FULL_MARKET_TREND_ALGORITHM_VERSION = MARKET_SCAN_TREND_ALGORITHM_VERSION
 FULL_MARKET_VOLUME_RATIO_ALGORITHM_VERSION = "recent-volume-ratio-v2-explicit-windows"
 FULL_MARKET_DATA_QUALITY_ALGORITHM_VERSION = "data-quality-v2-cache-neutral"
 FULL_MARKET_QUALITY_PENALTY_PER_MISSING_POINT = 0.15
@@ -101,13 +112,8 @@ FULL_MARKET_VOLUME_RATIO_BASE_WINDOW = 20
 FULL_MARKET_VOLUME_RATIO_MIN_COUNT = FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW + 1
 FULL_MARKET_VOLUME_RATIO_PRECISION = 2
 FULL_MARKET_SCORE_TIE_BREAK = MARKET_SCAN_RANK_TIE_BREAK
-MARKET_SCAN_INPUT_ADMISSION_CONTRACT_VERSION = "market-scan-input-admission-v3"
-_RANKING_BAR_SIGNATURE_FIELDS = (
-    "open", "close", "high", "low", "volume", "adjustment_mode",
-    "source", "from_cache", "fallback_used", "as_of", "fetched_at",
-    "data_version", "contract_version", "session_status", "open_execution_status",
-    "corporate_action_status", "adjustment_factor", "point_in_time", "execution_metadata_version",
-)
+MARKET_SCAN_INPUT_ADMISSION_CONTRACT_VERSION = "market-scan-input-admission-v5"
+_RANKING_BAR_SIGNATURE_FIELDS = DAILY_KLINE_ADMISSION_FIELDS
 MARKET_SCAN_PRODUCTION_SCORE_SEMANTICS = {
     "kind": "ordinal-cross-sectional-ranking",
     "expected_return": False,
@@ -187,7 +193,7 @@ def _verify_persisted_score_spec_contract(
             replay.score_spec_schema_version != FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION
             or score_rule != expected_score_rule_version
             or item.score_details.get("score_spec_hash") != expected_score_spec_hash
-            or not is_current_market_scan_score_spec(
+            or not _is_readable_v5_market_scan_score_spec(
                 score_spec,
                 item.score_details.get("score_spec_hash"),
             )
@@ -437,7 +443,11 @@ def _calculate_market_scan_score(
         as_of=as_of,
         minimum_score=min_data_quality_score,
     )
-    trend, _trend_label = trend_score(quote, rows, mode=mode)
+    trend_mode = market_scan_trend_context_mode(
+        mode, algorithm_version=FULL_MARKET_TREND_ALGORITHM_VERSION,
+    )
+    trend_algorithm = market_scan_shared_trend_algorithm(FULL_MARKET_TREND_ALGORITHM_VERSION)
+    trend, _trend_label = trend_score(quote, rows, mode=trend_mode, algorithm_version=trend_algorithm)
     volume_ratio = recent_volume_ratio(
         rows,
         recent_window=FULL_MARKET_VOLUME_RATIO_RECENT_WINDOW,
@@ -748,6 +758,7 @@ def _rankable_completed_rows(
         raise MarketScanDataMissing(f"日K日期 {latest_date.isoformat()} 晚于应有交易日 {expected_data_date.isoformat()}")
     _require_qfq_rows(completed_rows, as_of=as_of)
     _require_quote_kline_close_consistency(quote, completed_rows[-1], mode=mode)
+    _require_completed_quote_previous_close(quote, completed_rows, mode=mode)
     return completed_rows, latest_date
 
 
@@ -782,7 +793,7 @@ def completed_market_scan_klines(rows: list[Kline], cutoff: date) -> list[Kline]
         if is_demo_kline_source(row.source):
             raise MarketScanDataMissing("演示日K不能用于全市场生产评分")
         existing = by_date.get(row_date)
-        if existing is not None and _ranking_bar_signature(existing) != _ranking_bar_signature(row):
+        if existing is not None and daily_kline_signature(existing) != daily_kline_signature(row):
             raise MarketScanDataMissing(f"同一交易日 {row_date.isoformat()} 存在冲突日K")
         by_date[row_date] = row
     return [row for _row_date, row in sorted(by_date.items(), key=lambda entry: entry[0])]
@@ -830,7 +841,20 @@ def _strict_kline_snapshot_time(row: Kline) -> datetime:
         raise MarketScanDataMissing("前复权日K缺少可解析快照时点") from exc
     if snapshot_time.date() < row_date:
         raise MarketScanDataMissing("日K快照时点早于对应交易日")
+    _require_completed_snapshot_time(row, row_date, snapshot_time)
     return snapshot_time
+
+
+def _require_completed_snapshot_time(row: Kline, row_date: date, snapshot_time: datetime) -> None:
+    # Date-only as_of values are a retained coarse snapshot-date convention.
+    # An explicit timestamp, however, can positively prove the bar unfinished.
+    if _strict_date(row.as_of) is not None:
+        return
+    if snapshot_time.date() == row_date and snapshot_time.time() < MARKET_CLOSE_TIME:
+        raise MarketScanDataMissing(
+            f"日K快照时点 {snapshot_time.isoformat(sep=' ')} 早于对应交易日收盘，"
+            "不能作为完整日K"
+        )
 
 
 def _require_quote_date(quote: Quote, expected_quote_date: date, *, as_of: datetime) -> None:
@@ -919,6 +943,25 @@ def _require_quote_kline_close_consistency(
         )
 
 
+def _require_completed_quote_previous_close(
+    quote: Quote, rows: list[Kline], *, mode: MarketScanMode,
+) -> None:
+    if mode == "intraday" or len(rows) < 2:
+        return
+    previous = rows[-2].close
+    gap = abs(quote.prev_close - previous)
+    limit = max(
+        FULL_MARKET_MAX_CLOSE_GAP_ABSOLUTE,
+        max(quote.prev_close, previous) * FULL_MARKET_MAX_CLOSE_GAP_PCT / 100,
+    )
+    # Keep the stated inclusive tolerance despite decimal-to-binary roundoff.
+    if gap > limit and not math.isclose(gap, limit, rel_tol=1e-12, abs_tol=1e-12):
+        raise MarketScanDataMissing(
+            "完成快照报价昨收价与前一交易日日K收盘价"
+            f"偏差 {gap / previous * 100:.2f}%，数据快照或复权口径可能不同步"
+        )
+
+
 def _metadata_tags(
     item: MarketScanResultItem,
     quality_score: int,
@@ -999,6 +1042,23 @@ def market_scan_input_admission_spec() -> dict[str, object]:
             "validation": "finite-positive-consistent-ohlc-and-nonnegative-volume",
             "handling": "reject-as-missing-before-session-gap-classification",
         },
+        "completed_daily_snapshot_time": {
+            "explicit_timestamp": "not-before-own-session-market-close",
+            "market_timezone": "Asia/Shanghai",
+            "market_close": MARKET_CLOSE_TIME.isoformat(),
+            "date_only": "preserve-legacy-coarse-snapshot-date-convention",
+            "scope": "new-input-admission-only",
+        },
+        "completed_snapshot_previous_close": {
+            "modes": ["official", "preopen"],
+            "reference": "quote.prev_close-vs-penultimate-completed-daily-close",
+            "minimum_bars": 2,
+            "max_relative_gap_pct": FULL_MARKET_MAX_CLOSE_GAP_PCT,
+            "max_absolute_gap": FULL_MARKET_MAX_CLOSE_GAP_ABSOLUTE,
+            "inclusive_boundary_roundoff": {"relative": 1e-12, "absolute": 1e-12},
+            "scope": "after-history-and-completed-snapshot-admission-before-scoring",
+            "mismatch": "missing-without-adjustment-inference",
+        },
         "historical_score_replay": "preserve-frozen-contract-without-readmission",
     }
 
@@ -1042,6 +1102,7 @@ def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
             "component_stage": "after-quality-penalty-and-continuous-trend-adjustment",
             "raw_score_decimals": FULL_MARKET_RAW_SCORE_DECIMALS,
             "metric_decimals": FULL_MARKET_METRIC_DECIMALS,
+            "trend_calculation": market_scan_trend_calculation_spec(),
         },
         "ranking": _score_ranking_spec(),
     }
@@ -1070,10 +1131,11 @@ def market_scan_score_spec_v4(*, min_data_quality_score: int) -> dict[str, objec
     New scans must never call this function.  It exists so read paths can keep
     verifying already published v4 snapshots after production advances to v5.
     """
-    spec = market_scan_score_spec(min_data_quality_score=min_data_quality_score)
+    spec = market_scan_score_spec_dimension_v4(min_data_quality_score=min_data_quality_score)
     spec["schema_version"] = FULL_MARKET_LEGACY_V4_SCORE_SPEC_SCHEMA_VERSION
     spec["rule_version"] = FULL_MARKET_LEGACY_V4_SCORE_RULE_VERSION
     algorithms = cast(dict[str, object], spec["algorithms"])
+    algorithms["trend_score"] = MARKET_SCAN_LEGACY_TREND_ALGORITHM_VERSION
     algorithms["final_score"] = FULL_MARKET_LEGACY_V4_SCORE_ALGORITHM_VERSION
     algorithms["rank_refinement"] = MARKET_SCAN_RANK_REFINEMENT_ALGORITHM_VERSION
     algorithms.pop("continuous_trend")
@@ -1089,6 +1151,7 @@ def market_scan_score_spec_v4(*, min_data_quality_score: int) -> dict[str, objec
         "clamp": [0, 100],
     }
     rounding = cast(dict[str, object], spec["rounding"])
+    rounding.pop("trend_calculation")
     rounding["component_stage"] = "after-quality-penalty-before-rank-refinement"
     spec["ranking"] = {
         "refinement": market_scan_rank_refinement_spec(),
@@ -1097,6 +1160,54 @@ def market_scan_score_spec_v4(*, min_data_quality_score: int) -> dict[str, objec
         "tie_break": [list(item) for item in FULL_MARKET_SCORE_TIE_BREAK],
     }
     return spec
+
+
+def market_scan_score_spec_legacy_v5(*, min_data_quality_score: int) -> dict[str, object]:
+    """Register frozen v5 snapshots predating completed-preopen trend binding."""
+    spec = market_scan_score_spec_dimension_v4(min_data_quality_score=min_data_quality_score)
+    algorithms = cast(dict[str, object], spec["algorithms"])
+    algorithms["trend_score"] = MARKET_SCAN_LEGACY_TREND_ALGORITHM_VERSION
+    cast(dict[str, object], spec["rounding"]).pop("trend_calculation")
+    return spec
+
+
+def market_scan_score_spec_trend_v3(*, min_data_quality_score: int) -> dict[str, object]:
+    """Read frozen v5 completed snapshots whose trend still rounded MAs to cents."""
+    spec = market_scan_score_spec_dimension_v4(min_data_quality_score=min_data_quality_score)
+    algorithms = cast(dict[str, object], spec["algorithms"])
+    algorithms["trend_score"] = MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION
+    cast(dict[str, object], spec["rounding"]).pop("trend_calculation")
+    return spec
+
+
+def market_scan_score_spec_dimension_v4(*, min_data_quality_score: int) -> dict[str, object]:
+    """Read frozen v5 scores whose risk measured dispersion among losses."""
+    spec = market_scan_score_spec(min_data_quality_score=min_data_quality_score)
+    cast(dict[str, object], spec["research_dimensions"])["algorithm"] = (
+        MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION
+    )
+    return spec
+
+
+def _is_readable_v5_market_scan_score_spec(score_spec: object, score_spec_hash: object) -> bool:
+    if is_current_market_scan_score_spec(score_spec, score_spec_hash):
+        return True
+    if not isinstance(score_spec, Mapping):
+        return False
+    eligibility = score_spec.get("eligibility")
+    if not isinstance(eligibility, Mapping):
+        return False
+    minimum = eligibility.get("min_data_quality_score")
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or not 0 <= minimum <= 100:
+        return False
+    return any(
+        score_spec == legacy and score_spec_hash == stable_score_spec_hash(legacy)
+        for legacy in (
+            market_scan_score_spec_legacy_v5(min_data_quality_score=minimum),
+            market_scan_score_spec_trend_v3(min_data_quality_score=minimum),
+            market_scan_score_spec_dimension_v4(min_data_quality_score=minimum),
+        )
+    )
 
 
 def _score_algorithms_spec() -> dict[str, str]:
@@ -1255,10 +1366,6 @@ def _score_reason(calculated: _MarketScanScore) -> str:
     )
 
 
-def _ranking_bar_signature(row: Kline) -> tuple[object, ...]:
-    return tuple(getattr(row, field) for field in _RANKING_BAR_SIGNATURE_FIELDS)
-
-
 def _is_single_price_session(quote: Quote) -> bool:
     prices = (quote.open, quote.high, quote.low, quote.price)
     tolerance = max(0.0001, quote.price * 1e-8)
@@ -1291,6 +1398,9 @@ __all__ = [
     "market_scan_input_admission_spec",
     "market_scan_score_spec",
     "market_scan_score_spec_v4",
+    "market_scan_score_spec_legacy_v5",
+    "market_scan_score_spec_trend_v3",
+    "market_scan_score_spec_dimension_v4",
     "replay_score_details",
     "score_market_scan_item",
     "stable_score_spec_hash",

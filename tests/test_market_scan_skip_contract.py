@@ -1055,7 +1055,7 @@ def _case(
         for index, session in enumerate(dates)
     ]
     price = float(rows[-1].close)
-    previous = price - 0.1
+    previous = float(rows[-2].close)
     quote = make_quote(
         price=price,
         prev_close=previous,
@@ -1072,7 +1072,7 @@ def _case(
             "open": price - 0.05,
             "volume": 10_000.0,
             "amount": 100_000.0,
-            "change": 0.1,
+            "change": price - previous,
         }
     )
     return result_item, quote, rows
@@ -1091,7 +1091,7 @@ def _success_case(item: MarketScanResultItem):
         for index, session in enumerate(selected)
     ]
     price = float(rows[-1].close)
-    previous = price - 0.1
+    previous = float(rows[-2].close)
     quote = make_quote(
         price=price, prev_close=previous, high=price + 0.1, low=price - 0.2,
         change_pct=(price - previous) / previous * 100, turnover_rate=1.0,
@@ -1100,7 +1100,7 @@ def _success_case(item: MarketScanResultItem):
         update={
             "code": item.code, "market": item.market, "name": item.name,
             "open": price - 0.05, "volume": 10_000.0,
-            "amount": 100_000.0, "change": 0.1,
+            "amount": 100_000.0, "change": price - previous,
         }
     )
     return quote, rows
@@ -1452,10 +1452,10 @@ def _varying_success_case(
     ]
     quote = make_quote(
         price=final_close,
-        prev_close=10.0,
+        prev_close=rows[-2].close,
         high=10.8,
         low=9.9,
-        change_pct=5.0,
+        change_pct=(final_close - rows[-2].close) / rows[-2].close * 100,
         turnover_rate=4.5,
         timestamp="2026-07-17T15:00:00+08:00",
     ).model_copy(
@@ -1465,7 +1465,7 @@ def _varying_success_case(
             "name": item.name,
             "open": 10.1,
             "amount": 900_000_000.0,
-            "change": 0.5,
+            "change": final_close - rows[-2].close,
         }
     )
     return quote, rows

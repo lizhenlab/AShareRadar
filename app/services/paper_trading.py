@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from hashlib import sha256
 import json
@@ -49,7 +49,7 @@ from app.services.research_replay import (
     normalized_advice_review_prices,
 )
 from app.services.research_factor_execution_contract import factor_calibration_evidence_issue
-from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
+from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day, trading_dates_between, trading_day_gap
 from app.services.storage_contracts import PaperTradingStorage
 from app.utils.market_data import valid_kline
 from app.utils.market_time import market_local_naive
@@ -361,15 +361,12 @@ def simulate_paper_portfolio(
     normalized_benchmark_error = _normalized_error_message(benchmark_error)
     recorder = _EventRecorder()
     states, bars, rule_profiles = _prepare_paper_states(
-        ordered,
-        rows_by_symbol,
-        as_of,
-        normalized_errors,
-        metadata,
-        recorder,
+        ordered, rows_by_symbol, as_of, normalized_errors, metadata, recorder,
     )
     benchmark = _prepare_benchmark(benchmark_values, as_of, normalized_benchmark_error)
-    trades, equity, benchmark = _simulate_trade_days(account, states, bars, profile, benchmark, recorder)
+    trades, equity, benchmark = _simulate_trade_days(
+        account, states, bars, profile, benchmark, recorder, cutoff=completed_daily_bar_cutoff(as_of),
+    )
     simulations = [_simulation_from_state(states[item.id]) for item in ordered]
     unavailable_count = sum(item.status == "data_unavailable" for item in simulations)
     closed_count = sum(item.status == "closed" for item in simulations)
@@ -506,9 +503,14 @@ def _simulation_configuration(
         "allocation_order": "activation_market_time ASC, priority DESC, plan_id ASC, strategy_id ASC",
         "entry_fill": "first eligible complete daily bar open",
         "t1": "entry-day target/stop signal is latched; exit at next sellable session open",
-        "same_bar": "stop wins when target and stop are both touched",
+        "session_order": "opening exits, opening entries, intraday/closing exits, closing valuation",
+        "entry_cash": "opening cash plus opening exit proceeds; later sale proceeds wait until next session",
+        "exit_cash": "cash plus sale proceeds must cover full exit costs; otherwise retain shares and retry the latched exit at the next sellable open",
+        "same_bar": "known opening barrier first; stop wins only when later intraday order is unknown",
         "benchmark_start": "first simulated trade-day open; previous close only when that open is unavailable",
         "daily_bar_filter": "completed canonical trading dates only; conflicting duplicates are rejected",
+        "required_session_evidence": "active pending/open strategies require every calendar session through cutoff; reject incomplete account",
+        "benchmark_session_evidence": "every account session observed; only explicit suspension permits previous close; otherwise unavailable",
         "daily_bar_limit": "order-book queue and intraday sequence are not reconstructed",
         "initial_cash": initial_cash,
         "cost_profile_id": profile.profile_id,
@@ -605,7 +607,7 @@ def _prepare_strategy(
     state.stop = prices.stop_price
     bars, degraded_reasons = _prepared_strategy_bars(source, rows, cutoff, activation_date, metadata)
     _apply_rule_degradation(state, bars, degraded_reasons, activation_date, recorder)
-    if not bars and cutoff > activation_date:
+    if not bars and trading_day_gap(activation_date, cutoff) > 0:
         _mark_strategy_unavailable(
             state,
             cutoff,
@@ -751,15 +753,18 @@ def _simulate_trade_days(
     cost_profile: PaperCostProfile,
     benchmark: _BenchmarkSeries,
     recorder: _EventRecorder,
+    *,
+    cutoff: date,
 ) -> tuple[list[PaperTradeDraft], list[PaperEquityPointDraft], _BenchmarkSeries]:
-    trade_dates = sorted({trade_date for strategy_bars in bars.values() for trade_date in strategy_bars})
+    trade_dates = _paper_trade_dates(states, cutoff)
     cash = account.initial_cash
     peak_equity = account.initial_cash
     trades: list[PaperTradeDraft] = []
     equity: list[PaperEquityPointDraft] = []
     if trade_dates:
-        benchmark = benchmark.starting_at(trade_dates[0])
+        benchmark = benchmark.covering(trade_dates).starting_at(trade_dates[0])
     for trade_date in trade_dates:
+        _require_paper_session(states, bars, trade_date)
         cash = _process_open_positions(states, bars, trade_date, cash, cost_profile, trades, recorder)
         cash = _process_entries(
             states,
@@ -771,6 +776,7 @@ def _simulate_trade_days(
             trades,
             recorder,
         )
+        cash = _process_intraday_positions(states, bars, trade_date, cash, cost_profile, trades, recorder)
         point, peak_equity = _paper_equity_point(
             trade_date,
             cash,
@@ -783,6 +789,24 @@ def _simulate_trade_days(
         )
         equity.append(point)
     return trades, equity, benchmark
+
+
+def _paper_trade_dates(states: dict[int, _PaperState], cutoff: date) -> list[str]:
+    activations = [_market_date(state.source.activation_market_time) for state in states.values()
+                   if state.status == "pending"]
+    if not activations or (start := min(activations)) >= cutoff:
+        return []
+    return [day.isoformat() for day in trading_dates_between(start, cutoff) if day > start]
+
+
+def _require_paper_session(
+    states: dict[int, _PaperState], bars: dict[int, dict[str, _PreparedBar]], trade_date: str,
+) -> None:
+    for state in states.values():
+        if state.status not in {"pending", "open"} or trade_date <= _market_date(state.source.activation_market_time).isoformat():
+            continue
+        if trade_date not in bars.get(state.source.id, {}):
+            raise ValueError(f"{state.source.symbol} 在 {trade_date} 缺少完整交易会话，已拒绝本次共享现金模拟")
 
 
 def _process_open_positions(
@@ -806,44 +830,78 @@ def _process_open_positions(
             profile=prepared.rule,
         )
         if state.pending_exit_reason:
-            if not assessment.can_sell:
-                _record_blocked_exit(state, prepared, assessment, recorder)
-                continue
-            cash += _close_position(
-                state,
-                prepared.row,
-                prepared.row.open,
-                state.pending_exit_reason,
-                cost_profile,
-                trades,
-                recorder,
-                assessment,
-                "上一交易日信号因 T+1 或不可交易被延迟，本日开盘退出",
+            cash += _settle_position_exit(
+                state, prepared, assessment, prepared.row.open, state.pending_exit_reason,
+                cost_profile, trades, recorder, available_cash=cash,
             )
             continue
         if not (assessment.can_buy or assessment.can_sell):
             continue
-        state.last_price = prepared.row.close
-        reason, price = _exit_decision(state, prepared.row)
-        if reason is None or price is None:
-            continue
-        if not assessment.can_sell:
-            state.pending_exit_reason = reason
-            state.pending_exit_date = trade_date
-            _record_blocked_exit(state, prepared, assessment, recorder)
-            continue
-        cash += _close_position(
-            state,
-            prepared.row,
-            price,
-            reason,
-            cost_profile,
-            trades,
-            recorder,
-            assessment,
-            "达到退出条件并在日K模型允许的价格成交",
-        )
+        reason = _opening_exit_reason(state, prepared.row)
+        if reason is not None:
+            cash += _settle_position_exit(
+                state, prepared, assessment, prepared.row.open, reason, cost_profile, trades, recorder,
+                available_cash=cash,
+            )
     return cash
+
+
+def _process_intraday_positions(
+    states: dict[int, _PaperState],
+    bars: dict[int, dict[str, _PreparedBar]],
+    trade_date: str,
+    cash: float,
+    cost_profile: PaperCostProfile,
+    trades: list[PaperTradeDraft],
+    recorder: _EventRecorder,
+) -> float:
+    for state in _allocation_ordered_states(states):
+        prepared = bars[state.source.id].get(trade_date)
+        if state.status != "open" or state.entry_date == trade_date or prepared is None:
+            continue
+        assessment = assess_daily_tradeability(
+            prepared.row, previous_close=prepared.previous_close, profile=prepared.rule,
+        )
+        if not (assessment.can_buy or assessment.can_sell):
+            continue
+        state.last_price = prepared.row.close
+        if state.pending_exit_reason:
+            continue
+        reason, price = _exit_decision(state, prepared.row)
+        if reason is not None and price is not None:
+            cash += _settle_position_exit(
+                state, prepared, assessment, price, reason, cost_profile, trades, recorder, available_cash=cash,
+            )
+    return cash
+
+
+def _settle_position_exit(
+    state: _PaperState,
+    prepared: _PreparedBar,
+    assessment: DailyTradeability,
+    price: float,
+    reason: str,
+    cost_profile: PaperCostProfile,
+    trades: list[PaperTradeDraft],
+    recorder: _EventRecorder,
+    *,
+    available_cash: float,
+) -> float:
+    if not assessment.can_sell:
+        if not state.pending_exit_reason:
+            state.pending_exit_reason = reason
+            state.pending_exit_date = prepared.row.date
+        _record_blocked_exit(state, prepared, assessment, recorder)
+        return 0.0
+    gross = price * state.quantity
+    costs = trade_costs(cost_profile, side="sell", gross_amount=gross)
+    if _money(available_cash + gross - costs.total) < 0:
+        _record_exit_cash_shortfall(state, prepared.row, reason, gross, available_cash, costs, recorder)
+        return 0.0
+    return _close_position(
+        state, prepared.row, price, reason, costs, trades, recorder, assessment,
+        "达到退出条件并在日K模型允许的价格成交",
+    )
 
 
 def _process_entries(
@@ -1078,14 +1136,13 @@ def _close_position(
     row: Kline,
     price: float,
     reason: str,
-    cost_profile: PaperCostProfile,
+    costs: PaperTradeCosts,
     trades: list[PaperTradeDraft],
     recorder: _EventRecorder,
     assessment: DailyTradeability,
     message: str,
 ) -> float:
     gross = price * state.quantity
-    costs = trade_costs(cost_profile, side="sell", gross_amount=gross)
     proceeds = gross - costs.total
     cost_basis = (state.entry_price or 0) * state.quantity + state.buy_friction
     gross_realized = (price - (state.entry_price or 0)) * state.quantity
@@ -1101,6 +1158,7 @@ def _close_position(
     state.last_price = price
     state.pending_exit_reason = None
     state.pending_exit_date = None
+    state.error_message = None
     trades.append(_trade(state, "sell", row.date, price, state.quantity, gross, costs, reason))
     recorder.add(
         state,
@@ -1117,6 +1175,29 @@ def _close_position(
         daily_bar_model_limited=assessment.model_limited,
     )
     return proceeds
+
+
+def _record_exit_cash_shortfall(
+    state: _PaperState,
+    row: Kline,
+    reason: str,
+    gross: float,
+    cash: float,
+    costs: PaperTradeCosts,
+    recorder: _EventRecorder,
+) -> None:
+    if not state.pending_exit_reason:
+        state.pending_exit_reason = reason
+        state.pending_exit_date = row.date
+    state.error_message = "可用现金与卖出所得不足以支付完整退出费用，保留持仓等待下一可卖会话"
+    recorder.add(
+        state, row.date, "exit_fee_cash_shortfall", "execution", "critical", state.error_message,
+        pending_exit_reason=state.pending_exit_reason,
+        available_cash=_money(cash),
+        gross_amount=_money(gross),
+        total_cost=costs.total,
+        cash_shortfall=_money(costs.total - gross - cash),
+    )
 
 
 def _record_blocked_exit(
@@ -1145,6 +1226,14 @@ def _exit_decision(state: _PaperState, row: Kline) -> tuple[str | None, float | 
     if state.held_sessions >= state.source.horizon_days:
         return "horizon_close", row.close
     return None, None
+
+
+def _opening_exit_reason(state: _PaperState, row: Kline) -> str | None:
+    if row.open <= (state.stop or 0):
+        return "stop_hit"
+    if row.open >= (state.target or float("inf")):
+        return "target_hit"
+    return None
 
 
 def _stop_exit_price(state: _PaperState, row: Kline) -> float:
@@ -1214,19 +1303,25 @@ class _BenchmarkSeries:
     base_close: float | None
     available: bool
     message: str | None
+    observed_sessions: frozenset[str] = frozenset()
+
+    def covering(self, trade_dates: list[str]) -> _BenchmarkSeries:
+        if self.available and (missing := next((day for day in trade_dates if day not in self.observed_sessions), None)):
+            return replace(self, base_close=None, available=False, message=f"基准在 {missing} 缺少完整交易会话")
+        return self
 
     def starting_at(self, trade_date: str) -> _BenchmarkSeries:
         if not self.available:
             return self
         if trade_date in self.opens:
-            return _BenchmarkSeries(self.closes, self.opens, self.opens[trade_date], True, None)
+            return replace(self, base_close=self.opens[trade_date], message=None)
         eligible = [key for key in self.closes if key < trade_date]
         if not eligible:
             return _BenchmarkSeries(self.closes, self.opens, None, False, "基准在模拟起始日前没有可用日K")
-        return _BenchmarkSeries(self.closes, self.opens, self.closes[max(eligible)], True, "基准起始日缺失，使用前收盘价")
+        return replace(self, base_close=self.closes[max(eligible)], message="基准起始日明确停牌，使用前收盘价")
 
     def values(self, trade_date: str, initial_cash: float) -> tuple[float | None, float | None]:
-        if not self.available or self.base_close is None:
+        if not self.available or self.base_close is None or trade_date not in self.observed_sessions:
             return None, None
         eligible = [key for key in self.closes if key <= trade_date]
         if not eligible:
@@ -1265,7 +1360,7 @@ def _prepare_benchmark(rows: list[Kline], as_of: datetime, error: str | None) ->
     closes = {row_date: row.close for row_date, row in trading_rows.items()}
     opens = {row_date: row.open for row_date, row in trading_rows.items()}
     first = min(trading_rows)
-    return _BenchmarkSeries(closes, opens, opens[first], True, None)
+    return _BenchmarkSeries(closes, opens, opens[first], True, None, frozenset(ordered))
 
 
 def _paper_evidence_rows(rows: list[Kline], cutoff: date) -> list[Kline]:

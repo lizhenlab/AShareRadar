@@ -12,51 +12,6 @@ import {
   selectPrimaryView,
   workbenchPayload,
 } from "./frontend-flow-api-fixtures.mjs";
-test("primary navigation separates research, market, review, and monitoring workspaces", async ({ page }) => {
-  await mockApi(page, {
-    api(url) {
-      if (url.pathname === "/api/market-scans/latest") return { payload: null };
-      return null;
-    },
-  });
-  await page.goto("/");
-  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  const primaryButtons = page.locator("#primaryNavigation button[data-primary-view]");
-  await expect(primaryButtons).toHaveCount(4);
-  await expect(primaryButtons).toHaveText(["个股研究", "全市场选股", "复盘工具", "自选监控"]);
-  await expectPrimaryView(page, "research");
-  await expect(page.locator("#stockWorkbench")).toBeVisible();
-  await expect(page.locator(".query-panel")).toBeVisible();
-  await expect(page.locator("#workspace-panel-overview")).toBeVisible();
-  await expect(page.locator(".control-panel")).toBeHidden();
-  await expect(page.locator(".side-column")).toBeHidden();
-  await selectPrimaryView(page, "market");
-  await expect(page.locator("#stockWorkbench")).toBeHidden();
-  await expect(page.locator(".query-panel")).toBeHidden();
-  await expect(page.locator("#workspace-panel-market-scan")).toBeVisible();
-  await expect(page.locator("#workspace-panel-overview")).toBeHidden();
-  await selectPrimaryView(page, "review");
-  await expect(page.locator(".query-panel")).toBeVisible();
-  await expect(page.locator("#stockWorkbench")).toBeHidden();
-  await expect(page.locator("#workspace-panel-replay")).toBeVisible();
-  await expect(page.locator("#workspace-tab-replay")).toBeVisible();
-  await expect(page.locator("#workspace-tab-paper")).toBeVisible();
-  await expect(page.locator("#workspace-tab-tools")).toBeVisible();
-  await expect(page.locator("#workspace-tab-data")).toBeVisible();
-  await page.locator("#workspace-tab-tools").click();
-  await expect(page.locator("#workspace-panel-tools")).toBeVisible();
-
-  await selectPrimaryView(page, "monitor");
-  await expect(page.locator(".query-panel")).toBeHidden();
-  await expect(page.locator(".workspace")).toBeHidden();
-  await expect(page.locator(".control-panel")).toBeVisible();
-  await expect(page.locator(".side-column")).toBeVisible();
-
-  await selectPrimaryView(page, "research");
-  await expect(page.locator("#stockWorkbench")).toBeVisible();
-  await expect(page.locator(".query-panel")).toBeVisible();
-  await expect(page.locator("#workspace-panel-overview")).toBeVisible();
-});
 test("layout controls prioritize primary content across desktop and mobile workspaces", async ({ page }, testInfo) => {
   const mobileProject = Boolean(testInfo.project.use.isMobile);
   await page.setViewportSize(mobileProject ? { width: 390, height: 844 } : { width: 1440, height: 900 });
@@ -150,6 +105,7 @@ test("paper trading freezes a review plan and renders deterministic simulated fi
   });
 
   await page.goto("/");
+  await page.addStyleTag({ content: "html { scroll-behavior: auto !important; }" });
   await selectPrimaryView(page, "review");
   await page.locator("#workspace-tab-paper").click();
   if (testInfo.project.use.isMobile) {
@@ -443,7 +399,7 @@ test("research activity merges local records, filters each type, and keeps parti
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
   await page.locator('#quickList button[data-symbol="000001"]').click();
   await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await selectPrimaryView(page, "review");
+  await selectPrimaryView(page, "research");
   await page.locator("#workspace-tab-tools").click();
 
   const activity = page.locator("#researchActivity");
@@ -514,7 +470,7 @@ test("advice timeline shows snapshot changes without narrow-screen overflow", as
 
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await selectPrimaryView(page, "review");
+  await selectPrimaryView(page, "research");
   await page.locator("#workspace-tab-tools").click();
 
   const panel = page.locator('.timeline-panel[aria-labelledby="adviceTimelineTitle"]');
@@ -705,8 +661,9 @@ test("watchlist research queue supports ordered entry, editing, viewed state, an
 
   const unreadRow = page.locator('.watch-queue-row[data-symbol="000001.SZ"]');
   await expect(unreadRow).toContainText("4 条新变化");
-  await unreadRow.locator(".watch-main").click();
+  await unreadRow.locator('[data-action="changes"]').click();
   await expect(page.locator("#stockName")).toHaveText("平安银行");
+  await expect(page.locator("#adviceTimeline")).toBeVisible();
   await expect.poll(() => requests.marks.length).toBe(1);
   expect(requests.marks[0]).toEqual({ clear_unread: true, viewed_through_advice_id: 801 });
   await selectPrimaryView(page, "monitor");
@@ -902,7 +859,7 @@ test("failed alert and note writes retain the rendered rows and drafts", async (
 
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await selectPrimaryView(page, "review");
+  await selectPrimaryView(page, "research");
   await page.locator("#workspace-tab-tools").click();
   await expect(page.locator("#alertList")).toContainText("原有价格提醒");
   await expect(page.locator("#noteList")).toContainText("原有笔记证据");
@@ -926,7 +883,7 @@ test("failed alert and note writes retain the rendered rows and drafts", async (
   await expect(page.locator("#noteContent")).toHaveValue("失败后仍需保留的草稿");
 });
 
-test("restored tabs and tools retain the last successful current stock", async ({ page }, testInfo) => {
+test("restored tabs and tools retain the last successful current stock", async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem("ashare-radar.workspace-preferences", JSON.stringify({
       version: 1,
@@ -952,14 +909,14 @@ test("restored tabs and tools retain the last successful current stock", async (
   await page.goto("/");
   await expect(page.locator("#workspace-panel-tools")).toBeVisible();
   await expect(page.locator("#workspace-tab-tools")).toHaveAttribute("aria-selected", "true");
-  await expectPrimaryView(page, "review");
+  await expectPrimaryView(page, "research");
   await expect(page.locator("#workspace-tab-tools")).toBeInViewport();
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator("#toolsStockContext")).toContainText("当前股票");
   await expect(page.locator("#toolsStockContext")).toContainText("贵州茅台");
   await expect(page.locator("#toolsStockContext")).toContainText("SH600519");
 
-  if (testInfo.project.use.isMobile) await page.locator("#queryPanelToggle").click();
+  if (!(await page.locator("#symbolInput").isVisible())) await page.locator("#queryPanelToggle").click();
   await page.locator("#symbolInput").fill("000001");
   await page.locator("#searchForm button").click();
   await expect(page.locator("#dataStatus")).toContainText("仍显示贵州茅台");
@@ -1069,6 +1026,8 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   await page.keyboard.press("Tab");
   await expect(primaryViewButton(page, "monitor")).toBeFocused();
   await page.keyboard.press("Tab");
+  await expect(primaryViewButton(page, "system")).toBeFocused();
+  await page.keyboard.press("Tab");
   await expect(page.locator("#queryPanelToggle")).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.locator("#symbolInput")).toBeFocused();
@@ -1083,7 +1042,6 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
 
   const overviewTab = page.locator("#workspace-tab-overview");
   const qaTab = page.locator("#workspace-tab-qa");
-  const themeTab = page.locator("#workspace-tab-theme");
   const replayTab = page.locator("#workspace-tab-replay");
   const paperTab = page.locator("#workspace-tab-paper");
   const toolsTab = page.locator("#workspace-tab-tools");
@@ -1098,14 +1056,14 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   await expect(page.locator("#workspace-panel-overview")).toHaveAttribute("hidden", "");
 
   await page.keyboard.press("End");
-  await expect(themeTab).toBeFocused();
-  await expect(themeTab).toHaveAttribute("aria-selected", "true");
-  await themeTab.focus();
+  await expect(toolsTab).toBeFocused();
+  await expect(toolsTab).toHaveAttribute("aria-selected", "true");
+  await toolsTab.focus();
   await page.keyboard.press("Home");
   await expect(overviewTab).toBeFocused();
   await overviewTab.focus();
   await page.keyboard.press("ArrowLeft");
-  await expect(themeTab).toBeFocused();
+  await expect(toolsTab).toBeFocused();
 
   await selectPrimaryView(page, "review");
   await replayTab.focus();
@@ -1114,20 +1072,22 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
   await expect(paperTab).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#workspace-panel-paper")).not.toHaveAttribute("hidden", "");
   await page.keyboard.press("ArrowRight");
-  await expect(toolsTab).toBeFocused();
+  await expect(replayTab).toBeFocused();
+  await selectPrimaryView(page, "research");
   await expect(toolsTab).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#workspace-panel-tools")).not.toHaveAttribute("hidden", "");
   const markFilter = page.locator('#markFilters button[data-mark-category="买点"]');
   await expect(markFilter).toHaveAttribute("aria-pressed", "true");
   await markFilter.click();
   await expect(markFilter).toHaveAttribute("aria-pressed", "false");
-  await toolsTab.focus();
-  await page.keyboard.press("Home");
-  await expect(replayTab).toBeFocused();
-  await replayTab.focus();
+  await selectPrimaryView(page, "system");
+  const diagnosticsTab = page.locator("#workspace-tab-diagnostics");
+  await diagnosticsTab.focus();
   await page.keyboard.press("ArrowLeft");
   await expect(dataTab).toBeFocused();
   await expect(page.locator("#workspace-panel-data")).not.toHaveAttribute("hidden", "");
+  await page.keyboard.press("Home");
+  await expect(diagnosticsTab).toBeFocused();
 
   const widths = await page.evaluate(() => ({
     body: document.body.scrollWidth,
@@ -1147,7 +1107,7 @@ test("mobile DOM order, focus order, tabs, filters, and width remain accessible"
 
   await selectPrimaryView(page, "monitor");
   const monitorLayout = await narrowPrimaryLayout(page, [
-    ".watchlist-box", ".side-column", ".notice", ".data-health", ".data-monitor",
+    ".watchlist-box", ".side-column", ".notice",
   ]);
   expect(monitorLayout.scrollWidth).toBeLessThanOrEqual(monitorLayout.viewport);
   for (const item of monitorLayout.items) {

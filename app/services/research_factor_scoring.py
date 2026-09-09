@@ -17,6 +17,7 @@ from app.services.indicators import pct_change
 from app.services.research_factor_calibration import _calibrate_factor, _calibration_buckets, _factor_percentile
 from app.services.research_factor_specs import FactorSpec
 from app.services.research_factor_weights import _adjusted_factor_weight
+from app.services.research_volume_scoring import volume_confirmation_score
 from app.services.scoring import clamp_score as _clamp, score_level as _score_level
 
 
@@ -42,19 +43,6 @@ class ChipDistanceRule:
 
 
 @dataclass(frozen=True)
-class VolumeConfirmationContext:
-    ratio: float
-    change_pct: float
-
-
-@dataclass(frozen=True)
-class VolumeConfirmationRule:
-    name: str
-    adjustment: Callable[[VolumeConfirmationContext], int]
-    matches: Callable[[VolumeConfirmationContext], bool]
-
-
-@dataclass(frozen=True)
 class RiskPressureContext:
     risk_level: str
     data_quality_score: int
@@ -73,7 +61,6 @@ class RiskPressureRule:
     matches: Callable[[RiskPressureContext], bool]
 
 
-VOLUME_CONFIRMATION_BASE_SCORE = 52
 RISK_PRESSURE_BASE_SCORE = 72
 MIN_FACTOR_CONFIRMATION_SAMPLES = 20
 
@@ -202,36 +189,7 @@ def _factor_calibration_quality(factors: list[StandardFactor]) -> int:
 def _volume_confirmation_score(analysis: AnalysisResult, feature: FeatureSnapshot) -> int:
     if getattr(feature, "volume_ratio_available", False) is not True:
         return 50
-    context = VolumeConfirmationContext(ratio=feature.volume_ratio, change_pct=analysis.quote.change_pct)
-    adjustment = _volume_confirmation_adjustment(context)
-    return _clamp(VOLUME_CONFIRMATION_BASE_SCORE + adjustment)
-
-
-def _volume_confirmation_adjustment(context: VolumeConfirmationContext) -> int:
-    for rule in VOLUME_CONFIRMATION_RULES:
-        if rule.matches(context):
-            return rule.adjustment(context)
-    return 0
-
-
-def _positive_volume_adjustment(context: VolumeConfirmationContext) -> int:
-    return 18 + _volume_expansion_bonus(context.ratio)
-
-
-def _negative_volume_adjustment(context: VolumeConfirmationContext) -> int:
-    return -18 - _volume_expansion_bonus(context.ratio)
-
-
-def _volume_expansion_bonus(ratio: float) -> int:
-    return round(min(10, (ratio - 1.2) * 8))
-
-
-VOLUME_CONFIRMATION_RULES = (
-    VolumeConfirmationRule("positive_volume_expansion", _positive_volume_adjustment, lambda context: context.change_pct > 0 and context.ratio >= 1.2),
-    VolumeConfirmationRule("negative_volume_expansion", _negative_volume_adjustment, lambda context: context.change_pct < 0 and context.ratio >= 1.2),
-    VolumeConfirmationRule("low_volume_large_move", lambda context: -8, lambda context: context.ratio < 0.7 and abs(context.change_pct) >= 2),
-    VolumeConfirmationRule("normal_volume", lambda context: 4, lambda context: 0.85 <= context.ratio <= 1.25),
-)
+    return volume_confirmation_score(analysis.quote.change_pct, feature.volume_ratio)
 
 
 def _risk_pressure_score(analysis: AnalysisResult, insights: StockInsightBundle, feature: FeatureSnapshot) -> int:
@@ -408,7 +366,6 @@ __all__ = [
     "_historical_aggregate_factors",
     "_risk_pressure_score",
     "RISK_PRESSURE_RULES",
-    "VOLUME_CONFIRMATION_RULES",
     "_volume_confirmation_score",
     "_weighted_factor_score",
 ]

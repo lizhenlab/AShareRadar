@@ -1,0 +1,453 @@
+{
+  "generated_at": "2026-08-12T18:00:00+08:00",
+  "integrity": {
+    "algorithm": "sha256",
+    "integrity_digest": "0a62d08fa3fffaf6209872b688070d1850ed568c212c2912427179d80b77d1c4",
+    "notice": "integrity_digest_not_a_signature",
+    "scope": "payload"
+  },
+  "payload": {
+    "cohort": {
+      "mode": "official",
+      "rule_version": "full-market-scan-v6:96cb0857c8cee3f060adf482015767315ae93ac696c4a523fb3bcb1ca9479ad7",
+      "scope": "沪市 + 深市 + 北交所当前上市A股"
+    },
+    "compact_research_digest": "e4e57010d58b1413706a6c1eb9091cdc13c706bcb51d482cc4c5314cc0ed85b0",
+    "contract_version": "bounded-balanced-session-fit-v1",
+    "corpus_chain_digest": "c6a992bfb2f11ced4ae3552652d00ff438cbe9cbcbe6585ed7563e265ac55c6e",
+    "fit_replay_verified": true,
+    "fit_selection_qualification": {
+      "gates": {
+        "deterministic_sample_replay": true,
+        "full_market_benchmark_contract": false,
+        "full_market_top100_contract": false
+      },
+      "passed": false,
+      "reason": "sampled_market_benchmark_not_full_market_contract"
+    },
+    "fit_selection_qualified": false,
+    "fit_status": "not_fitted",
+    "horizons": {
+      "1": {
+        "absolute_net_positive": {
+          "compact_evidence_digest": "6fd59b8653b29497d24461ee97e95947493b102eafd90b276d59569b4ffa154b",
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "deterministic_replay_verified": true,
+          "evidence_digest": "7e471e14e7061516f18002f78bf2ed5632ffc749e04bf2ad525ec348529fb98b",
+          "fit_status": "not_fitted",
+          "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "promotion_gates": {
+            "gates": {
+              "auc_at_least_0_52": false,
+              "brier_skill_positive": false,
+              "calibrated_shadow": false,
+              "deterministic_replay_verified": true,
+              "ece_at_most_5pct": false,
+              "highest_bin_above_base_rate": false,
+              "label_coverage_at_least_95pct": false,
+              "major_board_calibration_acceptable": false,
+              "major_market_calibration_acceptable": false,
+              "maximum_drawdown_at_least_minus_25pct": false,
+              "mean_turnover_at_most_80pct": false,
+              "point_in_time_evidence_at_least_95pct": false,
+              "probability_bin_outcomes_complete": false,
+              "probability_bins_monotonic": false,
+              "selection_qualified": false,
+              "temporal_stability_acceptable": false,
+              "top100_independent_sessions_at_least_60": false,
+              "top100_mean_net_excess_return_positive": false
+            },
+            "passed": false,
+            "version": "market-scan-probability-shadow-gates-v2"
+          },
+          "selection_qualification": {
+            "gates": {
+              "deterministic_sample_replay": true,
+              "full_market_benchmark_contract": false,
+              "full_market_top100_contract": false
+            },
+            "passed": false,
+            "reason": "sampled_market_benchmark_not_full_market_contract"
+          },
+          "selection_qualified": false,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "net_excess_positive": {
+          "compact_evidence_digest": "5dc14674140075cc5539894cf0df2384f7407f1e1876dc9ecd4c317bddd14ef7",
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "deterministic_replay_verified": true,
+          "evidence_digest": "89b73bc1a2f8d6928bc120c6a81ab6a68d448d26b5009cfae262abb4824a3c3d",
+          "fit_status": "not_fitted",
+          "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "promotion_gates": {
+            "gates": {
+              "auc_at_least_0_52": false,
+              "brier_skill_positive": false,
+              "calibrated_shadow": false,
+              "deterministic_replay_verified": true,
+              "ece_at_most_5pct": false,
+              "highest_bin_above_base_rate": false,
+              "label_coverage_at_least_95pct": false,
+              "major_board_calibration_acceptable": false,
+              "major_market_calibration_acceptable": false,
+              "maximum_drawdown_at_least_minus_25pct": false,
+              "mean_turnover_at_most_80pct": false,
+              "point_in_time_evidence_at_least_95pct": false,
+              "probability_bin_outcomes_complete": false,
+              "probability_bins_monotonic": false,
+              "selection_qualified": false,
+              "temporal_stability_acceptable": false,
+              "top100_independent_sessions_at_least_60": false,
+              "top100_mean_net_excess_return_positive": false
+            },
+            "passed": false,
+            "version": "market-scan-probability-shadow-gates-v2"
+          },
+          "selection_qualification": {
+            "gates": {
+              "deterministic_sample_replay": true,
+              "full_market_benchmark_contract": false,
+              "full_market_top100_contract": false
+            },
+            "passed": false,
+            "reason": "sampled_market_benchmark_not_full_market_contract"
+          },
+          "selection_qualified": false,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        }
+      },
+      "20": {
+        "absolute_net_positive": {
+          "compact_evidence_digest": "94b4b61c8097f26ee56cae51fdc70dfc833984eb3bd47e04a86b3587282495a5",
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "deterministic_replay_verified": true,
+          "evidence_digest": "c8b087bdcc2a13864d96330b6de171637250a0053f506d5411d476ab7c0c5908",
+          "fit_status": "not_fitted",
+          "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "promotion_gates": {
+            "gates": {
+              "auc_at_least_0_52": false,
+              "brier_skill_positive": false,
+              "calibrated_shadow": false,
+              "deterministic_replay_verified": true,
+              "ece_at_most_5pct": false,
+              "highest_bin_above_base_rate": false,
+              "label_coverage_at_least_95pct": false,
+              "major_board_calibration_acceptable": false,
+              "major_market_calibration_acceptable": false,
+              "maximum_drawdown_at_least_minus_25pct": false,
+              "mean_turnover_at_most_80pct": false,
+              "point_in_time_evidence_at_least_95pct": false,
+              "probability_bin_outcomes_complete": false,
+              "probability_bins_monotonic": false,
+              "selection_qualified": false,
+              "temporal_stability_acceptable": false,
+              "top100_independent_sessions_at_least_60": false,
+              "top100_mean_net_excess_return_positive": false
+            },
+            "passed": false,
+            "version": "market-scan-probability-shadow-gates-v2"
+          },
+          "selection_qualification": {
+            "gates": {
+              "deterministic_sample_replay": true,
+              "full_market_benchmark_contract": false,
+              "full_market_top100_contract": false
+            },
+            "passed": false,
+            "reason": "sampled_market_benchmark_not_full_market_contract"
+          },
+          "selection_qualified": false,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "net_excess_positive": {
+          "compact_evidence_digest": "38aed9b570a0ca6374a7bba4ef536d7d7d6488ce7dd84615bafe94a93c9fde10",
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "deterministic_replay_verified": true,
+          "evidence_digest": "a59fa4c3beeb22ad2c01ea2a6ae23348bc483bec8bd359c704f4d541868b171c",
+          "fit_status": "not_fitted",
+          "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "promotion_gates": {
+            "gates": {
+              "auc_at_least_0_52": false,
+              "brier_skill_positive": false,
+              "calibrated_shadow": false,
+              "deterministic_replay_verified": true,
+              "ece_at_most_5pct": false,
+              "highest_bin_above_base_rate": false,
+              "label_coverage_at_least_95pct": false,
+              "major_board_calibration_acceptable": false,
+              "major_market_calibration_acceptable": false,
+              "maximum_drawdown_at_least_minus_25pct": false,
+              "mean_turnover_at_most_80pct": false,
+              "point_in_time_evidence_at_least_95pct": false,
+              "probability_bin_outcomes_complete": false,
+              "probability_bins_monotonic": false,
+              "selection_qualified": false,
+              "temporal_stability_acceptable": false,
+              "top100_independent_sessions_at_least_60": false,
+              "top100_mean_net_excess_return_positive": false
+            },
+            "passed": false,
+            "version": "market-scan-probability-shadow-gates-v2"
+          },
+          "selection_qualification": {
+            "gates": {
+              "deterministic_sample_replay": true,
+              "full_market_benchmark_contract": false,
+              "full_market_top100_contract": false
+            },
+            "passed": false,
+            "reason": "sampled_market_benchmark_not_full_market_contract"
+          },
+          "selection_qualified": false,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        }
+      },
+      "5": {
+        "absolute_net_positive": {
+          "compact_evidence_digest": "293a8303a58f0053781e58afbd9819eeb116924fd8a3e8bf191f8da2e27cf42f",
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "deterministic_replay_verified": true,
+          "evidence_digest": "dc51830d5dda817e71eb11b9932709dcbfca2c24b683c0012c421dfef420b35e",
+          "fit_status": "not_fitted",
+          "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "promotion_gates": {
+            "gates": {
+              "auc_at_least_0_52": false,
+              "brier_skill_positive": false,
+              "calibrated_shadow": false,
+              "deterministic_replay_verified": true,
+              "ece_at_most_5pct": false,
+              "highest_bin_above_base_rate": false,
+              "label_coverage_at_least_95pct": false,
+              "major_board_calibration_acceptable": false,
+              "major_market_calibration_acceptable": false,
+              "maximum_drawdown_at_least_minus_25pct": false,
+              "mean_turnover_at_most_80pct": false,
+              "point_in_time_evidence_at_least_95pct": false,
+              "probability_bin_outcomes_complete": false,
+              "probability_bins_monotonic": false,
+              "selection_qualified": false,
+              "temporal_stability_acceptable": false,
+              "top100_independent_sessions_at_least_60": false,
+              "top100_mean_net_excess_return_positive": false
+            },
+            "passed": false,
+            "version": "market-scan-probability-shadow-gates-v2"
+          },
+          "selection_qualification": {
+            "gates": {
+              "deterministic_sample_replay": true,
+              "full_market_benchmark_contract": false,
+              "full_market_top100_contract": false
+            },
+            "passed": false,
+            "reason": "sampled_market_benchmark_not_full_market_contract"
+          },
+          "selection_qualified": false,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        },
+        "net_excess_positive": {
+          "compact_evidence_digest": "f5529da0ffaa7041a7be27b3b058f2f459a9445e74038a6c7ae78e6858976249",
+          "counts": {
+            "available_independent_session_count": 0,
+            "calibration_session_count": 0,
+            "eligible_observation_count": 0,
+            "evaluated_fold_count": 0,
+            "label_coverage": 0.0,
+            "observation_count": 0,
+            "out_of_sample_observation_count": 0,
+            "out_of_sample_session_count": 0,
+            "test_session_count": 0,
+            "training_session_count": 0,
+            "unused_tail_session_count": 0,
+            "walk_forward_fold_count": 0
+          },
+          "deterministic_replay_verified": true,
+          "evidence_digest": "3b98e0370adfb77fec629f50127fa41d23d526455d08fefbaad4ba80024a08c4",
+          "fit_status": "not_fitted",
+          "input_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "limitations": [
+            "no_observations",
+            "minimum_label_coverage",
+            "minimum_independent_sessions",
+            "shadow_only_no_production_ranking_effect"
+          ],
+          "promotion_gates": {
+            "gates": {
+              "auc_at_least_0_52": false,
+              "brier_skill_positive": false,
+              "calibrated_shadow": false,
+              "deterministic_replay_verified": true,
+              "ece_at_most_5pct": false,
+              "highest_bin_above_base_rate": false,
+              "label_coverage_at_least_95pct": false,
+              "major_board_calibration_acceptable": false,
+              "major_market_calibration_acceptable": false,
+              "maximum_drawdown_at_least_minus_25pct": false,
+              "mean_turnover_at_most_80pct": false,
+              "point_in_time_evidence_at_least_95pct": false,
+              "probability_bin_outcomes_complete": false,
+              "probability_bins_monotonic": false,
+              "selection_qualified": false,
+              "temporal_stability_acceptable": false,
+              "top100_independent_sessions_at_least_60": false,
+              "top100_mean_net_excess_return_positive": false
+            },
+            "passed": false,
+            "version": "market-scan-probability-shadow-gates-v2"
+          },
+          "selection_qualification": {
+            "gates": {
+              "deterministic_sample_replay": true,
+              "full_market_benchmark_contract": false,
+              "full_market_top100_contract": false
+            },
+            "passed": false,
+            "reason": "sampled_market_benchmark_not_full_market_contract"
+          },
+          "selection_qualified": false,
+          "status": "insufficient_data",
+          "training_cutoff": null
+        }
+      }
+    },
+    "input_pair_digest": "aec591d5522d65d42d6a63ee9d4f13ae92df62e48d18fbc0673c2ec98d944643",
+    "limitations": [
+      "individual_probability_projection_not_published",
+      "selection_filter_fail_closed",
+      "bounded_sample_benchmark_not_full_market_contract_selection_forbidden"
+    ],
+    "members": [
+      {
+        "outcome_content_digest": "7c65b92fb15cdcd27220ebac4bb02e109580551fdab088f02c9b2cdd89575562",
+        "outcome_filename": "market-scan-probability-outcomes-run-71-through-2026-08-12-7c65b92fb15cdcd27220ebac4bb02e109580551fdab088f02c9b2cdd89575562.json.gz",
+        "run_id": 71,
+        "sampled_row_count": 1,
+        "sampled_symbol_digest": "49500131961e37a6c97ea664574407d3497371ad68e5b725b95b21dc8706d603",
+        "session_date": "2026-08-11",
+        "source_content_digest": "ea24ce85cba3fa04f1bedcbf73ec7add7caae172c1a93372d1f9cf44c3c07ad0",
+        "source_filename": "market-scan-probability-source-run-71-ea24ce85cba3fa04f1bedcbf73ec7add7caae172c1a93372d1f9cf44c3c07ad0.json.gz"
+      }
+    ],
+    "production_ranking_effect": "none",
+    "projection_status": "projection_pending",
+    "records_included": false,
+    "research_digest": "cf45b3cb1a8749734a6f526430a4494d92feeb3814ffd5e788b10e12ba21382b",
+    "sampled_row_count": 1,
+    "sampling": {
+      "excluded_older_session_count": 0,
+      "maximum_rolling_sessions": 300,
+      "maximum_rows_per_session": 90,
+      "maximum_total_rows": 30000,
+      "method": "deterministic_sha256_market_balanced_per_session",
+      "total_canonical_session_count": 1,
+      "window_end_session": "2026-08-11",
+      "window_start_session": "2026-08-11"
+    },
+    "through_run_id": 71,
+    "training_cutoff": "2026-08-11"
+  },
+  "schema_version": "market-scan-probability-fit-assessment-v1"
+}

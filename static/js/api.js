@@ -43,6 +43,7 @@ export function fetchCachedJson(url, options = {}) {
         record.hasValue = true;
         record.value = validatedValue;
         record.updatedAt = Date.now();
+        record.completedAtMonotonic = performance.now();
       }
       return validatedValue;
     })
@@ -60,6 +61,7 @@ export function invalidateCachedJson(url, options = {}) {
   if (!record) return false;
   record.generation += 1;
   record.updatedAt = 0;
+  record.completedAtMonotonic = null;
   if (options.abortInflight !== false) abortCachedJsonInflight(record);
   return true;
 }
@@ -90,6 +92,7 @@ function cachedJsonRecord(key) {
       hasValue: false,
       inflight: null,
       updatedAt: 0,
+      completedAtMonotonic: null,
       value: undefined,
     });
   }
@@ -98,7 +101,9 @@ function cachedJsonRecord(key) {
 
 function cachedJsonIsFresh(record, ttlMs) {
   const ttl = Number(ttlMs);
-  return record.hasValue && Number.isFinite(ttl) && ttl > 0 && Date.now() - record.updatedAt < ttl;
+  const elapsed = record.completedAtMonotonic === null ? null : performance.now() - record.completedAtMonotonic;
+  return record.hasValue && elapsed !== null && elapsed >= 0
+    && Number.isFinite(ttl) && ttl > 0 && elapsed < ttl;
 }
 
 function abortCachedJsonInflight(record) {

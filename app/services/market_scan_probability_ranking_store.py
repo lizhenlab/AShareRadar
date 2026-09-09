@@ -57,6 +57,8 @@ class MarketScanProbabilityRankingStore:
             if existing is not None:
                 self._verify_existing(conn, publication, path, existing)
             else:
+                if not publication.current_write_eligible:
+                    raise ProbabilityRankingError("historical v6 audit token cannot insert a new ranking mirror")
                 self._insert_publication_locked(conn, publication, path)
                 self._verify_mirror_locked(conn, publication)
             conn.commit()

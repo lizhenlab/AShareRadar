@@ -140,7 +140,8 @@ if TYPE_CHECKING:
         market_scanner: MarketScanManager | None
         _stop_event: asyncio.Event
         _runner: asyncio.Task[None] | None
-        _active_tasks: set[asyncio.Task[str]]
+        _active_tasks: set[asyncio.Task[object]]
+        _automatic_tick_task: asyncio.Task[None] | None
         _lifecycle_lock: asyncio.Lock
         _manual_run_lock: asyncio.Lock
         _instance_guard: SchedulerInstanceGuard
@@ -154,6 +155,9 @@ if TYPE_CHECKING:
         _market_scan_joint_execution_maintenance: MarketScanJointExecutionMaintenanceService | None
         _strategy_automation_service: StrategyAutomationRunner | None
         _quiescent_event: asyncio.Event
+
+        @property
+        def is_running(self) -> bool: ...
 
         async def _loop(self) -> None: ...
 

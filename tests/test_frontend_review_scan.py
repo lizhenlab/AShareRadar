@@ -628,7 +628,10 @@ def test_review_dashboard_loads_global_summary_due_queue_and_all_pages() -> None
             ambiguous_count: 0, target_hit_count: 0, stop_hit_count: 0, favorable_rate_pct: null,
             average_return_pct: null, average_mfe_pct: null, average_mae_pct: null, conclusion_counts: { pending: 1 },
           });
-          if (target === "/api/reviews/due?limit=200") return json([{ plan: plan(), latest_evaluation: null, due_date: "2026-07-17", overdue_trading_days: 2 }]);
+          if (target === "/api/reviews/due?page=1&page_size=50") return json({
+            items: [{ plan: plan(), latest_evaluation: null, due_date: "2026-07-17", overdue_trading_days: 2 }],
+            total: 1, page: 1, page_size: 50, page_count: 1, as_of: "2026-07-21 15:15:00", snapshot_token: "a".repeat(64),
+          });
           if (target === "/api/reviews?limit=100") return json([{ plan: plan(), latest_evaluation: null }]);
           throw new Error(`unexpected dashboard request: ${target}`);
         };
@@ -636,7 +639,11 @@ def test_review_dashboard_loads_global_summary_due_queue_and_all_pages() -> None
         const state = {};
 
         assert(await loadAdviceReviewDashboard(state) === true, "dashboard did not load");
-        assert(calls.length === 3, `dashboard made unexpected requests: ${calls}`);
+        assert(calls.length === 2, `ordinary dashboard made unexpected requests: ${calls}`);
+        assert(!elements.get("reviewDashboardQueue").innerHTML.includes("逾期"), "ordinary view used partial due membership");
+        elements.get("reviewDashboardStatus").value = "due";
+        await updateAdviceReviewDashboardFilters(state);
+        assert(calls.length === 3, `due activation did not read its page: ${calls}`);
         assert(elements.get("reviewDashboardSummary").innerHTML.includes("计划总数"), "summary cards were not rendered");
         assert(elements.get("reviewDashboardQueue").innerHTML.includes("逾期 2 个交易日"), "due evidence was not rendered");
         elements.get("reviewDashboardStatus").value = "evaluated";
@@ -694,15 +701,23 @@ def test_review_dashboard_keeps_healthy_sections_when_due_endpoint_fails() -> No
             ambiguous_count: 0, target_hit_count: 0, stop_hit_count: 0, favorable_rate_pct: null,
             conclusion_counts: { pending: 1 },
           });
-          if (target === "/api/reviews/due?limit=200") return json({ detail: "internal-private-error" }, 503);
+          if (target === "/api/reviews/due?page=1&page_size=50") return json({ detail: "internal-private-error" }, 503);
           if (target === "/api/reviews?limit=100") return json([{ plan: completeReviewPlan(), latest_evaluation: null }]);
           throw new Error(`unexpected ${target}`);
         };
-        const { loadAdviceReviewDashboard } = await import("./static/js/advice-reviews.js");
+        const { loadAdviceReviewDashboard, updateAdviceReviewDashboardFilters } = await import("./static/js/advice-reviews.js");
         const state = {};
         assert(await loadAdviceReviewDashboard(state) === true, "partial dashboard was rejected");
         assert(elements.get("reviewDashboardSummary").innerHTML.includes("计划总数"), "healthy summary disappeared");
         assert(elements.get("reviewDashboardQueue").innerHTML.includes("600519.SH"), "healthy plans disappeared");
+        elements.get("reviewDashboardStatus").value = "due";
+        await updateAdviceReviewDashboardFilters(state);
+        assert(elements.get("reviewDashboardQueue").innerHTML.includes("暂不可用"), "due failure became an empty success");
+        assert(elements.get("reviewDashboardSummary").innerHTML.includes("计划总数"), "due failure erased healthy summary");
+        assert(state.adviceReviewDashboardDetails.length === 1, "due failure discarded ordinary plans");
+        elements.get("reviewDashboardStatus").value = "all";
+        await updateAdviceReviewDashboardFilters(state);
+        assert(elements.get("reviewDashboardQueue").innerHTML.includes("600519.SH"), "ordinary plans could not be restored");
         assert(!elements.get("reviewDashboardFeedback").textContent.includes("internal-private-error"), "server 5xx leaked to UI");
         function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
         function assert(condition, message) { if (!condition) throw new Error(message); }

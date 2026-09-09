@@ -196,12 +196,13 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
         with self._maintenance_lock:
             yield
 
-    def cleanup_runtime_rows(self) -> dict[str, int]:
+    def cleanup_runtime_rows(self, *, compact: bool = True) -> dict[str, int]:
         with self.exclusive_operation():
             with market_scan_artifact_retention_lease(self._path):
                 removed = self._cleanup_specs(RUNTIME_CLEANUP_SPECS)
                 self._last_regenerable_cleanup_at = monotonic_now()
-            self._compact_after_cleanup(removed)
+            if compact:
+                self.compact_after_cleanup(removed)
         return removed
 
     def cleanup_regenerable_runtime_rows(self) -> dict[str, int]:
@@ -213,7 +214,7 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             with market_scan_artifact_retention_lease(self._path):
                 removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
                 self._last_regenerable_cleanup_at = monotonic_now()
-            self._compact_after_cleanup(removed)
+            self.compact_after_cleanup(removed)
         return removed
 
     def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]:
@@ -242,9 +243,11 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             require_market_scan_artifact_lease_namespace_current(self._path)
         return removed
 
-    def _compact_after_cleanup(self, removed: dict[str, int]) -> None:
-        if sum(removed.values()) > 0:
-            self._compact_database_if_worthwhile()
+    def compact_after_cleanup(self, removed: dict[str, int]) -> None:
+        """Attempt optional space reclamation after the deletion transaction commits."""
+        with self.exclusive_operation():
+            if sum(removed.values()) > 0:
+                self._compact_database_if_worthwhile()
 
     def _compact_database_if_worthwhile(self) -> bool:
         try:

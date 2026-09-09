@@ -16,7 +16,6 @@ from app.utils.symbols import standard_symbol
 
 MAX_EVENT_ITEMS = 4
 MAX_MISSING_DATA_ITEMS = 6
-DEFAULT_WATCH_EVENT = "暂无会改变结论的明确事件，继续观察行情和行业背景。"
 
 
 @dataclass
@@ -48,7 +47,7 @@ def build_event_digest_report(analysis: AnalysisResult, insights: StockInsightBu
         summary=f"{impact}。事件层仅统计已有数据形成的异动、行业背景和复盘记录；未接入的外部源不计作事件证据。",
         positive_events=_dedupe(buckets.positive)[:MAX_EVENT_ITEMS],
         negative_events=_dedupe(buckets.negative)[:MAX_EVENT_ITEMS],
-        watch_events=_watch_events(buckets),
+        watch_events=_dedupe(buckets.watch)[:MAX_EVENT_ITEMS],
         missing_data=_missing_data(insights),
     )
 
@@ -57,7 +56,8 @@ def _event_buckets(insights: StockInsightBundle) -> EventDigestBuckets:
     buckets = EventDigestBuckets.empty()
     for item in insights.abnormal_events.events:
         buckets.add(_abnormal_event_text(item), _abnormal_event_bucket(item))
-    for item in insights.events.events[:MAX_EVENT_ITEMS]:
+    events = [item for item in insights.events.events if item.evidence_kind == "event"]
+    for item in events[:MAX_EVENT_ITEMS]:
         buckets.add(_stock_event_text(item), _stock_event_bucket(item))
     return buckets
 
@@ -92,10 +92,6 @@ def _impact_label(buckets: EventDigestBuckets) -> str:
     if buckets.positive:
         return "事件偏积极"
     return "事件待确认"
-
-
-def _watch_events(buckets: EventDigestBuckets) -> list[str]:
-    return _dedupe(buckets.watch)[:MAX_EVENT_ITEMS] or [DEFAULT_WATCH_EVENT]
 
 
 def _missing_data(insights: StockInsightBundle) -> list[str]:

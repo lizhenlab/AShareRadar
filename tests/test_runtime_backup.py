@@ -1187,10 +1187,12 @@ def test_runtime_cleanup_caps_only_deleted_symbols_unread_badges_to_remaining_ch
     settings = Settings(cache_path=path, max_advice_history_rows=2)
     cache = SQLiteCache(path, settings=settings)
     _insert_watchlist_state(path, "600519.SH", unread_change_count=1, last_viewed_at=None)
+    # Direct SQL advice fixtures bypass unread increments; B has two changes
+    # before the partial acknowledgment below.
     _insert_watchlist_state(
         path,
         "000001.SZ",
-        unread_change_count=0,
+        unread_change_count=2,
         last_viewed_at=None,
     )
     _insert_advice(path, "a-baseline", "2026-07-14 10:00:00", symbol="600519.SH", confidence=80)

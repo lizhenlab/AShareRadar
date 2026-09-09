@@ -5,7 +5,7 @@ import shutil
 import threading
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import sqlite3
 from typing import Any, cast
@@ -40,6 +40,7 @@ from app.models.user_data import (
     AdviceHistoryItem,
     AdviceTimelineItem,
     AlertEventItem,
+    AlertNotificationPage,
     AlertRuleInput,
     AlertRuleItem,
     AlertRuleUpdate,
@@ -53,6 +54,7 @@ from app.models.user_data import (
 )
 from app.models.reviews import (
     AdviceReviewDetail,
+    AdviceReviewDuePage,
     AdviceReviewEvaluation,
     AdviceReviewEvaluationDraft,
     AdviceReviewPlan,
@@ -126,6 +128,10 @@ def resolve_cache_settings(
 class _BorrowedTransactionConnection:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._connection.in_transaction
 
     def execute(self, statement: str, parameters: Any = ()) -> sqlite3.Cursor:
         normalized = statement.strip().rstrip(";").upper()
@@ -817,6 +823,15 @@ class SQLiteCache:
             limit=limit,
         )
 
+    def advice_review_due_page(
+        self, *, as_of: datetime, page: int, page_size: int, snapshot_token: str | None,
+        symbol: str | None, from_date: date | None, horizon_days: int | None,
+    ) -> AdviceReviewDuePage:
+        return self.advice_review_repo.due_page(
+            as_of=as_of, page=page, page_size=page_size, snapshot_token=snapshot_token,
+            symbol=symbol, from_date=from_date, horizon_days=horizon_days,
+        )
+
     def update_advice_review_plan(
         self,
         plan_id: int,
@@ -975,6 +990,11 @@ class SQLiteCache:
             decision=decision,
         )
 
+    def alert_notification_events(
+        self, *, stream_id: str | None = None, after_id: int | None = None, limit: int = 50,
+    ) -> AlertNotificationPage:
+        return self.alert_repo.notification_events(stream_id=stream_id, after_id=after_id, limit=limit)
+
     def alert_events(
         self,
         symbol: str | None = None,
@@ -990,7 +1010,7 @@ class SQLiteCache:
             after_id=after_id,
         )
 
-    def create_stock_note(self, quote: Quote, payload: StockNoteInput) -> StockNoteItem:
+    def create_stock_note(self, quote: Quote | StockInfo, payload: StockNoteInput) -> StockNoteItem:
         return self.note_repo.create(quote, payload)
 
     def stock_notes(self, symbol: str, limit: int = 100, visible_only: bool = False) -> list[StockNoteItem]:
@@ -1002,11 +1022,11 @@ class SQLiteCache:
     def update_stock_note(self, row_id: int, payload: StockNoteUpdate) -> StockNoteItem | None:
         return self.note_repo.update(row_id, payload)
 
-    def delete_stock_note(self, row_id: int) -> bool:
-        return self.note_repo.delete(row_id)
+    def delete_stock_note(self, row_id: int, *, expected_revision: str) -> bool:
+        return self.note_repo.delete(row_id, expected_revision=expected_revision)
 
-    def cleanup_runtime_rows(self) -> dict[str, int]:
-        return self.maintenance_repo.cleanup_runtime_rows()
+    def cleanup_runtime_rows(self, *, compact: bool = True) -> dict[str, int]:
+        return self.maintenance_repo.cleanup_runtime_rows(compact=compact)
 
     def preview_runtime_cleanup(self) -> dict[str, int]:
         return self.maintenance_repo.preview_runtime_cleanup()

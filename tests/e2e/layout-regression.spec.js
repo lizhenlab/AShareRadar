@@ -115,7 +115,7 @@ async function assertPrimaryNavigationFits(page, viewport) {
   });
   expectWithinViewport(metrics.navigation, viewport.width);
   expectWithinViewport(metrics.inner, viewport.width);
-  expect(metrics.buttons.map((item) => item.view)).toEqual(["research", "market", "review", "monitor"]);
+  expect(metrics.buttons.map((item) => item.view)).toEqual(["research", "market", "review", "monitor", "system"]);
   for (const item of metrics.buttons) {
     expect(item.rect.height).toBeGreaterThanOrEqual(40);
     expect(item.rect.width).toBeGreaterThan(0);
@@ -153,13 +153,14 @@ async function assertHeaderAndQueryFit(page, viewport) {
 async function assertWorkspaceTabsAreReachable(page, viewport) {
   const tabs = page.locator(".workspace-tabs");
   const first = page.locator("#workspace-tab-overview");
-  const last = page.locator("#workspace-tab-theme");
+  const last = page.locator("#workspace-tab-tools");
   await expect(tabs).toBeVisible();
   await expect(first).toBeVisible();
-  await expect(page.locator(".workspace-tabs button:visible")).toHaveCount(5);
+  await expect(page.locator(".workspace-tabs button:visible")).toHaveCount(6);
   await expect(page.locator("#workspace-tab-market-scan")).toBeHidden();
   await expect(page.locator("#workspace-tab-replay")).toBeHidden();
-  await expect(page.locator("#workspace-tab-tools")).toBeHidden();
+  await expect(last).toBeVisible();
+  await expect(page.locator("#workspace-tab-diagnostics")).toBeHidden();
 
   const initial = await tabs.evaluate((element) => ({
     clientWidth: element.clientWidth,
@@ -184,7 +185,7 @@ async function assertWorkspaceTabsAreReachable(page, viewport) {
   });
   const end = await page.evaluate(() => ({
     tabs: window.__layoutRect(document.querySelector(".workspace-tabs")),
-    last: window.__layoutRect(document.querySelector("#workspace-tab-theme")),
+    last: window.__layoutRect(document.querySelector("#workspace-tab-tools")),
   }));
   expect(end.last.left).toBeGreaterThanOrEqual(end.tabs.left - 1);
   expect(end.last.right).toBeLessThanOrEqual(end.tabs.right + 1);
@@ -300,7 +301,7 @@ async function assertReviewWorkspaceLayout(page, viewport) {
   const paperTab = page.locator("#workspace-tab-paper");
   await expect(replayTab).toBeVisible();
   await expect(paperTab).toBeVisible();
-  await expect(page.locator(".workspace-tabs button:visible")).toHaveCount(4);
+  await expect(page.locator(".workspace-tabs button:visible")).toHaveCount(2);
 
   const dashboard = await page.locator(".review-dashboard-actions").evaluate((actions) => ({
     columns: window.__layoutGridColumnCount(actions),

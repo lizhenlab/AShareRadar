@@ -1,0 +1,1751 @@
+{
+  "producer": "baseline-workspace.tar.gz before input admission v5; unmodified old producer and verifier",
+  "run_contract": {
+    "schema_version": 6,
+    "mode": {
+      "id": "official",
+      "quote_date": "completed-daily-bar-date",
+      "daily_kline_cutoff": "same-completed-trading-day",
+      "quote_kline_consistency": "same-day-close"
+    },
+    "score_spec": {
+      "schema_version": 5,
+      "rule_version": "full-market-score-v5",
+      "algorithms": {
+        "trend_score": "market-scan-trend-v4-scale-invariant-completed-snapshot",
+        "volume_ratio": "recent-volume-ratio-v2-explicit-windows",
+        "data_quality": "data-quality-v2-cache-neutral",
+        "leader_score": "leader-score-additive-v1",
+        "final_score": "trend-quality-continuous-component-v4",
+        "continuous_trend": "bounded-medium-term-continuous-trend-v2"
+      },
+      "leader_profile": {
+        "algorithm": "leader-score-additive-v1",
+        "profile_id": "full-market-trend-only-v1",
+        "base": 50,
+        "trend_weight": 1.0,
+        "rules": []
+      },
+      "research_dimensions": {
+        "algorithm": "full-market-dimensions-v4-session-coverage",
+        "ranking_effect": "none",
+        "semantics": "ordinal-not-probability",
+        "actionable": false,
+        "probability": false
+      },
+      "tag_rules": {
+        "fallback": "观察",
+        "rules": [
+          {
+            "label": "龙头候选",
+            "input": "leader_score",
+            "comparison": "gte",
+            "threshold": 70
+          },
+          {
+            "label": "趋势强",
+            "input": "trend_score",
+            "comparison": "gte",
+            "threshold": 75
+          },
+          {
+            "label": "涨幅强",
+            "input": "change_pct",
+            "comparison": "gte",
+            "threshold": 5
+          },
+          {
+            "label": "量能放大",
+            "input": "volume_ratio",
+            "comparison": "gte",
+            "threshold": 1.4
+          },
+          {
+            "label": "换手活跃",
+            "input": "turnover_rate",
+            "comparison": "truthy-gte",
+            "threshold": 6
+          }
+        ]
+      },
+      "volume_ratio": {
+        "recent_window": 5,
+        "base_window": 20,
+        "min_count": 6,
+        "precision": 2
+      },
+      "data_quality_policy": {
+        "cached_quote": "neutral",
+        "fallback_quote": "penalize",
+        "stale_quote": "penalize",
+        "quote_field_anomalies": "penalize",
+        "kline_anomalies": "penalize"
+      },
+      "eligibility": {
+        "min_data_quality_score": 50,
+        "valid_quote_fields_required": true,
+        "max_change_pct_gap": 0.3,
+        "quote_timestamp_not_after_as_of": true,
+        "single_price_session_excluded": true,
+        "official_contiguous_session_coverage_required": true,
+        "quote_kline_close_consistency": {
+          "max_relative_gap_pct": 0.5,
+          "max_absolute_gap": 0.02,
+          "accept_when": "within-either-limit"
+        }
+      },
+      "final_score": {
+        "formula": "leader_score - quality_penalty + continuous_trend_adjustment",
+        "quality_policy": "penalty-only",
+        "quality_penalty_per_missing_point": 0.15,
+        "clamp": [
+          0,
+          100
+        ]
+      },
+      "rounding": {
+        "mode": "python-round-half-to-even",
+        "component_stage": "after-quality-penalty-and-continuous-trend-adjustment",
+        "raw_score_decimals": 6,
+        "metric_decimals": 4,
+        "trend_calculation": {
+          "moving_averages": "unrounded-price-means",
+          "relative_pct_decimals": 12,
+          "scaled_impact_decimals": 10,
+          "integer_impact": "floor-stable-scaled-magnitude-plus-half"
+        }
+      },
+      "ranking": {
+        "continuous_trend": {
+          "algorithm": "bounded-medium-term-continuous-trend-v2",
+          "normalization": "bounded-linear-0-1",
+          "input_bounds": {
+            "close_vs_ma5_pct": [
+              -5.0,
+              5.0
+            ],
+            "ma5_vs_ma20_pct": [
+              -8.0,
+              8.0
+            ],
+            "ma20_vs_ma60_pct": [
+              -15.0,
+              15.0
+            ],
+            "range_position_20d": [
+              0.0,
+              1.0
+            ],
+            "return_5d_pct": [
+              -10.0,
+              10.0
+            ],
+            "return_20d_pct": [
+              -25.0,
+              25.0
+            ]
+          },
+          "components": {
+            "ma_alignment": {
+              "aggregation": "mean",
+              "inputs": [
+                "close_vs_ma5_pct",
+                "ma5_vs_ma20_pct",
+                "ma20_vs_ma60_pct"
+              ]
+            },
+            "range_position_20d": {
+              "input": "range_position_20d"
+            },
+            "return_20d_pct": {
+              "input": "return_20d_pct"
+            },
+            "return_5d_pct": {
+              "input": "return_5d_pct"
+            }
+          },
+          "weights": {
+            "ma_alignment": 0.4,
+            "range_position_20d": 0.25,
+            "return_20d_pct": 0.25,
+            "return_5d_pct": 0.1
+          },
+          "input_decimals": 6,
+          "score_decimals": 6,
+          "flat_range_fallback": 0.5,
+          "score_role": "material-base-score-component",
+          "center": 0.5,
+          "adjustment_formula": "(2 * score - 1) * max_adjustment",
+          "max_adjustment": 4.0,
+          "adjustment_range": [
+            -4.0,
+            4.0
+          ]
+        },
+        "base_score_formula": "leader_score - quality_penalty + continuous_trend_adjustment",
+        "raw_score_formula": "base_score",
+        "tie_break": [
+          [
+            "raw_score",
+            "desc"
+          ],
+          [
+            "symbol",
+            "asc"
+          ]
+        ]
+      }
+    },
+    "production_score_semantics": {
+      "kind": "ordinal-cross-sectional-ranking",
+      "expected_return": false,
+      "probability": false,
+      "benchmark": "none-in-production-score",
+      "transaction_cost_model": "none-in-production-score",
+      "execution_model": "none-in-production-score",
+      "actionable": false
+    },
+    "input_admission": {
+      "contract_version": "market-scan-input-admission-v4",
+      "modes": [
+        "official",
+        "preopen",
+        "intraday"
+      ],
+      "demo_sources": {
+        "quote": "rejected",
+        "completed_daily_bars": "reject-any-demo-source",
+        "classification": "shared-quality-demo-source-v1"
+      },
+      "duplicate_daily_bars": {
+        "identity": "trading-date",
+        "accept_when": "all-market-and-provenance-fields-identical",
+        "comparison_fields": [
+          "open",
+          "close",
+          "high",
+          "low",
+          "volume",
+          "adjustment_mode",
+          "source",
+          "from_cache",
+          "fallback_used",
+          "as_of",
+          "fetched_at",
+          "data_version",
+          "contract_version",
+          "session_status",
+          "open_execution_status",
+          "corporate_action_status",
+          "adjustment_factor",
+          "point_in_time",
+          "execution_metadata_version"
+        ]
+      },
+      "invalid_completed_daily_bars": {
+        "scope": "recognized-trading-date-on-or-before-completed-cutoff",
+        "validation": "finite-positive-consistent-ohlc-and-nonnegative-volume",
+        "handling": "reject-as-missing-before-session-gap-classification"
+      },
+      "completed_daily_snapshot_time": {
+        "explicit_timestamp": "not-before-own-session-market-close",
+        "market_timezone": "Asia/Shanghai",
+        "market_close": "15:00:00",
+        "date_only": "preserve-legacy-coarse-snapshot-date-convention",
+        "scope": "new-input-admission-only"
+      },
+      "historical_score_replay": "preserve-frozen-contract-without-readmission"
+    },
+    "history": {
+      "adjustment_mode": "qfq",
+      "kline_limit": 120,
+      "min_history_rows": 61
+    },
+    "execution_quote_evidence": {
+      "schema_version": "market-scan-execution-quote-evidence-v1",
+      "contract_version": "published-scan-normalized-unadjusted-quote-v1",
+      "adjustment_mode": "none",
+      "source_authority": "vendor_normalized_quote",
+      "corporate_action_status": "unknown",
+      "formal_pit_authority": false
+    },
+    "universe": {
+      "classifier": "current-listed-a-share-v2",
+      "markets": [
+        "SH",
+        "SZ",
+        "BJ"
+      ],
+      "authoritative_baseline_min_retain_ratio": 0.98,
+      "new_stock_days": 120
+    },
+    "publication": {
+      "coverage_denominator_statuses": [
+        "success",
+        "missing"
+      ],
+      "excluded_denominator_statuses": [
+        "skipped"
+      ],
+      "minimum_coverage": {
+        "ALL": 0.95,
+        "SH": 0.95,
+        "SZ": 0.95,
+        "BJ": 0.95
+      },
+      "minimum_eligible_ratio": {
+        "ALL": 0.9,
+        "SH": 0.9,
+        "SZ": 0.9,
+        "BJ": 0.9
+      },
+      "quote_capture_scope": "all-quote-chunks-before-klines",
+      "quote_capture_envelope": "required",
+      "quote_observed_at": "per-provider-response-batch",
+      "event_time_span_scope": "per-market",
+      "global_event_time_span": "diagnostic-only",
+      "max_snapshot_span_seconds": 1200,
+      "score_distribution": {
+        "version": "score-layer-distribution-v4",
+        "base_score_decimals": 4,
+        "raw_score_decimals": 6,
+        "top_size": 100,
+        "minimum_sample_count": 100,
+        "failed_observed_ratio_below": 0.95,
+        "required_component_observed_ratio": 1.0,
+        "required_leader_trend_alias_ratio": 1.0,
+        "degraded_observed_ratio_below": 0.99,
+        "failed_max_tie_group_ratio_at_least": 0.95,
+        "failed_saturation_ratio_at_least": 0.95,
+        "failed_top100_upper_saturation_ratio_at_least": 1.0,
+        "degraded_distinct_ratio_at_most": 0.02,
+        "degraded_max_tie_group_ratio_at_least": 0.25,
+        "degraded_single_tie_group_ratio_at_least": 0.5,
+        "degraded_saturation_ratio_at_least": 0.5,
+        "degraded_top100_tie_ratio_at_least": 0.5,
+        "degraded_base_distinct_ratio_at_most": 0.02,
+        "degraded_final_distinct_ratio_at_least": 0.5,
+        "degraded_final_distinct_lift_at_least": 0.5,
+        "degraded_top100_base_tie_ratio_at_least": 0.5,
+        "degraded_base_normalized_entropy_at_most": 0.6,
+        "degraded_final_normalized_entropy_at_least": 0.9,
+        "degraded_effective_precision_lift_at_least": 3
+      }
+    }
+  },
+  "item": {
+    "run_id": 1,
+    "symbol": "600519.SH",
+    "code": "600519",
+    "market": "SH",
+    "name": "贵州茅台",
+    "industry": "白酒",
+    "list_date": "2001-08-27",
+    "is_st": false,
+    "is_new": false,
+    "metadata_source": null,
+    "status": "success",
+    "rank": 1,
+    "score": 69,
+    "raw_score": 69.0,
+    "base_production_rank": null,
+    "base_production_score": null,
+    "base_production_raw_score": null,
+    "production_score_rule_version": null,
+    "probability_ranking_adjustment": null,
+    "probability_ranking_artifact_digest": null,
+    "probability_ranking_details": {},
+    "trend_score": 69,
+    "leader_score": 69,
+    "data_quality_score": 100,
+    "price": 10.0,
+    "change_pct": 9.890109890109894,
+    "turnover_rate": 4.5,
+    "volume_ratio": 1.0,
+    "amount": 900000000.0,
+    "tags": [
+      "涨幅强"
+    ],
+    "metrics": {
+      "close": 10.0,
+      "ma5": 10.0,
+      "ma20": 10.0,
+      "ma60": 10.0,
+      "high20": 10.1,
+      "low20": 9.9,
+      "volume_ratio": 1.0
+    },
+    "score_details": {
+      "schema_version": 1,
+      "semantics": {
+        "kind": "ordinal-cross-sectional-ranking",
+        "expected_return": false,
+        "probability": false,
+        "benchmark": "none-in-production-score",
+        "transaction_cost_model": "none-in-production-score",
+        "execution_model": "none-in-production-score",
+        "actionable": false
+      },
+      "run_rule_version": "full-market-scan-v6:6b0d6cd259c3273c073b58df6527b317ed9a457476224ae7343db7821a9cb48e",
+      "score_spec_hash": "17c0e6b9ed6de9b39cad0d9f9d1fe14c8638749dd08796bed827869d3554e2c7",
+      "score_spec": {
+        "schema_version": 5,
+        "rule_version": "full-market-score-v5",
+        "algorithms": {
+          "trend_score": "market-scan-trend-v4-scale-invariant-completed-snapshot",
+          "volume_ratio": "recent-volume-ratio-v2-explicit-windows",
+          "data_quality": "data-quality-v2-cache-neutral",
+          "leader_score": "leader-score-additive-v1",
+          "final_score": "trend-quality-continuous-component-v4",
+          "continuous_trend": "bounded-medium-term-continuous-trend-v2"
+        },
+        "leader_profile": {
+          "algorithm": "leader-score-additive-v1",
+          "profile_id": "full-market-trend-only-v1",
+          "base": 50,
+          "trend_weight": 1.0,
+          "rules": []
+        },
+        "research_dimensions": {
+          "algorithm": "full-market-dimensions-v4-session-coverage",
+          "ranking_effect": "none",
+          "semantics": "ordinal-not-probability",
+          "actionable": false,
+          "probability": false
+        },
+        "tag_rules": {
+          "fallback": "观察",
+          "rules": [
+            {
+              "label": "龙头候选",
+              "input": "leader_score",
+              "comparison": "gte",
+              "threshold": 70
+            },
+            {
+              "label": "趋势强",
+              "input": "trend_score",
+              "comparison": "gte",
+              "threshold": 75
+            },
+            {
+              "label": "涨幅强",
+              "input": "change_pct",
+              "comparison": "gte",
+              "threshold": 5
+            },
+            {
+              "label": "量能放大",
+              "input": "volume_ratio",
+              "comparison": "gte",
+              "threshold": 1.4
+            },
+            {
+              "label": "换手活跃",
+              "input": "turnover_rate",
+              "comparison": "truthy-gte",
+              "threshold": 6
+            }
+          ]
+        },
+        "volume_ratio": {
+          "recent_window": 5,
+          "base_window": 20,
+          "min_count": 6,
+          "precision": 2
+        },
+        "data_quality_policy": {
+          "cached_quote": "neutral",
+          "fallback_quote": "penalize",
+          "stale_quote": "penalize",
+          "quote_field_anomalies": "penalize",
+          "kline_anomalies": "penalize"
+        },
+        "eligibility": {
+          "min_data_quality_score": 50,
+          "valid_quote_fields_required": true,
+          "max_change_pct_gap": 0.3,
+          "quote_timestamp_not_after_as_of": true,
+          "single_price_session_excluded": true,
+          "official_contiguous_session_coverage_required": true,
+          "quote_kline_close_consistency": {
+            "max_relative_gap_pct": 0.5,
+            "max_absolute_gap": 0.02,
+            "accept_when": "within-either-limit"
+          }
+        },
+        "final_score": {
+          "formula": "leader_score - quality_penalty + continuous_trend_adjustment",
+          "quality_policy": "penalty-only",
+          "quality_penalty_per_missing_point": 0.15,
+          "clamp": [
+            0,
+            100
+          ]
+        },
+        "rounding": {
+          "mode": "python-round-half-to-even",
+          "component_stage": "after-quality-penalty-and-continuous-trend-adjustment",
+          "raw_score_decimals": 6,
+          "metric_decimals": 4,
+          "trend_calculation": {
+            "moving_averages": "unrounded-price-means",
+            "relative_pct_decimals": 12,
+            "scaled_impact_decimals": 10,
+            "integer_impact": "floor-stable-scaled-magnitude-plus-half"
+          }
+        },
+        "ranking": {
+          "continuous_trend": {
+            "algorithm": "bounded-medium-term-continuous-trend-v2",
+            "normalization": "bounded-linear-0-1",
+            "input_bounds": {
+              "close_vs_ma5_pct": [
+                -5.0,
+                5.0
+              ],
+              "ma5_vs_ma20_pct": [
+                -8.0,
+                8.0
+              ],
+              "ma20_vs_ma60_pct": [
+                -15.0,
+                15.0
+              ],
+              "range_position_20d": [
+                0.0,
+                1.0
+              ],
+              "return_5d_pct": [
+                -10.0,
+                10.0
+              ],
+              "return_20d_pct": [
+                -25.0,
+                25.0
+              ]
+            },
+            "components": {
+              "ma_alignment": {
+                "aggregation": "mean",
+                "inputs": [
+                  "close_vs_ma5_pct",
+                  "ma5_vs_ma20_pct",
+                  "ma20_vs_ma60_pct"
+                ]
+              },
+              "range_position_20d": {
+                "input": "range_position_20d"
+              },
+              "return_20d_pct": {
+                "input": "return_20d_pct"
+              },
+              "return_5d_pct": {
+                "input": "return_5d_pct"
+              }
+            },
+            "weights": {
+              "ma_alignment": 0.4,
+              "range_position_20d": 0.25,
+              "return_20d_pct": 0.25,
+              "return_5d_pct": 0.1
+            },
+            "input_decimals": 6,
+            "score_decimals": 6,
+            "flat_range_fallback": 0.5,
+            "score_role": "material-base-score-component",
+            "center": 0.5,
+            "adjustment_formula": "(2 * score - 1) * max_adjustment",
+            "max_adjustment": 4.0,
+            "adjustment_range": [
+              -4.0,
+              4.0
+            ]
+          },
+          "base_score_formula": "leader_score - quality_penalty + continuous_trend_adjustment",
+          "raw_score_formula": "base_score",
+          "tie_break": [
+            [
+              "raw_score",
+              "desc"
+            ],
+            [
+              "symbol",
+              "asc"
+            ]
+          ]
+        }
+      },
+      "inputs": {
+        "trend_score": 69,
+        "change_pct": 9.890109890109894,
+        "volume_ratio": 1.0,
+        "amount": 900000000,
+        "turnover_rate": 4.5,
+        "data_quality_score": 100,
+        "continuous_trend_close_vs_ma5_pct": 0.0,
+        "continuous_trend_ma5_vs_ma20_pct": 0.0,
+        "continuous_trend_ma20_vs_ma60_pct": 0.0,
+        "continuous_trend_range_position_20d": 0.5,
+        "continuous_trend_return_5d_pct": 0.0,
+        "continuous_trend_return_20d_pct": 0.0
+      },
+      "components": {
+        "leader_score": {
+          "base": 50,
+          "trend_delta": 19,
+          "rule_deltas": {},
+          "unclamped": 69,
+          "score": 69
+        },
+        "data_quality_score": 100,
+        "continuous_trend": {
+          "normalized_inputs": {
+            "close_vs_ma5_pct": 0.5,
+            "ma5_vs_ma20_pct": 0.5,
+            "ma20_vs_ma60_pct": 0.5,
+            "range_position_20d": 0.5,
+            "return_5d_pct": 0.5,
+            "return_20d_pct": 0.5
+          },
+          "components": {
+            "ma_alignment": 0.5,
+            "range_position_20d": 0.5,
+            "return_20d_pct": 0.5,
+            "return_5d_pct": 0.5
+          },
+          "weighted_terms": {
+            "ma_alignment": 0.2,
+            "range_position_20d": 0.125,
+            "return_20d_pct": 0.125,
+            "return_5d_pct": 0.05
+          },
+          "score": 0.5
+        },
+        "final_score": {
+          "quality_penalty": 0.0,
+          "continuous_trend_adjustment": 0.0,
+          "base": 69.0,
+          "raw": 69.0,
+          "rounded": 69,
+          "score": 69
+        },
+        "score_dimensions": {
+          "schema_version": 1,
+          "algorithm": "full-market-dimensions-v4-session-coverage",
+          "semantics": {
+            "alpha": "ordinal-research-score-not-return-probability",
+            "confidence": "higher-is-more-reliable",
+            "risk": "higher-is-riskier",
+            "tradability": "higher-is-easier-to-execute",
+            "decision_utility": "profile-specific-research-utility-not-advice",
+            "volume": "completed-session-context; intraday lifecycle is neutral without time-aligned volume",
+            "return_windows": "market-scan-feature-windows-v1",
+            "session_coverage": "market-scan-session-coverage-v1"
+          },
+          "scores": {
+            "alpha_1d": 50.0,
+            "alpha_5d": 50.0,
+            "alpha_20d": 50.0,
+            "confidence": 94.1,
+            "risk": 10,
+            "tradability": 97.3068,
+            "decision_utility": {
+              "conservative": 45.025,
+              "balanced": 46.025,
+              "aggressive": 47.025
+            }
+          },
+          "raw_features": {
+            "return_1d_pct": 0.0,
+            "return_5d_pct": 0.0,
+            "return_20d_pct": 0.0,
+            "return_60d_pct": 0.0,
+            "skip5_return_20d_pct": 0.0,
+            "skip5_return_55d_pct": 0.0,
+            "ma20_slope_10d_pct": 0.0,
+            "ma_alignment": 0.0,
+            "atr20_pct": 2.0,
+            "downside_volatility_20d_pct": 0.0,
+            "max_drawdown_60d_pct": 0.0,
+            "range_position_20d": 0.5,
+            "volume_ratio": 1.0,
+            "volume_lifecycle_delta": 0.0,
+            "amount": 900000000.0,
+            "turnover_rate": 4.5
+          },
+          "volume_context": {
+            "mode": "official",
+            "feature_window_contract": "market-scan-feature-windows-v1",
+            "snapshot_bar_position": "snapshot-session",
+            "volume_ratio_basis": "completed-daily-bars-5d-vs-20d",
+            "volume_data_date": "2026-07-17",
+            "price_volume_alignment": "same-completed-session",
+            "lifecycle_applied": true
+          },
+          "point_in_time_evidence": {
+            "schema_version": 1,
+            "contract_version": "market-scan-point-in-time-feature-evidence-v4-bar-as-of-bound",
+            "status": "verified-persisted-at-scan-time",
+            "eligible_for_promotion_evidence": true,
+            "action_eligible": true,
+            "payload": {
+              "symbol": "600519.SH",
+              "code": "600519",
+              "market": "SH",
+              "name": "贵州茅台",
+              "industry": "白酒",
+              "metadata_source": null,
+              "quote_date": "2026-07-17",
+              "data_date": "2026-07-17",
+              "quote_timestamp": "2026-07-17 15:00:00",
+              "quote_source": "测试行情",
+              "kline_source": "test-qfq",
+              "adjustment_mode": "qfq",
+              "quote_price": 10.0,
+              "quote_change_pct": 9.890109890109894,
+              "quote_turnover_rate": 4.5,
+              "quote_amount": 900000000.0,
+              "reported_volume_ratio": 1.0,
+              "data_quality_score": 100,
+              "mode": "official",
+              "volume_context": {
+                "mode": "official",
+                "feature_window_contract": "market-scan-feature-windows-v1",
+                "snapshot_bar_position": "snapshot-session",
+                "volume_ratio_basis": "completed-daily-bars-5d-vs-20d",
+                "volume_data_date": "2026-07-17",
+                "price_volume_alignment": "same-completed-session",
+                "lifecycle_applied": true
+              },
+              "is_st": false,
+              "is_new": false,
+              "list_date": "2001-08-27",
+              "quote_fallback_used": false,
+              "kline_fallback_used": false,
+              "metadata_degraded": false,
+              "features": {
+                "return_1d_pct": 0.0,
+                "return_5d_pct": 0.0,
+                "return_20d_pct": 0.0,
+                "return_60d_pct": 0.0,
+                "skip5_return_20d_pct": 0.0,
+                "skip5_return_55d_pct": 0.0,
+                "ma20_slope_10d_pct": 0.0,
+                "ma_alignment": 0.0,
+                "atr20_pct": 2.0,
+                "downside_volatility_20d_pct": 0.0,
+                "max_drawdown_60d_pct": 0.0,
+                "range_position_20d": 0.5,
+                "volume_ratio": 1.0,
+                "volume_lifecycle_delta": 0.0,
+                "amount": 900000000.0,
+                "turnover_rate": 4.5
+              },
+              "bar_contract_61": [
+                [
+                  "2026-04-20",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-21",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-22",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-23",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-24",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-27",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-28",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-29",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-04-30",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-06",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-07",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-08",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-11",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-12",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-13",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-14",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-15",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-18",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-19",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-20",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-21",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-22",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-25",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-26",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-27",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-28",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-05-29",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-01",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-02",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-03",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-04",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-05",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-08",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-09",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-10",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-11",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-12",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-15",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-16",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-17",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-18",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-22",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-23",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-24",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-25",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-26",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-29",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-06-30",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-01",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-02",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-03",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-06",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-07",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-08",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-09",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-10",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-13",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-14",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-15",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-16",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ],
+                [
+                  "2026-07-17",
+                  10.0,
+                  10.0,
+                  10.1,
+                  9.9,
+                  1000000.0,
+                  "qfq",
+                  "test|qfq|2026-07-17",
+                  "daily-kline.v1",
+                  "2026-07-17"
+                ]
+              ],
+              "dimension_spec": {
+                "schema_version": 1,
+                "algorithm": "full-market-dimensions-v4-session-coverage",
+                "evidence_contract": "market-scan-point-in-time-feature-evidence-v4-bar-as-of-bound",
+                "feature_window_contract": "market-scan-feature-windows-v1",
+                "session_coverage_contract": "market-scan-session-coverage-v1",
+                "score_decimals": 4,
+                "scores": [
+                  "alpha_1d",
+                  "alpha_5d",
+                  "alpha_20d",
+                  "confidence",
+                  "risk",
+                  "tradability"
+                ],
+                "formula_contract": {
+                  "alpha_1d": "momentum+ma_alignment+volume_lifecycle-exhaustion",
+                  "alpha_5d": "momentum+ma_alignment+volume_lifecycle-exhaustion",
+                  "alpha_20d": "skip5_momentum+ma20_slope+return_60d",
+                  "confidence": "data_quality-fallback-metadata-history-session_gap_penalties",
+                  "risk": "atr+downside_volatility+drawdown+absolute_return+st+new",
+                  "tradability": "log_amount-turnover_extremes-limit_proximity-st"
+                },
+                "confidence": {
+                  "history_rows": 61,
+                  "fallback_penalties": {
+                    "quote": 8,
+                    "kline": 8,
+                    "metadata": 4
+                  },
+                  "history_penalty": "6 * unit(120-history_rows,0,60)",
+                  "session_gap_penalty": "sealed-session-coverage-confidence-penalty"
+                },
+                "semantics": {
+                  "ranking_effect": "none",
+                  "alpha": "ordinal-research-score-not-return-probability",
+                  "actionable": false
+                }
+              },
+              "dimension_spec_hash": "122d2342154c08bbfb17abff240b021bcfbdda6131482301232aea34f08e7c51",
+              "derived_scores": {
+                "alpha_1d": 50.0,
+                "alpha_5d": 50.0,
+                "alpha_20d": 50.0,
+                "confidence": 94.1,
+                "risk": 10,
+                "tradability": 97.3068
+              },
+              "session_coverage": {
+                "schema_version": 1,
+                "contract_version": "market-scan-session-coverage-v1",
+                "status": "verified",
+                "calendar_source": "bundled_baseline",
+                "expected_session_count": 61,
+                "observed_session_count": 61,
+                "missing_session_count": 0,
+                "missing_session_ratio": 0.0,
+                "max_gap_sessions": 0,
+                "expected_session_dates": [
+                  "2026-04-20",
+                  "2026-04-21",
+                  "2026-04-22",
+                  "2026-04-23",
+                  "2026-04-24",
+                  "2026-04-27",
+                  "2026-04-28",
+                  "2026-04-29",
+                  "2026-04-30",
+                  "2026-05-06",
+                  "2026-05-07",
+                  "2026-05-08",
+                  "2026-05-11",
+                  "2026-05-12",
+                  "2026-05-13",
+                  "2026-05-14",
+                  "2026-05-15",
+                  "2026-05-18",
+                  "2026-05-19",
+                  "2026-05-20",
+                  "2026-05-21",
+                  "2026-05-22",
+                  "2026-05-25",
+                  "2026-05-26",
+                  "2026-05-27",
+                  "2026-05-28",
+                  "2026-05-29",
+                  "2026-06-01",
+                  "2026-06-02",
+                  "2026-06-03",
+                  "2026-06-04",
+                  "2026-06-05",
+                  "2026-06-08",
+                  "2026-06-09",
+                  "2026-06-10",
+                  "2026-06-11",
+                  "2026-06-12",
+                  "2026-06-15",
+                  "2026-06-16",
+                  "2026-06-17",
+                  "2026-06-18",
+                  "2026-06-22",
+                  "2026-06-23",
+                  "2026-06-24",
+                  "2026-06-25",
+                  "2026-06-26",
+                  "2026-06-29",
+                  "2026-06-30",
+                  "2026-07-01",
+                  "2026-07-02",
+                  "2026-07-03",
+                  "2026-07-06",
+                  "2026-07-07",
+                  "2026-07-08",
+                  "2026-07-09",
+                  "2026-07-10",
+                  "2026-07-13",
+                  "2026-07-14",
+                  "2026-07-15",
+                  "2026-07-16",
+                  "2026-07-17"
+                ],
+                "missing_session_dates": [],
+                "expected_sessions_digest": "86515bd2606fef296f2415833ba609ced3fc5482947f265a790850a56b3f60f4",
+                "observed_sessions_digest": "86515bd2606fef296f2415833ba609ced3fc5482947f265a790850a56b3f60f4",
+                "recent_windows": {
+                  "5": {
+                    "expected_session_count": 5,
+                    "observed_session_count": 5,
+                    "missing_session_count": 0,
+                    "missing_session_ratio": 0.0
+                  },
+                  "20": {
+                    "expected_session_count": 20,
+                    "observed_session_count": 20,
+                    "missing_session_count": 0,
+                    "missing_session_ratio": 0.0
+                  },
+                  "60": {
+                    "expected_session_count": 60,
+                    "observed_session_count": 60,
+                    "missing_session_count": 0,
+                    "missing_session_ratio": 0.0
+                  }
+                },
+                "confidence_penalty": 0.0,
+                "action_eligible": true
+              }
+            },
+            "payload_digest": "c0621c20e0572913ee3d0ce081186dc0b70055cf4beb664fd498d6da8af5d8b1"
+          }
+        }
+      },
+      "ranking": {
+        "tie_break": [
+          [
+            "raw_score",
+            "desc"
+          ],
+          [
+            "symbol",
+            "asc"
+          ]
+        ],
+        "tie_break_values": {
+          "raw_score": 69.0,
+          "symbol": "600519.SH"
+        }
+      },
+      "execution_quote_evidence": {
+        "schema_version": "market-scan-execution-quote-evidence-v1",
+        "contract_version": "published-scan-normalized-unadjusted-quote-v1",
+        "mode": "official",
+        "symbol": "600519.SH",
+        "code": "600519",
+        "market": "SH",
+        "quote_date": "2026-07-17",
+        "provider_event_at": "2026-07-17T15:00:00+08:00",
+        "captured_at": "2026-07-17T16:30:00+08:00",
+        "source": "测试行情",
+        "source_authority": "vendor_normalized_quote",
+        "fallback_used": false,
+        "instrument": {
+          "board": "main",
+          "listing_status": "listed",
+          "list_date": "2001-08-27",
+          "is_st": false,
+          "metadata_source": null,
+          "metadata_effective_date": "2026-07-17",
+          "rule_profile_id": "sse-main-2026",
+          "rule_profile_quality": "ok",
+          "rule_profile_digest": "e6847f36d33b05a9fd1be9b0870d900f9cad7648ecc692a7750778b6635528aa",
+          "rule_source_url": "https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml"
+        },
+        "bar": {
+          "adjustment_mode": "none",
+          "open": 10.0,
+          "high": 10.1,
+          "low": 9.9,
+          "close": 10.0,
+          "previous_close_reference": 9.1,
+          "volume": 1000000.0,
+          "amount": 900000000.0,
+          "session_status": "trading",
+          "buy_open_state": "executable",
+          "sell_open_state": "executable",
+          "corporate_action_status": "unknown"
+        },
+        "normalized_quote_digest": "072f80613f6d493d210952991e7f2c111798a08f2bc5293b21c2797c09799dc9",
+        "evidence_digest": "79ddf1a68607fff1bc0558a1aad6f0b0af168acf35ec4d089290e6e555069947"
+      }
+    },
+    "reason": "趋势强度 69（序数状态分，非上涨概率；基础 69.00，趋势 69，质量扣分 0.00）；连续中期趋势 0.500，主要项为均线结构 0.200，基础分调整 +0.0000；近5日量比 1.00。完全同分按代码排序",
+    "error": null,
+    "data_date": "2026-07-17",
+    "quote_timestamp": "2026-07-17 15:00:00",
+    "quote_observed_at": "2026-07-17T16:30:00",
+    "quote_source": "测试行情",
+    "kline_source": "test-qfq",
+    "adjustment_mode": "qfq",
+    "quote_fallback_used": false,
+    "kline_fallback_used": false,
+    "metadata_degraded": false,
+    "degradation_reasons": [],
+    "upside_probabilities": {},
+    "updated_at": "2026-07-17 16:30:00"
+  },
+  "run": {
+    "id": 1,
+    "task_run_id": null,
+    "retry_of_run_id": null,
+    "status": "running",
+    "trigger": "manual",
+    "mode": "official",
+    "rule_version": "full-market-scan-v6:6b0d6cd259c3273c073b58df6527b317ed9a457476224ae7343db7821a9cb48e",
+    "as_of": "2026-07-17T16:30:00",
+    "data_date": "2026-07-17",
+    "quote_date": "2026-07-17",
+    "scope": "沪市 + 深市 + 北交所当前上市A股",
+    "stock_pool_source": null,
+    "total_count": 1,
+    "excluded_count": 0,
+    "processed_count": 1,
+    "success_count": 1,
+    "missing_count": 0,
+    "skipped_count": 0,
+    "retry_count": 0,
+    "progress_pct": 100.0,
+    "coverage_pct": 100.0,
+    "created_at": "2026-07-17T16:30:00",
+    "updated_at": "2026-07-17T16:30:00",
+    "started_at": null,
+    "finished_at": null,
+    "duration_ms": null,
+    "quote_capture_started_at": "2026-07-17T16:30:00",
+    "quote_capture_finished_at": "2026-07-17T16:30:00",
+    "quote_capture_duration_ms": 0,
+    "quote_capture_count": 1,
+    "current_stage": null,
+    "stage_started_at": null,
+    "stage_metrics": {},
+    "market_progress": [],
+    "elapsed_seconds": null,
+    "throughput_per_second": null,
+    "eta_seconds": null,
+    "message": null,
+    "last_error": null,
+    "publication_diagnostics": null,
+    "snapshot_digest": null,
+    "snapshot_seal_origin": null,
+    "snapshot_sealed_at": null,
+    "cancel_requested_at": null
+  }
+}

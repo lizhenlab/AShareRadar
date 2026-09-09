@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Buffer, Callable
 from datetime import datetime
 from importlib import import_module
 import math
+import re
+from typing import SupportsFloat, SupportsIndex, cast
 
 from app.models.user_data import (
     ChartMarkItem,
@@ -18,6 +20,8 @@ from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io
 from app.services.workbench_context import WorkbenchContext
 from app.utils.audit_time import audit_now_text as now_text
+from app.utils.audit_time import parse_audit_time
+from app.utils.clock import ASHARE_TIMEZONE
 from app.utils.symbols import normalize_symbol
 
 
@@ -28,6 +32,10 @@ DATE_KEY_FORMATS = (
     "%Y/%m/%d %H:%M:%S",
     "%Y-%m-%d",
     "%Y/%m/%d",
+)
+AUDIT_TIMESTAMP_PATTERN = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,6})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])?"
 )
 INVALID_MARK_TEXT_VALUES = {"", "none", "null", "nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}
 ChartContextLoader = Callable[[DataHub, str], Awaitable[WorkbenchContext]]
@@ -104,7 +112,10 @@ def _regular_event_marks(bundle: StockInsightBundle) -> list[ChartMarkItem]:
 
 
 def _non_abnormal_events(bundle: StockInsightBundle) -> list[StockEventItem]:
-    return [item for item in bundle.events.events if item.category != "异动"][:GENERAL_EVENT_MARK_LIMIT]
+    return [
+        item for item in bundle.events.events
+        if item.category != "异动" and item.evidence_kind != "availability_notice"
+    ][:GENERAL_EVENT_MARK_LIMIT]
 
 
 def _event_mark(*, date: str, label: str, category: str, level: str, description: str, source: str) -> ChartMarkItem:
@@ -131,8 +142,7 @@ def _event_mark(*, date: str, label: str, category: str, level: str, description
 def _note_marks(notes: list[StockNoteItem]) -> list[ChartMarkItem]:
     marks: list[ChartMarkItem] = []
     for note in notes:
-        date_text = _clean_text(getattr(note, "trade_date", None)) or _clean_text(getattr(note, "created_at", None)) or ""
-        kline_date = _date_key(date_text)
+        date_text, kline_date = _note_date(note)
         price = _positive_price(getattr(note, "price", None))
         marks.append(
             ChartMarkItem(
@@ -150,6 +160,28 @@ def _note_marks(notes: list[StockNoteItem]) -> list[ChartMarkItem]:
             )
         )
     return marks
+
+
+def _note_date(note: StockNoteItem) -> tuple[str, str | None]:
+    trade_date = getattr(note, "trade_date", None)
+    if trade_date is not None and str(trade_date).strip():
+        date_text = _clean_text(trade_date) or ""
+        return date_text, _date_key(date_text)
+    date_text = _clean_text(getattr(note, "created_at", None)) or ""
+    return date_text, _audit_date_key(date_text)
+
+
+def _audit_date_key(value: str) -> str | None:
+    legacy_date = _date_key(value)
+    if legacy_date is not None:
+        return legacy_date
+    # Accept extended audit timestamps without adding compact/week dates to chart input.
+    if AUDIT_TIMESTAMP_PATTERN.fullmatch(value) is None:
+        return None
+    try:
+        return parse_audit_time(value).astimezone(ASHARE_TIMEZONE).date().isoformat()
+    except (ValueError, OverflowError):
+        return None
 
 
 def _level_color(level: str) -> str:
@@ -176,7 +208,7 @@ def _positive_price(value: object) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        price = float(value)
+        price = float(cast(str | Buffer | SupportsFloat | SupportsIndex, value))
     except (TypeError, ValueError):
         return None
     return price if math.isfinite(price) and price > 0 else None

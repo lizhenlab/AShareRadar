@@ -107,7 +107,7 @@ class RuntimeCoordinator:
     async def start(self) -> bool:
         async with self._lifecycle_lock:
             if self._runner is not None and not self._runner.done():
-                return self.leadership.is_leader
+                return self._active and self.leadership.is_leader
             if self._runner is not None:
                 await asyncio.gather(self._runner, return_exceptions=True)
             self._stop_event.clear()
@@ -170,12 +170,18 @@ class RuntimeCoordinator:
         try:
             if self.market_scanner is not None:
                 await self.market_scanner.start()
-            await self.scheduler.start()
+            started = await self.scheduler.start()
+            activated = started or not self.scheduler.enabled or self.scheduler.is_running
         except BaseException:
             self._active = False
             cleanup = asyncio.create_task(self._rollback_activation(), name="runtime-activation-rollback")
             await await_cleanup(cleanup)
             raise
+        if not activated:
+            self._active = False
+            cleanup = asyncio.create_task(self._rollback_activation(), name="runtime-deferred-activation-rollback")
+            await await_cleanup(cleanup)
+            return False
         self._active = True
         return True
 

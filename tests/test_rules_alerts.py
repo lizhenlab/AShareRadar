@@ -624,7 +624,7 @@ class ChartMarkTests(unittest.TestCase):
         marks = _note_marks(
             [
                 StockNoteItem(
-                    id=1,
+                    id=1, revision="a" * 64,
                     symbol="600519.SH",
                     code="600519",
                     market="SH",

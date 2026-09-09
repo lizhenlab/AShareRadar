@@ -1,0 +1,196 @@
+{
+  "generated_at": "2026-08-12T18:00:00+08:00",
+  "integrity": {
+    "algorithm": "sha256",
+    "compression": "gzip-canonical-json-v1",
+    "integrity_digest": "7c65b92fb15cdcd27220ebac4bb02e109580551fdab088f02c9b2cdd89575562",
+    "notice": "integrity_digest_not_a_signature",
+    "scope": "payload"
+  },
+  "payload": {
+    "as_of_date": "2026-08-12",
+    "calendar_contract": {
+      "calendar_provider_source": "akshare.tool_trade_date_hist_sina",
+      "calendar_source": "bundled_baseline",
+      "calendar_updated_at": "2026-06-11T15:01:53+08:00",
+      "entry_session_date": "2026-08-12",
+      "future_sessions": [
+        "2026-08-12",
+        "2026-08-13",
+        "2026-08-14",
+        "2026-08-17",
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20",
+        "2026-08-21",
+        "2026-08-24",
+        "2026-08-25",
+        "2026-08-26",
+        "2026-08-27",
+        "2026-08-28",
+        "2026-08-31",
+        "2026-09-01",
+        "2026-09-02",
+        "2026-09-03",
+        "2026-09-04",
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "horizon_exit_sessions": {
+        "1": "2026-08-13",
+        "20": "2026-09-09",
+        "5": "2026-08-19"
+      },
+      "missing_bar_policy": "fixed_session_unavailable_never_shift_v1",
+      "quote_date": "2026-08-11",
+      "session_grid_digest": "e2211d7e34a960499e04df0cb14944dff50652018d0d6089d95d1cb40fba1b09",
+      "version": "trusted-fixed-exchange-session-grid-v1"
+    },
+    "cohort": {
+      "mode": "official",
+      "rule_version": "full-market-scan-v6:96cb0857c8cee3f060adf482015767315ae93ac696c4a523fb3bcb1ca9479ad7",
+      "scope": "沪市 + 深市 + 北交所当前上市A股"
+    },
+    "contract_version": "market-scan-probability-outcomes-v1",
+    "generated_at": "2026-08-12T18:00:00+08:00",
+    "label_contract": {
+      "cost_model_version": "cn-a-share-cost-model.v2",
+      "cost_profile_id": "base-a0441d84df44",
+      "entry_session_offset": 1,
+      "execution_model": "signal-D,next-session-open,holding-H-session-close,target-offset-H+1,T+1,no-delayed-exit,open-status-entry-only",
+      "execution_notional": 100000.0,
+      "horizons": [
+        1,
+        5,
+        20
+      ],
+      "label_version": "market-scan-upside-label-v4-execution-phase-separated",
+      "max_daily_participation_rate": 0.01,
+      "target_definitions": [
+        "absolute_net_return_positive",
+        "equal_weight_market_net_excess_positive"
+      ],
+      "target_session_offsets": {
+        "1": 2,
+        "20": 21,
+        "5": 6
+      }
+    },
+    "label_contract_digest": "c03dd382a19c93a682214c44bd14824e84fd3aa5181e2cf578dece39024c048c",
+    "limitations": [
+      "shadow_research_only_no_production_ranking_effect",
+      "daily_bar_cannot_reconstruct_intraday_queue_or_execution_order",
+      "signal_date_instrument_status_held_constant_through_horizon",
+      "missing_fixed_session_bar_is_unavailable_and_never_shifted",
+      "integrity_digest_is_not_an_authenticity_signature"
+    ],
+    "quality": {
+      "horizons": {
+        "1": {
+          "available_for_study": false,
+          "data_available_record_count": 0,
+          "data_unavailable_record_count": 0,
+          "eligible_observation_count": 0,
+          "horizon": 1,
+          "label_coverage": 0.0,
+          "mature": false,
+          "mature_record_count": 0,
+          "minimum_label_coverage": 0.95,
+          "modelled_record_count": 0,
+          "record_count": 1,
+          "target_session_date": "2026-08-13",
+          "unfilled_record_count": 0
+        },
+        "20": {
+          "available_for_study": false,
+          "data_available_record_count": 0,
+          "data_unavailable_record_count": 0,
+          "eligible_observation_count": 0,
+          "horizon": 20,
+          "label_coverage": 0.0,
+          "mature": false,
+          "mature_record_count": 0,
+          "minimum_label_coverage": 0.95,
+          "modelled_record_count": 0,
+          "record_count": 1,
+          "target_session_date": "2026-09-09",
+          "unfilled_record_count": 0
+        },
+        "5": {
+          "available_for_study": false,
+          "data_available_record_count": 0,
+          "data_unavailable_record_count": 0,
+          "eligible_observation_count": 0,
+          "horizon": 5,
+          "label_coverage": 0.0,
+          "mature": false,
+          "mature_record_count": 0,
+          "minimum_label_coverage": 0.95,
+          "modelled_record_count": 0,
+          "record_count": 1,
+          "target_session_date": "2026-08-19",
+          "unfilled_record_count": 0
+        }
+      },
+      "point_in_time_evidence_coverage": 1.0,
+      "record_count": 1,
+      "record_coverage": 1.0,
+      "source_record_count": 1
+    },
+    "records": [
+      {
+        "bar_evidence": {
+          "bar_set_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "bars": [],
+          "missing_dates": [],
+          "observed_dates": [],
+          "requested_dates": [],
+          "version": "qfq-daily-fixed-session-bar-evidence-v2"
+        },
+        "feature_vector_digest": "342a2770f4b2a17d26e41fd9fdff550d3f8324845528f93de2dab37fe758a02c",
+        "horizons": {
+          "1": {
+            "horizon": 1,
+            "maturity": "not_mature",
+            "outcome": null,
+            "target_session_date": "2026-08-13"
+          },
+          "20": {
+            "horizon": 20,
+            "maturity": "not_mature",
+            "outcome": null,
+            "target_session_date": "2026-09-09"
+          },
+          "5": {
+            "horizon": 5,
+            "maturity": "not_mature",
+            "outcome": null,
+            "target_session_date": "2026-08-19"
+          }
+        },
+        "instrument": {
+          "adjustment_mode": "qfq",
+          "is_st": false,
+          "list_date": "1991-04-03",
+          "market": "SZ",
+          "quote_amount": 749690000.0
+        },
+        "source_evidence_digest": "d14b5feef4e0c2a023e09bd1ac673aa6247b67ffc598027cf55a5321ba87a00b",
+        "symbol": "000001.SZ"
+      }
+    ],
+    "source": {
+      "as_of": "2026-08-11T21:44:37+08:00",
+      "captured_at": "2026-08-11T22:55:34+08:00",
+      "data_date": "2026-08-11",
+      "integrity_digest": "ea24ce85cba3fa04f1bedcbf73ec7add7caae172c1a93372d1f9cf44c3c07ad0",
+      "payload_contract_version": "market-scan-probability-source-snapshot-v1",
+      "quote_date": "2026-08-11",
+      "record_count": 1,
+      "run_id": 71,
+      "schema_version": "market-scan-probability-source-artifact-v1"
+    }
+  },
+  "schema_version": "market-scan-probability-outcome-artifact-v1"
+}

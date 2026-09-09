@@ -118,7 +118,9 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert 'id="marketScanProgressBar" max="100" value="0" aria-label="全市场扫描进度"' in html
     assert 'aria-valuetext="尚无扫描进度" aria-busy="false"' in html
     scan_panel = html.split('id="workspace-panel-market-scan"', 1)[1].split('</section>\n\n        <section class="workspace-view"', 1)[0]
-    assert scan_panel.count('aria-live="polite"') == 2
+    assert scan_panel.count('aria-live="polite"') == 5
+    assert 'id="strategyScheduleStatus" role="status" aria-live="polite"' in scan_panel
+    assert 'id="marketScanHistoryPageInfo" role="status" aria-live="polite"' in scan_panel
     assert 'id="strategyLabAnnouncement" role="status" aria-live="polite"' in scan_panel
     assert 'id="marketScanHeadline" role="status"' not in scan_panel
     assert 'id="marketScanResultState" role="status"' not in scan_panel
@@ -158,6 +160,28 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     imports = json.loads(import_map_match.group(1))["imports"]
     module_paths = {
         "/static/js/api.js",
+        "/static/js/notifications.js",
+        "/static/js/notification-navigation.js",
+        "/static/js/strategy-history.js",
+        "/static/js/strategy-draft-state.js",
+        "/static/js/paper-trading.js",
+        "/static/js/watchlist-navigation.js",
+        "/static/js/primary-navigation.js",
+        "/static/js/workspace-preferences.js",
+        "/static/js/diagnostics.js",
+        "/static/js/local-data.js",
+        "/static/js/notes.js",
+        "/static/js/note-editor-state.js",
+        "/static/js/stock-note-alert-events.js",
+        "/static/js/watchlist.js",
+        "/static/js/watchlist-queue-view.js",
+        "/static/js/strategy-schedule-manager.js",
+        "/static/js/strategy-schedule-view.js",
+        "/static/js/strategy-schedule-contracts.js",
+        "/static/js/advice-reviews.js",
+        "/static/js/advice-review-due.js",
+        "/static/js/advice-review-events.js",
+        "/static/js/advice-review-contracts.js",
         "/static/js/market-scan.js",
         "/static/js/market-scan-controller.js",
         "/static/js/market-scan-auxiliary-research.js",
@@ -200,6 +224,10 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/individual-probability-contracts.js",
         "/static/js/individual-probability-controller.js",
         "/static/js/individual-probability-view.js",
+        "/static/js/discovery-preset-state.js",
+        "/static/js/discovery-screen-alerts.js",
+        "/static/js/discovery-screen-alerts-contracts.js",
+        "/static/js/discovery-screen-alerts-view.js",
         "/static/js/discovery.js",
         "/static/js/strategy-lab.js",
         "/static/js/strategy-lab-contracts.js",

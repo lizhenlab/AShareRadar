@@ -97,15 +97,32 @@ function createElement(id, element, canvasContext) {
     id,
     value: "",
     innerHTML: "",
+    insertAdjacentHTML(position, html) {
+      if (position === "afterbegin") this.innerHTML = html + this.innerHTML;
+      else if (position === "beforeend") this.innerHTML += html;
+      else throw new Error("unsupported fixture insertion");
+    },
     textContent: "",
     className: "",
     dataset: {},
+    attributes: {},
     disabled: false,
+    open: false,
     width: 920,
     height: 300,
     clientWidth: 920,
     clientHeight: 300,
     classList: classList(),
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+      this[name] = String(value);
+      if (name.startsWith("aria-")) {
+        this[name.replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase())] = String(value);
+      }
+    },
+    getAttribute(name) {
+      return this.attributes[name] ?? null;
+    },
     addEventListener(type, handler) {
       this.listeners = this.listeners || {};
       this.listeners[type] = handler;

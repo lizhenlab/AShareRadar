@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from app.services.lifecycle_cleanup import await_cleanup
 from app.services.scheduler_contracts import (
     TASK_STATUS_DEGRADED,
     KlineRefreshSummary,
@@ -148,11 +149,17 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         return message
 
     async def _check_data_health(self, *, now: datetime | None = None) -> str:
-        stats, capability_rows, provider_rows = await asyncio.gather(
-            _offload(self.datahub.cache.stats),
-            _offload(self.datahub.cache.provider_capability_statuses),
-            _offload(self.datahub.cache.provider_statuses),
+        readers = (
+            asyncio.create_task(_offload(self.datahub.cache.stats)),
+            asyncio.create_task(_offload(self.datahub.cache.provider_capability_statuses)),
+            asyncio.create_task(_offload(self.datahub.cache.provider_statuses)),
         )
+        try:
+            stats, capability_rows, provider_rows = await asyncio.gather(*readers)
+        except BaseException:
+            cleanup = asyncio.create_task(_drain_health_readers(readers))
+            await await_cleanup(cleanup)
+            raise
         health_events = _data_health_events(stats, capability_rows, provider_rows, self.settings, now=now)
         for event in health_events:
             await self._save_monitor_event(event.level, event.category, event.message)
@@ -312,6 +319,12 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         if degraded:
             return TaskExecutionResult(message, TASK_STATUS_DEGRADED)
         return message
+
+
+async def _drain_health_readers(readers: tuple[asyncio.Task, ...]) -> None:
+    for reader in readers:
+        reader.cancel()
+    await asyncio.gather(*readers, return_exceptions=True)
 
 
 def _research_maintenance_window_open(now: datetime | None = None) -> bool:

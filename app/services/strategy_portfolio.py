@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 import hashlib
 import json
-from math import floor, isfinite
+from math import isfinite
 from typing import Any, cast
 
 from app.models.market_scan import MarketScanResultItem, MarketScanRun
@@ -23,6 +24,12 @@ from app.services.market_scan_score_dimensions import (
 )
 from app.services.paper_trading_rules import resolve_trade_rule_profile
 from app.services.strategy_compiler import compile_strategy_spec
+from app.services.strategy_portfolio_allocation import (
+    PlannedPurchase,
+    affordable_portfolio_purchase,
+    reference_buy_debit,
+    strategy_allocation_contract,
+)
 
 
 _MISSING = object()
@@ -592,6 +599,7 @@ def _evaluate_weighted_pool(
     industry_counts: dict[str, int] = {}
     industry_weights: dict[str, float] = {}
     board_weights: dict[str, float] = {}
+    remaining_cash = Decimal(str(notional))
     for candidate in pool:
         if len(decisions) >= constraints.stock_count:
             failures[candidate.item.symbol] = _AllocationFailure(
@@ -617,6 +625,7 @@ def _evaluate_weighted_pool(
             industry=industry,
             industry_weight=industry_weights.get(industry, 0.0),
             board_weight=board_weights.get(candidate.board, 0.0),
+            available_cash=float(remaining_cash),
         )
         if decision is None:
             if failure is None:
@@ -627,6 +636,7 @@ def _evaluate_weighted_pool(
         industry_counts[industry] = industry_counts.get(industry, 0) + 1
         industry_weights[industry] = industry_weights.get(industry, 0.0) + decision.weight
         board_weights[candidate.board] = board_weights.get(candidate.board, 0.0) + decision.weight
+        remaining_cash -= reference_buy_debit(strategy.spec.execution_policy, decision.gross_amount)
     return decisions, failures
 
 
@@ -640,6 +650,7 @@ def _candidate_allocation_decision(
     industry: str,
     industry_weight: float,
     board_weight: float,
+    available_cash: float,
 ) -> tuple[_AllocationDecision | None, _AllocationFailure | None]:
     constraints = strategy.spec.portfolio_constraints
     capacity_weight = _capacity_weight(
@@ -669,24 +680,36 @@ def _candidate_allocation_decision(
             status="unfilled",
             reason="冻结日K显示一字涨停，日线模型按无法买入处理",
         )
-    quantity = _target_quantity(candidate.item, run, target_weight * notional)
-    if quantity <= 0:
+    purchase = _target_purchase(strategy, candidate.item, run, target_weight * notional, available_cash)
+    return _actual_position_decision(strategy, purchase, notional, requested_weight)
+
+
+def _actual_position_decision(
+    strategy: StrategySpec, purchase: PlannedPurchase, notional: float, requested_weight: float,
+) -> tuple[_AllocationDecision | None, _AllocationFailure | None]:
+    if purchase.quantity <= 0:
         return None, _AllocationFailure(
             status="unfilled",
-            reason="目标金额不足以满足该板块最小买入数量",
+            reason="目标金额扣除估算买入费用后不足以满足该板块最小买入数量",
             change="提高名义本金或降低目标股票数量",
         )
-    gross = quantity * float(candidate.item.price or 0)
+    gross = purchase.gross_amount
+    if gross < strategy.spec.portfolio_constraints.min_position_amount_cny:
+        return None, _AllocationFailure(
+            status="unfilled",
+            reason="计入估算买入费用并按交易单位取整后的实际金额低于最小持仓金额",
+            change="提高名义本金或降低最小持仓金额",
+        )
     actual_weight = min(1.0, gross / notional)
     adjusted = actual_weight + 1e-6 < requested_weight
     return (
         _AllocationDecision(
             status="constraint_adjusted" if adjusted else "selected",
             weight=actual_weight,
-            quantity=quantity,
+            quantity=purchase.quantity,
             gross_amount=gross,
             round_trip_cost=_round_trip_cost(strategy, gross),
-            reason=("流动性容量或最小交易单位使目标权重低于基础权重" if adjusted else "进入受约束研究组合草案"),
+            reason=("流动性容量、买入费用或最小交易单位使目标权重低于基础权重" if adjusted else "进入受约束研究组合草案"),
         ),
         None,
     )
@@ -769,10 +792,10 @@ def _capacity_weight(item: MarketScanResultItem, share: float, notional: float) 
     return max(0.0, min(1.0, amount * share / notional))
 
 
-def _target_quantity(item: MarketScanResultItem, run: MarketScanRun, allocation: float) -> int:
-    price = float(item.price or 0)
-    if price <= 0:
-        return 0
+def _target_purchase(
+    strategy: StrategySpec, item: MarketScanResultItem, run: MarketScanRun,
+    allocation: float, available_cash: float,
+) -> PlannedPurchase:
     metadata = PaperInstrumentMetadata(
         symbol=item.symbol,
         name=item.name,
@@ -783,10 +806,14 @@ def _target_quantity(item: MarketScanResultItem, run: MarketScanRun, allocation:
         status_effective_date=run.data_date,
     )
     profile = resolve_trade_rule_profile(item.symbol, date.fromisoformat(run.data_date), metadata)
-    maximum = floor(allocation / price)
-    if maximum < profile.min_buy_quantity:
-        return 0
-    return profile.min_buy_quantity + floor((maximum - profile.min_buy_quantity) / profile.buy_quantity_step) * profile.buy_quantity_step
+    return affordable_portfolio_purchase(
+        strategy.spec.execution_policy,
+        price=float(item.price or 0),
+        cash_budget=min(allocation, available_cash),
+        gross_limit=allocation,
+        minimum_quantity=profile.min_buy_quantity,
+        quantity_step=profile.buy_quantity_step,
+    )
 
 
 def _locked_limit_up(item: MarketScanResultItem, run: MarketScanRun) -> bool:
@@ -875,8 +902,8 @@ def _portfolio_summary(
     no_trade_reasons = _no_trade_reasons(strategy, selected)
     turnover = _estimated_turnover(selected, request.current_weights)
     invested = min(1.0, _sum_candidate_field(selected, "target_weight"))
-    gross = _sum_candidate_field(selected, "estimated_gross_amount_cny")
     costs = _sum_candidate_field(selected, "estimated_round_trip_cost_cny")
+    residual_cash = _residual_buy_cash(strategy, selected, request.notional_cash_cny)
     no_trade = not selected
     underinvested_reason = _underinvested_reason(
         strategy,
@@ -897,7 +924,7 @@ def _portfolio_summary(
         target_invested_weight=round(invested, 8),
         estimated_turnover=round(min(2.0, turnover), 8),
         estimated_round_trip_cost_cny=round(costs, 2),
-        residual_cash_cny=round(max(0.0, request.notional_cash_cny - gross - costs), 2),
+        residual_cash_cny=residual_cash,
         evidence_verified_count=_verified_candidate_count(candidates),
         replacement_attempt_count=selection_stats.replacement_attempt_count,
         pool_exhausted=selection_stats.pool_exhausted,
@@ -909,8 +936,20 @@ def _portfolio_summary(
             "日K模型无法证明真实盘口排队与成交，结果仅用于研究和模拟。",
             "策略是否有效仍受独立扫描日期、成本、暴露和PBO晋级门槛约束。",
             "约束淘汰后会按多目标效用顺序确定性补位，并对最终集合重新计算权重和成本。",
+            "剩余现金已扣除按参考金额估算的买入佣金、过户费和滑点；卖出费用仅计入往返成本估计。",
         ],
     )
+
+
+def _residual_buy_cash(strategy: StrategySpec, selected: list[PortfolioCandidate], notional: float) -> float:
+    debits = sum((
+        reference_buy_debit(strategy.spec.execution_policy, item.estimated_gross_amount_cny)
+        for item in selected
+    ), Decimal(0))
+    residual = Decimal(str(notional)) - debits
+    if residual < 0:
+        raise RuntimeError("组合计划买入金额与估算费用超过可用现金")
+    return float(round(residual, 2))
 
 
 def _underinvested_reason(
@@ -1008,6 +1047,7 @@ def _execution_fingerprint(
             "data_as_of": run.as_of,
             "data_date": run.data_date,
             "cost_rule_fingerprint": cost_rule_fingerprint,
+            "allocation_contract": strategy_allocation_contract(),
             "freshness_contract": resolved_freshness,
             "execution_request": {
                 "kind": request.kind,

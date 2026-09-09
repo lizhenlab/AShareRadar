@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable
 
 from app.models.analysis import (
@@ -12,6 +13,7 @@ from app.models.research import (
     SignalValidationReport,
     TStrategyAssistantReport,
 )
+from app.services.analysis_signal_quality import quality_blocks_active_signals
 from app.utils.market_data import finite_float
 from app.utils.symbols import standard_symbol
 
@@ -34,7 +36,8 @@ class TStrategyContext:
     trend_score: int
     risk_multiplier: float
     width_pct: float
-    swing_buffer: float
+    execution_low: float
+    execution_high: float
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,7 @@ def _t_strategy_context(
     atr14 = _non_negative_or_zero(feature.atr14) if atr_available else 0
     atr_pct = _non_negative_or_zero(feature.atr_pct) if atr_available else 0
     ma5 = _positive_or_zero(feature.ma5)
+    execution_low, execution_high = _execution_levels(price, support, resistance, atr14)
     return TStrategyContext(
         analysis=analysis,
         feature=feature,
@@ -122,7 +126,8 @@ def _t_strategy_context(
         trend_score=_score_or_zero(feature.trend_score),
         risk_multiplier=_positive_or_one(market_regime.risk_multiplier),
         width_pct=_range_width_pct(price, support, resistance),
-        swing_buffer=atr14,
+        execution_low=execution_low,
+        execution_high=execution_high,
     )
 
 
@@ -169,31 +174,24 @@ def _t_strategy_suitability(context: TStrategyContext) -> str:
 
 
 def _low_zone(context: TStrategyContext) -> str:
-    if context.price > 0 and context.support > 0:
-        return _zone_text(
-            max(context.support, context.price - context.swing_buffer)
-            if context.swing_buffer > 0
-            else context.support
-        )
-    if context.price > 0 and context.swing_buffer > 0:
-        return _zone_text(max(0, context.price - context.swing_buffer))
-    if context.support > 0:
-        return _zone_text(context.support)
-    return "待确认"
+    return _zone_text(context.execution_low)
 
 
 def _high_zone(context: TStrategyContext) -> str:
-    if context.price > 0 and context.resistance > 0:
-        return _zone_text(
-            min(context.resistance, context.price + context.swing_buffer)
-            if context.swing_buffer > 0
-            else context.resistance
-        )
-    if context.price > 0 and context.swing_buffer > 0:
-        return _zone_text(context.price + context.swing_buffer)
-    if context.resistance > 0:
-        return _zone_text(context.resistance)
-    return "待确认"
+    return _zone_text(context.execution_high)
+
+
+def _execution_levels(price: float, support: float, resistance: float, buffer: float) -> tuple[float, float]:
+    if price <= 0:
+        return 0, 0
+    low = max(support, price - buffer) if buffer > 0 else support
+    high = min(resistance, price + buffer) if resistance > 0 and buffer > 0 else resistance
+    if resistance <= 0 and buffer > 0:
+        high = price + buffer
+    low, high = round(low, 2), round(high, 2)
+    if not 0 < low < round(price, 2) < high:
+        return 0, 0
+    return low, high
 
 
 def _zone_text(value: float) -> str:
@@ -207,11 +205,14 @@ def _support_stop_condition(context: TStrategyContext) -> str:
 
 
 def _active_t_strategy_blocked(context: TStrategyContext) -> bool:
-    return bool(context.analysis and context.analysis.data_quality.score < 70) or context.risk_multiplier >= 1.28
+    quality = context.analysis.data_quality if context.analysis else None
+    return bool(quality and (quality.score < 70 or quality_blocks_active_signals(quality))) or context.risk_multiplier >= 1.28
 
 
 def _range_is_tradable(context: TStrategyContext) -> bool:
-    return context.width_pct >= max(1.2, context.atr_pct * 0.8)
+    width = _range_width_pct(round(context.price, 2), context.execution_low, context.execution_high)
+    minimum = max(1.2, context.atr_pct * 0.8)
+    return width >= minimum or math.isclose(width, minimum, rel_tol=1e-12, abs_tol=1e-12)
 
 
 def _validation_allows_t_strategy(context: TStrategyContext) -> bool:

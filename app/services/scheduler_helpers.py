@@ -7,6 +7,7 @@ from typing import Callable, Iterable, TypeVar
 
 from app.utils.provider_errors import sanitize_provider_error
 from app.services.instance_guard import FileInstanceGuard
+from app.services.lifecycle_cleanup import await_cleanup
 from app.services.scheduler_contracts import (
     KLINE_FAILURE_DETAIL_LIMIT,
     PROVIDER_FAILURE_DETAIL_LIMIT,
@@ -25,7 +26,17 @@ T = TypeVar("T")
 
 
 async def _offload(call: Callable[..., T], *args, **kwargs) -> T:
-    return await asyncio.to_thread(partial(call, *args, **kwargs))
+    worker = asyncio.create_task(asyncio.to_thread(partial(call, *args, **kwargs)))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Cancelling an asyncio waiter cannot stop its synchronous worker. Keep
+        # the task (and its instance guard) owned until that worker really ends.
+        try:
+            await await_cleanup(worker)
+        except Exception:
+            pass  # Consume a late worker failure; caller cancellation wins.
+        raise
 
 
 async def _wait_for_tasks_bounded(

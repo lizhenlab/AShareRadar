@@ -2,7 +2,7 @@ import { escapeHtml } from "./dom.js";
 import { formatAuditTimestamp } from "./audit-time.js";
 import { changeClass, formatAmount, formatNumber } from "./format.js";
 import { defaultMarketScanMode, isActiveMarketScanRun, isPublishedMarketScanRun, isRetryableMarketScanRun, marketScanModeLabel, marketScanRunModeLabel, marketScanRunIdentityChanged } from "./market-scan-contracts.js";
-import { marketScanHistoryFilters, renderMarketScanHistory, renderMarketScanHistoryError, renderMarketScanHistoryLoading, selectedMarketScanHistoryRunId } from "./market-scan-history-view.js";
+import { marketScanHistoryElements, marketScanHistoryFilters, renderMarketScanHistory, renderMarketScanHistoryCancelled, renderMarketScanHistoryError, renderMarketScanHistoryLoading, selectedMarketScanHistoryRunId } from "./market-scan-history-view.js";
 import { marketScanHeadlineMessage, renderMarketScanMessageSummary } from "./market-scan-message-view.js";
 import { renderMarketScanBrowsingContext, renderMarketScanTop100Refresh } from "./market-scan-run-context-view.js";
 import { saveMarketScanExport } from "./market-scan-view-export.js";
@@ -54,6 +54,7 @@ export function createMarketScanView(root, now = new Date()) {
     ),
     renderHistoryError: (message) => renderMarketScanHistoryError(elements, message),
     renderHistoryLoading: () => renderMarketScanHistoryLoading(elements),
+    renderHistoryCancelled: () => renderMarketScanHistoryCancelled(elements),
     renderProbabilityHorizon: (payload) => renderResults(context, payload, { announce: false }),
     renderProbabilityResearch: (payload) => renderMarketScanProbabilityResearch(elements, payload.probability_research),
     renderResults: (payload) => renderResults(context, payload),
@@ -551,12 +552,7 @@ function marketScanElements(root) {
     browseContext: requiredElement(root, "marketScanBrowseContext"),
     executedAt: requiredElement(root, "marketScanExecutedAt"),
     taskContext: requiredElement(root, "marketScanTaskContext"),
-    history: requiredElement(root, "marketScanHistory"),
-    historyRun: requiredElement(root, "marketScanHistoryRun"),
-    historyStatus: requiredElement(root, "marketScanHistoryStatus"),
-    historyDate: requiredElement(root, "marketScanHistoryDate"),
-    historyRefresh: requiredElement(root, "marketScanHistoryRefresh"),
-    historyFeedback: requiredElement(root, "marketScanHistoryFeedback"),
+    ...marketScanHistoryElements((id) => requiredElement(root, id)),
     progressText: requiredElement(root, "marketScanProgressText"),
     progressBar: requiredElement(root, "marketScanProgressBar"),
     stage: requiredElement(root, "marketScanStage"),

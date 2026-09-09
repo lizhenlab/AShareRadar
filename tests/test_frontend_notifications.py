@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_alert_notifications_baseline_new_event_and_deduplication() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const { deliverAlertNotifications } = await import("./static/js/notifications.js");
@@ -22,16 +22,16 @@ def test_alert_notifications_baseline_new_event_and_deduplication() -> None:
         const first = [event(1, "2026-07-16 10:00:00", "触发")];
         const duplicateTrigger = event(2, "2026-07-16 10:01:00", "触发");
 
-        assert(deliverAlertNotifications(state, first, { NotificationApi: FakeNotification, storage }) === 0, "first load must establish a baseline");
+        assert(deliverAlertNotifications(state, fixtureBatch(state, first), { NotificationApi: FakeNotification, storage }) === 0, "first load must establish a baseline");
         const second = [
           event(3, "2026-07-16 10:02:00", "恢复"),
           duplicateTrigger,
           duplicateTrigger,
           ...first,
         ];
-        assert(deliverAlertNotifications(state, second, { NotificationApi: FakeNotification, storage }) === 1, "one new trigger should be delivered");
-        assert(sent.length === 1 && sent[0].options.tag === "ashare-radar-alert-2", "trigger notification was malformed");
-        assert(deliverAlertNotifications(state, second, { NotificationApi: FakeNotification, storage }) === 0, "same events were delivered twice");
+        assert(deliverAlertNotifications(state, fixtureBatch(state, second), { NotificationApi: FakeNotification, storage }) === 1, "one new trigger should be delivered");
+        assert(sent.length === 1 && sent[0].options.tag === "ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2", "trigger notification was malformed");
+        assert(deliverAlertNotifications(state, fixtureBatch(state, second), { NotificationApi: FakeNotification, storage }) === 0, "same events were delivered twice");
 
         function event(id, created_at, event_type) {
           return { id, created_at, event_type, stock_name: "测试股票", message: `事件${id}` };
@@ -46,7 +46,7 @@ def test_alert_notifications_baseline_new_event_and_deduplication() -> None:
 
 
 def test_alert_notifications_collapse_bursts_into_one_summary() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const { deliverAlertNotifications } = await import("./static/js/notifications.js");
@@ -56,7 +56,7 @@ def test_alert_notifications_collapse_bursts_into_one_summary() -> None:
           constructor(title, options) { sent.push({ title, options }); }
         }
         const state = {};
-        deliverAlertNotifications(state, [{ id: 1, created_at: "2026-07-16 10:00:00", event_type: "触发" }], { NotificationApi: FakeNotification });
+        deliverAlertNotifications(state, fixtureBatch(state, [{ id: 1, created_at: "2026-07-16 10:00:00", event_type: "触发" }]), { NotificationApi: FakeNotification });
         const burst = [2, 3, 4, 5].map((id) => ({
           id,
           created_at: `2026-07-16 10:0${id}:00`,
@@ -64,7 +64,7 @@ def test_alert_notifications_collapse_bursts_into_one_summary() -> None:
           message: `事件${id}`,
         }));
 
-        const delivered = deliverAlertNotifications(state, burst, { NotificationApi: FakeNotification });
+        const delivered = deliverAlertNotifications(state, fixtureBatch(state, burst), { NotificationApi: FakeNotification });
 
         assert(delivered === 4, "burst count was not reported");
         assert(sent.length === 1, "burst should produce one summary notification");
@@ -75,17 +75,13 @@ def test_alert_notifications_collapse_bursts_into_one_summary() -> None:
 
 
 def test_alert_notification_first_poll_establishes_newest_baseline() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const requests = [];
         globalThis.fetch = async (url) => {
           requests.push(String(url));
-          return jsonResponse([
-            event(3, "2026-07-16 10:02:00"),
-            event(2, "2026-07-16 10:01:00"),
-            event(1, "2026-07-16 10:00:00"),
-          ]);
+          return jsonResponse(fixtureBaseline(3));
         };
         const { ALERT_NOTIFICATION_CURSOR_KEY, pollAlertNotifications } = await import("./static/js/notifications.js");
         const sent = [];
@@ -101,8 +97,8 @@ def test_alert_notification_first_poll_establishes_newest_baseline() -> None:
         const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
 
         assert(completed === true, "baseline poll failed");
-        assert(requests.length === 1 && !requests[0].includes("after_id"), "first poll should use the newest-event list");
-        assert(cursor.id === 3 && cursor.createdAt === "2026-07-16 10:02:00", "first poll did not persist the newest cursor");
+        assert(requests.length === 1 && !requests[0].includes("after_id"), "first poll should request the current stream baseline");
+        assert(cursor.id === 3 && cursor.streamId === TEST_NOTIFICATION_STREAM, "first poll did not persist the newest cursor");
         assert(sent.length === 0, "baseline poll emitted an old notification");
         function event(id, created_at) { return { id, created_at, event_type: "触发", message: `事件${id}` }; }
         function jsonResponse(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
@@ -116,7 +112,7 @@ def test_alert_notification_first_poll_establishes_newest_baseline() -> None:
 
 
 def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_cursor() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const createdAt = "2026-07-16 10:00:00";
@@ -126,7 +122,7 @@ def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_
           const parsed = new URL(String(url), "http://local.test");
           const afterId = Number(parsed.searchParams.get("after_id"));
           requests.push({ afterId, limit: Number(parsed.searchParams.get("limit")) });
-          return jsonResponse(pending.filter((item) => item.id > afterId).slice(0, 50));
+          return jsonResponse(fixturePage(pending, afterId));
         };
         const {
           ALERT_NOTIFICATION_CURSOR_KEY,
@@ -141,7 +137,7 @@ def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_
         const state = {};
         const storage = memoryStorage();
         const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
-        deliverAlertNotifications(state, [event(1)], { NotificationApi: FakeNotification, storage });
+        deliverAlertNotifications(state, fixtureBatch(state, [event(1)]), { NotificationApi: FakeNotification, storage });
 
         const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
@@ -153,7 +149,7 @@ def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_
         assert(requests.every((request) => !Object.hasOwn(request, "createdAt")), "timestamp cursor should not control pagination");
         assert(requests.map((request) => request.afterId).join(",") === "1,51,101", "page cursors were unstable");
         assert(sent.length === 1 && sent[0].title.includes("125 条新预警"), "drained events were not delivered once");
-        assert(cursor.id === 126 && cursor.createdAt === createdAt, "cursor did not advance to the final drained event");
+        assert(cursor.id === 126 && cursor.streamId === TEST_NOTIFICATION_STREAM, "cursor did not advance to the final drained event");
         function event(id) { return { id, created_at: createdAt, event_type: "触发", message: `事件${id}` }; }
         function jsonResponse(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
         function memoryStorage() {
@@ -166,7 +162,7 @@ def test_alert_notification_poll_drains_more_than_fifty_events_before_advancing_
 
 
 def test_alert_notification_backlog_advances_in_bounded_batches() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const pending = Array.from({ length: 125 }, (_, index) => event(index + 2));
@@ -175,7 +171,7 @@ def test_alert_notification_backlog_advances_in_bounded_batches() -> None:
           requestCount += 1;
           const parsed = new URL(String(url), "http://local.test");
           const afterId = Number(parsed.searchParams.get("after_id"));
-          return jsonResponse(pending.filter((item) => item.id > afterId).slice(0, 50));
+          return jsonResponse(fixturePage(pending, afterId));
         };
         const {
           ALERT_NOTIFICATION_CURSOR_KEY,
@@ -190,7 +186,7 @@ def test_alert_notification_backlog_advances_in_bounded_batches() -> None:
         const state = {};
         const storage = memoryStorage();
         const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
-        deliverAlertNotifications(state, [event(1)], { NotificationApi: FakeNotification, storage });
+        deliverAlertNotifications(state, fixtureBatch(state, [event(1)]), { NotificationApi: FakeNotification, storage });
 
         const first = await pollAlertNotifications(state, {
           NotificationApi: FakeNotification,
@@ -223,14 +219,14 @@ def test_alert_notification_backlog_advances_in_bounded_batches() -> None:
 
 
 def test_alert_notification_poll_advances_by_id_when_new_event_has_older_created_at() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const requests = [];
         globalThis.fetch = async (url) => {
           const parsed = new URL(String(url), "http://local.test");
           requests.push(parsed.searchParams);
-          return jsonResponse([event(6, "2026-07-16 09:00:00")]);
+          return jsonResponse(fixturePage([event(6, "2026-07-16 09:00:00")], 5));
         };
         const { ALERT_NOTIFICATION_CURSOR_KEY, deliverAlertNotifications, pollAlertNotifications } = await import("./static/js/notifications.js");
         const sent = [];
@@ -241,7 +237,7 @@ def test_alert_notification_poll_advances_by_id_when_new_event_has_older_created
         const state = {};
         const storage = memoryStorage();
         const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
-        deliverAlertNotifications(state, [event(5, "2026-07-16 10:00:00")], { NotificationApi: FakeNotification, storage });
+        deliverAlertNotifications(state, fixtureBatch(state, [event(5, "2026-07-16 10:00:00")]), { NotificationApi: FakeNotification, storage });
 
         const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
@@ -249,7 +245,7 @@ def test_alert_notification_poll_advances_by_id_when_new_event_has_older_created
         assert(completed === true, "backdated event poll failed");
         assert(requests.length === 1 && requests[0].get("after_id") === "5", "id cursor was not used");
         assert(!requests[0].has("after_created_at"), "timestamp cursor was sent");
-        assert(sent.join(",") === "ashare-radar-alert-6", "backdated event was skipped");
+        assert(sent.join(",") === "ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-6", "backdated event was skipped");
         assert(cursor.id === 6, "cursor did not advance to the database id");
         function event(id, created_at) { return { id, created_at, event_type: "触发", message: `事件${id}` }; }
         function jsonResponse(value) { return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }); }
@@ -263,7 +259,7 @@ def test_alert_notification_poll_advances_by_id_when_new_event_has_older_created
 
 
 def test_alert_notification_poll_keeps_cursor_when_page_does_not_advance() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const createdAt = "2026-07-16 10:00:00";
@@ -271,7 +267,7 @@ def test_alert_notification_poll_keeps_cursor_when_page_does_not_advance() -> No
         let requestCount = 0;
         globalThis.fetch = async () => {
           requestCount += 1;
-          return new Response(JSON.stringify(repeatedPage), {
+          return new Response(JSON.stringify({ ...fixturePage(repeatedPage, 1), has_more: true }), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           });
@@ -288,7 +284,7 @@ def test_alert_notification_poll_keeps_cursor_when_page_does_not_advance() -> No
         }
         const state = {};
         const storage = memoryStorage();
-        deliverAlertNotifications(state, [event(1)], { NotificationApi: FakeNotification, storage });
+        deliverAlertNotifications(state, fixtureBatch(state, [event(1)]), { NotificationApi: FakeNotification, storage });
 
         const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage });
         const cursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
@@ -307,7 +303,7 @@ def test_alert_notification_poll_keeps_cursor_when_page_does_not_advance() -> No
 
 
 def test_alert_notification_delivery_failure_retries_without_skipping_later_events() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         const elements = new Map([
           ["enableAlertNotifications", { textContent: "", disabled: false }],
@@ -321,7 +317,7 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
           const parsed = new URL(String(url), "http://local.test");
           const afterId = Number(parsed.searchParams.get("after_id"));
           requestedAfterIds.push(afterId);
-          return jsonResponse(pending.filter((item) => item.id > afterId));
+          return jsonResponse(fixturePage(pending, afterId));
         };
         const {
           ALERT_NOTIFICATION_CURSOR_KEY,
@@ -336,7 +332,7 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
           static permission = "granted";
           constructor(title, options) {
             attempts.push(options.tag);
-            if (options.tag === "ashare-radar-alert-3" && failEventThreeOnce) {
+            if (options.tag === "ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3" && failEventThreeOnce) {
               failEventThreeOnce = false;
               throw new Error("OS notification delivery failed");
             }
@@ -346,7 +342,7 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
         const state = {};
         const storage = memoryStorage();
         const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
-        deliverAlertNotifications(state, [event(1)], { NotificationApi: FakeNotification, storage });
+        deliverAlertNotifications(state, fixtureBatch(state, [event(1)]), { NotificationApi: FakeNotification, storage });
 
         const firstCompleted = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
         const failedCursor = JSON.parse(storage.getItem(ALERT_NOTIFICATION_CURSOR_KEY));
@@ -354,7 +350,7 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
         assert(firstCompleted === false, "delivery failure was reported as a successful poll");
         assert(failedCursor.id === 2, "cursor advanced past the failed event");
         assert(!storage.getItem(ALERT_NOTIFICATION_FALLBACK_LOCK_KEY), "fallback delivery lease was left permanent");
-        assert(sent.join(",") === "ashare-radar-alert-2", "events after a failure were delivered or the successful prefix was lost");
+        assert(sent.join(",") === "ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2", "events after a failure were delivered or the successful prefix was lost");
         assert(elements.get("alertNotificationState").textContent.includes("投递失败"), "delivery failure state was not visible");
         assert(elements.get("alertNotificationState").dataset.tone === "warn", "delivery failure state did not use warning tone");
 
@@ -364,8 +360,8 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
 
         assert(retryCompleted === true && finalCompleted === true, "retry did not recover polling");
         assert(requestedAfterIds.join(",") === "1,2,4", "retry did not resume from the last delivered event");
-        assert(attempts.join(",") === "ashare-radar-alert-2,ashare-radar-alert-3,ashare-radar-alert-3,ashare-radar-alert-4", "failed and later events were not retried in order");
-        assert(sent.join(",") === "ashare-radar-alert-2,ashare-radar-alert-3,ashare-radar-alert-4", "successful events were duplicated or skipped");
+        assert(attempts.join(",") === "ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2,ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3,ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3,ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-4", "failed and later events were not retried in order");
+        assert(sent.join(",") === "ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2,ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3,ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-4", "successful events were duplicated or skipped");
         assert(retryCursor.id === 4, "successful retry did not advance the cursor");
         assert(elements.get("alertNotificationState").textContent === "等待新触发", "successful retry did not clear the failure state");
         function event(id) {
@@ -384,14 +380,14 @@ def test_alert_notification_delivery_failure_retries_without_skipping_later_even
 
 
 def test_notification_permission_is_requested_only_by_enable_action() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         const elements = new Map([
           ["enableAlertNotifications", { textContent: "", disabled: false }],
           ["alertNotificationState", { textContent: "", dataset: {} }],
         ]);
         globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
-        globalThis.fetch = async () => new Response(JSON.stringify([]), {
+        globalThis.fetch = async () => new Response(JSON.stringify(fixtureBaseline(0)), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -419,7 +415,7 @@ def test_notification_permission_is_requested_only_by_enable_action() -> None:
 
 
 def test_notification_disable_persists_and_reenable_skips_muted_events() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         const elements = new Map([
           ["enableAlertNotifications", { textContent: "", disabled: false }],
@@ -432,7 +428,7 @@ def test_notification_disable_persists_and_reenable_skips_muted_events() -> None
         let requests = 0;
         globalThis.fetch = async () => {
           requests += 1;
-          return jsonResponse([event(newestId)]);
+          return jsonResponse(fixtureBaseline(newestId));
         };
         const {
           ALERT_NOTIFICATION_CURSOR_KEY,
@@ -483,7 +479,7 @@ def test_notification_disable_persists_and_reenable_skips_muted_events() -> None
 
 
 def test_notification_disable_invalidates_an_inflight_poll() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         let resolveRequest;
@@ -497,9 +493,7 @@ def test_notification_disable_invalidates_an_inflight_poll() -> None:
         const state = { alertNotificationsEnabled: true };
         const polling = pollAlertNotifications(state, { NotificationApi: FakeNotification });
         disableAlertNotifications(state, { NotificationApi: FakeNotification });
-        resolveRequest(new Response(JSON.stringify([{
-          id: 9, created_at: "2026-07-16 10:09:00", event_type: "触发", message: "不应投递",
-        }]), { status: 200, headers: { "Content-Type": "application/json" } }));
+        resolveRequest(new Response(JSON.stringify(fixtureBaseline(9)), { status: 200, headers: { "Content-Type": "application/json" } }));
 
         assert(await polling === false, "disabled in-flight poll reported success");
         assert(sent.length === 0, "disabled in-flight poll still delivered a notification");
@@ -510,7 +504,7 @@ def test_notification_disable_invalidates_an_inflight_poll() -> None:
 
 
 def test_notification_permission_request_failure_remains_retryable() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         const elements = new Map([
           ["enableAlertNotifications", { textContent: "", disabled: false }],
@@ -534,13 +528,13 @@ def test_notification_permission_request_failure_remains_retryable() -> None:
 
 
 def test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const requests = [];
         globalThis.fetch = async (url) => {
           requests.push(String(url));
-          return jsonResponse([event(2)]);
+          return jsonResponse(fixturePage([event(2)], 1));
         };
         const {
           ALERT_NOTIFICATION_CURSOR_KEY,
@@ -565,7 +559,7 @@ def test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor
         }
         const firstPage = { alertNotificationsEnabled: true };
         const secondPage = { alertNotificationsEnabled: true };
-        deliverAlertNotifications(firstPage, [event(1)], { NotificationApi: FakeNotification, storage });
+        deliverAlertNotifications(firstPage, fixtureBatch(firstPage, [event(1)]), { NotificationApi: FakeNotification, storage });
 
         const results = await Promise.all([
           pollAlertNotifications(firstPage, { NotificationApi: FakeNotification, storage, locks }),
@@ -575,7 +569,7 @@ def test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor
 
         assert(results.every(Boolean), "one page reported a failed coordinated poll");
         assert(requests.length === 2 && requests.every((url) => url.includes("after_id=1")), "pages did not fetch from their initial cursor");
-        assert(sent.join(",") === "ashare-radar-alert-2", "the shared event was delivered more than once");
+        assert(sent.join(",") === "ashare-radar-alert-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2", "the shared event was delivered more than once");
         assert(cursor.id === 2, "shared cursor did not advance");
         assert(lockCalls.length === 2, "delivery did not use the Web Locks API");
         assert(lockCalls.every((call) => call.options.mode === "exclusive" && call.options.ifAvailable === true), "lock was not short/non-waiting");
@@ -596,7 +590,7 @@ def test_notification_web_lock_deduplicates_two_pages_with_a_fresh_shared_cursor
 
 
 def test_notification_storage_changes_merge_cursor_and_stop_other_page_polling() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         globalThis.document = { getElementById() { return null; } };
         const intervalIds = new Set();
@@ -607,7 +601,7 @@ def test_notification_storage_changes_merge_cursor_and_stop_other_page_polling()
         const storageTarget = eventTarget();
         const storage = memoryStorage();
         storage.setItem("ashare-radar.alert-notifications-enabled.v1", "1");
-        storage.setItem("ashare-radar.alert-notification-cursor.v1", JSON.stringify({ createdAt: "", id: 5 }));
+        storage.setItem("ashare-radar.alert-notification-cursor.v2", JSON.stringify({ streamId: TEST_NOTIFICATION_STREAM, id: 5 }));
         let resolveFetch;
         let requestedUrl = "";
         globalThis.fetch = (url) => {
@@ -630,13 +624,13 @@ def test_notification_storage_changes_merge_cursor_and_stop_other_page_polling()
         assert(initializeAlertNotifications(state, { NotificationApi: FakeNotification, storage, storageTarget, locks }) === true, "page did not initialize");
         assert(intervalIds.size === 1, "polling interval did not start");
 
-        storage.setItem(ALERT_NOTIFICATION_CURSOR_KEY, JSON.stringify({ createdAt: "", id: 6 }));
+        storage.setItem(ALERT_NOTIFICATION_CURSOR_KEY, JSON.stringify({ streamId: TEST_NOTIFICATION_STREAM, id: 6 }));
         const polling = pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, storageTarget, locks });
         await Promise.resolve();
         assert(requestedUrl.includes("after_id=6"), "poll did not merge the latest shared cursor");
         storage.setItem(ALERT_NOTIFICATION_ENABLED_KEY, "0");
         storageTarget.dispatch({ key: ALERT_NOTIFICATION_ENABLED_KEY, newValue: "0" });
-        resolveFetch(jsonResponse([event(7)]));
+        resolveFetch(jsonResponse(fixturePage([event(7)], 6)));
 
         assert(await polling === false, "storage-disabled in-flight poll reported success");
         assert(state.alertNotificationsEnabled === false, "storage disable did not update page state");
@@ -667,16 +661,14 @@ def test_notification_storage_changes_merge_cursor_and_stop_other_page_polling()
 
 
 def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable() -> None:
-    _run_node(
+    _run_feed_node(
         r'''
         const elements = new Map([
           ["enableAlertNotifications", { textContent: "", disabled: false }],
           ["alertNotificationState", { textContent: "", dataset: {} }],
         ]);
         globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
-        globalThis.fetch = async () => new Response(JSON.stringify([{
-          id: 2, created_at: "2026-07-16 10:01:00", event_type: "触发", message: "不应投递",
-        }]), { status: 200, headers: { "Content-Type": "application/json" } });
+        globalThis.fetch = async () => new Response(JSON.stringify(fixtureBaseline(2)), { status: 200, headers: { "Content-Type": "application/json" } });
         const { pollAlertNotifications } = await import("./static/js/notifications.js");
         const sent = [];
         class FakeNotification {
@@ -690,7 +682,7 @@ def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable()
         const locks = { request: (_name, _options, callback) => Promise.resolve(callback({})) };
         const state = {
           alertNotificationsEnabled: true,
-          alertNotificationCursor: { createdAt: "", id: 1 },
+          alertNotificationCursor: { streamId: TEST_NOTIFICATION_STREAM, id: 1 },
         };
 
         const completed = await pollAlertNotifications(state, { NotificationApi: FakeNotification, storage, locks });
@@ -702,6 +694,28 @@ def test_notification_delivery_fails_closed_when_shared_storage_is_unavailable()
         function assert(condition, message) { if (!condition) throw new Error(message); }
         '''
     )
+
+
+def _run_feed_node(script: str) -> None:
+    _run_node(r'''
+        const TEST_NOTIFICATION_STREAM = "a".repeat(32);
+        function fixtureBaseline(id) {
+          return { stream_id: TEST_NOTIFICATION_STREAM, baseline_id: 0,
+            cursor_id: id, reset: true, events: [], has_more: false };
+        }
+        function fixturePage(events, afterId) {
+          const pending = events.filter((item) => item.id > afterId);
+          const page = pending.slice(0, 50);
+          return { stream_id: TEST_NOTIFICATION_STREAM, baseline_id: 0,
+            cursor_id: page.at(-1)?.id ?? afterId, reset: false,
+            events: page, has_more: pending.length > 50 };
+        }
+        function fixtureBatch(state, events) {
+          return { requestedCursor: state.alertNotificationCursor || null,
+            streamId: TEST_NOTIFICATION_STREAM, baselineId: 0,
+            cursorId: Math.max(0, ...events.map((event) => event.id)), events };
+        }
+    ''' + script)
 
 
 def _run_node(script: str) -> None:

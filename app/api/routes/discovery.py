@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Path, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 
 from app.api.deps import get_domain_services
-from app.api.errors import run_sync_api_async
+from app.api.errors import no_store_http_exception, run_sync_api_async
 from app.models.discovery import (
     DiscoveryLeaderboardPage,
     DiscoveryPreset,
@@ -19,6 +19,9 @@ from app.models.discovery import (
     DiscoveryResearchQueueResponse,
 )
 from app.models.market_scan_screen_alert import (
+    MarketScanScreenAlertDetailPage,
+    MarketScanScreenAlertHistoryKind,
+    MarketScanScreenAlertHistoryPage,
     MarketScanScreenAlertRequest,
     MarketScanScreenAlertResponse,
 )
@@ -163,6 +166,33 @@ async def record_discovery_screen_alert(
 ) -> MarketScanScreenAlertResponse:
     response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(lambda: service.record_screen_alert(preset_id, payload))
+
+
+@router.get("/presets/{preset_id}/screen-alerts", response_model=MarketScanScreenAlertHistoryPage)
+async def discovery_screen_alert_history(
+    response: Response, preset_id: int = Path(ge=1),
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    service: DiscoveryService = Depends(get_discovery_service),
+) -> MarketScanScreenAlertHistoryPage:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await run_sync_api_async(lambda: service.screen_alert_history(preset_id, page=page, page_size=page_size))
+    except HTTPException as exc:
+        raise no_store_http_exception(exc) from exc
+
+
+@router.get("/presets/{preset_id}/screen-alerts/{event_id}", response_model=MarketScanScreenAlertDetailPage)
+async def discovery_screen_alert_detail(
+    response: Response, preset_id: int = Path(ge=1), event_id: int = Path(ge=1),
+    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
+    kind: MarketScanScreenAlertHistoryKind = Query("all"),
+    service: DiscoveryService = Depends(get_discovery_service),
+) -> MarketScanScreenAlertDetailPage:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await run_sync_api_async(lambda: service.screen_alert_detail(preset_id, event_id, page=page, page_size=page_size, kind=kind))
+    except HTTPException as exc:
+        raise no_store_http_exception(exc) from exc
 
 
 @router.get("/runs/{run_id}/rank-changes", response_model=DiscoveryRankChangePage)

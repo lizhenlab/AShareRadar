@@ -90,6 +90,7 @@ class _MarketScanHub:
                 SCAN_DATA_DATE,
                 80,
                 last_close=self.quotes_by_symbol["600001.SH"].price,
+                previous_close=self.quotes_by_symbol["600001.SH"].prev_close,
             ),
             "000001.SZ": _daily_rows(date(2026, 7, 10), 80),
             "920066.BJ": _daily_rows(SCAN_DATA_DATE, 80),
@@ -209,7 +210,9 @@ def _configure_clean_full_market(hub: _MarketScanHub) -> None:
         "920066.BJ": _quote_for("920066", "BJ", "北交样本", change_pct=1.2),
     }
     hub.klines_by_symbol = {
-        symbol: _daily_rows(SCAN_DATA_DATE, 80, last_close=quote.price)
+        symbol: _daily_rows(
+            SCAN_DATA_DATE, 80, last_close=quote.price, previous_close=quote.prev_close,
+        )
         for symbol, quote in hub.quotes_by_symbol.items()
     }
 
@@ -245,7 +248,10 @@ def _quote_for(code: str, market: str, name: str, *, change_pct: float) -> Quote
     )
 
 
-def _daily_rows(latest: date, count: int, *, last_close: float = 10.3) -> list[Kline]:
+def _daily_rows(
+    latest: date, count: int, *, last_close: float = 10.3,
+    previous_close: float | None = None,
+) -> list[Kline]:
     days: list[date] = []
     cursor = latest
     while len(days) < count:
@@ -257,7 +263,11 @@ def _daily_rows(latest: date, count: int, *, last_close: float = 10.3) -> list[K
     return [
         make_kline(
             date=day.isoformat(),
-            close=first_close + index * 0.03,
+            close=(
+                previous_close
+                if previous_close is not None and index == count - 2
+                else first_close + index * 0.03
+            ),
             volume=1_000_000 + index * 10_000,
             source="测试前复权日K",
             as_of=latest.isoformat(),

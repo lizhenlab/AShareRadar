@@ -1,0 +1,262 @@
+{
+  "schema_version": "market-scan-probability-outcome-artifact-v1",
+  "generated_at": "2026-08-13T16:30:00+08:00",
+  "payload": {
+    "contract_version": "market-scan-probability-outcomes-v1",
+    "generated_at": "2026-08-13T16:30:00+08:00",
+    "as_of_date": "2026-08-13",
+    "source": {
+      "schema_version": "market-scan-probability-source-artifact-v1",
+      "payload_contract_version": "market-scan-probability-source-snapshot-v1",
+      "run_id": 71,
+      "quote_date": "2026-08-11",
+      "data_date": "2026-08-11",
+      "as_of": "2026-08-11T16:00:00+08:00",
+      "captured_at": "2026-08-11T16:30:00+08:00",
+      "record_count": 1,
+      "integrity_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "cohort": {
+      "mode": "official",
+      "rule_version": "full-market-scan-v6:test",
+      "scope": "test-full-market"
+    },
+    "label_contract": {
+      "label_version": "market-scan-upside-label-v3-explicit-target-offset",
+      "execution_model": "signal-D,next-session-open,holding-H-session-close,target-offset-H+1,T+1,no-delayed-exit",
+      "horizons": [
+        1,
+        5,
+        20
+      ],
+      "target_definitions": [
+        "absolute_net_return_positive",
+        "equal_weight_market_net_excess_positive"
+      ],
+      "cost_model_version": "cn-a-share-cost-model.v2",
+      "cost_profile_id": "base-a0441d84df44",
+      "execution_notional": 100000.0,
+      "max_daily_participation_rate": 0.01,
+      "entry_session_offset": 1,
+      "target_session_offsets": {
+        "1": 2,
+        "5": 6,
+        "20": 21
+      }
+    },
+    "label_contract_digest": "5873d48b84e50177f0a13fb58cc46d43a9e268819de3f37c7b7f2651dfa8be00",
+    "calendar_contract": {
+      "version": "trusted-fixed-exchange-session-grid-v1",
+      "quote_date": "2026-08-11",
+      "entry_session_date": "2026-08-12",
+      "future_sessions": [
+        "2026-08-12",
+        "2026-08-13",
+        "2026-08-14",
+        "2026-08-17",
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20",
+        "2026-08-21",
+        "2026-08-24",
+        "2026-08-25",
+        "2026-08-26",
+        "2026-08-27",
+        "2026-08-28",
+        "2026-08-31",
+        "2026-09-01",
+        "2026-09-02",
+        "2026-09-03",
+        "2026-09-04",
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "horizon_exit_sessions": {
+        "1": "2026-08-13",
+        "20": "2026-09-09",
+        "5": "2026-08-19"
+      },
+      "session_grid_digest": "e2211d7e34a960499e04df0cb14944dff50652018d0d6089d95d1cb40fba1b09",
+      "calendar_source": "runtime_cache",
+      "calendar_provider_source": "akshare.tool_trade_date_hist_sina",
+      "calendar_updated_at": "2026-07-22T19:46:40+08:00",
+      "missing_bar_policy": "fixed_session_unavailable_never_shift_v1"
+    },
+    "records": [
+      {
+        "symbol": "600001.SH",
+        "feature_vector_digest": "cc4477e02356cfd844dce4bc3a33985f68fef65f29620295ddd7c003002d07ec",
+        "source_evidence_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "instrument": {
+          "market": "SH",
+          "list_date": "2020-01-02",
+          "is_st": false,
+          "quote_amount": 200000000.0,
+          "adjustment_mode": "qfq"
+        },
+        "bar_evidence": {
+          "version": "qfq-daily-fixed-session-bar-evidence-v1",
+          "requested_dates": [
+            "2026-08-11",
+            "2026-08-12",
+            "2026-08-13"
+          ],
+          "observed_dates": [
+            "2026-08-11",
+            "2026-08-12",
+            "2026-08-13"
+          ],
+          "missing_dates": [],
+          "bars": [
+            {
+              "date": "2026-08-11",
+              "open": 10.0,
+              "close": 10.0,
+              "high": 10.2,
+              "low": 9.9,
+              "volume": 1000.0,
+              "adjustment_mode": "qfq",
+              "as_of": null,
+              "data_version": "probability-outcome-test-v1",
+              "contract_version": "daily-kline.v1",
+              "source": "test",
+              "fallback_used": false
+            },
+            {
+              "date": "2026-08-12",
+              "open": 10.0,
+              "close": 10.5,
+              "high": 10.7,
+              "low": 9.9,
+              "volume": 1000.0,
+              "adjustment_mode": "qfq",
+              "as_of": null,
+              "data_version": "probability-outcome-test-v1",
+              "contract_version": "daily-kline.v1",
+              "source": "test",
+              "fallback_used": false
+            },
+            {
+              "date": "2026-08-13",
+              "open": 10.5,
+              "close": 11.0,
+              "high": 11.2,
+              "low": 10.4,
+              "volume": 1000.0,
+              "adjustment_mode": "qfq",
+              "as_of": null,
+              "data_version": "probability-outcome-test-v1",
+              "contract_version": "daily-kline.v1",
+              "source": "test",
+              "fallback_used": false
+            }
+          ],
+          "bar_set_digest": "337b6e6c5568fa9ab04b3b84bb2538ef8111908a0499f4dfa17792027fdef3e8"
+        },
+        "horizons": {
+          "1": {
+            "horizon": 1,
+            "maturity": "mature",
+            "outcome": {
+              "cost_drag": 0.001561281810367382,
+              "daily_bar_model_limited": true,
+              "entry_date": "2026-08-12",
+              "entry_price": 10.0,
+              "exit_date": "2026-08-13",
+              "exit_price": 11.0,
+              "gross_return": 0.10000000000000009,
+              "horizon": 1,
+              "label": 1,
+              "model_limited": true,
+              "net_return": 0.0984387181896327,
+              "reason": "target_close",
+              "rule_profile_verified": true,
+              "status": "modelled"
+            },
+            "target_session_date": "2026-08-13"
+          },
+          "20": {
+            "horizon": 20,
+            "maturity": "not_mature",
+            "outcome": null,
+            "target_session_date": "2026-09-09"
+          },
+          "5": {
+            "horizon": 5,
+            "maturity": "not_mature",
+            "outcome": null,
+            "target_session_date": "2026-08-19"
+          }
+        }
+      }
+    ],
+    "quality": {
+      "horizons": {
+        "1": {
+          "available_for_study": true,
+          "data_available_record_count": 1,
+          "data_unavailable_record_count": 0,
+          "eligible_observation_count": 1,
+          "horizon": 1,
+          "label_coverage": 1.0,
+          "mature": true,
+          "mature_record_count": 1,
+          "minimum_label_coverage": 0.95,
+          "modelled_record_count": 1,
+          "record_count": 1,
+          "target_session_date": "2026-08-13",
+          "unfilled_record_count": 0
+        },
+        "20": {
+          "available_for_study": false,
+          "data_available_record_count": 0,
+          "data_unavailable_record_count": 0,
+          "eligible_observation_count": 0,
+          "horizon": 20,
+          "label_coverage": 0.0,
+          "mature": false,
+          "mature_record_count": 0,
+          "minimum_label_coverage": 0.95,
+          "modelled_record_count": 0,
+          "record_count": 1,
+          "target_session_date": "2026-09-09",
+          "unfilled_record_count": 0
+        },
+        "5": {
+          "available_for_study": false,
+          "data_available_record_count": 0,
+          "data_unavailable_record_count": 0,
+          "eligible_observation_count": 0,
+          "horizon": 5,
+          "label_coverage": 0.0,
+          "mature": false,
+          "mature_record_count": 0,
+          "minimum_label_coverage": 0.95,
+          "modelled_record_count": 0,
+          "record_count": 1,
+          "target_session_date": "2026-08-19",
+          "unfilled_record_count": 0
+        }
+      },
+      "point_in_time_evidence_coverage": 1.0,
+      "record_count": 1,
+      "record_coverage": 1.0,
+      "source_record_count": 1
+    },
+    "limitations": [
+      "shadow_research_only_no_production_ranking_effect",
+      "daily_bar_cannot_reconstruct_intraday_queue_or_execution_order",
+      "signal_date_instrument_status_held_constant_through_horizon",
+      "missing_fixed_session_bar_is_unavailable_and_never_shifted",
+      "integrity_digest_is_not_an_authenticity_signature"
+    ]
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "compression": "gzip-canonical-json-v1",
+    "integrity_digest": "c54fd08aa49c3f23c40098311d8291cd6414f743460d0b7ac93382160cec9cbc",
+    "notice": "integrity_digest_not_a_signature",
+    "scope": "payload"
+  }
+}

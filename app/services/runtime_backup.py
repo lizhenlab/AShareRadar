@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -22,6 +22,16 @@ from typing import Iterator
 from pydantic import ValidationError
 
 from app.config import MIN_RUNTIME_BACKUP_COUNT, get_settings
+from app.db.alert_stream import (
+    ALERT_STREAM_TABLE,
+    AlertStreamState,
+    AlertStreamStateError,
+    alert_event_high_water,
+    alert_stream_table_exists,
+    read_alert_stream_state,
+    validate_existing_alert_stream_state,
+)
+from app.db.alert_stream_restore import rotate_private_restore_stream
 from app.models.local_data import (
     RUNTIME_BACKUP_MANIFEST_VERSION,
     RuntimeBackupManifest,
@@ -439,24 +449,63 @@ def _replace_from_verified_backup(
     manifest: RuntimeBackupManifest,
     rollback: RuntimeBackupResult | None,
 ) -> None:
-    staged = _temporary_database_path(target)
-    replaced = False
-    try:
-        _copy_database_file(source, staged)
-        _verify_database_against_manifest(staged, manifest)
-        _copy_permissions(target, staged)
-        _require_quiescent_database(target)
-        _remove_sqlite_sidecars(target)
-        os.replace(staged, target)
-        replaced = True
-        _fsync_directory(target.parent)
-        _verify_database_against_manifest(target, manifest)
-    except BaseException as exc:
-        if replaced:
-            _recover_failed_restore(target, rollback, exc)
-        raise
-    finally:
-        _remove_sqlite_files(staged)
+    with tempfile.TemporaryDirectory(prefix=f".{target.name}.restore-install.", dir=target.parent) as directory:
+        staged = Path(directory) / BACKUP_DATABASE_NAME
+        replaced = False
+        try:
+            _copy_database_file(source, staged)
+            _verify_database_against_manifest(staged, manifest)
+            restored_manifest = _prepare_restored_stream_manifest(staged, manifest)
+            _verify_database_against_manifest(staged, restored_manifest)
+            _copy_permissions(target, staged)
+            _require_quiescent_database(target)
+            _remove_sqlite_sidecars(target)
+            os.replace(staged, target)
+            replaced = True
+            _fsync_directory(target.parent)
+            _verify_database_against_manifest(target, restored_manifest)
+        except BaseException as exc:
+            if replaced:
+                _recover_failed_restore(target, rollback, exc)
+            raise
+        finally:
+            _remove_sqlite_files(staged)
+
+
+def _prepare_restored_stream_manifest(
+    staged: Path,
+    original: RuntimeBackupManifest,
+) -> RuntimeBackupManifest:
+    previous = _read_optional_alert_stream(staged)
+    expected = rotate_private_restore_stream(staged)
+    _require_restored_stream_state(staged, previous, expected)
+    facts = _database_facts(staged)
+    derived = original.model_copy(update={
+        "sha256": _sha256(staged),
+        "database_size_bytes": facts.size_bytes,
+        "schema_version": original.schema_version + int(previous is None),
+        "table_row_counts": {**original.table_row_counts, ALERT_STREAM_TABLE: 1},
+    })
+    _require_matching_manifest(derived, facts)
+    return derived
+
+
+def _read_optional_alert_stream(path: Path) -> AlertStreamState | None:
+    with closing(_open_read_only(path)) as conn:
+        return read_alert_stream_state(conn) if alert_stream_table_exists(conn) else None
+
+
+def _require_restored_stream_state(
+    path: Path,
+    previous: AlertStreamState | None,
+    expected: AlertStreamState,
+) -> None:
+    with closing(_open_read_only(path)) as conn:
+        actual = read_alert_stream_state(conn)
+        if actual != expected or actual.baseline_event_id != alert_event_high_water(conn):
+            raise RuntimeBackupError("恢复暂存库通知流状态与预期不一致")
+        if previous is not None and actual.stream_id == previous.stream_id:
+            raise RuntimeBackupError("恢复暂存库没有切换通知流代次")
 
 
 def _recover_failed_restore(
@@ -603,6 +652,10 @@ def _integrity_check(conn: sqlite3.Connection) -> str:
         details = "；".join(f"{row[0]}:{row[1]}->{row[2]}" for row in foreign_key_violations)
         raise RuntimeBackupError("SQLite foreign_key_check 失败：" + details)
     _require_market_scan_snapshot_integrity(conn)
+    try:
+        validate_existing_alert_stream_state(conn)
+    except AlertStreamStateError as exc:
+        raise RuntimeBackupError(str(exc)) from exc
     return "ok"
 
 

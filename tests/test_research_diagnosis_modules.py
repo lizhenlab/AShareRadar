@@ -14,9 +14,46 @@ from app.services.research_risk_reward_report import build_risk_reward_report
 from app.services.research_timeframe import build_timeframe_alignment_report
 from app.services.research_validation import build_signal_validation_report
 from app.services.stock_insights import build_stock_insight_bundle
-from app.services.research_diagnosis_decisions import final_diagnosis_action, diagnosis_headline
+from app.services.research_diagnosis_decisions import diagnosis_confidence, final_diagnosis_action, diagnosis_headline
 from app.services.research_diagnosis_sections import build_confirmation_signals, build_hard_risks, build_watch_focus, main_conflict_sentence
 from tests.factories import make_kline, make_quote
+
+
+def test_negative_diagnosis_evidence_never_raises_any_valid_base_score() -> None:
+    analysis, _bundle, _feature, alpha, _factor, _regime, _validation, risk, timeframe = _diagnosis_inputs()
+    neutral_risk = risk.model_copy(update={"rating": "性价比较好"})
+    neutral_timeframe = timeframe.model_copy(update={"conflict_level": "多周期顺向"})
+    for base in range(101):
+        current_alpha = alpha.model_copy(update={"confidence": base})
+        current_analysis = analysis.model_copy(update={"action_advice": analysis.action_advice.model_copy(update={"confidence": base})})
+        baseline = diagnosis_confidence(current_analysis, current_alpha, risk_reward=neutral_risk, timeframe=neutral_timeframe)
+        for conflict in ("高冲突", "中冲突", "多周期偏弱"):
+            after_conflict = diagnosis_confidence(current_analysis, current_alpha, risk_reward=neutral_risk, timeframe=timeframe.model_copy(update={"conflict_level": conflict}))
+            assert 0 <= after_conflict <= baseline, (base, conflict, after_conflict)
+        for rating in ("风险优先", "周期冲突"):
+            after_risk = diagnosis_confidence(current_analysis, current_alpha, risk_reward=risk.model_copy(update={"rating": rating}), timeframe=neutral_timeframe)
+            assert 0 <= after_risk <= baseline, (base, rating, after_risk)
+
+
+def test_production_low_alpha_evidence_is_not_promoted_by_diagnosis_penalties() -> None:
+    analysis, bundle, feature, _alpha, _factor, regime, validation, risk, timeframe = _diagnosis_inputs()
+    low_analysis = analysis.model_copy(update={
+        "data_quality": analysis.data_quality.model_copy(update={"score": 0}),
+        "signal_snapshot": analysis.signal_snapshot.model_copy(update={"confidence": 20}),
+    })
+    low_feature = feature.model_copy(update={"leader_score": 0})
+    alpha = build_alpha_evidence_report(low_analysis, bundle, low_feature, None, regime, timeframe, risk)
+    assert alpha.confidence < 28
+    baseline = build_stock_diagnosis(
+        low_analysis, bundle, low_feature, alpha, None, None, validation,
+        risk.model_copy(update={"rating": "性价比较好"}), timeframe.model_copy(update={"conflict_level": "多周期顺向"}),
+    )
+    degraded = build_stock_diagnosis(
+        low_analysis, bundle, low_feature, alpha, None, None, validation,
+        risk.model_copy(update={"rating": "风险优先"}), timeframe.model_copy(update={"conflict_level": "高冲突"}),
+    )
+    assert degraded.confidence <= baseline.confidence
+    assert degraded.action == "控制风险"
 
 
 def test_data_quality_blocks_active_diagnosis_action() -> None:

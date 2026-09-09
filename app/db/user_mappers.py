@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+import hashlib
+import json
 import sqlite3
 
 from app.models.user_data import (
@@ -299,9 +301,37 @@ def row_to_alert_event(row: sqlite3.Row) -> AlertEventItem:
     )
 
 
+STOCK_NOTE_COLUMNS = (
+    "id", "symbol", "code", "market", "name", "note_type", "content",
+    "price", "trade_date", "color", "visible", "created_at", "updated_at",
+)
+
+
+def stock_note_revision_from_row(row: sqlite3.Row) -> str:
+    """Bind every stored value, before display fallbacks, to a state precondition."""
+    values = [(column, _stock_note_revision_value(row[column])) for column in STOCK_NOTE_COLUMNS]
+    encoded = json.dumps(["stock-note-state-v1", values], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _stock_note_revision_value(value: object) -> tuple[str, str | None]:
+    if value is None:
+        return "null", None
+    if isinstance(value, bytes):
+        return "blob", value.hex()
+    if isinstance(value, float):
+        return "real", value.hex()
+    if isinstance(value, int):
+        return "integer", str(value)
+    if isinstance(value, str):
+        return "text", value
+    raise TypeError("笔记包含不支持的数据库字段类型")
+
+
 def row_to_stock_note(row: sqlite3.Row) -> StockNoteItem:
     return StockNoteItem(
         id=_int_or_default(row["id"]),
+        revision=stock_note_revision_from_row(row),
         symbol=_clean_text_or_default(row["symbol"], "", 20),
         code=_clean_text_or_default(row["code"], "", 20),
         market=_clean_text_or_default(row["market"], "", 8),

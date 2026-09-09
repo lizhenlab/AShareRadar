@@ -1010,11 +1010,13 @@ def test_full_market_scan_with_all_scores_still_degrades_for_fallback_data(tmp_p
             SCAN_DATA_DATE,
             80,
             last_close=hub.quotes_by_symbol["000001.SZ"].price,
+            previous_close=hub.quotes_by_symbol["000001.SZ"].prev_close,
         )
         hub.klines_by_symbol["920066.BJ"] = _daily_rows(
             SCAN_DATA_DATE,
             80,
             last_close=hub.quotes_by_symbol["920066.BJ"].price,
+            previous_close=hub.quotes_by_symbol["920066.BJ"].prev_close,
         )
         scanner = _scanner(hub)
         await scanner.start()

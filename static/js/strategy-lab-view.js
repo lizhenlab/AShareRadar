@@ -24,20 +24,28 @@ export function strategyLabElements(root) {
     "strategyCompareLeft", "strategyCompareRight", "strategyCompare", "strategyVersionLeft", "strategyVersionRight",
     "strategyVersionCompare", "strategyHistoryContent",
     "strategyCandidateDialog", "strategyCandidateDialogClose", "strategyCandidateDialogContent",
+    "strategyListPrev", "strategyListNext", "strategyListPage", "strategyExecutionSelect", "strategyExecutionLoad",
+    "strategyHistoryPrev", "strategyHistoryNext", "strategyHistoryPage",
   ];
   return Object.fromEntries(ids.map((id) => [id, required(root, id)]));
 }
 
-export function renderStrategyList(elements, page, selectedId = null) {
+export function renderStrategyList(elements, page, selectedId = null, loadedStrategy = null) {
   const items = page.items || [];
-  elements.strategySavedSelect.innerHTML = items.length
-    ? items.map((item) => `<option value="${item.strategy_id}">${escapeHtml(item.spec.name)} · v${item.strategy_version}${item.archived ? " · 已归档" : ""}</option>`).join("")
+  const pinned = loadedStrategy && !items.some(item => item.strategy_id === loadedStrategy.strategy_id) ? loadedStrategy : null;
+  const options = items.map(item => strategyOption(item)).join("") + (pinned ? strategyOption(pinned, "当前载入 · 不在本页") : "");
+  elements.strategySavedSelect.innerHTML = options
+    ? options
     : '<option value="">尚无策略</option>';
-  const desired = selectedId && items.some((item) => item.strategy_id === selectedId) ? String(selectedId) : "";
+  const desired = selectedId && (items.some(item => item.strategy_id === selectedId) || pinned?.strategy_id === selectedId) ? String(selectedId) : "";
   if (desired) elements.strategySavedSelect.value = desired;
   const enabled = Boolean(elements.strategySavedSelect.value);
   elements.strategyLoad.disabled = !enabled;
   elements.strategyCopy.disabled = !enabled;
+}
+
+function strategyOption(item, prefix = "") {
+  return `<option value="${item.strategy_id}">${prefix ? `${prefix} · ` : ""}${escapeHtml(item.spec.name)} · v${item.strategy_version}${item.archived ? " · 已归档" : ""}</option>`;
 }
 
 export function renderParsedStrategy(elements, parsed) {
@@ -74,7 +82,7 @@ export function renderExecutionPlan(elements, compiled) {
 export function renderPortfolioDraft(elements, draft) {
   const summary = draft.summary;
   elements.strategyPortfolioState.textContent = STATUS_LABELS[summary.status] || summary.status;
-  elements.strategyExecutionContext.textContent = `策略 v${draft.context.strategy_version} · 扫描 #${draft.context.market_scan_run_id} · 数据 ${draft.context.data_date}`;
+  elements.strategyExecutionContext.textContent = `执行 #${draft.context.execution_id} · 策略 v${draft.context.strategy_version} · 扫描 #${draft.context.market_scan_run_id} · 数据 ${draft.context.data_date}`;
   const rows = (draft.selected || []).slice(0, 20).map((item) => `
     <div class="strategy-portfolio-row"><span><strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.symbol)} · ${escapeHtml(item.board_label)}</span><span>${percent(item.target_weight)} · ${item.target_quantity} 股</span></div>`).join("");
   elements.strategyPortfolioContent.innerHTML = `
@@ -208,6 +216,9 @@ function renderShadowCandidate(candidate) {
 
 export function renderHistory(elements, executions, versions) {
   const options = (executions.items || []).map((item) => `<option value="${item.execution_id}">#${item.execution_id} · v${item.strategy_version} · ${escapeHtml(item.data_date)} · ${escapeHtml(item.kind)}</option>`).join("");
+  const selected = Number(elements.strategyExecutionSelect.value);
+  elements.strategyExecutionSelect.innerHTML = options || '<option value="">暂无历史执行</option>';
+  elements.strategyExecutionSelect.value = String(executions.items.find(item => item.execution_id === selected)?.execution_id || executions.items[0]?.execution_id || "");
   elements.strategyCompareLeft.innerHTML = `<option value="">请选择</option>${options}`;
   elements.strategyCompareRight.innerHTML = `<option value="">请选择</option>${options}`;
   if ((executions.items || []).length > 1) {
@@ -236,13 +247,30 @@ export function renderVersionComparison(elements, comparison) {
 
 export function renderSimulationPlan(elements, plan) {
   elements.strategyLifecycleContent.innerHTML = `
+    <h5>纸面委托草案 #${escapeHtml(plan.plan_id)}</h5>
+    <p>仅生成可审阅的委托草案，不会加入复盘模拟账户或产生持仓。</p>
     <div class="strategy-summary-grid">
-      ${metric("模拟计划", `#${plan.plan_id}`)}
-      ${metric("状态", plan.status)}
+      ${metric("来源策略", `策略 #${plan.strategy_id} v${plan.strategy_version}`)}
+      ${metric("来源执行", `执行 #${plan.execution_id}`)}
+      ${metric("数据时点", plan.data_as_of)}
+      ${metric("状态", plan.status === "no_trade" ? "无委托 · 不交易" : "待人工核对")}
       ${metric("纸面委托", `${(plan.orders || []).length} 条`)}
       ${metric("计划摘要", String(plan.plan_digest || "").slice(0, 12) + "…")}
     </div>
+    ${simulationOrderTable(plan.orders)}
     ${messageList("研究边界", plan.disclaimers, "warn")}`;
+}
+
+function simulationOrderTable(orders) {
+  if (!orders.length) return "<p>本次约束下没有可生成的纸面委托，请查看组合草案的不交易原因。</p>";
+  const rows = orders.map(item => `<tr data-strategy-order="${escapeHtml(item.symbol)}">
+    <td><strong>${escapeHtml(item.name)}</strong><br>${escapeHtml(item.symbol)} · ${escapeHtml(item.board_label)}</td>
+    <td>${item.target_quantity} 股<br>${percent(item.target_weight)}</td>
+    <td>${money(item.estimated_gross_amount_cny)}</td><td>${money(item.estimated_round_trip_cost_cny)}</td>
+    <td>${escapeHtml(item.earliest_exit_policy)}${messageList("约束说明", item.constraint_notes, "warn")}</td>
+  </tr>`).join("");
+  return `<div class="strategy-simulation-orders" role="region" aria-label="全部纸面委托明细" tabindex="0">
+    <table><thead><tr><th>股票</th><th>数量 / 权重</th><th>估算金额</th><th>估算往返成本</th><th>退出约束</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 export function renderSchedule(elements, schedule) {

@@ -289,6 +289,16 @@ class AdviceReviewDueItem(AdviceReviewDetail):
     overdue_trading_days: int = Field(default=0, ge=0)
 
 
+class AdviceReviewDuePage(BaseModel):
+    items: list[AdviceReviewDueItem] = Field(max_length=200)
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=200)
+    page_count: int = Field(ge=0)
+    as_of: str
+    snapshot_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ResearchQueueRefreshItem(BaseModel):
     symbol: str
     status: ResearchQueueRefreshStatus

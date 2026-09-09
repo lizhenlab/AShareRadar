@@ -8,10 +8,11 @@ from types import SimpleNamespace
 from app.models.market import (
     Kline,
 )
-from app.services.indicator_volume import positive_volume_ratio
+from app.services.indicator_volume import positive_volume_ratio, recent_volume_ratio_if_available
 from app.services.indicator_trend import trend_score_from_impact
 from app.services.indicator_trend_components import TrendContext, trend_contributions
 from app.services.indicators import pct_change
+from app.services.research_volume_scoring import volume_confirmation_score
 from app.services.scoring import clamp_score as _clamp
 from app.utils.market_data import finite_float, valid_kline
 
@@ -33,16 +34,6 @@ TREND_TRIGGER_TOLERANCE = 8
 TREND_TRIGGER_NEUTRAL_LOW = 45
 TREND_TRIGGER_NEUTRAL_HIGH = 62
 
-VOLUME_BASE_SCORE = 52
-VOLUME_CONFIRMATION_RATIO = 1.2
-VOLUME_EXPANSION_SCORE = 16
-VOLUME_DISTRIBUTION_SCORE = 18
-VOLUME_EXPANSION_CAP = 12
-VOLUME_EXPANSION_SCALE = 10
-VOLUME_SHRINK_RATIO = 0.7
-VOLUME_LARGE_MOVE_PCT = 2
-VOLUME_NORMAL_LOW_RATIO = 0.85
-VOLUME_NORMAL_HIGH_RATIO = 1.25
 VOLUME_STRONG_CURRENT_SCORE = 58
 VOLUME_WEAK_CURRENT_SCORE = 45
 VOLUME_TRIGGER_TOLERANCE = 10
@@ -168,39 +159,6 @@ class DistanceScoreRule:
     adjustment: int
 
 
-VOLUME_SCORE_RULES: tuple[ScoreAdjustmentRule, ...] = (
-    ScoreAdjustmentRule(
-        "positive_volume",
-        lambda context: context.change_pct > 0 and context.volume_ratio >= VOLUME_CONFIRMATION_RATIO,
-        lambda context: VOLUME_EXPANSION_SCORE
-        + min(
-            VOLUME_EXPANSION_CAP,
-            round((context.volume_ratio - VOLUME_CONFIRMATION_RATIO) * VOLUME_EXPANSION_SCALE),
-        ),
-    ),
-    ScoreAdjustmentRule(
-        "negative_volume",
-        lambda context: context.change_pct < 0 and context.volume_ratio >= VOLUME_CONFIRMATION_RATIO,
-        lambda context: -(
-            VOLUME_DISTRIBUTION_SCORE
-            + min(
-                VOLUME_EXPANSION_CAP,
-                round((context.volume_ratio - VOLUME_CONFIRMATION_RATIO) * VOLUME_EXPANSION_SCALE),
-            )
-        ),
-    ),
-    ScoreAdjustmentRule(
-        "shrinking_large_move",
-        lambda context: context.volume_ratio < VOLUME_SHRINK_RATIO and abs(context.change_pct) >= VOLUME_LARGE_MOVE_PCT,
-        lambda _context: -8,
-    ),
-    ScoreAdjustmentRule(
-        "normal_volume",
-        lambda context: VOLUME_NORMAL_LOW_RATIO <= context.volume_ratio <= VOLUME_NORMAL_HIGH_RATIO,
-        lambda _context: 4,
-    ),
-)
-
 RISK_SCORE_RULES: tuple[ScoreAdjustmentRule, ...] = (
     ScoreAdjustmentRule(
         "below_ma20",
@@ -314,10 +272,15 @@ def _trend_proxy_score_from_context(context: FactorScoreContext) -> float:
 
 
 def _volume_proxy_score_at(rows: list[Kline], index: int) -> float:
-    context = _score_context(rows, index, min_index=SCORE_CONTEXT_MIN_INDEX)
-    if context is None or context.current.volume <= 0:
-        return NEUTRAL_SCORE
-    return _clamp(VOLUME_BASE_SCORE + _first_score_rule_delta(context, VOLUME_SCORE_RULES))
+    score_rows = _score_rows(rows, index, min_index=VOLUME_BASE_WINDOW - 1)
+    volume_window = rows[index - VOLUME_BASE_WINDOW + 1 : index + 1]
+    ratio = recent_volume_ratio_if_available(volume_window) if score_rows is not None else None
+    if score_rows is None or ratio is None:
+        # Calibration and percentile callers skip unavailable observations;
+        # returning 50 would turn missing volume into a neutral-score sample.
+        raise ValueError("量价确认缺少完整的20日正成交量窗口")
+    change_pct = pct_change(score_rows.current.close, score_rows.previous.close)
+    return volume_confirmation_score(change_pct, ratio)
 
 
 def _risk_proxy_score_at(rows: list[Kline], index: int) -> float:
@@ -540,10 +503,6 @@ def _score_rule_delta(context: FactorScoreContext, rules: tuple[ScoreAdjustmentR
     return sum(rule.adjustment(context) for rule in rules if rule.matches(context))
 
 
-def _first_score_rule_delta(context: FactorScoreContext, rules: tuple[ScoreAdjustmentRule, ...]) -> int:
-    return next((rule.adjustment(context) for rule in rules if rule.matches(context)), 0)
-
-
 def _volume_weighted_typical_price(rows: list[Kline]) -> float:
     total_volume = 0.0
     weighted_price = 0.0
@@ -600,7 +559,10 @@ def _volume_trigger(rows: list[Kline], index: int, current_score: float | None) 
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
-    score = _volume_proxy_score_at(rows, index)
+    try:
+        score = _volume_proxy_score_at(rows, index)
+    except ValueError:
+        return False
     if current_score >= VOLUME_STRONG_CURRENT_SCORE or current_score <= VOLUME_WEAK_CURRENT_SCORE:
         return abs(score - current_score) <= VOLUME_TRIGGER_TOLERANCE and (
             score >= VOLUME_STRONG_CURRENT_SCORE or score <= VOLUME_WEAK_CURRENT_SCORE

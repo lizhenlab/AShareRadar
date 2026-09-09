@@ -7,9 +7,23 @@ const RUN_STATUS_LABELS = Object.freeze({
   degraded: "降级完成",
 });
 
+export function marketScanHistoryElements(getElement) {
+  return {
+    history: getElement("marketScanHistory"),
+    historyRun: getElement("marketScanHistoryRun"),
+    historyStatus: getElement("marketScanHistoryStatus"),
+    historyDate: getElement("marketScanHistoryDate"),
+    historyRefresh: getElement("marketScanHistoryRefresh"),
+    historyFeedback: getElement("marketScanHistoryFeedback"),
+    historyPagination: getElement("marketScanHistoryPagination"),
+    historyPrev: getElement("marketScanHistoryPrev"),
+    historyNext: getElement("marketScanHistoryNext"),
+    historyPageInfo: getElement("marketScanHistoryPageInfo"),
+  };
+}
+
 export function renderMarketScanHistoryLoading(elements) {
-  setAttribute(elements.history, "aria-busy", "true");
-  elements.historyRefresh.disabled = true;
+  setHistoryBusy(elements, true);
   setText(elements.historyFeedback, "正在读取历史批次...");
   elements.historyFeedback.className = "";
 }
@@ -26,18 +40,37 @@ export function renderMarketScanHistory(elements, payload, selectedRunId, select
   }).join("");
   elements.historyRun.innerHTML = `<option value="">最近发布</option>${options}`;
   elements.historyRun.value = items.some((run) => String(run.id) === selected) ? selected : "";
-  setAttribute(elements.history, "aria-busy", "false");
-  elements.historyRefresh.disabled = false;
-  const limited = payload.total > payload.items.length ? `，本次显示最近 ${payload.items.length} 个，请按日期缩小范围` : "";
-  setText(elements.historyFeedback, `找到 ${payload.total} 个${marketScanModeLabel(selectedMode)}已发布批次${limited}。`);
+  elements.historyPagination.dataset.page = String(payload.page || 1);
+  elements.historyPagination.dataset.pageCount = String(payload.page_count || 0);
+  setHistoryBusy(elements, false);
+  const range = payload.items.length ? `，当前第 ${(payload.page - 1) * payload.page_size + 1}–${(payload.page - 1) * payload.page_size + payload.items.length} 个` : "";
+  setText(elements.historyFeedback, `找到 ${payload.total} 个${marketScanModeLabel(selectedMode)}已发布批次${range}。`);
   elements.historyFeedback.className = "";
 }
 
 export function renderMarketScanHistoryError(elements, message) {
-  setAttribute(elements.history, "aria-busy", "false");
-  elements.historyRefresh.disabled = false;
+  setHistoryBusy(elements, false);
   setText(elements.historyFeedback, message);
   elements.historyFeedback.className = "error";
+}
+
+
+export function renderMarketScanHistoryCancelled(elements) {
+  setHistoryBusy(elements, false);
+  setText(elements.historyFeedback, "历史读取已取消，原批次列表保留，可重新查询。");
+  elements.historyFeedback.className = "";
+}
+
+
+function setHistoryBusy(elements, busy) {
+  setAttribute(elements.history, "aria-busy", String(busy));
+  elements.historyRefresh.disabled = busy;
+  const page = Number(elements.historyPagination.dataset.page) || 1;
+  const pageCount = Number(elements.historyPagination.dataset.pageCount) || 0;
+  elements.historyPagination.hidden = pageCount <= 1;
+  elements.historyPrev.disabled = busy || page <= 1;
+  elements.historyNext.disabled = busy || page >= pageCount;
+  setText(elements.historyPageInfo, `历史第 ${pageCount ? page : 0} / ${pageCount} 页`);
 }
 
 export function marketScanHistoryFilters(elements) {

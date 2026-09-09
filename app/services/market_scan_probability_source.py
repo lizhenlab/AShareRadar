@@ -60,6 +60,7 @@ from app.models.paper_trading import PaperInstrumentMetadata
 from app.utils.clock import ASHARE_TIMEZONE
 from app.services.market_scan_probability import (
     LEGACY_PROBABILITY_FEATURE_VERSION,
+    PREVIOUS_PROBABILITY_FEATURE_VERSION,
     PROBABILITY_FEATURE_VERSION,
     stable_probability_hash,
 )
@@ -80,6 +81,9 @@ from app.services.market_scan_scoring import (
     FULL_MARKET_SCORE_RULE_VERSION,
     MarketScanReplayError,
     market_scan_score_spec,
+    market_scan_score_spec_dimension_v4,
+    market_scan_score_spec_legacy_v5,
+    market_scan_score_spec_trend_v3,
     market_scan_score_spec_v4,
     stable_score_spec_hash,
     verify_score_details,
@@ -262,9 +266,19 @@ _LEGACY_READABLE_V4_PRODUCTION_SCORE_SPEC_HASHES = frozenset(
     stable_score_spec_hash(market_scan_score_spec_v4(min_data_quality_score=minimum))
     for minimum in range(101)
 )
+_LEGACY_READABLE_V5_PRODUCTION_SCORE_SPEC_HASHES = frozenset(
+    stable_score_spec_hash(factory(min_data_quality_score=minimum))
+    for factory in (
+        market_scan_score_spec_legacy_v5, market_scan_score_spec_trend_v3,
+        market_scan_score_spec_dimension_v4,
+    )
+    for minimum in range(101)
+)
 _READABLE_PRODUCTION_SCORE_SPEC_HASHES = {
     FULL_MARKET_LEGACY_V4_SCORE_RULE_VERSION: _LEGACY_READABLE_V4_PRODUCTION_SCORE_SPEC_HASHES,
-    FULL_MARKET_SCORE_RULE_VERSION: _CURRENT_WRITABLE_PRODUCTION_SCORE_SPEC_HASHES,
+    FULL_MARKET_SCORE_RULE_VERSION: (
+        _CURRENT_WRITABLE_PRODUCTION_SCORE_SPEC_HASHES | _LEGACY_READABLE_V5_PRODUCTION_SCORE_SPEC_HASHES
+    ),
 }
 
 
@@ -928,6 +942,7 @@ def _validate_payload(
         exact_keys=True,
         legacy=legacy,
         previous=previous,
+        archived=True,
     )
     _validate_cohort(_mapping(normalized["cohort"], "payload.cohort"), run)
     score_semantics = _validate_score_semantics(
@@ -935,7 +950,7 @@ def _validate_payload(
         run=run,
         legacy=legacy,
     )
-    feature_schema = _validate_feature_schema(_mapping(normalized["feature_schema"], "payload.feature_schema"))
+    feature_schema = _validated_source_feature_schema(normalized["feature_schema"], run, legacy=legacy)
     records = _stored_records(
         normalized["records"],
         run,
@@ -991,6 +1006,7 @@ def _normalize_run(
     exact_keys: bool,
     legacy: bool = False,
     previous: bool = False,
+    archived: bool = False,
 ) -> dict[str, object]:
     if legacy and previous:
         raise ProbabilitySourceError("上涨概率 source run generation 冲突")
@@ -1038,6 +1054,7 @@ def _normalize_run(
                 total_count=total_count,
                 success_count=success_count,
                 previous=previous,
+                archived=archived,
             )
         )
     return normalized
@@ -1090,10 +1107,13 @@ def _normalized_versioned_run_contract(
     total_count: int,
     success_count: int,
     previous: bool,
+    archived: bool,
 ) -> dict[str, object]:
     normalized: dict[str, object] = dict(
-        _registered_run_score_contract(run, current_writable=not previous),
+        _registered_run_score_contract(run, current_writable=not (previous or archived)),
     )
+    if not previous and normalized["production_score_rule_version"] != FULL_MARKET_SCORE_RULE_VERSION:
+        raise ProbabilitySourceError("当前 source 格式只接受已注册的 v5 评分合同")
     if previous:
         normalized["full_market_coverage"] = validate_previous_full_market_coverage(
             run.get("full_market_coverage"),
@@ -1443,11 +1463,37 @@ def _validate_feature_context(
 def _feature_schema(
     version: str = PROBABILITY_FEATURE_VERSION,
 ) -> dict[str, object]:
-    if version not in {PROBABILITY_FEATURE_VERSION, LEGACY_PROBABILITY_FEATURE_VERSION}:
+    if version not in {
+        PROBABILITY_FEATURE_VERSION, PREVIOUS_PROBABILITY_FEATURE_VERSION,
+        LEGACY_PROBABILITY_FEATURE_VERSION,
+    }:
         raise ProbabilitySourceError("上涨概率 source feature_schema version 不受支持")
     names = list(_REGISTERED_FEATURE_NAMES)
     identity = {"version": version, "names": names}
     return {**identity, "digest": stable_probability_hash(identity)}
+
+
+def _validate_feature_score_contract(
+    feature_schema: Mapping[str, object], run: Mapping[str, object], *, legacy: bool,
+) -> None:
+    if legacy:
+        if feature_schema["version"] == PROBABILITY_FEATURE_VERSION:
+            raise ProbabilitySourceError("历史 source 缺少评分身份，不能声明当前 feature contract")
+        return
+    if (
+        is_current_writable_production_score_contract(
+            run.get("production_score_rule_version"), run.get("production_score_spec_hash"),
+        ) != (feature_schema["version"] == PROBABILITY_FEATURE_VERSION)
+    ):
+        raise ProbabilitySourceError("上涨概率 source feature/production score 计算口径冲突")
+
+
+def _validated_source_feature_schema(
+    value: object, run: Mapping[str, object], *, legacy: bool,
+) -> dict[str, object]:
+    schema = _validate_feature_schema(_mapping(value, "payload.feature_schema"))
+    _validate_feature_score_contract(schema, run, legacy=legacy)
+    return schema
 
 
 def _validate_feature_schema(value: Mapping[str, object]) -> dict[str, object]:

@@ -147,15 +147,26 @@ export function isDiscoveryPresetUiRepresentable(preset) {
     ...RANGE_FIELDS.map(([field]) => field),
   ]);
   if (Object.entries(criteria).some(([field, value]) => value != null && !supported.has(field))) return false;
-  if (!validList(criteria.market, 3) || !validList(criteria.industry, 20)) return false;
+  if (!validPresetScope(criteria)) return false;
   for (const [field, , , , , minimum, maximum] of RANGE_FIELDS) {
     if (!validRange(criteria[field], minimum, maximum)) return false;
   }
+  if (!validPresetResearchBounds(criteria)) return false;
+  if (criteria.keyword != null && (typeof criteria.keyword !== "string" || !criteria.keyword.trim() || criteria.keyword.length > 80)) return false;
+  return validPresetSort(preset.sort) && DISCOVERY_COLUMN_VIEWS.has(preset.column_view || "overview");
+}
+
+function validPresetScope(criteria) {
+  if (!validList(criteria.market, 3) || !validList(criteria.industry, 20)) return false;
+  if ([criteria.is_st, criteria.is_new].some((value) => value != null && typeof value !== "boolean")) return false;
+  return !criteria.market?.some((value) => !["SH", "SZ", "BJ"].includes(value));
+}
+
+function validPresetResearchBounds(criteria) {
   for (const field of ["confidence", "risk", "tradability"]) {
     if (!validRange(criteria[field], 0, 100)) return false;
   }
-  if (criteria.keyword != null && (typeof criteria.keyword !== "string" || !criteria.keyword.trim() || criteria.keyword.length > 80)) return false;
-  return validPresetSort(preset.sort) && DISCOVERY_COLUMN_VIEWS.has(preset.column_view || "overview");
+  return criteria.confidence?.max == null && criteria.risk?.min == null && criteria.tradability?.max == null;
 }
 
 export function applyDiscoveryPresetFields(preset, elements) {
@@ -304,6 +315,7 @@ function setMarketValues(element, values) {
   const selected = new Set(values);
   if (element?.options) {
     Array.from(element.options).forEach((option) => { option.selected = selected.has(option.value); });
+    return;
   }
   setElementValue(element, values[0] || "");
 }

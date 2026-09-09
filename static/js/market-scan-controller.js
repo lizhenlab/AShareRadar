@@ -39,6 +39,7 @@ export function createMarketScanController(options = {}) {
     runRequest: null, resultRequest: null, actionRequest: null,
     runRequestSeq: 0, resultRequestSeq: 0, actionRequestSeq: 0,
     historyRequest: null, historyRequestSeq: 0,
+    historyPage: 1, historyPageCount: 0, historyQueryKey: null,
     onlineRecoveryPromise: null,
   };
   let probabilityHorizonController = null;
@@ -505,8 +506,6 @@ export function createMarketScanController(options = {}) {
   function clearControllerTimers() { polling.clear(); clearResetTimer(); }
   function bindEvents() {
     elements.modeInputs.forEach((input) => input.addEventListener("change", () => void history.changeMode()));
-    elements.historyRun.addEventListener("change", () => { auxiliaryResearch.resetExperiment(); void history.select(); });
-    elements.historyRefresh.addEventListener("click", () => void history.refresh());
     elements.start.addEventListener("click", () => void start());
     elements.cancel.addEventListener("click", () => void cancel());
     elements.retry.addEventListener("click", () => void retry());
