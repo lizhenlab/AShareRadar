@@ -9,6 +9,7 @@ import threading
 from typing import Literal
 
 from app.config import Settings
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION, SQLITE_MINUTE_TIME_FUNCTION
 from app.db.market_scan_artifact_lease import (
     market_scan_artifact_retention_lease,
     require_market_scan_artifact_lease_namespace_current,
@@ -83,7 +84,7 @@ REGENERABLE_RUNTIME_CLEANUP_SPECS = (
         "kline_minute",
         "max_minute_kline_rows",
         "rowid",
-        "timestamp DESC",
+        f"{SQLITE_MINUTE_TIME_FUNCTION}(timestamp) DESC, {SQLITE_AUDIT_EPOCH_FUNCTION}(fetched_at) DESC, rowid DESC",
         partition_by=("symbol", "interval"),
         limit_scope=PARTITION_LIMIT,
     ),

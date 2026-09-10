@@ -53,6 +53,7 @@ from app.models.workbench import (
 from app.services import chart_marks as chart_marks_service
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io, run_cache_io_best_effort
+from app.services.fuyao_financials import financial_fact_answer, financial_health_from_bundle
 from app.services.data_quality_time import quote_event_time_error
 from app.services.llm_explainer import enhance_stock_answer
 from app.services.research_qa_answer_report import answer_stock_question
@@ -396,6 +397,12 @@ async def stock_risk_radar(datahub: DataHub, symbol: str) -> RiskRadarReport:
 
 
 async def stock_question_answer(datahub: DataHub, payload: StockQuestionInput) -> StockQuestionAnswer:
+    source = getattr(datahub, "fuyao", None)
+    financials = await source.financials(payload.symbol) if source is not None else None
+    if financials is not None:
+        financial_answer = financial_fact_answer(payload.question, financials)
+        if financial_answer is not None:
+            return financial_answer
     context = await stock_workbench_context(datahub, payload.symbol)
     rule_answer = answer_stock_question(
         payload.question,
@@ -456,6 +463,10 @@ async def stock_strategy_cards(datahub: DataHub, symbol: str) -> list[StrategyCa
 
 
 async def stock_financial_health(datahub: DataHub, symbol: str) -> FinancialHealth:
+    source = getattr(datahub, "fuyao", None)
+    financials = await source.financials(symbol) if source is not None else None
+    if financials is not None:
+        return financial_health_from_bundle(financials)
     return (await stock_insight_bundle(datahub, symbol)).financial_health
 
 

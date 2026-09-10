@@ -1,0 +1,10 @@
+title = "AShareRadar secret detection"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "fuyao-api-key"
+description = "Fuyao API key"
+regex = '''sk-fuyao-[A-Za-z0-9_-]{20,}'''
+keywords = ["sk-fuyao-"]

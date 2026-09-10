@@ -23,7 +23,8 @@ def get_app_settings(request: Request) -> Settings:
     return get_container(request).settings
 
 
-def get_datahub(request: Request) -> DataHub:
+async def get_datahub(request: Request) -> DataHub:
+    """Read container state without waiting for the shared AnyIO worker pool."""
     return get_container(request).datahub
 
 

@@ -96,6 +96,7 @@ class PaperTradingRepository(SQLiteRepository):
     def update_account(self, payload: PaperTradingAccountUpdate) -> PaperTradingAccount:
         timestamp = audit_now_text()
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             _account_row(conn, create=True)
             if payload.initial_cash is not None:
                 has_paper_history = conn.execute(
@@ -113,7 +114,7 @@ class PaperTradingRepository(SQLiteRepository):
                     (payload.default_cost_profile, timestamp),
                 )
             row = conn.execute("SELECT * FROM paper_trading_account WHERE id = 1").fetchone()
-        return _account_from_row(_required_row(row, "模拟账户更新失败"))
+            return _account_from_row(_required_row(row, "模拟账户更新失败"))
 
     def create_strategy(
         self,
@@ -137,7 +138,7 @@ class PaperTradingRepository(SQLiteRepository):
                 activation_market_time,
                 timestamp,
             )
-        return _strategy_from_row(_required_row(row, "模拟策略创建失败"))
+            return _strategy_from_row(_required_row(row, "模拟策略创建失败"))
 
     def delete_pending_strategy(self, strategy_id: int) -> bool:
         with self._lock, self._connect() as conn:

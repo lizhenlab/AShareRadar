@@ -51,6 +51,7 @@ def test_index_loads_css_modules_in_parallel_and_in_order() -> None:
         "sidebar.css",
         "workspace-core.css",
         "research-panels.css",
+        "fuyao.css",
         "individual-probability.css",
         "market-scan.css",
         "market-scan-research.css",

@@ -4,8 +4,9 @@ from functools import lru_cache
 import math
 import os
 from pathlib import Path
+import re
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, field_validator, model_validator
 
 from app.config_shell import load_shell_env as _load_shell_env
 from app.config_validation import normalized_llm_base_url as _normalized_llm_base_url
@@ -105,6 +106,44 @@ def _env_text(name: str, default: str | None = None, *, aliases: tuple[str, ...]
         return default
     value = raw.strip()
     return value or default
+
+
+def _fuyao_environment_key() -> SecretStr | None:
+    """Read only explicitly supported process variables, never shell profiles."""
+    for name in ("ASHARE_RADAR_FUYAO_API_KEY", "HITHINK_FINANCE_API_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return SecretStr(value)
+    return None
+
+
+def _fuyao_environment_key_file() -> Path | None:
+    value = os.environ.get("ASHARE_RADAR_FUYAO_API_KEY_FILE", "").strip()
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _normalized_fuyao_download_hosts(value: object) -> tuple[str, ...]:
+    candidates = value.split(",") if isinstance(value, str) else value
+    if not isinstance(candidates, (list, tuple)):
+        raise ValueError("扶摇下载域名必须是域名列表")
+    hosts: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            raise ValueError("扶摇下载域名必须是纯域名")
+        host = candidate.strip().lower()
+        if not host or len(host) > 253 or host.endswith((".localhost", ".local", ".internal", ".lan", ".home")):
+            raise ValueError("扶摇下载域名必须是明确的公共域名")
+        labels = host.split(".")
+        if len(labels) < 2 or not labels[-1] or not labels[-1][0].isalpha():
+            raise ValueError("扶摇下载域名不能使用本机地址或 IP")
+        if any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels):
+            raise ValueError("扶摇下载域名不能包含 URL、端口、通配符或路径")
+        if host not in hosts:
+            hosts.append(host)
+    return tuple(hosts)
 
 
 def _env_bool(name: str, default: bool, *, aliases: tuple[str, ...] = ()) -> bool:
@@ -265,6 +304,21 @@ class Settings(BaseModel):
         )
     )
     tushare_token: str | None = Field(repr=False, default_factory=lambda: _env_text("ASHARE_RADAR_TUSHARE_TOKEN", aliases=("TUSHARE_TOKEN",)))
+    fuyao_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_FUYAO_ENABLED", False))
+    fuyao_api_key: SecretStr | None = Field(default_factory=_fuyao_environment_key, repr=False, exclude=True)
+    fuyao_api_key_file: Path | None = Field(default_factory=_fuyao_environment_key_file, repr=False, exclude=True)
+    fuyao_request_interval_seconds: float = Field(
+        default_factory=lambda: _env_float("ASHARE_RADAR_FUYAO_REQUEST_INTERVAL_SECONDS", 1.0, minimum=0.0), ge=0.0, le=60.0,
+    )
+    fuyao_daily_request_limit: int = Field(
+        default_factory=lambda: _env_int("ASHARE_RADAR_FUYAO_DAILY_REQUEST_LIMIT", 1000, minimum=1), ge=1, le=100000,
+    )
+    fuyao_timeout_seconds: float = Field(
+        default_factory=lambda: _env_float("ASHARE_RADAR_FUYAO_TIMEOUT_SECONDS", 20.0, minimum=1.0), ge=1.0, le=120.0,
+    )
+    fuyao_download_hosts: tuple[str, ...] = Field(
+        default_factory=lambda: _env_tuple("ASHARE_RADAR_FUYAO_DOWNLOAD_HOSTS", ()),
+    )
     futu_enabled: bool = Field(default_factory=lambda: _env_bool("ASHARE_RADAR_FUTU_ENABLED", False, aliases=("FUTU_ENABLED",)))
     futu_host: str = Field(default_factory=lambda: str(_env_text("ASHARE_RADAR_FUTU_HOST", "127.0.0.1", aliases=("FUTU_HOST",))))
     futu_port: int = Field(default_factory=lambda: _env_int("ASHARE_RADAR_FUTU_PORT", 11111, minimum=1, aliases=("FUTU_PORT",)))
@@ -655,6 +709,11 @@ class Settings(BaseModel):
     @classmethod
     def _validate_legacy_audit_timezone(cls, value: str) -> str:
         return _normalized_timezone_name(value)
+
+    @field_validator("fuyao_download_hosts", mode="before")
+    @classmethod
+    def _validate_fuyao_download_hosts(cls, value: object) -> tuple[str, ...]:
+        return _normalized_fuyao_download_hosts(value)
 
     @field_validator(
         "quote_provider_priority",

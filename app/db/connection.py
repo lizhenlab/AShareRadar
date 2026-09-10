@@ -7,10 +7,12 @@ from pathlib import Path
 
 from app.utils.market_time import market_datetime_epoch
 from app.utils.audit_time import audit_time_epoch
+from app.utils.minute_kline_identity import minute_timestamp_key
 
 
 SQLITE_MARKET_EPOCH_FUNCTION = "ashare_market_epoch"
 SQLITE_AUDIT_EPOCH_FUNCTION = "ashare_audit_epoch"
+SQLITE_MINUTE_TIME_FUNCTION = "ashare_minute_time"
 
 
 class SQLiteConnectionFactory:
@@ -25,6 +27,7 @@ class SQLiteConnectionFactory:
             conn.row_factory = sqlite3.Row
             conn.create_function(SQLITE_MARKET_EPOCH_FUNCTION, 1, market_datetime_epoch, deterministic=True)
             conn.create_function(SQLITE_AUDIT_EPOCH_FUNCTION, 1, audit_time_epoch, deterministic=True)
+            conn.create_function(SQLITE_MINUTE_TIME_FUNCTION, 1, minute_timestamp_key, deterministic=True)
             conn.execute("PRAGMA busy_timeout = 15000")
             conn.execute("PRAGMA foreign_keys = ON")
             yield conn

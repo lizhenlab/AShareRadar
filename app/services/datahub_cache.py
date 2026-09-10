@@ -18,6 +18,7 @@ from app.services.data_quality_time import (
     latest_expected_daily_kline_date,
     market_local_datetime,
 )
+from app.utils.minute_kline_identity import parse_minute_timestamp
 from app.utils.symbols import standard_symbol
 
 
@@ -130,7 +131,7 @@ def _minute_cache_freshness_context(
 def _latest_minute_timestamp(rows: list[MinuteKline]) -> datetime | None:
     if not rows:
         return None
-    return _parse_minute_timestamp(rows[-1].timestamp)
+    return parse_minute_timestamp(rows[-1].timestamp)
 
 
 def _minute_business_timestamp_is_valid(context: MinuteCacheFreshnessContext) -> bool:
@@ -244,13 +245,6 @@ MINUTE_CACHE_SESSION_RULES = (
 def _parse_kline_date(value: str) -> datetime | None:
     try:
         return datetime.fromisoformat(value[:10])
-    except ValueError:
-        return None
-
-
-def _parse_minute_timestamp(value: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(value[:19])
     except ValueError:
         return None
 

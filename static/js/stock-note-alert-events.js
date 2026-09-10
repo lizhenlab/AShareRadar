@@ -118,7 +118,7 @@ async function handleAlertListSubmit(context, event) {
   if (feedback) feedback.hidden = true;
   try {
     await runSubmitTask(form, "保存中", () =>
-      updateAlertRule(state, form.dataset.alertId, alertRuleUpdatesFromForm(form), options)
+      updateAlertRule(state, form.dataset.alertId, alertRuleUpdatesFromForm(form), { ...options, alertForm: form })
     );
     renderResearchActivityPanel();
   } catch (error) {

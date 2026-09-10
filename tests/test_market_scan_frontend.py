@@ -146,7 +146,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert "@import" not in styles
     css_modules = re.findall(r'<link rel="stylesheet" href="/static/css/([^"]+)\?v=([^"]+)" />', html)
     assert [name for name, _ in css_modules] == [
-        "base.css", "sidebar.css", "workspace-core.css", "research-panels.css", "individual-probability.css",
+        "base.css", "sidebar.css", "workspace-core.css", "research-panels.css", "fuyao.css", "individual-probability.css",
         "market-scan.css",
         "market-scan-research.css",
         "interactions.css", "side-footer.css", "responsive.css", "primary-navigation.css", "layout-optimizations.css",
@@ -159,8 +159,16 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
     assert import_map_match is not None
     imports = json.loads(import_map_match.group(1))["imports"]
     module_paths = {
+        "/static/js/fuyao-controller.js",
+        "/static/js/fuyao-job-controller.js",
+        "/static/js/fuyao-job-view.js",
+        "/static/js/fuyao-contracts.js",
+        "/static/js/fuyao-stock-view.js",
+        "/static/js/fuyao-market-view.js",
+        "/static/js/fuyao-status-view.js",
         "/static/js/api.js",
         "/static/js/notifications.js",
+        "/static/js/chart.js",
         "/static/js/notification-navigation.js",
         "/static/js/strategy-history.js",
         "/static/js/strategy-draft-state.js",
@@ -173,6 +181,8 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/notes.js",
         "/static/js/note-editor-state.js",
         "/static/js/stock-note-alert-events.js",
+        "/static/js/alerts.js",
+        "/static/js/alert-editor-state.js",
         "/static/js/watchlist.js",
         "/static/js/watchlist-queue-view.js",
         "/static/js/strategy-schedule-manager.js",

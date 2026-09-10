@@ -1,0 +1,32 @@
+.fuyao-panel { margin-top: 16px; }
+.fuyao-heading { display: flex; gap: 12px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.fuyao-note { color: var(--muted, #94a3b8); line-height: 1.6; font-size: 12px; }
+.fuyao-controls { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(140px, 1fr); gap: 12px; margin: 16px 0; }
+.fuyao-controls label { display: grid; gap: 6px; font-size: 12px; }
+.fuyao-controls input, .fuyao-controls select, .fuyao-period select { min-width: 0; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--panel); color: var(--text); }
+.fuyao-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.fuyao-actions button { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); padding: 8px 12px; cursor: pointer; font-size: 12px; }
+.fuyao-actions button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); background: var(--blue-soft); }
+.fuyao-actions button:disabled, [data-fuyao-refresh]:disabled { opacity: .5; cursor: not-allowed; }
+.fuyao-period { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 14px; font-size: 12px; }
+.fuyao-table-scroll { overflow: auto; max-height: 360px; margin: 12px 0; }
+.fuyao-table-scroll table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.fuyao-table-scroll th, .fuyao-table-scroll td { padding: 9px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+.fuyao-table-scroll thead th { white-space: nowrap; position: sticky; top: 0; background: var(--panel, #141d2e); }
+.fuyao-table-scroll tbody th { font-weight: 500; min-width: 120px; }
+.fuyao-table-scroll td { overflow-wrap: anywhere; }
+.fuyao-details { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; font-size: 12px; line-height: 1.6; }
+.fuyao-details summary { cursor: pointer; font-weight: 600; padding: 5px 0; }
+.fuyao-details details { margin: 10px 0; }
+.fuyao-job { display: grid; min-width: 0; gap: 5px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
+.fuyao-job small { color: var(--muted, #94a3b8); }
+.fuyao-error { color: var(--red, #fb7185); }
+.fuyao-version, .fuyao-member-list { overflow-wrap: anywhere; }
+#fuyaoJobFeedback, #fuyaoStockFeedback { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .fuyao-controls { grid-template-columns: 1fr; } .fuyao-heading button { width: 100%; } }
+
+.fuyao-job-detail { padding: 16px; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+.fuyao-job-parameters { display: grid; grid-template-columns: minmax(70px, auto) minmax(0, 1fr); gap: 8px 16px; }
+.fuyao-job-parameters dt { color: var(--muted, #94a3b8); }
+.fuyao-job-parameters dd { margin: 0; }
+.fuyao-job-progress { margin: 0; color: var(--muted, #94a3b8); }

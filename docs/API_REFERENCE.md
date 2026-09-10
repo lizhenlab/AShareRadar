@@ -7,7 +7,7 @@ The UI root route `/` is served from `app/main.py` and intentionally excluded fr
 
 ## Summary
 
-Total endpoints: 161
+Total endpoints: 168
 
 | Method | Path | Inputs | Handler | Response model | File |
 | --- | --- | --- | --- | --- | --- |
@@ -38,6 +38,13 @@ Total endpoints: 161
 | GET | `/api/discovery/presets/{preset_id}/screen-alerts/{event_id}` | path `preset_id: int` (ge=1)<br>path `event_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=100)<br>query `kind: MarketScanScreenAlertHistoryKind = 'all'` | `discovery_screen_alert_detail` | `MarketScanScreenAlertDetailPage` | `app/api/routes/discovery.py` |
 | GET | `/api/discovery/runs/{run_id}/rank-changes` | path `run_id: int` (ge=1)<br>query `page: int = 1` (ge=1)<br>query `page_size: int = 50` (ge=1; le=200) | `discovery_rank_changes` | `DiscoveryRankChangePage` | `app/api/routes/discovery.py` |
 | GET | `/api/futu/status` | - | `futu_status` | `FutuStatusResponse` | `app/api/routes/data.py` |
+| POST | `/api/fuyao/jobs` | body `payload: FuyaoJobRequest` | `start_job` | `FuyaoJob` | `app/api/routes/fuyao.py` |
+| GET | `/api/fuyao/jobs/{job_id}` | path `job_id: str` | `job_detail` | `FuyaoJob` | `app/api/routes/fuyao.py` |
+| POST | `/api/fuyao/jobs/{job_id}/cancel` | path `job_id: str` | `cancel_job` | `FuyaoJob` | `app/api/routes/fuyao.py` |
+| POST | `/api/fuyao/jobs/{job_id}/retry` | path `job_id: str` | `retry_job` | `FuyaoJob` | `app/api/routes/fuyao.py` |
+| GET | `/api/fuyao/market` | - | `market_observations` | `-` | `app/api/routes/fuyao.py` |
+| GET | `/api/fuyao/status` | - | `status` | `-` | `app/api/routes/fuyao.py` |
+| GET | `/api/fuyao/stock` | query `symbol: str = ...` | `stock_observations` | `-` | `app/api/routes/fuyao.py` |
 | GET | `/api/health` | - | `health` | `-` | `app/api/routes/health.py` |
 | GET | `/api/health/live` | - | `liveness` | `HealthProbe` | `app/api/routes/health.py` |
 | GET | `/api/health/ready` | - | `readiness` | `HealthProbe` | `app/api/routes/health.py` |

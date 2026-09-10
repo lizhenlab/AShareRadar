@@ -373,8 +373,10 @@ class SQLiteCache:
     def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None:
         self.market_data_repo.save_minute_klines(symbol, interval, rows, source)
 
-    def get_minute_klines(self, symbol: str, interval: str, limit: int, max_age_seconds: int) -> list[MinuteKline]:
-        return self.market_data_repo.get_minute_klines(symbol, interval, limit, max_age_seconds)
+    def get_minute_klines(
+        self, symbol: str, interval: str, limit: int, max_age_seconds: int, *, as_of: datetime | None = None,
+    ) -> list[MinuteKline]:
+        return self.market_data_repo.get_minute_klines(symbol, interval, limit, max_age_seconds, as_of=as_of)
 
     def save_stock_pool(self, rows: list[StockInfo]) -> None:
         self.market_data_repo.save_stock_pool(rows)

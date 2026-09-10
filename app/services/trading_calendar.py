@@ -180,8 +180,8 @@ def is_after_close(now: datetime | None = None) -> bool:
     }
 
 
-def is_trading_day(value: date) -> bool:
-    days, status = _calendar_resolution(value)
+def is_trading_day(value: date, *, allow_auto_refresh: bool = True) -> bool:
+    days, status = _calendar_resolution(value, allow_auto_refresh=allow_auto_refresh)
     if not status.covered:
         return False
     return value in days

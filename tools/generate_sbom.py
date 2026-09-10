@@ -19,6 +19,7 @@ from typing import Any, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON_LOCK = ROOT / "requirements-lock.txt"
 NPM_LOCK = ROOT / "package-lock.json"
+SBOM_COMMAND_TIMEOUT_SECONDS = 120
 
 
 class SbomGenerationError(RuntimeError):
@@ -101,7 +102,12 @@ def _run(command: Sequence[str], *, stdout: bool = False) -> str:
             capture_output=True,
             text=True,
             env={**os.environ, "NO_COLOR": "1"},
+            timeout=SBOM_COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise SbomGenerationError(
+            f"SBOM generator timed out after {SBOM_COMMAND_TIMEOUT_SECONDS:g} seconds"
+        ) from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)
         raise SbomGenerationError(_redact_error(detail)) from exc
@@ -110,10 +116,11 @@ def _run(command: Sequence[str], *, stdout: bool = False) -> str:
 
 def _write_atomic(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        handle.write(content)
-    os.replace(temporary, path)
+    with tempfile.TemporaryDirectory(dir=path.parent, prefix=".sbom-") as staging:
+        with tempfile.NamedTemporaryFile(dir=staging, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+        os.replace(temporary, path)
 
 
 def generate_sboms(output_dir: Path) -> tuple[Path, Path]:
@@ -180,8 +187,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir = ROOT / output_dir
     try:
         outputs = generate_sboms(output_dir)
-    except SbomGenerationError as exc:
-        print(f"SBOM generation failed: {exc}", file=sys.stderr)
+    except (SbomGenerationError, OSError) as exc:
+        print(f"SBOM generation failed: {_redact_error(str(exc))}", file=sys.stderr)
         return 1
     print("Generated " + ", ".join(path.name for path in outputs))
     return 0

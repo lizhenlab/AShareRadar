@@ -31,6 +31,7 @@ from app.api.routes import (
     analysis,
     data,
     discovery,
+    fuyao,
     health,
     local_data,
     market_scan,
@@ -243,6 +244,7 @@ def _register_routes(app: FastAPI, static_dir: Path) -> None:
     app.include_router(local_data.router)
     app.include_router(market_scan.router)
     app.include_router(discovery.router)
+    app.include_router(fuyao.router)
     app.include_router(strategy_lab.router)
 
     @app.get("/")

@@ -14,6 +14,8 @@ PYTHONNOUSERSITE=1 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --p
 
 浏览器打开 http://127.0.0.1:8010 。开发检查另需 Node.js 22 或 24、npm 10 或 11。数据默认写入 `data/ashare_radar.sqlite3`，首次启动可能需要建立缓存。数据源不可用、行情过期或证据不足时，页面应明确显示不可用或降级原因。
 
+已在本机配置扶摇密钥文件时，使用 `PYTHONNOUSERSITE=1 .venv/bin/python tools/run_local.py` 启动。该入口读取被 Git 忽略的本地配置，提供财报、估值、板块、情绪和批量历史研究功能，同步任务支持进度查询、主动停止和未完成项补做；配置与调用上限见[运行手册](docs/OPERATIONS.md#扶摇研究数据)。
+
 ## 当前功能
 
 | 入口 / 模块 | 用途 |

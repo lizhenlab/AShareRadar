@@ -3,6 +3,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+.workbuddy-ai/
 .venv/
 node_modules/
 *.pyc

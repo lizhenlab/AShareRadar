@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { emitQuoteFrame, mockApi, stockSearchPayload, workbenchPayload } from "./frontend-flow-api-fixtures.mjs";
 
+const deferredDiagnosticEndpoints = new Set([
+  "/api/tasks/status", "/api/tasks/runs?limit=8", "/api/monitor/events?limit=8", "/api/system/diagnostics",
+]);
+
 test("SSE status waits for the current frame and preserves degradation", async ({ page }) => {
   let degraded = false;
   await mockApi(page, {
@@ -35,18 +39,18 @@ test("three stock loads reuse global requests and add only six stock requests", 
 
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect.poll(() => apiRequests.length).toBe(15);
+  await expect.poll(() => apiRequests.length).toBe(11);
 
   const input = page.locator("#symbolInput");
   await input.fill("000001");
   await page.locator("#searchForm button").click();
   await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await expect.poll(() => apiRequests.length).toBe(21);
+  await expect.poll(() => apiRequests.length).toBe(17);
 
   await input.fill("300750");
   await page.locator("#searchForm button").click();
   await expect(page.locator("#stockName")).toHaveText("宁德时代");
-  await expect.poll(() => apiRequests.length).toBe(27);
+  await expect.poll(() => apiRequests.length).toBe(23);
 
   const globalEndpoints = [
     "/api/market",
@@ -60,7 +64,7 @@ test("three stock loads reuse global requests and add only six stock requests", 
     "/api/system/diagnostics",
   ];
   for (const endpoint of globalEndpoints) {
-    expect(apiRequests.filter((url) => url === endpoint), endpoint).toHaveLength(1);
+    expect(apiRequests.filter((url) => url === endpoint), endpoint).toHaveLength(deferredDiagnosticEndpoints.has(endpoint) ? 0 : 1);
   }
   const stockKinds = [
     "/api/stock/workbench?",
@@ -176,14 +180,14 @@ test("stock name suggestions select a canonical code without changing request ba
 
   await page.goto("/");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  await expect.poll(() => apiRequests.length).toBe(15);
+  await expect.poll(() => apiRequests.length).toBe(11);
 
   const input = page.locator("#symbolInput");
   const suggestions = page.locator("#symbolSuggestions");
   await input.fill("000001");
   await page.waitForTimeout(350);
   expect(searchKeywords).toEqual([]);
-  expect(apiRequests).toHaveLength(15);
+  expect(apiRequests).toHaveLength(11);
 
   await input.fill("平安");
   await expect(suggestions).toBeVisible();
@@ -213,7 +217,7 @@ test("stock name suggestions select a canonical code without changing request ba
   await expect(suggestions).toBeHidden();
   await expect(page.locator("#stockCode")).toHaveText("SZ000001");
   await expect(page.locator("#stockName")).toHaveText("平安银行");
-  await expect.poll(() => apiRequests.length).toBe(22);
+  await expect.poll(() => apiRequests.length).toBe(18);
   expect(searchKeywords).toEqual(["平安"]);
 
   const globalEndpoints = [
@@ -228,7 +232,7 @@ test("stock name suggestions select a canonical code without changing request ba
     "/api/system/diagnostics",
   ];
   for (const endpoint of globalEndpoints) {
-    expect(apiRequests.filter((url) => url === endpoint), endpoint).toHaveLength(1);
+    expect(apiRequests.filter((url) => url === endpoint), endpoint).toHaveLength(deferredDiagnosticEndpoints.has(endpoint) ? 0 : 1);
   }
   const stockKinds = [
     "/api/stock/workbench?",

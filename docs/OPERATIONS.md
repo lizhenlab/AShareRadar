@@ -10,13 +10,21 @@ export PYTHON="$PROJECT_ROOT/.venv/bin/python"
 export PYTHONNOUSERSITE=1
 python3.12 -m venv .venv
 $PYTHON -m pip install --require-hashes -r requirements-lock.txt
+$PYTHON tools/run_local.py
+```
+
+`tools/run_local.py` 是本地单进程启动入口。仅此入口发现项目 `data/fuyao-api-key` 时，为本次服务设置扶摇启用、密钥文件路径及已验证下载域名 `o.thsi.cn`；显式环境变量优先，包括显式关闭。文件只保存 Key 本身，须由当前用户拥有、无组/其他用户权限（建议 `chmod 600 data/fuyao-api-key`），所在 `data/` 已忽略提交；不要把 Key 写入命令、文档或浏览器。入口不因启用数据源而自动开始远端同步。
+
+标准 Uvicorn 入口仍可使用，且只遵循显式环境配置，不发现或自动加载上述本地密钥文件；未配置时扶摇默认关闭：
+
+```bash
 $PYTHON -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 1 --timeout-graceful-shutdown 5
 ```
 
 后台本地开发可使用独立 screen 会话：
 
 ```bash
-screen -dmS ashare_radar bash -lc 'cd "$PROJECT_ROOT" && exec env PYTHONNOUSERSITE=1 "$PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 1 --timeout-graceful-shutdown 5 > /tmp/ashare_radar.log 2>&1'
+screen -dmS ashare_radar bash -lc 'cd "$PROJECT_ROOT" && exec env PYTHONNOUSERSITE=1 "$PYTHON" tools/run_local.py > /tmp/ashare_radar.log 2>&1'
 tail -f /tmp/ashare_radar.log
 ```
 
@@ -43,6 +51,8 @@ lsof -nP -iTCP:8010 -sTCP:LISTEN
 
 `data/` 是本机运行状态，包含 SQLite/WAL/SHM、租约、交易日历、研究产物与备份，不提交到源码仓库。锁文件存在不等于锁被占用；运行中的文件不得删除或重建。
 
+扶摇研究资料单独保存到 `Settings.cache_path.with_suffix('.fuyao')`：`research.sqlite3` 保存观察版本、同步任务及本项目请求预算，`history/` 保存原始 Parquet、规范化未复权日线/企业行动和版本 manifest。默认位置为 `data/ashare_radar.fuyao/`。这些侧文件不在主数据库备份或浏览器用户数据导出中；备份、迁移和磁盘容量检查须另行包含它们。密钥文件独立管理，不放入可分享的研究导出。
+
 完整数据库备份使用 SQLite backup API，同时生成摘要、表计数及完整性清单：
 
 ```bash
@@ -64,7 +74,7 @@ SQLite 备份不包含研究侧文件。任何受管概率、来源、结果、�
 
 Before deleting or replacing local data at the filesystem level，或执行 DB-only restore、数据库迁移及彻底重置，先停止全部使用该数据库的服务，并创建、验证备份。备份和恢复都针对 Settings 解析后的同一数据库路径；不要把自定义数据库的备份与默认路径的删除命令混用。本手册不提供绕过目标检查的裸文件删除命令。需要彻底重置时，先核对实际配置、数据库及全部关联侧文件，再制定明确的备份与重置范围。
 
-“系统维护 → 数据管理”的清理与用户数据导入则在服务运行时使用：先预览，再通过受检接口提交，由维护租约、事务及各自的备份规则保护操作，无需先停服务。在线清理的逻辑删除先事务提交，再按原空闲空间阈值尝试压缩；界面的删除成功/计数不保证数据库文件立即变小，读写竞争导致可选压缩失败时，已删除记录仍保持提交。
+“系统维护 → 数据管理”的清理与用户数据导入则在服务运行时使用：先预览，再通过受检接口提交，由维护租约、事务及各自的备份规则保护操作，无需先停服务。清理预览通过“检查可清理数据”按钮显式启动，进入页面不会自动校验全部研究文件；预览确认有可清理项后才启用执行，执行前仍重新检查。在线清理的逻辑删除先事务提交，再按原空闲空间阈值尝试压缩；界面的删除成功/计数不保证数据库文件立即变小，读写竞争导致可选压缩失败时，已删除记录仍保持提交。
 
 不要用复制活跃 WAL 文件代替一致性备份；保留研究文件也不意味着新建空数据库会使这些产物有效。
 
@@ -109,9 +119,46 @@ liveness 只证明进程活着；readiness 与数据源健康分别检查可服�
 
 启停成功但列表同步失败时，使用“刷新任务”核实；没有收到明确成功回执时，不自动重试写请求。查看或刷新任务列表只读取本地状态。
 
+### 扶摇研究数据
+
+“系统维护 → 数据管理 → 扶摇研究数据”提供接入状态、项目当日请求数和显式同步入口；“个股研究”的财报面板读取当前股票的本地记录，支持报告期选择及后台刷新。打开页面、刷新本地记录和轮询任务都不触发远端取数。任务通过 `POST /api/fuyao/jobs` 提交；`GET /api/fuyao/status`、`GET /api/fuyao/stock?symbol=600519.SH` 与 `GET /api/fuyao/market` 只访问本地状态，返回不缓存响应。首次状态读取会把上次进程遗留的运行中任务标记为中断；这不恢复采集或占用供应商请求预算。
+
+任务列表可查看原始参数、已完成股票和阶段进度。历史任务显示签名、下载、校验、归并及写出阶段；仅显示实际取得的字节数、行数或项目数，未知总量不显示百分比。运行中可主动停止；“正在停止”表示后台仍在收尾，此时不能开启新同步，须等待实际终态。停止保留已保存观察和已发布历史版本，不撤销已发生的请求或供应商费用。输出已全部提交时，迟到的停止会返回原完成结果。进度保存失败会明确提示本地存储问题；数据已发布时保留完成结果，尚未发布时停止任务。
+
+失败、部分完成、中断或取消后可显式补做：财报/估值只处理原任务未完成的股票；历史、板块和情绪按原参数重新执行整批校验。补做创建带父任务ID的新任务，原记录不改变；重复点击同一父任务返回既有子任务，子任务仍失败时从子任务继续补做。旧任务没有保存请求参数时显示不可直接补做，需要重新选择参数创建任务。API 对应 `GET /api/fuyao/jobs/{id}`、`POST /api/fuyao/jobs/{id}/cancel` 和 `POST /api/fuyao/jobs/{id}/retry`；未知任务返回404，不能补做的状态或缺失参数返回409。
+
+财报任务按指定股票读取利润表、资产负债表、现金流量表及一个报告期指标；年度/季度、供应商报告日期、来源和获取时间分别保留。原始金额及没有明确单位的指标显示“单位待核实”；季度单季/累计及首次披露/修订历史仍未确认，因此不计算 TTM、财务评分或正式选股加分。结构化财务问答只回答已缓存且能对应字段的事实，不给交易动作。
+
+估值同步保存 PE TTM/MRQ、PB MRQ、PS TTM、PCF TTM 的当前观察；历史分位仅依据本地同口径观察日，不能解释为供应商完整历史估值。板块同步保存行业/概念目录、当前行情和明确选定板块的当前成员；情绪同步核验涨停/跌停/炸板分页，另取同日龙虎榜和有条件的当日个股异动解释。当前成员不反推历史，供应商理由不升级为公告事实。同步失败保持已有记录，并显示失败或部分完成状态。
+
+历史数据先做全量，再做近十交易日增量；每次同步通常需要两个签名 API 请求和两个独立文件下载，重试另计。全市场日期缺口、非法 OHLC、日线源内同证券同日的冲突重复或摘要错误会阻止发布；相同日线重复合并，增量修订计数记录在新版本中。企业行动仅去除全部规范字段完全相同的重复，同证券同日的不同记录完整保留、稳定排序，并在 manifest 注明歧义组数及事件/版本待核对，禁止直接求和、选择最后记录或自动复权；负股本变动比例保留原值并标记缩股语义，不能直接当作每类股东的持仓变动比例。下载使用独立无 Key 会话，只接受配置中的精确 HTTPS 域名，检查公网 DNS、拒绝重定向，按容量上限流式保存；不记录签名 URL。版本发布前以 8192 行批次校验和磁盘归并，优先校验较小的企业行动文件，保留原始文件及摘要；旧版本不会被原位修改，失败不会切换当前版本。
+
+命令行同步使用与服务一致的配置和持久请求预算，不自动套用 `run_local.py` 的本地启用规则。以下无 Key 的配置示例适用于已存在且权限正确的本地密钥文件；已有显式配置可直接复用：
+
+```bash
+export ASHARE_RADAR_FUYAO_ENABLED=1
+export ASHARE_RADAR_FUYAO_API_KEY_FILE="$PROJECT_ROOT/data/fuyao-api-key"
+export ASHARE_RADAR_FUYAO_DOWNLOAD_HOSTS=o.thsi.cn
+$PYTHON tools/sync_fuyao_history.py full
+$PYTHON tools/sync_fuyao_history.py incremental
+$PYTHON tools/sync_fuyao_history.py status
+$PYTHON tools/sync_fuyao_history.py verify
+$PYTHON tools/sync_fuyao_history.py export --output data/research/fuyao-export-20260910
+```
+
+导出目标必须是尚不存在的目录。`status/verify/export --root PATH` 可只读其他已发布档案，不读取配置或密钥；联网 `full/incremental` 固定使用项目配置目录，不接受 `--root` 绕开预算。`verify` 会遍历文件摘要，普通页面只读 manifest。Parquet 使用锁定的 `pyarrow==25.0.1`；未安装时在发请求前报错。导出只包含未复权日线 CSV、企业行动 CSV 和来源 manifest，明确 `point_in_time_verified=false`、`official_execution_admitted=false`；它不写入当前前复权行情缓存，正式回测仍需历史成员、披露版本、交易状态及独立来源准入。
+
+2026-09-10 已用真实账号取得 30 只有效沪深京股票的三张财报、财务指标及估值观察，样本为 25 只沪深股票和 `920002.BJ`、`920001.BJ`、`920003.BJ`、`920005.BJ`、`920006.BJ`；旧代码 `430047.BJ` 单独返回业务码 `3001`，未影响有效股票完成。板块目录及行情各 710 条；同日情绪数据为涨停 34、跌停 11、炸板 22、龙虎榜 60 条，选定股票的异动结果为 0 条，不能解释为全市场无异动。
+
+真实全量历史归档已发布并通过 CLI `verify`：5,560 只股票、10,275,240 条日线、2,427 个交易日期，覆盖 2016-09-12 至 2026-09-10。企业行动由 57,184 条原始记录去除 1 条完全重复后保留 57,183 条，同时保留 2 组同日不同记录及 2 条负股本变动记录的缩股标记。本地校验、规范文件写入及版本发布耗时 165.65 秒，不含下载时间。真实近十日文件的 55,479 行也已校验；增量归并与发布目前仅通过离线测试，尚未执行真实联网增量同步。
+
+上述结果证明这批样本及归档在本次运行中通过验证，不证明全部证券类型覆盖或长期权限稳定性。费用政策、财务单位和 PIT 仍未核实，不能认定接口免费；本地请求上限是工程限制，不是供应商余额或费用估计。下一步应完成小范围行情/企业行动对账，以及披露版本、单位和费用政策核实，再评估前复权转换与正式研究准入。
+
 ## 5. 环境变量
 
 Use the `ASHARE_RADAR_*` namespace for new configuration. Legacy aliases are accepted where listed for local compatibility. Process environment values take precedence. For the five allowlisted `ASHARE_RADAR_LLM_*` names only, the application falls back to simple top-level assignments in `$HOME/.zshrc`; it parses that file without sourcing or executing it and ignores command substitutions, nested shell blocks, and unrelated names. When that file contains `ASHARE_RADAR_LLM_API_KEY`, it must be owned by the current user and have no group/other permissions; run `chmod 600 "$HOME/.zshrc"` before startup. It does not read `.env` files, project configuration, user-data imports, or browser storage for credentials. Settings are captured by the application container, and scheduler intervals/task registration are not hot-reloaded. Restart the single process after changing configuration.
+
+扶摇 Key 仅来自支持的进程变量或显式配置的本地密钥文件；不从 `.zshrc` 搜索。`tools/run_local.py` 的本地文件发现是上述专用启动入口的行为，不改变 `Settings` 和标准 Uvicorn 的默认关闭合同。
 
 | Variable | Default | Legacy alias | Notes |
 | --- | --- | --- | --- |
@@ -121,6 +168,13 @@ Use the `ASHARE_RADAR_*` namespace for new configuration. Legacy aliases are acc
 | `ASHARE_RADAR_LLM_ENABLED` | `1` | - | Set `0` to force rule-only answers. |
 | `ASHARE_RADAR_LLM_TIMEOUT_SECONDS` | `30` | - | Positive finite total budget shared by initial generation and the optional validation-correction request. The browser timeout is fixed at 35 seconds, leaving a margin over the default 30-second server budget. Increasing this setting does not extend the browser timeout; the browser may time out before the server finishes. |
 | `ASHARE_RADAR_TUSHARE_TOKEN` | empty | `TUSHARE_TOKEN` | Secret for optional Tushare provider. |
+| `ASHARE_RADAR_FUYAO_ENABLED` | `0` | - | 扶摇研究接入开关；启用不自动采集。`run_local.py` 发现本地密钥文件时仅对该次启动提供默认值，显式环境配置优先。 |
+| `ASHARE_RADAR_FUYAO_API_KEY` | empty | `HITHINK_FINANCE_API_KEY` | 进程内秘密值，主名称优先；不返回浏览器或进入日志/模型序列化；有值时优先于密钥文件。 |
+| `ASHARE_RADAR_FUYAO_API_KEY_FILE` | empty | - | 当前用户拥有的普通密钥文件，不接受符号链接、组/其他用户权限或超过4096字节的文件；建议0600。相对路径按项目根解析，只有取数时才读取。 |
+| `ASHARE_RADAR_FUYAO_REQUEST_INTERVAL_SECONDS` | `1.0` | - | 同账号跨能力最小请求间隔，范围0–60秒；配合提供者并发准入、有限重试和冷却。 |
+| `ASHARE_RADAR_FUYAO_DAILY_REQUEST_LIMIT` | `1000` | - | 当前项目数据目录每日持久请求上限，范围1–100000；按上海日期，含失败尝试和重试。不是账号付费额度，也不是全部设备共享的供应商限额。 |
+| `ASHARE_RADAR_FUYAO_TIMEOUT_SECONDS` | `20.0` | - | 单次 REST 尝试超时，范围1–120秒；Parquet 文件下载使用独立有界下载流程。 |
+| `ASHARE_RADAR_FUYAO_DOWNLOAD_HOSTS` | empty | - | 逗号分隔的精确公网对象存储域名，禁止URL、路径、端口、IP及通配符；空值拒绝历史下载。专用本地启动入口已验证的默认域名为 `o.thsi.cn`。 |
 | `ASHARE_RADAR_FUTU_ENABLED` | `0` | `FUTU_ENABLED` | Requires local Futu OpenD. |
 | `ASHARE_RADAR_FUTU_HOST` | `127.0.0.1` | `FUTU_HOST` | Futu OpenD host. |
 | `ASHARE_RADAR_FUTU_PORT` | `11111` | `FUTU_PORT` | Futu OpenD port. |
@@ -274,7 +328,7 @@ $PYTHON -m pip install --only-binary=:all: --require-hashes -r requirements-secu
 $PYTHON -m pip check
 ```
 
-After any dependency lock changes, audit all three Python locks, run `npm audit`, and regenerate both SBOMs. `tools/generate_sbom.py` consumes `requirements-lock.txt` and `package-lock.json`, validates CycloneDX JSON, removes volatile serial/timestamp fields, imposes deterministic ordering, and writes `python.cdx.json` plus `npm.cdx.json` atomically. The Security workflow generates twice and compares bytes before artifact upload. Its separate tool lock prevents an audit-only Linux runner from building optional provider source distributions. A reproducible SBOM is an inventory aid; it is not a signed release or provenance attestation.
+After any dependency lock changes, audit all three Python locks, run `npm audit`, and regenerate both SBOMs. `tools/generate_sbom.py` consumes `requirements-lock.txt` and `package-lock.json`, validates CycloneDX JSON, removes volatile serial/timestamp fields, and imposes deterministic ordering. Each output (`python.cdx.json` and `npm.cdx.json`) is replaced atomically; the pair is not one transaction, so regenerate both after a failed run. Private staging files are cleaned on write failure or interruption. Each external generator has a 120-second timeout, after which its directly owned subprocess is terminated and reaped; filesystem errors produce a redacted message and nonzero exit status. The Security workflow generates twice and compares bytes before artifact upload. Its separate tool lock prevents an audit-only Linux runner from building optional provider source distributions. A reproducible SBOM is an inventory aid; it is not a signed release or provenance attestation.
 
 Dependabot runs weekly for pip, npm, and GitHub Actions. Review generated changes through the same tests instead of merging solely because a version is newer. Keep every `uses:` reference pinned to a reviewed 40-character commit SHA and preserve `persist-credentials: false` for checkout.
 
@@ -297,7 +351,7 @@ $PYTHON tools/architecture_inventory.py --check
 
 策略实验室修改输入后先完成编译；当前草案与已保存版本不一致时，须确认保存后才能执行、回放或创建新定时任务。若改回已保存定义，重新编译一致后可继续使用该版本，无需再次保存；状态行明确显示已保存版本及草案状态。保存请求超时或回执不匹配时，当前页面会标记“保存结果待核对”，先刷新列表并显式载入具体记录；列表为空不能证明首次写入未提交。该标记仅在当前页面会话有效，整页刷新后仍应先核对服务端记录，不能把刷新当作未提交证明。已保存定时任务仍固定原版本，修改编辑器不会改写已有任务。生成的纸面委托草案可查看股票、股数、金额、成本和退出约束，不会自动加入“复盘模拟”的账户。
 
-模拟账户加入策略或生成运行后初始资金冻结，仍可用“保存默认成本”调整后续默认配置；历史运行保持不可变。已进入运行的策略不能删除，无持仓并不代表可以删除其历史身份。
+模拟账户加入策略或生成运行后初始资金冻结，仍可用“保存默认成本”调整后续默认配置；并发运行先保存成功时，资金修改会拒绝并要求按当前账户状态操作。历史运行保持不可变。已进入运行的策略不能删除，无持仓并不代表可以删除其历史身份。
 
 ## 筛选方案和变化记录
 

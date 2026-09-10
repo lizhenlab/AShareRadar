@@ -32,6 +32,7 @@ from app.services.datahub_source_plan import SourcePlanBuilder
 from app.services.datahub_quotes import QuoteCoordinator
 from app.services.datahub_runtime import PROVIDER_SHUTDOWN_TIMEOUT_SECONDS, ProviderRuntime
 from app.services.workbench_context import WorkbenchContextCache
+from app.services.fuyao_service import FuyaoService
 from app.services.datahub_status_service import DataStatusService
 from app.services.llm_explainer import llm_available as llm_settings_available
 from app.services.provider_registry import (
@@ -119,6 +120,9 @@ class DataHub:
         self.workbench_contexts = workbench_contexts if workbench_contexts is not None else WorkbenchContextCache()
         self.providers = build_providers(self.settings)
         self._provider_runtime = ProviderRuntime(self.cache, self.settings)
+        self.fuyao = FuyaoService(self.settings, self._provider_runtime)
+        if self.settings.fuyao_enabled:
+            self.providers["fuyao"] = self.fuyao
         self._providers_closed = False
         self._closed_providers: list[object] = []
         self._provider_close_task: asyncio.Task[bool] | None = None
@@ -305,6 +309,8 @@ class DataHub:
         return task
 
     async def _close_providers_after_runtime_quiesces(self) -> bool:
+        if not self._provider_was_closed(self.fuyao):
+            await self._close_provider_once(self.fuyao)
         while not await self._provider_runtime.aclose(timeout=PROVIDER_SHUTDOWN_TIMEOUT_SECONDS):
             pass
         pending = [

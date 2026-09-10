@@ -1,3 +1,5 @@
+import { formatAuditTimestamp } from "./audit-time.js";
+
 export const DEFAULT_CHART_ROW_LIMIT = 60;
 
 const CHART_PADDING = Object.freeze({ left: 46, right: 16, top: 18, bottom: 28 });
@@ -452,6 +454,8 @@ function drawEventLabels(ctx, data, width, height, padding) {
 
 function eventTimeLabel(value) {
   const text = eventTimeText(value);
+  const marketTime = formatAuditTimestamp(text, { includeSeconds: false, fallback: "" });
+  if (marketTime && /[T ]\d{2}:\d{2}/.test(text)) return marketTime.slice(5);
   const match = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2}))?/);
   if (!match) return text.slice(0, 16);
   const date = `${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import sqlite3
+from sys import float_info
 import threading
 from typing import TYPE_CHECKING, cast
 
@@ -29,6 +30,7 @@ from app.utils.market_data import (
 )
 from app.utils.audit_time import audit_datetime_to_text, audit_now_text, audit_time_window, parse_audit_time
 from app.utils.market_time import market_local_naive
+from app.utils.minute_kline_identity import deduplicate_minute_klines
 from app.utils.daily_kline_identity import deduplicate_daily_klines
 from app.utils.symbols import standard_symbol
 
@@ -113,13 +115,6 @@ _DAILY_SPEC = _KlineCacheSpec(
 )
 DAILY_KLINE_RETENTION_PARTITION = ("symbol", "adjustment_mode")
 DAILY_KLINE_RETENTION_ORDER_BY = "date DESC"
-_MINUTE_SPEC = _KlineCacheSpec(
-    table="kline_minute",
-    columns=MINUTE_KLINE_COLUMNS,
-    conflict_columns=("symbol", "interval", "timestamp"),
-    lookup_columns=("symbol", "interval"),
-    order_column="timestamp",
-)
 _KLINE_REQUIRED_FINITE_COLUMNS = ("open", "close", "high", "low", "volume")
 _MINUTE_OPTIONAL_FINITE_COLUMNS = ("amount", "turnover_rate")
 
@@ -250,7 +245,7 @@ class MarketKlineRepositoryMixin:
         return grouped
 
     def save_minute_klines(self, symbol: str, interval: str, rows: list[MinuteKline], source: str) -> None:
-        valid_rows = filter_valid_minute_klines(rows)
+        valid_rows = deduplicate_minute_klines(rows)
         if not valid_rows:
             return
         normalized = standard_symbol(symbol)
@@ -275,9 +270,18 @@ class MarketKlineRepositoryMixin:
         )
         self._save_kline_rows(_MINUTE_INSERT_SQL, payload)
 
-    def get_minute_klines(self, symbol: str, interval: str, limit: int, max_age_seconds: int) -> list[MinuteKline]:
+    def get_minute_klines(
+        self, symbol: str, interval: str, limit: int, max_age_seconds: int, *, as_of: datetime | None = None,
+    ) -> list[MinuteKline]:
+        if limit <= 0:
+            return []
+        window = _market_time_window(max_age_seconds)
+        if window is None:
+            return []
         normalized = standard_symbol(symbol)
-        rows = self._latest_kline_rows(_MINUTE_SPEC, (normalized, interval), limit, max_age_seconds)
+        cutoff = market_local_naive(as_of).isoformat(timespec="microseconds") if as_of is not None else None
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(_MINUTE_LATEST_ROWS_SQL, (normalized, interval, *window, cutoff, cutoff, limit)).fetchall()
         return filter_valid_minute_klines(row_to_minute_kline(row) for row in rows if _valid_raw_minute_kline_row(row))
 
     def _save_kline_rows(self, sql: str, rows: Iterable[tuple[object, ...]]) -> None:
@@ -675,7 +679,46 @@ def _validated_adjustment_mode(value: object) -> KlineAdjustmentMode:
 
 
 _DAILY_INSERT_SQL = _upsert_sql(_DAILY_SPEC)
-_MINUTE_INSERT_SQL = _upsert_sql(_MINUTE_SPEC)
+# Minute observations have no referring foreign keys; replacement also advances
+# the rowid tie-breaker when an existing timestamp alias is written again.
+_MINUTE_INSERT_SQL = (
+    f"INSERT OR REPLACE INTO kline_minute ({_column_names(MINUTE_KLINE_COLUMNS)}) "
+    f"VALUES ({_placeholders(MINUTE_KLINE_COLUMNS)})"
+)
+_MINUTE_VALID_NUMBERS_SQL = " AND ".join(
+    [f"{column} BETWEEN 0 AND {float_info.max!r}" for column in _KLINE_REQUIRED_FINITE_COLUMNS]
+    + [f"({column} IS NULL OR {column} BETWEEN 0 AND {float_info.max!r})" for column in _MINUTE_OPTIONAL_FINITE_COLUMNS]
+)
+_MINUTE_LATEST_ROWS_SQL = f"""
+    WITH observations AS MATERIALIZED (
+        SELECT {_column_names(MINUTE_KLINE_COLUMNS)}, rowid AS observation_id,
+               ashare_audit_epoch(fetched_at) AS observed_at
+        FROM kline_minute
+        WHERE symbol = ? AND interval = ?
+          AND {_MINUTE_VALID_NUMBERS_SQL}
+          AND open > 0 AND close > 0 AND high > 0 AND low > 0
+          AND high >= MAX(open, close) AND low <= MIN(open, close)
+    ), timed AS MATERIALIZED (
+        SELECT *, ashare_minute_time(timestamp) AS event_time
+        FROM observations
+        WHERE observed_at BETWEEN ashare_audit_epoch(?) AND ashare_audit_epoch(?)
+    )
+    SELECT {_column_names(MINUTE_KLINE_COLUMNS)} FROM (
+        SELECT * FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY event_time
+                       ORDER BY observed_at DESC, observation_id DESC
+                   ) AS observation_rank
+            FROM timed
+            WHERE event_time IS NOT NULL AND (? IS NULL OR event_time <= ?)
+        )
+        WHERE observation_rank = 1
+        ORDER BY event_time DESC
+        LIMIT ?
+    )
+    ORDER BY event_time ASC
+"""
 
 
 __all__ = ["MarketKlineRepositoryMixin"]

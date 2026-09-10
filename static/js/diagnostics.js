@@ -25,6 +25,7 @@ export const MONITORING_ENDPOINTS = Object.freeze([
 ]);
 
 export async function loadMonitoring(state, options = {}) {
+  if (options.isVisible && !options.isVisible()) return false;
   const requestId = Number(state.monitorSeq || 0) + 1;
   state.monitorSeq = requestId;
   const request = createRequestScope(state.monitorRequest, options.signal);
@@ -42,7 +43,7 @@ export async function loadMonitoring(state, options = {}) {
     const eventsLoaded = renderMonitorEventsResult(eventsResult);
     return statusLoaded && runsLoaded && eventsLoaded;
   } finally {
-    if (isCurrent()) maintainMonitorTimer(state);
+    if (isCurrent()) maintainMonitorTimer(state, options);
     finishRequest(state, "monitorRequest", request);
   }
 }
@@ -52,6 +53,7 @@ function isCurrentMonitoringRequest(state, requestId, request, options) {
     state.monitorSeq === requestId &&
     state.monitorRequest === request &&
     !request.signal.aborted &&
+    (!options.isVisible || options.isVisible()) &&
     (!options.isCurrent || options.isCurrent())
   );
 }
@@ -113,17 +115,20 @@ function renderRefreshFailure(targetId, className, error) {
   target.innerHTML += `<div class="${className}" data-refresh-warning="true"><strong>刷新失败，显示上次成功结果</strong><span>${escapeHtml(errorMessage(error))}；请稍后刷新重试。</span></div>`;
 }
 
-function maintainMonitorTimer(state) {
-  if (state.monitorTimer && document.hidden) {
+function maintainMonitorTimer(state, options = {}) {
+  const visible = () => !document.hidden && (!options.isVisible || options.isVisible());
+  if (state.monitorTimer && !visible()) {
     clearInterval(state.monitorTimer);
     state.monitorTimer = null;
     return;
   }
-  if (!state.monitorTimer && !document.hidden) {
-    state.monitorTimer = setInterval(
-      () => loadMonitoring(state, { force: true }),
-      MONITORING_REFRESH_INTERVAL_MS
-    );
+  if (!state.monitorTimer && visible()) {
+    const timer = setInterval(() => {
+      if (state.monitorTimer !== timer) return;
+      if (!visible()) { clearInterval(timer); state.monitorTimer = null; return; }
+      void loadMonitoring(state, { force: true, isVisible: options.isVisible });
+    }, MONITORING_REFRESH_INTERVAL_MS);
+    state.monitorTimer = timer;
   }
 }
 
@@ -153,7 +158,7 @@ export async function runMonitorTask(state, task, options = {}) {
     });
     if (!isCurrent()) return false;
     invalidateMonitoringCache();
-    await loadMonitoring(state, { force: true, signal: request.signal, isCurrent });
+    await loadMonitoring(state, { force: true, signal: request.signal, isCurrent, isVisible: options.isVisible });
     if (!isCurrent()) return false;
     completed = true;
     return true;

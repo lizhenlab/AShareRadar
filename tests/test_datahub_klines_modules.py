@@ -1060,9 +1060,11 @@ def test_kline_coordinator_offloads_daily_and_minute_cache_io() -> None:
             interval: str,
             limit: int,
             max_age_seconds: int,
+            *,
+            as_of: datetime | None = None,
         ) -> list[MinuteKline]:
             self._track("get_minute_klines")
-            return super().get_minute_klines(symbol, interval, limit, max_age_seconds)
+            return super().get_minute_klines(symbol, interval, limit, max_age_seconds, as_of=as_of)
 
         def save_minute_klines(
             self,
@@ -2634,7 +2636,9 @@ def test_kline_cache_limits_recent_rows_before_filtering_and_returns_chronologic
         minute_rows = cache.get_minute_klines("600519.SH", "5m", limit=3, max_age_seconds=10**9)
 
     assert [item.date for item in daily_rows] == ["2026-05-11", "2026-05-13"]
-    assert [item.timestamp for item in minute_rows] == ["2026-05-13 10:05:00", "2026-05-13 10:15:00"]
+    assert [item.timestamp for item in minute_rows] == [
+        "2026-05-13 10:00:00", "2026-05-13 10:05:00", "2026-05-13 10:15:00",
+    ]
 
 
 def test_kline_cache_rejects_future_fetch_timestamps() -> None:

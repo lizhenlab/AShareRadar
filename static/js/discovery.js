@@ -526,28 +526,50 @@ export function createDiscoveryController(options = {}) {
   }
 
   async function allFilteredSymbols(applied) {
-    const symbols = [];
-    const totalPages = Math.max(1, applied.pageCount);
-    for (let page = 1; page <= totalPages; page += 1) {
-      requireCurrentApplied(applied);
-      const payload = normalizeDiscoveryLeaderboard(await request(
-        `/api/discovery/presets/${encodeURIComponent(applied.preset.id)}/apply`,
-        requestOptions({
-          method: "POST",
-          body: JSON.stringify({ run_id: applied.runId, page, page_size: marketScanPageSize(elements) }),
-        })
-      ));
-      if (
-        payload.run_id !== applied.runId
-        || payload.preset.id !== applied.preset.id
-        || payload.preset.revision !== applied.preset.revision
-      ) {
-        throw new Error("筛选方案或榜单批次已变化，请重新应用方案");
+    const pageSize = marketScanPageSize(elements);
+    const identity = beginAppliedRequest(applied.preset, { id: applied.runId });
+    try {
+      const first = await readFilteredPage(applied, identity, 1, pageSize);
+      const symbols = first.items.map(item => item.symbol);
+      for (let page = 2; page <= first.page_count; page += 1) {
+        const payload = await readFilteredPage(applied, identity, page, pageSize, first);
+        symbols.push(...payload.items.map(item => item.symbol));
       }
-      symbols.push(...payload.items.map((item) => item.symbol));
-      setFeedback(`正在读取当前筛选结果：${Math.min(symbols.length, payload.total)}/${payload.total}`);
+      if (symbols.length !== first.total || new Set(symbols).size !== first.total) {
+        throw new Error("完整筛选结果存在重复或缺失股票，请重新应用方案");
+      }
+      return symbols;
+    } finally {
+      finishAppliedRequest(identity);
     }
-    return symbols;
+  }
+
+  async function readFilteredPage(applied, identity, page, pageSize, first = null) {
+    requireCurrentApplied(applied);
+    const payload = normalizeDiscoveryLeaderboard(await request(
+      `/api/discovery/presets/${encodeURIComponent(applied.preset.id)}/apply`,
+      requestOptions({
+        method: "POST", signal: identity.controller.signal,
+        body: JSON.stringify({ run_id: applied.runId, page, page_size: pageSize }),
+      })
+    ));
+    requireCurrentApplied(applied);
+    validateFilteredPage(payload, applied, page, pageSize, first);
+    setFeedback(`正在读取当前筛选结果：${Math.min(page * pageSize, payload.total)}/${payload.total}`);
+    return payload;
+  }
+
+  function validateFilteredPage(payload, applied, page, pageSize, first) {
+    if (payload.run_id !== applied.runId || payload.preset.id !== applied.preset.id
+      || payload.preset.revision !== applied.preset.revision
+      || payload.rule_version !== applied.payload.rule_version) {
+      throw new Error("筛选方案或榜单批次已变化，请重新应用方案");
+    }
+    if (payload.page !== page || payload.page_size !== pageSize
+      || payload.total !== (first?.total ?? applied.payload.total)
+      || (first && payload.page_count !== first.page_count)) {
+      throw new Error("完整筛选结果分页与请求不一致，请重新应用方案");
+    }
   }
 
   function requireCurrentApplied(applied) {

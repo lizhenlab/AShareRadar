@@ -4,6 +4,7 @@ import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 import { toggleInlineEditor } from "./inline-editor.js";
 import { createStockPanelRequestOwner } from "./stock-panel-requests.js";
+import { alertEditorSubmission, ownsAlertEditorSubmission, preserveAlertEditors, reconcileAlertEditorSave, restoreAlertEditors } from "./alert-editor-state.js";
 
 const requests = createStockPanelRequestOwner({ readPrefix: "alertsRead", mutationPrefix: "alertMutation" });
 
@@ -122,6 +123,7 @@ export async function removeAlertRule(state, ruleId, options = {}) {
 }
 
 export async function updateAlertRule(state, ruleId, payload, options = {}) {
+  const submitted = alertEditorSubmission(options.alertForm);
   const request = requests.beginMutation(state, options);
   try {
     const responseItem = await fetchJson(`/api/alerts/${encodeURIComponent(ruleId)}`, requestOptions(request, {
@@ -130,6 +132,7 @@ export async function updateAlertRule(state, ruleId, payload, options = {}) {
       body: JSON.stringify(payload),
     }));
     if (!request.isCurrent()) return false;
+    reconcileAlertEditorSave(options.alertForm, submitted, { ...payload, ...objectRecord(responseItem) });
     const locallyReconciled = reconcileAlertRuleUpdate(ruleId, responseItem, payload);
     return await finishAlertMutation(state, request, {
       actionLabel: alertUpdateActionLabel(payload),
@@ -137,6 +140,7 @@ export async function updateAlertRule(state, ruleId, payload, options = {}) {
     });
   } catch (error) {
     if (isAbortError(error) || !request.isCurrent()) return false;
+    if (options.alertForm && !ownsAlertEditorSubmission(options.alertForm, submitted)) return false;
     throw error;
   } finally {
     requests.finishMutation(state, request);
@@ -340,8 +344,10 @@ function releaseAlertEvaluationRequest(state, request) {
 }
 
 export function renderAlerts(items) {
+  const target = $("alertList");
+  const editors = preserveAlertEditors(target, renderedAlertRules, items);
   renderedAlertRules = items.map((item) => ({ ...item }));
-  $("alertList").innerHTML = items.length
+  target.innerHTML = items.length
     ? items
         .map(
           (item, index) => {
@@ -368,6 +374,7 @@ export function renderAlerts(items) {
         )
         .join("")
     : `<div class="alert-row"><strong>暂无预警</strong><span>添加价格、涨跌幅或趋势评分提醒。</span></div>`;
+  restoreAlertEditors(target, editors);
 }
 
 function renderAlertEditor(item, editorId) {
@@ -419,6 +426,8 @@ export function alertRuleUpdatesFromForm(form) {
 }
 
 export function toggleAlertRuleEditor(button, forceOpen) {
+  const form = button?.closest?.(".alert-row")?.querySelector?.(".alert-edit-form");
+  if (form?.dataset) form.dataset.alertEditEpoch = String(Number(form.dataset.alertEditEpoch || 0) + 1);
   return toggleInlineEditor(
     button,
     { row: ".alert-row", form: ".alert-edit-form", button: "[data-alert-edit]" },

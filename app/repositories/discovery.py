@@ -114,7 +114,7 @@ class DiscoveryRepository(SQLiteRepository):
 
     def presets(self, *, page: int, page_size: int) -> tuple[list[DiscoveryPreset], int]:
         offset = (page - 1) * page_size
-        with self._lock, self._connect() as conn:
+        with self._lock, self._read_snapshot() as conn:
             total = int(conn.execute("SELECT COUNT(*) FROM discovery_preset").fetchone()[0])
             rows = conn.execute(
                 """

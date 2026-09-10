@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -159,8 +160,35 @@ def test_dependabot_covers_all_dependency_ecosystems() -> None:
     assert ecosystems == {"pip", "npm", "github-actions"}
 
 
+@pytest.mark.parametrize("suffix", ["A" * 20, "z" * 32, "0" * 24, "_-" * 16])
+def test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults(suffix: str) -> None:
+    config = tomllib.loads(_read(".gitleaks.toml"))
+
+    assert config["extend"]["useDefault"] is True
+    rule = next(rule for rule in config["rules"] if rule["id"] == "fuyao-api-key")
+    prefix = "-".join(("sk", "fuyao", ""))
+    pattern = re.compile(rule["regex"])
+    assert pattern.fullmatch(prefix + suffix)
+    assert pattern.search(prefix + "short-placeholder") is None
+    assert pattern.search(prefix + "A" * 19) is None
+    assert prefix in rule["keywords"]
+    assert "allowlists" not in config
+    assert "allowlists" not in rule
+
+
+def test_security_workflow_keeps_automatic_repository_gitleaks_config() -> None:
+    security = _read(".github/workflows/security.yml")
+    commands = " ".join(security.split())
+
+    assert "GITLEAKS_CONFIG" not in security
+    assert "--config" not in security
+    assert "--redact=100 --timeout=120 ." in commands
+    assert "--log-opts=--all ." in commands
+
+
 def test_supply_chain_files_contain_no_machine_specific_paths() -> None:
     paths = [
+        ".gitleaks.toml",
         ".github/workflows/ci.yml",
         ".github/workflows/security.yml",
         ".github/dependabot.yml",

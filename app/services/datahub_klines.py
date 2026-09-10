@@ -43,9 +43,10 @@ from app.utils.provider_errors import (
 from app.services.provider_utils import ensure_positive_limit
 from app.services.data_quality_time import expected_quote_date, latest_expected_daily_kline_date
 from app.services.trading_calendar import is_trading_day
-from app.utils.market_data import filter_valid_klines, filter_valid_minute_klines, valid_kline
+from app.utils.market_data import filter_valid_klines, valid_kline
 from app.utils.daily_kline_identity import deduplicate_daily_klines
 from app.utils.market_time import market_local_naive, market_now_naive
+from app.utils.minute_kline_identity import deduplicate_minute_klines
 from app.utils.symbols import normalize_symbol
 
 
@@ -581,6 +582,7 @@ class KlineCoordinator:
             normalized_interval,
             limit,
             max_age_seconds=60 * 60 * 6,
+            as_of=current,
         )
         if fallback:
             await _safe_log_kline_event(self.cache, "fallback", f"分钟K线数据源失败或无覆盖，使用缓存分钟K线：{symbol}")
@@ -1028,7 +1030,7 @@ def _contract_as_of_key(value: object) -> datetime:
 
 
 def _latest_minute_klines(rows: list[MinuteKline], limit: int) -> list[MinuteKline]:
-    return _latest_rows(filter_valid_minute_klines(rows or []), limit, key=lambda row: row.timestamp)
+    return deduplicate_minute_klines(rows or [])[-limit:]
 
 
 def _latest_rows(rows: list[T], limit: int, *, key: Callable[[T], object]) -> list[T]:

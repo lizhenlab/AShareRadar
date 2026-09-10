@@ -1,4 +1,4 @@
-import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS, createRequestScope, fetchJson, isAbortError } from "./api.js";
 import { $, escapeHtml } from "./dom.js";
 import { formatNumber } from "./format.js";
 
@@ -58,6 +58,7 @@ export async function loadPaperTradingDashboard(state, options = {}) {
 }
 
 function beginPaperDashboardOperation(state) {
+  cancelPaperTradingComparison(state);
   const sequence = Number(state.paperTradingSeq || 0) + 1;
   state.paperTradingSeq = sequence;
   return () => state.paperTradingSeq === sequence;
@@ -65,6 +66,7 @@ function beginPaperDashboardOperation(state) {
 
 async function loadPaperDashboard(state, options, isCurrent) {
   if (!isCurrent() || options.signal?.aborted) return false;
+  cancelPaperTradingComparison(state);
   renderPaperLoading();
   try {
     const runId = Number(options.runId || 0);
@@ -158,15 +160,38 @@ export async function comparePaperTradingRuns(state) {
   const leftRunId = positiveNumber($("paperCompareLeft")?.value, "请选择左侧运行");
   const rightRunId = positiveNumber($("paperCompareRight")?.value, "请选择右侧运行");
   if (leftRunId === rightRunId) throw new Error("请选择两个不同运行");
-  const comparison = await fetchJson(
-    `/api/paper-trading/runs/compare?left_run_id=${encodeURIComponent(leftRunId)}&right_run_id=${encodeURIComponent(rightRunId)}`,
-    { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }
-  );
-  requireRunComparison(comparison, leftRunId, rightRunId);
-  state.paperTradingComparison = comparison;
-  renderRunComparison(comparison);
-  setPaperFeedback(`已比较运行 #${leftRunId} 与 #${rightRunId}`, "ok");
-  return comparison;
+  const scope = createRequestScope(state.paperTradingComparisonScope);
+  state.paperTradingComparisonScope = scope;
+  const dashboardSequence = Number(state.paperTradingSeq || 0);
+  const isCurrent = () => state.paperTradingComparisonScope === scope && !scope.signal.aborted
+    && Number(state.paperTradingSeq || 0) === dashboardSequence
+    && Number($("paperCompareLeft")?.value) === leftRunId && Number($("paperCompareRight")?.value) === rightRunId;
+  try {
+    const comparison = await fetchJson(
+      `/api/paper-trading/runs/compare?left_run_id=${encodeURIComponent(leftRunId)}&right_run_id=${encodeURIComponent(rightRunId)}`,
+      { signal: scope.signal, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS }
+    );
+    if (!isCurrent()) return false;
+    requireRunComparison(comparison, leftRunId, rightRunId);
+    state.paperTradingComparison = comparison;
+    renderRunComparison(comparison);
+    setPaperFeedback(`已比较运行 #${leftRunId} 与 #${rightRunId}`, "ok");
+    return comparison;
+  } catch (error) {
+    if (isAbortError(error) || !isCurrent()) return false;
+    throw error;
+  } finally {
+    if (state.paperTradingComparisonScope === scope) state.paperTradingComparisonScope = null;
+    scope.dispose();
+  }
+}
+
+export function cancelPaperTradingComparison(state) {
+  const scope = state.paperTradingComparisonScope;
+  if (!scope) return false;
+  state.paperTradingComparisonScope = null;
+  scope.abort();
+  return true;
 }
 
 export async function deletePaperStrategy(state, strategyId, options = {}) {

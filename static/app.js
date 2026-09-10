@@ -3,6 +3,7 @@ import { bindStockNoteAlertEvents } from "./js/stock-note-alert-events.js";
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   GLOBAL_DATA_TTL_MS,
+  cancelCachedJsonRequest,
   createRequestScope,
   fetchCachedJson,
   fetchJson,
@@ -33,17 +34,20 @@ import {
   loadMonitoring,
   loadSystemDiagnostics,
   runMonitorTask,
+  SYSTEM_DIAGNOSTICS_ENDPOINT,
 } from "./js/diagnostics.js";
 import { $, escapeHtml, setMetricTone } from "./js/dom.js";
 import { createDiscoveryController } from "./js/discovery.js";
 import { createDiscoveryScreenAlertsController } from "./js/discovery-screen-alerts.js";
 import { createIndividualProbabilityController } from "./js/individual-probability-controller.js";
+import { createFuyaoController } from "./js/fuyao-controller.js";
 import { createMarketScanExecutableShadowController } from "./js/market-scan-executable-shadow-controller.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
 import { createMarketScanController } from "./js/market-scan.js";
 import { createStrategyLabController } from "./js/strategy-lab.js";
 import {
+  cancelPaperTradingComparison,
   comparePaperTradingRuns,
   createPaperStrategy,
   deletePaperStrategy,
@@ -290,6 +294,7 @@ function setPrimaryView(view, options = {}) {
     persistWorkspacePreferences();
   }
   syncWorkbenchSurface();
+  syncDiagnosticsWorkspace();
   if (previousView !== target && state.lastAnalysis) requestAnimationFrame(redrawResearchCharts);
   if (target === "review" && previousView !== target) {
     void loadAdviceReviewDashboard(state).then(() => syncPaperTradingPlans(state));
@@ -331,13 +336,16 @@ function setWorkspaceView(view, options = {}) {
   const surfaceChanged = marketScanController.setSurfaceActive(surfaceActive);
   discoveryScreenAlertsController.setSurfaceActive(surfaceActive);
   persistWorkspacePreferences();
+  syncDiagnosticsWorkspace();
   if (surfaceActive && previousView !== target) {
     if (!marketScanController.state.activated) void marketScanController.activate();
     else if (!surfaceChanged && options.refreshMarketScan !== false) void marketScanController.loadLatest();
     void discoveryController.activate();
     void strategyLabController.activate();
   }
-  if (target === "data") void loadRuntimeCleanupPreview().catch(() => {});
+  fuyaoController.setWorkspace(target);
+  if (target === "data") void fuyaoController.loadData();
+  if (target === "finance") void fuyaoController.loadStock();
   if (target === "paper" && previousView !== target) void loadPaperTradingDashboard(state);
   syncWorkbenchSurface();
   const analysis = state.lastAnalysis;
@@ -508,6 +516,7 @@ async function loadCurrentWorkbench(request) {
 function renderCurrentWorkbench(workbench, request) {
   try {
     renderWorkbench(workbench);
+    if (state.workspaceView === "finance") void fuyaoController.loadStock(request.symbol);
     if (state.pendingLoad === request) state.pendingLoad = null;
     if (request.reveal) revealMobileFeedback($("stockCode"));
     return true;
@@ -544,11 +553,36 @@ function refreshGlobalPanels(options = {}) {
   return {
     dataStatus: refreshDataStatus(refreshOptions),
     market: loadMarketPanels(refreshOptions),
-    monitoring: refreshMonitoring(refreshOptions),
     plates: loadPlateRank(refreshOptions),
     watchlist: refreshWatchlist(refreshOptions),
-    diagnostics: loadSystemDiagnostics(state, refreshOptions),
+    ...refreshDiagnosticsPanels(refreshOptions),
   };
+}
+
+function isDiagnosticsWorkspaceActive() {
+  return !document.hidden && state.primaryView === "system" && state.workspaceView === "diagnostics";
+}
+
+function refreshDiagnosticsPanels(options = {}) {
+  if (!isDiagnosticsWorkspaceActive()) return {};
+  return {
+    monitoring: refreshMonitoring(options),
+    diagnostics: loadSystemDiagnostics(state, { ...options, isCurrent: isDiagnosticsWorkspaceActive }),
+  };
+}
+
+function syncDiagnosticsWorkspace() {
+  const active = isDiagnosticsWorkspaceActive();
+  if (state.diagnosticsSurfaceActive === active) return;
+  state.diagnosticsSurfaceActive = active;
+  if (active) { void Promise.allSettled(Object.values(refreshDiagnosticsPanels({ force: true }))); return; }
+  clearInterval(state.monitorTimer);
+  state.monitorTimer = null;
+  cancelMonitoringRefresh(state);
+  state.systemDiagnosticsRequest?.abort();
+  cancelCachedJsonRequest(SYSTEM_DIAGNOSTICS_ENDPOINT);
+  clearAuxiliaryFailure("monitoring");
+  state.visibilityRefreshSources.delete("monitoring");
 }
 
 function beginLoadRequest(options = {}) {
@@ -597,6 +631,7 @@ function isStaleLoad(request) {
 function setActiveSymbol(symbol) {
   notificationNavigation?.cancel();
   state.symbol = normalizeUiSymbol(symbol);
+  fuyaoController.resetStock(state.symbol);
   renderCurrentAnalysisContext(null);
   stockSearchSurface.closeSuggestions();
   syncSymbolInputs(state.symbol);
@@ -982,17 +1017,16 @@ function syncResponseCapabilities(capabilities = {}) {
 }
 
 async function refreshMonitoring(options = {}) {
+  if (!isDiagnosticsWorkspaceActive()) return false;
   const pending = loadMonitoring(state, {
     force: Boolean(options.force),
     ttlMs: GLOBAL_REFRESH_TTL_MS,
+    isCurrent: isDiagnosticsWorkspaceActive,
+    isVisible: isDiagnosticsWorkspaceActive,
   });
   const requestId = state.monitorSeq;
   const loaded = await pending;
-  if (requestId !== state.monitorSeq) return false;
-  if (document.hidden) {
-    state.visibilityRefreshSources.add("monitoring");
-    return false;
-  }
+  if (requestId !== state.monitorSeq || !isDiagnosticsWorkspaceActive()) return false;
   if (loaded && !monitoringPanelsFailed()) {
     clearAuxiliaryFailure("monitoring");
     state.visibilityRefreshSources.delete("monitoring");
@@ -2343,6 +2377,8 @@ const marketScanExecutableShadowController = createMarketScanExecutableShadowCon
   getCurrentRun: () => marketScanController.state.publishedRun || marketScanController.state.run,
 });
 const individualProbabilityController = createIndividualProbabilityController();
+const fuyaoController = createFuyaoController({ getSymbol: () => state.symbol });
+fuyaoController.bind();
 
 const discoveryScreenAlertsController = createDiscoveryScreenAlertsController();
 const discoveryController = createDiscoveryController({
@@ -2429,6 +2465,10 @@ $("comparePaperRuns").addEventListener("click", async (event) => {
     onError: (error) => setInlineFeedback("paperTradingFeedback", error),
   });
 });
+
+for (const id of ["paperCompareLeft", "paperCompareRight"]) {
+  $(id).addEventListener("change", () => cancelPaperTradingComparison(state));
+}
 
 $("watchlistScanForm").addEventListener("change", (event) => {
   if (event.target.matches?.('input[name="scanUniverse"]')) {
@@ -2698,6 +2738,12 @@ $("runRuntimeCleanup").addEventListener("click", async () => {
   );
 });
 
+$("refreshRuntimeCleanupPreview").addEventListener("click", async () => {
+  await runButtonTask($("refreshRuntimeCleanupPreview"), () => loadRuntimeCleanupPreview(), {
+    onError: (error) => setInlineFeedback("localDataFeedback", error),
+  });
+});
+
 $("markFilters").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-mark-category]");
   if (!button) return;
@@ -2716,7 +2762,7 @@ $("markFilters").addEventListener("click", (event) => {
 document.querySelector(".monitor-actions").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-task]");
   if (!button) return;
-  await runMonitorTask(state, button.dataset.task);
+  await runMonitorTask(state, button.dataset.task, { isCurrent: isDiagnosticsWorkspaceActive, isVisible: isDiagnosticsWorkspaceActive });
   revealMobileFeedback($("schedulerState"));
 });
 
@@ -2785,6 +2831,7 @@ export const __appTest = {
   strategyLabController,
   marketScanExecutableShadowController,
   individualProbabilityController,
+  fuyaoController,
   discoveryController,
 };
 

@@ -2113,13 +2113,14 @@ def test_three_stock_loads_keep_global_requests_cached_across_stock_switches() -
         http: item.http - (snapshots[index - 1]?.http || 0),
         sse: item.sse - (snapshots[index - 1]?.sse || 0),
       }));
-      if (JSON.stringify(deltas) !== JSON.stringify([{ http: 13, sse: 1 }, { http: 4, sse: 1 }, { http: 4, sse: 1 }])) {
+      if (JSON.stringify(deltas) !== JSON.stringify([{ http: 9, sse: 1 }, { http: 4, sse: 1 }, { http: 4, sse: 1 }])) {
         throw new Error(`request deltas exceeded the expected global/stock budget: ${JSON.stringify(deltas)}`);
       }
 
       for (const endpoint of __appTest.GLOBAL_ENDPOINTS) {
         const count = fetchCalls.filter((url) => url === endpoint).length;
-        if (count !== 1) throw new Error(`global endpoint ${endpoint} fetched ${count} times`);
+        const diagnostic = endpoint.startsWith("/api/tasks/") || endpoint.startsWith("/api/monitor/") || endpoint === "/api/system/diagnostics";
+        if (count !== (diagnostic ? 0 : 1)) throw new Error(`global endpoint ${endpoint} fetched ${count} times`);
       }
       const stockKinds = {
         advice: (url) => url.startsWith("/api/advice/timeline"),
@@ -2166,6 +2167,10 @@ def test_stock_switch_does_not_abort_or_duplicate_inflight_global_requests() -> 
       const globalCalls = new Map();
       const globalResolvers = new Map();
       const globalSignals = new Map();
+      const deferredDiagnostics = new Set([
+        "/api/tasks/status", "/api/tasks/runs?limit=8", "/api/monitor/events?limit=8", "/api/system/diagnostics",
+      ]);
+      const visibleEndpoints = __appTest.GLOBAL_ENDPOINTS.filter((endpoint) => !deferredDiagnostics.has(endpoint));
       globalThis.fetch = (url, options = {}) => {
         const target = String(url);
         if (globalEndpoints.has(target)) {
@@ -2188,14 +2193,17 @@ def test_stock_switch_does_not_abort_or_duplicate_inflight_global_requests() -> 
 
       __appTest.setActiveSymbol("600519");
       const firstLoad = __appTest.loadAll();
-      await waitFor(() => globalResolvers.size === __appTest.GLOBAL_ENDPOINTS.length, "cold global requests");
+      await waitFor(() => globalResolvers.size === visibleEndpoints.length, "cold visible global requests");
       __appTest.setActiveSymbol("000001");
       const secondLoad = __appTest.loadAll();
       await Promise.resolve();
 
-      for (const endpoint of __appTest.GLOBAL_ENDPOINTS) {
+      for (const endpoint of visibleEndpoints) {
         if (globalCalls.get(endpoint) !== 1) throw new Error(`${endpoint} was duplicated during stock switch`);
         if (globalSignals.get(endpoint)?.aborted) throw new Error(`${endpoint} was aborted by stock loadSeq`);
+      }
+      for (const endpoint of deferredDiagnostics) {
+        if (globalCalls.has(endpoint)) throw new Error(`${endpoint} started outside the diagnostics workspace`);
       }
       globalResolvers.forEach((resolve) => resolve());
       await Promise.all([firstLoad, secondLoad]);
