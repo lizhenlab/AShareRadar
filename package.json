@@ -19,6 +19,6 @@
     "check:repo": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/check_repository.py"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1"
+    "@playwright/test": "^1.63.0"
   }
 }
