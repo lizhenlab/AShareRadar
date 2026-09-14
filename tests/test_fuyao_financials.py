@@ -139,6 +139,39 @@ def test_indicators_without_statements_stay_separate_and_units_are_not_guessed()
     assert health.score is None and health.formal_minimum_complete is False
 
 
+@pytest.mark.parametrize("abilities", [[], [{"ability": "growth", "indicators": []}]])
+def test_empty_indicators_do_not_create_a_financial_period(abilities) -> None:
+    payload = {"code": 0, "data": {"thscode": SYMBOL, "report": "2025-4", "abilities": abilities}}
+    bundle = normalize_financials(SYMBOL, {"indicators": payload}, FETCHED)
+    assert bundle.periods == []
+    health = financial_health_from_bundle(bundle)
+    assert health.metrics == [] and health.report_period is None
+    with_statement = normalize_financials(SYMBOL, {"income": _payloads()["income"], "indicators": payload}, FETCHED)
+    assert with_statement == normalize_financials(SYMBOL, {"income": _payloads()["income"]}, FETCHED)
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_blank_indicator_facts_need_a_statement_to_identify_a_financial_period(value) -> None:
+    payload = {"code": 0, "data": {"thscode": SYMBOL, "report": "2025-4", "abilities": [
+        {"ability": "growth", "indicators": [{"index_id": "observed_growth", "value": value}]},
+    ]}}
+    assert normalize_financials(SYMBOL, {"indicators": payload}, FETCHED).periods == []
+    with_statement = normalize_financials(SYMBOL, {"income": _payloads()["income"], "indicators": payload}, FETCHED)
+    observed = next(item for item in with_statement.periods[0].metrics if item.key == "observed_growth")
+    assert observed.value is None and observed.raw_value == value
+
+
+@pytest.mark.parametrize("value,unit", [("0", None), ("0%", "%")])
+def test_zero_indicator_is_a_present_fact_without_statements(value, unit) -> None:
+    payload = {"code": 0, "data": {"thscode": SYMBOL, "report": "2025-4", "abilities": [
+        {"ability": "growth", "indicators": [{"index_id": "observed_growth", "value": value}]},
+    ]}}
+    bundle = normalize_financials(SYMBOL, {"indicators": payload}, FETCHED)
+    assert len(bundle.periods) == 1 and bundle.periods[0].alignment == "indicators_only"
+    fact = bundle.periods[0].metrics[0]
+    assert fact.value == 0 and fact.raw_value == value and fact.unit == unit
+
+
 def test_display_keeps_financial_score_unavailable_and_source_visible() -> None:
     report = financial_health_from_bundle(_bundle())
     assert report.report_period == "2025-12-31"

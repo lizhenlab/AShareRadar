@@ -7,7 +7,7 @@ import re
 from typing import cast
 
 from app.models.fuyao import (
-    FinancialFact, FinancialPeriodRecord, FinancialPeriodType, FinancialReportBundle,
+    FINANCIAL_PARTIAL_WARNING, FinancialFact, FinancialPeriodRecord, FinancialPeriodType, FinancialReportBundle,
     FinancialSourceKind, FinancialSourceRecord,
 )
 from app.services.fuyao_financials_fields import FINANCIAL_WARNINGS, STATEMENT_FIELDS
@@ -37,7 +37,7 @@ def normalize_financials(
     ordered = sorted(periods.values(), key=lambda item: (item.period_end, item.period_type == "annual"), reverse=True)
     warnings = list(FINANCIAL_WARNINGS)
     if any(item.alignment != "complete" for item in ordered):
-        warnings.append("部分报告期三张报表未齐；不同报告期的数据不拼接为同一期结论。")
+        warnings.append(FINANCIAL_PARTIAL_WARNING)
     if not ordered:
         warnings.append("本次成功响应中没有财务记录；不表示公司没有财报。")
     return FinancialReportBundle(symbol=symbol, fetched_at=fetched.isoformat(), periods=ordered, warnings=warnings)
@@ -127,10 +127,16 @@ def _collect_indicators(
     end = date(year, month, day)
     if end > fetched.date():
         raise ValueError("financial indicator period is in the future")
+    facts = financial_indicators(data)
+    if not facts:
+        return
     period_type: FinancialPeriodType = "annual" if quarter == 4 else "quarterly"
     key = end.isoformat(), period_type
-    current = periods.get(key, FinancialPeriodRecord(period_end=end.isoformat(), period_type=period_type, alignment="indicators_only"))
-    facts = financial_indicators(data)
+    current = periods.get(key)
+    if current is None and not any(item.value is not None or (item.raw_value or "").strip() for item in facts):
+        return
+    if current is None:
+        current = FinancialPeriodRecord(period_end=end.isoformat(), period_type=period_type, alignment="indicators_only")
     periods[key] = _revalidate_period(current, {"metrics": [*current.metrics, *facts]})
 
 

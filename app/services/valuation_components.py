@@ -137,12 +137,17 @@ def _apply_current_pe(state: ValuationScoreState, analysis: AnalysisResult) -> N
     if pe is None:
         state.missing.append("PE")
         return
-    clean_pe = finite_float(pe)
+    clean_pe = None if isinstance(pe, bool) else finite_float(pe)
     if clean_pe is None:
         pe_score, _, pe_summary = pe_view(float("nan"))
         state.score += round((pe_score - 50) * 0.35)
         state.evidence.append(f"PE 字段异常：{pe_summary}")
         state.watch_points.append("PE 非有限或脏值时，应优先确认行情源和盈利口径。")
+        state.missing.append("PE")
+        return
+    if clean_pe == 0:
+        state.missing.append("PE")
+        state.evidence.append("PE 为零，缺少有意义的盈利估值口径，按缺失处理。")
         return
     pe_score, _, pe_summary = pe_view(clean_pe)
     state.score += round((pe_score - 50) * 0.35)
@@ -158,12 +163,17 @@ def _apply_current_pb(state: ValuationScoreState, analysis: AnalysisResult) -> N
     if pb is None:
         state.missing.append("PB")
         return
-    clean_pb = finite_float(pb)
+    clean_pb = None if isinstance(pb, bool) else finite_float(pb)
     if clean_pb is None:
         pb_score, _, pb_summary = pb_view(float("nan"))
         state.score += round((pb_score - 50) * 0.25)
         state.evidence.append(f"PB 字段异常：{pb_summary}")
         state.watch_points.append("PB 非有限或脏值时，应优先确认净资产或行情字段。")
+        state.missing.append("PB")
+        return
+    if clean_pb == 0:
+        state.missing.append("PB")
+        state.evidence.append("PB 为零，缺少有意义的净资产估值口径，按缺失处理。")
         return
     pb_score, _, pb_summary = pb_view(clean_pb)
     state.score += round((pb_score - 50) * 0.25)
@@ -207,9 +217,8 @@ def _apply_market_cap(state: ValuationScoreState, analysis: AnalysisResult) -> N
     if market_cap is None:
         state.missing.append("总市值")
         return
-    cap_score, _, cap_summary = market_cap_view(market_cap)
-    state.score += round((cap_score - 50) * 0.12)
-    state.evidence.append(f"总市值 {format_amount_text(market_cap)}：{cap_summary}")
+    _, _, cap_summary = market_cap_view(market_cap)
+    state.evidence.append(f"总市值 {format_amount_text(market_cap)}：{cap_summary} 仅作规模背景，不参与估值评分。")
 
 
 def _apply_industry_context(state: ValuationScoreState, analysis: AnalysisResult) -> None:
@@ -273,8 +282,7 @@ PEER_PERCENTILE_DELTA_RULES = (
 
 
 def valuation_summary(score: int, missing: list[str]) -> str:
-    primary_missing = {"PE", "PB", "总市值"}.intersection(missing)
-    if len(primary_missing) >= 2:
+    if {"PE", "PB"}.issubset(missing):
         return "估值字段不足，暂只能做低证据充分度观察。"
     if score >= 65:
         return "估值压力相对可控，但仍需和趋势确认一起使用。"

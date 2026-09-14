@@ -11,6 +11,7 @@ from uuid import uuid4
 from app.config import Settings
 from app.models.fuyao import FinancialReportBundle
 from app.models.fuyao_research import FuyaoJob, FuyaoJobProgress, FuyaoJobRequest
+from app.models.fuyao_scoring import FuyaoValuationScore
 from app.models.market import ProviderCapability
 from app.repositories.fuyao_research import FuyaoResearchRepository
 from app.services.datahub_runtime import ProviderRuntime
@@ -22,6 +23,7 @@ from app.services.fuyao_observations import canonical_stock, normalized_valuatio
 from app.services.fuyao_job_runtime import ACTIVE_JOB, ACTIVE_STATUSES, FuyaoJobExecution, retry_request
 from app.services.fuyao_sync_control import FuyaoSyncCancelled
 from app.services.fuyao_sectors import canonical_index, fetch_sectors
+from app.services.fuyao_scoring import build_fuyao_valuation_score
 from app.services.lifecycle_cleanup import await_cleanup
 from app.utils.audit_time import audit_now_text
 from app.utils.clock import market_now
@@ -90,8 +92,12 @@ class FuyaoService:
                 "download_hosts_configured": bool(self.settings.fuyao_download_hosts)}
 
     async def financials(self, symbol: str) -> FinancialReportBundle | None:
-        record = await fuyao_io(self.repository.latest, "financials", canonical_stock(symbol))
-        return FinancialReportBundle.model_validate(record.payload["report"]) if record else None
+        return await fuyao_io(self.repository.financials, canonical_stock(symbol))
+
+    async def valuation_score(self, symbol: str, evaluated_at: str) -> FuyaoValuationScore:
+        normalized = canonical_stock(symbol)
+        observation = await fuyao_io(self.repository.latest, "valuations", normalized)
+        return build_fuyao_valuation_score(normalized, observation, evaluated_at)
 
     async def start_job(self, request: FuyaoJobRequest) -> FuyaoJob:
         request = _normalized_request(request)
@@ -251,7 +257,7 @@ class FuyaoService:
     async def _collect_financials(self, job: FuyaoJob, request: FuyaoJobRequest) -> None:
         for symbol in request.symbols:
             try:
-                payload = await fetch_financials(self, symbol, request, audit_now_text())
+                payload = await fetch_financials(self, symbol, request)
                 await self._save_item(job, "financials", symbol, payload)
             except FuyaoError as exc:
                 job.errors.append(f"{symbol}: {_safe_job_error(exc)}")

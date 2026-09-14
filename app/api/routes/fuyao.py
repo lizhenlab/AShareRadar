@@ -12,6 +12,9 @@ from app.models.fuyao_research import FuyaoJob, FuyaoJobRequest
 from app.services.datahub import DataHub
 from app.services.fuyao_dumps import read_dump_status
 from app.services.fuyao_financials import financial_health_from_bundle
+from app.services.fuyao_scoring import build_fuyao_valuation_score
+from app.services.value_research import build_value_research
+from app.utils.audit_time import audit_now_text
 from app.services.fuyao_observations import canonical_stock, valuation_history_summary
 from app.services.fuyao_service import fuyao_io
 
@@ -79,9 +82,12 @@ async def stock_observations(response: Response, symbol: str = Query(...), datah
     valuation = await fuyao_io(service.repository.latest, "valuations", normalized)
     history = await fuyao_io(service.repository.valuation_history, normalized, 100)
     basis = valuation_history_summary([item.model_dump(mode="json") for item in history], valuation.payload) if valuation else None
+    valuation_score = build_fuyao_valuation_score(normalized, valuation, audit_now_text())
     return {"symbol": normalized, "financials": report.model_dump(mode="json") if report else None,
             "financial_health": financial_health_from_bundle(report).model_dump(mode="json") if report else None,
             "valuation": valuation.model_dump(mode="json") if valuation else None, "valuation_history": basis,
+            "valuation_score": valuation_score.model_dump(mode="json"),
+            "value_research": build_value_research(valuation_score, report).model_dump(mode="json"),
             "available": report is not None or valuation is not None, "read_mode": "local_cache_only"}
 
 

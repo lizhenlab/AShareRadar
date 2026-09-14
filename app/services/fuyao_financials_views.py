@@ -19,23 +19,30 @@ def financial_period_label(period: FinancialPeriodRecord) -> str:
     return f"{period.period_end} {kind}"
 
 
+def financial_period_provenance(bundle: FinancialReportBundle, period: FinancialPeriodRecord | None) -> tuple[str, str]:
+    source = period.source if period is not None else None
+    fetched_at = period.fetched_at if period is not None else None
+    return source or bundle.source, fetched_at or bundle.fetched_at
+
+
 def financial_health_from_bundle(
     bundle: FinancialReportBundle, fallback: FinancialHealth | None = None,
 ) -> FinancialHealth:
     if fallback is not None and fallback.symbol != bundle.symbol:
         raise ValueError("financial fallback belongs to a different stock")
     period = bundle.periods[0] if bundle.periods else None
-    metrics = _display_metrics(period, bundle.source) if period is not None else []
+    source, fetched_at = financial_period_provenance(bundle, period)
+    metrics = _display_metrics(period, source) if period is not None else []
     if fallback is not None:
         metrics.extend(item for item in fallback.metrics if item.category != "formal_financial")
     return FinancialHealth(
-        symbol=bundle.symbol, updated_at=bundle.fetched_at, score=None, score_available=False,
+        symbol=bundle.symbol, updated_at=fetched_at, score=None, score_available=False,
         formal_minimum_complete=False, report_period=period.period_end if period else None,
         metric_scope="formal_financial_health", level="不可用",
         summary=(f"已获取 {financial_period_label(period)} 的财务原始数值，当前只展示事实，不生成财务体检分。"
                  if period else "本次成功响应中没有财务记录，尚不能形成财务体检结论。"),
-        metrics=metrics, highlights=[f"来源：{bundle.source}；获取时间：{bundle.fetched_at}"],
-        risk_notes=list(bundle.warnings), missing_data=_missing_financial_evidence(period), source=bundle.source,
+        metrics=metrics, highlights=[f"来源：{source}；获取时间：{fetched_at}"],
+        risk_notes=list(bundle.warnings), missing_data=_missing_financial_evidence(period), source=source,
     )
 
 

@@ -798,7 +798,8 @@ class MinuteAnalysisTests(unittest.TestCase):
         ]
         quote = _quote(price=141, prev_close=139, high=142, low=138, change_pct=1.44, turnover_rate=4.0, pe=26.8, pb=2.95)
         history = [
-            {"price": 120 + index, "change_pct": 0.5, "pe": 18 + index * 0.8, "pb": 2.2 + index * 0.06, "market_cap": 1_000_000_000}
+            {"price": 120 + index, "change_pct": 0.5, "pe": 18 + index * 0.8, "pb": 2.2 + index * 0.06,
+             "market_cap": 1_000_000_000, "quote_timestamp": f"{date(2026, 3, 1) + timedelta(days=index)} 15:00:00"}
             for index in range(32)
         ]
         quality = build_data_quality(quote, klines, now=datetime(2026, 5, 13, 16, 0, 0))

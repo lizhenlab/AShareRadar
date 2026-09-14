@@ -12,6 +12,7 @@ from app.services.fuyao_observations import (
     item_rows, normalized_pool_rows, pool_pagination, safe_text,
 )
 from app.services.trading_calendar import expected_quote_date
+from app.utils.audit_time import audit_now_text
 from app.utils.clock import ASHARE_TIMEZONE, market_now
 
 
@@ -19,7 +20,7 @@ class FuyaoRequester(Protocol):
     async def request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
 
-async def fetch_financials(client: FuyaoRequester, symbol: str, request: FuyaoJobRequest, fetched_at: str) -> dict[str, Any]:
+async def fetch_financials(client: FuyaoRequester, symbol: str, request: FuyaoJobRequest) -> dict[str, Any]:
     symbol = canonical_stock(symbol)
     payloads = {}
     params = {"thscode": symbol, "period": request.period, "limit": request.limit}
@@ -29,7 +30,7 @@ async def fetch_financials(client: FuyaoRequester, symbol: str, request: FuyaoJo
     report = request.report or _latest_report(payloads["income"])
     if report is not None:
         payloads["indicators"] = await client.request("/api/a-share/financials/indicators", {"thscode": symbol, "report": report})
-    bundle = normalize_financials(symbol, payloads, fetched_at)
+    bundle = normalize_financials(symbol, payloads, audit_now_text())
     if not bundle.periods:
         raise ValueError("本次未返回财报记录，不能覆盖既有记录")
     return {"report": bundle.model_dump(mode="json"), "raw": payloads}

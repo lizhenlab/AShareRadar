@@ -238,7 +238,7 @@ def valuation_anchor_factor(
         confidence_level="待补数据" if available else "数据不可用",
         participates_in_historical_aggregate=False,
         availability="available" if available else "execution_evidence_unavailable",
-        unavailable_reason=None if available else "缺少可验证的 PE、PB、市值或估值分位证据",
+        unavailable_reason=None if available else "缺少有限且非零的 PE 或 PB 估值证据",
         note=(
             "当前只用最新可验证估值字段做安全边际观察；本项参与当前评分，不参与历史校准样本汇总。"
             if available
@@ -264,7 +264,7 @@ def valuation_anchor_factor(
         missing_data=_dedupe(["历史PE/PB序列", *insights.valuation.missing_data])[:6],
         calibration=calibration,
         data_nature="derived" if available else "unavailable",
-        methodology="PE、PB、市值与估值分位的规则锚；缺少这些证据时不计分。",
+        methodology="PE、PB 与同口径估值分位的规则锚；缺少有效 PE/PB 时不计分，市值仅作规模背景。",
     )
 
 

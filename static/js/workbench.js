@@ -223,12 +223,14 @@ function renderValuation(valuation) {
   const metrics = valuationMetrics(valuation);
   const evidence = asArray(valuation.evidence);
   const watchPoints = asArray(valuation.watch_points);
+  const title = valuation.input_basis === "fuyao_ttm_mrq" ? "估值辅助分" : "估值";
   $("valuationPanel").innerHTML = `
     <div class="finance-head">
-      <strong>${valuation.score_available === true ? `估值 ${escapeHtml(valuation.score)} · ${escapeHtml(valuation.level)}` : "估值证据不可用"}</strong>
+      <strong>${valuation.score_available === true ? `${title} ${escapeHtml(valuation.score)} · ${escapeHtml(valuation.level)}` : "估值证据不可用"}</strong>
       <span>${escapeHtml(valuation.market_cap_text || valuation.source)}</span>
     </div>
     <p>${escapeHtml(valuation.summary)}</p>
+    ${valuationObservation(valuation)}
     <div class="mini-metrics">
       ${renderEscapedItems(metrics, "span")}
     </div>
@@ -239,6 +241,10 @@ function renderValuation(valuation) {
 
 function valuationMetrics(valuation) {
   const anchor = valuation.valuation_anchor_label || "历史锚待确认";
+  if (valuation.input_basis === "fuyao_ttm_mrq") return [
+    `PE TTM：${formatOptionalNumber(valuation.pe)}`, `PB MRQ：${formatOptionalNumber(valuation.pb)}`,
+    `价格位置：${formatOptionalPercent(valuation.price_percentile)}`,
+  ];
   return [
     `PE：${formatOptionalNumber(valuation.pe)}`,
     `PB：${formatOptionalNumber(valuation.pb)}`,
@@ -246,6 +252,12 @@ function valuationMetrics(valuation) {
     `同行分位：PE ${formatOptionalPercent(valuation.peer_pe_percentile)} / PB ${formatOptionalPercent(valuation.peer_pb_percentile)} · 样本 ${valuation.peer_sample_count || 0}`,
     `价格位置：${formatOptionalPercent(valuation.price_percentile)}`,
   ];
+}
+
+function valuationObservation(valuation) {
+  if (valuation.input_basis === "fuyao_ttm_mrq") return `<p class="fuyao-note">观察获取 ${escapeHtml(valuation.observation_fetched_at || "未返回")}
+    · 评分计算 ${escapeHtml(valuation.score_evaluated_at || "未返回")}。该分数不代表财务健康或上涨概率。</p>`;
+  return valuation.score_unavailable_reason ? `<p class="fuyao-note">扶摇记录未采用：${escapeHtml(valuation.score_unavailable_reason)}</p>` : "";
 }
 
 function formatOptionalNumber(value, digits = 2) {

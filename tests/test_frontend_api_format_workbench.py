@@ -713,5 +713,37 @@ def test_workbench_distinguishes_proxy_orderbook_and_financial_data_semantics() 
     _run_node_script(script)
 
 
+def test_workbench_valuation_labels_preserve_fuyao_ttm_mrq_and_legacy_quote_basis() -> None:
+    _run_node_script(r'''
+      import assert from "node:assert/strict";
+      import { renderInsights } from "./static/js/workbench.js";
+      const elements = new Map();
+      globalThis.document = {getElementById(id) {
+        if(!elements.has(id)) elements.set(id,{innerHTML:"",textContent:""});
+        return elements.get(id);
+      }};
+      const valuation={score_available:true,score:62,level:"合成",pe:18,pb:4,source:"观察 <img src=x>",
+        summary:"合成估值解释",input_basis:"fuyao_ttm_mrq",updated_at:"2026-09-12T10:00:00+08:00",
+        observation_fetched_at:"2026-09-11T15:30:00+08:00",score_evaluated_at:"2026-09-12T09:00:00+08:00"};
+      renderInsights({valuation});
+      let html=elements.get("valuationPanel").innerHTML;
+      assert.ok(html.includes("估值辅助分 62") && html.includes("PE TTM：18") && html.includes("PB MRQ：4"));
+      assert.ok(html.includes(valuation.observation_fetched_at) && html.includes(valuation.score_evaluated_at));
+      assert.ok(!html.includes(valuation.updated_at) && !html.includes("同行分位"));
+      assert.ok(html.includes("观察 &lt;img src=x&gt;") && !html.includes("<img"));
+      assert.ok(elements.get("financialPanel").innerHTML.includes("财务体检分不可用"));
+      for(const input_basis of [undefined,"quote_fields"]){
+        renderInsights({valuation:{...valuation,input_basis}});
+        html=elements.get("valuationPanel").innerHTML;
+        assert.ok(html.includes("估值 62") && html.includes("PE：18") && html.includes("PB：4"));
+        assert.ok(!html.includes("PE TTM") && !html.includes("PB MRQ"));
+      }
+      renderInsights({valuation:{...valuation,score_available:false}});
+      assert.ok(elements.get("valuationPanel").innerHTML.includes("估值证据不可用"));
+      renderInsights({valuation:{...valuation,input_basis:'quote_fields',score_unavailable_reason:'缓存过期 <img src=y>'}});
+      assert.ok(elements.get("valuationPanel").innerHTML.includes('扶摇记录未采用：缓存过期 &lt;img src=y&gt;'));
+    ''')
+
+
 def _run_node_script(script: str) -> None:
     subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, check=True)

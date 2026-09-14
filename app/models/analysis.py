@@ -402,6 +402,13 @@ class ValuationAnalysis(BaseModel):
     watch_points: list[str] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)
     source: str
+    input_basis: Literal["quote_fields", "fuyao_ttm_mrq"] = "quote_fields"
+    score_rule_version: str | None = None
+    observation_id: int | None = None
+    observation_digest: str | None = None
+    observation_fetched_at: str | None = None
+    score_evaluated_at: str | None = None
+    score_unavailable_reason: str | None = None
 
 
 class LhbSummary(BaseModel):

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 FinancialSourceKind = Literal["income", "balance", "cashflow", "indicators"]
 FinancialPeriodType = Literal["annual", "quarterly"]
+FINANCIAL_PARTIAL_WARNING = "部分报告期三张报表未齐；不同报告期的数据不拼接为同一期结论。"
 
 
 class FinancialFact(BaseModel):
@@ -42,6 +43,8 @@ class FinancialPeriodRecord(BaseModel):
     metrics: list[FinancialFact] = Field(default_factory=list)
     alignment: Literal["complete", "partial", "indicators_only"] = "partial"
     supplier_report_dates: list[str] = Field(default_factory=list)
+    fetched_at: str | None = None
+    source: str | None = None
 
 
 class FinancialReportBundle(BaseModel):

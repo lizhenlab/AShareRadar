@@ -8,8 +8,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `app/` | 504 | 1239 | 7293 | 1824 | 167358 |
-| `tests/` | 435 | 245 | 5836 | 988 | 164765 |
+| `app/` | 511 | 1246 | 7318 | 1830 | 168066 |
+| `tests/` | 440 | 245 | 5931 | 988 | 166135 |
 | `tools/` | 35 | 9 | 260 | 7 | 5327 |
 
 ## Python Function Health
@@ -176,17 +176,17 @@ Lines: 210
 
 #### `app/api/routes/fuyao.py`
 
-Lines: 97
+Lines: 103
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| async function | `status` | 23 | `async def status(response: Response, datahub: DataHub=Depends(get_datahub)) -> dict[str, Any]` |
-| async function | `start_job` | 29 | `async def start_job(payload: FuyaoJobRequest, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
-| async function | `job_detail` | 40 | `async def job_detail(job_id: str, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
-| async function | `cancel_job` | 49 | `async def cancel_job(job_id: str, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
-| async function | `retry_job` | 60 | `async def retry_job(job_id: str, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
-| async function | `stock_observations` | 71 | `async def stock_observations(response: Response, symbol: str=Query(...), datahub: DataHub=Depends(get_datahub)) -> dict[str, Any]` |
-| async function | `market_observations` | 89 | `async def market_observations(response: Response, datahub: DataHub=Depends(get_datahub)) -> dict[str, Any]` |
+| async function | `status` | 26 | `async def status(response: Response, datahub: DataHub=Depends(get_datahub)) -> dict[str, Any]` |
+| async function | `start_job` | 32 | `async def start_job(payload: FuyaoJobRequest, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
+| async function | `job_detail` | 43 | `async def job_detail(job_id: str, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
+| async function | `cancel_job` | 52 | `async def cancel_job(job_id: str, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
+| async function | `retry_job` | 63 | `async def retry_job(job_id: str, response: Response, datahub: DataHub=Depends(get_datahub)) -> FuyaoJob` |
+| async function | `stock_observations` | 74 | `async def stock_observations(response: Response, symbol: str=Query(...), datahub: DataHub=Depends(get_datahub)) -> dict[str, Any]` |
+| async function | `market_observations` | 95 | `async def market_observations(response: Response, datahub: DataHub=Depends(get_datahub)) -> dict[str, Any]` |
 
 #### `app/api/routes/health.py`
 
@@ -1041,7 +1041,7 @@ Lines: 47
 
 #### `app/models/analysis.py`
 
-Lines: 489
+Lines: 496
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -1074,13 +1074,13 @@ Lines: 489
 | class | `FinancialHealth` | 359 | `class FinancialHealth(BaseModel)` |
 | method | `FinancialHealth.model_post_init` | 375 | `def model_post_init(self, __context: object) -> None` |
 | class | `ValuationAnalysis` | 382 | `class ValuationAnalysis(BaseModel)` |
-| class | `LhbSummary` | 407 | `class LhbSummary(BaseModel)` |
-| class | `AbnormalEventItem` | 424 | `class AbnormalEventItem(BaseModel)` |
-| class | `AbnormalEventSummary` | 434 | `class AbnormalEventSummary(BaseModel)` |
-| class | `RuleDefinition` | 444 | `class RuleDefinition(BaseModel)` |
-| class | `RuleMatch` | 454 | `class RuleMatch(BaseModel)` |
-| class | `StockRuleMatchSummary` | 470 | `class StockRuleMatchSummary(BaseModel)` |
-| class | `StockInsightBundle` | 479 | `class StockInsightBundle(BaseModel)` |
+| class | `LhbSummary` | 414 | `class LhbSummary(BaseModel)` |
+| class | `AbnormalEventItem` | 431 | `class AbnormalEventItem(BaseModel)` |
+| class | `AbnormalEventSummary` | 441 | `class AbnormalEventSummary(BaseModel)` |
+| class | `RuleDefinition` | 451 | `class RuleDefinition(BaseModel)` |
+| class | `RuleMatch` | 461 | `class RuleMatch(BaseModel)` |
+| class | `StockRuleMatchSummary` | 477 | `class StockRuleMatchSummary(BaseModel)` |
+| class | `StockInsightBundle` | 486 | `class StockInsightBundle(BaseModel)` |
 
 #### `app/models/discovery.py`
 
@@ -1151,14 +1151,14 @@ Explicit re-export facade (`__all__`): `MODELLED_ROUND_TRIP_FRICTION_PCT`
 
 #### `app/models/fuyao.py`
 
-Lines: 58
+Lines: 61
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `FinancialFact` | 13 | `class FinancialFact(BaseModel)` |
-| class | `FinancialSourceRecord` | 25 | `class FinancialSourceRecord(BaseModel)` |
-| class | `FinancialPeriodRecord` | 35 | `class FinancialPeriodRecord(BaseModel)` |
-| class | `FinancialReportBundle` | 47 | `class FinancialReportBundle(BaseModel)` |
+| class | `FinancialFact` | 14 | `class FinancialFact(BaseModel)` |
+| class | `FinancialSourceRecord` | 26 | `class FinancialSourceRecord(BaseModel)` |
+| class | `FinancialPeriodRecord` | 36 | `class FinancialPeriodRecord(BaseModel)` |
+| class | `FinancialReportBundle` | 50 | `class FinancialReportBundle(BaseModel)` |
 
 #### `app/models/fuyao_dumps.py`
 
@@ -1179,6 +1179,17 @@ Lines: 56
 | class | `FuyaoJobRequest` | 25 | `class FuyaoJobRequest(BaseModel)` |
 | class | `FuyaoJobProgress` | 35 | `class FuyaoJobProgress(BaseModel)` |
 | class | `FuyaoJob` | 42 | `class FuyaoJob(BaseModel)` |
+
+#### `app/models/fuyao_scoring.py`
+
+Lines: 69
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `FuyaoScoreContribution` | 11 | `class FuyaoScoreContribution(BaseModel)` |
+| class | `FuyaoValuationScore` | 21 | `class FuyaoValuationScore(BaseModel)` |
+| method | `FuyaoValuationScore.validate_available_score` | 47 | `def validate_available_score(self) -> FuyaoValuationScore` |
+| method | `FuyaoValuationScore._validate_observation_components` | 60 | `def _validate_observation_components(self) -> None` |
 
 #### `app/models/individual_probability.py`
 
@@ -2103,6 +2114,19 @@ Lines: 309
 | class | `AdviceTimelineChange` | 263 | `class AdviceTimelineChange(BaseModel)` |
 | class | `AdviceTimelineItem` | 273 | `class AdviceTimelineItem(BaseModel)` |
 
+#### `app/models/value_research.py`
+
+Lines: 88
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `ValueResearchCheck` | 13 | `class ValueResearchCheck(BaseModel)` |
+| class | `ValueValuationEvidence` | 25 | `class ValueValuationEvidence(BaseModel)` |
+| method | `ValueValuationEvidence.validate_coverage` | 40 | `def validate_coverage(self) -> ValueValuationEvidence` |
+| method | `ValueValuationEvidence._validate_inverse` | 52 | `def _validate_inverse(self, item: ValueResearchCheck) -> None` |
+| class | `ValueFinancialPeriod` | 65 | `class ValueFinancialPeriod(BaseModel)` |
+| class | `ValueResearchReport` | 77 | `class ValueResearchReport(BaseModel)` |
+
 #### `app/models/workbench.py`
 
 Lines: 324
@@ -2387,27 +2411,28 @@ Lines: 41
 
 #### `app/repositories/fuyao_research.py`
 
-Lines: 175
+Lines: 226
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `FuyaoResearchRepository` | 17 | `class FuyaoResearchRepository` |
-| method | `FuyaoResearchRepository.__init__` | 18 | `def __init__(self, path: Path) -> None` |
-| method | `FuyaoResearchRepository.initialize` | 24 | `def initialize(self) -> None` |
-| method | `FuyaoResearchRepository.reserve_request` | 40 | `def reserve_request(self, day: str, limit: int) -> None` |
-| method | `FuyaoResearchRepository.request_count` | 51 | `def request_count(self, day: str) -> int` |
-| method | `FuyaoResearchRepository.save_observation` | 59 | `def save_observation(self, capability: str, symbol: str, fetched_at: str, payload: dict[str, Any]) -> FuyaoObservation` |
-| method | `FuyaoResearchRepository.publish_item` | 71 | `def publish_item(self, job: FuyaoJob, capability: str, symbol: str, fetched_at: str, payload: dict[str, Any]) -> FuyaoJob` |
-| method | `FuyaoResearchRepository.latest` | 93 | `def latest(self, capability: str, symbol: str) -> FuyaoObservation \| None` |
-| method | `FuyaoResearchRepository.observations` | 102 | `def observations(self, capability: str, symbol: str, limit: int=30) -> list[FuyaoObservation]` |
-| method | `FuyaoResearchRepository.valuation_history` | 111 | `def valuation_history(self, symbol: str, limit: int=100) -> list[FuyaoObservation]` |
-| method | `FuyaoResearchRepository.save_job` | 126 | `def save_job(self, job: FuyaoJob) -> None` |
-| method | `FuyaoResearchRepository.jobs` | 133 | `def jobs(self, limit: int=20) -> list[FuyaoJob]` |
-| method | `FuyaoResearchRepository.job` | 141 | `def job(self, job_id: str) -> FuyaoJob \| None` |
-| method | `FuyaoResearchRepository.retry_child` | 149 | `def retry_child(self, parent_id: str) -> FuyaoJob \| None` |
-| method | `FuyaoResearchRepository.unfinished_jobs` | 157 | `def unfinished_jobs(self) -> list[FuyaoJob]` |
-| method | `FuyaoResearchRepository._observation` | 166 | `def _observation(row: sqlite3.Row) -> FuyaoObservation` |
-| function | `_encode_observation` | 171 | `def _encode_observation(payload: dict[str, Any]) -> tuple[str, str]` |
+| class | `FuyaoResearchRepository` | 40 | `class FuyaoResearchRepository` |
+| method | `FuyaoResearchRepository.__init__` | 41 | `def __init__(self, path: Path) -> None` |
+| method | `FuyaoResearchRepository.initialize` | 47 | `def initialize(self) -> None` |
+| method | `FuyaoResearchRepository.reserve_request` | 63 | `def reserve_request(self, day: str, limit: int) -> None` |
+| method | `FuyaoResearchRepository.request_count` | 74 | `def request_count(self, day: str) -> int` |
+| method | `FuyaoResearchRepository.save_observation` | 82 | `def save_observation(self, capability: str, symbol: str, fetched_at: str, payload: dict[str, Any]) -> FuyaoObservation` |
+| method | `FuyaoResearchRepository.publish_item` | 94 | `def publish_item(self, job: FuyaoJob, capability: str, symbol: str, fetched_at: str, payload: dict[str, Any]) -> FuyaoJob` |
+| method | `FuyaoResearchRepository.latest` | 116 | `def latest(self, capability: str, symbol: str) -> FuyaoObservation \| None` |
+| method | `FuyaoResearchRepository.observations` | 125 | `def observations(self, capability: str, symbol: str, limit: int=30) -> list[FuyaoObservation]` |
+| method | `FuyaoResearchRepository.financials` | 134 | `def financials(self, symbol: str) -> FinancialReportBundle \| None` |
+| method | `FuyaoResearchRepository.valuation_history` | 162 | `def valuation_history(self, symbol: str, limit: int=100) -> list[FuyaoObservation]` |
+| method | `FuyaoResearchRepository.save_job` | 177 | `def save_job(self, job: FuyaoJob) -> None` |
+| method | `FuyaoResearchRepository.jobs` | 184 | `def jobs(self, limit: int=20) -> list[FuyaoJob]` |
+| method | `FuyaoResearchRepository.job` | 192 | `def job(self, job_id: str) -> FuyaoJob \| None` |
+| method | `FuyaoResearchRepository.retry_child` | 200 | `def retry_child(self, parent_id: str) -> FuyaoJob \| None` |
+| method | `FuyaoResearchRepository.unfinished_jobs` | 208 | `def unfinished_jobs(self) -> list[FuyaoJob]` |
+| method | `FuyaoResearchRepository._observation` | 217 | `def _observation(row: sqlite3.Row) -> FuyaoObservation` |
+| function | `_encode_observation` | 222 | `def _encode_observation(payload: dict[str, Any]) -> tuple[str, str]` |
 
 #### `app/repositories/maintenance.py`
 
@@ -5363,22 +5388,22 @@ Lines: 141
 
 #### `app/services/fuyao_fetch.py`
 
-Lines: 116
+Lines: 117
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `FuyaoRequester` | 18 | `class FuyaoRequester(Protocol)` |
-| method | `FuyaoRequester.request` | 19 | `async def request(self, path: str, params: dict[str, Any] \| None=None) -> dict[str, Any]` |
-| async function | `fetch_financials` | 22 | `async def fetch_financials(client: FuyaoRequester, symbol: str, request: FuyaoJobRequest, fetched_at: str) -> dict[str, Any]` |
-| function | `_latest_report` | 38 | `def _latest_report(payload: dict[str, Any]) -> str \| None` |
-| async function | `fetch_sentiment` | 47 | `async def fetch_sentiment(client: FuyaoRequester, symbols: list[str]) -> dict[str, Any]` |
-| async function | `_fetch_pool` | 73 | `async def _fetch_pool(client: FuyaoRequester, kind: str, date_ms: int) -> list[dict[str, Any]]` |
-| function | `_anomalies` | 96 | `def _anomalies(data: dict[str, Any], symbols: list[str]) -> list[dict[str, Any]]` |
-| function | `_lhb_rows` | 109 | `def _lhb_rows(data: dict[str, Any]) -> list[dict[str, Any]]` |
+| class | `FuyaoRequester` | 19 | `class FuyaoRequester(Protocol)` |
+| method | `FuyaoRequester.request` | 20 | `async def request(self, path: str, params: dict[str, Any] \| None=None) -> dict[str, Any]` |
+| async function | `fetch_financials` | 23 | `async def fetch_financials(client: FuyaoRequester, symbol: str, request: FuyaoJobRequest) -> dict[str, Any]` |
+| function | `_latest_report` | 39 | `def _latest_report(payload: dict[str, Any]) -> str \| None` |
+| async function | `fetch_sentiment` | 48 | `async def fetch_sentiment(client: FuyaoRequester, symbols: list[str]) -> dict[str, Any]` |
+| async function | `_fetch_pool` | 74 | `async def _fetch_pool(client: FuyaoRequester, kind: str, date_ms: int) -> list[dict[str, Any]]` |
+| function | `_anomalies` | 97 | `def _anomalies(data: dict[str, Any], symbols: list[str]) -> list[dict[str, Any]]` |
+| function | `_lhb_rows` | 110 | `def _lhb_rows(data: dict[str, Any]) -> list[dict[str, Any]]` |
 
 #### `app/services/fuyao_financials.py`
 
-Lines: 143
+Lines: 149
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -5388,7 +5413,7 @@ Lines: 143
 | function | `_statement_metadata` | 83 | `def _statement_metadata(row: dict[str, object], kind: str, end: date, fetched: datetime) -> FinancialSourceRecord` |
 | function | `_merge_statement` | 99 | `def _merge_statement(current: FinancialPeriodRecord, incoming: FinancialPeriodRecord) -> FinancialPeriodRecord` |
 | function | `_collect_indicators` | 117 | `def _collect_indicators(periods: dict[tuple[str, str], FinancialPeriodRecord], symbol: str, data: dict[str, object], fetched: datetime) -> None` |
-| function | `_revalidate_period` | 137 | `def _revalidate_period(current: FinancialPeriodRecord, updates: dict[str, object]) -> FinancialPeriodRecord` |
+| function | `_revalidate_period` | 143 | `def _revalidate_period(current: FinancialPeriodRecord, updates: dict[str, object]) -> FinancialPeriodRecord` |
 
 #### `app/services/fuyao_financials_parsing.py`
 
@@ -5408,7 +5433,7 @@ Lines: 123
 
 #### `app/services/fuyao_financials_qa.py`
 
-Lines: 159
+Lines: 162
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -5421,19 +5446,20 @@ Lines: 159
 | function | `_validate_requested_date` | 121 | `def _validate_requested_date(question: str, end: str) -> None` |
 | function | `_requested_quarter` | 127 | `def _requested_quarter(question: str) -> int \| None` |
 | function | `_fact_answer` | 136 | `def _fact_answer(question: str, bundle: FinancialReportBundle, period: FinancialPeriodRecord, fact: FinancialFact) -> StockQuestionAnswer` |
-| function | `_unavailable` | 150 | `def _unavailable(question: str, bundle: FinancialReportBundle, reason: str, *, out_of_scope: bool=False) -> StockQuestionAnswer` |
+| function | `_unavailable` | 151 | `def _unavailable(question: str, bundle: FinancialReportBundle, reason: str, *, out_of_scope: bool=False, period: FinancialPeriodRecord \| None=None) -> StockQuestionAnswer` |
 
 #### `app/services/fuyao_financials_views.py`
 
-Lines: 61
+Lines: 68
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `financial_fact_text` | 9 | `def financial_fact_text(fact: FinancialFact) -> str` |
 | function | `financial_period_label` | 17 | `def financial_period_label(period: FinancialPeriodRecord) -> str` |
-| function | `financial_health_from_bundle` | 22 | `def financial_health_from_bundle(bundle: FinancialReportBundle, fallback: FinancialHealth \| None=None) -> FinancialHealth` |
-| function | `_display_metrics` | 42 | `def _display_metrics(period: FinancialPeriodRecord, source: str) -> list[FinancialMetric]` |
-| function | `_missing_financial_evidence` | 51 | `def _missing_financial_evidence(period: FinancialPeriodRecord \| None) -> list[str]` |
+| function | `financial_period_provenance` | 22 | `def financial_period_provenance(bundle: FinancialReportBundle, period: FinancialPeriodRecord \| None) -> tuple[str, str]` |
+| function | `financial_health_from_bundle` | 28 | `def financial_health_from_bundle(bundle: FinancialReportBundle, fallback: FinancialHealth \| None=None) -> FinancialHealth` |
+| function | `_display_metrics` | 49 | `def _display_metrics(period: FinancialPeriodRecord, source: str) -> list[FinancialMetric]` |
+| function | `_missing_financial_evidence` | 58 | `def _missing_financial_evidence(period: FinancialPeriodRecord \| None) -> list[str]` |
 
 #### `app/services/fuyao_job_runtime.py`
 
@@ -5468,6 +5494,20 @@ Lines: 168
 | function | `_valuation_observation` | 147 | `def _valuation_observation(row: object, now: datetime) -> tuple[datetime, dict[str, Any]] \| None` |
 | function | `_positive_valuation` | 163 | `def _positive_valuation(value: object) -> float \| None` |
 
+#### `app/services/fuyao_scoring.py`
+
+Lines: 123
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `FuyaoScoreInputError` | 30 | `class FuyaoScoreInputError(ValueError)` |
+| function | `build_fuyao_valuation_score` | 34 | `def build_fuyao_valuation_score(symbol: str, observation: FuyaoObservation \| None, evaluated_at: str) -> FuyaoValuationScore` |
+| function | `_score_evidence` | 64 | `def _score_evidence(components: list[FuyaoScoreContribution], observation: FuyaoObservation) -> list[str]` |
+| function | `_score_time` | 71 | `def _score_time(value: str) -> datetime` |
+| function | `_admitted_values` | 77 | `def _admitted_values(symbol: str, observation: FuyaoObservation, cutoff: datetime) -> dict[str, Any]` |
+| function | `_score_component` | 102 | `def _score_component(key: str, raw: object) -> FuyaoScoreContribution` |
+| function | `_valuation_points` | 112 | `def _valuation_points(value: float \| None, low: float, high: float, adjustment: int, pe: bool) -> tuple[int, str]` |
+
 #### `app/services/fuyao_sectors.py`
 
 Lines: 59
@@ -5480,49 +5520,50 @@ Lines: 59
 
 #### `app/services/fuyao_service.py`
 
-Lines: 397
+Lines: 403
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| async function | `fuyao_io` | 33 | `async def fuyao_io(call: Callable[..., T], *args: Any) -> T` |
-| class | `FuyaoPersistentBudget` | 38 | `class FuyaoPersistentBudget` |
-| method | `FuyaoPersistentBudget.__init__` | 39 | `def __init__(self, repository: FuyaoResearchRepository, limit: int) -> None` |
-| method | `FuyaoPersistentBudget.reserve` | 42 | `async def reserve(self) -> None` |
-| class | `FuyaoService` | 49 | `class FuyaoService` |
-| method | `FuyaoService.__init__` | 52 | `def __init__(self, settings: Settings, runtime: ProviderRuntime, *, client: FuyaoClient \| None=None) -> None` |
-| method | `FuyaoService.capability` | 66 | `def capability(self) -> ProviderCapability` |
-| method | `FuyaoService.request` | 70 | `async def request(self, path: str, params: dict[str, Any] \| None=None) -> dict[str, Any]` |
-| method | `FuyaoService.status` | 79 | `async def status(self) -> dict[str, Any]` |
-| method | `FuyaoService.financials` | 92 | `async def financials(self, symbol: str) -> FinancialReportBundle \| None` |
-| method | `FuyaoService.start_job` | 96 | `async def start_job(self, request: FuyaoJobRequest) -> FuyaoJob` |
-| method | `FuyaoService._start_locked` | 101 | `async def _start_locked(self, request: FuyaoJobRequest, parent_id: str \| None=None) -> FuyaoJob` |
-| method | `FuyaoService.get_job` | 115 | `async def get_job(self, job_id: str) -> FuyaoJob` |
-| method | `FuyaoService._find_job` | 120 | `async def _find_job(self, job_id: str) -> FuyaoJob` |
-| method | `FuyaoService.retry_job` | 126 | `async def retry_job(self, job_id: str) -> FuyaoJob` |
-| method | `FuyaoService.cancel_job` | 136 | `async def cancel_job(self, job_id: str) -> FuyaoJob` |
-| method | `FuyaoService._cancel_execution` | 148 | `async def _cancel_execution(self, execution: FuyaoJobExecution) -> FuyaoJob` |
-| method | `FuyaoService._persist_and_launch` | 164 | `async def _persist_and_launch(self, job: FuyaoJob, request: FuyaoJobRequest) -> FuyaoJob` |
-| method | `FuyaoService._recover_jobs` | 176 | `async def _recover_jobs(self) -> None` |
-| method | `FuyaoService._run_job` | 185 | `async def _run_job(self, job: FuyaoJob, request: FuyaoJobRequest) -> None` |
-| method | `FuyaoService._finish_execution` | 210 | `async def _finish_execution(self, execution: FuyaoJobExecution, status: str, message: str) -> None` |
-| method | `FuyaoService._persist_terminal_job` | 227 | `async def _persist_terminal_job(self, job: FuyaoJob) -> None` |
-| method | `FuyaoService._checkpoint` | 233 | `async def _checkpoint(self, job: FuyaoJob) -> None` |
-| method | `FuyaoService._collect` | 239 | `async def _collect(self, job: FuyaoJob, request: FuyaoJobRequest) -> None` |
-| method | `FuyaoService._collect_financials` | 251 | `async def _collect_financials(self, job: FuyaoJob, request: FuyaoJobRequest) -> None` |
-| method | `FuyaoService._collect_valuations` | 265 | `async def _collect_valuations(self, job: FuyaoJob, symbols: list[str]) -> None` |
-| method | `FuyaoService._collect_valuation_batch` | 268 | `async def _collect_valuation_batch(self, job: FuyaoJob, symbols: list[str]) -> None` |
-| method | `FuyaoService._collect_history` | 289 | `async def _collect_history(self, job: FuyaoJob, full: bool) -> None` |
-| method | `FuyaoService._monitor_history` | 302 | `async def _monitor_history(self, execution: FuyaoJobExecution, done: asyncio.Event) -> None` |
-| method | `FuyaoService._save_item` | 323 | `async def _save_item(self, job: FuyaoJob, capability: str, symbol: str, payload: dict[str, Any]) -> None` |
-| method | `FuyaoService._publish_item` | 326 | `async def _publish_item(self, job: FuyaoJob, capability: str, symbol: str, payload: dict[str, Any]) -> None` |
-| method | `FuyaoService._finished` | 333 | `def _finished(self, job_id: str, task: asyncio.Task[None]) -> None` |
-| method | `FuyaoService.aclose` | 339 | `async def aclose(self) -> None` |
-| method | `FuyaoService._close_owned` | 344 | `async def _close_owned(self) -> None` |
-| function | `_normalized_request` | 360 | `def _normalized_request(request: FuyaoJobRequest) -> FuyaoJobRequest` |
-| function | `_safe_job_error` | 373 | `def _safe_job_error(exc: Exception) -> str` |
-| function | `_symbol_rejection` | 381 | `def _symbol_rejection(exc: FuyaoError) -> bool` |
-| function | `_valuation_subsets` | 385 | `def _valuation_subsets(symbols: list[str]) -> list[list[str]]` |
-| async function | `_join_job` | 396 | `async def _join_job(task: asyncio.Task[None]) -> None` |
+| async function | `fuyao_io` | 35 | `async def fuyao_io(call: Callable[..., T], *args: Any) -> T` |
+| class | `FuyaoPersistentBudget` | 40 | `class FuyaoPersistentBudget` |
+| method | `FuyaoPersistentBudget.__init__` | 41 | `def __init__(self, repository: FuyaoResearchRepository, limit: int) -> None` |
+| method | `FuyaoPersistentBudget.reserve` | 44 | `async def reserve(self) -> None` |
+| class | `FuyaoService` | 51 | `class FuyaoService` |
+| method | `FuyaoService.__init__` | 54 | `def __init__(self, settings: Settings, runtime: ProviderRuntime, *, client: FuyaoClient \| None=None) -> None` |
+| method | `FuyaoService.capability` | 68 | `def capability(self) -> ProviderCapability` |
+| method | `FuyaoService.request` | 72 | `async def request(self, path: str, params: dict[str, Any] \| None=None) -> dict[str, Any]` |
+| method | `FuyaoService.status` | 81 | `async def status(self) -> dict[str, Any]` |
+| method | `FuyaoService.financials` | 94 | `async def financials(self, symbol: str) -> FinancialReportBundle \| None` |
+| method | `FuyaoService.valuation_score` | 97 | `async def valuation_score(self, symbol: str, evaluated_at: str) -> FuyaoValuationScore` |
+| method | `FuyaoService.start_job` | 102 | `async def start_job(self, request: FuyaoJobRequest) -> FuyaoJob` |
+| method | `FuyaoService._start_locked` | 107 | `async def _start_locked(self, request: FuyaoJobRequest, parent_id: str \| None=None) -> FuyaoJob` |
+| method | `FuyaoService.get_job` | 121 | `async def get_job(self, job_id: str) -> FuyaoJob` |
+| method | `FuyaoService._find_job` | 126 | `async def _find_job(self, job_id: str) -> FuyaoJob` |
+| method | `FuyaoService.retry_job` | 132 | `async def retry_job(self, job_id: str) -> FuyaoJob` |
+| method | `FuyaoService.cancel_job` | 142 | `async def cancel_job(self, job_id: str) -> FuyaoJob` |
+| method | `FuyaoService._cancel_execution` | 154 | `async def _cancel_execution(self, execution: FuyaoJobExecution) -> FuyaoJob` |
+| method | `FuyaoService._persist_and_launch` | 170 | `async def _persist_and_launch(self, job: FuyaoJob, request: FuyaoJobRequest) -> FuyaoJob` |
+| method | `FuyaoService._recover_jobs` | 182 | `async def _recover_jobs(self) -> None` |
+| method | `FuyaoService._run_job` | 191 | `async def _run_job(self, job: FuyaoJob, request: FuyaoJobRequest) -> None` |
+| method | `FuyaoService._finish_execution` | 216 | `async def _finish_execution(self, execution: FuyaoJobExecution, status: str, message: str) -> None` |
+| method | `FuyaoService._persist_terminal_job` | 233 | `async def _persist_terminal_job(self, job: FuyaoJob) -> None` |
+| method | `FuyaoService._checkpoint` | 239 | `async def _checkpoint(self, job: FuyaoJob) -> None` |
+| method | `FuyaoService._collect` | 245 | `async def _collect(self, job: FuyaoJob, request: FuyaoJobRequest) -> None` |
+| method | `FuyaoService._collect_financials` | 257 | `async def _collect_financials(self, job: FuyaoJob, request: FuyaoJobRequest) -> None` |
+| method | `FuyaoService._collect_valuations` | 271 | `async def _collect_valuations(self, job: FuyaoJob, symbols: list[str]) -> None` |
+| method | `FuyaoService._collect_valuation_batch` | 274 | `async def _collect_valuation_batch(self, job: FuyaoJob, symbols: list[str]) -> None` |
+| method | `FuyaoService._collect_history` | 295 | `async def _collect_history(self, job: FuyaoJob, full: bool) -> None` |
+| method | `FuyaoService._monitor_history` | 308 | `async def _monitor_history(self, execution: FuyaoJobExecution, done: asyncio.Event) -> None` |
+| method | `FuyaoService._save_item` | 329 | `async def _save_item(self, job: FuyaoJob, capability: str, symbol: str, payload: dict[str, Any]) -> None` |
+| method | `FuyaoService._publish_item` | 332 | `async def _publish_item(self, job: FuyaoJob, capability: str, symbol: str, payload: dict[str, Any]) -> None` |
+| method | `FuyaoService._finished` | 339 | `def _finished(self, job_id: str, task: asyncio.Task[None]) -> None` |
+| method | `FuyaoService.aclose` | 345 | `async def aclose(self) -> None` |
+| method | `FuyaoService._close_owned` | 350 | `async def _close_owned(self) -> None` |
+| function | `_normalized_request` | 366 | `def _normalized_request(request: FuyaoJobRequest) -> FuyaoJobRequest` |
+| function | `_safe_job_error` | 379 | `def _safe_job_error(exc: Exception) -> str` |
+| function | `_symbol_rejection` | 387 | `def _symbol_rejection(exc: FuyaoError) -> bool` |
+| function | `_valuation_subsets` | 391 | `def _valuation_subsets(symbols: list[str]) -> list[list[str]]` |
+| async function | `_join_job` | 402 | `async def _join_job(task: asyncio.Task[None]) -> None` |
 
 #### `app/services/fuyao_sync_control.py`
 
@@ -5538,6 +5579,17 @@ Lines: 49
 | method | `FuyaoSyncControl.cancel` | 30 | `def cancel(self) -> None` |
 | method | `FuyaoSyncControl.checkpoint` | 33 | `def checkpoint(self, stage: str \| None=None, current: int \| None=None, total: int \| None=None, unit: str \| None=None) -> None` |
 | method | `FuyaoSyncControl.snapshot` | 47 | `def snapshot(self) -> FuyaoSyncSnapshot` |
+
+#### `app/services/fuyao_valuation_adapter.py`
+
+Lines: 76
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `align_fuyao_valuation` | 11 | `def align_fuyao_valuation(result: FuyaoValuationScore \| None, quote_timestamp: str) -> FuyaoValuationScore \| None` |
+| function | `fuyao_valuation_fallback_note` | 28 | `def fuyao_valuation_fallback_note(result: FuyaoValuationScore) -> str` |
+| function | `fuyao_fundamental_factor` | 33 | `def fuyao_fundamental_factor(result: FuyaoValuationScore) -> FactorScore` |
+| function | `apply_fuyao_valuation` | 43 | `def apply_fuyao_valuation(baseline: ValuationAnalysis, result: FuyaoValuationScore \| None) -> ValuationAnalysis` |
 
 #### `app/services/indicator_levels.py`
 
@@ -12527,11 +12579,11 @@ Lines: 40
 
 #### `app/services/stock_insights.py`
 
-Lines: 51
+Lines: 55
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `build_stock_insight_bundle` | 21 | `def build_stock_insight_bundle(analysis: AnalysisResult, *, order_book: OrderBook \| None=None, order_book_error: str \| None=None) -> StockInsightBundle` |
+| function | `build_stock_insight_bundle` | 23 | `def build_stock_insight_bundle(analysis: AnalysisResult, *, order_book: OrderBook \| None=None, order_book_error: str \| None=None, fuyao_valuation: FuyaoValuationScore \| None=None) -> StockInsightBundle` |
 
 #### `app/services/stock_lhb.py`
 
@@ -12561,65 +12613,65 @@ Lines: 56
 
 #### `app/services/stock_overview.py`
 
-Lines: 588
+Lines: 600
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `ValuationMetricSpec` | 34 | `class ValuationMetricSpec` |
-| class | `FundamentalFieldResult` | 43 | `class FundamentalFieldResult` |
-| class | `MainConflictContext` | 50 | `class MainConflictContext` |
-| class | `MainConflictRule` | 57 | `class MainConflictRule` |
-| class | `OverviewScores` | 64 | `class OverviewScores` |
-| function | `_unique_strings` | 77 | `def _unique_strings(items) -> list[str]` |
-| function | `_bounded_score` | 92 | `def _bounded_score(value: object, *, default: int=0) -> int` |
-| function | `_positive_price` | 96 | `def _positive_price(value: object) -> float \| None` |
-| function | `_price_text` | 101 | `def _price_text(value: object) -> str \| None` |
-| function | `_display_price` | 106 | `def _display_price(value: object) -> str` |
-| function | `_contains_text` | 110 | `def _contains_text(value: object, keyword: str) -> bool` |
-| function | `build_stock_overview` | 115 | `def build_stock_overview(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure, events: StockEventSummary) -> StockOverview` |
-| function | `_overview_scores` | 141 | `def _overview_scores(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure, events: StockEventSummary) -> OverviewScores` |
-| function | `_overview_factors` | 159 | `def _overview_factors(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure, events: StockEventSummary) -> list[FactorScore]` |
-| function | `_signal_quality_score` | 174 | `def _signal_quality_score(analysis: AnalysisResult) -> int` |
-| function | `_quality_adjusted_total_score` | 180 | `def _quality_adjusted_total_score(analysis: AnalysisResult, factor_score: int, signal_quality_score: int) -> int` |
-| function | `_quality_adjusted_main_conflict` | 190 | `def _quality_adjusted_main_conflict(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure) -> str` |
-| function | `_beginner_takeaways` | 202 | `def _beginner_takeaways(analysis: AnalysisResult, main_conflict: str) -> list[str]` |
-| function | `_support_resistance_takeaway` | 217 | `def _support_resistance_takeaway(analysis: AnalysisResult) -> str` |
-| function | `_key_prices` | 230 | `def _key_prices(analysis: AnalysisResult) -> list[KeyPriceLevel]` |
-| function | `_normalized_support_resistance` | 245 | `def _normalized_support_resistance(analysis: AnalysisResult) -> tuple[float \| None, float \| None]` |
-| function | `_technical_factor` | 253 | `def _technical_factor(analysis: AnalysisResult) -> FactorScore` |
-| function | `_top_signal_contributions` | 273 | `def _top_signal_contributions(analysis: AnalysisResult) -> list[object]` |
-| function | `_signal_contribution_evidence` | 280 | `def _signal_contribution_evidence(item: object) -> str \| None` |
-| function | `_fund_factor` | 290 | `def _fund_factor(fund_flow: FundFlowAnalysis) -> FactorScore` |
-| function | `_fundamental_factor` | 308 | `def _fundamental_factor(analysis: AnalysisResult) -> FactorScore` |
-| function | `_fundamental_score_available` | 329 | `def _fundamental_score_available(analysis: AnalysisResult) -> bool` |
-| function | `_fundamental_parts` | 333 | `def _fundamental_parts(analysis: AnalysisResult) -> list[FundamentalFieldResult]` |
-| function | `_pe_part` | 343 | `def _pe_part(pe: float \| None) -> FundamentalFieldResult` |
-| function | `_pb_part` | 347 | `def _pb_part(pb: float \| None) -> FundamentalFieldResult` |
-| function | `_market_cap_part` | 351 | `def _market_cap_part(market_cap: float \| None) -> FundamentalFieldResult` |
-| function | `_industry_part` | 358 | `def _industry_part(analysis: AnalysisResult) -> FundamentalFieldResult` |
-| function | `_valuation_adjustment` | 365 | `def _valuation_adjustment(value: float, low_threshold: float, high_threshold: float, adjustment: int) -> int` |
-| function | `_valuation_metric_part` | 373 | `def _valuation_metric_part(value: float \| None, spec: ValuationMetricSpec) -> FundamentalFieldResult` |
-| function | `_event_factor` | 383 | `def _event_factor(events: StockEventSummary) -> FactorScore` |
-| function | `_event_score_available` | 405 | `def _event_score_available(item: object) -> bool` |
-| function | `_event_level` | 409 | `def _event_level(item: object) -> str \| None` |
-| function | `_event_evidence` | 413 | `def _event_evidence(item: object) -> str \| None` |
-| function | `_unique_event_items` | 421 | `def _unique_event_items(events) -> list[object]` |
-| function | `_risk_factor` | 442 | `def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> FactorScore` |
-| function | `_main_conflict` | 473 | `def _main_conflict(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure) -> str` |
-| function | `_analysis_data_quality_score` | 481 | `def _analysis_data_quality_score(analysis: AnalysisResult) -> int` |
-| function | `_analysis_signal_confidence` | 485 | `def _analysis_signal_confidence(analysis: AnalysisResult) -> int` |
-| function | `_analysis_trend_score` | 489 | `def _analysis_trend_score(analysis: AnalysisResult) -> int` |
-| function | `_fund_flow_score` | 493 | `def _fund_flow_score(fund_flow: FundFlowAnalysis) -> int` |
-| function | `_fund_flow_available` | 497 | `def _fund_flow_available(fund_flow: FundFlowAnalysis) -> bool` |
-| function | `_order_pressure_evidence_available` | 502 | `def _order_pressure_evidence_available(order_pressure: OrderPressure) -> bool` |
-| function | `_has_weak_data_quality` | 507 | `def _has_weak_data_quality(context: MainConflictContext) -> bool` |
-| function | `_has_low_signal_confidence` | 511 | `def _has_low_signal_confidence(context: MainConflictContext) -> bool` |
-| function | `_has_weak_trend_strong_fund_flow` | 515 | `def _has_weak_trend_strong_fund_flow(context: MainConflictContext) -> bool` |
-| function | `_has_strong_trend_weak_fund_flow` | 523 | `def _has_strong_trend_weak_fund_flow(context: MainConflictContext) -> bool` |
-| function | `_has_order_sell_pressure` | 531 | `def _has_order_sell_pressure(context: MainConflictContext) -> bool` |
-| function | `_risk_triggers` | 567 | `def _risk_triggers(analysis: AnalysisResult, order_pressure: OrderPressure) -> list[str]` |
-| function | `_support_break_trigger` | 580 | `def _support_break_trigger(analysis: AnalysisResult) -> str` |
-| function | `_ma20_break_trigger` | 586 | `def _ma20_break_trigger(analysis: AnalysisResult) -> str` |
+| class | `ValuationMetricSpec` | 35 | `class ValuationMetricSpec` |
+| class | `FundamentalFieldResult` | 44 | `class FundamentalFieldResult` |
+| class | `MainConflictContext` | 51 | `class MainConflictContext` |
+| class | `MainConflictRule` | 58 | `class MainConflictRule` |
+| class | `OverviewScores` | 65 | `class OverviewScores` |
+| function | `_unique_strings` | 78 | `def _unique_strings(items) -> list[str]` |
+| function | `_bounded_score` | 93 | `def _bounded_score(value: object, *, default: int=0) -> int` |
+| function | `_positive_price` | 97 | `def _positive_price(value: object) -> float \| None` |
+| function | `_price_text` | 102 | `def _price_text(value: object) -> str \| None` |
+| function | `_display_price` | 107 | `def _display_price(value: object) -> str` |
+| function | `_contains_text` | 111 | `def _contains_text(value: object, keyword: str) -> bool` |
+| function | `build_stock_overview` | 116 | `def build_stock_overview(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure, events: StockEventSummary, *, fuyao_valuation: FuyaoValuationScore \| None=None) -> StockOverview` |
+| function | `_overview_scores` | 143 | `def _overview_scores(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure, events: StockEventSummary, *, fuyao_valuation: FuyaoValuationScore \| None=None) -> OverviewScores` |
+| function | `_overview_factors` | 162 | `def _overview_factors(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure, events: StockEventSummary, *, fuyao_valuation: FuyaoValuationScore \| None=None) -> list[FactorScore]` |
+| function | `_signal_quality_score` | 178 | `def _signal_quality_score(analysis: AnalysisResult) -> int` |
+| function | `_quality_adjusted_total_score` | 184 | `def _quality_adjusted_total_score(analysis: AnalysisResult, factor_score: int, signal_quality_score: int) -> int` |
+| function | `_quality_adjusted_main_conflict` | 194 | `def _quality_adjusted_main_conflict(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure) -> str` |
+| function | `_beginner_takeaways` | 206 | `def _beginner_takeaways(analysis: AnalysisResult, main_conflict: str) -> list[str]` |
+| function | `_support_resistance_takeaway` | 221 | `def _support_resistance_takeaway(analysis: AnalysisResult) -> str` |
+| function | `_key_prices` | 234 | `def _key_prices(analysis: AnalysisResult) -> list[KeyPriceLevel]` |
+| function | `_normalized_support_resistance` | 249 | `def _normalized_support_resistance(analysis: AnalysisResult) -> tuple[float \| None, float \| None]` |
+| function | `_technical_factor` | 257 | `def _technical_factor(analysis: AnalysisResult) -> FactorScore` |
+| function | `_top_signal_contributions` | 277 | `def _top_signal_contributions(analysis: AnalysisResult) -> list[object]` |
+| function | `_signal_contribution_evidence` | 284 | `def _signal_contribution_evidence(item: object) -> str \| None` |
+| function | `_fund_factor` | 294 | `def _fund_factor(fund_flow: FundFlowAnalysis) -> FactorScore` |
+| function | `_fundamental_factor` | 312 | `def _fundamental_factor(analysis: AnalysisResult, fuyao_valuation: FuyaoValuationScore \| None=None) -> FactorScore` |
+| function | `_fundamental_score_available` | 341 | `def _fundamental_score_available(analysis: AnalysisResult) -> bool` |
+| function | `_fundamental_parts` | 345 | `def _fundamental_parts(analysis: AnalysisResult) -> list[FundamentalFieldResult]` |
+| function | `_pe_part` | 355 | `def _pe_part(pe: float \| None) -> FundamentalFieldResult` |
+| function | `_pb_part` | 359 | `def _pb_part(pb: float \| None) -> FundamentalFieldResult` |
+| function | `_market_cap_part` | 363 | `def _market_cap_part(market_cap: float \| None) -> FundamentalFieldResult` |
+| function | `_industry_part` | 370 | `def _industry_part(analysis: AnalysisResult) -> FundamentalFieldResult` |
+| function | `_valuation_adjustment` | 377 | `def _valuation_adjustment(value: float, low_threshold: float, high_threshold: float, adjustment: int) -> int` |
+| function | `_valuation_metric_part` | 385 | `def _valuation_metric_part(value: float \| None, spec: ValuationMetricSpec) -> FundamentalFieldResult` |
+| function | `_event_factor` | 395 | `def _event_factor(events: StockEventSummary) -> FactorScore` |
+| function | `_event_score_available` | 417 | `def _event_score_available(item: object) -> bool` |
+| function | `_event_level` | 421 | `def _event_level(item: object) -> str \| None` |
+| function | `_event_evidence` | 425 | `def _event_evidence(item: object) -> str \| None` |
+| function | `_unique_event_items` | 433 | `def _unique_event_items(events) -> list[object]` |
+| function | `_risk_factor` | 454 | `def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> FactorScore` |
+| function | `_main_conflict` | 485 | `def _main_conflict(analysis: AnalysisResult, fund_flow: FundFlowAnalysis, order_pressure: OrderPressure) -> str` |
+| function | `_analysis_data_quality_score` | 493 | `def _analysis_data_quality_score(analysis: AnalysisResult) -> int` |
+| function | `_analysis_signal_confidence` | 497 | `def _analysis_signal_confidence(analysis: AnalysisResult) -> int` |
+| function | `_analysis_trend_score` | 501 | `def _analysis_trend_score(analysis: AnalysisResult) -> int` |
+| function | `_fund_flow_score` | 505 | `def _fund_flow_score(fund_flow: FundFlowAnalysis) -> int` |
+| function | `_fund_flow_available` | 509 | `def _fund_flow_available(fund_flow: FundFlowAnalysis) -> bool` |
+| function | `_order_pressure_evidence_available` | 514 | `def _order_pressure_evidence_available(order_pressure: OrderPressure) -> bool` |
+| function | `_has_weak_data_quality` | 519 | `def _has_weak_data_quality(context: MainConflictContext) -> bool` |
+| function | `_has_low_signal_confidence` | 523 | `def _has_low_signal_confidence(context: MainConflictContext) -> bool` |
+| function | `_has_weak_trend_strong_fund_flow` | 527 | `def _has_weak_trend_strong_fund_flow(context: MainConflictContext) -> bool` |
+| function | `_has_strong_trend_weak_fund_flow` | 535 | `def _has_strong_trend_weak_fund_flow(context: MainConflictContext) -> bool` |
+| function | `_has_order_sell_pressure` | 543 | `def _has_order_sell_pressure(context: MainConflictContext) -> bool` |
+| function | `_risk_triggers` | 579 | `def _risk_triggers(analysis: AnalysisResult, order_pressure: OrderPressure) -> list[str]` |
+| function | `_support_break_trigger` | 592 | `def _support_break_trigger(analysis: AnalysisResult) -> str` |
+| function | `_ma20_break_trigger` | 598 | `def _ma20_break_trigger(analysis: AnalysisResult) -> str` |
 
 #### `app/services/stock_rule_contracts.py`
 
@@ -13319,41 +13371,43 @@ Lines: 2042
 
 #### `app/services/valuation_analysis.py`
 
-Lines: 87
+Lines: 84
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `build_valuation_analysis` | 30 | `def build_valuation_analysis(analysis: AnalysisResult) -> ValuationAnalysis` |
-| function | `_valuation_score_available` | 62 | `def _valuation_score_available(analysis: AnalysisResult, anchors: object) -> bool` |
+| function | `_valuation_score_available` | 62 | `def _valuation_score_available(analysis: AnalysisResult) -> bool` |
 
 #### `app/services/valuation_anchors.py`
 
-Lines: 187
+Lines: 218
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `ValuationAnchorBasis` | 16 | `class ValuationAnchorBasis` |
-| class | `ValuationAnchorBand` | 22 | `class ValuationAnchorBand` |
-| function | `price_percentile_from_klines` | 28 | `def price_percentile_from_klines(analysis: AnalysisResult) -> float \| None` |
-| function | `valuation_percentile_from_history` | 37 | `def valuation_percentile_from_history(analysis: AnalysisResult, field: str) -> float \| None` |
-| function | `daily_quote_history_rows` | 50 | `def daily_quote_history_rows(rows: list[dict[str, float \| str \| None]]) -> list[dict[str, float \| str \| None]]` |
-| function | `peer_valuation_percentile` | 61 | `def peer_valuation_percentile(analysis: AnalysisResult, field: str) -> float \| None` |
-| function | `peer_valuation_sample_count` | 72 | `def peer_valuation_sample_count(analysis: AnalysisResult) -> int` |
-| function | `peer_valuation_values` | 84 | `def peer_valuation_values(analysis: AnalysisResult, field: str) -> list[float]` |
-| function | `_positive_field_values` | 89 | `def _positive_field_values(rows: list[dict[str, float \| str \| None]], field: str) -> list[float]` |
-| function | `_positive_float` | 97 | `def _positive_float(value: float \| str \| None) -> float \| None` |
-| function | `valuation_anchor_label` | 106 | `def valuation_anchor_label(price_percentile: float \| None, pe_percentile: float \| None=None, pb_percentile: float \| None=None, peer_pe_percentile: float \| None=None, peer_pb_percentile: float \| None=None) -> str` |
-| function | `_valuation_anchor_basis` | 119 | `def _valuation_anchor_basis(price_percentile: float \| None, pe_percentile: float \| None, pb_percentile: float \| None, peer_pe_percentile: float \| None, peer_pb_percentile: float \| None) -> ValuationAnchorBasis \| None` |
-| function | `_known_percentiles` | 135 | `def _known_percentiles(*items: float \| None) -> list[float]` |
-| function | `_percentile_float` | 139 | `def _percentile_float(value: float \| None) -> float \| None` |
-| function | `_history_day_key` | 148 | `def _history_day_key(row: dict[str, float \| str \| None], index: int) -> str` |
-| function | `_history_latest_key` | 153 | `def _history_latest_key(row: dict[str, float \| str \| None], index: int) -> tuple[str, str, int]` |
-| function | `_history_text` | 157 | `def _history_text(value: object) -> str` |
-| function | `_valuation_anchor_band_label` | 161 | `def _valuation_anchor_band_label(percentile: float) -> str` |
+| class | `ValuationAnchorBasis` | 17 | `class ValuationAnchorBasis` |
+| class | `ValuationAnchorBand` | 23 | `class ValuationAnchorBand` |
+| function | `price_percentile_from_klines` | 29 | `def price_percentile_from_klines(analysis: AnalysisResult) -> float \| None` |
+| function | `valuation_percentile_from_history` | 38 | `def valuation_percentile_from_history(analysis: AnalysisResult, field: str) -> float \| None` |
+| function | `daily_quote_history_rows` | 56 | `def daily_quote_history_rows(rows: list[dict[str, float \| str \| None]]) -> list[dict[str, float \| str \| None]]` |
+| function | `peer_valuation_percentile` | 67 | `def peer_valuation_percentile(analysis: AnalysisResult, field: str) -> float \| None` |
+| function | `peer_valuation_sample_count` | 78 | `def peer_valuation_sample_count(analysis: AnalysisResult) -> int` |
+| function | `peer_valuation_values` | 94 | `def peer_valuation_values(analysis: AnalysisResult, field: str) -> list[float]` |
+| function | `_observed_by_quote` | 104 | `def _observed_by_quote(timestamp: object, cutoff: float \| None, fetched_at: object=None) -> bool` |
+| function | `_anchor_timestamp_epoch` | 114 | `def _anchor_timestamp_epoch(value: object) -> float \| None` |
+| function | `_positive_field_values` | 120 | `def _positive_field_values(rows: list[dict[str, float \| str \| None]], field: str) -> list[float]` |
+| function | `_positive_float` | 128 | `def _positive_float(value: float \| str \| None) -> float \| None` |
+| function | `valuation_anchor_label` | 137 | `def valuation_anchor_label(price_percentile: float \| None, pe_percentile: float \| None=None, pb_percentile: float \| None=None, peer_pe_percentile: float \| None=None, peer_pb_percentile: float \| None=None) -> str` |
+| function | `_valuation_anchor_basis` | 150 | `def _valuation_anchor_basis(price_percentile: float \| None, pe_percentile: float \| None, pb_percentile: float \| None, peer_pe_percentile: float \| None, peer_pb_percentile: float \| None) -> ValuationAnchorBasis \| None` |
+| function | `_known_percentiles` | 166 | `def _known_percentiles(*items: float \| None) -> list[float]` |
+| function | `_percentile_float` | 170 | `def _percentile_float(value: float \| None) -> float \| None` |
+| function | `_history_day_key` | 179 | `def _history_day_key(row: dict[str, float \| str \| None], index: int) -> str` |
+| function | `_history_latest_key` | 184 | `def _history_latest_key(row: dict[str, float \| str \| None], index: int) -> tuple[str, str, int]` |
+| function | `_history_text` | 188 | `def _history_text(value: object) -> str` |
+| function | `_valuation_anchor_band_label` | 192 | `def _valuation_anchor_band_label(percentile: float) -> str` |
 
 #### `app/services/valuation_components.py`
 
-Lines: 303
+Lines: 311
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -13366,17 +13420,42 @@ Lines: 303
 | function | `_apply_pe_history` | 101 | `def _apply_pe_history(state: ValuationScoreState, analysis: AnalysisResult, anchors: ValuationAnchorSnapshot) -> None` |
 | function | `_apply_pb_history` | 119 | `def _apply_pb_history(state: ValuationScoreState, analysis: AnalysisResult, anchors: ValuationAnchorSnapshot) -> None` |
 | function | `_apply_current_pe` | 135 | `def _apply_current_pe(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
-| function | `_apply_current_pb` | 156 | `def _apply_current_pb(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
-| function | `_apply_peer_pe` | 175 | `def _apply_peer_pe(state: ValuationScoreState, analysis: AnalysisResult, anchors: ValuationAnchorSnapshot) -> None` |
-| function | `_apply_peer_pb` | 191 | `def _apply_peer_pb(state: ValuationScoreState, analysis: AnalysisResult, anchors: ValuationAnchorSnapshot) -> None` |
-| function | `_apply_market_cap` | 205 | `def _apply_market_cap(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
-| function | `_apply_industry_context` | 215 | `def _apply_industry_context(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
-| function | `_apply_trend_context` | 225 | `def _apply_trend_context(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
-| function | `valuation_percentile_score_delta` | 232 | `def valuation_percentile_score_delta(percentile: float, value: float \| None) -> int` |
-| function | `peer_percentile_score_delta` | 236 | `def peer_percentile_score_delta(percentile: float, value: float \| None) -> int` |
-| function | `_percentile_score_delta` | 240 | `def _percentile_score_delta(percentile: float, value: float \| None, rules: tuple[PercentileDeltaRule, ...], *, invalid_delta: int) -> int` |
-| function | `valuation_summary` | 275 | `def valuation_summary(score: int, missing: list[str]) -> str` |
-| function | `_percentile_float` | 286 | `def _percentile_float(value: float) -> float \| None` |
+| function | `_apply_current_pb` | 161 | `def _apply_current_pb(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
+| function | `_apply_peer_pe` | 185 | `def _apply_peer_pe(state: ValuationScoreState, analysis: AnalysisResult, anchors: ValuationAnchorSnapshot) -> None` |
+| function | `_apply_peer_pb` | 201 | `def _apply_peer_pb(state: ValuationScoreState, analysis: AnalysisResult, anchors: ValuationAnchorSnapshot) -> None` |
+| function | `_apply_market_cap` | 215 | `def _apply_market_cap(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
+| function | `_apply_industry_context` | 224 | `def _apply_industry_context(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
+| function | `_apply_trend_context` | 234 | `def _apply_trend_context(state: ValuationScoreState, analysis: AnalysisResult) -> None` |
+| function | `valuation_percentile_score_delta` | 241 | `def valuation_percentile_score_delta(percentile: float, value: float \| None) -> int` |
+| function | `peer_percentile_score_delta` | 245 | `def peer_percentile_score_delta(percentile: float, value: float \| None) -> int` |
+| function | `_percentile_score_delta` | 249 | `def _percentile_score_delta(percentile: float, value: float \| None, rules: tuple[PercentileDeltaRule, ...], *, invalid_delta: int) -> int` |
+| function | `valuation_summary` | 284 | `def valuation_summary(score: int, missing: list[str]) -> str` |
+| function | `_percentile_float` | 294 | `def _percentile_float(value: float) -> float \| None` |
+
+#### `app/services/value_research.py`
+
+Lines: 74
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `build_value_research` | 23 | `def build_value_research(valuation: FuyaoValuationScore, financials: FinancialReportBundle \| None) -> ValueResearchReport` |
+| function | `_valuation_evidence` | 36 | `def _valuation_evidence(result: FuyaoValuationScore) -> ValueValuationEvidence` |
+| function | `_multiple_check` | 50 | `def _multiple_check(key: str, label: str, value: float \| None, result: FuyaoValuationScore) -> ValueResearchCheck` |
+| function | `_positive_inverse` | 64 | `def _positive_inverse(value: float \| None, label: str, name: str, result: FuyaoValuationScore) -> tuple[float \| None, str]` |
+
+#### `app/services/value_research_financials.py`
+
+Lines: 108
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `financial_value_periods` | 23 | `def financial_value_periods(bundle: FinancialReportBundle, evaluated_at: str) -> list[ValueFinancialPeriod]` |
+| function | `_financial_period` | 29 | `def _financial_period(bundle: FinancialReportBundle, period: FinancialPeriodRecord, evaluated_at: str, duplicated: bool) -> ValueFinancialPeriod` |
+| function | `_period_rejection` | 43 | `def _period_rejection(period: FinancialPeriodRecord, fetched_at: str, evaluated_at: str) -> str \| None` |
+| function | `_unique_fact` | 57 | `def _unique_fact(period: FinancialPeriodRecord, key: str, kind: str) -> FinancialFact \| None` |
+| function | `_consistent_fact_value` | 65 | `def _consistent_fact_value(fact: FinancialFact) -> bool` |
+| function | `_sign_check` | 75 | `def _sign_check(period: FinancialPeriodRecord, field: tuple[str, str, str, str], rejection: str \| None) -> ValueResearchCheck` |
+| function | `_profit_cashflow_check` | 92 | `def _profit_cashflow_check(period: FinancialPeriodRecord, checks: list[ValueResearchCheck], rejection: str \| None) -> ValueResearchCheck` |
 
 #### `app/services/watchlist_scan.py`
 
@@ -13802,34 +13881,35 @@ Lines: 106
 
 #### `app/workflows/workbench_pipeline.py`
 
-Lines: 465
+Lines: 484
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `WorkbenchInputs` | 73 | `class WorkbenchInputs` |
-| class | `WorkbenchResearchCore` | 85 | `class WorkbenchResearchCore` |
-| class | `WorkbenchEvidence` | 100 | `class WorkbenchEvidence` |
-| class | `WorkbenchSupportPanels` | 107 | `class WorkbenchSupportPanels` |
-| async function | `build_workbench_context` | 116 | `async def build_workbench_context(datahub: DataHub, symbol: str) -> WorkbenchContext` |
-| async function | `_collect_workbench_inputs` | 132 | `async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchInputs` |
-| function | `_time_aligned_breadth` | 172 | `def _time_aligned_breadth(analysis: AnalysisResult, rows: list[Quote], warnings: tuple[str, ...], *, decision_cutoff: str \| None=None) -> tuple[list[Quote], tuple[str, ...]]` |
-| function | `_bound_order_book` | 194 | `def _bound_order_book(analysis: AnalysisResult, order_book: OrderBook \| None, error: str \| None, *, decision_cutoff: str \| None=None) -> tuple[OrderBook \| None, str \| None]` |
-| function | `_bound_concepts` | 215 | `def _bound_concepts(analysis: AnalysisResult, rows: list[StockConceptItem], error: str \| None, *, decision_cutoff: str \| None=None) -> tuple[list[StockConceptItem], str \| None]` |
-| function | `_quote_date` | 239 | `def _quote_date(quote: Quote) -> str` |
-| function | `_decision_cutoff` | 246 | `def _decision_cutoff(value: str \| None) -> str` |
-| function | `_component_cutoff` | 253 | `def _component_cutoff(analysis: AnalysisResult, decision_cutoff: str \| None) -> str` |
-| function | `_event_at_or_before` | 262 | `def _event_at_or_before(value: object, cutoff: str) -> bool` |
-| function | `_same_symbol` | 267 | `def _same_symbol(value: object, expected: str) -> bool` |
-| async function | `_market_breadth_sample_or_empty` | 274 | `async def _market_breadth_sample_or_empty(datahub: DataHub) -> MarketBreadthQuoteResult` |
-| function | `_build_research_core` | 295 | `def _build_research_core(inputs: WorkbenchInputs) -> WorkbenchResearchCore` |
-| function | `_build_evidence_chain` | 323 | `def _build_evidence_chain(analysis: AnalysisResult, core: WorkbenchResearchCore) -> WorkbenchEvidence` |
-| function | `_build_support_panels` | 357 | `def _build_support_panels(analysis: AnalysisResult, core: WorkbenchResearchCore, evidence: WorkbenchEvidence) -> WorkbenchSupportPanels` |
-| function | `_workbench_context_from_parts` | 373 | `def _workbench_context_from_parts(requested_symbol: str, inputs: WorkbenchInputs, core: WorkbenchResearchCore, evidence: WorkbenchEvidence, support_panels: WorkbenchSupportPanels, *, cache_cohort_key: str) -> WorkbenchContext` |
-| async function | `_order_book_or_error` | 423 | `async def _order_book_or_error(datahub: DataHub, symbol: str) -> tuple[OrderBook \| None, str \| None]` |
-| async function | `_stock_concepts_or_error` | 438 | `async def _stock_concepts_or_error(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str \| None]` |
-| async function | `_load_order_book` | 446 | `async def _load_order_book(datahub: DataHub, symbol: str) -> tuple[OrderBook \| None, str \| None]` |
-| async function | `_load_stock_concepts` | 450 | `async def _load_stock_concepts(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str \| None]` |
-| function | `_unavailable_market_breadth_sample` | 457 | `def _unavailable_market_breadth_sample() -> MarketBreadthQuoteResult` |
+| class | `WorkbenchInputs` | 75 | `class WorkbenchInputs` |
+| class | `WorkbenchResearchCore` | 88 | `class WorkbenchResearchCore` |
+| class | `WorkbenchEvidence` | 103 | `class WorkbenchEvidence` |
+| class | `WorkbenchSupportPanels` | 110 | `class WorkbenchSupportPanels` |
+| async function | `build_workbench_context` | 119 | `async def build_workbench_context(datahub: DataHub, symbol: str) -> WorkbenchContext` |
+| async function | `_collect_workbench_inputs` | 135 | `async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchInputs` |
+| async function | `_fuyao_valuation_or_unavailable` | 177 | `async def _fuyao_valuation_or_unavailable(datahub: DataHub, symbol: str, evaluated_at: str) -> FuyaoValuationScore \| None` |
+| function | `_time_aligned_breadth` | 190 | `def _time_aligned_breadth(analysis: AnalysisResult, rows: list[Quote], warnings: tuple[str, ...], *, decision_cutoff: str \| None=None) -> tuple[list[Quote], tuple[str, ...]]` |
+| function | `_bound_order_book` | 212 | `def _bound_order_book(analysis: AnalysisResult, order_book: OrderBook \| None, error: str \| None, *, decision_cutoff: str \| None=None) -> tuple[OrderBook \| None, str \| None]` |
+| function | `_bound_concepts` | 233 | `def _bound_concepts(analysis: AnalysisResult, rows: list[StockConceptItem], error: str \| None, *, decision_cutoff: str \| None=None) -> tuple[list[StockConceptItem], str \| None]` |
+| function | `_quote_date` | 257 | `def _quote_date(quote: Quote) -> str` |
+| function | `_decision_cutoff` | 264 | `def _decision_cutoff(value: str \| None) -> str` |
+| function | `_component_cutoff` | 271 | `def _component_cutoff(analysis: AnalysisResult, decision_cutoff: str \| None) -> str` |
+| function | `_event_at_or_before` | 280 | `def _event_at_or_before(value: object, cutoff: str) -> bool` |
+| function | `_same_symbol` | 285 | `def _same_symbol(value: object, expected: str) -> bool` |
+| async function | `_market_breadth_sample_or_empty` | 292 | `async def _market_breadth_sample_or_empty(datahub: DataHub) -> MarketBreadthQuoteResult` |
+| function | `_build_research_core` | 313 | `def _build_research_core(inputs: WorkbenchInputs) -> WorkbenchResearchCore` |
+| function | `_build_evidence_chain` | 342 | `def _build_evidence_chain(analysis: AnalysisResult, core: WorkbenchResearchCore) -> WorkbenchEvidence` |
+| function | `_build_support_panels` | 376 | `def _build_support_panels(analysis: AnalysisResult, core: WorkbenchResearchCore, evidence: WorkbenchEvidence) -> WorkbenchSupportPanels` |
+| function | `_workbench_context_from_parts` | 392 | `def _workbench_context_from_parts(requested_symbol: str, inputs: WorkbenchInputs, core: WorkbenchResearchCore, evidence: WorkbenchEvidence, support_panels: WorkbenchSupportPanels, *, cache_cohort_key: str) -> WorkbenchContext` |
+| async function | `_order_book_or_error` | 442 | `async def _order_book_or_error(datahub: DataHub, symbol: str) -> tuple[OrderBook \| None, str \| None]` |
+| async function | `_stock_concepts_or_error` | 457 | `async def _stock_concepts_or_error(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str \| None]` |
+| async function | `_load_order_book` | 465 | `async def _load_order_book(datahub: DataHub, symbol: str) -> tuple[OrderBook \| None, str \| None]` |
+| async function | `_load_stock_concepts` | 469 | `async def _load_stock_concepts(datahub: DataHub, symbol: str) -> tuple[list[StockConceptItem], str \| None]` |
+| function | `_unavailable_market_breadth_sample` | 476 | `def _unavailable_market_breadth_sample() -> MarketBreadthQuoteResult` |
 
 ### `tests/`
 
@@ -14071,7 +14151,7 @@ Lines: 87
 
 #### `tests/test_analysis_research.py`
 
-Lines: 1148
+Lines: 1149
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -14108,17 +14188,17 @@ Lines: 1148
 | method | `MinuteAnalysisTests.test_timeframe_conflict_downgrades_validation_and_diagnosis` | 735 | `def test_timeframe_conflict_downgrades_validation_and_diagnosis(self) -> None` |
 | method | `MinuteAnalysisTests.test_market_breadth_adjusts_regime_risk` | 766 | `def test_market_breadth_adjusts_regime_risk(self) -> None` |
 | method | `MinuteAnalysisTests.test_valuation_uses_price_and_history_anchor` | 794 | `def test_valuation_uses_price_and_history_anchor(self) -> None` |
-| method | `MinuteAnalysisTests.test_valuation_history_requires_distinct_trade_days` | 815 | `def test_valuation_history_requires_distinct_trade_days(self) -> None` |
-| method | `MinuteAnalysisTests.test_valuation_uses_peer_percentiles_when_peer_quotes_exist` | 838 | `def test_valuation_uses_peer_percentiles_when_peer_quotes_exist(self) -> None` |
-| method | `MinuteAnalysisTests.test_market_breadth_symbols_use_stock_pool_before_truncation` | 875 | `def test_market_breadth_symbols_use_stock_pool_before_truncation(self) -> None` |
-| method | `MinuteAnalysisTests.test_market_breadth_symbols_are_stratified_across_markets` | 891 | `def test_market_breadth_symbols_are_stratified_across_markets(self) -> None` |
-| method | `MinuteAnalysisTests.test_market_breadth_quotes_tolerate_partial_failures` | 912 | `def test_market_breadth_quotes_tolerate_partial_failures(self) -> None` |
-| method | `MinuteAnalysisTests.test_sampling_quote_fallback_logs_failed_symbols` | 952 | `def test_sampling_quote_fallback_logs_failed_symbols(self) -> None` |
-| method | `MinuteAnalysisTests.test_strong_stock_watch_degrades_when_one_kline_fails` | 1009 | `def test_strong_stock_watch_degrades_when_one_kline_fails(self) -> None` |
-| method | `MinuteAnalysisTests.test_quote_history_persists_valuation_fields` | 1063 | `def test_quote_history_persists_valuation_fields(self) -> None` |
-| method | `MinuteAnalysisTests.test_quote_history_returns_latest_snapshot_per_trade_date` | 1073 | `def test_quote_history_returns_latest_snapshot_per_trade_date(self) -> None` |
-| method | `MinuteAnalysisTests.test_price_alert_uses_quote_quality_gate` | 1083 | `def test_price_alert_uses_quote_quality_gate(self) -> None` |
-| method | `MinuteAnalysisTests.test_alert_evaluation_isolates_recoverable_provider_failure_per_rule` | 1111 | `def test_alert_evaluation_isolates_recoverable_provider_failure_per_rule(self) -> None` |
+| method | `MinuteAnalysisTests.test_valuation_history_requires_distinct_trade_days` | 816 | `def test_valuation_history_requires_distinct_trade_days(self) -> None` |
+| method | `MinuteAnalysisTests.test_valuation_uses_peer_percentiles_when_peer_quotes_exist` | 839 | `def test_valuation_uses_peer_percentiles_when_peer_quotes_exist(self) -> None` |
+| method | `MinuteAnalysisTests.test_market_breadth_symbols_use_stock_pool_before_truncation` | 876 | `def test_market_breadth_symbols_use_stock_pool_before_truncation(self) -> None` |
+| method | `MinuteAnalysisTests.test_market_breadth_symbols_are_stratified_across_markets` | 892 | `def test_market_breadth_symbols_are_stratified_across_markets(self) -> None` |
+| method | `MinuteAnalysisTests.test_market_breadth_quotes_tolerate_partial_failures` | 913 | `def test_market_breadth_quotes_tolerate_partial_failures(self) -> None` |
+| method | `MinuteAnalysisTests.test_sampling_quote_fallback_logs_failed_symbols` | 953 | `def test_sampling_quote_fallback_logs_failed_symbols(self) -> None` |
+| method | `MinuteAnalysisTests.test_strong_stock_watch_degrades_when_one_kline_fails` | 1010 | `def test_strong_stock_watch_degrades_when_one_kline_fails(self) -> None` |
+| method | `MinuteAnalysisTests.test_quote_history_persists_valuation_fields` | 1064 | `def test_quote_history_persists_valuation_fields(self) -> None` |
+| method | `MinuteAnalysisTests.test_quote_history_returns_latest_snapshot_per_trade_date` | 1074 | `def test_quote_history_returns_latest_snapshot_per_trade_date(self) -> None` |
+| method | `MinuteAnalysisTests.test_price_alert_uses_quote_quality_gate` | 1084 | `def test_price_alert_uses_quote_quality_gate(self) -> None` |
+| method | `MinuteAnalysisTests.test_alert_evaluation_isolates_recoverable_provider_failure_per_rule` | 1112 | `def test_alert_evaluation_isolates_recoverable_provider_failure_per_rule(self) -> None` |
 
 #### `tests/test_analysis_signal_modules.py`
 
@@ -15960,7 +16040,7 @@ Lines: 208
 
 #### `tests/test_frontend_api_format_workbench.py`
 
-Lines: 717
+Lines: 749
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -15974,7 +16054,8 @@ Lines: 717
 | function | `test_workbench_renderers_tolerate_missing_quote_ma_and_arrays` | 295 | `def test_workbench_renderers_tolerate_missing_quote_ma_and_arrays() -> None` |
 | function | `test_minute_workbench_uses_availability_contract_and_escapes_status_content` | 511 | `def test_minute_workbench_uses_availability_contract_and_escapes_status_content() -> None` |
 | function | `test_workbench_distinguishes_proxy_orderbook_and_financial_data_semantics` | 649 | `def test_workbench_distinguishes_proxy_orderbook_and_financial_data_semantics() -> None` |
-| function | `_run_node_script` | 716 | `def _run_node_script(script: str) -> None` |
+| function | `test_workbench_valuation_labels_preserve_fuyao_ttm_mrq_and_legacy_quote_basis` | 716 | `def test_workbench_valuation_labels_preserve_fuyao_ttm_mrq_and_legacy_quote_basis() -> None` |
+| function | `_run_node_script` | 748 | `def _run_node_script(script: str) -> None` |
 
 #### `tests/test_frontend_app_flow.py`
 
@@ -16230,7 +16311,7 @@ Lines: 51
 
 #### `tests/test_frontend_fuyao.py`
 
-Lines: 172
+Lines: 245
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -16238,9 +16319,12 @@ Lines: 172
 | function | `test_requests_are_bounded_and_only_use_declared_scopes` | 15 | `def test_requests_are_bounded_and_only_use_declared_scopes() -> None` |
 | function | `test_views_escape_financial_facts_and_keep_units_provenance_and_negative_values` | 33 | `def test_views_escape_financial_facts_and_keep_units_provenance_and_negative_values() -> None` |
 | function | `test_slow_previous_stock_response_cannot_replace_current_financial_panel` | 53 | `def test_slow_previous_stock_response_cannot_replace_current_financial_panel() -> None` |
-| function | `test_reads_never_create_jobs_and_a_double_submit_creates_only_one` | 76 | `def test_reads_never_create_jobs_and_a_double_submit_creates_only_one() -> None` |
-| function | `test_failed_bounded_reads_keep_saved_financial_market_and_job_content` | 106 | `def test_failed_bounded_reads_keep_saved_financial_market_and_job_content() -> None` |
-| function | `test_initial_market_read_displays_loading_and_timeout_recovery_message` | 142 | `def test_initial_market_read_displays_loading_and_timeout_recovery_message() -> None` |
+| function | `test_selected_report_period_renders_its_own_observation_with_legacy_fallback` | 76 | `def test_selected_report_period_renders_its_own_observation_with_legacy_fallback() -> None` |
+| function | `test_reads_never_create_jobs_and_a_double_submit_creates_only_one` | 104 | `def test_reads_never_create_jobs_and_a_double_submit_creates_only_one() -> None` |
+| function | `test_auxiliary_valuation_score_preserves_components_provenance_and_unavailable_state` | 134 | `def test_auxiliary_valuation_score_preserves_components_provenance_and_unavailable_state() -> None` |
+| function | `test_auxiliary_valuation_score_rejects_wrong_stock_scope_and_invalid_numbers` | 161 | `def test_auxiliary_valuation_score_rejects_wrong_stock_scope_and_invalid_numbers() -> None` |
+| function | `test_failed_bounded_reads_keep_saved_financial_market_and_job_content` | 179 | `def test_failed_bounded_reads_keep_saved_financial_market_and_job_content() -> None` |
+| function | `test_initial_market_read_displays_loading_and_timeout_recovery_message` | 215 | `def test_initial_market_read_displays_loading_and_timeout_recovery_message() -> None` |
 
 #### `tests/test_frontend_fuyao_jobs.py`
 
@@ -16886,6 +16970,19 @@ Lines: 132
 | function | `test_missing_legacy_timezone_error_identifies_the_available_recovery_control` | 99 | `def test_missing_legacy_timezone_error_identifies_the_available_recovery_control() -> None` |
 | function | `_run` | 109 | `def _run(script: str) -> None` |
 
+#### `tests/test_frontend_value_research.py`
+
+Lines: 133
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `_node` | 10 | `def _node(source: str) -> None` |
+| function | `test_value_summary_is_optional_and_follows_the_selected_financial_period` | 16 | `def test_value_summary_is_optional_and_follows_the_selected_financial_period() -> None` |
+| function | `test_value_summary_shows_coverage_ratio_limits_and_verification_actions_without_new_score` | 40 | `def test_value_summary_shows_coverage_ratio_limits_and_verification_actions_without_new_score() -> None` |
+| function | `test_value_summary_escapes_all_dynamic_text_and_never_formats_invalid_ratios` | 63 | `def test_value_summary_escapes_all_dynamic_text_and_never_formats_invalid_ratios() -> None` |
+| function | `test_value_summary_contract_rejects_identity_scope_and_ambiguous_periods` | 82 | `def test_value_summary_contract_rejects_identity_scope_and_ambiguous_periods() -> None` |
+| function | `test_value_summary_contract_rejects_invalid_coverage_ratios_and_check_facts` | 99 | `def test_value_summary_contract_rejects_invalid_coverage_ratios_and_check_facts() -> None` |
+
 #### `tests/test_frontend_watchlist_navigation.py`
 
 Lines: 148
@@ -17126,9 +17223,29 @@ Lines: 181
 | function | `test_transport_exception_does_not_reveal_url` | 163 | `def test_transport_exception_does_not_reveal_url(tmp_path, monkeypatch)` |
 | function | `test_missing_pyarrow_has_explicit_actionable_error` | 175 | `def test_missing_pyarrow_has_explicit_actionable_error(monkeypatch)` |
 
+#### `tests/test_fuyao_financial_history.py`
+
+Lines: 143
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `period` | 15 | `def period(end='2025-12-31', kind='annual', *, value=100.0, statements=('income', 'balance', 'cashflow'))` |
+| function | `save` | 26 | `def save(repository, periods, *, fetched_at='2026-04-01T09:00:00+08:00', source='年报来源', warnings=())` |
+| function | `repository` | 34 | `def repository(tmp_path)` |
+| function | `test_empty_history_does_not_create_database` | 38 | `def test_empty_history_does_not_create_database(repository)` |
+| function | `test_latest_periods_survive_over_one_hundred_narrow_refreshes` | 45 | `def test_latest_periods_survive_over_one_hundred_narrow_refreshes(repository)` |
+| function | `test_q4_indicators_cannot_hide_annual_statements_from_another_observation` | 60 | `def test_q4_indicators_cannot_hide_annual_statements_from_another_observation(repository)` |
+| function | `test_new_partial_replaces_old_complete_without_cross_observation_statement_fill` | 69 | `def test_new_partial_replaces_old_complete_without_cross_observation_statement_fill(repository)` |
+| function | `test_replaced_partial_period_does_not_leave_stale_warning_on_complete_reports` | 81 | `def test_replaced_partial_period_does_not_leave_stale_warning_on_complete_reports(repository)` |
+| function | `test_legacy_empty_indicators_do_not_hide_facts_or_create_a_period` | 90 | `def test_legacy_empty_indicators_do_not_hide_facts_or_create_a_period(repository, raw)` |
+| function | `test_missing_default_statements_does_not_change_latest_indicator_priority` | 100 | `def test_missing_default_statements_does_not_change_latest_indicator_priority(repository)` |
+| function | `test_empty_legacy_records_and_other_capabilities_or_stocks_are_excluded` | 108 | `def test_empty_legacy_records_and_other_capabilities_or_stocks_are_excluded(repository)` |
+| function | `test_selected_report_retains_full_model_and_stock_identity_validation` | 118 | `def test_selected_report_retains_full_model_and_stock_identity_validation(repository, field, value, error)` |
+| function | `test_service_and_old_annual_qa_read_merged_cache_without_provider_calls` | 126 | `def test_service_and_old_annual_qa_read_merged_cache_without_provider_calls(tmp_path, monkeypatch)` |
+
 #### `tests/test_fuyao_financials.py`
 
-Lines: 220
+Lines: 253
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -17147,27 +17264,35 @@ Lines: 220
 | function | `test_same_period_duplicate_is_idempotent_but_conflict_rejected` | 119 | `def test_same_period_duplicate_is_idempotent_but_conflict_rejected() -> None` |
 | function | `test_indicators_reject_invalid_values` | 127 | `def test_indicators_reject_invalid_values(value: object) -> None` |
 | function | `test_indicators_without_statements_stay_separate_and_units_are_not_guessed` | 135 | `def test_indicators_without_statements_stay_separate_and_units_are_not_guessed() -> None` |
-| function | `test_display_keeps_financial_score_unavailable_and_source_visible` | 142 | `def test_display_keeps_financial_score_unavailable_and_source_visible() -> None` |
-| function | `test_empty_success_is_not_converted_into_zero_financials` | 151 | `def test_empty_success_is_not_converted_into_zero_financials() -> None` |
-| function | `test_fact_answer_includes_field_period_source_and_observation_time` | 160 | `def test_fact_answer_includes_field_period_source_and_observation_time() -> None` |
-| function | `test_missing_or_ambiguous_question_does_not_substitute_other_evidence` | 175 | `def test_missing_or_ambiguous_question_does_not_substitute_other_evidence(question: str) -> None` |
-| function | `test_financial_data_does_not_unlock_unsupported_questions` | 181 | `def test_financial_data_does_not_unlock_unsupported_questions(question: str) -> None` |
-| function | `test_nonfinancial_question_is_left_to_existing_question_pipeline` | 186 | `def test_nonfinancial_question_is_left_to_existing_question_pipeline() -> None` |
-| function | `test_relative_year_follows_question_time_instead_of_old_cache` | 190 | `def test_relative_year_follows_question_time_instead_of_old_cache(monkeypatch: pytest.MonkeyPatch) -> None` |
-| function | `test_explicit_percentage_only_is_answered_as_growth_rate` | 201 | `def test_explicit_percentage_only_is_answered_as_growth_rate() -> None` |
-| function | `test_fact_lookup_does_not_ignore_stock_relative_period_or_judgment` | 213 | `def test_fact_lookup_does_not_ignore_stock_relative_period_or_judgment(question: str) -> None` |
-| function | `test_latest_annual_question_uses_an_annual_record` | 218 | `def test_latest_annual_question_uses_an_annual_record() -> None` |
+| function | `test_empty_indicators_do_not_create_a_financial_period` | 143 | `def test_empty_indicators_do_not_create_a_financial_period(abilities) -> None` |
+| function | `test_blank_indicator_facts_need_a_statement_to_identify_a_financial_period` | 154 | `def test_blank_indicator_facts_need_a_statement_to_identify_a_financial_period(value) -> None` |
+| function | `test_zero_indicator_is_a_present_fact_without_statements` | 165 | `def test_zero_indicator_is_a_present_fact_without_statements(value, unit) -> None` |
+| function | `test_display_keeps_financial_score_unavailable_and_source_visible` | 175 | `def test_display_keeps_financial_score_unavailable_and_source_visible() -> None` |
+| function | `test_empty_success_is_not_converted_into_zero_financials` | 184 | `def test_empty_success_is_not_converted_into_zero_financials() -> None` |
+| function | `test_fact_answer_includes_field_period_source_and_observation_time` | 193 | `def test_fact_answer_includes_field_period_source_and_observation_time() -> None` |
+| function | `test_missing_or_ambiguous_question_does_not_substitute_other_evidence` | 208 | `def test_missing_or_ambiguous_question_does_not_substitute_other_evidence(question: str) -> None` |
+| function | `test_financial_data_does_not_unlock_unsupported_questions` | 214 | `def test_financial_data_does_not_unlock_unsupported_questions(question: str) -> None` |
+| function | `test_nonfinancial_question_is_left_to_existing_question_pipeline` | 219 | `def test_nonfinancial_question_is_left_to_existing_question_pipeline() -> None` |
+| function | `test_relative_year_follows_question_time_instead_of_old_cache` | 223 | `def test_relative_year_follows_question_time_instead_of_old_cache(monkeypatch: pytest.MonkeyPatch) -> None` |
+| function | `test_explicit_percentage_only_is_answered_as_growth_rate` | 234 | `def test_explicit_percentage_only_is_answered_as_growth_rate() -> None` |
+| function | `test_fact_lookup_does_not_ignore_stock_relative_period_or_judgment` | 246 | `def test_fact_lookup_does_not_ignore_stock_relative_period_or_judgment(question: str) -> None` |
+| function | `test_latest_annual_question_uses_an_annual_record` | 251 | `def test_latest_annual_question_uses_an_annual_record() -> None` |
 
 #### `tests/test_fuyao_individual_integration.py`
 
-Lines: 69
+Lines: 153
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| function | `test_financial_fact_uses_cache_without_workbench_or_llm` | 14 | `def test_financial_fact_uses_cache_without_workbench_or_llm(monkeypatch)` |
-| function | `test_financial_health_prefers_observed_period_but_does_not_score` | 29 | `def test_financial_health_prefers_observed_period_but_does_not_score(monkeypatch)` |
-| function | `test_no_cached_reports_retains_existing_financial_fallback` | 40 | `def test_no_cached_reports_retains_existing_financial_fallback(monkeypatch)` |
-| function | `test_datahub_closes_research_jobs_before_provider_runtime` | 47 | `def test_datahub_closes_research_jobs_before_provider_runtime(tmp_path)` |
+| function | `test_financial_fact_uses_cache_without_workbench_or_llm` | 18 | `def test_financial_fact_uses_cache_without_workbench_or_llm(monkeypatch)` |
+| function | `test_financial_health_prefers_observed_period_but_does_not_score` | 33 | `def test_financial_health_prefers_observed_period_but_does_not_score(monkeypatch)` |
+| function | `_period_observations` | 44 | `def _period_observations()` |
+| function | `test_cached_fact_answer_keeps_selected_period_observation_provenance` | 58 | `def test_cached_fact_answer_keeps_selected_period_observation_provenance(monkeypatch, index, question)` |
+| function | `test_financial_health_keeps_selected_period_source_without_granting_score` | 78 | `def test_financial_health_keeps_selected_period_source_without_granting_score()` |
+| function | `test_legacy_period_metadata_falls_back_independently_to_bundle` | 92 | `def test_legacy_period_metadata_falls_back_independently_to_bundle(missing_field)` |
+| function | `test_missing_period_fact_keeps_its_observation_time_and_source` | 110 | `def test_missing_period_fact_keeps_its_observation_time_and_source(unknown_unit)` |
+| function | `test_no_cached_reports_retains_existing_financial_fallback` | 124 | `def test_no_cached_reports_retains_existing_financial_fallback(monkeypatch)` |
+| function | `test_datahub_closes_research_jobs_before_provider_runtime` | 131 | `def test_datahub_closes_research_jobs_before_provider_runtime(tmp_path)` |
 
 #### `tests/test_fuyao_job_control.py`
 
@@ -17219,32 +17344,79 @@ Lines: 144
 | function | `test_sectors_preserve_current_membership_without_manufactured_quote_time` | 128 | `def test_sectors_preserve_current_membership_without_manufactured_quote_time()` |
 | function | `test_empty_sector_catalog_is_not_published_as_complete_market` | 141 | `def test_empty_sector_catalog_is_not_published_as_complete_market()` |
 
-#### `tests/test_fuyao_service.py`
+#### `tests/test_fuyao_score_integration.py`
 
-Lines: 243
+Lines: 247
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `Runtime` | 20 | `class Runtime` |
-| method | `Runtime.call_provider` | 21 | `async def call_provider(self, _name, _kind, start, **_kwargs)` |
-| class | `Client` | 25 | `class Client` |
-| method | `Client.status` | 26 | `def status(self)` |
-| method | `Client.request` | 29 | `async def request(self, _path, _params=None)` |
-| method | `Client.aclose` | 32 | `async def aclose(self)` |
-| function | `service` | 37 | `def service(tmp_path, monkeypatch)` |
-| async function | `completed` | 43 | `async def completed(service, request)` |
-| function | `test_empty_valuation_batch_fails_instead_of_claiming_partial_success` | 49 | `def test_empty_valuation_batch_fails_instead_of_claiming_partial_success(service)` |
-| function | `test_empty_financials_do_not_overwrite_prior_observation` | 59 | `def test_empty_financials_do_not_overwrite_prior_observation(service)` |
-| function | `test_partial_valuation_batch_is_degraded_with_actual_count` | 69 | `def test_partial_valuation_batch_is_degraded_with_actual_count(service)` |
-| function | `test_cancellation_during_write_drains_publication_and_persists_terminal_count` | 81 | `def test_cancellation_during_write_drains_publication_and_persists_terminal_count(service, monkeypatch)` |
-| function | `test_cancelled_job_submission_has_no_persisted_orphan` | 107 | `def test_cancelled_job_submission_has_no_persisted_orphan(service, monkeypatch)` |
-| function | `test_status_recovers_interrupted_jobs_without_new_collection` | 135 | `def test_status_recovers_interrupted_jobs_without_new_collection(service)` |
-| function | `test_terminal_status_storage_failure_is_visible_from_memory` | 143 | `def test_terminal_status_storage_failure_is_visible_from_memory(service, monkeypatch)` |
-| function | `test_persistent_budget_counts_retries_and_survives_repository_reopen` | 157 | `def test_persistent_budget_counts_retries_and_survives_repository_reopen(service, monkeypatch)` |
-| function | `test_history_limits_distinct_shanghai_days_before_row_limit` | 182 | `def test_history_limits_distinct_shanghai_days_before_row_limit(service)` |
-| function | `test_symbol_parameter_rejection_does_not_abort_remaining_financials` | 193 | `def test_symbol_parameter_rejection_does_not_abort_remaining_financials(service, monkeypatch, code)` |
-| function | `test_mixed_valuation_rejection_splits_bounded_batches_without_excluding_beijing` | 211 | `def test_mixed_valuation_rejection_splits_bounded_batches_without_excluding_beijing(service, code)` |
-| function | `test_non_symbol_failures_stop_valuation_collection_without_splitting` | 232 | `def test_non_symbol_failures_stop_valuation_collection_without_splitting(service, category, code)` |
+| function | `_observation` | 28 | `def _observation(tmp_path, pe=75, pb=9, fetched_at=OBSERVED)` |
+| function | `_research_analysis` | 36 | `def _research_analysis()` |
+| function | `test_same_observation_replaces_only_existing_factor_and_reaches_research_risk` | 44 | `def test_same_observation_replaces_only_existing_factor_and_reaches_research_risk(tmp_path)` |
+| function | `test_unadmitted_observation_preserves_quote_path_and_explains_fallback` | 79 | `def test_unadmitted_observation_preserves_quote_path_and_explains_fallback(tmp_path, reason)` |
+| function | `test_unavailable_observation_cannot_make_missing_quote_fields_available` | 98 | `def test_unavailable_observation_cannot_make_missing_quote_fields_available()` |
+| function | `test_market_cap_only_quote_fallback_stays_out_of_research_scores_and_rules` | 109 | `def test_market_cap_only_quote_fallback_stays_out_of_research_scores_and_rules(pe, pb)` |
+| function | `test_adapters_reject_wrong_stock_and_unavailable_direct_factor` | 130 | `def test_adapters_reject_wrong_stock_and_unavailable_direct_factor(tmp_path)` |
+| function | `_patch_input_reads` | 142 | `def _patch_input_reads(monkeypatch, analysis)` |
+| function | `test_pipeline_reads_local_score_once_at_fixed_cutoff_and_cache_keeps_identity` | 155 | `def test_pipeline_reads_local_score_once_at_fixed_cutoff_and_cache_keeps_identity(tmp_path, monkeypatch)` |
+| function | `test_pipeline_missing_dummy_source_and_storage_failure_remain_local` | 186 | `def test_pipeline_missing_dummy_source_and_storage_failure_remain_local(monkeypatch)` |
+| function | `test_local_score_read_cancellation_propagates` | 200 | `def test_local_score_read_cancellation_propagates()` |
+| function | `test_quote_time_alignment_preserves_real_freshness_window_across_all_entries` | 214 | `def test_quote_time_alignment_preserves_real_freshness_window_across_all_entries(tmp_path, quote_time, fetched_at, evaluated_at, adopted)` |
+| function | `test_unclear_quote_time_cannot_admit_an_observation` | 243 | `def test_unclear_quote_time_cannot_admit_an_observation(tmp_path, quote_time)` |
+
+#### `tests/test_fuyao_scoring.py`
+
+Lines: 190
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `observation` | 30 | `def observation(*, pe=10, pb=2, fetched=FETCHED, batch=None)` |
+| function | `rehash` | 37 | `def rehash(record)` |
+| function | `test_explicit_basis_contributions_missingness_and_negative_multiples` | 47 | `def test_explicit_basis_contributions_missingness_and_negative_multiples(pe, pb, expected)` |
+| function | `test_observation_window_includes_boundary_but_rejects_future_and_stale` | 68 | `def test_observation_window_includes_boundary_but_rejects_future_and_stale(offset, available)` |
+| function | `test_equivalent_timezones_and_legacy_shanghai_timestamp_have_identical_scores` | 77 | `def test_equivalent_timezones_and_legacy_shanghai_timestamp_have_identical_scores(fetched)` |
+| function | `test_invalid_observation_time_cannot_enter_score` | 82 | `def test_invalid_observation_time_cannot_enter_score(fetched)` |
+| function | `test_batch_timestamp_cannot_rejuvenate_old_data_or_claim_future_availability` | 93 | `def test_batch_timestamp_cannot_rejuvenate_old_data_or_claim_future_availability(batch, available)` |
+| function | `test_observation_identity_and_digest_are_required` | 101 | `def test_observation_identity_and_digest_are_required(field, value)` |
+| function | `test_consistent_digest_does_not_admit_wrong_identity_or_dirty_values` | 114 | `def test_consistent_digest_does_not_admit_wrong_identity_or_dirty_values(payload)` |
+| function | `test_nonfinite_or_overflowing_content_fails_closed` | 121 | `def test_nonfinite_or_overflowing_content_fails_closed(value)` |
+| function | `test_no_cache_and_all_missing_are_not_neutral_scores` | 128 | `def test_no_cache_and_all_missing_are_not_neutral_scores()` |
+| function | `test_score_model_rejects_claims_that_disagree_with_contributions` | 141 | `def test_score_model_rejects_claims_that_disagree_with_contributions(updates)` |
+| function | `test_duplicate_components_cannot_double_count_one_input` | 147 | `def test_duplicate_components_cannot_double_count_one_input()` |
+| function | `test_cached_service_and_http_score_agree_without_provider_or_extra_reads` | 154 | `def test_cached_service_and_http_score_agree_without_provider_or_extra_reads(tmp_path, monkeypatch)` |
+| function | `test_source_independent_reads_do_not_create_missing_cache` | 187 | `def test_source_independent_reads_do_not_create_missing_cache(tmp_path)` |
+
+#### `tests/test_fuyao_service.py`
+
+Lines: 326
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| class | `Runtime` | 24 | `class Runtime` |
+| method | `Runtime.call_provider` | 25 | `async def call_provider(self, _name, _kind, start, **_kwargs)` |
+| class | `Client` | 29 | `class Client` |
+| method | `Client.status` | 30 | `def status(self)` |
+| method | `Client.request` | 33 | `async def request(self, _path, _params=None)` |
+| method | `Client.aclose` | 36 | `async def aclose(self)` |
+| function | `service` | 41 | `def service(tmp_path, monkeypatch)` |
+| async function | `completed` | 47 | `async def completed(service, request)` |
+| function | `test_empty_valuation_batch_fails_instead_of_claiming_partial_success` | 53 | `def test_empty_valuation_batch_fails_instead_of_claiming_partial_success(service)` |
+| function | `test_empty_financials_do_not_overwrite_prior_observation` | 63 | `def test_empty_financials_do_not_overwrite_prior_observation(service)` |
+| function | `test_partial_valuation_batch_is_degraded_with_actual_count` | 73 | `def test_partial_valuation_batch_is_degraded_with_actual_count(service)` |
+| function | `test_cancellation_during_write_drains_publication_and_persists_terminal_count` | 85 | `def test_cancellation_during_write_drains_publication_and_persists_terminal_count(service, monkeypatch)` |
+| function | `test_cancelled_job_submission_has_no_persisted_orphan` | 111 | `def test_cancelled_job_submission_has_no_persisted_orphan(service, monkeypatch)` |
+| function | `test_status_recovers_interrupted_jobs_without_new_collection` | 139 | `def test_status_recovers_interrupted_jobs_without_new_collection(service)` |
+| function | `test_terminal_status_storage_failure_is_visible_from_memory` | 147 | `def test_terminal_status_storage_failure_is_visible_from_memory(service, monkeypatch)` |
+| function | `test_persistent_budget_counts_retries_and_survives_repository_reopen` | 161 | `def test_persistent_budget_counts_retries_and_survives_repository_reopen(service, monkeypatch)` |
+| function | `test_history_limits_distinct_shanghai_days_before_row_limit` | 186 | `def test_history_limits_distinct_shanghai_days_before_row_limit(service)` |
+| function | `test_symbol_parameter_rejection_does_not_abort_remaining_financials` | 197 | `def test_symbol_parameter_rejection_does_not_abort_remaining_financials(service, monkeypatch, code)` |
+| function | `test_mixed_valuation_rejection_splits_bounded_batches_without_excluding_beijing` | 215 | `def test_mixed_valuation_rejection_splits_bounded_batches_without_excluding_beijing(service, code)` |
+| function | `test_non_symbol_failures_stop_valuation_collection_without_splitting` | 236 | `def test_non_symbol_failures_stop_valuation_collection_without_splitting(service, category, code)` |
+| function | `_financial_response` | 250 | `def _financial_response(path, *, timestamp=None, empty=False, abilities=None)` |
+| function | `_prior_financial_observation` | 258 | `def _prior_financial_observation(service)` |
+| function | `_use_budgeted_mock_client` | 263 | `def _use_budgeted_mock_client(service, handler)` |
+| function | `test_financial_collection_observes_completion_time_and_rejects_future_batches` | 272 | `def test_financial_collection_observes_completion_time_and_rejects_future_batches(service, monkeypatch, future_seconds)` |
+| function | `test_empty_explicit_report_keeps_cache_budget_and_retry_checkpoint` | 303 | `def test_empty_explicit_report_keeps_cache_budget_and_retry_checkpoint(service, abilities)` |
 
 #### `tests/test_fuyao_sync_control.py`
 
@@ -18658,54 +18830,54 @@ Lines: 139
 
 #### `tests/test_market_scan_frontend.py`
 
-Lines: 5603
+Lines: 5606
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
 | function | `test_python_and_javascript_market_scan_publication_contracts_stay_in_parity` | 23 | `def test_python_and_javascript_market_scan_publication_contracts_stay_in_parity() -> None` |
 | function | `test_market_scan_frontend_contract_is_wired_into_workspace` | 62 | `def test_market_scan_frontend_contract_is_wired_into_workspace() -> None` |
-| function | `test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed` | 252 | `def test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed() -> None` |
-| function | `test_market_scan_modules_have_explicit_reviewable_boundaries` | 276 | `def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None` |
-| function | `test_market_scan_busy_retry_uses_server_delay_without_counting_failure` | 355 | `def test_market_scan_busy_retry_uses_server_delay_without_counting_failure() -> None` |
-| function | `test_market_scan_modes_default_request_contract_and_mode_copy` | 390 | `def test_market_scan_modes_default_request_contract_and_mode_copy() -> None` |
-| function | `test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator` | 576 | `def test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator() -> None` |
-| function | `test_market_scan_shows_execution_time_and_starts_top100_refresh` | 636 | `def test_market_scan_shows_execution_time_and_starts_top100_refresh() -> None` |
-| function | `test_market_scan_history_selection_binds_results_export_filters_and_mode` | 708 | `def test_market_scan_history_selection_binds_results_export_filters_and_mode() -> None` |
-| function | `test_market_scan_query_and_rows_are_bounded_encoded_and_escaped` | 893 | `def test_market_scan_query_and_rows_are_bounded_encoded_and_escaped() -> None` |
-| function | `test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action` | 1046 | `def test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action() -> None` |
-| function | `test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable` | 1135 | `def test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable() -> None` |
-| function | `test_probability_pending_states_are_honest_non_authorizing_and_refreshable` | 1526 | `def test_probability_pending_states_are_honest_non_authorizing_and_refreshable() -> None` |
-| function | `test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures` | 1614 | `def test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures() -> None` |
-| function | `test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics` | 1707 | `def test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics() -> None` |
-| function | `test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning` | 1745 | `def test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning() -> None` |
-| function | `test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state` | 1832 | `def test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state() -> None` |
-| function | `test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run` | 1963 | `def test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run() -> None` |
-| function | `test_market_scan_controller_discovers_external_run_and_retains_published_snapshot` | 2306 | `def test_market_scan_controller_discovers_external_run_and_retains_published_snapshot() -> None` |
-| function | `test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation` | 2439 | `def test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation() -> None` |
-| function | `test_market_scan_controller_rejects_malformed_success_payloads` | 2584 | `def test_market_scan_controller_rejects_malformed_success_payloads() -> None` |
-| function | `test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online` | 2784 | `def test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online() -> None` |
-| function | `test_market_scan_controller_uses_one_bounded_exponential_backoff_timer` | 2916 | `def test_market_scan_controller_uses_one_bounded_exponential_backoff_timer() -> None` |
-| function | `test_market_scan_controller_cancels_deferred_reset_when_deactivated` | 3024 | `def test_market_scan_controller_cancels_deferred_reset_when_deactivated() -> None` |
-| function | `test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading` | 3078 | `def test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading() -> None` |
-| function | `test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions` | 3188 | `def test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions() -> None` |
-| function | `test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent` | 3354 | `def test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent() -> None` |
-| function | `test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced` | 3444 | `def test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced() -> None` |
-| function | `test_latest_timeout_recovers_on_same_identity_after_existing_capped_backoff` | 3673 | `def test_latest_timeout_recovers_on_same_identity_after_existing_capped_backoff() -> None` |
-| function | `test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run` | 3766 | `def test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run() -> None` |
-| function | `test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries` | 3831 | `def test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries() -> None` |
-| function | `test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh` | 4222 | `def test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh() -> None` |
-| function | `test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results` | 4330 | `def test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results() -> None` |
-| function | `test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling` | 4438 | `def test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling() -> None` |
-| function | `test_market_scan_probability_horizon_switches_are_local_serial_and_retryable` | 4544 | `def test_market_scan_probability_horizon_switches_are_local_serial_and_retryable() -> None` |
-| function | `test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache` | 4833 | `def test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache() -> None` |
-| function | `test_market_scan_probability_horizon_drops_queued_filtered_query` | 4884 | `def test_market_scan_probability_horizon_drops_queued_filtered_query() -> None` |
-| function | `test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe` | 4981 | `def test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe() -> None` |
-| function | `test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection` | 5043 | `def test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection() -> None` |
-| function | `test_market_scan_poll_run_failure_releases_owner_before_latest_recovery` | 5152 | `def test_market_scan_poll_run_failure_releases_owner_before_latest_recovery() -> None` |
-| function | `test_market_scan_filter_waits_for_active_run_owner_without_abort` | 5263 | `def test_market_scan_filter_waits_for_active_run_owner_without_abort() -> None` |
-| function | `test_market_scan_applied_query_refresh_ignores_drafts_and_requalifies_new_publications` | 5381 | `def test_market_scan_applied_query_refresh_ignores_drafts_and_requalifies_new_publications() -> None` |
-| function | `test_market_scan_export_serializes_full_download_and_discards_stale_queued_intent` | 5451 | `def test_market_scan_export_serializes_full_download_and_discards_stale_queued_intent() -> None` |
-| function | `_run_node_script` | 5587 | `def _run_node_script(script: str) -> None` |
+| function | `test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed` | 255 | `def test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed() -> None` |
+| function | `test_market_scan_modules_have_explicit_reviewable_boundaries` | 279 | `def test_market_scan_modules_have_explicit_reviewable_boundaries() -> None` |
+| function | `test_market_scan_busy_retry_uses_server_delay_without_counting_failure` | 358 | `def test_market_scan_busy_retry_uses_server_delay_without_counting_failure() -> None` |
+| function | `test_market_scan_modes_default_request_contract_and_mode_copy` | 393 | `def test_market_scan_modes_default_request_contract_and_mode_copy() -> None` |
+| function | `test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator` | 579 | `def test_market_scan_run85_legacy_progress_projection_uses_eligible_denominator() -> None` |
+| function | `test_market_scan_shows_execution_time_and_starts_top100_refresh` | 639 | `def test_market_scan_shows_execution_time_and_starts_top100_refresh() -> None` |
+| function | `test_market_scan_history_selection_binds_results_export_filters_and_mode` | 711 | `def test_market_scan_history_selection_binds_results_export_filters_and_mode() -> None` |
+| function | `test_market_scan_query_and_rows_are_bounded_encoded_and_escaped` | 896 | `def test_market_scan_query_and_rows_are_bounded_encoded_and_escaped() -> None` |
+| function | `test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action` | 1049 | `def test_market_scan_snapshot_is_persisted_read_only_evidence_with_distinct_current_action() -> None` |
+| function | `test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable` | 1138 | `def test_market_scan_upside_probability_shadow_contract_is_gated_and_auditable() -> None` |
+| function | `test_probability_pending_states_are_honest_non_authorizing_and_refreshable` | 1529 | `def test_probability_pending_states_are_honest_non_authorizing_and_refreshable() -> None` |
+| function | `test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures` | 1617 | `def test_probability_capture_polling_uses_terminal_fake_timers_and_bounded_failures() -> None` |
+| function | `test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics` | 1710 | `def test_market_scan_observability_renders_eta_market_coverage_and_actionable_diagnostics() -> None` |
+| function | `test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning` | 1748 | `def test_market_scan_message_summary_separates_snapshot_blocker_passed_distribution_and_source_warning() -> None` |
+| function | `test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state` | 1835 | `def test_market_scan_export_uses_published_run_blob_filename_and_independent_busy_state() -> None` |
+| function | `test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run` | 1966 | `def test_market_scan_controller_loads_terminal_snapshot_and_tracks_active_run() -> None` |
+| function | `test_market_scan_controller_discovers_external_run_and_retains_published_snapshot` | 2309 | `def test_market_scan_controller_discovers_external_run_and_retains_published_snapshot() -> None` |
+| function | `test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation` | 2442 | `def test_market_scan_controller_retries_results_and_reconciles_uncertain_mutation() -> None` |
+| function | `test_market_scan_controller_rejects_malformed_success_payloads` | 2587 | `def test_market_scan_controller_rejects_malformed_success_payloads() -> None` |
+| function | `test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online` | 2787 | `def test_market_scan_controller_recovers_missing_run_and_syncs_immediately_online() -> None` |
+| function | `test_market_scan_controller_uses_one_bounded_exponential_backoff_timer` | 2919 | `def test_market_scan_controller_uses_one_bounded_exponential_backoff_timer() -> None` |
+| function | `test_market_scan_controller_cancels_deferred_reset_when_deactivated` | 3027 | `def test_market_scan_controller_cancels_deferred_reset_when_deactivated() -> None` |
+| function | `test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading` | 3081 | `def test_market_scan_pagination_keeps_visible_content_and_stable_focus_while_loading() -> None` |
+| function | `test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions` | 3191 | `def test_market_scan_mutations_own_reads_busy_state_focus_and_duplicate_submissions() -> None` |
+| function | `test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent` | 3357 | `def test_market_scan_surface_lifecycle_and_responsive_page_size_are_coherent() -> None` |
+| function | `test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced` | 3447 | `def test_market_scan_polling_identity_sync_is_non_authorizing_bounded_and_coalesced() -> None` |
+| function | `test_latest_timeout_recovers_on_same_identity_after_existing_capped_backoff` | 3676 | `def test_latest_timeout_recovers_on_same_identity_after_existing_capped_backoff() -> None` |
+| function | `test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run` | 3769 | `def test_market_scan_polling_identity_cannot_select_or_authorize_an_old_run() -> None` |
+| function | `test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries` | 3834 | `def test_market_scan_latest_sync_is_invalidated_by_history_surface_and_user_queries() -> None` |
+| function | `test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh` | 4225 | `def test_market_scan_polling_query_reset_tracks_trusted_publication_not_force_refresh() -> None` |
+| function | `test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results` | 4333 | `def test_market_scan_selector_failure_is_serial_bounded_and_never_reads_results() -> None` |
+| function | `test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling` | 4441 | `def test_market_scan_active_progress_identity_stabilizes_then_uses_run_polling() -> None` |
+| function | `test_market_scan_probability_horizon_switches_are_local_serial_and_retryable` | 4547 | `def test_market_scan_probability_horizon_switches_are_local_serial_and_retryable() -> None` |
+| function | `test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache` | 4836 | `def test_market_scan_stale_trust_failure_cannot_clear_cross_context_cache() -> None` |
+| function | `test_market_scan_probability_horizon_drops_queued_filtered_query` | 4887 | `def test_market_scan_probability_horizon_drops_queued_filtered_query() -> None` |
+| function | `test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe` | 4984 | `def test_market_scan_heavy_read_tail_is_single_owner_last_intent_and_rejection_safe() -> None` |
+| function | `test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection` | 5046 | `def test_market_scan_probability_stale_tail_resolves_without_http_or_unhandled_rejection() -> None` |
+| function | `test_market_scan_poll_run_failure_releases_owner_before_latest_recovery` | 5155 | `def test_market_scan_poll_run_failure_releases_owner_before_latest_recovery() -> None` |
+| function | `test_market_scan_filter_waits_for_active_run_owner_without_abort` | 5266 | `def test_market_scan_filter_waits_for_active_run_owner_without_abort() -> None` |
+| function | `test_market_scan_applied_query_refresh_ignores_drafts_and_requalifies_new_publications` | 5384 | `def test_market_scan_applied_query_refresh_ignores_drafts_and_requalifies_new_publications() -> None` |
+| function | `test_market_scan_export_serializes_full_download_and_discards_stale_queued_intent` | 5454 | `def test_market_scan_export_serializes_full_download_and_discards_stale_queued_intent() -> None` |
+| function | `_run_node_script` | 5590 | `def _run_node_script(script: str) -> None` |
 
 #### `tests/test_market_scan_frontier_cli.py`
 
@@ -23784,19 +23956,57 @@ Lines: 227
 
 #### `tests/test_valuation_modules.py`
 
-Lines: 155
+Lines: 293
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
-| class | `ValuationModuleTests` | 22 | `class ValuationModuleTests(unittest.TestCase)` |
-| method | `ValuationModuleTests.test_missing_valuation_fields_return_low_confidence_summary` | 23 | `def test_missing_valuation_fields_return_low_confidence_summary(self) -> None` |
-| method | `ValuationModuleTests.test_valuation_percentile_score_deltas_keep_risk_direction` | 41 | `def test_valuation_percentile_score_deltas_keep_risk_direction(self) -> None` |
-| method | `ValuationModuleTests.test_summary_distinguishes_missing_enrichment_from_missing_core_fields` | 59 | `def test_summary_distinguishes_missing_enrichment_from_missing_core_fields(self) -> None` |
-| method | `ValuationModuleTests.test_valuation_history_percentile_skips_malformed_values` | 68 | `def test_valuation_history_percentile_skips_malformed_values(self) -> None` |
-| method | `ValuationModuleTests.test_valuation_history_percentile_uses_latest_snapshot_per_day` | 88 | `def test_valuation_history_percentile_uses_latest_snapshot_per_day(self) -> None` |
-| method | `ValuationModuleTests.test_current_valuation_summary_hides_non_finite_raw_values` | 118 | `def test_current_valuation_summary_hides_non_finite_raw_values(self) -> None` |
-| method | `ValuationModuleTests.test_valuation_anchor_label_uses_ordered_bands_and_valuation_priority` | 137 | `def test_valuation_anchor_label_uses_ordered_bands_and_valuation_priority(self) -> None` |
-| method | `ValuationModuleTests.test_valuation_anchor_label_falls_back_to_price_position_or_pending` | 146 | `def test_valuation_anchor_label_falls_back_to_price_position_or_pending(self) -> None` |
+| class | `ValuationModuleTests` | 30 | `class ValuationModuleTests(unittest.TestCase)` |
+| method | `ValuationModuleTests.test_missing_valuation_fields_return_low_confidence_summary` | 31 | `def test_missing_valuation_fields_return_low_confidence_summary(self) -> None` |
+| method | `ValuationModuleTests.test_valuation_percentile_score_deltas_keep_risk_direction` | 49 | `def test_valuation_percentile_score_deltas_keep_risk_direction(self) -> None` |
+| method | `ValuationModuleTests.test_summary_distinguishes_missing_enrichment_from_missing_core_fields` | 67 | `def test_summary_distinguishes_missing_enrichment_from_missing_core_fields(self) -> None` |
+| method | `ValuationModuleTests.test_valuation_history_percentile_skips_malformed_values` | 77 | `def test_valuation_history_percentile_skips_malformed_values(self) -> None` |
+| method | `ValuationModuleTests.test_valuation_history_percentile_uses_latest_snapshot_per_day` | 97 | `def test_valuation_history_percentile_uses_latest_snapshot_per_day(self) -> None` |
+| method | `ValuationModuleTests.test_current_valuation_summary_hides_non_finite_raw_values` | 127 | `def test_current_valuation_summary_hides_non_finite_raw_values(self) -> None` |
+| method | `ValuationModuleTests.test_valuation_anchor_label_uses_ordered_bands_and_valuation_priority` | 146 | `def test_valuation_anchor_label_uses_ordered_bands_and_valuation_priority(self) -> None` |
+| method | `ValuationModuleTests.test_valuation_anchor_label_falls_back_to_price_position_or_pending` | 155 | `def test_valuation_anchor_label_falls_back_to_price_position_or_pending(self) -> None` |
+| function | `_valuation_input` | 163 | `def _valuation_input(*, pe=None, pb=None, market_cap=None, timestamp='2026-05-13 10:00:00')` |
+| function | `test_valuation_requires_meaningful_ratios_even_with_market_cap` | 173 | `def test_valuation_requires_meaningful_ratios_even_with_market_cap(market_cap, pe, pb)` |
+| function | `test_market_cap_context_cannot_change_ratio_valuation_score` | 183 | `def test_market_cap_context_cannot_change_ratio_valuation_score(pe, pb)` |
+| function | `test_zero_ratio_does_not_penalize_other_meaningful_ratio` | 194 | `def test_zero_ratio_does_not_penalize_other_meaningful_ratio(pe, pb)` |
+| function | `test_dirty_ratios_cannot_become_valuation_evidence` | 202 | `def test_dirty_ratios_cannot_become_valuation_evidence(value)` |
+| function | `_history_rows` | 211 | `def _history_rows(*, first_day=date(2026, 3, 1), pe=100, pb=10)` |
+| function | `test_future_valuation_history_cannot_improve_old_quote_score` | 216 | `def test_future_valuation_history_cannot_improve_old_quote_score()` |
+| function | `test_history_cutoff_excludes_unverifiable_or_late_observation` | 237 | `def test_history_cutoff_excludes_unverifiable_or_late_observation(last_row)` |
+| function | `test_history_cutoff_compares_instants_and_filters_before_daily_selection` | 244 | `def test_history_cutoff_compares_instants_and_filters_before_daily_selection()` |
+| function | `test_peer_percentile_and_count_require_verified_time_at_quote_cutoff` | 258 | `def test_peer_percentile_and_count_require_verified_time_at_quote_cutoff(peer_time, expected_count)` |
+| function | `test_peer_collection_time_is_checked_when_present` | 272 | `def test_peer_collection_time_is_checked_when_present(fetched_at, expected_count)` |
+| function | `test_unverifiable_target_quote_time_excludes_all_valuation_samples` | 283 | `def test_unverifiable_target_quote_time_excludes_all_valuation_samples(timestamp)` |
+
+#### `tests/test_value_research.py`
+
+Lines: 210
+
+| Kind | Name | Line | Signature |
+| --- | --- | ---: | --- |
+| function | `score` | 21 | `def score(pe=20.0, pb=2.0)` |
+| function | `period` | 25 | `def period(*, profit=100.0, cashflow=-10.0, equity=200.0, end='2025-12-31', kind='annual', fetched=FETCHED)` |
+| function | `bundle` | 36 | `def bundle(*periods)` |
+| function | `checks` | 40 | `def checks(report, index=0)` |
+| function | `test_positive_inverse_and_coverage_are_auditable_without_rescoring` | 44 | `def test_positive_inverse_and_coverage_are_auditable_without_rescoring()` |
+| function | `test_missing_zero_and_negative_values_have_distinct_coverage` | 59 | `def test_missing_zero_and_negative_values_have_distinct_coverage(pe, pb, count, earnings, book)` |
+| function | `test_rejected_observation_with_retained_raw_values_cannot_bypass_admission` | 68 | `def test_rejected_observation_with_retained_raw_values_cannot_bypass_admission()` |
+| function | `test_tiny_positive_multiples_cannot_overflow_json_or_disappear_from_observed_coverage` | 75 | `def test_tiny_positive_multiples_cannot_overflow_json_or_disappear_from_observed_coverage()` |
+| function | `test_mismatched_stock_rejected_before_financial_interpretation` | 83 | `def test_mismatched_stock_rejected_before_financial_interpretation()` |
+| function | `test_coverage_model_cannot_claim_inconsistent_input_count` | 91 | `def test_coverage_model_cannot_claim_inconsistent_input_count(updates)` |
+| function | `test_complete_annual_profit_cashflow_divergence_is_a_check_not_a_fraud_or_health_score` | 97 | `def test_complete_annual_profit_cashflow_divergence_is_a_check_not_a_fraud_or_health_score()` |
+| function | `test_zero_negative_positive_signs_are_not_neutral_missing_values` | 110 | `def test_zero_negative_positive_signs_are_not_neutral_missing_values(profit, cashflow, equity)` |
+| function | `test_joint_check_requires_complete_unique_annual_statements_and_both_values` | 119 | `def test_joint_check_requires_complete_unique_annual_statements_and_both_values(change)` |
+| function | `test_ambiguous_or_parent_profit_cannot_replace_consolidated_profit` | 136 | `def test_ambiguous_or_parent_profit_cannot_replace_consolidated_profit(change)` |
+| function | `test_dirty_or_inconsistent_raw_value_cannot_support_positive_financial_claims` | 152 | `def test_dirty_or_inconsistent_raw_value_cannot_support_positive_financial_claims(raw)` |
+| function | `test_future_or_unverifiable_financial_observation_cannot_form_risk_claims` | 165 | `def test_future_or_unverifiable_financial_observation_cannot_form_risk_claims(fetched, end)` |
+| function | `test_annual_and_quarterly_use_their_own_source_time_and_values` | 171 | `def test_annual_and_quarterly_use_their_own_source_time_and_values()` |
+| function | `test_duplicate_periods_and_missing_periods_do_not_produce_an_all_clear` | 181 | `def test_duplicate_periods_and_missing_periods_do_not_produce_an_all_clear()` |
+| function | `test_stock_endpoint_reuses_observations_without_provider_requests` | 191 | `def test_stock_endpoint_reuses_observations_without_provider_requests(monkeypatch)` |
 
 #### `tests/test_watchlist_monotone_read_watermark.py`
 

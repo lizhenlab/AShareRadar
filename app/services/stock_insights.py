@@ -7,6 +7,8 @@ from app.models.analysis import (
 from app.models.market import (
     OrderBook,
 )
+from app.models.fuyao_scoring import FuyaoValuationScore
+from app.services.fuyao_valuation_adapter import align_fuyao_valuation, apply_fuyao_valuation
 from app.services.financial_health import build_financial_health
 from app.services.stock_activity import build_fund_flow_analysis, build_order_pressure
 from app.services.stock_abnormal_events import build_abnormal_events
@@ -23,16 +25,18 @@ def build_stock_insight_bundle(
     *,
     order_book: OrderBook | None = None,
     order_book_error: str | None = None,
+    fuyao_valuation: FuyaoValuationScore | None = None,
 ) -> StockInsightBundle:
+    fuyao_valuation = align_fuyao_valuation(fuyao_valuation, analysis.quote.timestamp)
     fund_flow = build_fund_flow_analysis(analysis)
     order_pressure = build_order_pressure(analysis, order_book=order_book, order_book_error=order_book_error)
     abnormal_events = build_abnormal_events(analysis)
     lhb = build_lhb_summary(analysis, abnormal_events)
     events = build_event_summary(analysis, abnormal_events=abnormal_events, lhb=lhb)
     strategy_cards = build_strategy_cards(analysis, fund_flow, order_pressure)
-    overview = build_stock_overview(analysis, fund_flow, order_pressure, events)
+    overview = build_stock_overview(analysis, fund_flow, order_pressure, events, fuyao_valuation=fuyao_valuation)
     financial_health = build_financial_health(analysis)
-    valuation = build_valuation_analysis(analysis)
+    valuation = apply_fuyao_valuation(build_valuation_analysis(analysis), fuyao_valuation)
     rule_matches = build_rule_match_summary(analysis, fund_flow, order_pressure, valuation, abnormal_events)
     return StockInsightBundle(
         overview=overview,

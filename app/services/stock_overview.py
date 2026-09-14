@@ -13,14 +13,15 @@ from app.models.analysis import (
     StockOverview,
 )
 from app.services.scoring import clamp_score, score_level
+from app.models.fuyao_scoring import FuyaoValuationScore
+from app.services.fuyao_valuation_adapter import align_fuyao_valuation, fuyao_fundamental_factor, fuyao_valuation_fallback_note
+from app.services.valuation_thresholds import (
+    FUNDAMENTAL_BASE_SCORE, HIGH_PB_THRESHOLD, HIGH_PE_THRESHOLD, LOW_PB_THRESHOLD, LOW_PE_THRESHOLD,
+    PB_SCORE_ADJUSTMENT, PE_SCORE_ADJUSTMENT,
+)
 from app.utils.market_data import finite_float
 from app.utils.text import clean_optional_text as _clean_text
 
-FUNDAMENTAL_BASE_SCORE = 55
-LOW_PE_THRESHOLD = 25
-HIGH_PE_THRESHOLD = 60
-LOW_PB_THRESHOLD = 3
-HIGH_PB_THRESHOLD = 8
 DATA_QUALITY_CAP_THRESHOLD = 70
 WEAK_DATA_QUALITY_THRESHOLD = 50
 LOW_SIGNAL_CONFIDENCE_THRESHOLD = 60
@@ -69,8 +70,8 @@ class OverviewScores:
 
 
 VALUATION_METRIC_SPECS = {
-    "pe": ValuationMetricSpec("PE", LOW_PE_THRESHOLD, HIGH_PE_THRESHOLD, 8, "PE"),
-    "pb": ValuationMetricSpec("PB", LOW_PB_THRESHOLD, HIGH_PB_THRESHOLD, 6, "PB"),
+    "pe": ValuationMetricSpec("PE", LOW_PE_THRESHOLD, HIGH_PE_THRESHOLD, PE_SCORE_ADJUSTMENT, "PE"),
+    "pb": ValuationMetricSpec("PB", LOW_PB_THRESHOLD, HIGH_PB_THRESHOLD, PB_SCORE_ADJUSTMENT, "PB"),
 }
 
 
@@ -117,9 +118,10 @@ def build_stock_overview(
     fund_flow: FundFlowAnalysis,
     order_pressure: OrderPressure,
     events: StockEventSummary,
+    *, fuyao_valuation: FuyaoValuationScore | None = None,
 ) -> StockOverview:
     quote = analysis.quote
-    scores = _overview_scores(analysis, fund_flow, order_pressure, events)
+    scores = _overview_scores(analysis, fund_flow, order_pressure, events, fuyao_valuation=fuyao_valuation)
     main_conflict = _quality_adjusted_main_conflict(analysis, fund_flow, order_pressure)
     return StockOverview(
         symbol=f"{quote.code}.{quote.market}",
@@ -143,8 +145,9 @@ def _overview_scores(
     fund_flow: FundFlowAnalysis,
     order_pressure: OrderPressure,
     events: StockEventSummary,
+    *, fuyao_valuation: FuyaoValuationScore | None = None,
 ) -> OverviewScores:
-    factors = _overview_factors(analysis, fund_flow, order_pressure, events)
+    factors = _overview_factors(analysis, fund_flow, order_pressure, events, fuyao_valuation=fuyao_valuation)
     participating = [item for item in factors if item.score_available and item.participates_in_total_score]
     factor_score = (
         round(sum(_bounded_score(item.score) for item in participating) / len(participating))
@@ -161,11 +164,12 @@ def _overview_factors(
     fund_flow: FundFlowAnalysis,
     order_pressure: OrderPressure,
     events: StockEventSummary,
+    *, fuyao_valuation: FuyaoValuationScore | None = None,
 ) -> list[FactorScore]:
     return [
         _technical_factor(analysis),
         _fund_factor(fund_flow),
-        _fundamental_factor(analysis),
+        _fundamental_factor(analysis, fuyao_valuation),
         _event_factor(events),
         _risk_factor(analysis, order_pressure),
     ]
@@ -305,18 +309,26 @@ def _fund_factor(fund_flow: FundFlowAnalysis) -> FactorScore:
     )
 
 
-def _fundamental_factor(analysis: AnalysisResult) -> FactorScore:
+def _fundamental_factor(analysis: AnalysisResult, fuyao_valuation: FuyaoValuationScore | None = None) -> FactorScore:
+    fuyao_valuation = align_fuyao_valuation(fuyao_valuation, analysis.quote.timestamp)
+    if fuyao_valuation is not None and fuyao_valuation.score_available:
+        if fuyao_valuation.symbol != f"{analysis.quote.code}.{analysis.quote.market}":
+            raise ValueError("扶摇估值观察与当前股票不一致")
+        return fuyao_fundamental_factor(fuyao_valuation)
     parts = _fundamental_parts(analysis)
     evidence = _unique_strings(item.evidence for item in parts)
     missing = _unique_strings(item.missing_data for item in parts)
     score = FUNDAMENTAL_BASE_SCORE + sum(item.score_adjustment for item in parts)
     score = clamp_score(score)
     available = _fundamental_score_available(analysis)
+    has_valuation_evidence = bool(evidence)
+    if fuyao_valuation is not None:
+        evidence.append(fuyao_valuation_fallback_note(fuyao_valuation))
     return FactorScore(
         name="基本面",
         score=score,
         level=score_level(score),
-        summary="估值字段可用" if evidence else "基础财务数据待接入",
+        summary="估值字段可用" if has_valuation_evidence else "基础财务数据待接入",
         evidence=evidence or ["当前只有行情字段，财报指标待接入。"],
         missing_data=missing,
         score_available=available,

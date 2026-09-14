@@ -36,7 +36,77 @@ export function verifiedStockObservation(raw, symbol) {
     throw new Error("财务记录身份或报告期格式异常");
   }
   if (bundle && bundle.periods.some((period) => !validPeriod(period))) throw new Error("财务报告期或数值格式异常");
+  if (raw.valuation_score && !validValuationScore(raw.valuation_score, symbol)) throw new Error("估值辅助评分身份或口径不一致");
+  if (raw.value_research != null && !validValueResearch(raw.value_research, symbol)) throw new Error("价值研究摘要身份、口径或数值异常");
   return raw;
+}
+
+function validValueResearch(report, symbol) {
+  if (!report || canonicalFinancialSymbol(report.symbol) !== symbol || report.schema_version !== "value-research-v1"
+      || report.metric_scope !== "current_value_research" || report.ranking_effect !== "none" || report.point_in_time !== false) return false;
+  if (!validTimestamp(report.evaluated_at) || !validValueValuation(report.valuation) || !Array.isArray(report.periods)
+      || !Array.isArray(report.limitations) || !report.limitations.every(value => typeof value === "string")) return false;
+  return report.periods.every(validValuePeriod)
+    && new Set(report.periods.map(financialPeriodKey)).size === report.periods.length;
+}
+
+function validValueValuation(valuation) {
+  if (!valuation || !Number.isInteger(valuation.available_inputs) || valuation.required_inputs !== 2
+      || valuation.available_inputs < 0 || valuation.available_inputs > 2) return false;
+  const coverage = ["unavailable", "partial", "complete"][valuation.available_inputs];
+  return valuation.coverage === coverage && validValueSource(valuation) && validValuationChecks(valuation)
+    && validPositiveRatio(valuation.earnings_yield_pct) && validPositiveRatio(valuation.book_to_price_pct)
+    && typeof valuation.earnings_yield_reason === "string" && typeof valuation.book_to_price_reason === "string"
+    && validRatioInput(valuation, "pe_ttm", valuation.earnings_yield_pct)
+    && validRatioInput(valuation, "pb_mrq", valuation.book_to_price_pct)
+    && (valuation.available_inputs > 0 || valuation.earnings_yield_pct === null && valuation.book_to_price_pct === null);
+}
+
+function validRatioInput(valuation, key, ratio) {
+  const input = valuation.checks.find(check => check.key === key);
+  return ratio === null || input.status !== "unavailable" && input.value > 0;
+}
+
+function validValuationChecks(valuation) {
+  const checks = valuation.checks;
+  return validValueChecks(checks) && checks.length === 2
+    && checks.every(check => ["pe_ttm", "pb_mrq"].includes(check.key))
+    && checks.filter(check => check.status !== "unavailable").length === valuation.available_inputs;
+}
+
+function validValuePeriod(period) {
+  return period && /^\d{4}-\d{2}-\d{2}$/.test(period.period_end) && ["annual", "quarterly"].includes(period.period_type)
+    && typeof period.observation_available === "boolean" && typeof period.summary === "string"
+    && validValueSource(period) && validValueChecks(period.checks);
+}
+
+function validValueChecks(checks) {
+  return Array.isArray(checks) && checks.every(check => check && typeof check.key === "string" && check.key.length > 0
+    && typeof check.label === "string" && ["observed", "attention", "unavailable"].includes(check.status)
+    && (check.value === null || typeof check.value === "number" && Number.isFinite(check.value))
+    && (check.unit === null || typeof check.unit === "string") && typeof check.summary === "string"
+    && typeof check.action === "string" && check.action.trim().length > 0)
+    && new Set(checks.map(check => check.key)).size === checks.length;
+}
+
+function validValueSource(value) {
+  return typeof value.source === "string" && value.source.trim().length > 0
+    && (value.fetched_at === null || typeof value.fetched_at === "string");
+}
+
+function validTimestamp(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function validPositiveRatio(value) {
+  return value === null || typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function validValuationScore(score, symbol) {
+  return canonicalFinancialSymbol(score.symbol) === symbol && score.score_semantics === "heuristic_valuation_pressure"
+    && score.ranking_effect === "individual_research_only" && score.point_in_time === false
+    && (score.score_available !== true || typeof score.score === "number" && Number.isFinite(score.score)
+      && score.score >= 0 && score.score <= 100);
 }
 
 function validPeriod(period) {

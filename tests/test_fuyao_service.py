@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 import threading
 
 import httpx
@@ -14,7 +15,10 @@ from app.services.fuyao_client import FuyaoClient
 from app.services.fuyao_contracts import FuyaoError
 from app.services.fuyao_service import FuyaoPersistentBudget, FuyaoService
 import app.services.fuyao_client as client_module
+import app.services.fuyao_fetch as fetch_module
 import app.services.fuyao_service as service_module
+from app.services.fuyao_financials import normalize_financials
+from app.utils.clock import ASHARE_TIMEZONE, market_now
 
 
 class Runtime:
@@ -192,7 +196,7 @@ def test_history_limits_distinct_shanghai_days_before_row_limit(service):
 @pytest.mark.parametrize("code", [1002, 3001, 3004])
 def test_symbol_parameter_rejection_does_not_abort_remaining_financials(service, monkeypatch, code):
     seen = []
-    async def financials(_client, symbol, _request, _fetched):
+    async def financials(_client, symbol, _request):
         seen.append(symbol)
         if symbol == "430047.BJ":
             raise FuyaoError("business_error", code=code)
@@ -239,5 +243,84 @@ def test_non_symbol_failures_stop_valuation_collection_without_splitting(service
         _, final = await completed(service, FuyaoJobRequest(kind="valuations", symbols=["600519.SH", "000001.SZ"]))
         assert final["status"] == "failed" and final["completed"] == 0 and len(seen) == 1
         assert str(code) in final["errors"][0]
+        await service.aclose()
+    asyncio.run(run())
+
+
+def _financial_response(path, *, timestamp=None, empty=False, abilities=None):
+    if path.endswith("/indicators"):
+        return {"code": 0, "data": {"thscode": "600519.SH", "report": "2025-4", "abilities": abilities or []}}
+    period_end = int(datetime(2025, 12, 31, tzinfo=ASHARE_TIMEZONE).timestamp() * 1000)
+    row = {"thscode": "600519.SH", "period": "annual", "period_end_ms": period_end, "operating_income": 17}
+    return {"code": 0, "data": {"timestamp": timestamp, "item": [] if empty else [row]}}
+
+
+def _prior_financial_observation(service):
+    bundle = normalize_financials("600519.SH", {"income": _financial_response("/income-statements")}, "2026-09-09T10:00:00+08:00")
+    return service.repository.save_observation("financials", "600519.SH", bundle.fetched_at, {"report": bundle.model_dump(mode="json")})
+
+
+def _use_budgeted_mock_client(service, handler):
+    from pydantic import SecretStr
+    settings = service.settings.model_copy(update={"fuyao_request_interval_seconds": 0, "fuyao_daily_request_limit": 100})
+    settings.fuyao_api_key = SecretStr("synthetic-financial-clock-key")
+    budget = FuyaoPersistentBudget(service.repository, 100)
+    service.client = FuyaoClient(settings, transport=httpx.MockTransport(handler), budget=budget)
+
+
+@pytest.mark.parametrize("future_seconds", [0, 60])
+def test_financial_collection_observes_completion_time_and_rejects_future_batches(service, monkeypatch, future_seconds):
+    clock = [datetime(2026, 9, 10, 10, tzinfo=ASHARE_TIMEZONE)]
+    seen = []
+    def handler(request):
+        clock[0] += timedelta(seconds=1)
+        seen.append(request.url.path)
+        stamp = int((clock[0] + timedelta(seconds=future_seconds)).timestamp() * 1000)
+        return httpx.Response(200, json=_financial_response(request.url.path, timestamp=stamp))
+    monkeypatch.setattr(service_module, "audit_now_text", lambda: clock[0].isoformat())
+    monkeypatch.setattr(fetch_module, "audit_now_text", lambda: clock[0].isoformat())
+    previous = _prior_financial_observation(service)
+    _use_budgeted_mock_client(service, handler)
+    async def run():
+        _, final = await completed(service, FuyaoJobRequest(kind="financials", symbols=["600519.SH"]))
+        latest = service.repository.latest("financials", "600519.SH")
+        assert len(seen) == 4
+        assert service.repository.request_count(market_now().date().isoformat()) == 4
+        if future_seconds:
+            assert final["status"] == "failed" and final["completed"] == 0 and final["completed_symbols"] == []
+            assert latest == previous
+        else:
+            assert final["status"] == "completed" and final["completed"] == 1
+            assert latest.id != previous.id and latest.payload["report"]["fetched_at"] == clock[0].isoformat()
+            assert latest.payload["report"]["periods"][0]["alignment"] == "complete"
+        await service.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("abilities", [[], [{"ability": "growth", "indicators": []}], [
+    {"ability": "growth", "indicators": [{"index_id": "observed_growth", "value": None}]},
+]])
+def test_empty_explicit_report_keeps_cache_budget_and_retry_checkpoint(service, abilities):
+    returning_empty, seen = [True], []
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json=_financial_response(request.url.path, empty=returning_empty[0], abilities=abilities))
+    previous = _prior_financial_observation(service)
+    _use_budgeted_mock_client(service, handler)
+    async def run():
+        request = FuyaoJobRequest(kind="financials", symbols=["600519.SH"], report="2025-4")
+        submitted, final = await completed(service, request)
+        assert final["status"] == "failed" and final["completed"] == 0 and final["completed_symbols"] == []
+        assert service.repository.latest("financials", "600519.SH") == previous
+        assert service.repository.request_count(market_now().date().isoformat()) == 4
+        returning_empty[0] = False
+        child = await service.retry_job(submitted.id)
+        assert child.request == request and child.parent_job_id == submitted.id
+        await asyncio.gather(*tuple(service._tasks.values()))
+        retried = await service.get_job(child.id)
+        assert retried.status == "completed" and retried.completed == 1 and retried.completed_symbols == ["600519.SH"]
+        assert (await service.get_job(submitted.id)).status == "failed"
+        assert service.repository.latest("financials", "600519.SH").id != previous.id
+        assert len(seen) == 8 and service.repository.request_count(market_now().date().isoformat()) == 8
         await service.aclose()
     asyncio.run(run())

@@ -164,6 +164,7 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/fuyao-job-view.js",
         "/static/js/fuyao-contracts.js",
         "/static/js/fuyao-stock-view.js",
+        "/static/js/fuyao-value-view.js",
         "/static/js/fuyao-market-view.js",
         "/static/js/fuyao-status-view.js",
         "/static/js/api.js",

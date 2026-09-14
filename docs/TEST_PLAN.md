@@ -8,6 +8,12 @@
 
 同步任务控制专项验证：观察和成功checkpoint同一事务提交，保存失败不伪造成功；按ID查询、旧任务恢复、重复取消及停止与完成竞争；持久化原始请求和唯一父子补做身份，财报/估值只补未完成股票；历史下载、校验、写出中的合作停止，线程退出前不删除暂存或释放租约。浏览器验证任务详情、正在停止禁用、新旧请求身份、最近列表以外任务回执收敛及市场筛选保留展开状态。所有写入使用临时数据库、合成HTTP或Parquet，不为验收消耗真实账号额度。
 
+财报修复回归覆盖请求跨秒与真正未来批次、显式报告期空响应和占位指标、失败补做及请求预算；跨100次窄范围刷新、年报/季报并存、仅指标不遮蔽报表、部分报表替换及完整性提示重算；页面切换、财务体检和问答保留逐期来源时间，旧格式兼容。
+
+扶摇估值评分专项验证同一PE TTM/PB MRQ观察仅替换个股既有基本面槽、总览与估值一致，特征/因子/风险/规则随同一批次传播；金额与季度口径未确认不派生财务分。覆盖摘要、股票、未来及过期观察、旧上游时间不能靠重新获取刷新、缺失与零值不归一化、负值不奖励、组件唯一与分项合计、规则版本/来源/观察身份、工作台缓存复用和无远端读取。额外拒绝晚于行情时点的观察，避免跨日或日内后到信息写成旧批次特征；七日窗口仍按真实评估时刻计算。
+
+个股价值研究专项验证已准入输入覆盖、正倍数倒数及溢出边界、拒用观察保留原值时不得旁路准入；按所选报告期显示利润、经营现金流和权益符号，重复/缺失/错表/未来观察不可用，仅完整年度合并报表允许利润现金流方向检查。原行情路径验证市值不构成估值可用或加分、零值不扣分、未来历史及同行样本不进入分位；浏览器验证期间切换、缺口核实动作、转义、旧格式及无额外请求。
+
 ## 2. 交付命令
 
 在项目根目录使用 Python 3.12，所有单元测试使用临时 SQLite 和替代提供者，不依赖真实账户、运行数据库或外网。
@@ -182,6 +188,7 @@ The current test suite is split by domain:
 - `tests/test_frontend_watchlist_navigation.py`
 - `tests/test_frontend_watchlist_queue_view.py`
 - `tests/test_frontend_watchlist_requests.py`
+- `tests/test_frontend_value_research.py`
 - `tests/test_frontend_workbench_contracts.py`
 - `tests/test_frontend_workspace_preferences.py`
 - `tests/test_frontend_workspace_request_ownership.py`
@@ -192,10 +199,13 @@ The current test suite is split by domain:
 - `tests/test_fuyao_dumps_cli.py`
 - `tests/test_fuyao_dumps_sync.py`
 - `tests/test_fuyao_dumps_validation.py`
+- `tests/test_fuyao_financial_history.py`
 - `tests/test_fuyao_financials.py`
 - `tests/test_fuyao_individual_integration.py`
 - `tests/test_fuyao_job_control.py`
 - `tests/test_fuyao_observations.py`
+- `tests/test_fuyao_score_integration.py`
+- `tests/test_fuyao_scoring.py`
 - `tests/test_fuyao_service.py`
 - `tests/test_fuyao_sync_control.py`
 - `tests/test_historical_replay_estimator_binding.py`
@@ -467,6 +477,7 @@ The current test suite is split by domain:
 - `tests/test_user_data_alert_stream.py`
 - `tests/test_uvicorn_smoke.py`
 - `tests/test_valuation_modules.py`
+- `tests/test_value_research.py`
 - `tests/test_watchlist_monotone_read_watermark.py`
 - `tests/test_watchlist_research_queue.py`
 - `tests/test_watchlist_scan.py`
@@ -477,6 +488,8 @@ The current test suite is split by domain:
 
 
 ## 4. 浏览器与操作验收
+
+`tests/test_frontend_value_research.py` 与 `tests/e2e/value-research.spec.js` 验证价值摘要的输入覆盖、倒数边界、报告期精确匹配、核实动作、旧格式兼容、股票身份与迟到响应隔离；通过页面操作检查无额外读取、无任务写入及移动端宽度。
 
 `tests/test_frontend_fuyao.py` 使用正式前端模块验证范围上限、字段转义、未知单位与负值保留、股票切换迟到响应隔离、只读零采集及重复提交占用。`tests/e2e/fuyao-research.spec.js` 通过实际财报和系统数据管理入口验证报告期切换、显式任务失败重试/完成状态、切股后的旧响应隔离；业务 API 使用合成响应。`tests/test_frontend_fuyao_jobs.py` 和 `tests/e2e/fuyao-task-controls.spec.js` 验证结构化任务详情、停止收尾、补做剩余、旧任务回执核实、写入与导航独立、市场展开状态及筛选焦点。浏览器执行结果须以下方本轮记录为准，不将新增用例本身写成已通过。
 

@@ -6,6 +6,7 @@ from typing import Callable
 from app.models.analysis import (
     AnalysisResult,
 )
+from app.utils.audit_time import audit_time_epoch
 from app.utils.market_data import finite_float
 
 MIN_VALUATION_HISTORY_ROWS = 30
@@ -35,7 +36,12 @@ def price_percentile_from_klines(analysis: AnalysisResult) -> float | None:
 
 
 def valuation_percentile_from_history(analysis: AnalysisResult, field: str) -> float | None:
-    rows = daily_quote_history_rows(getattr(analysis, "quote_history", []) or [])
+    cutoff = _anchor_timestamp_epoch(analysis.quote.timestamp)
+    eligible = [
+        row for row in (getattr(analysis, "quote_history", []) or [])
+        if _observed_by_quote(row.get("quote_timestamp"), cutoff, row.get("fetched_at"))
+    ]
+    rows = daily_quote_history_rows(eligible)
     current = getattr(analysis.quote, field, None)
     current_value = _positive_float(current)
     if current_value is None:
@@ -71,19 +77,44 @@ def peer_valuation_percentile(analysis: AnalysisResult, field: str) -> float | N
 
 def peer_valuation_sample_count(analysis: AnalysisResult) -> int:
     peers = getattr(analysis, "peer_quotes", []) or []
+    cutoff = _anchor_timestamp_epoch(analysis.quote.timestamp)
     return len(
         [
             item
             for item in peers
-            if _positive_float(getattr(item, "pe", None)) is not None
-            or _positive_float(getattr(item, "pb", None)) is not None
+            if _observed_by_quote(getattr(item, "timestamp", None), cutoff, getattr(item, "fetched_at", None))
+            and (
+                _positive_float(getattr(item, "pe", None)) is not None
+                or _positive_float(getattr(item, "pb", None)) is not None
+            )
         ]
     )
 
 
 def peer_valuation_values(analysis: AnalysisResult, field: str) -> list[float]:
     peers = getattr(analysis, "peer_quotes", []) or []
-    return [value for item in peers if (value := _positive_float(getattr(item, field, None))) is not None]
+    cutoff = _anchor_timestamp_epoch(analysis.quote.timestamp)
+    return [
+        value for item in peers
+        if _observed_by_quote(getattr(item, "timestamp", None), cutoff, getattr(item, "fetched_at", None))
+        and (value := _positive_float(getattr(item, field, None))) is not None
+    ]
+
+
+def _observed_by_quote(timestamp: object, cutoff: float | None, fetched_at: object = None) -> bool:
+    observed = _anchor_timestamp_epoch(timestamp)
+    if cutoff is None or observed is None or observed > cutoff:
+        return False
+    if fetched_at is None:
+        return True
+    fetched = _anchor_timestamp_epoch(fetched_at)
+    return fetched is not None and fetched <= cutoff
+
+
+def _anchor_timestamp_epoch(value: object) -> float | None:
+    if not isinstance(value, str) or len(value.strip()) <= 10:
+        return None
+    return audit_time_epoch(value)
 
 
 def _positive_field_values(rows: list[dict[str, float | str | None]], field: str) -> list[float]:

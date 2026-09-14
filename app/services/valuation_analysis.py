@@ -32,7 +32,7 @@ def build_valuation_analysis(analysis: AnalysisResult) -> ValuationAnalysis:
     anchors = build_valuation_anchor_snapshot(analysis)
     state = build_valuation_score_state(analysis, anchors)
     score = clamp_score(state.score)
-    score_available = _valuation_score_available(analysis, anchors)
+    score_available = _valuation_score_available(analysis)
     return ValuationAnalysis(
         symbol=f"{quote.code}.{quote.market}",
         updated_at=quote.timestamp,
@@ -59,15 +59,12 @@ def build_valuation_analysis(analysis: AnalysisResult) -> ValuationAnalysis:
     )
 
 
-def _valuation_score_available(analysis: AnalysisResult, anchors: object) -> bool:
-    quote = analysis.quote
-    observed = (quote.pe, quote.pb, quote.market_cap)
-    if any(finite_float(value) is not None for value in observed):
-        return True
-    return any(
-        finite_float(getattr(anchors, name, None)) is not None
-        for name in ("pe_percentile", "pb_percentile", "peer_pe_percentile", "peer_pb_percentile")
-    )
+def _valuation_score_available(analysis: AnalysisResult) -> bool:
+    for value in (analysis.quote.pe, analysis.quote.pb):
+        parsed = None if isinstance(value, bool) else finite_float(value)
+        if parsed is not None and parsed != 0:
+            return True
+    return False
 
 
 __all__ = [

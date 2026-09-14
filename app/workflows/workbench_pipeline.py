@@ -27,6 +27,7 @@ from app.models.analysis import (
     FeatureSnapshot,
     StockInsightBundle,
 )
+from app.models.fuyao_scoring import FuyaoValuationScore
 from app.models.market import (
     OrderBook,
     Quote,
@@ -34,6 +35,7 @@ from app.models.market import (
 )
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io_best_effort
+from app.services.fuyao_scoring import build_fuyao_valuation_score
 from app.services.market_sampling import (
     MarketBreadthQuoteResult,
     QuoteSampleResult,
@@ -79,6 +81,7 @@ class WorkbenchInputs:
     order_book_error: str | None
     concepts: list[StockConceptItem]
     concept_error: str | None
+    fuyao_valuation: FuyaoValuationScore | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,7 @@ async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchI
     order_book, order_book_error = order_book_result
     concepts, concept_error = concept_result
     context_generated_at = audit_now_text()
+    fuyao_valuation = await _fuyao_valuation_or_unavailable(datahub, symbol, context_generated_at)
     breadth_quotes, breadth_warnings = _time_aligned_breadth(
         analysis,
         list(breadth_sample.quotes),
@@ -166,7 +170,21 @@ async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchI
         order_book_error=order_book_error,
         concepts=concepts,
         concept_error=concept_error,
+        fuyao_valuation=fuyao_valuation,
     )
+
+
+async def _fuyao_valuation_or_unavailable(
+    datahub: DataHub, symbol: str, evaluated_at: str,
+) -> FuyaoValuationScore | None:
+    source = getattr(datahub, "fuyao", None)
+    load = getattr(source, "valuation_score", None)
+    if not callable(load):
+        return None
+    def unavailable(_exc: Exception) -> FuyaoValuationScore:
+        result = build_fuyao_valuation_score(symbol, None, evaluated_at)
+        return result.model_copy(update={"unavailable_reason": "扶摇本地估值读取失败，未参与本次评分"})
+    return await optional_workflow_value(datahub, lambda: load(symbol, evaluated_at), unavailable)
 
 
 def _time_aligned_breadth(
@@ -294,7 +312,8 @@ async def _market_breadth_sample_or_empty(datahub: DataHub) -> MarketBreadthQuot
 
 def _build_research_core(inputs: WorkbenchInputs) -> WorkbenchResearchCore:
     analysis = inputs.analysis
-    insights = build_stock_insight_bundle(analysis, order_book=inputs.order_book, order_book_error=inputs.order_book_error)
+    insights = build_stock_insight_bundle(analysis, order_book=inputs.order_book, order_book_error=inputs.order_book_error,
+                                         fuyao_valuation=inputs.fuyao_valuation)
     feature_snapshot = build_feature_snapshot(analysis, insights)
     theme_context = build_theme_context_report(analysis, feature_snapshot, inputs.concepts, concept_error=inputs.concept_error)
     chip_analysis = build_chip_analysis(analysis, feature_snapshot)

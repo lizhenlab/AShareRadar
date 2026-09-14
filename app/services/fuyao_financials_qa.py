@@ -7,7 +7,7 @@ import re
 
 from app.models.fuyao import FinancialFact, FinancialPeriodRecord, FinancialReportBundle
 from app.models.research import StockQuestionAnswer
-from app.services.fuyao_financials_views import financial_fact_text, financial_period_label
+from app.services.fuyao_financials_views import financial_fact_text, financial_period_label, financial_period_provenance
 from app.utils.clock import market_now
 from app.utils.symbols import standard_a_share_stock_symbol
 
@@ -48,9 +48,9 @@ def financial_fact_answer(question: str, bundle: FinancialReportBundle) -> Stock
         return _unavailable(question, bundle, str(exc))
     fact = next((item for item in period.metrics if item.key == key), None)
     if fact is None or fact.raw_value is None or fact.value is None:
-        return _unavailable(question, bundle, f"{financial_period_label(period)} 未返回可识别的所问数值。")
+        return _unavailable(question, bundle, f"{financial_period_label(period)} 未返回可识别的所问数值。", period=period)
     if fact.source_kind == "indicators" and fact.unit is None:
-        return _unavailable(question, bundle, f"{financial_period_label(period)} 的指标单位未确认，不能把原字符串解释为百分比。")
+        return _unavailable(question, bundle, f"{financial_period_label(period)} 的指标单位未确认，不能把原字符串解释为百分比。", period=period)
     return _fact_answer(question, bundle, period, fact)
 
 
@@ -137,23 +137,26 @@ def _fact_answer(
     question: str, bundle: FinancialReportBundle, period: FinancialPeriodRecord, fact: FinancialFact,
 ) -> StockQuestionAnswer:
     report_dates = "、".join(period.supplier_report_dates) or "未返回"
+    source, fetched_at = financial_period_provenance(bundle, period)
     evidence = [f"股票：{bundle.symbol}；报告期：{financial_period_label(period)}；字段：{fact.key}；来源表：{fact.source_kind}。",
-                f"来源：{bundle.source}；获取时间：{bundle.fetched_at}；币种：{period.currency or '未返回'}。",
+                f"来源：{source}；获取时间：{fetched_at}；币种：{period.currency or '未返回'}。",
                 f"供应商报告日期：{report_dates}；该字段不等同于已核实的首次披露时刻。"]
     answer = f"{financial_period_label(period)} 的{fact.label}原值为 {financial_fact_text(fact)}。" + " ".join(evidence[1:])
-    return StockQuestionAnswer(symbol=bundle.symbol, updated_at=bundle.fetched_at, question=question,
+    return StockQuestionAnswer(symbol=bundle.symbol, updated_at=fetched_at, question=question,
                               topic="财务事实", conclusion=f"{fact.label}：{financial_fact_text(fact)}", answer=answer,
                               confidence=0, confidence_note="结构化字段逐项引用，不使用启发式分数表示事实真伪；0为兼容值。",
-                              answerability="answerable", answer_source=f"{bundle.source}结构化财务记录", evidence=evidence)
+                              answerability="answerable", answer_source=f"{source}结构化财务记录", evidence=evidence)
 
 
 def _unavailable(
     question: str, bundle: FinancialReportBundle, reason: str, *, out_of_scope: bool = False,
+    period: FinancialPeriodRecord | None = None,
 ) -> StockQuestionAnswer:
+    source, fetched_at = financial_period_provenance(bundle, period)
     return StockQuestionAnswer(
-        symbol=bundle.symbol, updated_at=bundle.fetched_at, question=question, topic="财务事实",
-        conclusion="当前财务记录无法回答这个问题", answer=reason + f" 来源：{bundle.source}；获取时间：{bundle.fetched_at}。",
+        symbol=bundle.symbol, updated_at=fetched_at, question=question, topic="财务事实",
+        conclusion="当前财务记录无法回答这个问题", answer=reason + f" 来源：{source}；获取时间：{fetched_at}。",
         confidence=0, confidence_note="没有可回答的完整证据，不把缺失解释为零值。",
         answerability="out_of_scope" if out_of_scope else "insufficient_evidence", missing_evidence=[reason],
-        answer_source=f"{bundle.source}结构化财务记录",
+        answer_source=f"{source}结构化财务记录",
     )

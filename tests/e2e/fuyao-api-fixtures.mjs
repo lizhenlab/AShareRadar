@@ -2,7 +2,7 @@ import { mockApi } from "./frontend-flow-api-fixtures.mjs";
 
 export async function mockFuyaoApi(page, options = {}) {
   const state = { reads: [], writes: [], actions: [], jobs: [], records: {} };
-  await mockApi(page, { async api(url, request) {
+  await mockApi(page, { workbench: options.workbench, async api(url, request) {
     if (!url.pathname.startsWith("/api/fuyao/")) return null;
     const body = request.method() === "POST" ? request.postDataJSON() : null;
     if (request.method() === "POST") {
@@ -62,6 +62,18 @@ export function fuyaoStock(rawSymbol = "600519.SH") {
       fetched_at: "2026-09-10T02:00:00+00:00", source: "同花顺扶摇", periods, score: null,
       metric_scope: "observed_financial_facts", point_in_time: false,
       warnings: ["当前财报观测不能证明历史时点可知，不生成财务评分。"] } };
+}
+
+export function fuyaoValuationScore(symbol = "600519.SH", overrides = {}) {
+  return { rule_version: "fuyao-valuation-threshold-v1", symbol, evaluated_at: "2026-09-12T09:00:00+08:00",
+    fetched_at: "2026-09-11T15:30:00+08:00", source: "扶摇合成观察", observation_id: 7,
+    observation_digest: "a".repeat(64), score: 57, score_available: true, base_score: 55, pe_ttm: 18, pb_mrq: 9,
+    max_observation_age_days: 7,
+    components: [{ key: "pe_ttm", label: "PE TTM", value: 18, points: 8, reason: "低于固定观察阈值 25" },
+      { key: "pb_mrq", label: "PB MRQ", value: 9, points: -6, reason: "高于固定观察阈值 8" }],
+    evidence: ["同一份观察的 PE TTM 和 PB MRQ"], missing_data: [], warnings: ["只用于当前个股研究"], unavailable_reason: null,
+    score_semantics: "heuristic_valuation_pressure", ranking_effect: "individual_research_only", point_in_time: false,
+    ...overrides };
 }
 
 function taskResponse(state, id, action) {

@@ -10,8 +10,31 @@ import threading
 from typing import Any
 
 from app.db.connection import SQLiteConnectionFactory
+from app.models.fuyao import FINANCIAL_PARTIAL_WARNING, FinancialReportBundle
 from app.models.fuyao_research import FuyaoJob, FuyaoObservation
 from app.utils.audit_time import audit_now_text
+
+
+_FINANCIAL_PERIODS_SQL = """WITH periods AS (
+    SELECT o.id,
+           json_extract(p.value,'$.period_end') AS period_end,
+           json_extract(p.value,'$.period_type') AS period_type,
+           ROW_NUMBER() OVER (
+               PARTITION BY json_extract(p.value,'$.period_end'),json_extract(p.value,'$.period_type')
+               ORDER BY (COALESCE(json_array_length(p.value,'$.statements'),0) > 0) DESC,o.id DESC
+           ) AS period_rank
+    FROM observations o, json_each(o.payload,'$.report.periods') p
+    WHERE o.capability='financials' AND o.symbol=? AND (
+        json_array_length(p.value,'$.statements') > 0 OR EXISTS (
+            SELECT 1 FROM json_each(p.value,'$.metrics') f
+            WHERE json_extract(f.value,'$.value') IS NOT NULL
+               OR length(trim(COALESCE(json_extract(f.value,'$.raw_value'),''),char(9)||char(10)||char(11)||char(12)||char(13)||' ')) > 0
+        )
+    )
+)
+SELECT p.id,json_extract(o.payload,'$.report') AS report,p.period_end,p.period_type
+FROM periods p JOIN observations o ON o.id=p.id WHERE p.period_rank=1
+ORDER BY p.id DESC,p.period_end DESC,p.period_type"""
 
 
 class FuyaoResearchRepository:
@@ -107,6 +130,34 @@ class FuyaoResearchRepository:
             rows = conn.execute("SELECT * FROM observations WHERE capability=? AND symbol=? ORDER BY id DESC LIMIT ?",
                                 (capability, symbol, min(100, max(1, limit)))).fetchall()
         return [self._observation(row) for row in rows]
+
+    def financials(self, symbol: str) -> FinancialReportBundle | None:
+        """Read one coherent observation per period, preferring statements to indicators alone."""
+        if not self.path.is_file():
+            return None
+        self.initialize()
+        with self._connections.connect() as conn:
+            rows = conn.execute(_FINANCIAL_PERIODS_SQL, (symbol,)).fetchall()
+        if not rows:
+            return None
+        reports: dict[int, FinancialReportBundle] = {}
+        periods = []
+        for row in rows:
+            if row["id"] not in reports:
+                report = FinancialReportBundle.model_validate_json(row["report"])
+                if report.symbol != symbol:
+                    raise ValueError("财报观察的证券身份不一致")
+                reports[row["id"]] = report
+            report = reports[row["id"]]
+            period = next(item for item in report.periods
+                          if (item.period_end, item.period_type) == (row["period_end"], row["period_type"]))
+            periods.append(period.model_copy(update={"fetched_at": report.fetched_at, "source": report.source}))
+        ordered = sorted(periods, key=lambda item: (item.period_end, item.period_type == "annual"), reverse=True)
+        warnings = list(dict.fromkeys(warning for report in reports.values() for warning in report.warnings
+                                     if warning != FINANCIAL_PARTIAL_WARNING))
+        if any(period.alignment != "complete" for period in ordered):
+            warnings.append(FINANCIAL_PARTIAL_WARNING)
+        return next(iter(reports.values())).model_copy(update={"periods": ordered, "warnings": warnings})
 
     def valuation_history(self, symbol: str, limit: int = 100) -> list[FuyaoObservation]:
         """Select the latest observation per Shanghai day before limiting days."""
