@@ -36,7 +36,9 @@ body {
 }
 
 html {
-  scroll-behavior: smooth;
+  /* Automatic focus/click scrolling must finish before hit testing. Explicit
+     navigation actions can still request smooth scrolling. */
+  scroll-behavior: auto;
 }
 
 button,

@@ -439,7 +439,7 @@ body.query-panel-collapsed .query-panel .layout-toggle::before {
 
   .discovery-bulk-controls input,
   .discovery-bulk-controls button {
-    scroll-margin-top: calc(var(--primary-navigation-height) + 12px);
+    scroll-margin-top: 12px;
   }
 
   .market-scan-table tr.market-scan-result-row {

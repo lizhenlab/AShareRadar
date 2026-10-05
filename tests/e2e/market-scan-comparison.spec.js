@@ -34,6 +34,20 @@ async function downloadedJson(download) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+test("comparison controls remain reachable when scrolling back from the result rows", async ({ page }) => {
+  const state = await openMarket(page);
+  await choose(page, [SYMBOLS.first, SYMBOLS.second]);
+  const button = page.locator("#marketScanCompareRun");
+  await button.evaluate((element) => element.scrollIntoView({ block: "start" }));
+  await expect.poll(() => button.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return element.contains(hit);
+  })).toBe(true);
+  await runComparison(page);
+  expect(state.calls).toHaveLength(1);
+});
+
 test("frozen comparison keeps cross-page selection bounded, filters differences and exports exact evidence", async ({ page }, testInfo) => {
   const state = await openMarket(page);
   await choose(page, [SYMBOLS.first, SYMBOLS.second]);

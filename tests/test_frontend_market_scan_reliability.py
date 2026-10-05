@@ -148,7 +148,7 @@ def test_layout_optimization_keeps_dense_scan_rows_readable_across_breakpoints()
     assert 'content: "#"' in mobile
     assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in mobile
     assert "#marketScanRetry:not([hidden])" in mobile
-    assert "scroll-margin-top: calc(var(--primary-navigation-height) + 12px)" in mobile
+    assert "scroll-margin-top: 12px" in mobile
 
     tablet = styles.split("@media (min-width: 600px) and (max-width: 820px)", 1)[1]
     assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in tablet
