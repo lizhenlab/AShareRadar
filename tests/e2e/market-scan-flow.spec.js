@@ -581,6 +581,9 @@ for (const viewport of [
 ]) {
   test(`advanced discovery editing and bulk queue preserve the plan at ${viewport.name}`, async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "desktop-chromium", "viewport matrix runs once in desktop Chromium");
+    // This flow edits every advanced field, queues both selection scopes and
+    // verifies export/import; its complete browser interactions exceed 15s on CI.
+    test.slow();
     const expectedPageSize = viewport.width <= 820 ? 30 : 100;
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     const discovery = discoveryApiHarness();
