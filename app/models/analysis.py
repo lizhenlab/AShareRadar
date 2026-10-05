@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.models.market import Kline, PlateItem, Quote, StockInfo
+from app.models.market_context import MarketContextScore
 
 
 class SignalItem(BaseModel):
@@ -195,6 +196,7 @@ class FactorScore(BaseModel):
     score_available: bool = True
     data_nature: Literal["derived", "unavailable"] = "derived"
     participates_in_total_score: bool = True
+    aggregation_role: Literal["direction", "risk_constraint"] = "direction"
     unavailable_reason: str | None = None
 
     @model_validator(mode="after")
@@ -230,6 +232,13 @@ class StockOverview(BaseModel):
     factors: list[FactorScore]
     action_advice: ActionAdvice
     updated_at: str
+    directional_score: int | None = Field(default=None, ge=0, le=100)
+    reliability_score: int | None = Field(default=None, ge=0, le=100)
+    market_context_score: MarketContextScore | None = None
+    score_rule_version: str | None = None
+    directional_evidence_score: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    risk_penalty: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    evidence_coverage_pct: int | None = Field(default=None, ge=0, le=100)
 
 
 class FundFlowWindow(BaseModel):
@@ -245,6 +254,7 @@ class FundFlowAnalysis(BaseModel):
     source: str
     data_nature: Literal["derived", "estimated", "observed", "unavailable"] = "unavailable"
     methodology: str = "旧数据未标注量价指标口径。"
+    score_rule_version: str | None = None
     updated_at: str
     overall_score: int
     level: str

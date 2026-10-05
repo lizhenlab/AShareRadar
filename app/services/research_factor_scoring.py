@@ -14,6 +14,7 @@ from app.models.research import (
     StandardFactor,
 )
 from app.services.indicators import pct_change
+from app.services.research_factor_aggregation import aggregate_factor_scores
 from app.services.research_factor_calibration import _calibrate_factor, _calibration_buckets, _factor_percentile
 from app.services.research_factor_specs import FactorSpec
 from app.services.research_factor_weights import _adjusted_factor_weight
@@ -84,6 +85,7 @@ def _build_factor(
         if participates_in_current_score
         else _unavailable_factor_calibration(spec.name, "当前因子所需观测字段不可用")
     )
+    calibration = calibration.model_copy(update={"score_rule_version": spec.score_rule_version})
     return StandardFactor(
         id=spec.id,
         name=spec.name,
@@ -94,7 +96,7 @@ def _build_factor(
         direction=_factor_direction(clean_score),
         percentile=(
             _factor_percentile(analysis.klines, spec.evaluator, clean_score)
-            if participates_in_current_score
+            if spec.historically_replayable and participates_in_current_score
             else None
         ),
         weight=_adjusted_factor_weight(spec.id, spec.weight, weight_adjustments or {}),
@@ -109,6 +111,7 @@ def _build_factor(
         ),
         data_nature=data_nature,
         methodology=methodology,
+        score_rule_version=spec.score_rule_version,
     )
 
 
@@ -151,11 +154,7 @@ def _unavailable_factor_calibration(name: str, reason: str) -> FactorCalibration
 
 
 def _weighted_factor_score(factors: list[StandardFactor]) -> int:
-    participating = [item for item in factors if item.participates_in_current_score]
-    total_weight = sum(item.weight for item in participating)
-    if total_weight <= 0:
-        return 50
-    return _clamp(round(sum(item.score * item.weight for item in participating) / total_weight))
+    return aggregate_factor_scores(factors).total_score
 
 
 def _factor_participates_in_historical_aggregate(factor: StandardFactor) -> bool:

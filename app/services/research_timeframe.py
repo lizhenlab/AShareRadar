@@ -8,7 +8,6 @@ from app.models.analysis import (
     FeatureSnapshot,
 )
 from app.models.research import (
-    FactorLabReport,
     TimeframeAlignmentReport,
     TimeframeTrend,
 )
@@ -86,7 +85,6 @@ ALIGNMENT_LABEL_RULES: tuple[AlignmentLabelRule, ...] = (
 def build_timeframe_alignment_report(
     analysis: AnalysisResult,
     feature: FeatureSnapshot,
-    factor_lab: FactorLabReport,
 ) -> TimeframeAlignmentReport:
     frames = [
         _timeframe_trend(analysis, feature, "短线", 20),
@@ -94,7 +92,7 @@ def build_timeframe_alignment_report(
         _timeframe_trend(analysis, feature, "中期", 120),
     ]
     valid_frames = [item for item in frames if item.window_days <= len(analysis.klines)]
-    alignment_score = _timeframe_alignment_score(valid_frames, factor_lab)
+    alignment_score = _timeframe_alignment_score(valid_frames)
     conflict_level = _timeframe_conflict_level(valid_frames)
     alignment_label = _timeframe_alignment_label(alignment_score, conflict_level)
     return TimeframeAlignmentReport(
@@ -133,16 +131,12 @@ def _timeframe_trend(
     )
 
 
-def _timeframe_alignment_score(frames: list[TimeframeTrend], factor_lab: FactorLabReport) -> int:
+def _timeframe_alignment_score(frames: list[TimeframeTrend]) -> int:
     if not frames:
         return 50
     weights = {"短线": 0.45, "波段": 0.35, "中期": 0.2}
     total_weight = sum(weights.get(item.name, 0.25) for item in frames) or 1
     raw = sum(item.score * weights.get(item.name, 0.25) for item in frames) / total_weight
-    if factor_lab.total_score >= 60:
-        raw += 4
-    if factor_lab.total_score <= 45:
-        raw -= 5
     return _clamp(round(raw))
 
 

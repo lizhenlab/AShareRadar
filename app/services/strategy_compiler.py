@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from math import isfinite
 
 from app.models.strategy_lab import (
     FilterValue,
@@ -166,6 +167,8 @@ def _compile_filter(item: StrategyHardFilter) -> tuple[StrategyCompiledExpressio
         return None, f"指标 {item.field} 不接受周期参数"
     if not _value_matches_kind(item.value, metric.kind):
         return None, f"指标 {item.field} 的值类型与 {metric.kind} 不匹配"
+    if item.operator == "between" and isinstance(item.value, list) and float(item.value[0]) > float(item.value[1]):
+        return None, f"指标 {item.field} 的区间下界不能大于上界"
     source_field = metric.source_field
     if item.period_sessions is not None:
         source_field = source_field.format(period=item.period_sessions)
@@ -176,7 +179,7 @@ def _compile_filter(item: StrategyHardFilter) -> tuple[StrategyCompiledExpressio
             operator=item.operator,
             value=item.value,
             period_sessions=item.period_sessions,
-            display=_display_expression(metric.label, metric.unit, item.operator, item.value, item.period_sessions),
+            display=_display_filter(item, label=metric.label, unit=metric.unit),
         ),
         "",
     )
@@ -185,10 +188,25 @@ def _compile_filter(item: StrategyHardFilter) -> tuple[StrategyCompiledExpressio
 def _value_matches_kind(value: FilterValue, kind: str) -> bool:
     values = value if isinstance(value, list) else [value]
     if kind == "number":
-        return bool(values) and all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in values)
+        return bool(values) and all(_finite_filter_number(item) for item in values)
     if kind == "boolean":
         return bool(values) and all(isinstance(item, bool) for item in values)
     return bool(values) and all(isinstance(item, str) for item in values)
+
+
+def _finite_filter_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _display_filter(item: StrategyHardFilter, *, label: str, unit: str) -> str:
+    if item.field == "skip5_return_pct":
+        return f"跳过最近5日后，此前{item.period_sessions}个交易日收益率 {item.operator} {_display_value(item.value, unit)}"
+    return _display_expression(label, unit, item.operator, item.value, item.period_sessions)
 
 
 def _exclusion_filters(spec: StrategySpecInput) -> list[StrategyHardFilter]:

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.instance_guard import FileInstanceGuard
+from app.services.market_scan_research_stores import MarketScanResearchStores
 from tests.market_scan_test_support import (
     SCAN_AS_OF,
     _BlockingTaskRunCache,
@@ -75,18 +76,18 @@ def test_market_scan_start_does_not_wait_for_probability_runtime_warmup(
             nonlocal activated
             activated = True
 
-        scanner.refresh_probability_research_cache = refresh  # type: ignore[method-assign]
-        scanner._activate_probability_capture_leader = activate  # type: ignore[method-assign]  # noqa: SLF001
+        scanner._probability_runtime.refresh = refresh  # type: ignore[method-assign]
+        scanner._probability_runtime._activate_capture = activate  # type: ignore[method-assign]  # noqa: SLF001
 
         assert await asyncio.wait_for(scanner.start(), timeout=0.5) == 0
         await asyncio.wait_for(entered.wait(), timeout=0.5)
         assert activated is False
-        assert scanner._probability_source_research_store.refresh_pending() is True  # noqa: SLF001
-        assert scanner._historical_probability_store.refresh_pending() is True  # noqa: SLF001
+        assert scanner._research_stores.probability_source.refresh_pending() is True  # noqa: SLF001
+        assert scanner._research_stores.historical_probability.refresh_pending() is True  # noqa: SLF001
         await asyncio.wait_for(scanner.stop(), timeout=0.5)
-        assert scanner._probability_runtime_warmup_task is None  # noqa: SLF001
-        assert scanner._probability_source_research_store.refresh_pending() is False  # noqa: SLF001
-        assert scanner._historical_probability_store.refresh_pending() is False  # noqa: SLF001
+        assert scanner._probability_runtime._warmup_task is None  # noqa: SLF001
+        assert scanner._research_stores.probability_source.refresh_pending() is False  # noqa: SLF001
+        assert scanner._research_stores.historical_probability.refresh_pending() is False  # noqa: SLF001
 
     asyncio.run(scenario())
 
@@ -103,7 +104,9 @@ def test_joint_probability_maintenance_normalizes_legacy_naive_market_time(
                 observed.append(now)
                 return object()
 
-        scanner._joint_probability_store = Store()  # type: ignore[assignment]  # noqa: SLF001
+        scanner = _scanner(_MarketScanHub(tmp_path), research_stores=MarketScanResearchStores(
+            probability=None, probability_source=None, future_range=None, joint_probability=Store(),
+        ))
         await scanner.maintain_joint_execution_probability(
             now=datetime(2026, 8, 23, 1, 30),
         )
@@ -137,8 +140,9 @@ def test_probability_preloads_serialize_and_refresh_new_capture_bindings(
 
         source = _preload_probe(preload, isolated=True)
         history = _preload_probe(lambda: 0)
-        scanner._probability_source_research_store = source  # noqa: SLF001
-        scanner._historical_probability_store = history  # noqa: SLF001
+        scanner = _scanner(_MarketScanHub(tmp_path), research_stores=MarketScanResearchStores(
+            probability=None, probability_source=source, future_range=None, historical_probability=history,
+        ))
         monkeypatch.setattr(scanner.cache, "probability_source_capture_archive_bindings", lambda: dict(bindings))
         first = asyncio.create_task(scanner.refresh_probability_research_cache())
         await asyncio.wait_for(entered.wait(), 1)
@@ -182,8 +186,9 @@ def test_probability_preload_failure_drains_other_worker_before_clearing_pending
 
         source = _preload_probe(failing, isolated=True)
         history = _preload_probe(history_preload)
-        scanner._probability_source_research_store = source  # noqa: SLF001
-        scanner._historical_probability_store = history  # noqa: SLF001
+        scanner = _scanner(_MarketScanHub(tmp_path), research_stores=MarketScanResearchStores(
+            probability=None, probability_source=source, future_range=None, historical_probability=history,
+        ))
         refresh = asyncio.create_task(scanner.refresh_probability_research_cache())
         await asyncio.wait_for(asyncio.gather(history_entered.wait(), source_failed.wait()), 1)
         await asyncio.sleep(0)
@@ -225,8 +230,9 @@ def test_probability_preload_repeated_cancellation_drains_real_workers(
 
         source = _preload_probe(preload, isolated=True)
         history = _preload_probe(history_preload)
-        scanner._probability_source_research_store = source  # noqa: SLF001
-        scanner._historical_probability_store = history  # noqa: SLF001
+        scanner = _scanner(_MarketScanHub(tmp_path), research_stores=MarketScanResearchStores(
+            probability=None, probability_source=source, future_range=None, historical_probability=history,
+        ))
         refresh = asyncio.create_task(scanner.refresh_probability_research_cache())
         await asyncio.wait_for(entered.wait(), 1)
         refresh.cancel()
@@ -239,7 +245,7 @@ def test_probability_preload_repeated_cancellation_drains_real_workers(
             await asyncio.wait_for(refresh, 2)
         assert source_finished.is_set() and history_finished.is_set()
         assert source.pending is False and history.pending is False
-        assert scanner._probability_preload_lock.locked() is False  # noqa: SLF001
+        assert scanner._probability_runtime._preload_lock.locked() is False  # noqa: SLF001
 
     asyncio.run(scenario())
 
@@ -249,6 +255,9 @@ def _preload_probe(read: Callable[..., int], *, isolated: bool = False) -> Simpl
     probe.mark_preload_pending = lambda: setattr(probe, "pending", True)
     probe.clear_preload_pending = lambda: setattr(probe, "pending", False)
     probe.refresh_pending = lambda: probe.pending
+    probe.acquire_preload_lease = lambda: None
+    probe.release_preload_lease = lambda: None
+    probe.set_refresh_request = lambda callback: None
     if isolated:
         probe.preload_isolated = read
         probe.preload = lambda: pytest.fail("isolated preload must be preferred")
@@ -274,14 +283,15 @@ def test_market_scan_stop_cancels_and_reaps_isolated_warmup_before_returning(
 
         source = _preload_probe(preload, isolated=True)
         history = _preload_probe(lambda: 1)
-        scanner._probability_source_research_store = source  # noqa: SLF001
-        scanner._historical_probability_store = history  # noqa: SLF001
+        scanner = _scanner(_MarketScanHub(tmp_path), research_stores=MarketScanResearchStores(
+            probability=None, probability_source=source, future_range=None, historical_probability=history,
+        ))
         await scanner.start()
         await asyncio.wait_for(entered.wait(), 1)
         await asyncio.wait_for(scanner.stop(), 1)
         assert finished.is_set()
         assert scanner.is_quiescent is True
-        assert scanner._probability_runtime_warmup_task is None  # noqa: SLF001
+        assert scanner._probability_runtime._warmup_task is None  # noqa: SLF001
         assert source.pending is False and history.pending is False
 
     asyncio.run(scenario())
@@ -328,8 +338,8 @@ def test_real_probability_store_keeps_batch_pending_after_its_preload_finishes(
         source_entered = asyncio.Event()
         history_finished = asyncio.Event()
         release_source = Event()
-        source = scanner._probability_source_research_store  # noqa: SLF001
-        historical = scanner._historical_probability_store  # noqa: SLF001
+        source = scanner._research_stores.probability_source  # noqa: SLF001
+        historical = scanner._research_stores.historical_probability  # noqa: SLF001
         original_source = source.preload_isolated
         original_history = historical.preload
         reads: list[bool] = []

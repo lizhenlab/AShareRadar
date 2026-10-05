@@ -26,12 +26,15 @@ from app.services.trading_calendar import (
 from app.services.minute_analysis import build_minute_analysis_report, build_unavailable_minute_analysis_report
 from app.services.review import build_individual_review
 from app.utils.symbols import normalize_symbol
+from app.utils.audit_time import audit_now_text
 from app.workflows.optional_data import optional_workflow_value, short_error
 from app.workflows.stock_lookup import confirmed_stock_profile, match_industry
 
 
 WORKBENCH_DAILY_KLINE_LIMIT = 240
 WORKBENCH_REVIEW_WINDOW_DAYS = 60
+# The existing industry provider validates a complete page bounded to 100 boards.
+INDIVIDUAL_INDUSTRY_PLATE_LIMIT = 100
 
 
 async def analyze_individual_stock(
@@ -61,7 +64,7 @@ async def analyze_individual_stock(
         completed_klines,
         quote_symbol,
     )
-    industry = match_industry(profile, plates)
+    industry = match_industry(profile, plates, quote=quote_data, evaluated_at=audit_now_text())
     review = build_individual_review(
         quote_data,
         completed_klines,
@@ -143,7 +146,7 @@ async def _safe_quote_history(datahub: DataHub, symbol: str) -> list[dict[str, f
 
 async def _optional_plate_rank(datahub: DataHub, symbol: str) -> list:
     try:
-        rows = await datahub.plate_rank(limit=20)
+        rows = await datahub.plate_rank(limit=INDIVIDUAL_INDUSTRY_PLATE_LIMIT)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

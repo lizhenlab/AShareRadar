@@ -146,6 +146,8 @@ def row_to_plate_item(row: sqlite3.Row) -> PlateItem:
         leading_stock_change_pct=row["leading_stock_change_pct"],
         source=row["source"],
         updated_at=row["updated_at"],
+        symbol=row["symbol"],
+        quote_timestamp=row["quote_timestamp"],
     )
 
 

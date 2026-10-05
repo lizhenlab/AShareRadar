@@ -91,13 +91,15 @@ function renderInsightOverview(overview) {
     <div class="overview-score">
       <div>
         <span>全景评分</span>
-        <strong>${escapeHtml(overview.total_score)}<small>/100</small></strong>
+        <strong>${contextNumber(overview.total_score, 0)}<small>/100</small></strong>
       </div>
       <i>${escapeHtml(overview.total_level)}</i>
     </div>
     <div class="overview-content">
       <strong>主要矛盾</strong>
       <p>${escapeHtml(overview.main_conflict)}</p>
+      ${renderDirectionalScoreBasis(overview)}
+      ${renderMarketContextScore(overview)}
       <div class="takeaways">
         ${renderEscapedItems(takeaways, "span")}
       </div>
@@ -116,6 +118,83 @@ function renderInsightOverview(overview) {
   `;
 }
 
+function contextNumber(value, digits = 1) {
+  return typeof value === "number" && Number.isFinite(value) ? formatNumber(value, digits) : "--";
+}
+
+function directionalNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    ? contextNumber(value) : "--";
+}
+
+function renderDirectionalScoreBasis(overview) {
+  const values = [overview.directional_evidence_score, overview.risk_penalty, overview.evidence_coverage_pct];
+  if (values.every(value => value === null || value === undefined)) return "";
+  return `<div data-directional-score-basis>
+    <p>独立证据分 ${directionalNumber(overview.directional_evidence_score)} → 风险扣分 ${directionalNumber(overview.risk_penalty)} → 方向基分 ${directionalNumber(overview.directional_score)}</p>
+    <small>方向证据覆盖 ${directionalNumber(overview.evidence_coverage_pct)}%；缺失份额不转移。覆盖度不是上涨概率。</small>
+  </div>`;
+}
+
+function contextDifference(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "未参与（缺少有效观测）";
+  return `${value > 0 ? "+" : ""}${formatNumber(value, 2)} 个百分点`;
+}
+
+function renderMarketContextScore(overview) {
+  const context = asObject(overview.market_context_score);
+  if (!Object.keys(context).length) return "";
+  const chain = [
+    `方向基础 ${contextNumber(context.base_score)}`,
+    `相对强弱修正 ${contextNumber(context.before_gates_score)}`,
+    `市场与行业约束 ${contextNumber(context.pre_reliability_score)}`,
+    `可靠性约束 ${contextNumber(context.score, 0)}`,
+  ].join(" → ");
+  return `
+    <div data-market-context-score>
+      <strong>当日市场与行业背景</strong>
+      <p>${escapeHtml(chain)}</p>
+      <small>数据可靠性 ${contextNumber(context.reliability_score, 0)}/100，只约束信号强度。</small>
+      <div class="mini-metrics">
+        ${renderContextObservation("大盘", context.market)}
+        ${renderContextObservation("主行业", context.industry)}
+      </div>
+      <p>个股相对行业：${contextDifference(context.stock_excess_pct)}；行业相对大盘：${contextDifference(context.industry_excess_pct)}。</p>
+      <small>相对抗跌不等于上涨，当前修正不用于历史概率。</small>
+      ${renderContextSources(context)}
+    </div>`;
+}
+
+function renderContextObservation(label, value) {
+  const observation = asObject(value);
+  if (typeof observation.change_pct !== "number" || !Number.isFinite(observation.change_pct)) {
+    return `<span>${label}：未参与（缺少有效观测）</span>`;
+  }
+  const change = `${observation.change_pct > 0 ? "+" : ""}${formatNumber(observation.change_pct, 2)}%`;
+  return `<span>${label}：${escapeHtml(observation.name)} ${escapeHtml(observation.symbol)} · ${change}</span>`;
+}
+
+function renderContextSources(context) {
+  const observations = [["大盘", context.market], ["主行业", context.industry]];
+  const sources = observations.filter(([, value]) => value && Number.isFinite(value.change_pct))
+    .map(([label, value]) => `<p>${label}来源：${escapeHtml(value.source)}；行情时间：${escapeHtml(value.event_at)}；观测时间：${escapeHtml(value.observed_at)}。</p>`).join("");
+  return `<details><summary>评分口径与数据来源</summary>
+    ${sources}
+    ${renderRelativeAdjustment(context)}
+    <p>大盘正向强度系数 ${contextNumber(context.market_multiplier, 2)}；行业正向强度系数 ${contextNumber(context.industry_multiplier, 2)}。</p>
+    ${renderEscapedItems(context.unavailable_reasons, "p")}
+    <small>${escapeHtml(context.note)}</small>
+  </details>`;
+}
+
+function renderRelativeAdjustment(context) {
+  if (context.relative_adjustment === null || context.relative_adjustment === undefined) return "";
+  const value = context.relative_adjustment;
+  const text = typeof value === "number" && Number.isFinite(value)
+    ? `${value > 0 ? "+" : ""}${formatNumber(value, 2)}` : "--";
+  return `<p>相对强弱实际调整 ${text} 分。</p>`;
+}
+
 function renderFactors(items) {
   $("factorList").innerHTML = renderList(
     items,
@@ -129,6 +208,7 @@ function renderFactors(items) {
           </div>
           ${available ? `<div class="score-bar"><i style="width:${Math.max(0, Math.min(100, Number(item.score) || 0))}%"></i></div>` : ""}
           <p>${escapeHtml(available ? item.summary : item.unavailable_reason || "当前证据不可用，未纳入全景评分。")}</p>
+          ${available && item.aggregation_role === "risk_constraint" ? "<small>风险约束：仅按风险扣分，不作为独立方向证据。</small>" : ""}
           ${available ? renderEscapedItems(item.evidence, "small") : ""}
           ${asArray(item.missing_data).length ? `<em>待补充：${escapedJoin(item.missing_data, "、")}</em>` : ""}
         </div>`;

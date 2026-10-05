@@ -372,7 +372,7 @@ def _verify_new_listing(
     try:
         listing = date.fromisoformat(cast(str, expected[6]))
         target = date.fromisoformat(cast(str, expected[10]))
-        trusted_dates, status = trading_date_range(listing, target)
+        trusted_dates, status = trading_date_range(listing, target, allow_auto_refresh=False)
     except (TypeError, ValueError):
         return False
     trusted = [item.isoformat() for item in trusted_dates]

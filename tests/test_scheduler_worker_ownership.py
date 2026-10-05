@@ -10,6 +10,7 @@ import pytest
 
 from app.config import Settings
 from app.services.instance_guard import FileInstanceGuard
+from app.services.scheduler_contracts import LocalTask
 from app.services.scheduler_helpers import _offload
 from app.services.scheduler_service import LocalDataScheduler
 from tests.test_scheduler_modules import _SchedulerCache
@@ -81,7 +82,8 @@ def test_manual_repeated_cancellation_keeps_worker_and_instance_guard_owned(tmp_
     asyncio.run(check())
 
 
-def test_stop_is_bounded_but_guard_and_quiescence_wait_for_sync_worker(tmp_path) -> None:
+def test_stop_is_bounded_but_guard_and_quiescence_wait_for_sync_worker(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.services.scheduler_execution.market_now_naive", lambda: datetime(2026, 5, 13, 10, 30))
     async def check() -> None:
         service = _BlockingAutomation()
         scheduler, cache = _scheduler(tmp_path, service, enabled=True)
@@ -155,7 +157,7 @@ def test_health_read_group_keeps_guard_until_every_worker_finishes(tmp_path, can
         cache.stats = statistics
         cache.provider_capability_statuses = capabilities
         cache.provider_statuses = lambda: []
-        task = SimpleNamespace(
+        task = LocalTask(
             name="check_data_health", display_name="健康检查", running=False,
             handler=scheduler._check_data_health, interval_seconds=600,
             next_run_at=datetime(2020, 1, 1),

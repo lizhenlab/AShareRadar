@@ -9,7 +9,7 @@ grant live probability, ranking, or filtering authority.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime
 import hashlib
@@ -22,6 +22,7 @@ from typing import Final, cast
 
 from app.artifacts.io import (
     ArtifactIOError,
+    ArtifactPathError,
     canonical_json_bytes,
     decode_json_bytes,
     exclusive_atomic_publish,
@@ -62,6 +63,10 @@ class HistoricalProbabilityContextError(ValueError):
     """Historical context is malformed, unbound, or changed."""
 
 
+class HistoricalProbabilityContextRejectedError(HistoricalProbabilityContextError):
+    """A stable input snapshot was rejected and published as unavailable."""
+
+
 _FileFingerprint = tuple[Path, int, int, int, int, int, int]
 _DirectoryIdentity = tuple[int, int, int, int]
 _DirectorySnapshot = tuple[_DirectoryIdentity | None, tuple[_FileFingerprint, ...]]
@@ -78,22 +83,29 @@ class MarketScanHistoricalProbabilityContextStore:
         self._preload_leases = 0
         self._snapshot: _DirectorySnapshot | None = None
         self._projection: dict[str, object] | None = None
+        self._refresh_request: Callable[[], bool] | None = None
 
     def preload(self) -> int:
         try:
-            self._refresh_if_changed(blocking=True)
+            self._refresh_if_changed()
             with self._lock:
-                return int(self._projection is not None)
+                return int(self._projection is not None and self._projection.get("status") != "unavailable")
         finally:
             self.clear_preload_pending()
 
     def research_projection(self) -> dict[str, object]:
-        if not self.refresh_pending():
-            self._refresh_if_changed(blocking=False)
+        observed = None if self.refresh_pending() else _directory_snapshot(self.directory)
         with self._lock:
-            if self._projection is None:
-                return not_generated_historical_probability_context()
-            return deepcopy(self._projection)
+            if observed is not None and self._snapshot == observed and not self.refresh_pending():
+                return deepcopy(self._projection) if self._projection is not None else not_generated_historical_probability_context()
+            callback = self._refresh_request
+        if callback is not None:
+            callback()
+        return {**not_generated_historical_probability_context(), "availability": "source_index_verification_pending"}
+
+    def set_refresh_request(self, callback: Callable[[], bool] | None) -> None:
+        with self._lock:
+            self._refresh_request = callback
 
     def mark_preload_pending(self) -> None:
         """Keep interactive reads non-blocking before a worker acquires the lock."""
@@ -120,29 +132,46 @@ class MarketScanHistoricalProbabilityContextStore:
             scheduled = self._preload_pending or self._preload_leases > 0
         return scheduled or self._refresh_lock.locked()
 
-    def _refresh_if_changed(self, *, blocking: bool) -> None:
+    def _refresh_if_changed(self) -> None:
         observed = _directory_snapshot(self.directory)
         with self._lock:
             if observed == self._snapshot:
                 return
-        acquired = self._refresh_lock.acquire(blocking=blocking)
-        if not acquired:
-            # Readers keep using the previous complete projection while the sole
-            # refresher verifies the bound full-replay files outside the state lock.
-            return
+        self._refresh_lock.acquire()
         try:
             snapshot = _directory_snapshot(self.directory)
             with self._lock:
                 if snapshot == self._snapshot:
                     return
-            projection = _load_newest_projection(self.directory, snapshot)
+            rejection = None
+            try:
+                projection = _load_newest_projection(self.directory, snapshot)
+            except HistoricalProbabilityContextError as exc:
+                if not _is_stable_context_rejection(exc):
+                    raise
+                # A negative verdict grants no evidence or authority. Retain it
+                # only for this complete snapshot; changed inputs must reverify.
+                projection = unavailable_historical_probability_context()
+                rejection = exc
             if _directory_snapshot(self.directory) != snapshot:
                 raise HistoricalProbabilityContextError("历史概率研究目录在读取期间发生变化，请重试")
             with self._lock:
                 self._projection = projection
                 self._snapshot = snapshot
+            if rejection is not None:
+                raise HistoricalProbabilityContextRejectedError(str(rejection)) from rejection
         finally:
             self._refresh_lock.release()
+
+
+def _is_stable_context_rejection(error: BaseException) -> bool:
+    """Do not negative-cache failed reads or unsafe/changing path identities."""
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, (ArtifactPathError, OSError)):
+            return False
+        cause = cause.__cause__
+    return True
 
 
 def build_historical_probability_context(

@@ -27,6 +27,7 @@ from app.services.scheduler_helpers import (
     _task_error_message,
 )
 from app.services.scheduler_schedule import (
+    automatic_task_due,
     _ordered_task_names,
     _ordered_tasks,
     _reschedule_task,
@@ -117,7 +118,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
         now: datetime,
         schedule_available: bool,
     ) -> ScheduledTaskState:
-        latest = self.market_scanner.latest_run() if self.market_scanner is not None else None
+        latest = _market_scan_status_header(self.market_scanner)
         automatic_enabled = bool(self.settings.market_scan_auto_enabled)
         next_run_at = None
         if automatic_enabled and self.enabled and schedule_available:
@@ -150,7 +151,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
         while not self._stop_event.is_set():
             now = market_now_naive()
             self._schedule_market_scan_tick()
-            due_tasks = [task for task in _ordered_tasks(self.tasks) if not task.running and task.next_run_at <= now]
+            due_tasks = [task for task in _ordered_tasks(self.tasks) if automatic_task_due(task, now)]
             for task in due_tasks:
                 active_task = asyncio.create_task(self._execute(task), name=f"local-data-task-{task.name}")
                 self._active_tasks.add(active_task)
@@ -193,6 +194,8 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
     async def _execute(self, task: LocalTask, manual: bool = False) -> str:
         if task.running:
             return f"{task.display_name} 正在运行，已跳过重复触发"
+        if not manual and not automatic_task_due(task, market_now_naive()):
+            return task.schedule_warning or f"{task.display_name} 未到自动执行窗口，已延后"
         task.running = True
         task.last_started_at = market_now_naive()
         task.last_finished_at = None
@@ -231,6 +234,19 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             finished_at = market_now_naive()
             task.last_finished_at = finished_at
             _reschedule_task(task, manual, finished_at)
+
+
+def _market_scan_status_header(scanner: object) -> MarketScanRun | None:
+    """Read navigation metadata only; status display never authorizes a publication."""
+    identities = getattr(scanner, "run_identities", None)
+    if callable(identities):
+        page = identities(page=1, page_size=1)
+        return page.items[0] if page.items else None
+    # Lightweight test doubles and external scanner implementations may expose
+    # only the legacy interface. Real managers always take the branch above;
+    # a failed or empty identity read must never retry through full verification.
+    latest = getattr(scanner, "latest_run", None)
+    return latest() if callable(latest) else None
 
 
 def _next_market_scan_run_at(

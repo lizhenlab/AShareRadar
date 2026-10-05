@@ -1,57 +1,64 @@
-"""One volume-confirmation rule for current and historical factor scores."""
+"""Versioned 5/20-session volume confirmation for current and replay factors."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Sequence
+from datetime import date
 
-from app.services.scoring import clamp_score
-
-
-@dataclass(frozen=True)
-class VolumeConfirmationContext:
-    ratio: float
-    change_pct: float
+from app.models.market import Kline
+from app.services.indicator_volume import recent_volume_ratio_if_available
+from app.services.price_volume_scoring import price_volume_change_pct, price_volume_score
+from app.services.trading_calendar import TradingCalendarCoverageError, trading_dates_between
+from app.utils.market_data import valid_kline, valid_positive_number
 
 
-@dataclass(frozen=True)
-class VolumeConfirmationRule:
-    name: str
-    adjustment: Callable[[VolumeConfirmationContext], int]
-    matches: Callable[[VolumeConfirmationContext], bool]
+VOLUME_CONFIRMATION_SCORE_RULE_VERSION = "factor-volume-confirmation.v3"
+VOLUME_CONFIRMATION_WINDOW_SESSIONS = 20
 
 
-VOLUME_CONFIRMATION_BASE_SCORE = 52
+def volume_confirmation_inputs(rows: Sequence[Kline]) -> tuple[float, float] | None:
+    """Admit one exact completed window with a comparable price and volume basis.
+
+    A daily adjustment factor does not identify its normalization direction or
+    a common anchor. Do not infer either across corporate actions. PIT snapshot
+    provenance remains an additional requirement for historical calibration.
+    """
+    if len(rows) != VOLUME_CONFIRMATION_WINDOW_SESSIONS or not _volume_window_is_comparable(rows):
+        return None
+    change = price_volume_change_pct(rows[-1].close, rows[-2].close)
+    ratio = recent_volume_ratio_if_available(list(rows))
+    return (change, ratio) if change is not None and ratio is not None and ratio > 0 else None
+
+
+def _volume_window_is_comparable(rows: Sequence[Kline]) -> bool:
+    if any(
+        not valid_kline(row) or not valid_positive_number(row.volume)
+        or row.adjustment_mode != "qfq" or row.session_status != "trading"
+        or row.corporate_action_status != "none"
+        for row in rows
+    ):
+        return False
+    try:
+        dates = tuple(date.fromisoformat(row.date) for row in rows)
+        if any(day.isoformat() != row.date for day, row in zip(dates, rows, strict=True)):
+            return False
+        return dates == trading_dates_between(dates[0], dates[-1])
+    except (ValueError, TradingCalendarCoverageError):
+        return False
 
 
 def volume_confirmation_score(change_pct: float, volume_ratio: float) -> int:
-    """Score observed inputs; callers establish availability and ratio precision."""
-    context = VolumeConfirmationContext(ratio=volume_ratio, change_pct=change_pct)
-    adjustment = next(
-        (rule.adjustment(context) for rule in VOLUME_CONFIRMATION_RULES if rule.matches(context)),
-        0,
-    )
-    return clamp_score(VOLUME_CONFIRMATION_BASE_SCORE + adjustment)
+    """Apply a bounded directional rule to an admitted 5/20-session volume ratio.
+
+    Before integer rounding: 50 + clip(5 * change_pct, -40, 40)
+    * clip(volume_ratio, 0.5, 1.25). Volume only changes the strength of the
+    observed price direction. This is a price-volume proxy, not money flow.
+    Current and replay callers share the exact-window admission above.
+    """
+    return price_volume_score(change_pct, volume_ratio)
 
 
-def _positive_volume_adjustment(context: VolumeConfirmationContext) -> int:
-    return 18 + _volume_expansion_bonus(context.ratio)
-
-
-def _negative_volume_adjustment(context: VolumeConfirmationContext) -> int:
-    return -18 - _volume_expansion_bonus(context.ratio)
-
-
-def _volume_expansion_bonus(ratio: float) -> int:
-    return round(min(10, (ratio - 1.2) * 8))
-
-
-VOLUME_CONFIRMATION_RULES = (
-    VolumeConfirmationRule("positive_volume_expansion", _positive_volume_adjustment, lambda context: context.change_pct > 0 and context.ratio >= 1.2),
-    VolumeConfirmationRule("negative_volume_expansion", _negative_volume_adjustment, lambda context: context.change_pct < 0 and context.ratio >= 1.2),
-    VolumeConfirmationRule("low_volume_large_move", lambda context: -8, lambda context: context.ratio < 0.7 and abs(context.change_pct) >= 2),
-    VolumeConfirmationRule("normal_volume", lambda context: 4, lambda context: 0.85 <= context.ratio <= 1.25),
-)
-
-
-__all__ = ["VOLUME_CONFIRMATION_RULES", "volume_confirmation_score"]
+__all__ = [
+    "VOLUME_CONFIRMATION_SCORE_RULE_VERSION", "VOLUME_CONFIRMATION_WINDOW_SESSIONS",
+    "volume_confirmation_inputs", "volume_confirmation_score",
+]

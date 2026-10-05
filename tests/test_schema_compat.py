@@ -25,10 +25,29 @@ from app.db.schema_migrations import (
     QUOTE_HISTORY_UNIQUE_INDEX,
     SCHEMA_MIGRATION_APPLIED_AT_UTC_MIGRATION,
     apply_compat_migrations,
+    ensure_compat_indexes,
 )
 
 
 class SchemaCompatibilityTests(unittest.TestCase):
+    def test_cache_stats_index_is_added_to_existing_daily_table_without_rewriting_rows(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute("CREATE TABLE kline_daily (symbol TEXT, adjustment_mode TEXT, date TEXT, fetched_at TEXT)")
+        conn.execute("INSERT INTO kline_daily VALUES ('600519.SH', 'qfq', '2026-09-22', 'legacy-value')")
+        before = conn.execute("SELECT rowid, * FROM kline_daily").fetchall()
+
+        ensure_compat_indexes(conn)
+        first_version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        ensure_compat_indexes(conn)
+
+        self.assertEqual(conn.execute("SELECT rowid, * FROM kline_daily").fetchall(), before)
+        self.assertEqual(conn.execute("PRAGMA schema_version").fetchone()[0], first_version)
+        self.assertEqual(
+            [row[2] for row in conn.execute("PRAGMA index_info(idx_kline_daily_cache_stats)")],
+            ["adjustment_mode", "date", "fetched_at"],
+        )
+
     def test_probability_ranking_v6_tables_are_separate_and_immutable(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

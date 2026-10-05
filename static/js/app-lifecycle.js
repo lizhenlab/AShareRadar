@@ -1,6 +1,7 @@
 const REQUIRED_EFFECTS = Object.freeze([
   "refreshGlobalPanels",
   "loadAll",
+  "isStockWorkspaceActive",
   "invalidateActiveLoad",
   "setActiveSymbol",
   "stopStream",
@@ -21,6 +22,11 @@ export function createAppLifecycleController(options = {}) {
       if (disposed) return;
       settings.cancelIndividualProbability();
       settings.onPageHide(event);
+    },
+    pageshow: (event) => {
+      if (!disposed && event?.persisted && !settings.documentTarget.hidden) {
+        settings.reconcileStreamSubscription();
+      }
     },
   };
   const removeListeners = bindLifecycleEvents(settings, handlers);
@@ -67,21 +73,23 @@ function bindLifecycleEvents(settings, handlers) {
   settings.documentTarget?.addEventListener?.("visibilitychange", handlers.visibilitychange);
   settings.windowTarget?.addEventListener?.("online", handlers.online);
   settings.windowTarget?.addEventListener?.("pagehide", handlers.pagehide);
+  settings.windowTarget?.addEventListener?.("pageshow", handlers.pageshow);
   return () => {
     settings.documentTarget?.removeEventListener?.("visibilitychange", handlers.visibilitychange);
     settings.windowTarget?.removeEventListener?.("online", handlers.online);
     settings.windowTarget?.removeEventListener?.("pagehide", handlers.pagehide);
+    settings.windowTarget?.removeEventListener?.("pageshow", handlers.pageshow);
   };
 }
 
 function recoverWorkbenchOnline(settings) {
   const { state } = settings;
   if (settings.documentTarget.hidden || state.onlineRecoveryPromise || !workbenchNeedsOnlineRecovery(state)) return false;
-  const recoverCore = Boolean(state.pendingLoad || state.failedLoadSymbol)
+  const recoverCore = settings.isStockWorkspaceActive() && (Boolean(state.pendingLoad || state.failedLoadSymbol)
     || ["loading", "error"].includes(state.coreStatus?.phase)
-    || Object.keys(state.auxiliaryStatus?.failures || {}).length > 0;
-  if (state.pendingLoad) settings.invalidateActiveLoad();
-  if (state.failedLoadSymbol) settings.setActiveSymbol(state.failedLoadSymbol);
+    || Object.keys(state.auxiliaryStatus?.failures || {}).length > 0);
+  if (recoverCore && state.pendingLoad) settings.invalidateActiveLoad();
+  if (recoverCore && state.failedLoadSymbol) settings.setActiveSymbol(state.failedLoadSymbol);
   const task = recoverCore
     ? settings.loadAll({ forceGlobal: true, waitForGlobal: true })
     : Promise.allSettled(Object.values(settings.refreshGlobalPanels({ force: true })));

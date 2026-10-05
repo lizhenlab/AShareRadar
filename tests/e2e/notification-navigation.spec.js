@@ -89,9 +89,13 @@ test("failed current quote retains the original notification while the prior sto
 
 test("summary notification opens a labelled batch without inventing a stock event", async ({ page }) => {
   const requests = await prepare(page, [1, 2, 3, 4].map(event));
-  const previousLoads = requests.filter((request) => request.pathname === "/api/stock/workbench").length;
+  const workbenchRequests = () => requests.filter((request) => request.pathname === "/api/stock/workbench");
+  const previousLoads = workbenchRequests().length;
+  const originalSymbol = workbenchRequests().at(-1).symbol;
   await selectPrimaryView(page, "monitor");
+  const restoredWorkbench = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/stock/workbench");
   await clickCaptured(page);
+  await restoredWorkbench;
   const detail = page.locator("#notificationDetail");
   await expect(detail).toBeVisible();
   await expect(page.locator("#workspace-panel-tools")).toBeVisible();
@@ -99,6 +103,8 @@ test("summary notification opens a labelled batch without inventing a stock even
   await expect(detail).toContainText("未指向单条记录");
   await expect(detail).not.toContainText("触发时价格");
   await expect(page.locator("#stockName")).toHaveText("贵州茅台");
-  expect(requests.filter((request) => request.pathname === "/api/stock/workbench")).toHaveLength(previousLoads);
+  expect(workbenchRequests()).toHaveLength(previousLoads + 1);
+  expect(workbenchRequests().slice(previousLoads).map((request) => request.symbol)).toEqual([originalSymbol]);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("ashare-radar.alert-notification-cursor.v2")))).toEqual({ streamId: RESTORED, id: 1 });
   expect(requests.some((request) => request.method !== "GET")).toBe(false);
 });

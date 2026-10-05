@@ -36,9 +36,9 @@ def test_frontend_validator_accepts_frozen_backend_catalog() -> None:
     result = json.loads(_run_validator(payload, "catalog.catalog_digest"))
 
     assert result == {"ok": True, "value": payload["catalog_digest"]}
-    assert len(payload["templates"]) == 14
-    assert sum(item["availability"] == "available_for_draft" for item in payload["templates"]) == 6
-    assert sum(item["availability"] == "shadow_only" for item in payload["templates"]) == 3
+    assert len(payload["templates"]) == 15
+    assert sum(item["availability"] == "available_for_draft" for item in payload["templates"]) == 8
+    assert sum(item["availability"] == "shadow_only" for item in payload["templates"]) == 2
     assert sum(item["availability"] == "unavailable" for item in payload["templates"]) == 5
 
 
@@ -102,3 +102,26 @@ console.log(strategyTemplateCardHtml(item));
     assert " disabled" in completed.stdout
     assert "研究适用环境" in completed.stdout and "假设未匹配" in completed.stdout
     assert "收益有效性不可用" in completed.stdout
+
+
+def test_catalog_metadata_cannot_claim_live_samples_or_drop_source_contracts() -> None:
+    base = market_strategy_template_catalog().model_dump(mode="json")
+    mutations = [
+        {**base, "schema_version": "full-market-strategy-template-catalog-v1"},
+        {**base, "official_session_count": 2},
+        {**base, "evidence_status": "validated"},
+        {**base, "source_contracts": {}},
+        {**base, "source_contracts": {**base["source_contracts"], "feature_windows": ""}},
+    ]
+    for payload in mutations:
+        assert json.loads(_run_validator(payload))["ok"] is False
+
+
+def test_new_quant_strategy_filters_survive_frontend_validation_unchanged() -> None:
+    payload = market_strategy_template_catalog().model_dump(mode="json")
+    for template_id in ("medium_momentum", "low_volatility_trend"):
+        expected = next(item for item in payload["templates"] if item["template_id"] == template_id)
+        expression = f'catalog.templates.find(item => item.template_id === "{template_id}").strategy_spec'
+        result = json.loads(_run_validator(payload, expression))
+        assert result == {"ok": True, "value": expected["strategy_spec"]}
+        assert expected["strategy_spec"]["evidence_policy"]["require_verified_point_in_time_evidence"]

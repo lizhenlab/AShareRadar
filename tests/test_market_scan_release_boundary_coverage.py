@@ -31,7 +31,6 @@ from app.services import market_scan_probability_source as probability_source
 from app.services.market_scan_probability import (
     PROBABILITY_COST_MODEL_VERSION,
     ProbabilityConfig,
-    ProbabilityReplayError,
     ProbabilitySample,
     VerifiedProbabilityDeploymentEstimator,
     build_probability_filter_qualification,
@@ -44,6 +43,7 @@ from app.services.market_scan_probability import (
     verify_probability_deployment_artifact,
     verify_shadow_probability_evidence,
 )
+from app.services.market_scan_probability_values import ProbabilityReplayError
 from tests.test_market_scan_probability import (
     _complete_test_label_contract,
     _filter_authorization,

@@ -6,6 +6,7 @@ from app.models.analysis import (
 )
 from app.models.market import (
     OrderBook,
+    Quote,
 )
 from app.models.fuyao_scoring import FuyaoValuationScore
 from app.services.fuyao_valuation_adapter import align_fuyao_valuation, apply_fuyao_valuation
@@ -26,6 +27,8 @@ def build_stock_insight_bundle(
     order_book: OrderBook | None = None,
     order_book_error: str | None = None,
     fuyao_valuation: FuyaoValuationScore | None = None,
+    market_quote: Quote | None = None,
+    evaluated_at: str | None = None,
 ) -> StockInsightBundle:
     fuyao_valuation = align_fuyao_valuation(fuyao_valuation, analysis.quote.timestamp)
     fund_flow = build_fund_flow_analysis(analysis)
@@ -34,7 +37,8 @@ def build_stock_insight_bundle(
     lhb = build_lhb_summary(analysis, abnormal_events)
     events = build_event_summary(analysis, abnormal_events=abnormal_events, lhb=lhb)
     strategy_cards = build_strategy_cards(analysis, fund_flow, order_pressure)
-    overview = build_stock_overview(analysis, fund_flow, order_pressure, events, fuyao_valuation=fuyao_valuation)
+    overview = build_stock_overview(analysis, fund_flow, order_pressure, events, fuyao_valuation=fuyao_valuation,
+                                    market_quote=market_quote, evaluated_at=evaluated_at)
     financial_health = build_financial_health(analysis)
     valuation = apply_fuyao_valuation(build_valuation_analysis(analysis), fuyao_valuation)
     rule_matches = build_rule_match_summary(analysis, fund_flow, order_pressure, valuation, abnormal_events)

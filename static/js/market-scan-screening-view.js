@@ -1,3 +1,4 @@
+import { conditionImpactContent } from "./market-scan-condition-impact.js";
 import { escapeHtml } from "./dom.js";
 import { formatAmount, formatNumber } from "./format.js";
 
@@ -20,6 +21,7 @@ export function createMarketScanScreeningView(root) {
   const elements = screeningElements(root);
   return {
     elements,
+    renderAppliedContext: (applied) => { elements.contextLabel.textContent = `${applied.source.label} · 批次 #${applied.run.id}${applied.error ? ` · ${applied.error}` : ""}`; },
     renderBreadth: (payload) => renderBreadth(elements, payload),
     renderBreadthError: (message) => renderRegionError(elements.breadth, message),
     renderCohortDiff: (payload) => renderCohortDiff(elements, payload),
@@ -76,7 +78,8 @@ function renderNoRun(elements) {
   elements.summaryStatus.dataset.kind = "idle";
   elements.summaryStatus.textContent = "暂无冻结榜单";
   elements.feedback.className = "market-scan-screening-feedback";
-  elements.feedback.textContent = "请先选择一个已发布榜单；工作台不会请求当前行情来补造证据。";
+  elements.feedback.textContent = "请先等待榜单和已应用条件读取完成；不会用未应用的表单草稿解释结果。";
+  elements.contextLabel.textContent = "尚无可解释的已应用榜单";
   for (const region of [elements.breadth, elements.evaluation, elements.diff]) region.innerHTML = "";
 }
 
@@ -118,7 +121,7 @@ function renderScreenSpec(elements, spec) {
 
 function renderBreadth(elements, payload) {
   const { population, score, change, evidence } = payload;
-  elements.evidence.textContent = `${evidence.mode} · 数据日 ${evidence.data_date} · ${evidence.rule_version} · 摘要 ${payload.canonical_digest.slice(0, 12)}`;
+  elements.evidence.textContent = `${evidence.mode} · 数据日 ${evidence.data_date} · ${evidence.rule_version} · 快照摘要 ${evidence.snapshot_digest.slice(0, 12)} · 汇总摘要 ${payload.canonical_digest.slice(0, 12)}`;
   const statusSuccess = ownCount(population.by_status, "success");
   const scoreCoverage = `${screeningNumber(score.present_count)}/${screeningNumber(population.total)}`;
   const cards = [
@@ -142,8 +145,9 @@ function renderEvaluation(elements, payload) {
   elements.summaryStatus.textContent = `命中 ${payload.matched_count}/${payload.population_count}`;
   elements.feedback.className = "market-scan-screening-feedback success";
   elements.feedback.textContent = `筛选摘要 ${payload.spec_digest.slice(0, 12)} · 证据摘要 ${payload.canonical_digest.slice(0, 12)} · 所有条件均在批次 #${payload.evidence.run_id} 的冻结行上评估。`;
-  elements.evaluation.innerHTML = `<div class="market-scan-screening-section-head"><div><h5>筛选漏斗</h5><p>缺失值不会当作 0；有条件时按缺失原因淘汰。</p></div><strong>${screeningNumber(payload.matched_count)} 条命中</strong></div>
-    ${funnelList(payload.funnel)}
+  elements.evaluation.innerHTML = `<div class="market-scan-screening-section-head"><div><h5>筛选结果解释</h5><p>缺失值不会当作 0；有条件时按缺失原因淘汰。</p></div><strong>${screeningNumber(payload.matched_count)} 条命中</strong></div>
+    <section id="marketScanConditionImpacts" aria-labelledby="marketScanConditionImpactTitle"><div class="market-scan-screening-section-head"><div><h5 id="marketScanConditionImpactTitle">单条件独立影响</h5><p>移除整个区间或整组条件，其余条件保持不变；示例保留原始值和缺失。仅解释筛选敏感性，不会自动放宽条件或推荐股票。</p></div></div>${conditionImpactContent(payload.condition_impacts)}</section>
+    <section><h5>顺序筛选漏斗（按条件顺序逐步淘汰）</h5>${funnelList(payload.funnel)}</section>
     ${matchedExplanationList(payload.matched_explanations, payload.matched.items, payload.funnel)}
     <section class="market-scan-near-misses" aria-labelledby="marketScanNearMissTitle">
       <div class="market-scan-screening-section-head"><div><h5 id="marketScanNearMissTitle">近失候选</h5><p>仅差一个条件；趋势强度仍是序数研究状态，不代表上涨概率。</p></div></div>
@@ -300,7 +304,7 @@ function columnViewLabel(value) {
 function screeningElements(root) {
   const get = (id) => requiredElement(root, id);
   return {
-    shell: get("marketScanScreeningWorkbench"), summaryStatus: get("marketScanScreeningSummaryStatus"),
+    contextLabel: get("marketScanScreeningContextLabel"), shell: get("marketScanScreeningWorkbench"), summaryStatus: get("marketScanScreeningSummaryStatus"),
     refresh: get("marketScanScreeningRefresh"), feedback: get("marketScanScreeningFeedback"),
     evidence: get("marketScanScreeningEvidence"), spec: get("marketScanScreeningSpec"),
     breadth: get("marketScanScreeningBreadth"), evaluation: get("marketScanScreeningEvaluation"),

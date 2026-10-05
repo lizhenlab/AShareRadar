@@ -385,7 +385,9 @@ const before=calls.length;
 app.setWorkspaceView("tools");
 await Promise.resolve();
 assert.equal(app.state.primaryView,"research");
-assert.equal(calls.length,before,"opening notes should not start unrelated review queries");
+const resumed = calls.slice(before);
+assert.equal(resumed.filter(call=>call.url.startsWith("/api/stock/workbench")).length,1,"returning to notes must resume deferred stock research once");
+assert.equal(resumed.some(call=>["/api/reviews/summary","/api/paper-trading/","/api/watchlist-scan/"].some(prefix=>call.url.startsWith(prefix))),false,"opening notes should not start unrelated global review queries");
 '''
     )
 

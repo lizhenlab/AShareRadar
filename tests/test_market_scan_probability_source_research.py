@@ -11,7 +11,10 @@ import pytest
 
 from app.models.market_scan import MarketScanProductionScoreContract, MarketScanRun
 from app.services import market_scan_probability_source_research as source_research
-from app.services.market_scan_manager import MarketScanManager
+from app.services.market_scan_probability_runtime import MarketScanProbabilityRuntime
+from app.services.market_scan_research_stores import MarketScanResearchStores
+from app.services.market_scan_query_service import MarketScanQueryService
+from tests.market_scan_test_support import SCAN_AS_OF
 from app.services.market_scan_probability_source import (
     PROBABILITY_SOURCE_ARTIFACT_SCHEMA_VERSION,
     PROBABILITY_SOURCE_PAYLOAD_CONTRACT_VERSION,
@@ -164,33 +167,28 @@ def test_source_research_canonical_order_uses_scan_as_of_before_run_id(
     )
     store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
 
+    store.preload()
     assert store.research_projection(70)["status"] == "insufficient_data"
     assert store.research_projection(71)["status"] == "not_generated"
 
 
-def test_manager_uses_source_progress_only_when_model_artifact_is_not_generated() -> None:
-    manager = object.__new__(MarketScanManager)
-    manager.cache = _ManagerCache(_published_run())
-    manager._query_service = None  # noqa: SLF001
-    manager._query_service_stores = None  # noqa: SLF001
-    manager._future_range_store = None  # noqa: SLF001
-    manager._probability_store = _ProbabilityStore("not_generated")  # noqa: SLF001
-    manager._probability_source_research_store = _SourceStore()  # noqa: SLF001
-
-    research = manager._run_probability_research(71)  # noqa: SLF001
-    projected, probabilities = manager._run_probability_projection(71)  # noqa: SLF001
-
+def test_query_uses_source_progress_only_when_model_artifact_is_not_generated() -> None:
+    probability = _ProbabilityStore("not_generated")
+    source = _SourceStore()
+    query = MarketScanQueryService(_ManagerCache(_published_run()), MarketScanResearchStores(
+        probability=probability, probability_source=source, future_range=None,
+    ))
+    research = query.probability_research(71)
+    projected, probabilities = query.probability_projection(71)
     assert research["status"] == "insufficient_data"
     assert projected == research
     assert probabilities == {}
-    assert manager._probability_source_research_store.calls == [71, 71]  # noqa: SLF001
-
-    manager._probability_store = _ProbabilityStore("calibrated_shadow")  # noqa: SLF001
-    calibrated = manager._run_probability_research(71)  # noqa: SLF001
+    assert source.calls == [71, 71]
+    probability.status = "calibrated_shadow"
+    calibrated = query.probability_research(71)
     assert calibrated["status"] == "calibrated_shadow"
-    # Even an existing model artifact must re-read the authoritative source
-    # binding before it can be exposed.
-    assert manager._probability_source_research_store.calls == [71, 71, 71]  # noqa: SLF001
+    # Existing model artifacts must still check the authoritative source.
+    assert source.calls == [71, 71, 71]
 
 
 def test_source_research_newest_capture_uses_aware_instant_not_iso_text_order(
@@ -221,7 +219,9 @@ def test_source_research_newest_capture_uses_aware_instant_not_iso_text_order(
         lambda path: artifacts[Path(path).resolve()],
     )
 
-    research = source_research.MarketScanProbabilitySourceResearchStore(tmp_path).research_projection(73)
+    store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
+    store.preload()
+    research = store.research_projection(73)
 
     study = cast(dict[str, dict[str, dict[str, object]]], research["horizons"])["5"]["net_excess_positive"]
     assert cast(dict[str, object], study["counts"])["observation_count"] == 20
@@ -252,6 +252,7 @@ def test_source_research_incrementally_loads_only_new_fingerprints_for_230_sessi
 
     monkeypatch.setattr(source_research, "load_probability_source_snapshot", load)
     store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
+    store.preload()
     first = store.research_projection(1_229)
 
     assert len(calls) == 230
@@ -272,6 +273,8 @@ def test_source_research_incrementally_loads_only_new_fingerprints_for_230_sessi
         5_500,
         captured_at=f"{quote_date}T16:05:00+08:00",
     )
+    assert store.research_projection(run_id)["availability"] == "source_index_verification_pending"
+    store.preload()
     second = store.research_projection(run_id)
 
     assert len(calls) == 231
@@ -310,6 +313,7 @@ def test_source_research_retries_one_concurrent_atomic_publish_without_reloading
     monkeypatch.setattr(source_research, "load_probability_source_snapshot", load)
     store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
 
+    store.preload()
     research = store.research_projection(81)
 
     counts = cast(
@@ -346,7 +350,7 @@ def test_source_research_fails_closed_when_directory_never_stabilizes(
     monkeypatch.setattr(source_research, "_directory_snapshot", changing_snapshot)
 
     with pytest.raises(source_research.ProbabilitySourceError, match="多次读取期间持续变化"):
-        store.research_projection(80)
+        store.preload()
 
     assert calls == 3 + 6 * source_research._STABLE_SNAPSHOT_READ_ATTEMPTS  # noqa: SLF001
     assert store._snapshot is previous_snapshot  # noqa: SLF001
@@ -363,8 +367,8 @@ def test_source_research_warm_read_does_not_wait_for_single_refresher(tmp_path: 
     finally:
         store._refresh_lock.release()  # noqa: SLF001
 
-    assert projected == previous[80]
-    assert projected is not previous[80]
+    assert projected["availability"] == "source_index_verification_pending"
+    assert projected["status"] == "not_generated"
 
 
 def test_source_research_scheduled_preload_keeps_request_read_nonblocking(
@@ -404,12 +408,14 @@ def test_source_research_does_not_fall_back_to_old_cache_when_new_archive_is_inv
 
     monkeypatch.setattr(source_research, "load_probability_source_snapshot", load)
     store = source_research.MarketScanProbabilitySourceResearchStore(tmp_path)
+    store.preload()
     assert store.research_projection(80)["status"] == "insufficient_data"
     previous_snapshot = store._snapshot  # noqa: SLF001
     _source_file(tmp_path, 81, "invalid")
 
+    assert store.research_projection(81)["availability"] == "source_index_verification_pending"
     with pytest.raises(source_research.ProbabilitySourceError, match="new archive is invalid"):
-        store.research_projection(81)
+        store.preload()
 
     assert store._snapshot == previous_snapshot  # noqa: SLF001
     assert store._research_by_run[80]["status"] == "insufficient_data"  # noqa: SLF001
@@ -441,7 +447,8 @@ def test_source_research_preload_excludes_only_typed_legacy_outcome_drift(
         if Path(path) == drift_path:
             raise source_research.ProbabilityOutcomeSemanticDriftError(
                 "legacy rule profile",
-                run_id=71,
+                run_id=71, integrity_digest="a" * 64, as_of_date="2026-08-13",
+                source_digest=f"{71:064x}", generated_at="2026-08-13T18:00:00+08:00",
             )
         raise source_research.ProbabilityOutcomeError("invalid outcome")
 
@@ -465,12 +472,6 @@ def test_source_research_preload_excludes_only_typed_legacy_outcome_drift(
     assert projection["outcome_evidence_status"] == "legacy_semantic_drift_excluded"
     assert store._excluded_outcome_run_ids == frozenset({71})  # noqa: SLF001
 
-    manager = object.__new__(MarketScanManager)
-    manager._lifecycle = SimpleNamespace(start=_zero_async)  # noqa: SLF001
-    manager._probability_source_research_store = store  # noqa: SLF001
-    manager._recover_terminal_persistence_failures = lambda: 0  # type: ignore[method-assign]
-    manager._activate_probability_capture_leader = _none_async  # type: ignore[method-assign]
-    assert asyncio.run(manager.start()) == 0
     invalid_path = outcome_dir / f"market-scan-probability-outcomes-run-71-through-2026-08-13-{'b' * 64}.json.gz"
     invalid_path.write_bytes(b"invalid")
     with pytest.raises(source_research.ProbabilitySourceError, match="outcome archive 校验失败"):
@@ -573,33 +574,26 @@ def test_source_research_preload_uses_exact_succeeded_archive_bindings(
     assert store.research_projection(71)["status"] == "not_generated"
 
 
-def test_manager_reuses_deep_verified_source_index_for_outbox_audit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = object.__new__(MarketScanManager)
-    manager._lifecycle = SimpleNamespace(owns_instance_guard=lambda: True)  # noqa: SLF001
-    manager._probability_activation_lock = asyncio.Lock()  # noqa: SLF001
-    manager._probability_archives_audited = False  # noqa: SLF001
+def test_runtime_reuses_deep_verified_source_index_for_outbox_audit(monkeypatch: pytest.MonkeyPatch) -> None:
     started: list[bool] = []
     audited: list[dict[int, str]] = []
-    manager._start_probability_capture_worker = lambda: started.append(True)  # type: ignore[method-assign]  # noqa: SLF001
-    manager._probability_source_research_store = SimpleNamespace(  # noqa: SLF001
-        verified_archive_digests=lambda: {90: "a" * 64}
-    )
-    manager.cache = SimpleNamespace(
+    source = SimpleNamespace(verified_archive_digests=lambda: {90: "a" * 64})
+    cache = SimpleNamespace(
         reconcile_probability_source_capture_outbox=lambda: 0,
         audit_probability_source_capture_archives=lambda value: audited.append(value) or 0,
     )
+    runtime = MarketScanProbabilityRuntime(cache, MarketScanResearchStores(
+        probability=None, probability_source=source, future_range=None,
+    ), owns_instance_guard=lambda: True, now=lambda: SCAN_AS_OF)
+    monkeypatch.setattr(runtime, "_start_capture", lambda: started.append(True))
     monkeypatch.setattr(
-        "app.services.market_scan_manager.audit_market_scan_probability_source_archives",
+        "app.services.market_scan_probability_runtime.audit_market_scan_probability_source_archives",
         lambda _cache: pytest.fail("deep source archives must not be read twice"),
     )
-
-    asyncio.run(manager._activate_probability_capture_leader())  # noqa: SLF001
-
+    asyncio.run(runtime._activate_capture())
     assert audited == [{90: "a" * 64}]
     assert started == [True]
-    assert manager._probability_archives_audited is True  # noqa: SLF001
+    assert runtime._archives_audited is True
 
 
 def test_sampled_fit_is_visible_but_never_qualifies_selection() -> None:
@@ -782,12 +776,9 @@ class _SourceStore:
         return 1
 
 
-async def _zero_async() -> int:
-    return 0
 
 
-async def _none_async() -> None:
-    return None
+
 
 
 def _drift_dependent_fit() -> dict[str, object]:
@@ -997,3 +988,30 @@ def _outcome_artifact(
         },
         "integrity": {"integrity_digest": digest},
     }
+
+
+def test_replay_rejection_blocks_earlier_and_later_cohort_fits_but_keeps_unrelated_cohort():
+    earlier = source_research._compact_source_summary(_artifact(71, "2026-08-11", 10, captured_at="2026-08-11T18:00:00+08:00"))
+    rejected_source = source_research._compact_source_summary(_artifact(72, "2026-08-12", 10, captured_at="2026-08-12T18:00:00+08:00"))
+    unrelated = source_research._compact_source_summary(_artifact(73, "2026-08-11", 10, captured_at="2026-08-11T18:00:00+08:00"))
+    unrelated["cohort"] = {**unrelated["cohort"], "rule_version": "other"}
+    valid = source_research._compact_outcome_summary(_outcome_artifact(73, "d" * 64))
+    valid["cohort"] = unrelated["cohort"]
+    rejected = {
+        "run_id": 72, "as_of_date": "2026-08-21", "generated_at": "2026-08-21T18:00:00+08:00",
+        "integrity_digest": "a" * 64, "source_integrity_digest": rejected_source["integrity_digest"],
+        "rejection_status": "replay_rejected", "rejection_reason": "historical replay mismatch",
+    }
+    dependent = source_research._compact_fit_summary(_drift_dependent_fit())
+    independent = {
+        **dependent, "through_run_id": 73, "cohort": unrelated["cohort"],
+        "through_source_digest": unrelated["integrity_digest"], "through_outcome_digest": valid["integrity_digest"],
+        "input_pair_digest": source_research.stable_probability_hash([(unrelated["integrity_digest"], valid["integrity_digest"])]),
+    }
+    selected = source_research._trusted_fits_by_run({71: dependent, 73: independent}, (earlier, rejected_source, unrelated), frozenset({72}))
+    assert selected == {73: independent}
+    projection = source_research._research_index((earlier, rejected_source, unrelated), (rejected, valid), (dependent, independent))
+    assert projection[71]["fit_evidence_status"] == projection[72]["fit_evidence_status"] == "cohort_quarantined"
+    assert projection[73]["fit_evidence_status"] == "current_replay_only"
+    assert projection[73]["outcome_progress"]["outcome_artifact_count"] == 1
+    assert projection[72]["outcome_progress"]["outcome_artifact_count"] == 0

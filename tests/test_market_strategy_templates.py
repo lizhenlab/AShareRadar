@@ -15,6 +15,8 @@ from app.services.market_strategy_templates import (
     market_strategy_template_digest,
 )
 from app.services.strategy_compiler import compile_strategy_spec
+from app.services.market_scan_feature_windows import MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION
+from app.services.market_scan_score_dimensions import MARKET_SCAN_DIMENSION_ALGORITHM_VERSION, MARKET_SCAN_EVIDENCE_CONTRACT_VERSION
 
 
 AVAILABLE_IDS = {
@@ -24,10 +26,11 @@ AVAILABLE_IDS = {
     "daily_continuation",
     "defensive_liquidity",
     "pullback_continuation",
+    "medium_momentum",
+    "low_volatility_trend",
 }
 SHADOW_IDS = {
     "industry_relative_strength",
-    "medium_momentum",
     "short_reversal",
 }
 UNAVAILABLE_IDS = {
@@ -42,15 +45,22 @@ UNAVAILABLE_IDS = {
 def test_catalog_contract_order_identity_statuses_and_production_boundary() -> None:
     catalog = market_strategy_template_catalog()
 
-    assert catalog.schema_version == "full-market-strategy-template-catalog-v1"
-    assert catalog.as_of_date == "2026-08-12"
+    assert catalog.schema_version == "full-market-strategy-template-catalog-v2"
+    assert catalog.as_of_date == "2026-09-19"
     assert catalog.selection_mode == "exclusive"
-    assert catalog.production_rule_version == "full-market-score-v4"
+    assert catalog.catalog_kind == "static_research_templates"
+    assert catalog.evidence_status == "not_evaluated"
+    assert catalog.source_contracts.model_dump() == {
+        "score_dimension_algorithm": MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
+        "point_in_time_evidence": MARKET_SCAN_EVIDENCE_CONTRACT_VERSION,
+        "feature_windows": MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION,
+    }
     assert catalog.production_effect == "none"
-    assert catalog.official_session_count == 2
+    assert not {"official_session_count", "production_rule_version"} & set(catalog.model_dump())
     identities = [(item.template_id, item.version) for item in catalog.templates]
     assert identities == sorted(identities)
-    assert len(identities) == len(set(identities)) == 14
+    assert len(identities) == len(set(identities)) == 15
+    assert all(item.version == (1 if item.template_id == "low_volatility_trend" else 2) for item in catalog.templates)
     assert _ids(catalog, "available_for_draft") == AVAILABLE_IDS
     assert _ids(catalog, "shadow_only") == SHADOW_IDS
     assert _ids(catalog, "unavailable") == UNAVAILABLE_IDS
@@ -71,13 +81,16 @@ def test_digests_are_canonical_deterministic_and_change_with_semantics() -> None
     assert market_strategy_template_digest(changed_item) != first.templates[0].template_digest
 
     catalog_payload = first.model_dump(mode="json")
-    catalog_payload["official_session_count"] = 3
+    catalog_payload["source_contracts"]["feature_windows"] = "changed-window-contract"
     assert market_strategy_catalog_digest(catalog_payload) != first.catalog_digest
 
 
 def test_available_drafts_are_strict_custom_and_compile_executable() -> None:
     catalog = market_strategy_template_catalog()
-    allowed_filter_fields = {"alpha_1d", "alpha_5d", "alpha_20d", "risk", "tradability", "amount", "return_pct"}
+    allowed_filter_fields = {
+        "alpha_1d", "alpha_5d", "alpha_20d", "risk", "tradability", "amount", "return_pct",
+        "skip5_return_pct", "atr_pct", "downside_volatility_pct", "max_drawdown_pct",
+    }
     for item in catalog.templates:
         if item.availability != "available_for_draft":
             assert item.strategy_spec is None

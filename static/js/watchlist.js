@@ -48,7 +48,8 @@ export async function loadWatchlist(state, options = {}) {
       validate: watchlistItems,
     });
     if (!isCurrent()) return false;
-    applyWatchlistItems(state, items, options);
+    applyWatchlistItems(state, items, options, true);
+    if (typeof options.onReadSuccess === "function") options.onReadSuccess();
     return true;
   } catch (error) {
     if (isAbortError(error)) return false;
@@ -84,11 +85,12 @@ function watchlistItems(payload) {
   throw new Error("自选股数据格式异常");
 }
 
-function applyWatchlistItems(state, items, options = {}) {
+function applyWatchlistItems(state, items, options = {}, complete = false) {
   const previousItems = Array.isArray(state.watchlist) ? state.watchlist : [];
   const changed = watchlistSubscriptionKey(previousItems) !== watchlistSubscriptionKey(items);
   state.watchlist = items;
   renderWatchlist(items);
+  if (complete) state.watchlistReady = true;
   if (changed && typeof options.onItemsChanged === "function") {
     options.onItemsChanged({ items, previousItems });
   }
@@ -415,6 +417,7 @@ async function refreshWatchlistAfterMutation(state, mutation, options, actionLab
     force: true,
     isCurrent: isRefreshCurrent,
     onItemsChanged: options.onItemsChanged,
+    onReadSuccess: options.onReadSuccess,
     preserveOnError: true,
     useCachedOnError: false,
   };

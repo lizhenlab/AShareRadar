@@ -18,6 +18,7 @@ from app.models.strategy_execution import PortfolioDraft, StrategyExecutionReque
 from app.models.strategy_lab import StrategySpecArchiveRequest, StrategySpecUpdate
 from app.repositories.strategy_automation import StrategyAutomationIntegrityError
 from app.services.cache import SQLiteCache
+from app.services.trading_calendar import TradingCalendarCoverageError
 from tests.market_scan_test_support import distribution_degraded_publication_diagnostics
 from tests.test_strategy_execution import (
     _disable_market_scan_immutability,
@@ -507,6 +508,61 @@ def test_policy_events_report_stale_data_and_invalid_evidence(tmp_path) -> None:
         "data_stale",
         "evidence_invalid",
     }
+
+
+@pytest.mark.parametrize(
+    ("now", "data_date", "mode", "expected_age", "reference_date"),
+    [
+        (datetime(2026, 7, 19, 12), "2026-07-17", "official", 0, "2026-07-17"),
+        (datetime(2026, 2, 20, 12), "2026-02-13", "official", 0, "2026-02-13"),
+        (datetime(2026, 7, 20, 10), "2026-07-16", "official", 1, "2026-07-17"),
+        (datetime(2026, 7, 20, 15, 14), "2026-07-16", "official", 1, "2026-07-17"),
+        (datetime(2026, 7, 20, 15, 15), "2026-07-16", "official", 2, "2026-07-20"),
+        (datetime(2026, 7, 20, 10), "2026-07-16", "intraday", 2, "2026-07-20"),
+        (datetime(2026, 7, 20, 9), "2026-07-16", "intraday", 1, "2026-07-17"),
+    ],
+)
+def test_strategy_stale_events_count_exchange_sessions_at_mode_boundary(
+    tmp_path, now, data_date, mode, expected_age, reference_date,
+) -> None:
+    cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
+    automation = cache.domain_services.strategy_automation
+    schedule = automation.create_schedule(StrategyScheduleCreate(
+        strategy_id=strategy_id,
+        mode=mode,
+        cadence="trading_day_intraday" if mode == "intraday" else "daily_after_close",
+        alert_conditions=[StrategyAlertCondition(event_type="data_stale")],
+    ))
+    draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
+    current = draft.model_copy(update={"context": draft.context.model_copy(update={"data_date": data_date})})
+
+    with patch("app.services.strategy_automation.market_now_naive", return_value=now):
+        events = automation._build_policy_events(schedule, current)
+
+    if expected_age <= 1:
+        assert events == []
+    else:
+        assert len(events) == 1
+        assert events[0].event_type == "data_stale"
+        assert events[0].trigger == {
+            "reference_date": reference_date,
+            "age_exchange_sessions": expected_age,
+            "maximum_age_exchange_sessions": 1,
+        }
+        assert f"{expected_age} 个交易日" in events[0].message
+
+
+def test_strategy_stale_events_refuse_uncovered_calendar(tmp_path) -> None:
+    cache, execution_service, strategy_id, _run_id = _environment(tmp_path)
+    automation = cache.domain_services.strategy_automation
+    schedule = automation.create_schedule(StrategyScheduleCreate(strategy_id=strategy_id))
+    draft = execution_service.execute(StrategyExecutionRequest(strategy_id=strategy_id))
+
+    with (
+        patch("app.services.strategy_automation.latest_expected_daily_kline_date", side_effect=TradingCalendarCoverageError("coverage unavailable")),
+        pytest.raises(TradingCalendarCoverageError, match="coverage unavailable"),
+    ):
+        automation._build_policy_events(schedule, draft)
 
 
 def _reseal_execution_source_as_legacy(

@@ -25,11 +25,11 @@ from app.services.market_scan_probability_research import (
     PROBABILITY_PRIMARY_TARGET,
 )
 from app.services.market_scan_probability import (
-    ProbabilityReplayError,
     build_probability_filter_qualification,
     probability_filter_qualified,
     verify_probability_filter_authorization_artifact,
 )
+from app.services.market_scan_probability_values import ProbabilityReplayError
 
 
 class ProbabilityFilterUnavailable(ValueError):

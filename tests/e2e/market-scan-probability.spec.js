@@ -9,6 +9,20 @@ test("full-market Shadow probability stays auditable, gated, and rank preserving
   await page.locator('button[data-primary-view="market"]').click();
   await page.locator("#marketScanModeOfficial").check({ force: true });
 
+  const advancedResearch = page.locator("#marketScanAdvancedResearch");
+  const advancedSummary = advancedResearch.locator(":scope > summary");
+  await expect(page.locator("#marketScanRows tr.market-scan-result-row")).toHaveCount(1);
+  await expect(advancedSummary).toBeVisible();
+  await expect(page.locator("#marketScanExperimentalPanel")).toBeHidden();
+  await expect(page.locator("#marketScanProbabilityResearch")).toBeHidden();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("market-scan-default.png"), fullPage: true });
+  await advancedSummary.focus();
+  await advancedSummary.press("Enter");
+  await expect(page.locator("#marketScanExperimentalEnable")).toBeVisible();
+  await expect(page.locator("#marketScanProbabilityResearch")).toBeVisible();
+  await expect(page.locator("#marketScanHistoricalProbabilitySample")).toBeHidden();
+
   await expect(page.locator("#marketScanProbabilityHorizon5d")).toBeChecked();
   await expect(page.locator("#marketScanProbabilitySemantics")).toContainText("正式上涨概率与历史回放参考分层展示，均不改变生产评分或排名");
   await expect(page.locator("#marketScanProbabilityTarget")).toHaveText("未来所选周期净超额收益为正");
@@ -70,6 +84,14 @@ test("full-market Shadow probability stays auditable, gated, and rank preserving
   await expect(page.locator("#marketScanRows .market-scan-probability").first()).toContainText("持有20日（D+21） 70.0%");
   await expect(page.locator("#marketScanProbabilityMin")).toBeEnabled();
   expect(resultQueries).toHaveLength(3);
+  await advancedSummary.click();
+  await expect(page.locator("#marketScanProbabilityResearch")).toBeHidden();
+  await advancedSummary.focus();
+  await advancedSummary.press("Enter");
+  await expect(page.locator("#marketScanProbabilityHorizon20d")).toBeChecked();
+  await expect(page.locator("#marketScanProbabilityBaseRate")).toHaveText("55.0%");
+  expect(resultQueries).toHaveLength(3);
+  await advancedResearch.screenshot({ path: testInfo.outputPath("market-scan-advanced-research.png") });
   await page.locator("#marketScanProbabilityMin").fill("69");
   await page.locator('#marketScanFilters button[type="submit"]').click();
   await expect.poll(() => resultQueries.length).toBe(4);

@@ -25,8 +25,10 @@ from app.models.market_scan import (
 from app.models.market_scan_screening import (
     MarketBreadthV1,
     MarketScanScreenEvaluateRequest,
-    MarketScanScreenEvaluationV1,
+    MarketScanScreenEvaluationV2,
 )
+from app.models.market_scan_comparison import MarketScanComparisonRequest, MarketScanComparisonResponse
+from app.services.market_scan_comparison import MarketScanComparisonService
 from app.models.market_scan_polling import MarketScanPollingIdentity
 from app.models.market_scan_snapshot import (
     MarketScanSnapshotIntegrityError,
@@ -109,6 +111,7 @@ class MarketScanQueryService:
         self._cache = cache
         self._stores = stores
         self._screening = MarketScanScreeningService(cache)
+        self._comparison = MarketScanComparisonService(cache)
 
     def run(self, run_id: int) -> MarketScanRun:
         return self._cache.market_scan_run(run_id)
@@ -292,11 +295,14 @@ class MarketScanQueryService:
     def breadth(self, run_id: int) -> MarketBreadthV1:
         return self._screening.breadth(run_id)
 
+    def compare_candidates(self, run_id: int, request: MarketScanComparisonRequest) -> MarketScanComparisonResponse:
+        return self._comparison.compare(run_id, request)
+
     def evaluate_screen(
         self,
         run_id: int,
         request: MarketScanScreenEvaluateRequest,
-    ) -> MarketScanScreenEvaluationV1:
+    ) -> MarketScanScreenEvaluationV2:
         return self._screening.evaluate(run_id, request)
 
     def probability_research(self, run_id: int) -> dict[str, object]:
@@ -328,12 +334,16 @@ class MarketScanQueryService:
         if joint_projection is not None:
             research, _records = joint_projection
             return self._finalize_probability_projection(verified, research, {})[0]
+        source_research = self._current_probability_source_research(run, capture)
+        if source_research.get("availability") == "source_index_verification_pending":
+            return self._finalize_probability_projection(verified, source_research, {})[0]
         store = self._stores.probability
         research = store.research_projection(run.id) if store is not None else not_generated_probability_research(run.id)
         research = self._resolve_probability_source_research(
             run,
             research,
             capture=capture,
+            source_research=source_research,
         )
         return self._finalize_probability_projection(verified, research, {})[0]
 
@@ -363,6 +373,9 @@ class MarketScanQueryService:
         joint_projection = self._joint_probability_projection(run.id, symbols=symbols)
         if joint_projection is not None:
             return self._finalize_probability_projection(verified, *joint_projection)
+        source_research = self._current_probability_source_research(run, capture)
+        if source_research.get("availability") == "source_index_verification_pending":
+            return self._finalize_probability_projection(verified, source_research, {})
         store = self._stores.probability
         if store is None:
             research = not_generated_probability_research(run.id)
@@ -373,6 +386,7 @@ class MarketScanQueryService:
             run,
             research,
             capture=capture,
+            source_research=source_research,
         )
         if research.get("availability") is not None:
             probabilities = {}
@@ -477,29 +491,45 @@ class MarketScanQueryService:
         research: dict[str, object],
         *,
         capture: Mapping[str, object] | None,
+        source_research: dict[str, object],
     ) -> dict[str, object]:
         expected_digest = _capture_archive_digest(capture, run_id=run.id)
-        source = self._stores.probability_source
-        if source is None or not callable(getattr(source, "preload", None)):
-            raise ProbabilityArtifactError("上涨概率归档已完成，但 source 只读索引不可用")
-        source_research = source.research_projection(run.id)
-        if not _source_projection_matches_capture(source_research, expected_digest):
-            refresh_pending = getattr(source, "refresh_pending", None)
-            if callable(refresh_pending) and refresh_pending():
-                return _probability_capture_state(
-                    run.id,
-                    availability="source_index_verification_pending",
-                    limitation="source_index_verification_pending",
-                    pipeline_stage="source_index_verification_pending",
-                )
-            source.preload()
-            source_research = source.research_projection(run.id)
-        if not _source_projection_matches_capture(source_research, expected_digest):
-            raise ProbabilityArtifactError("上涨概率归档已完成，但 source artifact 缺失或未进入只读索引")
+        if source_research.get("availability") == "source_index_verification_pending":
+            return source_research
+        if source_research.get("fit_evidence_status") == "cohort_quarantined":
+            rejected = deepcopy(source_research)
+            rejected["availability"] = "outcome_evidence_quarantined"
+            return rejected
         if research.get("status") != "not_generated" or research.get("availability") is not None:
             if _probability_artifact_matches_capture(research, expected_digest):
                 return research
             return _source_research_with_unbound_probability_artifact(source_research)
+        return source_research
+
+    def _current_probability_source_research(
+        self, run: MarketScanRun, capture: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        expected_digest = _capture_archive_digest(capture, run_id=run.id)
+        source = self._stores.probability_source
+        if source is None:
+            raise ProbabilityArtifactError("上涨概率归档已完成，但 source 只读索引不可用")
+        source_research = source.research_projection(run.id)
+        if source_research.get("availability") == "source_index_verification_pending":
+            return _probability_capture_state(
+                run.id, availability="source_index_verification_pending",
+                limitation="source_index_verification_pending", pipeline_stage="source_index_verification_pending",
+            )
+        if not _source_projection_matches_capture(source_research, expected_digest):
+            current_binding = getattr(source, "has_current_archive_binding", None)
+            if callable(current_binding) and current_binding(run.id, expected_digest, source_research):
+                raise ProbabilityArtifactError("上涨概率归档已完成，但当前已核验 source 索引中的绑定 artifact 缺失或摘要冲突")
+            request = getattr(source, "request_refresh", None)
+            if callable(request):
+                request()
+            return _probability_capture_state(
+                run.id, availability="source_index_verification_pending",
+                limitation="source_index_verification_pending", pipeline_stage="source_index_verification_pending",
+            )
         return source_research
 
     def _score_contract(

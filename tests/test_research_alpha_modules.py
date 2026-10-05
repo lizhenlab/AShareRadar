@@ -447,7 +447,7 @@ def _factor(name: str, *, score: int, calibration_sample_count: int = 0, expecte
         else None
     )
     return StandardFactor(
-        id=name,
+        id={"中性因子": "trend_momentum", "积极因子": "volume_confirmation", "风险因子": "fund_flow_proxy"}[name],
         name=name,
         category="测试",
         value="测试",

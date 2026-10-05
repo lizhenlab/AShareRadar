@@ -39,9 +39,7 @@ from app.repositories.market_scan_probability_capture import (
     read_probability_source_capture_state,
 )
 from app.repositories.market_scan_results import required_run_row
-from app.repositories.market_scan_score_diagnostics import (
-    read_production_score_contract,
-)
+from app.repositories.market_scan_screening import MarketScanScreeningRow, read_screening_rows
 from app.models.market_scan_execution_session import (
     build_market_scan_execution_session_evidence,
 )
@@ -100,6 +98,8 @@ class VerifiedMarketScanRead(Protocol):
 
     def results_page(self, **query: object) -> MarketScanResultPage: ...
 
+    def screening_rows(self) -> list[MarketScanScreeningRow]: ...
+
 
 class _VerifiedMarketScanReadSession:
     """Opaque read capability that is valid only inside its repository context."""
@@ -115,6 +115,8 @@ class _VerifiedMarketScanReadSession:
         "_release_guard",
         "_run",
         "_score_contract",
+        "_screening_reader",
+        "_screening_read",
         "_snapshot_digest",
         "_state_validator",
         "_thread_id",
@@ -131,6 +133,7 @@ class _VerifiedMarketScanReadSession:
         state_validator: Callable[[], None],
         page_reader: Callable[[Mapping[str, object]], MarketScanResultPage],
         execution_reader: Callable[[], Mapping[str, object]],
+        screening_reader: Callable[[], list[MarketScanScreeningRow]],
         release_guard: Callable[[], None],
     ) -> None:
         self._run = run
@@ -142,10 +145,12 @@ class _VerifiedMarketScanReadSession:
         self._state_validator = state_validator
         self._page_reader = page_reader
         self._execution_reader = execution_reader
+        self._screening_reader = screening_reader
         self._release_guard = release_guard
         self._active = True
         self._page_read = False
         self._execution_read = False
+        self._screening_read = False
 
     @property
     def run(self) -> MarketScanRun:
@@ -178,6 +183,13 @@ class _VerifiedMarketScanReadSession:
             raise RuntimeError("同一已验证榜单读取上下文只能读取一次分页")
         self._page_read = True
         return self._page_reader(query)
+
+    def screening_rows(self) -> list[MarketScanScreeningRow]:
+        self._require_active()
+        if self._screening_read:
+            raise RuntimeError("同一已验证榜单读取上下文只能读取一次筛选投影")
+        self._screening_read = True
+        return self._screening_reader()
 
     def execution_session_evidence(self) -> Mapping[str, object]:
         self._require_active()
@@ -219,16 +231,10 @@ def _verified_market_scan_read_in_snapshot(
 ) -> Iterator[VerifiedMarketScanRead]:
     _require_read_snapshot(conn)
     run_row = required_run_row(conn, run_id)
-    snapshot_digest, action_source_digest = _verified_read_identity(conn, run_row)
+    snapshot_digest, action_source_digest, score_contract = _verified_read_identity(conn, run_row)
     capture_state = None
-    score_contract = None
     if action_source_digest is not None:
         capture_state = read_probability_source_capture_state(conn, run_id)
-        score_contract = read_production_score_contract(
-            conn,
-            run_id,
-            expected_count=int(run_row["success_count"] or 0),
-        )
     state_validator, release_guard = _connection_state_guard(conn)
 
     def page_reader(query: Mapping[str, object]) -> MarketScanResultPage:
@@ -246,6 +252,7 @@ def _verified_market_scan_read_in_snapshot(
         state_validator=state_validator,
         page_reader=page_reader,
         execution_reader=execution_reader,
+        screening_reader=lambda: read_screening_rows(conn, run_id),
         release_guard=release_guard,
     )
     try:
@@ -325,12 +332,12 @@ def _validate_connection_state(
 def _verified_read_identity(
     conn: sqlite3.Connection,
     run_row: sqlite3.Row,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, MarketScanProductionScoreContract | None]:
     run_id = int(run_row["id"])
     if str(run_row["status"]) not in {"success", "degraded"}:
-        return None, None
+        return None, None, None
     if str(run_row["snapshot_seal_origin"] or "") != "publication":
-        return verify_market_scan_snapshot(conn, run_id), None
+        return verify_market_scan_snapshot(conn, run_id), None, None
     inspection = inspect_market_scan_action_source(conn, run_id)
     expected = str(run_row["snapshot_digest"] or "")
     if inspection.snapshot_digest != expected:
@@ -338,6 +345,7 @@ def _verified_read_identity(
     return (
         inspection.snapshot_digest,
         inspection.snapshot_digest if inspection.eligible else None,
+        inspection.success_score_contract if inspection.eligible else None,
     )
 
 

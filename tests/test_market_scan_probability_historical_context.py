@@ -71,6 +71,7 @@ def test_publish_and_load_compact_historical_context(
 
     target = publish_historical_probability_context(source, tmp_path)
     store = MarketScanHistoricalProbabilityContextStore(tmp_path)
+    store.preload()
     projection = store.research_projection()
 
     assert target.name == historical_probability_context_filename(
@@ -114,12 +115,14 @@ def test_store_rejects_changed_bound_full_replay(
     )
     publish_historical_probability_context(source, tmp_path)
     store = MarketScanHistoricalProbabilityContextStore(tmp_path)
+    store.preload()
     assert store.research_projection()["status"] == "ready"
 
     source.write_bytes(b"[]")
 
+    assert store.research_projection()["availability"] == "source_index_verification_pending"
     with pytest.raises(HistoricalProbabilityContextError, match="摘要不一致"):
-        store.research_projection()
+        store.preload()
 
 
 def test_store_returns_previous_projection_during_background_refresh(

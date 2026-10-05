@@ -18,6 +18,7 @@ def _scheduler(guard: _ThreadBarrierGuard) -> LocalDataScheduler:
         scheduler_kline_interval_seconds=3600,
         scheduler_plate_interval_seconds=3600,
         scheduler_health_interval_seconds=3600,
+        runtime_maintenance_interval_seconds=3600,
     )
     cache = SimpleNamespace(
         reconcile_orphaned_task_runs=lambda: 0,

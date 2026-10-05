@@ -12,27 +12,20 @@ from app.services.research_factor_scoring import (
     _risk_pressure_score,
     _volume_confirmation_score,
 )
-from app.services.research_volume_scoring import VOLUME_CONFIRMATION_RULES
 
 
-def test_volume_confirmation_rules_keep_priority_and_boundaries() -> None:
-    assert [rule.name for rule in VOLUME_CONFIRMATION_RULES] == [
-        "positive_volume_expansion",
-        "negative_volume_expansion",
-        "low_volume_large_move",
-        "normal_volume",
-    ]
-    assert _volume_confirmation_score(_analysis(change_pct=2), _feature(volume_ratio=1.2)) == 70
-    assert _volume_confirmation_score(_analysis(change_pct=-2), _feature(volume_ratio=1.2)) == 34
-    assert _volume_confirmation_score(_analysis(change_pct=2), _feature(volume_ratio=0.69)) == 44
-    assert _volume_confirmation_score(_analysis(change_pct=1.9), _feature(volume_ratio=0.69)) == 52
-    assert _volume_confirmation_score(_analysis(change_pct=0), _feature(volume_ratio=0.85)) == 56
-    assert _volume_confirmation_score(_analysis(change_pct=0), _feature(volume_ratio=1.25)) == 56
+def test_volume_confirmation_rule_preserves_direction_across_legacy_boundaries() -> None:
+    assert _volume_confirmation_score(_analysis(change_pct=2), _feature(volume_ratio=1.2)) == 62
+    assert _volume_confirmation_score(_analysis(change_pct=-2), _feature(volume_ratio=1.2)) == 38
+    assert _volume_confirmation_score(_analysis(change_pct=2), _feature(volume_ratio=0.69)) == 57
+    assert _volume_confirmation_score(_analysis(change_pct=1.9), _feature(volume_ratio=0.69)) == 57
+    assert _volume_confirmation_score(_analysis(change_pct=0), _feature(volume_ratio=0.85)) == 50
+    assert _volume_confirmation_score(_analysis(change_pct=0), _feature(volume_ratio=1.25)) == 50
 
 
-def test_volume_confirmation_expansion_bonus_is_capped() -> None:
-    assert _volume_confirmation_score(_analysis(change_pct=5), _feature(volume_ratio=2.5)) == 80
-    assert _volume_confirmation_score(_analysis(change_pct=-5), _feature(volume_ratio=2.5)) == 24
+def test_volume_confirmation_expansion_multiplier_is_capped() -> None:
+    assert _volume_confirmation_score(_analysis(change_pct=5), _feature(volume_ratio=2.5)) == 81
+    assert _volume_confirmation_score(_analysis(change_pct=-5), _feature(volume_ratio=2.5)) == 19
 
 
 def test_unavailable_volume_ratio_is_neutral_instead_of_normal_volume_bonus() -> None:

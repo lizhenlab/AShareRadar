@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import math
 
 from app.models.market import StockConceptItem
@@ -223,10 +223,13 @@ def test_leadership_summary_downgrades_low_quality_data_and_limits_tags() -> Non
 
 
 def _leadership_inputs(*, quote=None, industry_context=None):
-    quote = quote or make_quote(change_pct=2.5, turnover_rate=4.2)
+    quote = quote or make_quote(
+        price=1322.25, prev_close=1290.0, high=1330.0,
+        change_pct=2.5, turnover_rate=4.2, timestamp="2026-05-13 15:00:00",
+    )
     klines = [
         make_kline(
-            date=f"2026-05-{index + 1:02d}",
+            date=(date(2026, 5, 13) - timedelta(days=39 - index)).isoformat(),
             close=100 + index * 0.7,
             high=101 + index * 0.7,
             low=99 + index * 0.7,

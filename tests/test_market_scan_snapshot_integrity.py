@@ -696,8 +696,8 @@ def test_scheduler_no_action_hint_never_replaces_periodic_or_api_seal_verificati
         return None
 
     monkeypatch.setattr(
-        scanner,
-        "_activate_probability_capture_leader",
+        scanner._probability_runtime,
+        "_activate_capture",
         skip_probability_worker,
     )
 

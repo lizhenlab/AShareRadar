@@ -90,6 +90,12 @@ class StockInfo(BaseModel):
 
 
 class PlateItem(BaseModel):
+    """Industry observation; event time is distinct from local acquisition time.
+
+    ``symbol`` retains the provider's index namespace (for example BK1036),
+    rather than an A-share stock identity. Older observations may lack both.
+    """
+
     rank: int
     name: str
     change_pct: FiniteFloat
@@ -99,6 +105,8 @@ class PlateItem(BaseModel):
     leading_stock_change_pct: FiniteFloat | None = None
     source: str
     updated_at: str
+    symbol: str | None = None
+    quote_timestamp: str | None = None
     fallback_used: bool = False
 
 

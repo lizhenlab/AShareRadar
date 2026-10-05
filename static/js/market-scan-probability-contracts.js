@@ -5,17 +5,13 @@ import {
 } from "./market-scan-probability-binding.js";
 import { normalizedCalibrationIntervals } from "./market-scan-probability-interval.js";
 import { normalizeProbabilityRankingEvidence } from "./market-scan-ranking-contracts.js";
+import {
+  ALLOWED_PROBABILITY_STATUSES, PENDING_PROBABILITY_STAGES, unavailableAuthorityStage, requireUnquarantinedProbability,
+} from "./market-scan-probability-availability.js";
 
 export const MARKET_SCAN_PROBABILITY_HORIZONS = Object.freeze([1, 5, 20]);
 export const MARKET_SCAN_DEFAULT_PROBABILITY_HORIZON = 5;
 export const CALIBRATED_PROBABILITY_STATUS = "calibrated_shadow";
-const ALLOWED_STATUSES = new Set([
-  CALIBRATED_PROBABILITY_STATUS, "insufficient_data", "insufficient_evidence", "not_generated",
-]);
-const PENDING_PROBABILITY_STAGES = new Set([
-  "source_capture_pending", "source_index_verification_pending", "maintenance_pending",
-]);
-const unavailableAuthorityStage = (stage) => PENDING_PROBABILITY_STAGES.has(stage) || stage === "maintenance_failed";
 
 export function normalizeMarketScanProbabilityResearch(value, expectedRunId) {
   if (value === null || value === undefined) return emptyProbabilityResearch(expectedRunId);
@@ -28,6 +24,7 @@ export function normalizeMarketScanProbabilityResearch(value, expectedRunId) {
     ? payload
     : requireObject(payload.horizons, "扫描榜单响应.probability_research.horizons");
   const availability = optionalText(payload.availability, "扫描榜单响应.probability_research.availability");
+  requireUnquarantinedProbability(availability, normalizeStatus(payload.status), payload.filter_qualified, probabilityContractError);
   if (unavailableAuthorityStage(availability)
       && (normalizeStatus(payload.status) !== "not_generated" || payload.filter_qualified === true)) {
     throw probabilityContractError("概率证据校验或维护未完成时，不得保留已生成概率或筛选授权");
@@ -351,6 +348,7 @@ function normalizeArtifact(
   }
   const raw = requireObject(value, `probability_research.horizons.${horizon}`);
   const status = normalizeStatus(raw.status);
+  requireUnquarantinedProbability(inherited.availability, status, raw.filter_qualified, probabilityContractError);
   if ((unavailableAuthorityStage(inherited.availability)
       || ["maintenance_pending", "maintenance_failed"].includes(inherited.jointExecutionEvidence?.status)) && status !== "not_generated") {
     throw probabilityContractError("概率证据校验或维护未完成时，不得保留旧周期概率");
@@ -519,7 +517,7 @@ function normalizeHistoricalHorizon(value, horizon) {
 
 function normalizeStatus(value) {
   const status = String(value || "not_generated").trim();
-  if (!ALLOWED_STATUSES.has(status)) throw probabilityContractError(`未知上涨概率状态：${status}`);
+  if (!ALLOWED_PROBABILITY_STATUSES.has(status)) throw probabilityContractError(`未知上涨概率状态：${status}`);
   return status;
 }
 

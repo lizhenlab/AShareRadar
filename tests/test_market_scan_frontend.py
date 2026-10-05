@@ -195,6 +195,14 @@ def test_market_scan_frontend_contract_is_wired_into_workspace() -> None:
         "/static/js/advice-review-contracts.js",
         "/static/js/market-scan.js",
         "/static/js/market-scan-controller.js",
+        "/static/js/market-scan-comparison-controller.js",
+        "/static/js/market-scan-condition-impact.js",
+        "/static/js/market-scan-screen-context.js",
+        "/static/js/market-scan-screen-producer.js",
+        "/static/js/market-scan-result-context.js",
+        "/static/js/market-scan-screen-spec-source.js",
+        "/static/js/market-scan-comparison-contracts.js",
+        "/static/js/market-scan-comparison-view.js",
         "/static/js/market-scan-auxiliary-research.js",
         "/static/js/market-scan-experimental.js",
         "/static/js/market-scan-experimental-context.js",
@@ -261,15 +269,15 @@ def test_strategy_template_catalog_contract_and_ui_are_wired_fail_closed() -> No
     assert 'id="strategyTemplateCatalog"' in html
     assert 'id="strategyTemplatePicker"' in html
     assert 'id="strategyTemplateCatalogStatus" role="status"' in html
-    assert '模板用于组织研究目标与约束，不是上涨概率、投资建议或自动交易信号' in html
-    assert "模板身份固定绑定历史合同，来源批次生产评分与排名不会改变" in html
+    assert '模板用于组织研究目标与约束，尚未验证后续收益' in html
+    assert "目录修订日期不代表行情日期或有效样本数" in html
     assert 'createStrategyTemplateCatalog' in controller
     assert 'await Promise.all([loadStrategies(), templateCatalog.load()]);' in controller
     assert 'state.strategy = null;' in controller
     assert 'await compileEditor(true);' in controller
     assert 'templateCatalog.markCustom();' in controller
     assert '/api/strategy-lab/templates' in catalog
-    assert 'full-market-strategy-template-catalog-v1' in catalog
+    assert 'full-market-strategy-template-catalog-v2' in catalog
     assert 'available_for_draft' in catalog and 'shadow_only' in catalog and 'unavailable' in catalog
     assert '收益有效性未生成' in catalog and '假设未匹配' in catalog
     assert '.strategy-template-choice' in styles and 'min-height: 44px;' in styles
@@ -1610,6 +1618,22 @@ for (const stage of ["maintenance_pending", "maintenance_failed"]) {
 const official = payload("maintenance_pending").official_execution_evidence;
 assert.throws(() => normalizeOfficialExecutionEvidence({ ...official, formal_evidence_available: true }), /availability 与状态不一致/);
 assert.throws(() => normalizeOfficialExecutionEvidence({ ...official, verified_session_count: 5 }), /不得使用旧校验计数/);
+const rejected = {
+  ...payload("source_index_verification_pending"),
+  status: "insufficient_data", availability: "outcome_evidence_quarantined", pipeline_stage: "fit_insufficient",
+};
+const research = normalizeMarketScanProbabilityResearch(rejected, 42);
+renderMarketScanProbabilityResearch(elements, research);
+assert.equal(elements.probabilityStatus.textContent, "历史证据已隔离");
+assert.equal(elements.probabilityMin.disabled, true);
+assert.match(elements.probabilityFilterHelp.textContent, /同组模型暂停使用/);
+assert.match(marketScanProbabilitySnapshot({}, research), /历史证据已隔离/);
+assert.equal(isMarketScanProbabilitySourceCapturePending(research), false);
+assert.throws(() => normalizeMarketScanProbabilityResearch({ ...rejected, status: "calibrated_shadow" }, 42), /已隔离/);
+assert.throws(() => normalizeMarketScanProbabilityResearch({ ...rejected, filter_qualified: true }, 42), /已隔离/);
+assert.throws(() => normalizeMarketScanProbabilityResearch({
+  ...rejected, horizons: { "5": { status: "calibrated_shadow", probability: 0.8 } },
+}, 42), /已隔离/);
 '''
     )
 

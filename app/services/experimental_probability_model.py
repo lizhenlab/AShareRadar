@@ -15,10 +15,14 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.artifacts.io import ArtifactIOError, canonical_json_bytes, decode_json_bytes, exclusive_atomic_publish, path_has_only_trusted_aliases, read_regular_file, sha256_hex
-from app.services.market_scan_probability import (
-    PROBABILITY_CALIBRATOR_VERSION, PROBABILITY_MODEL_VERSION, ProbabilityConfig, ProbabilitySample,
-    fit_probability_logistic_model, fit_probability_platt_calibrator,
-    probability_model_probability, probability_platt_probability,
+from app.services.market_scan_probability import ProbabilityConfig, ProbabilitySample
+from app.services.market_scan_probability_estimators import (
+    PROBABILITY_CALIBRATOR_VERSION,
+    PROBABILITY_MODEL_VERSION,
+    fit_probability_logistic_model,
+    fit_probability_platt_calibrator,
+    probability_model_probability,
+    probability_platt_probability,
 )
 from app.services.market_scan_probability_replay import (
     HISTORICAL_REPLAY_FEATURE_NAMES, HISTORICAL_REPLAY_FEATURE_VERSION,

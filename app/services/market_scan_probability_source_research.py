@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime
 import hashlib
@@ -18,11 +18,11 @@ from app.artifacts.io import path_has_only_trusted_aliases
 from app.services.market_scan_probability import (
     PROBABILITY_FEATURE_VERSION,
     PROBABILITY_LABEL_VERSION,
-    PROBABILITY_MODEL_VERSION,
     ProbabilityConfig,
     build_probability_contract,
     stable_probability_hash,
 )
+from app.services.market_scan_probability_estimators import PROBABILITY_MODEL_VERSION
 from app.services.market_scan_probability_research import (
     PROBABILITY_ABSOLUTE_TARGET,
     PROBABILITY_PRIMARY_TARGET,
@@ -35,6 +35,7 @@ from app.services.market_scan_probability_source import (
 )
 from app.services.market_scan_probability_outcomes import (
     ProbabilityOutcomeError,
+    ProbabilityOutcomeReplayError,
     ProbabilityOutcomeSemanticDriftError,
     load_probability_outcome_artifact,
 )
@@ -69,6 +70,8 @@ _OutcomeSummary = dict[str, object]
 _FitSummary = dict[str, object]
 _SOURCE_CORPUS_CONTRACT_VERSION = "market-scan-probability-source-corpus-v1"
 _STABLE_SNAPSHOT_READ_ATTEMPTS = 3
+_VERIFICATION_CHUNK_SIZE = 4
+_REJECTION_STATUSES = frozenset({"legacy_semantic_drift_excluded", "replay_rejected"})
 _OUTCOME_FILENAME = re.compile(r"market-scan-probability-outcomes-run-(\d+)-through-" r"(\d{4}-\d{2}-\d{2})-([0-9a-f]{64})\.json\.gz")
 _SOURCE_FILENAME = re.compile(r"market-scan-probability-source-run-(\d+)-([0-9a-f]{64})\.json\.gz")
 _FIT_FILENAME = re.compile(r"market-scan-probability-fit-through-run-(\d+)-([0-9a-f]{64})\.json\.gz")
@@ -101,12 +104,46 @@ class MarketScanProbabilitySourceResearchStore:
         self._outcome_by_fingerprint: dict[_FileFingerprint, _OutcomeSummary] = {}
         self._fit_by_fingerprint: dict[_FileFingerprint, _FitSummary] = {}
         self._excluded_outcome_run_ids: frozenset[int] = frozenset()
+        self._verification_caches: tuple[dict[_FileFingerprint, dict[str, object]], ...] = ({}, {}, {})
+        self._refresh_request: Callable[[], bool] | None = None
 
     def research_projection(self, run_id: int) -> dict[str, object]:
-        if not self.refresh_pending():
-            self._refresh_if_changed(blocking=False)
+        observed = None if self.refresh_pending() else self._observed_snapshot()
         with self._lock:
-            return deepcopy(self._research_by_run.get(run_id, not_generated_probability_research(run_id)))
+            current = observed is not None and self._snapshot == observed and not self.refresh_pending()
+            if current:
+                return deepcopy(self._research_by_run.get(run_id, not_generated_probability_research(run_id)))
+        self.request_refresh()
+        return {**not_generated_probability_research(run_id), "availability": "source_index_verification_pending"}
+
+    def set_refresh_request(self, callback: Callable[[], bool] | None) -> None:
+        """Bind only a lifecycle owner; query workers never own refresh threads."""
+        with self._lock:
+            self._refresh_request = callback
+
+    def request_refresh(self) -> bool:
+        with self._lock:
+            callback = self._refresh_request
+        return callback() if callback is not None else False
+
+    def has_current_archive_binding(self, run_id: int, digest: str, projection: Mapping[str, object] | None = None) -> bool:
+        """Whether the completed index used this durable binding, not file availability."""
+        observed = None if self.refresh_pending() else self._observed_snapshot()
+        with self._lock:
+            return bool(
+                observed is not None and self._snapshot == observed and not self.refresh_pending()
+                and self._archive_bindings is not None and self._archive_bindings.get(run_id) == digest
+                and (projection is None or projection == self._research_by_run.get(run_id, not_generated_probability_research(run_id)))
+            )
+
+    def quarantine_diagnostics(self) -> tuple[str, ...]:
+        """Report committed rejection reasons without rereading any archive."""
+        with self._lock:
+            rejected = [item.get("outcome_rejection") for item in self._research_by_run.values()]
+        return tuple(
+            f"run {item['run_id']} {item['rejection_status']}: {item['rejection_reason']}"
+            for item in rejected if isinstance(item, Mapping)
+        )
 
     def preload(
         self,
@@ -123,7 +160,7 @@ class MarketScanProbabilitySourceResearchStore:
             previous_bindings = self._archive_bindings
             self._archive_bindings = normalized_bindings
         try:
-            self._refresh_if_changed(blocking=True)
+            self._refresh_if_changed()
             with self._lock:
                 return len(self._research_by_run)
         except Exception:
@@ -213,16 +250,12 @@ class MarketScanProbabilitySourceResearchStore:
                 raise ProbabilitySourceError(f"run {run_id} 存在同 captured_at 的冲突 source archives")
         return {run_id: value[1] for run_id, value in newest.items()}
 
-    def _refresh_if_changed(self, *, blocking: bool) -> None:
+    def _refresh_if_changed(self) -> None:
         observed = self._observed_snapshot()
         with self._lock:
             if self._snapshot == observed:
                 return
-        acquired = self._refresh_lock.acquire(blocking=blocking)
-        if not acquired:
-            # Non-blocking warm reads return the previous complete projection
-            # while the sole refresher verifies/decompresses the next snapshot.
-            return
+        self._refresh_lock.acquire()
         try:
             with self._lock:
                 isolated = self._isolated_refresh
@@ -240,6 +273,9 @@ class MarketScanProbabilitySourceResearchStore:
 
         with self._lock:
             caches = self._candidate_caches()
+            for staged, committed in zip(self._verification_caches, caches, strict=True):
+                staged.update(committed)
+            caches = cast(tuple[dict[_FileFingerprint, _SourceSummary], dict[_FileFingerprint, _OutcomeSummary], dict[_FileFingerprint, _FitSummary]], self._verification_caches)
             binding_token = _archive_binding_token(self._archive_bindings)
         for _attempt in range(_STABLE_SNAPSHOT_READ_ATTEMPTS):
             check_preload_active(cancel_event, deadline)
@@ -250,6 +286,7 @@ class MarketScanProbabilitySourceResearchStore:
                 if self._snapshot == snapshot:
                     check_preload_active(cancel_event, deadline)
                     return
+            _prune_verification_caches(caches, snapshot)
             summaries, outcomes, fits, excluded = _isolated_snapshot_summaries(snapshot, bindings, caches, cancel_event, deadline)
             for cache, verified in zip(caches, (summaries, outcomes, fits), strict=True):
                 cache.update(verified)
@@ -291,7 +328,10 @@ class MarketScanProbabilitySourceResearchStore:
             outcome_cache,
             allowed_run_ids=allowed,
         )
-        fits = _snapshot_fits(fit_snapshot, fit_cache, allowed_run_ids=allowed)
+        outcomes = _retain_rejections(outcome_cache, outcomes)
+        excluded_run_ids = frozenset(_active_rejections(tuple(summaries.values()), tuple(outcomes.values())))
+        fit_allowed = _unquarantined_fit_runs(tuple(summaries.values()), excluded_run_ids)
+        fits = _snapshot_fits(fit_snapshot, fit_cache, allowed_run_ids=fit_allowed)
         source_cache.update(summaries)
         outcome_cache.update(outcomes)
         fit_cache.update(fits)
@@ -403,31 +443,56 @@ def _isolated_snapshot_summaries(
     cancel_event: Event | None,
     deadline: float,
 ) -> tuple[dict[_FileFingerprint, _SourceSummary], dict[_FileFingerprint, _OutcomeSummary], dict[_FileFingerprint, _FitSummary], frozenset[int]]:
-    from app.services.market_scan_probability_preload_process import isolated_probability_summaries
-
     sources = _bound_source_fingerprints(snapshot[0], bindings)
-    # Filename binding selects candidates only. The child still replays every
-    # cache miss before the parent can use or commit any of these run identities.
-    allowed = frozenset(_source_fingerprint_run_id(fingerprint) for fingerprint in sources) if bindings is not None else None
-    selected = (sources, _latest_outcome_fingerprints(snapshot[1], allowed_run_ids=allowed), _bound_fit_fingerprints(snapshot[2], allowed))
-    groups = tuple(zip(("source", "outcome", "fit"), selected, caches, strict=True))
-    missing = [(kind, fingerprint) for kind, fingerprints, cache in groups for fingerprint in fingerprints if fingerprint not in cache]
-    verified = isolated_probability_summaries(missing, cancel_event=cancel_event, deadline=deadline)
-    compact: list[dict[_FileFingerprint, dict[str, object]]] = []
-    excluded: set[int] = set()
-    for kind, fingerprints, cache in groups:
-        summaries: dict[_FileFingerprint, dict[str, object]] = {}
-        for fingerprint in fingerprints:
-            summary = cache[fingerprint] if fingerprint in cache else verified[(kind, fingerprint)]
+    allowed = frozenset(_source_fingerprint_run_id(item) for item in sources) if bindings is not None else None
+    selected_outcomes = _latest_outcome_fingerprints(snapshot[1], allowed_run_ids=allowed)
+    summaries = _isolated_verified_group("source", sources, caches[0], cancel_event, deadline)
+    outcomes = _isolated_verified_group("outcome", selected_outcomes, caches[1], cancel_event, deadline)
+    outcomes = _retain_rejections(caches[1], outcomes)
+    excluded = frozenset(_active_rejections(tuple(summaries.values()), tuple(outcomes.values())))
+    fit_allowed = _unquarantined_fit_runs(tuple(summaries.values()), excluded)
+    selected_fits = _bound_fit_fingerprints(snapshot[2], fit_allowed)
+    fits = _isolated_verified_group("fit", selected_fits, caches[2], cancel_event, deadline)
+    return summaries, outcomes, fits, excluded
+
+
+def _isolated_verified_group(
+    kind: str,
+    fingerprints: Sequence[_FileFingerprint],
+    cache: dict[_FileFingerprint, dict[str, object]],
+    cancel_event: Event | None,
+    deadline: float,
+) -> dict[_FileFingerprint, dict[str, object]]:
+    from app.services.market_scan_probability_preload_process import check_preload_active, isolated_probability_summaries
+
+    missing = [(kind, fingerprint) for fingerprint in fingerprints if fingerprint not in cache]
+    for start in range(0, len(missing), _VERIFICATION_CHUNK_SIZE):
+        verified = isolated_probability_summaries(missing[start:start + _VERIFICATION_CHUNK_SIZE], cancel_event=cancel_event, deadline=deadline)
+        check_preload_active(cancel_event, deadline)
+        for (_kind, fingerprint), summary in verified.items():
             if summary is None:
-                match = _OUTCOME_FILENAME.fullmatch(fingerprint[0].name)
-                if kind != "outcome" or match is None:
-                    raise ProbabilitySourceError("上涨概率只读校验缺少摘要")
-                excluded.add(int(match.group(1)))
-            else:
-                summaries[fingerprint] = summary
-        compact.append(summaries)
-    return compact[0], compact[1], compact[2], frozenset(excluded)
+                raise ProbabilitySourceError("上涨概率只读校验缺少绑定摘要")
+            _verify_archive_fingerprint(fingerprint)
+            cache[fingerprint] = summary
+    return {fingerprint: cache[fingerprint] for fingerprint in fingerprints}
+
+
+def _prune_verification_caches(
+    caches: Sequence[dict[_FileFingerprint, dict[str, object]]],
+    snapshot: _ResearchSnapshot,
+) -> None:
+    for cache, directory in zip(caches, snapshot[:3], strict=True):
+        present = set(directory[1])
+        for fingerprint in tuple(cache):
+            if fingerprint not in present and not _is_rejection(cache[fingerprint]):
+                del cache[fingerprint]
+
+
+def _retain_rejections(
+    cache: Mapping[_FileFingerprint, _OutcomeSummary],
+    current: Mapping[_FileFingerprint, _OutcomeSummary],
+) -> dict[_FileFingerprint, _OutcomeSummary]:
+    return {**{key: value for key, value in cache.items() if _is_rejection(value)}, **current}
 
 
 def _source_fingerprint_run_id(fingerprint: _FileFingerprint) -> int:
@@ -448,15 +513,15 @@ def probability_archive_identity(kind: str, fingerprint: ProbabilityArchiveFinge
 
 def load_verified_probability_archive_summary(kind: str, fingerprint: ProbabilityArchiveFingerprint) -> dict[str, object] | None:
     """Pure read boundary shared by the worker and the existing deep validators."""
-    run_id, digest, as_of = probability_archive_identity(kind, fingerprint)
+    probability_archive_identity(kind, fingerprint)
     _verify_archive_fingerprint(fingerprint)
     loaders = {"source": _fingerprint_summary, "outcome": _fingerprint_outcome, "fit": _fingerprint_fit}
     try:
         summary = loaders[kind](fingerprint, {})
-    except ProbabilityOutcomeSemanticDriftError as exc:
-        if kind != "outcome" or (exc.run_id, exc.integrity_digest, exc.as_of_date) != (run_id, digest, as_of):
-            raise ProbabilitySourceError("legacy outcome semantic drift 缺少内容绑定") from None
-        summary = None
+    except (ProbabilityOutcomeSemanticDriftError, ProbabilityOutcomeReplayError) as exc:
+        if kind != "outcome":
+            raise ProbabilitySourceError("outcome rejection kind 无效") from None
+        summary = _compact_outcome_rejection(fingerprint, exc)
     _verify_archive_fingerprint(fingerprint)
     return summary
 
@@ -507,22 +572,11 @@ def _snapshot_outcomes(
     *,
     allowed_run_ids: frozenset[int] | None = None,
 ) -> tuple[dict[_FileFingerprint, _OutcomeSummary], frozenset[int]]:
-    outcomes: dict[_FileFingerprint, _OutcomeSummary] = {}
-    excluded_run_ids: set[int] = set()
-    for fingerprint in _latest_outcome_fingerprints(
-        snapshot,
-        allowed_run_ids=allowed_run_ids,
-    ):
-        try:
-            outcomes[fingerprint] = _fingerprint_outcome(fingerprint, cache)
-        except ProbabilityOutcomeSemanticDriftError as exc:
-            # Intact legacy evidence remains on disk for audit, but cannot enter
-            # the current replay/probability projection.
-            if exc.run_id is None:
-                raise ProbabilitySourceError("legacy outcome semantic drift 缺少 run 绑定") from exc
-            excluded_run_ids.add(exc.run_id)
-            continue
-    return outcomes, frozenset(excluded_run_ids)
+    outcomes = {
+        fingerprint: _fingerprint_outcome(fingerprint, cache)
+        for fingerprint in _latest_outcome_fingerprints(snapshot, allowed_run_ids=allowed_run_ids)
+    }
+    return outcomes, frozenset(_run_id(item) for item in outcomes.values() if _is_rejection(item))
 
 
 def _latest_outcome_fingerprints(
@@ -558,10 +612,66 @@ def _fingerprint_outcome(
         return cached
     try:
         return _compact_outcome_summary(load_probability_outcome_artifact(fingerprint[0]))
-    except ProbabilityOutcomeSemanticDriftError:
-        raise
+    except (ProbabilityOutcomeSemanticDriftError, ProbabilityOutcomeReplayError) as exc:
+        return _compact_outcome_rejection(fingerprint, exc)
     except ProbabilityOutcomeError as exc:
         raise ProbabilitySourceError("上涨概率 outcome archive 校验失败") from exc
+
+
+def _compact_outcome_rejection(
+    fingerprint: _FileFingerprint,
+    error: ProbabilityOutcomeSemanticDriftError | ProbabilityOutcomeReplayError,
+) -> _OutcomeSummary:
+    run_id, digest, as_of = probability_archive_identity("outcome", fingerprint)
+    if (error.run_id, error.integrity_digest, error.as_of_date) != (run_id, digest, as_of):
+        raise ProbabilitySourceError("outcome rejection 缺少内容绑定") from error
+    if re.fullmatch(r"[0-9a-f]{64}", error.source_digest or "") is None or error.generated_at is None:
+        raise ProbabilitySourceError("outcome rejection 缺少 source/time 内容绑定") from error
+    _timestamp_order(error.generated_at, "rejection.generated_at")
+    _verify_archive_fingerprint(fingerprint)
+    return {
+        "run_id": run_id,
+        "as_of_date": as_of,
+        "generated_at": error.generated_at,
+        "source_integrity_digest": error.source_digest,
+        "integrity_digest": digest,
+        "rejection_status": "replay_rejected" if isinstance(error, ProbabilityOutcomeReplayError) else "legacy_semantic_drift_excluded",
+        "rejection_reason": str(error)[:500],
+    }
+
+
+def _is_rejection(summary: Mapping[str, object]) -> bool:
+    return summary.get("rejection_status") in _REJECTION_STATUSES
+
+
+def _active_rejections(
+    sources: Sequence[_SourceSummary],
+    outcomes: Sequence[_OutcomeSummary],
+) -> dict[int, _OutcomeSummary]:
+    source_by_run = {_run_id(source): source for source in sources}
+    valid = _newest_outcome_by_run(tuple(item for item in outcomes if not _is_rejection(item)))
+    rejected: dict[int, _OutcomeSummary] = {}
+    for item in outcomes:
+        if not _is_rejection(item):
+            continue
+        run_id = _run_id(item)
+        source = source_by_run.get(run_id)
+        if source is None:
+            continue
+        if source["integrity_digest"] != item["source_integrity_digest"]:
+            raise ProbabilitySourceError(f"run {run_id} rejected outcome/source digest 不一致")
+        replacement = valid.get(run_id)
+        if replacement is not None and replacement["source_integrity_digest"] == item["source_integrity_digest"] and _outcome_order(replacement) > _outcome_order(item):
+            continue
+        previous = rejected.get(run_id)
+        if previous is None or _outcome_order(item) > _outcome_order(previous):
+            rejected[run_id] = item
+    return rejected
+
+
+def _unquarantined_fit_runs(sources: Sequence[_SourceSummary], excluded: frozenset[int]) -> frozenset[int]:
+    blocked = {_source_contract_key(source) for source in sources if _run_id(source) in excluded}
+    return frozenset(_run_id(source) for source in sources if _source_contract_key(source) not in blocked)
 
 
 def _snapshot_fits(
@@ -614,12 +724,16 @@ def _research_index(
     newest_by_run = _newest_capture_by_run(summaries)
     canonical = _canonical_sources(tuple(newest_by_run.values()))
     corpora = _cumulative_source_corpora(tuple(canonical.values()))
-    selected_outcomes = _newest_outcome_by_run(outcomes)
+    rejected = _active_rejections(tuple(canonical.values()), outcomes)
+    excluded_outcome_run_ids |= frozenset(rejected)
+    valid_outcomes = tuple(item for item in outcomes if not _is_rejection(item) and _run_id(item) not in excluded_outcome_run_ids)
+    selected_outcomes = _newest_outcome_by_run(valid_outcomes)
     progress = _outcome_progress_by_run(
         tuple(canonical.values()),
-        outcomes,
+        valid_outcomes,
         effective_as_of=effective_as_of or latest_expected_daily_kline_date().isoformat(),
     )
+    unquarantined_runs = _unquarantined_fit_runs(tuple(canonical.values()), excluded_outcome_run_ids)
     fit_by_run = _trusted_fits_by_run(
         _newest_fit_by_run(fits),
         tuple(canonical.values()),
@@ -637,7 +751,8 @@ def _research_index(
                 canonical_sources=tuple(canonical.values()),
                 outcomes=selected_outcomes,
             ),
-            excluded_outcome_semantic_drift=run_id in excluded_outcome_run_ids,
+            outcome_rejection=rejected.get(run_id),
+            cohort_quarantined=run_id not in unquarantined_runs,
         )
         for run_id, summary in canonical.items()
     }
@@ -671,23 +786,8 @@ def _trusted_fits_by_run(
     sources: Sequence[_SourceSummary],
     excluded_run_ids: frozenset[int],
 ) -> dict[int, _FitSummary]:
-    if not excluded_run_ids:
-        return dict(fits)
-    source_by_run = {_run_id(source): source for source in sources}
-    trusted: dict[int, _FitSummary] = {}
-    for run_id, fit in fits.items():
-        through = source_by_run.get(run_id)
-        if through is None:
-            trusted[run_id] = fit
-            continue
-        dependent_ids = {
-            _run_id(source)
-            for source in sources
-            if _source_contract_key(source) == _source_contract_key(through) and _source_progress_order(source) <= _source_progress_order(through)
-        }
-        if dependent_ids.isdisjoint(excluded_run_ids):
-            trusted[run_id] = fit
-    return trusted
+    allowed = _unquarantined_fit_runs(sources, excluded_run_ids)
+    return {run_id: fit for run_id, fit in fits.items() if run_id in allowed}
 
 
 def _fit_input_pair_digest(
@@ -745,7 +845,8 @@ def _source_research(
     corpus: Mapping[str, object],
     progress: Mapping[str, object],
     fit: Mapping[str, object] | None,
-    excluded_outcome_semantic_drift: bool = False,
+    outcome_rejection: Mapping[str, object] | None = None,
+    cohort_quarantined: bool = False,
 ) -> dict[str, object]:
     progress_horizons = _mapping(progress["horizons"], "progress.horizons")
     horizons = {
@@ -786,7 +887,9 @@ def _source_research(
         "integrity_notice": "source_corpus_integrity_digest_not_probability_model_evidence",
         "production_ranking_effect": "none",
         "automatic_promotion": False,
-        "outcome_evidence_status": ("legacy_semantic_drift_excluded" if excluded_outcome_semantic_drift else "current_replay_only"),
+        "outcome_evidence_status": outcome_rejection["rejection_status"] if outcome_rejection else "current_replay_only",
+        "outcome_rejection": dict(outcome_rejection) if outcome_rejection else None,
+        "fit_evidence_status": "cohort_quarantined" if cohort_quarantined else "current_replay_only",
         "run_binding": _source_run_binding(summary),
     }
 

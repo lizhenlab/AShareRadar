@@ -388,7 +388,12 @@ def _regime_inputs():
         )
         for index in range(48)
     ]
-    quote = make_quote(price=142.0, prev_close=139.0, high=144.0, low=138.5, change_pct=2.16, turnover_rate=4.2)
+    latest, previous = klines[-1], klines[-2]
+    quote = make_quote(
+        price=latest.close, prev_close=previous.close, high=latest.high, low=latest.low,
+        change_pct=(latest.close / previous.close - 1) * 100, turnover_rate=4.2,
+        timestamp=f"{latest.date} 15:30:00",
+    ).model_copy(update={"open": latest.open, "volume": latest.volume, "amount": latest.close * latest.volume})
     quality = build_data_quality(quote, klines, now=datetime(2026, 5, 13, 16, 0, 0))
     analysis = build_analysis(quote, klines, data_quality=quality)
     bundle = build_stock_insight_bundle(analysis)

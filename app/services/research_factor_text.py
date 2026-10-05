@@ -76,12 +76,15 @@ def _factor_missing_data(factor_lab: FactorLabReport) -> list[str]:
 def _factor_bucket_alpha_text(factor: StandardFactor) -> str:
     if not factor.calibration_buckets:
         return ""
-    best = sorted(
-        factor.calibration_buckets,
-        key=lambda item: (item.sample_count >= MIN_FACTOR_CONFIRMATION_SAMPLES, item.avg_forward_5d_return),
-        reverse=True,
-    )[0]
-    return f"分层校准中「{best.name}」样本 {best.sample_count} 个，5日均值 {best.avg_forward_5d_return:.2f}%。"
+    order = {name: index for index, name in enumerate(("强趋势", "弱趋势", "支撑附近", "压力附近"))}
+    buckets = sorted((item for item in factor.calibration_buckets if item.sample_count > 0),
+                     key=lambda item: (order.get(item.name, len(order)), item.name))[:4]
+    if not buckets:
+        return ""
+    comparisons = "；".join(
+        f"「{item.name}」{item.sample_count}个样本，5日均值{item.avg_forward_5d_return:.2f}%" for item in buckets
+    )
+    return f"分层历史对照：{comparisons}。场景可能重叠，未确认当前场景。"
 
 
 def _find_factor(factor_lab: FactorLabReport, factor_id: str) -> StandardFactor | None:

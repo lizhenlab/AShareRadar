@@ -122,6 +122,9 @@ def _calibrate_factor(rows: list, spec: FactorSpec, current_score: int) -> Facto
         return _insufficient_calibration()
     samples = _matching_calibration_samples(rows, spec, current_score)
     if not samples:
+        label_issue = _matching_label_evidence_issue(rows, spec, current_score)
+        if label_issue is not None:
+            return _unavailable_execution_calibration(label_issue)
         return _no_similar_sample_calibration(spec.name)
     stats = _calibration_stats(samples)
     return FactorCalibration(
@@ -135,7 +138,10 @@ def _calibrate_factor(rows: list, spec: FactorSpec, current_score: int) -> Facto
         confidence_level=_calibration_confidence_level(stats.sample_count, stats.win_rate, stats.avg_5d),
         availability="available",
         execution_contract_version=FACTOR_EXECUTION_METADATA_VERSION,
-        note=_calibration_note(spec.name, stats.sample_count, stats.win_rate, stats.avg_5d),
+        note=(
+            _calibration_note(spec.name, stats.sample_count, stats.win_rate, stats.avg_5d)
+            + " 仅统计入场至第10日完整、无公司行动的价格窗口；未推断复权因子的重基方式。"
+        ),
     )
 
 
@@ -224,6 +230,8 @@ def _calibration_indexes(rows: list) -> range:
 
 
 def _calibration_sample_at(rows: list, spec: FactorSpec, current_score: int, index: int) -> CalibrationSample | None:
+    if _calibration_label_evidence_issue(rows, index) is not None:
+        return None
     signal_row = _valid_row_at(rows, index)
     forward_5d_row = _valid_row_at(rows, index + FORWARD_5D_OFFSET)
     forward_10d_row = _valid_row_at(rows, index + FORWARD_10D_OFFSET)
@@ -237,6 +245,30 @@ def _calibration_sample_at(rows: list, spec: FactorSpec, current_score: int, ind
         forward_10d=net_forward_return(forward_10d_row.close, entry),
         adverse_return=_adverse_return(rows, index, entry),
     )
+
+
+def _calibration_label_evidence_issue(rows: list, index: int) -> str | None:
+    if index < 0 or index + FORWARD_10D_OFFSET >= len(rows):
+        return "缺少信号日至第10日完整价格窗口"
+    window = rows[index : index + FORWARD_10D_OFFSET + 1]
+    issue = factor_calibration_evidence_issue(window)
+    if issue is not None:
+        return issue
+    # A qfq tag and a daily adjustment_factor do not identify a shared anchor,
+    # its effective direction, or whether each PIT price already incorporates it.
+    # Do not invent a rebasing formula or mix post-action prices into the label.
+    if any(row.corporate_action_status != "none" for row in window[1:]):
+        return "入场至第10日发生公司行动，现有合同不能证明跨日价格基准可比"
+    return None
+
+
+def _matching_label_evidence_issue(rows: list, spec: FactorSpec, current_score: int) -> str | None:
+    for index in _calibration_indexes(rows):
+        if _trigger_matches(spec, rows, index, current_score):
+            issue = _calibration_label_evidence_issue(rows, index)
+            if issue is not None:
+                return issue
+    return None
 
 
 def _valid_row_at(rows: list, index: int):
@@ -254,10 +286,12 @@ def _trigger_matches(spec: FactorSpec, rows: list, index: int, current_score: in
 
 
 def _adverse_return(rows: list, index: int, entry: float) -> float:
+    # The whole label window is admitted before this calculation. Only known
+    # suspended sessions are excluded: carried OHLC is not an executable touch.
     lows = [
         item.low
         for item in rows[index + 1 : index + FORWARD_5D_OFFSET + 1]
-        if calibration_row_is_observed(item)
+        if item.session_status == "trading"
     ]
     return min(net_forward_return(low, entry) for low in lows) if lows else 0
 

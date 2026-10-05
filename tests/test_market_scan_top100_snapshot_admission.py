@@ -18,6 +18,8 @@ from app.models.market_scan import (
 )
 from app.services.market_scan_completion import MarketScanFinalizer, terminal_diagnostic
 from app.services.market_scan_manager import MarketScanManager
+from app.config import Settings
+from app.services.market_scan_research_stores import MarketScanResearchStores
 from app.services.market_scan_publication_decision import completion_diagnostics, completion_status
 
 
@@ -98,14 +100,13 @@ def _complete_through_manager(run, summary, monkeypatch, tmp_path):
     monkeypatch.setattr(trading_calendar, "CALENDAR_PATH", tmp_path / "absent-calendar.json")
     monkeypatch.setenv("ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH", "false")
     cache = _PublicationCache(run, summary)
-    manager = object.__new__(MarketScanManager)
-    manager.cache = cache
+    cache.path = tmp_path / "publication.sqlite3"
+    manager = MarketScanManager(SimpleNamespace(cache=cache, settings=Settings(cache_path=tmp_path / "publication.sqlite3")), now=lambda: NOW, research_stores=MarketScanResearchStores(probability=None, probability_source=None, future_range=None))
     manager._executor = SimpleNamespace(execute=_no_work)  # noqa: SLF001
     manager._finalizer = MarketScanFinalizer(cache)  # noqa: SLF001
     manager._now = lambda: NOW  # noqa: SLF001
     manager._track_terminal_persistence = lambda *_args: None  # noqa: SLF001
-    manager._probability_capture_wakeup = asyncio.Event()  # noqa: SLF001
-    manager._drain_probability_capture_outbox = _no_work  # noqa: SLF001
+    manager._probability_runtime.notify_published = _no_work  # noqa: SLF001
     manager._finish_failed = _unexpected_failure  # noqa: SLF001
     asyncio.run(manager._execute_run(run.id, asyncio.Event()))  # noqa: SLF001
     assert cache.finished is not None

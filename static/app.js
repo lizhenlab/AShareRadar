@@ -27,6 +27,8 @@ import {
 import { drawKlineChart } from "./js/chart.js";
 import { createChartInspector } from "./js/chart-inspector.js";
 import { createAppLifecycleController } from "./js/app-lifecycle.js";
+import { createQuoteStreamController } from "./js/quote-stream-controller.js";
+import { quoteStreamSymbols } from "./js/quote-stream-contracts.js";
 import {
   cancelDataStatusRefresh,
   cancelMonitoringRefresh,
@@ -130,7 +132,6 @@ const MINUTE_CHART_ROW_LIMIT = 500;
 
 const state = {
   symbol: "600519",
-  stream: null,
   lastAnalysis: null,
   lastInsights: null,
   lastMinuteReport: null,
@@ -151,12 +152,6 @@ const state = {
   chartMarks: [],
   activeMarkCategories: new Set(),
   monitorTimer: null,
-  streamRetryTimer: null,
-  streamRetryCount: 0,
-  streamRetryGeneration: 0,
-  streamSeq: 0,
-  streamContext: null,
-  streamSubscriptionKey: "",
   loadSeq: 0,
   loadRequest: null,
   pendingLoad: null,
@@ -199,7 +194,20 @@ const state = {
   watchlistScanResult: null,
   watchlistScanComparison: null,
   adviceTimelineWatermark: null,
+  adviceTimelineRequest: null,
 };
+
+const quoteStreamController = createQuoteStreamController({
+  getContext: currentLoadContext,
+  getSymbols: () => quoteStreamSymbols(state.symbol, state.watchlist, isExcludedWatchlistItem),
+  isContextCurrent: (context) => !isStaleContext(context),
+  canConnect: (context) => isQuoteWorkspaceActive() && !document.hidden && !isStaleContext(context),
+  canReconcile: (context) => isQuoteWorkspaceActive() && !document.hidden && !state.pendingLoad
+    && (state.primaryView === "monitor" ? state.watchlistReady : Boolean(state.lastAnalysis)) && !isStaleContext(context),
+  isHidden: () => document.hidden,
+  onRows: renderQuotes,
+  onStatus: setSseStatus,
+});
 
 let restoringWorkspacePreferences = false;
 let primaryNavigation = null;
@@ -274,6 +282,7 @@ function applyPrimaryView(view) {
 
 function setPrimaryView(view, options = {}) {
   const previousView = state.primaryView;
+  const previousWorkspace = state.workspaceView;
   const target = applyPrimaryView(view);
   const supportedWorkspaceViews = PRIMARY_WORKSPACE_VIEWS[target];
   if (
@@ -298,7 +307,7 @@ function setPrimaryView(view, options = {}) {
   if (previousView !== target && state.lastAnalysis) requestAnimationFrame(redrawResearchCharts);
   if (target === "review" && previousView !== target) {
     void loadAdviceReviewDashboard(state).then(() => syncPaperTradingPlans(state));
-    void loadPaperTradingDashboard(state);
+    if (state.workspaceView !== "paper" || previousWorkspace === "paper") void loadPaperTradingDashboard(state);
     void loadWatchlistScanHistory(state);
     if (state.lastAnalysis) void loadAdviceReviewSnapshotHistory(currentLoadContext());
   }
@@ -344,9 +353,9 @@ function setWorkspaceView(view, options = {}) {
     void strategyLabController.activate();
   }
   fuyaoController.setWorkspace(target);
-  if (target === "data") void fuyaoController.loadData();
-  if (target === "finance") void fuyaoController.loadStock();
-  if (target === "paper" && previousView !== target) void loadPaperTradingDashboard(state);
+  if (target === "data" && state.primaryView === "system") void fuyaoController.loadData();
+  if (target === "finance" && state.primaryView === "research" && !restoringWorkspacePreferences) void fuyaoController.loadStock();
+  if (target === "paper" && state.primaryView === "review" && previousView !== target) void loadPaperTradingDashboard(state);
   syncWorkbenchSurface();
   const analysis = state.lastAnalysis;
   if (!analysis) return;
@@ -358,19 +367,30 @@ function setWorkspaceView(view, options = {}) {
 function isMarketWorkspaceActive() {
   return state.primaryView === "market" && state.workspaceView === "market-scan";
 }
+function isStockWorkspaceActive() {
+  return state.primaryView === "research" || state.primaryView === "review";
+}
+function isQuoteWorkspaceActive() {
+  return isStockWorkspaceActive() || state.primaryView === "monitor";
+}
 function syncWorkbenchSurface() {
-  if (isMarketWorkspaceActive()) {
+  const changed = state.workbenchPrimaryView !== state.primaryView;
+  state.workbenchPrimaryView = state.primaryView;
+  if (!isStockWorkspaceActive()) {
+    if (!changed) return;
     state.workbenchDeferred = true;
     invalidateActiveLoad();
-    clearInterval(state.monitorTimer);
-    state.monitorTimer = null;
-    cancelMonitoringRefresh(state);
-    cancelDataStatusRefresh(state);
+    if (["monitor", "system"].includes(state.primaryView)) $("sourceLine").textContent = "数据来源与更新时间见当前面板。";
+    if (isMarketWorkspaceActive()) cancelDataStatusRefresh(state);
+    if (!restoringWorkspacePreferences && changed && !isMarketWorkspaceActive()) {
+      const view = state.primaryView;
+      queueMicrotask(() => { if (state.primaryView === view) void loadAll(); });
+    }
     return;
   }
   if (restoringWorkspacePreferences || !state.workbenchDeferred) return;
   queueMicrotask(() => {
-    if (!isMarketWorkspaceActive() && state.workbenchDeferred && !state.pendingLoad) void loadAll();
+    if (isStockWorkspaceActive() && state.workbenchDeferred && !state.pendingLoad) void loadAll();
   });
 }
 
@@ -407,6 +427,7 @@ function renderCompositeStatus() {
 }
 
 function compositeStatus() {
+  if (["monitor", "system"].includes(state.primaryView)) return independentWorkspaceStatus();
   const core = state.coreStatus || {};
   const quality = state.dataQualityStatus || {};
   const auxiliary = auxiliaryStatusValue();
@@ -430,6 +451,18 @@ function compositeStatus() {
     };
   }
   return statusValue(stream, core.text || "数据连接中");
+}
+
+function independentWorkspaceStatus() {
+  const monitor = state.primaryView === "monitor";
+  const sources = monitor ? ["data-status", "watchlist", "market", "strong-stocks", "market-panels", "plates"] : ["data-status", "monitoring"];
+  const failures = Object.entries(state.auxiliaryStatus?.failures || {}).filter(([source]) => sources.includes(source));
+  if (failures.length) return { text: `${failures.length} 项数据暂不可用，详细信息见对应面板`, kind: "warn" };
+  if (["error", "degraded"].includes(state.mutationStatus?.phase)) return statusValue(state.mutationStatus, "本地操作需关注");
+  if (monitor && state.sseStatus?.text) return {
+    text: state.sseStatus.text.replace("核心分析快照已加载；", ""), kind: state.sseStatus.kind || "",
+  };
+  return { text: monitor ? "自选监控" : "系统维护", kind: "" };
 }
 
 function statusValue(status, fallback) {
@@ -484,6 +517,7 @@ function loadingState(title, detail = "正在读取数据，请稍候。") {
 
 async function loadAll(options = {}) {
   if (isMarketWorkspaceActive()) return marketScanController.loadLatest().then(() => false);
+  if (!isStockWorkspaceActive()) { await refreshVisibleWorkspace(options); return false; }
   state.workbenchDeferred = false;
   const request = beginLoadRequest(options);
   const workbenchLoad = loadCurrentWorkbench(request);
@@ -496,11 +530,20 @@ async function loadAll(options = {}) {
     await globalLoads.watchlist;
     if (options.waitForAdviceTimeline) await stockPanels.adviceTimeline;
     if (isStaleLoad(request)) return false;
-    reconcileStreamSubscription({ context: loadContextFromRequest(request) });
+    quoteStreamController.reconcile({ context: loadContextFromRequest(request) });
     return true;
   } finally {
     if (options.waitForGlobal) await Promise.allSettled(Object.values(globalLoads));
   }
+}
+
+async function refreshVisibleWorkspace(options = {}) {
+  const view = state.primaryView;
+  const loads = refreshGlobalPanels({ force: Boolean(options.forceGlobal) });
+  const results = await Promise.allSettled(Object.values(loads));
+  if (state.primaryView !== view || document.hidden) return false;
+  quoteStreamController.reconcile();
+  return results.every((result) => result.status === "fulfilled" && result.value !== false);
 }
 
 async function loadCurrentWorkbench(request) {
@@ -532,12 +575,9 @@ async function refreshWatchlist(options = {}) {
     const loaded = await loadWatchlist(state, {
       force: Boolean(options.force),
       onItemsChanged: handleWatchlistItemsChanged,
+      onReadSuccess: handleWatchlistReadSuccess,
       ttlMs: GLOBAL_REFRESH_TTL_MS,
     });
-    if (loaded) {
-      clearAuxiliaryFailure("watchlist");
-      state.visibilityRefreshSources.delete("watchlist");
-    }
     return loaded;
   } catch (error) {
     if (isAbortError(error)) return false;
@@ -550,6 +590,10 @@ async function refreshWatchlist(options = {}) {
 function refreshGlobalPanels(options = {}) {
   if (isMarketWorkspaceActive()) return {};
   const refreshOptions = { force: Boolean(options.force) };
+  if (state.primaryView === "system") return {
+    dataStatus: refreshDataStatus(refreshOptions),
+    ...refreshDiagnosticsPanels(refreshOptions),
+  };
   return {
     dataStatus: refreshDataStatus(refreshOptions),
     market: loadMarketPanels(refreshOptions),
@@ -587,11 +631,12 @@ function syncDiagnosticsWorkspace() {
 
 function beginLoadRequest(options = {}) {
   cancelMinuteRequest();
+  cancelAdviceTimelineRequest();
   individualProbabilityController.cancel();
   if (state.loadRequest) state.loadRequest.abort();
   const loadRequest = createRequestScope();
   state.loadRequest = loadRequest;
-  stopStream();
+  quoteStreamController.stop();
   const request = {
     id: ++state.loadSeq,
     symbol: state.symbol,
@@ -616,10 +661,11 @@ function beginLoadRequest(options = {}) {
 
 function invalidateActiveLoad() {
   cancelMinuteRequest();
+  cancelAdviceTimelineRequest();
   individualProbabilityController.cancel();
   state.loadRequest?.abort();
   state.loadRequest = null;
-  stopStream();
+  quoteStreamController.stop();
   state.pendingLoad = null;
   state.loadSeq += 1;
 }
@@ -936,20 +982,21 @@ function syncWorkbenchChartMarks(chartMarks) {
 }
 
 function refreshStockPanels(request, workbench = null) {
-  if (isMarketWorkspaceActive()) return {};
+  if (!isStockWorkspaceActive()) return {};
   const context = {
     ...loadContextFromRequest(request),
     signalDate: workbenchSignalDate(workbench),
   };
+  const adviceTimeline = loadAdviceTimeline(context);
   return {
     individualProbability: individualProbabilityController.load({
       ...context,
       isCurrent: () => !isStaleContext(context),
     }),
     minute: loadMinuteAnalysis(context),
-    adviceTimeline: loadAdviceTimeline(context),
+    adviceTimeline,
     adviceReviews: loadAdviceReviews(state, context),
-    adviceReviewSnapshots: state.primaryView === "review" ? loadAdviceReviewSnapshotHistory(context) : Promise.resolve(false),
+    adviceReviewSnapshots: state.primaryView === "review" ? adviceTimeline : Promise.resolve(false),
   };
 }
 
@@ -961,22 +1008,8 @@ function workbenchSignalDate(workbench) {
   return /^\d{4}-\d{2}-\d{2}$/.test(quoteDate) ? quoteDate : "";
 }
 
-async function loadAdviceReviewSnapshotHistory(request = currentLoadContext()) {
-  const requestedSymbol = request.symbol;
-  const requestedLoadSeq = request.loadSeq;
-  if (request.signal?.aborted || requestedSymbol !== state.symbol || requestedLoadSeq !== state.loadSeq) return false;
-  try {
-    const items = await fetchJson(`/api/advice/timeline?symbol=${encodeURIComponent(requestedSymbol)}&limit=200`, {
-      signal: request.signal,
-      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    });
-    if (requestedSymbol !== state.symbol || requestedLoadSeq !== state.loadSeq || !Array.isArray(items)) return false;
-    syncAdviceReviewSnapshots(state, items, state.lastAnalysis);
-    return true;
-  } catch (error) {
-    if (isAbortError(error)) return false;
-    return false;
-  }
+function loadAdviceReviewSnapshotHistory(request = currentLoadContext()) {
+  return loadAdviceTimeline(request, { reviewSnapshots: true });
 }
 
 async function refreshDataStatus(options = {}) {
@@ -1158,7 +1191,7 @@ function markLoadFailure(error, request = {}) {
   const message = compactErrorMessage(error.message);
   const requested = normalizeUiSymbol(request.symbol || state.symbol);
   const displayed = request.previousSymbol || displayedAnalysisSymbol();
-  stopStream();
+  quoteStreamController.stop();
   state.pendingLoad = null;
   state.failedLoadSymbol = requested;
   if (request.previousAnalysis && displayed) {
@@ -1178,7 +1211,7 @@ function markLoadFailure(error, request = {}) {
     renderCompositeStatus();
     const sourceLine = $("sourceLine");
     if (sourceLine) sourceLine.textContent = `本次请求 ${requested} 失败：${message}；当前仍显示 ${previousName}（${displayed}）。`;
-    reconcileStreamSubscription({ context: currentLoadContext() });
+    quoteStreamController.reconcile({ context: currentLoadContext() });
     if (request.reveal) revealMobileFeedback($("dataStatus"));
     return;
   }
@@ -1198,7 +1231,7 @@ function markLoadFailure(error, request = {}) {
 function markRenderFailure(error, requestedSymbol = state.symbol, reveal = false) {
   const message = compactErrorMessage(error.message);
   const requested = normalizeUiSymbol(requestedSymbol);
-  stopStream();
+  quoteStreamController.stop();
   state.pendingLoad = null;
   document.body.classList.add("is-stale");
   setCoreStatus("error", `${requested} 页面显示异常`, "warn");
@@ -1213,26 +1246,50 @@ function markCompanionFailure(error, source = "companion", label = "辅助数据
   setAuxiliaryFailure(source, label, error);
 }
 
-async function loadAdviceTimeline(request = currentLoadContext()) {
+function loadAdviceTimeline(request = currentLoadContext(), options = {}) {
+  if (request.signal?.aborted || request.symbol !== state.symbol || request.loadSeq !== state.loadSeq) return Promise.resolve(false);
+  const limit = options.reviewSnapshots || state.primaryView === "review" ? 200 : 8;
+  const active = state.adviceTimelineRequest;
+  if (active && active.symbol === request.symbol && active.loadSeq === request.loadSeq
+      && active.limit >= limit && !active.signal.aborted) return active.promise;
+  cancelAdviceTimelineRequest();
+  const scope = createRequestScope(null, request.signal);
+  const owner = { ...request, limit, scope, signal: scope.signal, promise: null };
+  state.adviceTimelineRequest = owner;
+  owner.promise = loadOwnedAdviceTimeline(owner);
+  return owner.promise;
+}
+
+function cancelAdviceTimelineRequest() {
+  state.adviceTimelineRequest?.scope.abort();
+  state.adviceTimelineRequest = null;
+}
+
+function isCurrentAdviceTimeline(request) {
+  return state.adviceTimelineRequest === request && !request.signal.aborted
+    && request.symbol === state.symbol && request.loadSeq === state.loadSeq;
+}
+
+async function loadOwnedAdviceTimeline(request) {
   const requestedSymbol = request.symbol;
   const requestedLoadSeq = request.loadSeq;
-  if (request.signal?.aborted || requestedSymbol !== state.symbol || requestedLoadSeq !== state.loadSeq) return false;
-  state.adviceTimelineWatermark = null;
-  renderAdviceTimelineLoading(requestedSymbol);
-  setResearchActivityAdvice(requestedSymbol, "loading", [], "正在读取建议记录");
   try {
-    const items = await fetchJson(`/api/advice/timeline?symbol=${encodeURIComponent(requestedSymbol)}&limit=8`, {
+    state.adviceTimelineWatermark = null;
+    renderAdviceTimelineLoading(requestedSymbol);
+    setResearchActivityAdvice(requestedSymbol, "loading", [], "正在读取建议记录");
+    const items = await fetchJson(`/api/advice/timeline?symbol=${encodeURIComponent(requestedSymbol)}&limit=${request.limit}`, {
       signal: request.signal,
       timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     });
-    if (requestedSymbol !== state.symbol || requestedLoadSeq !== state.loadSeq) return false;
-    if (renderAdviceTimeline(items)) {
-      const adviceId = latestAdviceTimelineId(items);
+    if (!isCurrentAdviceTimeline(request)) return false;
+    const recent = Array.isArray(items) ? items.slice(0, 8) : items;
+    if (renderAdviceTimeline(recent)) {
+      const adviceId = latestAdviceTimelineId(recent);
       state.adviceTimelineWatermark = adviceId === null
         ? null
         : { symbol: requestedSymbol, loadSeq: requestedLoadSeq, adviceId };
       syncAdviceReviewSnapshots(state, items, state.lastAnalysis);
-      setResearchActivityAdvice(requestedSymbol, "ready", items);
+      setResearchActivityAdvice(requestedSymbol, "ready", recent);
       clearAuxiliaryFailure("advice-timeline");
       return true;
     } else {
@@ -1242,11 +1299,14 @@ async function loadAdviceTimeline(request = currentLoadContext()) {
     }
   } catch (error) {
     if (isAbortError(error)) return false;
-    if (requestedSymbol !== state.symbol || requestedLoadSeq !== state.loadSeq) return false;
+    if (!isCurrentAdviceTimeline(request)) return false;
     renderAdviceTimelineUnavailable(error);
     setResearchActivityAdvice(requestedSymbol, "unavailable", [], compactErrorMessage(error.message));
     markCompanionFailure(error, "advice-timeline", "建议变化时间线暂不可用");
     return false;
+  } finally {
+    request.scope.dispose();
+    if (state.adviceTimelineRequest === request) state.adviceTimelineRequest = null;
   }
 }
 
@@ -1422,6 +1482,7 @@ function currentWatchlistMutationOptions(actionLabel) {
     isCurrent,
     symbol: context.symbol,
     onItemsChanged: handleWatchlistItemsChanged,
+    onReadSuccess: handleWatchlistReadSuccess,
     onMutationSuccess() {
       if (!isCurrent()) return;
       clearWatchlistFeedback();
@@ -1484,7 +1545,7 @@ function clearInlineFeedback(id) {
 function setLocalDataRefreshWarning() {
   const feedback = $("localDataFeedback");
   if (!feedback) return;
-  feedback.textContent = "用户数据已导入，但当前页面同步失败，请重新加载当前股票。";
+  feedback.textContent = "用户数据已导入，但当前页面同步失败，请刷新当前页面。";
   feedback.dataset.tone = "warn";
   feedback.hidden = false;
 }
@@ -1493,7 +1554,9 @@ async function commitLocalDataAndRefresh() {
   const result = await commitLocalDataImport(state);
   if (!result) return false;
   invalidateWatchlistCache();
-  const refresh = loadAll({ reveal: true });
+  state.watchlistReady = false;
+  state.workbenchDeferred = true;
+  const refresh = isStockWorkspaceActive() ? loadAll({ reveal: true }) : refreshVisibleWorkspace({ forceGlobal: true });
   const refreshLoadSeq = state.loadSeq;
   const loaded = await refresh;
   if (!loaded && state.loadSeq === refreshLoadSeq) setLocalDataRefreshWarning();
@@ -1653,202 +1716,13 @@ function renderPlates(items) {
 }
 
 function handleWatchlistItemsChanged() {
-  reconcileStreamSubscription();
+  quoteStreamController.reconcile();
 }
 
-function reconcileStreamSubscription({ context = currentLoadContext() } = {}) {
-  if (isMarketWorkspaceActive() || document.hidden || state.pendingLoad || !state.lastAnalysis || isStaleContext(context)) return false;
-  const subscriptionKey = streamSymbols().join(",");
-  const streamContext = state.streamContext;
-  if (
-    state.stream &&
-    state.streamSubscriptionKey === subscriptionKey &&
-    streamContext &&
-    streamContext.symbol === context.symbol &&
-    streamContext.loadSeq === context.loadSeq
-  ) {
-    return false;
-  }
-  return startStream({ context });
-}
-
-function startStream({ retry = false, context = currentLoadContext() } = {}) {
-  if (isMarketWorkspaceActive() || document.hidden || isStaleContext(context)) return false;
-  clearStreamRetryTimer();
-  if (!retry) state.streamRetryCount = 0;
-  const streamId = ++state.streamSeq;
-  if (state.stream) {
-    state.stream.close();
-    state.stream = null;
-  }
-  state.streamSubscriptionKey = "";
-  state.streamContext = { symbol: context.symbol, loadSeq: context.loadSeq, signal: context.signal };
-  setSseStatus("connecting", "观察报价流连接中", "", false);
-  const symbols = streamSymbols();
-  if (!symbols.length) {
-    state.streamContext = null;
-    setSseStatus("idle", "核心分析快照已加载；观察报价流未启动", "warn", false);
-    return false;
-  }
-  let stream;
-  try {
-    stream = new EventSource(`/api/stream/quotes?symbols=${encodeURIComponent(symbols.join(","))}`);
-  } catch (error) {
-    state.streamContext = null;
-    state.streamSubscriptionKey = "";
-    const detail = compactErrorMessage(error.message || "创建失败");
-    setSseStatus("error", `观察报价流创建失败：${detail}`, "warn", false);
-    return false;
-  }
-  state.stream = stream;
-  state.streamSubscriptionKey = symbols.join(",");
-  stream.onmessage = (event) => {
-    if (!isCurrentStream(stream, streamId, context)) return;
-    const rows = quoteRowsFromStreamEvent(event);
-    if (!rows) return;
-    if (!rows.length) {
-      setSseStatus("connecting", "观察报价流暂无有效数据，等待下一帧", "warn", false);
-      return;
-    }
-    try {
-      renderQuotes(rows);
-    } catch (error) {
-      setSseStatus("invalid", "观察报价流显示异常，已保留上一帧", "warn", false);
-      return;
-    }
-    state.streamRetryCount = 0;
-    setSseStatus("ready", "核心分析快照已加载；观察报价流已收到有效帧", "ok", true);
-  };
-  stream.addEventListener("quote-error", (event) => {
-    if (isCurrentStream(stream, streamId, context)) handleStreamQuoteError(event);
-  });
-  stream.onerror = () => scheduleStreamReconnect(stream, streamId, context);
-  return true;
-}
-
-function streamSymbols() {
-  const watchlist = Array.isArray(state.watchlist) ? state.watchlist : [];
-  const excludedSymbols = new Set(
-    watchlist
-      .filter(isExcludedWatchlistItem)
-      .map((item) => canonicalStreamSymbol(item && item.symbol))
-      .filter(Boolean)
-  );
-  const watchSymbols = watchlist.filter((item) => !isExcludedWatchlistItem(item)).map((item) => item && item.symbol);
-  const activeSymbol = canonicalStreamSymbol(state.symbol);
-  const observedSymbols = [...watchSymbols, "600519", "000001", "300750", "002594", "600036"]
-    .map(canonicalStreamSymbol)
-    .filter(Boolean)
-    .filter((item) => !excludedSymbols.has(item))
-    .filter((item) => item !== activeSymbol);
-  return [activeSymbol, ...observedSymbols]
-    .filter(Boolean)
-    .filter((item, index, rows) => rows.indexOf(item) === index)
-    .slice(0, 8);
-}
-
-function canonicalStreamSymbol(symbol) {
-  try {
-    return validateUiSymbol(symbol);
-  } catch (error) {
-    return "";
-  }
-}
-
-function isCurrentStream(stream, streamId, context) {
-  return streamId === state.streamSeq && stream === state.stream && !isStaleContext(context);
-}
-
-function quoteRowsFromStreamEvent(event) {
-  let rows;
-  try {
-    rows = JSON.parse(event.data);
-  } catch (error) {
-    setSseStatus("invalid", "观察报价流数据异常，等待下一次刷新", "warn", false);
-    return null;
-  }
-  if (!Array.isArray(rows)) {
-    setSseStatus("invalid", "观察报价流数据格式异常，等待下一次刷新", "warn", false);
-    return null;
-  }
-  if (!rows.every(isValidQuoteRow)) {
-    setSseStatus("invalid", "观察报价流帧含无效数据，已保留上一帧", "warn", false);
-    return null;
-  }
-  return rows;
-}
-
-function isValidQuoteRow(item) {
-  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-  return (
-    typeof item.name === "string" &&
-    Boolean(item.name.trim()) &&
-    validQuoteSymbol(item.code, item.market) &&
-    isFiniteQuoteNumber(item.price) &&
-    isFiniteQuoteNumber(item.change_pct) &&
-    isFiniteQuoteNumber(item.amount)
-  );
-}
-
-function validQuoteSymbol(code, market) {
-  if (typeof code !== "string" || typeof market !== "string") return false;
-  const symbol = `${code}.${market}`;
-  try {
-    return validateUiSymbol(symbol) === symbol;
-  } catch (error) {
-    return false;
-  }
-}
-
-function isFiniteQuoteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function handleStreamQuoteError(event) {
-  if (event && typeof event.data === "string") {
-    try {
-      const payload = JSON.parse(event.data);
-      const detail = compactErrorMessage(payload.message || "暂不可用");
-      setSseStatus("error", `观察报价流暂不可用：${detail}`, "warn", false);
-      return;
-    } catch (error) {
-      setSseStatus("error", "观察报价流暂不可用", "warn", false);
-      return;
-    }
-  }
-  setSseStatus("error", "观察报价流暂不可用", "warn", false);
-}
-
-function scheduleStreamReconnect(stream, streamId, context) {
-  if (!isCurrentStream(stream, streamId, context)) return;
-  setSseStatus("reconnecting", "观察报价流连接波动，准备重连", "warn", false);
-  if (state.streamRetryTimer || document.hidden) return;
-  stopStream({ clearRetryTimer: false, preserveStatus: true });
-  const delay = Math.min(30000, 2000 * 2 ** Math.min(state.streamRetryCount, 4));
-  state.streamRetryCount += 1;
-  const generation = ++state.streamRetryGeneration;
-  state.streamRetryTimer = setTimeout(() => {
-    if (generation !== state.streamRetryGeneration || isStaleContext(context)) return;
-    state.streamRetryTimer = null;
-    startStream({ retry: true, context });
-  }, delay);
-}
-
-function stopStream({ clearRetryTimer = true, preserveStatus = false } = {}) {
-  if (clearRetryTimer) clearStreamRetryTimer();
-  if (state.stream || state.streamContext) state.streamSeq += 1;
-  if (state.stream) state.stream.close();
-  state.stream = null;
-  state.streamContext = null;
-  state.streamSubscriptionKey = "";
-  if (!preserveStatus) setSseStatus("idle", "", "", false);
-}
-
-function clearStreamRetryTimer() {
-  state.streamRetryGeneration += 1;
-  if (!state.streamRetryTimer) return;
-  clearTimeout(state.streamRetryTimer);
-  state.streamRetryTimer = null;
+function handleWatchlistReadSuccess() {
+  clearAuxiliaryFailure("watchlist");
+  state.visibilityRefreshSources.delete("watchlist");
+  quoteStreamController.reconcile();
 }
 
 function drawKline(rows, ma5, ma20) {
@@ -2176,8 +2050,10 @@ function restoreWorkspacePreferences() {
   restoringWorkspacePreferences = true;
   try {
     state.workspaceByPrimary = { ...preferences.workspaceByPrimary };
-    setWorkspaceView(preferences.workspaceView, { syncPrimary: false });
     setPrimaryView(preferences.primaryView);
+    if (state.workspaceView !== preferences.workspaceView || !document.body?.dataset?.workspaceView) {
+      setWorkspaceView(preferences.workspaceView, { syncPrimary: false });
+    }
     selectDailyChartRange(preferences.dailyChartRange);
     setDailyChartOverlay("ma5", preferences.dailyChartMa5);
     setDailyChartOverlay("ma20", preferences.dailyChartMa20);
@@ -2285,7 +2161,7 @@ function cancelPendingLoadForValidation() {
   state.loadRequest = null;
   state.pendingLoad = null;
   state.loadSeq += 1;
-  stopStream();
+  quoteStreamController.stop();
   if (!request.previousAnalysis || !request.previousSymbol) {
     renderWorkbenchCancelled(request.symbol);
     state.coreStatus = { phase: "idle", text: "尚未加载", kind: "" };
@@ -2300,7 +2176,7 @@ function cancelPendingLoadForValidation() {
   const watchSymbolInput = $("watchSymbolInput");
   if (watchSymbolInput) watchSymbolInput.value = request.previousSymbol.slice(0, 6);
   renderCompositeStatus();
-  startStream({ context: currentLoadContext() });
+  quoteStreamController.start({ context: currentLoadContext() });
 }
 
 function handleWorkspaceTabKeydown(event) {
@@ -2592,7 +2468,7 @@ $("watchForm").addEventListener("submit", async (event) => {
   const options = currentWatchlistMutationOptions("加入");
   try {
     if (await addWatchlistItem(state, options)) {
-      reconcileStreamSubscription();
+      quoteStreamController.reconcile();
       revealMobileFeedback($("watchList"));
     }
   } catch (error) {
@@ -2634,7 +2510,7 @@ $("watchList").addEventListener("click", async (event) => {
       async () => {
         const removed = await removeWatchlistItem(state, symbol, options);
         if (!removed || !options.isCurrent()) return;
-        reconcileStreamSubscription();
+        quoteStreamController.reconcile();
         revealMobileFeedback($("watchList"));
       },
       {
@@ -2775,10 +2651,15 @@ window.addEventListener("resize", () => {
 });
 
 const appLifecycleController = createAppLifecycleController({
-  state, documentTarget: document, windowTarget: window, marketScanController, refreshGlobalPanels, loadAll,
-  invalidateActiveLoad, setActiveSymbol, stopStream, reconcileStreamSubscription, cancelMonitoringRefresh,
+  state, documentTarget: document, windowTarget: window, marketScanController, refreshGlobalPanels, loadAll, isStockWorkspaceActive,
+  invalidateActiveLoad, setActiveSymbol, stopStream: quoteStreamController.stop,
+  reconcileStreamSubscription: quoteStreamController.reconcile, cancelMonitoringRefresh,
   cancelDataStatusRefresh, cancelIndividualProbability: () => individualProbabilityController.cancel(),
-  onPageHide: stockSearchSurface.handlePageHide,
+  onPageHide: (event) => {
+    if (event?.persisted) quoteStreamController.stop();
+    else quoteStreamController.dispose();
+    stockSearchSurface.handlePageHide(event);
+  },
 });
 
 function handleWorkbenchOnline() { return appLifecycleController.handleOnline(); }
@@ -2788,6 +2669,8 @@ function handleVisibilityChange() { appLifecycleController.handleVisibilityChang
 
 initializeChartInspectors();
 initializeAlertNotifications(state, notificationOptions);
+const lastResearchedStock = stockSearchHistory.items()[0];
+if (lastResearchedStock) setActiveSymbol(lastResearchedStock.symbol);
 restoreWorkspacePreferences();
 
 export const __appTest = {
@@ -2812,15 +2695,12 @@ export const __appTest = {
   handleStockSearchPageHide,
   handleWorkbenchOnline,
   handleVisibilityChange,
-  reconcileStreamSubscription,
   setActiveSymbol,
   setPrimaryView,
   setWorkspaceView,
   currentWorkspacePreferences,
   restoreWorkspacePreferences,
-  startStream,
-  canonicalStreamSymbol,
-  quoteRowsFromStreamEvent,
+  quoteStreamController,
   compositeStatus,
   availableAnalysisMa20,
   GLOBAL_ENDPOINTS,

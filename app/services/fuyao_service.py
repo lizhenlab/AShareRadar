@@ -65,6 +65,11 @@ class FuyaoService:
         self._closed = False
         self._recovered = False
 
+    @property
+    def has_active_jobs(self) -> bool:
+        """Inspect live local workers without recovering jobs or reading account state."""
+        return any(not task.done() for task in self._tasks.values())
+
     def capability(self) -> ProviderCapability:
         return ProviderCapability(name="fuyao", installed=True, enabled=self.settings.fuyao_enabled,
                                   reliability_level="授权数据源", note="财报、估值、板块与情绪研究；正式行情资格未开放")

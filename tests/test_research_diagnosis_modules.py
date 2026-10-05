@@ -35,6 +35,22 @@ def test_negative_diagnosis_evidence_never_raises_any_valid_base_score() -> None
             assert 0 <= after_risk <= baseline, (base, rating, after_risk)
 
 
+def test_diagnosis_does_not_reapply_market_adjustments_or_break_existing_caps() -> None:
+    analysis, bundle, feature, alpha, factors, regime, validation, risk, timeframe = _diagnosis_inputs()
+    analysis = analysis.model_copy(update={"action_advice": analysis.action_advice.model_copy(update={"confidence": 75})})
+    alpha = alpha.model_copy(update={"confidence": 70})
+    factors = factors.model_copy(update={"calibrated_confidence": 50})
+    risk = risk.model_copy(update={"rating": "性价比较好"})
+    timeframe = timeframe.model_copy(update={"conflict_level": "多周期顺向"})
+    for adjustment in (-20, -10, 0, 10, 20):
+        report = build_stock_diagnosis(
+            analysis, bundle, feature, alpha, factors,
+            regime.model_copy(update={"confidence_adjustment": adjustment}), validation, risk, timeframe,
+        )
+        assert report.confidence == 58
+        assert report.confidence <= min(alpha.confidence, analysis.action_advice.confidence)
+
+
 def test_production_low_alpha_evidence_is_not_promoted_by_diagnosis_penalties() -> None:
     analysis, bundle, feature, _alpha, _factor, regime, validation, risk, timeframe = _diagnosis_inputs()
     low_analysis = analysis.model_copy(update={
@@ -206,7 +222,12 @@ def _diagnosis_inputs():
         )
         for index in range(48)
     ]
-    quote = make_quote(price=142.0, prev_close=139.0, high=144.0, low=138.5, change_pct=2.16, turnover_rate=4.2)
+    latest, previous = klines[-1], klines[-2]
+    quote = make_quote(
+        price=latest.close, prev_close=previous.close, high=latest.high, low=latest.low,
+        change_pct=(latest.close / previous.close - 1) * 100, turnover_rate=4.2,
+        timestamp=f"{latest.date} 15:30:00",
+    ).model_copy(update={"open": latest.open, "volume": latest.volume, "amount": latest.close * latest.volume})
     quality = build_data_quality(quote, klines, now=datetime(2026, 5, 13, 16, 0, 0))
     analysis = build_analysis(quote, klines, data_quality=quality)
     bundle = build_stock_insight_bundle(analysis)
@@ -215,7 +236,7 @@ def _diagnosis_inputs():
     leadership = build_leadership_report(analysis, bundle, feature)
     factor_lab = build_factor_lab_report(analysis, bundle, feature, chip, leadership)
     regime = build_market_regime_report(analysis, bundle, feature, factor_lab)
-    timeframe = build_timeframe_alignment_report(analysis, feature, factor_lab)
+    timeframe = build_timeframe_alignment_report(analysis, feature)
     validation = build_signal_validation_report(analysis, feature, factor_lab, regime, timeframe)
     risk_reward = build_risk_reward_report(analysis, feature, factor_lab, regime, validation, timeframe)
     alpha = build_alpha_evidence_report(analysis, bundle, feature, factor_lab, regime, timeframe, risk_reward)

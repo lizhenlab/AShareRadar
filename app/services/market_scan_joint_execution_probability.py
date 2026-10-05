@@ -25,6 +25,8 @@ from typing import Literal, cast, overload
 from zoneinfo import ZoneInfo
 
 import app.services.market_scan_probability as _probability
+import app.services.market_scan_probability_estimators as _estimators
+from app.services.market_scan_probability_metrics import date_block_bootstrap_ci
 from app.artifacts.io import canonical_json_bytes, sha256_hex
 from app.services.market_scan_joint_execution_outcomes import (
     JOINT_EXECUTION_LABEL_VERSION,
@@ -864,7 +866,7 @@ def _deployment_calibration(
         _held_out_prediction(item, components, fold_id=1, reference_base_rate=base_rate)
         for item in sorted(partitions["calibration"], key=lambda row: (row.session_date, row.sample_id))
     ]
-    offset = _probability.probability_date_block_bootstrap_ci(
+    offset = date_block_bootstrap_ci(
         [
             (
                 str(item["session_date"]),
@@ -1057,8 +1059,8 @@ def _component_probability_estimates(
     calibrated: dict[str, float] = {}
     for component in JOINT_EXECUTION_COMPONENTS:
         artifact = _mapping(artifacts[component], f"deployment.{component}")
-        raw[component] = _probability.probability_model_probability(_mapping(artifact["model"], f"deployment.{component}.model"), normalized)
-        calibrated[component] = _probability.probability_platt_probability(
+        raw[component] = _estimators.probability_model_probability(_mapping(artifact["model"], f"deployment.{component}.model"), normalized)
+        calibrated[component] = _estimators.probability_platt_probability(
             _mapping(artifact["calibrator"], f"deployment.{component}.calibrator"),
             raw[component],
         )
@@ -1999,7 +2001,7 @@ def _fit_oos_folds(
             )
         except (
             _ComponentFitUnavailable,
-            _probability.ProbabilityModelConvergenceError,
+            _estimators.ProbabilityModelConvergenceError,
         ) as exc:
             return _OosFoldFit(
                 folds=folds,
@@ -2290,10 +2292,10 @@ def _fit_component(
             raise _ComponentFitUnavailable(f"{component}_{partition}_session_coverage")
     train_samples = _component_samples(selected["train"], component)
     calibration_samples = _component_samples(selected["calibration"], component)
-    model = _probability.fit_probability_logistic_model(train_samples, feature_names, config)
-    raw = [_probability.probability_model_probability(model, item.features) for item in calibration_samples]
+    model = _estimators.fit_probability_logistic_model(train_samples, feature_names, config)
+    raw = [_estimators.probability_model_probability(model, item.features) for item in calibration_samples]
     calibration_labels = [int(cast(int | bool, item.target)) for item in calibration_samples]
-    calibrator = _probability.fit_probability_platt_calibrator(raw, calibration_labels, config)
+    calibrator = _estimators.fit_probability_platt_calibrator(raw, calibration_labels, config)
     payload: dict[str, object] = {
         "component": component,
         "training_population": {
@@ -2356,8 +2358,8 @@ def _held_out_prediction(
         artifact = components[component]
         model = _mapping(artifact["model"], f"{component}.model")
         calibrator = _mapping(artifact["calibrator"], f"{component}.calibrator")
-        raw[component] = _probability.probability_model_probability(model, row.features)
-        calibrated[component] = _probability.probability_platt_probability(calibrator, raw[component])
+        raw[component] = _estimators.probability_model_probability(model, row.features)
+        calibrated[component] = _estimators.probability_platt_probability(calibrator, raw[component])
     joint_raw = raw["entry_fill"] * raw["exit_executable"] * raw["net_positive"]
     joint = calibrated["entry_fill"] * calibrated["exit_executable"] * calibrated["net_positive"]
     return {

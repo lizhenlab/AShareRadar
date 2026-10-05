@@ -96,15 +96,14 @@ def diagnosis_confidence(
     analysis: AnalysisResult,
     alpha: AlphaEvidenceReport,
     factor_lab: FactorLabReport | None = None,
-    market_regime: MarketRegimeReport | None = None,
     risk_reward: RiskRewardReport | None = None,
     timeframe: TimeframeAlignmentReport | None = None,
 ) -> int:
     confidence = min(analysis.action_advice.confidence, alpha.confidence)
     if factor_lab:
         confidence = min(confidence, max(35, factor_lab.calibrated_confidence + 8))
-    if market_regime:
-        confidence = _clamp(confidence + market_regime.confidence_adjustment)
+    # Alpha already incorporates market context. Reapplying it here both
+    # duplicates evidence and can break the action/factor evidence caps above.
     if timeframe and timeframe.conflict_level in {"高冲突", "中冲突", "多周期偏弱"}:
         confidence = _clamp(confidence - 10)
     if _risk_reward_rating_in(risk_reward, RISK_REWARD_CONTROL_RATINGS):

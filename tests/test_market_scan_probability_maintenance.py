@@ -82,19 +82,23 @@ def test_read_only_probability_maintenance_cli_cache_reads_only_requested_dates(
     assert selected["600000.SH"] == []
 
 
-@pytest.mark.parametrize(("failed_count", "expected_code"), ((0, 0), (2, 1)))
+@pytest.mark.parametrize(("failed_count", "quarantined_count", "expected_code"), ((0, 0, 0), (2, 0, 1), (0, 1, 1)))
 def test_probability_maintenance_cli_main_reports_summary_and_failure_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     failed_count: int,
+    quarantined_count: int,
     expected_code: int,
 ) -> None:
     captured: dict[str, object] = {}
 
     def maintain(cache, **kwargs):
         captured.update(cache=cache, **kwargs)
-        return SimpleNamespace(failed_count=failed_count, published_count=3)
+        return SimpleNamespace(
+            failed_count=failed_count, published_count=3, quarantined_count=quarantined_count,
+            degraded=bool(failed_count or quarantined_count),
+        )
 
     monkeypatch.setattr(maintenance_cli, "maintain_market_scan_probability", maintain)
     monkeypatch.setattr(
@@ -112,7 +116,10 @@ def test_probability_maintenance_cli_main_reports_summary_and_failure_exit(
     assert maintenance_cli.main() == expected_code
     output = json.loads(capsys.readouterr().out)
 
-    assert output == {"failed_count": failed_count, "published_count": 3}
+    assert output == {
+        "failed_count": failed_count, "published_count": 3, "quarantined_count": quarantined_count,
+        "degraded": bool(failed_count or quarantined_count),
+    }
     assert isinstance(captured["cache"], maintenance_cli._ReadOnlyKlineCache)  # noqa: SLF001
     assert captured["as_of_date"] == "2026-08-13"
     assert captured["source_directory"] == tmp_path / "sources"

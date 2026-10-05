@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 import sqlite3
 from typing import cast
 
 from app.db.market_scan_integrity import verify_market_scan_snapshot
-from app.models.market_scan import MarketScanResultItem, MarketScanResultStatus, MarketScanRun
-from app.models.market_scan_snapshot import validate_market_scan_run_binding
+from app.models.market_scan import MarketScanResultStatus, MarketScanRun
 from app.repositories.market_scan_context import MarketScanRepositoryContext
-from app.repositories.market_scan_mapping import result_from_row, run_from_row
+from app.repositories.market_scan_mapping import run_from_row
 from app.repositories.market_scan_results import required_run_row
 
 
@@ -78,49 +76,11 @@ class MarketScanScreeningMixin(MarketScanRepositoryContext):
             ).fetchall()
         return run_from_row(run_row), [_breadth_row(row) for row in rows]
 
-    def screening_evaluation_snapshot(
-        self,
-        run_id: int,
-    ) -> tuple[MarketScanRun, list[MarketScanScreeningRow]]:
-        """Read executable scalar fields without decoding full result payloads."""
+def read_screening_rows(conn: sqlite3.Connection, run_id: int) -> list[MarketScanScreeningRow]:
+    """Project scalar screening fields from the caller's verified read snapshot."""
+    rows = conn.execute(_SCREENING_PROJECTION_SQL, (run_id,)).fetchall()
+    return [_screening_row(row) for row in rows]
 
-        with self._read_snapshot() as conn:
-            run_row = required_run_row(conn, run_id)
-            if str(run_row["status"]) in {"success", "degraded"}:
-                verify_market_scan_snapshot(conn, run_id)
-            rows = conn.execute(_SCREENING_PROJECTION_SQL, (run_id,)).fetchall()
-        return run_from_row(run_row), [_screening_row(row) for row in rows]
-
-    def screening_result_items(
-        self,
-        run_id: int,
-        symbols: Sequence[str],
-        *,
-        expected_run: MarketScanRun | None = None,
-    ) -> list[MarketScanResultItem]:
-        """Hydrate only response rows after a terminal run has been validated."""
-
-        unique_symbols = tuple(dict.fromkeys(symbols))
-        if len(unique_symbols) > MAX_SCREENING_HYDRATION_SYMBOLS:
-            raise ValueError("筛选结果单次最多读取 300 只股票详情")
-        if not unique_symbols:
-            return []
-        placeholders = ",".join("?" for _symbol in unique_symbols)
-        with self._read_snapshot() as conn:
-            run_row = required_run_row(conn, run_id)
-            if str(run_row["status"]) in {"success", "degraded"}:
-                verify_market_scan_snapshot(conn, run_id)
-            if expected_run is not None:
-                validate_market_scan_run_binding(expected_run, run_from_row(run_row))
-            rows = conn.execute(
-                f"""
-                SELECT * FROM market_scan_result
-                WHERE run_id = ? AND symbol IN ({placeholders})
-                ORDER BY symbol ASC
-                """,
-                (run_id, *unique_symbols),
-            ).fetchall()
-        return [result_from_row(row) for row in rows]
 
 def _numeric_dimension_sql(name: str) -> str:
     path = f"{_DIMENSION_PREFIX}.{name}"

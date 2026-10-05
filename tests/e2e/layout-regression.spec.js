@@ -442,6 +442,7 @@ async function assertMarketScanLayout(page, viewport) {
       stockActionsDisplay: getComputedStyle(stockActions).display,
       stockActionColumns: window.__layoutGridColumnCount(stockActions),
       stockActionRects: stockActionButtons.map((button) => window.__layoutRect(button)),
+      stockActionLabels: stockActionButtons.map((button) => button.textContent.trim()),
       stockMetaRowRect: window.__layoutRect(stockMetaRow),
       cellRects: Array.from(firstRow.cells, (cell) => window.__layoutRect(cell)),
       tableDisplay: getComputedStyle(table).display,
@@ -452,6 +453,7 @@ async function assertMarketScanLayout(page, viewport) {
       tableMaxHeight: Number.parseFloat(getComputedStyle(tableWrap).maxHeight),
       tableOverflowY: getComputedStyle(tableWrap).overflowY,
       actionRect: window.__layoutRect(actions),
+      actionButtonRects: Array.from(actions.querySelectorAll("button:not([hidden])"), (button) => window.__layoutRect(button)),
       startRect: window.__layoutRect(start),
       filtersBeforeTable,
       strategyBeforeTable: Boolean(
@@ -483,16 +485,23 @@ async function assertMarketScanLayout(page, viewport) {
   expect(metrics.startRect.width).toBeGreaterThan(0);
   expect(metrics.startRect.left).toBeGreaterThanOrEqual(metrics.actionRect.left - 1);
   expect(metrics.startRect.right).toBeLessThanOrEqual(metrics.actionRect.right + 1);
+  for (const button of metrics.actionButtonRects) {
+    expect(button.left).toBeGreaterThanOrEqual(metrics.actionRect.left - 1);
+    expect(button.right).toBeLessThanOrEqual(metrics.actionRect.right + 1);
+  }
   expect(metrics.filtersBeforeTable).toBe(true);
   expect(metrics.strategyBeforeTable).toBe(true);
   expect(metrics.strategyOpen).toBe(false);
   expect(metrics.progressBeforeTable).toBe(true);
   expect(metrics.presetsBeforeTable).toBe(true);
   expect(metrics.historyHidden).toBe(true);
-  expect(metrics.stockActionRects).toHaveLength(2);
+  expect(metrics.stockActionLabels).toEqual(["快照", "分析", "加入对比"]);
   expect(metrics.stockActionRects[0].top).toBeCloseTo(metrics.stockActionRects[1].top, 0);
-  expect(metrics.stockActionRects[0].top).toBeGreaterThanOrEqual(metrics.stockMetaRowRect.top - 1);
-  expect(metrics.stockActionRects[0].bottom).toBeLessThanOrEqual(metrics.stockMetaRowRect.bottom + 1);
+  for (const button of metrics.stockActionRects) {
+    expect(button.top).toBeGreaterThanOrEqual(metrics.stockMetaRowRect.top - 1);
+    expect(button.bottom).toBeLessThanOrEqual(metrics.stockMetaRowRect.bottom + 1);
+    expect(button.right).toBeLessThanOrEqual(metrics.firstRowRect.right + 1);
+  }
 
   if (viewport.width <= 820) {
     expect(metrics.tableDisplay).toBe("block");
@@ -507,7 +516,7 @@ async function assertMarketScanLayout(page, viewport) {
     expect(metrics.rankZIndex).toBeGreaterThanOrEqual(1);
     expect(metrics.rankRect.top).toBeGreaterThanOrEqual(metrics.firstRowRect.top);
     expect(metrics.rankRect.right).toBeLessThanOrEqual(metrics.firstRowRect.right);
-    expect(metrics.stockActionColumns).toBe(2);
+    expect(metrics.stockActionColumns).toBe(viewport.width >= 600 ? 3 : 2);
     if (viewport.width >= 600) {
       expect(metrics.firstRowRect.height).toBeLessThanOrEqual(300);
       expect(metrics.cellRects[3].top).toBeCloseTo(metrics.cellRects[4].top, 0);

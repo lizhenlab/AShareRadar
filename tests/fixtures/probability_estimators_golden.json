@@ -1,0 +1,3307 @@
+{
+  "baseline_predictions": [
+    0.1,
+    0.5,
+    0.5,
+    0.9,
+    0.9
+  ],
+  "calibrator": {
+    "converged": true,
+    "fit_partition": "calibration_only",
+    "intercept": 1.0159095418057438,
+    "iterations": 23,
+    "slope": 12.445145646919217,
+    "version": "shadow-up-probability-platt-v2-convergence-required"
+  },
+  "isotonic": {
+    "algorithm": "weighted_pool_adjacent_violators",
+    "counts": [
+      2,
+      2,
+      1,
+      1
+    ],
+    "fit_partition": "calibration_only",
+    "probabilities": [
+      0.5,
+      0.5,
+      1.0,
+      1.0
+    ],
+    "upper_bounds": [
+      0.1,
+      0.3,
+      0.4,
+      0.9
+    ],
+    "version": "shadow-up-probability-isotonic-pav-v1"
+  },
+  "model": {
+    "coefficients": [
+      -1.5480577427379425,
+      2.1509300494309542
+    ],
+    "converged": true,
+    "feature_names": [
+      "risk",
+      "trend"
+    ],
+    "intercept": 0.000841573712503893,
+    "iterations": 7,
+    "l2_strength": 1.0,
+    "means": [
+      -0.020000000000000004,
+      -4.625929269271485e-18
+    ],
+    "scales": [
+      0.3754108860080289,
+      0.8944271909999157
+    ],
+    "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+  },
+  "nonconvergence": {
+    "calibrator": {
+      "message": "calibrator_nonconvergence",
+      "type": "ProbabilityModelConvergenceError"
+    },
+    "model": {
+      "message": "model_nonconvergence",
+      "type": "ProbabilityModelConvergenceError"
+    }
+  },
+  "predictions": [
+    {
+      "isotonic": 0.5,
+      "platt": 6.305116760146985e-16,
+      "raw": 0.005083581837395996
+    },
+    {
+      "isotonic": 0.5,
+      "platt": 2.8306774282094722e-11,
+      "raw": 0.1157580101110813
+    },
+    {
+      "isotonic": 1.0,
+      "platt": 0.9999998957878091,
+      "raw": 0.7703316595411185
+    },
+    {
+      "isotonic": 1.0,
+      "platt": 0.9999999999999993,
+      "raw": 0.9884972376141954
+    },
+    {
+      "isotonic": 0.5,
+      "platt": 6.305116760146985e-16,
+      "raw": 0.0036603352348142998
+    },
+    {
+      "isotonic": 0.5,
+      "platt": 4.66527351184541e-13,
+      "raw": 0.08602857998763466
+    },
+    {
+      "isotonic": 1.0,
+      "platt": 0.9999936769138772,
+      "raw": 0.706883145597493
+    },
+    {
+      "isotonic": 1.0,
+      "platt": 0.9999999999999993,
+      "raw": 0.9840733679543101
+    }
+  ],
+  "studies": {
+    "insufficient": {
+      "evidence": {
+        "actual_positive_rate_interval": null,
+        "base_rate": null,
+        "baseline_digest": null,
+        "calibration_candidates": [
+          {
+            "id": "platt",
+            "metrics": null,
+            "parameters": null,
+            "selected_for_display": true,
+            "status": "not_evaluated_study_insufficient",
+            "version": "shadow-up-probability-platt-v2-convergence-required"
+          },
+          {
+            "eligibility": {
+              "calibration_session_count": 0,
+              "minimum_calibration_session_count": 6
+            },
+            "id": "isotonic",
+            "metrics": null,
+            "parameters": null,
+            "selected_for_display": false,
+            "status": "not_evaluated_study_insufficient",
+            "version": "shadow-up-probability-isotonic-pav-v1"
+          }
+        ],
+        "calibration_metrics": null,
+        "calibrator": null,
+        "calibrator_digest": null,
+        "contract": {
+          "baseline": {
+            "bin_count": 10,
+            "prior_strength": 20.0,
+            "version": "shadow-up-probability-empirical-bayes-bins-v1"
+          },
+          "calibrator": {
+            "algorithm": "independent_platt_sigmoid",
+            "candidate_registry": [
+              {
+                "algorithm": "independent_platt_sigmoid",
+                "id": "platt",
+                "minimum_calibration_sessions": 6,
+                "version": "shadow-up-probability-platt-v2-convergence-required"
+              },
+              {
+                "algorithm": "weighted_pool_adjacent_violators",
+                "id": "isotonic",
+                "minimum_calibration_sessions": 6,
+                "selection_policy": "comparison_only_never_automatic",
+                "version": "shadow-up-probability-isotonic-pav-v1"
+              }
+            ],
+            "primary": true,
+            "version": "shadow-up-probability-platt-v2-convergence-required"
+          },
+          "compatibility": {
+            "legacy_artifact_policy": "replayable_read_only_never_filter_qualified",
+            "qualification_policy": "exact_current_contract_versions_only",
+            "superseded_feature_versions": [
+              "full-market-point-in-time-features-v2",
+              "full-market-point-in-time-features-v3-liquidity-medium"
+            ],
+            "superseded_label_versions": [
+              "market-scan-upside-label-v2",
+              "market-scan-upside-label-v3-explicit-target-offset"
+            ],
+            "superseded_schema_versions": [
+              "market-scan-shadow-probability-v3"
+            ],
+            "superseded_split_versions": [
+              "grouped-date-multifold-train-gap-calibration-gap-test-v2"
+            ],
+            "supersession_reason": "target_exit_is_H_plus_1_sessions_from_signal_and_v2_purged_only_H"
+          },
+          "cost": {
+            "components": [
+              "commission",
+              "stamp_tax",
+              "transfer_fee",
+              "slippage"
+            ],
+            "deduct_before_label": true,
+            "label_contract": {
+              "cost_model_version": "ashare-executable-round-trip-cost-v1",
+              "label_version": "market-scan-upside-label-v4-execution-phase-separated"
+            },
+            "label_contract_binding": "legacy_version_only",
+            "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+            "version": "ashare-executable-round-trip-cost-v1"
+          },
+          "evaluation": {
+            "automatic_promotion": false,
+            "bootstrap": "deterministic_circular_moving_target_offset_block_95pct_v2",
+            "bootstrap_block_length_sessions": 2,
+            "bootstrap_samples": 100,
+            "calibration_bin_count": 5,
+            "filter_qualification": {
+              "missing_evidence_policy": "fail_closed",
+              "requires_calibration_validation": true,
+              "requires_exact_evidence_digest_binding": true,
+              "requires_execution_validation": true,
+              "requires_multiple_testing_fdr_evidence": true,
+              "requires_positive_brier_improvement_ci_95": true,
+              "requires_positive_log_loss_improvement_ci_95": true,
+              "requires_temporal_drift_validation": true,
+              "version": "market-scan-probability-filter-qualification-v1"
+            },
+            "minimum_bin_sessions": 1,
+            "minimum_isotonic_calibration_sessions": 6,
+            "minimum_label_coverage": 0.95,
+            "minimum_selection_folds": 2,
+            "probability_when_insufficient": null,
+            "production_ranking_effect": "none",
+            "selection_qualification": {
+              "requires_complete_label_contract_binding": true,
+              "requires_effective_probability_stratification": true,
+              "requires_multiple_complete_oos_folds": true,
+              "requires_positive_oos_brier_skill": true,
+              "requires_positive_skill_in_every_complete_oos_fold": true
+            }
+          },
+          "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+          "label": {
+            "entry": "next_tradable_session_open_after_scan",
+            "entry_session_offset": 1,
+            "exit": "signal_plus_2_trading_session_close",
+            "holding_sessions": 1,
+            "point_in_time_required": true,
+            "target": "net_excess_positive",
+            "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+            "target_session_offset": 2,
+            "unfilled_policy": "explicitly_non_executable_never_assume_fill",
+            "version": "market-scan-upside-label-v4-execution-phase-separated"
+          },
+          "model": {
+            "algorithm": "standardized_l2_logistic_regression_newton",
+            "convergence_tolerance": 1e-10,
+            "l2_strength": 1.0,
+            "maximum_iterations": 100,
+            "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+          },
+          "schema_version": "market-scan-shadow-probability-v4",
+          "split": {
+            "gap_sessions": 2,
+            "group": "session_date",
+            "minimum_calibration_sessions": 6,
+            "minimum_fit_independent_sessions": 28,
+            "minimum_safe_gap_sessions": 2,
+            "minimum_selection_independent_sessions": 34,
+            "minimum_test_sessions": 6,
+            "minimum_train_sessions": 12,
+            "purge_rule": "all_prior_partition_labels_mature_strictly_before_next_partition_signal",
+            "random_split_forbidden": true,
+            "target_session_offset": 2,
+            "version": "grouped-date-multifold-target-offset-purge-v3",
+            "walk_forward": "expanding_train_rolling_calibration_and_test"
+          }
+        },
+        "cost_model_version": "ashare-executable-round-trip-cost-v1",
+        "counts": {
+          "available_independent_session_count": 2,
+          "calibration_session_count": 0,
+          "eligible_observation_count": 8,
+          "evaluated_fold_count": 0,
+          "label_coverage": 1.0,
+          "observation_count": 8,
+          "out_of_sample_observation_count": 0,
+          "out_of_sample_session_count": 0,
+          "test_session_count": 0,
+          "training_session_count": 0,
+          "unused_tail_session_count": 2,
+          "walk_forward_fold_count": 0
+        },
+        "empirical_bayes_baseline": null,
+        "evidence_digest": "b75b02c78d6c0698afec18a512775feb5193024a6a8a9626cea27edbe1106068",
+        "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+        "fit_status": "not_fitted",
+        "folds": [],
+        "generated_at": "2026-08-11T08:00:00Z",
+        "horizon": 1,
+        "input_digest": "b03b682676a88f62c15bcd3f48bf02824f89900d6634fd80b4ad94058de85de1",
+        "isotonic_calibrator": null,
+        "isotonic_calibrator_digest": null,
+        "label_contract_binding": "legacy_version_only",
+        "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+        "label_version": "market-scan-upside-label-v4-execution-phase-separated",
+        "limitations": [
+          "minimum_independent_sessions",
+          "shadow_only_no_production_ranking_effect"
+        ],
+        "model": null,
+        "model_digest": null,
+        "model_version": "shadow-up-probability-logit-l2-v2-convergence-required",
+        "predictions": [],
+        "probability": null,
+        "schema_version": "market-scan-shadow-probability-v4",
+        "selection_qualification": null,
+        "selection_qualified": false,
+        "split": null,
+        "status": "insufficient_data",
+        "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+        "training_cutoff": null
+      },
+      "projection": {
+        "base_rate": null,
+        "calibration_adjusted_probability_interval": null,
+        "calibration_bias_interval": null,
+        "cost_model_version": "ashare-executable-round-trip-cost-v1",
+        "counts": {
+          "available_independent_session_count": 2,
+          "calibration_session_count": 0,
+          "eligible_observation_count": 8,
+          "evaluated_fold_count": 0,
+          "label_coverage": 1.0,
+          "observation_count": 8,
+          "out_of_sample_observation_count": 0,
+          "out_of_sample_session_count": 0,
+          "test_session_count": 0,
+          "training_session_count": 0,
+          "unused_tail_session_count": 2,
+          "walk_forward_fold_count": 0
+        },
+        "deployment_status": "deployment_model_not_fitted",
+        "empirical_bayes_probability": null,
+        "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+        "generated_at": "2026-08-11T08:00:00Z",
+        "horizon": 1,
+        "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+        "label_version": "market-scan-upside-label-v4-execution-phase-separated",
+        "limitations": [
+          "minimum_independent_sessions",
+          "shadow_only_no_production_ranking_effect",
+          "oos_evaluation_fold_forbidden_for_new_prediction",
+          "deployment_model_and_fresh_calibrator_not_available"
+        ],
+        "model_version": "shadow-up-probability-logit-l2-v2-convergence-required",
+        "probability": null,
+        "raw_probability": null,
+        "sample_id": "fixed-current",
+        "selection_qualification": null,
+        "selection_qualified": false,
+        "status": "insufficient_data",
+        "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+        "training_cutoff": null
+      }
+    },
+    "nonconvergence": {
+      "evidence": {
+        "actual_positive_rate_interval": null,
+        "base_rate": null,
+        "baseline_digest": null,
+        "calibration_candidates": [
+          {
+            "id": "platt",
+            "metrics": null,
+            "parameters": null,
+            "selected_for_display": true,
+            "status": "not_evaluated_study_insufficient",
+            "version": "shadow-up-probability-platt-v2-convergence-required"
+          },
+          {
+            "eligibility": {
+              "calibration_session_count": 0,
+              "minimum_calibration_session_count": 6
+            },
+            "id": "isotonic",
+            "metrics": null,
+            "parameters": null,
+            "selected_for_display": false,
+            "status": "not_evaluated_study_insufficient",
+            "version": "shadow-up-probability-isotonic-pav-v1"
+          }
+        ],
+        "calibration_metrics": null,
+        "calibrator": null,
+        "calibrator_digest": null,
+        "contract": {
+          "baseline": {
+            "bin_count": 10,
+            "prior_strength": 20.0,
+            "version": "shadow-up-probability-empirical-bayes-bins-v1"
+          },
+          "calibrator": {
+            "algorithm": "independent_platt_sigmoid",
+            "candidate_registry": [
+              {
+                "algorithm": "independent_platt_sigmoid",
+                "id": "platt",
+                "minimum_calibration_sessions": 6,
+                "version": "shadow-up-probability-platt-v2-convergence-required"
+              },
+              {
+                "algorithm": "weighted_pool_adjacent_violators",
+                "id": "isotonic",
+                "minimum_calibration_sessions": 6,
+                "selection_policy": "comparison_only_never_automatic",
+                "version": "shadow-up-probability-isotonic-pav-v1"
+              }
+            ],
+            "primary": true,
+            "version": "shadow-up-probability-platt-v2-convergence-required"
+          },
+          "compatibility": {
+            "legacy_artifact_policy": "replayable_read_only_never_filter_qualified",
+            "qualification_policy": "exact_current_contract_versions_only",
+            "superseded_feature_versions": [
+              "full-market-point-in-time-features-v2",
+              "full-market-point-in-time-features-v3-liquidity-medium"
+            ],
+            "superseded_label_versions": [
+              "market-scan-upside-label-v2",
+              "market-scan-upside-label-v3-explicit-target-offset"
+            ],
+            "superseded_schema_versions": [
+              "market-scan-shadow-probability-v3"
+            ],
+            "superseded_split_versions": [
+              "grouped-date-multifold-train-gap-calibration-gap-test-v2"
+            ],
+            "supersession_reason": "target_exit_is_H_plus_1_sessions_from_signal_and_v2_purged_only_H"
+          },
+          "cost": {
+            "components": [
+              "commission",
+              "stamp_tax",
+              "transfer_fee",
+              "slippage"
+            ],
+            "deduct_before_label": true,
+            "label_contract": {
+              "cost_model_version": "ashare-executable-round-trip-cost-v1",
+              "label_version": "market-scan-upside-label-v4-execution-phase-separated"
+            },
+            "label_contract_binding": "legacy_version_only",
+            "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+            "version": "ashare-executable-round-trip-cost-v1"
+          },
+          "evaluation": {
+            "automatic_promotion": false,
+            "bootstrap": "deterministic_circular_moving_target_offset_block_95pct_v2",
+            "bootstrap_block_length_sessions": 2,
+            "bootstrap_samples": 100,
+            "calibration_bin_count": 5,
+            "filter_qualification": {
+              "missing_evidence_policy": "fail_closed",
+              "requires_calibration_validation": true,
+              "requires_exact_evidence_digest_binding": true,
+              "requires_execution_validation": true,
+              "requires_multiple_testing_fdr_evidence": true,
+              "requires_positive_brier_improvement_ci_95": true,
+              "requires_positive_log_loss_improvement_ci_95": true,
+              "requires_temporal_drift_validation": true,
+              "version": "market-scan-probability-filter-qualification-v1"
+            },
+            "minimum_bin_sessions": 1,
+            "minimum_isotonic_calibration_sessions": 6,
+            "minimum_label_coverage": 0.95,
+            "minimum_selection_folds": 2,
+            "probability_when_insufficient": null,
+            "production_ranking_effect": "none",
+            "selection_qualification": {
+              "requires_complete_label_contract_binding": true,
+              "requires_effective_probability_stratification": true,
+              "requires_multiple_complete_oos_folds": true,
+              "requires_positive_oos_brier_skill": true,
+              "requires_positive_skill_in_every_complete_oos_fold": true
+            }
+          },
+          "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+          "label": {
+            "entry": "next_tradable_session_open_after_scan",
+            "entry_session_offset": 1,
+            "exit": "signal_plus_2_trading_session_close",
+            "holding_sessions": 1,
+            "point_in_time_required": true,
+            "target": "net_excess_positive",
+            "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+            "target_session_offset": 2,
+            "unfilled_policy": "explicitly_non_executable_never_assume_fill",
+            "version": "market-scan-upside-label-v4-execution-phase-separated"
+          },
+          "model": {
+            "algorithm": "standardized_l2_logistic_regression_newton",
+            "convergence_tolerance": 1e-10,
+            "l2_strength": 1.0,
+            "maximum_iterations": 1,
+            "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+          },
+          "schema_version": "market-scan-shadow-probability-v4",
+          "split": {
+            "gap_sessions": 2,
+            "group": "session_date",
+            "minimum_calibration_sessions": 6,
+            "minimum_fit_independent_sessions": 28,
+            "minimum_safe_gap_sessions": 2,
+            "minimum_selection_independent_sessions": 34,
+            "minimum_test_sessions": 6,
+            "minimum_train_sessions": 12,
+            "purge_rule": "all_prior_partition_labels_mature_strictly_before_next_partition_signal",
+            "random_split_forbidden": true,
+            "target_session_offset": 2,
+            "version": "grouped-date-multifold-target-offset-purge-v3",
+            "walk_forward": "expanding_train_rolling_calibration_and_test"
+          }
+        },
+        "cost_model_version": "ashare-executable-round-trip-cost-v1",
+        "counts": {
+          "available_independent_session_count": 42,
+          "calibration_session_count": 6,
+          "eligible_observation_count": 168,
+          "evaluated_fold_count": 0,
+          "label_coverage": 1.0,
+          "observation_count": 168,
+          "out_of_sample_observation_count": 0,
+          "out_of_sample_session_count": 0,
+          "test_session_count": 6,
+          "training_session_count": 12,
+          "unused_tail_session_count": 42,
+          "walk_forward_fold_count": 3
+        },
+        "empirical_bayes_baseline": null,
+        "evidence_digest": "d3b5ba703fdff5fe31841eda9c3d4627e9f5a3df3532b82fc2bfff01c44e83d0",
+        "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+        "fit_status": "not_fitted",
+        "folds": [],
+        "generated_at": "2026-08-11T08:00:00Z",
+        "horizon": 1,
+        "input_digest": "001d321841f0dbe79ce56a5e3d01eda78c69064134340b12984fef03d8a7dcc1",
+        "isotonic_calibrator": null,
+        "isotonic_calibrator_digest": null,
+        "label_contract_binding": "legacy_version_only",
+        "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+        "label_version": "market-scan-upside-label-v4-execution-phase-separated",
+        "limitations": [
+          "fold_1_model_nonconvergence",
+          "shadow_only_no_production_ranking_effect"
+        ],
+        "model": null,
+        "model_digest": null,
+        "model_version": "shadow-up-probability-logit-l2-v2-convergence-required",
+        "predictions": [],
+        "probability": null,
+        "schema_version": "market-scan-shadow-probability-v4",
+        "selection_qualification": null,
+        "selection_qualified": false,
+        "split": {
+          "calibration_dates": [
+            "2025-01-15",
+            "2025-01-16",
+            "2025-01-17",
+            "2025-01-18",
+            "2025-01-19",
+            "2025-01-20"
+          ],
+          "calibration_gap_dates": [
+            "2025-01-21",
+            "2025-01-22"
+          ],
+          "test_dates": [
+            "2025-01-23",
+            "2025-01-24",
+            "2025-01-25",
+            "2025-01-26",
+            "2025-01-27",
+            "2025-01-28"
+          ],
+          "train_dates": [
+            "2025-01-01",
+            "2025-01-02",
+            "2025-01-03",
+            "2025-01-04",
+            "2025-01-05",
+            "2025-01-06",
+            "2025-01-07",
+            "2025-01-08",
+            "2025-01-09",
+            "2025-01-10",
+            "2025-01-11",
+            "2025-01-12"
+          ],
+          "train_gap_dates": [
+            "2025-01-13",
+            "2025-01-14"
+          ]
+        },
+        "status": "insufficient_data",
+        "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+        "training_cutoff": "2025-01-12"
+      },
+      "projection": {
+        "base_rate": null,
+        "calibration_adjusted_probability_interval": null,
+        "calibration_bias_interval": null,
+        "cost_model_version": "ashare-executable-round-trip-cost-v1",
+        "counts": {
+          "available_independent_session_count": 42,
+          "calibration_session_count": 6,
+          "eligible_observation_count": 168,
+          "evaluated_fold_count": 0,
+          "label_coverage": 1.0,
+          "observation_count": 168,
+          "out_of_sample_observation_count": 0,
+          "out_of_sample_session_count": 0,
+          "test_session_count": 6,
+          "training_session_count": 12,
+          "unused_tail_session_count": 42,
+          "walk_forward_fold_count": 3
+        },
+        "deployment_status": "deployment_model_not_fitted",
+        "empirical_bayes_probability": null,
+        "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+        "generated_at": "2026-08-11T08:00:00Z",
+        "horizon": 1,
+        "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+        "label_version": "market-scan-upside-label-v4-execution-phase-separated",
+        "limitations": [
+          "fold_1_model_nonconvergence",
+          "shadow_only_no_production_ranking_effect",
+          "oos_evaluation_fold_forbidden_for_new_prediction",
+          "deployment_model_and_fresh_calibrator_not_available"
+        ],
+        "model_version": "shadow-up-probability-logit-l2-v2-convergence-required",
+        "probability": null,
+        "raw_probability": null,
+        "sample_id": "fixed-current",
+        "selection_qualification": null,
+        "selection_qualified": false,
+        "status": "insufficient_data",
+        "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+        "training_cutoff": "2025-01-12"
+      }
+    },
+    "success": {
+      "evidence": {
+        "actual_positive_rate_interval": [
+          0.5,
+          0.5
+        ],
+        "base_rate": 0.5,
+        "baseline_digest": "46555177b305c7161ff9aae1621064d0accef51d9667596f78a6d9cf5ff599e1",
+        "calibration_candidates": [
+          {
+            "id": "platt",
+            "metrics": {
+              "actual_positive_rate": 0.5,
+              "actual_positive_rate_ci_95": [
+                0.5,
+                0.5
+              ],
+              "auc": 1.0,
+              "base_rate": 0.5,
+              "bin_monotonic": true,
+              "bootstrap_block_length_sessions": 2,
+              "bootstrap_method": "deterministic_circular_moving_target_offset_block_95pct_v2",
+              "bootstrap_samples": 100,
+              "brier_improvement_vs_reference": 0.24999999999825637,
+              "brier_improvement_vs_reference_ci_95": [
+                0.24999999999671152,
+                0.249999999999265
+              ],
+              "brier_score": 1.7436339843631742e-12,
+              "brier_score_ci_95": [
+                5.777404826737677e-13,
+                2.8556254491219537e-12
+              ],
+              "brier_skill_score": 0.9999999999930255,
+              "calibration_bins": [
+                {
+                  "actual_rate": 0.0,
+                  "count": 36,
+                  "independent_session_count": 18,
+                  "lower": 0.0,
+                  "mean_probability": 3.583567107368436e-07,
+                  "upper": 0.2
+                },
+                {
+                  "actual_rate": 1.0,
+                  "count": 36,
+                  "independent_session_count": 18,
+                  "lower": 0.8,
+                  "mean_probability": 0.999999555226939,
+                  "upper": 1.0
+                }
+              ],
+              "calibration_offset_ci_95": [
+                -2.0849127258407352e-07,
+                2.961771898431227e-07
+              ],
+              "ece": 4.0156488589239875e-07,
+              "highest_bin_above_base_rate": true,
+              "independent_session_count": 18,
+              "log_loss": 4.015657579208203e-07,
+              "log_loss_improvement_vs_reference": 0.6931467789941874,
+              "log_loss_improvement_vs_reference_ci_95": [
+                0.6931465665958623,
+                0.6931470167361393
+              ],
+              "observation_count": 72,
+              "reference_base_rate_mean": 0.5,
+              "reference_brier_score": 0.25,
+              "reference_definition": "per_observation_calibration_base_rate"
+            },
+            "parameters": {
+              "converged": true,
+              "fit_partition": "calibration_only",
+              "intercept": 0.3149873105814261,
+              "iterations": 25,
+              "slope": 9.886725419304005,
+              "version": "shadow-up-probability-platt-v2-convergence-required"
+            },
+            "selected_for_display": true,
+            "status": "evaluated_primary",
+            "version": "shadow-up-probability-platt-v2-convergence-required"
+          },
+          {
+            "eligibility": {
+              "calibration_session_count": 6,
+              "minimum_calibration_session_count": 6
+            },
+            "id": "isotonic",
+            "metrics": {
+              "actual_positive_rate": 0.5,
+              "auc": 1.0,
+              "base_rate": 0.5,
+              "bin_monotonic": true,
+              "brier_score": 0.0,
+              "brier_skill_score": 1.0,
+              "calibration_bins": [
+                {
+                  "actual_rate": 0.0,
+                  "count": 36,
+                  "independent_session_count": 18,
+                  "lower": 0.0,
+                  "mean_probability": 0.0,
+                  "upper": 0.2
+                },
+                {
+                  "actual_rate": 1.0,
+                  "count": 36,
+                  "independent_session_count": 18,
+                  "lower": 0.8,
+                  "mean_probability": 1.0,
+                  "upper": 1.0
+                }
+              ],
+              "ece": 0.0,
+              "highest_bin_above_base_rate": true,
+              "independent_session_count": 18,
+              "log_loss": 9.99200722162641e-16,
+              "observation_count": 72,
+              "reference_base_rate_mean": 0.5,
+              "reference_brier_score": 0.25,
+              "reference_definition": "per_observation_calibration_base_rate"
+            },
+            "parameters": {
+              "algorithm": "weighted_pool_adjacent_violators",
+              "counts": [
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1
+              ],
+              "fit_partition": "calibration_only",
+              "probabilities": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "upper_bounds": [
+                0.0008919400823968321,
+                0.0013298423060714452,
+                0.001982308150969538,
+                0.0029539490376546663,
+                0.004399746287438024,
+                0.05238068910444911,
+                0.07617004293323937,
+                0.10951500320381517,
+                0.1550081061871599,
+                0.2148399007141996,
+                0.7738867473283312,
+                0.8362031476404357,
+                0.8839213086713928,
+                0.9190831702502438,
+                0.9442655964010113,
+                0.9953033307367815,
+                0.9968463905550706,
+                0.9978835662265064,
+                0.9985801159759846,
+                0.9990476396572304
+              ],
+              "version": "shadow-up-probability-isotonic-pav-v1"
+            },
+            "selected_for_display": false,
+            "status": "evaluated_shadow_candidate",
+            "version": "shadow-up-probability-isotonic-pav-v1"
+          }
+        ],
+        "calibration_metrics": {
+          "calibrated": {
+            "actual_positive_rate": 0.5,
+            "actual_positive_rate_ci_95": [
+              0.5,
+              0.5
+            ],
+            "auc": 1.0,
+            "base_rate": 0.5,
+            "bin_monotonic": true,
+            "bootstrap_block_length_sessions": 2,
+            "bootstrap_method": "deterministic_circular_moving_target_offset_block_95pct_v2",
+            "bootstrap_samples": 100,
+            "brier_improvement_vs_reference": 0.24999999999825637,
+            "brier_improvement_vs_reference_ci_95": [
+              0.24999999999671152,
+              0.249999999999265
+            ],
+            "brier_score": 1.7436339843631742e-12,
+            "brier_score_ci_95": [
+              5.777404826737677e-13,
+              2.8556254491219537e-12
+            ],
+            "brier_skill_score": 0.9999999999930255,
+            "calibration_bins": [
+              {
+                "actual_rate": 0.0,
+                "count": 36,
+                "independent_session_count": 18,
+                "lower": 0.0,
+                "mean_probability": 3.583567107368436e-07,
+                "upper": 0.2
+              },
+              {
+                "actual_rate": 1.0,
+                "count": 36,
+                "independent_session_count": 18,
+                "lower": 0.8,
+                "mean_probability": 0.999999555226939,
+                "upper": 1.0
+              }
+            ],
+            "calibration_offset_ci_95": [
+              -2.0849127258407352e-07,
+              2.961771898431227e-07
+            ],
+            "ece": 4.0156488589239875e-07,
+            "highest_bin_above_base_rate": true,
+            "independent_session_count": 18,
+            "log_loss": 4.015657579208203e-07,
+            "log_loss_improvement_vs_reference": 0.6931467789941874,
+            "log_loss_improvement_vs_reference_ci_95": [
+              0.6931465665958623,
+              0.6931470167361393
+            ],
+            "observation_count": 72,
+            "reference_base_rate_mean": 0.5,
+            "reference_brier_score": 0.25,
+            "reference_definition": "per_observation_calibration_base_rate"
+          },
+          "empirical_bayes_baseline": {
+            "actual_positive_rate": 0.5,
+            "auc": 1.0,
+            "base_rate": 0.5,
+            "bin_monotonic": true,
+            "brier_score": 0.19682979300207143,
+            "brier_skill_score": 0.21268082799171428,
+            "calibration_bins": [
+              {
+                "actual_rate": 0.5,
+                "count": 72,
+                "independent_session_count": 18,
+                "lower": 0.4,
+                "mean_probability": 0.49819624819624814,
+                "upper": 0.6
+              }
+            ],
+            "ece": 0.001803751803751863,
+            "highest_bin_above_base_rate": false,
+            "independent_session_count": 18,
+            "log_loss": 0.5862975098066548,
+            "observation_count": 72,
+            "reference_base_rate_mean": 0.5,
+            "reference_brier_score": 0.25,
+            "reference_definition": "per_observation_calibration_base_rate"
+          },
+          "fold_stability": {
+            "all_folds_positive_brier_skill": true,
+            "fold_count": 3,
+            "folds": [
+              {
+                "brier_score": 2.2174602670949922e-12,
+                "brier_skill_score": 0.9999999999911302,
+                "fold_id": 1,
+                "independent_session_count": 6,
+                "observation_count": 24,
+                "positive_brier_skill": true,
+                "reference_brier_score": 0.25
+              },
+              {
+                "brier_score": 1.2264764608170356e-12,
+                "brier_skill_score": 0.9999999999950941,
+                "fold_id": 2,
+                "independent_session_count": 6,
+                "observation_count": 24,
+                "positive_brier_skill": true,
+                "reference_brier_score": 0.25
+              },
+              {
+                "brier_score": 1.7869652251774951e-12,
+                "brier_skill_score": 0.9999999999928522,
+                "fold_id": 3,
+                "independent_session_count": 6,
+                "observation_count": 24,
+                "positive_brier_skill": true,
+                "reference_brier_score": 0.25
+              }
+            ],
+            "version": "complete-oos-fold-brier-stability-v1"
+          },
+          "isotonic_candidate": {
+            "actual_positive_rate": 0.5,
+            "auc": 1.0,
+            "base_rate": 0.5,
+            "bin_monotonic": true,
+            "brier_score": 0.0,
+            "brier_skill_score": 1.0,
+            "calibration_bins": [
+              {
+                "actual_rate": 0.0,
+                "count": 36,
+                "independent_session_count": 18,
+                "lower": 0.0,
+                "mean_probability": 0.0,
+                "upper": 0.2
+              },
+              {
+                "actual_rate": 1.0,
+                "count": 36,
+                "independent_session_count": 18,
+                "lower": 0.8,
+                "mean_probability": 1.0,
+                "upper": 1.0
+              }
+            ],
+            "ece": 0.0,
+            "highest_bin_above_base_rate": true,
+            "independent_session_count": 18,
+            "log_loss": 9.99200722162641e-16,
+            "observation_count": 72,
+            "reference_base_rate_mean": 0.5,
+            "reference_brier_score": 0.25,
+            "reference_definition": "per_observation_calibration_base_rate"
+          }
+        },
+        "calibrator": {
+          "converged": true,
+          "fit_partition": "calibration_only",
+          "intercept": 0.3149873105814261,
+          "iterations": 25,
+          "slope": 9.886725419304005,
+          "version": "shadow-up-probability-platt-v2-convergence-required"
+        },
+        "calibrator_digest": "d2012cd5ef4db4eec126a85136170bdf394a70ea39543cc2f386dbbb9b90c1ba",
+        "contract": {
+          "baseline": {
+            "bin_count": 10,
+            "prior_strength": 20.0,
+            "version": "shadow-up-probability-empirical-bayes-bins-v1"
+          },
+          "calibrator": {
+            "algorithm": "independent_platt_sigmoid",
+            "candidate_registry": [
+              {
+                "algorithm": "independent_platt_sigmoid",
+                "id": "platt",
+                "minimum_calibration_sessions": 6,
+                "version": "shadow-up-probability-platt-v2-convergence-required"
+              },
+              {
+                "algorithm": "weighted_pool_adjacent_violators",
+                "id": "isotonic",
+                "minimum_calibration_sessions": 6,
+                "selection_policy": "comparison_only_never_automatic",
+                "version": "shadow-up-probability-isotonic-pav-v1"
+              }
+            ],
+            "primary": true,
+            "version": "shadow-up-probability-platt-v2-convergence-required"
+          },
+          "compatibility": {
+            "legacy_artifact_policy": "replayable_read_only_never_filter_qualified",
+            "qualification_policy": "exact_current_contract_versions_only",
+            "superseded_feature_versions": [
+              "full-market-point-in-time-features-v2",
+              "full-market-point-in-time-features-v3-liquidity-medium"
+            ],
+            "superseded_label_versions": [
+              "market-scan-upside-label-v2",
+              "market-scan-upside-label-v3-explicit-target-offset"
+            ],
+            "superseded_schema_versions": [
+              "market-scan-shadow-probability-v3"
+            ],
+            "superseded_split_versions": [
+              "grouped-date-multifold-train-gap-calibration-gap-test-v2"
+            ],
+            "supersession_reason": "target_exit_is_H_plus_1_sessions_from_signal_and_v2_purged_only_H"
+          },
+          "cost": {
+            "components": [
+              "commission",
+              "stamp_tax",
+              "transfer_fee",
+              "slippage"
+            ],
+            "deduct_before_label": true,
+            "label_contract": {
+              "cost_model_version": "ashare-executable-round-trip-cost-v1",
+              "label_version": "market-scan-upside-label-v4-execution-phase-separated"
+            },
+            "label_contract_binding": "legacy_version_only",
+            "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+            "version": "ashare-executable-round-trip-cost-v1"
+          },
+          "evaluation": {
+            "automatic_promotion": false,
+            "bootstrap": "deterministic_circular_moving_target_offset_block_95pct_v2",
+            "bootstrap_block_length_sessions": 2,
+            "bootstrap_samples": 100,
+            "calibration_bin_count": 5,
+            "filter_qualification": {
+              "missing_evidence_policy": "fail_closed",
+              "requires_calibration_validation": true,
+              "requires_exact_evidence_digest_binding": true,
+              "requires_execution_validation": true,
+              "requires_multiple_testing_fdr_evidence": true,
+              "requires_positive_brier_improvement_ci_95": true,
+              "requires_positive_log_loss_improvement_ci_95": true,
+              "requires_temporal_drift_validation": true,
+              "version": "market-scan-probability-filter-qualification-v1"
+            },
+            "minimum_bin_sessions": 1,
+            "minimum_isotonic_calibration_sessions": 6,
+            "minimum_label_coverage": 0.95,
+            "minimum_selection_folds": 2,
+            "probability_when_insufficient": null,
+            "production_ranking_effect": "none",
+            "selection_qualification": {
+              "requires_complete_label_contract_binding": true,
+              "requires_effective_probability_stratification": true,
+              "requires_multiple_complete_oos_folds": true,
+              "requires_positive_oos_brier_skill": true,
+              "requires_positive_skill_in_every_complete_oos_fold": true
+            }
+          },
+          "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+          "label": {
+            "entry": "next_tradable_session_open_after_scan",
+            "entry_session_offset": 1,
+            "exit": "signal_plus_2_trading_session_close",
+            "holding_sessions": 1,
+            "point_in_time_required": true,
+            "target": "net_excess_positive",
+            "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+            "target_session_offset": 2,
+            "unfilled_policy": "explicitly_non_executable_never_assume_fill",
+            "version": "market-scan-upside-label-v4-execution-phase-separated"
+          },
+          "model": {
+            "algorithm": "standardized_l2_logistic_regression_newton",
+            "convergence_tolerance": 1e-10,
+            "l2_strength": 1.0,
+            "maximum_iterations": 100,
+            "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+          },
+          "schema_version": "market-scan-shadow-probability-v4",
+          "split": {
+            "gap_sessions": 2,
+            "group": "session_date",
+            "minimum_calibration_sessions": 6,
+            "minimum_fit_independent_sessions": 28,
+            "minimum_safe_gap_sessions": 2,
+            "minimum_selection_independent_sessions": 34,
+            "minimum_test_sessions": 6,
+            "minimum_train_sessions": 12,
+            "purge_rule": "all_prior_partition_labels_mature_strictly_before_next_partition_signal",
+            "random_split_forbidden": true,
+            "target_session_offset": 2,
+            "version": "grouped-date-multifold-target-offset-purge-v3",
+            "walk_forward": "expanding_train_rolling_calibration_and_test"
+          }
+        },
+        "cost_model_version": "ashare-executable-round-trip-cost-v1",
+        "counts": {
+          "available_independent_session_count": 42,
+          "calibration_session_count": 6,
+          "eligible_observation_count": 168,
+          "evaluated_fold_count": 3,
+          "label_coverage": 1.0,
+          "observation_count": 168,
+          "out_of_sample_observation_count": 72,
+          "out_of_sample_session_count": 18,
+          "test_session_count": 6,
+          "training_session_count": 24,
+          "unused_tail_session_count": 2,
+          "walk_forward_fold_count": 3
+        },
+        "empirical_bayes_baseline": {
+          "base_rate": 0.5,
+          "boundaries": [
+            0.0022738004169750767,
+            0.003821427387524682,
+            0.07379110755036034,
+            0.1550081061871599,
+            0.49436332402126537,
+            0.8743776764652014,
+            0.9216014128653205,
+            0.9959205546640971,
+            0.9983711510511412
+          ],
+          "counts": [
+            3,
+            2,
+            2,
+            2,
+            3,
+            2,
+            3,
+            2,
+            2,
+            3
+          ],
+          "positives": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            2,
+            3,
+            2,
+            2,
+            3
+          ],
+          "prior_strength": 20.0,
+          "probabilities": [
+            0.43478260869565216,
+            0.45454545454545453,
+            0.45454545454545453,
+            0.45454545454545453,
+            0.43478260869565216,
+            0.5454545454545454,
+            0.5652173913043478,
+            0.5454545454545454,
+            0.5454545454545454,
+            0.5652173913043478
+          ],
+          "version": "shadow-up-probability-empirical-bayes-bins-v1"
+        },
+        "evidence_digest": "ec1717a58756a85371c410341cceffadc05ce0bcccb3d9ba4f52530b3a9f25f6",
+        "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+        "fit_status": "fitted_oos",
+        "folds": [
+          {
+            "base_rate": 0.5,
+            "baseline_digest": "8e56c89ec740c4077e1b67337d751080d4946833db8f4dd72ee9cbe0bb2431e2",
+            "calibrator": {
+              "converged": true,
+              "fit_partition": "calibration_only",
+              "intercept": 1.385334065472341,
+              "iterations": 23,
+              "slope": 12.770568340122198,
+              "version": "shadow-up-probability-platt-v2-convergence-required"
+            },
+            "calibrator_digest": "f43034785dd19ba8d65446480d854a2021313e0a658a2793519f135a52790319",
+            "empirical_bayes_baseline": {
+              "base_rate": 0.5,
+              "boundaries": [
+                0.005675400137591138,
+                0.012050881718412143,
+                0.08602857998763466,
+                0.16363653800873126,
+                0.4836737658731898,
+                0.7576419567523933,
+                0.8698326419339959,
+                0.9840733679543101,
+                0.9907410399053511
+              ],
+              "counts": [
+                3,
+                2,
+                1,
+                4,
+                2,
+                2,
+                3,
+                1,
+                3,
+                3
+              ],
+              "positives": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                3,
+                1,
+                3,
+                3
+              ],
+              "prior_strength": 20.0,
+              "probabilities": [
+                0.43478260869565216,
+                0.45454545454545453,
+                0.47619047619047616,
+                0.4166666666666667,
+                0.45454545454545453,
+                0.5454545454545454,
+                0.5652173913043478,
+                0.5238095238095238,
+                0.5652173913043478,
+                0.5652173913043478
+              ],
+              "version": "shadow-up-probability-empirical-bayes-bins-v1"
+            },
+            "fold_digest": "701b4fefaac225384f728ef676aacdd721c64de9388af098f8a6f4042ec004a4",
+            "fold_id": 1,
+            "isotonic_calibrator": {
+              "algorithm": "weighted_pool_adjacent_violators",
+              "counts": [
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1
+              ],
+              "fit_partition": "calibration_only",
+              "probabilities": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "upper_bounds": [
+                0.0036603352348142998,
+                0.005083581837395996,
+                0.007056309504713135,
+                0.009787040521084672,
+                0.013560109183297121,
+                0.08602857998763466,
+                0.1157580101110813,
+                0.15402980333097352,
+                0.202063476719762,
+                0.2604643861488866,
+                0.706883145597493,
+                0.7703316595411185,
+                0.8234757348675305,
+                0.866454412211523,
+                0.9002367094362527,
+                0.9840733679543101,
+                0.9884972376141954,
+                0.9917026694587037,
+                0.9940202591132293,
+                0.9956933166393088
+              ],
+              "version": "shadow-up-probability-isotonic-pav-v1"
+            },
+            "isotonic_calibrator_digest": "5bd7f1fbce237319a0b695e83396292c8d6180b1d7a1c1bc63bbc1ca66267ed0",
+            "model": {
+              "coefficients": [
+                -1.5480577427379425,
+                2.1509300494309542
+              ],
+              "converged": true,
+              "feature_names": [
+                "risk",
+                "trend"
+              ],
+              "intercept": 0.000841573712503893,
+              "iterations": 7,
+              "l2_strength": 1.0,
+              "means": [
+                -0.020000000000000004,
+                -4.625929269271485e-18
+              ],
+              "scales": [
+                0.3754108860080289,
+                0.8944271909999157
+              ],
+              "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+            },
+            "model_digest": "9fc4f74534322ea2840e47cffc0dc4f16d196cdb65c6fd7150b67a2385793116",
+            "prediction_count": 24,
+            "split": {
+              "calibration_dates": [
+                "2025-01-15",
+                "2025-01-16",
+                "2025-01-17",
+                "2025-01-18",
+                "2025-01-19",
+                "2025-01-20"
+              ],
+              "calibration_gap_dates": [
+                "2025-01-21",
+                "2025-01-22"
+              ],
+              "test_dates": [
+                "2025-01-23",
+                "2025-01-24",
+                "2025-01-25",
+                "2025-01-26",
+                "2025-01-27",
+                "2025-01-28"
+              ],
+              "train_dates": [
+                "2025-01-01",
+                "2025-01-02",
+                "2025-01-03",
+                "2025-01-04",
+                "2025-01-05",
+                "2025-01-06",
+                "2025-01-07",
+                "2025-01-08",
+                "2025-01-09",
+                "2025-01-10",
+                "2025-01-11",
+                "2025-01-12"
+              ],
+              "train_gap_dates": [
+                "2025-01-13",
+                "2025-01-14"
+              ]
+            },
+            "test_session_count": 6,
+            "training_cutoff": "2025-01-12"
+          },
+          {
+            "base_rate": 0.5,
+            "baseline_digest": "60f881c07326bcdbacc417a1f2424162de15ee4ebedb661dbddedd882110b50b",
+            "calibrator": {
+              "converged": true,
+              "fit_partition": "calibration_only",
+              "intercept": 0.3364324700598049,
+              "iterations": 24,
+              "slope": 11.150154338804427,
+              "version": "shadow-up-probability-platt-v2-convergence-required"
+            },
+            "calibrator_digest": "9cd69f0bc478c32afe1d73b863f41c7813597c6796f708cab9ef7de8a075aca8",
+            "empirical_bayes_baseline": {
+              "base_rate": 0.5,
+              "boundaries": [
+                0.003870157993481389,
+                0.007150569578058874,
+                0.08807966288995928,
+                0.18547373479716073,
+                0.48875202563953235,
+                0.849275215035691,
+                0.9279116457333978,
+                0.9929276139927268,
+                0.9969836079537544
+              ],
+              "counts": [
+                3,
+                1,
+                3,
+                3,
+                2,
+                2,
+                2,
+                3,
+                2,
+                3
+              ],
+              "positives": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                2,
+                3,
+                2,
+                3
+              ],
+              "prior_strength": 20.0,
+              "probabilities": [
+                0.43478260869565216,
+                0.47619047619047616,
+                0.43478260869565216,
+                0.43478260869565216,
+                0.45454545454545453,
+                0.5454545454545454,
+                0.5454545454545454,
+                0.5652173913043478,
+                0.5454545454545454,
+                0.5652173913043478
+              ],
+              "version": "shadow-up-probability-empirical-bayes-bins-v1"
+            },
+            "fold_digest": "5948c01c7f19995a0c255aa085f8f17e17ae1310cf7b1ee9bfe620b8abf75d3d",
+            "fold_id": 2,
+            "isotonic_calibrator": {
+              "algorithm": "weighted_pool_adjacent_violators",
+              "counts": [
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2
+              ],
+              "fit_partition": "calibration_only",
+              "probabilities": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "upper_bounds": [
+                0.0016242904817299951,
+                0.00235433306515403,
+                0.0034113744754810113,
+                0.004940652868815604,
+                0.007150569578058874,
+                0.06435370145023873,
+                0.09071588082770603,
+                0.12641809293321485,
+                0.17349038216144674,
+                0.2334071453400163,
+                0.7440969059390484,
+                0.8083447315546504,
+                0.8595078359059513,
+                0.8987239637187645,
+                0.9279116457333978,
+                0.9919307115420275,
+                0.9944229676687756,
+                0.9961484619174532,
+                0.9973415276835977,
+                0.9981657057867849
+              ],
+              "version": "shadow-up-probability-isotonic-pav-v1"
+            },
+            "isotonic_calibrator_digest": "ef42a8396ce6ac94c9b01263aa743b81df97702cf0722fbc6e17ba648a585c00",
+            "model": {
+              "coefficients": [
+                -1.7411425249157035,
+                2.522892822965842
+              ],
+              "converged": true,
+              "feature_names": [
+                "risk",
+                "trend"
+              ],
+              "intercept": 0.0010867871649022207,
+              "iterations": 8,
+              "l2_strength": 1.0,
+              "means": [
+                -0.013333333333333336,
+                -3.0839528461809902e-18
+              ],
+              "scales": [
+                0.3745219174716837,
+                0.8944271909999152
+              ],
+              "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+            },
+            "model_digest": "6d22693bf1c263d0a6832a541899e87bb121a263c9e061f589430cbf36c2052d",
+            "prediction_count": 24,
+            "split": {
+              "calibration_dates": [
+                "2025-01-21",
+                "2025-01-22",
+                "2025-01-23",
+                "2025-01-24",
+                "2025-01-25",
+                "2025-01-26"
+              ],
+              "calibration_gap_dates": [
+                "2025-01-27",
+                "2025-01-28"
+              ],
+              "test_dates": [
+                "2025-01-29",
+                "2025-01-30",
+                "2025-01-31",
+                "2025-02-01",
+                "2025-02-02",
+                "2025-02-03"
+              ],
+              "train_dates": [
+                "2025-01-01",
+                "2025-01-02",
+                "2025-01-03",
+                "2025-01-04",
+                "2025-01-05",
+                "2025-01-06",
+                "2025-01-07",
+                "2025-01-08",
+                "2025-01-09",
+                "2025-01-10",
+                "2025-01-11",
+                "2025-01-12",
+                "2025-01-13",
+                "2025-01-14",
+                "2025-01-15",
+                "2025-01-16",
+                "2025-01-17",
+                "2025-01-18"
+              ],
+              "train_gap_dates": [
+                "2025-01-19",
+                "2025-01-20"
+              ]
+            },
+            "test_session_count": 6,
+            "training_cutoff": "2025-01-18"
+          },
+          {
+            "base_rate": 0.5,
+            "baseline_digest": "46555177b305c7161ff9aae1621064d0accef51d9667596f78a6d9cf5ff599e1",
+            "calibrator": {
+              "converged": true,
+              "fit_partition": "calibration_only",
+              "intercept": 0.3149873105814261,
+              "iterations": 25,
+              "slope": 9.886725419304005,
+              "version": "shadow-up-probability-platt-v2-convergence-required"
+            },
+            "calibrator_digest": "d2012cd5ef4db4eec126a85136170bdf394a70ea39543cc2f386dbbb9b90c1ba",
+            "empirical_bayes_baseline": {
+              "base_rate": 0.5,
+              "boundaries": [
+                0.0022738004169750767,
+                0.003821427387524682,
+                0.07379110755036034,
+                0.1550081061871599,
+                0.49436332402126537,
+                0.8743776764652014,
+                0.9216014128653205,
+                0.9959205546640971,
+                0.9983711510511412
+              ],
+              "counts": [
+                3,
+                2,
+                2,
+                2,
+                3,
+                2,
+                3,
+                2,
+                2,
+                3
+              ],
+              "positives": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                3,
+                2,
+                2,
+                3
+              ],
+              "prior_strength": 20.0,
+              "probabilities": [
+                0.43478260869565216,
+                0.45454545454545453,
+                0.45454545454545453,
+                0.45454545454545453,
+                0.43478260869565216,
+                0.5454545454545454,
+                0.5652173913043478,
+                0.5454545454545454,
+                0.5454545454545454,
+                0.5652173913043478
+              ],
+              "version": "shadow-up-probability-empirical-bayes-bins-v1"
+            },
+            "fold_digest": "94693365297573fe2ec45ae64179162e0821863add9df1c8a092aad744de995e",
+            "fold_id": 3,
+            "isotonic_calibrator": {
+              "algorithm": "weighted_pool_adjacent_violators",
+              "counts": [
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1
+              ],
+              "fit_partition": "calibration_only",
+              "probabilities": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "upper_bounds": [
+                0.0008919400823968321,
+                0.0013298423060714452,
+                0.001982308150969538,
+                0.0029539490376546663,
+                0.004399746287438024,
+                0.05238068910444911,
+                0.07617004293323937,
+                0.10951500320381517,
+                0.1550081061871599,
+                0.2148399007141996,
+                0.7738867473283312,
+                0.8362031476404357,
+                0.8839213086713928,
+                0.9190831702502438,
+                0.9442655964010113,
+                0.9953033307367815,
+                0.9968463905550706,
+                0.9978835662265064,
+                0.9985801159759846,
+                0.9990476396572304
+              ],
+              "version": "shadow-up-probability-isotonic-pav-v1"
+            },
+            "isotonic_calibrator_digest": "1f14091e4acbf441dd108004550b14a09af7ef73ea1249de91d473ec3a741854",
+            "model": {
+              "coefficients": [
+                -1.8716345430367947,
+                2.824583283555043
+              ],
+              "converged": true,
+              "feature_names": [
+                "risk",
+                "trend"
+              ],
+              "intercept": 0.0005187603400387892,
+              "iterations": 8,
+              "l2_strength": 1.0,
+              "means": [
+                -0.006666666666666668,
+                -2.3129646346357427e-18
+              ],
+              "scales": [
+                0.37446257786622983,
+                0.8944271909999151
+              ],
+              "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+            },
+            "model_digest": "b1b6c20895ad7be72761a1dc209a03800eb33ea360d11e05f6e4e0eab73ed1ff",
+            "prediction_count": 24,
+            "split": {
+              "calibration_dates": [
+                "2025-01-27",
+                "2025-01-28",
+                "2025-01-29",
+                "2025-01-30",
+                "2025-01-31",
+                "2025-02-01"
+              ],
+              "calibration_gap_dates": [
+                "2025-02-02",
+                "2025-02-03"
+              ],
+              "test_dates": [
+                "2025-02-04",
+                "2025-02-05",
+                "2025-02-06",
+                "2025-02-07",
+                "2025-02-08",
+                "2025-02-09"
+              ],
+              "train_dates": [
+                "2025-01-01",
+                "2025-01-02",
+                "2025-01-03",
+                "2025-01-04",
+                "2025-01-05",
+                "2025-01-06",
+                "2025-01-07",
+                "2025-01-08",
+                "2025-01-09",
+                "2025-01-10",
+                "2025-01-11",
+                "2025-01-12",
+                "2025-01-13",
+                "2025-01-14",
+                "2025-01-15",
+                "2025-01-16",
+                "2025-01-17",
+                "2025-01-18",
+                "2025-01-19",
+                "2025-01-20",
+                "2025-01-21",
+                "2025-01-22",
+                "2025-01-23",
+                "2025-01-24"
+              ],
+              "train_gap_dates": [
+                "2025-01-25",
+                "2025-01-26"
+              ]
+            },
+            "test_session_count": 6,
+            "training_cutoff": "2025-01-24"
+          }
+        ],
+        "generated_at": "2026-08-11T08:00:00Z",
+        "horizon": 1,
+        "input_digest": "001d321841f0dbe79ce56a5e3d01eda78c69064134340b12984fef03d8a7dcc1",
+        "isotonic_calibrator": {
+          "algorithm": "weighted_pool_adjacent_violators",
+          "counts": [
+            1,
+            1,
+            1,
+            2,
+            1,
+            1,
+            1,
+            1,
+            2,
+            1,
+            1,
+            1,
+            1,
+            2,
+            1,
+            1,
+            1,
+            1,
+            2,
+            1
+          ],
+          "fit_partition": "calibration_only",
+          "probabilities": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "upper_bounds": [
+            0.0008919400823968321,
+            0.0013298423060714452,
+            0.001982308150969538,
+            0.0029539490376546663,
+            0.004399746287438024,
+            0.05238068910444911,
+            0.07617004293323937,
+            0.10951500320381517,
+            0.1550081061871599,
+            0.2148399007141996,
+            0.7738867473283312,
+            0.8362031476404357,
+            0.8839213086713928,
+            0.9190831702502438,
+            0.9442655964010113,
+            0.9953033307367815,
+            0.9968463905550706,
+            0.9978835662265064,
+            0.9985801159759846,
+            0.9990476396572304
+          ],
+          "version": "shadow-up-probability-isotonic-pav-v1"
+        },
+        "isotonic_calibrator_digest": "1f14091e4acbf441dd108004550b14a09af7ef73ea1249de91d473ec3a741854",
+        "label_contract_binding": "legacy_version_only",
+        "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+        "label_version": "market-scan-upside-label-v4-execution-phase-separated",
+        "limitations": [
+          "shadow_only_no_production_ranking_effect"
+        ],
+        "model": {
+          "coefficients": [
+            -1.8716345430367947,
+            2.824583283555043
+          ],
+          "converged": true,
+          "feature_names": [
+            "risk",
+            "trend"
+          ],
+          "intercept": 0.0005187603400387892,
+          "iterations": 8,
+          "l2_strength": 1.0,
+          "means": [
+            -0.006666666666666668,
+            -2.3129646346357427e-18
+          ],
+          "scales": [
+            0.37446257786622983,
+            0.8944271909999151
+          ],
+          "version": "shadow-up-probability-logit-l2-v2-convergence-required"
+        },
+        "model_digest": "b1b6c20895ad7be72761a1dc209a03800eb33ea360d11e05f6e4e0eab73ed1ff",
+        "model_version": "shadow-up-probability-logit-l2-v2-convergence-required",
+        "predictions": [
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.48,
+              "trend": -1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.007056309504713135,
+            "reference_base_rate": 0.5,
+            "sample_id": "22:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-23"
+          },
+          {
+            "baseline_probability": 0.4166666666666667,
+            "features": {
+              "risk": 0.16000000000000003,
+              "trend": -0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 1.4276151538643589e-09,
+            "raw_probability": 0.15402980333097352,
+            "reference_base_rate": 0.5,
+            "sample_id": "22:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-23"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.16000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999992808681,
+            "raw_probability": 0.8234757348675305,
+            "reference_base_rate": 0.5,
+            "sample_id": "22:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-23"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.48,
+              "trend": 1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9917026694587037,
+            "reference_base_rate": 0.5,
+            "sample_id": "22:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-23"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.5599999999999999,
+              "trend": -1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.005083581837395996,
+            "reference_base_rate": 0.5,
+            "sample_id": "23:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-24"
+          },
+          {
+            "baseline_probability": 0.4166666666666667,
+            "features": {
+              "risk": 0.24000000000000005,
+              "trend": -0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 2.1133656332955463e-11,
+            "raw_probability": 0.1157580101110813,
+            "reference_base_rate": 0.5,
+            "sample_id": "23:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-24"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.08000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999514214036,
+            "raw_probability": 0.7703316595411185,
+            "reference_base_rate": 0.5,
+            "sample_id": "23:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-24"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.39999999999999997,
+              "trend": 1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9884972376141954,
+            "reference_base_rate": 0.5,
+            "sample_id": "23:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-24"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.64,
+              "trend": -1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.0036603352348142998,
+            "reference_base_rate": 0.5,
+            "sample_id": "24:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-25"
+          },
+          {
+            "baseline_probability": 0.4166666666666667,
+            "features": {
+              "risk": 0.32000000000000006,
+              "trend": -0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 3.128514208970267e-13,
+            "raw_probability": 0.08602857998763466,
+            "reference_base_rate": 0.5,
+            "sample_id": "24:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-25"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -2.7755575615628914e-17,
+              "trend": 0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999967184421413,
+            "raw_probability": 0.706883145597493,
+            "reference_base_rate": 0.5,
+            "sample_id": "24:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-25"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.31999999999999995,
+              "trend": 1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9840733679543101,
+            "reference_base_rate": 0.5,
+            "sample_id": "24:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-25"
+          },
+          {
+            "baseline_probability": 0.47619047619047616,
+            "features": {
+              "risk": 0.31999999999999995,
+              "trend": -1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.013560109183297121,
+            "reference_base_rate": 0.5,
+            "sample_id": "25:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-26"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 2.7755575615628914e-17,
+              "trend": -0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.514503755186496e-06,
+            "raw_probability": 0.2604643861488866,
+            "reference_base_rate": 0.5,
+            "sample_id": "25:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-26"
+          },
+          {
+            "baseline_probability": 0.5238095238095238,
+            "features": {
+              "risk": -0.32000000000000006,
+              "trend": 0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999998423,
+            "raw_probability": 0.9002367094362527,
+            "reference_base_rate": 0.5,
+            "sample_id": "25:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-26"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.64,
+              "trend": 1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9956933166393088,
+            "reference_base_rate": 0.5,
+            "sample_id": "25:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-26"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.39999999999999997,
+              "trend": -1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.009787040521084672,
+            "reference_base_rate": 0.5,
+            "sample_id": "26:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-27"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.08000000000000003,
+              "trend": -0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 9.643787164233112e-08,
+            "raw_probability": 0.202063476719762,
+            "reference_base_rate": 0.5,
+            "sample_id": "26:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-27"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.24000000000000005,
+              "trend": 0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999893543,
+            "raw_probability": 0.866454412211523,
+            "reference_base_rate": 0.5,
+            "sample_id": "26:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-27"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.5599999999999999,
+              "trend": 1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9940202591132293,
+            "reference_base_rate": 0.5,
+            "sample_id": "26:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-27"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.48,
+              "trend": -1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.007056309504713135,
+            "reference_base_rate": 0.5,
+            "sample_id": "27:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-28"
+          },
+          {
+            "baseline_probability": 0.4166666666666667,
+            "features": {
+              "risk": 0.16000000000000003,
+              "trend": -0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 1.4276151538643589e-09,
+            "raw_probability": 0.15402980333097352,
+            "reference_base_rate": 0.5,
+            "sample_id": "27:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-28"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.16000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999992808681,
+            "raw_probability": 0.8234757348675305,
+            "reference_base_rate": 0.5,
+            "sample_id": "27:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-28"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.48,
+              "trend": 1.2
+            },
+            "fold_id": 1,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9917026694587037,
+            "reference_base_rate": 0.5,
+            "sample_id": "27:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-28"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.5599999999999999,
+              "trend": -1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.00235433306515403,
+            "reference_base_rate": 0.5,
+            "sample_id": "28:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-29"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.24000000000000005,
+              "trend": -0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 9.652164161433015e-12,
+            "raw_probability": 0.09071588082770603,
+            "reference_base_rate": 0.5,
+            "sample_id": "28:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-29"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.08000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999234056031,
+            "raw_probability": 0.8083447315546504,
+            "reference_base_rate": 0.5,
+            "sample_id": "28:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-29"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.39999999999999997,
+              "trend": 1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9944229676687756,
+            "reference_base_rate": 0.5,
+            "sample_id": "28:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-29"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.64,
+              "trend": -1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.0016242904817299951,
+            "reference_base_rate": 0.5,
+            "sample_id": "29:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-30"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.32000000000000006,
+              "trend": -0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 1.5262677150470607e-13,
+            "raw_probability": 0.06435370145023873,
+            "reference_base_rate": 0.5,
+            "sample_id": "29:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-30"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -2.7755575615628914e-17,
+              "trend": 0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999951561697793,
+            "raw_probability": 0.7440969059390484,
+            "reference_base_rate": 0.5,
+            "sample_id": "29:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-30"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.31999999999999995,
+              "trend": 1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9919307115420275,
+            "reference_base_rate": 0.5,
+            "sample_id": "29:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-30"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.31999999999999995,
+              "trend": -1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.007150569578058874,
+            "reference_base_rate": 0.5,
+            "sample_id": "30:600000.SH:1:net_excess_positive",
+            "session_date": "2025-01-31"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 2.7755575615628914e-17,
+              "trend": -0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 2.4412125010688705e-06,
+            "raw_probability": 0.2334071453400163,
+            "reference_base_rate": 0.5,
+            "sample_id": "30:600001.SH:1:net_excess_positive",
+            "session_date": "2025-01-31"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.32000000000000006,
+              "trend": 0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999996971,
+            "raw_probability": 0.9279116457333978,
+            "reference_base_rate": 0.5,
+            "sample_id": "30:600002.SH:1:net_excess_positive",
+            "session_date": "2025-01-31"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.64,
+              "trend": 1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9981657057867849,
+            "reference_base_rate": 0.5,
+            "sample_id": "30:600003.SH:1:net_excess_positive",
+            "session_date": "2025-01-31"
+          },
+          {
+            "baseline_probability": 0.47619047619047616,
+            "features": {
+              "risk": 0.39999999999999997,
+              "trend": -1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.004940652868815604,
+            "reference_base_rate": 0.5,
+            "sample_id": "31:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-01"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.08000000000000003,
+              "trend": -0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 3.8602252464951696e-08,
+            "raw_probability": 0.17349038216144674,
+            "reference_base_rate": 0.5,
+            "sample_id": "31:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-01"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.24000000000000005,
+              "trend": 0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999808482,
+            "raw_probability": 0.8987239637187645,
+            "reference_base_rate": 0.5,
+            "sample_id": "31:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-01"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.5599999999999999,
+              "trend": 1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9973415276835977,
+            "reference_base_rate": 0.5,
+            "sample_id": "31:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-01"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.48,
+              "trend": -1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.0034113744754810113,
+            "reference_base_rate": 0.5,
+            "sample_id": "32:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-02"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.16000000000000003,
+              "trend": -0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.10405841817182e-10,
+            "raw_probability": 0.12641809293321485,
+            "reference_base_rate": 0.5,
+            "sample_id": "32:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-02"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.16000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999987888357,
+            "raw_probability": 0.8595078359059513,
+            "reference_base_rate": 0.5,
+            "sample_id": "32:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-02"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.48,
+              "trend": 1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9961484619174532,
+            "reference_base_rate": 0.5,
+            "sample_id": "32:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-02"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.5599999999999999,
+              "trend": -1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.00235433306515403,
+            "reference_base_rate": 0.5,
+            "sample_id": "33:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-03"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.24000000000000005,
+              "trend": -0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 9.652164161433015e-12,
+            "raw_probability": 0.09071588082770603,
+            "reference_base_rate": 0.5,
+            "sample_id": "33:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-03"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.08000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999234056031,
+            "raw_probability": 0.8083447315546504,
+            "reference_base_rate": 0.5,
+            "sample_id": "33:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-03"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.39999999999999997,
+              "trend": 1.2
+            },
+            "fold_id": 2,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9944229676687756,
+            "reference_base_rate": 0.5,
+            "sample_id": "33:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-03"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.64,
+              "trend": -1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.0008919400823968321,
+            "reference_base_rate": 0.5,
+            "sample_id": "34:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-04"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.32000000000000006,
+              "trend": -0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 5.065343043768044e-13,
+            "raw_probability": 0.05238068910444911,
+            "reference_base_rate": 0.5,
+            "sample_id": "34:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-04"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -2.7755575615628914e-17,
+              "trend": 0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999961962181115,
+            "raw_probability": 0.7738867473283312,
+            "reference_base_rate": 0.5,
+            "sample_id": "34:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-04"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.31999999999999995,
+              "trend": 1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9953033307367815,
+            "reference_base_rate": 0.5,
+            "sample_id": "34:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-04"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.31999999999999995,
+              "trend": -1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.004399746287438024,
+            "reference_base_rate": 0.5,
+            "sample_id": "35:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-05"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 2.7755575615628914e-17,
+              "trend": -0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 3.7335217276902747e-06,
+            "raw_probability": 0.2148399007141996,
+            "reference_base_rate": 0.5,
+            "sample_id": "35:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-05"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.32000000000000006,
+              "trend": 0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.999999999999484,
+            "raw_probability": 0.9442655964010113,
+            "reference_base_rate": 0.5,
+            "sample_id": "35:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-05"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.64,
+              "trend": 1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9990476396572304,
+            "reference_base_rate": 0.5,
+            "sample_id": "35:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-05"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.39999999999999997,
+              "trend": -1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.0029539490376546663,
+            "reference_base_rate": 0.5,
+            "sample_id": "36:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-06"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.08000000000000003,
+              "trend": -0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 7.165432562203723e-08,
+            "raw_probability": 0.1550081061871599,
+            "reference_base_rate": 0.5,
+            "sample_id": "36:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-06"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.24000000000000005,
+              "trend": 0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999731104,
+            "raw_probability": 0.9190831702502438,
+            "reference_base_rate": 0.5,
+            "sample_id": "36:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-06"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.5599999999999999,
+              "trend": 1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9985801159759846,
+            "reference_base_rate": 0.5,
+            "sample_id": "36:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-06"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.48,
+              "trend": -1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.001982308150969538,
+            "reference_base_rate": 0.5,
+            "sample_id": "37:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-07"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.16000000000000003,
+              "trend": -0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 1.3751959448428741e-09,
+            "raw_probability": 0.10951500320381517,
+            "reference_base_rate": 0.5,
+            "sample_id": "37:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-07"
+          },
+          {
+            "baseline_probability": 0.5652173913043478,
+            "features": {
+              "risk": -0.16000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999985989245,
+            "raw_probability": 0.8839213086713928,
+            "reference_base_rate": 0.5,
+            "sample_id": "37:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-07"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.48,
+              "trend": 1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9978835662265064,
+            "reference_base_rate": 0.5,
+            "sample_id": "37:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-07"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.5599999999999999,
+              "trend": -1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.0013298423060714452,
+            "reference_base_rate": 0.5,
+            "sample_id": "38:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-08"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.24000000000000005,
+              "trend": -0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 2.6392876353749416e-11,
+            "raw_probability": 0.07617004293323937,
+            "reference_base_rate": 0.5,
+            "sample_id": "38:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-08"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.08000000000000003,
+              "trend": 0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999269972255,
+            "raw_probability": 0.8362031476404357,
+            "reference_base_rate": 0.5,
+            "sample_id": "38:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-08"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.39999999999999997,
+              "trend": 1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9968463905550706,
+            "reference_base_rate": 0.5,
+            "sample_id": "38:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-08"
+          },
+          {
+            "baseline_probability": 0.43478260869565216,
+            "features": {
+              "risk": 0.64,
+              "trend": -1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 6.305116760146985e-16,
+            "raw_probability": 0.0008919400823968321,
+            "reference_base_rate": 0.5,
+            "sample_id": "39:600000.SH:1:net_excess_positive",
+            "session_date": "2025-02-09"
+          },
+          {
+            "baseline_probability": 0.45454545454545453,
+            "features": {
+              "risk": 0.32000000000000006,
+              "trend": -0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 0.0,
+            "net_excess_return": -0.004,
+            "net_return": -0.009,
+            "outcome": 0,
+            "probability": 5.065343043768044e-13,
+            "raw_probability": 0.05238068910444911,
+            "reference_base_rate": 0.5,
+            "sample_id": "39:600001.SH:1:net_excess_positive",
+            "session_date": "2025-02-09"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -2.7755575615628914e-17,
+              "trend": 0.4
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999961962181115,
+            "raw_probability": 0.7738867473283312,
+            "reference_base_rate": 0.5,
+            "sample_id": "39:600002.SH:1:net_excess_positive",
+            "session_date": "2025-02-09"
+          },
+          {
+            "baseline_probability": 0.5454545454545454,
+            "features": {
+              "risk": -0.31999999999999995,
+              "trend": 1.2
+            },
+            "fold_id": 3,
+            "isotonic_probability": 1.0,
+            "net_excess_return": 0.006,
+            "net_return": 0.011,
+            "outcome": 1,
+            "probability": 0.9999999999999993,
+            "raw_probability": 0.9953033307367815,
+            "reference_base_rate": 0.5,
+            "sample_id": "39:600003.SH:1:net_excess_positive",
+            "session_date": "2025-02-09"
+          }
+        ],
+        "probability": null,
+        "schema_version": "market-scan-shadow-probability-v4",
+        "selection_qualification": {
+          "evaluated_complete_oos_folds": 3,
+          "gates": {
+            "complete_label_contract_bound": false,
+            "effective_probability_stratification": true,
+            "multiple_complete_oos_folds": true,
+            "positive_oos_brier_skill": true,
+            "stable_positive_skill_across_complete_oos_folds": true
+          },
+          "minimum_complete_oos_folds": 2,
+          "passed": false,
+          "version": "market-scan-probability-selection-gates-v1"
+        },
+        "selection_qualified": false,
+        "split": {
+          "calibration_dates": [
+            "2025-01-27",
+            "2025-01-28",
+            "2025-01-29",
+            "2025-01-30",
+            "2025-01-31",
+            "2025-02-01"
+          ],
+          "calibration_gap_dates": [
+            "2025-02-02",
+            "2025-02-03"
+          ],
+          "test_dates": [
+            "2025-02-04",
+            "2025-02-05",
+            "2025-02-06",
+            "2025-02-07",
+            "2025-02-08",
+            "2025-02-09"
+          ],
+          "train_dates": [
+            "2025-01-01",
+            "2025-01-02",
+            "2025-01-03",
+            "2025-01-04",
+            "2025-01-05",
+            "2025-01-06",
+            "2025-01-07",
+            "2025-01-08",
+            "2025-01-09",
+            "2025-01-10",
+            "2025-01-11",
+            "2025-01-12",
+            "2025-01-13",
+            "2025-01-14",
+            "2025-01-15",
+            "2025-01-16",
+            "2025-01-17",
+            "2025-01-18",
+            "2025-01-19",
+            "2025-01-20",
+            "2025-01-21",
+            "2025-01-22",
+            "2025-01-23",
+            "2025-01-24"
+          ],
+          "train_gap_dates": [
+            "2025-01-25",
+            "2025-01-26"
+          ]
+        },
+        "status": "calibrated_shadow",
+        "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+        "training_cutoff": "2025-01-24"
+      },
+      "projection": {
+        "base_rate": 0.5,
+        "calibration_adjusted_probability_interval": null,
+        "calibration_bias_interval": null,
+        "cost_model_version": "ashare-executable-round-trip-cost-v1",
+        "counts": {
+          "available_independent_session_count": 42,
+          "calibration_session_count": 6,
+          "eligible_observation_count": 168,
+          "evaluated_fold_count": 3,
+          "label_coverage": 1.0,
+          "observation_count": 168,
+          "out_of_sample_observation_count": 72,
+          "out_of_sample_session_count": 18,
+          "test_session_count": 6,
+          "training_session_count": 24,
+          "unused_tail_session_count": 2,
+          "walk_forward_fold_count": 3
+        },
+        "deployment_status": "deployment_model_not_fitted",
+        "empirical_bayes_probability": null,
+        "feature_version": "full-market-point-in-time-features-v4-target-semideviation",
+        "generated_at": "2026-08-11T08:00:00Z",
+        "horizon": 1,
+        "label_contract_digest": "5655cdcd638a48058fe693d33a491277b5caaad11ebb88dd0fd7eaa48a6671ec",
+        "label_version": "market-scan-upside-label-v4-execution-phase-separated",
+        "limitations": [
+          "shadow_only_no_production_ranking_effect",
+          "oos_evaluation_fold_forbidden_for_new_prediction",
+          "deployment_model_and_fresh_calibrator_not_available"
+        ],
+        "model_version": "shadow-up-probability-logit-l2-v2-convergence-required",
+        "probability": null,
+        "raw_probability": null,
+        "sample_id": "fixed-current",
+        "selection_qualification": {
+          "evaluated_complete_oos_folds": 3,
+          "gates": {
+            "complete_label_contract_bound": false,
+            "effective_probability_stratification": true,
+            "multiple_complete_oos_folds": true,
+            "positive_oos_brier_skill": true,
+            "stable_positive_skill_across_complete_oos_folds": true
+          },
+          "minimum_complete_oos_folds": 2,
+          "passed": false,
+          "version": "market-scan-probability-selection-gates-v1"
+        },
+        "selection_qualified": false,
+        "status": "insufficient_data",
+        "target_definition": "future_1d_net_excess_return_gt_0_after_costs",
+        "training_cutoff": "2025-01-24"
+      }
+    }
+  }
+}

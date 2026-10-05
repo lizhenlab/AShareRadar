@@ -401,6 +401,29 @@ def test_session_count_rejects_reversed_dates_before_resolving_calendar(
     resolution.assert_not_called()
 
 
+def test_session_count_index_changes_with_calendar_and_cannot_be_mutated(tmp_path, monkeypatch) -> None:
+    runtime, bundle = tmp_path / "runtime.json", tmp_path / "bundle.json"
+    _write_calendar(bundle, ["2026-01-05", "2026-01-06", "2026-01-07"])
+    _use_paths(monkeypatch, runtime, bundle)
+    start, end = date(2026, 1, 5), date(2026, 1, 7)
+    assert trading_calendar.trading_session_count(start, end) == 3
+    catalog = trading_calendar._trade_days()
+    with pytest.raises(AttributeError):
+        catalog.add(date(2026, 1, 8))
+    _write_calendar(runtime, ["2026-01-05", "2026-01-07"], updated_at="2026-01-08 12:00:00")
+    trading_calendar._reset_calendar_caches()
+    assert trading_calendar.trading_session_count(start, end) == 2
+
+
+def test_indexed_session_count_does_not_rescan_dates(tmp_path, monkeypatch) -> None:
+    bundle = tmp_path / "bundle.json"
+    _write_calendar(bundle, ["2026-01-05", "2026-01-06", "2026-01-07"])
+    _use_paths(monkeypatch, tmp_path / "missing.json", bundle)
+    trading_calendar._trade_days()
+    monkeypatch.setattr(trading_calendar._TradeDays, "__iter__", Mock(side_effect=AssertionError("calendar rescan")))
+    assert trading_calendar.trading_session_count(date(2026, 1, 5), date(2026, 1, 7)) == 3
+
+
 def test_next_trade_dates_fails_closed_when_future_coverage_is_short(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -692,3 +715,34 @@ def _write_calendar(
         ),
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize("lookup", ["previous", "next", "range", "between", "daily"])
+@pytest.mark.parametrize("covered", [True, False])
+def test_offline_calendar_queries_never_trigger_auto_refresh(monkeypatch, lookup, covered):
+    monkeypatch.setattr(trading_calendar, "_should_auto_refresh", lambda *_args: True)
+    refresh = Mock(side_effect=AssertionError("offline lookup attempted network refresh"))
+    monkeypatch.setattr(trading_calendar, "_trigger_auto_refresh", refresh)
+    start = date(2026, 8, 3) if covered else date(2030, 8, 3)
+    end = date(2026, 8, 7) if covered else date(2030, 8, 7)
+    calls = {
+        "previous": lambda: trading_calendar.previous_trade_date(start, allow_auto_refresh=False),
+        "next": lambda: trading_calendar.next_trade_dates(start, 2, allow_auto_refresh=False),
+        "range": lambda: trading_calendar.trading_date_range(start, end, allow_auto_refresh=False),
+        "between": lambda: trading_calendar.trading_dates_between(start, end, allow_auto_refresh=False),
+        "daily": lambda: trading_calendar.latest_expected_daily_kline_date(datetime.combine(start, datetime.min.time()), allow_auto_refresh=False),
+    }
+    if covered:
+        assert calls[lookup]()
+    else:
+        with pytest.raises(trading_calendar.TradingCalendarCoverageError):
+            calls[lookup]()
+    refresh.assert_not_called()
+
+
+def test_online_calendar_queries_keep_existing_auto_refresh_behavior(monkeypatch):
+    monkeypatch.setattr(trading_calendar, "_should_auto_refresh", lambda *_args: True)
+    refresh = Mock(return_value=True)
+    monkeypatch.setattr(trading_calendar, "_trigger_auto_refresh", refresh)
+    assert trading_calendar.previous_trade_date(date(2026, 8, 3)) == date(2026, 8, 3)
+    refresh.assert_called_once()

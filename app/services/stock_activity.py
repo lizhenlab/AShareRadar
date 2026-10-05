@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 
 from app.models.analysis import (
     AnalysisResult,
@@ -12,11 +13,19 @@ from app.models.analysis import (
 from app.models.market import (
     Kline,
     OrderBook,
+    Quote,
 )
+from app.services.completed_session import completed_quote_day, dated_rows_through_quote
+from app.services.data_quality_components import CHANGE_PCT_TOLERANCE, greater_than_boundary
 from app.services.indicators import pct_change
+from app.services.price_volume_scoring import (
+    PRICE_VOLUME_SCORE_RULE_VERSION,
+    completed_price_volume_ratio,
+    price_volume_change_pct,
+    price_volume_score,
+)
 from app.services.scoring import clamp_score, score_level
-from app.services.stock_abnormal_context import current_volume_metrics
-from app.utils.market_data import finite_float
+from app.utils.market_data import finite_float, valid_kline, valid_positive_number
 
 
 @dataclass(frozen=True)
@@ -36,24 +45,15 @@ class RangePressureMetrics:
 
 @dataclass(frozen=True)
 class FundFlowScoreContext:
-    amount: float
-    turnover: float
-    amount_score: int
-    turnover_score: int
-    direction_score: int
-    volume_score: int
-
-
-@dataclass(frozen=True)
-class NumericScoreRule:
-    score: int
-    matches: Callable[[float], bool]
+    change_pct: float
+    volume_ratio: float
+    rows: list[Kline]
 
 
 @dataclass(frozen=True)
 class RelationRule:
     summary: str
-    matches: Callable[[AnalysisResult, int], bool]
+    matches: Callable[[FundFlowScoreContext], bool]
 
 
 @dataclass(frozen=True)
@@ -70,8 +70,7 @@ class RangePressureRule:
 
 DEFAULT_RULE_SCORE = 50
 DATA_QUALITY_DOWNGRADE_THRESHOLD = 70
-FUND_FLOW_AMOUNT_UNIT = 100_000_000
-FUND_FLOW_AMOUNT_SCORE_CAP = 80
+CONTINUITY_DIRECTION_CAP = 30.0
 TODAY_FUND_FLOW_LABEL = "今日量价热度"
 NEUTRAL_PRICE_VOLUME_SUMMARY = "量价关系中性，等待更明确方向。"
 ORDER_BOOK_NEUTRAL_LEVEL = "盘口均衡"
@@ -79,7 +78,8 @@ ORDER_BOOK_STRONG_BID_RATIO = 1.25
 ORDER_BOOK_STRONG_ASK_RATIO = 0.8
 ORDER_BOOK_INSUFFICIENT_DEPTH_SUMMARY = "盘口深度不足，暂不能判断买卖盘强弱。"
 FUND_FLOW_BASE_NOTES = (
-    "数据性质：derived（衍生）。当前指标使用成交额、涨跌幅、换手率和量价关系，不是真实资金流。",
+    "数据性质：derived（衍生）。涨跌幅决定方向，相对前5个完整日的成交量只调整幅度，不是真实资金流。",
+    "成交额绝对规模和换手率不提供方向加分；量比缩放边界是工程参数，未经收益概率校准。",
     "未接入逐笔成交或正式资金流前，不输出大单/特大单净流入结论。",
     "接入可核验资金流或逐笔成交后，必须与当前量价衍生指标分开展示。",
 )
@@ -90,7 +90,7 @@ FUND_FLOW_UNAVAILABLE_NOTES = (
 INTRADAY_FUND_FLOW_NOTE = (
     "盘中累计成交量、成交额和换手率缺少同分钟历史进度基线，已从量价方向评分剔除。"
 )
-FUND_FLOW_DERIVED_METHODOLOGY = "成交额、涨跌幅、换手率和量价关系的规则衍生指标；不等于真实资金流。"
+FUND_FLOW_DERIVED_METHODOLOGY = "50 + clip(涨跌幅×5, -40, 40) × clip(当前成交量/前5个完整日均量, 0.5, 1.25)，取整并限制0至100；不等于真实资金流。"
 FUND_FLOW_UNAVAILABLE_METHODOLOGY = "有效量价输入不足，衍生指标不可用；未观测真实资金流。"
 ORDER_BOOK_REALTIME_NOTE = "数据性质：observed（实测）。来自实时盘口挂单深度，仅反映当前时点订单压力，不代表已成交资金。"
 RANGE_PRESSURE_FALLBACK_NOTE = "数据性质：estimated（估算）。实时盘口不可用，当前仅用日内高低价位置估算订单压力。"
@@ -98,28 +98,6 @@ ORDER_PRESSURE_UNAVAILABLE_NOTE = "数据性质：unavailable（不可用）。�
 ORDER_BOOK_METHODOLOGY = "实时盘口挂单金额比与价差观测；挂单不等于成交或资金流。"
 RANGE_PRESSURE_METHODOLOGY = "由现价在日内高低区间的位置估算；不是真实盘口观测。"
 UNAVAILABLE_PRESSURE_METHODOLOGY = "实时盘口与日内区间输入均不可用。"
-FUND_FLOW_WEIGHTS = {
-    "amount": 0.25,
-    "turnover": 0.25,
-    "direction": 0.3,
-    "volume": 0.2,
-}
-TURNOVER_SCORE_RULES = (
-    NumericScoreRule(60, lambda turnover: 2 <= turnover <= 8),
-    NumericScoreRule(45, lambda turnover: turnover < 2),
-    NumericScoreRule(50, lambda _turnover: True),
-)
-DIRECTION_SCORE_RULES = (
-    NumericScoreRule(62, lambda change_pct: change_pct > 0),
-    NumericScoreRule(42, lambda change_pct: change_pct < 0),
-    NumericScoreRule(50, lambda _change_pct: True),
-)
-VOLUME_SCORE_RULES = (
-    NumericScoreRule(68, lambda ratio: 1.2 <= ratio <= 2.5),
-    NumericScoreRule(45, lambda ratio: ratio > 3),
-    NumericScoreRule(42, lambda ratio: ratio < 0.7),
-    NumericScoreRule(56, lambda _ratio: True),
-)
 ORDER_BOOK_PRESSURE_RULES = (
     OrderBookPressureRule("买盘偏强", lambda ratio: ratio > ORDER_BOOK_STRONG_BID_RATIO),
     OrderBookPressureRule("卖压偏强", lambda ratio: ratio < ORDER_BOOK_STRONG_ASK_RATIO),
@@ -135,34 +113,34 @@ RANGE_PRESSURE_RULES = (
     ),
 )
 PRICE_VOLUME_RELATION_RULES = (
-    RelationRule("量价配合偏积极。", lambda analysis, volume_score: analysis.quote.change_pct > 1 and volume_score >= 60),
-    RelationRule("价格上涨但量能跟随不足。", lambda analysis, volume_score: analysis.quote.change_pct > 1 and volume_score < 50),
-    RelationRule("放量下跌，量价关系承压。", lambda analysis, volume_score: analysis.quote.change_pct < -1 and volume_score >= 60),
-    RelationRule("价格回落，量能未明显放大。", lambda analysis, _volume_score: analysis.quote.change_pct < -1),
-    RelationRule(NEUTRAL_PRICE_VOLUME_SUMMARY, lambda _analysis, _volume_score: True),
+    RelationRule("量价配合偏积极。", lambda context: context.change_pct > 1 and context.volume_ratio >= 1.2),
+    RelationRule("价格上涨但量能跟随不足。", lambda context: context.change_pct > 1 and context.volume_ratio < 0.7),
+    RelationRule("放量下跌，量价关系承压。", lambda context: context.change_pct < -1 and context.volume_ratio >= 1.2),
+    RelationRule("价格回落，量能未明显放大。", lambda context: context.change_pct < -1),
 )
 
 
 def build_fund_flow_analysis(analysis: AnalysisResult) -> FundFlowAnalysis:
     quote = analysis.quote
     context = _fund_flow_score_context(analysis)
-    data_nature = _fund_flow_data_nature(analysis, context)
-    overall = _fund_flow_overall_score(context, analysis.data_quality.score) if data_nature == "derived" else DEFAULT_RULE_SCORE
-    relation = _price_volume_relation(analysis, volume_score=context.volume_score) if data_nature == "derived" else "量价代理输入不足，方向不可用。"
+    data_nature = "derived" if context is not None else "unavailable"
+    overall = price_volume_score(context.change_pct, context.volume_ratio) if context is not None else DEFAULT_RULE_SCORE
+    relation = _price_volume_relation(context) if context is not None else "量价代理输入不足，方向不可用。"
     return FundFlowAnalysis(
         symbol=_analysis_symbol(analysis),
-        available=data_nature == "derived" and context.amount > 0,
+        available=context is not None,
         source=f"{quote.source}·{'量价衍生指标（非真实资金流）' if data_nature == 'derived' else '量价代理不可用'}",
         data_nature=data_nature,
         methodology=FUND_FLOW_DERIVED_METHODOLOGY if data_nature == "derived" else FUND_FLOW_UNAVAILABLE_METHODOLOGY,
-        updated_at=quote.timestamp,
+        score_rule_version=PRICE_VOLUME_SCORE_RULE_VERSION,
+        updated_at=quote.timestamp if isinstance(quote.timestamp, str) else "",
         overall_score=overall,
         level=score_level(overall) if data_nature == "derived" else "不可用",
         estimated_main_net_inflow=None,
         price_volume_relation=relation,
         windows=(
-            _fund_flow_windows(analysis, overall, relation)
-            if data_nature == "derived"
+            _fund_flow_windows(context.rows, overall, relation)
+            if context is not None
             else _unavailable_fund_flow_windows()
         ),
         notes=_fund_flow_notes(analysis, data_nature),
@@ -180,35 +158,33 @@ def build_order_pressure(
     return _range_estimated_pressure(analysis, order_book_error=order_book_error)
 
 
-def _fund_flow_score_context(analysis: AnalysisResult) -> FundFlowScoreContext:
+def _fund_flow_score_context(analysis: AnalysisResult) -> FundFlowScoreContext | None:
     quote = analysis.quote
-    amount = _positive_number(quote.amount)
-    turnover = _positive_number(quote.turnover_rate)
-    volume_score = _volume_score(analysis)
-    return FundFlowScoreContext(
-        amount=amount,
-        turnover=turnover,
-        amount_score=clamp_score(min(amount / FUND_FLOW_AMOUNT_UNIT, FUND_FLOW_AMOUNT_SCORE_CAP)),
-        turnover_score=_turnover_score(quote.turnover_rate),
-        direction_score=_score_from_rules(quote.change_pct, DIRECTION_SCORE_RULES),
-        volume_score=volume_score,
-    )
+    quote_day = completed_quote_day(quote.timestamp)
+    change = _fund_flow_change_pct(quote)
+    if analysis.research_mode != "official" or quote_day is None or change is None:
+        return None
+    rows = dated_rows_through_quote(analysis.klines, quote_day)
+    if rows is None:
+        return None
+    completed = rows[:-1] if rows and rows[-1].date == quote_day.isoformat() else rows
+    current = finite_float(quote.volume)
+    if not valid_positive_number(current):
+        current = _same_day_volume(rows, quote_day)
+    ratio = completed_price_volume_ratio(current, completed)
+    return FundFlowScoreContext(change, ratio, rows) if ratio is not None else None
 
 
-def _fund_flow_overall_score(context: FundFlowScoreContext, data_quality_score: int) -> int:
-    raw_score = clamp_score(
-        context.amount_score * FUND_FLOW_WEIGHTS["amount"]
-        + context.turnover_score * FUND_FLOW_WEIGHTS["turnover"]
-        + context.direction_score * FUND_FLOW_WEIGHTS["direction"]
-        + context.volume_score * FUND_FLOW_WEIGHTS["volume"],
-        round_value=True,
-    )
-    if data_quality_score < DATA_QUALITY_DOWNGRADE_THRESHOLD:
-        return clamp_score(raw_score * 0.8 + data_quality_score * 0.2, round_value=True)
-    return raw_score
+def _fund_flow_change_pct(quote: Quote) -> float | None:
+    """Check the supplied return, then use prices for its rounded-boundary direction."""
+    expected = price_volume_change_pct(quote.price, quote.prev_close)
+    reported = finite_float(quote.change_pct)
+    if expected is None or reported is None or greater_than_boundary(abs(expected - reported), CHANGE_PCT_TOLERANCE):
+        return None
+    return expected
 
 
-def _fund_flow_windows(analysis: AnalysisResult, overall: int, relation: str) -> list[FundFlowWindow]:
+def _fund_flow_windows(rows: list[Kline], overall: int, relation: str) -> list[FundFlowWindow]:
     return [
         FundFlowWindow(
             label=TODAY_FUND_FLOW_LABEL,
@@ -216,8 +192,8 @@ def _fund_flow_windows(analysis: AnalysisResult, overall: int, relation: str) ->
             estimated_net_inflow=None,
             summary=relation,
         ),
-        _recent_fund_flow_window(analysis.klines, 5),
-        _recent_fund_flow_window(analysis.klines, 10),
+        _recent_fund_flow_window(rows, 5),
+        _recent_fund_flow_window(rows, 10),
     ]
 
 
@@ -234,11 +210,19 @@ def _unavailable_fund_flow_windows() -> list[FundFlowWindow]:
 
 
 def _recent_fund_flow_window(klines: list[Kline], window: int) -> FundFlowWindow:
+    rows = klines[-window:]
+    score = DEFAULT_RULE_SCORE
+    summary = f"{window}日数据不足，须有{window}个独立日期的有效收盘价；未生成窗口方向结论。"
+    if len(rows) == window and all(valid_positive_number(row.close) for row in rows):
+        up = sum(right.close > left.close for left, right in zip(rows[:-1], rows[1:], strict=True))
+        down = sum(right.close < left.close for left, right in zip(rows[:-1], rows[1:], strict=True))
+        score = clamp_score(DEFAULT_RULE_SCORE + CONTINUITY_DIRECTION_CAP * (up - down) / (window - 1), round_value=True)
+        summary = f"近{window}日区间涨跌 {pct_change(rows[-1].close, rows[0].close):.2f}%；上涨{up}段、下跌{down}段，平盘不计方向。"
     return FundFlowWindow(
         label=f"{window}日连续性",
-        score=_recent_momentum_score(klines, window),
+        score=score,
         estimated_net_inflow=None,
-        summary=_recent_window_summary(klines, window),
+        summary=summary,
     )
 
 
@@ -247,7 +231,7 @@ def _fund_flow_notes(analysis: AnalysisResult, data_nature: str) -> list[str]:
     if analysis.research_mode != "official":
         notes.append(INTRADAY_FUND_FLOW_NOTE)
     if _should_downgrade_quality(analysis):
-        notes.append(_data_quality_note(analysis, "量价热度评分已降权。"))
+        notes.append(_data_quality_note(analysis, "量价方向分保留原值，低数据质量由全景评分可靠性控制。"))
     return notes
 
 
@@ -391,14 +375,11 @@ def _range_pressure_notes(analysis: AnalysisResult, order_book_error: str | None
     return notes
 
 
-def _fund_flow_data_nature(analysis: AnalysisResult, context: FundFlowScoreContext) -> str:
-    if analysis.research_mode != "official":
-        return "unavailable"
-    quote = analysis.quote
-    has_turnover = (turnover := finite_float(quote.turnover_rate)) is not None and turnover >= 0
-    has_change = finite_float(quote.change_pct) is not None
-    has_history = len(analysis.klines) >= 2
-    return "derived" if context.amount > 0 or has_turnover or has_change or has_history else "unavailable"
+def _same_day_volume(rows: list[Kline], quote_day: date) -> float | None:
+    if not rows or rows[-1].date != quote_day.isoformat():
+        return None
+    row = rows[-1]
+    return finite_float(row.volume) if valid_kline(row) and valid_positive_number(row.volume) else None
 
 
 def _quality_adjusted_level(level: str, analysis: AnalysisResult) -> str:
@@ -423,70 +404,8 @@ def _rounded_optional(value: float | None, digits: int) -> float | None:
     return round(parsed, digits) if parsed is not None else None
 
 
-def _positive_number(value: float | None) -> float:
-    parsed = finite_float(value)
-    return parsed if parsed is not None and parsed > 0 else 0
-
-
-def _turnover_score(value: float | None) -> int:
-    parsed = finite_float(value)
-    if parsed is None or parsed < 0:
-        return DEFAULT_RULE_SCORE
-    return _score_from_rules(parsed, TURNOVER_SCORE_RULES)
-
-
-def _score_from_rules(value: float | None, rules: tuple[NumericScoreRule, ...]) -> int:
-    parsed = finite_float(value)
-    if parsed is None:
-        return DEFAULT_RULE_SCORE
-    for rule in rules:
-        if rule.matches(parsed):
-            return rule.score
-    return DEFAULT_RULE_SCORE
-
-
-def _volume_score(analysis: AnalysisResult) -> int:
-    rows = analysis.klines[-10:]
-    metrics = current_volume_metrics(
-        analysis.quote,
-        rows,
-        allow_live_quote_volume=analysis.research_mode == "official",
-    )
-    ratio = _current_volume_ratio(metrics.latest_volume, metrics.avg_volume)
-    if metrics.history_count < 5 or ratio is None:
-        return DEFAULT_RULE_SCORE
-    return _score_from_rules(ratio, VOLUME_SCORE_RULES)
-
-
-def _current_volume_ratio(latest_volume: float | None, avg_volume: float | None) -> float | None:
-    latest = finite_float(latest_volume)
-    average = finite_float(avg_volume)
-    if latest is None or latest < 0 or average is None or average <= 0:
-        return None
-    return latest / average
-
-
-def _recent_momentum_score(klines: list[Kline], window: int) -> int:
-    rows = klines[-window:]
-    if len(rows) < 2:
-        return DEFAULT_RULE_SCORE
-    positive = sum(1 for index in range(1, len(rows)) if rows[index].close >= rows[index - 1].close)
-    return clamp_score(35 + positive / (len(rows) - 1) * 45, round_value=True)
-
-
-def _recent_window_summary(klines: list[Kline], window: int) -> str:
-    rows = klines[-window:]
-    if len(rows) < 2:
-        return f"{window}日数据不足。"
-    change = pct_change(rows[-1].close, rows[0].close)
-    return f"近{len(rows)}日区间涨跌 {change:.2f}%。"
-
-
-def _price_volume_relation(analysis: AnalysisResult, *, volume_score: int | None = None) -> str:
-    score = volume_score if volume_score is not None else _volume_score(analysis)
-    if finite_float(analysis.quote.change_pct) is None:
-        return NEUTRAL_PRICE_VOLUME_SUMMARY
+def _price_volume_relation(context: FundFlowScoreContext) -> str:
     for rule in PRICE_VOLUME_RELATION_RULES:
-        if rule.matches(analysis, score):
+        if rule.matches(context):
             return rule.summary
     return NEUTRAL_PRICE_VOLUME_SUMMARY

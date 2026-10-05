@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -31,7 +32,10 @@ from app.models.analysis import (
     AnalysisResult,
     FeatureSnapshot,
     StockInsightBundle,
+    StockOverview,
 )
+from app.models.market_context import MarketContextScore
+from app.services.scoring import clamp_score
 from app.services.trading_calendar import (
     expected_quote_date,
     latest_expected_daily_kline_date,
@@ -284,6 +288,82 @@ def _require_context_binding(context: object, expected_symbol: str) -> None:
     if requested != expected or observed != expected:
         raise WorkbenchContextIntegrityError("个股工作台请求身份绑定不一致")
     _require_context_time_cohort(context)
+    _require_market_context_binding(context, expected)
+
+
+def _require_market_context_binding(context: WorkbenchContext, expected_symbol: str) -> None:
+    overview = context.insights.overview
+    score = getattr(overview, "market_context_score", None)
+    _require_overview_score_metadata(overview, score)
+    if score is None:
+        return
+    try:
+        owner = standard_symbol(score.symbol)
+        stock_time = _market_context_timestamp(score.stock_event_at)
+        quote_time = _market_context_timestamp(context.analysis.quote.timestamp)
+        evaluated = _market_context_timestamp(score.evaluated_at)
+        decision = _market_context_timestamp(context.context_generated_at)
+        total_score, context_score = overview.total_score, score.score
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise WorkbenchContextIntegrityError("个股工作台分层评分身份或时点字段无效") from exc
+    if owner != expected_symbol:
+        raise WorkbenchContextIntegrityError("个股工作台分层评分股票身份绑定不一致")
+    if stock_time != quote_time or evaluated != decision:
+        raise WorkbenchContextIntegrityError("个股工作台分层评分与行情或研究决策时点不一致")
+    if total_score != context_score:
+        raise WorkbenchContextIntegrityError("个股工作台全景评分与分层评分不一致")
+
+
+def _require_overview_score_metadata(overview: StockOverview, score: MarketContextScore | None) -> None:
+    if score is not None:
+        for name, context_name in (("directional_score", "base_score"), ("reliability_score", "reliability_score")):
+            value = getattr(overview, name, None)
+            expected = getattr(score, context_name, None)
+            if value is not None and (type(value) is not int or type(expected) is not int or value != expected):
+                raise WorkbenchContextIntegrityError("个股工作台基础分或可靠性与分层评分不一致")
+    if getattr(overview, "score_rule_version", None) == "current-stock-overview.v2":
+        _require_v2_overview_score_metadata(overview, score)
+
+
+def _require_v2_overview_score_metadata(overview: StockOverview, score: MarketContextScore | None) -> None:
+    if score is None or getattr(score, "rule_version", None) != "current-market-context.v2":
+        raise WorkbenchContextIntegrityError("个股工作台新版全景评分与分层评分版本不一致")
+    evidence = _overview_metadata_number(getattr(overview, "directional_evidence_score", None))
+    penalty = _overview_metadata_number(getattr(overview, "risk_penalty", None))
+    coverage = getattr(overview, "evidence_coverage_pct", None)
+    if (evidence is None or penalty is None or type(coverage) is not int or coverage not in (0, 25, 50, 75, 100)
+            or getattr(overview, "directional_score", None) is None or getattr(overview, "reliability_score", None) is None):
+        raise WorkbenchContextIntegrityError("个股工作台新版全景评分分解字段缺失或无效")
+    if clamp_score(evidence - penalty, round_value=True) != overview.directional_score:
+        raise WorkbenchContextIntegrityError("个股工作台方向证据与风险扣分不能还原基础分")
+    _require_v2_overview_factor_metadata(overview, penalty, coverage)
+
+
+def _overview_metadata_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if 0 <= value <= 100 else None
+
+
+def _require_v2_overview_factor_metadata(overview: StockOverview, penalty: float, coverage: int) -> None:
+    factors = getattr(overview, "factors", None)
+    if not isinstance(factors, list):
+        raise WorkbenchContextIntegrityError("个股工作台新版全景评分缺少因子明细")
+    try:
+        participating = [factor for factor in factors if factor.score_available and factor.participates_in_total_score]
+        direction_count = sum(factor.aggregation_role == "direction" for factor in participating)
+        expected_penalty = sum(max(0, 50 - clamp_score(factor.score)) * 0.25
+                               for factor in participating if factor.aggregation_role == "risk_constraint")
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise WorkbenchContextIntegrityError("个股工作台新版全景评分因子明细无效") from exc
+    if coverage != 25 * direction_count or penalty != expected_penalty:
+        raise WorkbenchContextIntegrityError("个股工作台方向覆盖率或风险扣分与因子明细不一致")
+
+
+def _market_context_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}", value):
+        raise ValueError("market context requires a full timestamp")
+    return parse_audit_time(value)
 
 
 def _context_symbols(context: WorkbenchContext) -> tuple[str, ...]:

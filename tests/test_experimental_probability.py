@@ -22,7 +22,10 @@ from app.services.experimental_probability_model import (
 )
 from app.services.market_scan_experimental_probability import _validate_signal_date, experimental_results
 from app.services.market_scan_probability_history import trusted_probability_history_dates
-from app.services.market_scan_probability import PROBABILITY_CALIBRATOR_VERSION, PROBABILITY_MODEL_VERSION
+from app.services.market_scan_probability_estimators import (
+    PROBABILITY_CALIBRATOR_VERSION,
+    PROBABILITY_MODEL_VERSION,
+)
 from app.services.market_scan_probability_replay import HISTORICAL_REPLAY_FEATURE_NAMES
 
 

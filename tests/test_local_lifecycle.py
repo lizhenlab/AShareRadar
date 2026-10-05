@@ -742,7 +742,7 @@ class LocalLifecycleTests(unittest.TestCase):
             before = cache.table_counts()
             scheduler = LocalDataScheduler(SimpleNamespace(settings=settings, cache=cache))
 
-            asyncio.run(scheduler._check_data_health())
+            asyncio.run(scheduler.run_once("cleanup_runtime_cache"))
             after = cache.table_counts()
 
         self.assertEqual(before["cache_event"], 3)

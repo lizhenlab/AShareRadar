@@ -18,7 +18,8 @@ from app.services.market_scan_future_range_store import (
     FutureRangeResearchUnavailable,
     MarketScanFutureRangeStore,
 )
-from app.services.market_scan_manager import MarketScanManager
+from app.services.market_scan_query_service import MarketScanQueryService
+from app.services.market_scan_research_stores import MarketScanResearchStores
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 
 
@@ -235,8 +236,7 @@ def test_store_filesystem_helpers_reject_nonregular_and_mismatched_candidates(
         future_range_store_module._load_candidates((fingerprint,), {}, 29)
 
 
-def test_manager_allows_only_published_official_runs() -> None:
-    manager = object.__new__(MarketScanManager)
+def test_query_allows_only_published_official_runs() -> None:
     calls: list[tuple[int, dict[str, object]]] = []
     current_run = _run()
 
@@ -249,10 +249,11 @@ def test_manager_allows_only_published_official_runs() -> None:
         def market_scan_run(self, _run_id: int) -> MarketScanRun:
             return current_run
 
-    manager._future_range_store = _Store()  # type: ignore[assignment]
-    manager.cache = _Cache()  # type: ignore[assignment]
+    manager = MarketScanQueryService(_Cache(), MarketScanResearchStores(
+        probability=None, probability_source=None, future_range=_Store(),
+    ))
 
-    assert manager.future_range_research(29, page_size=20, session_offset=2) == {
+    assert manager.future_range_research(29, page=1, page_size=20, session_offset=2, symbol=None, include_research=True) == {
         "generation_status": "not_generated"
     }
     assert calls == [
@@ -270,13 +271,13 @@ def test_manager_allows_only_published_official_runs() -> None:
 
     current_run = _run(mode="intraday")
     with pytest.raises(FutureRangeResearchUnavailable, match="盘后正式"):
-        manager.future_range_research(29)
+        manager.future_range_research(29, page=1, page_size=20, session_offset=2, symbol=None, include_research=True)
     current_run = _run(scope=MARKET_SCAN_TOP100_REFRESH_SCOPE)
     with pytest.raises(FutureRangeResearchUnavailable, match="正式全市场"):
-        manager.future_range_research(29)
+        manager.future_range_research(29, page=1, page_size=20, session_offset=2, symbol=None, include_research=True)
     current_run = _run(status="running")
     with pytest.raises(FutureRangeResearchUnavailable, match="已发布"):
-        manager.future_range_research(29)
+        manager.future_range_research(29, page=1, page_size=20, session_offset=2, symbol=None, include_research=True)
     assert len(calls) == 1
 
 

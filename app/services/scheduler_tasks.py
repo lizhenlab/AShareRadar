@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING
 
 from app.services.lifecycle_cleanup import await_cleanup
 from app.services.scheduler_contracts import (
+    RUNTIME_CLEANUP_TASK_NAME,
     TASK_STATUS_DEGRADED,
+    TASK_STATUS_PENDING,
     KlineRefreshSummary,
     SchedulerRuntimeContext,
     TaskExecutionResult,
@@ -23,9 +25,6 @@ from app.services.scheduler_helpers import (
     _scheduler_cache_symbols,
     _short_task_error,
 )
-from app.services.trading_calendar import DAILY_KLINE_PUBLISH_TIME, is_trading_day
-from app.utils.clock import market_now_naive
-from app.utils.market_time import market_local_naive
 
 if TYPE_CHECKING:
     from app.services.market_scan_joint_execution_maintenance import (
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
 
 RESEARCH_QUEUE_REFRESH_BATCH_LIMIT = 20
 DUE_REVIEW_EVALUATION_BATCH_LIMIT = 20
+PROBABILITY_MAINTENANCE_BUDGET_SECONDS = 60.0
 
 
 def _probability_maintenance_message(
@@ -165,10 +165,40 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
             await self._save_monitor_event(event.level, event.category, event.message)
         events = [event.message for event in health_events]
 
-        removed = await _offload(self.datahub.cache.maintenance_repo.cleanup_regenerable_runtime_rows)
-        if cleanup_message := _runtime_cleanup_message(removed):
-            events.append(cleanup_message)
         return "；".join(events)
+
+    async def _cleanup_runtime_cache(self) -> str:
+        if reason := await self._runtime_cleanup_busy_reason():
+            busy_message = f"等待空闲后清理：{reason}"
+            await self._save_monitor_event("info", "maintenance", busy_message)
+            return TaskExecutionResult(busy_message, TASK_STATUS_PENDING)
+        removed = await _offload(self.datahub.cache.maintenance_repo.cleanup_regenerable_runtime_rows)
+        message = _runtime_cleanup_message(removed)
+        if message is None:
+            message = "已检查运行缓存，无需清理" if removed else "当前无需清理或尚未到维护间隔，已跳过"
+        await self._save_monitor_event("info", "maintenance", message)
+        return message
+
+    async def _refresh_stock_pool_metadata(self) -> str:
+        from app.services.stock_pool_maintenance import refresh_stock_pool_metadata
+
+        result = await refresh_stock_pool_metadata(self.datahub)
+        level = "warning" if result.status == TASK_STATUS_DEGRADED else "info"
+        await self._save_monitor_event(level, "stock_pool", result.message)
+        return TaskExecutionResult(result.message, result.status)
+
+    async def _runtime_cleanup_busy_reason(self) -> str | None:
+        busy = [task.display_name for task in self.tasks.values() if task.name != RUNTIME_CLEANUP_TASK_NAME and task.running]
+        if busy:
+            return "后台任务仍在运行：" + "、".join(busy)
+        if bool(getattr(self.market_scanner, "probability_research_refresh_pending", False)):
+            return "概率研究校验仍在运行或等待重试"
+        if bool(getattr(getattr(self.datahub, "fuyao", None), "has_active_jobs", False)):
+            return "扶摇同步任务仍在运行"
+        active_scan = getattr(self.datahub.cache, "active_market_scan_run", None)
+        if callable(active_scan) and await _offload(active_scan) is not None:
+            return "全市场扫描仍在运行"
+        return None
 
     async def _evaluate_alerts(self) -> str:
         from app.services.alerts import evaluate_alert_rules
@@ -186,10 +216,6 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         return message
 
     async def _refresh_research_queue(self, *, now: datetime | None = None) -> str:
-        if not _research_maintenance_window_open(now):
-            message = "当前不在交易日盘后日K发布窗口，已跳过主动研究刷新"
-            await self._save_monitor_event("info", "research", message)
-            return message
         from app.workflows.individual import refresh_active_research_queue
 
         summary = await refresh_active_research_queue(
@@ -211,10 +237,6 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         return message
 
     async def _evaluate_due_reviews(self, *, now: datetime | None = None) -> str:
-        if not _research_maintenance_window_open(now):
-            message = "当前不在交易日盘后日K发布窗口，已跳过到期研究计划评估"
-            await self._save_monitor_event("info", "review", message)
-            return message
         from app.services.advice_review import evaluate_due_advice_reviews
 
         summary = await evaluate_due_advice_reviews(
@@ -232,10 +254,6 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         return message
 
     async def _maintain_market_scan_probability(self, *, now: datetime | None = None) -> str:
-        if not _research_maintenance_window_open(now):
-            message = "当前不在交易日盘后日K发布窗口，已跳过上涨概率标签维护"
-            await self._save_monitor_event("info", "market_scan_probability", message)
-            return message
         from app.services.market_scan_probability_maintenance import (
             MarketScanProbabilityMaintenanceService,
         )
@@ -247,12 +265,25 @@ class SchedulerTaskHandlersMixin(SchedulerRuntimeContext):
         summary = await _offload(
             service.run,
             now=now,
+            time_budget_seconds=PROBABILITY_MAINTENANCE_BUDGET_SECONDS,
         )
+        if summary.pending:
+            message = _probability_maintenance_message(summary, None)
+            await self._save_monitor_event("info", "market_scan_probability", message)
+            return TaskExecutionResult(message, TASK_STATUS_DEGRADED if summary.degraded else TASK_STATUS_PENDING)
         joint_summary = await self._maintain_joint_execution_probability(now=now)
         scanner = self.market_scanner
         refresh = getattr(scanner, "refresh_probability_research_cache", None)
         if callable(refresh):
-            await refresh()
+            try:
+                await refresh()
+            except Exception as exc:
+                message = _probability_maintenance_message(summary, joint_summary)
+                await self._save_monitor_event("warning", "market_scan_probability", message)
+                raise RuntimeError(
+                    f"概率维护到期 {summary.due_count}，失败 {summary.failed_count}；"
+                    f"研究缓存刷新失败：{_short_task_error(exc)}"
+                ) from exc
         message = _probability_maintenance_message(summary, joint_summary)
         degraded = _probability_maintenance_degraded(summary, joint_summary)
         await self._save_monitor_event(
@@ -325,8 +356,3 @@ async def _drain_health_readers(readers: tuple[asyncio.Task, ...]) -> None:
     for reader in readers:
         reader.cancel()
     await asyncio.gather(*readers, return_exceptions=True)
-
-
-def _research_maintenance_window_open(now: datetime | None = None) -> bool:
-    current = market_local_naive(now) if now is not None else market_now_naive()
-    return is_trading_day(current.date()) and current.time() >= DAILY_KLINE_PUBLISH_TIME

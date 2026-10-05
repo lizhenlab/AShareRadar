@@ -56,7 +56,7 @@ def build_stock_diagnosis(
         hard_risks=build_hard_risks(feature, insights, factor_lab, market_regime, risk_reward, timeframe)[:MAX_DIAGNOSIS_ITEMS],
         watch_focus=build_watch_focus(feature, factor_lab, market_regime, validation, timeframe)[:MAX_DIAGNOSIS_ITEMS],
         action=final_action,
-        confidence=diagnosis_confidence(analysis, alpha, factor_lab, market_regime, risk_reward, timeframe),
+        confidence=diagnosis_confidence(analysis, alpha, factor_lab, risk_reward, timeframe),
     )
 
 

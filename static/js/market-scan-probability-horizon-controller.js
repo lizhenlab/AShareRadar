@@ -1,3 +1,6 @@
+import { beginScreenProducer, ownsScreenProducer, presetOwnsScreen, releaseOtherScreenBatch, screenProducer, ownsScreenProbe } from "./market-scan-screen-producer.js";
+import { clearAppliedScreenContext, commitStandardScreenContext } from "./market-scan-screen-context.js";
+import { resultContext, contextMatches, identityMatches, identityBinding } from "./market-scan-result-context.js";
 import { isAbortError } from "./api.js";
 import { validateResultPage } from "./market-scan-contracts.js";
 import { MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS, samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
@@ -36,6 +39,7 @@ export function createMarketScanProbabilityHorizonController(options) {
     refresh: (loadOptions) => load(context, { applied: true, ...loadOptions }),
     refreshQuery: context.queries.refresh,
     needsTrustedRefresh: () => context.needsTrustedRefresh,
+    ownsTrustedRead: () => ownsScreenProbe(options.elements.tableWrap, context.trustedInFlight),
     presentBusy: (error) => presentBusy(context, error),
     publicationChanged: (run) => publicationChanged(context, run),
     remember: (payload, query, identity) => remember(context, payload, query, identity),
@@ -51,6 +55,7 @@ export function createMarketScanProbabilityHorizonController(options) {
 }
 
 function invalidate(context, options = {}) {
+  clearAppliedScreenContext(context.options.elements.tableWrap);
   context.cache = null;
   if (options.clearLastGood) context.lastGoodCache = null;
 }
@@ -69,6 +74,7 @@ function supersede(context, options = {}) {
 }
 
 function publicationChanged(context, run) {
+  releaseOtherScreenBatch(context.options.elements.tableWrap, run);
   const trustedPublication = samePublishedMarketScanRun(context.trustedInFlight?.selectedRun, run);
   const preserveOwnedWork = trustedPublication && (context.queuedLoad || context.refreshQueued);
   if (!preserveOwnedWork) return supersede(context);
@@ -96,6 +102,7 @@ function remember(context, payload, query, identity) {
     context.cache = cache;
     context.lastGoodCache = cache;
     context.needsTrustedRefresh = false;
+    commitStandardScreenContext(options.elements.tableWrap, page, query);
   } catch (_error) {
     invalidate(context, { clearLastGood: true });
   }
@@ -138,6 +145,7 @@ function currentBaseline(context) {
 
 function changeHorizon(context) {
   const { options } = context;
+  if (presetOwnsScreen(options.elements.tableWrap, options.resultRun())) return;
   options.clearResetTimer();
   const retained = currentCache(context);
   const { activeQuery, baselineQuery, queuedQuery } = horizonChangeQueries(context, retained);
@@ -189,17 +197,23 @@ function queueHorizonRefresh(context, retained, queuedQuery, baselineQuery) {
 function load(context, loadOptions = {}) {
   const { options } = context;
   if (!options.state.surfaceActive) return Promise.resolve(null);
+  if (loadOptions.applied && presetOwnsScreen(options.elements.tableWrap, options.resultRun())) {
+    options.polling.scheduleDefault?.(options.state.run);
+    return Promise.resolve(null);
+  }
   if (options.state.actionBusy && !loadOptions.allowDuringAction) return Promise.resolve(null);
   if (loadOptions.horizonRefresh === true) return performLoad(context, loadOptions);
   const run = options.resultRun();
   const query = run ? context.queries.request(run, loadOptions) : null;
   if (run && !query) return Promise.resolve(null);
   context.queries.capture(query, run);
+  clearAppliedScreenContext(options.elements.tableWrap);
   context.intentGeneration += 1;
   context.refreshQueued = false;
   context.refreshBaseQuery = null;
   const spec = {
     ...loadOptions,
+    screenOwner: beginScreenProducer(options.elements.tableWrap, "standard", run),
     context: resultContext(options, run),
     intentGeneration: context.intentGeneration,
     query,
@@ -264,8 +278,10 @@ async function handleLoadFailure(options, error, runId) {
 async function loadOnce(context, loadOptions = {}) {
   const { options } = context;
   if (!options.state.surfaceActive) return { ok: true, payload: null, skipped: true };
+  if (loadOptions.screenOwner && !ownsScreenProducer(options.elements.tableWrap, loadOptions.screenOwner)) return staleOutcome();
   const publishedRun = options.resultRun();
   if (!publishedRun) return clearMissingResultRun(context);
+  if (loadOptions.applied && presetOwnsScreen(options.elements.tableWrap, publishedRun)) return { ok: true, payload: null, skipped: true };
   const runId = publishedRun.id;
   const query = context.queries.request(publishedRun, loadOptions);
   if (!validResultsQuery(query, runId)) return staleOutcome();
@@ -277,6 +293,7 @@ async function loadOnce(context, loadOptions = {}) {
     query,
     sequence,
   };
+  owned.screenOwner = loadOptions.screenOwner || beginScreenProducer(options.elements.tableWrap, "standard", publishedRun);
   context.directInFlight = owned;
   options.view.renderResultsLoading();
   return requestOwnedResult(context, owned, publishedRun, loadOptions);
@@ -374,6 +391,7 @@ function recordStaleTrustFailure(context, owned, error) {
   if (
     isAbortError(error)
     || !isDeterministicResultTrustFailure(error)
+    || (screenProducer(context.options.elements.tableWrap) && !ownsScreenProbe(context.options.elements.tableWrap, owned))
     || !contextMatches(owned?.context, context.options, context.options.resultRun())
   ) return false;
   invalidate(context, { clearLastGood: true });
@@ -399,6 +417,7 @@ function finishOwnedResult(context, owned) {
 function trustedChainStarted(context) {
   context.trustedInFlight = {
     context: resultContext(context.options, context.options.resultRun()),
+    producerBefore: screenProducer(context.options.elements.tableWrap),
     generation: context.intentGeneration,
     query: null,
     selectedRun: null,
@@ -406,9 +425,17 @@ function trustedChainStarted(context) {
 }
 
 function trustedReadStarted(context, query, run) {
-  invalidate(context);
   const owner = context.trustedInFlight || {};
+  const { options } = context;
+  const changedProducer = Object.hasOwn(owner, "producerBefore") && owner.producerBefore !== screenProducer(options.elements.tableWrap);
+  if (changedProducer || presetOwnsScreen(options.elements.tableWrap, run)) {
+    options.polling.scheduleDefault?.(options.state.run);
+    throw new DOMException("榜单显示已由另一读取持有", "AbortError");
+  }
+  invalidate(context);
+  const screenOwner = beginScreenProducer(options.elements.tableWrap, "standard", run);
   context.trustedInFlight = {
+    screenOwner,
     context: owner.context || resultContext(context.options, context.options.resultRun()),
     generation: owner.generation ?? context.intentGeneration,
     query,
@@ -421,6 +448,7 @@ function acceptTrusted(context, query) {
   const trusted = context.trustedInFlight;
   return Boolean(
     trusted
+    && ownsScreenProducer(context.options.elements.tableWrap, trusted.screenOwner)
     && trusted.query === query
     && trusted.generation === context.intentGeneration
     && contextMatches(trusted.context, context.options, context.options.resultRun())
@@ -495,6 +523,7 @@ async function runQueuedWork(context) {
   if (context.queuedLoad) return runQueuedLoad(context);
   context.refreshQueued = false;
   const run = context.options.resultRun();
+  if (presetOwnsScreen(context.options.elements.tableWrap, run)) return;
   const query = unfilteredResultsQuery(context.refreshBaseQuery, run?.id, { resetPage: false });
   context.refreshBaseQuery = null;
   if (!run || !query) return renderUnsafeRefresh(context, run?.id ?? null);
@@ -517,6 +546,7 @@ async function runQueuedLoad(context) {
 function queuedSpecForCurrentRun(context, spec) {
   const { options } = context;
   const run = options.resultRun();
+  if (spec.screenOwner && screenProducer(options.elements.tableWrap) && !ownsScreenProducer(options.elements.tableWrap, spec.screenOwner)) return null;
   if (contextMatches(spec.context, options, run)) return spec;
   if (
     !run
@@ -528,38 +558,15 @@ function queuedSpecForCurrentRun(context, spec) {
   if (!query) return null;
   options.elements.probabilityMin.value = "";
   options.state.page = 1;
-  return { ...spec, context: resultContext(options, run), query };
+  return { ...spec, screenOwner: null, context: resultContext(options, run), query };
 }
 
 function ownedRequestIsCurrent(context, owned, responseRun) {
   const run = context.options.resultRun();
-  return owned.generation === context.intentGeneration
+  return ownsScreenProducer(context.options.elements.tableWrap, owned.screenOwner)
+    && owned.generation === context.intentGeneration
     && contextMatches(owned.context, context.options, run)
     && samePublishedMarketScanRun(responseRun, run);
-}
-
-function resultContext(options, run) {
-  return {
-    browseMode: options.state.browseMode,
-    historyRunId: options.state.selectedHistoryRunId,
-    run: run ? structuredClone(run) : null,
-  };
-}
-
-function contextMatches(context, options, run) {
-  return Boolean(
-    context
-    && context.browseMode === options.state.browseMode
-    && context.historyRunId === options.state.selectedHistoryRunId
-    && samePublishedMarketScanRun(context.run, run)
-  );
-}
-
-function identityMatches(binding, identity) {
-  if (binding.kind === "none") return identity === null;
-  if (binding.kind === "history") return binding.fingerprint === identity?.fingerprint;
-  return binding.runId === identity?.latest_published?.run_id
-    && binding.token === identity?.latest_published?.token;
 }
 
 function cancelRefresh(context) {
@@ -574,12 +581,6 @@ function renderUnsafeRefresh(context, runId) {
   context.options.view.resetProbabilityResearch(runId, { readError: true });
   context.options.view.renderResultState(message, "error");
   context.options.view.announce(message, `results-error:${runId ?? "none"}:unsafe-query`);
-}
-
-function identityBinding(identity, historyRunId, runId) {
-  if (!identity) return { kind: "none" };
-  if (historyRunId !== null) return { kind: "history", fingerprint: identity.fingerprint };
-  return { kind: "published", runId, token: identity.latest_published?.token ?? null };
 }
 
 function staleOutcome(error = null) { return { ok: false, aborted: true, error }; }

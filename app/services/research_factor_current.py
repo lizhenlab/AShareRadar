@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from math import isclose
+
 from app.models.analysis import (
     AnalysisResult,
     FeatureSnapshot,
     StockInsightBundle,
 )
+from app.models.market import Kline
 from app.models.research import (
     ChipAnalysis,
     FactorCalibration,
@@ -19,11 +22,17 @@ from app.services.research_factor_scoring import (
     _dedupe,
     _factor_direction,
     _risk_pressure_score,
-    _volume_confirmation_score,
 )
+from app.services.data_quality_components import PRICE_BOUNDARY_ABS_TOLERANCE, PRICE_BOUNDARY_REL_TOLERANCE
 from app.services.research_factor_specs import _factor_specs
 from app.services.research_factor_weights import _adjusted_factor_weight
+from app.services.research_volume_scoring import volume_confirmation_inputs, volume_confirmation_score
 from app.services.scoring import clamp_score as _clamp, score_level as _score_level
+from app.services.completed_session import completed_quote_day, dated_rows_through_quote
+from app.utils.market_data import finite_float
+
+
+CURRENT_TREND_REPLAY_LIMITATION = "当前趋势包含实时换手率与当前报价时点，历史日K无法同口径还原；不生成历史校准、分桶或百分位。"
 
 
 def build_current_factors(
@@ -54,7 +63,7 @@ def trend_momentum_factor(
     adjustments: dict[str, float],
 ) -> StandardFactor:
     available = feature.ma20_available and len(analysis.klines) >= 20
-    return _build_factor(
+    factor = _build_factor(
         specs["trend_momentum"],
         analysis,
         feature.trend_score,
@@ -70,8 +79,16 @@ def trend_momentum_factor(
         [] if len(analysis.klines) >= 30 and available else ["至少20根有效日K及更长历史K线"],
         adjustments,
         data_nature="derived" if available else "unavailable",
+        methodology=CURRENT_TREND_REPLAY_LIMITATION,
         participates_in_current_score=available,
     )
+    if available and factor.calibration is not None:
+        factor.calibration = factor.calibration.model_copy(update={
+            "availability": "execution_evidence_unavailable",
+            "unavailable_reason": CURRENT_TREND_REPLAY_LIMITATION,
+            "note": CURRENT_TREND_REPLAY_LIMITATION,
+        })
+    return factor
 
 
 def volume_confirmation_factor(
@@ -80,29 +97,53 @@ def volume_confirmation_factor(
     specs: dict,
     adjustments: dict[str, float],
 ) -> StandardFactor:
-    volume_available = feature.volume_ratio_available
+    inputs = _current_volume_inputs(analysis, feature)
+    volume_available = inputs is not None
+    change, ratio = inputs if inputs is not None else (0.0, 0.0)
     return _build_factor(
         specs["volume_confirmation"],
         analysis,
-        _volume_confirmation_score(analysis, feature),
+        volume_confirmation_score(change, ratio) if volume_available else 50,
         (
-            f"量能 {feature.volume_ratio:.2f}倍 / 涨跌幅 {feature.change_pct:.2f}%"
+            f"量能 {ratio:.2f}倍 / 涨跌幅 {change:.2f}%"
             if volume_available
-            else f"量能不可用 / 涨跌幅 {feature.change_pct:.2f}%"
+            else "量能不可用 / 同时点收盘涨跌幅待确认"
         ),
         (
             [
                 "上涨放量偏确认，下跌放量偏风险；缩量波动需要降低判断强度。",
-                f"当前近5日量能约为20日均量 {feature.volume_ratio:.2f} 倍。",
+                f"当前近5日量能约为20日均量 {ratio:.2f} 倍；使用同日收盘价计算方向。",
             ]
             if volume_available
-            else ["近20个交易日的正成交量窗口不完整，量比不作为证据。"]
+            else ["缺少同日同价、无公司行动且会话状态明确的完整20日正成交量窗口；盘中、盘前或不可比量价不参与评分。"]
         ),
-        [] if volume_available else ["完整且为正的20日成交量序列"],
+        [] if volume_available else ["连续20日正成交量及无公司行动的统一前复权价格", "同日同价且昨收一致的明确收盘报价"],
         adjustments,
         data_nature="observed" if volume_available else "unavailable",
-        methodology="仅在完整正成交量窗口下计算近5日/20日量比。",
+        methodology="仅在official同日同价收盘报价下，以连续20个明确交易会话、无公司行动的统一前复权正量日K计算5/20量比；当前和历史共享准入，不是真实资金流。",
         participates_in_current_score=volume_available,
+    )
+
+
+def _current_volume_inputs(analysis: AnalysisResult, feature: FeatureSnapshot) -> tuple[float, float] | None:
+    quote_day = completed_quote_day(analysis.quote.timestamp)
+    if feature.volume_ratio_available is not True or analysis.research_mode != "official" or quote_day is None:
+        return None
+    rows = dated_rows_through_quote(analysis.klines, quote_day)
+    if rows is None or len(rows) < 20 or rows[-1].date != quote_day.isoformat():
+        return None
+    window = rows[-20:]
+    if not _volume_close_prices_match(analysis, window):
+        return None
+    return volume_confirmation_inputs(window)
+
+
+def _volume_close_prices_match(analysis: AnalysisResult, rows: list[Kline]) -> bool:
+    pairs = ((analysis.quote.price, rows[-1].close), (analysis.quote.prev_close, rows[-2].close))
+    return all(
+        (price := finite_float(quoted)) is not None and price > 0
+        and isclose(price, close, rel_tol=PRICE_BOUNDARY_REL_TOLERANCE, abs_tol=PRICE_BOUNDARY_ABS_TOLERANCE)
+        for quoted, close in pairs
     )
 
 
@@ -203,7 +244,7 @@ def leadership_strength_factor(
     level = leadership.level if leadership else feature.leader_level
     evidence = leadership.evidence if leadership else [f"龙头强度 {feature.leader_score} 分。"]
     missing_data = leadership.missing_data if leadership else []
-    return _build_factor(
+    factor = _build_factor(
         specs["leadership_strength"],
         analysis,
         score,
@@ -212,6 +253,11 @@ def leadership_strength_factor(
         missing_data,
         adjustments,
     )
+    return factor.model_copy(update={
+        "aggregation_role": "composite", "participates_in_current_score": False,
+        "weight": 0, "percentile": None, "calibration_buckets": [],
+        "methodology": "龙头强度已合并趋势、量价及行业信息，仅作复合观察，不与底层因子重复计分。",
+    })
 
 
 def valuation_anchor_factor(

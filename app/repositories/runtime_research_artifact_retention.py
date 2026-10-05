@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 import gzip
 from io import BytesIO
@@ -13,6 +13,7 @@ import stat
 from typing import Literal
 
 from app.artifacts.io import (
+    ArtifactCanonicalJsonError,
     ArtifactIOError,
     canonical_json_text,
     decode_json_bytes,
@@ -264,16 +265,15 @@ def _require_digest(
 ) -> None:
     digest = integrity.get("integrity_digest")
     encoded_scope = integrity.get("scope")
-    computed = _digest_candidates(artifact, payload, scope)
-    if encoded_scope == "generated_at+payload":
-        computed.add(sha256_hex(canonical_json_text({"generated_at": artifact.get("generated_at"), "payload": _without_generated_at(payload)})))
     if (
         integrity.get("algorithm") != "sha256"
         or (scope == "payload" and encoded_scope not in {"payload", "generated_at+payload"})
         or not isinstance(digest, str)
         or digest != filename_digest
-        or digest not in computed
     ):
+        raise RuntimeCleanupIntegrityError(f"研究 artifact 摘要或文件名不一致：{path.name}")
+    candidates = _digest_candidates(artifact, payload, scope, encoded_scope=encoded_scope)
+    if not any(candidate == digest for candidate in candidates):
         raise RuntimeCleanupIntegrityError(f"研究 artifact 摘要或文件名不一致：{path.name}")
 
 
@@ -281,19 +281,45 @@ def _digest_candidates(
     artifact: Mapping[object, object],
     payload: Mapping[object, object],
     scope: Literal["payload", "unsigned_artifact"],
-) -> set[str]:
+    *,
+    encoded_scope: object,
+) -> Iterator[str]:
+    """Try the declared/common encoding first; retain the same legacy alternatives."""
     if scope == "unsigned_artifact":
         unsigned = {str(key): value for key, value in artifact.items() if str(key) != "integrity"}
-        return {sha256_hex(canonical_json_text(unsigned))}
-    return {
-        sha256_hex(canonical_json_text(payload)),
-        sha256_hex(canonical_json_text(_without_generated_at(payload))),
-    }
+        yield sha256_hex(canonical_json_text(unsigned))
+        if encoded_scope == "generated_at+payload":
+            yield sha256_hex(canonical_json_text({"generated_at": artifact.get("generated_at"), "payload": _without_generated_at(payload)}))
+        return
+    if encoded_scope == "generated_at+payload":
+        stripped = _without_generated_at(payload)
+        yield sha256_hex(canonical_json_text({"generated_at": artifact.get("generated_at"), "payload": stripped}))
+        yield sha256_hex(canonical_json_text(payload))
+        yield sha256_hex(canonical_json_text(stripped))
+    elif "generated_at" in payload:
+        yield sha256_hex(canonical_json_text(_without_generated_at(payload)))
+        yield sha256_hex(canonical_json_text(payload))
+    else:
+        yield sha256_hex(canonical_json_text(payload))
+        yield sha256_hex(canonical_json_text(_without_generated_at(payload)))
 
 
 def _without_generated_at(value: object) -> object:
     if isinstance(value, Mapping):
-        return {str(key): _without_generated_at(item) for key, item in value.items() if str(key) != "generated_at"}
+        stripped: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ArtifactCanonicalJsonError
+            if key == "generated_at":
+                # A digest may omit timestamps, but malformed omitted values must
+                # still fail before a matching digest short-circuits validation.
+                if isinstance(item, str):
+                    item.encode("utf-8")
+                else:
+                    sha256_hex(canonical_json_text(item))
+            else:
+                stripped[key] = _without_generated_at(item)
+        return stripped
     if isinstance(value, list):
         return [_without_generated_at(item) for item in value]
     return value

@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -200,6 +201,107 @@ def test_source_load_for_run_orders_offset_timestamps_by_instant(tmp_path: Path)
     assert loaded is not None
     assert loaded["captured_at"] == "2026-08-11T10:00:00+00:00"
     assert cast(dict[str, object], loaded["integrity"])["integrity_digest"] == newer["digest"]
+
+
+@pytest.mark.parametrize("lookup", ["list", "run"])
+def test_source_lookup_verifies_each_candidate_once_per_call(tmp_path, monkeypatch, lookup):
+    projection = _source_projection(("600519.SH", "SH", "SH_MAIN"))
+    _capture_current_source(tmp_path, projection)
+    newest = _capture_current_source(tmp_path, projection, captured_at="2026-08-11T17:00:00+08:00")
+    verify = probability_source_module.verify_probability_source_snapshot
+    calls = []
+
+    def counted(artifact):
+        calls.append(artifact["captured_at"])
+        return verify(artifact)
+
+    monkeypatch.setattr(probability_source_module, "verify_probability_source_snapshot", counted)
+    for _ in range(2):
+        if lookup == "list":
+            result = list_probability_source_snapshots(tmp_path, run_id=70)
+            assert result[-1] == newest
+        else:
+            result = load_probability_source_snapshot_for_run(tmp_path, 70)
+            assert result["captured_at"] == newest["captured_at"]
+    assert Counter(calls) == {CAPTURED_AT: 2, newest["captured_at"]: 2}
+
+
+@pytest.mark.parametrize("lookup", [list_probability_source_snapshots, load_probability_source_snapshot_for_run])
+@pytest.mark.parametrize("corruption", ["digest", "duplicate", "gzip"])
+def test_source_lookup_rejects_changed_candidate_after_success(tmp_path, lookup, corruption):
+    info = _capture_current_source(tmp_path, _source_projection(("600519.SH", "SH", "SH_MAIN")))
+    path = Path(info["path"])
+    lookup(tmp_path, run_id=70)
+    encoded = gzip.decompress(path.read_bytes())
+    if corruption == "digest":
+        encoded = encoded.replace(b'"integrity_digest":"', b'"integrity_digest":"0', 1)
+    elif corruption == "duplicate":
+        encoded = encoded.replace(b'{"captured_at":', b'{"captured_at":"duplicate","captured_at":', 1)
+    path.write_bytes(gzip.compress(encoded, compresslevel=9, mtime=1 if corruption == "gzip" else 0))
+    with pytest.raises(ProbabilitySourceError):
+        lookup(tmp_path, run_id=70)
+
+
+def test_source_public_verifier_keeps_owned_tree_and_rejects_nonfinite_input():
+    artifact = _build_current_source(_source_projection(("600519.SH", "SH", "SH_MAIN")))
+    expected = deepcopy(artifact)
+    verified = verify_probability_source_snapshot(artifact)
+    artifact["payload"]["records"][0]["features"]["trend_score"] = float("nan")
+    assert verified == expected
+    with pytest.raises(ProbabilitySourceError, match="非有限"):
+        verify_probability_source_snapshot(artifact)
+    verified["payload"]["records"][0]["dimensions"]["industry"] = "changed"
+    assert expected["payload"]["records"][0]["dimensions"]["industry"] != "changed"
+
+
+@pytest.mark.parametrize("change", ["delete", "replace", "symlink", "parent_symlink", "same_size_mtime"])
+def test_source_selected_bytes_are_rechecked_after_candidate_verification(tmp_path, monkeypatch, change):
+    info = _capture_current_source(tmp_path / "archives", _source_projection(("600519.SH", "SH", "SH_MAIN")))
+    source = Path(info["path"])
+    original = source.read_bytes()
+    facts = source.stat()
+    load = probability_source_module._load_source_snapshot_with_bytes
+
+    def load_then_change(path):
+        verified = load(path)
+        if change == "delete":
+            source.unlink()
+        elif change == "replace":
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(b"replacement")
+            replacement.replace(source)
+        elif change == "symlink":
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(original)
+            source.unlink()
+            source.symlink_to(replacement)
+        elif change == "parent_symlink":
+            moved = tmp_path / "moved"
+            source.parent.rename(moved)
+            source.parent.symlink_to(moved, target_is_directory=True)
+        else:
+            source.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+            os.utime(source, ns=(facts.st_atime_ns, facts.st_mtime_ns))
+            assert source.stat().st_size == facts.st_size
+            assert source.stat().st_mtime_ns == facts.st_mtime_ns
+        return verified
+
+    monkeypatch.setattr(probability_source_module, "_load_source_snapshot_with_bytes", load_then_change)
+    with pytest.raises(ProbabilitySourceError):
+        load_probability_source_snapshot_for_run(source.parent, 70)
+
+
+@pytest.mark.parametrize("superseded", [False, True])
+def test_source_streamed_selection_rejects_only_newest_timestamp_ties(tmp_path, superseded):
+    projection = _source_projection(("600519.SH", "SH", "SH_MAIN"))
+    _capture_current_source(tmp_path, projection)
+    _capture_current_source(tmp_path, _source_projection(("600001.SH", "SH", "SH_MAIN")))
+    if not superseded:
+        with pytest.raises(ProbabilitySourceError, match="同 captured_at"):
+            load_probability_source_snapshot_for_run(tmp_path, 70)
+        return
+    newest = _capture_current_source(tmp_path, projection, captured_at="2026-08-11T18:00:00+08:00")
+    assert load_probability_source_snapshot_for_run(tmp_path, 70)["captured_at"] == newest["captured_at"]
 
 
 def test_source_load_and_list_reject_symlink_paths(tmp_path: Path) -> None:

@@ -230,8 +230,9 @@ class AKShareProvider:
         self._ensure_installed()
 
         def load() -> list[PlateItem]:
-            with _eastmoney_no_proxy():
-                return _eastmoney_industry_plate_rank(limit)
+            # The direct client's own session already disables environment proxies.
+            # Holding the SDK's process-wide environment lock blocks unrelated I/O.
+            return _eastmoney_industry_plate_rank(limit)
 
         return await run_provider_io(load)
 

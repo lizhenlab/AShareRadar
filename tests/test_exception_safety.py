@@ -142,6 +142,7 @@ _CANCELLATION_CONSUMERS = {
     ("app/services/datahub.py", "_consume_provider_close_exception"): "Done callback only observes a completed close task.",
     ("app/services/datahub_runtime.py", "ProviderRuntime._finish_provider_call"): "Done callback only consumes a completed provider Future.",
     ("app/services/market_scan_lifecycle.py", "MarketScanLifecycle._task_done"): "Done callback removes bookkeeping for an already completed task.",
+    ("app/services/market_scan_probability_runtime.py", "_consume_stop_exception"): "Done callback only observes the completed research background task.",
     ("app/services/market_scan_manager.py", "_consume_stop_exception"): "Done callback only observes the shielded stop task.",
     ("app/services/runtime_coordinator.py", "_consume_future_exception"): "Done callback only retrieves an already completed Future exception.",
     ("app/services/scheduler_helpers.py", "_consume_future_exception"): "Done callback prevents unobserved-exception warnings after completion.",
@@ -150,8 +151,10 @@ _CANCELLATION_CONSUMERS = {
 }
 
 _DEFERRED_CANCELLATION_PROPAGATION = {
+    ("app/services/market_scan_probability_runtime.py", "_cancel_and_drain_background"): "Retain repeated cancellation until the shared background task and its real I/O workers finish, then re-raise before clearing ownership.",
+    ("app/services/market_scan_probability_refresh.py", "ProbabilityResearchRefreshCoordinator.stop"): "Retain repeated cancellation while the owned refresh and its real I/O workers drain, then re-raise before releasing shutdown ownership.",
     ("app/services/market_scan_manager.py", "MarketScanManager._run_stop"): "Retain repeated cancellation until the shielded stop task finishes, then re-raise it.",
-    ("app/services/market_scan_manager.py", "_drain_probability_preloads"): "Cancel the isolated worker and drain both real workers before releasing the preload lease and re-raising cancellation.",
+    ("app/services/market_scan_probability_runtime.py", "_drain_probability_preloads"): "Cancel the isolated worker and drain both real workers before releasing the preload lease and re-raising cancellation.",
 }
 
 _PROVIDER_SANITIZER = "app.utils.provider_errors"

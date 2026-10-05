@@ -262,6 +262,12 @@ class ProviderRuntime:
                 existing = self._join_existing_provider_call(full_key)
                 if existing is not None:
                     return existing
+                retry_after = self.cooldown_remaining(*capability_key)
+                if retry_after > 0:
+                    raise ProviderCallBusyError(
+                        f"{capability_key[0]} {capability_key[1]} 最近失败，短暂冷却中",
+                        retry_after_seconds=retry_after,
+                    )
                 if self._provider_has_orphaned_call(capability_key):
                     raise ProviderCallBusyError(f"{capability_key[0]} {capability_key[1]} 上一次调用仍在后台执行")
                 if self._active_provider_call_count(capability_key) < self._capability_max_in_flight(
@@ -609,18 +615,17 @@ class ProviderRuntime:
     def record_failure(self, name: str, index: int, exc: Exception, kind: str) -> None:
         if is_provider_coverage_miss(exc) or isinstance(exc, ProviderCallBusyError):
             return
+        self._start_failure_cooldown(name, kind, exc)
         error_text = self._sanitized_error_text(exc)
         try:
             self.cache.update_provider_capability_failure(name, kind, index, error_text)
         except Exception:
             pass
-        cooldown_seconds = max(0, self.settings.provider_failure_cooldown_seconds)
-        if cooldown_seconds and not isinstance(exc, ProviderInstrumentDataError):
-            self._cooldowns[(name, kind)] = monotonic_now() + cooldown_seconds
 
     async def record_failure_async(self, name: str, index: int, exc: Exception, kind: str) -> None:
         if is_provider_coverage_miss(exc) or isinstance(exc, ProviderCallBusyError):
             return
+        self._start_failure_cooldown(name, kind, exc)
         error_text = self._sanitized_error_text(exc)
         await run_cache_io_best_effort(
             self.cache.update_provider_capability_failure,
@@ -629,6 +634,8 @@ class ProviderRuntime:
             index,
             error_text,
         )
+
+    def _start_failure_cooldown(self, name: str, kind: str, exc: Exception) -> None:
         cooldown_seconds = max(0, self.settings.provider_failure_cooldown_seconds)
         if cooldown_seconds and not isinstance(exc, ProviderInstrumentDataError):
             self._cooldowns[(name, kind)] = monotonic_now() + cooldown_seconds

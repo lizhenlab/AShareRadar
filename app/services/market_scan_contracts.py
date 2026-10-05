@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
@@ -115,6 +115,8 @@ class MarketScanVerifiedReadProtocol(Protocol):
     ) -> MarketScanProductionScoreContract | None: ...
 
     def results_page(self, **query: object) -> MarketScanResultPage: ...
+
+    def screening_rows(self) -> list[MarketScanScreeningRow]: ...
 
     def execution_session_evidence(self) -> Mapping[str, object]: ...
 
@@ -264,19 +266,6 @@ class MarketScanCacheProtocol(Protocol):
         self,
         run_id: int,
     ) -> tuple[MarketScanRun, list[MarketScanBreadthRow]]: ...
-
-    def market_scan_screening_evaluation_snapshot(
-        self,
-        run_id: int,
-    ) -> tuple[MarketScanRun, list[MarketScanScreeningRow]]: ...
-
-    def market_scan_screening_result_items(
-        self,
-        run_id: int,
-        symbols: Sequence[str],
-        *,
-        expected_run: MarketScanRun | None = None,
-    ) -> list[MarketScanResultItem]: ...
 
     def market_scan_retry_plan(self, run_id: int) -> MarketScanRetryPlan: ...
 

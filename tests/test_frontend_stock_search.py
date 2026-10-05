@@ -361,7 +361,7 @@ def test_stock_search_and_quote_stream_accept_valid_beijing_symbols_only() -> No
       const { __appTest, element, streams } = await createAppHarness();
       __appTest.state.symbol = "920066.BJ";
       __appTest.state.loadSeq = 7;
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const stream = streams.at(-1);
       assert.match(decodeURIComponent(stream.url), /920066\.BJ/);
       stream.onmessage({ data: JSON.stringify([quote("920066", "BJ", "北交行情")]) });

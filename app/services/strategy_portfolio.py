@@ -20,6 +20,7 @@ from app.models.strategy_execution import (
 )
 from app.models.strategy_lab import StrategyCompiledExpression, StrategySpec
 from app.services.market_scan_score_dimensions import (
+    MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
     verify_market_scan_point_in_time_evidence_context,
 )
 from app.services.paper_trading_rules import resolve_trade_rule_profile
@@ -33,6 +34,7 @@ from app.services.strategy_portfolio_allocation import (
 
 
 _MISSING = object()
+STRATEGY_METRIC_ADMISSION_VERSION = "strategy-metric-admission-v2-pit-raw-feature-bound"
 STRATEGY_EXECUTION_FRESHNESS_POLICY_VERSION = "strategy-execution-freshness-v2"
 _BOARD_LABELS = {
     "sh_main": "上海A股（主板）",
@@ -182,19 +184,13 @@ def _evaluate_candidate(
 
     dimensions, evidence = _dimensions_and_evidence(item)
     candidate.scores = dimensions
-    candidate.evidence_verified = bool(evidence) and verify_market_scan_point_in_time_evidence_context(
-        evidence,
-        item=item,
-        expected_data_date=run.data_date,
-        expected_quote_date=run.quote_date,
-        expected_as_of=run.as_of,
-        expected_mode=run.mode,
-    )
+    candidate.evidence_verified = _verify_candidate_evidence(evidence, item, run)
     candidate.freshness = _evidence_freshness(run, item, evidence, candidate.evidence_verified)
     _apply_evidence_policy(strategy, item, candidate)
+    verified_features = _verified_raw_features(item, evidence, candidate.evidence_verified)
 
     for expression in expressions:
-        actual = _source_value(expression.source_field, item, run, candidate.board)
+        actual = _source_value(expression.source_field, item, run, candidate.board, verified_features)
         if not _matches(expression, actual):
             actual_text = "缺失" if actual is _MISSING else str(actual)
             candidate.failures.append(f"{expression.display} 未通过（当前 {actual_text}）")
@@ -217,11 +213,33 @@ def _dimensions_and_evidence(item: MarketScanResultItem) -> tuple[dict[str, floa
     dimensions = _dict(components.get("score_dimensions"))
     scores = _dict(dimensions.get("scores"))
     values = {
-        name: float(value)
+        name: value
         for name in ("alpha_1d", "alpha_5d", "alpha_20d", "confidence", "risk", "tradability")
-        if (value := scores.get(name)) is not None and isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(float(value))
+        if (value := _finite_numeric(scores.get(name))) is not None and 0 <= value <= 100
     }
     return values, _dict(dimensions.get("point_in_time_evidence"))
+
+
+def _verify_candidate_evidence(
+    evidence: dict[str, object], item: MarketScanResultItem, run: MarketScanRun,
+) -> bool:
+    try:
+        return bool(evidence) and verify_market_scan_point_in_time_evidence_context(
+            evidence, item=item, expected_data_date=run.data_date,
+            expected_quote_date=run.quote_date, expected_as_of=run.as_of, expected_mode=run.mode,
+        )
+    except (ValueError, TypeError, OverflowError):
+        return False
+
+
+def _finite_numeric(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        parsed = float(value)
+    except OverflowError:
+        return None
+    return parsed if isfinite(parsed) else None
 
 
 def _apply_evidence_policy(
@@ -314,6 +332,7 @@ def _source_value(
     item: MarketScanResultItem,
     run: MarketScanRun,
     board: str,
+    verified_features: dict[str, float],
 ) -> object:
     if source_field.startswith("market_scan_result."):
         return getattr(item, source_field.removeprefix("market_scan_result."), _MISSING)
@@ -324,6 +343,9 @@ def _source_value(
         return _looks_untradeable(item)
     if source_field == "derived.listing_board":
         return board
+    raw_prefix = "score_details.components.score_dimensions.raw_features."
+    if source_field.startswith(raw_prefix):
+        return verified_features.get(source_field.removeprefix(raw_prefix), _MISSING)
     if source_field.startswith("score_details."):
         value: object = item.score_details
         for key in source_field.split(".")[1:]:
@@ -334,6 +356,31 @@ def _source_value(
             return len(value)
         return value
     return _MISSING
+
+
+def _verified_raw_features(
+    item: MarketScanResultItem,
+    evidence: dict[str, object],
+    verified: bool,
+) -> dict[str, float]:
+    """Expose only outer features bound to the already replayed PIT payload."""
+    if not verified:
+        return {}
+    dimensions = _dict(_dict(item.score_details.get("components")).get("score_dimensions"))
+    outer = _dict(dimensions.get("raw_features"))
+    payload = _dict(evidence.get("payload"))
+    frozen = _dict(payload.get("features"))
+    if outer != frozen:
+        return {}
+    parsed = {key: _finite_numeric(value) for key, value in outer.items()}
+    if any(value is None for value in parsed.values()):
+        return {}
+    result = cast(dict[str, float], parsed)
+    # Legacy v4 used conditional downside-return standard deviation.  It must
+    # not be admitted as target semideviation merely because the key is equal.
+    if dimensions.get("algorithm") != MARKET_SCAN_DIMENSION_ALGORITHM_VERSION:
+        result.pop("downside_volatility_20d_pct", None)
+    return result
 
 
 def _matches(expression: StrategyCompiledExpression, actual: object) -> bool:
@@ -1048,6 +1095,7 @@ def _execution_fingerprint(
             "data_date": run.data_date,
             "cost_rule_fingerprint": cost_rule_fingerprint,
             "allocation_contract": strategy_allocation_contract(),
+            "metric_admission_version": STRATEGY_METRIC_ADMISSION_VERSION,
             "freshness_contract": resolved_freshness,
             "execution_request": {
                 "kind": request.kind,

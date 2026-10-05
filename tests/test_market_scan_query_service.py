@@ -295,6 +295,8 @@ class _RacingResearchSource:
         self.after = after
         self.calls: list[int] = []
         self.preload_calls = 0
+        self.refresh_requests = 0
+        self.completed = False
         self.pending = False
 
     def research_projection(self, run_id: int) -> dict[str, object]:
@@ -304,10 +306,18 @@ class _RacingResearchSource:
     def preload(self) -> int:
         self.preload_calls += 1
         self.projection = self.after
+        self.completed = True
         return 1
 
     def refresh_pending(self) -> bool:
         return self.pending
+
+    def request_refresh(self) -> bool:
+        self.refresh_requests += 1
+        return True
+
+    def has_current_archive_binding(self, _run_id: int, _digest: str, _projection=None) -> bool:
+        return self.completed
 
 
 class _HistoricalProbabilityStore:
@@ -757,7 +767,7 @@ def test_action_and_capture_gate_precede_every_probability_artifact_read(
     assert cache.capture_status_calls == ([] if action_source_digest is None else [run.id] * 4)
 
 
-def test_succeeded_capture_forces_one_blocking_preload_before_source_reread() -> None:
+def test_succeeded_capture_requests_background_refresh_before_source_reread() -> None:
     run = _run(action_eligible=True)
     archived = {
         "status": "insufficient_data",
@@ -770,9 +780,12 @@ def test_succeeded_capture_forces_one_blocking_preload_before_source_reread() ->
     )
     service = _service(_Cache(run, capture_status="succeeded"), source=source)
 
+    assert service.probability_research(run.id)["availability"] == "source_index_verification_pending"
+    assert source.preload_calls == 0 and source.refresh_requests == 1
+    assert source.calls == [run.id]
+    source.preload()  # The lifecycle-owned background operation completes.
     assert _without_historical_context(service.probability_research(run.id)) == archived
-    assert source.preload_calls == 1
-    assert source.calls == [run.id, run.id]
+    assert source.preload_calls == 1 and source.calls == [run.id, run.id]
 
 
 def test_succeeded_capture_never_blocks_on_a_scheduled_source_preload() -> None:
@@ -804,6 +817,40 @@ def test_succeeded_capture_never_blocks_on_a_scheduled_source_preload() -> None:
     assert primary["pipeline_stage"] == "source_index_verification_pending"
     assert source.preload_calls == 0
     assert source.calls == [run.id]
+
+
+def test_staged_rejection_pending_does_not_restart_blocking_preload_from_query() -> None:
+    run = _run(action_eligible=True)
+    source = _RacingResearchSource(
+        {"status": "not_generated", "availability": "source_index_verification_pending"},
+        {"status": "insufficient_data", "run_binding": _run_binding(run)},
+    )
+    source.pending = False
+    service = _service(_Cache(run, capture_status="succeeded"), source=source,
+                       probability=_ProbabilityStore(_calibrated_research(), {"600519.SH": _probability_horizons(0.81)}))
+    research, probabilities = service.probability_projection(run.id)
+    assert research["availability"] == "source_index_verification_pending"
+    assert probabilities == {} and source.preload_calls == 0
+
+
+def test_pending_projection_is_not_combined_with_a_newly_completed_binding(monkeypatch) -> None:
+    run = _run(action_eligible=True)
+    source = _RacingResearchSource(
+        {"status": "not_generated", "availability": "source_index_verification_pending"},
+        {"status": "insufficient_data", "run_binding": _run_binding(run)},
+    )
+
+    def pending_then_complete(run_id):
+        source.calls.append(run_id)
+        source.completed = True
+        return source.projection
+
+    monkeypatch.setattr(source, "research_projection", pending_then_complete)
+    service = _service(_Cache(run, capture_status="succeeded"), source=source, probability=_ForbiddenProbabilityStore())
+    projected, probabilities = service.probability_projection(run.id)
+    assert projected["availability"] == "source_index_verification_pending"
+    assert not probabilities and source.completed
+    assert source.preload_calls == source.refresh_requests == 0
 
 
 @pytest.mark.parametrize("broken", (False, True))
@@ -883,8 +930,12 @@ def test_succeeded_capture_without_source_artifact_fails_closed() -> None:
     )
     service = _service(_Cache(run, capture_status="succeeded"), source=source)
 
-    with pytest.raises(ProbabilityArtifactError, match="artifact 缺失"):
+    assert service.probability_research(run.id)["availability"] == "source_index_verification_pending"
+    assert source.preload_calls == 0 and source.refresh_requests == 1
+    source.preload()
+    with pytest.raises(ProbabilityArtifactError, match="绑定 artifact 缺失"):
         service.probability_research(run.id)
+    assert source.refresh_requests == 1
 
 
 def test_succeeded_capture_rejects_source_archive_digest_mismatch() -> None:
@@ -899,10 +950,12 @@ def test_succeeded_capture_rejects_source_archive_digest_mismatch() -> None:
     source = _RacingResearchSource(mismatched, mismatched)
     service = _service(_Cache(run, capture_status="succeeded"), source=source)
 
-    with pytest.raises(ProbabilityArtifactError, match="artifact 缺失"):
+    assert service.probability_research(run.id)["availability"] == "source_index_verification_pending"
+    assert source.preload_calls == 0 and source.refresh_requests == 1
+    source.preload()
+    with pytest.raises(ProbabilityArtifactError, match="摘要冲突"):
         service.probability_research(run.id)
-
-    assert source.preload_calls == 1
+    assert source.refresh_requests == 1
 
 
 def test_oversized_legacy_projection_never_falls_back_or_enters_probability_filter() -> None:
@@ -933,6 +986,23 @@ def test_oversized_legacy_projection_never_falls_back_or_enters_probability_filt
     with pytest.raises(ProbabilityFilterUnavailable, match="尚无已校准 Shadow 概率"):
         _results(service, minimum=0.5)
     assert source.calls == [run.id, run.id]
+
+
+def test_quarantined_source_blocks_bound_legacy_model_and_symbol_probabilities() -> None:
+    run = _run(action_eligible=True)
+    source = _ResearchSource({
+        "status": "insufficient_data", "run_binding": _run_binding(run),
+        "fit_evidence_status": "cohort_quarantined", "outcome_evidence_status": "replay_rejected",
+    })
+    store = _ProbabilityStore(_calibrated_research(), {"600519.SH": _probability_horizons(0.81)})
+    service = _service(_Cache(run, capture_status="succeeded"), source=source, probability=store)
+    research, probabilities = service.probability_projection(run.id)
+    assert research["availability"] == "outcome_evidence_quarantined"
+    assert research["fit_evidence_status"] == "cohort_quarantined"
+    assert probabilities == {}
+    assert service.probability_research(run.id)["status"] == "insufficient_data"
+    with pytest.raises(ProbabilityFilterUnavailable):
+        _results(service, minimum=0.5)
 
 
 def test_probability_filter_rejects_self_attested_mapping_even_when_all_checks_are_true() -> None:
@@ -1811,12 +1881,12 @@ def _calibrated_research() -> dict[str, object]:
 
 def _current_selection_summary() -> dict[str, object]:
     from app.services.market_scan_probability import (
-        PROBABILITY_FEATURE_VERSION,
-        PROBABILITY_LABEL_VERSION,
-        PROBABILITY_MODEL_VERSION,
-        PROBABILITY_SCHEMA_VERSION,
-        PROBABILITY_SPLIT_VERSION,
-    )
+    PROBABILITY_FEATURE_VERSION,
+    PROBABILITY_LABEL_VERSION,
+    PROBABILITY_SCHEMA_VERSION,
+    PROBABILITY_SPLIT_VERSION,
+)
+    from app.services.market_scan_probability_estimators import PROBABILITY_MODEL_VERSION
 
     metrics = {
         "calibrated": {

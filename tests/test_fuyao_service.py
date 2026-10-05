@@ -50,6 +50,28 @@ async def completed(service, request):
     return job, next(item for item in (await service.status())["jobs"] if item["id"] == job.id)
 
 
+def test_active_job_probe_reads_only_current_workers(service, monkeypatch):
+    monkeypatch.setattr(service.client, "status", lambda: pytest.fail("probe must not read account status"))
+    monkeypatch.setattr(service.repository, "jobs", lambda: pytest.fail("probe must not recover stored jobs"))
+
+    async def run():
+        assert not service.has_active_jobs
+        release = asyncio.Event()
+        worker = asyncio.create_task(release.wait())
+        service._tasks["active"] = worker
+        try:
+            assert service.has_active_jobs
+            release.set()
+            await worker
+            assert not service.has_active_jobs
+        finally:
+            release.set()
+            await worker
+            service._tasks.clear()
+
+    asyncio.run(run())
+
+
 def test_empty_valuation_batch_fails_instead_of_claiming_partial_success(service):
     async def run():
         submitted, final = await completed(service, FuyaoJobRequest(kind="valuations", symbols=["600519.sh", "600519.SH"]))

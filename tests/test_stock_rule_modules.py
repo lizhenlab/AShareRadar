@@ -590,7 +590,11 @@ def test_sorted_rule_matches_use_spec_order_as_tie_breaker() -> None:
 def _rule_inputs(*, trend_score: int, fund_score: int, pressure: str, fund_available: bool):
     analysis = _analysis(price=100).model_copy(update={"trend_score": trend_score})
     bundle = build_stock_insight_bundle(analysis)
-    fund_flow = bundle.fund_flow.model_copy(update={"overall_score": fund_score, "available": fund_available})
+    fund_flow = bundle.fund_flow.model_copy(update={
+        "overall_score": fund_score,
+        "available": fund_available,
+        "data_nature": "derived" if fund_available else "unavailable",
+    })
     order_pressure = bundle.order_pressure.model_copy(update={"pressure_level": pressure})
     return analysis, fund_flow, order_pressure
 

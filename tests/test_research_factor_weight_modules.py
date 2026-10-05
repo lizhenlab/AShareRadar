@@ -23,7 +23,7 @@ def test_factor_weight_policy_uses_default_profile_without_matching_style() -> N
 
     assert profile == "常规个股"
     assert adjustments == {}
-    assert notes == ["使用默认单股分析权重。"]
+    assert notes == ["画像只作说明，使用固定方向预算；风险单独约束，数据质量单独披露。"]
 
 
 def test_factor_weight_policy_prioritizes_large_stable_profile() -> None:
@@ -37,16 +37,11 @@ def test_factor_weight_policy_prioritizes_large_stable_profile() -> None:
     profile, adjustments, notes = _factor_weight_policy(analysis, feature)
 
     assert profile == "大市值稳健股"
-    assert adjustments == {
-        "valuation_anchor": 1.25,
-        "risk_pressure": 1.12,
-        "trend_momentum": 1.08,
-        "leadership_strength": 0.9,
-    }
-    assert notes == ["大市值稳健股提高估值锚、风控和趋势修复权重，降低短线情绪权重。"]
+    assert adjustments == {}
+    assert "固定方向预算" in notes[0]
 
 
-def test_factor_weight_policy_applies_low_quality_overlay() -> None:
+def test_factor_weight_policy_never_applies_low_quality_overlay() -> None:
     analysis, feature = _factor_weight_inputs(
         turnover_rate=8.2,
         volume_ratio=1.0,
@@ -56,14 +51,8 @@ def test_factor_weight_policy_applies_low_quality_overlay() -> None:
     profile, adjustments, notes = _factor_weight_policy(analysis, feature)
 
     assert profile == "高活跃波动股"
-    assert adjustments["volume_confirmation"] == 1.25
-    assert adjustments["valuation_anchor"] == 0.82
-    assert adjustments["risk_pressure"] == pytest.approx(1.18 * 1.18)
-    assert adjustments["fund_flow_proxy"] == pytest.approx(1.15 * 0.88)
-    assert notes == [
-        "高活跃波动股提高量价、资金和风险权重，降低静态估值权重。",
-        "数据质量不足时提高风控权重，降低资金估算权重。",
-    ]
+    assert adjustments == {}
+    assert "固定方向预算" in notes[0]
 
 
 def test_factor_weight_policy_detects_low_liquidity_profile() -> None:
@@ -77,11 +66,8 @@ def test_factor_weight_policy_detects_low_liquidity_profile() -> None:
     profile, adjustments, notes = _factor_weight_policy(analysis, feature)
 
     assert profile == "低流动性个股"
-    assert adjustments["risk_pressure"] == 1.28
-    assert adjustments["volume_confirmation"] == 1.15
-    assert adjustments["fund_flow_proxy"] == 0.86
-    assert adjustments["leadership_strength"] == 0.88
-    assert notes == ["低流动性个股提高风险和量价确认权重，降低资金估算与强弱标签权重。"]
+    assert adjustments == {}
+    assert "固定方向预算" in notes[0]
 
 
 @pytest.mark.parametrize(
@@ -134,7 +120,33 @@ def test_unavailable_volume_ratio_never_changes_factor_profile(
     assert context.volume_ratio == 0
     assert profile == "常规个股"
     assert adjustments == {}
-    assert notes == ["使用默认单股分析权重。"]
+    assert notes == ["画像只作说明，使用固定方向预算；风险单独约束，数据质量单独披露。"]
+
+
+@pytest.mark.parametrize("quality", [0, 65, 69, 70, 100])
+@pytest.mark.parametrize("profile_fields,expected_profile", [
+    ({}, "常规个股"),
+    ({"market_cap": 600_000_000_000}, "大市值稳健股"),
+    ({"turnover_rate": 8.0}, "高活跃波动股"),
+    ({"volume_ratio": 1.6}, "高活跃波动股"),
+    ({"amount": 250_000_000}, "低流动性个股"),
+])
+def test_current_profile_and_quality_never_modify_directional_weights(quality, profile_fields, expected_profile):
+    analysis, feature = _factor_weight_inputs(data_quality_score=quality, **profile_fields)
+    profile, adjustments, notes = _factor_weight_policy(analysis, feature)
+    assert profile == expected_profile
+    assert adjustments == {}
+    assert "固定方向预算" in "".join(notes)
+    assert "提高" not in "".join(notes) and "降低" not in "".join(notes)
+
+
+@pytest.mark.parametrize("field,low,high", [("turnover_rate", 7.99, 8.0), ("volume_ratio", 1.59, 1.6)])
+def test_activity_profile_boundary_changes_only_the_label(field, low, high):
+    before = _factor_weight_policy(*_factor_weight_inputs(**{field: low}))
+    after = _factor_weight_policy(*_factor_weight_inputs(**{field: high}))
+    assert before[0] == "常规个股"
+    assert after[0] == "高活跃波动股"
+    assert before[1:] == after[1:]
 
 
 def _factor_weight_inputs(
@@ -165,6 +177,7 @@ def _factor_weight_inputs(
             "amount": amount,
             "turnover_rate": turnover_rate,
             "volume_ratio": volume_ratio,
+            "volume_ratio_available": True,
             "data_quality_score": data_quality_score,
             "data_quality_level": quality.level,
         }

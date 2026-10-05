@@ -519,7 +519,7 @@ class MinuteAnalysisTests(unittest.TestCase):
         leadership = build_leadership_report(analysis, bundle, feature)
         factor_lab = build_factor_lab_report(analysis, bundle, feature, chip, leadership)
         regime = build_market_regime_report(analysis, bundle, feature, factor_lab)
-        timeframe = build_timeframe_alignment_report(analysis, feature, factor_lab)
+        timeframe = build_timeframe_alignment_report(analysis, feature)
         validation = build_signal_validation_report(analysis, feature, factor_lab, regime, timeframe)
         risk_reward = build_risk_reward_report(analysis, feature, factor_lab, regime, validation, timeframe)
         alpha = build_alpha_evidence_report(analysis, bundle, feature, factor_lab, regime, timeframe, risk_reward)
@@ -566,8 +566,18 @@ class MinuteAnalysisTests(unittest.TestCase):
         for factor in factor_lab.factors:
             self.assertGreaterEqual(factor.score, 0)
             self.assertLessEqual(factor.score, 100)
-            self.assertGreaterEqual(factor.weight, 0.5)
-            self.assertLessEqual(factor.weight, 1.8)
+            if factor.aggregation_role == "composite":
+                self.assertEqual(factor.weight, 0)
+                self.assertFalse(factor.participates_in_current_score)
+            else:
+                self.assertIsNotNone(factor.score_share_pct)
+                self.assertAlmostEqual(factor.weight * 100, factor.score_share_pct)
+                if factor.id == "risk_pressure":
+                    self.assertEqual(factor.weight, 0)
+                    self.assertEqual(factor.score_usage, "risk_constraint")
+                else:
+                    self.assertGreater(factor.weight, 0)
+            self.assertLessEqual(factor.weight, 1 / 3 + 1e-12)
             self.assertIsNotNone(factor.calibration)
             assert factor.calibration is not None
             self.assertGreaterEqual(factor.calibration.stability_score, 0)
@@ -752,7 +762,7 @@ class MinuteAnalysisTests(unittest.TestCase):
         leadership = build_leadership_report(analysis, bundle, feature)
         factor_lab = build_factor_lab_report(analysis, bundle, feature, chip, leadership)
         regime = build_market_regime_report(analysis, bundle, feature, factor_lab)
-        timeframe = build_timeframe_alignment_report(analysis, feature, factor_lab)
+        timeframe = build_timeframe_alignment_report(analysis, feature)
         validation = build_signal_validation_report(analysis, feature, factor_lab, regime, timeframe)
         risk_reward = build_risk_reward_report(analysis, feature, factor_lab, regime, validation, timeframe)
         alpha = build_alpha_evidence_report(analysis, bundle, feature, factor_lab, regime, timeframe, risk_reward)

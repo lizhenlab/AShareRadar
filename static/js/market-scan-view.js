@@ -1,3 +1,4 @@
+import { clearAppliedScreenContext } from "./market-scan-screen-context.js";
 import { escapeHtml } from "./dom.js";
 import { formatAuditTimestamp } from "./audit-time.js";
 import { changeClass, formatAmount, formatNumber } from "./format.js";
@@ -98,7 +99,7 @@ export function marketScanResultRow(item, options = {}) {
   const run = options.run && typeof options.run === "object" ? options.run : {};
   return `<tr class="market-scan-result-row">
     <td data-label="排名" data-production-label="生产排名">${productionRankCell(view)}</td>
-    <td data-label="股票"><div class="market-scan-stock"><strong>${escapeHtml(view.name)}</strong><div class="market-scan-stock-meta-row"><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span><div class="market-scan-stock-actions"><button type="button" class="mini-button" data-market-scan-snapshot-target="${escapeHtml(snapshotTarget)}" aria-controls="${escapeHtml(snapshotTarget)}" aria-expanded="false" aria-label="查看扫描快照" title="查看该次扫描保存的证据快照">快照</button><button type="button" class="mini-button" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" data-market-scan-mode="${escapeHtml(run.mode || "")}" data-market-scan-quote-date="${escapeHtml(run.quote_date || "")}" data-market-scan-data-date="${escapeHtml(run.data_date || item.data_date || "")}" aria-label="打开当前个股分析" title="使用当前可用数据打开个股分析，不代表历史扫描快照">分析</button></div></div></div></td>
+    <td data-label="股票"><div class="market-scan-stock"><strong>${escapeHtml(view.name)}</strong><div class="market-scan-stock-meta-row"><span>${escapeHtml(view.symbol)}${escapeHtml(view.flags)}</span><div class="market-scan-stock-actions"><button type="button" class="mini-button" data-market-scan-snapshot-target="${escapeHtml(snapshotTarget)}" aria-controls="${escapeHtml(snapshotTarget)}" aria-expanded="false" aria-label="查看扫描快照" title="查看该次扫描保存的证据快照">快照</button><button type="button" class="mini-button" data-market-scan-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" data-market-scan-mode="${escapeHtml(run.mode || "")}" data-market-scan-quote-date="${escapeHtml(run.quote_date || "")}" data-market-scan-data-date="${escapeHtml(run.data_date || item.data_date || "")}" aria-label="打开当前个股分析" title="使用当前可用数据打开个股分析，不代表历史扫描快照">分析</button><button type="button" class="mini-button" data-market-scan-compare-symbol="${escapeHtml(view.dataSymbol)}" data-market-scan-compare-run-id="${escapeHtml(item.run_id ?? run.id ?? "")}" aria-pressed="false" aria-label="对比 ${escapeHtml(view.name)} ${escapeHtml(view.dataSymbol)}">加入对比</button></div></div></div></td>
     <td data-label="上市板块 / 行业"><div class="market-scan-market-industry"><strong class="market-scan-board">${escapeHtml(view.boardLabel)}</strong><span class="market-scan-meta">${escapeHtml(view.industry)}</span></div></td>
     <td data-label="趋势强度" data-production-label="生产分" title="${escapeHtml(productionScoreTitle(view))}">${productionScoreCell(view)}</td>
     <td data-label="研究信号"><div class="market-scan-research-signal">${marketScanProbabilityCell(item, options.probabilityHorizon, options.probabilityResearch)}${marketScanResearchDimensionCell(item)}</div></td>
@@ -303,6 +304,7 @@ function renderPagination(context, payload, hasRows) {
 }
 
 function renderResultsLoading(context) {
+  clearAppliedScreenContext(context.elements.tableWrap);
   const { elements } = context;
   setAttribute(elements.probabilityResearch, "aria-busy", "true");
   if (elements.tableWrap.hidden !== false || elements.pagination.hidden !== false) {
@@ -321,6 +323,7 @@ function renderResultsLoading(context) {
 }
 
 function renderResultState(context, message, kind = "") {
+  clearAppliedScreenContext(context.elements.tableWrap);
   const { elements } = context;
   setAttribute(elements.probabilityResearch, "aria-busy", kind === "loading" ? "true" : "false");
   if ([elements.tableWrap, elements.prev, elements.next].includes(context.root?.activeElement)) {

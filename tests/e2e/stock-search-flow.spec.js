@@ -5,6 +5,16 @@ const deferredDiagnosticEndpoints = new Set([
   "/api/tasks/status", "/api/tasks/runs?limit=8", "/api/monitor/events?limit=8", "/api/system/diagnostics",
 ]);
 
+test.beforeEach(async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.__quoteStreamErrors = errors;
+});
+
+test.afterEach(async ({ page }) => {
+  expect(page.__quoteStreamErrors).toEqual([]);
+});
+
 test("SSE status waits for the current frame and preserves degradation", async ({ page }) => {
   let degraded = false;
   await mockApi(page, {
@@ -156,12 +166,18 @@ test("stock search remains bound after a persisted pagehide lifecycle", async ({
 
   await page.goto("/");
   const input = page.locator("#symbolInput");
+  await expect(page.locator("#stockName")).toHaveText("贵州茅台");
+  await emitQuoteFrame(page);
   await input.fill("北交");
   await expect(page.locator("#symbolSuggestions")).toContainText("北交样本");
   await page.evaluate(() => {
     window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+  });
+  await expect.poll(async () => (await (await page.request.get("/__e2e/quote-streams")).json()).clients).toBe(0);
+  await page.evaluate(() => {
     window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
   });
+  await emitQuoteFrame(page);
   await input.fill("平安");
   await expect(page.locator("#symbolSuggestions")).toContainText("平安银行");
   await expect.poll(() => searchKeywords).toEqual(["北交", "平安"]);

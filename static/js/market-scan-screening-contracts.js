@@ -1,8 +1,9 @@
+import { validateConditionImpacts } from "./market-scan-condition-impact.js";
 import { marketScanFilterElements, readMarketScanFilters } from "./market-scan-filters.js";
 
 export const SCREEN_SPEC_SCHEMA_VERSION = "screen-spec-v2";
 export const MARKET_SCAN_BREADTH_SCHEMA_VERSION = "market-scan-breadth-v1";
-export const MARKET_SCAN_SCREEN_EVALUATION_SCHEMA_VERSION = "market-scan-screen-evaluation-v1";
+export const MARKET_SCAN_SCREEN_EVALUATION_SCHEMA_VERSION = "market-scan-screen-evaluation-v2";
 export const MARKET_SCAN_DELTA_SCHEMA_VERSION = "market-scan-delta-v1";
 export const MARKET_SCAN_SCREEN_ALERT_SCHEMA_VERSION = "market-scan-screen-alert-v1";
 
@@ -105,6 +106,7 @@ export function validateScreenEvaluation(value, expectedRunId) {
   const matchedSymbols = validateMatchedPage(payload.matched, payload.matched_count, expectedRunId);
   validateMatchedExplanations(payload.matched_explanations, matchedSymbols, conditionCodes);
   validateNearMisses(payload.near_misses, matchedSymbols, expectedRunId, conditionCodes);
+  validateConditionImpacts(payload.condition_impacts, payload.spec, payload.funnel, payload.population_count, payload.matched_count, matchedSymbols, expectedRunId, payload.exclusion_reasons);
   return payload;
 }
 

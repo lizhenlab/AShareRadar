@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 
 from pydantic import ValidationError
@@ -14,6 +15,7 @@ from app.models.strategy_lab import (
     StrategySpecUpdate,
     StrategyUniverse,
     StrategyObjectives,
+    StrategyPortfolioConstraints,
 )
 from app.repositories.strategy_lab import StrategyLabRepository, StrategyRevisionConflictError
 from app.services.strategy_compiler import compile_strategy_spec, strategy_spec_fingerprint
@@ -103,6 +105,32 @@ def test_named_profile_cannot_smuggle_custom_objective_weights() -> None:
                 tradability=0.0,
             ),
         )
+
+
+@pytest.mark.parametrize("weight", [math.nan, math.inf, -math.inf, 0, -0.01, 1.01, True, "0.1", None])
+def test_custom_portfolio_weights_reject_non_finite_or_invalid_values(weight: object) -> None:
+    with pytest.raises(ValidationError):
+        StrategyPortfolioConstraints.model_validate({
+            "weighting_method": "custom",
+            "custom_weights": {"600000.SH": weight},
+        })
+
+
+def test_custom_portfolio_weights_preserve_finite_values_and_constraints() -> None:
+    weights = {"600000.SH": 0.2, "000001.SZ": 0.3}
+    constraints = StrategyPortfolioConstraints(
+        weighting_method="custom", custom_weights=weights, max_stock_weight=0.3,
+    )
+    assert constraints.custom_weights == weights
+    for invalid, message in [
+        ({"600000.SH": 0.31}, "单股权重上限"),
+        ({"600000.SH": 0.6, "000001.SZ": 0.5}, "权重合计"),
+    ]:
+        with pytest.raises(ValidationError, match=message):
+            StrategyPortfolioConstraints(
+                weighting_method="custom", custom_weights=invalid,
+                max_stock_weight=0.3 if len(invalid) == 1 else 1.0,
+            )
 
 
 def test_fingerprint_is_semantic_stable_and_normalizes_order() -> None:

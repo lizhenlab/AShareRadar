@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -47,7 +47,10 @@ class StrategyExecutionRequest(_StrictModel):
         le=1_000_000_000,
         allow_inf_nan=False,
     )
-    current_weights: dict[str, float] = Field(default_factory=dict, max_length=100)
+    current_weights: dict[str, Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]] = Field(
+        default_factory=dict,
+        max_length=100,
+    )
 
     @model_validator(mode="after")
     def validate_execution_target(self) -> Self:
@@ -57,8 +60,6 @@ class StrategyExecutionRequest(_StrictModel):
             raise ValueError("latest_scan 不接受历史批次或日期")
         if self.kind == "historical_replay" and self.run_id is None and self.data_date is None:
             raise ValueError("historical_replay 必须指定 run_id 或 data_date")
-        if any(weight < 0 or weight > 1 for weight in self.current_weights.values()):
-            raise ValueError("当前持仓权重必须位于 [0, 1] 区间")
         if sum(self.current_weights.values()) > 1.0000001:
             raise ValueError("当前持仓权重合计不能超过 1")
         return self

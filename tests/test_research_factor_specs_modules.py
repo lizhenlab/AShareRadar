@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import date
 
 import pytest
 
@@ -25,6 +26,7 @@ from app.services.research_factor_specs import (
     _volume_ratio_at,
     _window_average_close,
 )
+from app.services.trading_calendar import next_trade_dates
 from tests.factories import make_kline
 
 
@@ -78,6 +80,9 @@ def test_factor_specs_reject_invalid_registration_rows() -> None:
     with pytest.raises(ValueError, match="factor spec invalid_trigger trigger must be callable"):
         _factor_spec_map((_factor_spec(id="invalid_trigger", trigger=None),))
 
+    with pytest.raises(ValueError, match="score_rule_version must be a non-empty string"):
+        _factor_spec_map((_factor_spec(score_rule_version=" "),))
+
 
 def test_trend_proxy_score_preserves_strong_trend_components() -> None:
     rows = _rows([100 + index for index in range(40)])
@@ -93,10 +98,10 @@ def test_trend_proxy_score_returns_neutral_for_malformed_current_bar() -> None:
 
 
 def test_volume_proxy_score_uses_positive_volume_confirmation_rule() -> None:
-    rows = _rows([100 + index for index in range(40)])
-    rows[30] = make_kline(date="2026-06-01", close=132, high=133, low=131, volume=4000)
+    rows = _flow_rows([100 + index for index in range(40)])
+    rows[30] = make_kline(date=rows[30].date, close=132, high=133, low=131, volume=4000, replay_eligible=True)
 
-    assert _volume_proxy_score_at(rows, 30) == 72
+    assert _volume_proxy_score_at(rows, 30) == 65
 
 
 def test_volume_proxy_score_rejects_current_volume_missing_from_history() -> None:
@@ -129,11 +134,13 @@ def test_position_and_flow_scores_require_valid_current_bar() -> None:
         update={"high": math.inf}
     )
     assert _chip_position_score_at(malformed_current, 30) == 50
-    assert _fund_flow_proxy_score_at(malformed_current, 30) == 50
+    with pytest.raises(ValueError, match="量价"):
+        _fund_flow_proxy_score_at(malformed_current, 30)
 
     zero_volume_current = list(rows)
     zero_volume_current[30] = make_kline(date="2026-06-01", close=130, high=131, low=129, volume=0)
-    assert _fund_flow_proxy_score_at(zero_volume_current, 30) == 50
+    with pytest.raises(ValueError, match="量价"):
+        _fund_flow_proxy_score_at(zero_volume_current, 30)
 
 
 def test_window_average_close_ignores_non_positive_values() -> None:
@@ -272,8 +279,12 @@ def test_triggers_reject_non_finite_current_scores_and_clamp_boundaries() -> Non
     assert _trend_trigger(rows, 30, math.nan) is False
     assert _fund_flow_trigger(rows, 30, math.inf) is False
     assert _trend_trigger(rows, 30, 200) is False
-    assert _fund_flow_proxy_score_at(rows, 30) == 92
-    assert _fund_flow_trigger(rows, 30, 120) is True
+    flow_rows = _flow_rows([100 + index for index in range(40)])
+    assert _fund_flow_proxy_score_at(flow_rows, 30) == 54
+    assert _fund_flow_trigger(flow_rows, 30, 120) is False
+    flow_rows[30] = flow_rows[30].model_copy(update={"open": 139, "close": 140, "high": 141, "low": 138, "volume": 1800})
+    assert _fund_flow_proxy_score_at(flow_rows, 30) == 100
+    assert _fund_flow_trigger(flow_rows, 30, 120) is True
 
 
 def test_chip_trigger_tolerance_boundary_is_inclusive() -> None:
@@ -309,6 +320,14 @@ def _rows(closes: list[float], *, volume: float = 1000):
             volume=volume,
         )
         for index, close in enumerate(closes)
+    ]
+
+
+def _flow_rows(closes: list[float]):
+    dates = next_trade_dates(date(2026, 3, 31), len(closes))
+    return [
+        make_kline(date=day.isoformat(), close=close, replay_eligible=True)
+        for day, close in zip(dates, closes, strict=True)
     ]
 
 

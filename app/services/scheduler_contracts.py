@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Protocol
+from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Literal, Protocol
 
 from app.models.strategy_automation import StrategyAutomationRunSummary
 from app.utils.time import datetime_to_text
@@ -21,8 +21,12 @@ if TYPE_CHECKING:
     from app.services.market_scan_manager import MarketScanManager
 
 
+TaskWindow = Literal["always", "market", "daytime", "post_close", "health", "maintenance", "stock_metadata"]
+
+
 TASK_STATUS_RUNNING = "running"
 TASK_STATUS_SUCCESS = "success"
+TASK_STATUS_PENDING = "pending"
 TASK_STATUS_DEGRADED = "degraded"
 TASK_STATUS_FAILED = "failed"
 TASK_STATUS_CANCELLED = "cancelled"
@@ -30,6 +34,7 @@ TASK_ERROR_MAX_LENGTH = 120
 KLINE_FAILURE_DETAIL_LIMIT = 3
 PROVIDER_FAILURE_DETAIL_LIMIT = 5
 INSTANCE_GUARD_BUSY_MESSAGE = "已有其他进程运行本地数据调度器，手动任务未执行"
+RUNTIME_CLEANUP_TASK_NAME = "cleanup_runtime_cache"
 
 
 class SchedulerInstanceGuard(Protocol):
@@ -69,6 +74,9 @@ class LocalTask:
     last_finished_at: datetime | None = None
     last_status: str | None = None
     last_message: str | None = None
+    automatic_window: TaskWindow = "always"
+    consecutive_failures: int = 0
+    schedule_warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,16 +86,18 @@ class TaskSpec:
     interval_seconds: int
     handler: Callable[[], Awaitable[str]]
     initial_delay_seconds: int = 0
+    automatic_window: TaskWindow = "always"
 
 
 @dataclass(frozen=True)
 class TaskDefinition:
     name: str
     display_name: str
-    settings_interval_attr: str
+    settings_interval_attr: str | None
     min_interval_seconds: int
     handler_name: str
     initial_delay_seconds: int = 0
+    automatic_window: TaskWindow = "always"
 
 
 @dataclass(frozen=True)
@@ -196,6 +206,7 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_quote_interval_seconds",
         min_interval_seconds=10,
         handler_name="_refresh_watch_quotes",
+        automatic_window="market",
     ),
     TaskDefinition(
         name="refresh_key_klines",
@@ -203,6 +214,7 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_kline_interval_seconds",
         min_interval_seconds=120,
         handler_name="_refresh_key_klines",
+        automatic_window="daytime",
         initial_delay_seconds=8,
     ),
     TaskDefinition(
@@ -211,14 +223,16 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_plate_interval_seconds",
         min_interval_seconds=120,
         handler_name="_refresh_plate_rank",
+        automatic_window="market",
         initial_delay_seconds=12,
     ),
     TaskDefinition(
         name="check_data_health",
         display_name="检查数据健康",
         settings_interval_attr="scheduler_health_interval_seconds",
-        min_interval_seconds=20,
+        min_interval_seconds=300,
         handler_name="_check_data_health",
+        automatic_window="health",
         initial_delay_seconds=16,
     ),
     TaskDefinition(
@@ -227,6 +241,7 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_quote_interval_seconds",
         min_interval_seconds=30,
         handler_name="_evaluate_alerts",
+        automatic_window="market",
         initial_delay_seconds=20,
     ),
     TaskDefinition(
@@ -235,6 +250,7 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_kline_interval_seconds",
         min_interval_seconds=300,
         handler_name="_refresh_research_queue",
+        automatic_window="post_close",
         initial_delay_seconds=24,
     ),
     TaskDefinition(
@@ -243,6 +259,7 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_kline_interval_seconds",
         min_interval_seconds=300,
         handler_name="_evaluate_due_reviews",
+        automatic_window="post_close",
         initial_delay_seconds=28,
     ),
     TaskDefinition(
@@ -251,6 +268,7 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_kline_interval_seconds",
         min_interval_seconds=300,
         handler_name="_run_strategy_schedules",
+        automatic_window="daytime",
         initial_delay_seconds=32,
     ),
     TaskDefinition(
@@ -259,7 +277,26 @@ _TASK_DEFINITIONS: tuple[TaskDefinition, ...] = (
         settings_interval_attr="scheduler_kline_interval_seconds",
         min_interval_seconds=300,
         handler_name="_maintain_market_scan_probability",
+        automatic_window="post_close",
         initial_delay_seconds=36,
+    ),
+    TaskDefinition(
+        name=RUNTIME_CLEANUP_TASK_NAME,
+        display_name="清理过期运行缓存",
+        settings_interval_attr="runtime_maintenance_interval_seconds",
+        min_interval_seconds=60,
+        handler_name="_cleanup_runtime_cache",
+        automatic_window="maintenance",
+        initial_delay_seconds=300,
+    ),
+    TaskDefinition(
+        name="refresh_stock_pool_metadata",
+        display_name="维护全市场股票池元数据",
+        settings_interval_attr=None,
+        min_interval_seconds=3600,
+        handler_name="_refresh_stock_pool_metadata",
+        automatic_window="stock_metadata",
+        initial_delay_seconds=60,
     ),
 )
 _TASK_ORDER = tuple(definition.name for definition in _TASK_DEFINITIONS)

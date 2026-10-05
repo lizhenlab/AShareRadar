@@ -8,11 +8,23 @@ from types import SimpleNamespace
 from app.models.market import (
     Kline,
 )
-from app.services.indicator_volume import positive_volume_ratio, recent_volume_ratio_if_available
+from app.services.indicator_volume import positive_volume_ratio
 from app.services.indicator_trend import trend_score_from_impact
 from app.services.indicator_trend_components import TrendContext, trend_contributions
 from app.services.indicators import pct_change
-from app.services.research_volume_scoring import volume_confirmation_score
+from app.services.price_volume_scoring import (
+    PRICE_VOLUME_BASELINE_DAYS,
+    PRICE_VOLUME_SCORE_RULE_VERSION,
+    completed_price_volume_ratio,
+    price_volume_change_pct,
+    price_volume_score,
+)
+from app.services.research_factor_execution_contract import factor_calibration_evidence_issue
+from app.services.research_volume_scoring import (
+    VOLUME_CONFIRMATION_SCORE_RULE_VERSION,
+    volume_confirmation_inputs,
+    volume_confirmation_score,
+)
 from app.services.scoring import clamp_score as _clamp
 from app.utils.market_data import finite_float, valid_kline
 
@@ -53,12 +65,6 @@ RISK_TRIGGER_TOLERANCE = 8
 RISK_TRIGGER_NEUTRAL_LOW = 48
 RISK_TRIGGER_NEUTRAL_HIGH = 65
 
-FLOW_MIN_INDEX = 10
-FLOW_LOOKBACK_WINDOW = 5
-FLOW_MIN_VALID_ROWS = 3
-FLOW_PRESSURE_WEIGHT = 32
-FLOW_CONTINUITY_ANCHOR = 2.5
-FLOW_CONTINUITY_WEIGHT = 4
 FLOW_STRONG_CURRENT_SCORE = 58
 FLOW_WEAK_CURRENT_SCORE = 45
 FLOW_TRIGGER_TOLERANCE = 12
@@ -97,6 +103,7 @@ class FactorSpec:
     evaluator: Callable[[list[Kline], int], float]
     trigger: Callable[[list[Kline], int, float], bool]
     historically_replayable: bool = True
+    score_rule_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,13 +143,6 @@ class FactorMovingAverages:
 class FactorPriceRange:
     high_20: float
     low_20: float
-
-
-@dataclass(frozen=True)
-class FlowMetrics:
-    up_amount: float
-    down_amount: float
-    continuity: int
 
 
 @dataclass(frozen=True)
@@ -241,6 +241,10 @@ def _validate_factor_spec(spec: FactorSpec) -> None:
         raise ValueError(f"factor spec {spec.id} trigger must be callable")
     if not isinstance(spec.historically_replayable, bool):
         raise ValueError(f"factor spec {spec.id} historically_replayable must be boolean")
+    if spec.score_rule_version is not None and (
+        not isinstance(spec.score_rule_version, str) or not spec.score_rule_version.strip()
+    ):
+        raise ValueError(f"factor spec {spec.id} score_rule_version must be a non-empty string")
 
 
 def _trend_proxy_score_at(rows: list[Kline], index: int) -> float:
@@ -274,13 +278,12 @@ def _trend_proxy_score_from_context(context: FactorScoreContext) -> float:
 def _volume_proxy_score_at(rows: list[Kline], index: int) -> float:
     score_rows = _score_rows(rows, index, min_index=VOLUME_BASE_WINDOW - 1)
     volume_window = rows[index - VOLUME_BASE_WINDOW + 1 : index + 1]
-    ratio = recent_volume_ratio_if_available(volume_window) if score_rows is not None else None
-    if score_rows is None or ratio is None:
+    inputs = volume_confirmation_inputs(volume_window) if score_rows is not None else None
+    if inputs is None:
         # Calibration and percentile callers skip unavailable observations;
         # returning 50 would turn missing volume into a neutral-score sample.
-        raise ValueError("量价确认缺少完整的20日正成交量窗口")
-    change_pct = pct_change(score_rows.current.close, score_rows.previous.close)
-    return volume_confirmation_score(change_pct, ratio)
+        raise ValueError("量价确认缺少完整且价格量基准可比的20日正成交量窗口")
+    return volume_confirmation_score(*inputs)
 
 
 def _risk_proxy_score_at(rows: list[Kline], index: int) -> float:
@@ -291,21 +294,19 @@ def _risk_proxy_score_at(rows: list[Kline], index: int) -> float:
 
 
 def _fund_flow_proxy_score_at(rows: list[Kline], index: int) -> float:
-    recent = _recent_valid_flow_rows(rows, index)
-    if len(recent) < FLOW_MIN_VALID_ROWS:
-        return NEUTRAL_SCORE
-    metrics = _flow_metrics(recent)
-    total = metrics.up_amount + metrics.down_amount
-    if total <= 0:
-        return NEUTRAL_SCORE
-    pressure = (metrics.up_amount - metrics.down_amount) / total
-    return _clamp(
-        round(
-            NEUTRAL_SCORE
-            + pressure * FLOW_PRESSURE_WEIGHT
-            + (metrics.continuity - FLOW_CONTINUITY_ANCHOR) * FLOW_CONTINUITY_WEIGHT
-        )
-    )
+    """Replay the current v2 rule using only evidence visible at this close."""
+    if not _score_index_is_valid(rows, index, min_index=PRICE_VOLUME_BASELINE_DAYS):
+        raise ValueError("量价历史评分缺少当日及前5个完整交易日")
+    window = rows[index - PRICE_VOLUME_BASELINE_DAYS : index + 1]
+    issue = factor_calibration_evidence_issue(window)
+    if issue is not None:
+        raise ValueError(f"量价历史评分缺少完整PIT会话证据：{issue}")
+    if any(row.session_status != "trading" or row.corporate_action_status != "none" for row in window):
+        raise ValueError("量价历史窗口包含停牌或公司行动，无法证明跨日价格与成交量可比")
+    current, previous = window[-1], window[-2]
+    change = price_volume_change_pct(current.close, previous.close)
+    ratio = completed_price_volume_ratio(current.volume, window[:-1])
+    return price_volume_score(change, ratio)
 
 
 def _chip_position_score_at(rows: list[Kline], index: int) -> float:
@@ -458,29 +459,6 @@ def _current_close_at(rows: list[Kline], index: int) -> float:
     return parsed if parsed is not None and parsed > 0 else 0
 
 
-def _recent_valid_flow_rows(rows: list[Kline], index: int) -> list[Kline]:
-    if index < FLOW_MIN_INDEX or not _has_valid_index(rows, index) or not _valid_positive_volume_row(rows[index]):
-        return []
-    return [item for item in _window_rows(rows, index, FLOW_LOOKBACK_WINDOW) if _valid_positive_volume_row(item)]
-
-
-
-def _flow_metrics(rows: list[Kline]) -> FlowMetrics:
-    up_amount = 0.0
-    down_amount = 0.0
-    continuity = 0
-    for item in rows:
-        if not _valid_positive_volume_row(item):
-            continue
-        amount = item.close * item.volume
-        if item.close >= item.open:
-            up_amount += amount
-            continuity += 1
-        else:
-            down_amount += amount
-    return FlowMetrics(up_amount=up_amount, down_amount=down_amount, continuity=continuity)
-
-
 def _window_high_low(
     rows: list[Kline],
     index: int,
@@ -586,7 +564,10 @@ def _fund_flow_trigger(rows: list[Kline], index: int, current_score: float | Non
     current_score = _trigger_score(current_score)
     if current_score is None:
         return False
-    score = _fund_flow_proxy_score_at(rows, index)
+    try:
+        score = _fund_flow_proxy_score_at(rows, index)
+    except ValueError:
+        return False
     if current_score >= FLOW_STRONG_CURRENT_SCORE or current_score <= FLOW_WEAK_CURRENT_SCORE:
         return abs(score - current_score) <= FLOW_TRIGGER_TOLERANCE and (
             score >= FLOW_STRONG_CURRENT_SCORE or score <= FLOW_WEAK_CURRENT_SCORE
@@ -657,6 +638,8 @@ TECHNICAL_FACTOR_SPECS: tuple[FactorSpec, ...] = (
         direction="正向",
         evaluator=_trend_proxy_score_at,
         trigger=_trend_trigger,
+        historically_replayable=False,
+        score_rule_version="factor-current-trend.v1",
     ),
     FactorSpec(
         id="volume_confirmation",
@@ -666,6 +649,7 @@ TECHNICAL_FACTOR_SPECS: tuple[FactorSpec, ...] = (
         direction="正向",
         evaluator=_volume_proxy_score_at,
         trigger=_volume_trigger,
+        score_rule_version=VOLUME_CONFIRMATION_SCORE_RULE_VERSION,
     ),
 )
 
@@ -704,6 +688,7 @@ FLOW_FACTOR_SPECS: tuple[FactorSpec, ...] = (
         direction="正向",
         evaluator=_fund_flow_proxy_score_at,
         trigger=_fund_flow_trigger,
+        score_rule_version=PRICE_VOLUME_SCORE_RULE_VERSION,
     ),
 )
 

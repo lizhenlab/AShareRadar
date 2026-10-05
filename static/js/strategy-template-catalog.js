@@ -16,8 +16,8 @@ const PROFILE_OBJECTIVES = {
 };
 
 export const STRATEGY_TEMPLATE_CATALOG_FIELDS = [
-  "schema_version", "as_of_date", "selection_mode", "production_rule_version",
-  "production_effect", "official_session_count", "templates", "catalog_digest",
+  "schema_version", "as_of_date", "catalog_kind", "evidence_status", "source_contracts",
+  "selection_mode", "production_effect", "templates", "catalog_digest",
 ];
 export const STRATEGY_TEMPLATE_FIELDS = [
   "template_id", "version", "name", "family", "objective", "horizon", "availability",
@@ -60,12 +60,15 @@ const EVIDENCE_FIELDS = [
 
 export function validateStrategyTemplateCatalog(value) {
   const catalog = exactObject(value, STRATEGY_TEMPLATE_CATALOG_FIELDS, "策略模板目录");
-  literal(catalog.schema_version, ["full-market-strategy-template-catalog-v1"], "schema_version");
-  literal(catalog.as_of_date, ["2026-08-12"], "as_of_date");
+  literal(catalog.schema_version, ["full-market-strategy-template-catalog-v2"], "schema_version");
+  literal(catalog.as_of_date, ["2026-09-19"], "as_of_date");
+  literal(catalog.catalog_kind, ["static_research_templates"], "catalog_kind");
+  literal(catalog.evidence_status, ["not_evaluated"], "evidence_status");
+  const contracts = exactObject(catalog.source_contracts,
+    ["score_dimension_algorithm", "point_in_time_evidence", "feature_windows"], "source_contracts");
+  Object.entries(contracts).forEach(([name, contract]) => boundedText(contract, 1, 200, `source_contracts.${name}`));
   literal(catalog.selection_mode, ["exclusive"], "selection_mode");
-  literal(catalog.production_rule_version, ["full-market-score-v4"], "production_rule_version");
   literal(catalog.production_effect, ["none"], "production_effect");
-  literal(catalog.official_session_count, [2], "official_session_count");
   digest(catalog.catalog_digest, "catalog_digest");
   if (!Array.isArray(catalog.templates) || catalog.templates.length < 1 || catalog.templates.length > 50) {
     throw new Error("策略模板目录 templates 数量无效");
@@ -130,7 +133,7 @@ function validateReadyTemplate(item) {
 
 function validateShadowTemplate(item) {
   if (item.strategy_spec !== null || item.contract_status !== "verified"
-      || item.efficacy_status !== "insufficient_data" || item.missing_fields.length) {
+      || item.efficacy_status !== "not_generated" || item.missing_fields.length) {
     throw new Error("Shadow 模板状态组合无效");
   }
 }
@@ -301,7 +304,7 @@ export function createStrategyTemplateCatalog(options = {}) {
       state.catalog = validateStrategyTemplateCatalog(payload);
       renderCatalog(elements, state);
       setCatalogStatus(elements, `已读取 ${state.catalog.templates.length} 个互斥策略镜头；环境匹配证据均未生成。`, "ready");
-      elements.summary.textContent = `${state.catalog.templates.length} 个 · 截至 ${state.catalog.as_of_date}`;
+      elements.summary.textContent = `${state.catalog.templates.length} 个 · 模板修订 ${state.catalog.as_of_date} · 有效性未评估`;
       return state.catalog;
     } catch (error) {
       state.catalog = null;

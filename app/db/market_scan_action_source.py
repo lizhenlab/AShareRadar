@@ -16,6 +16,7 @@ from app.models.market_scan import (
     MARKET_SCAN_FULL_MARKET_SCOPE,
     MarketScanPublicationDiagnostic,
     MarketScanPublicationDiagnostics,
+    MarketScanProductionScoreContract,
     MarketScanScoreDistributionObservation,
 )
 from app.repositories.market_scan_result_validation import (
@@ -27,6 +28,7 @@ from app.repositories.market_scan_action_gate_replay import (
     replay_current_action_gate_receipt_from_verified_observations,
 )
 from app.repositories.market_scan_score_diagnostics import (
+    ProductionScoreContractCollector,
     score_observation_from_canonical_result,
 )
 
@@ -45,14 +47,17 @@ class MarketScanActionSourceInspection:
     snapshot_digest: str
     eligible: bool
     reason: str | None = None
+    success_score_contract: MarketScanProductionScoreContract | None = None
 
 
-class _ScoreObservationCollector:
+class _ActionSourceResultCollector:
     def __init__(self) -> None:
         self.observations: list[MarketScanScoreDistributionObservation] = []
         self.invalid = False
+        self.score_contract = ProductionScoreContractCollector()
 
     def __call__(self, row: Mapping[str, object]) -> None:
+        self.score_contract.observe(row)
         try:
             observation = score_observation_from_canonical_result(row)
         except ValueError:
@@ -87,28 +92,34 @@ def inspect_market_scan_action_source(
 ) -> MarketScanActionSourceInspection:
     """Verify one snapshot once and report post-verification action eligibility."""
 
-    score_observations = _ScoreObservationCollector()
+    score_observations = _ActionSourceResultCollector()
     digest = require_publication_market_scan_snapshot(
         conn,
         run_id,
         result_observer=score_observations,
     )
     try:
-        _require_action_eligibility(conn, run_id, score_observations)
+        run = _require_action_eligibility(conn, run_id, score_observations)
     except MarketScanActionSourceError as exc:
         return MarketScanActionSourceInspection(
             snapshot_digest=digest,
             eligible=False,
             reason=str(exc),
         )
-    return MarketScanActionSourceInspection(snapshot_digest=digest, eligible=True)
+    return MarketScanActionSourceInspection(
+        snapshot_digest=digest,
+        eligible=True,
+        success_score_contract=score_observations.score_contract.contract(
+            expected_count=int(run["success_count"] or 0),
+        ),
+    )
 
 
 def _require_action_eligibility(
     conn: sqlite3.Connection,
     run_id: int,
-    score_observations: _ScoreObservationCollector,
-) -> None:
+    score_observations: _ActionSourceResultCollector,
+) -> sqlite3.Row:
     row = conn.execute(
         """
         SELECT *
@@ -140,6 +151,7 @@ def _require_action_eligibility(
         raise MarketScanActionSourceError(
             f"扫描批次 {run_id} 包含未证实的跳过样本"
         ) from exc
+    return row
 
 
 def market_scan_diagnostics_authorize_action(
@@ -188,7 +200,7 @@ def _require_current_canonical_replay_receipt(
     conn: sqlite3.Connection,
     run: sqlite3.Row,
     diagnostics: MarketScanPublicationDiagnostics,
-    score_observations: _ScoreObservationCollector,
+    score_observations: _ActionSourceResultCollector,
 ) -> None:
     if not _is_current_scan_run(run):
         return

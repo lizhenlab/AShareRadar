@@ -3002,3 +3002,19 @@ body.market-scan-view-active .market-scan-global-progress {
 .strategy-simulation-orders { max-height: 480px; overflow: auto; margin-top: 12px; }
 .strategy-simulation-orders table { width: 100%; min-width: 620px; border-collapse: collapse; }
 .strategy-simulation-orders th, .strategy-simulation-orders td { padding: 8px; text-align: left; border-bottom: 1px solid var(--line); }
+
+/* The comparison owns its selection independently of the research queue. */
+.market-scan-comparison { margin: 14px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.market-scan-comparison-toolbar, .market-scan-comparison-selected { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.market-scan-comparison-toolbar h3 { margin: 0 6px 0 0; font-size: 15px; }
+.market-scan-comparison-toolbar label { display: flex; align-items: center; gap: 5px; }
+.market-scan-comparison p { font-size: 12px; line-height: 1.6; }
+.market-scan-comparison-scroll { max-width: 100%; overflow-x: auto; }
+.market-scan-comparison-evidence { overflow-wrap: anywhere; }
+.market-scan-comparison-table { width: 100%; min-width: 620px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.market-scan-comparison-table caption { text-align: left; padding: 8px 0; font-weight: 600; }
+.market-scan-comparison-table th, .market-scan-comparison-table td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.market-scan-comparison-table th:first-child { width: 155px; }
+.market-scan-comparison-table thead th { background: var(--soft); }
+[data-market-scan-compare-symbol][aria-pressed="true"] { outline: 2px solid var(--blue); outline-offset: -2px; }
+@media (max-width: 760px) { .market-scan-comparison .mini-button { min-height: 44px; } }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -54,8 +54,9 @@ class StrategyExclusions(_StrictModel):
     min_amount_cny: float = Field(default=0.0, ge=0, le=1_000_000_000_000_000, allow_inf_nan=False)
 
 
-FilterScalar = bool | int | float | str
-FilterValue = FilterScalar | list[str] | list[int] | list[float]
+FiniteFilterNumber: TypeAlias = Annotated[float, Field(allow_inf_nan=False)]
+FilterScalar: TypeAlias = bool | int | FiniteFilterNumber | str
+FilterValue: TypeAlias = FilterScalar | list[str] | list[int] | list[FiniteFilterNumber]
 
 
 class StrategyHardFilter(_StrictModel):
@@ -113,7 +114,10 @@ class StrategyPortfolioConstraints(_StrictModel):
     max_board_weight: float = Field(default=0.50, gt=0, le=1, allow_inf_nan=False)
     min_position_amount_cny: float = Field(default=5_000.0, ge=0, le=1_000_000_000, allow_inf_nan=False)
     max_notional_share_of_daily_amount: float = Field(default=0.001, gt=0, le=0.05, allow_inf_nan=False)
-    custom_weights: dict[SymbolText, float] = Field(default_factory=dict, max_length=100)
+    custom_weights: dict[SymbolText, Annotated[float, Field(allow_inf_nan=False)]] = Field(
+        default_factory=dict,
+        max_length=100,
+    )
 
     @model_validator(mode="after")
     def validate_custom_weights(self) -> Self:

@@ -225,8 +225,8 @@ class ProbabilityOutcomeError(ValueError):
     """Raised when probability outcome evidence is unsafe or inconsistent."""
 
 
-class ProbabilityOutcomeSemanticDriftError(ProbabilityOutcomeError):
-    """Raised for intact legacy evidence that cannot authorize current replay."""
+class _BoundOutcomeError(ProbabilityOutcomeError):
+    """Rejected evidence identity, populated only after mechanical verification."""
 
     def __init__(
         self,
@@ -244,6 +244,14 @@ class ProbabilityOutcomeSemanticDriftError(ProbabilityOutcomeError):
         self.generated_at = generated_at
         self.integrity_digest = integrity_digest
         self.source_digest = source_digest
+
+
+class ProbabilityOutcomeSemanticDriftError(_BoundOutcomeError):
+    """Raised for intact legacy evidence that cannot authorize current replay."""
+
+
+class ProbabilityOutcomeReplayError(_BoundOutcomeError):
+    """Recorded labels differ from replay; this evidence is never admissible."""
 
 
 class _RecordSemanticDriftError(ProbabilityOutcomeError):
@@ -425,10 +433,16 @@ def probability_outcome_required_dates(
 def verify_probability_outcome_artifact(artifact: Mapping[str, object]) -> dict[str, object]:
     """Fail closed on structure, digests, fixed dates, and semantic replay."""
     normalized = _json_mapping(artifact, "artifact")
+    _verify_outcome_envelope(normalized)
+    return _replay_verified_outcome_envelope(normalized)
+
+
+def _verify_outcome_envelope(normalized: Mapping[str, object]) -> None:
+    """Check mechanical integrity before any typed semantic rejection."""
     _exact_keys(normalized, _TOP_LEVEL_KEYS, "artifact")
     if normalized["schema_version"] != PROBABILITY_OUTCOME_ARTIFACT_SCHEMA_VERSION:
         raise ProbabilityOutcomeError("outcome artifact schema_version 不受支持")
-    generated_at = _timestamp(normalized["generated_at"], "artifact.generated_at")
+    _timestamp(normalized["generated_at"], "artifact.generated_at")
     raw_payload = _mapping(normalized["payload"], "artifact.payload")
     integrity = _mapping(normalized["integrity"], "artifact.integrity")
     _exact_keys(integrity, _INTEGRITY_KEYS, "artifact.integrity")
@@ -443,7 +457,14 @@ def verify_probability_outcome_artifact(artifact: Mapping[str, object]) -> dict[
     digest = _sha256(integrity.get("integrity_digest"), "integrity.integrity_digest")
     if digest != probability_outcome_payload_digest(raw_payload):
         raise ProbabilityOutcomeError("outcome artifact payload digest 不一致")
-    # Mechanical integrity must precede any typed legacy-semantic classification.
+
+
+def _replay_verified_outcome_envelope(normalized: Mapping[str, object]) -> dict[str, object]:
+    """Replay an owned JSON tree after this call has verified its envelope."""
+    raw_payload = _mapping(normalized["payload"], "artifact.payload")
+    integrity = _mapping(normalized["integrity"], "artifact.integrity")
+    generated_at = str(normalized["generated_at"])
+    digest = integrity["integrity_digest"]
     payload = _validate_payload(raw_payload, generated_at)
     if digest != probability_outcome_payload_digest(payload):
         raise ProbabilityOutcomeError("outcome artifact payload digest 不一致")
@@ -463,19 +484,19 @@ def load_probability_outcome_artifact(path: str | Path) -> dict[str, object]:
     artifact = _decode_artifact(decoded, source)
     mechanically_verified = _verify_loaded_artifact_envelope(source, encoded, artifact)
     try:
-        return verify_probability_outcome_artifact(mechanically_verified)
-    except ProbabilityOutcomeSemanticDriftError as exc:
-        raise _bound_semantic_drift(exc, mechanically_verified) from exc
+        return _replay_verified_outcome_envelope(mechanically_verified)
+    except (ProbabilityOutcomeSemanticDriftError, ProbabilityOutcomeReplayError) as exc:
+        raise _bound_outcome_error(exc, mechanically_verified) from exc
 
 
-def _bound_semantic_drift(
-    error: ProbabilityOutcomeSemanticDriftError,
+def _bound_outcome_error(
+    error: _BoundOutcomeError,
     artifact: Mapping[str, object],
-) -> ProbabilityOutcomeSemanticDriftError:
+) -> _BoundOutcomeError:
     payload = _mapping(artifact["payload"], "payload")
     source = _mapping(payload["source"], "payload.source")
     integrity = _mapping(artifact["integrity"], "integrity")
-    return ProbabilityOutcomeSemanticDriftError(
+    return type(error)(
         str(error),
         run_id=_positive_integer(source["run_id"], "payload.source.run_id"),
         as_of_date=_date_text(payload["as_of_date"], "payload.as_of_date"),
@@ -490,26 +511,9 @@ def _verify_loaded_artifact_envelope(
     encoded: bytes,
     artifact: Mapping[str, object],
 ) -> dict[str, object]:
-    """Verify immutable bytes before a known legacy semantic error may escape."""
+    """Verify immutable bytes before a bound semantic rejection may escape."""
     normalized = _json_mapping(artifact, "artifact")
-    _exact_keys(normalized, _TOP_LEVEL_KEYS, "artifact")
-    if normalized["schema_version"] != PROBABILITY_OUTCOME_ARTIFACT_SCHEMA_VERSION:
-        raise ProbabilityOutcomeError("outcome artifact schema_version 不受支持")
-    _timestamp(normalized["generated_at"], "artifact.generated_at")
-    payload = _mapping(normalized["payload"], "artifact.payload")
-    integrity = _mapping(normalized["integrity"], "artifact.integrity")
-    _exact_keys(integrity, _INTEGRITY_KEYS, "artifact.integrity")
-    expected = {
-        "algorithm": PROBABILITY_OUTCOME_DIGEST_ALGORITHM,
-        "scope": PROBABILITY_OUTCOME_DIGEST_SCOPE,
-        "notice": PROBABILITY_OUTCOME_INTEGRITY_NOTICE,
-        "compression": PROBABILITY_OUTCOME_COMPRESSION,
-    }
-    if any(integrity.get(name) != value for name, value in expected.items()):
-        raise ProbabilityOutcomeError("outcome artifact integrity contract 冲突")
-    digest = _sha256(integrity.get("integrity_digest"), "integrity.integrity_digest")
-    if digest != probability_outcome_payload_digest(payload):
-        raise ProbabilityOutcomeError("outcome artifact payload digest 不一致")
+    _verify_outcome_envelope(normalized)
     _validate_filename(path, normalized)
     if encoded != _compressed_canonical_artifact_bytes(normalized):
         raise ProbabilityOutcomeError(f"outcome artifact 不是规范确定性 gzip：{path}")
@@ -1156,20 +1160,6 @@ def _validate_record(
         label_version=label_version,
     )
     horizons = _json_mapping(_mapping(normalized["horizons"], f"{symbol}.horizons"), f"{symbol}.horizons")
-    if horizons != expected_horizons:
-        if _legacy_rule_profile_semantic_drift(horizons, expected_horizons):
-            raise _RecordSemanticDriftError(
-                f"{symbol} outcome 使用旧规则画像语义",
-                {
-                    "symbol": symbol,
-                    "feature_vector_digest": feature_digest,
-                    "source_evidence_digest": source_digest,
-                    "instrument": instrument,
-                    "bar_evidence": bar_evidence,
-                    "horizons": horizons,
-                },
-            )
-        raise ProbabilityOutcomeError(f"{symbol} outcome horizons 不能由固定会话K线重放")
     verified: dict[str, object] = {
         "symbol": symbol,
         "feature_vector_digest": feature_digest,
@@ -1178,9 +1168,33 @@ def _validate_record(
         "bar_evidence": bar_evidence,
         "horizons": horizons,
     }
+    if horizons != expected_horizons:
+        if _legacy_rule_profile_semantic_drift(horizons, expected_horizons):
+            raise _RecordSemanticDriftError(f"{symbol} outcome 使用旧规则画像语义", verified)
+        raise ProbabilityOutcomeReplayError(
+            f"{symbol} outcome horizons 不能由固定会话K线重放"
+            + _replay_mismatch_diagnostic(horizons, expected_horizons, legacy=legacy)
+        )
     if legacy:
         raise _RecordSemanticDriftError(f"{symbol} 旧日K证据缺失执行状态", verified)
     return verified
+
+
+def _replay_mismatch_diagnostic(
+    recorded: Mapping[str, object], replayed: Mapping[str, object], *, legacy: bool,
+) -> str:
+    """Explain the known legacy flags mismatch without admitting its labels."""
+    if not legacy or recorded.keys() != replayed.keys():
+        return ""
+    stripped: list[dict[str, object]] = []
+    for horizons in (recorded, replayed):
+        normalized = _json_mapping(horizons, "horizons")
+        for state in normalized.values():
+            if isinstance(state, dict) and isinstance(state.get("outcome"), dict):
+                state["outcome"].pop("model_limited", None)
+                state["outcome"].pop("daily_bar_model_limited", None)
+        stripped.append(normalized)
+    return "（旧 model_limited/daily_bar_model_limited 标记冲突）" if stripped[0] == stripped[1] else ""
 
 
 def _legacy_rule_profile_semantic_drift(
@@ -1813,6 +1827,8 @@ __all__ = [
     "PROBABILITY_OUTCOME_MINIMUM_LABEL_COVERAGE",
     "PROBABILITY_OUTCOME_PAYLOAD_CONTRACT_VERSION",
     "ProbabilityOutcomeError",
+    "ProbabilityOutcomeReplayError",
+    "ProbabilityOutcomeSemanticDriftError",
     "build_probability_outcome_artifact",
     "list_probability_outcome_artifacts",
     "load_probability_outcome_artifact",

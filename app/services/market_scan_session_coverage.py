@@ -115,7 +115,7 @@ def verify_market_scan_session_coverage(
     *,
     bar_contract: object,
 ) -> bool:
-    """Verify a sealed coverage payload against the evidence's real bars."""
+    """Verify frozen evidence using the local calendar, without refreshing it."""
     if not isinstance(value, Mapping) or not isinstance(bar_contract, Sequence):
         return False
     if (
@@ -134,6 +134,7 @@ def verify_market_scan_session_coverage(
         trusted_dates, _calendar = trading_date_range(
             date.fromisoformat(observed[0]),
             date.fromisoformat(observed[-1]),
+            allow_auto_refresh=False,
         )
         trusted = tuple(item.isoformat() for item in trusted_dates)
         if expected != trusted:

@@ -58,6 +58,8 @@ PLATE_RANK_COLUMNS = (
     "leading_stock_change_pct",
     "source",
     "updated_at",
+    "symbol",
+    "quote_timestamp",
 )
 STOCK_CONCEPT_COLUMNS = (
     "symbol",
@@ -293,6 +295,8 @@ def _plate_rank_row(item: PlateItem) -> tuple[object, ...] | None:
         _optional_finite_float(item.leading_stock_change_pct),
         source,
         updated_at,
+        _optional_text(item.symbol),
+        _optional_text(item.quote_timestamp),
     )
 
 

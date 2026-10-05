@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
@@ -57,6 +58,7 @@ class FactorCalibration(BaseModel):
     availability: Literal["available", "insufficient_history", "no_similar_samples", "execution_evidence_unavailable"] = "available"
     unavailable_reason: str | None = None
     execution_contract_version: str | None = None
+    score_rule_version: str | None = Field(default=None, min_length=1)
     note: str
 
     @model_validator(mode="after")
@@ -93,18 +95,61 @@ class StandardFactor(BaseModel):
     percentile: float | None = None
     weight: float
     participates_in_current_score: bool = True
+    aggregation_role: Literal["independent", "composite"] = "independent"
     evidence: list[str] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)
     calibration: FactorCalibration | None = None
     calibration_buckets: list[CalibrationBucket] = Field(default_factory=list)
     data_nature: Literal["derived", "estimated", "observed", "unavailable"] | None = None
     methodology: str | None = None
+    score_rule_version: str | None = Field(default=None, min_length=1)
+    score_share_pct: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    score_usage: Literal["direction", "risk_constraint", "observation", "excluded"] | None = None
 
     @model_validator(mode="after")
     def validate_current_score_availability(self) -> StandardFactor:
+        if self.aggregation_role == "composite" and self.participates_in_current_score:
+            raise ValueError("composite observation cannot repeat its underlying scoring factors")
         if self.data_nature == "unavailable" and self.participates_in_current_score:
             raise ValueError("unavailable factor cannot participate in current score")
+        if self.calibration and self.calibration.participates_in_historical_aggregate:
+            if self.score_rule_version != self.calibration.score_rule_version:
+                raise ValueError("current and historical factor scoring rules must match")
         return self
+
+
+class FactorEvidenceSupport(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    data_quality_score: int = Field(ge=0, le=100)
+    calibration_coverage_pct: float = Field(ge=0, le=100)
+    sample_support_pct: float = Field(ge=0, le=100)
+    required_factor_count: int = Field(ge=0)
+    calibrated_factor_count: int = Field(ge=0)
+    minimum_similar_samples: int = Field(ge=0)
+    full_support_sample_threshold: int = Field(gt=0)
+
+
+class FactorGroupContribution(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    name: str
+    budget_pct: float = Field(ge=0, le=100)
+    contribution: float = Field(ge=-50, le=50)
+    coverage_pct: float = Field(ge=0, le=100)
+
+
+class FactorScoreAggregation(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    version: Literal["factor-aggregation.v3"]
+    directional_score: float = Field(ge=0, le=100)
+    risk_penalty: float = Field(ge=0, le=12.5)
+    total_score: int = Field(ge=0, le=100)
+    coverage_pct: float = Field(ge=0, le=100)
+    groups: list[FactorGroupContribution]
+    factor_shares: dict[str, FiniteFloat]
+    excluded_ids: list[str]
 
 
 class FactorLabReport(BaseModel):
@@ -116,6 +161,9 @@ class FactorLabReport(BaseModel):
     composite_reliability_level: str | None = Field(default=None, description="综合可信等级，非统计口径")
     confidence_semantics: Literal["non_statistical_evidence_sufficiency"] = "non_statistical_evidence_sufficiency"
     evidence_sufficiency_note: str = "综合值由因子、数据质量、样本稳定性和正负证据共同形成，不是统计置信度或概率。"
+    evidence_sufficiency_version: Literal["factor-evidence-sufficiency.v2"] | None = None
+    evidence_support: FactorEvidenceSupport | None = None
+    score_aggregation: FactorScoreAggregation | None = None
     calibration_sample_count: int = 0
     positive_factor_count: int = 0
     negative_factor_count: int = 0
@@ -132,6 +180,98 @@ class FactorLabReport(BaseModel):
             self.evidence_sufficiency = self.calibrated_confidence
         if self.composite_reliability_level is None:
             self.composite_reliability_level = _composite_reliability_level(self.evidence_sufficiency)
+
+    @model_validator(mode="after")
+    def validate_score_aggregation(self) -> FactorLabReport:
+        if self.score_aggregation is not None:
+            _validate_factor_aggregation_report(self, self.score_aggregation)
+        return self
+
+
+# Absolute tolerance only: serialized finite arithmetic may differ in its last
+# decimal places, while a larger displayed score must never widen the tolerance.
+_FACTOR_AGGREGATION_TOLERANCE = 1e-8
+
+
+def _aggregation_close(actual: float | None, expected: float, field: str) -> None:
+    if actual is None or not math.isclose(actual, expected, rel_tol=0, abs_tol=_FACTOR_AGGREGATION_TOLERANCE):
+        raise ValueError(f"factor aggregation inconsistent {field}")
+
+
+def _validate_factor_aggregation_report(report: FactorLabReport, aggregate: FactorScoreAggregation) -> None:
+    if report.total_score != aggregate.total_score:
+        raise ValueError("factor aggregation total must match report")
+    expected_total = round(max(0, min(100, aggregate.directional_score - aggregate.risk_penalty)))
+    if aggregate.total_score != expected_total:
+        raise ValueError("factor aggregation risk and rounding chain must match total")
+    _validate_factor_aggregation_groups(aggregate)
+    _validate_factor_aggregation_factors(report.factors, aggregate)
+
+
+def _validate_factor_aggregation_groups(aggregate: FactorScoreAggregation) -> None:
+    groups = aggregate.groups
+    if len(groups) != 3 or len({group.name for group in groups}) != 3:
+        raise ValueError("factor aggregation requires three distinct groups")
+    _aggregation_close(math.fsum(group.budget_pct for group in groups), 100, "group budgets")
+    _aggregation_close(50 + math.fsum(group.contribution for group in groups), aggregate.directional_score, "directional groups")
+    coverage = math.fsum(group.budget_pct * group.coverage_pct / 100 for group in groups)
+    _aggregation_close(coverage, aggregate.coverage_pct, "group coverage")
+    for group in groups:
+        available_budget = group.budget_pct * group.coverage_pct / 100
+        if abs(group.contribution) > available_budget / 2 + _FACTOR_AGGREGATION_TOLERANCE:
+            raise ValueError("factor aggregation group exceeds its directional budget")
+
+
+def _validate_factor_aggregation_factors(factors: list[StandardFactor], aggregate: FactorScoreAggregation) -> None:
+    shares = aggregate.factor_shares
+    if any(share < 0 or share > 100 for share in shares.values()):
+        raise ValueError("factor aggregation invalid factor share")
+    _aggregation_close(math.fsum(shares.values()), 100, "factor share budgets")
+    _aggregation_close(shares.get("risk_pressure"), 0, "risk share")
+    seen: set[str] = set()
+    excluded: set[str] = set()
+    admitted: dict[str, StandardFactor] = {}
+    for factor in factors:
+        if factor.id in shares and factor.id in seen:
+            raise ValueError("factor aggregation duplicate factor identity")
+        seen.add(factor.id)
+        usage = _validate_factor_aggregation_usage(factor, shares)
+        if factor.participates_in_current_score and usage in {"direction", "risk_constraint"}:
+            admitted[factor.id] = factor
+        else:
+            excluded.add(factor.id)
+    if excluded != set(aggregate.excluded_ids) or len(aggregate.excluded_ids) != len(excluded):
+        raise ValueError("factor aggregation excluded identities must match participation")
+    _validate_factor_aggregation_evidence(admitted, aggregate)
+
+
+def _validate_factor_aggregation_usage(factor: StandardFactor, shares: dict[str, float]) -> str:
+    share = shares.get(factor.id, 0)
+    if factor.aggregation_role == "composite":
+        usage = "observation"
+    elif factor.id == "risk_pressure":
+        usage = "risk_constraint"
+    else:
+        usage = "direction" if share > 0 else "excluded"
+    if factor.score_usage != usage:
+        raise ValueError("factor aggregation usage must match identity and role")
+    if factor.participates_in_current_score and (usage in {"excluded", "observation"} or factor.data_nature == "unavailable"):
+        raise ValueError("factor aggregation excluded observation cannot participate")
+    _aggregation_close(factor.score_share_pct, share, "factor share")
+    _aggregation_close(factor.weight, share / 100, "factor weight")
+    return usage
+
+
+def _validate_factor_aggregation_evidence(admitted: dict[str, StandardFactor], aggregate: FactorScoreAggregation) -> None:
+    shares = aggregate.factor_shares
+    coverage = math.fsum(shares[factor_id] for factor_id in admitted)
+    contribution = math.fsum((max(0, min(100, factor.score)) - 50) * shares[factor_id] / 100
+                             for factor_id, factor in admitted.items())
+    _aggregation_close(coverage, aggregate.coverage_pct, "factor coverage")
+    _aggregation_close(50 + contribution, aggregate.directional_score, "factor direction")
+    risk = admitted.get("risk_pressure")
+    penalty = max(0, 50 - max(0, min(100, risk.score))) * 0.25 if risk is not None else 0
+    _aggregation_close(penalty, aggregate.risk_penalty, "risk penalty")
 
 
 class MarketRegimeReport(BaseModel):

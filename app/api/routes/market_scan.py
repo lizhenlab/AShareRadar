@@ -23,11 +23,12 @@ from app.models.market_scan import (
     MarketScanStartResponse,
 )
 from app.models.market_scan_delta import MarketScanDeltaResponse
+from app.models.market_scan_comparison import MarketScanComparisonRequest, MarketScanComparisonResponse
 from app.models.market_scan_polling import MarketScanPollingIdentity
 from app.models.market_scan_screening import (
     MarketBreadthV1,
     MarketScanScreenEvaluateRequest,
-    MarketScanScreenEvaluationV1,
+    MarketScanScreenEvaluationV2,
     normalize_screen_keyword,
 )
 from app.services.market_scan_manager import MarketScanManager
@@ -38,6 +39,7 @@ from app.services.market_scan_probability_store import (
 )
 from app.services.market_scan_export import XLSX_MEDIA_TYPE, MarketScanExportFilters
 from app.services.market_scan_screening import MarketScanScreeningUnavailable
+from app.services.market_scan_comparison import MarketScanComparisonConflict, MarketScanComparisonUnavailable
 
 
 router = APIRouter()
@@ -388,7 +390,7 @@ async def market_scan_breadth(
 
 @router.post(
     "/api/market-scans/{run_id}/screen/evaluate",
-    response_model=MarketScanScreenEvaluationV1,
+    response_model=MarketScanScreenEvaluationV2,
 )
 async def evaluate_market_scan_screen(
     run_id: int,
@@ -396,7 +398,7 @@ async def evaluate_market_scan_screen(
     response: Response,
     scanner: MarketScanManager = Depends(get_market_scanner),
     admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
-) -> MarketScanScreenEvaluationV1:
+) -> MarketScanScreenEvaluationV2:
     response.headers["Cache-Control"] = "no-store"
     return await run_admitted_market_scan_read(admission, lambda: _screening_guard(lambda: scanner.evaluate_screen(run_id, payload)))
 
@@ -410,6 +412,25 @@ async def market_scan_delta(
 ) -> MarketScanDeltaResponse:
     response.headers["Cache-Control"] = "no-store"
     return await run_admitted_market_scan_read(admission, lambda: scanner.delta(run_id))
+
+
+@router.post("/api/market-scans/{run_id}/compare", response_model=MarketScanComparisonResponse)
+async def compare_market_scan_candidates(
+    run_id: int, payload: MarketScanComparisonRequest, response: Response,
+    scanner: MarketScanManager = Depends(get_market_scanner),
+    admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
+) -> MarketScanComparisonResponse:
+    response.headers["Cache-Control"] = "no-store"
+    return await run_admitted_market_scan_read(admission, lambda: _comparison_guard(lambda: scanner.compare_candidates(run_id, payload)))
+
+
+def _comparison_guard(call: Callable[[], T]) -> T:
+    try:
+        return artifact_integrity_guard(call)
+    except MarketScanComparisonConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc), headers={"Cache-Control": "no-store"}) from exc
+    except MarketScanComparisonUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc), headers={"Cache-Control": "no-store"}) from exc
 
 
 def _screening_guard(call: Callable[[], T]) -> T:

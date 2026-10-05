@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from typing import Any, Callable, cast
 
 import pytest
@@ -18,7 +19,7 @@ from app.market_scan_screening import (
     screen_spec_from_market_scan_filters,
 )
 from app.models.discovery import DiscoveryCriteria, DiscoverySort
-from app.models.market_scan import MarketScanResultItem, MarketScanResultStatus, MarketScanRun
+from app.models.market_scan import MarketScanResultItem, MarketScanResultPage, MarketScanResultStatus, MarketScanRun
 from app.models.market_scan_delta import (
     MarketScanDeltaCohort,
     MarketScanDeltaResponse,
@@ -28,7 +29,7 @@ from app.models.market_scan_delta import (
 from app.models.market_scan_screening import (
     MarketBreadthV1,
     MarketScanScreenEvaluateRequest,
-    MarketScanScreenEvaluationV1,
+    MarketScanScreenEvaluationV2,
 )
 from app.repositories.market_scan_screening import (
     MarketScanBreadthRow,
@@ -57,26 +58,21 @@ class _FrozenRepository:
         self.breadth_calls.append(run_id)
         return self.run, [_breadth_projection(item) for item in self.rows]
 
-    def market_scan_screening_evaluation_snapshot(
-        self,
-        run_id: int,
-    ) -> tuple[MarketScanRun, list[MarketScanScreeningRow]]:
+    @contextmanager
+    def verified_market_scan_read(self, run_id: int):
         self.evaluation_calls.append(run_id)
-        return self.run, [_evaluation_projection(item) for item in self.rows]
+        yield self
 
-    def market_scan_screening_result_items(
-        self,
-        run_id: int,
-        symbols: list[str] | tuple[str, ...],
-        *,
-        expected_run: MarketScanRun,
-    ) -> list[MarketScanResultItem]:
-        assert run_id == self.run.id
-        assert expected_run is self.run
-        selected = tuple(symbols)
+    def screening_rows(self) -> list[MarketScanScreeningRow]:
+        return [_evaluation_projection(item) for item in self.rows]
+
+    def results_page(self, **query: object) -> MarketScanResultPage:
+        selected = tuple(cast(list[str], query["symbols"]))
         self.hydrated_symbols.append(selected)
         by_symbol = {item.symbol: item for item in self.rows}
-        return [by_symbol[symbol] for symbol in selected]
+        items = [by_symbol[symbol] for symbol in selected]
+        return MarketScanResultPage.model_construct(run=self.run, items=items, total=len(items),
+                                    page=1, page_size=len(items), page_count=1)
 
 
 def test_breadth_is_complete_null_safe_and_content_addressed() -> None:
@@ -253,7 +249,7 @@ def test_screen_evaluation_contract_rejects_resealed_inconsistent_payloads(
     _reseal(payload)
 
     with pytest.raises(ValueError, match=message):
-        MarketScanScreenEvaluationV1.model_validate(payload)
+        MarketScanScreenEvaluationV2.model_validate(payload)
 
 
 def test_screen_evaluation_contract_rejects_unsealed_payload_mutation() -> None:
@@ -264,7 +260,7 @@ def test_screen_evaluation_contract_rejects_unsealed_payload_mutation() -> None:
     payload["funnel"][0]["label"] = "伪造筛选标签"
 
     with pytest.raises(ValueError, match="canonical_digest"):
-        MarketScanScreenEvaluationV1.model_validate(payload)
+        MarketScanScreenEvaluationV2.model_validate(payload)
 
 
 def _reseal(payload: dict[str, Any]) -> None:

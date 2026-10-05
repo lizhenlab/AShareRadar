@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from functools import lru_cache
@@ -98,9 +97,14 @@ from app.services.market_scan_probability_research import (
 )
 from app.services.market_scan_probability_source import (
     is_current_writable_production_score_contract,
-    is_registered_production_score_contract,
 )
-from app.services.market_scan_score_contract import stable_score_spec_hash
+from app.services.market_scan_score_tracking import (
+    evaluate_market_scan_score_tracking as evaluate_market_scan_score_tracking,
+)
+from app.services.market_scan_evaluation_source import (
+    frozen_result_raw_score, frozen_score_contract, frozen_source_evidence_digest,
+    portable_database_label, readonly_evaluation_connection,
+)
 from app.services.trading_calendar import next_trade_dates
 from app.repositories.market_scan_mapping import decode_result_payload
 from app.utils.clock import utc_now
@@ -223,7 +227,7 @@ def evaluate_market_scan_rankings(
 ) -> dict[str, object]:
     settings = config or EvaluationConfig()
     path = Path(database_path).resolve()
-    with _readonly_connection(path) as conn:
+    with readonly_evaluation_connection(path) as conn:
         runs = _published_runs(conn, mode=mode, run_ids=run_ids)
         snapshots_list: list[_RunSnapshot] = []
         run_failures: list[dict[str, object]] = []
@@ -249,7 +253,7 @@ def evaluate_market_scan_shadow_rankings(
     """Evaluate a candidate ranking reconstructed without changing production rows."""
     settings = config or EvaluationConfig()
     path = Path(database_path).resolve()
-    with _readonly_connection(path) as conn:
+    with readonly_evaluation_connection(path) as conn:
         production_runs = _published_runs(conn, mode=mode, run_ids=run_ids)
         runs = _deduplicate_shadow_sessions(production_runs)
         evaluated, run_failures = _evaluate_shadow_runs(conn, runs, settings, variant)
@@ -1630,7 +1634,7 @@ def _report_source(
     ranking_source: str,
 ) -> dict[str, object]:
     return {
-        "database": _portable_database_label(path),
+        "database": portable_database_label(path),
         "published_run_count": len(runs),
         "eligible_run_count": eligible_runs,
         "independent_session_count": len({item.quote_date for item in snapshots if item.observations}),
@@ -1658,24 +1662,6 @@ def _report_limitations() -> list[str]:
         "多候选比较使用独立交易日的配对净超额差异并实际执行BH-FDR；PBO与DSR未计算时明确标记不可用。",
         "报告不会自动修改生产评分权重；规则调整必须创建新的 rule_version。",
     ]
-
-
-def _portable_database_label(path: Path) -> str:
-    try:
-        return path.relative_to(Path.cwd().resolve()).as_posix()
-    except ValueError:
-        return str(path)
-
-
-@contextmanager
-def _readonly_connection(path: Path) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
-    try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON")
-        yield conn
-    finally:
-        conn.close()
 
 
 def _published_runs(
@@ -2240,7 +2226,7 @@ def _observation_from_rows(
         liquidity_bucket=_liquidity_bucket(result["amount"]),
         scan_time_bucket=_scan_time_bucket(run["as_of"], str(run["mode"] or "official")),
         rank=int(result["rank"]),
-        raw_score=_result_raw_score(result),
+        raw_score=frozen_result_raw_score(result),
         amount=amount,
         turnover_rate=float(result["turnover_rate"]) if result["turnover_rate"] is not None else None,
         quality_bucket=_quality_bucket(result["data_quality_score"]),
@@ -2257,8 +2243,8 @@ def _observation_from_rows(
             is_st=is_st,
             is_new=is_new,
         ),
-        source_evidence_digest=_source_evidence_digest(result),
-        production_score_contract=_probability_score_contract(result),
+        source_evidence_digest=frozen_source_evidence_digest(result),
+        production_score_contract=frozen_score_contract(result),
     )
 
 
@@ -2349,14 +2335,6 @@ def _probability_label_settings(config: EvaluationConfig) -> ProbabilityLabelCon
         execution_notional=config.execution_notional,
         max_daily_participation_rate=config.max_daily_participation_rate,
     )
-
-
-def _result_raw_score(result: sqlite3.Row) -> float:
-    if result["raw_score"] is not None:
-        return float(result["raw_score"])
-    if result["score"] is not None:
-        return float(result["score"])
-    return -float(result["rank"])
 
 
 def _execution_outcomes(
@@ -2851,10 +2829,11 @@ def _monotonicity_record(
     horizon: int,
     config: EvaluationConfig,
 ) -> dict[str, object]:
+    paired_rows = _paired_rank_rows(rows, horizon, config, deciles=False)
     summaries = [
-        _band_return_summary("1-20", rows, horizon, 1, 20),
-        _band_return_summary("21-50", rows, horizon, 21, 50),
-        _band_return_summary("51-100", rows, horizon, 51, 100),
+        _band_return_summary("1-20", paired_rows, horizon, 1, 20),
+        _band_return_summary("21-50", paired_rows, horizon, 21, 50),
+        _band_return_summary("51-100", paired_rows, horizon, 51, 100),
     ]
     enough = all(
         cast(int, item["sample_size"]) >= config.minimum_sample_size
@@ -2869,8 +2848,39 @@ def _monotonicity_record(
         "horizon_trading_days": horizon,
         "status": "ok" if enough else "insufficient_data",
         "monotonic": monotonic,
+        "comparison_basis": "same-session-frozen-groups-with-coverage",
+        "excluded_session_count": len({item.run_id for item in rows}) - len({item.run_id for item in paired_rows}),
         "bands": summaries,
     }
+
+
+def _paired_rank_rows(
+    rows: tuple[_Observation, ...], horizon: int, config: EvaluationConfig, *, deciles: bool,
+) -> tuple[_Observation, ...]:
+    """Choose comparison dates before averaging any band's available labels."""
+    sizes = Counter(item.run_id for item in rows)
+    groups: dict[int, dict[int, list[_Observation]]] = defaultdict(lambda: defaultdict(list))
+    for item in rows:
+        band = _comparison_rank_band(item.rank, sizes[item.run_id], deciles=deciles)
+        if band is not None:
+            groups[item.run_id][band].append(item)
+    required = range(1, 11) if deciles else range(1, 4)
+    admitted = {
+        run_id for run_id, bands in groups.items()
+        if all(_rank_band_covered(bands.get(band, ()), horizon, config.complete_day_coverage) for band in required)
+    }
+    return tuple(item for item in rows if item.run_id in admitted)
+
+
+def _comparison_rank_band(rank: int, size: int, *, deciles: bool) -> int | None:
+    if deciles:
+        return min(10, math.ceil(rank / max(1, size) * 10))
+    return 1 if rank <= 20 else 2 if rank <= 50 else 3 if rank <= 100 else None
+
+
+def _rank_band_covered(rows: Sequence[_Observation], horizon: int, coverage: float) -> bool:
+    available = sum(horizon in item.returns and math.isfinite(item.returns[horizon]) for item in rows)
+    return bool(rows) and available / len(rows) >= coverage
 
 
 def _band_return_summary(
@@ -2922,7 +2932,8 @@ def _decile_record(
     horizon: int,
     config: EvaluationConfig,
 ) -> dict[str, object]:
-    bands = [_decile_band(rows, run_sizes, horizon, decile) for decile in range(1, 11)]
+    paired_rows = _paired_rank_rows(rows, horizon, config, deciles=True)
+    bands = [_decile_band(paired_rows, run_sizes, horizon, decile) for decile in range(1, 11)]
     enough = all(_decile_band_sufficient(item, config) for item in bands)
     values = [cast(float, item["average_return"]) for item in bands] if enough else []
     return {
@@ -2932,6 +2943,8 @@ def _decile_record(
         "horizon_trading_days": horizon,
         "status": "ok" if enough else "insufficient_data",
         "monotonic": _descending(values) if enough else None,
+        "comparison_basis": "same-session-frozen-groups-with-coverage",
+        "excluded_session_count": len({item.run_id for item in rows}) - len({item.run_id for item in paired_rows}),
         "bands": bands,
     }
 
@@ -3143,32 +3156,6 @@ def _continuous_trend_component(
         return current
     legacy = components.get("rank_refinement")
     return legacy if isinstance(legacy, Mapping) else None
-
-
-def _source_evidence_digest(result: sqlite3.Row) -> str | None:
-    if "metrics_json" not in result.keys():
-        return None
-    _metrics, details = decode_result_payload(result["metrics_json"])
-    components = details.get("components")
-    dimensions = components.get("score_dimensions") if isinstance(components, dict) else None
-    evidence = dimensions.get("point_in_time_evidence") if isinstance(dimensions, dict) else None
-    if not isinstance(evidence, dict) or not verify_market_scan_point_in_time_evidence(evidence):
-        return None
-    digest = evidence.get("payload_digest") if isinstance(evidence, dict) else None
-    return digest if isinstance(digest, str) and len(digest) == 64 else None
-
-
-def _probability_score_contract(result: sqlite3.Row) -> tuple[str, str] | None:
-    if "metrics_json" not in result.keys():
-        return None
-    _metrics, details = decode_result_payload(result["metrics_json"])
-    spec, digest = details.get("score_spec"), details.get("score_spec_hash")
-    if not isinstance(spec, Mapping) or not isinstance(digest, str):
-        return None
-    rule = spec.get("rule_version")
-    if not isinstance(rule, str) or not is_registered_production_score_contract(rule, digest):
-        return None
-    return (rule, digest) if stable_score_spec_hash(spec) == digest else None
 
 
 def _finite_row_values(row: sqlite3.Row, names: Sequence[str]) -> dict[str, float]:
@@ -3524,6 +3511,7 @@ __all__ = [
     "EVALUATION_SCHEMA_VERSION",
     "EvaluationConfig",
     "evaluate_market_scan_rankings",
+    "evaluate_market_scan_score_tracking",
     "evaluate_market_scan_shadow_comparison",
     "evaluate_market_scan_shadow_rankings",
 ]

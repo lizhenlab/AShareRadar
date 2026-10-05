@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -20,7 +20,6 @@ from app.models.market_scan import (
     MarketScanPublicationDiagnostics,
     MarketScanProductionScoreContract,
     MarketScanResultWrite,
-    MarketScanRun,
     MarketScanScoreDistributionObservation,
     MarketScanSeed,
 )
@@ -591,11 +590,6 @@ class SQLiteCache:
     def market_scan_screening_breadth_snapshot(self, run_id: int):
         return self.market_scan_repo.screening_breadth_snapshot(run_id)
 
-    def market_scan_screening_evaluation_snapshot(self, run_id: int):
-        return self.market_scan_repo.screening_evaluation_snapshot(run_id)
-
-    def market_scan_screening_result_items(self, run_id: int, symbols: Sequence[str], *, expected_run: MarketScanRun | None = None):
-        return self.market_scan_repo.screening_result_items(run_id, symbols, expected_run=expected_run)
 
     def save_plate_rank(self, rows: list[PlateItem]) -> None:
         self.market_data_repo.save_plate_rank(rows)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 from app.models.research import (
@@ -19,6 +20,7 @@ from app.services.research_factors import (
     _factor_score_impact,
 )
 from app.services.scoring import bounded_int
+from app.services.research_factor_aggregation import FACTOR_SHARES
 
 
 @dataclass(frozen=True)
@@ -63,16 +65,22 @@ def trend_points(analysis: AnalysisResult) -> list[AlphaEvidencePoint]:
 
 def overview_factor_points(insights: StockInsightBundle) -> list[AlphaEvidencePoint]:
     return [
-        AlphaEvidencePoint(
-            source="五维诊断",
-            title=factor.name,
-            impact=round((factor.score - 50) / 2),
-            level=factor.level,
-            reason=factor.summary,
-        )
+        _overview_factor_alpha_point(factor)
         for factor in insights.overview.factors
         if factor.score_available and factor.participates_in_total_score
+        and factor.data_nature != "unavailable"
     ]
+
+
+def _overview_factor_alpha_point(factor) -> AlphaEvidencePoint:
+    impact = round((factor.score - 50) / 2)
+    is_constraint = factor.aggregation_role == "risk_constraint"
+    if is_constraint:
+        impact = min(0, impact)
+    return AlphaEvidencePoint(
+        source="五维诊断", title=factor.name, impact=impact,
+        level=impact_level(impact) if is_constraint else factor.level, reason=factor.summary,
+    )
 
 
 def rule_match_points(insights: StockInsightBundle) -> list[AlphaEvidencePoint]:
@@ -104,35 +112,68 @@ def abnormal_event_points(insights: StockInsightBundle) -> list[AlphaEvidencePoi
 def factor_lab_points(factor_lab: FactorLabReport | None) -> list[AlphaEvidencePoint]:
     if not factor_lab:
         return []
-    return [_factor_alpha_point(factor) for factor in factor_lab.factors if _factor_has_alpha_signal(factor)]
+    counts = Counter(factor.id for factor in factor_lab.factors)
+    return [_factor_alpha_point(factor) for factor in factor_lab.factors
+            if counts[factor.id] == 1 and _factor_has_alpha_signal(factor)]
 
 
 def _factor_has_alpha_signal(factor) -> bool:
-    return factor.score >= 62 or factor.score <= 45
+    return bool(
+        factor.participates_in_current_score
+        and factor.id in FACTOR_SHARES
+        and factor.score_usage not in {"excluded", "observation"}
+        and factor.aggregation_role != "composite"
+        and factor.data_nature != "unavailable"
+        and (factor.score >= 62 or factor.score <= 45)
+    )
 
 
 def _factor_alpha_point(factor) -> AlphaEvidencePoint:
     context = _factor_alpha_point_context(factor)
+    impact = bounded_int(context.score_impact + context.calibration_impact, -18, 18, round_value=True)
     return AlphaEvidencePoint(
         source="因子实验室",
         title=factor.name,
-        impact=bounded_int(context.score_impact + context.calibration_impact, -18, 18, round_value=True),
-        level=factor.level,
-        reason=_factor_alpha_reason(factor),
+        impact=impact,
+        level=impact_level(impact) if factor.id == "risk_pressure" else factor.level,
+        reason=_admitted_factor_alpha_reason(factor),
     )
 
 
 def _factor_alpha_point_context(factor) -> FactorAlphaPointContext:
+    current_impact = round((factor.score - 50) / 2)
+    if factor.id == "risk_pressure":
+        return FactorAlphaPointContext(score_impact=min(0, current_impact), calibration_impact=0)
     return FactorAlphaPointContext(
-        score_impact=_factor_score_impact(factor),
+        score_impact=_factor_score_impact(factor) if _has_eligible_factor_calibration(factor) else current_impact,
         calibration_impact=_eligible_factor_calibration_impact(factor),
     )
 
 
 def _eligible_factor_calibration_impact(factor) -> int:
-    if factor.calibration and factor.calibration.sample_count >= 5:
+    if _has_eligible_factor_calibration(factor) and factor.calibration.sample_count >= 5:
         return _factor_calibration_impact(factor.calibration)
     return 0
+
+
+def _has_eligible_factor_calibration(factor) -> bool:
+    calibration = factor.calibration
+    version = factor.score_rule_version
+    return bool(
+        calibration
+        and calibration.availability == "available"
+        and calibration.participates_in_historical_aggregate
+        and isinstance(version, str) and version.strip()
+        and calibration.score_rule_version == version
+    )
+
+
+def _admitted_factor_alpha_reason(factor) -> str:
+    if factor.id == "risk_pressure":
+        return f"{factor.value}；风险约束仅保留扣分，不作为看多证据。"
+    if _has_eligible_factor_calibration(factor):
+        return _factor_alpha_reason(factor)
+    return f"{factor.value}；仅使用当前观测，历史校准未参与加权。"
 
 
 def regime_points(market_regime: MarketRegimeReport | None) -> list[AlphaEvidencePoint]:

@@ -573,6 +573,10 @@ body.query-panel-collapsed .query-panel .layout-toggle::before {
 }
 
 @media (min-width: 600px) and (max-width: 820px) {
+  .market-scan-stock-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .market-scan-table tr.market-scan-result-row {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -650,7 +654,7 @@ body.query-panel-collapsed .query-panel .layout-toggle::before {
   }
 
   .market-scan-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
   #marketScanRetry:not([hidden]),

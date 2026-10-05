@@ -7,7 +7,6 @@ splits, fits a regularised model and emits JSON-compatible replay evidence.
 
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
@@ -18,10 +17,9 @@ import json
 import math
 from typing import Literal, cast
 
-import numpy as np
-from numpy.typing import NDArray
-
 import app.services.market_scan_probability_metrics as probability_metrics
+import app.services.market_scan_probability_estimators as probability_estimators
+import app.services.market_scan_probability_values as probability_values
 from app.models.joint_execution_probability import DecisionTimeJointExecutionProbabilityEvidence
 from app.services.joint_execution_probability import (
     joint_execution_probability_action_qualified,
@@ -35,10 +33,6 @@ from app.utils.clock import utc_now
 
 
 PROBABILITY_SCHEMA_VERSION = "market-scan-shadow-probability-v4"
-PROBABILITY_MODEL_VERSION = "shadow-up-probability-logit-l2-v2-convergence-required"
-PROBABILITY_CALIBRATOR_VERSION = "shadow-up-probability-platt-v2-convergence-required"
-PROBABILITY_ISOTONIC_CALIBRATOR_VERSION = "shadow-up-probability-isotonic-pav-v1"
-PROBABILITY_BASELINE_VERSION = probability_metrics.PROBABILITY_BASELINE_VERSION
 PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v4-target-semideviation"
 PREVIOUS_PROBABILITY_FEATURE_VERSION = "full-market-point-in-time-features-v3-liquidity-medium"
 PROBABILITY_LABEL_VERSION = "market-scan-upside-label-v4-execution-phase-separated"
@@ -107,33 +101,6 @@ _EVIDENCE_DIGEST_FIELDS = frozenset(
         "baseline_digest",
     }
 )
-
-# Compatibility aliases keep both the original public surface and historically
-# imported private helpers available while calculation ownership lives in the
-# dependency-free metrics module.
-evaluate_probability_predictions = probability_metrics.evaluate_probability_predictions
-fit_empirical_bayes_baseline = probability_metrics.fit_empirical_bayes_baseline
-_metric_reference_probabilities = probability_metrics.metric_reference_probabilities
-_brier_scores = probability_metrics.brier_scores
-_expected_calibration_error = probability_metrics.expected_calibration_error
-_validated_metric_rows = probability_metrics.validated_metric_rows
-_calibration_bins = probability_metrics.calibration_bins
-_bins_are_monotonic = probability_metrics.bins_are_monotonic
-_log_loss = probability_metrics.log_loss
-_auc = probability_metrics.auc
-_date_block_bootstrap_ci = probability_metrics.date_block_bootstrap_ci
-_validated_scores_and_labels = probability_metrics.validated_scores_and_labels
-_quantile_boundaries = probability_metrics.quantile_boundaries
-_percentile = probability_metrics.percentile
-probability_date_block_bootstrap_ci = probability_metrics.date_block_bootstrap_ci
-
-
-class ProbabilityReplayError(ValueError):
-    """Raised when persisted probability evidence is invalid or cannot replay."""
-
-
-class ProbabilityModelConvergenceError(ValueError):
-    """Fail-closed signal for an optimizer that did not converge."""
 
 
 _VERIFIED_AUTHORIZATION_SEAL = object()
@@ -335,7 +302,7 @@ def _probability_cost_contract(
 
 def _probability_model_contract(config: ProbabilityConfig) -> dict[str, object]:
     return {
-        "version": PROBABILITY_MODEL_VERSION,
+        "version": probability_estimators.PROBABILITY_MODEL_VERSION,
         "algorithm": "standardized_l2_logistic_regression_newton",
         "l2_strength": config.l2_strength,
         "maximum_iterations": config.maximum_iterations,
@@ -345,19 +312,19 @@ def _probability_model_contract(config: ProbabilityConfig) -> dict[str, object]:
 
 def _probability_calibrator_contract(config: ProbabilityConfig) -> dict[str, object]:
     return {
-        "version": PROBABILITY_CALIBRATOR_VERSION,
+        "version": probability_estimators.PROBABILITY_CALIBRATOR_VERSION,
         "algorithm": "independent_platt_sigmoid",
         "primary": True,
         "candidate_registry": [
             {
                 "id": "platt",
-                "version": PROBABILITY_CALIBRATOR_VERSION,
+                "version": probability_estimators.PROBABILITY_CALIBRATOR_VERSION,
                 "algorithm": "independent_platt_sigmoid",
                 "minimum_calibration_sessions": config.minimum_calibration_sessions,
             },
             {
                 "id": "isotonic",
-                "version": PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
+                "version": probability_estimators.PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
                 "algorithm": "weighted_pool_adjacent_violators",
                 "minimum_calibration_sessions": config.minimum_isotonic_calibration_sessions,
                 "selection_policy": "comparison_only_never_automatic",
@@ -389,7 +356,7 @@ def build_probability_contract(config: ProbabilityConfig) -> dict[str, object]:
         "model": _probability_model_contract(config),
         "calibrator": _probability_calibrator_contract(config),
         "baseline": {
-            "version": PROBABILITY_BASELINE_VERSION,
+            "version": probability_metrics.PROBABILITY_BASELINE_VERSION,
             "bin_count": config.empirical_bayes_bin_count,
             "prior_strength": config.empirical_bayes_prior_strength,
         },
@@ -439,7 +406,7 @@ def fit_shadow_probability(
             return _insufficient_evidence(prepared, config, generated_at, tagged, split=split)
         try:
             artifacts = _fit_artifacts(partitions, prepared.feature_names, config)
-        except ProbabilityModelConvergenceError as exc:
+        except probability_estimators.ProbabilityModelConvergenceError as exc:
             return _insufficient_evidence(
                 prepared,
                 config,
@@ -524,7 +491,7 @@ def _deployment_estimate(
         return estimate
     payload = deployment.payload
     if not _deployment_binding_matches(payload, evidence):
-        raise ProbabilityReplayError("deployment estimator 与研究证据绑定冲突")
+        raise probability_values.ProbabilityReplayError("deployment estimator 与研究证据绑定冲突")
     if not _deployment_is_fresh(payload, as_of):
         estimate = _null_estimate(evidence, sample_id)
         estimate["deployment_status"] = "deployment_estimator_stale"
@@ -533,15 +500,15 @@ def _deployment_estimate(
     model = _object_mapping(payload.get("model"), "deployment.model")
     calibrator = _object_mapping(payload.get("calibrator"), "deployment.calibrator")
     baseline = _object_mapping(payload.get("empirical_bayes_baseline"), "deployment.baseline")
-    raw = _model_probability(model, features)
-    probability = _platt_probability(calibrator, raw)
+    raw = probability_estimators.probability_model_probability(model, features)
+    probability = probability_estimators.probability_platt_probability(calibrator, raw)
     estimate = _deployment_estimate_payload(
         evidence,
         payload,
         sample_id,
         probability,
         raw,
-        _baseline_probability(baseline, raw),
+        probability_estimators.probability_baseline_probability(baseline, raw),
     )
     estimate["deployment_artifact_digest"] = deployment.integrity_digest
     return estimate
@@ -555,7 +522,7 @@ def _deployment_estimate_payload(
     raw: float,
     baseline: float,
 ) -> dict[str, object]:
-    offset = _number_sequence(
+    offset = probability_values.number_sequence(
         deployment.get("calibration_offset_ci_95"),
         "deployment.calibration_offset_ci_95",
     )
@@ -583,9 +550,9 @@ def _validate_prediction_features_only(
         return
     names = model.get("feature_names")
     if not isinstance(names, list) or sorted(features) != names:
-        raise ProbabilityReplayError("上涨概率新样本 feature schema 与研究模型不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率新样本 feature schema 与研究模型不一致")
     for name in names:
-        _finite_number(features[str(name)], f"features.{name}")
+        probability_values.finite_number(features[str(name)], f"features.{name}")
 
 
 def probability_selection_qualified(evidence: Mapping[str, object]) -> bool:
@@ -671,11 +638,11 @@ def verify_shadow_probability_evidence(
     """Verify registered contracts, hashes, predictions and optionally full refit replay."""
     if evidence.get("schema_version") == "market-scan-joint-execution-probability-v1":
         if samples is not None:
-            raise ProbabilityReplayError("joint execution probability requires its opaque learning corpus for refit")
+            raise probability_values.ProbabilityReplayError("joint execution probability requires its opaque learning corpus for refit")
         try:
             return _joint_execution_probability_verifier()(evidence)
         except (TypeError, ValueError) as exc:
-            raise ProbabilityReplayError("联合执行概率证据结构损坏") from exc
+            raise probability_values.ProbabilityReplayError("联合执行概率证据结构损坏") from exc
     try:
         _verify_evidence_digest(evidence)
         config = _config_from_evidence(evidence)
@@ -689,11 +656,11 @@ def verify_shadow_probability_evidence(
         if samples is not None:
             rebuilt = fit_shadow_probability(samples, config=config, generated_at=str(evidence.get("generated_at") or ""))
             if rebuilt != dict(evidence):
-                raise ProbabilityReplayError("上涨概率完整输入重放不一致")
-    except ProbabilityReplayError:
+                raise probability_values.ProbabilityReplayError("上涨概率完整输入重放不一致")
+    except probability_values.ProbabilityReplayError:
         raise
     except (KeyError, TypeError, ValueError) as exc:
-        raise ProbabilityReplayError("上涨概率证据结构损坏") from exc
+        raise probability_values.ProbabilityReplayError("上涨概率证据结构损坏") from exc
     return True
 
 
@@ -709,7 +676,7 @@ def _joint_execution_probability_verifier() -> Callable[[Mapping[str, object]], 
     module = import_module("app.services.market_scan_joint_execution_probability")
     verifier = getattr(module, "verify_joint_execution_probability_evidence", None)
     if not callable(verifier):
-        raise ProbabilityReplayError("联合执行概率 verifier 不可用")
+        raise probability_values.ProbabilityReplayError("联合执行概率 verifier 不可用")
     return cast(Callable[[Mapping[str, object]], bool], verifier)
 
 
@@ -724,7 +691,7 @@ def _has_current_probability_contract(evidence: Mapping[str, object]) -> bool:
     label = contract.get("label") if isinstance(contract, Mapping) else None
     return bool(
         evidence.get("schema_version") == PROBABILITY_SCHEMA_VERSION
-        and evidence.get("model_version") == PROBABILITY_MODEL_VERSION
+        and evidence.get("model_version") == probability_estimators.PROBABILITY_MODEL_VERSION
         and evidence.get("feature_version") == PROBABILITY_FEATURE_VERSION
         and evidence.get("label_version") == PROBABILITY_LABEL_VERSION
         and isinstance(split, Mapping)
@@ -841,10 +808,10 @@ def verify_probability_filter_authorization_artifact(
         ):
             raise ValueError("authorization content address 不一致")
         _verify_filter_authorization_payload(payload, evidence)
-    except ProbabilityReplayError:
+    except probability_values.ProbabilityReplayError:
         raise
     except (KeyError, TypeError, ValueError) as exc:
-        raise ProbabilityReplayError("概率筛选 authorization 原始证据无效") from exc
+        raise probability_values.ProbabilityReplayError("概率筛选 authorization 原始证据无效") from exc
     encoded_payload = json.dumps(
         _canonical_json_value(payload),
         ensure_ascii=False,
@@ -870,10 +837,10 @@ def fit_probability_deployment_estimator(
     """Refit a standalone estimator only after strict OOS/filter authorization."""
 
     if not isinstance(authorization, VerifiedProbabilityFilterAuthorization):
-        raise ProbabilityReplayError("deployment refit 需要 strict verified authorization")
+        raise probability_values.ProbabilityReplayError("deployment refit 需要 strict verified authorization")
     verify_shadow_probability_evidence(evidence, samples)
     if not probability_filter_qualified(evidence, authorization):
-        raise ProbabilityReplayError("deployment refit 的 OOS/filter gates 未通过")
+        raise probability_values.ProbabilityReplayError("deployment refit 的 OOS/filter gates 未通过")
     generated = _validated_aware_timestamp(generated_at, "deployment.generated_at")
     evidence_generated = _validated_aware_timestamp(
         str(evidence.get("generated_at") or ""),
@@ -884,17 +851,17 @@ def fit_probability_deployment_estimator(
         "authorization.generated_at",
     )
     if generated < max(evidence_generated, authorization_generated):
-        raise ProbabilityReplayError("deployment generated_at 早于研究或授权证据")
+        raise probability_values.ProbabilityReplayError("deployment generated_at 早于研究或授权证据")
     config = _config_from_evidence(evidence)
     prepared = _prepare_study(samples, config)
     split = _deployment_refit_split(prepared.eligible, config)
     generated_market_date = generated.astimezone(timezone(timedelta(hours=8))).date()
     if date.fromisoformat(split.calibration_dates[-1]) > generated_market_date:
-        raise ProbabilityReplayError("deployment calibration 尚未成熟")
+        raise probability_values.ProbabilityReplayError("deployment calibration 尚未成熟")
     partitions = _partition_samples(prepared.eligible, split)
     reasons = _class_diversity_reasons(partitions)
     if reasons:
-        raise ProbabilityReplayError(f"deployment refit 数据不足：{','.join(reasons)}")
+        raise probability_values.ProbabilityReplayError(f"deployment refit 数据不足：{','.join(reasons)}")
     artifacts = _fit_artifacts(partitions, prepared.feature_names, config)
     calibration_predictions = _deployment_calibration_predictions(
         partitions["calibration"],
@@ -955,7 +922,7 @@ def verify_probability_deployment_artifact(
     """Full-refit replay and freshness verification for one deployment artifact."""
 
     if not isinstance(authorization, VerifiedProbabilityFilterAuthorization):
-        raise ProbabilityReplayError("deployment verifier 缺少 strict authorization")
+        raise probability_values.ProbabilityReplayError("deployment verifier 缺少 strict authorization")
     try:
         generated_at, payload, digest = _verified_deployment_envelope(artifact)
         rebuilt = fit_probability_deployment_estimator(
@@ -968,10 +935,10 @@ def verify_probability_deployment_artifact(
             raise ValueError("deployment artifact 无法由完整 corpus 确定性重放")
         if not _deployment_is_fresh(payload, as_of):
             raise ValueError("deployment artifact 已过期或存在未来时间偏差")
-    except ProbabilityReplayError:
+    except probability_values.ProbabilityReplayError:
         raise
     except (KeyError, TypeError, ValueError) as exc:
-        raise ProbabilityReplayError("deployment estimator artifact 无效") from exc
+        raise probability_values.ProbabilityReplayError("deployment estimator artifact 无效") from exc
     encoded = json.dumps(
         _canonical_json_value(payload),
         ensure_ascii=False,
@@ -1078,7 +1045,7 @@ def _predictions_bind_evidence(
             return False
         try:
             return verify_shadow_probability_evidence(evidence)
-        except ProbabilityReplayError:
+        except probability_values.ProbabilityReplayError:
             return False
     if not _EVIDENCE_DIGEST_FIELDS - {"predictions"} <= evidence.keys():
         return False
@@ -1106,20 +1073,20 @@ def _verify_authorization_calibration(
     inputs = _prediction_metric_inputs(predictions)
     series = _prediction_bootstrap_series(inputs)
     seed = str(evidence.get("input_digest") or "")
-    expected_brier = _date_block_bootstrap_ci(
+    expected_brier = probability_metrics.date_block_bootstrap_ci(
         series["brier_improvement_vs_reference"],
         seed + ":brier-improvement",
         config.bootstrap_samples,
         block_length_sessions=config.target_session_offset,
     )
-    expected_log = _date_block_bootstrap_ci(
+    expected_log = probability_metrics.date_block_bootstrap_ci(
         series["log_loss_improvement_vs_reference"],
         seed + ":log-loss-improvement",
         config.bootstrap_samples,
         block_length_sessions=config.target_session_offset,
     )
     probabilities, _baseline, outcomes, dates, references = inputs
-    metrics = evaluate_probability_predictions(
+    metrics = probability_metrics.evaluate_probability_predictions(
         probabilities,
         outcomes,
         dates,
@@ -1235,8 +1202,8 @@ def _selected_candidate_session_statistics(
     for raw in predictions:
         row = _strict_mapping(raw, "prediction")
         outcome = _integer(row.get("outcome"), "prediction.outcome")
-        probability = _finite_number(row.get("probability"), "prediction.probability")
-        reference = _finite_number(row.get("reference_base_rate"), "prediction.reference_base_rate")
+        probability = probability_values.finite_number(row.get("probability"), "prediction.probability")
+        reference = probability_values.finite_number(row.get("reference_base_rate"), "prediction.reference_base_rate")
         grouped[str(row.get("session_date") or "")].append((outcome - reference) ** 2 - (outcome - probability) ** 2)
     return [(day, sum(values) / len(values)) for day, values in sorted(grouped.items())]
 
@@ -1250,7 +1217,7 @@ def _deployment_refit_split(
     calibration_start = len(dates) - config.minimum_calibration_sessions
     train_end = calibration_start - gap
     if train_end < config.minimum_train_sessions or calibration_start >= len(dates):
-        raise ProbabilityReplayError("deployment refit 缺少独立后置 calibration block")
+        raise probability_values.ProbabilityReplayError("deployment refit 缺少独立后置 calibration block")
     split = GroupedWalkForwardSplit(
         train_dates=dates[:train_end],
         train_gap_dates=dates[train_end:calibration_start],
@@ -1259,7 +1226,7 @@ def _deployment_refit_split(
         test_dates=(),
     )
     if split.train_dates[-1] >= split.calibration_dates[0]:
-        raise ProbabilityReplayError("deployment calibration 与 training overlap")
+        raise probability_values.ProbabilityReplayError("deployment calibration 与 training overlap")
     return split
 
 
@@ -1272,10 +1239,10 @@ def _deployment_calibration_predictions(
         {
             "sample_id": item.sample_id,
             "session_date": item.session_date,
-            "outcome": _required_label(item),
-            "raw_probability": (raw := _model_probability(artifacts.model, item.features)),
-            "probability": _platt_probability(artifacts.calibrator, raw),
-            "baseline_probability": _baseline_probability(artifacts.baseline, raw),
+            "outcome": probability_estimators.probability_required_label(item),
+            "raw_probability": (raw := probability_estimators.probability_model_probability(artifacts.model, item.features)),
+            "probability": probability_estimators.probability_platt_probability(artifacts.calibrator, raw),
+            "baseline_probability": probability_estimators.probability_baseline_probability(artifacts.baseline, raw),
             "feature_vector_digest": stable_probability_hash(
                 {name: float(item.features[name]) for name in feature_names},
             ),
@@ -1292,11 +1259,11 @@ def _deployment_calibration_offset_ci(
     series = [
         (
             str(item["session_date"]),
-            _integer(item["outcome"], "outcome") - _finite_number(item["probability"], "probability"),
+            _integer(item["outcome"], "outcome") - probability_values.finite_number(item["probability"], "probability"),
         )
         for item in predictions
     ]
-    return _date_block_bootstrap_ci(
+    return probability_metrics.date_block_bootstrap_ci(
         series,
         seed + ":deployment-calibration-offset",
         config.bootstrap_samples,
@@ -1357,7 +1324,7 @@ def _deployment_payload(
         "oos_final_fold_reuse_forbidden": True,
     }
     if model_digest == final_fold["model_digest"]:
-        raise ProbabilityReplayError("deployment estimator 不得复用 final OOS fold 参数")
+        raise probability_values.ProbabilityReplayError("deployment estimator 不得复用 final OOS fold 参数")
     return payload
 
 
@@ -1377,7 +1344,7 @@ def _deployment_joint_bindings(
         )
     }
     if any(len(value) != 64 for value in bindings.values()):
-        raise ProbabilityReplayError("deployment 缺少成熟 joint execution 评估绑定")
+        raise probability_values.ProbabilityReplayError("deployment 缺少成熟 joint execution 评估绑定")
     return bindings
 
 
@@ -1427,7 +1394,7 @@ def _validated_candidate_statistics(value: object) -> list[tuple[str, float]]:
             f"session_statistics[{index}]",
         )
         day = _validated_date(str(row.get("session_date") or ""))
-        output.append((day, _finite_number(row.get("proper_score_improvement"), "proper_score_improvement")))
+        output.append((day, probability_values.finite_number(row.get("proper_score_improvement"), "proper_score_improvement")))
     if output != sorted(output) or len({day for day, _value in output}) != len(output):
         raise ValueError("candidate session statistics 必须按唯一日期排序")
     return output
@@ -1541,14 +1508,14 @@ def _validated_drift_series(
             {"session_date", "feature_statistic", "probability", "performance"},
             f"drift.{path}[{index}]",
         )
-        probability = _finite_number(row.get("probability"), "drift.probability")
-        _require_probability(probability, "drift.probability")
+        probability = probability_values.finite_number(row.get("probability"), "drift.probability")
+        probability_values.require_probability(probability, "drift.probability")
         rows.append(
             (
                 _validated_date(str(row.get("session_date") or "")),
-                _finite_number(row.get("feature_statistic"), "drift.feature_statistic"),
+                probability_values.finite_number(row.get("feature_statistic"), "drift.feature_statistic"),
                 probability,
-                _finite_number(row.get("performance"), "drift.performance"),
+                probability_values.finite_number(row.get("performance"), "drift.performance"),
             )
         )
     if rows != sorted(rows) or len({row[0] for row in rows}) != len(rows):
@@ -1572,11 +1539,11 @@ def _oos_current_drift_series(value: object) -> list[tuple[str, float, float, fl
             # back to the registered all-decisions action event instead of
             # deleting the decision or inventing a delayed liquidation return.
             performance = row.get("outcome")
-        net = _finite_number(performance, "prediction.performance")
+        net = probability_values.finite_number(performance, "prediction.performance")
         grouped[_validated_date(str(row.get("session_date") or ""))].append(
             (
-                _finite_number(row.get("raw_probability"), "prediction.raw_probability"),
-                _finite_number(row.get("probability"), "prediction.probability"),
+                probability_values.finite_number(row.get("raw_probability"), "prediction.raw_probability"),
+                probability_values.finite_number(row.get("probability"), "prediction.probability"),
                 net,
             )
         )
@@ -1797,7 +1764,7 @@ def _execution_session_economics(
     for session_date, candidates in sorted(grouped.items()):
         selected = sorted(
             candidates,
-            key=lambda row: (-_finite_number(row["probability"], "probability"), str(row["sample_id"])),
+            key=lambda row: (-probability_values.finite_number(row["probability"], "probability"), str(row["sample_id"])),
         )[:100]
         symbols = {_probability_sample_symbol(str(row["sample_id"])) for row in selected}
         output.append(
@@ -1820,8 +1787,8 @@ def _execution_session_row(
     symbols: set[str],
     previous_symbols: set[str] | None,
 ) -> dict[str, object]:
-    net_returns = [_finite_number(row.get("net_return"), "net_return") for row in selected]
-    excess_returns = [_finite_number(row.get("net_excess_return"), "net_excess_return") for row in selected]
+    net_returns = [probability_values.finite_number(row.get("net_return"), "net_return") for row in selected]
+    excess_returns = [probability_values.finite_number(row.get("net_excess_return"), "net_excess_return") for row in selected]
     selected_reports = [report_by_id[str(row["sample_id"])] for row in selected]
     capacity_count = sum(_joint_report_within_capacity(report) for report in selected_reports)
     turnover = 0.0 if previous_symbols is None else (1.0 - len(symbols & previous_symbols) / max(1, len(symbols), len(previous_symbols)))
@@ -1842,7 +1809,7 @@ def _execution_session_row(
 def _joint_report_within_capacity(report: Mapping[str, object]) -> bool:
     evidence = _strict_mapping(report.get("evidence"), "joint.evidence")
     participation = _strict_mapping(evidence.get("participation"), "joint.participation")
-    maximum = _finite_number(
+    maximum = probability_values.finite_number(
         participation.get("maximum_participation_rate"),
         "maximum_participation_rate",
     )
@@ -1851,13 +1818,13 @@ def _joint_report_within_capacity(report: Mapping[str, object]) -> bool:
 
 
 def _execution_metrics(economics: Sequence[Mapping[str, object]]) -> dict[str, float]:
-    net_excess = [_finite_number(row["net_excess_return"], "net_excess_return") for row in economics]
+    net_excess = [probability_values.finite_number(row["net_excess_return"], "net_excess_return") for row in economics]
     decision_count = sum(_integer(row["decision_count"], "decision_count") for row in economics)
     capacity_count = sum(_integer(row["capacity_eligible_count"], "capacity_eligible_count") for row in economics)
     return {
         "mean_net_excess_return": sum(net_excess) / len(net_excess),
         "maximum_drawdown": _execution_maximum_drawdown(economics),
-        "mean_top100_turnover": sum(_finite_number(row["top100_turnover"], "top100_turnover") for row in economics) / len(economics),
+        "mean_top100_turnover": sum(probability_values.finite_number(row["top100_turnover"], "top100_turnover") for row in economics) / len(economics),
         "capacity_coverage": capacity_count / decision_count,
     }
 
@@ -1866,7 +1833,7 @@ def _execution_maximum_drawdown(economics: Sequence[Mapping[str, object]]) -> fl
     wealth = peak = 1.0
     drawdown = 0.0
     for row in economics:
-        wealth *= 1.0 + _finite_number(row["portfolio_net_return"], "portfolio_net_return")
+        wealth *= 1.0 + probability_values.finite_number(row["portfolio_net_return"], "portfolio_net_return")
         peak = max(peak, wealth)
         drawdown = min(drawdown, wealth / peak - 1.0)
     return drawdown
@@ -2242,8 +2209,8 @@ def _validate_samples(samples: tuple[ProbabilitySample, ...]) -> tuple[str, ...]
         if not names or names != expected:
             raise ValueError("上涨概率所有样本必须具有相同且非空的特征集合")
         for name in names:
-            _finite_number(item.features[name], f"features.{name}")
-        _validated_target(item.target)
+            probability_values.finite_number(item.features[name], f"features.{name}")
+        probability_values.validated_target(item.target)
         if not item.executable and item.target is not None:
             raise ValueError("上涨概率不可执行样本的 target 必须为 None")
         _validate_optional_return(item.net_return, "net_return")
@@ -2258,19 +2225,9 @@ def _validate_feature_names(names: Sequence[str]) -> None:
             raise ValueError(f"上涨概率包含禁止或无效特征：{name}")
 
 
-def _validated_target(value: int | bool | None) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int) and value in (0, 1):
-        return value
-    raise ValueError("上涨概率 target 必须是 0、1 或 None")
-
-
 def _validate_optional_return(value: float | None, label: str) -> None:
     if value is not None:
-        _finite_number(value, label)
+        probability_values.finite_number(value, label)
 
 
 def _sample_payload(item: ProbabilitySample) -> dict[str, object]:
@@ -2278,7 +2235,7 @@ def _sample_payload(item: ProbabilitySample) -> dict[str, object]:
         "sample_id": item.sample_id,
         "session_date": _validated_date(item.session_date),
         "features": {name: float(item.features[name]) for name in sorted(item.features)},
-        "target": _validated_target(item.target),
+        "target": probability_values.validated_target(item.target),
         "executable": item.executable,
         "net_return": item.net_return,
         "net_excess_return": item.net_excess_return,
@@ -2313,7 +2270,7 @@ def _class_diversity_reasons(
 ) -> list[str]:
     reasons: list[str] = []
     for name in ("train", "calibration"):
-        labels = {_validated_target(item.target) for item in partitions[name]}
+        labels = {probability_values.validated_target(item.target) for item in partitions[name]}
         if labels != {0, 1}:
             reasons.append(f"{name}_class_diversity")
     return reasons
@@ -2324,13 +2281,13 @@ def _fit_artifacts(
     feature_names: tuple[str, ...],
     config: ProbabilityConfig,
 ) -> _FittedArtifacts:
-    model = _fit_logistic_model(partitions["train"], feature_names, config)
-    raw_calibration = [_model_probability(model, item.features) for item in partitions["calibration"]]
-    labels = [_required_label(item) for item in partitions["calibration"]]
-    calibrator = _fit_platt_calibrator(raw_calibration, labels, config)
+    model = probability_estimators.fit_probability_logistic_model(partitions["train"], feature_names, config)
+    raw_calibration = [probability_estimators.probability_model_probability(model, item.features) for item in partitions["calibration"]]
+    labels = [probability_estimators.probability_required_label(item) for item in partitions["calibration"]]
+    calibrator = probability_estimators.fit_probability_platt_calibrator(raw_calibration, labels, config)
     calibration_sessions = len({item.session_date for item in partitions["calibration"]})
-    isotonic = _fit_isotonic_calibrator(raw_calibration, labels) if calibration_sessions >= config.minimum_isotonic_calibration_sessions else None
-    baseline = fit_empirical_bayes_baseline(
+    isotonic = probability_estimators.fit_probability_isotonic_calibrator(raw_calibration, labels) if calibration_sessions >= config.minimum_isotonic_calibration_sessions else None
+    baseline = probability_metrics.fit_empirical_bayes_baseline(
         raw_calibration,
         labels,
         bin_count=config.empirical_bayes_bin_count,
@@ -2345,125 +2302,6 @@ def _fit_artifacts(
     )
 
 
-def _fit_logistic_model(
-    samples: Sequence[ProbabilitySample],
-    feature_names: tuple[str, ...],
-    config: ProbabilityConfig,
-) -> dict[str, object]:
-    matrix = np.asarray([[float(item.features[name]) for name in feature_names] for item in samples], dtype=np.float64)
-    labels = np.asarray([_required_label(item) for item in samples], dtype=np.float64)
-    means = matrix.mean(axis=0)
-    scales = matrix.std(axis=0)
-    scales = np.where(scales > 1e-12, scales, 1.0)
-    standardized = (matrix - means) / scales
-    design = np.column_stack((np.ones(len(samples), dtype=np.float64), standardized))
-    weights, iterations = _newton_logistic(
-        design,
-        labels,
-        config.l2_strength,
-        config,
-        component="model",
-    )
-    return {
-        "version": PROBABILITY_MODEL_VERSION,
-        "feature_names": list(feature_names),
-        "means": means.tolist(),
-        "scales": scales.tolist(),
-        "intercept": float(weights[0]),
-        "coefficients": weights[1:].tolist(),
-        "l2_strength": config.l2_strength,
-        "iterations": iterations,
-        "converged": True,
-    }
-
-
-def _newton_logistic(
-    design: NDArray[np.float64],
-    labels: NDArray[np.float64],
-    l2_strength: float,
-    config: ProbabilityConfig,
-    *,
-    component: str,
-) -> tuple[NDArray[np.float64], int]:
-    base_rate = (float(labels.sum()) + 0.5) / (len(labels) + 1.0)
-    weights = np.zeros(design.shape[1], dtype=np.float64)
-    weights[0] = math.log(base_rate / (1.0 - base_rate))
-    regularizer = np.eye(design.shape[1], dtype=np.float64) * (l2_strength / len(labels))
-    regularizer[0, 0] = 1e-12
-    for iteration in range(1, config.maximum_iterations + 1):
-        probabilities = _sigmoid_array(design @ weights)
-        gradient = design.T @ (probabilities - labels) / len(labels) + regularizer @ weights
-        variance = np.maximum(probabilities * (1.0 - probabilities), 1e-9)
-        hessian = design.T @ (design * variance[:, None]) / len(labels) + regularizer
-        try:
-            step = np.linalg.solve(hessian, gradient)
-        except np.linalg.LinAlgError as exc:
-            raise ProbabilityModelConvergenceError(f"{component}_singular_hessian") from exc
-        weights -= step
-        if float(np.max(np.abs(step))) <= config.convergence_tolerance:
-            return weights, iteration
-    raise ProbabilityModelConvergenceError(f"{component}_nonconvergence")
-
-
-def _fit_platt_calibrator(
-    raw_probabilities: Sequence[float],
-    labels: Sequence[int],
-    config: ProbabilityConfig,
-) -> dict[str, object]:
-    logits = np.asarray([_logit(value) for value in raw_probabilities], dtype=np.float64)
-    design = np.column_stack((np.ones(len(logits), dtype=np.float64), logits))
-    targets = np.asarray(labels, dtype=np.float64)
-    weights, iterations = _newton_logistic(
-        design,
-        targets,
-        1e-6,
-        config,
-        component="calibrator",
-    )
-    return {
-        "version": PROBABILITY_CALIBRATOR_VERSION,
-        "intercept": float(weights[0]),
-        "slope": float(weights[1]),
-        "iterations": iterations,
-        "converged": True,
-        "fit_partition": "calibration_only",
-    }
-
-
-def _fit_isotonic_calibrator(
-    raw_probabilities: Sequence[float],
-    labels: Sequence[int],
-) -> dict[str, object]:
-    """Fit deterministic weighted PAV blocks on the independent calibration partition."""
-    grouped: list[list[float]] = []
-    for score, label in sorted(zip(raw_probabilities, labels, strict=True)):
-        _require_probability(score, "isotonic raw probability")
-        if grouped and math.isclose(grouped[-1][1], score, rel_tol=0, abs_tol=1e-15):
-            grouped[-1][2] += 1.0
-            grouped[-1][3] += float(label)
-        else:
-            grouped.append([score, score, 1.0, float(label)])
-    blocks: list[list[float]] = []
-    for group in grouped:
-        blocks.append(group)
-        while len(blocks) >= 2 and _isotonic_rate(blocks[-2]) > _isotonic_rate(blocks[-1]):
-            right = blocks.pop()
-            left = blocks.pop()
-            blocks.append([left[0], right[1], left[2] + right[2], left[3] + right[3]])
-    return {
-        "version": PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
-        "algorithm": "weighted_pool_adjacent_violators",
-        "upper_bounds": [block[1] for block in blocks],
-        "probabilities": [_isotonic_rate(block) for block in blocks],
-        "counts": [int(block[2]) for block in blocks],
-        "fit_partition": "calibration_only",
-    }
-
-
-def _isotonic_rate(block: Sequence[float]) -> float:
-    return block[3] / block[2]
-
-
 def _test_predictions(
     samples: Sequence[ProbabilitySample],
     artifacts: _FittedArtifacts,
@@ -2473,19 +2311,19 @@ def _test_predictions(
 ) -> list[dict[str, object]]:
     predictions: list[dict[str, object]] = []
     for item in sorted(samples, key=lambda value: (value.session_date, value.sample_id)):
-        raw = _model_probability(artifacts.model, item.features)
+        raw = probability_estimators.probability_model_probability(artifacts.model, item.features)
         predictions.append(
             {
                 "sample_id": item.sample_id,
                 "session_date": item.session_date,
                 "fold_id": fold_id,
                 "features": {name: float(item.features[name]) for name in feature_names},
-                "outcome": _required_label(item),
+                "outcome": probability_estimators.probability_required_label(item),
                 "reference_base_rate": artifacts.base_rate,
                 "raw_probability": raw,
-                "probability": _platt_probability(artifacts.calibrator, raw),
-                "isotonic_probability": (_isotonic_probability(artifacts.isotonic_calibrator, raw) if artifacts.isotonic_calibrator is not None else None),
-                "baseline_probability": _baseline_probability(artifacts.baseline, raw),
+                "probability": probability_estimators.probability_platt_probability(artifacts.calibrator, raw),
+                "isotonic_probability": (probability_estimators.probability_isotonic_probability(artifacts.isotonic_calibrator, raw) if artifacts.isotonic_calibrator is not None else None),
+                "baseline_probability": probability_estimators.probability_baseline_probability(artifacts.baseline, raw),
                 "net_return": item.net_return,
                 "net_excess_return": item.net_excess_return,
             }
@@ -2506,11 +2344,11 @@ _DatedMetricSeries = dict[str, list[tuple[str, float]]]
 def _prediction_metric_inputs(
     predictions: Sequence[Mapping[str, object]],
 ) -> _PredictionMetricInputs:
-    probabilities = [_finite_number(item["probability"], "probability") for item in predictions]
-    baseline = [_finite_number(item["baseline_probability"], "baseline_probability") for item in predictions]
+    probabilities = [probability_values.finite_number(item["probability"], "probability") for item in predictions]
+    baseline = [probability_values.finite_number(item["baseline_probability"], "baseline_probability") for item in predictions]
     outcomes = [_integer(item["outcome"], "outcome") for item in predictions]
     dates = [str(item["session_date"]) for item in predictions]
-    references = [_finite_number(item["reference_base_rate"], "reference_base_rate") for item in predictions]
+    references = [probability_values.finite_number(item["reference_base_rate"], "reference_base_rate") for item in predictions]
     return probabilities, baseline, outcomes, dates, references
 
 
@@ -2520,7 +2358,7 @@ def _core_prediction_metrics(
 ) -> tuple[dict[str, object], dict[str, object], float]:
     probabilities, baseline, outcomes, dates, references = inputs
     base_rate = sum(references) / len(references)
-    calibrated = evaluate_probability_predictions(
+    calibrated = probability_metrics.evaluate_probability_predictions(
         probabilities,
         outcomes,
         dates,
@@ -2528,7 +2366,7 @@ def _core_prediction_metrics(
         bin_count=config.calibration_bin_count,
         reference_probabilities=references,
     )
-    baseline_metrics = evaluate_probability_predictions(
+    baseline_metrics = probability_metrics.evaluate_probability_predictions(
         baseline,
         outcomes,
         dates,
@@ -2594,7 +2432,7 @@ def _attach_prediction_bootstrap_metrics(
         ),
     )
     for output_name, series_name, seed_suffix in bootstrap_specs:
-        calibrated[output_name] = _date_block_bootstrap_ci(
+        calibrated[output_name] = probability_metrics.date_block_bootstrap_ci(
             series[series_name],
             seed + seed_suffix,
             config.bootstrap_samples,
@@ -2653,11 +2491,11 @@ def _fold_selection_stability(
         grouped[_integer(item.get("fold_id"), "fold_id")].append(item)
     folds: list[dict[str, object]] = []
     for fold_id, rows in sorted(grouped.items()):
-        losses = [(_integer(item["outcome"], "outcome") - _finite_number(item["probability"], "probability")) ** 2 for item in rows]
+        losses = [(_integer(item["outcome"], "outcome") - probability_values.finite_number(item["probability"], "probability")) ** 2 for item in rows]
         references = [
             (
                 _integer(item["outcome"], "outcome")
-                - _finite_number(
+                - probability_values.finite_number(
                     item["reference_base_rate"],
                     "reference_base_rate",
                 )
@@ -2698,8 +2536,8 @@ def _optional_candidate_metrics(
     values = [item.get("isotonic_probability") for item in predictions]
     if not values or any(value is None for value in values):
         return None
-    return evaluate_probability_predictions(
-        [_finite_number(value, "isotonic probability") for value in values],
+    return probability_metrics.evaluate_probability_predictions(
+        [probability_values.finite_number(value, "isotonic probability") for value in values],
         outcomes,
         dates,
         base_rate=base_rate,
@@ -2852,7 +2690,7 @@ def _calibrator_candidate_records(
     return [
         {
             "id": "platt",
-            "version": PROBABILITY_CALIBRATOR_VERSION,
+            "version": probability_estimators.PROBABILITY_CALIBRATOR_VERSION,
             "status": "evaluated_primary",
             "selected_for_display": True,
             "parameters": dict(artifacts.calibrator),
@@ -2860,7 +2698,7 @@ def _calibrator_candidate_records(
         },
         {
             "id": "isotonic",
-            "version": PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
+            "version": probability_estimators.PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
             "status": "evaluated_shadow_candidate" if isotonic is not None else "not_evaluated_insufficient_sessions",
             "selected_for_display": False,
             "eligibility": {
@@ -2877,7 +2715,7 @@ def _unfitted_calibrator_candidates(config: ProbabilityConfig) -> list[dict[str,
     return [
         {
             "id": "platt",
-            "version": PROBABILITY_CALIBRATOR_VERSION,
+            "version": probability_estimators.PROBABILITY_CALIBRATOR_VERSION,
             "status": "not_evaluated_study_insufficient",
             "selected_for_display": True,
             "parameters": None,
@@ -2885,7 +2723,7 @@ def _unfitted_calibrator_candidates(config: ProbabilityConfig) -> list[dict[str,
         },
         {
             "id": "isotonic",
-            "version": PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
+            "version": probability_estimators.PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
             "status": "not_evaluated_study_insufficient",
             "selected_for_display": False,
             "eligibility": {
@@ -2915,7 +2753,7 @@ def _base_evidence(
         "target_definition": _target_definition(config),
         "base_rate": None,
         "actual_positive_rate_interval": None,
-        "model_version": PROBABILITY_MODEL_VERSION,
+        "model_version": probability_estimators.PROBABILITY_MODEL_VERSION,
         "feature_version": PROBABILITY_FEATURE_VERSION,
         "label_version": PROBABILITY_LABEL_VERSION,
         "cost_model_version": config.cost_model_version,
@@ -3001,51 +2839,6 @@ def _with_evidence_digest(evidence: dict[str, object]) -> dict[str, object]:
     return output
 
 
-def _model_probability(model: Mapping[str, object], features: Mapping[str, float]) -> float:
-    names = cast(Sequence[str], model.get("feature_names"))
-    if tuple(sorted(features)) != tuple(names):
-        raise ValueError("上涨概率预测特征集合与模型不一致")
-    means = _number_sequence(model.get("means"), "model.means")
-    scales = _number_sequence(model.get("scales"), "model.scales")
-    coefficients = _number_sequence(model.get("coefficients"), "model.coefficients")
-    if not (len(names) == len(means) == len(scales) == len(coefficients)):
-        raise ProbabilityReplayError("上涨概率模型维度损坏")
-    linear = _finite_number(model.get("intercept"), "model.intercept")
-    for name, mean, scale, coefficient in zip(names, means, scales, coefficients, strict=True):
-        value = _finite_number(features[name], f"features.{name}")
-        if scale <= 0:
-            raise ProbabilityReplayError("上涨概率模型 scale 无效")
-        linear += coefficient * (value - mean) / scale
-    return _sigmoid(linear)
-
-
-def _platt_probability(calibrator: Mapping[str, object], raw_probability: float) -> float:
-    intercept = _finite_number(calibrator.get("intercept"), "calibrator.intercept")
-    slope = _finite_number(calibrator.get("slope"), "calibrator.slope")
-    return _sigmoid(intercept + slope * _logit(raw_probability))
-
-
-def _isotonic_probability(calibrator: Mapping[str, object], raw_probability: float) -> float:
-    _require_probability(raw_probability, "isotonic raw probability")
-    bounds = _number_sequence(calibrator.get("upper_bounds"), "isotonic.upper_bounds")
-    probabilities = _number_sequence(calibrator.get("probabilities"), "isotonic.probabilities")
-    if not bounds or len(bounds) != len(probabilities):
-        raise ProbabilityReplayError("上涨概率 Isotonic 校准器维度损坏")
-    probability = probabilities[min(len(probabilities) - 1, bisect_left(bounds, raw_probability))]
-    _require_probability(probability, "isotonic probability")
-    return probability
-
-
-def _baseline_probability(baseline: Mapping[str, object], score: float) -> float:
-    boundaries = _number_sequence(baseline.get("boundaries"), "baseline.boundaries")
-    probabilities = _number_sequence(baseline.get("probabilities"), "baseline.probabilities")
-    if len(probabilities) != len(boundaries) + 1:
-        raise ProbabilityReplayError("上涨概率经验贝叶斯分箱维度损坏")
-    probability = probabilities[bisect_right(boundaries, score)]
-    _require_probability(probability, "baseline probability")
-    return probability
-
-
 def _estimate_payload(
     evidence: Mapping[str, object],
     sample_id: str,
@@ -3055,7 +2848,7 @@ def _estimate_payload(
 ) -> dict[str, object]:
     metrics = _object_mapping(evidence.get("calibration_metrics"), "calibration_metrics")
     calibrated = _object_mapping(metrics.get("calibrated"), "calibration_metrics.calibrated")
-    offset = _number_sequence(calibrated.get("calibration_offset_ci_95"), "calibration_offset_ci_95")
+    offset = probability_values.number_sequence(calibrated.get("calibration_offset_ci_95"), "calibration_offset_ci_95")
     interval = [_clamp_probability(probability + offset[0]), _clamp_probability(probability + offset[1])]
     return {
         "status": "calibrated_shadow",
@@ -3119,16 +2912,16 @@ def _verify_evidence_digest(evidence: Mapping[str, object]) -> None:
     expected = evidence.get("evidence_digest")
     unsigned = {key: value for key, value in evidence.items() if key != "evidence_digest"}
     if not isinstance(expected, str) or expected != stable_probability_hash(unsigned):
-        raise ProbabilityReplayError("上涨概率 evidence_digest 不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率 evidence_digest 不一致")
 
 
 def _verify_registered_evidence(evidence: Mapping[str, object], config: ProbabilityConfig) -> None:
     contract = _object_mapping(evidence.get("contract"), "contract")
     if dict(contract) != build_probability_contract(config):
-        raise ProbabilityReplayError("上涨概率契约不是已注册版本")
+        raise probability_values.ProbabilityReplayError("上涨概率契约不是已注册版本")
     expected = {
         "schema_version": PROBABILITY_SCHEMA_VERSION,
-        "model_version": PROBABILITY_MODEL_VERSION,
+        "model_version": probability_estimators.PROBABILITY_MODEL_VERSION,
         "feature_version": PROBABILITY_FEATURE_VERSION,
         "label_version": PROBABILITY_LABEL_VERSION,
         "cost_model_version": config.cost_model_version,
@@ -3137,15 +2930,15 @@ def _verify_registered_evidence(evidence: Mapping[str, object], config: Probabil
         "target_definition": _target_definition(config),
     }
     if any(evidence.get(name) != value for name, value in expected.items()):
-        raise ProbabilityReplayError("上涨概率顶层版本或标签口径不受支持")
+        raise probability_values.ProbabilityReplayError("上涨概率顶层版本或标签口径不受支持")
     if evidence.get("status") not in ("insufficient_data", "calibrated_shadow"):
-        raise ProbabilityReplayError("上涨概率状态不受支持")
+        raise probability_values.ProbabilityReplayError("上涨概率状态不受支持")
     if evidence.get("status") == "calibrated_shadow" and evidence.get("model") is None:
-        raise ProbabilityReplayError("上涨概率 calibrated_shadow 缺少已拟合模型")
+        raise probability_values.ProbabilityReplayError("上涨概率 calibrated_shadow 缺少已拟合模型")
     if evidence.get("probability") is not None:
-        raise ProbabilityReplayError("上涨概率研究批次不能伪装成个股概率")
+        raise probability_values.ProbabilityReplayError("上涨概率研究批次不能伪装成个股概率")
     if not isinstance(evidence.get("generated_at"), str) or not str(evidence["generated_at"]).strip():
-        raise ProbabilityReplayError("上涨概率 generated_at 无效")
+        raise probability_values.ProbabilityReplayError("上涨概率 generated_at 无效")
 
 
 def _verify_artifact_digests(evidence: Mapping[str, object]) -> None:
@@ -3160,21 +2953,21 @@ def _verify_artifact_digests(evidence: Mapping[str, object]) -> None:
         if payload is None and digest is None:
             continue
         if not isinstance(payload, Mapping) or digest != stable_probability_hash(payload):
-            raise ProbabilityReplayError(f"上涨概率 {digest_name} 不一致")
+            raise probability_values.ProbabilityReplayError(f"上涨概率 {digest_name} 不一致")
     _verify_artifact_versions(evidence)
 
 
 def _verify_artifact_versions(evidence: Mapping[str, object]) -> None:
     expected = (
-        ("model", PROBABILITY_MODEL_VERSION),
-        ("calibrator", PROBABILITY_CALIBRATOR_VERSION),
-        ("isotonic_calibrator", PROBABILITY_ISOTONIC_CALIBRATOR_VERSION),
-        ("empirical_bayes_baseline", PROBABILITY_BASELINE_VERSION),
+        ("model", probability_estimators.PROBABILITY_MODEL_VERSION),
+        ("calibrator", probability_estimators.PROBABILITY_CALIBRATOR_VERSION),
+        ("isotonic_calibrator", probability_estimators.PROBABILITY_ISOTONIC_CALIBRATOR_VERSION),
+        ("empirical_bayes_baseline", probability_metrics.PROBABILITY_BASELINE_VERSION),
     )
     for name, version in expected:
         payload = evidence.get(name)
         if payload is not None and _object_mapping(payload, name).get("version") != version:
-            raise ProbabilityReplayError(f"上涨概率 {name} 版本不受支持")
+            raise probability_values.ProbabilityReplayError(f"上涨概率 {name} 版本不受支持")
     for name in ("model", "calibrator"):
         payload = evidence.get(name)
         if payload is not None:
@@ -3183,9 +2976,9 @@ def _verify_artifact_versions(evidence: Mapping[str, object]) -> None:
 
 def _verify_optimizer_status(payload: Mapping[str, object], name: str) -> None:
     if payload.get("converged") is not True:
-        raise ProbabilityReplayError(f"上涨概率 {name} 未证明优化器收敛")
+        raise probability_values.ProbabilityReplayError(f"上涨概率 {name} 未证明优化器收敛")
     if _integer(payload.get("iterations"), f"{name}.iterations") <= 0:
-        raise ProbabilityReplayError(f"上涨概率 {name} iterations 无效")
+        raise probability_values.ProbabilityReplayError(f"上涨概率 {name} iterations 无效")
 
 
 def _verify_fold_artifacts(
@@ -3194,13 +2987,13 @@ def _verify_fold_artifacts(
 ) -> None:
     value = evidence.get("folds")
     if not isinstance(value, list):
-        raise ProbabilityReplayError("上涨概率 folds 必须是数组")
+        raise probability_values.ProbabilityReplayError("上涨概率 folds 必须是数组")
     counts = _object_mapping(evidence.get("counts"), "counts")
     if evidence.get("model") is None:
         _verify_unfitted_folds(value, counts)
         return
     if not value:
-        raise ProbabilityReplayError("上涨概率已拟合研究缺少逐折证据")
+        raise probability_values.ProbabilityReplayError("上涨概率已拟合研究缺少逐折证据")
     folds = [_object_mapping(item, "fold") for item in value]
     _verify_fold_counts(folds, counts)
     splits = [_verify_one_fold(fold, expected_fold_id, config) for expected_fold_id, fold in enumerate(folds, start=1)]
@@ -3214,7 +3007,7 @@ def _verify_unfitted_folds(
 ) -> None:
     evaluated = _integer(counts.get("evaluated_fold_count"), "evaluated_fold_count")
     if folds or evaluated != 0:
-        raise ProbabilityReplayError("上涨概率未拟合研究不应持久化完成折")
+        raise probability_values.ProbabilityReplayError("上涨概率未拟合研究不应持久化完成折")
 
 
 def _verify_fold_counts(
@@ -3224,9 +3017,9 @@ def _verify_fold_counts(
     evaluated = _integer(counts.get("evaluated_fold_count"), "evaluated_fold_count")
     available = _integer(counts.get("walk_forward_fold_count"), "walk_forward_fold_count")
     if len(folds) != evaluated:
-        raise ProbabilityReplayError("上涨概率完成折数量与计数不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率完成折数量与计数不一致")
     if len(folds) != available:
-        raise ProbabilityReplayError("上涨概率 Walk-forward 折未全部评估")
+        raise probability_values.ProbabilityReplayError("上涨概率 Walk-forward 折未全部评估")
 
 
 def _verify_one_fold(
@@ -3235,15 +3028,15 @@ def _verify_one_fold(
     config: ProbabilityConfig,
 ) -> GroupedWalkForwardSplit:
     if _integer(fold.get("fold_id"), "fold_id") != expected_fold_id:
-        raise ProbabilityReplayError("上涨概率 fold_id 必须连续且从 1 开始")
+        raise probability_values.ProbabilityReplayError("上涨概率 fold_id 必须连续且从 1 开始")
     _verify_fold_digest(fold)
     split = _split_from_payload(fold.get("split"))
     _verify_complete_split(split, config)
     if fold.get("training_cutoff") != split.train_dates[-1]:
-        raise ProbabilityReplayError("上涨概率逐折训练截止日不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率逐折训练截止日不一致")
     if _integer(fold.get("test_session_count"), "test_session_count") != len(split.test_dates):
-        raise ProbabilityReplayError("上涨概率逐折测试日期计数不一致")
-    _require_probability(_finite_number(fold.get("base_rate"), "fold.base_rate"), "fold.base_rate")
+        raise probability_values.ProbabilityReplayError("上涨概率逐折测试日期计数不一致")
+    probability_values.require_probability(probability_values.finite_number(fold.get("base_rate"), "fold.base_rate"), "fold.base_rate")
     _verify_fold_artifact_digests(fold)
     return split
 
@@ -3254,10 +3047,10 @@ def _verify_split_sequence(
 ) -> None:
     all_dates = sorted({value for split in splits for value in _all_split_dates(split)})
     if tuple(splits) != grouped_walk_forward_splits(all_dates, config):
-        raise ProbabilityReplayError("上涨概率逐折窗口并非完整且无重叠的 grouped-date Walk-forward")
+        raise probability_values.ProbabilityReplayError("上涨概率逐折窗口并非完整且无重叠的 grouped-date Walk-forward")
     test_dates = [date_value for split in splits for date_value in split.test_dates]
     if len(test_dates) != len(set(test_dates)):
-        raise ProbabilityReplayError("上涨概率逐折测试窗口重叠")
+        raise probability_values.ProbabilityReplayError("上涨概率逐折测试窗口重叠")
 
 
 def _verify_active_fold(
@@ -3278,22 +3071,22 @@ def _verify_active_fold(
         ("baseline_digest", "baseline_digest"),
     )
     if any(evidence.get(top_name) != final.get(fold_name) for top_name, fold_name in top_level_pairs):
-        raise ProbabilityReplayError("上涨概率主展示模型必须等于最后一个完整折")
+        raise probability_values.ProbabilityReplayError("上涨概率主展示模型必须等于最后一个完整折")
 
 
 def _verify_fold_digest(fold: Mapping[str, object]) -> None:
     digest = fold.get("fold_digest")
     unsigned = {key: value for key, value in fold.items() if key != "fold_digest"}
     if not isinstance(digest, str) or digest != stable_probability_hash(unsigned):
-        raise ProbabilityReplayError("上涨概率 fold_digest 不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率 fold_digest 不一致")
 
 
 def _verify_fold_artifact_digests(fold: Mapping[str, object]) -> None:
     pairs = (
-        ("model", "model_digest", PROBABILITY_MODEL_VERSION),
-        ("calibrator", "calibrator_digest", PROBABILITY_CALIBRATOR_VERSION),
-        ("isotonic_calibrator", "isotonic_calibrator_digest", PROBABILITY_ISOTONIC_CALIBRATOR_VERSION),
-        ("empirical_bayes_baseline", "baseline_digest", PROBABILITY_BASELINE_VERSION),
+        ("model", "model_digest", probability_estimators.PROBABILITY_MODEL_VERSION),
+        ("calibrator", "calibrator_digest", probability_estimators.PROBABILITY_CALIBRATOR_VERSION),
+        ("isotonic_calibrator", "isotonic_calibrator_digest", probability_estimators.PROBABILITY_ISOTONIC_CALIBRATOR_VERSION),
+        ("empirical_bayes_baseline", "baseline_digest", probability_metrics.PROBABILITY_BASELINE_VERSION),
     )
     for payload_name, digest_name, version in pairs:
         payload, digest = fold.get(payload_name), fold.get(digest_name)
@@ -3301,9 +3094,9 @@ def _verify_fold_artifact_digests(fold: Mapping[str, object]) -> None:
             continue
         mapping = _object_mapping(payload, f"fold.{payload_name}")
         if digest != stable_probability_hash(mapping):
-            raise ProbabilityReplayError(f"上涨概率逐折 {digest_name} 不一致")
+            raise probability_values.ProbabilityReplayError(f"上涨概率逐折 {digest_name} 不一致")
         if mapping.get("version") != version:
-            raise ProbabilityReplayError(f"上涨概率逐折 {payload_name} 版本不受支持")
+            raise probability_values.ProbabilityReplayError(f"上涨概率逐折 {payload_name} 版本不受支持")
         if payload_name in {"model", "calibrator"}:
             _verify_optimizer_status(mapping, f"fold.{payload_name}")
 
@@ -3314,10 +3107,10 @@ def _split_from_payload(value: object) -> GroupedWalkForwardSplit:
     def dates(name: str) -> tuple[str, ...]:
         items = payload.get(name)
         if not isinstance(items, list):
-            raise ProbabilityReplayError(f"上涨概率 {name} 必须是日期数组")
+            raise probability_values.ProbabilityReplayError(f"上涨概率 {name} 必须是日期数组")
         result = tuple(_validated_date(str(item)) for item in items)
         if result != tuple(sorted(set(result))):
-            raise ProbabilityReplayError(f"上涨概率 {name} 日期必须唯一且升序")
+            raise probability_values.ProbabilityReplayError(f"上涨概率 {name} 日期必须唯一且升序")
         return result
 
     return GroupedWalkForwardSplit(
@@ -3341,7 +3134,7 @@ def _all_split_dates(split: GroupedWalkForwardSplit) -> tuple[str, ...]:
 
 def _verify_complete_split(split: GroupedWalkForwardSplit, config: ProbabilityConfig) -> None:
     if len(split.train_dates) < config.minimum_train_sessions:
-        raise ProbabilityReplayError("上涨概率逐折训练日期不足")
+        raise probability_values.ProbabilityReplayError("上涨概率逐折训练日期不足")
     expected_lengths = (
         (split.train_gap_dates, config.effective_gap_sessions),
         (split.calibration_dates, config.minimum_calibration_sessions),
@@ -3349,10 +3142,10 @@ def _verify_complete_split(split: GroupedWalkForwardSplit, config: ProbabilityCo
         (split.test_dates, config.minimum_test_sessions),
     )
     if any(len(values) != expected for values, expected in expected_lengths):
-        raise ProbabilityReplayError("上涨概率逐折 gap、校准或测试窗口不完整")
+        raise probability_values.ProbabilityReplayError("上涨概率逐折 gap、校准或测试窗口不完整")
     dates = _all_split_dates(split)
     if dates != tuple(sorted(set(dates))):
-        raise ProbabilityReplayError("上涨概率逐折日期分区重叠或乱序")
+        raise probability_values.ProbabilityReplayError("上涨概率逐折日期分区重叠或乱序")
 
 
 def _verify_calibrator_candidate_records(
@@ -3361,13 +3154,13 @@ def _verify_calibrator_candidate_records(
 ) -> None:
     records = evidence.get("calibration_candidates")
     if not isinstance(records, list) or len(records) != 2:
-        raise ProbabilityReplayError("上涨概率校准候选记录不完整")
+        raise probability_values.ProbabilityReplayError("上涨概率校准候选记录不完整")
     by_id = {str(record.get("id")): record for record in records if isinstance(record, Mapping)}
     if set(by_id) != {"platt", "isotonic"}:
-        raise ProbabilityReplayError("上涨概率校准候选标识不受支持")
+        raise probability_values.ProbabilityReplayError("上涨概率校准候选标识不受支持")
     if evidence.get("model") is None:
         if records != _unfitted_calibrator_candidates(config):
-            raise ProbabilityReplayError("上涨概率未拟合候选记录不一致")
+            raise probability_values.ProbabilityReplayError("上涨概率未拟合候选记录不一致")
         return
     _verify_fitted_calibrator_candidate_records(evidence, config, by_id)
 
@@ -3387,12 +3180,12 @@ def _verify_fitted_calibrator_candidate_records(
         "minimum_calibration_session_count": config.minimum_isotonic_calibration_sessions,
     }
     checks = (
-        platt_record.get("version") == PROBABILITY_CALIBRATOR_VERSION,
+        platt_record.get("version") == probability_estimators.PROBABILITY_CALIBRATOR_VERSION,
         platt_record.get("status") == "evaluated_primary",
         platt_record.get("selected_for_display") is True,
         platt_record.get("parameters") == evidence.get("calibrator"),
         platt_record.get("metrics") == metrics.get("calibrated"),
-        isotonic_record.get("version") == PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
+        isotonic_record.get("version") == probability_estimators.PROBABILITY_ISOTONIC_CALIBRATOR_VERSION,
         isotonic_record.get("selected_for_display") is False,
         isotonic_record.get("status") == expected_status,
         isotonic_record.get("eligibility") == eligibility,
@@ -3400,13 +3193,13 @@ def _verify_fitted_calibrator_candidate_records(
         isotonic_record.get("metrics") == metrics.get("isotonic_candidate"),
     )
     if not all(checks):
-        raise ProbabilityReplayError("上涨概率校准候选参数或指标不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率校准候选参数或指标不一致")
 
 
 def _verify_persisted_predictions(evidence: Mapping[str, object]) -> None:
     predictions = evidence.get("predictions")
     if not isinstance(predictions, list):
-        raise ProbabilityReplayError("上涨概率 predictions 必须是数组")
+        raise probability_values.ProbabilityReplayError("上涨概率 predictions 必须是数组")
     if not predictions:
         counts = _object_mapping(evidence.get("counts"), "counts")
         persisted_count = _integer(
@@ -3414,11 +3207,11 @@ def _verify_persisted_predictions(evidence: Mapping[str, object]) -> None:
             "out_of_sample_observation_count",
         )
         if evidence.get("model") is not None or persisted_count != 0:
-            raise ProbabilityReplayError("上涨概率已拟合研究不能缺少 OOS 预测")
+            raise probability_values.ProbabilityReplayError("上涨概率已拟合研究不能缺少 OOS 预测")
         return
     fold_items = evidence.get("folds")
     if not isinstance(fold_items, list):
-        raise ProbabilityReplayError("上涨概率缺少逐折预测模型")
+        raise probability_values.ProbabilityReplayError("上涨概率缺少逐折预测模型")
     folds = {_integer(fold.get("fold_id"), "fold_id"): fold for value in fold_items for fold in [_object_mapping(value, "fold")]}
     rows = [_object_mapping(item, "prediction") for item in predictions]
     _verify_unique_prediction_ids(rows)
@@ -3427,15 +3220,15 @@ def _verify_persisted_predictions(evidence: Mapping[str, object]) -> None:
     session_folds = {session_date for _fold_id, session_date in assignments}
     counts = _object_mapping(evidence.get("counts"), "counts")
     if len(predictions) != _integer(counts.get("out_of_sample_observation_count"), "out_of_sample_observation_count"):
-        raise ProbabilityReplayError("上涨概率 OOS 观测数量不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率 OOS 观测数量不一致")
     if len(session_folds) != _integer(counts.get("out_of_sample_session_count"), "out_of_sample_session_count"):
-        raise ProbabilityReplayError("上涨概率 OOS 独立日期数量不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率 OOS 独立日期数量不一致")
 
 
 def _verify_unique_prediction_ids(rows: Sequence[Mapping[str, object]]) -> None:
     sample_ids = [_nonempty_text(row.get("sample_id"), "prediction.sample_id") for row in rows]
     if len(sample_ids) != len(set(sample_ids)):
-        raise ProbabilityReplayError("上涨概率 OOS 预测 sample_id 重复")
+        raise probability_values.ProbabilityReplayError("上涨概率 OOS 预测 sample_id 重复")
 
 
 def _verify_one_prediction(
@@ -3445,17 +3238,17 @@ def _verify_one_prediction(
     fold_id = _integer(row.get("fold_id"), "prediction.fold_id")
     fold = folds.get(fold_id)
     if fold is None:
-        raise ProbabilityReplayError("上涨概率预测引用未知 fold_id")
+        raise probability_values.ProbabilityReplayError("上涨概率预测引用未知 fold_id")
     split = _split_from_payload(fold.get("split"))
     session_date = _validated_date(str(row.get("session_date") or ""))
     if session_date not in split.test_dates:
-        raise ProbabilityReplayError("上涨概率预测不属于所标记折的测试窗口")
+        raise probability_values.ProbabilityReplayError("上涨概率预测不属于所标记折的测试窗口")
     model = _object_mapping(fold.get("model"), "fold.model")
     calibrator = _object_mapping(fold.get("calibrator"), "fold.calibrator")
     baseline = _object_mapping(fold.get("empirical_bayes_baseline"), "fold.empirical_bayes_baseline")
     features = _object_mapping(row.get("features"), "prediction.features")
-    raw = _model_probability(model, cast(Mapping[str, float], features))
-    expected = (raw, _platt_probability(calibrator, raw), _baseline_probability(baseline, raw))
+    raw = probability_estimators.probability_model_probability(model, cast(Mapping[str, float], features))
+    expected = (raw, probability_estimators.probability_platt_probability(calibrator, raw), probability_estimators.probability_baseline_probability(baseline, raw))
     _verify_prediction_values(row, expected)
     _verify_prediction_reference(row, fold)
     isotonic_value = fold.get("isotonic_calibrator")
@@ -3468,20 +3261,20 @@ def _verify_prediction_values(
     row: Mapping[str, object],
     expected: Sequence[float],
 ) -> None:
-    persisted = tuple(_finite_number(row.get(name), name) for name in ("raw_probability", "probability", "baseline_probability"))
+    persisted = tuple(probability_values.finite_number(row.get(name), name) for name in ("raw_probability", "probability", "baseline_probability"))
     differences = zip(expected, persisted, strict=True)
     if any(not math.isclose(left, right, rel_tol=0, abs_tol=1e-12) for left, right in differences):
-        raise ProbabilityReplayError("上涨概率预测无法从模型重放")
+        raise probability_values.ProbabilityReplayError("上涨概率预测无法从模型重放")
 
 
 def _verify_prediction_reference(
     row: Mapping[str, object],
     fold: Mapping[str, object],
 ) -> None:
-    reference = _finite_number(row.get("reference_base_rate"), "reference_base_rate")
-    base_rate = _finite_number(fold.get("base_rate"), "fold.base_rate")
+    reference = probability_values.finite_number(row.get("reference_base_rate"), "reference_base_rate")
+    base_rate = probability_values.finite_number(fold.get("base_rate"), "fold.base_rate")
     if not math.isclose(reference, base_rate, rel_tol=0, abs_tol=1e-12):
-        raise ProbabilityReplayError("上涨概率 Brier Skill 参考率不是该折校准期基准率")
+        raise probability_values.ProbabilityReplayError("上涨概率 Brier Skill 参考率不是该折校准期基准率")
 
 
 def _verify_prediction_assignments(
@@ -3494,11 +3287,11 @@ def _verify_prediction_assignments(
         by_session[session_date].add(fold_id)
         prediction_counts[fold_id] += 1
     if any(len(values) != 1 for values in by_session.values()):
-        raise ProbabilityReplayError("上涨概率同一交易日股票被分到不同折")
+        raise probability_values.ProbabilityReplayError("上涨概率同一交易日股票被分到不同折")
     for fold_id, fold in folds.items():
         expected = _integer(fold.get("prediction_count"), "prediction_count")
         if prediction_counts[fold_id] != expected:
-            raise ProbabilityReplayError("上涨概率逐折预测数量不一致")
+            raise probability_values.ProbabilityReplayError("上涨概率逐折预测数量不一致")
 
 
 def _verify_isotonic_prediction(
@@ -3509,28 +3302,28 @@ def _verify_isotonic_prediction(
     persisted = row.get("isotonic_probability")
     if calibrator is None:
         if persisted is not None:
-            raise ProbabilityReplayError("上涨概率未注册 Isotonic 候选却持久化了预测")
+            raise probability_values.ProbabilityReplayError("上涨概率未注册 Isotonic 候选却持久化了预测")
         return
-    expected = _isotonic_probability(calibrator, raw)
-    if not math.isclose(expected, _finite_number(persisted, "isotonic_probability"), rel_tol=0, abs_tol=1e-12):
-        raise ProbabilityReplayError("上涨概率 Isotonic 预测无法重放")
+    expected = probability_estimators.probability_isotonic_probability(calibrator, raw)
+    if not math.isclose(expected, probability_values.finite_number(persisted, "isotonic_probability"), rel_tol=0, abs_tol=1e-12):
+        raise probability_values.ProbabilityReplayError("上涨概率 Isotonic 预测无法重放")
 
 
 def _verify_persisted_metrics(evidence: Mapping[str, object], config: ProbabilityConfig) -> None:
     predictions = evidence.get("predictions")
     if not isinstance(predictions, list):
-        raise ProbabilityReplayError("上涨概率 predictions 必须是数组")
+        raise probability_values.ProbabilityReplayError("上涨概率 predictions 必须是数组")
     if not predictions:
         if evidence.get("calibration_metrics") is not None:
-            raise ProbabilityReplayError("上涨概率空预测不应带有校准指标")
+            raise probability_values.ProbabilityReplayError("上涨概率空预测不应带有校准指标")
         return
     rows = [_object_mapping(item, "prediction") for item in predictions]
     seed = evidence.get("input_digest")
     if not isinstance(seed, str) or len(seed) != 64:
-        raise ProbabilityReplayError("上涨概率 input_digest 无效")
+        raise probability_values.ProbabilityReplayError("上涨概率 input_digest 无效")
     expected = _prediction_metrics(rows, config, seed)
     if expected != evidence.get("calibration_metrics"):
-        raise ProbabilityReplayError("上涨概率校准指标无法从测试观测重放")
+        raise probability_values.ProbabilityReplayError("上涨概率校准指标无法从测试观测重放")
 
 
 def _verify_selection_qualification(
@@ -3545,16 +3338,16 @@ def _verify_selection_qualification(
             or evidence.get("selection_qualified") is not False
             or evidence.get("selection_qualification") is not None
         ):
-            raise ProbabilityReplayError("上涨概率未拟合证据的选择资格无效")
+            raise probability_values.ProbabilityReplayError("上涨概率未拟合证据的选择资格无效")
         return
     if not isinstance(metrics, Mapping) or not isinstance(folds, list):
-        raise ProbabilityReplayError("上涨概率选择资格缺少指标或逐折证据")
+        raise probability_values.ProbabilityReplayError("上涨概率选择资格缺少指标或逐折证据")
     expected = _selection_qualification(metrics, len(folds), config)
     if evidence.get("fit_status") != "fitted_oos" or evidence.get("selection_qualification") != expected:
-        raise ProbabilityReplayError("上涨概率选择资格无法从样本外指标重放")
+        raise probability_values.ProbabilityReplayError("上涨概率选择资格无法从样本外指标重放")
     qualified = evidence.get("status") == "calibrated_shadow" and expected["passed"] is True
     if evidence.get("selection_qualified") is not qualified:
-        raise ProbabilityReplayError("上涨概率 selection_qualified 与门禁不一致")
+        raise probability_values.ProbabilityReplayError("上涨概率 selection_qualified 与门禁不一致")
 
 
 def _config_from_evidence(evidence: Mapping[str, object]) -> ProbabilityConfig:
@@ -3577,7 +3370,7 @@ def _config_from_evidence(evidence: Mapping[str, object]) -> ProbabilityConfig:
         minimum_train_sessions=_integer(split.get("minimum_train_sessions"), "minimum_train_sessions"),
         minimum_calibration_sessions=_integer(split.get("minimum_calibration_sessions"), "minimum_calibration_sessions"),
         minimum_test_sessions=_integer(split.get("minimum_test_sessions"), "minimum_test_sessions"),
-        minimum_label_coverage=_finite_number(evaluation.get("minimum_label_coverage"), "minimum_label_coverage"),
+        minimum_label_coverage=probability_values.finite_number(evaluation.get("minimum_label_coverage"), "minimum_label_coverage"),
         minimum_bin_sessions=_integer(evaluation.get("minimum_bin_sessions"), "minimum_bin_sessions"),
         minimum_selection_folds=_integer(
             evaluation.get("minimum_selection_folds"),
@@ -3590,11 +3383,11 @@ def _config_from_evidence(evidence: Mapping[str, object]) -> ProbabilityConfig:
         gap_sessions=_integer(split.get("gap_sessions"), "gap_sessions"),
         calibration_bin_count=_integer(evaluation.get("calibration_bin_count"), "calibration_bin_count"),
         empirical_bayes_bin_count=_integer(baseline.get("bin_count"), "empirical_bayes_bin_count"),
-        empirical_bayes_prior_strength=_finite_number(baseline.get("prior_strength"), "prior_strength"),
-        l2_strength=_finite_number(model.get("l2_strength"), "l2_strength"),
+        empirical_bayes_prior_strength=probability_values.finite_number(baseline.get("prior_strength"), "prior_strength"),
+        l2_strength=probability_values.finite_number(model.get("l2_strength"), "l2_strength"),
         bootstrap_samples=_integer(evaluation.get("bootstrap_samples"), "bootstrap_samples"),
         maximum_iterations=_integer(model.get("maximum_iterations"), "maximum_iterations"),
-        convergence_tolerance=_finite_number(model.get("convergence_tolerance"), "convergence_tolerance"),
+        convergence_tolerance=probability_values.finite_number(model.get("convergence_tolerance"), "convergence_tolerance"),
     )
 
 
@@ -3612,49 +3405,21 @@ def _joint_config_from_evidence(evidence: Mapping[str, object]) -> ProbabilityCo
         minimum_train_sessions=_integer(split.get("minimum_train_sessions"), "minimum_train_sessions"),
         minimum_calibration_sessions=calibration_sessions,
         minimum_test_sessions=_integer(split.get("minimum_test_sessions"), "minimum_test_sessions"),
-        minimum_label_coverage=_finite_number(evaluation.get("minimum_label_coverage"), "minimum_label_coverage"),
+        minimum_label_coverage=probability_values.finite_number(evaluation.get("minimum_label_coverage"), "minimum_label_coverage"),
         minimum_bin_sessions=_integer(evaluation.get("minimum_bin_sessions"), "minimum_bin_sessions"),
         minimum_selection_folds=_integer(evaluation.get("minimum_selection_folds"), "minimum_selection_folds"),
         minimum_isotonic_calibration_sessions=calibration_sessions,
         gap_sessions=_integer(split.get("gap_sessions"), "gap_sessions"),
         calibration_bin_count=_integer(evaluation.get("calibration_bin_count"), "calibration_bin_count"),
-        l2_strength=_finite_number(model.get("l2_strength"), "l2_strength"),
+        l2_strength=probability_values.finite_number(model.get("l2_strength"), "l2_strength"),
         bootstrap_samples=_integer(evaluation.get("bootstrap_samples"), "bootstrap_samples"),
         maximum_iterations=_integer(model.get("maximum_iterations"), "maximum_iterations"),
-        convergence_tolerance=_finite_number(model.get("convergence_tolerance"), "convergence_tolerance"),
+        convergence_tolerance=probability_values.finite_number(model.get("convergence_tolerance"), "convergence_tolerance"),
     )
-
-
-def _required_label(item: ProbabilitySample) -> int:
-    label = _validated_target(item.target)
-    if label is None:
-        raise ValueError("上涨概率训练分区缺少 target")
-    return label
-
-
-def _sigmoid(value: float) -> float:
-    bounded = max(-35.0, min(35.0, value))
-    return 1.0 / (1.0 + math.exp(-bounded))
-
-
-def _sigmoid_array(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    bounded = np.clip(values, -35.0, 35.0)
-    return cast(NDArray[np.float64], 1.0 / (1.0 + np.exp(-bounded)))
-
-
-def _logit(probability: float) -> float:
-    _require_probability(probability, "probability")
-    clipped = min(1.0 - 1e-12, max(1e-12, probability))
-    return math.log(clipped / (1.0 - clipped))
 
 
 def _clamp_probability(value: float) -> float:
     return max(0.0, min(1.0, value))
-
-
-def _require_probability(value: float, label: str) -> None:
-    if not 0 <= value <= 1:
-        raise ValueError(f"{label} 必须在 [0, 1] 范围内")
 
 
 def _validated_date(value: str) -> str:
@@ -3665,15 +3430,6 @@ def _validated_date(value: str) -> str:
     return parsed.isoformat()
 
 
-def _finite_number(value: object, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{label} 必须是数值")
-    numeric = float(value)
-    if not math.isfinite(numeric):
-        raise ValueError(f"{label} 必须是有限数值")
-    return numeric
-
-
 def _integer(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{label} 必须是整数")
@@ -3682,22 +3438,13 @@ def _integer(value: object, label: str) -> int:
 
 def _nonempty_text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ProbabilityReplayError(f"{label} 必须是非空字符串")
+        raise probability_values.ProbabilityReplayError(f"{label} 必须是非空字符串")
     return value
-
-
-def _number_sequence(value: object, label: str) -> list[float]:
-    if not isinstance(value, (list, tuple)):
-        raise ProbabilityReplayError(f"{label} 必须是数组")
-    try:
-        return [_finite_number(item, label) for item in value]
-    except ValueError as exc:
-        raise ProbabilityReplayError(str(exc)) from exc
 
 
 def _object_mapping(value: object, label: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
-        raise ProbabilityReplayError(f"{label} 必须是对象")
+        raise probability_values.ProbabilityReplayError(f"{label} 必须是对象")
     return cast(Mapping[str, object], value)
 
 
@@ -3706,40 +3453,6 @@ def probability_deployment_joint_bindings(
 ) -> dict[str, str]:
     """Return the strict joint-execution bindings required by deployment."""
     return _deployment_joint_bindings(authorization)
-
-
-def fit_probability_logistic_model(
-    samples: Sequence[ProbabilitySample],
-    feature_names: tuple[str, ...],
-    config: ProbabilityConfig,
-) -> dict[str, object]:
-    """Fit the registered convergent logistic model."""
-    return _fit_logistic_model(samples, feature_names, config)
-
-
-def fit_probability_platt_calibrator(
-    raw_probabilities: Sequence[float],
-    labels: Sequence[int],
-    config: ProbabilityConfig,
-) -> dict[str, object]:
-    """Fit the registered convergent Platt calibrator."""
-    return _fit_platt_calibrator(raw_probabilities, labels, config)
-
-
-def probability_model_probability(
-    model: Mapping[str, object],
-    features: Mapping[str, float],
-) -> float:
-    """Replay one probability from a registered fitted model."""
-    return _model_probability(model, features)
-
-
-def probability_platt_probability(
-    calibrator: Mapping[str, object],
-    raw_probability: float,
-) -> float:
-    """Replay one registered Platt calibration."""
-    return _platt_probability(calibrator, raw_probability)
 
 
 def probability_prediction_metrics(
@@ -3770,8 +3483,6 @@ def _canonical_json_value(value: object) -> object:
 
 
 __all__ = [
-    "PROBABILITY_BASELINE_VERSION",
-    "PROBABILITY_CALIBRATOR_VERSION",
     "PROBABILITY_COST_MODEL_VERSION",
     "PROBABILITY_DEPLOYMENT_ARTIFACT_SCHEMA_VERSION",
     "PROBABILITY_DEPLOYMENT_CONTRACT_VERSION",
@@ -3780,32 +3491,21 @@ __all__ = [
     "PROBABILITY_FILTER_AUTHORIZATION_VERSION",
     "PROBABILITY_FILTER_AUTHORIZATION_SCHEMA_VERSION",
     "PROBABILITY_FILTER_QUALIFICATION_VERSION",
-    "PROBABILITY_ISOTONIC_CALIBRATOR_VERSION",
     "PROBABILITY_LABEL_VERSION",
-    "PROBABILITY_MODEL_VERSION",
     "PROBABILITY_SCHEMA_VERSION",
     "GroupedWalkForwardSplit",
     "ProbabilityConfig",
-    "ProbabilityModelConvergenceError",
-    "ProbabilityReplayError",
     "ProbabilitySample",
     "VerifiedProbabilityFilterAuthorization",
     "VerifiedProbabilityDeploymentEstimator",
     "build_probability_contract",
     "build_probability_filter_qualification",
-    "evaluate_probability_predictions",
-    "fit_empirical_bayes_baseline",
-    "fit_probability_logistic_model",
-    "fit_probability_platt_calibrator",
     "fit_probability_deployment_estimator",
     "fit_shadow_probability",
     "grouped_walk_forward_splits",
     "probability_selection_qualified",
-    "probability_date_block_bootstrap_ci",
     "probability_deployment_joint_bindings",
     "probability_filter_qualified",
-    "probability_model_probability",
-    "probability_platt_probability",
     "probability_prediction_metrics",
     "predict_shadow_probability",
     "seal_probability_filter_authorization_artifact",

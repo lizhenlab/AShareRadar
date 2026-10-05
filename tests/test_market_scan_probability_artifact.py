@@ -11,16 +11,18 @@ import pytest
 import app.artifacts.io as artifact_io
 import app.services.market_scan_probability_artifact as probability_artifact_module
 from app.services.market_scan_probability import (
-    PROBABILITY_BASELINE_VERSION,
-    PROBABILITY_CALIBRATOR_VERSION,
     PROBABILITY_COST_MODEL_VERSION,
     PROBABILITY_FEATURE_VERSION,
     PROBABILITY_LABEL_VERSION,
-    PROBABILITY_MODEL_VERSION,
     ProbabilityConfig,
     ProbabilitySample,
     fit_shadow_probability,
 )
+from app.services.market_scan_probability_estimators import (
+    PROBABILITY_CALIBRATOR_VERSION,
+    PROBABILITY_MODEL_VERSION,
+)
+from app.services.market_scan_probability_metrics import PROBABILITY_BASELINE_VERSION
 from app.services.market_scan_probability_artifact import (
     LEGACY_PROBABILITY_RESULT_CONTRACT_VERSION,
     LEGACY_SCORE_BOUND_PROBABILITY_RESULT_CONTRACT_VERSION,

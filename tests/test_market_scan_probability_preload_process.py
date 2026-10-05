@@ -277,7 +277,9 @@ def test_once_enabled_ordinary_preload_and_projection_incremental_refresh_stay_i
     store.preload()
     assert len(processes) == 2 and len(store._summary_by_fingerprint) == 2
     _source_archive(tmp_path / "source", 73)
-    store.research_projection(73)
+    assert store.research_projection(73)["availability"] == "source_index_verification_pending"
+    assert len(processes) == 2
+    store.preload()
     assert len(processes) == 3 and len(store._summary_by_fingerprint) == 3
 
 
@@ -303,10 +305,13 @@ def test_worker_only_excludes_mechanically_verified_bound_legacy_semantic_drift(
     run_id, digest, as_of = worker._file_identity(*item)
 
     def drift(*_args):
-        raise outcomes.ProbabilityOutcomeSemanticDriftError("legacy", run_id=run_id, integrity_digest=digest, as_of_date=as_of)
+        raise outcomes.ProbabilityOutcomeSemanticDriftError(
+            "legacy", run_id=run_id, integrity_digest=digest, as_of_date=as_of,
+            source_digest="a" * 64, generated_at="2026-08-13T18:00:00+08:00",
+        )
 
     monkeypatch.setattr(research, "_fingerprint_outcome", drift)
-    assert child._verified_summary(*item) is None
+    assert child._verified_summary(*item)["rejection_status"] == "legacy_semantic_drift_excluded"
 
     def unbound(*_args):
         raise outcomes.ProbabilityOutcomeSemanticDriftError("unbound", run_id=run_id)
@@ -415,8 +420,7 @@ def test_isolated_failure_preserves_cache_but_never_silently_accepts_new_invalid
     with pytest.raises(sources.ProbabilitySourceError):
         store.preload_isolated()
     assert (store._snapshot, store._research_by_run, store._summary_by_fingerprint) == previous
-    with pytest.raises(sources.ProbabilitySourceError):
-        store.research_projection(71)
+    assert store.research_projection(71)["availability"] == "source_index_verification_pending"
 
 
 def test_cancellation_after_atomic_commit_does_not_roll_back_only_archive_bindings(tmp_path, monkeypatch):
@@ -589,3 +593,185 @@ def test_child_audit_denies_provider_network_sqlite_and_file_writes(tmp_path):
     target = tmp_path / "forbidden.sqlite"
     result = subprocess.run([sys.executable, "-B", "-c", script, str(target)], capture_output=True, timeout=10, check=True)
     assert result.stdout.strip() == b"readonly" and not target.exists()
+
+
+def _replay_rejected_archive(tmp_path, monkeypatch):
+    import gzip
+    from app.services.market_scan_probability import stable_probability_hash
+    from app.services.market_scan_probability_labels import probability_label_contract
+    from tests import test_market_scan_probability_outcomes as support
+
+    source_path = _source_archive(tmp_path / "source")
+    source = sources.load_probability_source_snapshot(source_path)
+    bars = [*support._complete_h1_rows(), support._bar("2026-08-19", 10.0, 10.1)]
+    with monkeypatch.context() as patch:
+        # A frozen v2 feature source is a reader fixture, not current training input.
+        patch.setattr(outcomes, "_source_artifact", lambda _value: source)
+        artifact = outcomes.build_probability_outcome_artifact(
+            source, {"000001.SZ": bars}, generated_at="2026-08-19T18:00:00+08:00", as_of_date="2026-08-19",
+        )
+    payload = artifact["payload"]
+    payload["label_contract"] = probability_label_contract(label_version="market-scan-upside-label-v3-explicit-target-offset")
+    payload["label_contract_digest"] = stable_probability_hash(payload["label_contract"])
+    record = payload["records"][0]
+    evidence = record["bar_evidence"]
+    evidence["version"] = "qfq-daily-fixed-session-bar-evidence-v1"
+    for bar in evidence["bars"]:
+        bar.pop("session_status")
+        bar.pop("open_execution_status")
+    evidence["bar_set_digest"] = stable_probability_hash(evidence["bars"])
+    h5 = record["horizons"]["5"]["outcome"]
+    assert h5["reason"] == "fixed_exit_previous_session_bar_missing"
+    h5["model_limited"] = h5["daily_bar_model_limited"] = True
+    digest = outcomes.probability_outcome_payload_digest(payload)
+    artifact["integrity"]["integrity_digest"] = digest
+    directory = tmp_path / "outcomes"
+    directory.mkdir(exist_ok=True)
+    path = directory / f"market-scan-probability-outcomes-run-71-through-2026-08-19-{digest}.json.gz"
+    path.write_bytes(gzip.compress(canonical_json_bytes(artifact), compresslevel=9, mtime=0))
+    return source_path, path
+
+
+def test_real_isolated_projection_quarantines_bound_replay_and_caches_unchanged_rejection(tmp_path, monkeypatch):
+    source_path, rejected_path = _replay_rejected_archive(tmp_path, monkeypatch)
+    files = [(kind, research._file_fingerprint(path)) for kind, path in (("source", source_path), ("outcome", rejected_path))]
+    before = {path: path.read_bytes() for path in (source_path, rejected_path)}
+    summary = worker.isolated_probability_summaries([files[1]])[files[1]]
+    assert summary["rejection_status"] == "replay_rejected"
+    assert "旧 model_limited" in summary["rejection_reason"]
+    calls = []
+    real_worker = worker.isolated_probability_summaries
+
+    def collect(batch, **kwargs):
+        calls.extend(batch)
+        return real_worker(batch, **kwargs)
+
+    monkeypatch.setattr(worker, "isolated_probability_summaries", collect)
+    # A fit in the contaminated cohort is neither replayed nor exposed.
+    (tmp_path / "fits").mkdir()
+    (tmp_path / "fits" / f"market-scan-probability-fit-through-run-71-{'c' * 64}.json.gz").write_bytes(b"untrusted fit")
+    store = _store(tmp_path)
+    assert store.preload_isolated() == 1
+    projection = store.research_projection(71)
+    assert projection["outcome_evidence_status"] == "replay_rejected"
+    assert projection["fit_evidence_status"] == "cohort_quarantined"
+    assert projection["outcome_progress"]["outcome_artifact_count"] == 0
+    assert projection["fit_selection_qualified"] is False
+    assert "run 71 replay_rejected" in store.quarantine_diagnostics()[0]
+    # A directory identity change must not trigger decompression of an intact rejection.
+    (tmp_path / "outcomes" / "unrelated.txt").write_text("directory changed")
+    assert store.preload_isolated() == 1 and calls == files
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_rejected_projection_cannot_recover_by_deletion_or_older_valid_outcome(tmp_path, monkeypatch):
+    files = _archive_files(tmp_path)
+    _source, rejected = _replay_rejected_archive(tmp_path, monkeypatch)
+    store = _store(tmp_path)
+    assert store.preload_isolated() == 1
+    rejected.unlink()
+    assert store.preload_isolated() == 1
+    projection = store.research_projection(71)
+    assert projection["fit_evidence_status"] == "cohort_quarantined"
+    assert projection["outcome_progress"]["outcome_artifact_count"] == 0
+    assert projection["outcome_rejection"]["as_of_date"] == "2026-08-19"
+    assert files[1][1][0].exists()  # The earlier valid result never replaces the rejection.
+
+
+def test_isolated_verified_chunks_resume_after_failure_without_publishing_partial_index(tmp_path, monkeypatch):
+    for run_id in range(71, 77):
+        _source_archive(tmp_path / "source", run_id)
+    store = _store(tmp_path)
+    batches = []
+
+    def verify(batch, **kwargs):
+        batches.append(list(batch))
+        if len(batches) == 2:
+            raise sources.ProbabilitySourceError("bounded timeout")
+        return _in_process_summaries(batch, **kwargs)
+
+    monkeypatch.setattr(worker, "isolated_probability_summaries", verify)
+    with pytest.raises(sources.ProbabilitySourceError, match="bounded timeout"):
+        store.preload_isolated()
+    assert store._snapshot is None and store._summary_by_fingerprint == {}
+    assert store._research_by_run == {} and len(store._verification_caches[0]) == 4
+    assert store.preload_isolated() == 1
+    assert [len(batch) for batch in batches] == [4, 2, 2]
+    assert batches[1] == batches[2] and len(store._summary_by_fingerprint) == 6
+
+
+@pytest.mark.parametrize("field,value", [
+    ("run_id", True), ("integrity_digest", "0" * 64), ("as_of_date", "2026-08-20"),
+    ("source_integrity_digest", "missing"), ("generated_at", "2026-08-19T18:00:00"),
+    ("rejection_status", "accepted"), ("rejection_status", []), ("rejection_status", {}),
+    ("rejection_reason", "x" * 501),
+])
+def test_worker_rejection_protocol_remains_bound_and_bounded(tmp_path, monkeypatch, field, value):
+    _source, rejected = _replay_rejected_archive(tmp_path, monkeypatch)
+    files = [("outcome", research._file_fingerprint(rejected))]
+    request = _request(files)
+    response = json.loads(child._worker_response(request))
+    response["results"][0]["summary"][field] = value
+    with pytest.raises(sources.ProbabilitySourceError, match="拒绝摘要"):
+        worker._decode_worker_response(canonical_json_bytes(response), request, files)
+
+
+def test_only_strictly_newer_verified_same_source_outcome_can_release_rejection(tmp_path, monkeypatch):
+    source_path, _rejected = _replay_rejected_archive(tmp_path, monkeypatch)
+    store = _store(tmp_path)
+    assert store.preload_isolated() == 1 and store.quarantine_diagnostics()
+    source = sources.load_probability_source_snapshot(source_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes, "_source_artifact", lambda _value: source)
+        replacement = outcomes.build_probability_outcome_artifact(
+            source, {}, generated_at="2026-08-20T18:00:00+08:00", as_of_date="2026-08-20",
+        )
+    path = Path(outcomes.publish_built_probability_outcome_artifact(tmp_path / "outcomes", replacement)["path"])
+    assert store.preload_isolated() == 1
+    assert store.quarantine_diagnostics() == ()
+    assert store.research_projection(71)["fit_evidence_status"] == "current_replay_only"
+    path.unlink()
+    assert store.preload_isolated() == 1 and store.quarantine_diagnostics()
+    assert store.research_projection(71)["fit_evidence_status"] == "cohort_quarantined"
+
+
+def test_staged_rejection_masks_old_index_until_full_snapshot_commits(tmp_path, monkeypatch):
+    _archive_files(tmp_path)
+    store = _store(tmp_path)
+    assert store.preload_isolated() == 1
+    _source, rejected = _replay_rejected_archive(tmp_path, monkeypatch)
+    fingerprint = research._file_fingerprint(rejected)
+    store._verification_caches[1][fingerprint] = child._verified_summary("outcome", fingerprint)
+    store.acquire_preload_lease()
+    try:
+        masked = store.research_projection(71)
+        assert masked["status"] == "not_generated"
+        assert masked["availability"] == "source_index_verification_pending"
+        assert masked.get("run_binding") is None
+    finally:
+        store.release_preload_lease()
+    assert store.research_projection(71)["availability"] == "source_index_verification_pending"
+    assert store.preload_isolated() == 1
+    assert store.research_projection(71)["fit_evidence_status"] == "cohort_quarantined"
+
+
+def test_staged_new_valid_result_cannot_release_old_index_before_atomic_commit(tmp_path, monkeypatch):
+    _archive_files(tmp_path)
+    store = _store(tmp_path)
+    assert store.preload_isolated() == 1
+    source_path, rejected = _replay_rejected_archive(tmp_path, monkeypatch)
+    rejected_fingerprint = research._file_fingerprint(rejected)
+    store._verification_caches[1][rejected_fingerprint] = child._verified_summary("outcome", rejected_fingerprint)
+    source = sources.load_probability_source_snapshot(source_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes, "_source_artifact", lambda _value: source)
+        replacement = outcomes.build_probability_outcome_artifact(
+            source, {}, generated_at="2026-08-20T18:00:00+08:00", as_of_date="2026-08-20",
+        )
+    path = Path(outcomes.publish_built_probability_outcome_artifact(tmp_path / "outcomes", replacement)["path"])
+    fingerprint = research._file_fingerprint(path)
+    store._verification_caches[1][fingerprint] = child._verified_summary("outcome", fingerprint)
+    previous = store._snapshot
+    assert not store.refresh_pending()
+    assert store.research_projection(71)["availability"] == "source_index_verification_pending"
+    assert store._snapshot == previous

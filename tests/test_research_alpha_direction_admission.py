@@ -47,7 +47,7 @@ def _public_research(*, count=40, price=100.5, high=102, low=98, volume=1000, ch
     feature = build_feature_snapshot(analysis, insights)
     factors = build_factor_lab_report(analysis, insights, feature)
     regime = build_market_regime_report(analysis, insights, feature, factors)
-    timeframe = build_timeframe_alignment_report(analysis, feature, factors)
+    timeframe = build_timeframe_alignment_report(analysis, feature)
     validation = build_signal_validation_report(analysis, feature, factors, regime, timeframe)
     reward = build_risk_reward_report(analysis, feature, factors, regime, validation, timeframe)
     alpha = build_alpha_evidence_report(analysis, insights, feature, factors, regime, timeframe, reward)
@@ -62,6 +62,11 @@ def near_risk_research():
 @pytest.mark.parametrize("rule_id", ["break_ma20_risk", "fund_tech_divergence", "high_valuation_chase_risk"])
 def test_real_close_risk_and_divergence_rules_do_not_become_positive_evidence(near_risk_research, rule_id):
     report = near_risk_research
+    if rule_id == "fund_tech_divergence":
+        # With volume ratio 1, v2 produces 55 against trend 75: a gap without a weak-flow hit.
+        report = _public_research(price=102, change_pct=(102 / 101 - 1) * 100, volume=1000)
+        assert report.insights.fund_flow.available is True
+        assert 48 <= report.insights.fund_flow.overall_score <= report.analysis.trend_score - 18
     rule = next(item for item in report.insights.rule_matches.matches if item.rule_id == rule_id)
     assert rule.status == "接近" and rule.level == "观察"
     points = collect_alpha_points(report.analysis, report.insights)

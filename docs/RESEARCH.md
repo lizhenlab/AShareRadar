@@ -1,5 +1,15 @@
 # 离线研究与验证
 
+## 因子评分第三版：2026-09-15
+
+[评分第三版](SCORING_V3.md)记录固定预算、风险方向、量能连续性、时点准入和下游重复传播修复；引用资产定价预测不确定性研究作为方法边界，不把工程预算当作统计最优权重。
+
+[量化因子与策略](QUANT_FACTORS_AND_STRATEGIES.md)维护当前因子与可载入策略清单、2026-09-19量价准入修复、动量及低波风险筛选的研究依据和后续验证计划。
+
+## 评分预测能力：2026-09-15
+
+当前评分与历史量价代理已统一规则，并补充除权标签拒绝、证据充分度分解和方向验证v2。完整论文取舍、真实历史回放、已实现项目及后续模型条件见[评分预测修改方案](PREDICTION_IMPROVEMENT_PLAN.md)。新诊断保留同日AUC、日期等权概率损失和固定高概率子集，不自动训练选模或发放生产资格。
+
 ## 全市场选股前沿审查：2026-09-10
 
 本轮核对 2026 年正式论文及截至 9 月的预印本，复现概率排序晋级统计的时间依赖与命名问题，并优化保持结果不变的整手搜索和分页组装。新旧授权边界、原文读取范围、未采用方法和后续经济验证见[前沿研究与具体方案](MARKET_SCAN_FRONTIER_RESEARCH.md)；当前验收见[测试计划](TEST_PLAN.md)。
@@ -139,6 +149,20 @@ ATR 的本地实现是固定窗口真实区间的简单均值：有效的 0 必�
 
 后续经济假设须另行登记：先从受检冻结快照生成分项相关性、排名扰动、换手和成本敏感度诊断；若检验移除趋势家族或修改窗口，再于读取相应未来结果前固定候选族、主指标、样本外日期、账户政策和成本方案。项目已有三候选配对日净收益增量、6 会话块和 BY FDR 契约，不重复新增同类工具，也不追溯改写已登记试验。当前最低日期数是工程准入线，不代表检验功效充分。这是前次研究取舍；现行实现合同与验收边界见[设计文档](DESIGN.md)和[测试计划](TEST_PLAN.md)。
 
+## 固定策略模板选择：2026-09-19研究依据
+
+当前三模板对照新增净执行与选择分层，完整合同见[策略模板对照](STRATEGY_TEMPLATE_TRACKING.md)。它与前次概率研究的三候选/BY合同是不同实验，不改变旧登记、试验身份或发表权限。本次只比较同一评分合同内的固定模板，保留D至D+H毛收益解释，另用严格官方执行证据计算D+1开盘至D+H+1收盘的独立批次净收益。注册表、独立摘要、原始交付目录和会话目录须四项齐全；没有官方证据时只报告缺口，不用普通日线或合成数据代替。
+
+研究设计依据是：[Bailey等的PBO作者稿](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf)指出回测后择优的选择偏差；[Harvey、Liu、Zhu的已发表原文](https://people.duke.edu/~charvey/Research/Published_Papers/P118_and_the_cross.PDF)要求重视完整比较族与多重检验；[Holm原始论文](https://www.jstor.org/stable/4615733)提供逐步家族错误率校正。本工具不计算PBO，也不移植文献中的通用t统计阈值。Holm只在单项p值有效的前提下处理本次固定三对比较，不能修复错误成交假设、隐藏探索或反复查看结果。
+
+实现先按每合同首日和完整可信日历每H+1会话固定锚点；缺失成熟锚点不压缩时间轴，直接阻断推断。至少20个完整锚点后，使用2000次、每块2锚点的零假设中心化循环移动块bootstrap，同步重采样三模板，三对双侧p值作Holm校正，家族显著性水平0.05。基础净收益显著领先两者后，另检查佣金率及最低佣金各1.5倍、双边滑点各加10bp下的相对优势，以及最差独立批次回撤是否较任一对手恶化超过2个百分点。股数在压力成本下重新求解；批次回撤不是连续账户回撤。
+
+这些样本数、块长、重采样次数和压力阈值是项目工程研究合同，不是论文保证，也不证明检验功效充分。非重叠窗口仍可能有长期依赖；三对校正不覆盖改期限、日期范围、模板或跨评分合同挑赢家的探索。诊断领先、统计优势和压力/风险通过分别展示，当前回溯结果的`adoptable_template_id`始终为`null`，保留用户当前策略。后续采用须另有预登记的独立前瞻与连续资金/持仓证据。
+
+本轮本地输入仍无合格官方执行证据，历史扫描还存在封印失效或已保存成员的`missing`输入状态，无法证明哪套策略收益优胜。这里的缺失是数据准入问题，不是这些股票没有保存，也不能通过删除或改为跳过来恢复完整性。修正工程执行规则只使比较更可复验，不构成投资表现提升证据。
+
+[三策略前瞻采集](STRATEGY_PROSPECTIVE_COLLECTION.md)已提供未来计划、原始扫描留档、研究资料抽取和独立批次结果追加。计划冻结日历、模板和源码，按`H+1`会话采集，不回填错过截止的信号；扶摇档案仍仅作研究资料。第一阶段2026-09-21至2026-12-31、`H=10`只有7个计划锚点，当前日历覆盖其中6个退出日，尚不能达到完整统计比较所需样本。当前没有独立时间戳认证、连续账户验证或完整前瞻统计晋级。
+
 ## 平台与问答：2026-09-08研究依据
 
 以下原始来源查阅于 2026-09-08。研究用于发现遗漏的工程条件；采用方案还须由本项目的可复现实验支持。项目是本地 FastAPI/SQLite 服务，当前问答读取结构化研究结果，不是开放文档检索 RAG。
@@ -172,6 +196,9 @@ ATR 的本地实现是固定窗口真实区间的简单均值：有效的 0 必�
 | `build_market_scan_probability_historical_context.py` | `--artifact --output-dir`：深验历史重放，生成同目录的紧凑研究上下文 |
 | `ingest_market_scan_official_execution.py` | `contract / status / verify / ingest`：输出格式合同、核验或原子安装执行会话；实际核验依赖独立 registry 摘要及许可原始材料 |
 | `evaluate_market_scan.py` | `--database`：评估已保存的全市场排序，支持固定批次和输出报告 |
+| `track_market_scan_scores.py` | `--database --output-directory`：只读跟踪冻结评分 D+1/D+5/D+20，同版本高低组按共同日期比较，输出 JSON 与 HTML；[口径与使用](SCORE_TRACKING.md) |
+| `track_strategy_templates.py` | `--database --output-directory`：v2只读比较中期趋势基线、动量、低波趋势，分别保存D至D+H毛收益与严格官方证据下D+1至D+H+1独立批次净收益；`--non-overlapping-signals`按H+1固定扫描锚点，与`--run-id`互斥；净收益选择不授予采用资格；[四件套、统计合同及使用](STRATEGY_TEMPLATE_TRACKING.md) |
+| `collect_strategy_prospective.py` | `--plan-id ID init / status / capture / evidence / evaluate`：冻结未来三模板计划，按时归档全量扫描、抽取已有扶摇研究资料并追加净执行结果；不联网、不启动扫描、不自动晋级；[命令与证据边界](STRATEGY_PROSPECTIVE_COLLECTION.md) |
 | `evaluate_market_scan_shadow.py` | `--database --variant`：当前支持的 Shadow 公式离线对照；紧凑摘要供证据读取，不能自行晋级 |
 | `evaluate_market_scan_probability.py` | `--database --output-dir`：构建概率研究产物；`--output-dir` 必填 |
 | `evaluate_market_scan_future_range.py` | `--database --output-dir`：构建固定 D+1/D+2/D+3 区间研究产物；`--output-dir` 必填 |
@@ -189,7 +216,7 @@ ATR 的本地实现是固定窗口真实区间的简单均值：有效的 0 必�
 | `build_choice_experimental_history.py` | `build / verify`：从已验证 Choice 包生成或核验独立静态历史 |
 | `compare_choice_tencent_history.py` | 核对 Choice 与 Tencent 的同日数据、特征和标签差异 |
 | `build_experimental_probability.py` | 构建明确目标的个人实验模型，Choice 候选必须隔离输出 |
-| `validate_experimental_direction.py` | 在共同日期切分上评估 Choice D+1/D+2/D+5，保留全部目标和基线 |
+| `validate_experimental_direction.py` | 在共同日期切分上评估 Choice D+1/D+2/D+5，保留全部目标和基线；v2增加同日AUC、日期等权损失、成对基准改善和固定概率阈值子集，不自动晋级 |
 
 运维工具 `runtime_data.py`、`provider_canary.py`、`runtime_contract.py`、`api_inventory.py`、`architecture_inventory.py`、`generate_sbom.py` 不属于金融研究流程。不要把所有工具无参数批量执行，或把 `--help` 当作任意脚本都支持的安全模式；例如 `runtime_contract.py` 是直接运行检查的脚本。
 
@@ -235,9 +262,11 @@ Outcome 的 bar evidence v2 将 `session_status` 和 `open_execution_status` 纳
 
 ## 前瞻收据与延迟反馈
 
-前瞻工具在第一计划日之前冻结可信日历原文、每日逻辑采集槽位、截止时间、唯一选择规则、missing 政策以及候选／统计／代码身份。槽位不是尚未生成的数据库 run_id；收据绑定实际 run_id、原字节摘要、声明可用时间和 plan 摘要。每日只登记一次，迟到和缺失不能补成 PIT；封存要求每个计划日都有收据，结果只能在封存之后绑定。历史验证使用已冻结日历，不因本地日历扩展而重解释计划。
+通用收据工具`manage_market_scan_prospective.py`在第一计划日之前冻结可信日历原文、每日逻辑采集槽位、截止时间、唯一选择规则、missing 政策以及候选／统计／代码身份。槽位不是尚未生成的数据库 run_id；收据绑定实际 run_id、原字节摘要、声明可用时间和 plan 摘要。每日只登记一次，迟到和缺失不能补成 PIT；封存要求每个计划日都有收据，结果只能在封存之后绑定。历史验证使用已冻结日历，不因本地日历扩展而重解释计划。
 
 这些是 `local-only / unverified` 证据：本地时钟、自报 available_at、收据链和文件摘要均不证明外部事前可获得性，也没有核实通用 envelope 的市场内容或批次选择合格性。输出保持不可生产晋级。
+
+三模板专用的`collect_strategy_prospective.py`是另一套计划/收据合同，不复用通用工具的`seal/bind-result`操作。它核验实际扫描准入、压缩留存全部结果行，并只对按时准入的篮子追加研究资料及独立批次结果；源码变化阻断原计划继续采集。详见[三策略前瞻采集](STRATEGY_PROSPECTIVE_COLLECTION.md)。两套工具都没有因本地留档获得独立时间戳证明。
 
 新日期群组账本 `market-scan-date-cohort-feedback-ledger-v1` 与逐条账本 `market-scan-delayed-feedback-ledger-v1` 是两种不同合同，互不自动迁移。新账本一次冻结同日全部预测成员，使用固定目标时点和标签可用时点；新预测不能读取其决策时点之后才到账的标签，旧预测不会被回写。
 

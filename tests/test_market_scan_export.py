@@ -23,7 +23,7 @@ from app.services.market_scan_export import (
 from app.services.market_scan_future_range_store import (
     not_generated_future_range_research,
 )
-from app.services.market_scan_manager import MarketScanManager
+from tests.market_scan_test_support import _MarketScanHub, _scanner
 from app.services.market_scan_probability_store import ProbabilityResearchUnavailable
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 
@@ -539,7 +539,7 @@ def test_workbook_rejects_a_truncated_result_page() -> None:
         build_market_scan_workbook(page, MarketScanExportFilters(), exported_at=EXPORTED_AT)
 
 
-def test_manager_exports_only_published_runs_and_forwards_every_filter() -> None:
+def test_manager_exports_only_published_runs_and_forwards_every_filter(tmp_path) -> None:
     page = _page([_item()])
     filters = MarketScanExportFilters(
         status=None,
@@ -565,7 +565,7 @@ def test_manager_exports_only_published_runs_and_forwards_every_filter() -> None
         sort=("score", "amount", "symbol"),
         order=("desc", "desc", "asc"),
     )
-    manager = object.__new__(MarketScanManager)
+    manager = _scanner(_MarketScanHub(tmp_path), now=EXPORTED_AT)
     calls: list[tuple[int, MarketScanExportFilters]] = []
 
     class _Queries:
@@ -579,8 +579,7 @@ def test_manager_exports_only_published_runs_and_forwards_every_filter() -> None
             return page, not_generated_future_range_research(run_id)
 
     queries = _Queries()
-    manager._queries = lambda: queries  # type: ignore[method-assign]  # noqa: SLF001
-    manager._now = lambda: EXPORTED_AT
+    manager._query_service.export_projection = queries.export_projection  # type: ignore[method-assign]  # noqa: SLF001
 
     exported = manager.export_results(page.run.id, filters=filters)
 
@@ -597,7 +596,7 @@ def test_manager_exports_only_published_runs_and_forwards_every_filter() -> None
         validate_market_scan_export_run(page.run.model_copy(update={"quote_date": "2026-07-30"}))
 
 
-def test_manager_exports_published_intraday_without_official_research_artifacts() -> None:
+def test_manager_exports_published_intraday_without_official_research_artifacts(tmp_path) -> None:
     page = _page([_item()])
     intraday_run = page.run.model_copy(
         update={
@@ -607,7 +606,7 @@ def test_manager_exports_published_intraday_without_official_research_artifacts(
         }
     )
     intraday_page = page.model_copy(update={"run": intraday_run})
-    manager = object.__new__(MarketScanManager)
+    manager = _scanner(_MarketScanHub(tmp_path), now=EXPORTED_AT)
 
     class _Queries:
         def export_projection(
@@ -620,8 +619,7 @@ def test_manager_exports_published_intraday_without_official_research_artifacts(
             return intraday_page, not_generated_future_range_research(run_id)
 
     queries = _Queries()
-    manager._queries = lambda: queries  # type: ignore[method-assign]  # noqa: SLF001
-    manager._now = lambda: EXPORTED_AT
+    manager._query_service.export_projection = queries.export_projection  # type: ignore[method-assign]  # noqa: SLF001
 
     exported = manager.export_results(intraday_run.id, filters=MarketScanExportFilters())
     workbook = load_workbook(BytesIO(exported.content))

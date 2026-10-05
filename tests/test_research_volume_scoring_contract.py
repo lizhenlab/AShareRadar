@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.market import Kline
+from app.models.research import StandardFactor
 from app.services.analysis import build_analysis
 from app.services.indicator_volume import recent_volume_ratio_if_available
 from app.services.indicators import pct_change
@@ -38,7 +39,7 @@ def test_historical_volume_score_matches_current_rounding_and_rule_boundaries(
     assert _volume_proxy_score_at(rows, len(rows) - 1) == _current_score(rows)
 
 
-@pytest.mark.parametrize("change_pct, expected", [(2.0, 70), (-2.0, 34), (0.0, 56)])
+@pytest.mark.parametrize("change_pct, expected", [(2.0, 62), (-2.0, 38), (0.0, 50)])
 def test_ratio_1199_uses_the_same_observed_120_rule_in_both_paths(change_pct: float, expected: int) -> None:
     rows = _window_with_ratio(1.199, change_pct=change_pct)
 
@@ -49,7 +50,7 @@ def test_ratio_1199_uses_the_same_observed_120_rule_in_both_paths(change_pct: fl
 def test_historical_volume_score_starts_with_the_same_twenty_observed_sessions() -> None:
     rows = _window_with_ratio(1.2, change_pct=2.0)[-20:]
 
-    assert _volume_proxy_score_at(rows, 19) == _current_score(rows) == 70
+    assert _volume_proxy_score_at(rows, 19) == _current_score(rows) == 62
     with pytest.raises(ValueError, match="20日正成交量窗口"):
         _volume_proxy_score_at(rows, 18)
     assert _volume_trigger(rows, 18, 50) is False
@@ -60,14 +61,13 @@ def test_historical_volume_score_and_trigger_ignore_future_rows() -> None:
     index = len(rows) - 1
     future = [make_kline(close=1, volume=1e15), make_kline(close=1e6, volume=0)]
 
-    assert _volume_proxy_score_at(rows + future, index) == _volume_proxy_score_at(rows, index) == 70
-    assert _volume_trigger(rows + future, index, 70) is True
+    assert _volume_proxy_score_at(rows + future, index) == _volume_proxy_score_at(rows, index) == 62
+    assert _volume_trigger(rows + future, index, 62) is True
 
 
 def test_public_factor_calibration_uses_the_same_rounded_historical_state() -> None:
-    # Every completed twenty-session window ending at index 25 or 35 has a
-    # raw ratio of 1.199. The former rule scored the historical state as 56,
-    # outside the current 70-point trigger's tolerance, and discarded it.
+    # Keep the original raw 1.199 / observed 1.20 boundary in both paths.
+    # Small positive returns now remain close to neutral under the v2 rule.
     recent_volume = 9000.0
     other_volume = recent_volume * (2 / 1.199 - 1)
     volumes = [recent_volume if 1 <= index % 10 <= 5 else other_volume for index in range(36)]
@@ -76,23 +76,25 @@ def test_public_factor_calibration_uses_the_same_rounded_historical_state() -> N
     factor = _public_volume_factor(rows)
 
     assert factor_calibration_evidence_issue(rows) is None
-    assert factor.score == 70
+    assert factor.score == 51
     assert factor.calibration is not None
     assert factor.calibration.availability == "available"
     assert factor.calibration.sample_count == 1
     assert factor.calibration.participates_in_historical_aggregate is True
+    assert factor.score_rule_version == factor.calibration.score_rule_version == "factor-volume-confirmation.v3"
     assert factor.calibration_buckets == []  # The original 45-row bucket gate remains.
 
 
 def test_public_factor_percentile_compares_scores_with_the_current_rule() -> None:
     volumes = [1000 * 1.05 ** index for index in range(60)] + [7000] * 15 + [9000] * 5
     rows = _pit_rows(volumes)
+    rows[30] = make_kline(date=rows[30].date, close=104, volume=rows[30].volume, replay_eligible=True)
     factor = _public_volume_factor(rows)
     current_rule_history = [_current_score(rows[: index + 1]) for index in range(20, len(rows) - 1)]
     expected = round(sum(score <= factor.score for score in current_rule_history) / len(current_rule_history) * 100, 1)
 
     assert factor_calibration_evidence_issue(rows) is None
-    assert factor.score == 70
+    assert factor.score == 51
     assert expected < 100
     assert factor.percentile == expected
 
@@ -124,7 +126,7 @@ def test_public_calibration_still_rejects_missing_pit_evidence() -> None:
 
     factor = _public_volume_factor(rows)
 
-    assert factor.score == 70
+    assert factor.score == 51
     assert factor.participates_in_current_score is True
     assert factor.percentile is None
     assert factor.calibration is not None
@@ -142,12 +144,33 @@ def test_public_calibration_resumes_only_after_suspension_leaves_the_volume_wind
 
     assert factor_calibration_evidence_issue(rows) is None
     assert factor.participates_in_current_score is True
-    assert factor.score == 56
+    assert factor.score == 50
     assert factor.calibration is not None
     assert factor.calibration.availability == "available"
     # The first complete positive-volume window ends at index 38. Keeping the
     # existing ten-session non-overlap rule selects 38 and 48, never 25 or 35.
     assert factor.calibration.sample_count == 2
+
+
+def test_volume_rule_version_roundtrip_and_unversioned_legacy_read() -> None:
+    factor = _public_volume_factor(_pit_rows([1000] * 36))
+    payload = factor.model_dump()
+    assert StandardFactor.model_validate(payload) == factor
+    assert factor.score_rule_version == "factor-volume-confirmation.v3"
+    payload.pop("score_rule_version")
+    payload["calibration"].pop("score_rule_version")
+
+    legacy = StandardFactor.model_validate(payload)
+    assert legacy.score_rule_version is None
+    assert legacy.calibration is not None and legacy.calibration.score_rule_version is None
+
+
+def test_volume_calibration_cannot_claim_a_different_rule_version() -> None:
+    payload = _public_volume_factor(_pit_rows([1000] * 36)).model_dump()
+    payload["calibration"]["score_rule_version"] = "factor-volume-confirmation.v1"
+
+    with pytest.raises(ValueError, match="current and historical factor scoring rules must match"):
+        StandardFactor.model_validate(payload)
 
 
 def _window_with_ratio(raw_ratio: float, *, change_pct: float) -> list[Kline]:

@@ -6,6 +6,13 @@ let controllerPromise = null;
 
 columnInputs.forEach((input) => input.addEventListener("change", () => applyColumnView(input.value)));
 shell?.addEventListener("toggle", () => { if (shell.open) void openWorkbench(); });
+document.getElementById("marketScanExplainEmpty")?.addEventListener("click", () => {
+  if (!shell) return;
+  shell.open = true;
+  shell.querySelector("summary")?.focus();
+  shell.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  void openWorkbench();
+});
 if (shell?.open) void openWorkbench();
 
 function openWorkbench() {

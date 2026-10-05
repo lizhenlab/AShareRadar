@@ -14,6 +14,9 @@ from app.models.analysis import (
 )
 from app.services.scoring import clamp_score, score_level
 from app.models.fuyao_scoring import FuyaoValuationScore
+from app.models.market import Quote
+from app.services.analysis_signal_points import risk_level as price_risk_level
+from app.services.market_context_scoring import build_market_context_score
 from app.services.fuyao_valuation_adapter import align_fuyao_valuation, fuyao_fundamental_factor, fuyao_valuation_fallback_note
 from app.services.valuation_thresholds import (
     FUNDAMENTAL_BASE_SCORE, HIGH_PB_THRESHOLD, HIGH_PE_THRESHOLD, LOW_PB_THRESHOLD, LOW_PE_THRESHOLD,
@@ -29,6 +32,9 @@ WEAK_TREND_THRESHOLD = 45
 STRONG_TREND_THRESHOLD = 65
 STRONG_FUND_FLOW_THRESHOLD = 60
 WEAK_FUND_FLOW_THRESHOLD = 50
+DIRECTION_FACTOR_NAMES = ("技术面", "量价热度（衍生）", "基本面", "事件面")
+DIRECTION_FACTOR_SHARE = 1 / len(DIRECTION_FACTOR_NAMES)
+RISK_PENALTY_SHARE = 0.25
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,9 @@ class OverviewScores:
     factor_score: int
     signal_quality_score: int
     total_score: int
+    directional_evidence_score: float
+    risk_penalty: float
+    evidence_coverage_pct: int
 
 
 VALUATION_METRIC_SPECS = {
@@ -119,17 +128,31 @@ def build_stock_overview(
     order_pressure: OrderPressure,
     events: StockEventSummary,
     *, fuyao_valuation: FuyaoValuationScore | None = None,
+    market_quote: Quote | None = None, evaluated_at: str | None = None,
 ) -> StockOverview:
     quote = analysis.quote
     scores = _overview_scores(analysis, fund_flow, order_pressure, events, fuyao_valuation=fuyao_valuation)
     main_conflict = _quality_adjusted_main_conflict(analysis, fund_flow, order_pressure)
+    context = build_market_context_score(
+        scores.factor_score, quote, market=market_quote, industry=analysis.industry_context,
+        industry_name=analysis.stock_profile.industry if analysis.stock_profile else None, evaluated_at=evaluated_at,
+        reliability_score=min(scores.signal_quality_score, _bounded_score(analysis.data_quality.score)),
+    ) if evaluated_at is not None else None
+    total_score = context.score if context else scores.total_score
     return StockOverview(
         symbol=f"{quote.code}.{quote.market}",
         code=quote.code,
         market=quote.market,
         name=quote.name,
-        total_score=scores.total_score,
-        total_level=score_level(scores.total_score),
+        total_score=total_score,
+        total_level=score_level(total_score),
+        directional_score=scores.factor_score,
+        reliability_score=min(scores.signal_quality_score, _bounded_score(analysis.data_quality.score)),
+        market_context_score=context,
+        score_rule_version="current-stock-overview.v2",
+        directional_evidence_score=scores.directional_evidence_score,
+        risk_penalty=scores.risk_penalty,
+        evidence_coverage_pct=scores.evidence_coverage_pct,
         main_conflict=main_conflict,
         beginner_takeaways=_beginner_takeaways(analysis, main_conflict),
         key_prices=_key_prices(analysis),
@@ -149,14 +172,20 @@ def _overview_scores(
 ) -> OverviewScores:
     factors = _overview_factors(analysis, fund_flow, order_pressure, events, fuyao_valuation=fuyao_valuation)
     participating = [item for item in factors if item.score_available and item.participates_in_total_score]
-    factor_score = (
-        round(sum(_bounded_score(item.score) for item in participating) / len(participating))
-        if participating
-        else 50
-    )
+    directional = [item for item in participating if item.aggregation_role == "direction"]
+    if len({item.name for item in directional}) != len(directional) or any(item.name not in DIRECTION_FACTOR_NAMES for item in directional):
+        raise ValueError("方向因子必须使用唯一且已注册的固定份额")
+    evidence_score = 50 + sum((_bounded_score(item.score) - 50) * DIRECTION_FACTOR_SHARE for item in directional)
+    risk_penalty = sum(max(0, 50 - _bounded_score(item.score)) * RISK_PENALTY_SHARE
+                       for item in participating if item.aggregation_role == "risk_constraint")
+    factor_score = clamp_score(evidence_score - risk_penalty, round_value=True)
     signal_quality_score = _signal_quality_score(analysis)
     total_score = _quality_adjusted_total_score(analysis, factor_score, signal_quality_score)
-    return OverviewScores(factors=factors, factor_score=factor_score, signal_quality_score=signal_quality_score, total_score=total_score)
+    return OverviewScores(
+        factors=factors, factor_score=factor_score, signal_quality_score=signal_quality_score, total_score=total_score,
+        directional_evidence_score=evidence_score, risk_penalty=risk_penalty,
+        evidence_coverage_pct=round(100 * len(directional) / len(DIRECTION_FACTOR_NAMES)),
+    )
 
 
 def _overview_factors(
@@ -183,12 +212,9 @@ def _signal_quality_score(analysis: AnalysisResult) -> int:
 
 def _quality_adjusted_total_score(analysis: AnalysisResult, factor_score: int, signal_quality_score: int) -> int:
     clean_factor_score = _bounded_score(factor_score)
-    clean_signal_quality_score = _bounded_score(signal_quality_score)
-    data_quality_score = _bounded_score(analysis.data_quality.score)
-    total_score = clamp_score(clean_factor_score * 0.68 + clean_signal_quality_score * 0.32, round_value=True)
-    if data_quality_score < DATA_QUALITY_CAP_THRESHOLD:
-        return min(total_score, round((clean_factor_score + data_quality_score) / 2))
-    return total_score
+    reliability = min(_bounded_score(signal_quality_score), _bounded_score(analysis.data_quality.score)) / 100
+    # Reliable bearish evidence must stay bearish; reliability is not directional alpha.
+    return clamp_score(50 + (clean_factor_score - 50) * reliability, round_value=True)
 
 
 def _quality_adjusted_main_conflict(
@@ -301,11 +327,11 @@ def _fund_factor(fund_flow: FundFlowAnalysis) -> FactorScore:
         level=score_level(score),
         summary=_clean_text(fund_flow.price_volume_relation) or "量价关系待确认",
         evidence=_unique_strings(getattr(item, "summary", None) for item in (getattr(fund_flow, "windows", []) or [])),
-        missing_data=[] if available else ["逐笔大单/特大单资金流"],
+        missing_data=[] if available else ["同日收盘价量与前5个完整日的正成交量基线"],
         score_available=available,
         data_nature="derived" if available else "unavailable",
         participates_in_total_score=available,
-        unavailable_reason=None if available else "量价热度证据不可用",
+        unavailable_reason=None if available else "收盘价量或前5个完整日量能基线未通过核验，量价方向不可用",
     )
 
 
@@ -397,7 +423,7 @@ def _event_factor(events: StockEventSummary) -> FactorScore:
     scorable_items = [item for item in event_items if _event_score_available(item)]
     risk_count = sum(1 for item in scorable_items if _event_level(item) == "风险")
     positive_count = sum(1 for item in scorable_items if _event_level(item) == "积极")
-    score = clamp_score(58 + positive_count * 8 - risk_count * 10)
+    score = clamp_score(50 + positive_count * 8 - risk_count * 10)
     notes = _unique_strings(getattr(events, "notes", []) or [])
     available = bool(scorable_items)
     return FactorScore(
@@ -410,12 +436,12 @@ def _event_factor(events: StockEventSummary) -> FactorScore:
         score_available=available,
         data_nature="derived" if available else "unavailable",
         participates_in_total_score=available,
-        unavailable_reason=None if available else "仅有数据质量/观察提醒，没有可评分事件",
+        unavailable_reason=None if available else "仅有数据/观察/行业背景、行情异动或历史复盘，没有独立可评分事件",
     )
 
 
 def _event_score_available(item: object) -> bool:
-    return (_clean_text(getattr(item, "category", None)) or "事件") not in {"数据", "观察"}
+    return (_clean_text(getattr(item, "category", None)) or "事件") not in {"数据", "观察", "行业", "异动", "历史复盘"}
 
 
 def _event_level(item: object) -> str | None:
@@ -454,8 +480,11 @@ def _unique_event_items(events) -> list[object]:
 def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> FactorScore:
     data_quality_score = _bounded_score(analysis.data_quality.score)
     confidence = _bounded_score(analysis.signal_snapshot.confidence)
-    risk_level = _clean_text(analysis.risk_level) or "风险待确认"
-    risk_score = 100 - data_quality_score
+    risk_level = price_risk_level(
+        analysis.quote, analysis.trend_score,
+        analysis.support if analysis.support_available else 0.0, quality=None,
+    )
+    risk_score = 0
     if risk_level == "高风险":
         risk_score += 30
     elif risk_level == "中等风险":
@@ -463,11 +492,10 @@ def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> Fac
     pressure_available = _order_pressure_evidence_available(order_pressure)
     if pressure_available and _contains_text(order_pressure.pressure_level, "卖压"):
         risk_score += 10
-    if confidence < LOW_SIGNAL_CONFIDENCE_THRESHOLD:
-        risk_score += 10
-    score = clamp_score(100 - risk_score)
+    score = clamp_score(50 - risk_score)
     return FactorScore(
         name="风险面",
+        aggregation_role="risk_constraint",
         score=score,
         level=score_level(score),
         summary=risk_level,
@@ -476,6 +504,7 @@ def _risk_factor(analysis: AnalysisResult, order_pressure: OrderPressure) -> Fac
                 analysis.action_advice.reason,
                 order_pressure.summary if pressure_available else "盘口证据不可用，订单压力不参与风险评分。",
                 f"信号证据充分度 {confidence}/100，数据质量 {data_quality_score} 分。",
+                "风险面以50为中性，低于50的风险压力按四分之一扣除，不进入方向均值；数据质量在总分中控制可靠性。",
             ]
         ),
         missing_data=[] if getattr(order_pressure, "available", False) else ["实时五档盘口"],

@@ -10,11 +10,13 @@
 | 行情与缓存 | `datahub_*.py`、`provider_registry.py`、`repositories/market_*.py` |
 | 调度 | `scheduler_service.py`、`scheduler_lifecycle.py`、`scheduler_execution.py`及任务模块 |
 | 个股分析 | `analysis_*.py`、`financial_*.py`、`valuation_analysis.py`、`stock_event_*.py` |
-| 全市场流程 | `market_scan_manager.py`及 lifecycle/execution/completion/query 领域模块 |
+| 全市场流程 | `market_scan_manager.py`及 lifecycle/execution/completion/query 领域模块；概率后台任务由`market_scan_probability_runtime.py`拥有 |
 | 扫描规则 | `market_scan_scoring.py`、`market_scan_score_*`和 replay；修改前明确是否改变规格身份 |
+| 概率数值 | `market_scan_probability_estimators.py`、`market_scan_probability_values.py`；编排、证据与来源准入留在所属服务 |
 | 研究产物 | `app/artifacts/`、领域 research/store/validation 模块及 `tools/`真实 CLI |
 | 数据库 | `app/db/`、`app/repositories/`；迁移与触发器必须完整事务验证 |
-| 页面装配 | `static/app.js`、`static/js/`中的控制器、事件绑定和请求模块 |
+| 页面装配 | `static/app.js`、`static/js/`中的控制器、事件绑定和请求模块；报价连接由`quote-stream-controller.js`拥有 |
+| 复盘结果摘要 | `utils/advice_review_evidence.py`；仓储和导入分别决定版本准入与数值规范化 |
 | 样式 | HTML 引用的 `static/css/`，共用规则放已有域文件，不新增空转发样式表 |
 
 完整模块与函数位置由[函数索引](FUNCTION_INVENTORY.md)生成，不在指南中重复维护几百个签名。

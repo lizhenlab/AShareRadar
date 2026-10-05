@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -249,6 +249,46 @@ class MarketScanNearMiss(_StrictScreenModel):
     failed_conditions: list[MarketScanFailedCondition]
 
 
+class MarketScanConditionImpactExample(_StrictScreenModel):
+    run_id: int = Field(ge=1)
+    symbol: str = Field(pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    market: Literal["SH", "SZ", "BJ"]
+    name: str
+    status: MarketScanResultStatus
+    observed_value: str | bool | Annotated[float, Field(allow_inf_nan=False)] | None
+    missing: bool
+
+    @model_validator(mode="after")
+    def validate_identity_and_missing(self) -> Self:
+        if self.symbol != f"{self.code}.{self.market}":
+            raise ValueError("条件影响示例股票标识不一致")
+        if self.missing != (self.observed_value is None):
+            raise ValueError("条件影响示例缺失标记与原值不一致")
+        return self
+
+
+class MarketScanConditionImpact(_StrictScreenModel):
+    condition_code: str
+    label: str
+    additional_count: int = Field(ge=0)
+    missing_additional_count: int = Field(ge=0)
+    matched_without_condition: int = Field(ge=0)
+    examples: list[MarketScanConditionImpactExample] = Field(max_length=3)
+
+    @model_validator(mode="after")
+    def validate_example_counts(self) -> Self:
+        if self.missing_additional_count > self.additional_count:
+            raise ValueError("条件影响缺失新增数不能大于新增数")
+        if len(self.examples) != min(3, self.additional_count):
+            raise ValueError("条件影响示例数量与新增总数不一致")
+        shown_missing = sum(item.missing for item in self.examples)
+        shown_present = len(self.examples) - shown_missing
+        if shown_missing > self.missing_additional_count or shown_present > self.additional_count - self.missing_additional_count:
+            raise ValueError("条件影响示例缺失与非缺失计数超出相应总体")
+        return self
+
+
 class MarketScanMatchExplanation(_StrictScreenModel):
     symbol: str
     passed_conditions: list[str]
@@ -283,9 +323,9 @@ class MarketScanScreenEvaluateRequest(_StrictScreenModel):
     near_miss_max_failures: int = Field(default=1, ge=1, le=3)
 
 
-class MarketScanScreenEvaluationV1(_StrictScreenModel):
-    schema_version: Literal["market-scan-screen-evaluation-v1"] = (
-        "market-scan-screen-evaluation-v1"
+class MarketScanScreenEvaluationV2(_StrictScreenModel):
+    schema_version: Literal["market-scan-screen-evaluation-v2"] = (
+        "market-scan-screen-evaluation-v2"
     )
     evidence: MarketScanScreenEvidence
     spec: ScreenSpecV2
@@ -294,6 +334,7 @@ class MarketScanScreenEvaluationV1(_StrictScreenModel):
     matched_count: int = Field(ge=0)
     funnel: list[MarketScanFunnelStep]
     exclusion_reasons: list[MarketScanExclusionReason]
+    condition_impacts: list[MarketScanConditionImpact]
     matched: MarketScanScreenMatchedPage
     matched_explanations: list[MarketScanMatchExplanation]
     near_misses: list[MarketScanNearMiss]
@@ -309,6 +350,7 @@ class MarketScanScreenEvaluationV1(_StrictScreenModel):
         _validate_funnel(self.funnel, condition_codes, self.population_count, self.matched_count)
         _validate_exclusion_reasons(self.exclusion_reasons, condition_codes, self.population_count)
         matched_symbols = _validated_result_symbols(self.matched.items, self.evidence.run_id)
+        _validate_condition_impacts(self, condition_codes, matched_symbols)
         _validate_explanations(self.matched_explanations, matched_symbols, condition_codes)
         _validate_near_misses(self.near_misses, matched_symbols, self.evidence.run_id, condition_codes)
         _require_canonical_digest(self)
@@ -481,6 +523,83 @@ def _validated_result_symbols(items: list[MarketScanResultItem], run_id: int) ->
     return symbols
 
 
+def _validate_condition_impacts(
+    evaluation: MarketScanScreenEvaluationV2,
+    condition_codes: tuple[str, ...],
+    matched_symbols: list[str],
+) -> None:
+    impacts = evaluation.condition_impacts
+    if [item.condition_code for item in impacts] != list(condition_codes):
+        raise ValueError("条件影响与完整筛选条件及顺序不一致")
+    if sum(item.additional_count for item in impacts) > evaluation.population_count - evaluation.matched_count:
+        raise ValueError("单条件新增集合数量不能超过原始未命中总体")
+    excluded = {item.code: item for item in evaluation.exclusion_reasons}
+    seen = set(matched_symbols)
+    for impact in impacts:
+        _validate_impact_counts(impact, evaluation.matched_count, excluded.get(impact.condition_code))
+        for example in impact.examples:
+            if example.run_id != evaluation.evidence.run_id or example.symbol in seen:
+                raise ValueError("条件影响示例批次不一致或与命中及其他条件新增集合重叠")
+            seen.add(example.symbol)
+            _validate_impact_observed_value(impact.condition_code, example)
+            if _impact_condition_passes(evaluation.spec, impact.condition_code, example):
+                raise ValueError("条件影响示例原值并未违反所移除条件")
+
+
+def _validate_impact_counts(
+    impact: MarketScanConditionImpact, matched_count: int, reason: MarketScanExclusionReason | None,
+) -> None:
+    if impact.matched_without_condition != matched_count + impact.additional_count:
+        raise ValueError("移除条件后命中总数与原始命中及新增不守恒")
+    failures = reason.count if reason else 0
+    missing = reason.missing_count if reason else 0
+    if impact.missing_additional_count > missing:
+        raise ValueError("单条件缺失新增计数不能超过对应缺失失败计数")
+    if impact.additional_count - impact.missing_additional_count > failures - missing:
+        raise ValueError("单条件非缺失新增计数不能超过对应非缺失失败计数")
+
+
+def _validate_impact_observed_value(code: str, example: MarketScanConditionImpactExample) -> None:
+    value = example.observed_value
+    if value is None:
+        if code in {"status", "market", "keyword", "is_st", "is_new"}:
+            raise ValueError("固有非空字段的条件影响原值不能缺失")
+        return
+    if code.startswith("range.") and (isinstance(value, bool) or not isinstance(value, float)):
+        raise ValueError("数值条件影响原值必须是有限数字或缺失")
+    if code in {"is_st", "is_new"} and not isinstance(value, bool):
+        raise ValueError("布尔条件影响原值必须是布尔值或缺失")
+    if code in {"status", "market", "industry", "keyword"} and not isinstance(value, str):
+        raise ValueError("文本条件影响原值必须是文本或缺失")
+    originals = {"status": example.status, "market": example.market, "keyword": example.name}
+    if code in originals and value != originals[code]:
+        raise ValueError("条件影响原值与示例冻结字段不一致")
+
+
+def _impact_condition_passes(
+    spec: ScreenSpecV2, code: str, example: MarketScanConditionImpactExample,
+) -> bool:
+    value = example.observed_value
+    if value is None:
+        return False
+    if code.startswith("range."):
+        bounds = getattr(spec.ranges, code.removeprefix("range."))
+        return (bounds.min is None or value >= bounds.min) and (bounds.max is None or value <= bounds.max)
+    if code in {"status", "is_st", "is_new"}:
+        return value == getattr(spec, code)
+    if code == "market":
+        return value in spec.markets
+    if code == "industry":
+        return any(screen_text_contains(str(value), candidate) for candidate in spec.industries)
+    return any(screen_text_contains(original, spec.keyword or "") for original in (example.symbol, example.code, example.name))
+
+
+def screen_text_contains(value: str, needle: str) -> bool:
+    """SQLite LIKE semantics for literal substrings, including ASCII-only folding."""
+    folding = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    return needle.translate(folding) in value.translate(folding)
+
+
 def _validate_explanations(
     explanations: list[MarketScanMatchExplanation],
     matched_symbols: list[str],
@@ -515,7 +634,7 @@ __all__ = [
     "MarketScanFailedCondition",
     "MarketScanMatchExplanation",
     "MarketScanScreenEvaluateRequest",
-    "MarketScanScreenEvaluationV1",
+    "MarketScanScreenEvaluationV2",
     "MarketScanScreenEvidence",
     "ScreenRangeField",
     "ScreenRangesV2",
@@ -523,4 +642,5 @@ __all__ = [
     "ScreenSortV2",
     "ScreenSpecV2",
     "normalize_screen_keyword",
+    "screen_text_contains",
 ]

@@ -18,8 +18,11 @@ from app.services.choice_sdk import ChoiceError
 from app.services.experimental_probability_model import (
     MODEL_FEATURE_NAMES, ExperimentalCalibrator, ExperimentalLogit,
 )
-from app.services.market_scan_probability import (
-    PROBABILITY_CALIBRATOR_VERSION, PROBABILITY_MODEL_VERSION, ProbabilityModelConvergenceError, ProbabilitySample,
+from app.services.market_scan_probability import ProbabilitySample
+from app.services.market_scan_probability_estimators import (
+    PROBABILITY_CALIBRATOR_VERSION,
+    PROBABILITY_MODEL_VERSION,
+    ProbabilityModelConvergenceError,
 )
 from tools import validate_experimental_direction as cli
 
@@ -77,6 +80,30 @@ def test_fixed_calendar_final_period_is_common_and_each_horizon_is_purged(report
         assert set(result["by_market"]) == {"SH", "SZ", "BJ"}
 
 
+def test_v2_adds_within_date_ranking_and_frozen_benchmark_diagnostics_without_selection(report):
+    assert report["schema_version"] == "personal-experimental-direction-validation-v2"
+    assert report["protocol"]["selection_diagnostic_thresholds"] == [0.6, 0.7]
+    assert report["protocol"]["selection_diagnostics_grant_authority"] is False
+    for horizon in report["horizons"].values():
+        diagnostics = horizon["overall"]["diagnostics"]
+        assert diagnostics["planned_test_dates"] == horizon["split"]["test"]
+        assert diagnostics["missing_test_dates"] == []
+        assert diagnostics["observation_count"] == horizon["overall"]["predicted_count"]
+        assert diagnostics["pooled_auc"] == horizon["overall"]["pooled_metrics"]["model"]["auc"]
+        assert set(diagnostics["benchmarks"]) == {"calibration_rate", "constant_half"}
+        assert diagnostics["benchmarks"]["calibration_rate"]["fitted_through"] == horizon["fit"]["calibration_label_end"]
+        assert diagnostics["candidate_selected"] is diagnostics["promotion_eligible"] is False
+        assert diagnostics["date_balanced_model_scores"]["brier_score"] == pytest.approx(horizon["overall"]["date_balanced_metrics"]["model"]["brier_score"])
+        for benchmark in diagnostics["benchmarks"].values():
+            assert len(benchmark["provenance_digest"]) == len(benchmark["probabilities_digest"]) == 64
+            assert benchmark["paired_improvement_ci95"]["block_length_sessions"] == horizon["horizon"]
+        for market in horizon["by_market"].values():
+            # One stock per market can measure direction, but cannot rank a cross-section.
+            ranking = market["diagnostics"]["cross_sectional_auc"]
+            assert ranking["date_equal_weight_auc"] is None
+            assert ranking["single_class_session_count"] == 60
+
+
 def test_final_test_targets_cannot_affect_training_calibration_or_predictions(history, report):
     series, sessions = history
     changed = {symbol: list(rows) for symbol, rows in series.items()}
@@ -110,6 +137,10 @@ def test_missing_final_targets_keep_fixed_dates_and_disable_gap_compressed_boots
         assert balanced["scored_session_count"] == 59
         assert balanced["improvement_ci95"] is None
         assert "not_compressed" in balanced["interval_limitation"]
+        diagnostics = horizon["overall"]["diagnostics"]
+        assert len(diagnostics["missing_test_dates"]) == 1
+        assert "not_compressed" in diagnostics["paired_interval_limitation"]
+        assert all(value["paired_improvement_ci95"] is None for value in diagnostics["benchmarks"].values())
 
 
 def test_market_with_zero_test_coverage_remains_in_report(history, report):
@@ -333,6 +364,12 @@ def test_cli_publishes_only_new_research_report_and_does_not_modify_inputs(tmp_p
     monkeypatch.setattr(cli, "_load_history", load)
     monkeypatch.setattr(cli, "validate_experimental_direction_history", lambda *_args, **_kwargs: deepcopy(report))
     output = tmp_path / "validation"
+    output.mkdir()
+    legacy_payload = {"schema_version": "personal-experimental-direction-validation-v1", "prior_result": "immutable"}
+    legacy_digest = sha256_hex(canonical_json_bytes(legacy_payload))
+    legacy_path = output / f"experimental-direction-validation-{legacy_digest}.json"
+    legacy_bytes = canonical_json_bytes({"payload": legacy_payload, "sha256": legacy_digest})
+    legacy_path.write_bytes(legacy_bytes)
     result = cli.main(["--choice-history-manifest", str(manifest), "--choice-history-database", str(database), "--output-dir", str(output)])
 
     assert result == 0 and loaded == [(manifest, database)]
@@ -341,7 +378,9 @@ def test_cli_publishes_only_new_research_report_and_does_not_modify_inputs(tmp_p
     envelope = json.loads(target.read_text())
     assert envelope["payload"] == report
     assert envelope["sha256"] == sha256_hex(canonical_json_bytes(report))
-    assert list(output.iterdir()) == [target]
+    assert set(output.iterdir()) == {legacy_path, target}
+    assert legacy_path.read_bytes() == legacy_bytes
+    assert envelope["payload"]["schema_version"] == "personal-experimental-direction-validation-v2"
     assert not target.name.startswith("experimental-close-")
     assert all(path.read_bytes() == value for path, value in before.items())
     assert summary["online_models_modified"] is False

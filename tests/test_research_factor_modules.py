@@ -76,7 +76,8 @@ def test_factor_calibration_rejects_impossible_availability_and_metrics(updates:
 
 
 def test_factor_lab_uses_minimum_per_factor_samples_instead_of_summing_six_by_four() -> None:
-    factors = [_factor(index, sample_count=4) for index in range(6)]
+    ids = ("trend_momentum", "chip_position", "volume_confirmation", "fund_flow_proxy", "valuation_anchor", "risk_pressure")
+    factors = [_factor(index, sample_count=4, factor_id=factor_id) for index, factor_id in enumerate(ids)]
 
     report = assemble_factor_lab_report(_feature(), "常规个股", [], factors)
 
@@ -87,7 +88,7 @@ def test_factor_lab_uses_minimum_per_factor_samples_instead_of_summing_six_by_fo
 
 
 def test_factor_lab_preserves_a_single_factors_full_sample_support() -> None:
-    factors = [_factor(1, sample_count=30), _uncalibrated_valuation_factor()]
+    factors = [_factor(1, sample_count=30, factor_id="volume_confirmation"), _uncalibrated_valuation_factor()]
 
     report = assemble_factor_lab_report(_feature(), "常规个股", [], factors)
 
@@ -98,6 +99,8 @@ def test_factor_lab_preserves_a_single_factors_full_sample_support() -> None:
     assert "/100" in _factor_confirmation_text(report)
     assert "置信度" not in _factor_confirmation_text(report)
     assert any("未校准项：估值锚" in note for note in report.notes)
+    assert any("固定份额保留" in note and "降低覆盖与证据充分度" in note for note in report.notes)
+    assert all("不纳入综合证据充分度" not in note for note in report.notes)
 
 
 def test_factor_lab_stays_at_zero_when_all_calibration_factors_have_no_samples() -> None:
@@ -222,9 +225,9 @@ def test_real_current_factors_only_aggregate_historically_replayable_definitions
     assert flow_proxy.methodology and "不是真实资金流" in flow_proxy.methodology
     assert "量价热度评分（衍生）" in flow_proxy.value
     assert all("资金评分" not in item and "资金源" not in item for item in flow_proxy.evidence)
-    assert len(calibration_samples) == 3
+    assert len(calibration_samples) == 2
     assert 6 <= min(calibration_samples) < 20
-    for factor in (factors[2], factors[4], factors[5]):
+    for factor in (factors[0], factors[2], factors[4], factors[5]):
         assert factor.calibration is not None
         assert factor.calibration.sample_count == 0
         assert factor.calibration.participates_in_historical_aggregate is False
@@ -233,19 +236,30 @@ def test_real_current_factors_only_aggregate_historically_replayable_definitions
     assert valuation.calibration.sample_count == 0
     assert valuation.calibration.confidence_level == "待补数据"
     assert valuation.calibration.participates_in_historical_aggregate is False
-    assert metrics.scoring_factor_count == 7
-    assert metrics.calibration_factor_count == 3
-    assert metrics.uncalibrated_factor_names == ("风险压力", "筹码位置", "龙头强度", "估值锚")
+    assert metrics.scoring_factor_count == 6
+    assert metrics.calibration_factor_count == 2
+    assert metrics.uncalibrated_factor_names == ("趋势动量", "风险压力", "筹码位置", "估值锚")
     assert report.calibration_sample_count == min(calibration_samples)
     assert report.evidence_sufficiency == report.calibrated_confidence
     assert report.composite_reliability_level in {"较高", "中等", "较低", "不足"}
     assert all("低置信" not in note for note in report.notes)
     assert any(
-        "7 个因子参与评分" in note
-        and "3 个参与历史校准" in note
-        and "未校准项：风险压力、筹码位置、龙头强度、估值锚" in note
+        "6 个因子参与评分" in note
+        and "2 个参与历史校准" in note
+        and "未校准项：趋势动量、风险压力、筹码位置、估值锚" in note
         for note in report.notes
     )
+
+
+def test_composite_leadership_cannot_repeat_underlying_factor_evidence():
+    analysis, insights, feature, chip, leadership = _fully_calibrated_factor_inputs()
+    first = build_current_factors(analysis, insights, feature, chip, leadership)
+    second = build_current_factors(analysis, insights, feature, chip, leadership.model_copy(update={"score": 100}))
+    composite = next(item for item in second if item.id == "leadership_strength")
+    assert composite.aggregation_role == "composite" and not composite.participates_in_current_score
+    assert composite.weight == 0 and composite.percentile is None
+    assert _weighted_factor_score(first) == _weighted_factor_score(second)
+    assert build_factor_lab_metrics(first, feature).unavailable_factor_names == ()
 
 
 def test_zero_volume_window_is_unavailable_and_has_no_factor_score_weight() -> None:
@@ -271,7 +285,7 @@ def test_zero_volume_window_is_unavailable_and_has_no_factor_score_weight() -> N
     assert volume.participates_in_current_score is False
     assert volume.calibration is not None
     assert volume.calibration.participates_in_historical_aggregate is False
-    assert "完整且为正的20日成交量序列" in volume.missing_data
+    assert "连续20日正成交量及无公司行动的统一前复权价格" in volume.missing_data
     assert _weighted_factor_score(factors) == _weighted_factor_score([item for item in factors if item is not volume])
 
 
@@ -448,11 +462,12 @@ def _fully_calibrated_factor_inputs():
         pe=24.0,
         pb=4.0,
         market_cap=1_500_000_000_000,
+        timestamp=f"{dates[-1].isoformat()} 15:00:00",
     ).model_copy(update={"open": price - 0.2})
     quality = build_data_quality(
         quote,
         klines,
-        now=datetime(2026, 5, 13, 16, 0, 0),
+        now=datetime.fromisoformat(f"{dates[-1].isoformat()} 16:00:00"),
     ).model_copy(update={"score": 90, "level": "优秀", "anomalies": []})
     analysis = build_analysis(quote, klines, data_quality=quality)
     insights = build_stock_insight_bundle(analysis)

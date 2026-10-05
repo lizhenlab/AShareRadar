@@ -761,7 +761,7 @@ def capture_source_snapshot(
                 _write_probability_source_snapshot(target, artifact, before_publish=before_publish)
         except MarketScanArtifactLeaseError as exc:
             raise ProbabilitySourceError("上涨概率 source 来源批次已失效") from exc
-    return _snapshot_info(target, artifact)
+    return _verified_snapshot_info(target, artifact)
 
 
 def build_probability_source_snapshot(
@@ -836,6 +836,12 @@ def verify_probability_source_snapshot(artifact: Mapping[str, object]) -> dict[s
 
 def load_probability_source_snapshot(path: str | Path) -> dict[str, object]:
     """Load one deterministic gzip archive and verify content plus filename."""
+    verified, _encoded = _load_source_snapshot_with_bytes(path)
+    return verified
+
+
+def _load_source_snapshot_with_bytes(path: str | Path) -> tuple[dict[str, object], bytes]:
+    """Keep the exact verified bytes for this call's eventual selection check."""
     source = Path(path).expanduser().absolute()
     encoded = _read_regular_file(source)
     decoded = _decompress(encoded, source)
@@ -844,7 +850,7 @@ def load_probability_source_snapshot(path: str | Path) -> dict[str, object]:
     _validate_source_filename(source, verified)
     if encoded != _compressed_artifact_bytes(verified):
         raise ProbabilitySourceError(f"上涨概率 source archive 不是规范确定性 gzip：{source}")
-    return verified
+    return verified, encoded
 
 
 def list_probability_source_snapshots(
@@ -853,6 +859,15 @@ def list_probability_source_snapshots(
     run_id: int | None = None,
 ) -> list[dict[str, object]]:
     """List verified source archives with compact quality and storage facts."""
+    output = [
+        _verified_snapshot_info(path, load_probability_source_snapshot(path))
+        for path in _source_archive_paths(directory, run_id=run_id)
+    ]
+    return sorted(output, key=lambda item: (str(item["captured_at"]), int(cast(int, item["run_id"])), str(item["digest"])))
+
+
+def _source_archive_paths(directory: str | Path, *, run_id: int | None) -> list[Path]:
+    """Select candidates only; every caller must deeply verify their contents."""
     normalized_run_id = _optional_run_id(run_id)
     root = Path(directory).expanduser().absolute()
     try:
@@ -868,12 +883,12 @@ def list_probability_source_snapshots(
     if not stat.S_ISDIR(facts.st_mode):
         raise ProbabilitySourceError(f"上涨概率 source archive 路径不是目录：{root}")
     paths = sorted(root.glob("market-scan-probability-source-run-*.json.gz"))
-    output: list[dict[str, object]] = []
+    output: list[Path] = []
     for path in paths:
         encoded_run_id, _digest = _filename_identity(path)
         if normalized_run_id is None or encoded_run_id == normalized_run_id:
-            output.append(_snapshot_info(path, load_probability_source_snapshot(path)))
-    return sorted(output, key=lambda item: (str(item["captured_at"]), int(cast(int, item["run_id"])), str(item["digest"])))
+            output.append(path)
+    return output
 
 
 def load_probability_source_snapshot_for_run(
@@ -881,14 +896,23 @@ def load_probability_source_snapshot_for_run(
     run_id: int,
 ) -> dict[str, object] | None:
     """Load the newest verified capture for a run, surviving process restart."""
-    candidates = list_probability_source_snapshots(directory, run_id=run_id)
-    if not candidates:
+    newest: tuple[Path, dict[str, object], bytes] | None = None
+    newest_at, newest_count = float("-inf"), 0
+    for path in _source_archive_paths(directory, run_id=run_id):
+        artifact, encoded = _load_source_snapshot_with_bytes(path)
+        captured_at = _parsed_timestamp(str(artifact["captured_at"])).timestamp()
+        if captured_at > newest_at:
+            newest, newest_at, newest_count = (path, artifact, encoded), captured_at, 1
+        elif captured_at == newest_at:
+            newest_count += 1
+    if newest is None:
         return None
-    newest_at = max(_parsed_timestamp(str(item["captured_at"])).timestamp() for item in candidates)
-    newest = [item for item in candidates if _parsed_timestamp(str(item["captured_at"])).timestamp() == newest_at]
-    if len(newest) != 1:
+    if newest_count != 1:
         raise ProbabilitySourceError(f"run {run_id} 存在同 captured_at 的冲突 source archives")
-    return load_probability_source_snapshot(cast(str, newest[0]["path"]))
+    path, verified, encoded = newest
+    if _read_regular_file(path) != encoded:
+        raise ProbabilitySourceError("上涨概率 source archive 在选择期间发生变化")
+    return verified
 
 
 def canonical_probability_source_json(value: object) -> str:
@@ -923,12 +947,12 @@ def probability_source_snapshot_filename(run_id: int, artifact: Mapping[str, obj
 
 
 def _validate_payload(
-    payload: Mapping[str, object],
+    normalized: Mapping[str, object],
     captured_at: str,
     *,
     expected_contract: str,
 ) -> dict[str, object]:
-    normalized = cast(dict[str, object], _json_value(payload, "payload"))
+    # Only the public verifier calls this with its own fully normalized JSON tree.
     _exact_keys(normalized, _PAYLOAD_KEYS, "payload")
     if normalized["contract_version"] != expected_contract:
         raise ProbabilitySourceError("上涨概率 source payload contract_version 不受支持")
@@ -1648,8 +1672,8 @@ def _score_archive_stats(path: Path, artifact: Mapping[str, object]) -> dict[str
     }
 
 
-def _snapshot_info(path: Path, artifact: Mapping[str, object]) -> dict[str, object]:
-    verified = verify_probability_source_snapshot(artifact)
+def _verified_snapshot_info(path: Path, verified: Mapping[str, object]) -> dict[str, object]:
+    """Project a source just returned by this module's strict builder/loader."""
     payload = cast(Mapping[str, object], verified["payload"])
     run = cast(Mapping[str, object], payload["run"])
     integrity = cast(Mapping[str, object], verified["integrity"])

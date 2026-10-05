@@ -24,6 +24,11 @@ from app.repositories.strategy_automation import (
 )
 from app.services.strategy_execution import StrategyExecutionService
 from app.services.strategy_lab import StrategyLabService
+from app.services.trading_calendar import (
+    expected_quote_date,
+    latest_expected_daily_kline_date,
+    trading_day_gap,
+)
 from app.utils.audit_time import audit_now_text
 from app.utils.clock import market_now_naive
 
@@ -303,13 +308,23 @@ class StrategyAutomationService:
         strategy = self.strategies.get(schedule.strategy_id, revision=schedule.strategy_version)
         events = []
         if "data_stale" in event_types:
-            age_days = (market_now_naive().date() - date.fromisoformat(current.context.data_date)).days
+            now = market_now_naive()
+            reference_date = (
+                expected_quote_date(now)
+                if schedule.mode == "intraday"
+                else latest_expected_daily_kline_date(now)
+            )
+            age_sessions = trading_day_gap(date.fromisoformat(current.context.data_date), reference_date)
             maximum = strategy.spec.evidence_policy.maximum_market_data_age_days
-            if age_days > maximum:
+            if age_sessions > maximum:
                 events.append(StrategyAlertWrite(
                     "data_stale", None,
-                    f"策略数据已过期：{age_days} 天，策略上限 {maximum} 天",
-                    {"age_days": age_days, "maximum_age_days": maximum},
+                    f"策略数据已过期：{age_sessions} 个交易日，策略上限 {maximum} 个交易日",
+                    {
+                        "reference_date": reference_date.isoformat(),
+                        "age_exchange_sessions": age_sessions,
+                        "maximum_age_exchange_sessions": maximum,
+                    },
                 ))
         evidence_invalid = (
             current.summary.selected_count > current.summary.evidence_verified_count

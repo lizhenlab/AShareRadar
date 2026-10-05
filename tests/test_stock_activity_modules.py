@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.models.analysis import AnalysisResult
 from app.models.market import OrderBook, OrderBookLevel, Quote
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
 from app.services.stock_activity import build_fund_flow_analysis, build_order_pressure
+from app.services.stock_insights import build_stock_insight_bundle
 from tests.factories import make_kline, make_quote
 
 
@@ -15,49 +16,68 @@ NOW = datetime(2026, 5, 13, 16, 0, 0)
 
 
 class StockActivityModuleTests(unittest.TestCase):
-    def test_fund_flow_negative_amount_is_not_available(self) -> None:
+    def test_rebuilt_analysis_preserves_price_volume_direction_across_quality_levels(self) -> None:
+        baseline = _analysis()
+        bundles = []
+        for quality in (100, 65, 45):
+            analysis = build_analysis(
+                baseline.quote, baseline.klines,
+                data_quality=baseline.data_quality.model_copy(update={"score": quality}),
+            )
+            bundles.append(build_stock_insight_bundle(analysis))
+        self.assertEqual(len({bundle.fund_flow.overall_score for bundle in bundles}), 1)
+        self.assertEqual(len({bundle.overview.directional_score for bundle in bundles}), 1)
+        distances = [abs(bundle.overview.total_score - 50) for bundle in bundles]
+        self.assertEqual(distances, sorted(distances, reverse=True))
+
+    def test_fund_flow_negative_amount_does_not_hide_valid_price_volume(self) -> None:
         quote = make_quote(turnover_rate=-1.0, timestamp="2026-05-13 15:00:00").model_copy(update={"amount": -1000.0})
         fund_flow = build_fund_flow_analysis(_analysis(quote=quote))
 
-        self.assertFalse(fund_flow.available)
+        self.assertTrue(fund_flow.available)
         self.assertEqual(fund_flow.data_nature, "derived")
         self.assertEqual(fund_flow.windows[0].label, "今日量价热度")
         self.assertIn("derived（衍生）", fund_flow.notes[0])
         self.assertIn("不是真实资金流", fund_flow.notes[0])
 
-    def test_fund_flow_low_quality_adds_downgrade_note(self) -> None:
+    def test_fund_flow_low_quality_explains_separate_reliability_control(self) -> None:
         quote = make_quote(source="本地演示数据", timestamp="2026-05-13 15:00:00")
         fund_flow = build_fund_flow_analysis(_analysis(quote=quote))
 
-        self.assertTrue(any("评分已降权" in note for note in fund_flow.notes))
+        self.assertTrue(any("低数据质量由全景评分可靠性控制" in note for note in fund_flow.notes))
 
     def test_fund_flow_relation_reports_positive_volume_confirmation(self) -> None:
-        quote = make_quote(change_pct=2.0, timestamp="2026-05-13 15:00:00").model_copy(update={"volume": 1800.0})
+        quote = make_quote(price=102, prev_close=100, high=103, low=99, change_pct=2.0,
+                           timestamp="2026-05-13 15:00:00").model_copy(update={"open": 100.0, "volume": 1800.0})
         klines = [make_kline(close=100.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(8, 13)]
 
         fund_flow = build_fund_flow_analysis(_analysis(quote=quote, klines=klines))
 
+        self.assertTrue(fund_flow.available)
         self.assertEqual(fund_flow.price_volume_relation, "量价配合偏积极。")
 
     def test_fund_flow_relation_falls_back_to_kline_volume_when_quote_volume_is_invalid(self) -> None:
-        quote = make_quote(change_pct=2.0, timestamp="2026-05-13 15:00:00").model_copy(update={"volume": 0.0})
+        quote = make_quote(price=102, prev_close=100, high=103, low=99, change_pct=2.0,
+                           timestamp="2026-05-13 15:00:00").model_copy(update={"open": 100.0, "volume": 0.0})
         klines = [make_kline(close=100.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(8, 13)]
         klines.append(make_kline(close=102.0, volume=1800.0, date="2026-05-13"))
 
         fund_flow = build_fund_flow_analysis(_analysis(quote=quote, klines=klines))
 
+        self.assertTrue(fund_flow.available)
         self.assertEqual(fund_flow.price_volume_relation, "量价配合偏积极。")
 
-    def test_fund_flow_relation_uses_kline_volume_when_quote_timestamp_is_stale(self) -> None:
+    def test_fund_flow_future_kline_cannot_repair_stale_quote(self) -> None:
         quote = make_quote(change_pct=2.0, timestamp="2026-05-12 15:00:00").model_copy(update={"volume": 100.0})
         klines = [make_kline(close=100.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(8, 13)]
         klines.append(make_kline(close=102.0, volume=1800.0, date="2026-05-13"))
 
         fund_flow = build_fund_flow_analysis(_analysis(quote=quote, klines=klines))
 
-        self.assertEqual(fund_flow.price_volume_relation, "量价配合偏积极。")
+        self.assertFalse(fund_flow.available)
+        self.assertEqual(fund_flow.price_volume_relation, "量价代理输入不足，方向不可用。")
 
-    def test_fund_flow_non_finite_change_pct_keeps_price_volume_relation_neutral(self) -> None:
+    def test_fund_flow_non_finite_change_pct_is_unavailable(self) -> None:
         quote = make_quote(change_pct=0.0, timestamp="2026-05-13 15:00:00").model_copy(
             update={"change_pct": float("inf"), "volume": 1800.0}
         )
@@ -65,19 +85,22 @@ class StockActivityModuleTests(unittest.TestCase):
 
         fund_flow = build_fund_flow_analysis(_analysis(quote=quote, klines=klines))
 
-        self.assertEqual(fund_flow.price_volume_relation, "量价关系中性，等待更明确方向。")
+        self.assertFalse(fund_flow.available)
+        self.assertEqual(fund_flow.price_volume_relation, "量价代理输入不足，方向不可用。")
 
     def test_fund_flow_exact_price_change_edges_keep_relation_neutral(self) -> None:
         klines = [make_kline(close=100.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(8, 13)]
 
         for change_pct in (1.0, -1.0):
             with self.subTest(change_pct=change_pct):
-                quote = make_quote(change_pct=change_pct, timestamp="2026-05-13 15:00:00").model_copy(update={"volume": 1800.0})
+                quote = make_quote(price=100 + change_pct, prev_close=100, high=102, low=98, change_pct=change_pct,
+                                   timestamp="2026-05-13 15:00:00").model_copy(update={"open": 100.0, "volume": 1800.0})
                 fund_flow = build_fund_flow_analysis(_analysis(quote=quote, klines=klines))
 
+                self.assertTrue(fund_flow.available)
                 self.assertEqual(fund_flow.price_volume_relation, "量价关系中性，等待更明确方向。")
 
-    def test_fund_flow_invalid_turnover_is_neutral_not_zero_turnover(self) -> None:
+    def test_fund_flow_turnover_does_not_change_price_direction(self) -> None:
         klines = [make_kline(close=100.0, volume=1000.0, date=f"2026-05-{day:02d}") for day in range(8, 13)]
         base_quote = make_quote(change_pct=0.0, timestamp="2026-05-13 15:00:00").model_copy(update={"volume": 1000.0})
         missing_turnover = build_fund_flow_analysis(_analysis(quote=base_quote.model_copy(update={"turnover_rate": None}), klines=klines))
@@ -88,15 +111,17 @@ class StockActivityModuleTests(unittest.TestCase):
                 fund_flow = build_fund_flow_analysis(_analysis(quote=base_quote.model_copy(update={"turnover_rate": turnover_rate}), klines=klines))
 
                 self.assertEqual(fund_flow.overall_score, missing_turnover.overall_score)
-                self.assertGreater(fund_flow.overall_score, zero_turnover.overall_score)
+                self.assertEqual(fund_flow.overall_score, zero_turnover.overall_score)
+                self.assertEqual(fund_flow.overall_score, 50)
 
-    def test_fund_flow_zero_volume_baseline_keeps_relation_neutral(self) -> None:
+    def test_fund_flow_zero_volume_baseline_is_unavailable(self) -> None:
         quote = make_quote(change_pct=2.0, timestamp="2026-05-13 15:00:00").model_copy(update={"volume": 1800.0})
         klines = [make_kline(close=100.0, volume=0.0, date=f"2026-05-{day:02d}") for day in range(8, 13)]
 
         fund_flow = build_fund_flow_analysis(_analysis(quote=quote, klines=klines))
 
-        self.assertEqual(fund_flow.price_volume_relation, "量价关系中性，等待更明确方向。")
+        self.assertFalse(fund_flow.available)
+        self.assertEqual(fund_flow.price_volume_relation, "量价代理输入不足，方向不可用。")
 
     def test_order_book_pressure_reports_strong_bid_side(self) -> None:
         analysis = _analysis()
@@ -272,7 +297,8 @@ class StockActivityModuleTests(unittest.TestCase):
 
 def _analysis(*, quote: Quote | None = None, klines: list | None = None) -> AnalysisResult:
     quote = quote or make_quote(price=100.0, prev_close=99.0, high=101.0, low=98.0, change_pct=1.01, timestamp="2026-05-13 15:00:00")
-    klines = klines or [make_kline(close=100.0, volume=1000.0, date="2026-05-13") for _ in range(80)]
+    if klines is None:
+        klines = [make_kline(close=100.0, volume=1000.0, date=(NOW - timedelta(days=80 - index)).date().isoformat()) for index in range(80)]
     return build_analysis(quote, klines, data_quality=build_data_quality(quote, klines, now=NOW))
 
 

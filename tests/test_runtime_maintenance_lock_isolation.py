@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+import sqlite3
 from threading import Event, get_ident
 
 import pytest
@@ -15,7 +16,7 @@ from app.services.cache import SQLiteCache
 @pytest.fixture
 def cache(tmp_path: Path) -> SQLiteCache:
     path = tmp_path / "runtime.sqlite3"
-    return SQLiteCache(path, settings=Settings(cache_path=path, max_cache_event_rows=1))
+    return SQLiteCache(path, settings=Settings(cache_path=path, max_cache_event_rows=1, max_market_scan_runs=1))
 
 
 def _create_scan(cache: SQLiteCache) -> int:
@@ -25,8 +26,40 @@ def _create_scan(cache: SQLiteCache) -> int:
     ).id
 
 
+def _seed_scan_overflow(cache: SQLiteCache) -> None:
+    for _ in range(2):
+        run_id = _create_scan(cache)
+        cache.start_market_scan_run(run_id)
+        cache.finish_market_scan_run(run_id, "failed", message="retention test")
+
+
+def test_table_counts_read_committed_snapshot_while_cleanup_transaction_owns_cache_lock(cache) -> None:
+    with cache.exclusive_local_data_operation() as operation, operation.transaction() as conn:
+        conn.execute("INSERT INTO cache_event(category, message, created_at) VALUES ('test', 'pending', '2026-09-22T00:00:00Z')")
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            counts = workers.submit(cache.table_counts).result(timeout=2)
+        assert counts["cache_event"] == 0
+    assert cache.table_counts()["cache_event"] == 1
+
+
+def test_table_counts_keep_one_snapshot_across_concurrent_commit(cache, monkeypatch) -> None:
+    original = maintenance._table_count
+    writes = []
+    def count_then_write(conn, table):
+        result = original(conn, table)
+        if not writes:
+            with sqlite3.connect(cache.path, timeout=1) as writer:
+                writer.execute("INSERT INTO cache_event(category, message, created_at) VALUES ('test', 'new', '2026-09-22T00:00:00Z')")
+            writes.append(True)
+        return result
+    monkeypatch.setattr(maintenance, "_table_count", count_then_write)
+    assert cache.table_counts()["cache_event"] == 0
+    assert cache.table_counts()["cache_event"] == 1
+
+
 @pytest.mark.parametrize("operation", ["cleanup_runtime_rows", "cleanup_regenerable_runtime_rows", "preview_runtime_cleanup"])
 def test_artifact_deep_validation_does_not_block_scan_creation(cache, monkeypatch, operation) -> None:
+    _seed_scan_overflow(cache)
     entered, release, written = Event(), Event(), Event()
     original = maintenance.market_scan_artifact_protection
 
@@ -55,6 +88,7 @@ def test_artifact_deep_validation_does_not_block_scan_creation(cache, monkeypatc
 
 
 def test_concurrent_periodic_cleanup_keeps_one_validation_and_one_interval(cache, monkeypatch) -> None:
+    _seed_scan_overflow(cache)
     entered, release, second_started = Event(), Event(), Event()
     original = maintenance.market_scan_artifact_protection
     validations = []
@@ -84,6 +118,7 @@ def test_concurrent_periodic_cleanup_keeps_one_validation_and_one_interval(cache
 
 
 def test_failed_validation_releases_locks_and_does_not_consume_cleanup_interval(cache, monkeypatch) -> None:
+    _seed_scan_overflow(cache)
     original = maintenance.market_scan_artifact_protection
     validations = []
 
@@ -104,6 +139,7 @@ def test_failed_validation_releases_locks_and_does_not_consume_cleanup_interval(
 
 @pytest.mark.parametrize("paused_phase", ["validation", "compaction"])
 def test_manual_transaction_waits_before_cache_lock_and_connection_borrowing(cache, monkeypatch, paused_phase) -> None:
+    _seed_scan_overflow(cache)
     phase_entered, phase_release = Event(), Event()
     manual_waiting, manual_release, manual_entered = Event(), Event(), Event()
     abort_manual, written = Event(), Event()

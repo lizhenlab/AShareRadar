@@ -9,8 +9,6 @@ import sqlite3
 
 import pytest
 
-import app.repositories.advice_reviews as advice_review_repository_module
-import app.services.user_data_portability as portability_module
 from app.config import Settings
 from app.db.advice_review_schema import _backfill_current_plan_revisions
 from app.db.paper_trading_schema import paper_run_output_digest
@@ -33,6 +31,7 @@ from app.services.user_data_portability import (
     import_user_data,
     user_data_state_digest,
 )
+from app.utils.advice_review_evidence import review_result_input_digest
 
 
 def test_export_contains_only_exact_user_data_allowlist(tmp_path: Path) -> None:
@@ -1071,26 +1070,7 @@ def test_collision_remap_rewrites_canonical_plan_result_and_paper_bindings(
     imported_detail = target_cache.advice_review_detail(int(row["plan_id"]))
     assert imported_detail is not None and imported_detail.latest_evaluation is not None
     assert source_evaluation is not None
-    result_digest_fields = {"plan_payload_digest", "input_digest", "result_digest"}
-    result_value_fields = {
-        "status",
-        "conclusion",
-        "return_pct",
-        "max_favorable_excursion_pct",
-        "max_adverse_excursion_pct",
-        "target_hit",
-        "target_hit_date",
-        "stop_hit",
-        "stop_hit_date",
-    }
-    input_payload = {
-        field: result_row[field]
-        for field in advice_review_repository_module._RESULT_INSERT_FIELDS
-        if field not in result_digest_fields | result_value_fields
-    }
-    assert result_row["input_digest"] == advice_review_repository_module._payload_digest(
-        input_payload
-    )
+    assert result_row["input_digest"] == review_result_input_digest(dict(result_row))
     assert result_row["input_digest"] != source_evaluation.input_digest
     assert result_row["evidence_contract_version"] == "advice-review-evidence.v2"
     imported_strategy = next(
@@ -1165,7 +1145,7 @@ def test_v1_review_evidence_digest_imports_as_fail_closed_audit_history(
     payload = export_user_data(source).model_dump(mode="json")
     row = payload["tables"]["advice_review_result"]["rows"][0]
     row["evidence_contract_version"] = "advice-review-evidence.v1"
-    row["input_digest"] = portability_module._review_result_input_digest(row)
+    row["input_digest"] = review_result_input_digest(row, normalize_reals=True)
 
     import_user_data(
         target,

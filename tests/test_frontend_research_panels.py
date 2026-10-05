@@ -139,7 +139,7 @@ def test_factor_lab_renders_all_seven_production_factors_and_participation_note(
       if (!html.includes("当前评分口径：龙头强度当前不计分/不可用。")) {
         throw new Error(`current-score exclusion note was missing: ${html}`);
       }
-      if (!html.includes("历史聚合口径：估值锚参与当前评分，但不参与综合证据充分度、正负证据与历史样本聚合")) {
+      if (!html.includes("历史聚合口径：估值锚参与当前评分，但不提供历史支持、不参与正负证据与历史样本聚合")) {
         throw new Error(`explicit participation note was missing: ${html}`);
       }
       const excludedCard = html.slice(html.indexOf("<strong>龙头强度</strong>"), html.indexOf("</div>", html.indexOf("<strong>龙头强度</strong>") + 1));
@@ -155,6 +155,204 @@ def test_factor_lab_renders_all_seven_production_factors_and_participation_note(
       }
       if (html.includes("第三条保持紧凑") || html.includes("<script>") || !html.includes("证据&lt;script&gt;")) {
         throw new Error(`factor rendering was not compact and escaped: ${html}`);
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_factor_evidence_support_explains_zero_and_small_samples_with_escaped_notes() -> None:
+    script = r'''
+      import { renderFactorLab } from "./static/js/research-factor-diagnostics.js";
+
+      const target = { innerHTML: "" };
+      globalThis.document = { getElementById(id) { return id === "factorLab" ? target : null; } };
+      const report = {
+        total_score: 70, evidence_sufficiency: 0, factors: [],
+        evidence_sufficiency_version: "factor-evidence-sufficiency.v2",
+        evidence_sufficiency_note: '样本不足 <img src=x onerror="alert(1)"> & 待补',
+        evidence_support: { data_quality_score: 0, calibration_coverage_pct: 0, sample_support_pct: 0,
+          required_factor_count: 0, calibrated_factor_count: 0, minimum_similar_samples: 0, full_support_sample_threshold: 30 },
+      };
+      renderFactorLab(report);
+      for (const text of ['<details data-factor-evidence-support>', '数据质量 <b>0.0分</b>',
+        '历史校准覆盖 <b>0.0%</b>', '样本支持 <b>0.0%</b>', '历史校准因子 0/0', '最低相似样本 0',
+        '充分支持阈值 30', '三项中最低值限制', '不是统计置信度或上涨概率', '&lt;img', '&amp; 待补']) {
+        if (!target.innerHTML.includes(text)) throw new Error(`missing evidence basis ${text}: ${target.innerHTML}`);
+      }
+      if (target.innerHTML.includes('<img')) throw new Error('unescaped evidence note');
+      renderFactorLab({ ...report, evidence_sufficiency: 3, evidence_support: {
+        ...report.evidence_support, data_quality_score: 90, calibration_coverage_pct: 50,
+        sample_support_pct: 100 / 30, required_factor_count: 4, calibrated_factor_count: 2, minimum_similar_samples: 1,
+      }});
+      for (const text of ['数据质量 <b>90.0分</b>', '历史校准覆盖 <b>50.0%</b>', '样本支持 <b>3.3%</b>',
+        '历史校准因子 2/4', '最低相似样本 1']) {
+        if (!target.innerHTML.includes(text)) throw new Error(`small-sample explanation missing ${text}`);
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_factor_evidence_support_rejects_missing_dirty_and_legacy_explanations() -> None:
+    script = r'''
+      import { renderFactorLab } from "./static/js/research-factor-diagnostics.js";
+
+      const target = { innerHTML: "" };
+      globalThis.document = { getElementById(id) { return id === "factorLab" ? target : null; } };
+      const support = { data_quality_score: 90, calibration_coverage_pct: 50, sample_support_pct: 10,
+        required_factor_count: 4, calibrated_factor_count: 2, minimum_similar_samples: 3, full_support_sample_threshold: 30 };
+      const base = { total_score: 70, evidence_sufficiency: 10, factors: [], evidence_support: support,
+        evidence_sufficiency_version: "factor-evidence-sufficiency.v2", evidence_sufficiency_note: '专属新版解释' };
+      const invalid = [
+        ...[undefined, null, "factor-evidence-sufficiency.v1"].map(evidence_sufficiency_version => ({ ...base, evidence_sufficiency_version })),
+        ...[undefined, null, [], {}].map(evidence_support => ({ ...base, evidence_support })),
+      ];
+      for (const key of ['data_quality_score', 'calibration_coverage_pct', 'sample_support_pct']) {
+        for (const value of [undefined, null, '', '50', true, NaN, Infinity, -1, 101, '<script>']) {
+          invalid.push({ ...base, evidence_support: { ...support, [key]: value } });
+        }
+      }
+      for (const key of ['required_factor_count', 'calibrated_factor_count', 'minimum_similar_samples', 'full_support_sample_threshold']) {
+        for (const value of [undefined, null, '3', true, NaN, Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+          invalid.push({ ...base, evidence_support: { ...support, [key]: value } });
+        }
+      }
+      invalid.push({ ...base, evidence_support: { ...support, full_support_sample_threshold: 0 } },
+        { ...base, evidence_support: { ...support, calibrated_factor_count: 5 } });
+      for (const report of invalid) {
+        renderFactorLab(report);
+        if (target.innerHTML.includes('data-factor-evidence-support') || target.innerHTML.includes('专属新版解释')) {
+          throw new Error(`invalid or legacy support displayed as v2: ${JSON.stringify(report)}`);
+        }
+        if (!target.innerHTML.includes('证据充分度 10/100')) throw new Error('legacy headline compatibility lost');
+      }
+    '''
+    _run_node_script(script)
+
+
+_FACTOR_SCORE_AGGREGATION_FIXTURE = r'''
+  import { renderFactorLab } from "./static/js/research-factor-diagnostics.js";
+  const target = { innerHTML: "" };
+  globalThis.document = { getElementById(id) { return id === "factorLab" ? target : null; } };
+  const aggregation = {
+    version: 'factor-aggregation.v3', directional_score: 53.75, risk_penalty: 2.5, total_score: 51, coverage_pct: 50,
+    groups: ['趋势与价位', '量价', '估值'].map((name, i) => ({name, budget_pct: 100 / 3,
+      contribution: [5, -1.25, 0][i], coverage_pct: [100, 50, 0][i]})),
+    factor_shares: {trend_momentum: 100 / 6, chip_position: 100 / 6, volume_confirmation: 100 / 6,
+      fund_flow_proxy: 100 / 6, valuation_anchor: 100 / 3, risk_pressure: 0}, excluded_ids: ['unknown'],
+  };
+  const direction = {id: 'trend_momentum', name: '趋势<script>', score: 80, score_usage: 'direction',
+    score_share_pct: 100 / 6, participates_in_current_score: true, value: '当前证据', weight: 1.25,
+    data_nature: 'derived', calibration: {sample_count: 0, participates_in_historical_aggregate: false}};
+  const report = {total_score: 51, evidence_sufficiency: 0, score_aggregation: aggregation, factors: [direction,
+    {...direction, id: 'volume_confirmation', name: '零分量价', score: 0},
+    {...direction, id: 'fund_flow_proxy', name: '缺失方向', participates_in_current_score: false, data_nature: 'unavailable'},
+    {...direction, id: 'risk_pressure', name: '风险压力', score: 40, score_share_pct: 0, score_usage: 'risk_constraint',
+      calibration: {sample_count: 999, win_rate: 99}},
+    {...direction, id: 'unknown', name: '未知<img src=x>', score_share_pct: 0, score_usage: 'excluded'},
+  ]};
+'''
+
+
+def test_factor_score_v3_explains_fixed_groups_constraints_zeroes_and_escaped_text() -> None:
+    script = _FACTOR_SCORE_AGGREGATION_FIXTURE + r'''
+      report.score_aggregation.groups[0].name = '趋势与价位 <img src=x>';
+      renderFactorLab(report);
+      for (const text of ['data-factor-score-aggregation', '综合分依据', '方向分 53.8 → 风险扣分 2.5 → 总分 51',
+        '方向覆盖 50.0%', '贡献 +5.00 分', '贡献 -1.25 分', '贡献 0.00 分', '固定预算 <b>33.3%',
+        '缺失份额不转移', '画像不改变方向预算', '风险只扣分，不加看多', '不是上涨概率',
+        '固定份额 16.7%', '0 分', '缺失保留份额', '仅作风险约束', '未注册，不计入综合分',
+        '趋势&lt;script&gt;', '&lt;img src=x&gt;']) {
+        if (!target.innerHTML.includes(text)) throw new Error(`missing v3 explanation ${text}: ${target.innerHTML}`);
+      }
+      for (const text of ['<img', '<script>', '权重 1.25', '胜率 99', '样本 999', '未知&lt;img src=x&gt;参与当前评分']) {
+        if (target.innerHTML.includes(text)) throw new Error(`v3 leaked stale or unsafe content ${text}`);
+      }
+      const zero = structuredClone(report);
+      Object.assign(zero.score_aggregation, {directional_score: 0, risk_penalty: 0, total_score: 0, coverage_pct: 100});
+      zero.score_aggregation.groups.forEach(group => { group.contribution = -50 / 3; group.coverage_pct = 100; });
+      zero.total_score = 0;
+      renderFactorLab(zero);
+      if (!target.innerHTML.includes('方向分 0.0 → 风险扣分 0.0 → 总分 0')) throw new Error('zero chain disappeared');
+    '''
+    _run_node_script(script)
+
+
+def test_factor_score_v3_rejects_dirty_or_partial_contracts_and_keeps_legacy_display() -> None:
+    script = _FACTOR_SCORE_AGGREGATION_FIXTURE + r'''
+      const invalid = [null, undefined, {}, {...aggregation, version: 'factor-aggregation.v2'},
+        {...aggregation, groups: []}, {...aggregation, factor_shares: []}, {...aggregation, excluded_ids: [5]}];
+      for (const key of ['directional_score', 'risk_penalty', 'total_score', 'coverage_pct']) {
+        for (const value of [null, undefined, true, '50', NaN, Infinity, -1, 101]) {
+          invalid.push({...aggregation, [key]: value});
+        }
+      }
+      invalid.push({...aggregation, total_score: 51.5}, {...aggregation, risk_penalty: 12.6});
+      for (const key of ['budget_pct', 'contribution', 'coverage_pct']) {
+        for (const value of [null, undefined, true, '1', NaN, Infinity, -51, 101]) {
+          invalid.push({...aggregation, groups: aggregation.groups.map((group, i) => i ? group : {...group, [key]: value})});
+        }
+      }
+      invalid.push({...aggregation, groups: aggregation.groups.map(group => ({...group, budget_pct: 30}))},
+        {...aggregation, factor_shares: {trend_momentum: NaN}}, {...aggregation, factor_shares: {trend_momentum: -1}},
+        {...aggregation, groups: aggregation.groups.map((group, i) => i ? group : {...group, contribution: 17})});
+      for (const score_aggregation of invalid) {
+        renderFactorLab({...report, score_aggregation});
+        if (target.innerHTML.includes('data-factor-score-aggregation') || target.innerHTML.includes('固定份额')) {
+          throw new Error(`invalid contract rendered as v3: ${JSON.stringify(score_aggregation)}`);
+        }
+        if (!target.innerHTML.includes('80 · 权重 1.25')) throw new Error('legacy factor weights changed');
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_factor_score_v3_does_not_invent_missing_or_nonfinite_item_shares() -> None:
+    script = _FACTOR_SCORE_AGGREGATION_FIXTURE + r'''
+      for (const score_share_pct of [null, undefined, true, '16.7', NaN, Infinity, -1, 101, '<script>']) {
+        renderFactorLab({...report, factors: [{...direction, score_share_pct}]});
+        if (!target.innerHTML.includes('评分分解不一致，等待刷新') || target.innerHTML.includes('固定份额 16.7%')) {
+          throw new Error(`invalid factor share was invented: ${score_share_pct}`);
+        }
+      }
+      renderFactorLab({...report, factors: [{...direction, score: NaN}]});
+      if (target.innerHTML.includes('NaN') || !target.innerHTML.includes('当前不可用')) throw new Error('dirty current score leaked');
+      renderFactorLab({...report, factors: [{...direction, score_usage: '<img src=x>'}]});
+      if (!target.innerHTML.includes('评分分解不一致，等待刷新') || target.innerHTML.includes('固定份额 16.7%')) {
+        throw new Error('unknown score usage was presented as direction');
+      }
+    '''
+    _run_node_script(script)
+
+
+def test_factor_score_v3_rejects_conflicting_totals_shares_roles_and_duplicate_ids() -> None:
+    script = _FACTOR_SCORE_AGGREGATION_FIXTURE + r'''
+      const invalid = [
+        {...report, total_score: 99}, {...report, total_score: '51'},
+        ...[{score_share_pct: 99}, {score_share_pct: 0}, {score_usage: 'risk_constraint'},
+          {aggregation_role: 'composite'}, {aggregation_role: 'unknown'}, {id: 'unregistered'},
+        ].map(change => ({...report, factors: [{...direction, ...change}]})),
+        {...report, factors: [direction, {...direction}]},
+        {...report, factors: [{...report.factors[3], score_usage: 'direction'}]},
+        {...report, factors: [{...report.factors[4], score_usage: 'direction'}]},
+        {...report, factors: null},
+      ];
+      for (const value of invalid) {
+        renderFactorLab(value);
+        if (!target.innerHTML.includes('评分分解不一致，等待刷新')
+          || target.innerHTML.includes('data-factor-score-aggregation') || target.innerHTML.includes('固定份额')) {
+          throw new Error(`inconsistent report was shown as valid v3: ${JSON.stringify(value)}`);
+        }
+      }
+      renderFactorLab({...report, factors: [{...direction, id: 'leadership_strength', aggregation_role: 'composite',
+        participates_in_current_score: false, score_share_pct: 0, score_usage: 'observation'}]});
+      if (!target.innerHTML.includes('data-factor-score-aggregation') || !target.innerHTML.includes('复合观察，不重复计分')) {
+        throw new Error('valid composite observation rejected');
+      }
+      for (const score_aggregation of [null, undefined]) {
+        renderFactorLab({...report, score_aggregation});
+        if (target.innerHTML.includes('评分分解不一致') || !target.innerHTML.includes('80 · 权重 1.25')) {
+          throw new Error('legacy report was marked inconsistent');
+        }
       }
     '''
     _run_node_script(script)

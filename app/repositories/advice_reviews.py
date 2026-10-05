@@ -32,6 +32,12 @@ from app.models.reviews import (
 )
 from app.models.market import DAILY_KLINE_CONTRACT_VERSION
 from app.repositories.base import SQLiteRepository
+from app.utils.advice_review_evidence import (
+    ADVICE_REVIEW_EVIDENCE_CONTRACT_VERSION,
+    REVIEW_RESULT_INSERT_FIELDS,
+    review_result_input_digest,
+    review_result_outcome_digest,
+)
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.errors import NotFoundError
 from app.utils.exchange_calendar_contract import bundled_exchange_sessions, is_bundled_exchange_session
@@ -158,7 +164,6 @@ _SUMMARY_RESULT_SQL = f"""
     ORDER BY plan.id ASC
 """
 
-ADVICE_REVIEW_EVIDENCE_CONTRACT_VERSION = "advice-review-evidence.v2"
 
 _PLAN_MUTABLE_FIELDS = (
     "hypothesis",
@@ -217,60 +222,6 @@ class AdviceReviewQueueConflictError(ValueError):
 class AdviceReviewIntegrityError(ValueError):
     """Raised when a persisted review ledger cannot be independently verified."""
 
-
-_RESULT_INSERT_FIELDS = (
-    "plan_id",
-    "plan_revision",
-    "advice_id",
-    "symbol",
-    "snapshot_market_time",
-    "as_of",
-    "evaluated_at",
-    "status",
-    "conclusion",
-    "rule_version",
-    "trigger_basis",
-    "invalidation_basis",
-    "snapshot_adjustment_mode",
-    "snapshot_anchor_date",
-    "snapshot_anchor_close",
-    "snapshot_data_version",
-    "snapshot_contract_version",
-    "evaluation_adjustment_mode",
-    "evaluation_data_version",
-    "evaluation_contract_version",
-    "anchor_evaluation_close",
-    "price_scale_factor",
-    "normalized_entry_price",
-    "normalized_target_price",
-    "normalized_stop_price",
-    "entry_price",
-    "target_price",
-    "stop_price",
-    "horizon_days",
-    "visible_bar_count",
-    "visible_start_date",
-    "visible_end_date",
-    "available_forward_days",
-    "forward_start_date",
-    "forward_end_date",
-    "return_pct",
-    "max_favorable_excursion_pct",
-    "max_adverse_excursion_pct",
-    "target_hit",
-    "target_hit_date",
-    "stop_hit",
-    "stop_hit_date",
-    "attempt",
-    "plan_payload_digest",
-    "input_digest",
-    "result_digest",
-    "evidence_contract_version",
-    "source_window_digest",
-    "source_session_count",
-    "expected_session_count",
-    "observation_basis",
-)
 
 _PLAN_INSERT_SQL = """
     INSERT INTO advice_review_plan (
@@ -1143,29 +1094,11 @@ def _evaluation_plan_digest_matches(row: sqlite3.Row) -> bool:
 def _evaluation_digests_match(row: sqlite3.Row) -> bool:
     if str(row["evidence_contract_version"]) != ADVICE_REVIEW_EVIDENCE_CONTRACT_VERSION:
         return False
-    values = {field: row[field] for field in _RESULT_INSERT_FIELDS}
-    digest_fields = {"plan_payload_digest", "input_digest", "result_digest"}
-    input_payload = {
-        field: values[field]
-        for field in _RESULT_INSERT_FIELDS
-        if field not in {
-            "status", "conclusion", "return_pct",
-            "max_favorable_excursion_pct", "max_adverse_excursion_pct",
-            "target_hit", "target_hit_date", "stop_hit", "stop_hit_date",
-        } | digest_fields
-    }
-    result_payload = {
-        field: values[field]
-        for field in (
-            "status", "conclusion", "return_pct", "max_favorable_excursion_pct",
-            "max_adverse_excursion_pct", "target_hit", "target_hit_date",
-            "stop_hit", "stop_hit_date",
-        )
-    }
+    values = {field: row[field] for field in REVIEW_RESULT_INSERT_FIELDS}
     try:
         return (
-            str(row["input_digest"]) == _payload_digest(input_payload)
-            and str(row["result_digest"]) == _payload_digest(result_payload)
+            str(row["input_digest"]) == review_result_input_digest(values)
+            and str(row["result_digest"]) == review_result_outcome_digest(values)
         )
     except (TypeError, ValueError):
         return False
@@ -1343,7 +1276,7 @@ def _evaluation_insert_values(evaluation: AdviceReviewEvaluationDraft) -> dict[s
     values = evaluation.model_dump()
     values["target_hit"] = int(evaluation.target_hit)
     values["stop_hit"] = int(evaluation.stop_hit)
-    return {field: values[field] for field in _RESULT_INSERT_FIELDS}
+    return {field: values[field] for field in REVIEW_RESULT_INSERT_FIELDS}
 
 
 def _prepared_evaluation_values(
@@ -1355,38 +1288,8 @@ def _prepared_evaluation_values(
     values = _evaluation_insert_values(evaluation)
     values["attempt"] = attempt
     values["plan_payload_digest"] = plan_digest
-    digest_fields = {"plan_payload_digest", "input_digest", "result_digest"}
-    input_payload = {
-        field: values[field]
-        for field in _RESULT_INSERT_FIELDS
-        if field not in {
-            "status",
-            "conclusion",
-            "return_pct",
-            "max_favorable_excursion_pct",
-            "max_adverse_excursion_pct",
-            "target_hit",
-            "target_hit_date",
-            "stop_hit",
-            "stop_hit_date",
-        } | digest_fields
-    }
-    result_payload = {
-        field: values[field]
-        for field in (
-            "status",
-            "conclusion",
-            "return_pct",
-            "max_favorable_excursion_pct",
-            "max_adverse_excursion_pct",
-            "target_hit",
-            "target_hit_date",
-            "stop_hit",
-            "stop_hit_date",
-        )
-    }
-    values["input_digest"] = _payload_digest(input_payload)
-    values["result_digest"] = _payload_digest(result_payload)
+    values["input_digest"] = review_result_input_digest(values)
+    values["result_digest"] = review_result_outcome_digest(values)
     return values
 
 
@@ -1409,7 +1312,7 @@ def _matching_evaluation_row(
     for row in rows:
         if not _evaluation_snapshot_is_verifiable(row):
             continue
-        if all(row[field] == expected[field] for field in _RESULT_INSERT_FIELDS if field not in ignored):
+        if all(row[field] == expected[field] for field in REVIEW_RESULT_INSERT_FIELDS if field not in ignored):
             return row
     return None
 
@@ -1443,8 +1346,8 @@ def _next_evaluation_attempt(
 
 
 def _evaluation_insert_sql() -> str:
-    columns = ", ".join(_RESULT_INSERT_FIELDS)
-    placeholders = ", ".join(f":{field}" for field in _RESULT_INSERT_FIELDS)
+    columns = ", ".join(REVIEW_RESULT_INSERT_FIELDS)
+    placeholders = ", ".join(f":{field}" for field in REVIEW_RESULT_INSERT_FIELDS)
     return f"""
         INSERT INTO advice_review_result ({columns})
         VALUES ({placeholders})

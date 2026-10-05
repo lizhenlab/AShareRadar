@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+
+from app.services.market_scan_probability_estimators import PROBABILITY_MODEL_VERSION
 from pydantic import ValidationError
 
 import app.models.individual_probability as individual_model_module
@@ -879,7 +881,7 @@ def test_compact_nonofficial_fit_can_never_self_authorize_current_selection() ->
         "calibration_metrics": None,
         "training_cutoff": "2026-01-01",
         "base_rate": 0.5,
-        "model_version": artifact_module.PROBABILITY_MODEL_VERSION,
+        "model_version": PROBABILITY_MODEL_VERSION,
         "feature_version": artifact_module.PROBABILITY_FEATURE_VERSION,
         "evidence_digest": "a" * 64,
         "limitations": [],
@@ -1316,7 +1318,7 @@ def test_minimal_attested_sqlite_builds_current_v2_assessment(
             "calibration_metrics": None,
             "training_cutoff": None,
             "base_rate": None,
-            "model_version": artifact_module.PROBABILITY_MODEL_VERSION,
+            "model_version": PROBABILITY_MODEL_VERSION,
             "feature_version": artifact_module.PROBABILITY_FEATURE_VERSION,
             "evidence_digest": sha256_hex(f"holding-{holding}"),
             "limitations": ["minimum_independent_sessions_not_met"],

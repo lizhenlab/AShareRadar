@@ -10,8 +10,8 @@ from app.artifacts.io import canonical_json_bytes, sha256_hex
 from app.models.strategy_lab import StrategySpecInput
 
 
-MARKET_STRATEGY_TEMPLATE_CATALOG_SCHEMA_VERSION: Literal["full-market-strategy-template-catalog-v1"] = "full-market-strategy-template-catalog-v1"
-MARKET_STRATEGY_TEMPLATE_AS_OF_DATE: Literal["2026-08-12"] = "2026-08-12"
+MARKET_STRATEGY_TEMPLATE_CATALOG_SCHEMA_VERSION: Literal["full-market-strategy-template-catalog-v2"] = "full-market-strategy-template-catalog-v2"
+MARKET_STRATEGY_TEMPLATE_AS_OF_DATE: Literal["2026-09-19"] = "2026-09-19"
 
 TemplateAvailability = Literal["available_for_draft", "shadow_only", "unavailable"]
 TemplateContractStatus = Literal["verified", "unavailable"]
@@ -29,6 +29,10 @@ _DRAFT_FILTER_PERIODS: dict[str, frozenset[int | None]] = {
     "tradability": frozenset({None}),
     "amount": frozenset({None}),
     "return_pct": frozenset({1, 5, 20, 60}),
+    "skip5_return_pct": frozenset({20, 55}),
+    "atr_pct": frozenset({20}),
+    "downside_volatility_pct": frozenset({20}),
+    "max_drawdown_pct": frozenset({60}),
 }
 
 
@@ -118,8 +122,8 @@ class MarketStrategyTemplate(_StrictModel):
     def _validate_shadow_only(self) -> None:
         if self.strategy_spec is not None:
             raise ValueError("shadow_only 模板不能提供 strategy_spec")
-        if self.contract_status != "verified" or self.efficacy_status != "insufficient_data":
-            raise ValueError("影子模板必须是 verified/insufficient_data")
+        if self.contract_status != "verified" or self.efficacy_status != "not_generated":
+            raise ValueError("影子模板必须是 verified/not_generated")
         if self.missing_fields:
             raise ValueError("影子模板的已冻结研究合同不能声明缺失字段")
 
@@ -132,13 +136,20 @@ class MarketStrategyTemplate(_StrictModel):
             raise ValueError("不可用模板必须明确 missing_fields")
 
 
+class MarketStrategyTemplateSourceContracts(_StrictModel):
+    score_dimension_algorithm: Annotated[str, Field(min_length=1, max_length=160)]
+    point_in_time_evidence: Annotated[str, Field(min_length=1, max_length=160)]
+    feature_windows: Annotated[str, Field(min_length=1, max_length=160)]
+
+
 class MarketStrategyTemplateCatalog(_StrictModel):
-    schema_version: Literal["full-market-strategy-template-catalog-v1"] = MARKET_STRATEGY_TEMPLATE_CATALOG_SCHEMA_VERSION
-    as_of_date: Literal["2026-08-12"] = MARKET_STRATEGY_TEMPLATE_AS_OF_DATE
+    schema_version: Literal["full-market-strategy-template-catalog-v2"] = MARKET_STRATEGY_TEMPLATE_CATALOG_SCHEMA_VERSION
+    as_of_date: Literal["2026-09-19"] = MARKET_STRATEGY_TEMPLATE_AS_OF_DATE
+    catalog_kind: Literal["static_research_templates"] = "static_research_templates"
+    evidence_status: Literal["not_evaluated"] = "not_evaluated"
+    source_contracts: MarketStrategyTemplateSourceContracts
     selection_mode: Literal["exclusive"] = "exclusive"
-    production_rule_version: Literal["full-market-score-v4"] = "full-market-score-v4"
     production_effect: Literal["none"] = "none"
-    official_session_count: Literal[2] = 2
     templates: list[MarketStrategyTemplate] = Field(min_length=1, max_length=50)
     catalog_digest: DigestText
 
@@ -166,6 +177,7 @@ __all__ = [
     "MarketStrategyTemplate",
     "MarketStrategyTemplateCatalog",
     "MarketStrategyTemplateHorizon",
+    "MarketStrategyTemplateSourceContracts",
     "TemplateAvailability",
     "TemplateContractStatus",
     "TemplateEfficacyStatus",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from random import Random
 
 import pytest
 
@@ -12,6 +13,7 @@ from app.repositories.cache_stats import (
     _normalize_market_datetime,
     _select_latest_market_datetime,
 )
+from app.db.schema_migrations import ensure_compat_indexes
 from app.services.cache import SQLiteCache
 
 
@@ -238,6 +240,66 @@ def test_cache_stats_primary_daily_fields_ignore_unknown_and_other_adjustments(t
     assert stats.latest_daily_kline_at == "2026-05-13 10:29:02"
     assert stats.latest_daily_kline_fetched_at == "2026-05-13 10:29:02"
     assert stats.latest_daily_kline_date == "2026-05-12"
+
+
+@pytest.mark.parametrize("row_count", [0, 1, 1000])
+def test_daily_stats_grouping_preserves_legacy_query_results(row_count: int) -> None:
+    rng = Random(220922)
+    date_values = [
+        "2026-05-12", "2026/05/13", "20260514", "2026-05-13T16:00:00Z",
+        "2026-05-14T01:00:00+08:00", "not-a-date", "", "   ",
+    ]
+    fetch_values = [None, "", "invalid", "2026/05/14 08:00:00", "2026-05-14T00:01:00.000000Z"]
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE kline_daily (symbol TEXT, adjustment_mode TEXT, date TEXT, fetched_at TEXT)")
+        conn.executemany(
+            "INSERT INTO kline_daily VALUES (?, ?, ?, ?)",
+            [(f"{i:06d}.SZ", rng.choice(["qfq", "none", "unknown"]), rng.choice(date_values), rng.choice(fetch_values))
+             for i in range(row_count)],
+        )
+        ensure_compat_indexes(conn)
+        cache_stats_module._register_market_datetime_function(conn)
+        expected_count, expected_fetch = conn.execute(
+            "SELECT COUNT(*), MAX(fetched_at) FROM kline_daily WHERE adjustment_mode = 'qfq'",
+        ).fetchone()
+        expected_market = _select_latest_market_datetime(
+            conn, "SELECT DISTINCT date AS market_time FROM kline_daily WHERE adjustment_mode = 'qfq'",
+        )
+
+        actual = cache_stats_module._read_daily_kline_stats(conn)
+
+    assert (actual.count, actual.latest_fetched_at, actual.latest_market_datetime) == (
+        expected_count, expected_fetch, expected_market,
+    )
+
+
+def test_daily_stats_query_uses_covering_index_and_normalizes_each_date_once(monkeypatch) -> None:
+    dates = ["2026-05-13", "2026/05/14", "invalid"]
+    normalized: list[object] = []
+
+    def normalize(value: object) -> str | None:
+        normalized.append(value)
+        return _normalize_market_datetime(value)
+
+    monkeypatch.setattr(cache_stats_module, "_normalize_market_datetime", normalize)
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE kline_daily (symbol TEXT, adjustment_mode TEXT, date TEXT, fetched_at TEXT)")
+        conn.executemany(
+            "INSERT INTO kline_daily VALUES (?, 'qfq', ?, '2026-05-14T01:00:00.000000Z')",
+            [(f"{i:06d}.SZ", day) for i in range(100) for day in dates],
+        )
+        ensure_compat_indexes(conn)
+        cache_stats_module._register_market_datetime_function(conn)
+        plan = conn.execute("EXPLAIN QUERY PLAN " + cache_stats_module._DAILY_KLINE_STATS_QUERY, ("qfq",)).fetchall()
+
+        actual = cache_stats_module._read_daily_kline_stats(conn)
+
+    details = " ".join(row[3] for row in plan)
+    assert "COVERING INDEX idx_kline_daily_cache_stats" in details
+    assert "TEMP B-TREE" not in details
+    assert sorted(normalized) == sorted(dates)
+    assert actual.count == 300
+    assert actual.latest_market_datetime == "2026-05-14 00:00:00"
 
 
 def _save_market_times(

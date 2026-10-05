@@ -52,6 +52,20 @@ def test_strategy_execution_rejects_preopen_review_cohort() -> None:
         StrategyExecutionRequest(strategy_id=1, mode="preopen")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("weight", [float("nan"), float("inf"), -float("inf"), -0.01, 1.01, True, "0.5", None])
+def test_strategy_execution_rejects_invalid_current_weights(weight: object) -> None:
+    with pytest.raises(ValidationError):
+        StrategyExecutionRequest.model_validate({"strategy_id": 1, "current_weights": {"600000.SH": weight}})
+
+
+def test_strategy_execution_current_weight_budget_accepts_cash_and_rejects_overallocation() -> None:
+    for weights in ({}, {"600000.SH": 0}, {"600000.SH": 1}, {"600000.SH": 0.25, "000001.SZ": 0.5}):
+        request = StrategyExecutionRequest.model_validate({"strategy_id": 1, "current_weights": weights})
+        assert request.current_weights == weights
+    with pytest.raises(ValidationError, match="合计不能超过"):
+        StrategyExecutionRequest(strategy_id=1, current_weights={"600000.SH": 0.6, "000001.SZ": 0.6})
+
+
 def test_strategy_repository_rejects_direct_preopen_access(tmp_path) -> None:
     cache, _service, _strategy_id, _run_id = _environment(tmp_path)
 

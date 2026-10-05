@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
+from dataclasses import asdict
 import math
 from typing import Protocol, TypeVar
 
@@ -23,22 +25,28 @@ from app.models.market_scan_screening import (
     MarketBreadthPopulation,
     MarketBreadthScore,
     MarketBreadthV1,
+    MarketScanConditionImpact,
+    MarketScanConditionImpactExample,
     MarketScanExclusionReason,
     MarketScanFailedCondition,
     MarketScanFunnelStep,
     MarketScanMatchExplanation,
     MarketScanNearMiss,
     MarketScanScreenEvaluateRequest,
-    MarketScanScreenEvaluationV1,
+    MarketScanScreenEvaluationV2,
     MarketScanScreenEvidence,
     MarketScanScreenMatchedPage,
     ScreenSortField,
     ScreenSortV2,
+    screen_text_contains,
 )
 from app.repositories.market_scan_screening import (
+    MAX_SCREENING_HYDRATION_SYMBOLS,
     MarketScanBreadthRow,
     MarketScanScreeningRow,
 )
+from app.services.market_scan_contracts import MarketScanVerifiedReadProtocol
+from app.services.market_scan_export import MarketScanExportFilters
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 
 
@@ -52,18 +60,7 @@ class MarketScanScreeningRepositoryProtocol(Protocol):
         run_id: int,
     ) -> tuple[MarketScanRun, list[MarketScanBreadthRow]]: ...
 
-    def market_scan_screening_evaluation_snapshot(
-        self,
-        run_id: int,
-    ) -> tuple[MarketScanRun, list[MarketScanScreeningRow]]: ...
-
-    def market_scan_screening_result_items(
-        self,
-        run_id: int,
-        symbols: Sequence[str],
-        *,
-        expected_run: MarketScanRun,
-    ) -> list[MarketScanResultItem]: ...
+    def verified_market_scan_read(self, run_id: int) -> AbstractContextManager[MarketScanVerifiedReadProtocol]: ...
 
 
 class MarketScanScreeningService:
@@ -90,50 +87,59 @@ class MarketScanScreeningService:
         self,
         run_id: int,
         request: MarketScanScreenEvaluateRequest,
-    ) -> MarketScanScreenEvaluationV1:
-        run, population = self._repository.market_scan_screening_evaluation_snapshot(run_id)
-        _require_eligible_run(run)
-        conditions = compile_screen_conditions(request.spec)
-        funnel = _funnel(population, conditions)
-        failures = {item.symbol: _failures(item, conditions) for item in population}
-        matched_rows = [item for item in population if not failures[item.symbol]]
-        ordered = _ordered(matched_rows, request.spec.sort)
-        page_items, near_misses = _hydrate_evaluation_items(
-            self._repository,
-            run,
-            population,
-            failures,
-            ordered,
-            request,
-        )
-        return _sealed_response(MarketScanScreenEvaluationV1,
-            evidence=_evidence(run),
-            spec=request.spec,
-            spec_digest=screen_spec_digest(request.spec),
-            population_count=len(population),
-            matched_count=len(matched_rows),
-            funnel=funnel,
-            exclusion_reasons=_exclusion_reasons(failures, conditions),
-            matched=MarketScanScreenMatchedPage(
-                items=page_items,
-                total=len(matched_rows),
-                page=request.page,
-                page_size=request.page_size,
-                page_count=_page_count(len(matched_rows), request.page_size),
-            ),
-            matched_explanations=[
-                MarketScanMatchExplanation(
-                    symbol=item.symbol,
-                    passed_conditions=(
-                        [condition.code for condition in conditions]
-                        if conditions
-                        else ["all_conditions_passed"]
-                    ),
-                )
-                for item in page_items
-            ],
-            near_misses=near_misses,
-        )
+    ) -> MarketScanScreenEvaluationV2:
+        with self._repository.verified_market_scan_read(run_id) as verified:
+            return _evaluate_snapshot(verified, request)
+
+
+def _evaluate_snapshot(
+    verified: MarketScanVerifiedReadProtocol,
+    request: MarketScanScreenEvaluateRequest,
+) -> MarketScanScreenEvaluationV2:
+    run = verified.run
+    _require_eligible_run(run)
+    population = verified.screening_rows()
+    conditions = compile_screen_conditions(request.spec)
+    failures = {item.symbol: _failures(item, conditions) for item in population}
+    matched_rows = [item for item in population if not failures[item.symbol]]
+    ordered = _ordered(matched_rows, request.spec.sort)
+    page_items, near_misses = _hydrate_evaluation_items(
+        verified,
+        run,
+        population,
+        failures,
+        ordered,
+        request,
+    )
+    return _sealed_response(MarketScanScreenEvaluationV2,
+        evidence=_evidence(run),
+        spec=request.spec,
+        spec_digest=screen_spec_digest(request.spec),
+        population_count=len(population),
+        matched_count=len(matched_rows),
+        funnel=_funnel(population, conditions, failures),
+        condition_impacts=_condition_impacts(run.id, population, conditions, failures, request.spec.sort, len(matched_rows)),
+        exclusion_reasons=_exclusion_reasons(failures, conditions),
+        matched=MarketScanScreenMatchedPage(
+            items=page_items,
+            total=len(matched_rows),
+            page=request.page,
+            page_size=request.page_size,
+            page_count=_page_count(len(matched_rows), request.page_size),
+        ),
+        matched_explanations=[
+            MarketScanMatchExplanation(
+                symbol=item.symbol,
+                passed_conditions=(
+                    [condition.code for condition in conditions]
+                    if conditions
+                    else ["all_conditions_passed"]
+                ),
+            )
+            for item in page_items
+        ],
+        near_misses=near_misses,
+    )
 
 
 def _require_eligible_run(run: MarketScanRun) -> None:
@@ -240,25 +246,21 @@ def _industry_breadth(rows: Sequence[MarketScanBreadthRow]) -> list[MarketBreadt
 def _funnel(
     population: Sequence[MarketScanScreeningRow],
     conditions: Sequence[CompiledScreenCondition],
+    failures: dict[str, list[MarketScanFailedCondition]],
 ) -> list[MarketScanFunnelStep]:
-    current = list(population)
+    first_failures = [item_failures[0] for item_failures in failures.values() if item_failures]
+    counts = Counter(failure.code.removesuffix(".missing") for failure in first_failures)
+    missing = Counter(failure.code.removesuffix(".missing") for failure in first_failures if failure.missing)
+    current_count = len(population)
     steps: list[MarketScanFunnelStep] = []
     for index, condition in enumerate(conditions, start=1):
-        outcomes = [(item, _condition_failure(item, condition)) for item in current]
-        matched = [item for item, failure in outcomes if failure is None]
-        failures = [failure for _item, failure in outcomes if failure is not None]
-        steps.append(
-            MarketScanFunnelStep(
-                index=index,
-                condition_code=condition.code,
-                label=condition.label,
-                input_count=len(current),
-                matched_count=len(matched),
-                excluded_count=len(current) - len(matched),
-                missing_count=sum(failure.missing for failure in failures),
-            )
-        )
-        current = matched
+        excluded_count = counts[condition.code]
+        steps.append(MarketScanFunnelStep(
+            index=index, condition_code=condition.code, label=condition.label,
+            input_count=current_count, matched_count=current_count - excluded_count,
+            excluded_count=excluded_count, missing_count=missing[condition.code],
+        ))
+        current_count -= excluded_count
     return steps
 
 
@@ -292,11 +294,11 @@ def _condition_passed(
     if condition.kind == "in":
         return value in condition.values
     if condition.kind == "contains_any":
-        return any(_sqlite_like_contains(str(value), str(candidate)) for candidate in condition.values)
+        return any(screen_text_contains(str(value), str(candidate)) for candidate in condition.values)
     if condition.kind == "keyword":
         needle = str(condition.values[0])
         return any(
-            _sqlite_like_contains(candidate, needle)
+            screen_text_contains(candidate, needle)
             for candidate in (item.symbol, item.code, item.name)
         )
     number = _number(value)
@@ -337,6 +339,45 @@ def _exclusion_reasons(
     ]
 
 
+def _condition_impacts(
+    run_id: int,
+    population: Sequence[MarketScanScreeningRow],
+    conditions: Sequence[CompiledScreenCondition],
+    failures: dict[str, list[MarketScanFailedCondition]],
+    sort: list[ScreenSortV2],
+    matched_count: int,
+) -> list[MarketScanConditionImpact]:
+    grouped: dict[str, list[MarketScanScreeningRow]] = {condition.code: [] for condition in conditions}
+    for item in population:
+        item_failures = failures[item.symbol]
+        if len(item_failures) == 1:
+            grouped[item_failures[0].code.removesuffix(".missing")].append(item)
+    return [
+        MarketScanConditionImpact(
+            condition_code=condition.code,
+            label=condition.label,
+            additional_count=len(grouped[condition.code]),
+            missing_additional_count=sum(failures[item.symbol][0].missing for item in grouped[condition.code]),
+            matched_without_condition=matched_count + len(grouped[condition.code]),
+            examples=[_impact_example(run_id, item, condition, failures[item.symbol][0])
+                      for item in _ordered(grouped[condition.code], sort)[:3]],
+        )
+        for condition in conditions
+    ]
+
+
+def _impact_example(
+    run_id: int, item: MarketScanScreeningRow,
+    condition: CompiledScreenCondition, failure: MarketScanFailedCondition,
+) -> MarketScanConditionImpactExample:
+    observed = item.name if condition.kind == "keyword" else _field_value(item, condition.field)
+    return MarketScanConditionImpactExample.model_validate({
+        "run_id": run_id, "symbol": item.symbol, "code": item.code,
+        "market": item.market, "name": item.name, "status": item.status,
+        "observed_value": None if failure.missing else observed, "missing": failure.missing,
+    })
+
+
 def _near_miss_candidates(
     population: Sequence[MarketScanScreeningRow],
     failures: dict[str, list[MarketScanFailedCondition]],
@@ -352,7 +393,7 @@ def _near_miss_candidates(
 
 
 def _hydrate_evaluation_items(
-    repository: MarketScanScreeningRepositoryProtocol,
+    verified: MarketScanVerifiedReadProtocol,
     run: MarketScanRun,
     population: Sequence[MarketScanScreeningRow],
     failures: dict[str, list[MarketScanFailedCondition]],
@@ -369,7 +410,7 @@ def _hydrate_evaluation_items(
         maximum_failures=request.near_miss_max_failures,
     )
     hydrated = _hydrate_selected(
-        repository,
+        verified,
         run,
         [item.symbol for item in (*page_rows, *near_miss_rows)],
     )
@@ -385,14 +426,23 @@ def _hydrate_evaluation_items(
 
 
 def _hydrate_selected(
-    repository: MarketScanScreeningRepositoryProtocol,
+    verified: MarketScanVerifiedReadProtocol,
     run: MarketScanRun,
     symbols: Sequence[str],
 ) -> dict[str, MarketScanResultItem]:
     unique_symbols = tuple(dict.fromkeys(symbols))
     if not unique_symbols:
         return {}
-    items = repository.market_scan_screening_result_items(run.id, unique_symbols, expected_run=run)
+    if len(unique_symbols) > MAX_SCREENING_HYDRATION_SYMBOLS:
+        raise ValueError("筛选结果单次最多读取 300 只股票详情")
+    query: dict[str, object] = asdict(MarketScanExportFilters(status=None, sort="symbol"))
+    query.pop("probability_horizon")
+    query.pop("min_upside_probability")
+    query.update(symbols=unique_symbols, page=1, page_size=len(unique_symbols))
+    page = verified.results_page(**query)
+    if page.run != run or page.total != len(unique_symbols):
+        raise RuntimeError("冻结筛选结果与同快照股票集合不一致")
+    items = page.items
     observed_symbols = [item.symbol for item in items]
     if len(observed_symbols) != len(set(observed_symbols)):
         raise RuntimeError("冻结筛选结果详情包含重复股票")
@@ -464,16 +514,6 @@ def _sortable(value: object | None) -> tuple[int, str, float] | None:
         return (1, value, 0.0)
     number = _number(value)
     return None if number is None else (0, "", number)
-
-
-def _sqlite_like_contains(value: str, needle: str) -> bool:
-    """Match SQLite LIKE's default ASCII folding while treating wildcards literally."""
-
-    return _ascii_fold(needle) in _ascii_fold(value)
-
-
-def _ascii_fold(value: str) -> str:
-    return value.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
 
 
 def _number(value: object | None) -> float | None:

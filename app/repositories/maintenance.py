@@ -9,7 +9,7 @@ import threading
 from typing import Literal
 
 from app.config import Settings
-from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION, SQLITE_MINUTE_TIME_FUNCTION
+from app.db.connection import SQLITE_AUDIT_EPOCH_FUNCTION, SQLITE_MINUTE_TIME_FUNCTION, SQLiteConnectionFactory
 from app.db.market_scan_artifact_lease import (
     market_scan_artifact_retention_lease,
     require_market_scan_artifact_lease_namespace_current,
@@ -21,6 +21,7 @@ from app.repositories.market_scan_retention import (
 )
 from app.repositories.runtime_research_artifact_retention import (
     MarketScanArtifactProtection,
+    RuntimeCleanupIntegrityError,
     market_scan_artifact_protection,
     require_market_scan_artifacts_unchanged,
 )
@@ -190,6 +191,7 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
         self.settings = settings
         self._maintenance_lock = threading.RLock()
         self._last_regenerable_cleanup_at: float | None = None
+        self._count_connections = SQLiteConnectionFactory(path)
 
     @contextmanager
     def exclusive_operation(self) -> Iterator[None]:
@@ -213,20 +215,27 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             if self._last_regenerable_cleanup_at is not None and now - self._last_regenerable_cleanup_at < interval:
                 return {}
             with market_scan_artifact_retention_lease(self._path):
-                removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS)
+                removed = self._cleanup_specs(REGENERABLE_RUNTIME_CLEANUP_SPECS, only_verify_scan_deletions=True)
                 self._last_regenerable_cleanup_at = monotonic_now()
             self.compact_after_cleanup(removed)
         return removed
 
-    def _cleanup_specs(self, specs: tuple[RuntimeCleanupSpec, ...]) -> dict[str, int]:
+    def _cleanup_specs(
+        self, specs: tuple[RuntimeCleanupSpec, ...], *, only_verify_scan_deletions: bool = False,
+    ) -> dict[str, int]:
         removed: dict[str, int] = {}
-        artifact_protection = market_scan_artifact_protection(self._path)
+        artifact_protection = self._cleanup_artifact_protection(specs, only_verify_scan_deletions=only_verify_scan_deletions)
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             for spec in specs:
                 limit = int(getattr(self.settings, spec.limit_setting))
                 candidates = _cleanup_advice_candidates(conn, spec, limit)
                 if spec.table == "market_scan_run":
+                    if artifact_protection is None:
+                        if _cleanup_candidate_count(conn, spec, limit):
+                            raise RuntimeCleanupIntegrityError("全市场清理候选在预检后出现，须重新验证研究档案")
+                        removed[spec.table] = 0
+                        continue
                     require_market_scan_artifacts_unchanged(
                         self._path,
                         artifact_protection,
@@ -240,9 +249,24 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
                 if candidates:
                     deleted_symbols = _deleted_advice_symbols(conn, candidates)
                     cap_watchlist_unread_change_counts_to_viewable(conn, deleted_symbols)
-            require_market_scan_artifacts_unchanged(self._path, artifact_protection)
+            if artifact_protection is not None:
+                require_market_scan_artifacts_unchanged(self._path, artifact_protection)
             require_market_scan_artifact_lease_namespace_current(self._path)
         return removed
+
+    def _cleanup_artifact_protection(
+        self, specs: tuple[RuntimeCleanupSpec, ...], *, only_verify_scan_deletions: bool,
+    ) -> MarketScanArtifactProtection | None:
+        if only_verify_scan_deletions:
+            spec = next((item for item in specs if item.table == "market_scan_run"), None)
+            if spec is None:
+                return None
+            # A preflight can only avoid validation, never authorize deletion.
+            # The write transaction rechecks that this candidate set is empty.
+            with self._count_connections.read_snapshot() as conn:
+                if not _cleanup_candidate_count(conn, spec, int(getattr(self.settings, spec.limit_setting))):
+                    return None
+        return market_scan_artifact_protection(self._path)
 
     def compact_after_cleanup(self, removed: dict[str, int]) -> None:
         """Attempt optional space reclamation after the deletion transaction commits."""
@@ -290,7 +314,9 @@ class RuntimeMaintenanceRepository(SQLiteRepository):
             return preview
 
     def table_counts(self) -> dict[str, int]:
-        with self._lock, self._connect() as conn:
+        # Diagnostics read committed state, including while cleanup borrows a
+        # different connection for its owning destructive transaction.
+        with self._count_connections.read_snapshot() as conn:
             return {table: _table_count(conn, table) for table in TABLE_COUNT_NAMES}
 
 
@@ -390,11 +416,15 @@ def _cleanup_sql(spec: RuntimeCleanupSpec) -> str:
 
 def _retention_overflow_sql(spec: RuntimeCleanupSpec) -> str:
     partition = f"PARTITION BY {', '.join(spec.partition_by)} " if spec.limit_scope == PARTITION_LIMIT else ""
+    columns = [f"retained_source.{spec.keep_column} AS retention_key"]
+    if spec.protected_statuses or spec.table == "market_scan_run":
+        columns.append("retained_source.status")
+    if spec.table == "advice_history":
+        columns.append("retained_source.symbol")
     return f"""
         SELECT candidate.*
         FROM (
-            SELECT retained_source.{spec.keep_column} AS retention_key,
-                   retained_source.*,
+            SELECT {', '.join(columns)},
                    ROW_NUMBER() OVER ({partition}ORDER BY {spec.order_by}) AS retention_rank
             FROM {spec.table} AS retained_source
         ) AS candidate

@@ -74,12 +74,12 @@ test("failed change history keeps the count and a second explicit click can reco
 });
 
 test("leaving the changes page before its history arrives does not mark invisible records", async ({ page }) => {
-  const watchlist=queue(); const marks=[]; let release; let pending=false;
+  const watchlist=queue(); const marks=[]; let release; let pending=false; let delivered=false;
   const delayed=new Promise(resolve=>{release=resolve;});
   await mockApi(page,{watchlist,timeline,api:async(url)=>{
     if(url.pathname.endsWith("/mark-viewed")) marks.push(url.pathname);
     if(url.pathname === "/api/advice/timeline" && url.searchParams.get("symbol") === "000001.SZ") {
-      pending=true; await delayed; return {payload:timeline("000001.SZ")};
+      pending=true; await delayed; delivered=true; return {payload:timeline("000001.SZ")};
     }
     return null;
   }});
@@ -88,11 +88,30 @@ test("leaving the changes page before its history arrives does not mark invisibl
   await selectPrimaryView(page,"monitor");
   await page.locator('.watch-queue-row[data-symbol="000001.SZ"] [data-action="changes"]').click();
   await expect.poll(()=>pending).toBe(true);
+  const cancelled = page.waitForEvent("requestfailed", {
+    predicate: request => new URL(request.url()).pathname === "/api/advice/timeline"
+      && new URL(request.url()).searchParams.get("symbol") === "000001.SZ",
+  });
   await selectPrimaryView(page,"system");
+  expect((await cancelled).failure().errorText).toMatch(/abort|cancel/i);
+  const feedback = await page.locator("#watchlistFeedback").textContent();
+  const focus = await page.evaluate(() => document.activeElement.id);
   release();
-  await expect(page.locator("#watchlistFeedback")).toContainText("未读状态保持");
+  await expect.poll(()=>delivered).toBe(true);
+  await expect(page.locator("body")).toHaveAttribute("data-primary-view", "system");
+  await expect(page.locator("#adviceTimeline")).toBeHidden();
+  await expect(page.locator("#watchlistFeedback")).toHaveText(feedback);
+  expect(await page.evaluate(() => document.activeElement.id)).toBe(focus);
   expect(marks).toHaveLength(0);
   expect(watchlist[1].unread_change_count).toBe(2);
+  await selectPrimaryView(page,"monitor");
+  const changes = page.locator('.watch-queue-row[data-symbol="000001.SZ"]')
+    .getByRole("button", { name: "查看 平安银行 的 2 条新变化" });
+  await expect(changes).toBeVisible();
+  expect(marks).toHaveLength(0);
+  await changes.click();
+  await expect(page.locator("#adviceTimeline")).toBeFocused();
+  await expect.poll(() => marks.length).toBe(1);
 });
 
 function queue() {

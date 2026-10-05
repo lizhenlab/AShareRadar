@@ -343,10 +343,8 @@ def verify_market_scan_snapshot(
     if not str(row["snapshot_sealed_at"] or "").strip():
         raise MarketScanSnapshotSealError(f"扫描批次 {run_id} 缺少快照封印时间")
     if str(row["snapshot_seal_origin"]) == "publication":
-        _require_publication_time_order(
-            conn,
-            run_id,
-            str(row["snapshot_sealed_at"]),
+        result_observer = _publication_time_observer(
+            conn, run_id, str(row["snapshot_sealed_at"]), result_observer,
         )
     actual = market_scan_snapshot_digest(
         conn,
@@ -363,6 +361,31 @@ def _require_publication_time_order(
     run_id: int,
     sealed_at: str,
 ) -> None:
+    updated = _publication_result_time_limit(conn, run_id, sealed_at)
+    _require_result_times_not_after(conn, run_id, updated)
+
+
+def _publication_time_observer(
+    conn: sqlite3.Connection,
+    run_id: int,
+    sealed_at: str,
+    observer: Callable[[Mapping[str, object]], None] | None,
+) -> Callable[[Mapping[str, object]], None]:
+    updated = _publication_result_time_limit(conn, run_id, sealed_at)
+
+    def observe(row: Mapping[str, object]) -> None:
+        _require_result_time_not_after(row["symbol"], row["updated_at"], run_id, updated)
+        if observer is not None:
+            observer(row)
+
+    return observe
+
+
+def _publication_result_time_limit(
+    conn: sqlite3.Connection,
+    run_id: int,
+    sealed_at: str,
+) -> datetime:
     row = conn.execute(
         "SELECT finished_at, updated_at FROM market_scan_run WHERE id = ?",
         (run_id,),
@@ -380,7 +403,7 @@ def _require_publication_time_order(
         raise MarketScanSnapshotSealError(
             f"扫描批次 {run_id} 的 snapshot_sealed_at 早于 updated_at"
         )
-    _require_result_times_not_after(conn, run_id, updated)
+    return updated
 
 
 def _require_result_times_not_after(
@@ -393,10 +416,19 @@ def _require_result_times_not_after(
         (run_id,),
     )
     for row in rows:
-        if _audit_time(row[1], f"result[{row[0]}].updated_at", run_id) > run_updated_at:
-            raise MarketScanSnapshotSealError(
-                f"扫描批次 {run_id} 的结果更新时间晚于批次更新时间"
-            )
+        _require_result_time_not_after(row[0], row[1], run_id, run_updated_at)
+
+
+def _require_result_time_not_after(
+    symbol: object,
+    updated_at: object,
+    run_id: int,
+    run_updated_at: datetime,
+) -> None:
+    if _audit_time(updated_at, f"result[{symbol}].updated_at", run_id) > run_updated_at:
+        raise MarketScanSnapshotSealError(
+            f"扫描批次 {run_id} 的结果更新时间晚于批次更新时间"
+        )
 
 
 def _audit_time(value: object, field: str, run_id: int) -> datetime:

@@ -20,12 +20,17 @@ from app.models.strategy_lab import (
     StrategySpecInput,
 )
 from app.services.strategy_compiler import compile_strategy_spec
+from app.services.market_scan_feature_windows import MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION
+from app.services.market_scan_score_dimensions import (
+    MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
+    MARKET_SCAN_EVIDENCE_CONTRACT_VERSION,
+)
 
 
 _COMMON_LIMITATIONS = [
     "该模板仅为研究草案，不代表上涨概率、投资建议或已验证收益。",
     "所有数值阈值均为未经过样本外验证的产品初始值。",
-    "截至2026-08-12仅有2个独立official交易日，不足以检验有效性或市场状态稳健性。",
+    "目录为静态研究模板，不读取数据库；模板修订日不是数据截止日，不声明当前样本数或实证结果。",
     "停牌与一字状态当前使用冻结日K成交额和原因文本代理，不等同交易所逐时停复牌或排队成交证据。",
 ]
 _COMMON_COST_NOTES = [
@@ -50,9 +55,14 @@ def market_strategy_template_catalog() -> MarketStrategyTemplateCatalog:
         "schema_version": MARKET_STRATEGY_TEMPLATE_CATALOG_SCHEMA_VERSION,
         "as_of_date": MARKET_STRATEGY_TEMPLATE_AS_OF_DATE,
         "selection_mode": "exclusive",
-        "production_rule_version": "full-market-score-v4",
+        "catalog_kind": "static_research_templates",
+        "evidence_status": "not_evaluated",
+        "source_contracts": {
+            "score_dimension_algorithm": MARKET_SCAN_DIMENSION_ALGORITHM_VERSION,
+            "point_in_time_evidence": MARKET_SCAN_EVIDENCE_CONTRACT_VERSION,
+            "feature_windows": MARKET_SCAN_FEATURE_WINDOW_CONTRACT_VERSION,
+        },
         "production_effect": "none",
-        "official_session_count": 2,
         "templates": [item.model_dump(mode="json") for item in templates],
     }
     payload["catalog_digest"] = market_strategy_catalog_digest(payload)
@@ -93,6 +103,8 @@ def _available_templates() -> list[MarketStrategyTemplate]:
         _pullback_continuation(),
         _defensive_liquidity(),
         _capacity_first(),
+        _medium_momentum(),
+        _low_volatility_trend(),
     ]
 
 
@@ -208,6 +220,56 @@ def _capacity_first() -> MarketStrategyTemplate:
     return _available_template("capacity_first", "容量", "先控制容量与可交易性，再观察短中周期序数分。", 61, spec)
 
 
+def _medium_momentum() -> MarketStrategyTemplate:
+    spec = _draft_spec(
+        name="跳过近期5日动量研究草案",
+        description="跳过最近5日，筛选此前20/55日正动量；短窗与阈值为工程研究默认，并非经典跳月动量复现。",
+        filters=[
+            _filter("skip5_return_pct", "between", [0.0, 25.0], period=20),
+            _filter("skip5_return_pct", "gte", 0.0, period=55),
+            _filter("return_pct", "between", [-8.0, 10.0], period=5),
+            _filter("max_drawdown_pct", "lte", 20.0, period=60),
+            _filter("risk", "lte", 60.0),
+            _filter("tradability", "gte", 25.0),
+            _filter("amount", "gte", 50_000_000.0),
+        ],
+        objectives=(0.03, 0.12, 0.45, 0.15, 0.15, 0.10),
+        holding=10,
+        rebalance=10,
+    )
+    return _available_template(
+        "medium_momentum", "跳过近期动量", "研究近期噪声之外的短窗趋势及回撤风险。", 61, spec,
+        extra_limitations=["跳过5日、回看20/55日仅为短窗研究配置，不等于经典12-2月动量或已验证的A股动量收益。"],
+    )
+
+
+def _low_volatility_trend() -> MarketStrategyTemplate:
+    spec = _draft_spec(
+        name="低波趋势研究草案",
+        description="在正趋势下限制ATR、下行半偏差与回撤；阈值为工程研究默认，未使用股息率或市场beta。",
+        filters=[
+            _filter("skip5_return_pct", "gte", 0.0, period=20),
+            _filter("return_pct", "gte", 0.0, period=60),
+            _filter("atr_pct", "lte", 4.0, period=20),
+            _filter("downside_volatility_pct", "lte", 2.0, period=20),
+            _filter("max_drawdown_pct", "lte", 15.0, period=60),
+            _filter("tradability", "gte", 30.0),
+            _filter("amount", "gte", 80_000_000.0),
+        ],
+        objectives=(0.03, 0.12, 0.30, 0.20, 0.25, 0.10),
+        holding=10,
+        rebalance=10,
+    )
+    return _available_template(
+        "low_volatility_trend", "低波趋势", "研究波动和回撤约束下的正趋势候选。", 61, spec,
+        version=1,
+        extra_limitations=[
+            "ATR与下行半偏差是价格风险指标，不是beta估计；该草案不是BAB策略，也没有红利选股证据。",
+            "下行半偏差使用20个日收益相对零目标的均方根（包含非下跌日的零项），不年化；回撤为60个收盘价的正数损失幅度。",
+        ],
+    )
+
+
 def _draft_spec(
     *,
     name: str,
@@ -259,6 +321,9 @@ def _available_template(
     objective: str,
     formation: int,
     spec: StrategySpecInput,
+    *,
+    version: int = 2,
+    extra_limitations: list[str] | None = None,
 ) -> MarketStrategyTemplate:
     compiled = compile_strategy_spec(spec)
     if not compiled.execution_plan.executable or compiled.unsupported_clauses:
@@ -274,6 +339,7 @@ def _available_template(
         rebalance=spec.rebalance_policy.rebalance_every_sessions,
     )
     payload.update(
+        version=version,
         availability="available_for_draft",
         strategy_spec=spec.model_dump(mode="json"),
         contract_status="verified",
@@ -282,6 +348,7 @@ def _available_template(
         missing_fields=[],
         gate_reasons=_COMMON_GATE_REASONS,
         regime_hypotheses=["候选阈值可能随市场状态变化，当前尚未生成分状态证据。"],
+        limitations=[*_COMMON_LIMITATIONS, *(extra_limitations or [])],
     )
     return _materialize(payload)
 
@@ -289,7 +356,6 @@ def _available_template(
 def _research_route_templates() -> list[MarketStrategyTemplate]:
     return [
         _shadow_route("short_reversal", "短期反转", "研究短期反转在A股T+1和成本约束下的净效应。", ["return_pct", "risk", "tradability", "amount"]),
-        _shadow_route("medium_momentum", "中期动量", "研究跳过近期窗口后的中期动量与状态依赖。", ["alpha_20d", "return_pct", "risk", "tradability"]),
         _shadow_route(
             "industry_relative_strength",
             "行业相对强度",
@@ -333,10 +399,10 @@ def _shadow_route(
         availability="shadow_only",
         strategy_spec=None,
         contract_status="verified",
-        efficacy_status="insufficient_data",
+        efficacy_status="not_generated",
         required_fields=required_fields,
         missing_fields=[],
-        gate_reasons=["相关PIT字段合同可用于影子研究，但仅2个独立official交易日。", "尚无足够样本外证据，不生成可执行StrategySpec。"],
+        gate_reasons=["相关PIT字段合同可用于影子研究，目录不读取当前样本或推断实证状态。", "该研究路线尚未冻结可载入阈值，不生成StrategySpec。"],
         regime_hypotheses=["效应方向和强度可能依赖市场状态，需按状态分层验证。"],
     )
     return _materialize(payload)
@@ -383,7 +449,7 @@ def _base_payload(
 ) -> dict[str, object]:
     return {
         "template_id": template_id,
-        "version": 1,
+        "version": 2,
         "name": name,
         "family": family,
         "objective": objective,

@@ -1,0 +1,493 @@
+{
+  "schema_version": "market-scan-screen-evaluation-v2",
+  "evidence": {
+    "run_id": 41,
+    "status": "success",
+    "mode": "official",
+    "scope": "沪市 + 深市 + 北交所当前上市A股",
+    "data_date": "2026-08-11",
+    "quote_date": "2026-08-11",
+    "rule_version": "full-market-score-v4",
+    "finished_at": "2026-08-11 16:10:00",
+    "snapshot_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "snapshot_seal_origin": "publication",
+    "snapshot_sealed_at": "2026-08-11 16:10:00"
+  },
+  "spec": {
+    "schema_version": "screen-spec-v2",
+    "status": "success",
+    "markets": [],
+    "industries": [],
+    "is_st": null,
+    "is_new": null,
+    "ranges": {
+      "score": null,
+      "trend_score": null,
+      "change_pct": null,
+      "turnover_rate": null,
+      "amount": null,
+      "data_quality_score": null,
+      "confidence": {
+        "min": 80.0,
+        "max": null
+      },
+      "risk": {
+        "min": null,
+        "max": 50.0
+      },
+      "tradability": null
+    },
+    "keyword": null,
+    "sort": [
+      {
+        "field": "rank",
+        "order": "asc"
+      }
+    ]
+  },
+  "spec_digest": "1d0d0461c41f4b41e0233726b62c566eccfc091480c089c9233609492f8090ed",
+  "population_count": 6,
+  "matched_count": 2,
+  "funnel": [
+    {
+      "index": 1,
+      "condition_code": "status",
+      "label": "结果状态",
+      "input_count": 6,
+      "matched_count": 6,
+      "excluded_count": 0,
+      "missing_count": 0
+    },
+    {
+      "index": 2,
+      "condition_code": "range.confidence",
+      "label": "置信度",
+      "input_count": 6,
+      "matched_count": 3,
+      "excluded_count": 3,
+      "missing_count": 1
+    },
+    {
+      "index": 3,
+      "condition_code": "range.risk",
+      "label": "风险分",
+      "input_count": 3,
+      "matched_count": 2,
+      "excluded_count": 1,
+      "missing_count": 1
+    }
+  ],
+  "exclusion_reasons": [
+    {
+      "code": "range.confidence",
+      "label": "置信度",
+      "count": 3,
+      "missing_count": 1
+    },
+    {
+      "code": "range.risk",
+      "label": "风险分",
+      "count": 2,
+      "missing_count": 1
+    }
+  ],
+  "condition_impacts": [
+    {
+      "condition_code": "status",
+      "label": "结果状态",
+      "additional_count": 0,
+      "missing_additional_count": 0,
+      "matched_without_condition": 2,
+      "examples": []
+    },
+    {
+      "condition_code": "range.confidence",
+      "label": "置信度",
+      "additional_count": 2,
+      "missing_additional_count": 1,
+      "matched_without_condition": 4,
+      "examples": [
+        {
+          "run_id": 41,
+          "symbol": "000002.SH",
+          "code": "000002",
+          "market": "SH",
+          "name": "样本 2",
+          "status": "success",
+          "observed_value": 0.0,
+          "missing": false
+        },
+        {
+          "run_id": 41,
+          "symbol": "000003.SH",
+          "code": "000003",
+          "market": "SH",
+          "name": "样本 3",
+          "status": "success",
+          "observed_value": null,
+          "missing": true
+        }
+      ]
+    },
+    {
+      "condition_code": "range.risk",
+      "label": "风险分",
+      "additional_count": 1,
+      "missing_additional_count": 1,
+      "matched_without_condition": 3,
+      "examples": [
+        {
+          "run_id": 41,
+          "symbol": "000006.SH",
+          "code": "000006",
+          "market": "SH",
+          "name": "样本 6",
+          "status": "success",
+          "observed_value": null,
+          "missing": true
+        }
+      ]
+    }
+  ],
+  "matched": {
+    "items": [
+      {
+        "run_id": 41,
+        "symbol": "000001.SH",
+        "code": "000001",
+        "market": "SH",
+        "name": "样本 1",
+        "industry": "半导体",
+        "list_date": null,
+        "is_st": false,
+        "is_new": false,
+        "metadata_source": null,
+        "status": "success",
+        "rank": 1,
+        "score": 90,
+        "raw_score": null,
+        "base_production_rank": null,
+        "base_production_score": null,
+        "base_production_raw_score": null,
+        "production_score_rule_version": null,
+        "probability_ranking_adjustment": null,
+        "probability_ranking_artifact_digest": null,
+        "probability_ranking_details": {},
+        "trend_score": null,
+        "leader_score": null,
+        "data_quality_score": null,
+        "price": null,
+        "change_pct": 0.0,
+        "turnover_rate": null,
+        "volume_ratio": null,
+        "amount": null,
+        "tags": [],
+        "metrics": {},
+        "score_details": {
+          "components": {
+            "score_dimensions": {
+              "scores": {
+                "confidence": 90,
+                "risk": 10
+              }
+            }
+          }
+        },
+        "reason": null,
+        "error": null,
+        "data_date": null,
+        "quote_timestamp": null,
+        "quote_observed_at": null,
+        "quote_source": null,
+        "kline_source": null,
+        "adjustment_mode": null,
+        "quote_fallback_used": false,
+        "kline_fallback_used": false,
+        "metadata_degraded": false,
+        "degradation_reasons": [],
+        "upside_probabilities": {},
+        "updated_at": "2026-08-11 16:10:00"
+      },
+      {
+        "run_id": 41,
+        "symbol": "000005.SH",
+        "code": "000005",
+        "market": "SH",
+        "name": "样本 5",
+        "industry": "半导体",
+        "list_date": null,
+        "is_st": false,
+        "is_new": false,
+        "metadata_source": null,
+        "status": "success",
+        "rank": 5,
+        "score": 90,
+        "raw_score": null,
+        "base_production_rank": null,
+        "base_production_score": null,
+        "base_production_raw_score": null,
+        "production_score_rule_version": null,
+        "probability_ranking_adjustment": null,
+        "probability_ranking_artifact_digest": null,
+        "probability_ranking_details": {},
+        "trend_score": null,
+        "leader_score": null,
+        "data_quality_score": null,
+        "price": null,
+        "change_pct": 0.0,
+        "turnover_rate": null,
+        "volume_ratio": null,
+        "amount": null,
+        "tags": [],
+        "metrics": {},
+        "score_details": {
+          "components": {
+            "score_dimensions": {
+              "scores": {
+                "confidence": 90,
+                "risk": 0
+              }
+            }
+          }
+        },
+        "reason": null,
+        "error": null,
+        "data_date": null,
+        "quote_timestamp": null,
+        "quote_observed_at": null,
+        "quote_source": null,
+        "kline_source": null,
+        "adjustment_mode": null,
+        "quote_fallback_used": false,
+        "kline_fallback_used": false,
+        "metadata_degraded": false,
+        "degradation_reasons": [],
+        "upside_probabilities": {},
+        "updated_at": "2026-08-11 16:10:00"
+      }
+    ],
+    "total": 2,
+    "page": 1,
+    "page_size": 100,
+    "page_count": 1
+  },
+  "matched_explanations": [
+    {
+      "symbol": "000001.SH",
+      "passed_conditions": [
+        "status",
+        "range.confidence",
+        "range.risk"
+      ]
+    },
+    {
+      "symbol": "000005.SH",
+      "passed_conditions": [
+        "status",
+        "range.confidence",
+        "range.risk"
+      ]
+    }
+  ],
+  "near_misses": [
+    {
+      "item": {
+        "run_id": 41,
+        "symbol": "000002.SH",
+        "code": "000002",
+        "market": "SH",
+        "name": "样本 2",
+        "industry": "半导体",
+        "list_date": null,
+        "is_st": false,
+        "is_new": false,
+        "metadata_source": null,
+        "status": "success",
+        "rank": 2,
+        "score": 90,
+        "raw_score": null,
+        "base_production_rank": null,
+        "base_production_score": null,
+        "base_production_raw_score": null,
+        "production_score_rule_version": null,
+        "probability_ranking_adjustment": null,
+        "probability_ranking_artifact_digest": null,
+        "probability_ranking_details": {},
+        "trend_score": null,
+        "leader_score": null,
+        "data_quality_score": null,
+        "price": null,
+        "change_pct": 0.0,
+        "turnover_rate": null,
+        "volume_ratio": null,
+        "amount": null,
+        "tags": [],
+        "metrics": {},
+        "score_details": {
+          "components": {
+            "score_dimensions": {
+              "scores": {
+                "confidence": 0,
+                "risk": 10
+              }
+            }
+          }
+        },
+        "reason": null,
+        "error": null,
+        "data_date": null,
+        "quote_timestamp": null,
+        "quote_observed_at": null,
+        "quote_source": null,
+        "kline_source": null,
+        "adjustment_mode": null,
+        "quote_fallback_used": false,
+        "kline_fallback_used": false,
+        "metadata_degraded": false,
+        "degradation_reasons": [],
+        "upside_probabilities": {},
+        "updated_at": "2026-08-11 16:10:00"
+      },
+      "failed_conditions": [
+        {
+          "code": "range.confidence",
+          "label": "置信度",
+          "missing": false
+        }
+      ]
+    },
+    {
+      "item": {
+        "run_id": 41,
+        "symbol": "000003.SH",
+        "code": "000003",
+        "market": "SH",
+        "name": "样本 3",
+        "industry": "半导体",
+        "list_date": null,
+        "is_st": false,
+        "is_new": false,
+        "metadata_source": null,
+        "status": "success",
+        "rank": 3,
+        "score": 90,
+        "raw_score": null,
+        "base_production_rank": null,
+        "base_production_score": null,
+        "base_production_raw_score": null,
+        "production_score_rule_version": null,
+        "probability_ranking_adjustment": null,
+        "probability_ranking_artifact_digest": null,
+        "probability_ranking_details": {},
+        "trend_score": null,
+        "leader_score": null,
+        "data_quality_score": null,
+        "price": null,
+        "change_pct": 0.0,
+        "turnover_rate": null,
+        "volume_ratio": null,
+        "amount": null,
+        "tags": [],
+        "metrics": {},
+        "score_details": {
+          "components": {
+            "score_dimensions": {
+              "scores": {
+                "confidence": null,
+                "risk": 10
+              }
+            }
+          }
+        },
+        "reason": null,
+        "error": null,
+        "data_date": null,
+        "quote_timestamp": null,
+        "quote_observed_at": null,
+        "quote_source": null,
+        "kline_source": null,
+        "adjustment_mode": null,
+        "quote_fallback_used": false,
+        "kline_fallback_used": false,
+        "metadata_degraded": false,
+        "degradation_reasons": [],
+        "upside_probabilities": {},
+        "updated_at": "2026-08-11 16:10:00"
+      },
+      "failed_conditions": [
+        {
+          "code": "range.confidence.missing",
+          "label": "置信度",
+          "missing": true
+        }
+      ]
+    },
+    {
+      "item": {
+        "run_id": 41,
+        "symbol": "000006.SH",
+        "code": "000006",
+        "market": "SH",
+        "name": "样本 6",
+        "industry": "半导体",
+        "list_date": null,
+        "is_st": false,
+        "is_new": false,
+        "metadata_source": null,
+        "status": "success",
+        "rank": 6,
+        "score": 90,
+        "raw_score": null,
+        "base_production_rank": null,
+        "base_production_score": null,
+        "base_production_raw_score": null,
+        "production_score_rule_version": null,
+        "probability_ranking_adjustment": null,
+        "probability_ranking_artifact_digest": null,
+        "probability_ranking_details": {},
+        "trend_score": null,
+        "leader_score": null,
+        "data_quality_score": null,
+        "price": null,
+        "change_pct": 0.0,
+        "turnover_rate": null,
+        "volume_ratio": null,
+        "amount": null,
+        "tags": [],
+        "metrics": {},
+        "score_details": {
+          "components": {
+            "score_dimensions": {
+              "scores": {
+                "confidence": 90,
+                "risk": null
+              }
+            }
+          }
+        },
+        "reason": null,
+        "error": null,
+        "data_date": null,
+        "quote_timestamp": null,
+        "quote_observed_at": null,
+        "quote_source": null,
+        "kline_source": null,
+        "adjustment_mode": null,
+        "quote_fallback_used": false,
+        "kline_fallback_used": false,
+        "metadata_degraded": false,
+        "degradation_reasons": [],
+        "upside_probabilities": {},
+        "updated_at": "2026-08-11 16:10:00"
+      },
+      "failed_conditions": [
+        {
+          "code": "range.risk.missing",
+          "label": "风险分",
+          "missing": true
+        }
+      ]
+    }
+  ],
+  "canonical_digest": "854d19efaded7537714b5731972b709d9194b63979dda4250523459c4ecdf841"
+}

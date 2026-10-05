@@ -492,7 +492,7 @@ class DataSourceReliabilityTests(unittest.TestCase):
 
         with patch("app.services.eastmoney_client._eastmoney_session", return_value=FakeSession()), patch(
             "app.services.eastmoney_client.time.monotonic",
-            side_effect=(100.0, 105.0),
+            side_effect=(100.0, 100.0, 107.0, 107.0),
         ):
             with self.assertRaisesRegex(ProviderTransportError, "内部截止时间"):
                 eastmoney_industry_plate_rank()

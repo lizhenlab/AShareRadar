@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import sqlite3
 
 from fastapi import FastAPI, HTTPException, Response
@@ -16,6 +18,7 @@ from app.repositories.strategy_automation import StrategyAutomationIntegrityErro
 from app.repositories.strategy_evidence import StrategyEvidenceIntegrityError
 from app.repositories.strategy_execution import StrategyExecutionIntegrityError
 from app.models.strategy_execution import StrategyExecutionRequest
+from app.models.strategy_lab import StrategySpecInput
 from app.services.strategy_lab import StrategyLabService
 
 
@@ -150,11 +153,13 @@ def test_strategy_template_catalog_route_is_read_only_and_not_cached(tmp_path) -
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     payload = response.json()
-    assert payload["schema_version"] == "full-market-strategy-template-catalog-v1"
+    assert payload["schema_version"] == "full-market-strategy-template-catalog-v2"
     assert payload["production_effect"] == "none"
-    assert payload["official_session_count"] == 2
+    assert payload["catalog_kind"] == "static_research_templates"
+    assert payload["evidence_status"] == "not_evaluated"
+    assert "official_session_count" not in payload
     assert len(payload["catalog_digest"]) == 64
-    assert len(payload["templates"]) == 14
+    assert len(payload["templates"]) == 15
 
 
 def test_strategy_execution_success_sets_no_store_before_service_call() -> None:
@@ -229,6 +234,23 @@ def test_strategy_evidence_and_simulation_integrity_errors_are_generic_conflicts
         response.json()["detail"] for response in responses
     } == {"研究 artifact 完整性校验失败，已拒绝读取"}
     assert all("sensitive" not in response.text for response in responses)
+
+
+@pytest.mark.parametrize("endpoint", ["compile", "strategies"])
+@pytest.mark.parametrize("weight", [math.nan, math.inf, -math.inf])
+def test_strategy_routes_reject_non_finite_custom_weights(tmp_path, endpoint: str, weight: float) -> None:
+    client = _client(tmp_path)
+    spec = StrategySpecInput(name="自定义权重边界").model_dump(mode="json")
+    spec["portfolio_constraints"]["weighting_method"] = "custom"
+    spec["portfolio_constraints"]["custom_weights"] = {"600000.SH": weight}
+    payload = {"spec": spec, "dry_run": True} if endpoint == "compile" else {"spec": spec, "confirmed": True}
+    response = client.post(
+        f"/api/strategy-lab/{endpoint}",
+        content=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert client.get("/api/strategy-lab/strategies").json()["total"] == 0
 
 
 def _client(tmp_path) -> TestClient:

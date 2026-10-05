@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -212,6 +214,128 @@ def test_advice_timeline_failure_is_explicit_and_abort_is_silent() -> None:
     _run_node_script(script)
 
 
+_ADVICE_TIMELINE_LOAD_HARNESS = r'''
+  import assert from "node:assert/strict";
+  import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
+  const { __appTest: app, element, jsonResponse, legacyWorkbenchResponse, waitFor } = await createAppHarness({ canvasContext: null });
+  const symbol = "600519.SH";
+  app.state.symbol = symbol;
+  app.state.loadSeq = 41;
+  app.state.researchActivitySymbol = symbol;
+  const history = Array.from({ length: 20 }, (_, index) => ({
+    id: 100 - index, symbol, action: `建议-${100 - index}`, price: 10,
+    market_time: "2026-09-22 15:00:00", created_at: "2026-09-22T07:00:00Z",
+    kline_adjustment_mode: "qfq", kline_anchor_date: "2026-09-22", kline_anchor_close: 10,
+    kline_data_version: "fixture-v1", kline_contract_version: "fixture-v1",
+    snapshot_contract_version: "fixture-v1", rule_version: "fixture-v1",
+  }));
+  const workbench = {
+    analysis: { quote: { code: "600519", market: "SH", name: "贵州茅台", price: 10, change: 0, change_pct: 0,
+      source: "测试", timestamp: "2026-09-22 15:00:00" }, data_quality: {},
+      signal_snapshot: { label: "观察", summary: "测试" }, review: {}, klines: [] },
+    insights: { overview: {} }, chart_marks: { marks: [], categories: [] },
+  };
+  function assertHistoryOwned() {
+    assert.deepEqual(app.state.adviceReviewSnapshots.map(item => item.id), history.map(item => item.id));
+    assert.equal((element("adviceTimeline").innerHTML.match(/advice-timeline-item/g) || []).length, 8);
+    assert.deepEqual(app.state.researchActivityAdvice.map(item => item.id), history.slice(0, 8).map(item => item.id));
+    assert.equal(app.state.adviceTimelineWatermark.adviceId, 100);
+  }
+  async function settle() { for (let index = 0; index < 100; index += 1) await Promise.resolve(); }
+'''
+
+
+def test_review_load_uses_one_history_response_for_snapshot_and_short_timeline() -> None:
+    _run_node_script(_ADVICE_TIMELINE_LOAD_HARNESS + r'''
+      const calls = [];
+      globalThis.fetch = async url => {
+        const target = String(url); calls.push(target);
+        if (target.startsWith("/api/stock/workbench")) return legacyWorkbenchResponse(workbench);
+        if (target.startsWith("/api/advice/timeline")) return jsonResponse(history);
+        if (target === "/api/data/status") return jsonResponse({ providers: [], source_plan: {}, cache: {}, capabilities: [], capability_statuses: [] });
+        if (target === "/api/market") return jsonResponse({ indices: [] });
+        if (target === "/api/strong-stocks") return jsonResponse({ items: [] });
+        return jsonResponse([]);
+      };
+      app.state.primaryView = "review"; app.state.workspaceView = "replay";
+      assert.equal(await app.loadAll({ waitForAdviceTimeline: true }), true);
+      assert.deepEqual(calls.filter(url => url.startsWith("/api/advice/timeline")), [`/api/advice/timeline?symbol=${symbol}&limit=200`]);
+      assertHistoryOwned();
+    ''')
+
+
+def test_timeline_upgrade_cancels_short_read_and_ignores_late_response_without_harming_owner() -> None:
+    _run_node_script(_ADVICE_TIMELINE_LOAD_HARNESS + r'''
+      const pending = [];
+      globalThis.fetch = (url, options) => new Promise(resolve => pending.push({ url: String(url), signal: options.signal, resolve }));
+      const oldParent = new AbortController(), nextParent = new AbortController();
+      const short = app.loadAdviceTimeline({ symbol, loadSeq: 41, signal: oldParent.signal });
+      app.state.primaryView = "review";
+      const large = app.loadAdviceTimeline({ symbol, loadSeq: 41, signal: nextParent.signal });
+      assert.equal(app.loadAdviceTimeline({ symbol, loadSeq: 41, signal: nextParent.signal }), large);
+      assert.equal(pending.length, 2);
+      assert.equal(pending[0].signal.aborted, true);
+      oldParent.abort();
+      assert.equal(pending[1].signal.aborted, false);
+      pending[1].resolve(jsonResponse(history));
+      assert.equal(await large, true);
+      pending[0].resolve(jsonResponse(history.slice(0, 8).map(item => ({ ...item, action: "旧响应" }))));
+      assert.equal(await short, false);
+      await settle();
+      assertHistoryOwned();
+      assert.equal(app.state.adviceTimelineRequest, null);
+      assert.equal(element("adviceTimeline").innerHTML.includes("旧响应"), false);
+    ''')
+
+
+def test_failed_review_history_releases_owner_and_never_reuses_other_stock_generation() -> None:
+    _run_node_script(_ADVICE_TIMELINE_LOAD_HARNESS + r'''
+      app.state.primaryView = "review";
+      const pending = [];
+      globalThis.fetch = (url, options) => new Promise(resolve => pending.push({ url: String(url), signal: options.signal, resolve }));
+      const failed = app.loadAdviceTimeline();
+      pending[0].resolve({ ok: false, status: 503, async json() { return { detail: "历史暂不可用" }; } });
+      assert.equal(await failed, false);
+      assert.equal(app.state.adviceTimelineRequest, null);
+      const retry = app.loadAdviceTimeline();
+      assert.equal(pending.length, 2);
+      pending[1].resolve(jsonResponse(history));
+      assert.equal(await retry, true);
+      assertHistoryOwned();
+      const first = app.loadAdviceTimeline();
+      app.state.symbol = "000001.SZ"; app.state.loadSeq = 42;
+      const other = app.loadAdviceTimeline();
+      app.state.symbol = symbol; app.state.loadSeq = 43;
+      const current = app.loadAdviceTimeline();
+      assert.equal(pending.length, 5);
+      assert.equal(pending[2].signal.aborted, true); assert.equal(pending[3].signal.aborted, true);
+      pending[4].resolve(jsonResponse(history));
+      assert.equal(await current, true);
+      pending[2].resolve(jsonResponse([])); pending[3].resolve(jsonResponse([]));
+      await Promise.all([first, other]); await settle();
+      assertHistoryOwned();
+      assert.equal(app.state.adviceTimelineWatermark.loadSeq, 43);
+    ''')
+
+
+def test_review_navigation_to_remembered_paper_workspace_loads_dashboard_once() -> None:
+    _run_node_script(_ADVICE_TIMELINE_LOAD_HARNESS + r'''
+      const tabs = ["overview", "replay", "paper"].map(view => {
+        const tab = element(`tab-${view}`); tab.dataset.view = view; return tab;
+      });
+      document.querySelectorAll = selector => selector === ".workspace-tabs button[data-view]" ? tabs : [];
+      const calls = [];
+      globalThis.fetch = async url => { calls.push(String(url)); return jsonResponse([]); };
+      app.state.primaryView = "research"; app.state.workspaceView = "overview";
+      app.state.workspaceByPrimary.review = "paper";
+      app.setPrimaryView("review"); await settle();
+      assert.equal(app.state.workspaceView, "paper");
+      assert.equal(calls.filter(url => url === "/api/paper-trading").length, 1);
+      app.setWorkspaceView("overview"); app.setWorkspaceView("paper"); await settle();
+      assert.equal(calls.filter(url => url === "/api/paper-trading").length, 2, "explicit paper entry must still refresh");
+    ''')
+
+
 def test_data_status_response_drives_initial_question_and_minute_capabilities() -> None:
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
@@ -256,7 +380,7 @@ def test_quote_stream_ignores_dirty_symbols_and_stale_frames() -> None:
 
       __appTest.state.symbol = "600519.SH";
       __appTest.state.watchlist = [{ symbol: "600000.SH" }];
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const stream = streams.at(-1);
       if (!stream.url.includes("600519.SH") || !stream.url.includes("600000.SH")) {
         throw new Error(`stream URL did not include current/watch symbols: ${stream.url}`);
@@ -275,7 +399,7 @@ def test_quote_stream_ignores_dirty_symbols_and_stale_frames() -> None:
       }
 
       element("quoteList").innerHTML = "current quote rows";
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const currentStream = streams.at(-1);
       const currentStreamStatus = element("dataStatus").textContent;
       stream.onmessage({
@@ -289,18 +413,18 @@ def test_quote_stream_ignores_dirty_symbols_and_stale_frames() -> None:
         throw new Error("stale stream quote-error mutated the current status");
       }
       stream.onerror();
-      if (currentStream.closed || __appTest.state.stream !== currentStream) {
+      if (currentStream.closed || !__appTest.quoteStreamController.snapshot().connected) {
         throw new Error("stale stream error closed the active stream");
       }
 
       __appTest.state.watchlist = { stale: "bad shape" };
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const malformedWatchlistStream = streams.at(-1);
       if (!malformedWatchlistStream.url.includes("600519.SH") || malformedWatchlistStream.url.includes("600000.SH")) {
         throw new Error(`malformed watchlist state leaked into stream URL: ${malformedWatchlistStream.url}`);
       }
       __appTest.state.watchlist = [{ symbol: "600000.SH&x=1" }, { symbol: "000001.SZ" }, { symbol: "bad" }];
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const dirtyWatchlistStream = streams.at(-1);
       if (!dirtyWatchlistStream.url.includes("000001.SZ") || dirtyWatchlistStream.url.includes("&x=1") || dirtyWatchlistStream.url.includes("bad")) {
         throw new Error(`dirty stream symbols leaked into stream URL: ${dirtyWatchlistStream.url}`);
@@ -321,7 +445,7 @@ def test_quote_stream_status_requires_current_valid_frame_and_preserves_degradat
       __appTest.state.coreStatus = { phase: "ready", text: "核心数据已加载", kind: "" };
       __appTest.state.dataQualityStatus = { phase: "ready", text: "", kind: "" };
 
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const cleanStream = streams.at(-1);
       if (element("dataStatus").textContent.includes("正常") || __appTest.state.sseStatus.hasValidFrame) {
         throw new Error(`new stream reported healthy before a frame: ${element("dataStatus").textContent}`);
@@ -367,7 +491,7 @@ def test_quote_stream_status_requires_current_valid_frame_and_preserves_degradat
       Object.defineProperty(quoteList, "innerHTML", { configurable: true, writable: true, value: validQuoteHtml });
 
       __appTest.state.dataQualityStatus = { phase: "degraded", text: "核心数据已加载，本地数据部分降级", kind: "warn" };
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const degradedStream = streams.at(-1);
       degradedStream.onmessage({
         data: JSON.stringify([{ name: "贵州茅台", market: "SH", code: "600519", amount: 1, price: 10, change_pct: 1 }]),
@@ -396,21 +520,21 @@ def test_quote_stream_reconnect_timer_is_scoped_and_resets_after_success() -> No
       };
 
       __appTest.state.symbol = "600519.SH";
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const firstStream = streams.at(-1);
       firstStream.onerror();
 
-      if (!firstStream.closed || __appTest.state.stream !== null) {
+      if (!firstStream.closed || __appTest.quoteStreamController.snapshot().connected) {
         throw new Error("current stream error did not close the failed stream before reconnect");
       }
-      if (timers.length !== 1 || timers[0].delay !== 2000 || __appTest.state.streamRetryCount !== 1) {
+      if (timers.length !== 1 || timers[0].delay !== 2000 || __appTest.quoteStreamController.snapshot().retryCount !== 1) {
         throw new Error(`first reconnect timer was wrong: ${JSON.stringify(timers)}`);
       }
       if (!element("dataStatus").textContent.includes("观察报价流连接波动")) {
         throw new Error("current stream error did not surface reconnect status");
       }
 
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       if (!clearedTimers.includes("timer-1")) {
         throw new Error("manual stream restart did not clear pending retry timer");
       }
@@ -418,13 +542,13 @@ def test_quote_stream_reconnect_timer_is_scoped_and_resets_after_success() -> No
       secondStream.onmessage({
         data: JSON.stringify([{ name: "贵州茅台", market: "SH", code: "600519", amount: 1000000, price: 10, change_pct: 1 }]),
       });
-      if (__appTest.state.streamRetryCount !== 0) {
+      if (__appTest.quoteStreamController.snapshot().retryCount !== 0) {
         throw new Error("successful stream frame did not reset retry count");
       }
 
       document.hidden = true;
       secondStream.onerror();
-      if (timers.length !== 1 || secondStream.closed || __appTest.state.stream !== secondStream) {
+      if (timers.length !== 1 || secondStream.closed || !__appTest.quoteStreamController.snapshot().connected) {
         throw new Error("hidden document should not schedule reconnect or close the active stream");
       }
       document.hidden = false;
@@ -435,7 +559,7 @@ def test_quote_stream_reconnect_timer_is_scoped_and_resets_after_success() -> No
       }
       timers[1].callback();
       const thirdStream = streams.at(-1);
-      if (__appTest.state.stream !== thirdStream || thirdStream === secondStream) {
+      if (!__appTest.quoteStreamController.snapshot().connected || thirdStream === secondStream) {
         throw new Error("reconnect timer did not start a fresh stream");
       }
     '''
@@ -449,7 +573,7 @@ def test_quote_stream_constructor_failure_does_not_leave_closed_stream_active() 
       const { __appTest, element, streams } = await createAppHarness();
 
       __appTest.state.symbol = "600519.SH";
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const oldStream = streams.at(-1);
       globalThis.EventSource = class {
         constructor() {
@@ -457,9 +581,9 @@ def test_quote_stream_constructor_failure_does_not_leave_closed_stream_active() 
         }
       };
 
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
 
-      if (!oldStream.closed || __appTest.state.stream !== null) {
+      if (!oldStream.closed || __appTest.quoteStreamController.snapshot().connected) {
         throw new Error("failed EventSource construction left the closed old stream active");
       }
       if (!element("dataStatus").textContent.includes("stream constructor down")) {
@@ -477,7 +601,7 @@ def test_failed_main_load_closes_stream_and_keeps_failure_status() -> None:
 
       element("dataStatus").textContent = "current stream status";
       __appTest.state.symbol = "600519.SH";
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const streamBeforeFailedLoad = streams.at(-1);
       globalThis.fetch = async (url) => {
         if (String(url).startsWith("/api/stock/workbench")) {
@@ -486,7 +610,7 @@ def test_failed_main_load_closes_stream_and_keeps_failure_status() -> None:
         throw new Error(`unexpected request after failed workbench load: ${url}`);
       };
       await __appTest.loadAll();
-      if (!streamBeforeFailedLoad.closed || __appTest.state.stream !== null) {
+      if (!streamBeforeFailedLoad.closed || __appTest.quoteStreamController.snapshot().connected) {
         throw new Error("failed main load did not close the previous quote stream");
       }
       streamBeforeFailedLoad.onmessage({
@@ -1837,13 +1961,13 @@ def test_hidden_delayed_load_tail_defers_quote_stream_until_visible() -> None:
       resolveWatchlist();
       await pendingLoad;
 
-      if (streams.length !== 0 || __appTest.state.stream !== null) {
+      if (streams.length !== 0 || __appTest.quoteStreamController.snapshot().connected) {
         throw new Error("a delayed load tail created EventSource while the page was hidden");
       }
 
       document.hidden = false;
       __appTest.handleVisibilityChange();
-      if (streams.length !== 1 || __appTest.state.stream !== streams[0]) {
+      if (streams.length !== 1 || !__appTest.quoteStreamController.snapshot().connected) {
         throw new Error("visibility restore did not start the deferred quote stream");
       }
 
@@ -1919,6 +2043,8 @@ def test_workspace_tabs_and_mark_filters_sync_accessibility_state() -> None:
       keydown({ target: tabs.at(-1), key: "Home", preventDefault() { prevented += 1; } });
       if (focused !== tabs[0] || tabs[0].attributes["aria-selected"] !== "true" || prevented !== 4) throw new Error("Home did not select the first tab");
 
+      // Finish the deferred workspace entry before testing the independent mark request.
+      for (let index = 0; index < 100; index += 1) await Promise.resolve();
       __appTest.state.symbol = "600519.SH";
       __appTest.state.loadSeq = 92;
       globalThis.fetch = async () => jsonResponse({
@@ -1969,10 +2095,16 @@ def test_new_quote_stream_session_resets_previous_symbol_backoff() -> None:
       globalThis.clearTimeout = () => {};
 
       __appTest.state.symbol = "600519.SH";
-      __appTest.state.streamRetryCount = 3;
+      __appTest.quoteStreamController.start();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        streams.at(-1).onerror();
+        timers.at(-1).callback();
+      }
+      if (__appTest.quoteStreamController.snapshot().retryCount !== 3) throw new Error("retry setup failed");
+      timers.length = 0;
       __appTest.setActiveSymbol("000001");
-      __appTest.startStream();
-      if (__appTest.state.streamRetryCount !== 0) {
+      __appTest.quoteStreamController.start();
+      if (__appTest.quoteStreamController.snapshot().retryCount !== 0) {
         throw new Error("new symbol inherited previous stream retry count");
       }
       streams.at(-1).onerror();
@@ -2291,7 +2423,7 @@ def test_watchlist_subscription_change_rebuilds_sse_once() -> None:
         throw new Error(`unexpected request ${target}`);
       };
 
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const firstStream = streams[0];
       await element("watchForm").listeners.submit({ preventDefault() {}, currentTarget: element("watchForm") });
       if (streams.length !== 2 || !firstStream.closed || !streams[1].url.includes("600000.SH")) {
@@ -2321,7 +2453,7 @@ def test_excluded_watchlist_symbols_leave_observation_pool_but_active_symbol_sta
         { symbol: "600000.SH", research_status: "watching" },
       ];
 
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const activeExcludedStream = decodeURIComponent(streams.at(-1).url);
       if (!activeExcludedStream.includes("600036.SH")) {
         throw new Error(`current excluded stock was removed from its active stream: ${activeExcludedStream}`);
@@ -2333,7 +2465,7 @@ def test_excluded_watchlist_symbols_leave_observation_pool_but_active_symbol_sta
       __appTest.state.symbol = "600519.SH";
       __appTest.state.loadSeq = 92;
       __appTest.state.watchlist = [{ symbol: "600000.SH", research_status: "watching" }];
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const beforeTransition = streams.at(-1);
       globalThis.fetch = async (url) => {
         if (String(url) === "/api/watchlist") {
@@ -2576,7 +2708,7 @@ def test_committed_local_data_import_refreshes_all_runtime_owned_browser_state()
       element("alertList").innerHTML = "旧预警";
       element("noteList").innerHTML = "旧笔记";
       element("reviewPlanList").innerHTML = "旧复盘";
-      __appTest.startStream();
+      __appTest.quoteStreamController.start();
       const oldStream = streams.at(-1);
       const calls = [];
 
@@ -2839,3 +2971,221 @@ def _run_node_script(script: str) -> None:
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+_REVIEW_HARNESS = _WORKSPACE_BOOTSTRAP_HARNESS + r'''
+  for (const view of ["replay", "finance", "diagnostics"]) {
+    const tab = element(`tab-${view}`);
+    tab.dataset.view = view;
+    tabs.push(tab);
+  }
+  function restorePreference(primaryView, workspaceView) {
+    preferences.set(WORKSPACE_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      version: WORKSPACE_PREFERENCES_VERSION,
+      preferences: { primaryView, workspaceView },
+    }));
+  }
+'''
+
+
+def test_restored_replay_loads_global_review_dashboard_and_scan_history() -> None:
+    _run_node_script(_REVIEW_HARNESS + r'''
+      restorePreference("review", "replay");
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.equal(__appTest.state.primaryView, "review");
+      assert.equal(__appTest.state.workspaceView, "replay");
+      assert.ok(calls.includes("/api/reviews/summary"), "restored review must load its global dashboard");
+      assert.ok(calls.includes("/api/watchlist/scans?limit=20"), "restored review must load scan history");
+    ''')
+
+
+def test_reselecting_active_monitor_keeps_quote_stream_available() -> None:
+    _run_node_script(_REVIEW_HARNESS + r'''
+      restorePreference("monitor", "overview");
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.ok(streams.some((stream) => !stream.closed), "monitor must initially connect quotes");
+      __appTest.setPrimaryView("monitor");
+      await settle();
+      assert.ok(streams.some((stream) => !stream.closed), "reselecting monitor must not leave quotes disconnected");
+      assert.deepEqual(stockCalls(), [], "monitor does not require hidden stock research");
+    ''')
+
+
+def test_monitor_with_remembered_paper_tab_defers_paper_requests() -> None:
+    _run_node_script(_REVIEW_HARNESS + r'''
+      restorePreference("monitor", "paper");
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.equal(__appTest.state.primaryView, "monitor");
+      assert.equal(__appTest.state.workspaceView, "paper");
+      assert.equal(calls.some((url) => url.startsWith("/api/paper-trading")), false,
+        "remembered hidden paper tab must not load its dashboard");
+      assert.deepEqual(stockCalls(), []);
+    ''')
+
+
+@pytest.mark.parametrize(("primary", "workspace"), [("system", "data"), ("system", "diagnostics"), ("monitor", "finance")])
+def test_independent_workspace_bootstrap_and_recovery_do_not_load_hidden_stock(primary, workspace) -> None:
+    _run_node_script(_REVIEW_HARNESS + f'restorePreference("{primary}", "{workspace}");' + r'''
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.deepEqual(stockCalls(), []);
+      assert.equal(calls.some(url => url.startsWith("/api/fuyao/stock")), false);
+      assert.equal(calls.some(url => url.startsWith("/api/advice/timeline") || url.startsWith("/api/reviews?")), false);
+      if (__appTest.state.primaryView === "system") {
+        assert.equal(calls.some(url => ["/api/market", "/api/strong-stocks", "/api/watchlist"].includes(url) || url.startsWith("/api/plates")), false);
+        assert.equal(streams.length, 0);
+      } else {
+        assert.ok(calls.includes("/api/watchlist"));
+        assert.ok(streams.some(stream => !stream.closed));
+        streams.at(-1).onmessage({data:JSON.stringify([{code:"600519",market:"SH",name:"测试",price:10,amount:1,change_pct:0}])});
+        assert.equal(element("dataStatus").textContent, "观察报价流已收到有效帧");
+      }
+      __appTest.state.failedLoadSymbol = "300750.SZ";
+      const symbol = __appTest.state.symbol;
+      assert.equal(__appTest.handleWorkbenchOnline(), true);
+      await __appTest.state.onlineRecoveryPromise;
+      assert.equal(__appTest.state.symbol, symbol, "background recovery must not select a failed hidden stock");
+      document.hidden = true; __appTest.handleVisibilityChange();
+      document.hidden = false; __appTest.handleVisibilityChange();
+      await settle();
+      assert.deepEqual(stockCalls(), []);
+      __appTest.state.failedLoadSymbol = "";
+      __appTest.setPrimaryView("research");
+      await settle();
+      assert.equal(workbenchCalls().length, 1, "returning to stock research must load once");
+      assert.ok(__appTest.state.lastAnalysis);
+    ''')
+
+
+def test_bootstrap_restores_last_successful_stock_and_failed_selection_keeps_history() -> None:
+    _run_node_script(_REVIEW_HARNESS + r'''
+      const historyKey = "ashare-radar.stock-search-history";
+      preferences.set(historyKey, JSON.stringify({version:1,items:[
+        {symbol:"bad",name:"非法记录"},{symbol:"000001.SZ",name:"平安银行"},{symbol:"600519.SH",name:"贵州茅台"}
+      ]}));
+      Object.assign(workbench.analysis.quote, {code:"000001",market:"SZ",name:"平安银行"});
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.equal(__appTest.state.symbol, "000001.SZ");
+      assert.equal(element("symbolInput").value, "000001");
+      assert.equal(element("stockName").textContent, "平安银行");
+      assert.equal(new URL(workbenchCalls()[0], "http://test").searchParams.get("symbol"), "000001.SZ");
+      const originalFetch = globalThis.fetch;
+      const historyBeforeFailure = preferences.get(historyKey);
+      globalThis.fetch = async (url) => String(url).startsWith("/api/stock/workbench")
+        ? {ok:false,status:503,json:async()=>({detail:"暂不可用"})} : originalFetch(url);
+      __appTest.setActiveSymbol("300750");
+      assert.equal(await __appTest.loadAll(), false);
+      assert.equal(preferences.get(historyKey), historyBeforeFailure);
+      element("stockSearchHistoryClear").listeners.click();
+      assert.deepEqual(JSON.parse(preferences.get(historyKey)).items, []);
+    ''')
+
+
+@pytest.mark.parametrize("primary", ["system", "monitor"])
+def test_leaving_stock_for_independent_workspace_rejects_late_stock_response(primary) -> None:
+    _run_node_script(_REVIEW_HARNESS + r'''
+      globalThis.__ASHARE_RADAR_DISABLE_AUTOLOAD__ = true;
+      holdWorkbench = true;
+      const { __appTest } = await import("./static/app.js");
+      const pending = __appTest.loadAll();
+      await settle();
+    ''' + f'__appTest.setPrimaryView("{primary}");' + r'''
+      await settle();
+      workbenchResolvers[0]();
+      assert.equal(await pending, false);
+      await settle();
+      assert.equal(__appTest.state.lastAnalysis, null);
+      assert.equal(stockCalls().length, 1, "late core response must not launch companion reads");
+    ''')
+
+
+def test_monitor_recovers_quotes_after_add_when_initial_watchlist_read_failed() -> None:
+    _run_node_script(_REVIEW_HARNESS + r'''
+      restorePreference("monitor", "overview");
+      const originalFetch = globalThis.fetch;
+      const watchRequests = [];
+      let added = false;
+      globalThis.fetch = async (url, options = {}) => {
+        if (String(url) !== "/api/watchlist") return originalFetch(url, options);
+        const method = options.method || "GET";
+        calls.push(String(url));
+        watchRequests.push(method);
+        if (method === "POST") {
+          assert.equal(JSON.parse(options.body).symbol, "601318");
+          added = true;
+          return jsonResponse({ symbol: "601318.SH", name: "中国平安" });
+        }
+        if (!added) return { ok: false, status: 503, json: async () => ({ detail: "自选暂不可用" }) };
+        return jsonResponse([{ symbol: "601318.SH", code: "601318", name: "中国平安", research_status: "watching" }]);
+      };
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.equal(Boolean(__appTest.state.watchlistReady), false);
+      assert.equal(streams.length, 0, "failed initial list cannot authorize a quote subscription");
+      assert.match(element("watchList").innerHTML, /自选股读取失败/);
+
+      element("watchSymbolInput").value = "601318";
+      await element("watchForm").listeners.submit({ preventDefault() {} });
+      await settle();
+      assert.deepEqual(watchRequests, ["GET", "POST", "GET"]);
+      assert.equal(__appTest.state.watchlistReady, true, "successful complete readback establishes readiness");
+      assert.equal(__appTest.state.watchlist[0].symbol, "601318.SH");
+      const active = streams.filter((stream) => !stream.closed);
+      assert.equal(active.length, 1, "successful add and complete readback recover monitor quotes");
+      assert.ok(decodeURIComponent(active[0].url).includes("601318.SH"));
+      assert.equal(__appTest.state.auxiliaryStatus.failures.watchlist, undefined);
+      assert.equal(__appTest.state.visibilityRefreshSources.has("watchlist"), false);
+      assert.deepEqual(stockCalls(), [], "adding a watch does not load hidden stock research");
+    ''')
+
+
+def test_system_data_import_refreshes_visible_state_without_hidden_stock_or_false_failure() -> None:
+    _run_node_script(_REVIEW_HARNESS + r'''
+      restorePreference("system", "data");
+      const { __appTest } = await import("./static/app.js");
+      await settle();
+      assert.equal(__appTest.state.primaryView, "system");
+      assert.equal(__appTest.state.workspaceView, "data");
+      Object.assign(__appTest.state, {
+        localDataImportBundle: { kind: "ashare-radar-user-data", version: 1 },
+        localDataImportFileKey: "replace.json:10:1", localDataImportSelectionGeneration: 1,
+        localDataImportPreviewRequestGeneration: 1, localDataImportPreviewMode: "replace",
+        localDataImportPreviewTimezone: "", localDataImportPreviewFileKey: "replace.json:10:1",
+        localDataImportPreviewSelectionGeneration: 1, localDataImportPreviewGeneration: 1,
+        localDataImportPreview: { preview_token: "x".repeat(40), preview_expires_at: "2099-01-01T00:00:00Z" },
+      });
+      element("localDataImportMode").value = "replace";
+      element("commitLocalDataImport").disabled = false;
+      element("commitLocalDataImport").textContent = "提交导入";
+      const originalFetch = globalThis.fetch;
+      const importRequests = [];
+      calls.length = 0;
+      globalThis.fetch = async (url, options = {}) => {
+        importRequests.push(`${options.method || "GET"} ${String(url)}`);
+        if (String(url).startsWith("/api/local-data/import") && options.method === "POST") {
+          return jsonResponse({
+            bundle_version: 1, mode: "replace", dry_run: false, committed: true,
+            conflict_strategy: "remap_surrogate_ids_source_wins_on_stable_keys", tables: {},
+            totals: { incoming: 0, inserted: 0, updated: 0, unchanged: 0, deleted: 4, remapped: 0 },
+            rollback_backup_path: "/tmp/backup",
+          });
+        }
+        return originalFetch(url, options);
+      };
+      await element("commitLocalDataImport").listeners.click({ preventDefault() {} });
+      await settle();
+      assert.ok(importRequests[0].startsWith("POST /api/local-data/import"));
+      assert.ok(importRequests.includes("GET /api/data/status"), "committed import refreshes the visible system data state");
+      assert.equal(importRequests.filter((request) => request.startsWith("POST ")).length, 1);
+      assert.deepEqual(stockCalls(), []);
+      assert.equal(importRequests.some((request) => /\/api\/(stock\/|fuyao\/stock|advice\/timeline|reviews\?)/.test(request)), false);
+      assert.equal(streams.length, 0);
+      assert.equal(__appTest.state.workbenchDeferred, true, "research will refresh only when reopened");
+      assert.equal(element("localDataFeedback").dataset.tone, "ok");
+      assert.match(element("localDataFeedback").textContent, /用户数据导入已提交/);
+      assert.doesNotMatch(element("localDataFeedback").textContent, /同步失败/);
+    ''')

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.services.analysis import build_analysis
 from app.services.data_quality import build_data_quality
+from app.services.eastmoney_client import EASTMONEY_BRIDGE_SOURCE_NAME
 from app.services.stock_insights import build_stock_insight_bundle
 from app.services.stock_overview import (
     MAIN_CONFLICT_RULES,
@@ -21,7 +22,7 @@ from app.services.stock_overview import (
     _technical_factor,
 )
 from app.services.research_alpha_points import overview_factor_points
-from tests.factories import make_kline, make_quote, make_stock_info
+from tests.factories import make_kline, make_plate_item, make_quote, make_stock_info
 
 
 def test_fundamental_factor_reports_missing_fields_without_evidence() -> None:
@@ -137,13 +138,11 @@ def test_overview_low_quality_caps_total_score() -> None:
     analysis = _analysis(pe=18.5, pb=2.2, market_cap=120_000_000_000, industry="白酒", data_quality_score=45)
 
     overview = build_stock_insight_bundle(analysis).overview
-    participating = [item for item in overview.factors if item.score_available and item.participates_in_total_score]
-    factor_score = round(sum(item.score for item in participating) / len(participating))
+    factor_score = round(overview.directional_evidence_score - overview.risk_penalty)
     signal_quality_score = round(analysis.signal_snapshot.confidence * 0.7 + analysis.data_quality.score * 0.3)
-    raw_total = round(factor_score * 0.68 + signal_quality_score * 0.32)
-    capped_total = round((factor_score + analysis.data_quality.score) / 2)
-
-    assert overview.total_score == min(raw_total, capped_total)
+    reliability = min(signal_quality_score, analysis.data_quality.score) / 100
+    assert overview.total_score == round(50 + (factor_score - 50) * reliability)
+    assert min(factor_score, 50) <= overview.total_score <= max(factor_score, 50)
 
 
 def test_quality_cap_treats_non_finite_quality_score_as_low_quality() -> None:
@@ -160,6 +159,78 @@ def test_overview_factor_order_stays_stable() -> None:
     ).overview
 
     assert [item.name for item in overview.factors] == ["技术面", "量价热度（衍生）", "基本面", "事件面", "风险面"]
+
+
+def test_quality_does_not_leak_back_into_direction_through_risk_factor() -> None:
+    analysis = _analysis(pe=18.5, pb=2.2, market_cap=120_000_000_000, data_quality_score=100)
+    bundle = build_stock_insight_bundle(analysis)
+    baseline = _overview_scores(analysis, bundle.fund_flow, bundle.order_pressure, bundle.events)
+    low = analysis.model_copy(update={
+        "data_quality": analysis.data_quality.model_copy(update={"score": 20}),
+        "signal_snapshot": analysis.signal_snapshot.model_copy(update={"confidence": 10}),
+    })
+    result = _overview_scores(low, bundle.fund_flow, bundle.order_pressure, bundle.events)
+    assert baseline.factor_score == result.factor_score
+    assert _risk_factor(analysis, bundle.order_pressure).score <= 50
+    assert abs(result.total_score - 50) <= abs(baseline.total_score - 50)
+
+
+def test_rebuilding_analysis_keeps_quality_risk_out_of_direction_and_preserves_action_gates() -> None:
+    analyses = [
+        _analysis(pe=18.5, pb=2.2, market_cap=120_000_000_000, data_quality_score=quality)
+        for quality in (100, 65, 45)
+    ]
+    snapshots = [analysis.model_dump() for analysis in analyses]
+    inputs = build_stock_insight_bundle(analyses[0])
+    risk_scores = [_risk_factor(analysis, inputs.order_pressure).score for analysis in analyses]
+    assert risk_scores == [50, 50, 50]
+    scores = [_overview_scores(analysis, inputs.fund_flow, inputs.order_pressure, inputs.events) for analysis in analyses]
+    assert len({score.factor_score for score in scores}) == 1
+    assert [analysis.risk_level for analysis in analyses] == ["低风险", "中等风险", "高风险"]
+    assert [analysis.model_dump() for analysis in analyses] == snapshots
+
+
+def test_price_risk_and_observed_sell_pressure_keep_their_penalties_without_quality_input() -> None:
+    baseline = _analysis(pe=18.5, pb=2.2, market_cap=120_000_000_000, data_quality_score=100)
+    cases = [
+        ({"quote": baseline.quote.model_copy(update={"change_pct": -5.0})}, 20),
+        ({"quote": baseline.quote.model_copy(update={"change_pct": -3.0})}, 32),
+        ({"support": baseline.quote.price + 1, "support_available": True}, 20),
+        ({"trend_score": 40}, 32),
+    ]
+    for updates, expected in cases:
+        analysis = baseline.model_copy(update={"risk_level": "低风险", **updates})
+        before = analysis.model_dump()
+        assert _risk_factor(analysis, _order_pressure("买盘偏强")).score == expected
+        assert _risk_factor(analysis, _order_pressure("卖压偏强")).score == expected - 10
+        assert analysis.model_dump() == before
+
+
+def test_industry_events_remain_visible_without_reentering_directional_base() -> None:
+    original = _analysis(pe=18.5, pb=2.2, market_cap=120_000_000_000, data_quality_score=100)
+    market = original.quote.model_copy(update={"code": "000300", "name": "沪深300", "price": 100, "prev_close": 100, "change_pct": 0})
+    results = []
+    for change in (-3.0, 3.0):
+        industry = make_plate_item(change).model_copy(update={
+            "source": EASTMONEY_BRIDGE_SOURCE_NAME, "symbol": "BK0477", "quote_timestamp": original.quote.timestamp,
+        })
+        analysis = original.model_copy(update={"industry_context": industry})
+        bundle = build_stock_insight_bundle(analysis, market_quote=market, evaluated_at="2026-05-13 10:00:01")
+        assert any(event.category == "行业" for event in bundle.events.events)
+        results.append(bundle.overview)
+    assert results[0].directional_score == results[1].directional_score
+    assert results[0].factors[3].score == results[1].factors[3].score
+    assert results[0].market_context_score.industry_excess_pct == -3
+    assert results[1].market_context_score.industry_excess_pct == 3
+    assert results[0].market_context_score.raw_score != results[1].market_context_score.raw_score
+
+
+def test_industry_only_event_is_explanatory_and_does_not_create_an_event_factor() -> None:
+    event = SimpleNamespace(category="行业", title="行业背景变化", level="积极")
+    factor = _event_factor(SimpleNamespace(events=[event], notes=[]))
+    assert not factor.score_available and not factor.participates_in_total_score
+    assert factor.evidence == ["行业：行业背景变化"]
+    assert "行业背景" in factor.unavailable_reason
 
 
 def test_key_prices_skip_invalid_prices_and_normalize_reversed_support_resistance() -> None:
@@ -265,7 +336,7 @@ def test_event_factor_deduplicates_events_before_score_and_evidence() -> None:
 
     factor = _event_factor(SimpleNamespace(events=[risk_event, duplicate_risk_event, positive_event], notes=["估算"]))
 
-    assert factor.score == 56
+    assert factor.score == 48
     assert factor.summary == "事件需观察"
     assert factor.evidence == ["公告：股东减持计划", "业绩：订单增长"]
     assert factor.missing_data == ["公告全文", "研报摘要", "龙虎榜"]
@@ -282,7 +353,7 @@ def test_event_factor_deduplicates_same_visible_event_across_dates_and_ignores_d
         SimpleNamespace(events=[risk_event, duplicate_with_new_date, dirty_title_event, positive_event], notes=[" ", "nan"])
     )
 
-    assert factor.score == 56
+    assert factor.score == 48
     assert factor.evidence == ["公告：股东减持计划", "业绩：订单增长"]
     assert factor.missing_data == []
 
@@ -295,14 +366,15 @@ def test_quality_only_event_and_missing_fundamental_do_not_enter_overview_or_alp
 
     scores = _overview_scores(analysis, bundle.fund_flow, bundle.order_pressure, events)
     factors = {item.name: item for item in scores.factors}
-    participating = [item for item in scores.factors if item.score_available and item.participates_in_total_score]
     patched_bundle = bundle.model_copy(update={"overview": bundle.overview.model_copy(update={"factors": scores.factors})})
 
     assert factors["基本面"].score == 55
     assert factors["基本面"].score_available is False
-    assert factors["事件面"].score == 58
+    assert factors["事件面"].score == 50
     assert factors["事件面"].score_available is False
-    assert scores.factor_score == round(sum(item.score for item in participating) / len(participating))
+    expected_evidence = 50 + ((factors["技术面"].score - 50) + (factors["量价热度（衍生）"].score - 50)) / 4
+    assert scores.directional_evidence_score == expected_evidence
+    assert scores.factor_score == round(expected_evidence - scores.risk_penalty)
     assert {item.title for item in overview_factor_points(patched_bundle)}.isdisjoint({"基本面", "事件面"})
 
 

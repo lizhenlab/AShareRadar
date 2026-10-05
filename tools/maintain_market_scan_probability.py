@@ -49,15 +49,20 @@ def main() -> int:
     parser.add_argument("--source-dir", type=Path, required=True)
     parser.add_argument("--outcome-dir", type=Path, required=True)
     parser.add_argument("--as-of-date", required=True)
+    parser.add_argument(
+        "--time-budget-seconds", type=float,
+        help="单次合作式预算；单项验证可能超时，待续返回 2；默认完整执行（跨 CLI 进程不保留缓存）",
+    )
     args = parser.parse_args()
     summary = maintain_market_scan_probability(
         _ReadOnlyKlineCache(args.database),
         as_of_date=args.as_of_date,
         source_directory=args.source_dir,
         outcome_directory=args.outcome_dir,
+        time_budget_seconds=args.time_budget_seconds,
     )
     print(json.dumps(summary.__dict__, ensure_ascii=False, sort_keys=True))
-    return 1 if summary.failed_count else 0
+    return 1 if summary.degraded else (2 if getattr(summary, "pending", False) else 0)
 
 
 if __name__ == "__main__":

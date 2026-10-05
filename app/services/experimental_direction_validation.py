@@ -26,17 +26,23 @@ from app.services.experimental_probability_model import (
     MODEL_FEATURE_NAMES, ExperimentalCalibrator, ExperimentalLogit,
     ExperimentalProbabilityUnavailable,
 )
-from app.services.market_scan_probability import (
-    ProbabilityConfig, ProbabilityModelConvergenceError, ProbabilitySample,
-    fit_probability_logistic_model, fit_probability_platt_calibrator,
-    probability_model_probability, probability_platt_probability,
+from app.services.market_scan_probability import ProbabilityConfig, ProbabilitySample
+from app.services.market_scan_probability_estimators import (
+    ProbabilityModelConvergenceError,
+    fit_probability_logistic_model,
+    fit_probability_platt_calibrator,
+    probability_model_probability,
+    probability_platt_probability,
 )
 from app.services.market_scan_probability_metrics import (
     date_block_bootstrap_ci, evaluate_probability_predictions,
 )
+from app.services.prediction_diagnostics import (
+    DiagnosticPrediction, FrozenProbabilityBenchmark, build_prediction_diagnostics,
+)
 
 
-DIRECTION_VALIDATION_SCHEMA = "personal-experimental-direction-validation-v1"
+DIRECTION_VALIDATION_SCHEMA = "personal-experimental-direction-validation-v2"
 DIRECTION_VALIDATION_MAX_BYTES = 8 * 1024 * 1024
 _OFFSETS = (1, 2, 5)
 _MARKETS = ("SH", "SZ", "BJ")
@@ -137,6 +143,9 @@ def _protocol() -> dict[str, Any]:
         "bootstrap_samples": _BOOTSTRAP_SAMPLES,
         "bootstrap_block_length": "horizon_sessions",
         "bootstrap_requires_complete_scored_test_calendar": True,
+        "additional_diagnostics": "same_date_auc_multiple_frozen_benchmarks_fixed_threshold_subsets",
+        "selection_diagnostic_thresholds": [0.6, 0.7],
+        "selection_diagnostics_grant_authority": False,
         "previous_exposure_excluded": False,
         "repeat_policy": "same_fixed_period_is_replay_not_new_independent_evidence",
     }
@@ -332,8 +341,28 @@ def _group_report(
         "prediction_coverage": len(scored) / expected if expected else None,
         "unique_scored_session_count": len({row.sample.session_date for row in scored}),
         "pooled_metrics": metrics, "date_balanced_metrics": _date_balanced_metrics(daily, offset),
+        "diagnostics": _prediction_diagnostics(scored, split, base_rate, offset) if base_rate is not None else None,
         "daily": daily,
     }
+
+
+def _prediction_diagnostics(predictions: Sequence[_Prediction], split: _Split, base_rate: float, offset: int) -> dict[str, Any]:
+    rows = [DiagnosticPrediction(row.sample.sample_id, row.sample.session_date, int(cast(int, row.sample.target)), row.probability) for row in predictions]
+    label_end = split.test_gap[-1] if split.test_gap else split.calibration[-1] if split.calibration else None
+    calibration_contract = {"definition": "calibration_label_rate_only", "probability": base_rate,
+                            "calibration_dates": list(split.calibration), "calibration_label_end": label_end}
+    half_contract = {"definition": "constant_half_predeclared", "probability": 0.5}
+    benchmarks = {
+        "calibration_rate": FrozenProbabilityBenchmark(
+            {row.sample_id: base_rate for row in rows}, "calibration_label_rate_only",
+            sha256_hex(canonical_json_bytes(calibration_contract)), label_end,
+        ),
+        "constant_half": FrozenProbabilityBenchmark(
+            {row.sample_id: 0.5 for row in rows}, "constant_half_predeclared", sha256_hex(canonical_json_bytes(half_contract)),
+        ),
+    }
+    return build_prediction_diagnostics(rows, planned_test_dates=split.test, benchmarks=benchmarks,
+                                        target_offset_sessions=offset, bootstrap_samples=_BOOTSTRAP_SAMPLES)
 
 
 def _daily_reports(

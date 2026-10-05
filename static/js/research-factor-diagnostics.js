@@ -173,13 +173,16 @@ export function renderFactorLab(report) {
     if (el) el.innerHTML = "";
     return;
   }
+  const aggregation = consistentFactorScoreReport(report) ? report.score_aggregation : null;
   el.innerHTML = `
     ${renderFactorLabHead(report)}
     <div class="factor-lab-metrics">${renderFactorLabMetrics(report)}</div>
+    ${renderFactorScoreAggregation(aggregation, report)}
+    ${renderFactorEvidenceSupport(report)}
     <p>${escapeHtml(report.summary)}</p>
-    <div class="factor-lab-grid">${renderFactorLabItems(report.factors)}</div>
+    <div class="factor-lab-grid">${renderFactorLabItems(report.factors, aggregation)}</div>
     ${renderInlineItems(report.weight_policy, "em", 2)}
-    ${renderFactorParticipationNote(report.factors)}
+    ${renderFactorParticipationNote(report.factors, aggregation)}
     ${renderInlineItems(report.notes, "small", 2)}
   `;
 }
@@ -219,25 +222,125 @@ function renderFactorLabMetrics(report) {
   ]);
 }
 
-function renderFactorLabItems(items) {
-  return asArray(items).map(renderStandardFactor).join("");
+function renderFactorEvidenceSupport(report) {
+  const support = asObject(report.evidence_support);
+  if (report.evidence_sufficiency_version !== "factor-evidence-sufficiency.v2" || !validFactorEvidenceSupport(support)) return "";
+  const note = typeof report.evidence_sufficiency_note === "string" ? report.evidence_sufficiency_note.trim() : "";
+  return `
+    <details data-factor-evidence-support>
+      <summary>充分度依据（不是上涨概率）</summary>
+      <div class="factor-lab-metrics">${renderMetricPairs([
+        ["数据质量", `${formatNumber(support.data_quality_score, 1)}分`],
+        ["历史校准覆盖", `${formatNumber(support.calibration_coverage_pct, 1)}%`],
+        ["样本支持", `${formatNumber(support.sample_support_pct, 1)}%`],
+      ])}</div>
+      <p>充分度受三项中最低值限制；不是统计置信度或上涨概率。</p>
+      <small>历史校准因子 ${escapeHtml(support.calibrated_factor_count)}/${escapeHtml(support.required_factor_count)}；最低相似样本 ${escapeHtml(support.minimum_similar_samples)}，充分支持阈值 ${escapeHtml(support.full_support_sample_threshold)}。</small>
+      ${note ? `<p>${escapeHtml(note)}</p>` : ""}
+    </details>`;
 }
 
-function renderFactorParticipationNote(items) {
-  const factors = asArray(items).map(asObject);
+function validFactorEvidenceSupport(support) {
+  const percentages = [support.data_quality_score, support.calibration_coverage_pct, support.sample_support_pct];
+  const counts = [support.required_factor_count, support.calibrated_factor_count, support.minimum_similar_samples, support.full_support_sample_threshold];
+  return percentages.every(value => Number.isFinite(value) && value >= 0 && value <= 100)
+    && counts.every(value => Number.isSafeInteger(value) && value >= 0)
+    && support.full_support_sample_threshold > 0
+    && support.calibrated_factor_count <= support.required_factor_count;
+}
+
+function renderFactorScoreAggregation(aggregation, report) {
+  if (!aggregation) return asObject(report.score_aggregation).version === "factor-aggregation.v3"
+    ? "<p data-factor-score-error>评分分解不一致，等待刷新。</p>" : "";
+  const chain = `方向分 ${formatNumber(aggregation.directional_score, 1)} → 风险扣分 ${formatNumber(aggregation.risk_penalty, 1)} → 总分 ${aggregation.total_score}`;
+  return `<details data-factor-score-aggregation>
+    <summary>综合分依据</summary>
+    <p>${escapeHtml(chain)}</p>
+    <p>方向覆盖 ${escapeHtml(formatNumber(aggregation.coverage_pct, 1))}%；缺失份额不转移。</p>
+    <div class="factor-lab-metrics">${aggregation.groups.map(group => `<span>${escapeHtml(group.name)}
+      <br>固定预算 <b>${escapeHtml(formatNumber(group.budget_pct, 1))}%</b>
+      <br>贡献 ${escapeHtml(signedText(formatNumber(group.contribution, 2)))} 分
+      <br>组内覆盖 ${escapeHtml(formatNumber(group.coverage_pct, 1))}%</span>`).join("")}</div>
+    <p>以50分为中性，使用三组固定预算；画像不改变方向预算。风险只扣分，不加看多。</p>
+    <small>覆盖度衡量可用方向证据；预算是工程参数，综合分和覆盖度都不是上涨概率。</small>
+  </details>`;
+}
+
+function validFactorScoreAggregation(value) {
+  const item = asObject(value);
+  return item.version === "factor-aggregation.v3"
+    && [item.directional_score, item.total_score, item.coverage_pct].every(factorPercentage)
+    && Number.isInteger(item.total_score) && factorBoundedNumber(item.risk_penalty, 0, 12.5)
+    && Array.isArray(item.groups) && item.groups.length === 3 && item.groups.every(validFactorScoreGroup)
+    && Math.abs(item.groups.reduce((sum, group) => sum + group.budget_pct, 0) - 100) < 0.001
+    && item.factor_shares === asObject(item.factor_shares) && Object.values(item.factor_shares).every(factorPercentage)
+    && Array.isArray(item.excluded_ids) && item.excluded_ids.every(id => typeof id === "string");
+}
+
+function consistentFactorScoreReport(report) {
+  const aggregation = report.score_aggregation;
+  if (!validFactorScoreAggregation(aggregation) || report.total_score !== aggregation.total_score) return false;
+  if (!Array.isArray(report.factors)) return false;
+  const ids = new Set();
+  return report.factors.every(factor => {
+    const item = asObject(factor);
+    if (ids.has(item.id) || !consistentFactorScoreUsage(item, aggregation.factor_shares)) return false;
+    ids.add(item.id);
+    return true;
+  });
+}
+
+function consistentFactorScoreUsage(item, shares) {
+  if (typeof item.id !== "string" || !item.id.trim() || !factorPercentage(item.score_share_pct)) return false;
+  const role = item.aggregation_role === undefined ? "independent" : item.aggregation_role;
+  if (!["independent", "composite"].includes(role)) return false;
+  const expectedShare = Object.hasOwn(shares, item.id) ? shares[item.id] : 0;
+  if (Math.abs(item.score_share_pct - expectedShare) > 1e-8) return false;
+  if (role === "composite") return item.score_usage === "observation";
+  if (item.id === "risk_pressure") return expectedShare === 0 && item.score_usage === "risk_constraint";
+  return item.score_usage === (expectedShare > 0 ? "direction" : "excluded");
+}
+
+function validFactorScoreGroup(value) {
+  const group = asObject(value);
+  return typeof group.name === "string" && group.name.trim()
+    && factorPercentage(group.budget_pct) && factorPercentage(group.coverage_pct)
+    && Math.abs(group.budget_pct - 100 / 3) < 0.001
+    && factorBoundedNumber(group.contribution, -group.budget_pct / 2, group.budget_pct / 2);
+}
+
+function factorPercentage(value) {
+  return factorBoundedNumber(value, 0, 100);
+}
+
+function factorBoundedNumber(value, minimum, maximum) {
+  return Number.isFinite(value) && value >= minimum && value <= maximum;
+}
+
+function renderFactorLabItems(items, aggregation) {
+  return asArray(items).map(item => renderStandardFactor(item, aggregation)).join("");
+}
+
+function renderFactorParticipationNote(items, aggregation) {
+  const factors = asArray(items).map(asObject).filter(item => !aggregation || item.score_usage !== "excluded");
   const currentExcludedNames = uniqueFactorNames(
-    factors.filter((item) => item.participates_in_current_score === false),
+    factors.filter((item) => item.participates_in_current_score === false && item.aggregation_role !== "composite"),
   );
+  const compositeNames = uniqueFactorNames(factors.filter((item) => item.aggregation_role === "composite"));
   const historicalExcludedNames = uniqueFactorNames(
     factors.filter((item) => item.participates_in_current_score !== false
+      && item.aggregation_role !== "composite"
       && asObject(item.calibration).participates_in_historical_aggregate === false),
   );
   return [
+    compositeNames.length
+      ? `<small>${escapeHtml(`当前评分口径：${compositeNames.join("、")}为复合观察，不重复计分。`)}</small>`
+      : "",
     currentExcludedNames.length
       ? `<small>${escapeHtml(`当前评分口径：${currentExcludedNames.join("、")}当前不计分/不可用。`)}</small>`
       : "",
     historicalExcludedNames.length
-      ? `<small>${escapeHtml(`历史聚合口径：${historicalExcludedNames.join("、")}参与当前评分，但不参与综合证据充分度、正负证据与历史样本聚合。`)}</small>`
+      ? `<small>${escapeHtml(`历史聚合口径：${historicalExcludedNames.join("、")}参与当前评分，但不提供历史支持、不参与正负证据与历史样本聚合。`)}</small>`
       : "",
   ].join("");
 }
@@ -253,17 +356,21 @@ function uniqueFactorNames(items) {
   ];
 }
 
-function renderStandardFactor(item) {
+function renderStandardFactor(item, aggregation) {
   item = asObject(item);
+  if (aggregation && item.score_usage !== "direction") return renderFactorUsageObservation(item);
+  if (item.aggregation_role === "composite") return renderCompositeFactor(item);
   const calibration = asObject(item.calibration);
   const bucket = asArray(item.calibration_buckets)[0];
-  const participates = item.participates_in_current_score !== false;
+  const participates = item.participates_in_current_score !== false
+    && (!aggregation || (item.data_nature !== "unavailable" && factorPercentage(item.score)));
   return `
     <div class="standard-factor ${participates ? factorDirectionClass(item) : "unavailable"}">
       <div>
         <strong>${escapeHtml(item.name)}</strong>
-        <span>${participates ? `${escapeHtml(item.score)} · 权重 ${formatNumber(item.weight, 2)}` : "当前不计分/不可用 · 权重不生效"}</span>
+        <span>${factorScoreLabel(item, participates, aggregation)}</span>
       </div>
+      ${aggregation ? factorScoreShareLine(item) : ""}
       <div class="score-bar"><i style="width:${participates ? Math.max(0, Math.min(100, Number(item.score) || 0)) : 0}%"></i></div>
       <p>${participates ? escapeHtml(item.value) : "当前观测值不可用，未形成评分证据。"}</p>
       <small>${participates ? factorCalibrationSampleText(calibration) : "当前观测证据不可用，不纳入当前评分。"}</small>
@@ -273,6 +380,42 @@ function renderStandardFactor(item) {
       ${participates ? renderInlineItems(item.evidence, "small", 1) : ""}
     </div>
   `;
+}
+
+function factorScoreLabel(item, participates, aggregation) {
+  if (aggregation) return participates ? `${escapeHtml(item.score)} 分` : "当前不可用";
+  return participates ? `${escapeHtml(item.score)} · 权重 ${formatNumber(item.weight, 2)}` : "当前不计分/不可用 · 权重不生效";
+}
+
+function factorScoreShareLine(item) {
+  return factorPercentage(item.score_share_pct)
+    ? `<small>固定份额 ${escapeHtml(formatNumber(item.score_share_pct, 1))}%${item.participates_in_current_score === false ? "；缺失保留份额" : ""}</small>`
+    : "<small>固定份额信息不可用</small>";
+}
+
+function renderFactorUsageObservation(item) {
+  if (item.score_usage === "observation") return renderCompositeFactor(item);
+  const risk = item.score_usage === "risk_constraint";
+  const observed = item.data_nature !== "unavailable" && factorPercentage(item.score);
+  const reason = risk ? "仅作风险约束，风险只扣分，不加看多。"
+    : item.score_usage === "excluded" ? "未注册，不计入综合分。" : "计分用途未确认，不展示方向份额。";
+  return `<div class="standard-factor ${risk ? "risk-constraint" : "observation"}">
+    <div><strong>${escapeHtml(item.name)}</strong><span>${risk ? "风险约束" : "不计分"}</span></div>
+    <p>${observed ? escapeHtml(item.value) : "当前观测证据不可用。"}</p>
+    <small>${escapeHtml(reason)}</small>
+    ${observed ? renderInlineItems(item.evidence, "small", 1) : ""}
+  </div>`;
+}
+
+function renderCompositeFactor(item) {
+  const observed = item.data_nature !== "unavailable" && typeof item.score === "number" && Number.isFinite(item.score);
+  return `<div class="standard-factor composite">
+    <div><strong>${escapeHtml(item.name)}</strong>
+      <span>${observed ? `${escapeHtml(item.score)} · ` : ""}复合观察，不重复计分</span></div>
+    <p>${observed ? escapeHtml(item.value) : "当前观测证据不可用。"}</p>
+    <small>包含其他因子信息，不再叠加到评分，也不参与历史概率。</small>
+    ${observed ? renderInlineItems(item.evidence, "small", 1) : ""}
+  </div>`;
 }
 
 function factorCalibrationSampleText(calibration) {

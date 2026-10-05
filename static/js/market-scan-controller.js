@@ -1,6 +1,8 @@
+import { releaseScreenProducer, suspendScreenProducer } from "./market-scan-screen-producer.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { compactErrorMessage } from "./errors.js";
 import { isActiveMarketScanRun, isPublishedMarketScanRun, isRetryableMarketScanRun, marketScanContractError, marketScanRunIdentityChanged, marketScanRunStateChanged, validateMarketScanRun, validateStartResponse } from "./market-scan-contracts.js";
+import { createMarketScanComparisonController } from "./market-scan-comparison-controller.js";
 import { createMarketScanPolling, isMarketScanReadBusy } from "./market-scan-polling.js";
 import { MARKET_SCAN_TRUSTED_READ_TIMEOUT_MS, createMarketScanLatestLoader, samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
 import { createMarketScanLatestSync } from "./market-scan-latest-sync.js";
@@ -70,7 +72,7 @@ export function createMarketScanController(options = {}) {
     beginRequest,
     commit: commitLatestSnapshot,
     finishRequest,
-    handleError: handleLatestSyncError,
+    handleError: (error, syncOptions) => probabilityHorizonController.ownsTrustedRead() && handleLatestSyncError(error, syncOptions),
     handleStaleError: (error) => probabilityHorizonController?.staleTrustedFailure(error),
     isCurrentRequest,
     polling,
@@ -110,7 +112,7 @@ export function createMarketScanController(options = {}) {
     state,
     transitionReads: readTransition.transition,
     scheduleReads: readTransition.run,
-    view, onNavigationChanged: () => auxiliaryResearch.resetExperiment(), resumeTracking: () => polling.scheduleDefault(state.run),
+    view, onNavigationChanged: () => { auxiliaryResearch.resetExperiment(); comparison.clear(); }, resumeTracking: () => polling.scheduleDefault(state.run),
   });
   const surface = createMarketScanSurface({
     abortHistory: history.abort, scheduleTracking: () => polling.scheduleDefault(state.run),
@@ -131,6 +133,7 @@ export function createMarketScanController(options = {}) {
   const handleRowClick = createMarketScanRowClickHandler({ onSelectStock, view });
   const top100Refresh = createMarketScanTop100Refresh({ applyRun, elements, mutate, polling, resultRun, state, view });
   const auxiliaryResearch = createMarketScanAuxiliaryResearch({ root, request, view, getRun: resultRun, onSelectStock });
+  const comparison = createMarketScanComparisonController({ root, request, getRun: resultRun, isActive: () => state.activated && state.visible && state.surfaceActive });
   bindEvents();
   view.renderRun(null);
   view.resetProbabilityResearch(null);
@@ -143,14 +146,14 @@ export function createMarketScanController(options = {}) {
   }
   function deactivate() {
     state.activated = false;
-    auxiliaryResearch.abort();
+    auxiliaryResearch.abort(); comparison.abort();
     clearControllerTimers();
     void readTransition.transition(() => null);
     history.abort();
     releaseResults();
   }
   function releaseResults(options = {}) {
-    probabilityHorizonController.supersede(options);
+    releaseScreenProducer(elements.tableWrap); probabilityHorizonController.supersede(options); comparison.abort();
     elements.rows.innerHTML = "";
     elements.tableWrap.hidden = true;
     elements.pagination.hidden = true;
@@ -159,7 +162,7 @@ export function createMarketScanController(options = {}) {
   function setVisible(visible) {
     state.visible = Boolean(visible);
     if (!state.visible) {
-      auxiliaryResearch.abort();
+      suspendScreenProducer(elements.tableWrap); auxiliaryResearch.abort(); comparison.abort();
       clearControllerTimers();
       void readTransition.transition(() => null, { preserveCache: true });
       history.abort();
@@ -491,7 +494,7 @@ export function createMarketScanController(options = {}) {
       state.selectedHistoryRunId !== null,
     );
     top100Refresh.sync();
-    auxiliaryResearch.sync(resultRun());
+    auxiliaryResearch.sync(resultRun()); comparison.sync();
   }
   async function recoverLatest(error) {
     if (!state.activated || !state.visible || state.actionBusy) return null;

@@ -31,6 +31,11 @@ from app.models.local_data import (
     OPTIONAL_RESEARCH_USER_DATA_TABLES,
     UserDataBundle,
 )
+from app.utils.advice_review_evidence import (
+    REVIEW_EVIDENCE_DIGEST_VERSIONS,
+    review_result_input_digest,
+    review_result_outcome_digest,
+)
 from app.utils.audit_time import audit_now_text, normalize_audit_time_text
 
 
@@ -92,82 +97,6 @@ _CASE_INSENSITIVE_STABLE_COLUMNS = {
 }
 _IMMUTABLE_LEDGER_TABLES = frozenset(
     {"advice_review_plan_revision", "advice_review_result"}
-)
-_REVIEW_RESULT_INPUT_FIELDS = (
-    "plan_id",
-    "plan_revision",
-    "advice_id",
-    "symbol",
-    "snapshot_market_time",
-    "as_of",
-    "evaluated_at",
-    "rule_version",
-    "trigger_basis",
-    "invalidation_basis",
-    "snapshot_adjustment_mode",
-    "snapshot_anchor_date",
-    "snapshot_anchor_close",
-    "snapshot_data_version",
-    "snapshot_contract_version",
-    "evaluation_adjustment_mode",
-    "evaluation_data_version",
-    "evaluation_contract_version",
-    "anchor_evaluation_close",
-    "price_scale_factor",
-    "normalized_entry_price",
-    "normalized_target_price",
-    "normalized_stop_price",
-    "entry_price",
-    "target_price",
-    "stop_price",
-    "horizon_days",
-    "visible_bar_count",
-    "visible_start_date",
-    "visible_end_date",
-    "available_forward_days",
-    "forward_start_date",
-    "forward_end_date",
-    "evidence_contract_version",
-    "source_window_digest",
-    "source_session_count",
-    "expected_session_count",
-    "observation_basis",
-    "attempt",
-)
-_REVIEW_RESULT_V1_INPUT_FIELDS = tuple(
-    field
-    for field in _REVIEW_RESULT_INPUT_FIELDS
-    if field not in {"evaluated_at", "attempt"}
-)
-_REVIEW_EVIDENCE_DIGEST_VERSIONS = frozenset(
-    {"advice-review-evidence.v1", "advice-review-evidence.v2"}
-)
-_REVIEW_RESULT_OUTCOME_FIELDS = (
-    "status",
-    "conclusion",
-    "return_pct",
-    "max_favorable_excursion_pct",
-    "max_adverse_excursion_pct",
-    "target_hit",
-    "target_hit_date",
-    "stop_hit",
-    "stop_hit_date",
-)
-_REVIEW_RESULT_REAL_FIELDS = frozenset(
-    {
-        "snapshot_anchor_close",
-        "anchor_evaluation_close",
-        "price_scale_factor",
-        "normalized_entry_price",
-        "normalized_target_price",
-        "normalized_stop_price",
-        "entry_price",
-        "target_price",
-        "stop_price",
-        "return_pct",
-        "max_favorable_excursion_pct",
-        "max_adverse_excursion_pct",
-    }
 )
 _REVIEW_PLAN_PAYLOAD_KEYS = frozenset(
     {
@@ -1200,48 +1129,15 @@ def _validate_review_result_digests(
         return
     evidence_version = row["evidence_contract_version"]
     if (
-        evidence_version not in _REVIEW_EVIDENCE_DIGEST_VERSIONS
+        evidence_version not in REVIEW_EVIDENCE_DIGEST_VERSIONS
         or not isinstance(input_digest, str)
         or not isinstance(result_digest, str)
         or _SHA256.fullmatch(input_digest) is None
         or _SHA256.fullmatch(result_digest) is None
-        or input_digest != _review_result_input_digest(row)
-        or result_digest != _review_result_outcome_digest(row)
+        or input_digest != review_result_input_digest(row, normalize_reals=True)
+        or result_digest != review_result_outcome_digest(row, normalize_reals=True)
     ):
         raise ValueError("advice_review_result 输入或结果摘要不一致")
-
-
-def _review_result_input_digest(
-    row: dict[str, JsonValue] | dict[str, object],
-) -> str:
-    fields = (
-        _REVIEW_RESULT_V1_INPUT_FIELDS
-        if row["evidence_contract_version"] == "advice-review-evidence.v1"
-        else _REVIEW_RESULT_INPUT_FIELDS
-    )
-    return _payload_digest(
-        {
-            field: _review_result_digest_value(field, row[field])
-            for field in fields
-        }
-    )
-
-
-def _review_result_outcome_digest(
-    row: dict[str, JsonValue] | dict[str, object],
-) -> str:
-    return _payload_digest(
-        {
-            field: _review_result_digest_value(field, row[field])
-            for field in _REVIEW_RESULT_OUTCOME_FIELDS
-        }
-    )
-
-
-def _review_result_digest_value(field: str, value: object) -> object:
-    if field not in _REVIEW_RESULT_REAL_FIELDS or value is None:
-        return value
-    return _float_value(value)
 
 
 def _payload_digest(value: object) -> str:
@@ -1343,8 +1239,8 @@ def _rewrite_review_plan_digest_after_remap(
     else:
         row["plan_payload_digest"] = digest
         if table == "advice_review_result" and row.get("input_digest") != "legacy-unverified":
-            row["input_digest"] = _review_result_input_digest(row)
-            row["result_digest"] = _review_result_outcome_digest(row)
+            row["input_digest"] = review_result_input_digest(row, normalize_reals=True)
+            row["result_digest"] = review_result_outcome_digest(row, normalize_reals=True)
 
 
 def _review_plan_revision_identity(

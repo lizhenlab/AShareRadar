@@ -12,12 +12,14 @@ import pytest
 
 from app.models.market_scan import MarketScanResultItem, MarketScanRun
 from app.services import market_scan_probability as probability
+from app.services.market_scan_probability_values import ProbabilityReplayError
 from app.services import market_scan_probability_maintenance as maintenance
 from app.services import market_scan_probability_outcomes as outcomes
 from app.services import market_scan_probability_source as source
 from app.services import market_scan_scoring as scoring
 from app.services import market_scan_joint_execution_probability as joint
 from app.services import market_scan_evaluation as evaluation
+from app.services.market_scan_evaluation_source import frozen_score_contract, frozen_source_evidence_digest
 from app.services import market_scan_probability_research as research
 from app.repositories.market_scan_mapping import encode_result_payload
 from app.services.market_scan_probability_labels import ProbabilityLabelOutcome
@@ -173,9 +175,9 @@ def test_actual_frozen_fitted_model_is_rejected_and_current_fit_replays():
     old = json.loads(encoded)
     assert old["status"] == "calibrated_shadow" and old["model"]["converged"] is True
     assert old["evidence_digest"] == "4479ecc5d3080e1c6e8887bfad97637f66c12fe244d879f786f7c585c9aea4ce"
-    with pytest.raises(probability.ProbabilityReplayError, match="契约不是已注册版本"):
+    with pytest.raises(ProbabilityReplayError, match="契约不是已注册版本"):
         probability.verify_shadow_probability_evidence(old)
-    with pytest.raises(probability.ProbabilityReplayError, match="契约不是已注册版本"):
+    with pytest.raises(ProbabilityReplayError, match="契约不是已注册版本"):
         probability.predict_shadow_probability(old, {"trend": 1.0, "risk": -0.4})
     current = probability.fit_shadow_probability(_signal_samples(42), config=_small_config(), generated_at="2026-08-11T08:00:00Z")
     assert current["status"] == "calibrated_shadow"
@@ -212,9 +214,9 @@ def test_sqlite_evaluation_preserves_old_rows_dates_and_evidence_but_refuses_tra
         connection.row_factory = sqlite3.Row
         for index, details in enumerate((old["score_details"], current.score_details)):
             stored = connection.execute("SELECT ? AS metrics_json", (encode_result_payload({}, details),)).fetchone()
-            contract = evaluation._probability_score_contract(stored)
+            contract = frozen_score_contract(stored)
             assert contract == (scoring.FULL_MARKET_SCORE_RULE_VERSION, details["score_spec_hash"])
-            evidence_digest = evaluation._source_evidence_digest(stored)
+            evidence_digest = frozen_source_evidence_digest(stored)
             assert evidence_digest == details["components"]["score_dimensions"]["point_in_time_evidence"]["payload_digest"]
             observations.append(SimpleNamespace(
                 run_id=index + 1, quote_date=f"2026-07-{16 + index}", symbol="600519.SH", market="SH", board="SH_MAIN",

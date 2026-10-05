@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
+from collections.abc import Set as AbstractSet
 import json
 import logging
 import os
@@ -95,7 +97,10 @@ class TradeCalendarStatus:
     warning: str | None = None
 
 
-class _TradeDays(set[date]):
+class _TradeDays(frozenset[date]):
+    def __new__(cls, values: Iterable[date] = (), **metadata: object) -> _TradeDays:
+        return super().__new__(cls, values)
+
     def __init__(
         self,
         values: Iterable[date] = (),
@@ -106,7 +111,7 @@ class _TradeDays(set[date]):
         load_warnings: Iterable[str] = (),
         candidates: Iterable[_TradeDays] = (),
     ) -> None:
-        super().__init__(values)
+        self.ordered_dates = tuple(sorted(self))
         self.min_date = min(self) if self else None
         self.max_date = max(self) if self else None
         self.updated_at = updated_at
@@ -124,12 +129,12 @@ def latest_expected_trade_date(now: datetime | None = None) -> date:
     return previous_trade_date(candidate)
 
 
-def latest_expected_daily_kline_date(now: datetime | None = None) -> date:
+def latest_expected_daily_kline_date(now: datetime | None = None, *, allow_auto_refresh: bool = True) -> date:
     current = _market_datetime(now)
     candidate = current.date()
-    if is_trading_day(candidate) and current.time() < DAILY_KLINE_PUBLISH_TIME:
+    if is_trading_day(candidate, allow_auto_refresh=allow_auto_refresh) and current.time() < DAILY_KLINE_PUBLISH_TIME:
         candidate -= timedelta(days=1)
-    return previous_trade_date(candidate)
+    return previous_trade_date(candidate, allow_auto_refresh=allow_auto_refresh)
 
 
 def expected_quote_date(now: datetime | None = None) -> date:
@@ -187,8 +192,8 @@ def is_trading_day(value: date, *, allow_auto_refresh: bool = True) -> bool:
     return value in days
 
 
-def previous_trade_date(value: date) -> date:
-    days, status = _calendar_resolution(value)
+def previous_trade_date(value: date, *, allow_auto_refresh: bool = True) -> date:
+    days, status = _calendar_resolution(value, allow_auto_refresh=allow_auto_refresh)
     _require_coverage(status)
     candidates = [item for item in days if item <= value]
     if not candidates:
@@ -196,7 +201,7 @@ def previous_trade_date(value: date) -> date:
     return max(candidates)
 
 
-def next_trade_dates(value: date, count: int) -> tuple[date, ...]:
+def next_trade_dates(value: date, count: int, *, allow_auto_refresh: bool = True) -> tuple[date, ...]:
     """Return the next fixed exchange sessions without silently skipping gaps."""
     if isinstance(count, bool) or count <= 0:
         raise ValueError("count 必须是正整数")
@@ -208,7 +213,7 @@ def next_trade_dates(value: date, count: int) -> tuple[date, ...]:
         if (minimum := _coverage_bounds(item)[0]) is not None and minimum <= value and len([day for day in item if day > value]) >= count
     ]
     if not eligible:
-        _days, status = _calendar_resolution(value)
+        _days, status = _calendar_resolution(value, allow_auto_refresh=allow_auto_refresh)
         _require_coverage(status)
         raise TradingCalendarCoverageError(f"可信交易日历在 {value.isoformat()} 之后不足 {count} 个交易日；" "请刷新运行时交易日历或更新 bundled baseline。")
     selected = max(eligible, key=_future_candidate_rank)
@@ -230,23 +235,27 @@ def trading_session_count(start: date, end: date) -> int:
         raise ValueError("start 不能晚于 end")
     days, status = _calendar_resolution(end, range_start=start)
     _require_coverage(status, range_start=start)
+    if isinstance(days, _TradeDays):
+        return bisect_right(days.ordered_dates, end) - bisect_left(days.ordered_dates, start)
     return sum(start <= item <= end for item in days)
 
 
-def trading_dates_between(start: date, end: date) -> tuple[date, ...]:
+def trading_dates_between(start: date, end: date, *, allow_auto_refresh: bool = True) -> tuple[date, ...]:
     """Return every trusted exchange session in an inclusive date range."""
-    days, _status = trading_date_range(start, end)
+    days, _status = trading_date_range(start, end, allow_auto_refresh=allow_auto_refresh)
     return days
 
 
 def trading_date_range(
     start: date,
     end: date,
+    *,
+    allow_auto_refresh: bool = True,
 ) -> tuple[tuple[date, ...], TradeCalendarStatus]:
     """Return trusted inclusive sessions and the exact selected source status."""
     if start > end:
         raise ValueError("start 不能晚于 end")
-    days, status = _calendar_resolution(end, range_start=start)
+    days, status = _calendar_resolution(end, range_start=start, allow_auto_refresh=allow_auto_refresh)
     _require_coverage(status, range_start=start)
     return tuple(sorted(item for item in days if start <= item <= end)), status
 
@@ -285,7 +294,7 @@ def refresh_trade_calendar_result() -> TradeCalendarRefreshResult:
 
 
 @lru_cache(maxsize=1)
-def _trade_days() -> set[date]:
+def _trade_days() -> AbstractSet[date]:
     candidates: list[_TradeDays] = []
     warnings: list[str] = []
     runtime, runtime_warning = _load_calendar_file(CALENDAR_PATH, TradeCalendarSource.RUNTIME_CACHE)
@@ -308,7 +317,7 @@ def _calendar_resolution(
     *,
     range_start: date | None = None,
     allow_auto_refresh: bool = True,
-) -> tuple[set[date], TradeCalendarStatus]:
+) -> tuple[AbstractSet[date], TradeCalendarStatus]:
     catalog = _trade_days()
     selected = _select_from_catalog(catalog, value, range_start=range_start)
     if allow_auto_refresh and _should_auto_refresh(catalog, selected, value):
@@ -335,11 +344,11 @@ def _catalog_days(
 
 
 def _select_from_catalog(
-    catalog: set[date],
+    catalog: AbstractSet[date],
     value: date,
     *,
     range_start: date | None = None,
-) -> set[date] | None:
+) -> AbstractSet[date] | None:
     if isinstance(catalog, _TradeDays) and catalog.candidates:
         return _select_candidate(catalog.candidates, value, range_start=range_start)
     min_date, max_date = _coverage_bounds(catalog)
@@ -372,7 +381,7 @@ def _candidate_rank(days: _TradeDays) -> tuple[datetime, int, date, int]:
     )
 
 
-def _future_candidate_rank(days: set[date]) -> tuple[datetime, int, date, int]:
+def _future_candidate_rank(days: AbstractSet[date]) -> tuple[datetime, int, date, int]:
     if isinstance(days, _TradeDays):
         return _candidate_rank(days)
     minimum, maximum = _coverage_bounds(days)
@@ -381,8 +390,8 @@ def _future_candidate_rank(days: set[date]) -> tuple[datetime, int, date, int]:
 
 def _status_for_resolution(
     value: date,
-    catalog: set[date],
-    selected: set[date] | None,
+    catalog: AbstractSet[date],
+    selected: AbstractSet[date] | None,
 ) -> TradeCalendarStatus:
     warnings = catalog.load_warnings if isinstance(catalog, _TradeDays) else ()
     if selected is not None:
@@ -419,7 +428,7 @@ def _status_for_resolution(
     )
 
 
-def _out_of_coverage_warning(value: date, candidates: Iterable[set[date]]) -> str:
+def _out_of_coverage_warning(value: date, candidates: Iterable[AbstractSet[date]]) -> str:
     ranges = []
     for candidate in candidates:
         min_date, max_date = _coverage_bounds(candidate)
@@ -439,7 +448,7 @@ def _require_coverage(status: TradeCalendarStatus, *, range_start: date | None =
     raise TradingCalendarCoverageError(f"可信交易日历未覆盖 {scope}，无法推导交易日期；请刷新运行时交易日历或更新 bundled baseline。")
 
 
-def _should_auto_refresh(catalog: set[date], selected: set[date] | None, value: date) -> bool:
+def _should_auto_refresh(catalog: AbstractSet[date], selected: AbstractSet[date] | None, value: date) -> bool:
     if not env_bool("ASHARE_RADAR_TRADE_CALENDAR_AUTO_FETCH", False, aliases=("TRADE_CALENDAR_AUTO_FETCH",)):
         return False
     candidates = catalog.candidates if isinstance(catalog, _TradeDays) else ()
@@ -653,14 +662,14 @@ def _parse_dates(values: Iterable[object]) -> set[date]:
     return result
 
 
-def _covers(days: set[date] | None, value: date) -> bool:
+def _covers(days: AbstractSet[date] | None, value: date) -> bool:
     if days is None:
         return False
     min_date, max_date = _coverage_bounds(days)
     return min_date is not None and max_date is not None and min_date <= value <= max_date
 
 
-def _coverage_bounds(days: set[date]) -> tuple[date | None, date | None]:
+def _coverage_bounds(days: AbstractSet[date]) -> tuple[date | None, date | None]:
     if isinstance(days, _TradeDays):
         return days.min_date, days.max_date
     if not days:

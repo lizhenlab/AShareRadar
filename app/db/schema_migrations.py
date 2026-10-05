@@ -166,6 +166,10 @@ AUDIT_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 COMPAT_COLUMNS = {
+    "plate_rank": {
+        "symbol": "TEXT",
+        "quote_timestamp": "TEXT",
+    },
     "advice_history": {
         "updated_at": "TEXT",
         "repeat_count": "INTEGER NOT NULL DEFAULT 1",
@@ -1099,6 +1103,12 @@ def ensure_compat_indexes(conn: sqlite3.Connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_kline_daily_adjustment_fetch
                 ON kline_daily(symbol, adjustment_mode, fetched_at, date)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_kline_daily_cache_stats
+                ON kline_daily(adjustment_mode, date, fetched_at)
             """
         )
     if table_has_columns(conn, "quote_history", "symbol", "trade_date", "fetched_at", "id"):

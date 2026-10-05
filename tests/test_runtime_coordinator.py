@@ -520,6 +520,7 @@ def _runtime_scheduler(leadership: RuntimeLeadership, cache_path: Path) -> Local
         scheduler_kline_interval_seconds=3600,
         scheduler_plate_interval_seconds=3600,
         scheduler_health_interval_seconds=3600,
+        runtime_maintenance_interval_seconds=3600,
         scheduler_shutdown_timeout_seconds=0.01,
     )
     hub = SimpleNamespace(settings=settings, cache=_RuntimeCache(cache_path))

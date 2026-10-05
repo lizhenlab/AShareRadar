@@ -10,6 +10,10 @@ test("trusted screening stays lazy, auditable, responsive, and column configurab
   await routeScreeningFixture(page, calls);
   await page.goto("/");
   await page.locator('button[data-primary-view="market"]').click();
+  await expect(page.locator("#marketScanRows")).toContainText("贵州茅台");
+  await page.locator("#marketScanFilterToggle").click();
+  await page.locator("#marketScanScoreMin").fill("80");
+  await page.locator('#marketScanFilters button[type="submit"]').click();
 
   await expect(page.locator("#marketScanScreeningWorkbench")).not.toHaveAttribute("open", "");
   await expect.poll(() => calls.filter((value) => /breadth|screen\/evaluate|delta/.test(value)).length).toBe(0);
@@ -29,7 +33,7 @@ test("trusted screening stays lazy, auditable, responsive, and column configurab
   await expect(page.locator("#marketScanScreeningSummaryStatus")).toContainText("暂无冻结榜单");
   await expect(page.locator("#marketScanScreeningEvidence")).toContainText("尚未绑定冻结批次");
   await expect(page.locator("#marketScanScreeningSpec")).toBeEmpty();
-  await page.locator("#marketScanTableWrap").evaluate((element) => { element.dataset.marketScanRunId = "42"; });
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
   await expect.poll(() => calls.filter((value) => /breadth|screen\/evaluate|delta/.test(value)).length).toBe(6);
 
   await page.locator('label:has(#marketScanColumnLiquidity)').click();
@@ -66,7 +70,7 @@ async function routeScreeningFixture(page, calls) {
     if (url.pathname === "/api/market-scans" && request.method() === "GET") return fulfill(route, { items: [scanRun()], total: 1, page: 1, page_size: 30, page_count: 1 });
     if (url.pathname === "/api/market-scans/42/results") return fulfill(route, resultPage());
     if (url.pathname === "/api/market-scans/42/breadth") return fulfill(route, breadth());
-    if (url.pathname === "/api/market-scans/42/screen/evaluate") return fulfill(route, evaluation());
+    if (url.pathname === "/api/market-scans/42/screen/evaluate") return fulfill(route, evaluation(request.postDataJSON()));
     if (url.pathname === "/api/market-scans/42/delta") return fulfill(route, delta());
     return fulfill(route, fallback(url));
   });
@@ -120,14 +124,15 @@ function breadth() {
   };
 }
 
-function spec() {
-  return { schema_version: "screen-spec-v2", status: "success", markets: [], industries: [], is_st: null, is_new: null, ranges: { score: { min: 80 } }, keyword: null, sort: [{ field: "rank", order: "asc" }] };
-}
-
-function evaluation() {
+function evaluation(request) {
   return {
-    schema_version: "market-scan-screen-evaluation-v1", evidence: evidence(), spec: spec(), spec_digest: "b".repeat(64),
+    schema_version: "market-scan-screen-evaluation-v2", evidence: evidence(), spec: request.spec, spec_digest: "b".repeat(64),
     population_count: 2, matched_count: 1,
+    condition_impacts: [
+      { condition_code: "status", label: "结果状态", additional_count: 0, missing_additional_count: 0, matched_without_condition: 1, examples: [] },
+      { condition_code: "range.score", label: "趋势强度 ≥ 80", additional_count: 1, missing_additional_count: 1, matched_without_condition: 2,
+        examples: [{ run_id: 42, symbol: "600000.SH", code: "600000", market: "SH", name: "浦发银行", status: "success", observed_value: null, missing: true }] },
+    ],
     funnel: [
       { index: 1, condition_code: "status", label: "结果状态", input_count: 2, matched_count: 2, excluded_count: 0, missing_count: 0 },
       { index: 2, condition_code: "range.score", label: "趋势强度 ≥ 80", input_count: 2, matched_count: 1, excluded_count: 1, missing_count: 1 },

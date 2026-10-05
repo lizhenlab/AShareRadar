@@ -48,6 +48,7 @@ def test_app_lifecycle_coordinates_visibility_online_pagehide_and_dispose() -> N
         marketScanController: { setVisible: (value) => calls.visible.push(value) },
         refreshGlobalPanels: (options) => { calls.refresh.push(options); return { status: Promise.resolve(true) }; },
         loadAll: (options) => { calls.load.push(options); return loadPromise; },
+        isStockWorkspaceActive: () => !["market", "monitor", "system"].includes(state.primaryView),
         invalidateActiveLoad: () => { calls.invalidated += 1; },
         setActiveSymbol: (symbol) => calls.symbols.push(symbol),
         stopStream: () => { calls.stopped += 1; },
@@ -62,6 +63,7 @@ def test_app_lifecycle_coordinates_visibility_online_pagehide_and_dispose() -> N
       assert.equal(documentTarget.count("visibilitychange"), 1);
       assert.equal(windowTarget.count("online"), 1);
       assert.equal(windowTarget.count("pagehide"), 1);
+      assert.equal(windowTarget.count("pageshow"), 1);
       assert.equal(workbenchNeedsOnlineRecovery(state), true);
 
       documentTarget.hidden = true;
@@ -97,15 +99,27 @@ def test_app_lifecycle_coordinates_visibility_online_pagehide_and_dispose() -> N
       assert.deepEqual(calls.pagehide, [pagehide]);
       assert.equal(calls.probabilityCancelled, 1);
 
+      windowTarget.dispatch("pageshow", { persisted: false });
+      assert.equal(calls.reconciled, 1);
+      documentTarget.hidden = true;
+      windowTarget.dispatch("pageshow", { persisted: true });
+      assert.equal(calls.reconciled, 1);
+      documentTarget.hidden = false;
+      windowTarget.dispatch("pageshow", { persisted: true });
+      assert.equal(calls.reconciled, 2);
+
       controller.dispose();
       controller.dispose();
       assert.equal(documentTarget.count("visibilitychange"), 0);
       assert.equal(windowTarget.count("online"), 0);
       assert.equal(windowTarget.count("pagehide"), 0);
+      assert.equal(windowTarget.count("pageshow"), 0);
       const stoppedBeforeDispatch = calls.stopped;
       documentTarget.hidden = true;
       documentTarget.dispatch("visibilitychange");
       windowTarget.dispatch("pagehide", { persisted: false });
+      windowTarget.dispatch("pageshow", { persisted: true });
+      assert.equal(calls.reconciled, 2);
       assert.equal(calls.stopped, stoppedBeforeDispatch);
       assert.equal(calls.pagehide.length, 1);
       assert.equal(calls.probabilityCancelled, 1);

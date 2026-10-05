@@ -14,6 +14,7 @@ from app.models.market import Kline, Quote, StockInfo
 from app.services.cache import SQLiteCache
 from app.services.datahub_metadata_stock_pool import StockPoolResolution
 from app.services.market_scan_manager import MarketScanManager, market_scan_rule_version
+from app.services.market_scan_research_stores import MarketScanResearchStores
 from tests.factories import make_kline, make_quote, make_stock_info
 
 
@@ -190,8 +191,9 @@ def _scanner(
     hub: _MarketScanHub,
     *,
     now: datetime = SCAN_AS_OF,
+    research_stores: MarketScanResearchStores | None = None,
 ) -> MarketScanManager:
-    return MarketScanManager(hub, now=lambda: now)  # type: ignore[arg-type]
+    return MarketScanManager(hub, now=lambda: now, research_stores=research_stores)  # type: ignore[arg-type]
 
 
 def _rule_version(hub: _MarketScanHub) -> str:

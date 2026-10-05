@@ -228,8 +228,8 @@ export function strategySpecFromEditor(root, base = null) {
       && spec.portfolio_constraints.max_stock_weight * spec.portfolio_constraints.stock_count < .999999) {
     throw new Error("组合股票数与单股权重上限无法形成满仓组合");
   }
-  spec.rebalance_policy.hold_sessions = numberValue(root, "strategyHoldSessions", 1, 60);
-  spec.rebalance_policy.rebalance_every_sessions = spec.rebalance_policy.hold_sessions;
+  spec.rebalance_policy.hold_sessions = sessionCountValue(root, "strategyHoldSessions");
+  spec.rebalance_policy.rebalance_every_sessions = sessionCountValue(root, "strategyRebalanceSessions");
   spec.rebalance_policy.buy_utility_threshold = numberValue(root, "strategyBuyThreshold", 0, 100);
   spec.rebalance_policy.hold_utility_threshold = numberValue(root, "strategyHoldThreshold", 0, 100);
   if (spec.rebalance_policy.hold_utility_threshold > spec.rebalance_policy.buy_utility_threshold) {
@@ -282,6 +282,7 @@ function syncObjectiveEditor(root, objectives) {
 
 function syncRebalanceEditor(root, policy) {
   root.getElementById("strategyHoldSessions").value = policy.hold_sessions ?? 5;
+  root.getElementById("strategyRebalanceSessions").value = policy.rebalance_every_sessions ?? "";
   root.getElementById("strategyBuyThreshold").value = policy.buy_utility_threshold ?? 0;
   root.getElementById("strategyHoldThreshold").value = policy.hold_utility_threshold ?? 0;
 }
@@ -318,6 +319,12 @@ function textValue(root, id) {
 function numberValue(root, id, minimum, maximum) {
   const value = Number(root.getElementById(id)?.value);
   if (!Number.isFinite(value) || value < minimum || value > maximum) throw new Error(`${id} 数值无效`);
+  return value;
+}
+
+function sessionCountValue(root, id) {
+  const value = numberValue(root, id, 1, 60);
+  if (!Number.isInteger(value)) throw new Error(`${id} 必须为整数交易日`);
   return value;
 }
 

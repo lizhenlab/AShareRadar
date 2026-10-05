@@ -99,6 +99,66 @@ def test_new_protection_operation_does_not_reuse_prior_semantic_validation(tmp_p
     assert second == first and calls == 1
 
 
+@pytest.mark.parametrize("scope", ["payload", "unsigned_artifact"])
+@pytest.mark.parametrize("encoded_scope", ["payload", "generated_at+payload"])
+def test_lazy_digest_variants_preserve_existing_acceptance(scope, encoded_scope) -> None:
+    payload = {"run_id": 37, "nested": {"generated_at": "old", "value": 4}, "generated_at": "old"}
+    artifact = {"generated_at": "2026-09-22T00:00:00Z", "payload": payload, "integrity": {}}
+    stripped = retention._without_generated_at(payload)
+    expected = {sha256_hex(canonical_json_text({k: v for k, v in artifact.items() if k != "integrity"}))} if scope == "unsigned_artifact" else {
+        sha256_hex(canonical_json_text(payload)), sha256_hex(canonical_json_text(stripped)),
+    }
+    if encoded_scope == "generated_at+payload":
+        expected.add(sha256_hex(canonical_json_text({"generated_at": artifact["generated_at"], "payload": stripped})))
+    assert set(retention._digest_candidates(artifact, payload, scope, encoded_scope=encoded_scope)) == expected
+
+
+@pytest.mark.parametrize("with_generated_at", [False, True])
+def test_retention_stops_after_first_matching_digest_variant(tmp_path, monkeypatch, with_generated_at) -> None:
+    payload = {"run_id": 37, "data": list(range(100))}
+    if with_generated_at:
+        payload["generated_at"] = "2026-09-22T00:00:00Z"
+    digest = sha256_hex(canonical_json_text(retention._without_generated_at(payload)))
+    artifact = {"payload": payload, "integrity": {"algorithm": "sha256", "scope": "payload", "integrity_digest": digest}}
+    calls = []
+    canonical = retention.canonical_json_text
+    def counted(value):
+        calls.append(value)
+        return canonical(value)
+    monkeypatch.setattr(retention, "canonical_json_text", counted)
+    retention._require_digest(tmp_path / "artifact", artifact, payload, artifact["integrity"], digest, "payload")
+    assert len(calls) == 1
+
+
+def test_legacy_raw_payload_digest_still_checked_after_stripped_variant(tmp_path) -> None:
+    payload = {"run_id": 37, "generated_at": "2026-09-22T00:00:00Z"}
+    digest = sha256_hex(canonical_json_text(payload))
+    artifact = {"payload": payload, "integrity": {"algorithm": "sha256", "scope": "payload", "integrity_digest": digest}}
+    retention._require_digest(tmp_path / "artifact", artifact, payload, artifact["integrity"], digest, "payload")
+    with pytest.raises(retention.RuntimeCleanupIntegrityError):
+        retention._require_digest(tmp_path / "artifact", artifact, {**payload, "run_id": 38}, artifact["integrity"], digest, "payload")
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("encoded_scope", ["payload", "generated_at+payload"])
+@pytest.mark.parametrize("invalid", ["1e309", "[1e309]", '{"value":1e309}', '"\\ud800"', '{"value":"\\ud800"}'])
+def test_matching_stripped_digest_cannot_hide_invalid_timestamp(tmp_path, nested, encoded_scope, invalid) -> None:
+    directory = tmp_path / "research/market_scan_probability_source"
+    directory.mkdir(parents=True)
+    stripped = {"run_id": 37, "nested": {}} if nested else {"run_id": 37}
+    generated_at = "2026-09-22T00:00:00Z"
+    hashed = {"generated_at": generated_at, "payload": stripped} if encoded_scope == "generated_at+payload" else stripped
+    digest = sha256_hex(canonical_json_text(hashed))
+    invalid_field = '"generated_at":' + invalid
+    payload = '{"run_id":37,"nested":{' + invalid_field + '}}' if nested else '{"run_id":37,' + invalid_field + '}'
+    integrity = {"algorithm": "sha256", "scope": encoded_scope, "integrity_digest": digest}
+    raw = '{"generated_at":"' + generated_at + '","payload":' + payload + ',"integrity":' + canonical_json_text(integrity) + '}'
+    path = directory / f"market-scan-probability-source-run-37-{digest}.json.gz"
+    path.write_bytes(gzip.compress(raw.encode(), mtime=0))
+    with pytest.raises((retention.RuntimeCleanupIntegrityError, UnicodeEncodeError)):
+        retention.market_scan_artifact_protection(tmp_path / "runtime.sqlite3")
+
+
 @pytest.mark.parametrize("change_during_decode", [False, True])
 def test_content_digest_binds_validated_bytes_even_when_metadata_cannot_distinguish_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change_during_decode: bool,

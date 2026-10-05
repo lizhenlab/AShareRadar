@@ -462,7 +462,9 @@ CREATE TABLE IF NOT EXISTS plate_rank (
     leading_stock TEXT,
     leading_stock_change_pct REAL,
     source TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    symbol TEXT,
+    quote_timestamp TEXT
 );
 
 CREATE TABLE IF NOT EXISTS stock_concept (

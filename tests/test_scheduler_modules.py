@@ -6,7 +6,7 @@ import gc
 import sqlite3
 import threading
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -32,7 +32,6 @@ from app.services.scheduler_schedule import (
     _reschedule_task,
     _task_state,
 )
-from app.services.scheduler_tasks import _research_maintenance_window_open
 from app.utils.time import seconds_ago_text
 
 
@@ -62,6 +61,7 @@ def test_scheduler_uses_datahub_settings_instance() -> None:
         scheduler_kline_interval_seconds=121,
         scheduler_plate_interval_seconds=122,
         scheduler_health_interval_seconds=21,
+        runtime_maintenance_interval_seconds=3600,
     )
     scheduler = LocalDataScheduler(SimpleNamespace(settings=settings))  # type: ignore[arg-type]
 
@@ -327,7 +327,7 @@ def test_stop_does_not_wait_for_manual_run_and_releases_guard_afterward() -> Non
     assert guard.release_calls == 1
 
 
-def test_scheduler_health_maintenance_runs_off_event_loop() -> None:
+def test_scheduler_runtime_cleanup_runs_off_event_loop() -> None:
     cache = _ThreadRecordingCache()
     hub = _SchedulerHub(cache=cache)
     hub.settings.quote_stale_warning_seconds = 60
@@ -336,14 +336,14 @@ def test_scheduler_health_maintenance_runs_off_event_loop() -> None:
 
     async def run_check() -> tuple[int, str]:
         event_loop_thread = threading.get_ident()
-        message = await scheduler._check_data_health()
+        message = await scheduler._cleanup_runtime_cache()
         return event_loop_thread, message
 
     event_loop_thread, message = asyncio.run(run_check())
 
     assert cache.cleanup_thread_id is not None
     assert cache.cleanup_thread_id != event_loop_thread
-    assert "尚未形成报价缓存" in message
+    assert "无需清理或尚未到维护间隔" in message
 
 
 def test_scheduler_start_cancellation_releases_guard_acquired_in_worker() -> None:
@@ -541,9 +541,11 @@ def test_build_local_tasks_uses_explicit_specs_min_intervals_and_offsets() -> No
         "evaluate_due_reviews",
         "run_strategy_schedules",
         "maintain_market_scan_probability",
+        "cleanup_runtime_cache",
+        "refresh_stock_pool_metadata",
     ]
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 20, 30, 300, 300, 300, 300]
-    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20, 24, 28, 32, 36]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 300, 30, 300, 300, 300, 300, 60, 3600]
+    assert [(task.next_run_at - now).total_seconds() for task in tasks.values()] == [0, 8, 12, 16, 20, 20700, 20700, 32, 20700, 37800, 20700]
 
 
 def test_scheduler_loop_lets_market_scanner_use_its_shanghai_clock() -> None:
@@ -682,11 +684,12 @@ def test_build_local_tasks_clamps_invalid_interval_settings() -> None:
         scheduler_kline_interval_seconds=" ",
         scheduler_plate_interval_seconds=-1,
         scheduler_health_interval_seconds="45",
+        runtime_maintenance_interval_seconds=float("inf"),
     )
 
     tasks = _build_local_tasks(settings, now, _handlers())
 
-    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 45, 30, 300, 300, 300, 300]
+    assert [task.interval_seconds for task in tasks.values()] == [10, 120, 120, 300, 30, 300, 300, 300, 300, 60, 3600]
 
 
 def test_run_once_and_status_use_task_spec_order() -> None:
@@ -752,7 +755,7 @@ def test_alert_scheduler_persists_partial_rule_failures_as_degraded() -> None:
     )
 
     with patch("app.services.alerts.evaluate_alert_rules", return_value=summary):
-        message = asyncio.run(scheduler._execute(scheduler.tasks["evaluate_alerts"]))
+        message = asyncio.run(scheduler._execute(scheduler.tasks["evaluate_alerts"], manual=True))
 
     assert message.endswith("失败 1 条")
     assert scheduler.tasks["evaluate_alerts"].last_status == "degraded"
@@ -958,7 +961,7 @@ def test_refresh_watch_quotes_reports_fallback_cache_as_warning() -> None:
     hub = _SchedulerHub(quote_fallback_symbols={"600519.SH"}, kline_symbols=["600519.SH", "000001.SZ"])
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"]))
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"], manual=True))
 
     assert hub.quote_calls == [["600519.SH", "000001.SZ"]]
     assert message == "已刷新 1 只观察个股报价，兜底缓存 1 只：600519.SH"
@@ -974,7 +977,7 @@ def test_all_fallback_quote_refresh_is_persisted_as_degraded() -> None:
     )
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"]))
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"], manual=True))
 
     assert message == "已刷新 0 只观察个股报价，兜底缓存 2 只：600519.SH、000001.SZ"
     assert scheduler.tasks["refresh_watch_quotes"].last_status == "degraded"
@@ -989,7 +992,7 @@ def test_refresh_watch_quotes_reports_partial_provider_coverage() -> None:
     )
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"]))
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_watch_quotes"], manual=True))
 
     assert message == "已刷新 1 只观察个股报价，缺失 1 只：000001.SZ"
     assert scheduler.tasks["refresh_watch_quotes"].last_status == "degraded"
@@ -1105,7 +1108,7 @@ def test_refresh_key_klines_continues_after_per_symbol_failure() -> None:
     hub = _SchedulerHub(kline_failures={"600001.SH"}, kline_symbols=["600001.SH", "600002.SH", "600003.SH"])
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"]))
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"], manual=True))
 
     assert hub.kline_calls == ["600001.SH", "600002.SH", "600003.SH"]
     assert message == "已刷新 2 只关键个股日K线，失败 1 只"
@@ -1118,7 +1121,7 @@ def test_refresh_key_klines_reports_fallback_cache_as_warning() -> None:
     hub = _SchedulerHub(kline_fallback={"600001.SH"}, kline_symbols=["600001.SH", "600002.SH"])
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"]))
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"], manual=True))
 
     assert hub.kline_calls == ["600001.SH", "600002.SH"]
     assert message == "已刷新 1 只关键个股日K线，兜底缓存 1 只"
@@ -1134,7 +1137,7 @@ def test_all_fallback_kline_refresh_is_persisted_as_degraded() -> None:
     )
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"]))
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_key_klines"], manual=True))
 
     assert message == "已刷新 0 只关键个股日K线，兜底缓存 2 只"
     assert scheduler.tasks["refresh_key_klines"].last_status == "degraded"
@@ -1146,7 +1149,7 @@ def test_fallback_plate_refresh_is_persisted_as_degraded() -> None:
     hub = _SchedulerHub(plate_fallback=True)
     scheduler = LocalDataScheduler(hub)
 
-    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_plate_rank"]))
+    message = asyncio.run(scheduler._execute(scheduler.tasks["refresh_plate_rank"], manual=True))
 
     assert message == "行业背景数据源不可用，使用缓存 1 条"
     assert scheduler.tasks["refresh_plate_rank"].last_status == "degraded"
@@ -1441,14 +1444,15 @@ def test_scheduler_healthy_plate_and_alert_tasks_persist_success() -> None:
     ]
 
 
-def test_scheduler_health_includes_runtime_cleanup_result() -> None:
+def test_scheduler_health_does_not_trigger_runtime_cleanup() -> None:
     cache = _ThreadRecordingCache()
-    cache.cleanup_regenerable_runtime_rows = lambda: {"task_run": 2, "monitor_event": 1}  # type: ignore[method-assign]
+    cache.cleanup_regenerable_runtime_rows = lambda: pytest.fail("health must not invoke deep retention")  # type: ignore[method-assign]
     scheduler = LocalDataScheduler(_SchedulerHub(cache=cache))
 
     message = asyncio.run(scheduler._check_data_health(now=datetime(2026, 5, 13, 10, 30)))
 
-    assert message.endswith("已清理 3 条过期运行记录")
+    assert "尚未形成报价缓存" in message
+    assert "清理" not in message
 
 
 @pytest.mark.parametrize(
@@ -1474,17 +1478,6 @@ def test_research_queue_outcomes_are_explicit(summary, expected_status, raises) 
             assert getattr(result, "status", None) == expected_status
 
 
-def test_research_queue_and_due_reviews_skip_outside_publish_window() -> None:
-    scheduler = LocalDataScheduler(_SchedulerHub())
-    now = datetime(2026, 5, 13, 8, 0)
-
-    research = asyncio.run(scheduler._refresh_research_queue(now=now))
-    review = asyncio.run(scheduler._evaluate_due_reviews(now=now))
-    probability = asyncio.run(scheduler._maintain_market_scan_probability(now=now))
-
-    assert "已跳过主动研究刷新" in research
-    assert "已跳过到期研究计划评估" in review
-    assert "已跳过上涨概率标签维护" in probability
 
 
 @pytest.mark.parametrize(
@@ -1511,11 +1504,12 @@ def test_due_review_outcomes_are_explicit(summary, expected_status, raises) -> N
 
 
 class _ProbabilityMaintenanceSummary:
-    def __init__(self, *, due: int, failed: int, degraded: bool, failures: tuple[str, ...] = ()) -> None:
+    def __init__(self, *, due: int, failed: int, degraded: bool, failures: tuple[str, ...] = (), pending: bool = False) -> None:
         self.due_count = due
         self.failed_count = failed
         self.degraded = degraded
         self.failures = failures
+        self.pending = pending
 
     def message(self) -> str:
         return f"维护 {self.due_count} 条，失败 {self.failed_count} 条"
@@ -1526,7 +1520,8 @@ class _ProbabilityMaintenanceRunner:
         self.summary = summary
         self.calls = 0
 
-    def run(self, *, now=None):
+    def run(self, *, now=None, time_budget_seconds=None):
+        assert time_budget_seconds == 60.0
         self.calls += 1
         return self.summary
 
@@ -1584,6 +1579,45 @@ def test_probability_maintenance_refreshes_shared_projection_cache_before_return
 
     assert result == "维护 1 条，失败 0 条"
     assert scanner.refreshed == 1
+
+
+def test_probability_maintenance_pending_preserves_progress_without_downstream_work() -> None:
+    scanner = SimpleNamespace(refresh_probability_research_cache=AsyncMock())
+    scheduler = LocalDataScheduler(_SchedulerHub(), market_scanner=scanner)
+    scheduler._market_scan_probability_maintenance = _ProbabilityMaintenanceRunner(
+        _ProbabilityMaintenanceSummary(due=0, failed=0, degraded=False, pending=True)
+    )
+    scheduler._maintain_joint_execution_probability = AsyncMock()
+    result = asyncio.run(scheduler._maintain_market_scan_probability())
+    assert result.status == "pending"
+    scanner.refresh_probability_research_cache.assert_not_called()
+    scheduler._maintain_joint_execution_probability.assert_not_called()
+
+
+def test_probability_refresh_failure_keeps_completed_maintenance_diagnostics() -> None:
+    scanner = SimpleNamespace(refresh_probability_research_cache=AsyncMock(side_effect=ValueError("校验拒绝")))
+    scheduler = LocalDataScheduler(_SchedulerHub(), market_scanner=scanner)
+    scheduler._market_scan_probability_maintenance = _ProbabilityMaintenanceRunner(
+        _ProbabilityMaintenanceSummary(due=2, failed=1, degraded=True, failures=("run 135 隔离",))
+    )
+    with pytest.raises(RuntimeError, match="概率维护到期 2，失败 1；研究缓存刷新失败.*校验拒绝"):
+        asyncio.run(scheduler._maintain_market_scan_probability())
+
+
+def test_probability_task_persists_counts_before_truncating_long_refresh_error() -> None:
+    scanner = SimpleNamespace(refresh_probability_research_cache=AsyncMock(side_effect=ValueError("校验拒绝" * 100)))
+    scheduler = LocalDataScheduler(_SchedulerHub(), market_scanner=scanner)
+    scheduler._market_scan_probability_maintenance = _ProbabilityMaintenanceRunner(
+        _ProbabilityMaintenanceSummary(due=2, failed=1, degraded=True, failures=("run 135 隔离",))
+    )
+    task = scheduler.tasks["maintain_market_scan_probability"]
+    with pytest.raises(RuntimeError):
+        asyncio.run(scheduler._execute(task, manual=True))
+    status, message = scheduler.datahub.cache.finished_runs[-1]
+    assert status == "failed" and message.startswith("概率维护到期 2，失败 1；研究缓存刷新失败：")
+    assert len(message) <= 120
+    assert any(category == "market_scan_probability" and "run 135 隔离" in detail
+               for _level, category, detail in scheduler.datahub.cache.monitor_events)
 
 
 @pytest.mark.parametrize(
@@ -1731,12 +1765,6 @@ def test_scheduler_time_helpers_cover_unavailable_and_exhausted_schedules() -> N
         assert _next_market_scan_run_at(settings, None, datetime(2026, 5, 13, 16, 0)) is None
 
 
-def test_scheduler_window_uses_runtime_clock_when_now_is_omitted() -> None:
-    with (
-        patch("app.services.scheduler_tasks.market_now_naive", return_value=datetime(2026, 5, 13, 16, 0)),
-        patch("app.services.scheduler_tasks.is_trading_day", return_value=True),
-    ):
-        assert _research_maintenance_window_open() is True
 
 
 def _settings(*, quote_stale_warning_seconds: int = 60, kline_cache_seconds: int = 300):
@@ -1752,6 +1780,7 @@ def _scheduler_settings():
         scheduler_kline_interval_seconds=1,
         scheduler_plate_interval_seconds=1,
         scheduler_health_interval_seconds=1,
+        runtime_maintenance_interval_seconds=1,
     )
 
 
@@ -1766,6 +1795,8 @@ def _handlers():
         "evaluate_due_reviews": _handler,
         "run_strategy_schedules": _handler,
         "maintain_market_scan_probability": _handler,
+        "cleanup_runtime_cache": _handler,
+        "refresh_stock_pool_metadata": _handler,
     }
 
 

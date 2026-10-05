@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from statistics import mean
-from typing import Callable
+from typing import Callable, Protocol
 
 from app.models.market import (
     Kline,
@@ -17,9 +17,17 @@ from app.services.indicator_volume import recent_volume_ratio
 from app.utils.market_data import filter_valid_klines
 
 
+class TrendPriceInputs(Protocol):
+    """Price fields shared by current quotes and causal historical snapshots."""
+
+    price: float
+    change_pct: float
+    turnover_rate: float | None
+
+
 @dataclass(frozen=True)
 class TrendContext:
-    quote: Quote
+    quote: TrendPriceInputs
     klines: list[Kline]
     ma5: float
     ma10: float

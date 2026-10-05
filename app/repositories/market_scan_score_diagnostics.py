@@ -76,6 +76,42 @@ ORDER BY symbol ASC
 """
 
 
+class ProductionScoreContractCollector:
+    """Collect contract coverage from one request's strict-decoded snapshot rows."""
+
+    def __init__(self) -> None:
+        self._success_count = 0
+        self._covered_count = 0
+        self._rules: set[str] = set()
+        self._hashes: set[str] = set()
+
+    def observe(self, row: Mapping[str, object]) -> None:
+        if row.get("status") != "success":
+            return
+        self._success_count += 1
+        metrics = row.get("metrics_json")
+        rule = _nested_json_value(metrics, "score_details", "score_spec", "rule_version")
+        score_hash = _nested_json_value(metrics, "score_details", "score_spec_hash")
+        if isinstance(rule, str) and isinstance(score_hash, str):
+            self._covered_count += 1
+            self._rules.add(rule)
+            self._hashes.add(score_hash)
+
+    def contract(self, *, expected_count: int) -> MarketScanProductionScoreContract | None:
+        if expected_count <= 0 or self._success_count != expected_count or self._covered_count != expected_count:
+            return None
+        if len(self._rules) != 1 or len(self._hashes) != 1:
+            return None
+        try:
+            return MarketScanProductionScoreContract(
+                production_score_rule_version=next(iter(self._rules)),
+                production_score_spec_hash=next(iter(self._hashes)),
+                success_count=expected_count,
+            )
+        except (TypeError, ValueError):
+            return None
+
+
 def read_production_score_contract(
     conn: sqlite3.Connection,
     run_id: int,
@@ -369,6 +405,7 @@ def _optional_distribution_unit_interval(value: object) -> float | None:
 
 
 __all__ = [
+    "ProductionScoreContractCollector",
     "read_production_score_contract",
     "read_publication_summary",
     "read_success_score_observations",

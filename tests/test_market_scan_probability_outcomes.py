@@ -76,6 +76,69 @@ def test_outcome_artifact_is_compact_content_addressed_and_idempotent(
     assert publish_built_probability_outcome_artifact(tmp_path, built) == first
 
 
+def test_outcome_load_reuses_one_verified_envelope_without_repeating_normalization(tmp_path, monkeypatch):
+    source = _source()
+    monkeypatch.setattr(outcomes_module, "_source_artifact", lambda _value: source)
+    artifact = build_probability_outcome_artifact(
+        source, {"600001.SH": _complete_h1_rows()}, generated_at=GENERATED_AT, as_of_date="2026-08-13",
+    )
+    info = publish_built_probability_outcome_artifact(tmp_path, artifact)
+    normalizer = outcomes_module._json_mapping
+    digest = outcomes_module.probability_outcome_payload_digest
+    normalizations, digests = [], []
+
+    def normalize(value, path):
+        normalizations.append(path)
+        return normalizer(value, path)
+
+    def payload_digest(value):
+        digests.append(value)
+        return digest(value)
+
+    monkeypatch.setattr(outcomes_module, "_json_mapping", normalize)
+    monkeypatch.setattr(outcomes_module, "probability_outcome_payload_digest", payload_digest)
+    assert load_probability_outcome_artifact(info["path"]) == artifact
+    assert normalizations.count("artifact") == 1
+    assert len(digests) == 2  # raw envelope and normalized replay both remain sealed
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+def test_outcome_replay_cannot_change_the_verified_payload_digest(tmp_path, monkeypatch, loaded):
+    source = _source()
+    monkeypatch.setattr(outcomes_module, "_source_artifact", lambda _value: source)
+    artifact = build_probability_outcome_artifact(
+        source, {"600001.SH": _complete_h1_rows()}, generated_at=GENERATED_AT, as_of_date="2026-08-13",
+    )
+    info = publish_built_probability_outcome_artifact(tmp_path, artifact)
+    validate = outcomes_module._validate_payload
+
+    def changed_replay(payload, generated_at):
+        verified = validate(payload, generated_at)
+        verified["quality"]["record_count"] += 1
+        return verified
+
+    monkeypatch.setattr(outcomes_module, "_validate_payload", changed_replay)
+    with pytest.raises(ProbabilityOutcomeError, match="payload digest"):
+        if loaded:
+            load_probability_outcome_artifact(info["path"])
+        else:
+            verify_probability_outcome_artifact(artifact)
+
+
+def test_outcome_public_verifier_owns_its_tree_and_rejects_nonfinite_input(monkeypatch):
+    source = _source()
+    monkeypatch.setattr(outcomes_module, "_source_artifact", lambda _value: source)
+    artifact = build_probability_outcome_artifact(
+        source, {"600001.SH": _complete_h1_rows()}, generated_at=GENERATED_AT, as_of_date="2026-08-13",
+    )
+    expected = deepcopy(artifact)
+    verified = verify_probability_outcome_artifact(artifact)
+    artifact["payload"]["records"][0]["instrument"]["quote_amount"] = float("nan")
+    assert verified == expected
+    with pytest.raises(ProbabilityOutcomeError, match="有限 JSON"):
+        verify_probability_outcome_artifact(artifact)
+
+
 def test_outcome_required_dates_are_exact_and_horizon_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -60,6 +60,10 @@ export function probabilitySnapshotCopy(artifact) {
 
 function pendingProbabilityCopy(availability) {
   return {
+    outcome_evidence_quarantined: {
+      title: "上涨概率研究 · 历史证据已隔离",
+      description: "历史结果未通过当前规则重放校验，同组模型暂停使用；保留原始档案，概率与筛选保持关闭。",
+    },
     source_index_verification_pending: {
       title: "上涨概率研究 · 归档证据校验中",
       description: "归档证据校验中，完成后自动更新；概率、区间与选股筛选保持为空或关闭。",

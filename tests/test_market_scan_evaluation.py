@@ -250,8 +250,9 @@ def test_read_only_forward_evaluation_uses_frozen_rank_and_complete_future_days(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    # V4 binds execution phases; this fixture changes only schema/execution identity.
-    assert normalized_digest == "0eba820de35a38508640767c1186f0ec5817d3642a6624d00ac86dbcad6c93be"
+    # Rank-group comparisons now use only common, sufficiently covered dates;
+    # this three-stock fixture has no complete rank bands. Calibration is unchanged.
+    assert normalized_digest == "6f45b136b99e704019246dd363052bdef885d66ca7d5c18be8dbe290679a735d"
     assert calibration_digest == "8f36b6d7a1035c20d245135b234cc2896e9b20d8750c7787b829e1cdf9519bb2"
 
     assert report["status"] == "ok"

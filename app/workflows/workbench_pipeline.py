@@ -36,6 +36,7 @@ from app.models.market import (
 from app.services.datahub import DataHub
 from app.services.datahub_runtime import run_cache_io_best_effort
 from app.services.fuyao_scoring import build_fuyao_valuation_score
+from app.services.market_context_scoring import MARKET_CONTEXT_INDEX
 from app.services.market_sampling import (
     MarketBreadthQuoteResult,
     QuoteSampleResult,
@@ -82,6 +83,7 @@ class WorkbenchInputs:
     concepts: list[StockConceptItem]
     concept_error: str | None
     fuyao_valuation: FuyaoValuationScore | None = None
+    market_quote: Quote | None = None
 
 
 @dataclass(frozen=True)
@@ -133,7 +135,7 @@ async def build_workbench_context(datahub: DataHub, symbol: str) -> WorkbenchCon
 
 
 async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchInputs:
-    analysis = await analyze_individual_stock(datahub, symbol, persist_history=False)
+    analysis, market_quote = await _analysis_and_market(datahub, symbol)
     breadth_sample, order_book_result, concept_result = await asyncio.gather(
         _market_breadth_sample_or_empty(datahub),
         _order_book_or_error(datahub, symbol),
@@ -171,7 +173,25 @@ async def _collect_workbench_inputs(datahub: DataHub, symbol: str) -> WorkbenchI
         concepts=concepts,
         concept_error=concept_error,
         fuyao_valuation=fuyao_valuation,
+        market_quote=market_quote,
     )
+
+
+async def _analysis_and_market(datahub: DataHub, symbol: str) -> tuple[AnalysisResult, Quote | None]:
+    market, analysis = await asyncio.gather(
+        _market_index_or_unavailable(datahub),
+        analyze_individual_stock(datahub, symbol, persist_history=False),
+        return_exceptions=True,
+    )
+    if isinstance(analysis, BaseException):
+        raise analysis
+    if isinstance(market, BaseException):
+        raise market
+    return analysis, market
+
+
+async def _market_index_or_unavailable(datahub: DataHub) -> Quote | None:
+    return await optional_workflow_value(datahub, lambda: datahub.quote(MARKET_CONTEXT_INDEX), lambda _exc: None)
 
 
 async def _fuyao_valuation_or_unavailable(
@@ -313,7 +333,8 @@ async def _market_breadth_sample_or_empty(datahub: DataHub) -> MarketBreadthQuot
 def _build_research_core(inputs: WorkbenchInputs) -> WorkbenchResearchCore:
     analysis = inputs.analysis
     insights = build_stock_insight_bundle(analysis, order_book=inputs.order_book, order_book_error=inputs.order_book_error,
-                                         fuyao_valuation=inputs.fuyao_valuation)
+                                         fuyao_valuation=inputs.fuyao_valuation, market_quote=inputs.market_quote,
+                                         evaluated_at=inputs.context_generated_at)
     feature_snapshot = build_feature_snapshot(analysis, insights)
     theme_context = build_theme_context_report(analysis, feature_snapshot, inputs.concepts, concept_error=inputs.concept_error)
     chip_analysis = build_chip_analysis(analysis, feature_snapshot)
@@ -321,7 +342,7 @@ def _build_research_core(inputs: WorkbenchInputs) -> WorkbenchResearchCore:
     factor_lab = build_factor_lab_report(analysis, insights, feature_snapshot, chip_analysis, leadership)
     market_breadth = build_market_breadth_snapshot(inputs.breadth_quotes, warnings=inputs.breadth_warnings)
     market_regime = build_market_regime_report(analysis, insights, feature_snapshot, factor_lab, market_breadth)
-    timeframe_alignment = build_timeframe_alignment_report(analysis, feature_snapshot, factor_lab)
+    timeframe_alignment = build_timeframe_alignment_report(analysis, feature_snapshot)
     signal_validation = build_signal_validation_report(analysis, feature_snapshot, factor_lab, market_regime, timeframe_alignment)
     risk_reward = build_risk_reward_report(analysis, feature_snapshot, factor_lab, market_regime, signal_validation, timeframe_alignment)
     return WorkbenchResearchCore(

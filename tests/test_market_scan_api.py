@@ -341,6 +341,10 @@ def test_all_snapshot_read_routes_share_one_nonblocking_admission_slot(
         client.post(f"/api/market-scans/{scanner.active.id}/screen/evaluate", json={}),
         client.get(f"/api/market-scans/{scanner.active.id}/delta"),
         client.get(f"/api/market-scans/{scanner.active.id}/future-range-research"),
+        client.post(
+            f"/api/market-scans/{scanner.active.id}/compare",
+            json={"symbols": ["600001.SH", "688001.SH"], "expected_snapshot_digest": "a" * 64},
+        ),
     ]
     identity = client.get("/api/market-scans/polling-identity", params={"mode": "official"})
     navigation = client.get(
@@ -348,7 +352,7 @@ def test_all_snapshot_read_routes_share_one_nonblocking_admission_slot(
         params={"mode": "official", "status": "published", "authority": "navigation"},
     )
 
-    assert [response.status_code for response in busy] == [503] * 10
+    assert [response.status_code for response in busy] == [503] * 11
     assert all(response.headers["cache-control"] == "no-store" for response in busy)
     assert all(response.headers["retry-after"] == "2" for response in busy)
     assert all(response.json() == {"detail": MARKET_SCAN_BUSY_DETAIL} for response in busy)

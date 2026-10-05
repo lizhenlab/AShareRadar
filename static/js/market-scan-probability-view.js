@@ -353,6 +353,9 @@ function failedSelectionGateLabels(artifact) {
 }
 
 function probabilityUnavailableHelp(artifact) {
+  if (artifact.availability === "outcome_evidence_quarantined") {
+    return "历史结果未通过重放校验，同组模型暂停使用；概率与筛选保持关闭。";
+  }
   if (artifact.availability === "source_index_verification_pending") {
     return "归档证据校验中，完成后自动更新；概率与筛选保持关闭。";
   }
@@ -478,6 +481,7 @@ function statusLabel(value) {
   const status = String(artifact.status || "not_generated");
   const joint = objectValue(artifact.joint_execution_evidence);
   const pending = {
+    outcome_evidence_quarantined: "历史证据已隔离",
     source_index_verification_pending: "归档证据校验中",
     maintenance_pending: "正式证据维护中",
     maintenance_failed: "正式证据维护失败",

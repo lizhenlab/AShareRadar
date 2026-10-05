@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +10,7 @@ from app.services.data_quality import build_data_quality
 from app.services.research_features import build_feature_snapshot
 from app.services.research_timeframe import (
     _timeframe_alignment_label,
+    _timeframe_alignment_score,
     _timeframe_conflict_level,
     _timeframe_trend,
     build_timeframe_alignment_report,
@@ -94,11 +94,19 @@ def test_timeframe_alignment_label_follows_explicit_directional_conflict_levels(
     assert _timeframe_alignment_label(52, "多周期偏弱") == "多周期偏弱"
 
 
+def test_timeframe_requires_its_own_evidence_to_reach_resonance() -> None:
+    frames = [_trend("短线", 61), _trend("波段", 61)]
+    score = _timeframe_alignment_score(frames)
+    conflict = _timeframe_conflict_level(frames)
+    assert score == 61
+    assert _timeframe_alignment_label(score, conflict) == "多周期顺向"
+
+
 def test_timeframe_alignment_has_no_valid_period_below_20_rows() -> None:
     closes = [100 + index * 0.2 for index in range(19)]
     analysis, feature = _timeframe_inputs(closes, latest=closes[-1])
 
-    report = build_timeframe_alignment_report(analysis, feature, SimpleNamespace(total_score=50))
+    report = build_timeframe_alignment_report(analysis, feature)
 
     assert report.timeframes == []
     assert report.alignment_score == 50
@@ -123,7 +131,7 @@ def test_timeframe_alignment_only_includes_completed_requested_windows(
     closes = [100 + index * 0.2 for index in range(row_count)]
     analysis, feature = _timeframe_inputs(closes, latest=closes[-1])
 
-    report = build_timeframe_alignment_report(analysis, feature, SimpleNamespace(total_score=50))
+    report = build_timeframe_alignment_report(analysis, feature)
 
     assert [(item.name, item.window_days) for item in report.timeframes] == expected_frames
     if row_count < 60:

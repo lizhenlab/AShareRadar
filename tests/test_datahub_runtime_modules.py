@@ -87,6 +87,96 @@ def test_provider_runtime_timed_call_returns_value_and_latency() -> None:
     assert latency_ms >= 0
 
 
+def test_provider_cooldown_stops_queued_calls_before_slow_failure_status_write(monkeypatch) -> None:
+    async def run_check() -> None:
+        runtime = ProviderRuntime(_FailingStatusCache(), Settings(provider_failure_cooldown_seconds=30))
+        release_failure, release_other = asyncio.Event(), asyncio.Event()
+        persistence_entered, finish_persistence = asyncio.Event(), asyncio.Event()
+        started: list[str] = []
+
+        async def slow_status_write(*_args):
+            persistence_entered.set()
+            await finish_persistence.wait()
+
+        monkeypatch.setattr("app.services.datahub_runtime.run_cache_io_best_effort", slow_status_write)
+
+        async def fetch(key: str) -> str:
+            started.append(key)
+            if key == "fails":
+                await release_failure.wait()
+                raise OSError("network unavailable")
+            await release_other.wait()
+            return key
+
+        async def request(key: str):
+            try:
+                return await runtime.call_provider("live", "quote", lambda: fetch(key), request_key=key)
+            except OSError as exc:
+                await runtime.record_failure_async("live", 1, exc, "quote")
+
+        first, other = asyncio.create_task(request("fails")), asyncio.create_task(request("other"))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        queued = [asyncio.create_task(request(f"queued-{index}")) for index in range(20)]
+        await asyncio.sleep(0)
+        try:
+            assert started == ["fails", "other"]
+            release_failure.set()
+            await asyncio.wait_for(persistence_entered.wait(), 0.5)
+            results = await asyncio.wait_for(asyncio.gather(*queued, return_exceptions=True), 0.5)
+            assert all(isinstance(result, ProviderCallBusyError) for result in results)
+            assert all(0 < result.retry_after_seconds <= 30 for result in results)
+            assert started == ["fails", "other"]
+            assert not first.done()  # Failure persistence must not hold the cooldown open.
+        finally:
+            finish_persistence.set()
+            release_other.set()
+            await asyncio.gather(first, other, *queued, return_exceptions=True)
+            await runtime.aclose()
+
+    asyncio.run(run_check())
+
+
+def test_provider_cooldown_preserves_shared_call_and_recovers_after_expiry(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("app.services.datahub_runtime.monotonic_now", lambda: clock[0])
+
+    async def run_check() -> None:
+        cache = _FailingStatusCache()
+        runtime = ProviderRuntime(cache, Settings(provider_failure_cooldown_seconds=30))
+        release = asyncio.Event()
+        started: list[str] = []
+
+        async def fetch(key: str) -> str:
+            started.append(key)
+            await release.wait()
+            return key
+
+        first = asyncio.create_task(runtime.call_provider("live", "quote", lambda: fetch("shared"), request_key="same"))
+        await asyncio.sleep(0)
+        runtime.record_failure("live", 1, OSError("network unavailable"), "quote")
+        shared = asyncio.create_task(runtime.call_provider("live", "quote", lambda: fetch("duplicate"), request_key="same"))
+        await asyncio.sleep(0)
+        try:
+            with pytest.raises(ProviderCallBusyError) as blocked:
+                await runtime.call_provider("live", "quote", lambda: fetch("blocked"), request_key="new")
+            assert blocked.value.retry_after_seconds == 30
+            await runtime.record_failure_async("live", 1, blocked.value, "quote")
+            assert len(cache.failure_calls) == 1
+            release.set()
+            assert await first == await shared == "shared"
+            clock[0] += 31
+            assert await runtime.call_provider("live", "quote", lambda: fetch("recovered")) == "recovered"
+            assert started == ["shared", "recovered"]
+            assert not runtime.is_cooling("live", "quote")
+        finally:
+            release.set()
+            await asyncio.gather(first, shared, return_exceptions=True)
+            await runtime.aclose()
+
+    asyncio.run(run_check())
+
+
 def test_provider_runtime_supports_a_longer_timeout_for_full_stock_pool_calls() -> None:
     async def run_check() -> str:
         runtime = ProviderRuntime(

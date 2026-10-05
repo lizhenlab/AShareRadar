@@ -16,7 +16,9 @@ from app.models.market_scan import (
 from app.services import market_scan_probability_capture as capture
 from app.services import market_scan_probability_source as probability_source
 from app.services.cache import SQLiteCache
-from app.services.market_scan_manager import MarketScanManager
+from app.services.market_scan_probability_runtime import MarketScanProbabilityRuntime
+from app.services.market_scan_research_stores import MarketScanResearchStores
+from tests.market_scan_test_support import SCAN_AS_OF
 from app.services.market_scan_probability_source import ProbabilitySourceError, list_probability_source_snapshots
 from app.services.market_scan_universe import FULL_MARKET_SCOPE
 from app.services.market_scan_scoring import (
@@ -506,12 +508,9 @@ def test_capture_outbox_retries_after_failure_and_recovers_expired_lease_on_rest
 def test_capture_publish_refreshes_compact_index_before_the_next_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manager = object.__new__(MarketScanManager)
-    manager._probability_capture_lock = asyncio.Lock()  # noqa: SLF001
-    manager._probability_capture_owner = "test-owner"  # noqa: SLF001
-    manager._sensitive_values = ()  # noqa: SLF001
-    manager.cache = object()
-    manager._lifecycle = SimpleNamespace(owns_instance_guard=lambda: True)  # noqa: SLF001
+    runtime = MarketScanProbabilityRuntime(object(), MarketScanResearchStores(
+        probability=None, probability_source=None, future_range=None,
+    ), owns_instance_guard=lambda: True, now=lambda: SCAN_AS_OF)
     refresh_finished = False
 
     async def processed(*_args, **_kwargs):
@@ -523,12 +522,12 @@ def test_capture_publish_refreshes_compact_index_before_the_next_projection(
         return 1
 
     monkeypatch.setattr(
-        "app.services.market_scan_manager.process_market_scan_probability_capture_outbox",
+        "app.services.market_scan_probability_runtime.process_market_scan_probability_capture_outbox",
         processed,
     )
-    manager.refresh_probability_research_cache = refresh  # type: ignore[method-assign]
+    runtime.refresh = refresh  # type: ignore[method-assign]
 
-    summary = asyncio.run(manager._drain_probability_capture_outbox())  # noqa: SLF001
+    summary = asyncio.run(runtime.drain_capture())  # noqa: SLF001
 
     assert summary["captured"] == 1
     assert refresh_finished is True

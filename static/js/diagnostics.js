@@ -356,6 +356,7 @@ function taskBadgeClass(task, recent) {
 function statusLabel(status) {
   if (status === "success") return "正常";
   if (status === "degraded") return "降级";
+  if (status === "pending") return "待续";
   if (status === "failed") return "异常";
   if (status === "cancelled") return "已取消";
   if (status === "running") return "执行中";

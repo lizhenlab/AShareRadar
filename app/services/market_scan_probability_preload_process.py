@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 import hashlib
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ WORKER_POLL_SECONDS = 0.1
 WORKER_MAX_FILES = 2048
 WORKER_MAX_INPUT_BYTES = 2 * 1024 * 1024
 WORKER_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
-PROBABILITY_PRELOAD_SCHEMA = "market-scan-probability-preload-v1"
+PROBABILITY_PRELOAD_SCHEMA = "market-scan-probability-preload-v2"
 _SCHEMA = PROBABILITY_PRELOAD_SCHEMA
 _FileFingerprint = tuple[Path, int, int, int, int, int, int]
 _KINDS = frozenset({"source", "outcome", "fit"})
@@ -41,6 +42,7 @@ _SUMMARY_FIELDS = {
         "training_cutoff", "through_source_digest", "through_outcome_digest", "input_pair_digest", "integrity_digest",
     }),
 }
+_REJECTION_FIELDS = frozenset({"run_id", "generated_at", "as_of_date", "source_integrity_digest", "integrity_digest", "rejection_status", "rejection_reason"})
 _RequestFile = tuple[str, "_FileFingerprint"]
 
 
@@ -225,7 +227,8 @@ def _file_identity(kind: str, fingerprint: _FileFingerprint) -> tuple[int, str, 
 
 
 def _validate_summary(kind: str, fingerprint: _FileFingerprint, summary: object) -> None:
-    if summary is None and kind == "outcome":
+    if kind == "outcome" and isinstance(summary, dict) and "rejection_status" in summary:
+        _validate_rejection_summary(fingerprint, summary)
         return
     if not isinstance(summary, dict) or set(summary) != _SUMMARY_FIELDS[kind]:
         raise ProbabilitySourceError("上涨概率只读校验摘要格式无效")
@@ -237,6 +240,31 @@ def _validate_summary(kind: str, fingerprint: _FileFingerprint, summary: object)
         raise ProbabilitySourceError("上涨概率只读校验摘要日期绑定无效")
     if not isinstance(summary["cohort"], dict) or not {"mode", "scope", "rule_version"} <= summary["cohort"].keys():
         raise ProbabilitySourceError("上涨概率只读校验摘要 cohort 无效")
+
+
+def _validate_rejection_summary(fingerprint: _FileFingerprint, summary: dict[str, object]) -> None:
+    run_id, digest, as_of = _file_identity("outcome", fingerprint)
+    if set(summary) != _REJECTION_FIELDS or type(summary.get("run_id")) is not int:
+        raise ProbabilitySourceError("上涨概率只读拒绝摘要格式无效")
+    if (summary["run_id"], summary["integrity_digest"], summary["as_of_date"]) != (run_id, digest, as_of):
+        raise ProbabilitySourceError("上涨概率只读拒绝摘要内容绑定无效")
+    if not isinstance(summary["rejection_status"], str) or summary["rejection_status"] not in {"legacy_semantic_drift_excluded", "replay_rejected"}:
+        raise ProbabilitySourceError("上涨概率只读拒绝摘要状态无效")
+    source_digest, generated_at, reason = summary["source_integrity_digest"], summary["generated_at"], summary["rejection_reason"]
+    if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
+        raise ProbabilitySourceError("上涨概率只读拒绝摘要 source 绑定无效")
+    _validate_rejection_time_reason(generated_at, reason)
+
+
+def _validate_rejection_time_reason(generated_at: object, reason: object) -> None:
+    if not isinstance(generated_at, str) or not isinstance(reason, str) or len(reason) > 500:
+        raise ProbabilitySourceError("上涨概率只读拒绝摘要原因或日期无效")
+    try:
+        moment = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        if moment.tzinfo is None or moment.utcoffset() is None:
+            raise ValueError("timezone missing")
+    except ValueError:
+        raise ProbabilitySourceError("上涨概率只读拒绝摘要日期无效") from None
 
 
 def _decode_worker_response(raw: bytes, request: bytes, files: Sequence[_RequestFile]) -> dict[_RequestFile, dict[str, object] | None]:

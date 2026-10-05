@@ -20,6 +20,24 @@ _COMPACT_MARKET_TIME_FORMATS = {
     12: "%Y%m%d%H%M",
     14: "%Y%m%d%H%M%S",
 }
+_DAILY_KLINE_STATS_QUERY = f"""
+    SELECT COALESCE(SUM(row_count), 0), MAX(latest_fetched_at),
+           MAX({SQLITE_MARKET_DATETIME_FUNCTION}(market_date))
+    FROM (
+        SELECT date AS market_date, COUNT(*) AS row_count,
+               MAX(fetched_at) AS latest_fetched_at
+        FROM kline_daily
+        WHERE adjustment_mode = ?
+        GROUP BY date
+    ) AS daily_dates
+"""
+
+
+@dataclass(frozen=True)
+class _DailyKlineStats:
+    count: int
+    latest_fetched_at: str | None
+    latest_market_datetime: str | None
 
 
 @dataclass(frozen=True)
@@ -50,8 +68,9 @@ class CacheStatsRepository(SQLiteRepository):
     def stats(self) -> CacheStats:
         with self._read_snapshot() as conn:
             _register_market_datetime_function(conn)
-            counts = _read_cache_counts(conn)
-            times = _read_cache_times(conn)
+            daily = _read_daily_kline_stats(conn)
+            counts = _read_cache_counts(conn, daily)
+            times = _read_cache_times(conn, daily)
         return CacheStats(
             path=str(self._path),
             quote_count=counts.quote_count,
@@ -86,15 +105,17 @@ def _register_market_datetime_function(conn: sqlite3.Connection) -> None:
     )
 
 
-def _read_cache_counts(conn: sqlite3.Connection) -> _CacheCounts:
+def _read_daily_kline_stats(conn: sqlite3.Connection) -> _DailyKlineStats:
+    # Grouping matches the covering index and normalizes each distinct date once.
+    row = conn.execute(_DAILY_KLINE_STATS_QUERY, (DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,)).fetchone()
+    return _DailyKlineStats(count=row[0], latest_fetched_at=row[1], latest_market_datetime=row[2])
+
+
+def _read_cache_counts(conn: sqlite3.Connection, daily: _DailyKlineStats) -> _CacheCounts:
     return _CacheCounts(
         quote_count=_select_count(conn, "SELECT COUNT(*) FROM quote_snapshot"),
         quote_history_count=_select_count(conn, "SELECT COUNT(*) FROM quote_history"),
-        daily_kline_count=_select_count(
-            conn,
-            "SELECT COUNT(*) FROM kline_daily WHERE adjustment_mode = ?",
-            (DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,),
-        ),
+        daily_kline_count=daily.count,
         minute_kline_count=_select_count(conn, "SELECT COUNT(*) FROM kline_minute"),
         stock_count=_select_count(conn, "SELECT COUNT(*) FROM stock_master"),
         plate_rank_count=_select_count(conn, "SELECT COUNT(*) FROM plate_rank"),
@@ -103,27 +124,15 @@ def _read_cache_counts(conn: sqlite3.Connection) -> _CacheCounts:
     )
 
 
-def _read_cache_times(conn: sqlite3.Connection) -> _CacheTimes:
+def _read_cache_times(conn: sqlite3.Connection, daily: _DailyKlineStats) -> _CacheTimes:
     latest_quote_fetched_at = _select_optional_text(conn, "SELECT MAX(fetched_at) FROM quote_snapshot")
-    latest_daily_kline_fetched_at = _select_optional_text(
-        conn,
-        "SELECT MAX(fetched_at) FROM kline_daily WHERE adjustment_mode = ?",
-        (DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,),
-    )
+    latest_daily_kline_fetched_at = daily.latest_fetched_at
     latest_minute_kline_fetched_at = _select_optional_text(conn, "SELECT MAX(fetched_at) FROM kline_minute")
     latest_quote_timestamp = _select_latest_market_datetime(
         conn,
         "SELECT DISTINCT quote_timestamp AS market_time FROM quote_snapshot",
     )
-    latest_daily_kline_datetime = _select_latest_market_datetime(
-        conn,
-        """
-        SELECT DISTINCT date AS market_time
-        FROM kline_daily
-        WHERE adjustment_mode = ?
-        """,
-        (DEFAULT_DAILY_KLINE_ADJUSTMENT_MODE,),
-    )
+    latest_daily_kline_datetime = daily.latest_market_datetime
     latest_minute_kline_timestamp = _select_latest_market_datetime(
         conn,
         "SELECT DISTINCT timestamp AS market_time FROM kline_minute",

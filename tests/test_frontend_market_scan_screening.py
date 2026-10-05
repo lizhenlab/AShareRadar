@@ -46,7 +46,8 @@ def test_screening_workbench_contracts_keep_nulls_and_digests_strict() -> None:
       };
       validateMarketScanBreadth(breadthPayload, 42);
       const evaluationPayload = {
-        schema_version: "market-scan-screen-evaluation-v1", evidence, spec, spec_digest: digest,
+        condition_impacts: [{condition_code:"status",label:"结果状态",additional_count:0,missing_additional_count:0,matched_without_condition:1,examples:[]}],
+        schema_version: "market-scan-screen-evaluation-v2", evidence, spec, spec_digest: digest,
         population_count: 1, matched_count: 1,
         funnel: [{ index: 1, condition_code: "status", label: "结果状态", input_count: 1, matched_count: 1, excluded_count: 0, missing_count: 0 }],
         exclusion_reasons: [],
@@ -482,6 +483,8 @@ def test_screening_controller_cancels_changed_run_before_deferred_refresh_and_sk
       assert.equal(fixture.get("marketScanScreeningEvaluation").innerHTML, "");
       assert.equal(controller.state.loaded, false);
       scheduled.shift()();
+      assert.equal(pending.length, 2, "DOM id alone cannot authorize new explanation");
+      commitFixtureScreen(fixture.get, 43); scheduled.shift()();
       assert.equal(pending[2].url, "/api/market-scans/43/breadth");
       const later = screeningResponses();
       later.breadth.evidence.run_id = 43;
@@ -576,6 +579,7 @@ def test_screening_controller_stops_closed_work_and_does_not_cache_failed_eviden
 
 def _screening_controller_fixture() -> str:
     return r'''
+      import { commitStandardScreenContext } from "./static/js/market-scan-screen-context.js";
       async function flushPromises() {
         for (let index = 0; index < 20; index += 1) await Promise.resolve();
       }
@@ -595,10 +599,16 @@ def _screening_controller_fixture() -> str:
           return elements.get(id);
         }
         get("marketScanTableWrap").dataset.marketScanRunId = "42";
+        commitFixtureScreen(get, 42);
         get("marketScanStatus").value = "success";
         get("marketScanSort").value = "rank";
         get("marketScanOrder").value = "asc";
         return { get, root: { getElementById: get, querySelectorAll: () => [] } };
+      }
+      function commitFixtureScreen(get, runId) {
+        const evidence = screeningResponses().breadth.evidence;
+        const run = {...evidence, id: runId, updated_at: evidence.finished_at};
+        commitStandardScreenContext(get("marketScanTableWrap"),{run,total:0,items:[]},`/api/market-scans/${runId}/results?status=success&sort=rank&order=asc`);
       }
       function screeningResponses() {
         const digest = "a".repeat(64);
@@ -622,7 +632,8 @@ def _screening_controller_fixture() -> str:
             change: { advancing: 0, flat: 0, declining: 0, missing: 0 }, industries: [],
           },
           evaluation: {
-            schema_version: "market-scan-screen-evaluation-v1", evidence, spec, spec_digest: digest, canonical_digest: digest,
+            condition_impacts: [{condition_code:"status",label:"结果状态",additional_count:0,missing_additional_count:0,matched_without_condition:0,examples:[]}],
+            schema_version: "market-scan-screen-evaluation-v2", evidence, spec, spec_digest: digest, canonical_digest: digest,
             population_count: 0, matched_count: 0,
             funnel: [{ index: 1, condition_code: "status", label: "结果状态", input_count: 0, matched_count: 0, excluded_count: 0, missing_count: 0 }],
             exclusion_reasons: [], matched: { items: [], total: 0, page: 1, page_size: 100, page_count: 0 },

@@ -1,3 +1,5 @@
+import { beginScreenProducer, ownsScreenProducer, releaseScreenProducer } from "./market-scan-screen-producer.js";
+import { clearAppliedScreenContext, commitDiscoveryScreenContext } from "./market-scan-screen-context.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { escapeHtml } from "./dom.js";
 import { compactErrorMessage } from "./errors.js";
@@ -353,6 +355,7 @@ export function createDiscoveryController(options = {}) {
       if (!acceptPresetApplication(identity, payload)) return null;
       commitPresetApplication(payload, rankOutcome.payload);
       renderDiscoveryResults(payload, rankOutcome.payload);
+      commitDiscoveryScreenContext(elements.tableWrap, run, payload, preset);
       reportPresetApplication(payload, rankOutcome, editable);
       return payload;
     } finally {
@@ -726,6 +729,7 @@ export function createDiscoveryController(options = {}) {
   }
 
   function clearApplied() {
+    releaseScreenProducer(elements.tableWrap, "preset"); clearAppliedScreenContext(elements.tableWrap);
     const hadPendingRequest = Boolean(state.appliedRequest);
     invalidateAppliedRequest();
     if (hadPendingRequest) {
@@ -842,10 +846,12 @@ export function createDiscoveryController(options = {}) {
   }
 
   function beginAppliedRequest(preset, run) {
+    clearAppliedScreenContext(elements.tableWrap);
     invalidateAppliedRequest();
     const controller = new AbortController();
     const identity = {
       controller,
+      screenOwner: beginScreenProducer(elements.tableWrap, "preset", run, clearApplied),
       presetId: preset.id,
       presetRevision: preset.revision,
       runId: run.id,
@@ -857,7 +863,8 @@ export function createDiscoveryController(options = {}) {
 
   function isAppliedRequestCurrent(identity, payload) {
     const currentPreset = selectedPreset();
-    return state.appliedRequest === identity.controller
+    return ownsScreenProducer(elements.tableWrap, identity.screenOwner)
+      && state.appliedRequest === identity.controller
       && state.appliedSequence === identity.sequence
       && currentPreset?.id === identity.presetId
       && currentPreset?.revision === identity.presetRevision

@@ -8,12 +8,14 @@ probability merely because labels exist.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 import inspect
+import math
 from pathlib import Path
 import stat
 from threading import RLock
+import time
 from typing import Protocol, TypeVar, cast
 
 from app.artifacts.io import path_has_only_trusted_aliases
@@ -33,6 +35,7 @@ from app.services.market_scan_probability_fit_assessment import (
 )
 from app.services.market_scan_probability_outcomes import (
     ProbabilityOutcomeError,
+    ProbabilityOutcomeReplayError,
     ProbabilityOutcomeSemanticDriftError,
     build_probability_outcome_artifact,
     load_probability_outcome_artifact,
@@ -85,10 +88,15 @@ class ProbabilityMaintenanceSummary:
     as_of_date: str
     outcome_directory: str
     failures: tuple[str, ...] = ()
+    quarantined_count: int = 0
+    pending: bool = False
+    phase: str = "complete"
+    completed_items: int = 0
+    total_items: int = 0
 
     @property
     def degraded(self) -> bool:
-        return self.failed_count > 0
+        return self.failed_count > 0 or self.quarantined_count > 0
 
     def message(self) -> str:
         return (
@@ -96,8 +104,33 @@ class ProbabilityMaintenanceSummary:
             f"到期 {self.due_count} 个，新增 {self.published_count} 个，"
             f"无变化 {self.unchanged_count} 个，跳过 {self.skipped_count} 个，"
             f"失败 {self.failed_count} 个"
+            f"，重放拒绝隔离档案 {self.quarantined_count} 个"
             f"，fit assessment {self.fit_assessment_count} 个（{self.fit_status}）"
+            + (f"，分段待续 {self.phase} {self.completed_items}/{self.total_items}" if self.pending else "")
         )
+
+
+class _MaintenancePending(Exception):
+    def __init__(self, phase: str, completed: int, total: int) -> None:
+        self.phase, self.completed, self.total = phase, completed, total
+        self.fit_assessment_count = 0
+
+
+@dataclass(frozen=True)
+class _MaintenanceBudget:
+    deadline: float | None = None
+
+    def checkpoint(self, phase: str, completed: int, total: int) -> None:
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise _MaintenancePending(phase, completed, total)
+
+
+def _maintenance_budget(seconds: float | None) -> _MaintenanceBudget:
+    if seconds is None:
+        return _MaintenanceBudget()
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("time_budget_seconds 必须是正有限秒数")
+    return _MaintenanceBudget(time.monotonic() + seconds)
 
 
 @dataclass(frozen=True)
@@ -133,9 +166,37 @@ class _OutcomeSemanticDriftManifest:
     generated_at: str
     digest: str
     source_digest: str
+    diagnostic: str = "固定交易规则语义漂移，旧标签不可用于拟合"
 
 
-_OutcomeCatalogEntry = _OutcomeManifest | _OutcomeSemanticDriftManifest
+@dataclass(frozen=True)
+class _OutcomeReplayRejectionManifest:
+    path: Path
+    run_id: int
+    as_of_date: str
+    generated_at: str
+    digest: str
+    source_digest: str
+    diagnostic: str
+    archive_present: bool = True
+
+
+@dataclass(frozen=True)
+class _ReplayQuarantine:
+    rejected: tuple[_OutcomeReplayRejectionManifest, ...]
+    source_identities: frozenset[tuple[int, str]]
+    cohorts: frozenset[tuple[str, str, str]]
+
+    @property
+    def diagnostics(self) -> tuple[str, ...]:
+        return tuple(
+            f"run {item.run_id} 隔离 {item.path.name}"
+            f"{'（档案当前缺失，保留本进程隔离）' if not item.archive_present else ''}: {item.diagnostic}"
+            for item in self.rejected[:5]
+        )
+
+
+_OutcomeCatalogEntry = _OutcomeManifest | _OutcomeSemanticDriftManifest | _OutcomeReplayRejectionManifest
 _Manifest = TypeVar("_Manifest", _SourceManifest, _OutcomeCatalogEntry)
 
 
@@ -164,18 +225,31 @@ class MarketScanProbabilityMaintenanceService:
         self._source_cache: dict[_FileFingerprint, _SourceManifest] = {}
         self._outcome_cache: dict[_FileFingerprint, _OutcomeCatalogEntry] = {}
         self._semantic_drift_by_run: dict[int, _OutcomeSemanticDriftManifest] = {}
+        self._replay_rejections: tuple[_OutcomeReplayRejectionManifest, ...] = ()
         self._attempt_ledger: dict[str, dict[str, str]] = {}
         self._assessed_corpus_digests: dict[tuple[str, str, str], str] = {}
         self._fit_state_loaded = False
+        self._fit_file_cache: dict[_FileFingerprint, tuple[tuple[str, str, str], str]] = {}
+        self._budget = _MaintenanceBudget()
+        self._completed_sources: set[tuple[str, str, str, str]] = set()
+        self._source_work_identity: tuple[object, ...] | None = None
+        self._source_failures: dict[tuple[str, str, str, str], str] = {}
 
     def run(
         self,
         *,
         now: datetime | None = None,
         as_of_date: str | None = None,
+        time_budget_seconds: float | None = None,
     ) -> ProbabilityMaintenanceSummary:
+        """Resume at verified checkpoints; one atomic operation may exceed the budget."""
+        budget = _maintenance_budget(time_budget_seconds)
         with self._lock:
-            return self._run_locked(now=now, as_of_date=as_of_date)
+            self._budget = budget
+            try:
+                return self._run_locked(now=now, as_of_date=as_of_date)
+            finally:
+                self._budget = _MaintenanceBudget()
 
     def _run_locked(
         self,
@@ -185,63 +259,103 @@ class MarketScanProbabilityMaintenanceService:
     ) -> ProbabilityMaintenanceSummary:
         current = now or market_now()
         effective_as_of = as_of_date or latest_expected_daily_kline_date(current).isoformat()
-        sources = _canonical_sources(self._source_manifests())
-        latest = _latest_outcomes(self._outcome_manifests())
         counts = {"due": 0, "published": 0, "unchanged": 0, "skipped": 0}
         failures: list[str] = []
-        for source in sources:
-            if _terminal_semantic_drift(
-                source,
-                latest.get(source.run_id),
-                self._semantic_drift_by_run.get(source.run_id),
-            ):
-                counts["skipped"] += 1
-                continue
-            try:
-                _maintain_source(
-                    self,
-                    source,
-                    latest.get(source.run_id),
-                    effective_as_of,
-                    current,
-                    counts,
-                    self._attempt_ledger,
-                )
-            except Exception as exc:  # isolate one immutable source from the maintenance batch
-                failures.append(f"run {source.run_id}: {_short_error(exc)}")
-        fit_count, fit_status = self._maintain_fit(sources, latest, failures)
+        sources: tuple[_SourceManifest, ...] = ()
+        quarantine = _ReplayQuarantine((), frozenset(), frozenset())
+        fit_count, fit_status, pending = 0, "pending", None
+        try:
+            sources = _canonical_sources(self._source_manifests())
+            latest = _latest_outcomes(self._outcome_manifests())
+            quarantine = self._quarantine(sources, latest)
+            self._maintain_sources(sources, latest, quarantine, effective_as_of, current, counts, failures)
+            # Newly published outcomes must pass the same full catalog gate before fit.
+            latest = _latest_outcomes(self._outcome_manifests())
+            if sources != _canonical_sources(self._source_manifests()):
+                raise _MaintenancePending("source_catalog_changed", 0, len(sources))
+            quarantine = self._quarantine(sources, latest)
+            fit_count, fit_status = self._maintain_fit(sources, latest, failures, quarantine.cohorts)
+            self._completed_sources.clear()
+            self._source_failures.clear()
+        except _MaintenancePending as exc:
+            pending = exc
+            fit_count = exc.fit_assessment_count
+            # A partial catalog cannot establish a newer valid replacement.
+            quarantine = self._quarantine(sources, {})
         return ProbabilityMaintenanceSummary(
-            source_count=len(sources),
-            due_count=counts["due"],
-            published_count=counts["published"],
-            unchanged_count=counts["unchanged"],
-            skipped_count=counts["skipped"],
-            failed_count=len(failures),
-            fit_assessment_count=fit_count,
-            fit_status=fit_status,
-            as_of_date=effective_as_of,
+            source_count=len(sources), due_count=counts["due"], published_count=counts["published"],
+            unchanged_count=counts["unchanged"], skipped_count=counts["skipped"], failed_count=len(failures),
+            fit_assessment_count=fit_count, fit_status=fit_status, as_of_date=effective_as_of,
             outcome_directory=str(self.outcome_directory),
-            failures=tuple(failures[:5]),
+            failures=tuple((list(quarantine.diagnostics) + failures)[:5]),
+            quarantined_count=len(quarantine.rejected), pending=pending is not None,
+            phase=pending.phase if pending else "complete",
+            completed_items=pending.completed if pending else 0,
+            total_items=pending.total if pending else 0,
         )
+
+    def _maintain_sources(
+        self, sources: Sequence[_SourceManifest], latest: Mapping[int, _OutcomeManifest],
+        quarantine: _ReplayQuarantine, as_of_date: str, current: datetime,
+        counts: dict[str, int], failures: list[str],
+    ) -> None:
+        identity = (as_of_date, tuple((s.path, s.digest, s.captured_at) for s in sources))
+        if identity != self._source_work_identity:
+            self._completed_sources.clear()
+            self._source_failures.clear()
+            self._source_work_identity = identity
+        for index, source in enumerate(sources):
+            outcome = latest.get(source.run_id)
+            key = (as_of_date, str(source.path), source.digest, outcome.digest if outcome else "")
+            if key in self._completed_sources:
+                if key in self._source_failures:
+                    failures.append(self._source_failures[key])
+                continue
+            self._budget.checkpoint("sources", index, len(sources))
+            try:
+                self._maintain_one_source(source, outcome, quarantine, as_of_date, current, counts)
+            except Exception as exc:
+                failure = f"run {source.run_id}: {_short_error(exc)}"
+                self._source_failures[key] = failure
+                failures.append(failure)
+            self._completed_sources.add(key)
+
+    def _maintain_one_source(
+        self, source: _SourceManifest, outcome: _OutcomeManifest | None,
+        quarantine: _ReplayQuarantine, as_of_date: str, current: datetime, counts: dict[str, int],
+    ) -> None:
+        if (source.run_id, source.digest) in quarantine.source_identities or _terminal_semantic_drift(
+            source, outcome, self._semantic_drift_by_run.get(source.run_id),
+        ):
+            counts["skipped"] += 1
+            return
+        _maintain_source(self, source, outcome, as_of_date, current, counts, self._attempt_ledger)
 
     def _maintain_fit(
         self,
         sources: Sequence[_SourceManifest],
         outcomes: Mapping[int, _OutcomeManifest],
         failures: list[str],
+        quarantined_cohorts: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> tuple[int, str]:
-        ready = _ready_fit_cohorts(sources, outcomes)
+        eligible = tuple(source for source in sources if source.cohort not in quarantined_cohorts)
+        ready = _ready_fit_cohorts(eligible, outcomes)
         if not ready:
-            return 0, "threshold_pending"
+            return 0, "quarantined" if quarantined_cohorts else "threshold_pending"
         self._load_existing_fit_state()
         published = 0
         try:
-            for complete in ready:
+            for index, complete in enumerate(ready):
+                self._budget.checkpoint("fit_assessment", index, len(ready))
                 published += self._maintain_fit_cohort(complete)
+        except _MaintenancePending as exc:
+            exc.fit_assessment_count = published
+            raise
         except Exception as exc:
             failures.append(f"fit assessment: {_short_error(exc)}")
             return 0, "failed"
-        return published, "projection_pending" if published else "unchanged"
+        status = "projection_pending" if published else "unchanged"
+        return published, "partial_quarantine" if quarantined_cohorts else status
 
     def _maintain_fit_cohort(
         self,
@@ -275,12 +389,16 @@ class MarketScanProbabilityMaintenanceService:
             self.fit_directory,
             "market-scan-probability-fit-through-run-*.json.gz",
         )
+        for index, fingerprint in enumerate(snapshot[1]):
+            if fingerprint not in self._fit_file_cache:
+                self._budget.checkpoint("fit_catalog", index, len(snapshot[1]))
+                self._fit_file_cache[fingerprint] = _fit_corpus_identity(fingerprint[0])
+        if _directory_snapshot(self.fit_directory, "market-scan-probability-fit-through-run-*.json.gz") != snapshot:
+            raise _MaintenancePending("fit_catalog_changed", 0, len(snapshot[1]))
         for fingerprint in snapshot[1]:
-            artifact = load_probability_fit_assessment(fingerprint[0])
-            payload = _mapping(artifact["payload"], "fit.payload")
-            cohort = _mapping(payload["cohort"], "fit.cohort")
-            key = (str(cohort["mode"]), str(cohort["scope"]), str(cohort["rule_version"]))
-            self._assessed_corpus_digests[key] = str(payload["input_pair_digest"])
+            key, digest = self._fit_file_cache[fingerprint]
+            self._assessed_corpus_digests[key] = digest
+        self._fit_file_cache = {key: self._fit_file_cache[key] for key in snapshot[1]}
         self._fit_state_loaded = True
 
     def _source_manifests(self) -> tuple[_SourceManifest, ...]:
@@ -290,25 +408,91 @@ class MarketScanProbabilityMaintenanceService:
             self._source_snapshot,
             self._source_cache,
             _source_manifest,
+            budget=self._budget, phase="source_catalog",
         )
         self._source_snapshot, self._source_cache = snapshot, cache
         return tuple(cache.values())
 
     def _outcome_manifests(self) -> tuple[_OutcomeManifest, ...]:
-        snapshot, cache = _stable_manifest_refresh(
-            self.outcome_directory,
-            "market-scan-probability-outcomes-run-*.json.gz",
-            self._outcome_snapshot,
-            self._outcome_cache,
-            _outcome_catalog_entry,
-        )
+        try:
+            snapshot, cache = _stable_manifest_refresh(
+                self.outcome_directory,
+                "market-scan-probability-outcomes-run-*.json.gz",
+                self._outcome_snapshot,
+                self._outcome_cache,
+                _outcome_catalog_entry,
+                budget=self._budget, phase="outcome_catalog",
+            )
+        finally:
+            self._remember_replay_rejections(self._outcome_cache)
         self._outcome_snapshot, self._outcome_cache = snapshot, cache
         valid = tuple(item for item in cache.values() if isinstance(item, _OutcomeManifest))
         drifted = tuple(
             item for item in cache.values() if isinstance(item, _OutcomeSemanticDriftManifest)
         )
         self._semantic_drift_by_run = _latest_semantic_drifts(drifted)
+        self._remember_replay_rejections(cache)
         return valid
+
+    def _remember_replay_rejections(self, cache: Mapping[_FileFingerprint, _OutcomeCatalogEntry]) -> None:
+        rejected = {(item.path, item.digest): item for item in self._replay_rejections}
+        rejected.update(
+            ((item.path, item.digest), _rejection_manifest(item))
+            for item in cache.values() if isinstance(item, _OutcomeReplayRejectionManifest | _OutcomeSemanticDriftManifest)
+        )
+        self._replay_rejections = tuple(
+            replace(item, archive_present=item.path.is_file()) for item in rejected.values()
+        )
+
+
+    def _quarantine(
+        self, sources: Sequence[_SourceManifest], latest: Mapping[int, _OutcomeManifest],
+    ) -> _ReplayQuarantine:
+        rejected = {(item.path, item.digest): item for item in self._replay_rejections}
+        rejected.update(
+            ((item.path, item.digest), _rejection_manifest(item))
+            for item in self._semantic_drift_by_run.values()
+        )
+        return _replay_quarantine(sources, latest, tuple(rejected.values()))
+
+
+def _rejection_manifest(
+    item: _OutcomeReplayRejectionManifest | _OutcomeSemanticDriftManifest,
+) -> _OutcomeReplayRejectionManifest:
+    if isinstance(item, _OutcomeReplayRejectionManifest):
+        return item
+    return _OutcomeReplayRejectionManifest(
+        item.path, item.run_id, item.as_of_date, item.generated_at, item.digest,
+        item.source_digest, item.diagnostic, archive_present=item.path.is_file(),
+    )
+
+
+def _fit_corpus_identity(path: Path) -> tuple[tuple[str, str, str], str]:
+    artifact = load_probability_fit_assessment(path)
+    payload = _mapping(artifact["payload"], "fit.payload")
+    cohort = _mapping(payload["cohort"], "fit.cohort")
+    key = (str(cohort["mode"]), str(cohort["scope"]), str(cohort["rule_version"]))
+    return key, str(payload["input_pair_digest"])
+
+
+def _replay_quarantine(
+    sources: Sequence[_SourceManifest],
+    latest: Mapping[int, _OutcomeManifest],
+    rejected: Sequence[_OutcomeReplayRejectionManifest],
+) -> _ReplayQuarantine:
+    active = tuple(item for item in rejected if not _replay_rejection_superseded(item, latest.get(item.run_id)))
+    identities = frozenset((item.run_id, item.source_digest) for item in active)
+    cohorts = frozenset(source.cohort for source in sources if (source.run_id, source.digest) in identities)
+    return _ReplayQuarantine(active, identities, cohorts)
+
+
+def _replay_rejection_superseded(
+    rejected: _OutcomeReplayRejectionManifest, valid: _OutcomeManifest | None,
+) -> bool:
+    return bool(
+        valid is not None and valid.source_digest == rejected.source_digest
+        and _outcome_order(valid) > _outcome_order(rejected)
+    )
 
 
 def _ready_fit_cohorts(
@@ -334,13 +518,14 @@ def maintain_market_scan_probability(
     as_of_date: str | None = None,
     source_directory: str | Path | None = None,
     outcome_directory: str | Path | None = None,
+    time_budget_seconds: float | None = None,
 ) -> ProbabilityMaintenanceSummary:
     """Public synchronous entry point for scheduler, CLI, and deterministic tests."""
     return MarketScanProbabilityMaintenanceService(
         cache,
         source_directory=source_directory,
         outcome_directory=outcome_directory,
-    ).run(now=now, as_of_date=as_of_date)
+    ).run(now=now, as_of_date=as_of_date, time_budget_seconds=time_budget_seconds)
 
 
 def _maintain_source(
@@ -567,7 +752,7 @@ def _terminal_semantic_drift(
 
 
 def _outcome_order(
-    item: _OutcomeManifest | _OutcomeSemanticDriftManifest,
+    item: _OutcomeCatalogEntry,
 ) -> tuple[str, float]:
     return item.as_of_date, _timestamp(item.generated_at)
 
@@ -575,7 +760,7 @@ def _outcome_order(
 def _outcome_catalog_entry(path: Path) -> _OutcomeCatalogEntry:
     try:
         return _outcome_manifest(path)
-    except ProbabilityOutcomeSemanticDriftError as exc:
+    except (ProbabilityOutcomeSemanticDriftError, ProbabilityOutcomeReplayError) as exc:
         identity = (
             exc.run_id,
             exc.as_of_date,
@@ -584,7 +769,13 @@ def _outcome_catalog_entry(path: Path) -> _OutcomeCatalogEntry:
             exc.source_digest,
         )
         if any(value is None for value in identity):
-            raise ProbabilityOutcomeError("legacy outcome semantic drift 缺少机械封存身份") from exc
+            raise ProbabilityOutcomeError("outcome replay rejection 缺少机械封存身份") from exc
+        if isinstance(exc, ProbabilityOutcomeReplayError):
+            return _OutcomeReplayRejectionManifest(
+                path, cast(int, exc.run_id), cast(str, exc.as_of_date),
+                cast(str, exc.generated_at), cast(str, exc.integrity_digest),
+                cast(str, exc.source_digest), _short_error(exc),
+            )
         return _OutcomeSemanticDriftManifest(
             path=path,
             run_id=cast(int, exc.run_id),
@@ -592,6 +783,7 @@ def _outcome_catalog_entry(path: Path) -> _OutcomeCatalogEntry:
             generated_at=cast(str, exc.generated_at),
             digest=cast(str, exc.integrity_digest),
             source_digest=cast(str, exc.source_digest),
+            diagnostic=_short_error(exc),
         )
 
 
@@ -653,17 +845,26 @@ def _stable_manifest_refresh(
     directory: Path,
     pattern: str,
     previous: _DirectorySnapshot | None,
-    cache: Mapping[_FileFingerprint, _Manifest],
+    cache: dict[_FileFingerprint, _Manifest],
     loader: Callable[[Path], _Manifest],
+    *,
+    budget: _MaintenanceBudget = _MaintenanceBudget(),
+    phase: str = "catalog",
 ) -> tuple[_DirectorySnapshot, dict[_FileFingerprint, _Manifest]]:
-    candidate = dict(cache)
+    candidate = cache
     for _attempt in range(_STABLE_READ_ATTEMPTS):
         snapshot = _directory_snapshot(directory, pattern)
         if snapshot == previous:
             return snapshot, candidate
         refreshed: dict[_FileFingerprint, _Manifest] = {}
-        for fingerprint in snapshot[1]:
-            refreshed[fingerprint] = candidate.get(fingerprint) or loader(fingerprint[0])
+        for index, fingerprint in enumerate(snapshot[1]):
+            if fingerprint not in candidate:
+                budget.checkpoint(phase, index, len(snapshot[1]))
+                manifest = loader(fingerprint[0])
+                if _file_fingerprint(fingerprint[0]) != fingerprint:
+                    raise ProbabilitySourceError("概率维护 artifact 在校验期间变化")
+                candidate[fingerprint] = manifest
+            refreshed[fingerprint] = candidate[fingerprint]
         if _directory_snapshot(directory, pattern) == snapshot:
             return snapshot, refreshed
         candidate.update(refreshed)
