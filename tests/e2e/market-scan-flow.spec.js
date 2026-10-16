@@ -76,7 +76,8 @@ test("full-market scan runs in background and renders a bounded responsive snaps
   await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-label", "全市场扫描进度");
   await expect(page.locator("#marketScanProgressBar")).toHaveAttribute("aria-busy", "false");
   await expect(page.locator("#marketScanHistory")).toBeHidden();
-  await expect(page.locator("#workspace-panel-market-scan [aria-live=polite]")).toHaveCount(5);
+  await expect(page.locator("#workspace-panel-market-scan [aria-live=polite]")).toHaveCount(6);
+  await expect(page.locator("#marketScanScopeStatus")).toHaveAttribute("role", "status");
   await expect(page.locator("#strategyScheduleStatus")).toHaveAttribute("role", "status");
   await expect(page.locator("#marketScanHistoryPageInfo")).toHaveAttribute("role", "status");
   expect(latestCalls).toBe(1);

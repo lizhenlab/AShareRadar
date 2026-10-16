@@ -180,11 +180,10 @@ class AlertRepository(SQLiteRepository):
             cursor = conn.execute(_ALERT_RULE_INSERT_SQL, params)
             if cursor.lastrowid is None:
                 raise RuntimeError("预警规则保存失败")
-            row_id = cursor.lastrowid
-        item = self.rule(row_id)
-        if item is None:
-            raise RuntimeError("预警规则保存失败")
-        return item
+            row = _alert_rule_row(conn, cursor.lastrowid)
+            if row is None:
+                raise RuntimeError("预警规则保存失败")
+            return row_to_alert_rule(row)
 
     def rule(self, row_id: int) -> AlertRuleItem | None:
         with self._lock, self._connect() as conn:
@@ -274,7 +273,7 @@ class AlertRepository(SQLiteRepository):
     ) -> AlertStateUpdateResult:
         if not rule.enabled:
             return AlertStateUpdateResult(applied=False)
-        event_id: int | None = None
+        event: AlertEventItem | None = None
         snapshot_guard = decision is not None
         decision = decision or _alert_state_decision(rule, triggered, event_type, force_event)
         with self._lock, self._connect() as conn:
@@ -282,7 +281,11 @@ class AlertRepository(SQLiteRepository):
                 return AlertStateUpdateResult(applied=False)
             if decision.should_create_event:
                 event_id = _insert_alert_event_row(conn, rule, quote, checked_at, message, decision.event_type)
-        return AlertStateUpdateResult(applied=True, event=self.event(event_id) if event_id else None)
+                row = conn.execute(f"SELECT {_ALERT_EVENT_SELECT_SQL} FROM alert_event WHERE id = ?", (event_id,)).fetchone()
+                if row is None:
+                    raise RuntimeError("预警事件保存失败")
+                event = row_to_alert_event(row)
+            return AlertStateUpdateResult(applied=True, event=event)
 
     def event(self, row_id: int | None) -> AlertEventItem | None:
         if row_id is None:

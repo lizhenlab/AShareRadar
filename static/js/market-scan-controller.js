@@ -1,3 +1,4 @@
+import { bindSelectionControls, notifySelectionMembers, resetSelection, markSelectionConflict, selectionIsStale } from "./market-scan-selection.js";
 import { releaseScreenProducer, suspendScreenProducer } from "./market-scan-screen-producer.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
 import { compactErrorMessage } from "./errors.js";
@@ -200,9 +201,7 @@ export function createMarketScanController(options = {}) {
     return latestSync.sync(syncOptions).finally(finishLatestRead);
   }
   function commitLatestSnapshot(staged, identity, syncOptions = {}) {
-    const acceptResult = Boolean(
-      staged.resultPage && probabilityHorizonController.acceptTrusted(staged.resultQuery)
-    );
+    const acceptResult = Boolean(staged.resultPage && probabilityHorizonController.acceptTrusted(staged.resultQuery));
     applyRun(staged.run, syncOptions.recoveryMessage || "");
     applyPublishedRun(staged.publishedRun);
     if (acceptResult) {
@@ -219,6 +218,11 @@ export function createMarketScanController(options = {}) {
     probabilityHorizonController.requestFinished();
   }
   function handleLatestSyncError(error, syncOptions = {}) {
+    if (markSelectionConflict(elements, error) || selectionIsStale(elements)) {
+      probabilityHorizonController.invalidate({ clearLastGood: true });
+      view.announce(error.message, "latest-selection:stale");
+      return;
+    }
     const resultError = Boolean(error?.marketScanResultsRead);
     if (isMarketScanReadBusy(error)) {
       polling.retryBusy(error, "latest"); probabilityHorizonController.presentBusy(error); return;
@@ -419,11 +423,8 @@ export function createMarketScanController(options = {}) {
   async function processPolledRun(run) {
     polling.resetFailures(); applyRun(run);
     if (isActiveMarketScanRun(run)) { polling.scheduleDefault(state.run); return null; }
-    const publishedForBrowse = (
-      state.selectedHistoryRunId === null
-      && isPublishedMarketScanRun(run)
-      && run.mode === state.browseMode
-    );
+    const publishedForBrowse = state.selectedHistoryRunId === null
+      && isPublishedMarketScanRun(run) && run.mode === state.browseMode;
     if (publishedForBrowse) {
       applyPublishedRun(run);
       if (state.surfaceActive) void history.load();
@@ -487,12 +488,7 @@ export function createMarketScanController(options = {}) {
     return null;
   }
   function syncBrowsingContext() {
-    view.renderBrowsingContext(
-      state.run,
-      resultRun(),
-      state.browseMode,
-      state.selectedHistoryRunId !== null,
-    );
+    view.renderBrowsingContext(state.run, resultRun(), state.browseMode, state.selectedHistoryRunId !== null);
     top100Refresh.sync();
     auxiliaryResearch.sync(resultRun()); comparison.sync();
   }
@@ -508,6 +504,7 @@ export function createMarketScanController(options = {}) {
   }
   function clearControllerTimers() { polling.clear(); clearResetTimer(); }
   function bindEvents() {
+    bindSelectionControls(elements, () => { state.page = 1; return loadResults(); });
     elements.modeInputs.forEach((input) => input.addEventListener("change", () => void history.changeMode()));
     elements.start.addEventListener("click", () => void start());
     elements.cancel.addEventListener("click", () => void cancel());
@@ -524,6 +521,7 @@ export function createMarketScanController(options = {}) {
       clearResetTimer();
       state.resetTimer = setTimeout(() => {
         state.resetTimer = null;
+        resetSelection(elements);
         if (!state.activated || !state.visible) return;
         state.page = 1;
         void loadResults();
@@ -567,6 +565,7 @@ export function createMarketScanController(options = {}) {
     return true;
   }
   return {
+    notifyWatchlistChanged: (payload) => notifySelectionMembers(elements, payload),
     activate, cancel, deactivate, exportResults, loadHistory: history.load, loadLatest, loadResults,
     releaseResults, retry, refreshTop100: top100Refresh.refresh,
     setSurfaceActive: surface.setActive, setVisible, start, state,

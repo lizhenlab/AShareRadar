@@ -24,6 +24,7 @@ from app.services.strategy_prospective_outcomes import (  # noqa: E402
 from app.services.strategy_prospective_plan import (  # noqa: E402
     create_strategy_prospective_plan, strategy_prospective_status,
 )
+from app.services.strategy_prospective_readiness import strategy_prospective_readiness  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,6 +41,8 @@ def _parser() -> argparse.ArgumentParser:
     capture = commands.add_parser("capture", help="仅从本地冻结扫描捕获到期信号；不读未来行情、不启动扫描")
     capture.add_argument("--database", type=Path, default=ROOT / "data/ashare_radar.sqlite3")
     commands.add_parser("status", help="校验计划与收据链，并报告成熟与缺口；不消费供应商额度")
+    readiness = commands.add_parser("readiness", help="只读分层诊断代码、首批输入、样本成熟度及正式执行材料")
+    readiness.add_argument("--database", type=Path, required=True)
     evidence = commands.add_parser("evidence", help="保留已选股票所需的原始研究资料，列出正式执行证据缺口")
     evidence.add_argument("--history-root", type=Path, default=ROOT / "data/ashare_radar.fuyao/history")
     evidence.add_argument("--public-root", type=Path, default=DEFAULT_PUBLIC_EXECUTION_ROOT)
@@ -72,6 +75,8 @@ def _execute(args: argparse.Namespace) -> dict[str, object]:
         return strategy_prospective_status(args.root, args.plan_id)
     if args.operation == "capture":
         return collect_strategy_prospective_inputs(args.database, args.root, args.plan_id)
+    if args.operation == "readiness":
+        return strategy_prospective_readiness(args.database, args.root, args.plan_id)
     if args.operation == "evidence":
         return collect_prospective_execution_evidence(args.root, args.plan_id, args.history_root, public_root=args.public_root)
     if args.operation == "evaluate":

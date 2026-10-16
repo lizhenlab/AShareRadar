@@ -216,6 +216,45 @@ test("a late saved-plan producer cannot replace newer ordinary filters in the sa
   assertReadOnly(state);
 });
 
+for (const source of ["standard", "preset"]) {
+  test(`${source} explanations follow the displayed page and ignore a late previous-page response`, async ({ page }) => {
+    const state = await routeImpactFixture(page, { candidateCount: 205 });
+    await page.goto("/");
+    await selectPrimaryView(page, "market");
+    await page.locator("#marketScanModeOfficial").check({ force: true });
+    await expect(page.locator("#marketScanRows")).toContainText("分页候选0001");
+    if (source === "preset") {
+      await page.locator("#discoveryPresetSelect").selectOption("7");
+      await page.locator("#discoveryPresetApply").click();
+      await expect.poll(() => state.applications.length).toBe(1);
+    }
+    await page.locator("#marketScanScreeningWorkbench > summary").click();
+    await expect(page.locator("#marketScanScreeningSummaryStatus")).toHaveText("命中 205/205");
+    const pageSize = state.evaluations.at(-1).page_size;
+    const explanations = page.locator(".market-scan-matched-explanations");
+    await expect(explanations).toContainText(`当前页共 ${pageSize} 条，展示前 8 条`);
+    await expect(explanations.locator("li")).toHaveCount(8);
+    state.holdNext = true;
+    await page.locator("#marketScanScreeningRefresh").click();
+    await expect.poll(() => typeof state.releaseHeld).toBe("function");
+    await page.locator("#marketScanNext").click();
+    const expectedName = `分页候选${String(pageSize + 1).padStart(4, "0")}`;
+    await expect(page.locator("#marketScanRows")).toContainText(expectedName);
+    await expect(page.locator("#marketScanScreeningContextLabel")).toContainText(`榜单第 2 页，每页 ${pageSize} 条`);
+    await expect(explanations).toContainText(expectedName);
+    await expect(explanations).not.toContainText("分页候选0001");
+    expect(state.evaluations.at(-1)).toMatchObject({ page: 2, page_size: pageSize });
+    await expect(page.locator("#marketScanScreeningSummaryStatus")).toHaveText("命中 205/205");
+    const completed = state.returned.length;
+    state.releaseHeld();
+    await expect.poll(() => state.returned.length).toBe(completed + 1);
+    await expect(explanations).toContainText(expectedName);
+    await expect(explanations).not.toContainText("分页候选0001");
+    await expect(page.locator("#marketScanScreeningContextLabel")).toContainText("榜单第 2 页");
+    assertReadOnly(state);
+  });
+}
+
 async function expectMobileLayout(page) {
   const layout = await page.locator("#marketScanConditionImpacts").evaluate((element) => ({
     right: element.getBoundingClientRect().right, width: document.documentElement.clientWidth,

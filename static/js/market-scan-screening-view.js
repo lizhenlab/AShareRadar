@@ -21,7 +21,7 @@ export function createMarketScanScreeningView(root) {
   const elements = screeningElements(root);
   return {
     elements,
-    renderAppliedContext: (applied) => { elements.contextLabel.textContent = `${applied.source.label} · 批次 #${applied.run.id}${applied.error ? ` · ${applied.error}` : ""}`; },
+    renderAppliedContext: (applied) => { elements.contextLabel.textContent = `${applied.source.label}${applied.selection ? " · 仅当前自选（市场宽度及批次变化仍为全市场）" : ""} · 批次 #${applied.run.id}${applied.pagination ? ` · 榜单第 ${applied.pagination.page} 页，每页 ${applied.pagination.pageSize} 条` : ""}${applied.error ? ` · ${applied.error}` : ""}`; },
     renderBreadth: (payload) => renderBreadth(elements, payload),
     renderBreadthError: (message) => renderRegionError(elements.breadth, message),
     renderCohortDiff: (payload) => renderCohortDiff(elements, payload),
@@ -160,7 +160,8 @@ function matchedExplanationList(explanations, items, funnel) {
   const names = new Map(items.map((item) => [item.symbol, item.name || item.code || item.symbol]));
   const labels = new Map(funnel.map((item) => [item.condition_code, item.label]));
   const rows = explanations.slice(0, 8).map((item) => `<li><strong>${escapeHtml(names.get(item.symbol) || item.symbol)}</strong><span>${escapeHtml(passedConditionText(item.passed_conditions, labels))}</span></li>`).join("");
-  return `<section class="market-scan-matched-explanations" aria-labelledby="marketScanMatchedExplanationsTitle"><div class="market-scan-screening-section-head"><div><h5 id="marketScanMatchedExplanationsTitle">当前页入选理由</h5><p>条件代码来自与筛选漏斗相同的冻结条件编译器。</p></div></div><ul>${rows}</ul></section>`;
+  const scope = explanations.length > 8 ? `当前页共 ${explanations.length} 条，展示前 8 条入选理由。` : `展示当前页全部 ${explanations.length} 条入选理由。`;
+  return `<section class="market-scan-matched-explanations" aria-labelledby="marketScanMatchedExplanationsTitle"><div class="market-scan-screening-section-head"><div><h5 id="marketScanMatchedExplanationsTitle">当前页入选理由</h5><p>${scope}条件代码来自与筛选漏斗相同的冻结条件编译器。</p></div></div><ul>${rows}</ul></section>`;
 }
 
 function passedConditionText(codes, labels) {

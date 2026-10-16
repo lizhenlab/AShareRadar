@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from app.models.market_scan_selection import MarketScanSelectionRequest
+
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from io import BytesIO
 import json
@@ -244,6 +246,8 @@ _FUTURE_RANGE_LAST_COLUMN: Final = get_column_letter(len(_FUTURE_RANGE_COLUMNS))
 
 @dataclass(frozen=True)
 class MarketScanExportFilters:
+    selection: MarketScanSelectionRequest | None = None
+    frozen_spec: ScreenSpecV2 | None = None
     status: MarketScanResultStatus | None = "success"
     market: str | Sequence[str] | None = None
     industry: str | Sequence[str] | None = None
@@ -272,6 +276,7 @@ class MarketScanExportFilters:
 
     def normalized(self) -> "MarketScanExportFilters":
         return MarketScanExportFilters(
+            selection=self.selection, frozen_spec=self.frozen_spec,
             status=self.status,
             market=_normalized_filter_values(self.market, maximum=3),
             industry=_normalized_filter_values(self.industry, maximum=20),
@@ -339,6 +344,7 @@ def build_market_scan_workbook(
         workbook.create_sheet("未来区间验证"),
         future_range_research,
         run_id=page.run.id,
+        selected_symbols={item.symbol for item in page.items} if page.selection_scope or filters.frozen_spec is not None else None,
     )
     _populate_info_sheet(workbook.create_sheet("导出信息"), page, filters, exported_at)
     stream = BytesIO()
@@ -636,8 +642,9 @@ def _populate_future_range_sheet(
     projection: dict[str, object] | None,
     *,
     run_id: int,
+    selected_symbols: set[str] | None = None,
 ) -> None:
-    rows = list(_future_range_rows(projection, run_id=run_id))
+    rows = list(_future_range_rows(projection, run_id=run_id, selected_symbols=selected_symbols))
     sheet.append([header for header, _width in _FUTURE_RANGE_COLUMNS])
     for row in rows:
         sheet.append(row)
@@ -664,6 +671,7 @@ def _future_range_rows(
     projection: dict[str, object] | None,
     *,
     run_id: int,
+    selected_symbols: set[str] | None = None,
 ) -> Iterator[list[object]]:
     wrapper = _mapping(projection)
     generation_status = _safe_text(wrapper.get("generation_status") or "not_generated")
@@ -676,6 +684,8 @@ def _future_range_rows(
         return
     for value in records:
         record = _mapping(value)
+        if selected_symbols is not None and record.get("symbol") not in selected_symbols:
+            continue
         offsets = record.get("offsets")
         if not isinstance(offsets, list) or not offsets:
             yield _future_range_row(generation_status, record, {}, execution_contract)
@@ -972,9 +982,13 @@ def _info_sheet_rows(
     ranking_active = ranking.get("status") == "active"
     return (
         *_run_identity_info_rows(run),
-        *_ranking_info_rows(ranking, active=ranking_active),
+        *_export_ranking_info_rows(filters, ranking, active=ranking_active),
         *_run_scope_info_rows(run),
-        *_filter_info_rows(filters),
+        *(_filter_info_rows(filters) if filters.frozen_spec is None else (("筛选条件说明", "以本文件完整筛选合同 JSON 为准，保留已应用方案的全部区间和排序"),)),
+        ("导出评分口径", "frozen" if filters.frozen_spec else "production"),
+        ("当前查看范围", "当前自选" if page.selection_scope else "全市场"),
+        ("自选成员摘要", page.selection_scope.watchlist_digest if page.selection_scope else "不适用"),
+        ("自选成员数", page.selection_scope.member_count if page.selection_scope else "不适用"),
         ("筛选合同", screen_spec.schema_version),
         ("筛选摘要", screen_spec_digest(screen_spec)),
         ("筛选合同 JSON", _safe_json(screen_spec.model_dump(mode="json"))),
@@ -1095,6 +1109,8 @@ def _style_info_sheet(sheet) -> None:
 
 
 def _export_screen_spec(filters: MarketScanExportFilters) -> ScreenSpecV2:
+    if filters.frozen_spec is not None:
+        return filters.frozen_spec
     return screen_spec_from_market_scan_filters(
         status=filters.status,
         market=filters.market,
@@ -1242,3 +1258,21 @@ __all__ = [
     "market_scan_board_label",
     "validate_market_scan_export_run",
 ]
+
+
+def frozen_market_scan_export_filters(
+    filters: MarketScanExportFilters, screen_spec: str,
+) -> MarketScanExportFilters:
+    spec = ScreenSpecV2.model_validate_json(screen_spec)
+    return replace(filters, frozen_spec=spec)
+
+
+def _export_ranking_info_rows(
+    filters: MarketScanExportFilters, ranking: Mapping[str, object], *, active: bool,
+) -> tuple[tuple[str, object], ...]:
+    if filters.frozen_spec is not None:
+        return (("本次导出评分规则", "冻结行原始评分与名次（按筛选合同排序）"),
+            ("当前生产排名状态", "未读取；本次冻结导出不判断 v6 是否启用"),
+            ("当前概率研究", "未读取；以冻结行筛选、分页和解释口径为准"),
+            ("历史排名改写", "否"))
+    return _ranking_info_rows(ranking, active=active)

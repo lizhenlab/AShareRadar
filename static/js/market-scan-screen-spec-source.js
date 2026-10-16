@@ -9,7 +9,7 @@ export function screenSpecFromResultsQuery(query, runId) {
   const parsed = parseResultsQuery(query);
   if (parsed?.runId !== runId) throw new Error("已提交筛选与冻结批次不一致");
   const params = parsed.params;
-  const allowed = new Set(["page", "page_size", "status", "market", "industry", "is_st", "is_new", "keyword", "sort", "order", "probability_horizon", ...Object.values(RANGE_QUERIES).flat().filter(Boolean)]);
+  const allowed = new Set(["universe", "watchlist_digest", "page", "page_size", "status", "market", "industry", "is_st", "is_new", "keyword", "sort", "order", "probability_horizon", ...Object.values(RANGE_QUERIES).flat().filter(Boolean)]);
   if (params.has("min_upside_probability")) throw new Error("已应用的上涨概率条件暂不支持冻结条件解释");
   if ([...params.keys()].some((key) => !allowed.has(key))) throw new Error("已提交筛选含尚不支持解释的条件");
   const ranges = Object.fromEntries(Object.entries(RANGE_QUERIES).map(([field, bounds]) => [field, queryRange(params, bounds)]).filter(([, value]) => value !== null));
@@ -63,3 +63,8 @@ function queryBoolean(params, key) {
 }
 
 function normalizeText(value) { return value.trim().split(/\s+/u).filter(Boolean).join(" "); }
+
+export function screenSpecResultsQuery(spec, runId) {
+  const params = new URLSearchParams({ ranking_basis: "frozen", screen_spec: JSON.stringify(normalizeScreenSpec(spec)) });
+  return `/api/market-scans/${runId}/results?${params}`;
+}

@@ -1,4 +1,5 @@
 import { beginScreenProducer, ownsScreenProducer, presetOwnsScreen, releaseOtherScreenBatch, screenProducer, ownsScreenProbe } from "./market-scan-screen-producer.js";
+import { acceptSelection, bindSelectionQuery, markSelectionConflict, querySelection, requireSelectionBinding, selectionIsStale, selectionGeneration, renderSelection } from "./market-scan-selection.js";
 import { clearAppliedScreenContext, commitStandardScreenContext } from "./market-scan-screen-context.js";
 import { resultContext, contextMatches, identityMatches, identityBinding } from "./market-scan-result-context.js";
 import { isAbortError } from "./api.js";
@@ -14,9 +15,7 @@ export { unfilteredResultsQuery } from "./market-scan-result-query.js";
 export function createMarketScanProbabilityHorizonController(options) {
   const context = {
     options,
-    cache: null,
-    lastGoodCache: null,
-    lastValidatedQuery: null,
+    cache: null, lastGoodCache: null, lastValidatedQuery: null,
     needsTrustedRefresh: false,
     intentGeneration: 0,
     directInFlight: null,
@@ -90,6 +89,8 @@ function remember(context, payload, query, identity) {
     if (!samePublishedMarketScanRun(page.run, options.resultRun())) {
       return invalidate(context, { clearLastGood: true });
     }
+    acceptSelection(options.elements, page, querySelection(query), query);
+    query = bindSelectionQuery(query, page.selection_scope);
     const owner = resultContext(options, page.run);
     context.lastValidatedQuery = { ...owner, query };
     context.queries.capture(query, page.run);
@@ -232,6 +233,7 @@ function load(context, loadOptions = {}) {
 }
 
 function loadAppliedPage(context, page) {
+  if (selectionIsStale(context.options.elements)) return Promise.resolve(null);
   const baseline = currentBaseline(context)?.query;
   if (!context.queries.matchesFilters(baseline)) {
     context.options.view.announce("新的筛选条件正在校验，请等待结果更新后再翻页。", "results-page:pending-filters");
@@ -290,7 +292,7 @@ async function loadOnce(context, loadOptions = {}) {
   const owned = {
     context: loadOptions.context || resultContext(options, publishedRun),
     generation: loadOptions.intentGeneration ?? context.intentGeneration,
-    query,
+    query, selectionGeneration: selectionGeneration(options.elements),
     sequence,
   };
   owned.screenOwner = loadOptions.screenOwner || beginScreenProducer(options.elements.tableWrap, "standard", publishedRun);
@@ -316,6 +318,7 @@ async function requestOwnedResult(context, owned, publishedRun, loadOptions) {
     });
     if (!options.isCurrentRequest("resultRequestSeq", owned.sequence)) return staleOutcome();
     const payload = validateResultPage(response, publishedRun.id);
+    requireSelectionBinding(payload, querySelection(owned.query));
     return commitOwnedResult(context, owned, payload);
   } catch (error) {
     return handleOwnedResultError(context, owned, publishedRun, loadOptions, error);
@@ -346,6 +349,14 @@ function handleOwnedResultError(context, owned, publishedRun, loadOptions, error
   ) {
     recordStaleTrustFailure(context, owned, error);
     return staleOutcome(error);
+  }
+  if (markSelectionConflict(options.elements, error)) {
+    const retained = context.lastGoodCache;
+    if (retained) { options.state.page = retained.page.page; options.view.renderResults(retained.page); }
+    invalidate(context, { clearLastGood: true });
+    renderSelection(options.elements);
+    options.view.announce(error.message, "results-selection:stale");
+    return { ok: false, aborted: true, error };
   }
   if (isMarketScanReadBusy(error)) {
     if (loadOptions.horizonRefresh === true) cancelRefresh(context);
@@ -438,7 +449,7 @@ function trustedReadStarted(context, query, run) {
     screenOwner,
     context: owner.context || resultContext(context.options, context.options.resultRun()),
     generation: owner.generation ?? context.intentGeneration,
-    query,
+    query, selectionGeneration: selectionGeneration(options.elements),
     selectedRun: run ? structuredClone(run) : null,
   };
   context.options.view.renderResultsLoading();
@@ -449,6 +460,7 @@ function acceptTrusted(context, query) {
   return Boolean(
     trusted
     && ownsScreenProducer(context.options.elements.tableWrap, trusted.screenOwner)
+    && trusted.selectionGeneration === selectionGeneration(context.options.elements)
     && trusted.query === query
     && trusted.generation === context.intentGeneration
     && contextMatches(trusted.context, context.options, context.options.resultRun())
@@ -564,6 +576,7 @@ function queuedSpecForCurrentRun(context, spec) {
 function ownedRequestIsCurrent(context, owned, responseRun) {
   const run = context.options.resultRun();
   return ownsScreenProducer(context.options.elements.tableWrap, owned.screenOwner)
+    && owned.selectionGeneration === selectionGeneration(context.options.elements)
     && owned.generation === context.intentGeneration
     && contextMatches(owned.context, context.options, run)
     && samePublishedMarketScanRun(responseRun, run);

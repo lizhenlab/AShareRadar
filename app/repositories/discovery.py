@@ -13,6 +13,8 @@ from app.db.market_scan_integrity import (
     require_publication_market_scan_snapshot,
 )
 from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE
+from app.models.market_scan_selection import MarketScanSelectionRequest, MarketScanSelectionScope
+from app.repositories.market_scan_selection import resolve_selection, watchlist_symbols
 from app.models.discovery import (
     DISCOVERY_PRESET_SCHEMA_VERSION,
     DiscoveryCriteria,
@@ -260,19 +262,29 @@ class DiscoveryRepository(SQLiteRepository):
         return None if row is None else DiscoveryRunReference.model_validate(dict(row))
 
     def leaderboard(
+        self, preset: DiscoveryPreset, *, run_id: int, page: int, page_size: int,
+    ) -> tuple[list[DiscoveryLeaderboardItem], int]:
+        items, total, _scope = self.leaderboard_with_scope(preset, run_id=run_id, page=page, page_size=page_size)
+        return items, total
+
+    def leaderboard_with_scope(
         self,
         preset: DiscoveryPreset,
         *,
         run_id: int,
         page: int,
         page_size: int,
-    ) -> tuple[list[DiscoveryLeaderboardItem], int]:
+        selection: MarketScanSelectionRequest | None = None,
+    ) -> tuple[list[DiscoveryLeaderboardItem], int, MarketScanSelectionScope | None]:
         where_sql, parameters = discovery_filter_sql(preset.criteria)
         order_sql = discovery_order_sql(preset.sort)
         offset = (page - 1) * page_size
         base_parameters = [run_id, *parameters]
         with self._read_snapshot() as conn:
             _require_discovery_source(conn, run_id)
+            scope, members = resolve_selection(selection or MarketScanSelectionRequest(), lambda: watchlist_symbols(conn), require_digest=page > 1)
+            if members is not None:
+                where_sql += " AND r.symbol IN (SELECT symbol FROM watchlist)"
             total = int(
                 conn.execute(
                     f"SELECT COUNT(*) FROM market_scan_result AS r WHERE r.run_id = ? AND {where_sql}",
@@ -293,7 +305,7 @@ class DiscoveryRepository(SQLiteRepository):
                 """,
                 [*base_parameters, page_size, offset],
             ).fetchall()
-        return [_leaderboard_item(row, position=offset + index + 1) for index, row in enumerate(rows)], total
+        return [_leaderboard_item(row, position=offset + index + 1) for index, row in enumerate(rows)], total, scope
 
     def enqueue_research(
         self,

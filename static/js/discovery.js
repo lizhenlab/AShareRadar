@@ -1,3 +1,5 @@
+import { acceptSelection, markSelectionConflict, requireSelectionBinding, selectionGeneration, selectionRequest, setSelectionReload } from "./market-scan-selection.js";
+import { screenSpecFromPreset, screenSpecResultsQuery } from "./market-scan-screen-spec-source.js";
 import { beginScreenProducer, ownsScreenProducer, releaseScreenProducer } from "./market-scan-screen-producer.js";
 import { clearAppliedScreenContext, commitDiscoveryScreenContext } from "./market-scan-screen-context.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, fetchJson, isAbortError } from "./api.js";
@@ -351,8 +353,10 @@ export function createDiscoveryController(options = {}) {
       const [pageResult, rankingResult] = await requestPresetApplication(identity, preset, run, page);
       if (pageResult.status === "rejected") throw pageResult.reason;
       const payload = normalizeDiscoveryLeaderboard(pageResult.value);
+      requireSelectionBinding(payload, identity.selection);
       const rankOutcome = resolveRankChanges(rankingResult, run.id);
       if (!acceptPresetApplication(identity, payload)) return null;
+      acceptSelection(elements, payload, identity.selection, presetExportQuery(payload));
       commitPresetApplication(payload, rankOutcome.payload);
       renderDiscoveryResults(payload, rankOutcome.payload);
       commitDiscoveryScreenContext(elements.tableWrap, run, payload, preset);
@@ -368,7 +372,7 @@ export function createDiscoveryController(options = {}) {
     const operation = request(`/api/discovery/presets/${encodeURIComponent(preset.id)}/apply`, {
       ...options,
       method: "POST",
-      body: JSON.stringify({ run_id: run.id, page, page_size: marketScanPageSize(elements) }),
+      body: JSON.stringify({ run_id: run.id, page, page_size: marketScanPageSize(elements), ...identity.selection }),
     });
     const ranking = request(
       `/api/discovery/runs/${encodeURIComponent(run.id)}/rank-changes?page=1&page_size=${RANK_CHANGE_PAGE_SIZE}`,
@@ -394,7 +398,13 @@ export function createDiscoveryController(options = {}) {
     return false;
   }
 
+  function presetExportQuery(payload) {
+    try { return screenSpecResultsQuery(screenSpecFromPreset(payload.preset), payload.run_id); }
+    catch { return null; }
+  }
+
   function commitPresetApplication(payload, rankPayload) {
+    setSelectionReload(elements, () => { invalidateAppliedRequest(); setBusy(false); return applyPreset(1); });
     const previous = state.applied;
     state.applied = {
       page: payload.page,
@@ -553,10 +563,11 @@ export function createDiscoveryController(options = {}) {
       `/api/discovery/presets/${encodeURIComponent(applied.preset.id)}/apply`,
       requestOptions({
         method: "POST", signal: identity.controller.signal,
-        body: JSON.stringify({ run_id: applied.runId, page, page_size: pageSize }),
+        body: JSON.stringify({ run_id: applied.runId, page, page_size: pageSize, ...identity.selection }),
       })
     ));
     requireCurrentApplied(applied);
+    requireSelectionBinding(payload, identity.selection);
     validateFilteredPage(payload, applied, page, pageSize, first);
     setFeedback(`正在读取当前筛选结果：${Math.min(page * pageSize, payload.total)}/${payload.total}`);
     return payload;
@@ -590,6 +601,7 @@ export function createDiscoveryController(options = {}) {
       return await operation();
     } catch (error) {
       if (!isAbortError(error) && sequence === state.sequence) {
+        markSelectionConflict(elements, error);
         setFeedback(state.writeUnconfirmed ? compactErrorMessage(error?.message)
           : `${failureLabel}失败：${compactErrorMessage(error?.message)}`, state.writeUnconfirmed ? "warn" : "error");
       }
@@ -729,6 +741,7 @@ export function createDiscoveryController(options = {}) {
   }
 
   function clearApplied() {
+    setSelectionReload(elements, null);
     releaseScreenProducer(elements.tableWrap, "preset"); clearAppliedScreenContext(elements.tableWrap);
     const hadPendingRequest = Boolean(state.appliedRequest);
     invalidateAppliedRequest();
@@ -846,11 +859,12 @@ export function createDiscoveryController(options = {}) {
   }
 
   function beginAppliedRequest(preset, run) {
+    const selection = selectionRequest(elements);
     clearAppliedScreenContext(elements.tableWrap);
     invalidateAppliedRequest();
     const controller = new AbortController();
     const identity = {
-      controller,
+      controller, selection, selectionGeneration: selectionGeneration(elements),
       screenOwner: beginScreenProducer(elements.tableWrap, "preset", run, clearApplied),
       presetId: preset.id,
       presetRevision: preset.revision,
@@ -863,7 +877,8 @@ export function createDiscoveryController(options = {}) {
 
   function isAppliedRequestCurrent(identity, payload) {
     const currentPreset = selectedPreset();
-    return ownsScreenProducer(elements.tableWrap, identity.screenOwner)
+    return selectionGeneration(elements) === identity.selectionGeneration
+      && ownsScreenProducer(elements.tableWrap, identity.screenOwner)
       && state.appliedRequest === identity.controller
       && state.appliedSequence === identity.sequence
       && currentPreset?.id === identity.presetId

@@ -1,3 +1,4 @@
+import { applySelectionParams } from "./market-scan-selection.js";
 import { selectedMarketScanProbabilityHorizon } from "./market-scan-probability-view.js";
 
 const MARKET_SCAN_TO_DISCOVERY_SORT = Object.freeze({
@@ -40,6 +41,10 @@ export function marketScanFilterElements(root, requireElement) {
   const order2 = get("marketScanOrder2");
   const order3 = get("marketScanOrder3");
   return {
+    universe: root.getElementById?.("marketScanUniverse"),
+    scopeExportButton: root.getElementById?.("marketScanExport"),
+    scopeRefresh: root.getElementById?.("marketScanScopeRefresh"),
+    scopeStatus: root.getElementById?.("marketScanScopeStatus"),
     filters: get("marketScanFilters"),
     status: get("marketScanStatus"),
     market: get("marketScanMarket"),
@@ -102,7 +107,7 @@ export function marketScanQueryParams(elements, initial = {}) {
   setOptional(params, "keyword", filters.keyword);
   appendValues(params, "sort", filters.sort.map((item) => item.field));
   appendValues(params, "order", filters.sort.map((item) => item.order));
-  return params;
+  return applySelectionParams(elements, params);
 }
 
 export function buildDiscoveryPresetDefinition(nameValue, elements) {

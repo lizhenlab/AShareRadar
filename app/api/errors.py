@@ -17,7 +17,7 @@ from starlette.requests import Request
 from app.db.market_scan_integrity import MarketScanSnapshotSealError
 from app.models.market_scan_snapshot import MarketScanSnapshotIntegrityError
 from app.repositories.strategy_evidence import StrategyEvidenceIntegrityError
-from app.repositories.notes import StockNoteRevisionConflictError
+from app.repositories.notes import StockNoteHistoryConflictError, StockNoteRevisionConflictError
 from app.repositories.advice_reviews import (
     AdviceReviewIntegrityError,
     AdviceReviewQueueConflictError,
@@ -166,8 +166,8 @@ def _api_exception(exc: Exception) -> HTTPException:
             detail=MARKET_SCAN_INTEGRITY_DETAIL,
             headers=NO_STORE_HEADER,
         )
-    if isinstance(exc, StockNoteRevisionConflictError):
-        return HTTPException(status_code=409, detail="笔记已更新，请读取最新记录后重试", headers=NO_STORE_HEADER)
+    if isinstance(exc, (StockNoteRevisionConflictError, StockNoteHistoryConflictError)):
+        return _note_api_exception(exc)
     if isinstance(exc, (AdviceReviewRevisionConflictError, AdviceReviewQueueConflictError, AdviceReviewIntegrityError)):
         return _review_api_exception(exc)
     if isinstance(exc, StrategyExecutionIntegrityError):
@@ -184,6 +184,11 @@ def _api_exception(exc: Exception) -> HTTPException:
     if isinstance(exc, sqlite3.DatabaseError):
         return HTTPException(status_code=503, detail=f"本地数据库暂不可用：{sanitize_provider_error(exc)}")
     return HTTPException(status_code=503, detail=sanitize_provider_error(exc))
+
+
+def _note_api_exception(exc: Exception) -> HTTPException:
+    detail = "笔记历史已变化，请刷新后重新翻页" if isinstance(exc, StockNoteHistoryConflictError) else "笔记已更新，请读取最新记录后重试"
+    return HTTPException(status_code=409, detail=detail, headers=NO_STORE_HEADER)
 
 
 def _review_api_exception(exc: Exception) -> HTTPException:

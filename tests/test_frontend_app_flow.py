@@ -1923,6 +1923,7 @@ def test_visibility_restore_retries_cancelled_data_status_request() -> None:
 def test_hidden_delayed_load_tail_defers_quote_stream_until_visible() -> None:
     script = r'''
       import { createAppHarness } from "./tests/frontend_app_flow_helpers.mjs";
+      import { clearCachedJsonRequests } from "./static/js/api.js";
 
       const { __appTest, jsonResponse, legacyWorkbenchResponse, streams, waitFor } = await createAppHarness({ canvasContext: null });
       let resolveWatchlist;
@@ -1953,22 +1954,27 @@ def test_hidden_delayed_load_tail_defers_quote_stream_until_visible() -> None:
         throw new Error(`unexpected request during delayed hidden load: ${target}`);
       };
 
-      __appTest.setActiveSymbol("600519");
-      const pendingLoad = __appTest.loadAll();
-      await waitFor(() => typeof resolveWatchlist === "function", "watchlist tail resolver");
-      document.hidden = true;
-      __appTest.handleVisibilityChange();
-      resolveWatchlist();
-      await pendingLoad;
+      try {
+        __appTest.setActiveSymbol("600519");
+        const pendingLoad = __appTest.loadAll();
+        await waitFor(() => typeof resolveWatchlist === "function", "watchlist tail resolver");
+        document.hidden = true;
+        __appTest.handleVisibilityChange();
+        resolveWatchlist();
+        await pendingLoad;
 
-      if (streams.length !== 0 || __appTest.quoteStreamController.snapshot().connected) {
-        throw new Error("a delayed load tail created EventSource while the page was hidden");
-      }
+        if (streams.length !== 0 || __appTest.quoteStreamController.snapshot().connected) {
+          throw new Error("a delayed load tail created EventSource while the page was hidden");
+        }
 
-      document.hidden = false;
-      __appTest.handleVisibilityChange();
-      if (streams.length !== 1 || !__appTest.quoteStreamController.snapshot().connected) {
-        throw new Error("visibility restore did not start the deferred quote stream");
+        document.hidden = false;
+        __appTest.handleVisibilityChange();
+        if (streams.length !== 1 || !__appTest.quoteStreamController.snapshot().connected) {
+          throw new Error("visibility restore did not start the deferred quote stream");
+        }
+      } finally {
+        clearCachedJsonRequests();
+        __appTest.marketScanController.deactivate();
       }
 
       function workbench() {

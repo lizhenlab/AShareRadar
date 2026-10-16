@@ -9,14 +9,14 @@ from app.models.system import (
     MonitorEvent,
     TaskRun,
 )
-from app.repositories.base import SQLiteRepository
+from app.repositories.task_requests import TaskRequestRepository
 from app.utils.audit_time import audit_now_text as now_text
 from app.utils.clock import market_now_naive, monotonic_now
 from app.utils.symbols import standard_symbol
 from app.utils.time import parse_text_time
 
 
-class RuntimeEventRepository(SQLiteRepository):
+class RuntimeEventRepository(TaskRequestRepository):
     def __init__(self, path: Path, lock: threading.RLock) -> None:
         super().__init__(path, lock)
         self._task_started_monotonic: dict[int, float] = {}

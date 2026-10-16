@@ -608,7 +608,7 @@ def _screening_controller_fixture() -> str:
       function commitFixtureScreen(get, runId) {
         const evidence = screeningResponses().breadth.evidence;
         const run = {...evidence, id: runId, updated_at: evidence.finished_at};
-        commitStandardScreenContext(get("marketScanTableWrap"),{run,total:0,items:[]},`/api/market-scans/${runId}/results?status=success&sort=rank&order=asc`);
+        commitStandardScreenContext(get("marketScanTableWrap"),{run,total:0,items:[],page:1,page_size:100,page_count:0},`/api/market-scans/${runId}/results?status=success&sort=rank&order=asc`);
       }
       function screeningResponses() {
         const digest = "a".repeat(64);

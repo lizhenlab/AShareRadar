@@ -14,6 +14,7 @@ from app.services.scheduler_contracts import (
 from app.services.scheduler_execution import SchedulerExecutionMixin
 from app.services.scheduler_helpers import _default_instance_guard
 from app.services.scheduler_lifecycle import SchedulerLifecycleMixin
+from app.services.scheduler_requests import SchedulerRequestMixin
 from app.services.scheduler_schedule import _build_local_tasks
 from app.services.scheduler_tasks import SchedulerTaskHandlersMixin
 from app.utils.clock import market_now_naive
@@ -22,6 +23,7 @@ from app.utils.clock import market_now_naive
 class LocalDataScheduler(
     SchedulerLifecycleMixin,
     SchedulerExecutionMixin,
+    SchedulerRequestMixin,
     SchedulerTaskHandlersMixin,
 ):
     def __init__(
@@ -42,6 +44,8 @@ class LocalDataScheduler(
         self._automatic_tick_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._manual_run_lock = asyncio.Lock()
+        self._manual_request_admission_lock = asyncio.Lock()
+        self._manual_requests: dict[str, tuple[str | None, asyncio.Future]] = {}
         self._instance_guard = instance_guard if instance_guard is not None else _default_instance_guard(datahub)
         self.market_scanner = market_scanner
         self._strategy_automation_service = strategy_automation_service

@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     runs-on: macos-latest
@@ -110,6 +114,14 @@ jobs:
               message = escape(f"{name}: {detail}"[:4000])
               print(f"::error title=pytest failure::{message}")
           PY
+
+      - name: Install Chromium for real backend integration
+        run: npx --no-install playwright install chromium
+
+      - name: Browser transport and real backend persistence
+        env:
+          PYTHON: python
+        run: npm run test:integration
 
   node-24-smoke:
     runs-on: macos-latest

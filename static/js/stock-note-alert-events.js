@@ -1,7 +1,7 @@
 import { isAbortError } from "./api.js";
 import { escapeHtml } from "./dom.js";
 import { addAlertRule, alertRuleUpdatesFromForm, evaluateAlerts, removeAlertRule, toggleAlertRuleEditor, updateAlertRule } from "./alerts.js";
-import { addStockNote, readLatestStockNote, removeStockNote, stockNoteUpdatesFromForm, toggleStockNoteEditor, updateStockNote } from "./notes.js";
+import { addStockNote, loadNoteHistory, readLatestStockNote, removeStockNote, stockNoteUpdatesFromForm, toggleStockNoteEditor, updateStockNote } from "./notes.js";
 import { resolveNoteConflict } from "./note-editor-state.js";
 
 const boundRoots = new WeakMap();
@@ -18,6 +18,7 @@ export function bindStockNoteAlertEvents(options) {
     ["noteForm", "submit", handleNoteFormSubmit],
     ["noteList", "click", handleNoteListClick],
     ["noteList", "submit", handleNoteListSubmit],
+    ["noteHistoryControls", "click", handleNoteHistoryClick],
   ];
   const removers = bindings.map(([id, type, handle]) => {
     const target = root.getElementById(id);
@@ -32,6 +33,19 @@ export function bindStockNoteAlertEvents(options) {
   };
   boundRoots.set(root, dispose);
   return dispose;
+}
+
+async function handleNoteHistoryClick(context, event) {
+  const button = event.target.closest("button[data-note-history]");
+  if (!button || button.disabled) return;
+  const options = context.currentWorkbenchMutationOptions();
+  if (!options) return;
+  try {
+    await loadNoteHistory(context.state, button.dataset.noteHistory, options);
+    if (options.isCurrent()) context.renderResearchActivityPanel();
+  } catch (error) {
+    if (!isAbortError(error) && options.isCurrent()) context.setInlineFeedback("noteHistoryStatus", error);
+  }
 }
 
 async function handleAlertFormSubmit(context, event) {

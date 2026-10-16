@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
+from functools import lru_cache
 import json
 import sqlite3
 import threading
@@ -52,6 +53,8 @@ from app.services.market_scan_manager import market_scan_rule_contract
 from app.services.market_scan_query_service import MarketScanQueryService
 from app.services.market_scan_research_stores import MarketScanResearchStores
 from app.services.market_scan_scoring import FULL_MARKET_SCORE_RULE_VERSION
+from app.services import market_scan_scoring
+from app.utils import market_data
 from tests.test_strategy_execution import _disable_market_scan_immutability, _environment
 from tests.test_market_scan_skip_contract import (
     DATA_DATE,
@@ -1199,23 +1202,24 @@ def _large_current_action_publication(
     )
     pending = {item.symbol: item for item in repo.pending_items(run.id)}
     writes: list[MarketScanResultWrite] = []
-    for index, seed in enumerate(seeds):
-        quote, rows = _varying_success_case(
-            pending[seed.symbol],
-            index=index * 199.0 / (result_count - 1),
-        )
-        writes.append(
-            replace(
-                _score(
-                    pending[seed.symbol],
-                    quote,
-                    rows,
-                    settings=settings,
-                    rule_version=rule_version,
-                ),
-                quote_observed_at=QUOTE_OBSERVED_AT,
+    with _cached_fixture_score_primitives():
+        for index, seed in enumerate(seeds):
+            quote, rows = _varying_success_case(
+                pending[seed.symbol],
+                index=index * 199.0 / (result_count - 1),
             )
-        )
+            writes.append(
+                replace(
+                    _score(
+                        pending[seed.symbol],
+                        quote,
+                        rows,
+                        settings=settings,
+                        rule_version=rule_version,
+                    ),
+                    quote_observed_at=QUOTE_OBSERVED_AT,
+                )
+            )
     repo.save_result_batch(run.id, writes)
     policy = MarketScanScoreDistributionPolicy()
     distribution = MarketScanScoreDistribution.from_score_observations(
@@ -1236,6 +1240,17 @@ def _large_current_action_publication(
     )
     assert published.success_count == result_count
     return cache, run.id
+
+
+@contextmanager
+def _cached_fixture_score_primitives() -> Iterator[None]:
+    # Cache only immutable primitive inputs during construction. All 5,382 scores
+    # still use their original quotes/bars; persistence, sealing and reads run uncached.
+    with pytest.MonkeyPatch.context() as patch:
+        for module, name in ((market_data, "valid_ohlc"), (market_scan_scoring, "_strict_date")):
+            primitive = getattr(module, name)
+            patch.setattr(module, name, lru_cache(maxsize=256, typed=True)(primitive))
+        yield
 
 
 def _representative_market_counts(result_count: int) -> dict[str, int]:

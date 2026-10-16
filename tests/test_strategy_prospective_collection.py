@@ -143,7 +143,7 @@ def test_capture_crossing_deadline_remains_late(study, monkeypatch):
 
 
 def test_no_published_source_waits_before_deadline(study, monkeypatch):
-    monkeypatch.setattr(collection, "_first_published_scan", lambda *_args: None)
+    monkeypatch.setattr(collection, "first_published_strategy_scan", lambda *_args: None)
     assert _collect(study)["receipts_added"] == []
     assert not _receipts(study)
 

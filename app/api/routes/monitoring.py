@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.deps import get_datahub, get_scheduler
-from app.api.errors import run_api, run_sync_api_async
+from app.api.errors import no_store_http_exception, run_api, run_sync_api_async
 from app.models.system import (
     MonitorEvent,
     SchedulerStatus,
     SystemDiagnostics,
     TaskRun,
     TaskRunOnceResponse,
+    TaskRunRequestReceipt,
 )
 from app.models.reliability import ReliabilityReport
 from app.services.datahub import DataHub
@@ -42,16 +43,36 @@ async def monitor_events(
     return await run_sync_api_async(lambda: datahub.cache.recent_monitor_events(limit=limit))
 
 
-@router.post("/api/tasks/run-once", response_model=TaskRunOnceResponse)
+@router.post("/api/tasks/run-once", response_model=TaskRunOnceResponse, response_model_exclude_none=True)
 async def run_task_once(
+    response: Response,
     task: str | None = Query(None, description="任务名称，不填则按顺序执行全部本地刷新任务"),
+    request_id: str | None = Query(None, max_length=36, description="手动请求UUID；重复提交只返回同一执行回执"),
     scheduler: LocalDataScheduler = Depends(get_scheduler),
 ) -> TaskRunOnceResponse:
     async def run() -> TaskRunOnceResponse:
+        if request_id is not None:
+            receipt = await scheduler.submit_run_once(task, request_id)
+            response.status_code = 202
+            response.headers["Cache-Control"] = "no-store"
+            return TaskRunOnceResponse(ok=True, receipt=receipt)
         messages = await scheduler.run_once(task)
         return TaskRunOnceResponse(ok=True, messages=messages)
 
     return await run_api(run)
+
+
+@router.get("/api/tasks/requests/{request_id}", response_model=TaskRunRequestReceipt)
+async def task_request_receipt(
+    request_id: str,
+    response: Response,
+    scheduler: LocalDataScheduler = Depends(get_scheduler),
+) -> TaskRunRequestReceipt:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await run_api(lambda: scheduler.read_run_once_receipt(request_id))
+    except HTTPException as exc:
+        raise no_store_http_exception(exc) from exc
 
 
 @router.get("/api/system/diagnostics", response_model=SystemDiagnostics)

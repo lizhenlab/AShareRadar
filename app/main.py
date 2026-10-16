@@ -44,6 +44,7 @@ from app.api.routes import (
     strategy_lab,
     watchlist,
     watchlist_scan,
+    workspace_maintenance,
 )
 from app.api.security import SameOriginMutationMiddleware
 from app.api.static_assets import RevalidatingStaticFiles
@@ -246,6 +247,7 @@ def _register_routes(app: FastAPI, static_dir: Path) -> None:
     app.include_router(discovery.router)
     app.include_router(fuyao.router)
     app.include_router(strategy_lab.router)
+    app.include_router(workspace_maintenance.router)
 
     @app.get("/")
     async def index() -> FileResponse:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.models.market import ProviderCapability
@@ -104,11 +106,6 @@ class TradeCalendarRefreshResponse(BaseModel):
     error: str | None = None
 
 
-class TaskRunOnceResponse(BaseModel):
-    ok: bool
-    messages: list[str] = Field(default_factory=list)
-
-
 class MutationResult(BaseModel):
     ok: bool
     removed: bool
@@ -129,6 +126,22 @@ class TaskRun(BaseModel):
     finished_at: str | None = None
     duration_ms: int | None = None
     message: str | None = None
+
+
+class TaskRunRequestReceipt(BaseModel):
+    request_id: str
+    requested_task: str | None = None
+    status: Literal["accepted", "running", "completed", "failed", "interrupted", "unknown"]
+    created_at: str
+    finished_at: str | None = None
+    messages: list[str] = Field(default_factory=list)
+    runs: list[TaskRun] = Field(default_factory=list)
+
+
+class TaskRunOnceResponse(BaseModel):
+    ok: bool
+    messages: list[str] = Field(default_factory=list)
+    receipt: TaskRunRequestReceipt | None = None
 
 
 class MonitorEvent(BaseModel):

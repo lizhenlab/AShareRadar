@@ -124,6 +124,28 @@ def test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke() -> None:
     assert "python tools/runtime_contract.py" in node_24_job
 
 
+def test_real_backend_ci_uses_macos_resolved_dependencies_and_linux_keeps_mock_browsers() -> None:
+    ci = _read(".github/workflows/ci.yml")
+    jobs = dict(re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", ci, flags=re.M | re.S))
+    assert [name for name, job in jobs.items() if "npm run test:integration" in job] == ["quality"]
+    quality = jobs["quality"]
+    assert "runs-on: macos-latest" in quality
+    assert "PYTHON: python" in quality
+    integration = quality.index("run: npm run test:integration")
+    for setup in (
+        "python -m pip install --require-hashes -r requirements-dev-lock.txt",
+        "npm ci --ignore-scripts",
+        "npx --no-install playwright install chromium",
+    ):
+        assert quality.index(setup) < integration
+    browser = jobs["browser"]
+    assert "runs-on: ubuntu-latest" in browser
+    assert "npm run test:e2e" in browser
+    assert "playwright install --with-deps chromium firefox webkit" in browser
+    assert "setup-python" not in browser
+    assert not re.search(r"pip install.*requirements-(?:dev-)?lock\.txt", browser)
+
+
 def test_security_workflow_enforces_audits_history_redaction_and_sbom_diff() -> None:
     security = _read(".github/workflows/security.yml")
 

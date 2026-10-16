@@ -8,14 +8,17 @@
     "npm": ">=10 <12"
   },
   "scripts": {
-    "check": "npm run check:runtime && npm run check:py && npm run check:js && npm run check:repo && npm test",
+    "check": "npm run check:static && npm test",
+    "check:static": "npm run check:runtime && npm run check:py && npm run check:js && npm run check:repo",
     "check:runtime": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/runtime_contract.py",
     "check:js": "node tools/check_javascript.mjs",
     "check:py": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; PYCACHE_DIR=$(mktemp -d /tmp/ashare-radar-pycache.XXXXXX); trap 'rm -rf \"$PYCACHE_DIR\"' EXIT; PYTHONPYCACHEPREFIX=$PYCACHE_DIR PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m compileall -q app tests tools && PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m pyflakes app tests tools",
     "clean:caches": "find app tests tools -type d -name __pycache__ -prune -exec rm -rf {} + && rm -rf .pytest_cache",
     "sbom": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/generate_sbom.py",
     "test": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \"$PYTHON_BIN\" -m pytest -q -p no:cacheprovider",
+    "test:coverage": "npm test -- --cov=app --cov=tools --cov-report=term-missing",
     "test:e2e": "node tools/run_playwright.mjs",
+    "test:integration": "node --test tests/integration/real-backend-smoke.test.mjs",
     "check:repo": "PYTHON_BIN=${PYTHON:-.venv/bin/python3}; [ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=python3; \"$PYTHON_BIN\" tools/check_repository.py"
   },
   "devDependencies": {

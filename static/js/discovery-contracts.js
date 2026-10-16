@@ -1,3 +1,4 @@
+import { validateSelectionScope } from "./market-scan-selection.js";
 import { validateUiSymbol } from "./symbols.js";
 
 export function rankChangeLabel(value) {
@@ -22,7 +23,7 @@ export function normalizeDiscoveryLeaderboard(value) {
   unique(items, (item) => item.position, "筛选榜单位置");
   const offset = (page.page - 1) * page.page_size;
   if (items.some((item, index) => item.position !== offset + index + 1)) throw new Error("筛选榜单位置与当前分页不一致");
-  return { preset, run_id: runId, rule_version: requiredString(payload.rule_version, "筛选榜单规则版本"), items, ...page };
+  return { selection_scope: validateSelectionScope(payload.selection_scope), preset, run_id: runId, rule_version: requiredString(payload.rule_version, "筛选榜单规则版本"), items, ...page };
 }
 
 export function validateDiscoveryPresetPage(value) {

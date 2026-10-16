@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.models.market_scan_selection import MarketScanSelectionRequest, MarketScanSelectionScope
+
 from collections.abc import Iterable, Sequence
 from math import isfinite
 from typing import Annotated, Literal, Self, TypeVar
@@ -206,7 +208,7 @@ class DiscoveryPresetArchive(_StrictModel):
     preset: DiscoveryPresetPortable
 
 
-class DiscoveryPresetApplyRequest(_StrictModel):
+class DiscoveryPresetApplyRequest(MarketScanSelectionRequest, _StrictModel):
     run_id: int = Field(ge=1)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=50, ge=1, le=200)
@@ -238,6 +240,7 @@ class DiscoveryLeaderboardItem(BaseModel):
 
 
 class DiscoveryLeaderboardPage(BaseModel):
+    selection_scope: MarketScanSelectionScope | None = None
     preset: DiscoveryPreset
     run_id: int = Field(ge=1)
     rule_version: str

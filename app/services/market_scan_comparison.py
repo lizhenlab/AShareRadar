@@ -59,6 +59,8 @@ def _require_comparable_run(run: MarketScanRun) -> None:
 
 def _comparison_query(symbols: list[str]) -> dict[str, object]:
     query: dict[str, object] = asdict(MarketScanExportFilters(status=None, sort="symbol"))
+    query.pop("selection")
+    query.pop("frozen_spec")
     query.pop("probability_horizon")
     query.pop("min_upside_probability")
     query.update(symbols=tuple(symbols), page=1, page_size=len(symbols))

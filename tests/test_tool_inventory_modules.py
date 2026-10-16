@@ -4,6 +4,8 @@ import ast
 from pathlib import Path
 import re
 
+import pytest
+
 import tools.api_inventory as api_inventory
 import tools.architecture_inventory as architecture_inventory
 from tools.api_inventory import collect_endpoints, render
@@ -36,7 +38,14 @@ _MACHINE_SPECIFIC_PATH_PATTERNS = (
 )
 
 
-def test_architecture_inventory_includes_tooling_modules() -> None:
+@pytest.fixture(scope="module")
+def source_inventories() -> list[architecture_inventory.SourceInventory]:
+    """Share this module's real source scan without caching across pytest runs."""
+    return collect_source_inventories()
+
+
+def test_architecture_inventory_includes_tooling_modules(source_inventories, monkeypatch) -> None:
+    monkeypatch.setattr(architecture_inventory, "collect_source_inventories", lambda: source_inventories)
     inventory = build_inventory()
 
     assert SOURCE_DIRS == ("app", "tests", "tools")
@@ -48,8 +57,8 @@ def test_architecture_inventory_includes_tooling_modules() -> None:
     assert "Explicit re-export facade (`__all__`)" in inventory
 
 
-def test_architecture_inventory_source_collection_matches_config() -> None:
-    sources = collect_source_inventories()
+def test_architecture_inventory_source_collection_matches_config(source_inventories) -> None:
+    sources = source_inventories
 
     assert [source.name for source in sources] == list(SOURCE_DIRS)
     assert all("__pycache__" not in path.parts for source in sources for path in source.files)
@@ -57,9 +66,9 @@ def test_architecture_inventory_source_collection_matches_config() -> None:
     assert all(source.function_metrics for source in sources)
 
 
-def test_production_python_functions_stay_reviewable() -> None:
+def test_production_python_functions_stay_reviewable(source_inventories) -> None:
     offenders: list[str] = []
-    for source in collect_source_inventories():
+    for source in source_inventories:
         if source.name not in PRODUCTION_SOURCE_DIRS:
             continue
         for metric in source.function_metrics:
@@ -106,6 +115,8 @@ def test_test_plan_indexes_every_test_module_once() -> None:
 
 
 def test_inventory_check_mode_detects_missing_current_and_stale_output(tmp_path, monkeypatch) -> None:
+    # Source collection has separate real-repository checks; this test owns output states.
+    monkeypatch.setattr(architecture_inventory, "build_inventory", lambda: "# Function Inventory\n\nSynthetic inventory.\n")
     cases = (
         (api_inventory, "API_REFERENCE.md"),
         (architecture_inventory, "FUNCTION_INVENTORY.md"),

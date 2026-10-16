@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.models.market_scan_selection import MarketScanSelectionScope
+
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -1389,6 +1391,7 @@ class MarketScanResultItem(BaseModel):
 
 
 class MarketScanResultPage(BaseModel):
+    selection_scope: MarketScanSelectionScope | None = None
     run: MarketScanRun
     items: list[MarketScanResultItem]
     total: int = Field(ge=0)

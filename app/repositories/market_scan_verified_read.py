@@ -29,6 +29,7 @@ from app.models.market_scan import (
     MarketScanSortValues,
 )
 from app.models.market_scan_screening import ScreenSpecV2
+from app.repositories.market_scan_selection import watchlist_symbols
 from app.repositories.market_scan_filtering import market_scan_result_screen_sql
 from app.repositories.market_scan_mapping import (
     page_count,
@@ -100,6 +101,8 @@ class VerifiedMarketScanRead(Protocol):
 
     def screening_rows(self) -> list[MarketScanScreeningRow]: ...
 
+    def watchlist_symbols(self) -> tuple[str, ...]: ...
+
 
 class _VerifiedMarketScanReadSession:
     """Opaque read capability that is valid only inside its repository context."""
@@ -120,6 +123,7 @@ class _VerifiedMarketScanReadSession:
         "_snapshot_digest",
         "_state_validator",
         "_thread_id",
+        "_watchlist_reader",
     )
 
     def __init__(
@@ -135,6 +139,7 @@ class _VerifiedMarketScanReadSession:
         execution_reader: Callable[[], Mapping[str, object]],
         screening_reader: Callable[[], list[MarketScanScreeningRow]],
         release_guard: Callable[[], None],
+        watchlist_reader: Callable[[], tuple[str, ...]],
     ) -> None:
         self._run = run
         self._snapshot_digest = snapshot_digest
@@ -147,6 +152,7 @@ class _VerifiedMarketScanReadSession:
         self._execution_reader = execution_reader
         self._screening_reader = screening_reader
         self._release_guard = release_guard
+        self._watchlist_reader = watchlist_reader
         self._active = True
         self._page_read = False
         self._execution_read = False
@@ -190,6 +196,10 @@ class _VerifiedMarketScanReadSession:
             raise RuntimeError("同一已验证榜单读取上下文只能读取一次筛选投影")
         self._screening_read = True
         return self._screening_reader()
+
+    def watchlist_symbols(self) -> tuple[str, ...]:
+        self._require_active()
+        return self._watchlist_reader()
 
     def execution_session_evidence(self) -> Mapping[str, object]:
         self._require_active()
@@ -253,6 +263,7 @@ def _verified_market_scan_read_in_snapshot(
         page_reader=page_reader,
         execution_reader=execution_reader,
         screening_reader=lambda: read_screening_rows(conn, run_id),
+        watchlist_reader=lambda: watchlist_symbols(conn),
         release_guard=release_guard,
     )
     try:
@@ -361,6 +372,8 @@ def _verified_market_scan_result_page(
         spec,
         symbols=cast(MarketScanFilterValues, query["symbols"]),
     )
+    if query.get("watchlist_only") is True:
+        where += " AND symbol IN (SELECT symbol FROM watchlist)"
     page = cast(int, query["page"])
     page_size = cast(int, query["page_size"])
     total = int(
@@ -432,6 +445,8 @@ def _verified_market_scan_execution_session(
 
 
 def _screen_spec(query: Mapping[str, object]) -> ScreenSpecV2:
+    if isinstance(query.get("screen_spec"), ScreenSpecV2):
+        return ScreenSpecV2.model_validate(cast(ScreenSpecV2, query["screen_spec"]).model_dump())
     return screen_spec_from_market_scan_filters(
         status=cast(MarketScanResultStatus | None, query["status"]),
         market=cast(MarketScanFilterValues, query["market"]),

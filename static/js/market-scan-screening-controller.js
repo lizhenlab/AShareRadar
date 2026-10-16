@@ -3,12 +3,13 @@ import { compactErrorMessage } from "./errors.js";
 import { requestMarketScanRead } from "./market-scan-read-client.js";
 import { screenEvaluationRequest, validateMarketScanBreadth, validateMarketScanDelta, validateScreenEvaluation } from "./market-scan-screening-contracts.js";
 import { createMarketScanScreeningView } from "./market-scan-screening-view.js";
-import { clearAppliedScreenContext, readAppliedScreenContext, requireScreenEvidenceBinding, screenContextMatches, subscribeAppliedScreenContext } from "./market-scan-screen-context.js";
+import { clearAppliedScreenContext, readAppliedScreenContext, requireScreenEvidenceBinding, requireScreenPageBinding, screenContextMatches, subscribeAppliedScreenContext } from "./market-scan-screen-context.js";
+import { markSelectionConflict } from "./market-scan-selection.js";
 
 export function createMarketScanScreeningController(options = {}) {
   const root = options.root || globalThis.document;
   const view = createMarketScanScreeningView(root);
-  const context = { root, request: options.fetcher || fetchJson, view,
+  const context = { root, request: options.fetcher || fetchJson, view, selectionControls: selectionControls(root, view.elements.tableWrap),
     state: { requestScope: null, requestSequence: 0, lastKey: "", loaded: false, disposed: false, timer: null } };
   const update = () => appliedContextChanged(context);
   const unsubscribe = subscribeAppliedScreenContext(view.elements.tableWrap, update);
@@ -47,7 +48,7 @@ async function loadWorkbench(context, requestState) {
   const options = { signal: scope.signal };
   const reads = [
     ["breadth", `/api/market-scans/${runId}/breadth`, options, validateMarketScanBreadth, "renderBreadth", "renderBreadthError"],
-    ["evaluation", `/api/market-scans/${runId}/screen/evaluate`, { ...options, method: "POST", headers: { "Content-Type": "application/json" }, body: applied.spec ? JSON.stringify(screenEvaluationRequest(applied.spec)) : null }, validateScreenEvaluation, "renderEvaluation", "renderEvaluationError"],
+    ["evaluation", `/api/market-scans/${runId}/screen/evaluate`, { ...options, method: "POST", headers: { "Content-Type": "application/json" }, body: applied.spec ? JSON.stringify({ ...screenEvaluationRequest(applied.spec, applied.pagination), ...(applied.selection ? { universe: "watchlist", watchlist_digest: applied.selection.watchlist_digest } : {}) }) : null }, validateScreenEvaluation, "renderEvaluation", "renderEvaluationError"],
     ["delta", `/api/market-scans/${runId}/delta`, options, validateMarketScanDelta, "renderCohortDiff", "renderCohortDiffError"],
   ];
   const result = {};
@@ -60,18 +61,26 @@ async function loadWorkbench(context, requestState) {
       const valid = validate(payload, runId);
       requireScreenEvidenceBinding(key === "delta" ? valid.current : valid.evidence, applied, key === "evaluation" ? valid.spec : undefined, key === "delta");
       if (key === "evaluation") {
-        if (valid.matched_count !== applied.total) throw new Error("筛选命中数量与已应用榜单不一致");
+        requireScreenPageBinding(valid, applied);
         context.view.renderScreenSpec(valid.spec);
       }
       context.view[render](valid); result[key] = valid;
     } catch (error) {
       if (!ownsRefresh(context, requestState)) return null;
+      if (markSelectionConflict(context.selectionControls, error)) return null;
       if (!isAbortError(error)) context.view[renderError](`冻结证据读取失败：${compactErrorMessage(error?.message)}`);
       result[key] = null;
     }
   }
   context.state.loaded = Object.values(result).every(Boolean);
   return result;
+}
+
+function selectionControls(root, tableWrap) {
+  const get = id => root.getElementById?.(id);
+  return { tableWrap, universe: get("marketScanUniverse"), scopeRefresh: get("marketScanScopeRefresh"),
+    scopeStatus: get("marketScanScopeStatus"), scopeExportButton: get("marketScanExport"),
+    prev: get("marketScanPrev"), next: get("marketScanNext") };
 }
 
 function ownsRefresh(context, requestState) {

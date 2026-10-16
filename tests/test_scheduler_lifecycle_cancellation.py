@@ -172,8 +172,9 @@ def test_manual_run_repeated_cancellation_drains_cleanup_waiting_for_lifecycle_l
         scheduler = _scheduler(guard)
         entered, cancelled = asyncio.Event(), asyncio.Event()
 
-        async def execute(_task, *, manual: bool) -> str:
+        async def execute(_task, *, manual: bool, request_id: str | None = None) -> str:
             assert manual
+            assert request_id is None
             entered.set()
             try:
                 await asyncio.Event().wait()

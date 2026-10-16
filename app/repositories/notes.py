@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 import math
 import sqlite3
 
@@ -13,6 +14,7 @@ from app.models.market import (
 from app.models.user_data import (
     StockNoteInput,
     StockNoteItem,
+    StockNotePage,
     StockNoteUpdate,
 )
 from app.repositories.base import SQLiteRepository
@@ -31,6 +33,10 @@ def _named_placeholders_sql(columns: tuple[str, ...]) -> str:
 
 _STOCK_NOTE_INSERT_COLUMNS = STOCK_NOTE_COLUMNS[1:]
 _STOCK_NOTE_SELECT_SQL = _columns_sql(STOCK_NOTE_COLUMNS)
+_STOCK_NOTE_ORDER_SQL = f"""
+    COALESCE(trade_date, strftime('%Y-%m-%d', {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at), 'unixepoch', '+8 hours')) DESC,
+    {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at) DESC, id DESC
+"""
 
 _STOCK_NOTE_INSERT_SQL = f"""
     INSERT INTO stock_note (
@@ -107,6 +113,10 @@ class StockNoteRevisionConflictError(ValueError):
     """A mutation was based on a different complete persisted note state."""
 
 
+class StockNoteHistoryConflictError(ValueError):
+    """The ordered note collection changed between page reads."""
+
+
 class StockNoteRepository(SQLiteRepository):
     def create(self, quote: Quote | StockInfo, payload: StockNoteInput) -> StockNoteItem:
         timestamp = now_text()
@@ -140,18 +150,38 @@ class StockNoteRepository(SQLiteRepository):
                 f"""
                 SELECT {_STOCK_NOTE_SELECT_SQL} FROM stock_note
                 WHERE {" AND ".join(clauses)}
-                ORDER BY
-                    COALESCE(
-                        trade_date,
-                        strftime('%Y-%m-%d', {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at), 'unixepoch', '+8 hours')
-                    ) DESC,
-                    {SQLITE_AUDIT_EPOCH_FUNCTION}(created_at) DESC,
-                    id DESC
+                ORDER BY {_STOCK_NOTE_ORDER_SQL}
                 LIMIT ?
                 """,
                 (*params, limit),
             ).fetchall()
         return [row_to_stock_note(row) for row in rows]
+
+    def page(
+        self, symbol: str, *, page: int = 1, page_size: int = 50, expected_snapshot: str | None = None,
+    ) -> StockNotePage:
+        if page < 1 or not 1 <= page_size <= 100:
+            raise ValueError("笔记分页参数超出范围")
+        normalized = standard_symbol(symbol)
+        digest = hashlib.sha256(f"stock-note-page-v1\0{normalized}\0{page_size}\0".encode())
+        offset = (page - 1) * page_size
+        items: list[StockNoteItem] = []
+        total = 0
+        with self._lock, self._read_snapshot() as conn:
+            rows = conn.execute(
+                f"SELECT {_STOCK_NOTE_SELECT_SQL} FROM stock_note WHERE symbol = ? ORDER BY {_STOCK_NOTE_ORDER_SQL}",
+                (normalized,),
+            )
+            for row in rows:
+                digest.update(stock_note_revision_from_row(row).encode("ascii"))
+                if offset <= total < offset + page_size:
+                    items.append(row_to_stock_note(row))
+                total += 1
+        snapshot = digest.hexdigest()
+        if expected_snapshot is not None and expected_snapshot != snapshot:
+            raise StockNoteHistoryConflictError("笔记历史已变化，请刷新后重新翻页")
+        return StockNotePage(symbol=normalized, page=page, page_size=page_size, total=total,
+                             page_count=(total + page_size - 1) // page_size, snapshot=snapshot, items=items)
 
     def delete(self, row_id: int, *, expected_revision: str) -> bool:
         with self._lock, self._connect() as conn:

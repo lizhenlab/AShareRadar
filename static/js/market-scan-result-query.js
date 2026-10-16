@@ -1,3 +1,4 @@
+import { applySelectionQuery, selectionRequest } from "./market-scan-selection.js";
 import { compactErrorMessage } from "./errors.js";
 import { marketScanPageSize } from "./layout-optimizations.js";
 import { samePublishedMarketScanRun } from "./market-scan-latest-loader.js";
@@ -12,7 +13,7 @@ export function createAppliedMarketScanQueries(options) {
     const parsed = parseResultsQuery(query);
     if (!parsed) return null;
     parsed.params.set("page_size", String(marketScanPageSize(options.elements)));
-    query = formatResultsQuery(parsed);
+    query = applySelectionQuery(options.elements, formatResultsQuery(parsed));
     if (queryOptions.includeProbability === false || (applied && (
       applied.run.id !== runId || !samePublishedMarketScanRun(applied.run, options.resultRun())
     ))) return unfilteredResultsQuery(query, runId, { resetPage: false });
@@ -29,6 +30,7 @@ export function createAppliedMarketScanQueries(options) {
     refresh,
     request(run, loadOptions = {}) {
       try {
+        selectionRequest(options.elements);
         return loadOptions.query || (loadOptions.applied
           ? refresh(run.id, options.state.page)
           : options.resultsUrl(run.id, options.state.page));

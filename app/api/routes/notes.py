@@ -8,6 +8,7 @@ from app.models.user_data import (
     ChartMarkSummary,
     StockNoteInput,
     StockNoteItem,
+    StockNotePage,
     StockNoteUpdate,
 )
 from app.models.system import (
@@ -46,6 +47,23 @@ async def create_stock_note(
         return await run_sync_api_async(lambda: datahub.cache.create_stock_note(stock, enriched))
 
     return await run_api(create)
+
+
+@router.get("/api/stock/notes/page", response_model=StockNotePage)
+async def stock_note_page(
+    response: Response,
+    symbol: str = Query("600519", description="6位A股代码"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    expected_snapshot: str | None = Query(None, pattern=r"^[0-9a-f]{64}$"),
+    datahub: DataHub = Depends(get_datahub),
+) -> StockNotePage:
+    def load() -> StockNotePage:
+        normalize_symbol(symbol)
+        return datahub.cache.stock_note_page(symbol, page=page, page_size=page_size, expected_snapshot=expected_snapshot)
+
+    response.headers["Cache-Control"] = "no-store"
+    return await run_sync_api_async(load)
 
 
 @router.delete("/api/stock/notes/{note_id}", response_model=MutationResult)

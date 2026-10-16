@@ -106,6 +106,9 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ("app/services/scheduler_lifecycle.py", "SchedulerLifecycleMixin.start"): _BoundaryPolicy(
         "propagate", "Abort partial scheduler startup and preserve cancellation or fatal failure."
     ),
+    ("app/services/scheduler_requests.py", "SchedulerRequestMixin._admit_manual_request"): _BoundaryPolicy(
+        "propagate", "Release the admitted scheduler lease after reservation or reconciliation fails, preserving cancellation and the original failure."
+    ),
     ("app/services/scheduler_tasks.py", "SchedulerTaskHandlersMixin._check_data_health"): _BoundaryPolicy(
         "propagate", "Drain all parallel health-read workers before propagating cancellation or failure and releasing scheduler ownership."
     ),
@@ -120,6 +123,21 @@ _BASE_EXCEPTION_BOUNDARIES = {
     ),
     ("app/services/user_data_portability.py", "import_user_data"): _BoundaryPolicy(
         "propagate", "Roll back the user-data import transaction before preserving any fatal failure."
+    ),
+    ("app/services/workspace_backup_io.py", "_regular_destination"): _BoundaryPolicy(
+        "propagate", "Remove only the exclusively created file identity on failure; preserve cancellation or fatal failure with any cleanup error chained."
+    ),
+    ("app/services/workspace_backup_io.py", "_owned_at"): _BoundaryPolicy(
+        "propagate", "Clean only the owned private destination tree on failure; preserve cancellation or fatal failure with any cleanup error chained."
+    ),
+    ("app/services/workspace_backup_sqlite.py", "restore_database_snapshot"): _BoundaryPolicy(
+        "propagate", "Remove only the newly created restore file after validation or primary-stream rotation failure, then re-raise."
+    ),
+    ("app/services/workspace_backup_sqlite.py", "_publish_private_snapshot"): _BoundaryPolicy(
+        "propagate", "Remove only the owned private snapshot link after publication failure, then preserve cancellation or fatal failure."
+    ),
+    ("app/services/workspace_backup_sqlite.py", "_copy_to_new_file"): _BoundaryPolicy(
+        "propagate", "Remove only the incomplete exclusive restore file after copy, fsync, or source validation failure, then re-raise and close its descriptor."
     ),
 }
 

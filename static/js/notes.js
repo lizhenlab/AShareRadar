@@ -5,6 +5,8 @@ import { formatNumber } from "./format.js";
 import { toggleInlineEditor } from "./inline-editor.js";
 import { createStockPanelRequestOwner } from "./stock-panel-requests.js";
 import { normalizeUiSymbol } from "./symbols.js";
+import { NOTE_PAGE_SIZE, acceptNoteHistoryPage, failNoteHistoryRead, noteHistoryState, noteHistoryUrl,
+  planNoteHistoryRead, renderNoteHistoryControls, validateNoteHistoryPage } from "./notes-history.js";
 import { displayLatestNote, noteConflictState, noteDraft, ownsNoteEditorSubmission, preserveNoteEditors, reconcileNoteEditorSave, restoreNoteEditors, showNoteConflict } from "./note-editor-state.js";
 
 const requests = createStockPanelRequestOwner({ readPrefix: "notesRead", mutationPrefix: "noteMutation" });
@@ -13,12 +15,63 @@ const NOTES_ACTIVITY_READ_ERROR = "\u7b14\u8bb0\u8bfb\u53d6\u5931\u8d25";
 const NOTES_ACTIVITY_FORMAT_ERROR = "\u7b14\u8bb0\u6570\u636e\u683c\u5f0f\u5f02\u5e38";
 
 export async function loadNotes(state, options = {}) {
+  if (noteHistoryState(state, options.symbol || state.symbol).active) return loadNoteHistory(state, "refresh", options);
   const request = requests.beginRead(state, options);
   try {
     return await refreshNotes(state, request, options.preserveOnError === true);
   } finally {
     requests.finishRead(state, request);
   }
+}
+
+export function renderWorkbenchNotes(state, items, symbol, warning = null) {
+  const history = noteHistoryState(state, symbol);
+  if (history.active) return false;
+  renderNotes(items, symbol);
+  syncResearchActivityNotes(state, symbol, items, warning ? "unavailable" : "ready", warning?.message || "");
+  history.recentCount = items.length;
+  renderNoteHistoryControls(history);
+  return true;
+}
+
+export async function loadNoteHistory(state, action = "open", options = {}) {
+  const plan = planNoteHistoryRead(state, action, options.symbol || state.symbol);
+  if (!plan) return false;
+  const request = requests.beginRead(state, options, plan.symbol);
+  const { history } = plan;
+  history.owner = request;
+  history.busy = true;
+  renderNoteHistoryControls(history);
+  const current = () => request.isCurrent() && state.notesHistory === history && history.owner === request;
+  try {
+    let page = await readNoteHistoryPage(plan, request);
+    if (!current()) return false;
+    if (page.page > Math.max(1, page.page_count)) {
+      page = await readNoteHistoryPage({ ...plan, page: Math.max(1, page.page_count), snapshot: page.snapshot }, request);
+      if (!current()) return false;
+    }
+    acceptNoteHistoryPage(history, page);
+    renderNotes(page.items, plan.symbol);
+    syncResearchActivityNotes(state, plan.symbol, page.items, "ready", "");
+    return true;
+  } catch (error) {
+    if (isAbortError(error) || !current()) return false;
+    failNoteHistoryRead(history, error);
+    syncResearchActivityNotes(state, plan.symbol, knownNotes(state, plan.symbol), "unavailable", history.message);
+    return false;
+  } finally {
+    requests.finishRead(state, request);
+    if (state.notesHistory === history && history.owner === request) {
+      history.busy = false;
+      history.owner = null;
+      renderNoteHistoryControls(history);
+    }
+  }
+}
+
+async function readNoteHistoryPage(plan, request) {
+  const payload = await fetchJson(noteHistoryUrl(plan), requestOptions(request, { cache: "no-store" }));
+  return validateNoteHistoryPage(payload, plan);
 }
 
 export async function addStockNote(state, refreshChartMarks, options = {}) {
@@ -197,13 +250,16 @@ function scopedRefreshContext(request, context) {
 async function refreshNotes(state, request, preserveOnError) {
   try {
     const notes = await fetchJson(
-      `/api/stock/notes?symbol=${encodeURIComponent(request.symbol)}&limit=8`,
+      `/api/stock/notes?symbol=${encodeURIComponent(request.symbol)}&limit=${NOTE_PAGE_SIZE}`,
       requestOptions(request)
     );
     if (!request.isCurrent()) return false;
     if (!Array.isArray(notes)) throw new TypeError(NOTES_ACTIVITY_FORMAT_ERROR);
     renderNotes(notes, request.symbol);
     syncResearchActivityNotes(state, request.symbol, notes, "ready", "");
+    const history = noteHistoryState(state, request.symbol);
+    history.recentCount = notes.length;
+    renderNoteHistoryControls(history);
     return true;
   } catch (error) {
     if (isAbortError(error) || !request.isCurrent()) return false;

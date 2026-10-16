@@ -53,6 +53,8 @@ lsof -nP -iTCP:8010 -sTCP:LISTEN
 
 扶摇研究资料单独保存到 `Settings.cache_path.with_suffix('.fuyao')`：`research.sqlite3` 保存观察版本、同步任务及本项目请求预算，`history/` 保存原始 Parquet、规范化未复权日线/企业行动和版本 manifest。默认位置为 `data/ashare_radar.fuyao/`。这些侧文件不在主数据库备份或浏览器用户数据导出中；备份、迁移和磁盘容量检查须另行包含它们。密钥文件独立管理，不放入可分享的研究导出。
 
+容量与备份范围可使用[工作区清单工具](WORKSPACE_STORAGE.md)：`tools/workspace_storage.py`的`inventory`或`preview`命令（`--scope <显式清单>`）只读取元数据，支持主库、扶摇、研究及封存运行目录。逻辑字节、文件身份去重字节和分配块字节分别展示；链接、缺失、读取错误或预算不足明确标记`partial`。清单完整只针对显式范围，预览不生成备份、不取得跨库一致性，也不替代恢复演练。
+
 完整数据库备份使用 SQLite backup API，同时生成摘要、表计数及完整性清单：
 
 ```bash
@@ -84,7 +86,31 @@ replace提交时同步切换预警流身份；merge和dry-run保留当前流。�
 
 “系统维护 → 数据管理”可填写“旧文件来源时区”，使用原导出设备的 IANA 时间基准，例如 `Asia/Shanghai`；带明确时间元数据的新备份无需填写，无时区旧文件留空不会自动推断。改变时区后先重新预览，确认影响范围后再提交。
 
+### 工作区离线归档
+
+主库、扶摇侧库、研究文件及封存运行目录需要共同归档时，使用[工作区离线归档指南](WORKSPACE_BACKUP.md)中的独立scope，声明分立绝对根、恰好一个主库和范围内全部SQLite。先由操作者停止全部应用、runner和同步写入者；`offline_writers_stopped=true`是外部停写声明，工具只核验并持有已知租约，不证明任意外部进程均已静止。
+
+```bash
+$PYTHON tools/workspace_backup.py create --scope /absolute/workspace-backup-scope.json --destination /absolute/archive-store/snapshot-20261015
+$PYTHON tools/workspace_backup.py verify --archive /absolute/archive-store/snapshot-20261015
+$PYTHON tools/workspace_backup.py restore --archive /absolute/archive-store/snapshot-20261015 --destination /absolute/restore-area/restored-20261015
+```
+
+创建和恢复的目的目录必须尚不存在，其父目录应已存在；不会覆盖或安装到生产目录。归档在`payload/<root-name>/`内保存文件，以`workspace-manifest.json`为完成标记；没有标记的目录不可用，有标记也应实际验证。成功后将输出的digest独立保存，可通过`verify/restore --expected-digest`固定输入身份；自摘要不是签名。校验无需原源路径，也不运行封存Python。
+
+恢复副本仅旋转主库预警流身份，旁库字节保持；原备份不变。原绝对路径不改写，控制绑定、研究引用、基础Python等仍需重新绑定和独立验收。结果始终保留`cross_domain_consistency_verified=false`和`resume_eligible=false`。秘密等默认排除可能使runtime归档失败，预算耗尽或异常会清理可确认属于本次操作的内容；强制终止等情况下可能有残留，不能仅凭目的目录存在判定成功。此CLI不替代DB-only restore的原位保护，也不改变现有保留轮转策略。
+
 ## 4. 日常工作与诊断
+
+系统维护页中的[工作区维护面板](WORKSPACE_MAINTENANCE.md)读取主数据库旁的`.maintenance.json`服务端配置。刷新只读取备份清单、历史验证回执和runner健康记录；容量统计需点击“检查容量”。记录时间、范围和资格边界均单独展示，不自动重新校验大归档或启动研究任务。
+
+手动本地监控按钮使用UUID请求回执：`POST /api/tasks/run-once?task=...&request_id=...`受理后返回202，`GET /api/tasks/requests/{request_id}`核对实际运行记录。浏览器超时、离开页面或关闭读取不等于后台取消；返回页面继续核对同一UUID，重试不会创建第二次执行。服务重启后未确认完成的请求保守标为中断。原来不带`request_id`的同步接口继续保留；全市场扫描仍使用其独立批次接口。
+
+请求身份单独保存在`task_run_request`及`task_run_request_item`；运行历史清理仅解除被删`task_run`的关联，保留幂等请求和最终消息。目前这些小型请求身份记录不自动清理，以免旧UUID重试再次执行。恢复较早数据库备份会丢失备份之后的请求身份，因此不承诺跨这种恢复仍保持幂等。浏览器会话存储不可用时仅能在当前页面内保留待核对身份，关闭页面后不能宣称已恢复该关联。
+
+全市场结果新增“当前自选”范围，在同一个已完成扫描批次内先按当前自选成员筛选，再计算总数、页码、解释和导出。首屏取得成员摘要，后续读取带同一摘要；自选成员发生变化时返回409，需显式刷新范围后继续。空自选返回空结果，缺少对应扫描结果的成员不会自动创建扫描。保存的筛选方案保持条件定义，当前自选范围作为本次视图选择应用。
+
+已应用的保存方案导出携带完整`ScreenSpecV2`，按冻结基础评分处理，保留所有区间和排序；不会为了导出重新套用当前生产调分。Excel注明评分口径、完整筛选合同和自选成员摘要。接口用`ranking_basis=frozen&screen_spec=<JSON>`明确选择此口径，不能混用普通筛选参数；省略时仍为普通榜单的`production`口径。两者不能仅凭分数阈值相同就视为相同筛选。
 
 ```bash
 curl -sS http://127.0.0.1:8010/api/health/live
@@ -130,7 +156,7 @@ liveness 只证明进程活着；readiness 与数据源健康分别检查可服�
 
 股票池任务仅在本地所有库存行仍新鲜、总量及沪深北三市场覆盖满足配置时跳过刷新；否则通过原有全量股票池解析入口更新，不逐股票取数。完整提供者结果及其本地新鲜完整缓存均通过后才报成功；部分池、旧缓存回退、写入未落地继续显示降级。保留现有异常缩水、共享请求、能力冷却和数据源顺序，独立于全市场自动扫描开关。
 
-全市场自动扫描继续使用自身开关、发布时间及重试规则，默认关闭；Codex“策略前瞻样本采集”的工作日15:45、17:45、21:45跟进也独立管理，不随普通任务间隔改变。
+全市场自动扫描继续使用自身开关、发布时间及重试规则，默认关闭；Codex“策略前瞻样本采集”在旧试验阻断期间改为工作日19:45一次只读巡检，独立管理。未来计划的按分钟采集由受检独立runtime中的程序承担，尚未登记或启用；普通任务间隔不会改变该试验日期轴。
 
 行业排行的东方财富直连请求只在传输失败时尝试一个固定延迟行情入口；共享6秒协作式内部预算、每响应512KiB上限，不跟随重定向。预算不保证底层同步网络线程严格在6秒终止，worker收尾仍受原提供者生命周期管理。协议、分页或字段错误直接拒绝，HTTP 429/5xx也不触发本备用路径。延迟入口明确标记来源、保留真实事件时间，仅供排行参考，不进入实时行业评分。全部入口失败时仍保留旧缓存原时间；超过现有缓存回退期限则明确不可用。2026-09-22的真实连接检查仍遭上游间歇断开，不能把增加备用入口写成行情已恢复。总行业数超过100时允许完整的前100条排行，不因总数大于页大小误拒绝；短页、重复、失序和字段无效仍拒绝，不追取额外分页。提供者失败时立即设置能力冷却，排队请求真正进入并发槽位前再次检查，避免等待数据库记录期间继续冲击失败来源。
 
@@ -203,7 +229,9 @@ $PYTHON tools/sync_fuyao_history.py export --output data/research/fuyao-export-2
 
 上述结果证明这批样本及归档在本次运行中通过验证，不证明全部证券类型覆盖或长期权限稳定性。费用政策、财务单位和 PIT 仍未核实，不能认定接口免费；本地请求上限是工程限制，不是供应商余额或费用估计。下一步应完成小范围行情/企业行动对账，以及披露版本、单位和费用政策核实，再评估前复权转换与正式研究准入。
 
-三策略未来样本使用[前瞻采集操作指南](STRATEGY_PROSPECTIVE_COLLECTION.md)：`collect_strategy_prospective.py`的五个子命令均离线，只读扫描及历史档案，另写本地计划、完整输入快照和研究报告。计划绑定`app/`、`tools/`全部Python源码，发布代码变更前应检查计划状态；源码漂移会阻断继续采集，不能静默更新旧计划摘要。运行目录需单独备份。
+三策略未来样本使用[前瞻采集操作指南](STRATEGY_PROSPECTIVE_COLLECTION.md)：`collect_strategy_prospective.py`的六个子命令均离线，`status/readiness`只读，其他命令另写本地计划、完整输入快照和研究报告。新增runtime工具离线实复制代码与Python包，校验锁版本、全部文件、资源、共享基础Python和显式非敏感配置；不继承shell或凭据。未来计划从该固定副本运行，读取生产数据仍显式绑定绝对路径、固定合同及封印，旧计划漂移仍阻断。运行目录需单独备份，不能推送Git。
+
+`run_strategy_prospective.py`从受检副本启动，窗口内每分钟捕获首批；持久attempt和文件锁保证每日最多一次提交，未知响应不重提。服务就绪接口`checks.database_identity`是实际缓存路径的SHA-256，用于检查请求服务和实验读取数据库的配置是否一致，不代表数据内容或外部认证。控制目录固定为计划目录的兄弟`strategy_prospective_control`，不得删除attempt或换目录重置。watch在漂移/采集阶段结束时退出；当前旧计划只做单次只读观察，未开启未来试验watch。
 
 调度与这些离线命令分开管理。先查计划状态及在途任务，仅在预定锚点按需启动一次正式全市场扫描，并在上海时间20:00截止前捕获。每交易日最多执行一次`history_incremental`，先核对持久预算；一次成功增量路径包含两个签名接口请求及文件下载。不为缺口购买新订阅，也不发送外部消息。截止后的检查只登记缺失或报告故障，不补成按时样本。默认官方执行注册表在2026-09-19检查时尚不存在，研究档案不能替代许可、交易状态和完整执行证据。
 
@@ -277,6 +305,8 @@ Use the `ASHARE_RADAR_*` namespace for new configuration. Legacy aliases are acc
 | `ASHARE_RADAR_MARKET_SCAN_JOINT_EXECUTION_AUTHORIZATION_DIGEST` | unset | - | Out-of-band lowercase SHA-256 pin for the formal H5 filter authorization. Unset, stale, mismatched or superseded evidence keeps probability filtering disabled. |
 | `ASHARE_RADAR_MARKET_SCAN_PROBABILITY_RANKING_CONTROL_PATH` | `data/research/market_scan_joint_execution/ranking-control/active.json` | - | Human-authored exact `promote` or `rollback` control for `full-market-score-v6`; automation must not create or silently replace it. |
 | `ASHARE_RADAR_MARKET_SCAN_PROBABILITY_RANKING_CONTROL_DIGEST` | unset | - | Out-of-band lowercase SHA-256 pin for the ranking control. The current audit-only inference contract blocks new v6 promotions even with a pinned control; verified rollback is persisted independently of Shadow qualification. Old publications remain auditable, but an old audit token cannot recreate a missing SQLite mirror or authorize a new publication. |
+| `ASHARE_RADAR_PROSPECTIVE_RUNTIME_DIR` | unset | - | 内部进程标记；由 `strategy_prospective_runtime.py` 校验后自动注入封存运行目录的绝对路径，供 watch 每轮重验运行副本，不作为普通手工配置。 |
+| `ASHARE_RADAR_PROSPECTIVE_RUNTIME_DIGEST` | unset | - | 内部进程标记；同一启动器自动注入启动时核准的运行清单 SHA-256（64 位小写十六进制）。与运行目录标记配对，缺失或运行副本、摘要、配置漂移均阻断 watch；只保证本地一致性，不代表外部认证。 |
 | `ASHARE_RADAR_SCHEDULER_ENABLED` | `1` | `SCHEDULER_ENABLED` | Local refresh scheduler switch. |
 | `ASHARE_RADAR_SCHEDULER_QUOTE_INTERVAL_SECONDS` | `30` | `SCHEDULER_QUOTE_INTERVAL_SECONDS` | Quote refresh interval. |
 | `ASHARE_RADAR_SCHEDULER_KLINE_INTERVAL_SECONDS` | `900` | `SCHEDULER_KLINE_INTERVAL_SECONDS` | K-line refresh interval. |

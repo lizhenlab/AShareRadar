@@ -1,5 +1,7 @@
+import { requireSelectionBinding, validateSelectionScope } from "./market-scan-selection.js";
 import { comparisonRunKey } from "./market-scan-comparison-contracts.js";
 import { normalizedScreenSpecKey, screenSpecFromPreset, screenSpecFromResultsQuery } from "./market-scan-screen-spec-source.js";
+import { screenPageIdentity } from "./market-scan-screening-contracts.js";
 
 const records = new WeakMap();
 const EVIDENCE_FIELDS = ["status", "mode", "scope", "data_date", "quote_date", "rule_version", "finished_at", "snapshot_digest", "snapshot_seal_origin", "snapshot_sealed_at"];
@@ -34,7 +36,7 @@ export function resolveAppliedScreenRun(element, run) {
 }
 
 export function commitStandardScreenContext(element, payload, query) {
-  commitContext(element, payload.run, payload.total, { kind: "standard", label: "已应用的普通榜单筛选" }, () => {
+  commitContext(element, payload.run, payload, { kind: "standard", label: "已应用的普通榜单筛选" }, () => {
     if (["active", "ready"].includes(payload.production_ranking?.status) || payload.production_ranking?.score_rule_version === "full-market-score-v6" || payload.ranking_policy === "v6" || payload.items.some((item) => item.production_score_rule_version === "full-market-score-v6")) {
       throw new Error("当前生产榜单使用概率调整排名，暂不支持原始冻结条件解释");
     }
@@ -45,7 +47,7 @@ export function commitStandardScreenContext(element, payload, query) {
 export function commitDiscoveryScreenContext(element, run, payload, expectedPreset = payload.preset) {
   const preset = payload.preset;
   const source = { kind: "preset", id: preset.id, revision: preset.revision, label: `已应用方案“${preset.name}” · 修订 ${preset.revision}` };
-  commitContext(element, resolveAppliedScreenRun(element, run), payload.total, source, () => {
+  commitContext(element, resolveAppliedScreenRun(element, run), payload, source, () => {
     if (payload.run_id !== run?.id || payload.rule_version !== resolveAppliedScreenRun(element, run)?.rule_version) throw new Error("方案响应与冻结批次不一致");
     const spec = screenSpecFromPreset(preset);
     if (preset.id !== expectedPreset.id || preset.revision !== expectedPreset.revision || normalizedScreenSpecKey(spec) !== normalizedScreenSpecKey(screenSpecFromPreset(expectedPreset))) throw new Error("方案响应与本次提交的方案条件不一致");
@@ -53,17 +55,23 @@ export function commitDiscoveryScreenContext(element, run, payload, expectedPres
   });
 }
 
-function commitContext(element, run, total, source, createSpec) {
+function commitContext(element, run, payload, source, createSpec) {
   if (!element) return;
   const record = recordFor(element);
   if (!comparisonRunKey(run)) return clearAppliedScreenContext(element);
   record.run = structuredClone(run);
-  let spec = null, error = null;
-  try { spec = createSpec(); } catch (failure) { error = String(failure?.message || "无法解释已应用条件"); }
-  const identity = JSON.stringify([comparisonRunKey(run), source.kind, source.id, source.revision, spec && normalizedScreenSpecKey(spec), error]);
+  const total = payload.total;
+  let spec = null, pagination = null, selection = null, error = null;
+  try {
+    const definition = createSpec();
+    selection = validateSelectionScope(payload.selection_scope);
+    pagination = screenPageIdentity(payload, run.id);
+    spec = definition;
+  } catch (failure) { error = String(failure?.message || "无法解释已应用条件"); }
+  const identity = JSON.stringify([comparisonRunKey(run), source.kind, source.id, source.revision, spec && normalizedScreenSpecKey(spec), pagination, selection, error]);
   if (record.value?.identity === identity && record.value.total === total) return;
   record.generation += 1;
-  record.value = { run: structuredClone(run), spec, source, total, error, identity, generation: record.generation };
+  record.value = { run: structuredClone(run), spec, source, total, pagination, selection, error, identity, generation: record.generation };
   publishContext(element, record);
 }
 
@@ -92,4 +100,13 @@ export function requireScreenEvidenceBinding(evidence, captured, spec = undefine
     throw new Error("筛选证据与已应用榜单的完整冻结身份不一致");
   }
   if (spec !== undefined && normalizedScreenSpecKey(spec) !== normalizedScreenSpecKey(captured.spec)) throw new Error("筛选响应与已应用的条件不一致");
+}
+
+export function requireScreenPageBinding(payload, captured) {
+  requireSelectionBinding(payload, captured.selection || {});
+  if (payload.matched_count !== captured.total) throw new Error("筛选命中数量与已应用榜单不一致");
+  const pagination = screenPageIdentity(payload.matched, captured.run.id);
+  if (JSON.stringify(pagination) !== JSON.stringify(captured.pagination)) {
+    throw new Error("筛选解释的分页或候选顺序与当前榜单不一致");
+  }
 }

@@ -4,7 +4,6 @@ import {
   cancelCachedJsonRequest,
   createRequestScope,
   fetchCachedJson,
-  fetchJson,
   getCachedJsonSnapshot,
   invalidateCachedJson,
   isAbortError,
@@ -13,6 +12,12 @@ import { formatAuditTimestamp } from "./audit-time.js";
 import { $, escapeHtml } from "./dom.js";
 import { compactErrorMessage } from "./errors.js";
 import { formatNumber } from "./format.js";
+import {
+  monitorTaskRequestSettled,
+  refreshMonitorTaskRequest,
+  renderMonitorTaskRequest,
+  submitMonitorTaskRequest,
+} from "./monitor-task-requests.js";
 
 const standaloneDataStatusState = {};
 export const MONITORING_REFRESH_INTERVAL_MS = 15000;
@@ -36,11 +41,13 @@ export async function loadMonitoring(state, options = {}) {
       statusRequest(MONITORING_ENDPOINTS[0], request.signal, options),
       statusRequest(MONITORING_ENDPOINTS[1], request.signal, options),
       statusRequest(MONITORING_ENDPOINTS[2], request.signal, options),
+      refreshMonitorTaskRequest(state, { ...options, signal: request.signal, isCurrent }),
     ]);
     if (!isCurrent() || hasAbortedResult(statusResult, runsResult, eventsResult)) return false;
     const statusLoaded = renderSchedulerStatusResult(statusResult, runsResult);
     const runsLoaded = renderSchedulerRunsResult(runsResult);
     const eventsLoaded = renderMonitorEventsResult(eventsResult);
+    renderMonitorTaskRequest(state);
     return statusLoaded && runsLoaded && eventsLoaded;
   } finally {
     if (isCurrent()) maintainMonitorTimer(state, options);
@@ -133,53 +140,16 @@ function maintainMonitorTimer(state, options = {}) {
 }
 
 export async function runMonitorTask(state, task, options = {}) {
-  if (state.monitorTaskRunning) return false;
-  state.monitorTaskRunning = true;
-  const requestId = Number(state.monitorTaskSeq || 0) + 1;
-  state.monitorTaskSeq = requestId;
-  const request = createRequestScope(state.monitorTaskRequest, options.signal);
-  state.monitorTaskRequest = request;
-  const ownsRequest = () => state.monitorTaskSeq === requestId && state.monitorTaskRequest === request;
-  const isCurrent = () =>
-    ownsRequest() &&
-    !request.signal.aborted &&
-    (!options.isCurrent || options.isCurrent());
-  const buttons = document.querySelectorAll(".monitor-actions button");
-  buttons.forEach((button) => {
-    button.disabled = true;
-  });
-  let completed = false;
-  try {
-    $("schedulerState").textContent = "执行中";
-    await fetchJson(`/api/tasks/run-once?task=${encodeURIComponent(task)}`, {
-      method: "POST",
-      signal: request.signal,
-      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    });
-    if (!isCurrent()) return false;
-    invalidateMonitoringCache();
-    await loadMonitoring(state, { force: true, signal: request.signal, isCurrent, isVisible: options.isVisible });
-    if (!isCurrent()) return false;
-    completed = true;
-    return true;
-  } catch (error) {
-    if (isAbortError(error) || !isCurrent()) return false;
-    $("schedulerState").textContent = compactErrorMessage(error.message);
-    return false;
-  } finally {
-    state.monitorTaskRunning = false;
-    buttons.forEach((button) => {
-      button.disabled = false;
-    });
-    if (ownsRequest() && !completed && $("schedulerState").textContent === "执行中") {
-      $("schedulerState").textContent = "已取消";
-    }
-    if (isCurrent()) {
-      invalidateDataStatusCache();
-      await loadDataStatus(state, { force: true, signal: request.signal, isCurrent });
-    }
-    finishRequest(state, "monitorTaskRequest", request);
+  const accepted = await submitMonitorTaskRequest(state, task, options);
+  if (options.signal?.aborted || (options.isCurrent && !options.isCurrent())) return accepted;
+  if (!accepted) return false;
+  invalidateMonitoringCache();
+  await loadMonitoring(state, { ...options, force: true });
+  if (monitorTaskRequestSettled(state)) {
+    invalidateDataStatusCache();
+    await loadDataStatus(state, { ...options, force: true });
   }
+  return true;
 }
 
 export async function loadDataStatus(state = standaloneDataStatusState, options = {}) {

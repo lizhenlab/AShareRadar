@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from app.models.market_scan_selection import MarketScanSelectionRequest, MarketScanSelectionScope
+from app.repositories.market_scan_selection import resolve_selection
+
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from functools import cmp_to_key
@@ -192,6 +195,7 @@ class MarketScanQueryService:
         order: MarketScanSortOrderValues,
         probability_horizon: Literal[1, 5, 20] = 5,
         min_upside_probability: float | None = None,
+        selection: MarketScanSelectionRequest | None = None,
     ) -> MarketScanResultPage:
         _validate_probability_minimum(min_upside_probability)
         values = locals()
@@ -201,7 +205,7 @@ class MarketScanQueryService:
                 verified,
                 query=query,
                 probability_horizon=probability_horizon,
-                minimum=min_upside_probability,
+                minimum=min_upside_probability, selection=selection,
             )
 
     def export_projection(
@@ -216,11 +220,10 @@ class MarketScanQueryService:
         with self._cache.verified_market_scan_read(run_id) as verified:
             run = verified.run
             validate_market_scan_export_run(run)
-            page = self._results_from_verified(
-                verified,
-                query=_export_result_query(normalized, total_count=run.total_count),
+            page = _frozen_export_page(verified, normalized) if normalized.frozen_spec is not None else self._results_from_verified(
+                verified, query=_export_result_query(normalized, total_count=run.total_count),
                 probability_horizon=normalized.probability_horizon,
-                minimum=normalized.min_upside_probability,
+                minimum=normalized.min_upside_probability, selection=normalized.selection, require_digest=True,
             )
         return page, self._future_range_export_for_verified_run(run)
 
@@ -231,8 +234,10 @@ class MarketScanQueryService:
         query: dict[str, object],
         probability_horizon: Literal[1, 5, 20],
         minimum: float | None,
+        selection: MarketScanSelectionRequest | None = None, require_digest: bool = False,
     ) -> MarketScanResultPage:
         run = verified.run
+        scope, query = _selection_result_query(verified, query, selection, require_digest=require_digest)
         eligible = _probability_run_eligible(run)
         research, all_probabilities, symbols = self._result_probability_filter(
             verified, eligible=eligible, horizon=probability_horizon, minimum=minimum,
@@ -272,7 +277,7 @@ class MarketScanQueryService:
             research,
             probabilities,
             production_ranking=ranking_context,
-        )
+        ).model_copy(update={"selection_scope": scope})
 
     def _result_probability_filter(
         self, verified: MarketScanVerifiedReadProtocol, *, eligible: bool,
@@ -1359,3 +1364,26 @@ def _attach_probability_projection(
 
 
 __all__ = ["MarketScanQueryService"]
+
+
+def _selection_result_query(
+    verified: MarketScanVerifiedReadProtocol, query: dict[str, object],
+    selection: MarketScanSelectionRequest | None, *, require_digest: bool,
+) -> tuple[MarketScanSelectionScope | None, dict[str, object]]:
+    scope, _members = resolve_selection(selection or MarketScanSelectionRequest(), lambda: verified.watchlist_symbols(),
+        require_digest=require_digest or isinstance(query["page"], int) and query["page"] > 1)
+    return scope, {**query, "watchlist_only": True} if scope is not None else query
+
+
+def _frozen_export_page(
+    verified: MarketScanVerifiedReadProtocol, filters: MarketScanExportFilters,
+) -> MarketScanResultPage:
+    scope, _members = resolve_selection(filters.selection or MarketScanSelectionRequest(),
+        lambda: verified.watchlist_symbols(), require_digest=True)
+    page = verified.results_page(screen_spec=filters.frozen_spec, symbols=None, watchlist_only=scope is not None,
+        page=1, page_size=max(1, verified.run.total_count))
+    _validate_result_page_binding(verified.run, page)
+    return page.model_copy(update={"selection_scope": scope, "production_ranking": {
+        "status": "not_read", "ranking_basis": "frozen", "run_id": verified.run.id,
+        "base_v5_mutated": False, "historical_ranks_mutated": False,
+    }})

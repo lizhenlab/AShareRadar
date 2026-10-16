@@ -54,10 +54,10 @@ def _capture_source(database: Path, directory: Path, day: str, spec: Mapping[str
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
         conn.execute("BEGIN")
-        row = _first_published_scan(conn, day, now)
+        row = first_published_strategy_scan(conn, day, now)
         if row is None:
             return None
-        payload = _freeze_source(conn, row, spec, now)
+        payload = freeze_strategy_prospective_source(conn, row, spec, now)
         payload.update(archive_strategy_scan(conn, row, directory))
         payload.update(run_id=int(row["id"]), data_date=row["data_date"], source_snapshot_digest=row["snapshot_digest"],
                        rule_version=row["rule_version"], score_spec_hash=row["declared_score_spec_hash"],
@@ -65,7 +65,8 @@ def _capture_source(database: Path, directory: Path, day: str, spec: Mapping[str
     return payload
 
 
-def _first_published_scan(conn: sqlite3.Connection, day: str, now: datetime) -> sqlite3.Row | None:
+def first_published_strategy_scan(conn: sqlite3.Connection, day: str, now: datetime) -> sqlite3.Row | None:
+    """Select the canonical published source in the caller's read transaction."""
     rows = conn.execute(
         """SELECT r.*, c.production_score_spec_hash AS declared_score_spec_hash
            FROM market_scan_run r LEFT JOIN market_scan_rule_contract c ON c.rule_version=r.rule_version
@@ -78,7 +79,8 @@ def _first_published_scan(conn: sqlite3.Connection, day: str, now: datetime) -> 
     return min(eligible, key=lambda row: (audit_time_epoch(row["finished_at"]) or float("-inf"), int(row["id"]))) if eligible else None
 
 
-def _freeze_source(conn: sqlite3.Connection, row: sqlite3.Row, spec: Mapping[str, object], now: datetime) -> dict[str, object]:
+def freeze_strategy_prospective_source(conn: sqlite3.Connection, row: sqlite3.Row, spec: Mapping[str, object], now: datetime) -> dict[str, object]:
+    """Validate and freeze an in-memory source without publishing any artifact."""
     available = max(audit_time_epoch(row[key]) or 0 for key in ("finished_at", "snapshot_sealed_at"))
     payload: dict[str, object] = {"available_at": now.isoformat(), "observed_at": now.isoformat(),
                                   "source_available_at": datetime.fromtimestamp(available, timezone.utc).isoformat() if available else None,

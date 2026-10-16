@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -52,6 +53,7 @@ from app.db.market_scan_artifact_lease import (
     require_restored_market_scan_artifact_bindings,
 )
 from app.utils.audit_time import audit_now_text
+from app.services.workspace_backup_progress import backup_checkpoint
 from app.utils.clock import monotonic_now, utc_now
 
 
@@ -297,7 +299,11 @@ def create_runtime_backup(
     destination: Path | None = None,
     *,
     max_backups: int | None = None,
+    snapshot_timeout_seconds: float | None = None,
+    snapshot_max_bytes: int | None = None,
 ) -> RuntimeBackupResult:
+    _snapshot_deadline(snapshot_timeout_seconds)
+    _validate_snapshot_max_bytes(snapshot_max_bytes)
     source = _require_database(source_path)
     destination_parent = _backup_destination_parent(source, destination)
     destination_parent.mkdir(parents=True, exist_ok=True)
@@ -309,7 +315,8 @@ def create_runtime_backup(
         if managed_limit is not None:
             _remove_stale_managed_backup_temporaries(source)
         target = _backup_destination(source, destination)
-        result = _create_runtime_backup_bundle(source, target)
+        result = _create_runtime_backup_bundle(source, target, snapshot_timeout_seconds=snapshot_timeout_seconds,
+                                              snapshot_max_bytes=snapshot_max_bytes)
         if managed_limit is not None:
             _prune_managed_runtime_backups(
                 source,
@@ -319,13 +326,16 @@ def create_runtime_backup(
         return result
 
 
-def _create_runtime_backup_bundle(source: Path, target: Path) -> RuntimeBackupResult:
+def _create_runtime_backup_bundle(
+    source: Path, target: Path, *, snapshot_timeout_seconds: float | None = None, snapshot_max_bytes: int | None = None,
+) -> RuntimeBackupResult:
+    deadline = _snapshot_deadline(snapshot_timeout_seconds)
     temporary = _new_backup_temporary_directory(source, target.parent)
     try:
         database_path = temporary / BACKUP_DATABASE_NAME
-        _sqlite_snapshot(source, database_path)
-        facts = _database_facts(database_path)
-        manifest = _build_manifest(source, database_path, facts)
+        _sqlite_snapshot(source, database_path, deadline=deadline, max_bytes=snapshot_max_bytes)
+        facts = _database_facts(database_path, deadline=deadline)
+        manifest = _build_manifest(source, database_path, facts, deadline=deadline)
         _write_manifest(temporary / BACKUP_MANIFEST_NAME, manifest)
         _fsync_directory(temporary)
         os.replace(temporary, target)
@@ -347,6 +357,13 @@ def verify_runtime_backup(backup_path: Path) -> RuntimeBackupVerification:
         _backup_directory_operation_lock_path(root.parent),
     ):
         return _verify_runtime_backup(root)
+
+
+def verify_runtime_database_file(
+    database: Path, manifest: RuntimeBackupManifest, *, timeout_seconds: float | None = 30.0,
+) -> None:
+    """Verify one private snapshot read-only without creating operation lock files."""
+    _verify_database_against_manifest(database, manifest, deadline=_snapshot_deadline(timeout_seconds), immutable=True)
 
 
 def _verify_runtime_backup(backup_path: Path) -> RuntimeBackupVerification:
@@ -590,24 +607,59 @@ def _require_quiescent_database(path: Path) -> None:
         conn.close()
 
 
-def _sqlite_snapshot(source: Path, destination: Path) -> None:
+def _sqlite_snapshot(
+    source: Path, destination: Path, *, deadline: float | None = None, max_bytes: int | None = None,
+) -> None:
+    backup_checkpoint("sqlite_snapshot")
     if destination.exists():
         raise RuntimeBackupError(f"快照目标已存在：{destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_conn = _open_read_only(source)
-    destination_conn = sqlite3.connect(destination, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    destination_conn = None
     try:
-        source_conn.backup(destination_conn)
+        page_size = _admit_sqlite_pages(source_conn, max_bytes)
+        destination_conn = sqlite3.connect(destination, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+        if deadline is None and max_bytes is None:
+            source_conn.backup(destination_conn)
+        else:
+            _require_snapshot_deadline(deadline)
+            source_conn.backup(destination_conn, pages=256, sleep=0.01,
+                               progress=lambda _status, remaining, total: _snapshot_progress(deadline, max_bytes, page_size, total, remaining))
         destination_conn.execute("PRAGMA journal_mode = DELETE")
         destination_conn.commit()
+        _require_snapshot_size(destination.stat().st_size, max_bytes)
     except BaseException:
-        destination_conn.close()
+        if destination_conn is not None:
+            destination_conn.close()
         source_conn.close()
         _remove_sqlite_files(destination)
         raise
     destination_conn.close()
     source_conn.close()
     _fsync_file(destination)
+
+
+def _admit_sqlite_pages(connection: sqlite3.Connection, max_bytes: int | None) -> int:
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+    page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+    _require_snapshot_size(page_size * page_count, max_bytes)
+    return page_size
+
+
+def _snapshot_progress(deadline: float | None, max_bytes: int | None, page_size: int, total: int, remaining: int = 0) -> None:
+    _require_snapshot_deadline(deadline)
+    _require_snapshot_size(page_size * total, max_bytes)
+    backup_checkpoint(current=total - remaining, total=total, unit="pages")
+
+
+def _validate_snapshot_max_bytes(max_bytes: int | None) -> None:
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("snapshot max_bytes must be a nonnegative integer")
+
+
+def _require_snapshot_size(size: int, max_bytes: int | None) -> None:
+    if max_bytes is not None and size > max_bytes:
+        raise RuntimeBackupError("数据库快照超过字节预算")
 
 
 def _copy_database_file(source: Path, destination: Path) -> None:
@@ -624,14 +676,19 @@ def _copy_database_file(source: Path, destination: Path) -> None:
         raise
 
 
-def _database_facts(path: Path) -> _DatabaseFacts:
+def _database_facts(path: Path, *, deadline: float | None = None, immutable: bool = False) -> _DatabaseFacts:
+    _require_snapshot_deadline(deadline)
     database = _require_database(path)
-    conn = _open_read_only(database)
+    conn = _open_read_only(database, immutable=immutable)
     try:
+        if deadline is not None:
+            conn.set_progress_handler(lambda: _verification_progress(deadline), 1000)
+        backup_checkpoint("sqlite_integrity")
         integrity = _integrity_check(conn)
+        backup_checkpoint("sqlite_row_counts")
         table_counts = _table_row_counts(conn)
         user_counts = {name: table_counts[name] for name in available_user_tables(conn)}
-        return _DatabaseFacts(
+        facts = _DatabaseFacts(
             size_bytes=database.stat().st_size,
             schema_version=int(conn.execute("PRAGMA schema_version").fetchone()[0]),
             user_version=int(conn.execute("PRAGMA user_version").fetchone()[0]),
@@ -639,8 +696,18 @@ def _database_facts(path: Path) -> _DatabaseFacts:
             user_table_row_counts=user_counts,
             integrity_check=integrity,
         )
+        _require_snapshot_deadline(deadline)
+        return facts
+    except sqlite3.OperationalError:
+        _require_snapshot_deadline(deadline)
+        raise
     finally:
         conn.close()
+
+
+def _verification_progress(deadline: float) -> int:
+    backup_checkpoint()
+    return int(monotonic_now() >= deadline)
 
 
 def _integrity_check(conn: sqlite3.Connection) -> str:
@@ -751,10 +818,17 @@ def _require_market_scan_rule_contract_integrity(
 
 def _table_row_counts(conn: sqlite3.Connection) -> dict[str, int]:
     names = sorted(str(row[0]) for row in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchall())
-    return {name: int(conn.execute(f"SELECT COUNT(*) FROM {_quote_identifier(name)}").fetchone()[0]) for name in names}
+    counts = {}
+    for index, name in enumerate(names):
+        backup_checkpoint(current=index, total=len(names), unit="tables")
+        counts[name] = int(conn.execute(f"SELECT COUNT(*) FROM {_quote_identifier(name)}").fetchone()[0])
+    backup_checkpoint(current=len(names), total=len(names), unit="tables")
+    return counts
 
 
-def _build_manifest(source: Path, database: Path, facts: _DatabaseFacts) -> RuntimeBackupManifest:
+def _build_manifest(
+    source: Path, database: Path, facts: _DatabaseFacts, *, deadline: float | None = None,
+) -> RuntimeBackupManifest:
     return RuntimeBackupManifest(
         manifest_version=RUNTIME_BACKUP_MANIFEST_VERSION,
         created_at=_utc_now_text(),
@@ -765,7 +839,7 @@ def _build_manifest(source: Path, database: Path, facts: _DatabaseFacts) -> Runt
         user_version=facts.user_version,
         table_row_counts=facts.table_row_counts,
         user_table_row_counts=facts.user_table_row_counts,
-        sha256=_sha256(database),
+        sha256=_sha256(database) if deadline is None else _sha256(database, deadline=deadline),
         integrity_check=facts.integrity_check,
     )
 
@@ -773,11 +847,12 @@ def _build_manifest(source: Path, database: Path, facts: _DatabaseFacts) -> Runt
 def _verify_database_against_manifest(
     database: Path,
     manifest: RuntimeBackupManifest,
+    *, deadline: float | None = None, immutable: bool = False,
 ) -> tuple[str, _DatabaseFacts]:
-    actual_hash = _sha256(database)
+    actual_hash = _sha256(database) if deadline is None else _sha256(database, deadline=deadline)
     if actual_hash != manifest.sha256:
         raise RuntimeBackupError("备份数据库 SHA-256 与 manifest 不一致")
-    facts = _database_facts(database)
+    facts = _database_facts(database, deadline=deadline, immutable=immutable)
     _require_matching_manifest(manifest, facts)
     return actual_hash, facts
 
@@ -1071,8 +1146,9 @@ def _temporary_database_path(target: Path) -> Path:
     return path
 
 
-def _open_read_only(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+def _open_read_only(path: Path, *, immutable: bool = False) -> sqlite3.Connection:
+    suffix = "&immutable=1" if immutable else ""
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro{suffix}", uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA query_only = ON")
@@ -1086,12 +1162,32 @@ def _require_database(path: Path) -> Path:
     return resolved
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path, *, deadline: float | None = None) -> str:
+    backup_checkpoint("sqlite_hash")
+    _require_snapshot_deadline(deadline)
     digest = hashlib.sha256()
+    read_bytes, total = 0, path.stat().st_size
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(BACKUP_READ_CHUNK_BYTES), b""):
+            _require_snapshot_deadline(deadline)
             digest.update(chunk)
+            read_bytes += len(chunk)
+            backup_checkpoint(current=read_bytes, total=total, unit="bytes")
+    _require_snapshot_deadline(deadline)
     return digest.hexdigest()
+
+
+def _snapshot_deadline(timeout_seconds: float | None) -> float | None:
+    if timeout_seconds is None:
+        return None
+    if isinstance(timeout_seconds, bool) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("snapshot timeout must be a positive finite number")
+    return monotonic_now() + timeout_seconds
+
+
+def _require_snapshot_deadline(deadline: float | None) -> None:
+    if deadline is not None and monotonic_now() >= deadline:
+        raise RuntimeBackupError("数据库快照或验证超出时间预算")
 
 
 def _copy_permissions(source: Path, destination: Path) -> None:
@@ -1151,4 +1247,5 @@ __all__ = [
     "runtime_backup_session",
     "runtime_backup_storage",
     "verify_runtime_backup",
+    "verify_runtime_database_file",
 ]

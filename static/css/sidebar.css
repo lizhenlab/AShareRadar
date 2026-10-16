@@ -587,6 +587,11 @@
   border-bottom: 0;
 }
 
+.workspace-maintenance-card {
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
+}
+
 .provider-item strong,
 .cache-stats strong {
   display: block;

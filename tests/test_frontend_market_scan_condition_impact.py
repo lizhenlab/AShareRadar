@@ -29,7 +29,7 @@ function harness(){
       removeEventListener(type,handler){this.handlers.get(type)?.delete(handler);},dispatch(type){for(const handler of this.handlers.get(type)||[])handler({target:this});}});
     return elements.get(id);},querySelectorAll(){return [];}};
   const get=id=>root.getElementById(id), wrap=get("marketScanTableWrap");wrap.dataset.marketScanRunId=String(RUN.id);
-  const commit=(run=RUN,query=QUERY,total=2,extra={})=>{wrap.dataset.marketScanRunId=String(run.id);commitStandardScreenContext(wrap,{run,total,items:[],...extra},query);};
+  const commit=(run=RUN,query=QUERY,total=2,extra={})=>{wrap.dataset.marketScanRunId=String(run.id);commitStandardScreenContext(wrap,{run,total,page:1,page_size:100,page_count:total?Math.ceil(total/100):0,items:total?structuredClone(BASE.matched.items):[],...extra},query);};
   commit();return {root,get,wrap,commit,elements};
 }
 function responses(run=RUN){
@@ -44,6 +44,18 @@ function responses(run=RUN){
   return {breadth,evaluation,delta};
 }
 function responseFor(url, data=responses()){return structuredClone(url.endsWith("breadth")?data.breadth:url.endsWith("delta")?data.delta:data.evaluation);}
+function pageEvaluation(page, pageSize=1) {
+  const value=structuredClone(BASE), start=(page-1)*pageSize;
+  value.matched={...value.matched,page,page_size:pageSize,page_count:Math.ceil(value.matched_count/pageSize),items:value.matched.items.slice(start,start+pageSize)};
+  value.matched_explanations=value.matched_explanations.slice(start,start+pageSize);
+  return value;
+}
+function commitPage(h,kind,page,pageSize=1) {
+  const matched=pageEvaluation(page,pageSize).matched;
+  if(kind==="standard") return h.commit(RUN,`${QUERY}&page=${page}&page_size=${pageSize}`,2,matched);
+  const preset={id:7,revision:1,name:"分页方案",criteria:{confidence:{min:80},risk:{max:50}},sort:[{field:"rank",order:"asc"}]};
+  commitDiscoveryScreenContext(h.wrap,RUN,{...matched,preset,run_id:RUN.id,rule_version:RUN.rule_version},preset);
+}
 '''
 
 
@@ -150,7 +162,7 @@ def test_unsupported_applied_query_has_visible_reason_and_never_evaluates(policy
 def test_context_same_batch_preset_definition_revision_and_failed_application_clear_explanation() -> None:
     run_node(r'''
       const h=harness(), preset={id:7,revision:1,name:"完整兼容方案",criteria:{confidence:{min:80,max:95},risk:{max:50}},sort:[{field:"rank",order:"asc"}]};
-      const payload={run_id:RUN.id,rule_version:RUN.rule_version,total:2,preset};
+      const payload={...structuredClone(BASE.matched),run_id:RUN.id,rule_version:RUN.rule_version,preset};
       commitDiscoveryScreenContext(h.wrap,RUN,payload,preset);
       const previous=readAppliedScreenContext(h.wrap); assert.equal(previous.spec.ranges.confidence.max,95);
       assert.match(previous.source.label,/修订 1/);
@@ -228,3 +240,85 @@ def test_screen_producers_keep_order_and_never_revive_a_b_a_or_a_cancelled_probe
       clearAppliedScreenContext(h.wrap);suspendScreenProducer(h.wrap);assert(!ownsScreenProducer(h.wrap,next));
       assert.equal(readAppliedScreenContext(h.wrap),null);
     ''')
+
+
+@pytest.mark.parametrize("source", ["standard", "preset"])
+def test_explanations_follow_current_page_and_page_size_without_changing_full_counts(source: str) -> None:
+    run_node(r'''
+      const h=harness(), calls=[];
+      commitPage(h,"SOURCE",2);
+      const controller=createMarketScanScreeningController({root:h.root,fetcher:async(url,options)=>{
+        if(!url.endsWith("evaluate")) return responseFor(url);
+        const body=JSON.parse(options.body);calls.push(body);return pageEvaluation(body.page,body.page_size);
+      }});
+      await controller.open();
+      assert.equal(controller.state.loaded,true);
+      assert.deepEqual(calls.map(body=>[body.page,body.page_size]),[[2,1]]);
+      assert.match(h.get("marketScanScreeningContextLabel").textContent,/第 2 页，每页 1 条/);
+      assert.match(h.get("marketScanScreeningEvaluation").innerHTML,new RegExp(BASE.matched.items[1].name));
+      assert(!h.get("marketScanScreeningEvaluation").innerHTML.includes(`<strong>${BASE.matched.items[0].name}</strong>`));
+      assert.equal(h.get("marketScanScreeningSummaryStatus").textContent,"命中 2/6");
+      const previous=readAppliedScreenContext(h.wrap);
+      commitPage(h,"SOURCE",1,2);
+      assert.equal(screenContextMatches(h.wrap,previous),false,"Page size must invalidate the old explanation without relying on a producer reset");
+      await controller.open();
+      assert.equal(controller.state.loaded,true);
+      assert.deepEqual(calls.map(body=>[body.page,body.page_size]),[[2,1],[1,2]]);
+      assert.equal(h.get("marketScanScreeningSummaryStatus").textContent,"命中 2/6");
+      assert.match(h.get("marketScanScreeningEvaluation").innerHTML,/当前页全部 2 条/);
+      controller.dispose();
+    '''.replace("SOURCE", source))
+
+
+@pytest.mark.parametrize("source", ["standard", "preset"])
+@pytest.mark.parametrize("mutation", [
+    "value=pageEvaluation(2)",
+    "value=pageEvaluation(1,2)",
+    'value.matched.items[0]={...value.matched.items[0],symbol:"600099.SH",code:"600099"};value.matched_explanations[0].symbol="600099.SH"',
+])
+def test_controller_rejects_other_valid_page_size_or_candidate(source: str, mutation: str) -> None:
+    run_node(r'''
+      const h=harness();commitPage(h,"SOURCE",1);
+      const controller=createMarketScanScreeningController({root:h.root,fetcher:async(url)=>{
+        if(!url.endsWith("evaluate")) return responseFor(url);
+        let value=pageEvaluation(1);MUTATION;validateScreenEvaluation(value,RUN.id);return value;
+      }});
+      await controller.open();assert.equal(controller.state.loaded,false);
+      assert.match(h.get("marketScanScreeningEvaluation").innerHTML,/分页或候选顺序与当前榜单不一致/);
+      assert(!h.get("marketScanScreeningEvaluation").innerHTML.includes("data-condition-impact"));
+      controller.dispose();
+    '''.replace("SOURCE", source).replace("MUTATION", mutation))
+
+
+def test_controller_rejects_candidate_order_and_invalidates_changed_displayed_rows() -> None:
+    run_node(r'''
+      const h=harness(), changed=structuredClone(BASE);
+      changed.matched.items.reverse();changed.matched_explanations.reverse();validateScreenEvaluation(changed,RUN.id);
+      const controller=createMarketScanScreeningController({root:h.root,fetcher:async(url)=>url.endsWith("evaluate")?changed:responseFor(url)});
+      await controller.open();assert.equal(controller.state.loaded,false);
+      assert.match(h.get("marketScanScreeningEvaluation").innerHTML,/分页或候选顺序/);
+      const previous=readAppliedScreenContext(h.wrap);
+      h.commit(RUN,QUERY,2,changed.matched);
+      assert.equal(screenContextMatches(h.wrap,previous),false,"Displayed row order is part of explanation ownership");
+      await controller.open();assert.equal(controller.state.loaded,true);controller.dispose();
+    ''')
+
+
+@pytest.mark.parametrize("source", ["standard", "preset"])
+def test_page_switch_aborts_previous_explanation_and_ignores_late_completion(source: str) -> None:
+    run_node(r'''
+      const h=harness(), pending=deferred(), calls=[];commitPage(h,"SOURCE",1);
+      const controller=createMarketScanScreeningController({root:h.root,fetcher:async(url,options)=>{
+        if(!url.endsWith("evaluate")) return responseFor(url);
+        const body=JSON.parse(options.body);calls.push({body,signal:options.signal});
+        return body.page===1?pending.promise:pageEvaluation(2);
+      }});
+      const old=controller.open();await flush();assert.equal(calls.length,1);
+      commitPage(h,"SOURCE",2);assert.equal(calls[0].signal.aborted,true);
+      await controller.open();assert.equal(controller.state.loaded,true);
+      const html=h.get("marketScanScreeningEvaluation").innerHTML;
+      pending.resolve(pageEvaluation(1));await old;
+      assert.equal(h.get("marketScanScreeningEvaluation").innerHTML,html);
+      assert.match(h.get("marketScanScreeningContextLabel").textContent,/第 2 页/);
+      assert.equal(controller.state.loaded,true);controller.dispose();
+    '''.replace("SOURCE", source))

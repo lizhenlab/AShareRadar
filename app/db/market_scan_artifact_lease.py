@@ -138,12 +138,13 @@ def market_scan_artifact_retention_lease(
     database_path: str | Path,
     *,
     allow_missing: bool = False,
+    blocking: bool = True,
 ) -> Iterator[Path]:
     """Hold one re-entrant thread/fcntl lease for a canonical runtime database."""
 
     hint, database, initially_missing = _lease_database_hint(database_path, allow_missing)
     state = _lease_state(database)
-    with state.lock:
+    with _retention_thread_lock(state.lock, blocking=blocking):
         held_database = getattr(_HELD_DATABASE, "path", None)
         if held_database is not None and held_database != database:
             raise MarketScanArtifactLeaseError("同一线程不能嵌套不同运行库的 artifact 租约")
@@ -155,7 +156,7 @@ def market_scan_artifact_retention_lease(
             finally:
                 state.local.depth = depth
             return
-        handle = _acquire_file_lease(database)
+        handle = _acquire_file_lease(database, blocking=blocking)
         try:
             database = _revalidate_acquired_database(hint, database, initially_missing)
         except BaseException:
@@ -172,6 +173,16 @@ def market_scan_artifact_retention_lease(
             finally:
                 _clear_lease_state(state)
                 _release_file_lease(handle)
+
+
+@contextmanager
+def _retention_thread_lock(lock: threading.RLock, *, blocking: bool) -> Iterator[None]:
+    if not lock.acquire(blocking=blocking):
+        raise MarketScanArtifactLeaseError("全市场 artifact 发布/保留租约正在使用")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _clear_lease_state(state: _LeaseState) -> None:
@@ -385,7 +396,7 @@ def require_market_scan_artifact_lease_namespace_current(
         raise MarketScanArtifactLeaseError("artifact sidecar 在租约期间被替换")
 
 
-def _acquire_file_lease(database: Path) -> _FileLease:
+def _acquire_file_lease(database: Path, *, blocking: bool = True) -> _FileLease:
     descriptor: int | None = None
     directory_descriptor: int | None = None
     try:
@@ -396,7 +407,8 @@ def _acquire_file_lease(database: Path) -> _FileLease:
             lock_root,
             os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
-        fcntl.flock(directory_descriptor, fcntl.LOCK_EX)
+        operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        fcntl.flock(directory_descriptor, operation)
         descriptor = os.open(
             lock_name,
             os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -407,7 +419,7 @@ def _acquire_file_lease(database: Path) -> _FileLease:
         path_facts = os.stat(lock_name, dir_fd=directory_descriptor, follow_symlinks=False)
         if not stat.S_ISREG(facts.st_mode) or facts.st_nlink != 1 or (facts.st_dev, facts.st_ino) != (path_facts.st_dev, path_facts.st_ino):
             raise MarketScanArtifactLeaseError("全市场 artifact 租约 sidecar 身份不可信")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        fcntl.flock(descriptor, operation)
         locked_path_facts = os.stat(lock_name, dir_fd=directory_descriptor, follow_symlinks=False)
         if (facts.st_dev, facts.st_ino) != (
             locked_path_facts.st_dev,

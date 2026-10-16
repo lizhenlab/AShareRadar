@@ -86,3 +86,12 @@ def test_cli_does_not_expose_error_payloads(tmp_path, monkeypatch, capsys):
 def test_no_cli_clock_override_can_create_backdated_receipts(tmp_path):
     with pytest.raises(SystemExit):
         cli.main(["--root", str(tmp_path), "--plan-id", "test", "capture", "--as-of", "2020-01-01"])
+
+
+def test_cli_readiness_is_read_only_and_keeps_formal_evidence_unknown(study, capsys):
+    database, root, _clock = study
+    before = {p.name: p.read_bytes() for p in (root / "study").iterdir() if p.is_file()}
+    assert cli.main(["--root", str(root), "--plan-id", "study", "readiness", "--database", str(database[0])]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["read_only"] and result["formal_execution"]["official_execution_admitted"] is False
+    assert before == {p.name: p.read_bytes() for p in (root / "study").iterdir() if p.is_file()}

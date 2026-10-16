@@ -308,6 +308,45 @@ def _tracking_target_dates(signal_date: str, horizon: int) -> tuple[date, ...]:
         return ()
 
 
+def strategy_template_input_checks(
+    conn: sqlite3.Connection, row: sqlite3.Row, result_rows: Sequence[sqlite3.Row], *,
+    as_of: datetime, score_spec_hash: str,
+) -> dict[str, object]:
+    """Diagnose each admission gate independently, using a frozen score identity.
+
+    These checks do not select a portfolio or grant admission. The existing
+    freeze_strategy_template_session contract remains the admission authority.
+    """
+    if not conn.in_transaction:
+        raise ValueError("strategy input checks require a stable read transaction")
+    checks: dict[str, object] = {
+        "frozen_score_contract": {"status": "passed" if row["declared_score_spec_hash"] == score_spec_hash else "failed"},
+        "original_publication_seal": _input_check(lambda: require_publication_market_scan_snapshot(conn, int(row["id"]))),
+        "no_missing_members": {"status": "failed" if row["missing_count"] or any(item["status"] == "missing" for item in result_rows) else "passed"},
+    }
+    dependent = ("frozen_full_market_integrity", "decision_time", "registered_score_contract", "point_in_time_features", "signal_availability")
+    try:
+        run, items = run_from_row(row), [result_from_row(item) for item in result_rows]
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        checks.update({name: {"status": "unknown", "reason": "source_rows_invalid", "error_type": type(exc).__name__} for name in dependent})
+        return checks
+    checks["frozen_full_market_integrity"] = _input_check(lambda: validate_frozen_full_market_snapshot(run, items))
+    checks["decision_time"] = _input_check(lambda: validate_research_decision_time(run, items))
+    checks["registered_score_contract"] = _input_check(lambda: _require_registered_contract(row, result_rows, score_spec_hash))
+    checks["point_in_time_features"] = {**_input_check(lambda: _require_point_in_time_features(run, items)), "scope": "success_rows"}
+    checks["signal_availability"] = _input_check(lambda: _require_signal_availability(
+        run, as_of, latest_expected_daily_kline_date(as_of, allow_auto_refresh=False)))
+    return checks
+
+
+def _input_check(operation: Callable[[], object]) -> dict[str, object]:
+    try:
+        operation()
+    except (MarketScanSnapshotSealError, ValueError, TypeError, KeyError, OverflowError, sqlite3.Error) as exc:
+        return {"status": "failed", "error_type": type(exc).__name__}
+    return {"status": "passed"}
+
+
 def _tracking_session(conn: sqlite3.Connection, row: sqlite3.Row, context: _TrackingContext) -> StrategyTrackingSession:
     frozen = freeze_strategy_template_session(
         conn, row, as_of=context.as_of, horizon=context.horizon, notional_cash_cny=context.notional, templates=context.templates,
@@ -488,4 +527,5 @@ def _selection_outcome_status(positions: Sequence[StrategyTrackingPosition], mis
 __all__ = [
     "MAX_STRATEGY_TRACKING_SESSIONS", "evaluate_strategy_template_tracking",
     "freeze_strategy_template_session", "strategy_template_tracking_contracts",
+    "strategy_template_input_checks",
 ]

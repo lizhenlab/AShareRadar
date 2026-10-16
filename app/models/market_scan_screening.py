@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.models.market_scan_selection import MarketScanSelectionRequest, MarketScanSelectionScope
+
 from datetime import date, datetime
 from typing import Annotated, Literal, Self
 
@@ -315,7 +317,7 @@ class MarketScanScreenMatchedPage(_StrictScreenModel):
         return self
 
 
-class MarketScanScreenEvaluateRequest(_StrictScreenModel):
+class MarketScanScreenEvaluateRequest(MarketScanSelectionRequest, _StrictScreenModel):
     spec: ScreenSpecV2 = Field(default_factory=ScreenSpecV2)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=100, ge=1, le=200)
@@ -324,6 +326,7 @@ class MarketScanScreenEvaluateRequest(_StrictScreenModel):
 
 
 class MarketScanScreenEvaluationV2(_StrictScreenModel):
+    selection_scope: MarketScanSelectionScope | None = None
     schema_version: Literal["market-scan-screen-evaluation-v2"] = (
         "market-scan-screen-evaluation-v2"
     )

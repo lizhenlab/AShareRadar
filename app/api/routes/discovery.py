@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 
 from app.api.deps import get_domain_services
+from app.api.routes.market_scan_selection import selection_guard
+from app.models.market_scan_selection import MarketScanSelectionRequest
 from app.api.errors import no_store_http_exception, run_sync_api_async
 from app.models.discovery import (
     DiscoveryLeaderboardPage,
@@ -131,12 +133,13 @@ async def apply_discovery_preset(
 ) -> DiscoveryLeaderboardPage:
     response.headers["Cache-Control"] = "no-store"
     return await run_sync_api_async(
-        lambda: service.apply_preset(
+        lambda: selection_guard(lambda: service.apply_preset(
             preset_id,
             run_id=payload.run_id,
             page=payload.page,
             page_size=payload.page_size,
-        )
+            selection=MarketScanSelectionRequest(universe=payload.universe, watchlist_digest=payload.watchlist_digest),
+        ))
     )
 
 

@@ -266,7 +266,7 @@ def test_monitoring_recovers_after_partial_runs_failure() -> None:
     _run_node_script(script)
 
 
-def test_failed_monitor_task_keeps_error_without_refreshing_scheduler_panel() -> None:
+def test_unconfirmed_monitor_task_preserves_identity_without_refreshing_scheduler_panel() -> None:
     script = r'''
       import { runMonitorTask } from "./static/js/diagnostics.js";
 
@@ -294,9 +294,10 @@ def test_failed_monitor_task_keeps_error_without_refreshing_scheduler_panel() ->
       };
 
       const result = await runMonitorTask(state, "refresh_quotes");
-      if (result !== false || element("schedulerState").textContent !== "任务执行失败") {
-        throw new Error(`failed task error was not preserved: ${element("schedulerState").textContent}`);
+      if (result !== false || !element("schedulerState").textContent.includes("请求结果未确认")) {
+        throw new Error(`unconfirmed write was incorrectly classified: ${element("schedulerState").textContent}`);
       }
+      if (!state.monitorTaskPending?.requestId) throw new Error("unconfirmed request identity was discarded");
       if (button.disabled) {
         throw new Error("monitor task button did not recover after failure");
       }
@@ -307,7 +308,7 @@ def test_failed_monitor_task_keeps_error_without_refreshing_scheduler_panel() ->
     _run_node_script(script)
 
 
-def test_cancelled_monitor_task_clears_running_state_and_recovers_controls() -> None:
+def test_navigating_away_preserves_submitted_monitor_task_and_receipt() -> None:
     script = r'''
       import { runMonitorTask } from "./static/js/diagnostics.js";
 
@@ -316,26 +317,30 @@ def test_cancelled_monitor_task_clears_running_state_and_recovers_controls() -> 
       const state = { monitorTimer: null };
       const parent = new AbortController();
       let taskSignal;
+      let resolveTask;
       globalThis.document.querySelectorAll = () => [button];
       globalThis.fetch = (url, options = {}) => {
         if (!String(url).startsWith("/api/tasks/run-once")) throw new Error(`cancelled task unexpectedly fetched ${url}`);
         taskSignal = options.signal;
-        return new Promise(() => {});
+        return new Promise((resolve) => { resolveTask = resolve; });
       };
 
       const task = runMonitorTask(state, "refresh_quotes", { signal: parent.signal });
       await waitFor(() => taskSignal, "monitor task signal");
-      if (element("schedulerState").textContent !== "执行中" || !button.disabled) {
+      if (!element("schedulerState").textContent.includes("正在提交") || !button.disabled) {
         throw new Error("monitor task did not enter the running state");
       }
       parent.abort();
+      if (taskSignal.aborted) throw new Error("navigation cancelled ownership of a submitted write");
+      resolveTask(jsonResponse({ ok: true, receipt: {
+        request_id: state.monitorTaskPending.requestId, requested_task: "refresh_quotes",
+        status: "running", messages: [], runs: [],
+      } }));
       const result = await task;
 
-      if (result !== false || !taskSignal.aborted) throw new Error("cancelled monitor request did not stop cleanly");
-      if (element("schedulerState").textContent !== "已取消") {
-        throw new Error(`cancelled monitor task remained running: ${element("schedulerState").textContent}`);
-      }
-      if (state.monitorTaskRunning || button.disabled) throw new Error("cancelled monitor task did not recover controls");
+      if (result !== true || state.monitorTaskPending?.status !== "running") throw new Error("hidden task lost its receipt");
+      if (element("schedulerState").textContent.includes("已取消")) throw new Error("navigation falsely reported server cancellation");
+      if (state.monitorTaskRunning) throw new Error("settled HTTP request retained its submitting flag");
     '''
     _run_node_script(script)
 
@@ -461,7 +466,10 @@ def test_monitoring_refresh_and_explicit_task_keep_one_timer() -> None:
       const state = { monitorTimer: null };
       globalThis.fetch = async (url, options = {}) => {
         const target = String(url);
-        if (target.startsWith("/api/tasks/run-once") && options.method === "POST") return jsonResponse({ ok: true });
+        if (target.startsWith("/api/tasks/run-once") && options.method === "POST") return jsonResponse({ ok: true, receipt: {
+          request_id: new URL(target, "http://localhost").searchParams.get("request_id"), requested_task: "refresh_quotes",
+          status: "completed", messages: [], runs: [],
+        } });
         if (target === "/api/tasks/status") return jsonResponse({ enabled: true, running: true, tasks: [] });
         if (target === "/api/tasks/runs?limit=8" || target === "/api/monitor/events?limit=8") return jsonResponse([]);
         if (target === "/api/data/status") {

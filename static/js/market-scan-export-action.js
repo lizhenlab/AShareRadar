@@ -1,3 +1,4 @@
+import { selectionExportUrl, markSelectionConflict, renderSelection } from "./market-scan-selection.js";
 import { compactErrorMessage } from "./errors.js";
 import {
   exportTimeoutScope,
@@ -16,12 +17,12 @@ export function createMarketScanExportAction(options) {
     options.state.exportBusy = true;
     options.view.renderExportBusy(true, publishedRun);
     options.view.announce(
-      `正在导出批次 #${publishedRun.id} 当前输入筛选条件下的 Excel 榜单，校验及下载可能需要 1–2 分钟。`,
+      `正在导出批次 #${publishedRun.id} 所选范围与导出条件下的 Excel 榜单，校验及下载可能需要 1–2 分钟。`,
       `export:start:${publishedRun.id}`
     );
     let timeout = null;
     try {
-      const url = buildMarketScanExportUrl(publishedRun.id, options.elements);
+      const url = selectionExportUrl(options.elements, publishedRun.id, () => buildMarketScanExportUrl(publishedRun.id, options.elements));
       const read = () => {
         timeout = exportTimeoutScope();
         return readExport(options.exportRequest, url, timeout.signal);
@@ -39,6 +40,7 @@ export function createMarketScanExportAction(options) {
       options.view.announce(`Excel 榜单已导出：${filename}`, `export:success:${publishedRun.id}:${filename}`);
       return filename;
     } catch (error) {
+      markSelectionConflict(options.elements, error);
       const detail = timeout?.didTimeout() ? "请求超时，请稍后重试" : compactErrorMessage(error?.message);
       const message = `导出 Excel 失败：${detail}`;
       options.view.announce(message, `export:error:${publishedRun.id}:${String(error?.message || "")}`);
@@ -47,6 +49,7 @@ export function createMarketScanExportAction(options) {
       timeout?.dispose();
       options.state.exportBusy = false;
       options.view.renderExportBusy(false, options.resultRun());
+      renderSelection(options.elements);
     }
   };
 }

@@ -43,6 +43,7 @@ import { createDiscoveryController } from "./js/discovery.js";
 import { createDiscoveryScreenAlertsController } from "./js/discovery-screen-alerts.js";
 import { createIndividualProbabilityController } from "./js/individual-probability-controller.js";
 import { createFuyaoController } from "./js/fuyao-controller.js";
+import { createWorkspaceMaintenanceController } from "./js/workspace-maintenance.js";
 import { createMarketScanExecutableShadowController } from "./js/market-scan-executable-shadow-controller.js";
 import { compactErrorMessage } from "./js/errors.js";
 import { changeClass, formatNumber } from "./js/format.js";
@@ -61,8 +62,9 @@ import {
 } from "./js/paper-trading.js";
 import { createPrimaryNavigation } from "./js/primary-navigation.js";
 import {
-  renderNotes,
+  renderWorkbenchNotes,
 } from "./js/notes.js";
+import { resetNoteHistory } from "./js/notes-history.js";
 import { disableAlertNotifications, enableAlertNotifications, initializeAlertNotifications } from "./js/notifications.js";
 import { createNotificationNavigation } from "./js/notification-navigation.js";
 import {
@@ -612,6 +614,7 @@ function refreshDiagnosticsPanels(options = {}) {
   return {
     monitoring: refreshMonitoring(options),
     diagnostics: loadSystemDiagnostics(state, { ...options, isCurrent: isDiagnosticsWorkspaceActive }),
+    maintenance: workspaceMaintenanceController.load(),
   };
 }
 
@@ -624,6 +627,7 @@ function syncDiagnosticsWorkspace() {
   state.monitorTimer = null;
   cancelMonitoringRefresh(state);
   state.systemDiagnosticsRequest?.abort();
+  workspaceMaintenanceController.deactivate();
   cancelCachedJsonRequest(SYSTEM_DIAGNOSTICS_ENDPOINT);
   clearAuxiliaryFailure("monitoring");
   state.visibilityRefreshSources.delete("monitoring");
@@ -677,6 +681,7 @@ function isStaleLoad(request) {
 function setActiveSymbol(symbol) {
   notificationNavigation?.cancel();
   state.symbol = normalizeUiSymbol(symbol);
+  resetNoteHistory(state, state.symbol);
   fuyaoController.resetStock(state.symbol);
   renderCurrentAnalysisContext(null);
   stockSearchSurface.closeSuggestions();
@@ -741,7 +746,6 @@ function renderWorkbench(workbench) {
   renderResearch(workbench, state);
   renderAlerts(workbench.alert_rules || []);
   renderAlertEvents(workbench.alert_events || []);
-  renderNotes(workbench.notes || [], state.symbol);
   syncToolsStockContext(analysis);
   state.lastAnalysis = analysis;
   state.lastInsights = workbench.insights;
@@ -904,13 +908,10 @@ function syncResearchActivityWorkbench(workbench, analysis) {
   state.researchActivitySymbol = symbol;
   state.researchActivityAdvice = [];
   state.researchActivityAlerts = Array.isArray(workbench.alert_events) ? [...workbench.alert_events] : [];
-  state.researchActivityNotes = Array.isArray(workbench.notes) ? [...workbench.notes] : [];
+  renderWorkbenchNotes(state, Array.isArray(workbench.notes) ? workbench.notes : [], symbol, noteWarning);
   state.researchActivityAdviceSource = { symbol, phase: "loading", message: "正在读取建议记录" };
   state.researchActivityAlertSource = alertWarning
     ? { symbol, phase: "unavailable", message: alertWarning.message }
-    : { symbol, phase: "ready", message: "" };
-  state.researchActivityNoteSource = noteWarning
-    ? { symbol, phase: "unavailable", message: noteWarning.message }
     : { symbol, phase: "ready", message: "" };
   renderResearchActivityPanel();
 }
@@ -1715,8 +1716,9 @@ function renderPlates(items) {
     : `<div class="leader-row"><strong>暂无行业背景</strong><span>等待本地调度器刷新。</span></div>`;
 }
 
-function handleWatchlistItemsChanged() {
+function handleWatchlistItemsChanged(payload) {
   quoteStreamController.reconcile();
+  marketScanController.notifyWatchlistChanged?.(payload);
 }
 
 function handleWatchlistReadSuccess() {
@@ -2254,6 +2256,7 @@ const marketScanExecutableShadowController = createMarketScanExecutableShadowCon
 });
 const individualProbabilityController = createIndividualProbabilityController();
 const fuyaoController = createFuyaoController({ getSymbol: () => state.symbol });
+const workspaceMaintenanceController = createWorkspaceMaintenanceController({ isVisible: isDiagnosticsWorkspaceActive });
 fuyaoController.bind();
 
 const discoveryScreenAlertsController = createDiscoveryScreenAlertsController();

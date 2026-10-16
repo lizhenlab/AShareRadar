@@ -1,3 +1,4 @@
+import { querySelection, requireSelectionBinding } from "./market-scan-selection.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS } from "./api.js";
 import {
   isPublishedMarketScanRun,
@@ -63,6 +64,7 @@ async function readPublishedPage({ options }, published, queryOptions, sequence)
     const payload = await options.request(query, requestOptions(options));
     requireCurrentRequest(options, sequence);
     const page = validateResultPage(payload, published.id);
+    requireSelectionBinding(page, querySelection(query));
     requireSamePublishedRun(page.run, published);
     return { page, query };
   } catch (error) {

@@ -52,12 +52,11 @@ function evidence(run) {
   return Object.fromEntries(Object.keys(BASE.evidence).map((key) => [key, key === "run_id" ? run.id : run[key]]));
 }
 
-export function impactEvaluation(run, request) {
+export function impactEvaluation(run, request, rows = impactRows(run)) {
   const spec = structuredClone(request.spec);
   spec.ranges = Object.fromEntries(Object.keys(BASE.spec.ranges).map((field) => [field,
     spec.ranges[field] ? { min: null, max: null, ...spec.ranges[field] } : null]));
   const rules = conditions(spec);
-  const rows = impactRows(run);
   const failures = rows.map((row) => rules.filter((rule) => fails(row, rule)));
   const matched = rows.filter((_, index) => failures[index].length === 0);
   let remaining = rows;
@@ -82,6 +81,7 @@ export function impactEvaluation(run, request) {
       label: LABELS[rule.code], missing: row[rule.field] == null })) }] : []).slice(0, request.near_miss_limit);
   // These browser fixtures exercise opaque digest shape and full request binding.
   // Backend contract tests cover canonical Python serialization and hash integrity.
+  const matchedPage = itemPage(matched, request.page, request.page_size);
   return { schema_version: "market-scan-screen-evaluation-v2", evidence: evidence(run), spec, spec_digest: "b".repeat(64),
     population_count: rows.length, matched_count: matched.length, funnel, condition_impacts,
     exclusion_reasons: rules.flatMap((rule) => {
@@ -89,28 +89,28 @@ export function impactEvaluation(run, request) {
       return excluded.length ? [{ code: rule.code, label: LABELS[rule.code], count: excluded.length,
         missing_count: excluded.filter((row) => row[rule.field] == null).length }] : [];
     }),
-    matched: { items: matched, total: matched.length, page: 1, page_size: request.page_size,
-      page_count: matched.length ? 1 : 0 },
-    matched_explanations: matched.map((row) => ({ symbol: row.symbol, passed_conditions: rules.map((rule) => rule.code) })),
+    matched: matchedPage,
+    matched_explanations: matchedPage.items.map((row) => ({ symbol: row.symbol, passed_conditions: rules.map((rule) => rule.code) })),
     near_misses, canonical_digest: "c".repeat(64) };
 }
 
-function resultPayload(run, query) {
+function resultPayload(run, query, rows = impactRows(run)) {
   const ranges = {};
   for (const [parameter, field, bound] of [["min_confidence", "confidence", "min"], ["max_risk", "risk", "max"], ["min_score", "score", "min"]]) {
     if (query.has(parameter)) ranges[field] = { [bound]: Number(query.get(parameter)) };
   }
   const spec = impactSpec(ranges);
-  const items = impactRows(run).filter((row) => conditions(spec).every((condition) => !fails(row, condition)));
-  return { run, items, total: items.length, page: 1, page_size: 100, page_count: items.length ? 1 : 0, probability_research: null };
+  const items = rows.filter((row) => conditions(spec).every((condition) => !fails(row, condition)));
+  return { run, ...itemPage(items, Number(query.get("page") || 1), Number(query.get("page_size") || 100)), probability_research: null };
 }
 
 function breadth(run) {
-  return { schema_version: "market-scan-breadth-v1", evidence: evidence(run), population: { total: 6, by_status: { success: 6 }, by_market: { SH: 6 } },
-    score: { present_count: 6, missing_count: 0, min: 90, max: 90, mean: 90,
+  const total = run.total_count;
+  return { schema_version: "market-scan-breadth-v1", evidence: evidence(run), population: { total, by_status: { success: total }, by_market: { SH: total } },
+    score: { present_count: total, missing_count: 0, min: 90, max: 90, mean: 90,
       percentiles: { p10: 90, p25: 90, p50: 90, p75: 90, p90: 90 },
-      bins: Array.from({ length: 10 }, (_, index) => ({ lower: index * 10, upper: (index + 1) * 10, count: index === 9 ? 6 : 0 })) },
-    change: { advancing: 6, flat: 0, declining: 0, missing: 0 }, industries: [{ industry: "银行", count: 6, score_present_count: 6, average_score: 90 }],
+      bins: Array.from({ length: 10 }, (_, index) => ({ lower: index * 10, upper: (index + 1) * 10, count: index === 9 ? total : 0 })) },
+    change: { advancing: total, flat: 0, declining: 0, missing: 0 }, industries: [{ industry: "银行", count: total, score_present_count: total, average_score: 90 }],
     canonical_digest: "d".repeat(64) };
 }
 
@@ -118,7 +118,7 @@ function delta(run) {
   const current = evidence(run); delete current.quote_date;
   return { schema_version: "market-scan-delta-v1", status: "unavailable", unavailable_reason: "previous_same_cohort_not_found",
     current, previous: null, cohort: { mode: run.mode, scope: run.scope, rule_version: run.rule_version },
-    summary: { previous_present_count: 0, current_present_count: 6, compared_symbol_count: 0,
+    summary: { previous_present_count: 0, current_present_count: run.total_count, compared_symbol_count: 0,
       evidence_detail_scope: "top100_union", evidence_change_reason_counts: [] },
     top_buckets: [], rank_score_changes: [], exposure_changes: [], evidence_changes: [], canonical_digest: "e".repeat(64) };
 }
@@ -130,7 +130,7 @@ function presets() {
 }
 
 async function evaluationResponse(state, body) {
-  const payload = impactEvaluation(structuredClone(state.run), body);
+  const payload = impactEvaluation(structuredClone(state.run), body, fixtureRows(state));
   state.evaluations.push(structuredClone(body));
   if (state.mutateNext) { state.mutateNext(payload); state.mutateNext = null; }
   if (state.holdNext) {
@@ -141,8 +141,24 @@ async function evaluationResponse(state, body) {
   return { payload };
 }
 
-export async function routeImpactFixture(page) {
-  const state = { run: impactRun(), calls: [], evaluations: [], returned: [], results: [], applications: [],
+function itemPage(items, page, pageSize) {
+  const start = (page - 1) * pageSize;
+  return { items: items.slice(start, start + pageSize), total: items.length, page, page_size: pageSize, page_count: Math.ceil(items.length / pageSize) };
+}
+
+function fixtureRows(state) {
+  const rows = impactRows(state.run);
+  if (!state.candidateCount) return rows;
+  return Array.from({ length: state.candidateCount }, (_, index) => {
+    const code = String(600000 + index);
+    return { ...structuredClone(rows[0]), code, symbol: `${code}.SH`, rank: index + 1, name: `分页候选${String(index + 1).padStart(4, "0")}` };
+  });
+}
+
+export async function routeImpactFixture(page, { candidateCount = 0 } = {}) {
+  const total = candidateCount || 6;
+  const state = { run: impactRun({ total_count: total, processed_count: total, success_count: total }), candidateCount,
+    calls: [], evaluations: [], returned: [], results: [], applications: [],
     mutateNext: null, holdNext: false, releaseHeld: null, holdResultNext: false, releaseHeldResult: null,
     returnedResults: [], heldResultRequest: null, holdPresetNext: false, releaseHeldPreset: null,
     heldPresetRequest: null, returnedPresets: [] };
@@ -155,7 +171,7 @@ export async function routeImpactFixture(page) {
     if (path === "/api/market-scans") return { payload: { items: [state.run], total: 1, page: 1, page_size: 30, page_count: 1 } };
     if (path === "/api/market-scans/42/results") {
       state.results.push(Object.fromEntries(url.searchParams));
-      const payload = resultPayload(state.run, url.searchParams);
+      const payload = resultPayload(state.run, url.searchParams, fixtureRows(state));
       if (state.holdResultNext) {
         state.holdResultNext = false;
         state.heldResultRequest = request;
@@ -171,11 +187,10 @@ export async function routeImpactFixture(page) {
     if (/^\/api\/discovery\/presets\/[78]\/apply$/.test(path)) {
       const body = request.postDataJSON(); const preset = saved.find((entry) => path.includes(`/${entry.id}/`));
       state.applications.push({ body, preset });
-      const items = impactRows(state.run).filter((row) => conditions(impactSpec(preset.criteria)).every((rule) => !fails(row, rule)))
+      const items = fixtureRows(state).filter((row) => conditions(impactSpec(preset.criteria)).every((rule) => !fails(row, rule)))
         .map((row, index) => ({ ...row, position: index + 1, source_rank: row.rank, quality: row.data_quality_score,
           trend: row.trend_score, change: row.change_pct, turnover: row.turnover_rate }));
-      const payload = { preset, run_id: state.run.id, rule_version: state.run.rule_version, items, total: items.length,
-        page: body.page, page_size: body.page_size, page_count: items.length ? 1 : 0 };
+      const payload = { preset, run_id: state.run.id, rule_version: state.run.rule_version, ...itemPage(items, body.page, body.page_size) };
       if (state.holdPresetNext) {
         state.holdPresetNext = false; state.heldPresetRequest = request;
         await new Promise((resolve) => { state.releaseHeldPreset = resolve; });

@@ -11,6 +11,7 @@ from app.config import Settings
 from app.models.system import HealthProbe
 from app.services.datahub import DataHub
 from app.utils.audit_time import audit_now_text
+from app.utils.database_identity import database_identity
 
 
 router = APIRouter()
@@ -69,7 +70,7 @@ async def readiness(
         status="ready",
         app=settings.app_name,
         checked_at=audit_now_text(),
-        checks={"container": "ready", "database": "ready", "runtime": _runtime_role(container)},
+        checks=_readiness_checks(datahub, container),
     )
 
 
@@ -78,3 +79,11 @@ def _runtime_role(container: AppContainer) -> str:
     if coordinator is None:
         return "single"
     return "leader" if coordinator.leadership.is_leader else "standby"
+
+
+def _readiness_checks(datahub: DataHub, container: AppContainer) -> dict[str, str]:
+    checks = {"container": "ready", "database": "ready", "runtime": _runtime_role(container)}
+    path = getattr(datahub.cache, "path", None)
+    if path is not None:
+        checks["database_identity"] = database_identity(path)
+    return checks

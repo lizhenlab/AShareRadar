@@ -45,6 +45,12 @@ PYTHONNOUSERSITE=1 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --p
 
 [三策略前瞻采集](docs/STRATEGY_PROSPECTIVE_COLLECTION.md)提供`init/status/capture/evidence/evaluate`离线流程：先冻结未来日期、模板和源码，按时保留完整扫描，再抽取已有扶摇研究资料并追加独立批次结果。缺失与迟到不补成按时样本；当前仍需正式执行证据、成熟样本及后续账户验证，不自动晋级策略。
 
+[工作区容量与备份范围](docs/WORKSPACE_STORAGE.md)提供显式目录清单驱动的只读CLI，可共同统计主数据库、扶摇、研究资料与封存运行目录，报告遗漏、链接和预算不足；预览不创建备份。
+
+[工作区维护面板](docs/WORKSPACE_MAINTENANCE.md)在系统维护页展示已配置范围的容量、备份覆盖与历史验证记录、前瞻采集巡检。容量通过按钮检查；历史回执不表示当前归档已重新验证或恢复后可直接运行。离线归档CLI支持`--progress`阶段进度，并在复制及源复查完成后释放源租约，目标最终验证通过后才发布完成清单。
+
+[工作区离线归档](docs/WORKSPACE_BACKUP.md)提供独立的`create/verify/restore`命令：声明全部SQLite与相关根，停写后创建带摘要的归档，并恢复至全新目录。校验不依赖原源路径，也不会执行封存Python；恢复后仍须处理原绝对路径绑定及运行资格。
+
 [免费公开执行事实](docs/PUBLIC_EXECUTION_SOURCES.md)接入BaoStock按日批量行情及沪深交易所停复牌记录，保存原始响应、实际采集时间和摘要。日内更新后采集、按日复用、限制预算与超时，供前瞻证据报告逐只核验；公开资料仍不等于可成交或正式收益证据。
 
 正式评分、展示百分位和研究概率是不同指标。研究产物不会自动取得排序、筛选或发布权限；正式来源、完整性、样本外评估及独立授权必须分别通过校验。
@@ -56,13 +62,15 @@ PYTHONNOUSERSITE=1 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --p
 ```bash
 .venv/bin/python -m pip install --require-hashes -r requirements-dev-lock.txt
 npm ci
-npm run check
+npm run check:static
 .venv/bin/python -m ruff check app tests tools
 .venv/bin/python -m mypy
-.venv/bin/python -m pytest -q -p no:cacheprovider --cov=app --cov=tools
+npm run test:coverage
 ```
 
-完整交付还需生成文档漂移检查、覆盖率门槛和浏览器回归，见[测试计划](docs/TEST_PLAN.md)。单元测试使用临时数据库和替代数据源，不依赖真实账户或在线行情。
+上述流程只执行一次带覆盖率的完整 Python 测试。`npm run check:static`只运行环境、编译/Pyflakes、JavaScript语法及仓库一致性检查；`npm run check`保持“静态检查加完整pytest”的原语义，不要再把它作为覆盖率流程的前置步骤。日常用`npm test -- tests/test_具体领域.py`运行已确认受影响的领域；完整交付的文档漂移、覆盖率及浏览器要求见[测试计划](docs/TEST_PLAN.md)。单元测试使用临时数据库和替代数据源，不依赖真实账户或在线行情。
+
+`npm run test:integration`以真实浏览器请求模块连接临时FastAPI和SQLite，验证预警、笔记写入及重启后的持久化；供应商边界使用固定夹具，不请求真实行情。需先安装Playwright Chromium。
 
 `npm run test:e2e` 会核对完整测试清单，并把 WebKit 分为有界的独立进程批次；所有项目和断言保持不变，批次报告合并后交付。此方式规避当前测试环境中连续创建浏览器上下文导致的导航故障，不自动重试失败或延长超时。
 

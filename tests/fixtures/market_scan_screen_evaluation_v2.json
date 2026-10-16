@@ -1,4 +1,5 @@
 {
+  "selection_scope": null,
   "schema_version": "market-scan-screen-evaluation-v2",
   "evidence": {
     "run_id": 41,
@@ -489,5 +490,5 @@
       ]
     }
   ],
-  "canonical_digest": "854d19efaded7537714b5731972b709d9194b63979dda4250523459c4ecdf841"
+  "canonical_digest": "57fb162e817a308200844cadf716659848569c9ea4fddd0f67029d078e202a14"
 }

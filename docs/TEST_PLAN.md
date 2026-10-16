@@ -27,23 +27,25 @@ $PYTHON -m pip install --require-hashes -r requirements-dev-lock.txt
 npm ci
 npm ls --depth=0
 npx --no-install playwright --version
-$PYTHON tools/runtime_contract.py
 $PYTHON -m pip check
 $PYTHON -m ruff check app tests tools
 $PYTHON -m mypy
-npm run check:py
-npm run check:js
-$PYTHON tools/check_repository.py
+npm run check:static
 $PYTHON tools/api_inventory.py --check
 $PYTHON tools/architecture_inventory.py --check
-$PYTHON -m pytest -q -p no:cacheprovider --cov=app --cov=tools --cov-report=term-missing
+npm run test:coverage
 npx --no-install playwright install chromium firefox webkit
 npm run test:e2e
+npm run test:integration
 ```
 
 Python `app/` 与 `tools/` 的分支和行综合覆盖率门槛为 90%；JavaScript 不计入该数字，使用独立语法、Node行为与浏览器回归。Python 生产函数不超过 60 行、12 个 AST 分支点；前端生产 JavaScript 函数严格少于 60 行、20 个分支点，入口与 E2E 文件另受逐文件增长预算约束。类型显式清单、依赖方向、导入环、文档链接和参考文档漂移均受检查。`npm run check` 聚合运行环境、编译/Pyflakes、JS 语法、仓库一致性与全量 pytest；交付仍须单独执行 Mypy、Ruff、覆盖率及浏览器项目。
 
+日常迭代先运行受影响领域的测试及相关静态检查；例如`npm test -- tests/test_workspace_backup.py tests/test_workspace_backup_cli.py`，应补上具体改动涉及的其他模块。`npm run check:static`不运行pytest；`npm run test:coverage`执行一次全量覆盖率检查，并沿用原90%门槛。上面的命令是完整交付入口，不需要在每次局部修改后全部重跑。执行该完整流程时，不要额外先运行含全量pytest的`npm run check`。局部测试不宣称全仓覆盖率通过；跨域、共享基础设施或影响范围不明确的变更仍回到完整验收。当前尚无可靠的`fast/unit/integration` pytest分层标记；具体耗时、重复工作与整合建议见[测试套件评估](TEST_SUITE_REVIEW.md)。
+
 CI 还运行 Shanghai 时区回归、Node 24 smoke 与安全工作流。锁审计、npm audit、历史秘密扫描及可复现 SBOM 命令见[运行手册](OPERATIONS.md)。在线 provider canary 为独立诊断，不作为离线通过的依据。
+
+`test:integration`独立使用真实Chromium、生产`api.js`请求模块、FastAPI及临时SQLite。只有供应商边界替换为固定股票夹具，真实预警/笔记写入、回读及服务重启后的持久化均需一致；手动监控请求关联真实运行记录，重启后以相同请求身份重试不得重复执行；维护面板读取真实配置并检查临时数据库容量。服务和浏览器拒绝外连，临时服务退出后清理自有目录。该测试验证浏览器传输和真实后端衔接，不代替表单交互的mock浏览器用例；使用已有Python环境及Playwright Chromium，无新增依赖。CI在macOS `quality`作业复用已安装的开发依赖锁和npm依赖，安装Chromium后执行同一命令；Ubuntu `browser`作业继续运行四个浏览器测试项目的mock E2E。当前Python锁包含按平台解析的AkShare依赖，不作为Linux环境的完整安装锁。
 
 ## 3. 当前测试索引
 
@@ -58,6 +60,7 @@ The current test suite is split by domain:
 - `tests/test_advice_review_window_contract.py`
 - `tests/test_advice_reviews.py`
 - `tests/test_akshare_stock_metadata.py`
+- `tests/test_alert_create_transactions.py`
 - `tests/test_alert_notification_feed.py`
 - `tests/test_alert_rule_mutation_transactions.py`
 - `tests/test_alert_stream_persistence.py`
@@ -174,9 +177,12 @@ The current test suite is split by domain:
 - `tests/test_frontend_market_scan_history_pagination.py`
 - `tests/test_frontend_market_scan_reliability.py`
 - `tests/test_frontend_market_scan_screening.py`
+- `tests/test_frontend_market_scan_selection.py`
+- `tests/test_frontend_monitor_task_requests.py`
 - `tests/test_frontend_note_commit_recovery.py`
 - `tests/test_frontend_note_revision.py`
 - `tests/test_frontend_notes_alerts_requests.py`
+- `tests/test_frontend_notes_history.py`
 - `tests/test_frontend_notification_navigation.py`
 - `tests/test_frontend_notification_request_ownership.py`
 - `tests/test_frontend_notifications.py`
@@ -209,6 +215,7 @@ The current test suite is split by domain:
 - `tests/test_frontend_watchlist_queue_view.py`
 - `tests/test_frontend_watchlist_requests.py`
 - `tests/test_frontend_workbench_contracts.py`
+- `tests/test_frontend_workspace_maintenance.py`
 - `tests/test_frontend_workspace_preferences.py`
 - `tests/test_frontend_workspace_request_ownership.py`
 - `tests/test_futu_provider_modules.py`
@@ -267,9 +274,9 @@ The current test suite is split by domain:
 - `tests/test_market_scan_cohort_feedback.py`
 - `tests/test_market_scan_cohort_feedback_cli.py`
 - `tests/test_market_scan_comparison.py`
-- `tests/test_market_scan_condition_impacts.py`
 - `tests/test_market_scan_completed_snapshot_time.py`
 - `tests/test_market_scan_completed_snapshot_trend.py`
+- `tests/test_market_scan_condition_impacts.py`
 - `tests/test_market_scan_delayed_feedback.py`
 - `tests/test_market_scan_delayed_feedback_cli.py`
 - `tests/test_market_scan_delta.py`
@@ -373,6 +380,8 @@ The current test suite is split by domain:
 - `tests/test_market_scan_screen_alert.py`
 - `tests/test_market_scan_screen_alert_history.py`
 - `tests/test_market_scan_screening.py`
+- `tests/test_market_scan_selection.py`
+- `tests/test_market_scan_selection_export.py`
 - `tests/test_market_scan_sensitivity_cli.py`
 - `tests/test_market_scan_shadow_scoring.py`
 - `tests/test_market_scan_skip_contract.py`
@@ -481,6 +490,7 @@ The current test suite is split by domain:
 - `tests/test_scheduler_recovery_admission.py`
 - `tests/test_scheduler_stock_pool_task.py`
 - `tests/test_scheduler_structure.py`
+- `tests/test_scheduler_task_requests.py`
 - `tests/test_scheduler_tick_isolation.py`
 - `tests/test_scheduler_windows.py`
 - `tests/test_scheduler_worker_ownership.py`
@@ -499,6 +509,7 @@ The current test suite is split by domain:
 - `tests/test_stock_event_summary.py`
 - `tests/test_stock_lhb_modules.py`
 - `tests/test_stock_lookup_modules.py`
+- `tests/test_stock_note_history.py`
 - `tests/test_stock_note_revision_contract.py`
 - `tests/test_stock_overview_aggregation_contract.py`
 - `tests/test_stock_overview_modules.py`
@@ -518,8 +529,14 @@ The current test suite is split by domain:
 - `tests/test_strategy_prospective_cli.py`
 - `tests/test_strategy_prospective_collection.py`
 - `tests/test_strategy_prospective_evidence.py`
+- `tests/test_strategy_prospective_health.py`
+- `tests/test_strategy_prospective_health_inspection.py`
 - `tests/test_strategy_prospective_plan.py`
+- `tests/test_strategy_prospective_readiness.py`
 - `tests/test_strategy_prospective_replay.py`
+- `tests/test_strategy_prospective_runner.py`
+- `tests/test_strategy_prospective_runner_health_cli.py`
+- `tests/test_strategy_prospective_runtime.py`
 - `tests/test_strategy_quant_metrics.py`
 - `tests/test_strategy_schedule_claim_admission.py`
 - `tests/test_strategy_schedule_mutation_admission.py`
@@ -550,8 +567,19 @@ The current test suite is split by domain:
 - `tests/test_workbench_admission.py`
 - `tests/test_workbench_context_cache_modules.py`
 - `tests/test_workbench_pipeline_modules.py`
+- `tests/test_workspace_backup.py`
+- `tests/test_workspace_backup_cli.py`
+- `tests/test_workspace_backup_domains.py`
+- `tests/test_workspace_backup_io.py`
+- `tests/test_workspace_backup_progress.py`
+- `tests/test_workspace_backup_sqlite.py`
+- `tests/test_workspace_maintenance.py`
+- `tests/test_workspace_storage.py`
+- `tests/test_workspace_storage_cli.py`
 
 ## 4. 浏览器与操作验收
+
+`tests/e2e/note-history.spec.js`通过真实页面验证首次50条不产生额外读取、显式历史分页、在第二页保存后保留页码与范围、409后再遇503仍要求刷新，以及切换股票时迟到响应隔离。`tests/e2e/market-scan-condition-impact.spec.js`补充第二页解释的页码/页大小/股票顺序绑定；页码、结果行或身份不符时拒绝展示。所有项目的实际结果在本轮验收记录中列明。
 
 `tests/e2e/workspace-loading.spec.js` 验证系统/自选偏好恢复的请求范围、重新打开成功研究股票、失败选择不覆盖历史及清空后回到默认。`tests/e2e/market-scan-probability.spec.js` 验证高级研究默认收起、键盘展开及再次折叠后保留期间和证据；`tests/e2e/layout-regression.spec.js` 检查手机扫描控制与三个股票操作按钮完整可见。
 
@@ -604,6 +632,9 @@ The current test suite is split by domain:
 | Open system data management | 2 Fuyao local GETs; 0 cleanup-preview requests; first entering the default diagnostics subpage may start 4 GETs that are cancelled on leaving |
 | Check eligible cleanup data | 1 explicit preview GET; execution obtains a fresh preview before any cleanup POST |
 | Daily chart range switch | 0 |
+| Initial workbench notes | 0 extra requests; reuse up to 50 notes from the workbench |
+| Open note history, refresh or turn a page | 1 explicit history GET; subsequent page reads bind the collection snapshot |
+| Refresh note history after a confirmed mutation | 1 history GET for the current page; at most 1 additional GET if the last page disappeared |
 | Each new minute interval | 1 |
 | Repeated active minute interval | 0 |
 | Complete valid 6-digit input | 0 stock-search requests |
@@ -664,6 +695,84 @@ The current test suite is split by domain:
 预算按实际流量和当前测试维护；跨页面副作用、重复监听器和轮询重入必须有行为回归，不能只检查代码字符串。
 
 ## 6. 当前验收结果
+
+### 手动任务回执、备份租约、维护面板与自选范围（2026-10-16）
+
+手动监控请求以UUID持久记录实际运行结果，切页、超时和重启后继续核对同一请求；工作区备份完成源复查后释放源租约，再校验目标，提供安全进度与验证时间；系统维护显示显式配置的容量、备份和巡检记录；冻结榜单支持当前自选范围，分页、解释与导出绑定同一成员摘要，保存方案导出保留完整筛选合同和冻结评分。超过一万历史自选成员的读取不再静默截断。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| Python完整回归与修复 | 完整回归一次：12,125项通过、6项失败、另57个子测试通过，耗时1,012.83秒。失败为4项旧参数/样例合同断言和2项API文档参数遗漏；最小修正后8个相关模块222项通过，耗时53.43秒。按JUnit身份合并，12,131项均有通过记录，补测不重复累计 |
+| 覆盖率 | 完整回归91.78%；最终91.76%，达到90%门槛。完整运行期间生产源码未变；之后仅整理一个路由模块的公开参数声明，原校验不变。保留原覆盖文件，复制后清除该模块旧行/分支，再由定向回归重新采集；其他未变模块保留完整回归数据，不将错位行号合并 |
+| 浏览器 | Chromium桌面/手机、Firefox、WebKit的受影响矩阵及补测按身份合并：134项通过，18项原有设备条件跳过，无未解决失败；旧无障碍提示数量断言修正后4项目通过，更新筛选样例后的60项通过，不重复累计 |
+| 真实后端集成 | 真实Chromium、请求模块、FastAPI和临时SQLite贯通：预警/笔记持久化、手动任务真实回执、重启后相同UUID不重复执行、维护配置和容量接口通过；外连被禁止 |
+| 时区与工程检查 | Shanghai专项117项及4个子测试通过；495文件Mypy、Ruff、209份JS语法、编译/Pyflakes、仓库一致性、API/函数清单和差异检查通过，既有预算未放宽 |
+| 本机上线 | 升级前6,094,721,024字节主库快照及独立验证通过；旧进程完全退出后启动新版，约14.14秒恢复ready/leader。主库身份、原自选/预警/笔记数量一致，两张请求表存在，新维护接口和无回执404/no-store正常；核对时扶摇当日请求数仍为0 |
+
+验收冻结清单包含1,391份源码、测试及配置；本轮开始前的1,397份既有文件均保留。生产维护配置沿用已确认的34个范围和2份历史归档记录；旧回执没有验证时间时明确显示未记录，不推算时间；尚无已确认的巡检实例，保持未配置，不据此宣称研究可运行。升级备份不覆盖原主库或旧归档，未手动启动生产采集、扫描或研究任务。
+
+原始完整回归、补测JUnit、覆盖数据、浏览器去重身份和上线核对证据位于本机`/tmp/ashare-four-improvements-20261016/`；升级备份及服务日志在`data/local-backups/upgrade-four-improvements-20261016-133713/`。操作边界见[工作区维护](WORKSPACE_MAINTENANCE.md)、[工作区备份](WORKSPACE_BACKUP.md)和[运行手册](OPERATIONS.md)。
+
+### 测试入口与夹具优化（2026-10-16）
+
+新增`check:static`与`test:coverage`，避免完整验收路径重复执行全量pytest。工具清单共享模块内真实扫描，备份CLI减少重复创建子进程，大规模快照只在夹具准备时缓存重复纯计算；全部原测试场景和断言保留。CI新增同工作流、事件类型、ref的过时运行取消，触发范围及门槛不变。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| 受影响测试 | 去重后373项通过：备份307、快照49（慢单例与其余48项分开运行）、工具清单14、CI/依赖配置3 |
+| 执行成本 | 串行同条件：工具清单18.32→8.16秒，备份CLI18.113→13.720秒；带覆盖率的大规模单例103.89→98.02秒，仍保留5,382行及真实读取门禁；不据单次局部测量推算全量耗时 |
+| 工程检查 | 新静态入口、Ruff、仓库合同、函数清单漂移、diff通过；npm参数及退出码探针、CI YAML解析与分组复核通过 |
+| 保留范围 | 全套仅收集核对12,036个测试身份，与历史完整JUnit完全相同；754份生产源码摘要未变，90%门槛未变 |
+| 验证边界 | 本轮未重跑Python全量或浏览器矩阵，未产生新的全仓覆盖率结论；未操作生产数据 |
+
+详细实现、收益范围和原始证据位置见[测试套件整合评估](TEST_SUITE_REVIEW.md)。下方保留此前功能交付的独立完整验收记录。
+
+### 离线工作区归档、独立验证与新目录恢复（2026-10-15）
+
+本轮新增显式范围的`create/verify/restore`。全部SQLite须声明并恰好指定一个主库；人工停写确认不冒充自动证明，已知锁与逐库写保留不授予跨域一致性资格。原源目录移除后仍能验证和恢复；仅主库副本旋转预警流，旁库保持原字节。领域结论重新计算，归档验证末尾复查成员树；重封清单、晚替换、增删文件和未声明数据库不能伪造通过。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| 新增专项 | 307项通过：完整流程50、I/O84、SQLite40、领域绑定74、真实CLI59；使用临时数据，包含取消、磁盘错误、预算、链接/FIFO、目的目录保护、外部摘要固定和错误脱敏 |
+| 工程检查 | Ruff、485文件Mypy、编译/Pyflakes、202份JS语法、运行环境与依赖、仓库导入/链接和参考索引检查通过；另43项架构、异常、类型与函数规模检查通过 |
+| 全量及覆盖率 | 一次执行12,036项及57个子测试全部通过，0失败、0跳过，用时1,088.19秒；app/tools共90,676条语句、33,696个分支，综合91.77%，达到90%门槛；本轮独立覆盖文件未合并历史数据 |
+| 运行边界 | 未停止生产服务、创建生产备份、执行生产恢复、调用真实供应商、改写旧冻结研究或提交/推送；前端本轮未改，未重复运行上一轮浏览器矩阵 |
+
+冻结验收期间1,371个源码、测试及配置文件摘要保持不变；本轮开始前的1,396个已有文件均保留，无既有文件删除。`cross_domain_consistency_verified=false`、`resume_eligible=false`始终保留，数据归档验证不代表恢复后的环境与控制绑定可直接运行。用法见[工作区备份](WORKSPACE_BACKUP.md)。
+
+### 前瞻健康诊断与备份准备（2026-10-15）
+
+本轮交付来源新鲜度及明确待满足条件、runner独立健康记录与离线检查、显式目录清单的只读容量统计和备份范围预览。来源完整性不再替代新鲜度；当前工作区业务合同不用于重判旧封存计划；重试开始不会提前清除未解决故障。容量工具检测路径替换和重复inode元数据冲突，明确报告排除、预算及部分结果。
+
+| 范围 | 实际结果与边界 |
+| --- | --- |
+| Python全量 | 一次执行11,729项通过，另57个子测试通过，0失败、0跳过，耗时1030.61秒；JUnit包含子测试共11,786条记录，无补测合并 |
+| 覆盖率 | app/tools共89,123条语句、33,020个分支，综合91.77%，通过90%门槛；使用本轮独立覆盖文件，未合并历史数据 |
+| 故障与竞态 | 健康失联、时钟倒退、故障恢复、错误runtime摘要先于目标探针拒绝、旧合同隔离、只读检查均有回归；容量祖先排除、硬链接冲突、根路径替换、预算与CLI失败通过测试及独立临时探针复核 |
+| 工程检查 | Ruff、477文件Mypy、编译/Pyflakes、202份JS语法、运行环境及依赖、仓库导入/链接、API/函数索引和diff检查通过；另43项架构、异常、类型及函数预算检查通过，无门槛放宽 |
+| 前端 | 本轮没有前端代码改动，未重跑浏览器矩阵或真实后端浏览器集成；上一轮结果单独保留在下节，不计入本轮执行 |
+| 运行边界 | 使用临时数据库、目录及固定时钟验证；未启动真实runner、登记未来计划、重启本地服务、发起真实供应商请求或改写旧封存目录；未创建整套备份或执行恢复，未提交/推送 |
+
+验收期间1,202个源码及测试文件摘要不变。原有工作在本轮开始前保存源码快照，无既有文件删除。新增健康功能需由新准备的受检副本使用，旧runner缺少健康记录时不会被推断为健康。新容量入口只覆盖显式根和默认排除策略下的观察结果，不自动发现数据库引用，不能代替一致备份。
+
+本机结果为`/tmp/ashare-ops-20261015-acceptance.json`、`/tmp/ashare-ops-20261015-pytest.xml`和`/tmp/ashare-ops-20261015-coverage.json`。这些临时证据不是新检出环境的复验前置条件，命令见第2节。使用边界见[前瞻采集](STRATEGY_PROSPECTIVE_COLLECTION.md)与[容量清单](WORKSPACE_STORAGE.md)。
+
+### 预警事务、筛选分页与笔记历史（2026-10-15）
+
+本轮完成规则创建及触发事件的事务内回读、冻结筛选解释与当前页的身份绑定、50条普通笔记与显式历史分页，并新增浏览器生产请求模块连接真实临时后端的集成入口。前瞻恢复、完整备份及容量统计交付实施设计，未启动新计划或真实采集。
+
+| 范围 | 实际结果与边界 |
+| --- | --- |
+| Python | 全量11,576项首次执行11,573通过、3项文档/清单失败，另57个子测试通过，耗时1125.67秒。补齐新增JS模块清单、两项内部环境变量文档并排序Mypy文件后，三个完整模块补跑47+46项全部通过；按JUnit身份合并，最终11,576项均有通过记录，不累计重复补测 |
+| 覆盖率 | 本轮全量app/tools共88,418条语句、32,772个分支，综合91.64%，通过90%门槛；未合并历史覆盖。补测只改文档、测试清单及配置顺序，生产代码未变 |
+| 浏览器 | 完整636项，桌面/移动Chromium、Firefox及WebKit共586通过、50项按既有平台条件跳过，0失败、0flaky，约9.9分钟。新增第二页解释及笔记历史交互均通过，移动端截图无横向溢出 |
+| 真实后端集成 | `npm run test:integration` 1项通过：真实FastAPI/SQLite和生产`api.js`完成预警、笔记写入与回读，历史分页及重启后的持久化一致；只替换供应商边界，服务与浏览器阻断外连。启动超时及标记文件写入失败的清理边界已复核 |
+| 工程检查 | Ruff、Mypy 470文件、Python编译/Pyflakes、202份JS语法、运行环境/依赖一致性、仓库链接/导入、API/函数索引与diff检查通过；无新增依赖，未降低覆盖率或函数预算 |
+| 运行边界 | 所有写入测试使用临时数据库，未重启现有本地服务或执行真实供应商请求；没有变更生产评分、旧冻结试验、运行数据，未提交或推送。已接入CI入口，GitHub托管CI尚未运行 |
+
+验收期间739个生产源码文件摘要不变。原有前瞻工作均保留；已有`pyproject.toml`仅调整Mypy文件排列，文件集合与配置值完全一致，运行手册仅补两行变量说明。新历史分页为检测跨页变化而扫描该股票的笔记集合并生成摘要，每页返回至多100条；此成本随该股笔记数量增长，当前没有数据库结构迁移。
+
+本机汇总为`/tmp/ashare-goal-20261015-acceptance.json`，原始全量与补验JUnit分别为同前缀的`pytest.xml`、`contract-supplement.xml`、`config-supplement.xml`；覆盖率为`coverage.json`，完整浏览器过程证据位于`/tmp/ashare-goal-20261015-browser/ashare-playwright-iOPTR1/`。临时证据不是新检出复验的前置条件，复验使用第2节命令。
 
 ### 页面恢复、按需加载与研究入口（2026-10-04）
 

@@ -239,3 +239,10 @@ def _finish_task_run_quietly(cache, run_id: int, status: str, message: str) -> N
 
 def _short_task_error(exc: Exception) -> str:
     return _task_error_message(exc)
+
+
+# Scheduler ownership is shared by periodic execution and durable manual requests.
+# Keep existing callers stable while exposing those domain contracts explicitly.
+offload = _offload
+consume_future_exception = _consume_future_exception
+task_error_message = _task_error_message

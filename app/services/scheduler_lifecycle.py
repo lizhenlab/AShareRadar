@@ -85,6 +85,9 @@ class SchedulerLifecycleMixin(SchedulerRuntimeContext):
         if reconcile is None:
             return
         reconciled = await _offload(reconcile)
+        repository = getattr(self.datahub.cache, "runtime_event_repo", None)
+        if repository is not None:
+            await _offload(repository.reconcile_task_requests)
         if reconciled:
             await self._save_monitor_event(
                 "warning",

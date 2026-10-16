@@ -18,6 +18,8 @@ from app.market_scan_screening import (
     screen_spec_digest,
 )
 from app.models.market_scan import MarketScanResultItem, MarketScanRun
+from app.models.market_scan_selection import MarketScanSelectionRequest
+from app.repositories.market_scan_selection import resolve_selection
 from app.models.market_scan_screening import (
     MarketBreadthBin,
     MarketBreadthChange,
@@ -98,7 +100,12 @@ def _evaluate_snapshot(
 ) -> MarketScanScreenEvaluationV2:
     run = verified.run
     _require_eligible_run(run)
+    scope, members = resolve_selection(MarketScanSelectionRequest(universe=request.universe, watchlist_digest=request.watchlist_digest),
+        lambda: verified.watchlist_symbols(), require_digest=True)
     population = verified.screening_rows()
+    if members is not None:
+        member_set = set(members)
+        population = [item for item in population if item.symbol in member_set]
     conditions = compile_screen_conditions(request.spec)
     failures = {item.symbol: _failures(item, conditions) for item in population}
     matched_rows = [item for item in population if not failures[item.symbol]]
@@ -112,6 +119,7 @@ def _evaluate_snapshot(
         request,
     )
     return _sealed_response(MarketScanScreenEvaluationV2,
+        selection_scope=scope,
         evidence=_evidence(run),
         spec=request.spec,
         spec_digest=screen_spec_digest(request.spec),
@@ -436,6 +444,8 @@ def _hydrate_selected(
     if len(unique_symbols) > MAX_SCREENING_HYDRATION_SYMBOLS:
         raise ValueError("筛选结果单次最多读取 300 只股票详情")
     query: dict[str, object] = asdict(MarketScanExportFilters(status=None, sort="symbol"))
+    query.pop("selection")
+    query.pop("frozen_spec")
     query.pop("probability_horizon")
     query.pop("min_upside_probability")
     query.update(symbols=unique_symbols, page=1, page_size=len(unique_symbols))

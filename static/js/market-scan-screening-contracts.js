@@ -121,6 +121,11 @@ export function screenEvaluationRequest(spec, options = {}) {
   };
 }
 
+export function screenPageIdentity(payload, expectedRunId) {
+  const symbols = validateMatchedPage(payload, payload.total, expectedRunId);
+  return { page: payload.page, pageSize: payload.page_size, pageCount: payload.page_count, symbols };
+}
+
 export function validateMarketScanDelta(value, expectedRunId) {
   const payload = objectValue(value, "同 cohort 变化响应");
   requireSchema(payload, MARKET_SCAN_DELTA_SCHEMA_VERSION, "同 cohort 变化响应");

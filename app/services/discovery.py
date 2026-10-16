@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.models.market_scan_selection import MarketScanSelectionRequest
+
 import hashlib
 import hmac
 
@@ -111,18 +113,20 @@ class DiscoveryService:
         run_id: int,
         page: int,
         page_size: int,
+        selection: MarketScanSelectionRequest | None = None,
     ) -> DiscoveryLeaderboardPage:
         preset = self.repository.preset(preset_id)
         run = self.repository.run_reference(run_id)
         _require_completed_run(run.id, run.status)
-        items, total = self.repository.leaderboard(
+        items, total, scope = self.repository.leaderboard_with_scope(
             preset,
             run_id=run_id,
             page=page,
-            page_size=page_size,
+            page_size=page_size, selection=selection,
         )
         _require_stable_run(run, self.repository.run_reference(run_id))
         return DiscoveryLeaderboardPage(
+            selection_scope=scope,
             preset=preset,
             run_id=run.id,
             rule_version=run.rule_version,

@@ -164,6 +164,16 @@ class StockNoteItem(BaseModel):
     updated_at: str
 
 
+class StockNotePage(BaseModel):
+    symbol: str
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
+    page_count: int = Field(ge=0)
+    snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+    items: list[StockNoteItem]
+
+
 class ChartMarkItem(BaseModel):
     date: str
     kline_date: str | None = None

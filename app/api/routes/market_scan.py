@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from app.api.routes.market_scan_selection import market_scan_selection_query, selection_guard, export_selection_filters
+
 from datetime import date
 from collections.abc import Callable
 from typing import Literal, TypeAlias, TypeVar, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 
 from app.api.deps import get_market_scan_experimental_read_admission, get_market_scan_heavy_read_admission, get_market_scanner
 from app.api.errors import artifact_integrity_guard, run_api, run_sync_api_async
@@ -169,16 +171,17 @@ def market_scan_filter_query(
     keyword: str | None = Query(None, max_length=80),
     sort: list[MarketScanSort] | None = Query(None),
     order: list[MarketScanSortOrder] | None = Query(None),
+    universe: Literal["all", "watchlist"] = Query("all"),
+    watchlist_digest: str | None = Query(None, pattern=r"^[0-9a-f]{64}$"),
 ) -> MarketScanExportFilters:
     _validate_filter_lists(market, industry, sort, order)
     probability_horizon = _validated_probability_horizon(probability_horizon)
     sorts, orders = _normalized_sort_query(sort, order)
     filters = MarketScanExportFilters(
-        status=None if status == "all" else status,
+        selection=market_scan_selection_query(universe, watchlist_digest), status=None if status == "all" else status,
         market=tuple(market or ()),
         industry=tuple(_normalized_industries(industry)),
-        is_st=is_st,
-        is_new=is_new,
+        is_st=is_st, is_new=is_new,
         min_score=min_score,
         max_score=max_score,
         min_trend_score=min_trend_score,
@@ -347,7 +350,7 @@ async def market_scan_results(
                 run_id,
                 page=page,
                 page_size=page_size,
-                status=filters.status,
+                status=filters.status, selection=filters.selection,
                 market=filters.market,
                 industry=filters.industry,
                 is_st=filters.is_st,
@@ -435,14 +438,14 @@ def _comparison_guard(call: Callable[[], T]) -> T:
 
 def _screening_guard(call: Callable[[], T]) -> T:
     try:
-        return call()
+        return selection_guard(call)
     except MarketScanScreeningUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _probability_filter_guard(call: Callable[[], T]) -> T:
     try:
-        return artifact_integrity_guard(call)
+        return selection_guard(lambda: artifact_integrity_guard(call))
     except ProbabilityFilterUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -517,11 +520,14 @@ def _future_range_artifact_guard(call: Callable[[], T]) -> T:
     responses={200: {"content": {XLSX_MEDIA_TYPE: {}}, "description": "当前筛选结果的 Excel 工作簿"}},
 )
 async def export_market_scan_results(
-    run_id: int,
+    run_id: int, request: Request,
+    ranking_basis: Literal["production", "frozen"] = Query("production"),
+    screen_spec: str | None = Query(None, max_length=16384),
     filters: MarketScanExportFilters = Depends(market_scan_filter_query),
     scanner: MarketScanManager = Depends(get_market_scanner),
     admission: MarketScanHeavyReadAdmission = Depends(get_market_scan_heavy_read_admission),
 ) -> Response:
+    filters = export_selection_filters(request, filters, ranking_basis, screen_spec)
     exported = await run_admitted_market_scan_read(
         admission,
         lambda: _probability_filter_guard(

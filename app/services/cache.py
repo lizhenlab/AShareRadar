@@ -46,6 +46,7 @@ from app.models.user_data import (
     ResearchStatus,
     StockNoteInput,
     StockNoteItem,
+    StockNotePage,
     StockNoteUpdate,
     WatchlistItem,
     WatchlistPriority,
@@ -1011,6 +1012,11 @@ class SQLiteCache:
 
     def stock_notes(self, symbol: str, limit: int = 100, visible_only: bool = False) -> list[StockNoteItem]:
         return self.note_repo.items(symbol, limit=limit, visible_only=visible_only)
+
+    def stock_note_page(
+        self, symbol: str, *, page: int = 1, page_size: int = 50, expected_snapshot: str | None = None,
+    ) -> StockNotePage:
+        return self.note_repo.page(symbol, page=page, page_size=page_size, expected_snapshot=expected_snapshot)
 
     def stock_note(self, row_id: int) -> StockNoteItem | None:
         return self.note_repo.item(row_id)

@@ -47,7 +47,7 @@ _MARKET_SCAN_SCHEDULE_LOOKAHEAD_DAYS = 370
 
 
 class SchedulerExecutionMixin(SchedulerRuntimeContext):
-    async def run_once(self, task_name: str | None = None) -> list[str]:
+    async def run_once(self, task_name: str | None = None, *, request_id: str | None = None) -> list[str]:
         if task_name == MARKET_SCAN_TASK_NAME:
             if self.market_scanner is None:
                 raise RuntimeError("全市场扫描管理器未启用")
@@ -66,7 +66,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             try:
                 messages: list[str] = []
                 for name in names:
-                    messages.append(await self._execute(self.tasks[name], manual=True))
+                    messages.append(await self._execute(self.tasks[name], manual=True, request_id=request_id))
                 return messages
             finally:
                 await self._end_manual_guard_use()
@@ -191,7 +191,7 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
             self._automatic_tick_task = None
         _consume_future_exception(task)
 
-    async def _execute(self, task: LocalTask, manual: bool = False) -> str:
+    async def _execute(self, task: LocalTask, manual: bool = False, *, request_id: str | None = None) -> str:
         if task.running:
             return f"{task.display_name} 正在运行，已跳过重复触发"
         if not manual and not automatic_task_due(task, market_now_naive()):
@@ -208,6 +208,8 @@ class SchedulerExecutionMixin(SchedulerRuntimeContext):
                 task.name,
                 f"{task.display_name} 已取消",
             )
+            if request_id is not None:
+                await _offload(self.datahub.cache.runtime_event_repo.attach_task_request_run, request_id, run_id)
             result = await task.handler()
             message = str(result)
             status = _task_result_status(result)

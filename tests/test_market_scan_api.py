@@ -30,6 +30,7 @@ from app.models.market_scan import (
     MarketScanStartResponse,
 )
 from app.models.market_scan_snapshot import MarketScanSnapshotIntegrityError
+from app.models.market_scan_selection import MarketScanSelectionRequest
 from app.models.market_scan_polling import (
     MarketScanPollingIdentity,
     MarketScanPollingRunToken,
@@ -528,6 +529,7 @@ def test_results_route_forwards_pagination_sorting_and_every_filter() -> None:
                 "page": 3,
                 "page_size": 25,
                 "status": "missing",
+                "selection": MarketScanSelectionRequest(universe="all"),
                 "market": ("BJ", "SZ"),
                 "industry": ("高端装备", "银行"),
                 "is_st": True,
@@ -897,6 +899,7 @@ def test_export_route_returns_xlsx_attachment_and_forwards_current_filters() -> 
         (
             scanner.previous.id,
             MarketScanExportFilters(
+                selection=MarketScanSelectionRequest(universe="all"),
                 status=None,
                 market=("SZ",),
                 industry=("银行",),
@@ -948,7 +951,15 @@ def test_export_and_results_routes_share_the_same_filter_and_sort_contract() -> 
     results = {item["name"] for item in parameters["/api/market-scans/{run_id}/results"]["get"]["parameters"] if item["in"] == "query"}
     exported = {item["name"] for item in parameters["/api/market-scans/{run_id}/export.xlsx"]["get"]["parameters"] if item["in"] == "query"}
 
-    assert exported == results - {"page", "page_size"}
+    assert exported == (results - {"page", "page_size"}) | {"ranking_basis", "screen_spec"}
+    assert {"universe", "watchlist_digest"} <= results
+    schemas = {item["name"]: item["schema"] for item in parameters["/api/market-scans/{run_id}/export.xlsx"]["get"]["parameters"]}
+    assert schemas["universe"]["enum"] == ["all", "watchlist"]
+    assert schemas["universe"]["default"] == "all"
+    assert schemas["watchlist_digest"]["anyOf"][0]["pattern"] == r"^[0-9a-f]{64}$"
+    assert schemas["ranking_basis"]["enum"] == ["production", "frozen"]
+    assert schemas["ranking_basis"]["default"] == "production"
+    assert schemas["screen_spec"]["anyOf"][0]["maxLength"] == 16384
 
 
 @pytest.mark.parametrize(

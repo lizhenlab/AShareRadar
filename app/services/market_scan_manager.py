@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.models.market_scan_selection import MarketScanSelectionRequest
+
 import asyncio
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -698,6 +700,7 @@ class MarketScanManager:
         order: MarketScanSortOrderValues,
         probability_horizon: Literal[1, 5, 20] = 5,
         min_upside_probability: float | None = None,
+        selection: MarketScanSelectionRequest | None = None,
     ) -> MarketScanResultPage:
         # fmt: off
         return self._query_service.results(
@@ -714,7 +717,7 @@ class MarketScanManager:
             min_confidence=min_confidence, max_risk=max_risk,
             min_tradability=min_tradability, keyword=keyword,
             sort=sort, order=order, probability_horizon=probability_horizon,
-            min_upside_probability=min_upside_probability,
+            min_upside_probability=min_upside_probability, selection=selection,
         )
         # fmt: on
 
