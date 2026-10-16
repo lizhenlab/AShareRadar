@@ -9,8 +9,8 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 569 | 1346 | 7916 | 1941 | 180077 |
-| `tests/` | 524 | 254 | 7363 | 1013 | 187432 |
-| `tools/` | 46 | 11 | 366 | 8 | 7348 |
+| `tests/` | 524 | 254 | 7372 | 1013 | 187576 |
+| `tools/` | 46 | 11 | 371 | 8 | 7408 |
 
 ## Python Function Health
 
@@ -26366,7 +26366,7 @@ Lines: 159
 
 #### `tests/test_strategy_prospective_runtime.py`
 
-Lines: 310
+Lines: 454
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -26392,6 +26392,15 @@ Lines: 310
 | function | `test_runner_requires_all_explicit_paths_and_preserves_arguments` | 282 | `def test_runner_requires_all_explicit_paths_and_preserves_arguments(sealed, tmp_path)` |
 | function | `test_prepare_rejects_existing_runtime_and_sensitive_configuration` | 294 | `def test_prepare_rejects_existing_runtime_and_sensitive_configuration(prepared_runtime, tmp_path)` |
 | function | `test_runtime_receipt_is_canonical_and_seals_full_content` | 303 | `def test_runtime_receipt_is_canonical_and_seals_full_content(sealed)` |
+| function | `framework_python` | 314 | `def framework_python(tmp_path)` |
+| function | `test_official_framework_library_alias_is_pinned_and_reverified` | 329 | `def test_official_framework_library_alias_is_pinned_and_reverified(framework_python, tmp_path, monkeypatch)` |
+| function | `test_base_identity_without_alias_keeps_existing_receipt_shape` | 343 | `def test_base_identity_without_alias_keeps_existing_receipt_shape(framework_python)` |
+| function | `test_framework_target_or_alias_drift_is_rejected_before_probe` | 352 | `def test_framework_target_or_alias_drift_is_rejected_before_probe(framework_python, tmp_path, monkeypatch, change)` |
+| function | `test_framework_alias_requires_an_existing_regular_nonlink_target` | 373 | `def test_framework_alias_requires_an_existing_regular_nonlink_target(framework_python, tmp_path, kind)` |
+| function | `test_framework_alias_rejects_symbolic_directory_ancestors` | 393 | `def test_framework_alias_rejects_symbolic_directory_ancestors(framework_python, tmp_path, relative)` |
+| function | `test_framework_exception_does_not_admit_other_library_links` | 404 | `def test_framework_exception_does_not_admit_other_library_links(framework_python, tmp_path, kind)` |
+| function | `test_other_standard_library_directory_links_are_not_silently_skipped` | 425 | `def test_other_standard_library_directory_links_are_not_silently_skipped(framework_python)` |
+| function | `test_framework_changes_during_hashing_are_rejected` | 436 | `def test_framework_changes_during_hashing_are_rejected(framework_python, monkeypatch, change)` |
 
 #### `tests/test_strategy_quant_metrics.py`
 
@@ -27994,7 +28003,7 @@ Lines: 316
 
 #### `tools/strategy_prospective_runtime.py`
 
-Lines: 451
+Lines: 511
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -28008,23 +28017,28 @@ Lines: 451
 | function | `_copy_file` | 137 | `def _copy_file(source: Path, destination: Path) -> None` |
 | function | `_copy_code` | 144 | `def _copy_code(source: Path, target: Path) -> None` |
 | function | `_probe` | 159 | `def _probe(executable: Path) -> dict[str, object]` |
-| function | `_base_identity` | 168 | `def _base_identity(probe: Mapping[str, object]) -> dict[str, object]` |
-| function | `_installed_packages` | 186 | `def _installed_packages(site: Path) -> list[dict[str, str]]` |
-| function | `_package_directory` | 191 | `def _package_directory(environment: Path) -> Path` |
-| function | `_locked_versions` | 195 | `def _locked_versions(path: Path) -> dict[str, str]` |
-| function | `_validate_dependencies` | 213 | `def _validate_dependencies(code: Path, packages: list[dict[str, str]]) -> dict[str, object]` |
-| function | `_create_environment` | 231 | `def _create_environment(source: Path, target: Path) -> dict[str, object]` |
-| function | `prepare_runtime` | 248 | `def prepare_runtime(source_root: Path, destination: Path, environment_root: Path, *, configuration: Mapping[str, str] \| None=None) -> dict[str, object]` |
-| function | `_verify_base_python` | 284 | `def _verify_base_python(root: Path, identity: Mapping[str, object]) -> None` |
-| function | `_runtime_json_object` | 296 | `def _runtime_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]` |
-| function | `_read_runtime_manifest` | 305 | `def _read_runtime_manifest(record: Path) -> dict[str, object]` |
-| function | `_admit_runtime_manifest` | 323 | `def _admit_runtime_manifest(record: Path, expected_digest: str \| None) -> dict[str, object]` |
-| function | `inspect_runtime` | 337 | `def inspect_runtime(directory: Path, *, expected_digest: str \| None=None) -> dict[str, object]` |
-| function | `inspect_running_runtime` | 356 | `def inspect_running_runtime() -> dict[str, object]` |
-| function | `_option_values` | 372 | `def _option_values(argv: Sequence[str]) -> dict[str, str]` |
-| function | `_validate_arguments` | 384 | `def _validate_arguments(argv: Sequence[str], entrypoint: str) -> dict[str, str]` |
-| function | `run_runtime` | 400 | `def run_runtime(directory: Path, argv: Sequence[str], *, entrypoint: str='collect_strategy_prospective.py', capture_output: bool=False) -> subprocess.CompletedProcess[str]` |
-| function | `main` | 419 | `def main(argv: Sequence[str] \| None=None) -> int` |
+| function | `_base_file_stamp` | 168 | `def _base_file_stamp(value: os.stat_result) -> tuple[int, ...]` |
+| function | `_base_regular_digest` | 172 | `def _base_regular_digest(path: Path) -> str` |
+| function | `_require_base_directories` | 185 | `def _require_base_directories(path: Path) -> None` |
+| function | `_framework_library_link` | 191 | `def _framework_library_link(path: Path, stdlib: Path, base: Path) -> dict[str, str]` |
+| function | `_stdlib_identity` | 212 | `def _stdlib_identity(stdlib: Path, base: Path) -> tuple[dict[str, str], dict[str, dict[str, str]]]` |
+| function | `_base_identity` | 234 | `def _base_identity(probe: Mapping[str, object]) -> dict[str, object]` |
+| function | `_installed_packages` | 246 | `def _installed_packages(site: Path) -> list[dict[str, str]]` |
+| function | `_package_directory` | 251 | `def _package_directory(environment: Path) -> Path` |
+| function | `_locked_versions` | 255 | `def _locked_versions(path: Path) -> dict[str, str]` |
+| function | `_validate_dependencies` | 273 | `def _validate_dependencies(code: Path, packages: list[dict[str, str]]) -> dict[str, object]` |
+| function | `_create_environment` | 291 | `def _create_environment(source: Path, target: Path) -> dict[str, object]` |
+| function | `prepare_runtime` | 308 | `def prepare_runtime(source_root: Path, destination: Path, environment_root: Path, *, configuration: Mapping[str, str] \| None=None) -> dict[str, object]` |
+| function | `_verify_base_python` | 344 | `def _verify_base_python(root: Path, identity: Mapping[str, object]) -> None` |
+| function | `_runtime_json_object` | 356 | `def _runtime_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]` |
+| function | `_read_runtime_manifest` | 365 | `def _read_runtime_manifest(record: Path) -> dict[str, object]` |
+| function | `_admit_runtime_manifest` | 383 | `def _admit_runtime_manifest(record: Path, expected_digest: str \| None) -> dict[str, object]` |
+| function | `inspect_runtime` | 397 | `def inspect_runtime(directory: Path, *, expected_digest: str \| None=None) -> dict[str, object]` |
+| function | `inspect_running_runtime` | 416 | `def inspect_running_runtime() -> dict[str, object]` |
+| function | `_option_values` | 432 | `def _option_values(argv: Sequence[str]) -> dict[str, str]` |
+| function | `_validate_arguments` | 444 | `def _validate_arguments(argv: Sequence[str], entrypoint: str) -> dict[str, str]` |
+| function | `run_runtime` | 460 | `def run_runtime(directory: Path, argv: Sequence[str], *, entrypoint: str='collect_strategy_prospective.py', capture_output: bool=False) -> subprocess.CompletedProcess[str]` |
+| function | `main` | 479 | `def main(argv: Sequence[str] \| None=None) -> int` |
 
 #### `tools/strategy_template_tracking_report.py`
 

@@ -308,3 +308,147 @@ def test_runtime_receipt_is_canonical_and_seals_full_content(sealed):
     assert "app/resources/trading_calendar.json" in manifest["code_files"]
     assert "requirements-lock.txt" in manifest["code_files"]
     assert "lib/python3.12/site-packages/independent_package.py" in manifest["environment_files"]
+
+
+@pytest.fixture
+def framework_python(tmp_path):
+    version_root = tmp_path.resolve() / "Python.framework/Versions/3.12"
+    stdlib = version_root / "lib/python3.12"
+    library = stdlib / "config-3.12-darwin/libpython3.12.dylib"
+    library.parent.mkdir(parents=True)
+    executable = version_root / "bin/python3.12"
+    executable.parent.mkdir()
+    executable.write_bytes(b"framework executable")
+    (version_root / "Python").write_bytes(b"framework shared library")
+    (stdlib / "os.py").write_text("# a standard library module\n")
+    library.symlink_to("../../../Python")
+    probe = {"base_executable": str(executable), "stdlib": str(stdlib), "search_paths": [str(stdlib)]}
+    return probe, library, version_root / "Python"
+
+
+def test_official_framework_library_alias_is_pinned_and_reverified(framework_python, tmp_path, monkeypatch):
+    probe, library, target = framework_python
+    identity = runtime._base_identity(probe)
+    relative = "config-3.12-darwin/libpython3.12.dylib"
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    assert identity["stdlib_files"][relative] == digest
+    assert identity["stdlib_links"] == {relative: {
+        "target": "../../../Python", "resolved_target": str(target), "sha256": digest,
+    }}
+    monkeypatch.setattr(runtime, "_probe", lambda _executable: dict(probe))
+    runtime._verify_base_python(tmp_path, identity)
+    assert library.is_symlink()
+
+
+def test_base_identity_without_alias_keeps_existing_receipt_shape(framework_python):
+    probe, library, _target = framework_python
+    library.unlink()
+    identity = runtime._base_identity(probe)
+    assert set(identity) == {"probe", "executable_sha256", "stdlib_files", "search_path_files"}
+    assert identity["stdlib_files"] == {"os.py": hashlib.sha256(b"# a standard library module\n").hexdigest()}
+
+
+@pytest.mark.parametrize("change", ["content", "regular-copy", "equivalent-target", "external-target"])
+def test_framework_target_or_alias_drift_is_rejected_before_probe(framework_python, tmp_path, monkeypatch, change):
+    probe, library, target = framework_python
+    identity = runtime._base_identity(probe)
+    monkeypatch.setattr(runtime, "_probe", lambda _executable: pytest.fail("drifted base interpreter executed"))
+    if change == "content":
+        target.write_bytes(b"changed framework shared library")
+    else:
+        library.unlink()
+        if change == "regular-copy":
+            shutil.copyfile(target, library)
+        elif change == "equivalent-target":
+            library.symlink_to("../../.././Python")
+        else:
+            external = tmp_path / "external-Python"
+            shutil.copyfile(target, external)
+            library.symlink_to(external)
+    with pytest.raises((ValueError, OSError), match="drift|symbolic link"):
+        runtime._verify_base_python(tmp_path, identity)
+
+
+@pytest.mark.parametrize("kind", ["missing", "symlink", "directory", "fifo"])
+def test_framework_alias_requires_an_existing_regular_nonlink_target(framework_python, tmp_path, kind):
+    probe, _library, target = framework_python
+    target.unlink()
+    if kind == "symlink":
+        external = tmp_path / "external-Python"
+        external.write_bytes(b"framework shared library")
+        target.symlink_to(external)
+    elif kind == "directory":
+        target.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(target)
+    with pytest.raises((ValueError, OSError)):
+        runtime._base_identity(probe)
+
+
+@pytest.mark.parametrize("relative", [
+    "Python.framework", "Python.framework/Versions", "Python.framework/Versions/3.12",
+    "Python.framework/Versions/3.12/lib", "Python.framework/Versions/3.12/lib/python3.12",
+    "Python.framework/Versions/3.12/lib/python3.12/config-3.12-darwin",
+])
+def test_framework_alias_rejects_symbolic_directory_ancestors(framework_python, tmp_path, relative):
+    probe, _library, _target = framework_python
+    directory = tmp_path.resolve() / relative
+    moved = directory.with_name(directory.name + "-real")
+    directory.rename(moved)
+    directory.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(ValueError, match="symbolic link"):
+        runtime._base_identity(probe)
+
+
+@pytest.mark.parametrize("kind", ["different-name", "different-directory", "foreign-interpreter", "foreign-framework"])
+def test_framework_exception_does_not_admit_other_library_links(framework_python, tmp_path, kind):
+    probe, library, target = framework_python
+    if kind == "foreign-interpreter":
+        executable = tmp_path / "other-python"
+        executable.write_bytes(b"other Python")
+        probe["base_executable"] = str(executable)
+    elif kind == "foreign-framework":
+        version_root = target.parent
+        moved = tmp_path / "other-framework/Versions/3.12"
+        moved.parent.mkdir(parents=True)
+        version_root.rename(moved)
+        probe["base_executable"] = str(moved / "bin/python3.12")
+        probe["stdlib"] = str(moved / "lib/python3.12")
+    else:
+        library.unlink()
+        other = library.with_name("other.dylib") if kind == "different-name" else library.parent.parent / library.name
+        other.symlink_to(target)
+    with pytest.raises(ValueError, match="unsupported symbolic"):
+        runtime._base_identity(probe)
+
+
+def test_other_standard_library_directory_links_are_not_silently_skipped(framework_python):
+    probe, library, _target = framework_python
+    real = library.parent.parent / "real_package"
+    real.mkdir()
+    (real / "__init__.py").write_text("# imported code\n")
+    (real.parent / "aliased_package").symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match="directory.*symbolic"):
+        runtime._base_identity(probe)
+
+
+@pytest.mark.parametrize("change", ["target", "alias", "ancestor"])
+def test_framework_changes_during_hashing_are_rejected(framework_python, monkeypatch, change):
+    probe, library, target = framework_python
+    original = runtime.hashlib.file_digest
+    def changed(stream, algorithm):
+        result = original(stream, algorithm)
+        if isinstance(stream.name, int):
+            if change == "target":
+                target.write_bytes(b"changed while hashing")
+            elif change == "alias":
+                library.unlink()
+                library.symlink_to("../../../Python")
+            else:
+                moved = library.parent.with_name("moved-config")
+                library.parent.rename(moved)
+                library.parent.symlink_to(moved, target_is_directory=True)
+        return result
+    monkeypatch.setattr(runtime.hashlib, "file_digest", changed)
+    with pytest.raises((ValueError, OSError), match="changed|symbolic"):
+        runtime._base_identity(probe)

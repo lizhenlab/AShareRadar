@@ -1139,7 +1139,7 @@ test("background restore retries auxiliary failures without letting SSE hide deg
   await expect(page.locator("#dataStatus")).not.toContainText("unavailable");
   await expect(page.locator("#marketStrip")).toContainText("market unavailable");
   await expect(page.locator("#leaderList")).toContainText("strong unavailable");
-  await expect(page.locator(".data-health")).toContainText("status unavailable");
+  await expect(page.locator("#providerStatus")).toContainText("status unavailable");
   const statusLayout = await page.locator(".topbar").evaluate((topbar) => {
     const pill = topbar.querySelector("#dataStatus");
     return {

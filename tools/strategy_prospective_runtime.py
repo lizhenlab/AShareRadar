@@ -165,22 +165,82 @@ def _probe(executable: Path) -> dict[str, object]:
     return value
 
 
-def _base_identity(probe: Mapping[str, object]) -> dict[str, object]:
-    base = Path(str(probe["base_executable"])).resolve()
-    stdlib = Path(str(probe["stdlib"])).resolve()
+def _base_file_stamp(value: os.stat_result) -> tuple[int, ...]:
+    return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
+def _base_regular_digest(path: Path) -> str:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("base Python Framework target must be a regular file")
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        after, current = os.fstat(stream.fileno()), path.stat(follow_symlinks=False)
+    if _base_file_stamp(before) != _base_file_stamp(after) or _base_file_stamp(after) != _base_file_stamp(current):
+        raise OSError("base Python Framework target changed during inspection")
+    return digest
+
+
+def _require_base_directories(path: Path) -> None:
+    for directory in (path, *path.parents):
+        if not stat.S_ISDIR(directory.stat(follow_symlinks=False).st_mode):
+            raise ValueError("base Python library directory cannot be a symbolic link or special file")
+
+
+def _framework_library_link(path: Path, stdlib: Path, base: Path) -> dict[str, str]:
+    version_root = stdlib.parent.parent
+    expected_parts = ("Python.framework", "Versions", "3.12", "lib", "python3.12")
+    if (stdlib.parts[-5:] != expected_parts or not stdlib.is_absolute()
+            or path != stdlib / "config-3.12-darwin/libpython3.12.dylib" or not base.is_relative_to(version_root)):
+        raise ValueError("base Python library contains unsupported symbolic links")
+    # CPython's frameworkinstallmaclib creates this one compatibility alias.
+    # Pin the alias and its target, without allowing arbitrary shared inputs.
+    _require_base_directories(path.parent)
+    before, link = path.lstat(), os.readlink(path)
+    if link != "../../../Python":
+        raise ValueError("base Python Framework library has an unsupported symbolic link target")
+    target = version_root / "Python"
+    digest = _base_regular_digest(target)
+    _require_base_directories(path.parent)
+    if (_base_file_stamp(before) != _base_file_stamp(path.lstat()) or os.readlink(path) != link
+            or path.resolve(strict=True) != target):
+        raise OSError("base Python Framework link changed during inspection")
+    return {"target": link, "resolved_target": str(target), "sha256": digest}
+
+
+def _stdlib_identity(stdlib: Path, base: Path) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     files: dict[str, str] = {}
+    links: dict[str, dict[str, str]] = {}
+    if stdlib.is_symlink():
+        raise ValueError("base Python library directory cannot be a symbolic link")
     # Third-party packages are copied separately; executable stdlib inputs are pinned.
     for directory, names, filenames in os.walk(stdlib, followlinks=False):
         names[:] = [name for name in names if name not in {"site-packages", "__pycache__"}]
+        if any((Path(directory) / name).is_symlink() for name in names):
+            raise ValueError("base Python library directory cannot contain symbolic links")
         for name in sorted(filenames):
             path = Path(directory) / name
             if path.suffix in {".py", ".so", ".dylib", ".zip"}:
+                relative = path.relative_to(stdlib).as_posix()
                 if path.is_symlink():
-                    raise ValueError("base Python library contains symbolic links")
-                files[path.relative_to(stdlib).as_posix()] = _digest(path)
+                    links[relative] = _framework_library_link(path, stdlib, base)
+                    files[relative] = links[relative]["sha256"]
+                else:
+                    files[relative] = _digest(path)
+    return files, links
+
+
+def _base_identity(probe: Mapping[str, object]) -> dict[str, object]:
+    base = Path(str(probe["base_executable"])).resolve()
+    files, links = _stdlib_identity(Path(str(probe["stdlib"])), base)
     search_files = {str(path): _digest(path) for raw in cast(list[str], probe["search_paths"])
                     if (path := Path(raw)).is_file()}
-    return {"probe": dict(probe), "executable_sha256": _digest(base), "stdlib_files": files, "search_path_files": search_files}
+    identity: dict[str, object] = {"probe": dict(probe), "executable_sha256": _digest(base),
+                                   "stdlib_files": files, "search_path_files": search_files}
+    if links:
+        identity["stdlib_links"] = links
+    return identity
 
 
 def _installed_packages(site: Path) -> list[dict[str, str]]:

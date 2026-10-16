@@ -26,7 +26,9 @@ test("area navigation retains each page and notes avoid unrelated review reads",
   await page.screenshot({path:testInfo.outputPath("system-maintenance.png"),fullPage:false});
   await page.locator("#workspace-tab-data").click();
   await selectPrimaryView(page, "monitor");
-  await expect(page.locator(".data-health")).toBeHidden();
+  const sourceHealth = page.locator("#workspace-panel-diagnostics .data-health:has(#providerStatus)");
+  await expect(sourceHealth).toHaveCount(1);
+  await expect(sourceHealth).toBeHidden();
   await selectPrimaryView(page, "research");
   await expect(page.locator("#workspace-panel-tools")).toBeVisible();
   await expect(page.locator("#noteContent")).toHaveValue("导航期间保留的研究草稿");
