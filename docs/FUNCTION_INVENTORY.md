@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 569 | 1346 | 7916 | 1941 | 180077 |
-| `tests/` | 524 | 254 | 7372 | 1013 | 187576 |
+| `tests/` | 524 | 254 | 7372 | 1013 | 187587 |
 | `tools/` | 46 | 11 | 371 | 8 | 7408 |
 
 ## Python Function Health
@@ -15636,7 +15636,7 @@ Lines: 154
 
 #### `tests/test_api_local_data_routes.py`
 
-Lines: 644
+Lines: 647
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -15651,13 +15651,13 @@ Lines: 644
 | function | `test_backup_io_failure_is_returned_as_stable_service_error` | 291 | `def test_backup_io_failure_is_returned_as_stable_service_error(tmp_path: Path, monkeypatch) -> None` |
 | function | `test_expired_server_preview_token_is_rejected` | 319 | `def test_expired_server_preview_token_is_rejected(tmp_path: Path, monkeypatch) -> None` |
 | function | `test_destructive_local_data_lease_serializes_processes` | 344 | `def test_destructive_local_data_lease_serializes_processes(tmp_path: Path) -> None` |
-| function | `test_destructive_local_data_lease_timeout_is_clean_and_redacted` | 386 | `def test_destructive_local_data_lease_timeout_is_clean_and_redacted(tmp_path: Path, monkeypatch) -> None` |
-| class | `_DataHubStub` | 414 | `class _DataHubStub` |
-| method | `_DataHubStub.__init__` | 415 | `def __init__(self, cache: SQLiteCache) -> None` |
-| function | `test_manual_user_history_cleanup_creates_verified_pre_cleanup_backup` | 420 | `def test_manual_user_history_cleanup_creates_verified_pre_cleanup_backup(tmp_path: Path) -> None` |
-| function | `test_cleanup_backup_failure_rolls_back_without_deleting_user_history` | 462 | `def test_cleanup_backup_failure_rolls_back_without_deleting_user_history(tmp_path: Path, monkeypatch) -> None` |
-| function | `test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision` | 503 | `def test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision(tmp_path: Path, monkeypatch) -> None` |
-| function | `test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotation` | 559 | `def test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotation(tmp_path: Path, monkeypatch) -> None` |
+| function | `test_destructive_local_data_lease_timeout_is_clean_and_redacted` | 389 | `def test_destructive_local_data_lease_timeout_is_clean_and_redacted(tmp_path: Path, monkeypatch) -> None` |
+| class | `_DataHubStub` | 417 | `class _DataHubStub` |
+| method | `_DataHubStub.__init__` | 418 | `def __init__(self, cache: SQLiteCache) -> None` |
+| function | `test_manual_user_history_cleanup_creates_verified_pre_cleanup_backup` | 423 | `def test_manual_user_history_cleanup_creates_verified_pre_cleanup_backup(tmp_path: Path) -> None` |
+| function | `test_cleanup_backup_failure_rolls_back_without_deleting_user_history` | 465 | `def test_cleanup_backup_failure_rolls_back_without_deleting_user_history(tmp_path: Path, monkeypatch) -> None` |
+| function | `test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision` | 506 | `def test_cleanup_transaction_blocks_late_process_write_before_no_backup_decision(tmp_path: Path, monkeypatch) -> None` |
+| function | `test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotation` | 562 | `def test_cleanup_rollback_backup_is_protected_through_commit_from_process_rotation(tmp_path: Path, monkeypatch) -> None` |
 
 #### `tests/test_api_monitoring_routes.py`
 
@@ -26673,7 +26673,7 @@ Lines: 405
 
 #### `tests/test_supply_chain.py`
 
-Lines: 224
+Lines: 232
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -26685,10 +26685,10 @@ Lines: 224
 | function | `test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke` | 114 | `def test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke() -> None` |
 | function | `test_real_backend_ci_uses_macos_resolved_dependencies_and_linux_keeps_mock_browsers` | 127 | `def test_real_backend_ci_uses_macos_resolved_dependencies_and_linux_keeps_mock_browsers() -> None` |
 | function | `test_security_workflow_enforces_audits_history_redaction_and_sbom_diff` | 149 | `def test_security_workflow_enforces_audits_history_redaction_and_sbom_diff() -> None` |
-| function | `test_dependabot_covers_all_dependency_ecosystems` | 178 | `def test_dependabot_covers_all_dependency_ecosystems() -> None` |
-| function | `test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults` | 186 | `def test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults(suffix: str) -> None` |
-| function | `test_security_workflow_keeps_automatic_repository_gitleaks_config` | 201 | `def test_security_workflow_keeps_automatic_repository_gitleaks_config() -> None` |
-| function | `test_supply_chain_files_contain_no_machine_specific_paths` | 211 | `def test_supply_chain_files_contain_no_machine_specific_paths() -> None` |
+| function | `test_dependabot_covers_all_dependency_ecosystems` | 186 | `def test_dependabot_covers_all_dependency_ecosystems() -> None` |
+| function | `test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults` | 194 | `def test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults(suffix: str) -> None` |
+| function | `test_security_workflow_keeps_automatic_repository_gitleaks_config` | 209 | `def test_security_workflow_keeps_automatic_repository_gitleaks_config() -> None` |
+| function | `test_supply_chain_files_contain_no_machine_specific_paths` | 219 | `def test_supply_chain_files_contain_no_machine_specific_paths() -> None` |
 
 #### `tests/test_symbol_modules.py`
 
