@@ -10,9 +10,12 @@ updates:
       timezone: Asia/Shanghai
     open-pull-requests-limit: 5
     groups:
-      python-dependencies:
+      python-patch-updates:
         patterns:
           - "*"
+        # Larger runtime/tool migrations remain individual version-update PRs.
+        update-types:
+          - patch
 
   - package-ecosystem: npm
     directory: "/"

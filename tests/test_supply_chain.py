@@ -171,7 +171,15 @@ def test_security_workflow_enforces_audits_history_redaction_and_sbom_diff() -> 
     assert "sha256sum --check --strict" in security
     assert security.count("tools/generate_sbom.py") == 2
     assert "diff --recursive --unified" in security
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in security
+    upload_step = security.split("- name: Upload CycloneDX SBOMs\n", maxsplit=1)[1].split(
+        "\n  secret-scan:", maxsplit=1
+    )[0]
+    assert re.search(
+        r"(?m)^        uses: actions/upload-artifact@[0-9a-f]{40}\s+# v\d+(?:\.\d+)*$",
+        upload_step,
+    )
+    assert 'path: ${{ runner.temp }}/sbom-a/*.cdx.json' in upload_step
+    assert "if-no-files-found: error" in upload_step
     assert "${{ secrets." not in security
 
 
