@@ -415,6 +415,8 @@ After any dependency lock changes, audit all three Python locks, run `npm audit`
 
 Dependabot runs weekly for pip, npm, and GitHub Actions. Review generated changes through the same tests instead of merging solely because a version is newer. Keep every `uses:` reference pinned to a reviewed 40-character commit SHA and preserve `persist-credentials: false` for checkout.
 
+Python version updates group only patch releases. Minor and major migrations remain individual PRs, so changes to numerical libraries, provider SDKs and quality tools can be verified separately; no version class is ignored. Security updates remain eligible independently of this version-update grouping. For a targeted transitive security fix, use `piptools compile --upgrade-package 'package==fixed-version'` with the normal hash-generation options for each affected lock, preserving unrelated seeded versions. Verify clean installation and all audit gates before merging. Action tests check SHA pinning and the required artifact-upload behavior without hard-coding an obsolete release SHA.
+
 Regenerate inventory files only when accepting their source changes. CI and review should use the non-mutating checks:
 
 ```bash

@@ -9,7 +9,7 @@ It is intentionally mechanical: it records every Python class, module function, 
 | Area | Python files | Classes | Module functions | Methods | Lines |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `app/` | 569 | 1346 | 7916 | 1941 | 180077 |
-| `tests/` | 524 | 254 | 7372 | 1013 | 187576 |
+| `tests/` | 524 | 254 | 7372 | 1013 | 187584 |
 | `tools/` | 46 | 11 | 371 | 8 | 7408 |
 
 ## Python Function Health
@@ -26673,7 +26673,7 @@ Lines: 405
 
 #### `tests/test_supply_chain.py`
 
-Lines: 224
+Lines: 232
 
 | Kind | Name | Line | Signature |
 | --- | --- | ---: | --- |
@@ -26685,10 +26685,10 @@ Lines: 224
 | function | `test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke` | 114 | `def test_ci_keeps_node_22_contract_and_adds_node_24_macos_smoke() -> None` |
 | function | `test_real_backend_ci_uses_macos_resolved_dependencies_and_linux_keeps_mock_browsers` | 127 | `def test_real_backend_ci_uses_macos_resolved_dependencies_and_linux_keeps_mock_browsers() -> None` |
 | function | `test_security_workflow_enforces_audits_history_redaction_and_sbom_diff` | 149 | `def test_security_workflow_enforces_audits_history_redaction_and_sbom_diff() -> None` |
-| function | `test_dependabot_covers_all_dependency_ecosystems` | 178 | `def test_dependabot_covers_all_dependency_ecosystems() -> None` |
-| function | `test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults` | 186 | `def test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults(suffix: str) -> None` |
-| function | `test_security_workflow_keeps_automatic_repository_gitleaks_config` | 201 | `def test_security_workflow_keeps_automatic_repository_gitleaks_config() -> None` |
-| function | `test_supply_chain_files_contain_no_machine_specific_paths` | 211 | `def test_supply_chain_files_contain_no_machine_specific_paths() -> None` |
+| function | `test_dependabot_covers_all_dependency_ecosystems` | 186 | `def test_dependabot_covers_all_dependency_ecosystems() -> None` |
+| function | `test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults` | 194 | `def test_gitleaks_covers_bare_fuyao_keys_without_replacing_defaults(suffix: str) -> None` |
+| function | `test_security_workflow_keeps_automatic_repository_gitleaks_config` | 209 | `def test_security_workflow_keeps_automatic_repository_gitleaks_config() -> None` |
+| function | `test_supply_chain_files_contain_no_machine_specific_paths` | 219 | `def test_supply_chain_files_contain_no_machine_specific_paths() -> None` |
 
 #### `tests/test_symbol_modules.py`
 
