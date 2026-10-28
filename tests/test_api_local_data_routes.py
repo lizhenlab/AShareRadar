@@ -359,18 +359,21 @@ def test_destructive_local_data_lease_serializes_processes(tmp_path: Path) -> No
         target=_hold_destructive_local_data_lease,
         args=(str(target.path), second_attempting, second_entered, second_release, outcomes),
     )
-    first.start()
-    assert first_attempting.wait(timeout=10)
-    assert first_entered.wait(timeout=10)
-    second.start()
-    assert second_attempting.wait(timeout=10)
     try:
+        # Spawn imports and schema initialization can exceed ten seconds on CI.
+        # Keep startup under the same bounded allowance as the other workers,
+        # and clean up even if a worker never reaches its first handshake.
+        first.start()
+        assert first_attempting.wait(timeout=PROCESS_START_TIMEOUT_SECONDS)
+        assert first_entered.wait(timeout=PROCESS_START_TIMEOUT_SECONDS)
+        second.start()
+        assert second_attempting.wait(timeout=PROCESS_START_TIMEOUT_SECONDS)
         assert second_entered.wait(timeout=0.3) is False
         first_release.set()
-        assert second_entered.wait(timeout=10)
+        assert second_entered.wait(timeout=PROCESS_START_TIMEOUT_SECONDS)
         second_release.set()
-        first.join(timeout=10)
-        second.join(timeout=10)
+        first.join(timeout=PROCESS_START_TIMEOUT_SECONDS)
+        second.join(timeout=PROCESS_START_TIMEOUT_SECONDS)
     finally:
         first_release.set()
         second_release.set()
