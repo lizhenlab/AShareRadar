@@ -124,7 +124,9 @@ def _boundary_inputs(scale):
 
 def test_legal_price_path_at_half_impact_boundary_has_stable_full_market_rank():
     results = [_score(*_boundary_inputs(scale)) for scale in (1, 10, 100)]
-    assert [result.trend_score for result in results] == [71, 71, 71]
+    # The opt-in production rules neutralize overlapping high/low position bands.
+    # Removing their old net +2 keeps every denomination on the same score.
+    assert [result.trend_score for result in results] == [69, 69, 69]
     assert len({result.raw_score for result in results}) == 1
     assert [trend_score_snapshot(*_boundary_inputs(scale))[2][0].impact for scale in (1, 10, 100)] == [6, 6, 6]
     assert [trend_score_snapshot(

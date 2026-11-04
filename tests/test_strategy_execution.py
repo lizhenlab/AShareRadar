@@ -1046,6 +1046,7 @@ def _seed_scan(cache: SQLiteCache, *, action_eligible: bool = True) -> int:
                     min_data_quality_score=0,
                     mode="official",
                     rule_version="full-market-score-v4-test",
+                    quote_observed_at="2026-07-17T08:30:00Z",
                 ),
                 quote_observed_at="2026-07-17T08:30:00Z",
             )

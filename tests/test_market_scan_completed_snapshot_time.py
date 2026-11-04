@@ -37,7 +37,7 @@ def test_retained_coarse_date_and_completed_explicit_snapshot_preserve_v5_score(
     assert result.score == baseline.score
     assert result.score_details["score_spec_hash"] == baseline.score_details["score_spec_hash"]
     _assert_current_score_contract_and_frozen_dimension_v4(result.score_details["score_spec"])
-    assert result.score_details["score_spec_hash"] == "2fca8cd2e3a6dbefbb2c424dd7fb07d7ed8e1b88c35334e8e1256d9d5e1d7f88"
+    assert result.score_details["score_spec_hash"] == "46ba33586a3068a18a4d4054dbb53fd5c488073d8dd99f45d4ced26de773b322"
 
 
 def test_known_incomplete_historical_bar_is_rejected_even_outside_recent_features() -> None:

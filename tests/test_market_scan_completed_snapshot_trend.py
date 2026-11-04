@@ -124,8 +124,15 @@ def test_legacy_algorithm_cannot_be_relabelled_as_current_with_a_new_hash():
     details = item.score_details
     details["score_spec"] = market_scan_score_spec(min_data_quality_score=50)
     details["score_spec_hash"] = stable_score_spec_hash(details["score_spec"])
-    # Its downstream arithmetic is still self-consistent; raw-input replay
-    # must notice that the new completed-snapshot algorithm would produce 91.
+    with pytest.raises(MarketScanReplayError, match="scoring_change_pct"):
+        replay_score_details(details)
+    # Even after supplying the new canonical arithmetic input, the legacy
+    # preopen evidence must not be relabelled as the current trend algorithm.
+    bar = details["execution_quote_evidence"]["bar"]
+    previous_close = bar["previous_close_reference"]
+    details["inputs"]["scoring_change_pct"] = round(
+        (bar["close"] - previous_close) / previous_close * 100, 12,
+    )
     assert replay_score_details(details).raw_score == item.raw_score
     with pytest.raises(MarketScanReplayError, match="逐时点证据"):
         verify_persisted_market_scan_result(

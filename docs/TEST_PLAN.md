@@ -271,6 +271,7 @@ The current test suite is split by domain:
 - `tests/test_market_scan_artifact_lease.py`
 - `tests/test_market_scan_automation.py`
 - `tests/test_market_scan_benchmark_equivalence.py`
+- `tests/test_market_scan_canonical_return_contract.py`
 - `tests/test_market_scan_cohort_feedback.py`
 - `tests/test_market_scan_cohort_feedback_cli.py`
 - `tests/test_market_scan_comparison.py`
@@ -390,6 +391,7 @@ The current test suite is split by domain:
 - `tests/test_market_scan_time_verification_stream.py`
 - `tests/test_market_scan_top100_snapshot_admission.py`
 - `tests/test_market_scan_trend_precision_contract.py`
+- `tests/test_market_scan_trend_rule_boundaries.py`
 - `tests/test_market_scan_trial_registry.py`
 - `tests/test_market_scan_trial_registry_clock_recovery.py`
 - `tests/test_market_scan_trial_registry_lock_cleanup.py`

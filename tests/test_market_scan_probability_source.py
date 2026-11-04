@@ -19,6 +19,8 @@ import app.services.market_scan_joint_execution_probability as joint_probability
 import app.services.market_scan_score_dimensions as score_dimensions_module
 import app.services.market_scan_scoring as scoring_module
 from app.models.market import Kline, Quote
+from app.models.market_scan_execution_quote import MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY
+from app.services.indicator_trend_components import canonical_price_change_pct
 from app.services.market_scan_probability import (
     probability_selection_qualified,
     stable_probability_hash,
@@ -46,6 +48,7 @@ from app.services.market_scan_probability_source_research import (
 from app.services.market_scan_execution_session import (
     build_market_scan_execution_session_evidence,
 )
+from app.services.market_scan_execution_quote import build_market_scan_execution_quote_evidence
 from app.services.market_scan_joint_execution_source import (
     JointExecutionSourceError,
     VerifiedJointExecutionSourceCorpus,
@@ -1432,6 +1435,7 @@ def _result_item(
 ) -> dict[str, object]:
     resolved_as_of = run_as_of or f"{quote_date}T16:00:00+08:00"
     resolved_quote_timestamp = quote_timestamp or f"{quote_date}T15:00:00+08:00"
+    resolved_quote_observed_at = quote_observed_at or f"{quote_date}T15:00:01+08:00"
     evidence = _evidence(
         symbol,
         market,
@@ -1482,6 +1486,15 @@ def _result_item(
         score_spec=calculated.score_spec,
         rule_version="full-market-scan-v6:test-contract",
     )
+    quote = _source_quote(symbol, market, quote_date=quote_date, quote_timestamp=resolved_quote_timestamp)
+    score_details["inputs"]["scoring_change_pct"] = canonical_price_change_pct(quote.price, quote.prev_close)
+    score_details[MARKET_SCAN_EXECUTION_QUOTE_EVIDENCE_KEY] = build_market_scan_execution_quote_evidence(
+        SimpleNamespace(
+            symbol=symbol, code=symbol.split(".", 1)[0], market=market, name="测试股票",
+            list_date="2001-08-27", is_st=False, metadata_source="test-master",
+        ),
+        quote, mode="official", quote_date=quote_date, captured_at=resolved_quote_observed_at,
+    )
     return {
         "run_id": 70,
         "symbol": symbol,
@@ -1506,7 +1519,7 @@ def _result_item(
         "amount": 200_000_000.0,
         "data_date": quote_date,
         "quote_timestamp": resolved_quote_timestamp,
-        "quote_observed_at": quote_observed_at or f"{quote_date}T15:00:01+08:00",
+        "quote_observed_at": resolved_quote_observed_at,
         "quote_source": "test-quote",
         "kline_source": "test-kline",
         "adjustment_mode": "qfq",
@@ -1515,17 +1528,15 @@ def _result_item(
     }
 
 
-def _calculated_score(
+def _source_quote(
     symbol: str,
     market: str,
     *,
     quote_date: str = QUOTE_DATE,
-    as_of: str | None = None,
     quote_timestamp: str | None = None,
-) -> object:
-    resolved_as_of = as_of or f"{quote_date}T16:00:00+08:00"
+) -> Quote:
     resolved_quote_timestamp = quote_timestamp or f"{quote_date}T15:00:00+08:00"
-    quote = Quote(
+    return Quote(
         code=symbol.split(".", 1)[0],
         name="测试股票",
         market=market,
@@ -1542,6 +1553,19 @@ def _calculated_score(
         timestamp=resolved_quote_timestamp,
         source="test-quote",
     )
+
+
+def _calculated_score(
+    symbol: str,
+    market: str,
+    *,
+    quote_date: str = QUOTE_DATE,
+    as_of: str | None = None,
+    quote_timestamp: str | None = None,
+) -> object:
+    resolved_as_of = as_of or f"{quote_date}T16:00:00+08:00"
+    resolved_quote_timestamp = quote_timestamp or f"{quote_date}T15:00:00+08:00"
+    quote = _source_quote(symbol, market, quote_date=quote_date, quote_timestamp=resolved_quote_timestamp)
     rows = [
         Kline(
             date=row[0],
@@ -1661,6 +1685,7 @@ def _evidence(
         "kline_source": "test-kline",
         "adjustment_mode": "qfq",
         "quote_price": 1510.0,
+        "quote_prev_close": 1491.36,
         "quote_change_pct": 1.25,
         "quote_turnover_rate": 0.8,
         "quote_amount": amount,

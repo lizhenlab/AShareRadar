@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 import math
 import re
@@ -31,6 +31,7 @@ from app.services.data_quality_components import is_demo_quote_source
 from app.services.data_quality_kline import is_demo_kline_source
 from app.services.data_quality_time import parse_quote_time
 from app.services.indicators import recent_volume_ratio, trend_score
+from app.services.indicator_trend_components import canonical_price_change_pct
 from app.services.leader_scoring import (
     FULL_MARKET_LEADER_PROFILE,
     LEADER_SCORE_ALGORITHM_VERSION,
@@ -46,6 +47,7 @@ from app.services.leader_scoring import (
 from app.services.market_scan_score_contract import (
     MARKET_SCAN_LEGACY_TREND_ALGORITHM_VERSION,
     MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION,
+    MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION,
     MARKET_SCAN_TREND_ALGORITHM_VERSION,
     MarketScanReplayError,
     market_scan_trend_context_mode,
@@ -463,6 +465,7 @@ def _calculate_market_scan_score(
     )
     leader_breakdown = leader_score_breakdown(leader_inputs, FULL_MARKET_LEADER_PROFILE)
     leadership = leader_breakdown.score
+    tag_inputs = replace(leader_inputs, change_pct=canonical_price_change_pct(quote.price, quote.prev_close))
     rank_refinement = market_scan_rank_refinement(quote, rows, mode=mode)
     quality_penalty, continuous_trend_adjustment, base_score, raw_score, score = (
         _continuous_final_score(
@@ -477,7 +480,7 @@ def _calculate_market_scan_score(
         leadership=leadership,
         quality=quality,
         volume_ratio=volume_ratio,
-        tags=tuple(leader_tags(leader_inputs, leadership, STRONG_STOCK_TAG_RULES, "观察")),
+        tags=tuple(leader_tags(tag_inputs, leadership, STRONG_STOCK_TAG_RULES, "观察")),
         leader_inputs=leader_inputs,
         leader_breakdown=leader_breakdown,
         rank_refinement=rank_refinement,
@@ -622,6 +625,10 @@ def _market_scan_score_details(
             quote_date=quote_date,
             captured_at=quote_observed_at or quote.timestamp,
         )
+    )
+    # Keep the observed return untouched; expose the distinct direction input.
+    cast(dict[str, object], details["inputs"])["scoring_change_pct"] = (
+        canonical_price_change_pct(quote.price, quote.prev_close)
     )
     return details
 
@@ -1064,6 +1071,14 @@ def market_scan_input_admission_spec() -> dict[str, object]:
 
 
 def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
+    spec = market_scan_score_spec_trend_v4(min_data_quality_score=min_data_quality_score)
+    cast(dict[str, object], spec["algorithms"])["trend_score"] = FULL_MARKET_TREND_ALGORITHM_VERSION
+    cast(dict[str, object], spec["rounding"])["trend_calculation"] = market_scan_trend_calculation_spec()
+    return spec
+
+
+def market_scan_score_spec_trend_v4(*, min_data_quality_score: int) -> dict[str, object]:
+    """Read the frozen scale-invariant v5 score before canonical direction rules."""
     return {
         "schema_version": FULL_MARKET_SCORE_SPEC_SCHEMA_VERSION,
         "rule_version": FULL_MARKET_SCORE_RULE_VERSION,
@@ -1102,7 +1117,9 @@ def market_scan_score_spec(*, min_data_quality_score: int) -> dict[str, object]:
             "component_stage": "after-quality-penalty-and-continuous-trend-adjustment",
             "raw_score_decimals": FULL_MARKET_RAW_SCORE_DECIMALS,
             "metric_decimals": FULL_MARKET_METRIC_DECIMALS,
-            "trend_calculation": market_scan_trend_calculation_spec(),
+            "trend_calculation": market_scan_trend_calculation_spec(
+                algorithm_version=MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION,
+            ),
         },
         "ranking": _score_ranking_spec(),
     }
@@ -1182,7 +1199,7 @@ def market_scan_score_spec_trend_v3(*, min_data_quality_score: int) -> dict[str,
 
 def market_scan_score_spec_dimension_v4(*, min_data_quality_score: int) -> dict[str, object]:
     """Read frozen v5 scores whose risk measured dispersion among losses."""
-    spec = market_scan_score_spec(min_data_quality_score=min_data_quality_score)
+    spec = market_scan_score_spec_trend_v4(min_data_quality_score=min_data_quality_score)
     cast(dict[str, object], spec["research_dimensions"])["algorithm"] = (
         MARKET_SCAN_DIMENSION_LEGACY_V4_ALGORITHM_VERSION
     )
@@ -1206,13 +1223,14 @@ def _is_readable_v5_market_scan_score_spec(score_spec: object, score_spec_hash: 
             market_scan_score_spec_legacy_v5(min_data_quality_score=minimum),
             market_scan_score_spec_trend_v3(min_data_quality_score=minimum),
             market_scan_score_spec_dimension_v4(min_data_quality_score=minimum),
+            market_scan_score_spec_trend_v4(min_data_quality_score=minimum),
         )
     )
 
 
 def _score_algorithms_spec() -> dict[str, str]:
     return {
-        "trend_score": FULL_MARKET_TREND_ALGORITHM_VERSION,
+        "trend_score": MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION,
         "volume_ratio": FULL_MARKET_VOLUME_RATIO_ALGORITHM_VERSION,
         "data_quality": FULL_MARKET_DATA_QUALITY_ALGORITHM_VERSION,
         "leader_score": LEADER_SCORE_ALGORITHM_VERSION,
@@ -1400,6 +1418,7 @@ __all__ = [
     "market_scan_score_spec_v4",
     "market_scan_score_spec_legacy_v5",
     "market_scan_score_spec_trend_v3",
+    "market_scan_score_spec_trend_v4",
     "market_scan_score_spec_dimension_v4",
     "replay_score_details",
     "score_market_scan_item",

@@ -19,6 +19,7 @@ from app.services.market_scan_rank_refinement import (
 from app.services.market_scan_score_contract import (
     MARKET_SCAN_LEGACY_TREND_ALGORITHM_VERSION,
     MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION,
+    MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION,
     MARKET_SCAN_TREND_ALGORITHM_VERSION,
     MarketScanReplayError,
     market_scan_trend_calculation_spec,
@@ -152,7 +153,11 @@ def replay_score_details(details: Mapping[str, object]) -> MarketScanScoreReplay
     if payload.get("schema_version") != 1:
         raise MarketScanReplayError(f"未知 score_details schema：{payload.get('schema_version')!r}")
     score_spec, score_spec_schema, actual_hash, algorithms = _verified_score_spec(payload)
-    inputs = _score_inputs(payload, schema_version=score_spec_schema)
+    inputs = _score_inputs(
+        payload,
+        schema_version=score_spec_schema,
+        trend_algorithm=algorithms["trend_score"],
+    )
     leader_breakdown = _replay_leader_score(
         score_spec,
         inputs,
@@ -277,7 +282,11 @@ def _require_supported_algorithms(
     if (
         schema_version == _CURRENT_SCORE_SPEC_SCHEMA_VERSION
         and isinstance(trend_algorithm, str)
-        and trend_algorithm in (MARKET_SCAN_TREND_ALGORITHM_VERSION, MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION)
+        and trend_algorithm in (
+            MARKET_SCAN_TREND_ALGORITHM_VERSION,
+            MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION,
+            MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION,
+        )
     ):
         supported_algorithms["trend_score"] = trend_algorithm
     if set(algorithms) != set(supported_algorithms):
@@ -295,8 +304,14 @@ def _require_supported_rounding(score_spec: Mapping[str, object]) -> None:
     if mode != _SUPPORTED_ROUNDING_MODE:
         raise MarketScanReplayError(f"未知舍入算法：{mode!r}")
     algorithms = _mapping(score_spec.get("algorithms"), "score_spec.algorithms")
-    if algorithms.get("trend_score") == MARKET_SCAN_TREND_ALGORITHM_VERSION:
-        if rounding.get("trend_calculation") != market_scan_trend_calculation_spec():
+    trend_algorithm = algorithms.get("trend_score")
+    if trend_algorithm in (
+        MARKET_SCAN_TREND_ALGORITHM_VERSION,
+        MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION,
+    ):
+        if rounding.get("trend_calculation") != market_scan_trend_calculation_spec(
+            algorithm_version=trend_algorithm,
+        ):
             raise MarketScanReplayError("趋势计算精度合同无效")
     elif "trend_calculation" in rounding:
         raise MarketScanReplayError("旧趋势算法不能使用新精度合同")
@@ -537,7 +552,9 @@ def _require_current_ranking_contract(score_spec: Mapping[str, object]) -> None:
         raise MarketScanReplayError("当前评分规范必须按 raw_score 和 symbol 稳定排序")
 
 
-def _score_inputs(payload: Mapping[str, object], *, schema_version: int) -> dict[str, float]:
+def _score_inputs(
+    payload: Mapping[str, object], *, schema_version: int, trend_algorithm: str,
+) -> dict[str, float]:
     raw = _mapping(payload.get("inputs"), "score_details.inputs")
     inputs = {
         "trend_score": _number(raw.get("trend_score"), "inputs.trend_score"),
@@ -553,6 +570,10 @@ def _score_inputs(payload: Mapping[str, object], *, schema_version: int) -> dict
             "inputs.data_quality_score",
         ),
     }
+    if trend_algorithm == MARKET_SCAN_TREND_ALGORITHM_VERSION:
+        inputs["scoring_change_pct"] = _number(
+            raw.get("scoring_change_pct"), "inputs.scoring_change_pct",
+        )
     if schema_version in {
         _V4_SCORE_SPEC_SCHEMA_VERSION,
         _CURRENT_SCORE_SPEC_SCHEMA_VERSION,

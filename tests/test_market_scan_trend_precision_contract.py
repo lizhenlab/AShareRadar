@@ -19,11 +19,13 @@ from app.services.market_scan_research_challengers import prepare_research_score
 from app.services.market_scan_score_contract import (
     MARKET_SCAN_LEGACY_TREND_ALGORITHM_VERSION,
     MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION,
+    MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION,
     MARKET_SCAN_TREND_ALGORITHM_VERSION,
     market_scan_shared_trend_algorithm,
     market_scan_trend_context_mode,
 )
 from app.services.indicator_trend import TREND_SCORE_ALGORITHM_VERSION, TREND_SCORE_LEGACY_ALGORITHM_VERSION
+from app.services.indicator_trend_components import TREND_SCORE_MARKET_SCAN_ALGORITHM_VERSION
 from app.services.market_scan_scoring import (
     MarketScanReplayError, is_current_market_scan_score_spec, market_scan_score_spec,
     market_scan_score_spec_trend_v3, replay_score_details, stable_score_spec_hash,
@@ -80,6 +82,15 @@ def test_rounded_ma_inputs_cannot_be_relabelled_with_current_hash():
     details = item.score_details
     details["score_spec"] = market_scan_score_spec(min_data_quality_score=50)
     details["score_spec_hash"] = stable_score_spec_hash(details["score_spec"])
+    with pytest.raises(MarketScanReplayError, match="scoring_change_pct"):
+        replay_score_details(details)
+    # Supplying the newly required arithmetic input must not let an old
+    # rounded-MA observation acquire the current algorithm's PIT identity.
+    bar = details["execution_quote_evidence"]["bar"]
+    previous_close = bar["previous_close_reference"]
+    details["inputs"]["scoring_change_pct"] = round(
+        (bar["close"] - previous_close) / previous_close * 100, 12,
+    )
     assert replay_score_details(details).raw_score == item.raw_score
     with pytest.raises(MarketScanReplayError, match="逐时点证据"):
         verify_persisted_market_scan_result(
@@ -147,7 +158,8 @@ def test_old_v3_research_comparison_rejects_before_rebuilding_current_contributi
 @pytest.mark.parametrize("algorithm,shared,preopen", [
     (MARKET_SCAN_LEGACY_TREND_ALGORITHM_VERSION, TREND_SCORE_LEGACY_ALGORITHM_VERSION, "preopen"),
     (MARKET_SCAN_ROUNDED_MA_TREND_ALGORITHM_VERSION, TREND_SCORE_LEGACY_ALGORITHM_VERSION, "official"),
-    (MARKET_SCAN_TREND_ALGORITHM_VERSION, TREND_SCORE_ALGORITHM_VERSION, "official"),
+    (MARKET_SCAN_SCALE_INVARIANT_TREND_ALGORITHM_VERSION, TREND_SCORE_ALGORITHM_VERSION, "official"),
+    (MARKET_SCAN_TREND_ALGORITHM_VERSION, TREND_SCORE_MARKET_SCAN_ALGORITHM_VERSION, "official"),
 ])
 def test_each_frozen_algorithm_binds_its_mode_and_precision(algorithm, shared, preopen):
     assert market_scan_shared_trend_algorithm(algorithm) == shared

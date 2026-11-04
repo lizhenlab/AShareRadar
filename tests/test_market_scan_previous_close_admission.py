@@ -101,7 +101,8 @@ def test_stock_evaluator_classifies_previous_close_conflict_as_missing(mode, pre
         assert "昨收价" in result.error
     else:
         assert result.data_quality_score == 100
-        assert result.raw_score == 60
+        # Narrow-range position is neutral; retain only the active-turnover lift.
+        assert result.raw_score == 58
 
 
 @pytest.mark.parametrize("mode", ["official", "preopen"])

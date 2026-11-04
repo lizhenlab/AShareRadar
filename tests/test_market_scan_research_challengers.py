@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from copy import deepcopy
+import json
+from pathlib import Path
 
 import pytest
 
+from app.models.market_scan import MarketScanResultItem, MarketScanRun
 from app.services.market_scan_research_challengers import (
     RESEARCH_CHALLENGERS, prepare_research_scores, research_challenger_spec,
     score_research_challenger, smooth_turnover_impact,
@@ -13,8 +16,10 @@ from tests.test_market_scan_raw_score_replay import _snapshot
 
 
 def _prepared(monkeypatch):
-    item, run = _snapshot(monkeypatch, mutation="none", mode="official")
-    item = item.model_copy(update={"rank": 1})
+    # Registered challengers remain tied to the original complete score contract.
+    frozen = json.loads((Path(__file__).parent / "fixtures" / "market_scan_trend_v4_canonical_predecessor.json").read_text(encoding="utf-8"))
+    item = MarketScanResultItem.model_validate(frozen["item"])
+    run = MarketScanRun.model_validate(frozen["run"])
     return prepare_research_scores([item], run), item, run
 
 
@@ -25,6 +30,18 @@ def test_production_control_preserves_frozen_score_and_inputs(monkeypatch) -> No
     assert ranked[0].raw_score == item.raw_score
     assert ranked[0].rank == item.rank
     assert item.score_details == before
+    assert item.score_details["score_spec_hash"] == "2fca8cd2e3a6dbefbb2c424dd7fb07d7ed8e1b88c35334e8e1256d9d5e1d7f88"
+
+
+def test_current_production_snapshot_cannot_enter_previously_registered_research_family(monkeypatch) -> None:
+    item, run = _snapshot(monkeypatch, mutation="none", mode="official")
+    item = item.model_copy(update={"rank": 1})
+    frozen_contract = research_challenger_spec("production_v5")["production_score_contract"]
+
+    assert frozen_contract == "2fca8cd2e3a6dbefbb2c424dd7fb07d7ed8e1b88c35334e8e1256d9d5e1d7f88"
+    assert item.score_details["score_spec_hash"] != frozen_contract
+    with pytest.raises(ValueError, match="quality threshold"):
+        prepare_research_scores([item], run)
 
 
 def test_ablation_removes_only_the_continuous_component_before_clamping(monkeypatch) -> None:

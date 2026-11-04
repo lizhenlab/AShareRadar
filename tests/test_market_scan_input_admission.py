@@ -93,13 +93,17 @@ def _rule_contract():
 
 def _assert_current_score_contract_and_frozen_dimension_v4(spec):
     assert spec["research_dimensions"]["algorithm"] == "full-market-dimensions-v5-target-semideviation"
-    assert scoring.stable_score_spec_hash(spec) == "2fca8cd2e3a6dbefbb2c424dd7fb07d7ed8e1b88c35334e8e1256d9d5e1d7f88"
+    assert scoring.stable_score_spec_hash(spec) == "46ba33586a3068a18a4d4054dbb53fd5c488073d8dd99f45d4ced26de773b322"
     frozen = scoring.market_scan_score_spec_dimension_v4(min_data_quality_score=50)
     assert frozen["research_dimensions"]["algorithm"] == "full-market-dimensions-v4-session-coverage"
     assert scoring.stable_score_spec_hash(frozen) == "17c0e6b9ed6de9b39cad0d9f9d1fe14c8638749dd08796bed827869d3554e2c7"
-    # The research risk generation changes; trend and ranking math stay exact.
+    # Preserve the old risk-only generation before opting in to the new trend.
     expected = deepcopy(frozen)
     expected["research_dimensions"]["algorithm"] = "full-market-dimensions-v5-target-semideviation"
+    assert expected == scoring.market_scan_score_spec_trend_v4(min_data_quality_score=50)
+    assert scoring.stable_score_spec_hash(expected) == "2fca8cd2e3a6dbefbb2c424dd7fb07d7ed8e1b88c35334e8e1256d9d5e1d7f88"
+    expected["algorithms"]["trend_score"] = scoring.FULL_MARKET_TREND_ALGORITHM_VERSION
+    expected["rounding"]["trend_calculation"] = scoring.market_scan_trend_calculation_spec()
     assert spec == expected
 
 

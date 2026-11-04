@@ -17,7 +17,7 @@ from app.models.market_scan import MARKET_SCAN_FULL_MARKET_SCOPE, MarketScanResu
 from app.services.indicator_trend import trend_score_from_impact
 from app.services.indicator_trend_components import build_trend_context, trend_contributions
 from app.services.market_scan_score_dimensions import verify_market_scan_point_in_time_evidence_context
-from app.services.market_scan_scoring import market_scan_score_spec, replay_score_details, stable_score_spec_hash
+from app.services.market_scan_scoring import market_scan_score_spec_trend_v4, replay_score_details, stable_score_spec_hash
 
 
 ResearchChallenger = Literal["production_v5", "without_continuous_trend", "smooth_turnover", "combined"]
@@ -58,7 +58,7 @@ def research_challenger_spec(variant: ResearchChallenger) -> dict[str, object]:
         "variant": variant,
         "research_only": True,
         "production_mutation": False,
-        "production_score_contract": stable_score_spec_hash(market_scan_score_spec(min_data_quality_score=50)),
+        "production_score_contract": stable_score_spec_hash(market_scan_score_spec_trend_v4(min_data_quality_score=50)),
         "quality": "retain-frozen-quality-penalty",
         "turnover": "cubic-smoothstep-fixed-knots" if variant in ("smooth_turnover", "combined") else "production",
         "turnover_knots": [[0, 0], [1, 0], [2, 8], [8, 8], [10, 0], [14, 0], [16, -5]],

@@ -1090,6 +1090,7 @@ def _evidence_identity_payload(
         "kline_source": rows[-1].source,
         "adjustment_mode": rows[-1].adjustment_mode,
         "quote_price": float(quote.price),
+        "quote_prev_close": float(quote.prev_close),
         "quote_change_pct": float(quote.change_pct),
         "quote_turnover_rate": (
             float(quote.turnover_rate) if quote.turnover_rate is not None else None

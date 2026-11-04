@@ -84,6 +84,7 @@ from app.services.market_scan_scoring import (
     market_scan_score_spec_dimension_v4,
     market_scan_score_spec_legacy_v5,
     market_scan_score_spec_trend_v3,
+    market_scan_score_spec_trend_v4,
     market_scan_score_spec_v4,
     stable_score_spec_hash,
     verify_score_details,
@@ -271,6 +272,7 @@ _LEGACY_READABLE_V5_PRODUCTION_SCORE_SPEC_HASHES = frozenset(
     for factory in (
         market_scan_score_spec_legacy_v5, market_scan_score_spec_trend_v3,
         market_scan_score_spec_dimension_v4,
+        market_scan_score_spec_trend_v4,
     )
     for minimum in range(101)
 )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date
 import json
 from pathlib import Path
 import subprocess
@@ -15,15 +15,14 @@ from app.services.market_scan_official_execution_store import official_execution
 from app.services.market_scan_trial_registry import load_trial_registry, start_trial
 from app.services.market_scan_trial_registry_contract import trial_registry_digest
 from app.services.trading_calendar import trading_dates_between
-from tests.test_market_scan_raw_score_replay import _snapshot
-from tests import test_market_scan_raw_score_replay as raw_replay_fixtures
 from tests.test_market_scan_research_portfolio import _official_sessions, row
+from tests.test_market_scan_research_runner import _frozen_research_snapshot
 from tools import run_market_scan_research as cli
 
 
 @pytest.fixture
 def bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    item, run = _snapshot(monkeypatch, mutation="none", mode="official")
+    item, run = _frozen_research_snapshot()
     item = item.model_copy(update={"rank": 1})
     run = run.model_copy(update={
         "status": "success", "finished_at": run.as_of, "snapshot_digest": "d" * 64,
@@ -221,12 +220,7 @@ def _external_snapshot_bundle(bundle: Path) -> tuple[Path, dict]:
 
 
 def _second_snapshot(monkeypatch, first: dict) -> dict:
-    original_quote = raw_replay_fixtures._quote
-    with monkeypatch.context() as patch:
-        patch.setattr(raw_replay_fixtures, "DATA_DATE", date(2026, 7, 20))
-        patch.setattr(raw_replay_fixtures, "AS_OF", datetime(2026, 7, 20, 16, 30))
-        patch.setattr(raw_replay_fixtures, "_quote", lambda: original_quote(timestamp="2026-07-20 15:00:00"))
-        item, run = raw_replay_fixtures._snapshot(patch, mutation="none", mode="official")
+    item, run = _frozen_research_snapshot(data_date="2026-07-20")
     run_data = run.model_dump(mode="json")
     run_data.update(id=2, status="success", finished_at=run.as_of, snapshot_digest="e" * 64,
                     snapshot_seal_origin="publication", snapshot_sealed_at=run.as_of,

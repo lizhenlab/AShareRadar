@@ -40,6 +40,8 @@ class TrendContext:
     volume_confirmation_enabled: bool = True
     volume_price_alignment: str = "same-completed-session"
     legacy_precision: bool = False
+    price_change_pct: float | None = None
+    use_market_scan_rules: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,8 +70,10 @@ RELATIVE_NEUTRAL_BAND_PCT = 0.10
 RELATIVE_FULL_EFFECT_PCT = 2.00
 TREND_SCORE_LEGACY_ALGORITHM_VERSION = "trend-score-v2-continuous-soft-clip"
 TREND_SCORE_ALGORITHM_VERSION = "trend-score-v3-scale-invariant"
+TREND_SCORE_MARKET_SCAN_ALGORITHM_VERSION = "trend-score-v4-canonical-return-bounded-activity"
 TREND_RELATIVE_PCT_DECIMALS = 12
 TREND_SCALED_IMPACT_DECIMALS = 10
+MARKET_SCAN_TURNOVER_KNOTS = ((0.0, 0), (1.0, 0), (2.0, 8), (8.0, 8), (10.0, 0), (15.0, 0), (20.0, -5))
 
 
 def build_trend_context(
@@ -81,9 +85,10 @@ def build_trend_context(
 ) -> TrendContext:
     if mode not in {"official", "intraday", "preopen"}:
         raise ValueError(f"未知趋势评分模式：{mode!r}")
-    if algorithm_version not in (TREND_SCORE_ALGORITHM_VERSION, TREND_SCORE_LEGACY_ALGORITHM_VERSION):
+    if algorithm_version not in (TREND_SCORE_ALGORITHM_VERSION, TREND_SCORE_LEGACY_ALGORITHM_VERSION, TREND_SCORE_MARKET_SCAN_ALGORITHM_VERSION):
         raise ValueError(f"未知趋势评分算法：{algorithm_version!r}")
     legacy_rounding = algorithm_version == TREND_SCORE_LEGACY_ALGORITHM_VERSION
+    use_market_scan_rules = algorithm_version == TREND_SCORE_MARKET_SCAN_ALGORITHM_VERSION
     valid_klines = filter_valid_klines(klines)
     closes = [item.close for item in valid_klines]
     recent_rows = valid_klines[-20:]
@@ -103,6 +108,12 @@ def build_trend_context(
         volume_ratio=recent_volume_ratio(valid_klines),
         volume_confirmation_enabled=mode == "official",
         legacy_precision=legacy_rounding,
+        price_change_pct=(
+            canonical_price_change_pct(quote.price, getattr(quote, "prev_close", None))
+            if use_market_scan_rules
+            else None
+        ),
+        use_market_scan_rules=use_market_scan_rules,
         volume_price_alignment=(
             "intraday-time-aligned-volume-unavailable-neutralized"
             if mode == "intraday"
@@ -266,18 +277,23 @@ def format_relative_pct(relative_pct: float | None) -> str:
 
 
 def price_change_contribution(context: TrendContext) -> SignalContribution:
+    change_pct = context.price_change_pct if context.price_change_pct is not None else context.quote.change_pct
     return contribution(
         "价格",
         "日内涨跌",
-        change_impact(context.quote.change_pct),
-        f"当前涨跌幅 {context.quote.change_pct:.2f}%。",
+        change_impact(change_pct),
+        f"当前涨跌幅 {change_pct:.2f}%。",
     )
 
 
 def position_contributions(context: TrendContext) -> list[SignalContribution]:
     quote = context.quote
+    near_high = quote.price >= context.recent_high * 0.985
+    near_low = quote.price <= context.recent_low * 1.03
+    if context.use_market_scan_rules and near_high and near_low:
+        return [contribution("位置", "窄幅区间", 0, "现价同时落在20日高低位邻近区间，位置方向保持中性。")]
     contributions: list[SignalContribution] = []
-    if quote.price >= context.recent_high * 0.985:
+    if near_high:
         contributions.append(
             contribution(
                 "位置",
@@ -286,7 +302,7 @@ def position_contributions(context: TrendContext) -> list[SignalContribution]:
                 f"现价接近20日高点 {context.recent_high:.2f}，右侧强度较好。",
             )
         )
-    if quote.price <= context.recent_low * 1.03:
+    if near_low:
         contributions.append(
             contribution(
                 "位置",
@@ -300,6 +316,9 @@ def position_contributions(context: TrendContext) -> list[SignalContribution]:
 
 def turnover_contribution(context: TrendContext) -> SignalContribution:
     turnover_rate = context.quote.turnover_rate
+    if context.use_market_scan_rules and turnover_rate is not None:
+        impact, reason = bounded_turnover_signal(turnover_rate)
+        return contribution("活跃度", "换手率", impact, reason)
     if turnover_rate:
         impact, reason = turnover_signal(turnover_rate)
         return contribution("活跃度", "换手率", impact, reason)
@@ -315,7 +334,8 @@ def volume_confirmation_contribution(context: TrendContext) -> SignalContributio
             0,
             f"{phase}缺少同进度成交量；历史完整日K量比仅作背景，量价确认保持中性。",
         )
-    impact, reason = volume_signal(context.quote.change_pct, context.volume_ratio)
+    change_pct = context.price_change_pct if context.price_change_pct is not None else context.quote.change_pct
+    impact, reason = volume_signal(change_pct, context.volume_ratio)
     return contribution("量能", "量价确认", impact, reason)
 
 
@@ -339,6 +359,38 @@ def change_impact(change_pct: float) -> int:
     if change_pct < -1:
         return -6
     return 0
+
+
+def canonical_price_change_pct(price: float, prev_close: float | None) -> float:
+    """Use the same positive finite price pair for all opt-in direction rules."""
+    if not math.isfinite(price) or price <= 0 or prev_close is None or not math.isfinite(prev_close) or prev_close <= 0:
+        raise ValueError("canonical return requires positive finite price and prev_close")
+    change_pct = (price - prev_close) / prev_close * 100
+    if not math.isfinite(change_pct):
+        raise ValueError("canonical return must be finite")
+    normalized = round(change_pct, TREND_RELATIVE_PCT_DECIMALS)
+    return 0.0 if normalized == 0 else normalized
+
+
+def bounded_turnover_signal(turnover_rate: float) -> tuple[int, str]:
+    """Smooth the frozen knots, then quantize the bounded impact to integer points.
+
+    The underlying interpolation is continuous; integer signal contributions still
+    move in one-point steps. This is a ranking rule, not an expected-return model.
+    """
+    if not math.isfinite(turnover_rate) or turnover_rate < 0:
+        raise ValueError("turnover rate must be finite and non-negative")
+    scaled_impact = float(MARKET_SCAN_TURNOVER_KNOTS[-1][1])
+    for (left, left_impact), (right, right_impact) in zip(MARKET_SCAN_TURNOVER_KNOTS, MARKET_SCAN_TURNOVER_KNOTS[1:], strict=False):
+        if turnover_rate <= right:
+            progress = max(0.0, min(1.0, (turnover_rate - left) / (right - left)))
+            smooth_progress = progress * progress * (3 - 2 * progress)
+            scaled_impact = left_impact + (right_impact - left_impact) * smooth_progress
+            break
+    scaled_impact = round(scaled_impact, TREND_SCALED_IMPACT_DECIMALS)
+    magnitude = int(math.floor(abs(scaled_impact) + 0.5))
+    impact = max(-5, min(8, magnitude if scaled_impact >= 0 else -magnitude))
+    return impact, f"换手率 {turnover_rate:.2f}% 按固定节点平滑计分（整数影响仍以1分量化），活跃度影响 {impact:+d}。"
 
 
 def turnover_signal(turnover_rate: float) -> tuple[int, str]:
