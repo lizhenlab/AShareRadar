@@ -394,8 +394,8 @@ fqdn==1.5.1 \
     --hash=sha256:105ed3677e767fb5ca086a0c1f4bb66ebc3c100be518f0e0d755d9eae164d89f \
     --hash=sha256:3a179af3761e4df6eb2e026ff9e1a3033d3587bf980a0b1b2e1e5d08d7358014
     # via jsonschema
-futu-api==10.5.6508 \
-    --hash=sha256:12df53ce098fb410a4d9a7fdbdee87a9fef5049b06456f13cf87c3f45d28e028
+futu-api==10.11.7108 \
+    --hash=sha256:35e3357009a2dad9c21715c11d5f8a690297f99818020963c46bac03a9f66fec
     # via -r requirements.txt
 h11==0.16.0 \
     --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
