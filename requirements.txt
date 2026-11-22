@@ -1,6 +1,6 @@
 # Direct runtime dependencies. Keep test and lint tooling in requirements-dev.txt.
 akshare==1.18.91
-baostock==0.9.3
+baostock==0.9.4
 fastapi==0.136.1
 futu-api==10.5.6508
 httpx==0.27.0
